@@ -1,0 +1,12 @@
+[package]
+name = "orbiters-spout"
+description = "Spout2 receiver and test sender (Windows, Direct3D 11), protocol-compatible with the Spout2 SDK."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
+[dev-dependencies]
+orbiters-contracts = { workspace = true }

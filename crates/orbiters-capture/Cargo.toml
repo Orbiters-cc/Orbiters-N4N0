@@ -1,0 +1,23 @@
+[package]
+name = "orbiters-capture"
+description = "Capture worker of Orbiters desktop: frame sources (Spout, raw captures, test pattern), strip and depth decoding, session bundles."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "orbiters-capture"
+path = "src/main.rs"
+
+[dependencies]
+orbiters-core = { workspace = true }
+orbiters-contracts = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+crossbeam-channel = { workspace = true }
+uuid = { workspace = true }
+flate2 = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+orbiters-spout = { workspace = true }

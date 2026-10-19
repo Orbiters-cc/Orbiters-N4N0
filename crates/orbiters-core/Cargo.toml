@@ -1,0 +1,18 @@
+[package]
+name = "orbiters-core"
+description = "Shared logic of Orbiters desktop: settings, session bundles, keyframes, VRChat log, OSC, worker protocol."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+orbiters-contracts = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+dirs = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+rosc = { workspace = true }
+mdns-sd = { workspace = true }
+flate2 = { workspace = true }

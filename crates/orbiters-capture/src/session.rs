@@ -1,0 +1,345 @@
+//! One capture session: decodes every frame's strip (and depth symbols on depth frames), chooses keyframes,
+//! and writes the session bundle. Keyframe images are encoded on a small thread pool so capture never waits
+//! on disk or compression; when the pool falls behind, keyframes are dropped (and counted) instead.
+
+use crossbeam_channel::{bounded, Receiver as ChanReceiver, Sender as ChanSender, TrySendError};
+use orbiters_contracts::frame_record::{record_flags, FrameRecord};
+use orbiters_contracts::image::{ImageView, PixelOrder};
+use orbiters_contracts::manifest::{depth_file, SessionManifest, StorageQuality};
+use orbiters_contracts::{depth, qoi, strip};
+use orbiters_core::bundle::BundleWriter;
+use orbiters_core::keyframes::{self, KeyframeSelector};
+use orbiters_core::protocol::{CaptureStats, StartCapture};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Instant;
+
+enum Job {
+    Keyframe { path: PathBuf, data: Vec<u8>, width: u32, height: u32, bgra: bool },
+    Depth { path: PathBuf, bytes: Vec<u8> },
+}
+
+struct Pool {
+    tx: Option<ChanSender<Job>>,
+    threads: Vec<JoinHandle<()>>,
+    written: Arc<AtomicU64>,
+    errors: Arc<AtomicU64>,
+}
+
+impl Pool {
+    fn new(threads: usize) -> Self {
+        let (tx, rx): (ChanSender<Job>, ChanReceiver<Job>) = bounded(threads * 2);
+        let written = Arc::new(AtomicU64::new(0));
+        let errors = Arc::new(AtomicU64::new(0));
+        let handles = (0..threads)
+            .map(|i| {
+                let rx = rx.clone();
+                let written = written.clone();
+                let errors = errors.clone();
+                std::thread::Builder::new()
+                    .name(format!("encode-{i}"))
+                    .spawn(move || {
+                        for job in rx {
+                            let (path, bytes) = match job {
+                                Job::Keyframe { path, data, width, height, bgra } => {
+                                    (path, qoi::encode_bgra_strided(&data, width, height, width as usize * 4, bgra, true))
+                                }
+                                Job::Depth { path, bytes } => (path, bytes),
+                            };
+                            match std::fs::write(&path, &bytes) {
+                                Ok(()) => {
+                                    written.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                                }
+                                Err(e) => {
+                                    eprintln!("write {}: {e}", path.display());
+                                    errors.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    })
+                    .expect("spawn encoder")
+            })
+            .collect();
+        Self { tx: Some(tx), threads: handles, written, errors }
+    }
+
+    fn try_send(&self, job: Job) -> bool {
+        match self.tx.as_ref().expect("pool open").try_send(job) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    /// Depth files are small and must not be lost: block until queued.
+    fn send(&self, job: Job) {
+        let _ = self.tx.as_ref().expect("pool open").send(job);
+    }
+
+    fn finish(mut self) -> (u64, u64) {
+        self.tx = None;
+        for t in self.threads.drain(..) {
+            let _ = t.join();
+        }
+        (self.written.load(Ordering::Relaxed), self.errors.load(Ordering::Relaxed))
+    }
+}
+
+/// Copies a borrowed frame into a tightly packed, upright buffer (4 bytes per pixel, source channel order).
+fn copy_upright(view: &ImageView, flipped: bool) -> Vec<u8> {
+    let row = view.width as usize * 4;
+    let mut out = vec![0u8; row * view.height as usize];
+    for y in 0..view.height as usize {
+        let src_row = if flipped { view.height as usize - 1 - y } else { y };
+        out[y * row..(y + 1) * row].copy_from_slice(&view.data[src_row * view.stride..src_row * view.stride + row]);
+    }
+    out
+}
+
+pub struct CaptureSession {
+    writer: BundleWriter,
+    selector: KeyframeSelector,
+    pool: Pool,
+    pub stats: CaptureStats,
+    started: Instant,
+    frame_index: u64,
+    prefer_flipped: bool,
+    previous: Option<(u32, [f32; 12], f32)>,
+    thumbnail_done: bool,
+    decode_time_total: f64,
+    fps_window: (Instant, u64),
+}
+
+impl CaptureSession {
+    pub fn start(cmd: &StartCapture, source_description: String, folder_hint: &str) -> anyhow::Result<Self> {
+        let mut manifest = SessionManifest::new(uuid::Uuid::new_v4().to_string(), orbiters_core::now_utc_iso(), orbiters_core::APP_VERSION);
+        manifest.world = cmd.world.clone();
+        manifest.consent = cmd.consent.clone();
+        manifest.capture.mode = cmd.mode;
+        manifest.capture.quality = cmd.quality;
+        manifest.capture.source = match &cmd.source {
+            orbiters_core::protocol::SourceSpec::Spout { .. } => "spout",
+            orbiters_core::protocol::SourceSpec::RawSequence { .. } => "raw_sequence",
+            orbiters_core::protocol::SourceSpec::TestPattern { .. } => "test",
+        }
+        .into();
+        manifest.capture.source_name = source_description.clone();
+        let base = cmd
+            .folder_name
+            .clone()
+            .unwrap_or_else(|| {
+                let world = cmd.world.as_ref().and_then(|w| w.name.clone()).unwrap_or_else(|| folder_hint.to_string());
+                format!("{world} {}", orbiters_core::now_local_for_names())
+            });
+        let writer = BundleWriter::create(&cmd.sessions_dir, &base, manifest)?;
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 6) / 2 + 1;
+        Ok(Self {
+            writer,
+            selector: KeyframeSelector::new(cmd.keyframes.clone(), cmd.quality == StorageQuality::Lossless),
+            pool: Pool::new(threads),
+            stats: CaptureStats::default(),
+            started: Instant::now(),
+            frame_index: 0,
+            prefer_flipped: false,
+            previous: None,
+            thumbnail_done: false,
+            decode_time_total: 0.0,
+            fps_window: (Instant::now(), 0),
+        })
+    }
+
+    pub fn dir(&self) -> PathBuf {
+        self.writer.dir().to_path_buf()
+    }
+
+    pub fn set_world(&mut self, world: Option<orbiters_contracts::manifest::WorldInfo>) {
+        self.writer.manifest_mut().world = world;
+    }
+
+    /// Processes one frame (called with the source's borrowed view).
+    pub fn process(&mut self, view: ImageView<'_>) -> anyhow::Result<()> {
+        let t0 = Instant::now();
+        let mut record = FrameRecord {
+            frame_index: self.frame_index,
+            capture_time_ns: self.started.elapsed().as_nanos() as u64,
+            width: view.width,
+            height: view.height,
+            ..Default::default()
+        };
+        self.frame_index += 1;
+        self.stats.frames += 1;
+        self.stats.width = view.width;
+        self.stats.height = view.height;
+
+        match strip::decode_preferring(&view, self.prefer_flipped) {
+            Err(e) => {
+                self.stats.strip_failed += 1;
+                self.stats.last_error = Some(e.to_string());
+            }
+            Ok(d) => {
+                self.prefer_flipped = d.flipped;
+                self.stats.flipped = d.flipped;
+                self.stats.strip_ok += 1;
+                let p = d.payload;
+                record.flags |= record_flags::STRIP_OK;
+                if d.flipped {
+                    record.flags |= record_flags::FLIPPED;
+                }
+                record.game_time = p.time;
+                record.strip_flags = p.flags;
+                record.camera_to_world = p.camera_to_world;
+                record.projection = p.projection;
+                record.near = p.near;
+                record.far = p.far;
+                record.corrected_bits = d.corrected_bits;
+                record.patch = d.patch;
+                record.min_contrast = d.min_contrast;
+                let pos = p.position();
+                self.stats.position = Some(pos);
+                self.stats.heading_deg = Some(p.camera_to_world[2].atan2(p.camera_to_world[10]).to_degrees());
+
+                // Gating: a repeated frame (same game time) or an impossible jump (teleport, respawn).
+                let gated = match &self.previous {
+                    Some((bits, prev_pose, prev_time)) if *bits == p.time.to_bits() => true,
+                    Some((_, prev_pose, prev_time)) => {
+                        let dt = (p.time - prev_time).abs().max(1e-3);
+                        let moved = keyframes::translation(&p.camera_to_world, prev_pose);
+                        if moved > 3.0 && moved / dt > 40.0 {
+                            self.selector.reset();
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    None => false,
+                };
+                self.previous = Some((p.time.to_bits(), p.camera_to_world, p.time));
+                if gated {
+                    record.flags |= record_flags::GATED;
+                } else if p.is_depth_frame() {
+                    if let Some(dd) = depth::decode(&view, d.flipped) {
+                        let (index, path) = self.writer.reserve_depth();
+                        let bytes = depth_file::write(dd.grid_width, dd.grid_height, view.width, view.height, &dd.codes);
+                        self.pool.send(Job::Depth { path, bytes });
+                        record.flags |= record_flags::DEPTH;
+                        record.depth_index = index;
+                        self.stats.depth_frames += 1;
+                    }
+                } else if self.selector.consider(&p.camera_to_world, p.time) {
+                    let data = copy_upright(&view, d.flipped);
+                    let bgra = view.order == PixelOrder::Bgra;
+                    if !self.thumbnail_done {
+                        let mut rgba = data.clone();
+                        if bgra {
+                            for px in rgba.chunks_exact_mut(4) {
+                                px.swap(0, 2);
+                            }
+                        }
+                        if self.writer.write_thumbnail(&rgba, view.width, view.height).is_ok() {
+                            self.thumbnail_done = true;
+                        }
+                    }
+                    let (index, path) = self.writer.reserve_keyframe();
+                    if self.pool.try_send(Job::Keyframe { path, data, width: view.width, height: view.height, bgra }) {
+                        record.flags |= record_flags::KEYFRAME;
+                        record.keyframe_index = index;
+                        self.stats.keyframes += 1;
+                    } else {
+                        self.stats.dropped += 1;
+                    }
+                }
+            }
+        }
+        if record.has(record_flags::GATED) {
+            self.stats.gated += 1;
+        }
+        self.writer.append_record(&record)?;
+        self.decode_time_total += t0.elapsed().as_secs_f64();
+        Ok(())
+    }
+
+    /// Refreshes rates and byte counts; call before sending stats.
+    pub fn refresh_stats(&mut self) -> &CaptureStats {
+        let (since, frames_then) = self.fps_window;
+        let dt = since.elapsed().as_secs_f32();
+        if dt >= 1.0 {
+            self.stats.fps = (self.stats.frames - frames_then) as f32 / dt;
+            self.fps_window = (Instant::now(), self.stats.frames);
+        }
+        self.stats.decode_ms = if self.stats.frames > 0 { (self.decode_time_total / self.stats.frames as f64 * 1000.0) as f32 } else { 0.0 };
+        self.stats.bytes = self.writer.manifest().stats.bytes + self.pool.written.load(Ordering::Relaxed);
+        self.stats.elapsed_s = self.started.elapsed().as_secs_f64();
+        &self.stats
+    }
+
+    /// Waits for pending files and writes the final manifest.
+    pub fn finish(self) -> anyhow::Result<(PathBuf, SessionManifest)> {
+        let Self { mut writer, pool, .. } = self;
+        let (written, errors) = pool.finish();
+        writer.add_bytes(written);
+        if errors > 0 {
+            eprintln!("{errors} file(s) could not be written");
+        }
+        writer.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sources::{FrameSource, Next, TestPatternSource};
+    use orbiters_contracts::manifest::{CaptureMode, ConsentInfo};
+    use orbiters_core::protocol::SourceSpec;
+    use orbiters_core::settings::KeyframeSettings;
+
+    #[test]
+    fn test_pattern_session_end_to_end() {
+        let root = std::env::temp_dir().join(format!("orbiters-capture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cmd = StartCapture {
+            source: SourceSpec::TestPattern { width: 1280, height: 720, fps: 30.0, depth_every: 4, frames: 60 },
+            sessions_dir: root.clone(),
+            mode: CaptureMode::RecordOnly,
+            quality: StorageQuality::High,
+            keyframes: KeyframeSettings::default(),
+            world: None,
+            consent: ConsentInfo::default(),
+            folder_name: Some("pattern".into()),
+        };
+        let mut src = TestPatternSource::new(1280, 720, 30.0, 4, 60, false);
+        let mut session = CaptureSession::start(&cmd, src.describe(), &src.folder_hint()).unwrap();
+        loop {
+            let mut err = None;
+            match src.next(std::time::Duration::from_millis(10), &mut |v| {
+                if let Err(e) = session.process(v) {
+                    err = Some(e);
+                }
+            }) {
+                Ok(Next::Frame) => assert!(err.is_none()),
+                Ok(Next::End) => break,
+                Ok(Next::Timeout) => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
+        let (dir, manifest) = session.finish().unwrap();
+        assert_eq!(manifest.stats.frames, 60);
+        assert_eq!(manifest.stats.strip_ok, 60);
+        assert_eq!(manifest.stats.depth_frames, 15);
+        assert!(manifest.stats.keyframes >= 5, "keyframes {}", manifest.stats.keyframes);
+        let records = orbiters_core::bundle::read_records(&dir).unwrap();
+        assert_eq!(records.len(), 60);
+        let k = records.iter().find(|r| r.has(record_flags::KEYFRAME)).unwrap();
+        let kf = dir.join("keyframes").join(orbiters_core::bundle::keyframe_file(k.keyframe_index));
+        let (h, _) = qoi::decode_rgba(&std::fs::read(kf).unwrap()).unwrap();
+        assert_eq!((h.width, h.height, h.channels), (1280, 720, 3));
+        let d = records.iter().find(|r| r.has(record_flags::DEPTH)).unwrap();
+        let df = std::fs::read(dir.join("depth").join(orbiters_core::bundle::depth_file(d.depth_index))).unwrap();
+        let (gw, gh, fw, _, codes) = depth_file::read(&df).unwrap();
+        assert_eq!(fw, 1280);
+        assert_eq!(codes.len() as u32, gw * gh);
+        assert!(codes.iter().filter(|&&c| c != 0).count() > 1000);
+        assert!(dir.join("thumbnail.qoi").is_file());
+        std::fs::remove_dir_all(&root).ok();
+    }
+}

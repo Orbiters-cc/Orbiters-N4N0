@@ -149,3 +149,4 @@
   background: linear-gradient(100deg, transparent 20%, rgb(255 255 255 / 0.06) 50%, transparent 80%);
   animation: shimmer 1.6s var(--ease-out-expo) infinite;
 }
+

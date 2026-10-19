@@ -1,5 +1,6 @@
 import { motion, useAnimationControls } from "motion/react";
 import { useEffect } from "react";
+import { useLive } from "../lib/live";
 
 // The Orbiters mark (paths from the official logo, logo-animation/out/orbiters-static.svg).
 const PATHS = [
@@ -25,6 +26,8 @@ function Mark({ fill }: { fill: string }) {
 export function Logo({ size = 34, pulse = false, intro = true }: { size?: number; pulse?: boolean; intro?: boolean }) {
   const cyan = useAnimationControls();
   const violet = useAnimationControls();
+  const live = useLive();
+  pulse = pulse && live;
 
   const glitch = (strength: number, delay = 0) => {
     const t = { duration: 0.6 + strength * 0.3, delay, times: [0, 0.3, 0.65, 1], ease: "easeOut" as const };

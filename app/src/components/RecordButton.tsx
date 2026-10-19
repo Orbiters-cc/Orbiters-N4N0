@@ -1,4 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
+import { useLive } from "../lib/live";
 import type { CaptureStateName } from "../lib/types";
 import { spring } from "./ui";
 
@@ -10,13 +11,17 @@ export function RecordButton({ state, disabled, onToggle, health }: { state: Cap
   const recording = state === "recording" || state === "paused";
   const busy = state === "starting" || state === "stopping" || state === "importing";
   const paused = state === "paused";
+  const live = useLive();
   const size = 252;
+  // Loops only run while the window is live; otherwise the rings rest where they are.
+  const spin = (duration: number, direction: 1 | -1) =>
+    live ? { animate: { rotate: 360 * direction }, transition: { duration, repeat: Infinity, ease: "linear" as const } } : { animate: { rotate: 0 }, transition: { duration: 0 } };
 
   return (
     <div className="relative grid place-items-center" style={{ width: size, height: size }}>
       {/* ripples */}
       <AnimatePresence>
-        {recording && !paused &&
+        {recording && !paused && live &&
           [0, 1, 2].map((i) => (
             <motion.span
               key={i}
@@ -42,20 +47,12 @@ export function RecordButton({ state, disabled, onToggle, health }: { state: Cap
             <stop offset="1" stopColor="#bd65ff" />
           </linearGradient>
         </defs>
-        <motion.g
-          style={{ originX: "126px", originY: "126px" }}
-          animate={{ rotate: 360 }}
-          transition={{ duration: recording ? (paused ? 60 : 9) : 38, repeat: Infinity, ease: "linear" }}
-        >
+        <motion.g style={{ originX: "126px", originY: "126px" }} {...spin(recording ? (paused ? 60 : 9) : 38, 1)}>
           <circle cx="126" cy="126" r="118" fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="1" />
           <circle cx="126" cy="126" r="118" fill="none" stroke={recording ? "url(#orbit-rec)" : "url(#orbit-a)"} strokeWidth="1.6" strokeDasharray="60 680" strokeLinecap="round" />
           <motion.circle cx="126" cy="8" r="4.5" animate={{ fill: recording ? "#ff4d6d" : "#48e6ff" }} style={{ filter: "drop-shadow(0 0 6px currentColor)" }} />
         </motion.g>
-        <motion.g
-          style={{ originX: "126px", originY: "126px" }}
-          animate={{ rotate: -360 }}
-          transition={{ duration: recording ? (paused ? 80 : 14) : 52, repeat: Infinity, ease: "linear" }}
-        >
+        <motion.g style={{ originX: "126px", originY: "126px" }} {...spin(recording ? (paused ? 80 : 14) : 52, -1)}>
           <circle cx="126" cy="126" r="100" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="1" strokeDasharray="2 7" />
           <motion.circle cx="226" cy="126" r="3.2" animate={{ fill: recording ? "#ffb4c2" : "#bd65ff" }} />
         </motion.g>
@@ -94,8 +91,8 @@ export function RecordButton({ state, disabled, onToggle, health }: { state: Cap
               ? "conic-gradient(from 0deg, #ff4d6d, #bd65ff, #ff8a5c, #ff4d6d)"
               : "conic-gradient(from 0deg, #48e6ff, #7466ff, #bd65ff, #4f89ff, #48e6ff)",
           }}
-          animate={{ rotate: 360, opacity: disabled ? 0.25 : 1 }}
-          transition={{ rotate: { duration: recording ? 3 : 8, repeat: Infinity, ease: "linear" }, opacity: { duration: 0.3 } }}
+          animate={{ rotate: live ? 360 : 0, opacity: disabled ? 0.25 : 1 }}
+          transition={{ rotate: live ? { duration: recording ? 3 : 8, repeat: Infinity, ease: "linear" } : { duration: 0 }, opacity: { duration: 0.3 } }}
         />
         <motion.span
           className="absolute inset-[2px] rounded-full"

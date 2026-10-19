@@ -1,5 +1,6 @@
 import { motion } from "motion/react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useLive } from "../lib/live";
 
 interface View {
   cx: number;
@@ -9,9 +10,11 @@ interface View {
 
 /**
  * Top-down map of the camera path (Unity X right, Z up the screen). The view eases towards the path's
- * bounds every frame so new points glide in instead of jumping; the current position carries a heading cone.
+ * bounds so new points glide in instead of jumping (the frame loop runs only while it moves); the current
+ * position carries a heading cone.
  */
 export function TrailMap({ points, heading, live, className }: { points: [number, number, number][]; heading?: number | null; live?: boolean; className?: string }) {
+  const windowLive = useLive();
   const box = useRef<HTMLDivElement>(null);
   const [aspect, setAspect] = useState(2.5);
   useEffect(() => {
@@ -43,23 +46,26 @@ export function TrailMap({ points, heading, live, className }: { points: [number
   }, [points, aspect]);
 
   const [view, setView] = useState<View>(target);
-  const targetRef = useRef(target);
-  targetRef.current = target;
+  const viewRef = useRef(view);
   useEffect(() => {
     let raf = 0;
     const step = () => {
-      setView((v) => {
-        const t = targetRef.current;
-        const k = 0.12;
-        const next = { cx: v.cx + (t.cx - v.cx) * k, cy: v.cy + (t.cy - v.cy) * k, span: v.span + (t.span - v.span) * k };
-        const settled = Math.abs(next.span - t.span) < 0.001 && Math.abs(next.cx - t.cx) < 0.001 && Math.abs(next.cy - t.cy) < 0.001;
-        return settled ? t : next;
-      });
-      raf = requestAnimationFrame(step);
+      const v = viewRef.current;
+      const k = 0.12;
+      const next = { cx: v.cx + (target.cx - v.cx) * k, cy: v.cy + (target.cy - v.cy) * k, span: v.span + (target.span - v.span) * k };
+      const settled = Math.abs(next.span - target.span) < 0.001 && Math.abs(next.cx - target.cx) < 0.001 && Math.abs(next.cy - target.cy) < 0.001;
+      viewRef.current = settled ? target : next;
+      setView(viewRef.current);
+      if (!settled) raf = requestAnimationFrame(step);
     };
+    if (!windowLive) {
+      viewRef.current = target;
+      setView(target);
+      return;
+    }
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [target, windowLive]);
 
   const w = view.span;
   const h = view.span / aspect;
@@ -106,7 +112,7 @@ export function TrailMap({ points, heading, live, className }: { points: [number
             {heading != null && (
               <path d={`M0 0 L${-unit * 0.05} ${-unit * 0.11} A ${unit * 0.12} ${unit * 0.12} 0 0 1 ${unit * 0.05} ${-unit * 0.11} Z`} fill="url(#cone)" transform={`rotate(${heading})`} />
             )}
-            {live && (
+            {live && windowLive && (
               <motion.circle r={unit * 0.02} fill="#48e6ff" animate={{ r: [unit * 0.012, unit * 0.04], opacity: [0.6, 0] }} transition={{ duration: 1.6, repeat: Infinity, ease: "easeOut" }} />
             )}
             <circle r={unit * 0.0115} fill="#ffffff" stroke="#48e6ff" strokeWidth={stroke * 1.4} />

@@ -1,5 +1,6 @@
 import { motion, useMotionValueEvent, useSpring, type HTMLMotionProps } from "motion/react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useLive } from "../lib/live";
 
 // Spring presets shared by every animation: quick and slightly bouncy, like the tools' ease-out-back presses.
 export const spring = {
@@ -150,6 +151,8 @@ export function Card({ children, className, ...rest }: { children: ReactNode } &
 }
 
 export function StatusDot({ tone, pulse }: { tone: "ok" | "warn" | "off" | "rec" | "info"; pulse?: boolean }) {
+  const live = useLive();
+  pulse = pulse && live;
   const colors = { ok: "bg-ok", warn: "bg-warn", off: "bg-fg-4", rec: "bg-rec", info: "bg-cyan" };
   return (
     <span className="relative inline-flex size-2.5">

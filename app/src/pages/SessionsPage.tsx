@@ -6,6 +6,7 @@ import { bytes, duration, integer, relativeTime } from "../lib/format";
 import { useApp } from "../lib/store";
 import type { RawCaptureSummary, SessionSummary, Snapshot } from "../lib/types";
 import { Logo } from "../components/Logo";
+import { useLive } from "../lib/live";
 import { TrailMap } from "../components/TrailMap";
 import { Button, Card, cx, IconButton, spring } from "../components/ui";
 
@@ -326,9 +327,10 @@ function ImportPopover({ onClose, busy }: { onClose: () => void; busy: boolean }
 }
 
 function EmptyState({ searching }: { searching: boolean }) {
+  const live = useLive();
   return (
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={spring.soft} className="flex h-[60%] flex-col items-center justify-center gap-4 text-center">
-      <motion.div animate={{ y: [0, -8, 0] }} transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}>
+      <motion.div animate={live ? { y: [0, -8, 0] } : { y: 0 }} transition={live ? { duration: 4, repeat: Infinity, ease: "easeInOut" } : { duration: 0 }}>
         <Logo size={70} intro={false} />
       </motion.div>
       <div className="text-[17px] font-semibold">{searching ? "No session matches" : "No sessions yet"}</div>

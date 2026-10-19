@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent, Wry};
+use tauri::{AppHandle, Emitter, Manager, State, Wry};
 use worker::WorkerHandle;
 
 /// What the interface needs to know about a finished session.
@@ -596,11 +596,22 @@ fn quit_app(app: AppHandle, ctl: State<'_, Ctl>) {
     app.exit(0);
 }
 
+/// Shows the window, recreating it when it was closed to the tray. Closing destroys the web view, so the app
+/// costs no GPU time and only the shell's memory while it waits in the tray (the web view alone kept the GPU's
+/// 3D engine at 14-17 % and held about 450 MB).
 fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+        return;
+    }
+    let Some(config) = app.config().app.windows.first().cloned() else { return };
+    match tauri::WebviewWindowBuilder::from_config(app, &config).and_then(|b| b.build()) {
+        Ok(w) => {
+            let _ = w.set_focus();
+        }
+        Err(e) => eprintln!("could not open the window: {e}"),
     }
 }
 
@@ -616,7 +627,7 @@ pub fn run() {
             let ctl = Controller::new(app.handle().clone(), settings);
             app.manage(ctl.clone());
 
-            // Tray: show, start/stop, quit. Closing the window only hides it.
+            // Tray: show, start/stop, quit. Closing the window destroys it; the app keeps running in the tray.
             let show = MenuItem::with_id(app, "show", "Show Orbiters desktop", true, None::<&str>)?;
             let toggle = MenuItem::with_id(app, "toggle", "Start recording", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Orbiters desktop", true, None::<&str>)?;
@@ -650,16 +661,6 @@ pub fn run() {
             })
             .build(app)?;
 
-            if let Some(window) = app.get_webview_window("main") {
-                let w = window.clone();
-                window.on_window_event(move |e| {
-                    if let WindowEvent::CloseRequested { api, .. } = e {
-                        api.prevent_close();
-                        let _ = w.hide();
-                    }
-                });
-            }
-
             ctl.start_osc();
             let c = ctl.clone();
             std::thread::spawn(move || {
@@ -687,6 +688,12 @@ pub fn run() {
             worker_log,
             quit_app
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Orbiters desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building Orbiters desktop")
+        .run(|_app, event| {
+            // The last window closing is not a reason to quit: capture keeps running from the tray.
+            if let tauri::RunEvent::ExitRequested { api, code: None, .. } = event {
+                api.prevent_exit();
+            }
+        });
 }

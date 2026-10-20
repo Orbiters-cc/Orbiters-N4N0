@@ -32,6 +32,18 @@ struct Scenario {
     pointer: Option<Pos2>,
     /// Points the page is scrolled down by (a mouse wheel over it, half a second before the capture).
     scroll: f32,
+    /// The Visited worlds page: a world opened, and what happens in it.
+    world: Option<WorldShot>,
+}
+
+/// In a world's page (the one with the most captures, or with `pictures` the most pictures): pictures picked or shown
+/// large, and what this member already shared.
+#[derive(Clone, Default)]
+struct WorldShot {
+    pictures: bool,
+    select: usize,
+    view: Option<usize>,
+    maps: Option<crate::state::MapsMine>,
 }
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
@@ -112,6 +124,41 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         seconds: 41.0,
     });
 
+    // Visited worlds: the world with the most captures has a 3D preview shared; in the one with the most pictures, the
+    // first two count as shared and the next two as being sent.
+    let visited = crate::worlds::load(&settings.sessions_dir);
+    let captured = visited.iter().max_by_key(|w| (w.reconstructed(), w.sessions.len())).cloned();
+    let pictured = visited.iter().max_by_key(|w| w.shots.len()).cloned();
+    let signed_in = with_account(&idle, crate::state::AccountState::SignedIn { username: "Desktop Tester".into() }, None);
+    let mut maps = crate::state::MapsMine::default();
+    let mut sharing = signed_in.clone();
+    if let Some(w) = &captured {
+        maps.worlds.push(orbiters_core::maps::MineWorld {
+            world_id: w.id.clone(),
+            preview: Some(orbiters_core::maps::MinePreview { id: 1, splats: 600_000, created_at: None }),
+            pictures: Vec::new(),
+        });
+    }
+    if let Some(w) = &pictured {
+        let first: Vec<PathBuf> = w.shots.iter().take(2).map(|s| s.path.clone()).collect();
+        let hashes = crate::worlds::hashes(first.clone());
+        maps.worlds.push(orbiters_core::maps::MineWorld {
+            world_id: w.id.clone(),
+            preview: None,
+            pictures: first.iter().filter_map(|p| hashes.get(p)).enumerate().map(|(i, h)| orbiters_core::maps::MinePicture { id: i as u64 + 1, source_hash: h.clone() }).collect(),
+        });
+        sharing.uploads.push(crate::state::UploadStatus {
+            id: 1,
+            world_id: w.id.clone(),
+            world_name: w.name.clone(),
+            kind: crate::state::UploadKind::Pictures,
+            paths: w.shots.iter().skip(2).take(2).map(|s| s.path.clone()).collect(),
+            sent: 9_400_000,
+            total: 21_000_000,
+            state: crate::state::UploadState::Sending,
+        });
+    }
+
     let scenarios = vec![
         Scenario {
             name: "splash",
@@ -123,6 +170,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: None,
             scroll: 0.0,
+            world: None,
         },
         Scenario {
             name: "capture-idle",
@@ -134,6 +182,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: None,
             scroll: 0.0,
+            world: None,
         },
         Scenario {
             name: "capture-recording",
@@ -145,6 +194,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: None,
             scroll: 0.0,
+            world: None,
         },
         Scenario {
             name: "capture-consent",
@@ -156,6 +206,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: None,
             scroll: 0.0,
+            world: None,
         },
         Scenario {
             name: "toasts",
@@ -170,6 +221,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             ],
             pointer: None,
             scroll: 0.0,
+            world: None,
         },
         Scenario {
             name: "sessions",
@@ -181,6 +233,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: Some(pos2(400.0, 300.0)),
             scroll: 0.0,
+            world: None,
         },
         Scenario {
             name: "session-detail",
@@ -192,6 +245,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: None,
             scroll: 0.0,
+            world: None,
         },
         Scenario {
             name: "session-reconstructing",
@@ -203,6 +257,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: None,
             scroll: 0.0,
+            world: None,
         },
         Scenario {
             name: "settings",
@@ -214,6 +269,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: None,
             scroll: 0.0,
+            world: None,
         },
         // The Orbiters account: signed out, then finishing in the browser.
         Scenario {
@@ -226,6 +282,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: None,
             scroll: 0.0,
+            world: None,
         },
         Scenario {
             name: "settings-signing-in",
@@ -237,6 +294,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: None,
             scroll: 0.0,
+            world: None,
         },
         // Content under the title bar (and the sessions under their heading): blurred, not cut.
         Scenario {
@@ -249,6 +307,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: None,
             scroll: 112.0,
+            world: None,
         },
         Scenario {
             name: "settings-scrolled",
@@ -260,6 +319,92 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: None,
             scroll: 250.0,
+            world: None,
+        },
+        Scenario {
+            name: "worlds",
+            page: Page::Worlds,
+            snapshot: signed_in.clone(),
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: Some(pos2(420.0, 260.0)),
+            scroll: 0.0,
+            world: Some(WorldShot { maps: Some(maps.clone()), ..Default::default() }),
+        },
+        // The card flying into the world's page, a sixth of a second in.
+        Scenario {
+            name: "world-flight",
+            page: Page::Worlds,
+            snapshot: signed_in.clone(),
+            frames: 56,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: Some(WorldShot { maps: Some(maps.clone()), ..Default::default() }),
+        },
+        Scenario {
+            name: "world-detail",
+            page: Page::Worlds,
+            snapshot: signed_in.clone(),
+            frames: 170,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: Some(WorldShot { maps: Some(maps.clone()), ..Default::default() }),
+        },
+        Scenario {
+            name: "world-pictures",
+            page: Page::Worlds,
+            snapshot: signed_in.clone(),
+            frames: 200,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 560.0,
+            world: Some(WorldShot { pictures: true, select: 3, maps: Some(maps.clone()), ..Default::default() }),
+        },
+        Scenario {
+            name: "world-sharing",
+            page: Page::Worlds,
+            snapshot: sharing,
+            frames: 200,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 560.0,
+            world: Some(WorldShot { pictures: true, maps: Some(maps.clone()), ..Default::default() }),
+        },
+        Scenario {
+            name: "world-signed-out",
+            page: Page::Worlds,
+            snapshot: with_account(&idle, crate::state::AccountState::SignedOut, None),
+            frames: 200,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 560.0,
+            world: Some(WorldShot { pictures: true, select: 2, ..Default::default() }),
+        },
+        Scenario {
+            name: "world-viewer",
+            page: Page::Worlds,
+            snapshot: signed_in.clone(),
+            frames: 200,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: Some(WorldShot { pictures: true, view: Some(1), maps: Some(maps), ..Default::default() }),
         },
         Scenario {
             name: "sessions-scrolled",
@@ -271,6 +416,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: None,
             scroll: 140.0,
+            world: None,
         },
     ];
 
@@ -291,7 +437,8 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, height: f32, path: &st
     orbiters_ui::install(&ctx);
     let ctl = Controller::new(sc.snapshot.settings.clone());
     ctl.set_snapshot(sc.snapshot.clone());
-    let backend: Ctl = std::sync::Arc::new(Local::new(ctl));
+    let backend: Ctl = std::sync::Arc::new(Local::new(ctl.clone()));
+    let mut world_opened = false;
     backend.attach(&ctx);
     let mut app = App::offline(backend);
     app.set_gpu(crate::gpu::Handles { device: gpu.device().clone(), queue: gpu.queue().clone(), textures: gpu.textures().clone() });
@@ -324,8 +471,33 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, height: f32, path: &st
                 app.toasts_mut().push(&ctx, *kind, *message);
             }
         }
-        if sc.open_detail && f == 45 && app.sessions_mut().loaded() {
+        if sc.open_detail && sc.world.is_none() && f == 45 && app.sessions_mut().loaded() {
             app.sessions_mut().open_first(&ctx, Rect::from_min_size(pos2(264.0, 160.0), vec2(300.0, 265.0)));
+        }
+        if let Some(ws) = &sc.world {
+            // After the page asked for it (the stand-in controller has no account and answers nothing).
+            if f == 20 {
+                if let Some(m) = &ws.maps {
+                    ctl.set_maps(m.clone());
+                }
+            }
+            if sc.open_detail && !world_opened && f >= 45 && app.worlds_mut().loaded() {
+                world_opened = true;
+                let visited = crate::worlds::load(&sc.snapshot.settings.sessions_dir);
+                let pick = if ws.pictures { visited.iter().max_by_key(|w| w.shots.len()) } else { visited.iter().max_by_key(|w| (w.reconstructed(), w.sessions.len())) };
+                if let Some(w) = pick {
+                    app.worlds_mut().open_world(&ctx, &w.id, Rect::from_min_size(pos2(264.0, 152.0), vec2(300.0, 169.0)));
+                }
+            }
+            if f == 110 {
+                if ws.select > 0 {
+                    // After the two counted as shared.
+                    app.worlds_mut().select_some(2, ws.select);
+                }
+                if let Some(i) = ws.view {
+                    app.worlds_mut().view_picture(i);
+                }
+            }
         }
         let capture = f + 1 == sc.frames;
         let image = gpu.frame(
@@ -732,6 +904,12 @@ impl crate::backend::Backend for Still {
     fn sign_out(&self) {}
     fn request_worker_log(&self) {}
     fn worker_log(&self) -> Option<Vec<String>> {
+        None
+    }
+    fn upload_pictures(&self, _world_id: String, _world_name: String, _paths: Vec<PathBuf>) {}
+    fn upload_preview(&self, _world_id: String, _world_name: String, _session: PathBuf) {}
+    fn request_maps(&self) {}
+    fn maps(&self) -> Option<crate::state::MapsMine> {
         None
     }
     fn calibrated(&self, _calibration: orbiters_contracts::performance::calibration::Calibration) {}

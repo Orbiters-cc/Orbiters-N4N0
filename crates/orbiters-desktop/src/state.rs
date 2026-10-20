@@ -144,6 +144,60 @@ impl ReconstructionJob {
     }
 }
 
+/// What is sent to the Map explorer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadKind {
+    Preview,
+    Pictures,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UploadState {
+    /// Building the web preview of the splats.
+    Preparing,
+    Sending,
+    Done { added: usize, skipped: usize },
+    Failed { message: String },
+}
+
+/// An upload to the Map explorer (the latest ones stay listed once finished).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UploadStatus {
+    pub id: u64,
+    pub world_id: String,
+    pub world_name: String,
+    pub kind: UploadKind,
+    /// The session (preview) or the pictures sent.
+    pub paths: Vec<PathBuf>,
+    pub sent: u64,
+    pub total: u64,
+    pub state: UploadState,
+}
+
+impl UploadStatus {
+    pub fn running(&self) -> bool {
+        matches!(self.state, UploadState::Preparing | UploadState::Sending)
+    }
+
+    pub fn fraction(&self) -> f32 {
+        if self.total == 0 {
+            0.0
+        } else {
+            (self.sent as f64 / self.total as f64) as f32
+        }
+    }
+}
+
+/// What this member added to the Map explorer (the tray service fetches it: the credential stays there).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MapsMine {
+    pub worlds: Vec<orbiters_core::maps::MineWorld>,
+    /// The last fetch failed (the worlds are the previous answer).
+    pub error: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WorkerStatus {
     pub ready: bool,
@@ -166,6 +220,7 @@ pub struct Snapshot {
     pub reconstruction: Option<ReconstructionJob>,
     #[serde(default)]
     pub account: AccountStatus,
+    pub uploads: Vec<UploadStatus>,
 }
 
 impl Snapshot {
@@ -183,6 +238,7 @@ impl Snapshot {
             steamvr: SteamVrStatus::default(),
             reconstruction: None,
             account: AccountStatus::default(),
+            uploads: Vec::new(),
         }
     }
 

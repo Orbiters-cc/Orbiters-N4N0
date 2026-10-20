@@ -339,7 +339,7 @@ fn preview(ctx: &egui::Context, d: &mut Detail, s: &SessionSummary) -> Option<Te
     }
 }
 
-fn stage_label(stage: Stage) -> &'static str {
+pub(super) fn stage_label(stage: Stage) -> &'static str {
     match stage {
         Stage::Loading => "Reading frames",
         Stage::Seeding => "Seeding splats from depth",
@@ -349,7 +349,7 @@ fn stage_label(stage: Stage) -> &'static str {
 }
 
 /// The whole run's progress: reading and seeding are short, training is most of it.
-fn overall_progress(j: &ReconstructionJob) -> f32 {
+pub(super) fn overall_progress(j: &ReconstructionJob) -> f32 {
     match j.stage {
         Stage::Loading => 0.05 * j.progress,
         Stage::Seeding => 0.05,
@@ -396,7 +396,7 @@ fn splats_view(ui: &Ui, rect: Rect, tex: Option<&TextureHandle>, report: Option<
 }
 
 /// UV rect that covers `target` with an image of `image_aspect`, zoomed by `zoom` around the centre.
-fn cover_uv(target: Rect, image_aspect: f32, zoom: f32) -> Rect {
+pub(super) fn cover_uv(target: Rect, image_aspect: f32, zoom: f32) -> Rect {
     let ta = target.width() / target.height().max(1.0);
     let (mut w, mut h) = if ta > image_aspect { (1.0, image_aspect / ta) } else { (ta / image_aspect, 1.0) };
     w /= zoom;
@@ -404,7 +404,7 @@ fn cover_uv(target: Rect, image_aspect: f32, zoom: f32) -> Rect {
     Rect::from_center_size(pos2(0.5, 0.5), vec2(w, h))
 }
 
-fn thumb_shape(painter: &egui::Painter, rect: Rect, radius: CornerRadius, tex: Option<&TextureHandle>, zoom: f32) {
+pub(super) fn thumb_shape(painter: &egui::Painter, rect: Rect, radius: CornerRadius, tex: Option<&TextureHandle>, zoom: f32) {
     match tex {
         Some(t) => {
             let size = t.size_vec2();
@@ -481,7 +481,7 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
 }
 
 /// A small label on a picture; returns its width.
-fn badge(p: &egui::Painter, ui: &Ui, at: egui::Pos2, label: &str, bg: Color32, fg: Color32, right: bool) -> f32 {
+pub(super) fn badge(p: &egui::Painter, ui: &Ui, at: egui::Pos2, label: &str, bg: Color32, fg: Color32, right: bool) -> f32 {
     let t = Txt::new(label, 10.5).weight(weight::SEMIBOLD).tracking(0.025).color(fg);
     let s = widgets::text_size(ui, &t);
     let w = s.x + 20.0;
@@ -491,7 +491,7 @@ fn badge(p: &egui::Painter, ui: &Ui, at: egui::Pos2, label: &str, bg: Color32, f
     w
 }
 
-fn shimmer_card(ui: &Ui, rect: Rect) {
+pub(super) fn shimmer_card(ui: &Ui, rect: Rect) {
     let p = ui.painter();
     widgets::frame(p, rect, theme::CARD_RADIUS, theme::surface());
     let t = anim::clock(ui.ctx(), 30.0);
@@ -882,7 +882,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
     }
 }
 
-fn mini_stat(p: &egui::Painter, r: Rect, glyph: &str, label: &str, value: &str, sub: Option<&str>) {
+pub(super) fn mini_stat(p: &egui::Painter, r: Rect, glyph: &str, label: &str, value: &str, sub: Option<&str>) {
     widgets::frame(p, r, 16.0, theme::surface_soft());
     widgets::icon(p, pos2(r.left() + 19.0, r.top() + 20.0), glyph, 14.0, theme::FG_4);
     widgets::text(p, pos2(r.left() + 32.0, r.top() + 20.0), Align2::LEFT_CENTER, &Txt::caps(label));

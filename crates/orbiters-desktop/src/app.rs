@@ -1,4 +1,4 @@
-//! The window: glow background, frameless title bar, sidebar with a sliding pill, the three pages with spring
+//! The window: glow background, frameless title bar, sidebar with a sliding pill, the pages with spring
 //! entrances, toasts and the opening splash. The tray service does the work; this only reads its snapshot.
 
 use crate::backend::Ctl;
@@ -32,6 +32,7 @@ pub struct App {
     toasts: toast::Toasts,
     capture: pages::capture::State,
     sessions: pages::sessions::State,
+    worlds: pages::worlds::State,
     settings: pages::settings::State,
     logo_glitch: Option<(f64, f32)>,
     logo_hovered: bool,
@@ -70,6 +71,7 @@ impl App {
             toasts: toast::Toasts::default(),
             capture: Default::default(),
             sessions: Default::default(),
+            worlds: Default::default(),
             settings: Default::default(),
             logo_glitch: None,
             logo_hovered: false,
@@ -98,6 +100,10 @@ impl App {
 
     pub fn sessions_mut(&mut self) -> &mut pages::sessions::State {
         &mut self.sessions
+    }
+
+    pub fn worlds_mut(&mut self) -> &mut pages::worlds::State {
+        &mut self.worlds
     }
 
     pub fn toasts_mut(&mut self) -> &mut toast::Toasts {
@@ -273,6 +279,7 @@ impl App {
         let items = [
             (Page::Capture, "Capture", icons::APERTURE),
             (Page::Sessions, "Sessions", icons::FOLDER_OPEN),
+            (Page::Worlds, "Visited worlds", icons::GLOBE),
             (Page::Settings, "Settings", icons::SLIDERS_HORIZONTAL),
         ];
         let item_rect = |i: usize| Rect::from_min_size(pos2(inner.left(), nav_top + i as f32 * 48.0), vec2(inner.width(), 44.0));
@@ -387,6 +394,7 @@ impl App {
         match self.page {
             Page::Capture => pages::capture::show(&mut child, &mut cx, &mut self.capture),
             Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions),
+            Page::Worlds => pages::worlds::show(&mut child, &mut cx, &mut self.worlds),
             Page::Settings => pages::settings::show(&mut child, &mut cx, &mut self.settings),
         }
     }

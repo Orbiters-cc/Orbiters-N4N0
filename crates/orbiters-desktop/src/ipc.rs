@@ -4,7 +4,7 @@
 //! it waits in the tray stays small; a window exists only while it is shown.
 
 use crate::controller::Notice;
-use crate::state::Snapshot;
+use crate::state::{MapsMine, Snapshot};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::settings::Settings;
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,10 @@ pub enum ToClient {
     },
     WorkerLog {
         lines: Vec<String>,
+    },
+    /// What this member added to the Map explorer.
+    Maps {
+        mine: MapsMine,
     },
     /// Come to the front.
     Show,
@@ -85,6 +89,20 @@ pub enum ToService {
     ReopenSignIn,
     CancelSignIn,
     SignOut,
+    /// Shares pictures of a world on the Map explorer.
+    UploadPictures {
+        world_id: String,
+        world_name: String,
+        paths: Vec<PathBuf>,
+    },
+    /// Shares a session's reconstruction as a world's 3D preview.
+    UploadPreview {
+        world_id: String,
+        world_name: String,
+        session: PathBuf,
+    },
+    /// Asks what this member added to the Map explorer (answered with `ToClient::Maps`).
+    Maps,
     /// A T-pose calibration taken in the overlay (`time_ns` is a shared-clock reading).
     Calibrated {
         calibration: Box<Calibration>,
@@ -124,6 +142,7 @@ pub struct Client {
     notices: Mutex<Vec<Notice>>,
     library: AtomicU64,
     worker_log: Mutex<Option<Vec<String>>>,
+    maps: Mutex<Option<MapsMine>>,
     show: AtomicBool,
     close: AtomicBool,
     connected: AtomicBool,
@@ -150,6 +169,7 @@ impl Client {
             notices: Mutex::new(Vec::new()),
             library: AtomicU64::new(0),
             worker_log: Mutex::new(None),
+            maps: Mutex::new(None),
             show: AtomicBool::new(false),
             close: AtomicBool::new(false),
             connected: AtomicBool::new(true),
@@ -165,6 +185,7 @@ impl Client {
                     ToClient::Notice { notice } => c.notices.lock().unwrap().push(notice),
                     ToClient::Library { version } => c.library.store(version, Ordering::Relaxed),
                     ToClient::WorkerLog { lines } => *c.worker_log.lock().unwrap() = Some(lines),
+                    ToClient::Maps { mine } => *c.maps.lock().unwrap() = Some(mine),
                     ToClient::Show => c.show.store(true, Ordering::Relaxed),
                     ToClient::Close => c.close.store(true, Ordering::Relaxed),
                 }
@@ -216,6 +237,10 @@ impl Client {
 
     pub fn worker_log(&self) -> Option<Vec<String>> {
         self.worker_log.lock().unwrap().clone()
+    }
+
+    pub fn maps(&self) -> Option<MapsMine> {
+        self.maps.lock().unwrap().clone()
     }
 
     pub fn take_show(&self) -> bool {

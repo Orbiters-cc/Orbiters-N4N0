@@ -1,0 +1,1233 @@
+//! Visited worlds page: the worlds this player visited in VRChat (the tray service keeps them from VRChat's logs), the
+//! pictures taken in each and the sessions recorded there. A card flies into the world's page, where pictures are
+//! picked and shared on the Orbiters Map explorer, along with a session's 3D preview. Uploads run in the tray service.
+
+use super::sessions::{badge, cover_uv, mini_stat, overall_progress, shimmer_card, stage_label, thumb_shape};
+use super::{Cx, Job};
+use crate::controller;
+use crate::state::{UploadKind, UploadState, UploadStatus};
+use crate::worlds::{self, Info, Infos, Picture, Pictures, VisitedWorld, THUMB_WIDTH};
+use egui::{pos2, vec2, Align2, Color32, CornerRadius, CursorIcon, Id, Order, Rect, Sense, TextureHandle, Ui, UiBuilder};
+use orbiters_core::account::Server;
+use orbiters_core::bundle::SessionSummary;
+use orbiters_core::maps::{world_page_url, MineWorld};
+use orbiters_core::visited::{self, Shot};
+use orbiters_ui::anim::{self, ease, Spring};
+use orbiters_ui::paint::{self, Gradient};
+use orbiters_ui::theme::{self, weight, Txt};
+use orbiters_ui::widgets::{self, Button, IconButton, Size, Variant};
+use orbiters_ui::{format, icons, logo, toast};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Pictures in a world's page are at least this wide.
+const TILE_W: f32 = 200.0;
+/// Pictures are shown this wide in the viewer.
+const LARGE_W: u32 = 2048;
+
+struct Open {
+    id: String,
+    /// The card's picture when it was opened (the flight starts there).
+    origin: Rect,
+    serial: u64,
+    closing: bool,
+    /// The flight's progress (0 the card, 1 the page), as the last frame drew it.
+    progress: f32,
+    hashes: Job<HashMap<PathBuf, String>>,
+    selected: BTreeSet<PathBuf>,
+    /// Pictures just handed to the tray service (shown as sending until its upload shows up).
+    handed: Option<(f64, BTreeSet<PathBuf>)>,
+    /// The picture shown large, by its index in the world's pictures.
+    viewer: Option<usize>,
+}
+
+#[derive(Default)]
+pub struct State {
+    loaded: Option<(u64, PathBuf, u64)>,
+    list: Job<Vec<VisitedWorld>>,
+    worlds: Option<Vec<Arc<VisitedWorld>>>,
+    query: String,
+    infos: Option<Infos>,
+    pictures: Option<Pictures>,
+    open: Option<Open>,
+    serial: u64,
+    /// Uploads seen finished.
+    finished: HashSet<u64>,
+}
+
+impl State {
+    pub fn loaded(&mut self) -> bool {
+        if let Some(list) = self.list.take() {
+            self.worlds = Some(list.into_iter().map(Arc::new).collect());
+        }
+        self.worlds.is_some()
+    }
+
+    /// Opens a world as if its card was clicked (screenshots).
+    pub fn open_world(&mut self, ctx: &egui::Context, id: &str, origin: Rect) {
+        self.open(ctx, id.to_string(), origin);
+    }
+
+    /// Selects `n` pictures after the first `skip` (screenshots).
+    pub fn select_some(&mut self, skip: usize, n: usize) {
+        let Some(o) = self.open.as_mut() else { return };
+        let Some(w) = self.worlds.as_ref().and_then(|l| l.iter().find(|w| w.id == o.id)) else { return };
+        o.selected = w.shots.iter().skip(skip).take(n).map(|s| s.path.clone()).collect();
+    }
+
+    /// Shows a picture large (screenshots).
+    pub fn view_picture(&mut self, index: usize) {
+        if let Some(o) = self.open.as_mut() {
+            o.viewer = Some(index);
+        }
+    }
+
+    fn open(&mut self, ctx: &egui::Context, id: String, origin: Rect) {
+        self.serial += 1;
+        let paths: Vec<PathBuf> =
+            self.worlds.as_ref().and_then(|l| l.iter().find(|w| w.id == id)).map(|w| w.shots.iter().map(|s| s.path.clone()).collect()).unwrap_or_default();
+        self.open = Some(Open {
+            id,
+            origin,
+            serial: self.serial,
+            closing: false,
+            progress: 0.0,
+            hashes: Job::spawn(ctx, move || worlds::hashes(paths)),
+            selected: BTreeSet::new(),
+            handed: None,
+            viewer: None,
+        });
+    }
+}
+
+fn now_secs() -> u64 {
+    visited::now()
+}
+
+fn server(cx: &Cx) -> Server {
+    if cx.snap.account.development {
+        Server::Development
+    } else {
+        Server::Production
+    }
+}
+
+fn vrchat_url(id: &str) -> String {
+    format!("https://vrchat.com/home/world/{id}")
+}
+
+/// The world's picture: the latest screenshot, else a session's thumbnail, else VRChat's. Large (the page's hero),
+/// VRChat's full picture comes before a session's small thumbnail.
+fn cover(w: &VisitedWorld, info: Option<&Info>, width: u32) -> Option<Picture> {
+    let large = width > THUMB_WIDTH;
+    if let Some(s) = w.shots.first() {
+        return Some(Picture::Shot { path: s.path.clone(), size: s.size, width });
+    }
+    let session = w.sessions.iter().find(|s| s.has_thumbnail).map(|s| Picture::Session(s.dir.clone()));
+    let remote = match info {
+        Some(Info::Listed(p)) => {
+            let url = if large {
+                p.world.image_url.clone().or_else(|| p.world.thumbnail_url.clone())
+            } else {
+                p.world.thumbnail_url.clone().or_else(|| p.world.image_url.clone())
+            };
+            url.map(|url| Picture::Remote { world_id: w.id.clone(), url, large })
+        }
+        _ => None,
+    };
+    if large {
+        remote.or(session)
+    } else {
+        session.or(remote)
+    }
+}
+
+fn mine_of<'a>(mine: &'a Option<crate::state::MapsMine>, id: &str) -> Option<&'a MineWorld> {
+    mine.as_ref()?.worlds.iter().find(|w| w.world_id == id)
+}
+
+pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
+    let ctx = ui.ctx().clone();
+    let page = ui.max_rect();
+
+    // Reload when the library changes, the folder changes, or the page is entered again.
+    let key = (cx.ctl.library_version(), cx.snap.settings.sessions_dir.clone(), cx.visit);
+    if state.loaded.as_ref() != Some(&key) {
+        let entered = state.loaded.as_ref().is_none_or(|k| k.2 != key.2);
+        state.loaded = Some(key);
+        let dir = cx.snap.settings.sessions_dir.clone();
+        state.list = Job::spawn(&ctx, move || worlds::load(&dir));
+        if entered {
+            cx.ctl.request_maps();
+        }
+    }
+    if let Some(list) = state.list.take() {
+        state.worlds = Some(list.into_iter().map(Arc::new).collect());
+    }
+    state.infos.get_or_insert_with(|| Infos::new(&ctx));
+    state.pictures.get_or_insert_with(|| Pictures::new(&ctx));
+    // A world shared to gets its page fetched again.
+    for u in &cx.snap.uploads {
+        if !u.running() && state.finished.insert(u.id) && matches!(u.state, UploadState::Done { .. }) {
+            if let Some(infos) = state.infos.as_mut() {
+                infos.refresh(&u.world_id);
+            }
+        }
+    }
+
+    let progress = state.open.as_ref().map_or(0.0, |o| o.progress);
+    let shown = 1.0 - ease::out_cubic(progress.clamp(0.0, 1.0));
+    if shown > 0.01 {
+        if let Some((id, origin)) = grid(ui, cx, state, page, shown, state.open.is_none()) {
+            state.open(&ctx, id, origin);
+        }
+    }
+    if state.open.is_some() {
+        detail(ui, cx, state, page);
+    }
+}
+
+/// The grid of worlds and its heading; returns the world clicked and its card's picture.
+fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, interactive: bool) -> Option<(String, Rect)> {
+    let ctx = ui.ctx().clone();
+    let head = Rect::from_min_size(pos2(page.left() + super::PAD_X, page.top() + cx.top + 8.0), vec2(page.width() - super::PAD_X * 2.0, 72.0));
+    let actions_y = head.bottom() - 40.0;
+    let folder_r = Rect::from_min_size(pos2(head.right() - 36.0, actions_y + 2.0), vec2(36.0, 36.0));
+    let search_r = Rect::from_min_size(pos2(folder_r.left() - 8.0 - 224.0, actions_y), vec2(224.0, 40.0));
+    let grid_top = head.bottom() + 20.0;
+    let below_head = Rect::from_min_max(pos2(page.left(), grid_top), page.max);
+
+    let mine = cx.ctl.maps();
+    let q = state.query.trim().to_lowercase();
+    let filtered: Vec<Arc<VisitedWorld>> = state
+        .worlds
+        .as_ref()
+        .map(|l| l.iter().filter(|w| q.is_empty() || w.name.to_lowercase().contains(&q) || w.id.contains(&q)).cloned().collect())
+        .unwrap_or_default();
+    let mut clicked = None;
+    let from = orbiters_ui::blur::next_shape(ui);
+    let mut gu = ui.new_child(UiBuilder::new().max_rect(page).id_salt("worlds-grid"));
+    gu.multiply_opacity(shown);
+    egui::ScrollArea::vertical().id_salt("worlds").auto_shrink([false, false]).scroll_bar_rect(below_head).show(&mut gu, |ui| {
+        egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 32 }).show(ui, |ui| {
+            ui.add_space(grid_top - page.top());
+            let w = ui.available_width();
+            if state.worlds.is_some() && filtered.is_empty() {
+                empty_state(ui, cx, !q.is_empty(), below_head.height() * 0.6);
+                return;
+            }
+            let cols = (((w + 16.0) / (270.0 + 16.0)).floor() as usize).max(1);
+            let card_w = (w - 16.0 * (cols - 1) as f32) / cols as f32;
+            let card_h = card_w * 9.0 / 16.0 + 96.0;
+            let count = if state.worlds.is_none() { 6 } else { filtered.len() };
+            let rows = count.div_ceil(cols);
+            let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + 16.0) - 16.0), Sense::hover());
+            for i in 0..count {
+                let r = Rect::from_min_size(
+                    pos2(area.left() + (i % cols) as f32 * (card_w + 16.0), area.top() + (i / cols) as f32 * (card_h + 16.0)),
+                    vec2(card_w, card_h),
+                );
+                if !ui.is_rect_visible(r) {
+                    continue;
+                }
+                let Some(world) = filtered.get(i) else {
+                    shimmer_card(ui, r);
+                    continue;
+                };
+                let info = state.infos.as_mut().and_then(|i| i.get(&world.id));
+                let tex = cover(world, info.as_ref(), THUMB_WIDTH).and_then(|p| state.pictures.as_mut()?.get(&ctx, &p));
+                let open_here = state.open.as_ref().is_some_and(|o| o.id == world.id);
+                let shared = mine_of(&mine, &world.id).is_some_and(|m| m.preview.is_some() || !m.pictures.is_empty());
+                if let Some(cover_r) = world_card(ui, cx, i, world, r, tex.as_ref(), info.as_ref(), shared, if open_here { 0.0 } else { 1.0 }, interactive) {
+                    clicked = Some((world.id.clone(), cover_r));
+                }
+            }
+        });
+    });
+    super::under_top(&gu, cx, from, grid_top);
+
+    let sub = match &state.worlds {
+        Some(l) => {
+            let pictures: usize = l.iter().map(|w| w.shots.len()).sum();
+            let in_3d = l.iter().filter(|w| w.reconstructed() > 0).count();
+            let mut s = format!("{} world{} · {} picture{}", l.len(), plural(l.len()), format::integer(pictures as f64), plural(pictures));
+            if in_3d > 0 {
+                s.push_str(&format!(" · {in_3d} in 3D"));
+            }
+            s
+        }
+        None => "Reading VRChat's logs and pictures…".into(),
+    };
+    let mut hu = ui.new_child(UiBuilder::new().max_rect(page).id_salt("worlds-head"));
+    hu.multiply_opacity(shown);
+    let (head_r, head_a) = super::entering(&hu, cx, 0, head);
+    {
+        let mut tu = hu.new_child(UiBuilder::new().max_rect(head_r).id_salt("worlds-title"));
+        tu.multiply_opacity(head_a);
+        super::heading(&tu, head_r, "VRChat", "Visited worlds", Some(&sub));
+    }
+    if interactive {
+        let mut su = hu.new_child(UiBuilder::new().max_rect(search_r).id_salt("worlds-search"));
+        widgets::search_field(&mut su, "worlds-search", &mut state.query, "Search worlds", 224.0);
+        if IconButton::new(icons::IMAGES, "Open VRChat's pictures folder").show_at(&mut hu, folder_r).clicked() {
+            if let Some(dir) = visited::screenshot_dirs().into_iter().next() {
+                let r = controller::open_path(&dir);
+                cx.run(&ctx, r);
+            }
+        }
+    }
+    clicked
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// One card; returns its picture's rect when clicked.
+#[allow(clippy::too_many_arguments)]
+fn world_card(
+    ui: &mut Ui,
+    cx: &Cx,
+    i: usize,
+    w: &VisitedWorld,
+    rect: Rect,
+    tex: Option<&TextureHandle>,
+    info: Option<&Info>,
+    shared: bool,
+    shown: f32,
+    interactive: bool,
+) -> Option<Rect> {
+    let ctx = ui.ctx().clone();
+    let id = Id::unique(("world-card", &w.id));
+    let resp = ui.interact(rect, id, if interactive { Sense::click() } else { Sense::hover() });
+    let resp = if interactive { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
+    // Entrance: up and in, 35 ms apart.
+    let delay = 0.05 + i.min(12) as f64 * 0.035;
+    let elapsed = anim::time(&ctx) - cx.entered;
+    if elapsed < delay {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(delay - elapsed));
+    }
+    let enter = anim::spring_from(&ctx, id.with(("enter", cx.visit)), [0.0], [if elapsed >= delay { 1.0 } else { 0.0 }], Spring::SOFT)[0];
+    let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered() && interactive, Spring::SOFT);
+    let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on() && interactive, Spring::SNAPPY);
+    let scale = (0.97 + 0.03 * enter) * (1.0 - 0.03 * press);
+    let r = Rect::from_center_size(rect.center() + vec2(0.0, 20.0 * (1.0 - enter) - 4.0 * hover), rect.size() * scale);
+    let mut p = ui.painter().clone();
+    p.multiply_opacity(enter.clamp(0.0, 1.0) * shown);
+
+    widgets::frame(&p, r, theme::CARD_RADIUS, theme::surface());
+    let thumb = Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0));
+    thumb_shape(&p, thumb, CornerRadius { nw: 20, ne: 20, sw: 0, se: 0 }, tex, 1.0 + 0.06 * ease::out_cubic(hover));
+    let shade = paint::rounded_rect_points_corners(thumb, [20.0, 20.0, 0.0, 0.0]);
+    paint::fill_gradient(
+        &p,
+        &shade,
+        &Gradient::vertical(thumb, &[(0.0, Color32::TRANSPARENT), (0.55, theme::alpha(theme::INK_950, 0.1)), (1.0, theme::alpha(theme::INK_950, 0.9))]),
+    );
+    let mut x = thumb.left() + 12.0;
+    if w.reconstructed() > 0 {
+        x += badge(&p, ui, pos2(x, thumb.top() + 12.0), "3D", theme::black(0.55), theme::ACCENT, false) + 6.0;
+    }
+    if !w.shots.is_empty() {
+        badge(&p, ui, pos2(x, thumb.top() + 12.0), &format!("{} picture{}", w.shots.len(), plural(w.shots.len())), theme::black(0.55), theme::FG_2, false);
+    }
+    if shared {
+        badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), "On Orbiters", theme::alpha(theme::OK, 0.2), theme::OK, true);
+    }
+
+    let x = r.left() + 16.0;
+    widgets::text_truncated(&p, pos2(x, thumb.bottom() + 22.0), Align2::LEFT_CENTER, &Txt::new(&w.name, 15.0).weight(weight::SEMIBOLD), r.width() - 32.0);
+    let when = if w.visits > 0 {
+        format!("Visited {}", format::relative_time(w.last, now_secs()))
+    } else {
+        format!("Last seen {}", format::relative_time(w.last, now_secs()))
+    };
+    let author = match info {
+        Some(Info::Listed(page)) => page.world.author_name.clone().map(|a| format!(" · by {a}")).unwrap_or_default(),
+        _ => String::new(),
+    };
+    widgets::text_truncated(
+        &p,
+        pos2(x, thumb.bottom() + 42.0),
+        Align2::LEFT_CENTER,
+        &Txt::new(format!("{when}{author}"), 12.0).color(theme::FG_3),
+        r.width() - 32.0,
+    );
+    let mut px = x;
+    let py = thumb.bottom() + 68.0;
+    let mut pills: Vec<(Option<&str>, String)> = Vec::new();
+    if w.visits > 0 {
+        pills.push((Some(icons::CLOCK), format!("{} visit{}", w.visits, plural(w.visits))));
+    }
+    if !w.sessions.is_empty() {
+        pills.push((Some(icons::CUBE), format!("{} capture{}", w.sessions.len(), plural(w.sessions.len()))));
+    }
+    if let Some(Info::Listed(page)) = info {
+        if let Some(c) = page.world.capacity.filter(|c| *c > 0) {
+            pills.push((Some(icons::USERS), c.to_string()));
+        }
+    }
+    for (glyph, label) in pills {
+        let pw = widgets::pill_at(&p, ui, pos2(px, py), glyph, &label);
+        if px + pw > r.right() - 12.0 {
+            break;
+        }
+        px += pw + 6.0;
+    }
+    resp.clicked().then_some(thumb)
+}
+
+fn empty_state(ui: &mut Ui, cx: &Cx, searching: bool, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height.max(240.0)), Sense::hover());
+    let (rect, alpha) = super::entering(ui, cx, 1, rect);
+    let mut p = ui.painter().clone();
+    p.multiply_opacity(alpha);
+    let t = anim::clock(ui.ctx(), 30.0);
+    let bob = -8.0 * ease::in_out(ease::mirror(t, 2.0));
+    let lr = Rect::from_center_size(rect.center() + vec2(0.0, -44.0 + bob), logo::size_for_width(70.0));
+    logo::paint(&p, lr, logo::Look::default());
+    let (title, text) = if searching {
+        ("No world matches", "Try another name.")
+    } else if !cx.snap.vrchat.log_found {
+        ("VRChat was not found", "Worlds show up here once VRChat ran on this computer.")
+    } else {
+        ("No world yet", "Worlds you visit in VRChat show up here, with the pictures you take and the sessions you record there.")
+    };
+    widgets::text(&p, rect.center() + vec2(0.0, 18.0), Align2::CENTER_CENTER, &Txt::new(title, 17.0).weight(weight::SEMIBOLD));
+    let g = p.layout_job({
+        let mut job = Txt::new(text, 13.0).color(theme::FG_3).line_height(20.0).job(380.0);
+        job.halign = egui::Align::Center;
+        job
+    });
+    p.galley(pos2(rect.center().x, rect.center().y + 34.0), g, theme::FG_3);
+}
+
+/// What the world's page shares and how.
+struct Sharing<'a> {
+    /// Signed in to Orbiters (or an account saved but not checked yet).
+    account: bool,
+    /// Why nothing can be shared, when nothing can.
+    blocked: Option<&'static str>,
+    mine: Option<&'a MineWorld>,
+    hashes: Option<&'a HashMap<PathBuf, String>>,
+    uploads: Vec<&'a UploadStatus>,
+}
+
+impl Sharing<'_> {
+    fn shared(&self, shot: &Shot) -> bool {
+        let (Some(mine), Some(hashes)) = (self.mine, self.hashes) else { return false };
+        hashes.get(&shot.path).is_some_and(|h| mine.pictures.iter().any(|p| &p.source_hash == h))
+    }
+
+    fn sending(&self, path: &PathBuf) -> Option<&UploadStatus> {
+        self.uploads.iter().copied().find(|u| u.running() && u.kind == UploadKind::Pictures && u.paths.contains(path))
+    }
+
+    fn preview_upload(&self, session: &PathBuf) -> Option<&UploadStatus> {
+        self.uploads.iter().copied().filter(|u| u.kind == UploadKind::Preview && u.paths.first() == Some(session)).max_by_key(|u| u.id)
+    }
+}
+
+fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
+    let ctx = ui.ctx().clone();
+    let Some(o) = state.open.as_mut() else { return };
+    let Some(world) = state.worlds.as_ref().and_then(|l| l.iter().find(|w| w.id == o.id)).cloned() else {
+        state.open = None;
+        return;
+    };
+    let id = Id::unique(("world-page", o.serial));
+    let t = anim::spring_from(&ctx, id.with("flight"), [0.0], [if o.closing { 0.0 } else { 1.0 }], Spring::MORPH)[0];
+    o.progress = t;
+    if o.closing && t < 0.02 {
+        state.open = None;
+        if let Some(p) = state.pictures.as_mut() {
+            p.forget_large();
+        }
+        return;
+    }
+    let content = ((t - 0.45) / 0.55).clamp(0.0, 1.0);
+    let info = state.infos.as_mut().and_then(|i| i.get(&world.id));
+    let mine = cx.ctl.maps();
+    let hashes = o.hashes.poll().cloned();
+    let blocked = match &info {
+        Some(Info::Unlisted) => Some("Orbiters lists public worlds only: this one is private or was removed from VRChat."),
+        _ => None,
+    };
+    let sharing = Sharing {
+        account: cx.snap.account.state.username().is_some(),
+        blocked,
+        mine: mine_of(&mine, &world.id),
+        hashes: hashes.as_ref(),
+        uploads: cx.snap.uploads.iter().filter(|u| u.world_id == world.id).collect(),
+    };
+    // Handed pictures show as sending until the service lists their upload (or for three seconds).
+    if let Some((at, paths)) = &o.handed {
+        if anim::time(&ctx) - at > 3.0 || paths.iter().any(|p| sharing.sending(p).is_some()) {
+            o.handed = None;
+        }
+    }
+
+    let mut close = false;
+    let mut toggle: Option<PathBuf> = None;
+    let mut view: Option<usize> = None;
+    let mut select_new = false;
+    let mut clear = false;
+    let mut share_preview: Option<PathBuf> = None;
+    let mut reconstruct: Option<PathBuf> = None;
+    let selecting = !o.selected.is_empty();
+
+    let from = orbiters_ui::blur::next_shape(ui);
+    let mut du = ui.new_child(UiBuilder::new().max_rect(page).id_salt(("world-page", o.serial)));
+    egui::ScrollArea::vertical().id_salt(("world-scroll", o.serial)).auto_shrink([false, false]).scroll_bar_rect(super::below_bar(&du, cx)).show(
+        &mut du,
+        |ui| {
+            egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 120 }).show(ui, |ui| {
+                ui.add_space(cx.top + 8.0);
+                let w = ui.available_width();
+
+                // Back.
+                let (back_row, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
+                {
+                    let mut bu = ui.new_child(UiBuilder::new().max_rect(back_row).id_salt("back"));
+                    bu.multiply_opacity(content);
+                    let b = Button::new("Visited worlds").icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(Size::Sm);
+                    let bw = b.desired_width(&bu);
+                    if b.show_at(&mut bu, Rect::from_min_size(back_row.min, vec2(bw, 32.0))).clicked() {
+                        close = true;
+                    }
+                }
+                ui.add_space(12.0);
+
+                // The hero flies in from the card.
+                let hero_h = (w * 0.36).clamp(220.0, 340.0);
+                let (hero_r, _) = ui.allocate_exact_size(vec2(w, hero_h), Sense::hover());
+                let e = t.clamp(0.0, 1.2);
+                let lerp = |a: f32, b: f32| a + (b - a) * e;
+                let flight = Rect::from_min_max(
+                    pos2(lerp(o.origin.left(), hero_r.left()), lerp(o.origin.top(), hero_r.top())),
+                    pos2(lerp(o.origin.right(), hero_r.right()), lerp(o.origin.bottom(), hero_r.bottom())),
+                );
+                let pictures = state.pictures.as_mut();
+                let (small, large) = match pictures {
+                    Some(p) => (
+                        cover(&world, info.as_ref(), THUMB_WIDTH).and_then(|c| p.get(&ctx, &c)),
+                        if t > 0.6 { cover(&world, info.as_ref(), 1280).and_then(|c| p.get(&ctx, &c)) } else { None },
+                    ),
+                    None => (None, None),
+                };
+                hero(ui, cx, &world, info.as_ref(), flight, small.as_ref(), large.as_ref(), t, content);
+                ui.add_space(20.0);
+
+                let mut cu = ui.new_child(UiBuilder::new().max_rect(ui.available_rect_before_wrap()).id_salt("world-body"));
+                cu.multiply_opacity(content);
+                let dy = 14.0 * (1.0 - content);
+
+                // Stats.
+                let (stats_r, _) = ui.allocate_exact_size(vec2(w, 78.0), Sense::hover());
+                let stats_r = stats_r.translate(vec2(0.0, dy));
+                // Visits count from when the app started keeping them; a world only seen in pictures or sessions has none.
+                let (visits, last_visit) = if world.visits > 0 {
+                    (world.visits.to_string(), Some(format!("last {}", format::relative_time(world.last, now_secs()))))
+                } else {
+                    ("–".to_string(), Some("before Orbiters kept them".to_string()))
+                };
+                let shared_sub = match (world.shots.is_empty(), sharing.mine) {
+                    (true, _) => None,
+                    (false, Some(m)) => Some(format!("{} shared", m.pictures.len())),
+                    (false, None) => Some("none shared".to_string()),
+                };
+                let minis = [
+                    (icons::CLOCK, "Visits", visits, last_visit),
+                    (icons::IMAGES, "Pictures", world.shots.len().to_string(), shared_sub),
+                    (icons::CUBE, "Captures", world.sessions.len().to_string(), Some(format!("{} in 3D", world.reconstructed()))),
+                    (
+                        icons::USERS,
+                        "Players",
+                        match &info {
+                            Some(Info::Listed(p)) => p.world.capacity.map(|c| c.to_string()).unwrap_or_else(|| "–".into()),
+                            _ => "–".into(),
+                        },
+                        match &info {
+                            Some(Info::Listed(p)) => p.world.visits.map(|v| format!("{} visits on VRChat", compact(v))),
+                            _ => None,
+                        },
+                    ),
+                ];
+                let mw = (w - 36.0) / 4.0;
+                for (i, (glyph, label, value, sub)) in minis.iter().enumerate() {
+                    let r = Rect::from_min_size(pos2(stats_r.left() + i as f32 * (mw + 12.0), stats_r.top()), vec2(mw, 78.0));
+                    mini_stat(cu.painter(), r, glyph, label, value, sub.as_deref());
+                }
+                ui.add_space(32.0);
+
+                // 3D preview: the sessions recorded here.
+                let (title_r, _) = ui.allocate_exact_size(vec2(w, 44.0), Sense::hover());
+                let preview_sub = match sharing.mine.and_then(|m| m.preview.as_ref()) {
+                    Some(p) => format!("Your 3D preview is on the Map explorer · {} splats", compact(p.splats as u64)),
+                    None => "Share a reconstructed session: the world opens in 3D on the Map explorer.".into(),
+                };
+                section_title(&cu, title_r.translate(vec2(0.0, dy)), "3D preview", &preview_sub);
+                ui.add_space(8.0);
+                if world.sessions.is_empty() {
+                    let (r, _) = ui.allocate_exact_size(vec2(w, 72.0), Sense::hover());
+                    note(
+                        &cu,
+                        r.translate(vec2(0.0, dy)),
+                        icons::CUBE,
+                        "No session recorded here yet",
+                        "Record this world from the Capture page with the capture kit's depth frames on, then come back to share it in 3D.",
+                    );
+                }
+                for s in &world.sessions {
+                    let (r, _) = ui.allocate_exact_size(vec2(w, 84.0), Sense::hover());
+                    if !cu.is_rect_visible(r) {
+                        ui.add_space(10.0);
+                        continue;
+                    }
+                    let tex = state.pictures.as_mut().and_then(|p| if s.has_thumbnail { p.get(&ctx, &Picture::Session(s.dir.clone())) } else { None });
+                    match session_row(&mut cu, cx, r.translate(vec2(0.0, dy)), s, tex.as_ref(), &sharing) {
+                        Some(RowAction::Share) => share_preview = Some(s.dir.clone()),
+                        Some(RowAction::Reconstruct) => reconstruct = Some(s.dir.clone()),
+                        None => {}
+                    }
+                    ui.add_space(10.0);
+                }
+                ui.add_space(24.0);
+
+                // Pictures.
+                let (title_r, _) = ui.allocate_exact_size(vec2(w, 44.0), Sense::hover());
+                let title_r = title_r.translate(vec2(0.0, dy));
+                let shared_n = world.shots.iter().filter(|s| sharing.shared(s)).count();
+                let pictures_sub = if world.shots.is_empty() {
+                    "Pictures you take here in VRChat show up here.".to_string()
+                } else if shared_n > 0 {
+                    format!("{} on this computer · {shared_n} shared on the Map explorer", world.shots.len())
+                } else {
+                    format!("{} on this computer · pick the ones to show on the Map explorer", world.shots.len())
+                };
+                section_title(&cu, title_r, "Pictures", &pictures_sub);
+                let new: Vec<&Shot> = world.shots.iter().filter(|s| !sharing.shared(s)).collect();
+                if !new.is_empty() && sharing.blocked.is_none() {
+                    let label = if selecting { "Clear selection" } else { "Select all new" };
+                    let b = Button::new(label).variant(Variant::Ghost).size(Size::Sm);
+                    let bw = b.desired_width(&cu);
+                    if b.show_at(&mut cu, Rect::from_min_size(pos2(title_r.right() - bw, title_r.top() + 4.0), vec2(bw, 32.0))).clicked() {
+                        if selecting {
+                            clear = true;
+                        } else {
+                            select_new = true;
+                        }
+                    }
+                }
+                ui.add_space(8.0);
+                if !world.shots.is_empty() {
+                    let cols = (((w + 12.0) / (TILE_W + 12.0)).floor() as usize).max(1);
+                    let tile_w = (w - 12.0 * (cols - 1) as f32) / cols as f32;
+                    let tile_h = tile_w * 9.0 / 16.0;
+                    let rows = world.shots.len().div_ceil(cols);
+                    let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (tile_h + 12.0) - 12.0), Sense::hover());
+                    for (i, shot) in world.shots.iter().enumerate() {
+                        let r = Rect::from_min_size(
+                            pos2(area.left() + (i % cols) as f32 * (tile_w + 12.0), area.top() + (i / cols) as f32 * (tile_h + 12.0)),
+                            vec2(tile_w, tile_h),
+                        )
+                        .translate(vec2(0.0, dy));
+                        if !cu.is_rect_visible(r) {
+                            continue;
+                        }
+                        let tex =
+                            state.pictures.as_mut().and_then(|p| p.get(&ctx, &Picture::Shot { path: shot.path.clone(), size: shot.size, width: THUMB_WIDTH }));
+                        let handed = o.handed.as_ref().is_some_and(|(_, h)| h.contains(&shot.path));
+                        let look = TileLook {
+                            selected: o.selected.contains(&shot.path),
+                            selecting,
+                            shared: sharing.shared(shot),
+                            sending: handed || sharing.sending(&shot.path).is_some(),
+                            selectable: sharing.blocked.is_none(),
+                        };
+                        match picture_tile(&mut cu, r, shot, tex.as_ref(), look, i) {
+                            Some(TileAction::Toggle) => toggle = Some(shot.path.clone()),
+                            Some(TileAction::View) => view = Some(i),
+                            None => {}
+                        }
+                    }
+                }
+            });
+        },
+    );
+    super::under_top(&du, cx, from, page.top() + cx.top);
+
+    // Actions gathered while drawing.
+    let Some(o) = state.open.as_mut() else { return };
+    if let Some(p) = toggle {
+        if !o.selected.remove(&p) {
+            o.selected.insert(p);
+        }
+    }
+    if select_new {
+        o.selected = world.shots.iter().filter(|s| !sharing.shared(s) && sharing.sending(&s.path).is_none()).map(|s| s.path.clone()).collect();
+    }
+    if clear {
+        o.selected.clear();
+    }
+    if let Some(i) = view {
+        o.viewer = Some(i);
+    }
+    if let Some(dir) = reconstruct {
+        cx.ctl.reconstruct(dir);
+        cx.toasts.push(&ctx, toast::Kind::Info, "Reconstruction started: follow it here or in Sessions.");
+    }
+    if let Some(dir) = share_preview {
+        cx.ctl.upload_preview(world.id.clone(), world.name.clone(), dir);
+    }
+
+    // The bar of the selection, over the page's bottom.
+    let bar = action_bar(&ctx, o, &world, &sharing, page);
+    if let Some(BarAction::Share) = bar {
+        let paths: Vec<PathBuf> = o.selected.iter().cloned().collect();
+        cx.ctl.upload_pictures(world.id.clone(), world.name.clone(), paths);
+        o.handed = Some((anim::time(&ctx), std::mem::take(&mut o.selected)));
+    }
+    if let Some(BarAction::SignIn(provider)) = bar {
+        cx.ctl.sign_in(provider);
+    }
+    if let Some(BarAction::Clear) = bar {
+        o.selected.clear();
+    }
+
+    if o.viewer.is_some() {
+        let fixed: HashSet<PathBuf> = world.shots.iter().filter(|s| sharing.shared(s) || sharing.sending(&s.path).is_some()).map(|s| s.path.clone()).collect();
+        let pickable = sharing.blocked.is_none();
+        viewer(&ctx, cx, state, &world, &fixed, pickable);
+    } else if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if let Some(o) = state.open.as_mut() {
+            if o.selected.is_empty() {
+                close = true;
+            } else {
+                o.selected.clear();
+            }
+        }
+    }
+    if close {
+        if let Some(o) = state.open.as_mut() {
+            o.closing = true;
+            o.viewer = None;
+        }
+    }
+}
+
+/// 1 234 → "1.2K", 668 000 000 → "668M".
+fn compact(n: u64) -> String {
+    let f = n as f64;
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => trim(format!("{:.1}", f / 1e3)) + "K",
+        1_000_000..1_000_000_000 => trim(format!("{:.1}", f / 1e6)) + "M",
+        _ => trim(format!("{:.1}", f / 1e9)) + "B",
+    }
+}
+
+fn trim(s: String) -> String {
+    s.strip_suffix(".0").map(str::to_string).unwrap_or(s)
+}
+
+/// The world's picture with its name, author and links over it: the card's picture, and the large one fading in
+/// over it once decoded.
+#[allow(clippy::too_many_arguments)]
+fn hero(
+    ui: &mut Ui,
+    cx: &mut Cx,
+    world: &VisitedWorld,
+    info: Option<&Info>,
+    rect: Rect,
+    small: Option<&TextureHandle>,
+    large: Option<&TextureHandle>,
+    t: f32,
+    content: f32,
+) {
+    let ctx = ui.ctx().clone();
+    let p = ui.painter().clone();
+    let k = t.clamp(0.0, 1.0);
+    let top = 20.0 + 4.0 * k;
+    let bottom = 24.0 * k;
+    let radii = [top, top, bottom, bottom];
+    let r8 = |r: f32| r.round().clamp(0.0, 255.0) as u8;
+    let fade = anim::toggle(&ctx, Id::unique(("hero-large", &world.id)), large.is_some(), Spring::SOFT);
+    if fade < 0.99 || large.is_none() {
+        thumb_shape(&p, rect, CornerRadius { nw: r8(top), ne: r8(top), sw: r8(bottom), se: r8(bottom) }, small.or(large), 1.0);
+    }
+    if let Some(l) = large.filter(|_| fade > 0.01) {
+        let size = l.size_vec2();
+        let uv = cover_uv(rect, size.x / size.y.max(1.0), 1.0);
+        paint::squircle_texture(&p, rect, radii.map(theme::squircle), l.id(), uv, Color32::from_white_alpha((fade.clamp(0.0, 1.0) * 255.0) as u8));
+    }
+    let shade = paint::rounded_rect_points_corners(rect, radii);
+    paint::fill_gradient(
+        &p,
+        &shade,
+        &Gradient::vertical(rect, &[(0.0, theme::alpha(theme::INK_950, 0.15)), (0.45, Color32::TRANSPARENT), (1.0, theme::alpha(theme::INK_950, 0.85))]),
+    );
+    if content <= 0.0 {
+        return;
+    }
+    let mut cp = p.clone();
+    cp.multiply_opacity(content);
+    let dy = 14.0 * (1.0 - content);
+    let listed = match info {
+        Some(Info::Listed(page)) => Some(page),
+        _ => None,
+    };
+    let buttons_w = 2.0 * 168.0 + 8.0;
+    widgets::text_truncated(
+        &cp,
+        pos2(rect.left() + 28.0, rect.bottom() - 58.0 + dy),
+        Align2::LEFT_CENTER,
+        &Txt::new(&world.name, 30.0).weight(weight::SEMIBOLD).tracking(-0.015),
+        rect.width() - 56.0 - buttons_w,
+    );
+    let mut sub = Vec::new();
+    if let Some(a) = listed.and_then(|p| p.world.author_name.clone()) {
+        sub.push(format!("by {a}"));
+    }
+    if let Some(page) = listed {
+        if page.previews > 0 {
+            sub.push(format!("{} 3D preview{} on Orbiters", page.previews, plural(page.previews)));
+        }
+        if page.picture_count > 0 {
+            sub.push(format!("{} picture{} on Orbiters", page.picture_count, plural(page.picture_count)));
+        }
+    }
+    if matches!(info, Some(Info::Unlisted)) {
+        sub.push("Private or removed world".into());
+    }
+    let sub = if sub.is_empty() { world.id.clone() } else { sub.join(" · ") };
+    widgets::text_truncated(
+        &cp,
+        pos2(rect.left() + 28.0, rect.bottom() - 28.0 + dy),
+        Align2::LEFT_CENTER,
+        &Txt::new(sub, 13.0).color(theme::FG_2),
+        rect.width() - 56.0 - buttons_w,
+    );
+
+    let mut hu = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("hero-actions"));
+    hu.multiply_opacity(content);
+    let y = rect.bottom() - 24.0 - 40.0 + dy;
+    let map_r = Rect::from_min_size(pos2(rect.right() - 24.0 - 168.0, y), vec2(168.0, 40.0));
+    let vrc_r = Rect::from_min_size(pos2(map_r.left() - 8.0 - 168.0, y), vec2(168.0, 40.0));
+    if Button::new("View on VRChat").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Glass).width(168.0).show_at(&mut hu, vrc_r).clicked() {
+        let r = controller::open_url(&vrchat_url(&world.id));
+        cx.run(&ctx, r);
+    }
+    let mut map = Button::new("Map explorer").icon(icons::MAP_TRIFOLD).variant(Variant::Glass).width(168.0);
+    if listed.is_none() {
+        map = map.enabled(false).hint("Orbiters lists public worlds only");
+    }
+    if map.show_at(&mut hu, map_r).clicked() {
+        let r = controller::open_url(&world_page_url(server(cx), &world.id));
+        cx.run(&ctx, r);
+    }
+}
+
+fn section_title(ui: &Ui, rect: Rect, title: &str, sub: &str) {
+    let p = ui.painter();
+    widgets::text(p, pos2(rect.left(), rect.top() + 12.0), Align2::LEFT_CENTER, &Txt::new(title, 18.0).weight(weight::SEMIBOLD));
+    widgets::text_truncated(p, pos2(rect.left(), rect.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3), rect.width() - 180.0);
+}
+
+fn note(ui: &Ui, rect: Rect, glyph: &str, title: &str, text: &str) {
+    let p = ui.painter();
+    widgets::frame(p, rect, 16.0, theme::surface_soft());
+    let tile = Rect::from_min_size(pos2(rect.left() + 16.0, rect.center().y - 18.0), vec2(36.0, 36.0));
+    p.rect_filled(tile, theme::radius(10.0), theme::white(0.06));
+    widgets::icon(p, tile.center(), glyph, 17.0, theme::FG_3);
+    let x = tile.right() + 14.0;
+    widgets::text(p, pos2(x, rect.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(title, 13.5).weight(weight::MEDIUM));
+    widgets::text_truncated(p, pos2(x, rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(text, 12.0).color(theme::FG_3), rect.right() - x - 16.0);
+}
+
+enum RowAction {
+    Share,
+    Reconstruct,
+}
+
+/// A session recorded in the world: its thumbnail, when, and what can be done with it.
+fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option<&TextureHandle>, sharing: &Sharing) -> Option<RowAction> {
+    let p = ui.painter().clone();
+    widgets::frame(&p, rect, 18.0, theme::surface());
+    let thumb = Rect::from_min_size(pos2(rect.left() + 10.0, rect.top() + 10.0), vec2((rect.height() - 20.0) * 16.0 / 9.0, rect.height() - 20.0));
+    thumb_shape(&p, thumb, theme::radius(10.0), tex, 1.0);
+    let x = thumb.right() + 16.0;
+    let title = super::local_time(&s.manifest.created_utc);
+    widgets::text(&p, pos2(x, rect.top() + 26.0), Align2::LEFT_CENTER, &Txt::new(title, 14.0).weight(weight::SEMIBOLD));
+    let st = &s.manifest.stats;
+    let mut line = format!("{} · {} keyframes", format::duration(st.duration_s), format::integer(st.keyframes as f64));
+    let job = cx.snap.reconstruction.as_ref().filter(|j| j.session_dir == s.dir);
+    let upload = sharing.preview_upload(&s.dir);
+    let (state_text, state_color) = if let Some(j) = job {
+        (format!("{} · {:.0}%", stage_label(j.stage), overall_progress(j) * 100.0), theme::ACCENT)
+    } else if let Some(u) = upload.filter(|u| u.running()) {
+        match u.state {
+            UploadState::Preparing => ("Preparing the web preview…".to_string(), theme::ACCENT),
+            _ => (format!("Sharing · {:.0}%", u.fraction() * 100.0), theme::ACCENT),
+        }
+    } else if let Some(r) = &s.reconstruction {
+        let q = r.psnr_held_out.map(|q| format!(" · {q:.1} dB")).unwrap_or_default();
+        (format!("Splats ready · {}{q}", compact(r.gaussians as u64)), theme::FG_2)
+    } else if st.depth_frames == 0 {
+        ("No depth frames: cannot be reconstructed".to_string(), theme::FG_4)
+    } else {
+        ("Not reconstructed yet".to_string(), theme::FG_3)
+    };
+    if upload.is_some_and(|u| matches!(u.state, UploadState::Done { .. })) {
+        line.push_str(" · shared");
+    }
+    let right_w = 196.0;
+    widgets::text_truncated(&p, pos2(x, rect.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::FG_3), rect.right() - x - right_w - 16.0);
+    widgets::text_truncated(
+        &p,
+        pos2(x, rect.top() + 64.0),
+        Align2::LEFT_CENTER,
+        &Txt::new(state_text, 12.0).color(state_color),
+        rect.right() - x - right_w - 16.0,
+    );
+    if let Some(u) = upload.filter(|u| u.running()) {
+        let bar = Rect::from_min_size(pos2(x, rect.bottom() - 6.0), vec2(rect.right() - x - right_w - 16.0, 3.0));
+        let f = anim::spring_from(ui.ctx(), Id::unique(("preview-upload", u.id)), [0.0], [u.fraction()], Spring::SOFT)[0].clamp(0.0, 1.0);
+        p.rect_filled(bar, theme::radius(1.5), theme::white(0.08));
+        p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), theme::radius(1.5), theme::ACCENT);
+    }
+
+    let b = Rect::from_min_size(pos2(rect.right() - 16.0 - right_w + 16.0, rect.center().y - 20.0), vec2(right_w - 16.0, 40.0));
+    if job.is_some() || upload.is_some_and(|u| u.running()) {
+        return None;
+    }
+    if s.reconstruction.is_some() {
+        let replace = sharing.mine.is_some_and(|m| m.preview.is_some());
+        let mut button = Button::new(if replace { "Replace 3D preview" } else { "Share in 3D" })
+            .icon(icons::CLOUD_ARROW_UP)
+            .variant(if replace { Variant::Secondary } else { Variant::Primary })
+            .width(b.width());
+        let hint = if let Some(h) = sharing.blocked {
+            Some(h)
+        } else if !sharing.account {
+            Some("Sign in to Orbiters in Settings to share")
+        } else {
+            None
+        };
+        if let Some(h) = hint {
+            button = button.enabled(false).hint(h);
+        } else {
+            button = button.hint("Public on the Map explorer: everyone in the capture becomes visible to everyone");
+        }
+        if button.show_at(ui, b).clicked() {
+            return Some(RowAction::Share);
+        }
+    } else {
+        let blocked = if cx.snap.reconstruction.is_some() {
+            Some("Another session is being reconstructed")
+        } else if cx.snap.is_capturing() {
+            Some("Finish the capture first: reconstruction takes the whole GPU")
+        } else if st.depth_frames == 0 {
+            Some("This session has no depth frames: record with the capture kit's depth frames on")
+        } else {
+            None
+        };
+        let mut button = Button::new("Reconstruct").icon(icons::MAGIC_WAND).variant(Variant::Secondary).enabled(blocked.is_none()).width(b.width());
+        if let Some(h) = blocked {
+            button = button.hint(h);
+        }
+        if button.show_at(ui, b).clicked() {
+            return Some(RowAction::Reconstruct);
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+struct TileLook {
+    selected: bool,
+    /// Some picture is selected: a click selects instead of opening.
+    selecting: bool,
+    shared: bool,
+    sending: bool,
+    selectable: bool,
+}
+
+enum TileAction {
+    Toggle,
+    View,
+}
+
+/// A picture: opens large, or (its check, or any click while picking) selects it. Shared ones carry a badge.
+fn picture_tile(ui: &mut Ui, rect: Rect, shot: &Shot, tex: Option<&TextureHandle>, look: TileLook, i: usize) -> Option<TileAction> {
+    let ctx = ui.ctx().clone();
+    let id = Id::unique(("picture-tile", &shot.path));
+    let resp = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+    let check = Rect::from_center_size(pos2(rect.right() - 18.0, rect.top() + 18.0), vec2(24.0, 24.0));
+    let can_pick = look.selectable && !look.shared && !look.sending;
+    let over_check = resp.hover_pos().is_some_and(|p| check.expand(6.0).contains(p));
+    let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SOFT);
+    let picked = anim::toggle(&ctx, id.with("picked"), look.selected, Spring::SNAPPY);
+    // Pressing shows at once.
+    let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
+    let enter = anim::spring_from(&ctx, id.with("enter"), [0.0], [1.0], Spring::SOFT)[0];
+    let inset = 10.0 * picked + 3.0 * press;
+    let r = rect.shrink(inset).translate(vec2(0.0, 10.0 * (1.0 - enter)));
+    let mut p = ui.painter().clone();
+    p.multiply_opacity(enter.clamp(0.0, 1.0));
+    if picked > 0.01 {
+        p.rect_filled(rect, theme::radius(theme::TILE_RADIUS), theme::alpha(theme::ACCENT, 0.12 * picked));
+    }
+    match tex {
+        Some(t) => {
+            let size = t.size_vec2();
+            let uv = cover_uv(r, size.x / size.y.max(1.0), 1.0 + 0.04 * hover);
+            paint::squircle_texture(&p, r, [theme::squircle(theme::TILE_RADIUS - inset * 0.3); 4], t.id(), uv, Color32::WHITE);
+        }
+        None => {
+            widgets::frame(&p, r, theme::TILE_RADIUS, theme::surface_soft());
+            let k = ((anim::clock(&ctx, 30.0) + i as f64 * 0.12) % 1.6 / 1.6) as f32;
+            p.rect_filled(r, theme::radius(theme::TILE_RADIUS), theme::white(0.03 + 0.03 * (k * std::f32::consts::TAU).sin().abs()));
+        }
+    }
+    if look.shared || look.sending {
+        let label = if look.sending { "Sharing…" } else { "Shared" };
+        let fg = if look.sending { theme::FG_2 } else { theme::OK };
+        badge(&p, ui, pos2(r.left() + 8.0, r.top() + 8.0), label, theme::black(0.6), fg, false);
+    }
+    if can_pick && (look.selecting || hover > 0.01 || picked > 0.01) {
+        let a = if look.selecting || look.selected { 1.0 } else { hover };
+        let mut cp = p.clone();
+        cp.multiply_opacity(a);
+        let c = check.center();
+        cp.circle_filled(c, 11.0, theme::mix(theme::black(0.35), theme::ACCENT, picked));
+        cp.circle_stroke(c, 11.0, egui::Stroke::new(1.5, theme::mix(theme::white(if over_check { 1.0 } else { 0.8 }), theme::ACCENT, picked)));
+        if picked > 0.01 {
+            let mut ip = cp.clone();
+            ip.multiply_opacity(picked);
+            widgets::icon(&ip, c, icons::CHECK, 13.0, theme::ON_ACCENT);
+        }
+    }
+    if resp.clicked() {
+        if can_pick && (look.selecting || over_check) {
+            return Some(TileAction::Toggle);
+        }
+        return Some(TileAction::View);
+    }
+    None
+}
+
+enum BarAction {
+    Share,
+    Clear,
+    SignIn(&'static str),
+}
+
+/// The selection's bar at the bottom of the page: how many, and share them (or sign in first); a pictures upload of
+/// this world shows its progress there.
+fn action_bar(ctx: &egui::Context, o: &Open, world: &VisitedWorld, sharing: &Sharing, page: Rect) -> Option<BarAction> {
+    let sending = sharing.uploads.iter().copied().filter(|u| u.kind == UploadKind::Pictures && u.running()).max_by_key(|u| u.id);
+    let n = o.selected.len();
+    let visible = n > 0 || sending.is_some();
+    let id = Id::unique(("world-bar", o.serial));
+    let k = anim::toggle(ctx, id, visible, Spring::BOUNCY);
+    if k < 0.01 {
+        return None;
+    }
+    let width = (page.width() - 64.0).min(640.0);
+    let rect = Rect::from_min_size(pos2(page.center().x - width / 2.0, page.bottom() - 24.0 - 64.0 + 40.0 * (1.0 - k)), vec2(width, 64.0));
+    let mut action = None;
+    egui::Area::new(id.with("area")).order(Order::Middle).fixed_pos(rect.min).show(ctx, |ui| {
+        ui.set_min_size(rect.size());
+        // The panel's shadow reaches past the bar.
+        ui.set_clip_rect(ctx.content_rect());
+        ui.multiply_opacity(k.clamp(0.0, 1.0));
+        let p = ui.painter().clone();
+        widgets::panel(&p, rect, 22.0);
+        let x = rect.left() + 22.0;
+        if n == 0 {
+            if let Some(u) = sending {
+                let count = u.paths.len();
+                widgets::text(
+                    &p,
+                    pos2(x, rect.center().y - 9.0),
+                    Align2::LEFT_CENTER,
+                    &Txt::new(format!("Sharing {count} picture{} of {}", plural(count), world.name), 13.5).weight(weight::SEMIBOLD),
+                );
+                let bar = Rect::from_min_size(pos2(x, rect.center().y + 9.0), vec2(rect.width() - 44.0 - 60.0, 4.0));
+                let f = anim::spring_from(ctx, Id::unique(("pictures-upload", u.id)), [0.0], [u.fraction()], Spring::SOFT)[0].clamp(0.0, 1.0);
+                p.rect_filled(bar, theme::radius(2.0), theme::white(0.08));
+                p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(4.0), 4.0)), theme::radius(2.0), theme::ACCENT);
+                widgets::text(
+                    &p,
+                    pos2(rect.right() - 22.0, rect.center().y + 10.0),
+                    Align2::RIGHT_CENTER,
+                    &Txt::new(format!("{:.0}%", f * 100.0), 12.0).color(theme::FG_3),
+                );
+            }
+            return;
+        }
+        widgets::text(
+            &p,
+            pos2(x, rect.center().y - 9.0),
+            Align2::LEFT_CENTER,
+            &Txt::new(format!("{n} picture{} selected", plural(n)), 13.5).weight(weight::SEMIBOLD),
+        );
+        widgets::text(
+            &p,
+            pos2(x, rect.center().y + 10.0),
+            Align2::LEFT_CENTER,
+            &Txt::new("Public on the Map explorer, with everyone in them", 11.5).color(theme::FG_3),
+        );
+        let mut right = rect.right() - 12.0;
+        if sharing.account {
+            let share = Button::new("Share on Orbiters").icon(icons::CLOUD_ARROW_UP).variant(Variant::Primary);
+            let sw = share.desired_width(ui);
+            let sr = Rect::from_min_size(pos2(right - sw, rect.center().y - 20.0), vec2(sw, 40.0));
+            let share = match sharing.blocked {
+                Some(h) => share.enabled(false).hint(h),
+                None => share,
+            };
+            if share.show_at(ui, sr).clicked() {
+                action = Some(BarAction::Share);
+            }
+            right = sr.left() - 8.0;
+        } else {
+            for (provider, glyph, label) in
+                [("telegram", icons::TELEGRAM_LOGO, "Sign in with Telegram"), ("discord", icons::DISCORD_LOGO, "Sign in with Discord")]
+            {
+                let ib = Rect::from_min_size(pos2(right - 40.0, rect.center().y - 20.0), vec2(40.0, 40.0));
+                if IconButton::new(glyph, label).size(40.0, 18.0).show_at(ui, ib).clicked() {
+                    action = Some(BarAction::SignIn(provider));
+                }
+                right = ib.left() - 6.0;
+            }
+            widgets::text(&p, pos2(right - 4.0, rect.center().y), Align2::RIGHT_CENTER, &Txt::new("Sign in to share", 12.5).color(theme::FG_2));
+            right -= 110.0;
+        }
+        let clear = Rect::from_min_size(pos2(right - 36.0, rect.center().y - 18.0), vec2(36.0, 36.0));
+        if IconButton::new(icons::X, "Clear the selection").show_at(ui, clear).clicked() {
+            action = Some(BarAction::Clear);
+        }
+    });
+    action
+}
+
+/// A picture large over the window: arrows (or ←/→) go through the world's pictures, Esc or a click outside closes.
+fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWorld, fixed: &HashSet<PathBuf>, pickable: bool) {
+    let Some(o) = state.open.as_mut() else { return };
+    let Some(index) = o.viewer else { return };
+    let count = world.shots.len();
+    if count == 0 {
+        o.viewer = None;
+        return;
+    }
+    let index = index.min(count - 1);
+    let shot = &world.shots[index];
+    let id = Id::unique(("picture-viewer", o.serial));
+    let k = anim::spring_from(ctx, id.with("in"), [0.0], [1.0], Spring::SNAPPY)[0];
+    let window = ctx.content_rect();
+    let area = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
+    let pictures = state.pictures.as_mut();
+    let (large, small) = match pictures {
+        Some(p) => (
+            p.get(ctx, &Picture::Shot { path: shot.path.clone(), size: shot.size, width: LARGE_W }),
+            p.get(ctx, &Picture::Shot { path: shot.path.clone(), size: shot.size, width: THUMB_WIDTH }),
+        ),
+        None => (None, None),
+    };
+    let mut step: i64 = 0;
+    let mut close = false;
+    let mut toggle = false;
+    let selected = o.selected.contains(&shot.path);
+    egui::Area::new(id).order(Order::Foreground).fixed_pos(area.min).show(ctx, |ui| {
+        let (_, backdrop) = ui.allocate_exact_size(area.size(), Sense::click());
+        let p = ui.painter().clone();
+        p.rect_filled(area, 0.0, theme::alpha(theme::INK_950, 0.92 * k));
+        let stage = area.shrink2(vec2(88.0, 72.0));
+        let aspect = if shot.info.height > 0 { shot.info.width as f32 / shot.info.height as f32 } else { 16.0 / 9.0 };
+        let (w, h) = if stage.width() / stage.height() > aspect { (stage.height() * aspect, stage.height()) } else { (stage.width(), stage.width() / aspect) };
+        let pic = Rect::from_center_size(stage.center(), vec2(w, h) * (0.96 + 0.04 * k));
+        let mut pp = p.clone();
+        pp.multiply_opacity(k.clamp(0.0, 1.0));
+        match large.as_ref().or(small.as_ref()) {
+            Some(t) => {
+                paint::squircle_texture(&pp, pic, [theme::squircle(16.0); 4], t.id(), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE)
+            }
+            None => widgets::frame(&pp, pic, 16.0, theme::surface_soft()),
+        }
+        if backdrop.clicked() && !pic.contains(backdrop.interact_pointer_pos().unwrap_or_default()) {
+            close = true;
+        }
+        let caption = format!("{} · {}×{} · {} of {count}", super::local_time_unix(shot.info.taken), shot.info.width, shot.info.height, index + 1);
+        widgets::text(&pp, pos2(pic.left(), pic.bottom() + 24.0), Align2::LEFT_CENTER, &Txt::new(caption, 12.5).color(theme::FG_2));
+        let mut vu = ui.new_child(UiBuilder::new().max_rect(area).id_salt("viewer-actions"));
+        vu.multiply_opacity(k.clamp(0.0, 1.0));
+        if count > 1 {
+            for (s, glyph, label, x) in
+                [(-1, icons::CARET_LEFT, "Previous picture", area.left() + 24.0 + 22.0), (1, icons::CARET_RIGHT, "Next picture", area.right() - 24.0 - 22.0)]
+            {
+                let r = Rect::from_center_size(pos2(x, area.center().y), vec2(44.0, 44.0));
+                if IconButton::new(glyph, label).size(44.0, 20.0).backdrop(theme::white(0.08)).show_at(&mut vu, r).clicked() {
+                    step = s;
+                }
+            }
+        }
+        let close_r = Rect::from_min_size(pos2(area.right() - 24.0 - 40.0, area.top() + 16.0), vec2(40.0, 40.0));
+        if IconButton::new(icons::X, "Close").size(40.0, 18.0).backdrop(theme::white(0.08)).show_at(&mut vu, close_r).clicked() {
+            close = true;
+        }
+        let mut left = pic.right();
+        if pickable && !fixed.contains(&shot.path) {
+            let sel = Button::new(if selected { "Selected" } else { "Select" })
+                .icon(if selected { icons::CHECK_CIRCLE } else { icons::CIRCLE })
+                .variant(if selected { Variant::Primary } else { Variant::Glass })
+                .size(Size::Sm);
+            let sw = sel.desired_width(&vu);
+            let sel_r = Rect::from_min_size(pos2(pic.right() - sw, pic.bottom() + 8.0), vec2(sw, 32.0));
+            if sel.show_at(&mut vu, sel_r).clicked() {
+                toggle = true;
+            }
+            left = sel_r.left() - 8.0;
+        } else if fixed.contains(&shot.path) {
+            widgets::text(&pp, pos2(pic.right(), pic.bottom() + 24.0), Align2::RIGHT_CENTER, &Txt::new("Shared on the Map explorer", 12.5).color(theme::OK));
+            left = pic.right() - 190.0;
+        }
+        let folder_r = Rect::from_min_size(pos2(left - 32.0, pic.bottom() + 8.0), vec2(32.0, 32.0));
+        if IconButton::new(icons::FOLDER_OPEN, "Show in its folder").size(32.0, 15.0).show_at(&mut vu, folder_r).clicked() {
+            if let Some(dir) = shot.path.parent() {
+                let r = controller::open_path(dir);
+                cx.run(ctx, r);
+            }
+        }
+    });
+    ctx.input(|i| {
+        if i.key_pressed(egui::Key::ArrowLeft) {
+            step = -1;
+        }
+        if i.key_pressed(egui::Key::ArrowRight) {
+            step = 1;
+        }
+        if i.key_pressed(egui::Key::Escape) {
+            close = true;
+        }
+    });
+    let Some(o) = state.open.as_mut() else { return };
+    if toggle && !o.selected.remove(&shot.path) {
+        o.selected.insert(shot.path.clone());
+    }
+    if step != 0 {
+        o.viewer = Some((index as i64 + step).rem_euclid(count as i64) as usize);
+    }
+    if close {
+        o.viewer = None;
+        if let Some(p) = state.pictures.as_mut() {
+            p.forget_large();
+        }
+    }
+}

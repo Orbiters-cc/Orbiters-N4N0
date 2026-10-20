@@ -93,6 +93,17 @@ pub fn rounded_rect_points_corners(rect: Rect, radii: [f32; 4]) -> Vec<Pos2> {
             pts.push(c + vec2(a.cos(), a.sin()) * r);
         }
     }
+    without_repeats(pts)
+}
+
+/// Corners that meet (a radius of half the side) end where the next begins: a point repeated (or a hundredth of a point
+/// away, from rounding) makes a stroke's join shoot hundreds of points out of the shape.
+fn without_repeats(mut pts: Vec<Pos2>) -> Vec<Pos2> {
+    const CLOSE: f32 = 0.25 * 0.25;
+    pts.dedup_by(|a, b| (*a - *b).length_sq() < CLOSE);
+    if pts.len() > 1 && (pts[0] - pts[pts.len() - 1]).length_sq() < CLOSE {
+        pts.pop();
+    }
     pts
 }
 
@@ -122,7 +133,7 @@ pub fn squircle_points_corners(rect: Rect, radii: [f32; 4]) -> Vec<Pos2> {
             pts.push(c + vec2(root(a.cos()), root(a.sin())) * r);
         }
     }
-    pts
+    without_repeats(pts)
 }
 
 pub fn squircle_points(rect: Rect, radius: f32) -> Vec<Pos2> {
@@ -491,4 +502,27 @@ pub fn dashed_circle(painter: &Painter, center: Pos2, radius: f32, pattern: [f32
 /// A thin circle outline, anti-aliased by egui.
 pub fn ring(painter: &Painter, center: Pos2, radius: f32, width: f32, color: Color32) {
     painter.circle_stroke(center, radius, egui::Stroke::new(width, color));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outlines_with_meeting_corners_repeat_no_point() {
+        // A 64-point high bar with corners of half its height (the Visited worlds selection bar).
+        let rect = Rect::from_min_size(pos2(437.0, 732.0), vec2(640.0, 64.0));
+        for pts in [squircle_points(rect.shrink(0.5), 43.5), rounded_rect_points(rect, 40.0)] {
+            for (i, p) in pts.iter().enumerate() {
+                let next = pts[(i + 1) % pts.len()];
+                assert!((*p - next).length() >= 0.25, "point {i} repeats");
+                assert!(rect.expand(0.01).contains(*p));
+            }
+            // Its stroke stays on the shape.
+            let mut mesh = Mesh::default();
+            let mut tess = egui::epaint::Tessellator::new(1.0, egui::epaint::TessellationOptions::default(), [1, 1], vec![]);
+            tess.tessellate_shape(Shape::closed_line(pts, egui::Stroke::new(1.0, Color32::WHITE)), &mut mesh);
+            assert!(mesh.vertices.iter().all(|v| rect.expand(2.0).contains(v.pos)));
+        }
+    }
 }

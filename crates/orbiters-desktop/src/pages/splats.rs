@@ -7,7 +7,7 @@ use super::Job;
 use crate::gpu::Handles;
 use eframe::egui_wgpu::{self, wgpu};
 use egui::{pos2, vec2, Align2, Color32, Id, Rect, Sense, Ui};
-use orbiters_core::bundle;
+use crate::views::{self, View};
 use orbiters_core::reconstruction;
 use orbiters_reconstruct::camera::{normalize, Camera};
 use orbiters_reconstruct::gpu::{Gpu, Target};
@@ -20,14 +20,6 @@ use std::sync::{Arc, Mutex};
 
 /// Behind the splats (encoded sRGB, like the trained colours).
 const BACKGROUND: [f32; 3] = [0.035, 0.035, 0.043];
-
-/// A recorded keyframe's camera: pose and vertical field of view.
-#[derive(Clone, Copy)]
-struct View {
-    position: [f32; 3],
-    forward: [f32; 3],
-    fov_y: f32,
-}
 
 /// What the loading thread hands over.
 struct Loaded {
@@ -245,39 +237,10 @@ fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_p
 
 /// Reads the splats and the recorded views, and sets the renderer up on the window's device.
 fn load(dir: &Path, device: wgpu::Device, queue: wgpu::Queue) -> anyhow::Result<Loaded> {
-    let report = reconstruction::read_report(dir);
     let g = ply::read(&reconstruction::dir(dir).join(reconstruction::PLY_FILE))?;
-    let records = bundle::read_records(dir)?;
-    use orbiters_core::contracts::frame_record::record_flags;
-    let keyframes: Vec<_> = records.iter().filter(|r| r.has(record_flags::KEYFRAME) && r.has(record_flags::STRIP_OK) && r.keyframe_index >= 0).collect();
-    let views: Vec<View> = keyframes
-        .iter()
-        .map(|r| {
-            let cam = Camera::from_strip(&r.camera_to_world, &r.projection, r.width.max(1), r.height.max(1), 1.0);
-            View { position: cam.position(), forward: cam.forward(), fov_y: cam.fov_y() }
-        })
-        .collect();
-    anyhow::ensure!(!views.is_empty(), "this session has no keyframe to look from");
-    // The preview's keyframe, else the first.
-    let start = report
-        .as_ref()
-        .and_then(|r| r.held_out_keyframes.first())
-        .and_then(|k| keyframes.iter().position(|r| r.keyframe_index == *k))
-        .unwrap_or(0);
-    // Orbit around what that view looks at: the median distance of the splats ahead of it.
-    let v = views[start];
-    let mut ahead: Vec<f32> = g
-        .means
-        .iter()
-        .map(|m| (m[0] - v.position[0]) * v.forward[0] + (m[1] - v.position[1]) * v.forward[1] + (m[2] - v.position[2]) * v.forward[2])
-        .filter(|d| *d > 0.1 && *d < 100.0)
-        .collect();
-    let depth = if ahead.is_empty() {
-        3.0
-    } else {
-        let k = ahead.len() / 2;
-        *ahead.select_nth_unstable_by(k, f32::total_cmp).1
-    };
+    let (views, start) = views::recorded(dir)?;
+    // Orbit around what that view looks at.
+    let depth = views::depth_ahead(&g, &views[start]);
     let mut gpu = Gpu::renderer(device, queue);
     gpu.upload(&g);
     Ok(Loaded { renderer: Arc::new(Mutex::new(Renderer { gpu, target: None, last: None })), splats: g.len(), views, start, depth })

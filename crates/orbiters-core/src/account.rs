@@ -375,10 +375,8 @@ impl Api {
 }
 
 fn error(status: u16, body: &str) -> ApiError {
-    let message = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
-        .unwrap_or_default();
+    let message =
+        serde_json::from_str::<serde_json::Value>(body).ok().and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string)).unwrap_or_default();
     ApiError { status, message }
 }
 
@@ -396,7 +394,12 @@ mod tests {
     fn account_files_round_trip_in_toolkit_format() {
         let dir = std::env::temp_dir().join(format!("orbiters-account-{}", std::process::id()));
         let path = dir.join("MCB").join("account.dat");
-        let account = Account { token: "orbit-00000000-00000000-00000000-01-01-2026".into(), user: Some("42".into()), username: Some("Example".into()), avatar_url: None };
+        let account = Account {
+            token: "orbit-00000000-00000000-00000000-01-01-2026".into(),
+            user: Some("42".into()),
+            username: Some("Example".into()),
+            avatar_url: None,
+        };
         write_file(&path, &account).unwrap();
         assert_eq!(read_file(&path), Some(account));
         let raw = std::fs::read(&path).unwrap();
@@ -405,7 +408,10 @@ mod tests {
             assert_eq!(&raw[..4], &[1, 0, 0, 0]);
             assert!(serde_json::from_slice::<Account>(&raw).is_err());
             let json = protect::unprotect(&raw).unwrap();
-            assert_eq!(String::from_utf8(json).unwrap(), r#"{"token":"orbit-00000000-00000000-00000000-01-01-2026","user":"42","username":"Example","avatarUrl":null}"#);
+            assert_eq!(
+                String::from_utf8(json).unwrap(),
+                r#"{"token":"orbit-00000000-00000000-00000000-01-01-2026","user":"42","username":"Example","avatarUrl":null}"#
+            );
         }
         // Tampered: signed out.
         std::fs::write(&path, b"nonsense").unwrap();

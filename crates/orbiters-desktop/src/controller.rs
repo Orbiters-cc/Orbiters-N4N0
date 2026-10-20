@@ -4,7 +4,7 @@
 
 use crate::ipc::ToClient;
 use crate::reconstruct::ReconstructHandle;
-use crate::state::{self, CalibrationInfo, CaptureState, ReconstructionJob, Snapshot};
+use crate::state::{self, CalibrationInfo, CaptureState, MapsMine, ReconstructionJob, Snapshot};
 use crate::worker::WorkerHandle;
 use orbiters_contracts::manifest::{ConsentInfo, WorldInfo};
 use orbiters_contracts::performance::calibration::Calibration;
@@ -14,6 +14,7 @@ use orbiters_core::osc::{OscEvent, OscService, OscValue, AVATAR_CHANGE, DEPTH_FR
 use orbiters_core::protocol::{OscSample, PerformanceSpec, SourceSpec, StartCapture, WorkerCommand, WorkerEvent};
 use orbiters_core::reconstruction::Event as ReconstructEvent;
 use orbiters_core::settings::Settings;
+use orbiters_core::visited;
 use orbiters_core::vrchat_log::{LogEvent, LogWatcher, WorldState};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -114,6 +115,9 @@ pub struct Controller {
     avatar_changed_at: Mutex<Option<Instant>>,
     /// The Orbiters account's credential and a sign-in in progress (controller/account.rs).
     account_runtime: Mutex<account::AccountRuntime>,
+    /// What this member added to the Map explorer, and the uploads' numbering (controller/maps.rs).
+    maps_mine: Mutex<Option<MapsMine>>,
+    upload_serial: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -165,6 +169,8 @@ fn calibration_info(stored: &StoredCalibration) -> CalibrationInfo {
 pub type Shared = Arc<Controller>;
 
 mod account;
+mod maps;
+pub use account::open_url;
 
 impl Controller {
     pub fn new(settings: Settings) -> Shared {
@@ -189,6 +195,8 @@ impl Controller {
             avatar_before: Mutex::new(None),
             avatar_changed_at: Mutex::new(None),
             account_runtime: Mutex::new(account::AccountRuntime::default()),
+            maps_mine: Mutex::new(None),
+            upload_serial: AtomicU64::new(0),
         })
     }
 
@@ -1039,6 +1047,9 @@ fn spawn_watchers(ctl: Shared) {
         .name("watchers".into())
         .spawn(move || {
             let mut log = LogWatcher::new(None);
+            // The worlds visited, kept from VRChat's logs before VRChat deletes them (the Visited worlds page).
+            let history_file = visited::history_file();
+            let mut history = visited::History::load(&history_file);
             let mut system = sysinfo::System::new();
             let mut tick = 0u64;
             let mut running = false;
@@ -1143,6 +1154,17 @@ fn spawn_watchers(ctl: Shared) {
                         s.osc.vrchat_found = found;
                         changed
                     });
+                }
+
+                // Visited worlds, every 10 s.
+                if tick.is_multiple_of(10) {
+                    if let Some(dir) = orbiters_core::paths::vrchat_log_dir() {
+                        if history.read_logs(&dir) {
+                            if let Err(e) = history.save(&history_file) {
+                                eprintln!("visited worlds: {e}");
+                            }
+                        }
+                    }
                 }
 
                 // Storage, every 30 s (it walks the session folders).

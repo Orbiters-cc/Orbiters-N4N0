@@ -9,3 +9,4 @@ pub mod gpu;
 pub mod init;
 pub mod ply;
 pub mod train;
+pub mod web;

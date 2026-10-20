@@ -111,7 +111,32 @@ fn replace(dir: &Path, partial: &Path) -> anyhow::Result<()> {
     std::fs::rename(partial, &out).with_context(|| format!("moving the result to {}", out.display()))
 }
 
+/// `orbiters-reconstruct --web-preview <splats.ply> <out.splat> [--max N]`: the reconstruction as a web preview
+/// (orbiters_reconstruct::web), started from the scene's centre.
+fn web_preview(args: &[String]) -> anyhow::Result<()> {
+    let (Some(ply_path), Some(out)) = (args.first(), args.get(1)) else { bail!("usage: orbiters-reconstruct --web-preview <splats.ply> <out.splat> [--max N]") };
+    let max = match args.get(2).map(String::as_str) {
+        Some("--max") => args.get(3).context("--max N")?.parse()?,
+        _ => orbiters_reconstruct::web::DEFAULT_MAX,
+    };
+    let g = ply::read(std::path::Path::new(ply_path))?;
+    let n = g.len().max(1) as f32;
+    let centre = g.means.iter().fold([0.0f32; 3], |a, m| [a[0] + m[0] / n, a[1] + m[1] / n, a[2] + m[2] / n]);
+    let web = orbiters_reconstruct::web::splat_file(&g, max, centre);
+    std::fs::write(out, &web.bytes)?;
+    println!("{} of {} splats, {:.1} MB", web.count, g.len(), web.bytes.len() as f64 / 1e6);
+    Ok(())
+}
+
 fn main() {
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    if all.first().map(String::as_str) == Some("--web-preview") {
+        if let Err(e) = web_preview(&all[1..]) {
+            eprintln!("{e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     match args().and_then(run) {
         Ok(report) => emit(&Event::Done { report }),
         Err(e) => {

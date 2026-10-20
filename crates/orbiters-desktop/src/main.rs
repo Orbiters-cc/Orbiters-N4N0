@@ -21,6 +21,8 @@ mod single;
 mod state;
 mod streams;
 mod tray;
+mod views;
+mod worlds;
 mod window;
 mod worker;
 

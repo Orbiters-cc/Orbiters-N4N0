@@ -4,12 +4,14 @@ pub mod account;
 pub mod bundle;
 pub mod clock;
 pub mod keyframes;
+pub mod maps;
 pub mod osc;
 pub mod paths;
 pub mod pose;
 pub mod protocol;
 pub mod reconstruction;
 pub mod settings;
+pub mod visited;
 pub mod vrchat_log;
 
 pub use orbiters_contracts as contracts;

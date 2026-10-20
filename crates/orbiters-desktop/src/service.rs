@@ -182,6 +182,9 @@ impl Service {
                     let _ = l.tx.send(ToClient::WorkerLog { lines });
                 }
             }
+            ToService::UploadPictures { world_id, world_name, paths } => report(ctl.upload_pictures(world_id, world_name, paths)),
+            ToService::UploadPreview { world_id, world_name, session } => report(ctl.upload_preview(world_id, world_name, session)),
+            ToService::Maps => ctl.refresh_maps(),
             ToService::Calibrated { calibration } => ctl.calibrated(*calibration),
             ToService::Quit => self.quit(),
         }

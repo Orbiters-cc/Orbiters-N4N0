@@ -4,7 +4,7 @@
 
 use crate::controller::{self, Notice, NoticeKind};
 use crate::ipc::{Client, ToService};
-use crate::state::Snapshot;
+use crate::state::{MapsMine, Snapshot};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::settings::Settings;
 use std::path::PathBuf;
@@ -37,6 +37,13 @@ pub trait Backend: Send + Sync {
     /// Asks for the worker's log; [`Backend::worker_log`] has it once it arrived.
     fn request_worker_log(&self);
     fn worker_log(&self) -> Option<Vec<String>>;
+    /// Shares pictures of a world on the Map explorer (the tray service sends them).
+    fn upload_pictures(&self, world_id: String, world_name: String, paths: Vec<PathBuf>);
+    /// Shares a session's reconstruction as a world's 3D preview.
+    fn upload_preview(&self, world_id: String, world_name: String, session: PathBuf);
+    /// Asks what this member added to the Map explorer; [`Backend::maps`] has it once it arrived.
+    fn request_maps(&self);
+    fn maps(&self) -> Option<MapsMine>;
     /// A T-pose calibration taken in the overlay.
     fn calibrated(&self, calibration: Calibration);
     /// Quits the whole app (the tray service and every window).
@@ -136,6 +143,22 @@ impl Backend for Remote {
 
     fn worker_log(&self) -> Option<Vec<String>> {
         self.0.worker_log()
+    }
+
+    fn upload_pictures(&self, world_id: String, world_name: String, paths: Vec<PathBuf>) {
+        self.0.send(&ToService::UploadPictures { world_id, world_name, paths });
+    }
+
+    fn upload_preview(&self, world_id: String, world_name: String, session: PathBuf) {
+        self.0.send(&ToService::UploadPreview { world_id, world_name, session });
+    }
+
+    fn request_maps(&self) {
+        self.0.send(&ToService::Maps);
+    }
+
+    fn maps(&self) -> Option<MapsMine> {
+        self.0.maps()
     }
 
     fn calibrated(&self, calibration: Calibration) {
@@ -262,6 +285,22 @@ impl Backend for Local {
 
     fn worker_log(&self) -> Option<Vec<String>> {
         self.log.lock().unwrap().clone()
+    }
+
+    fn upload_pictures(&self, world_id: String, world_name: String, paths: Vec<PathBuf>) {
+        self.report(self.ctl.upload_pictures(world_id, world_name, paths));
+    }
+
+    fn upload_preview(&self, world_id: String, world_name: String, session: PathBuf) {
+        self.report(self.ctl.upload_preview(world_id, world_name, session));
+    }
+
+    fn request_maps(&self) {
+        self.ctl.refresh_maps();
+    }
+
+    fn maps(&self) -> Option<MapsMine> {
+        self.ctl.maps()
     }
 
     fn calibrated(&self, calibration: Calibration) {

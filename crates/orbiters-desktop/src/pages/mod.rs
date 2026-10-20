@@ -1,9 +1,10 @@
-//! The three pages, plus what they share: the page context, background jobs and staggered entrances.
+//! The pages, plus what they share: the page context, background jobs and staggered entrances.
 
 pub mod capture;
 pub mod sessions;
 pub mod splats;
 pub mod settings;
+pub mod worlds;
 
 use crate::backend::Ctl;
 use crate::state::Snapshot;
@@ -17,6 +18,7 @@ use std::sync::mpsc;
 pub enum Page {
     Capture,
     Sessions,
+    Worlds,
     Settings,
 }
 
@@ -157,4 +159,10 @@ pub fn local_time(iso: &str) -> String {
     let t = time::UtcOffset::current_local_offset().map(|o| t.to_offset(o)).unwrap_or(t);
     let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     format!("{} {} {}, {:02}:{:02}", t.day(), months[t.month() as usize - 1], t.year(), t.hour(), t.minute())
+}
+
+/// Unix seconds in local time, as [`local_time`].
+pub fn local_time_unix(secs: u64) -> String {
+    let Ok(t) = time::OffsetDateTime::from_unix_timestamp(secs as i64) else { return String::new() };
+    local_time(&t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default())
 }

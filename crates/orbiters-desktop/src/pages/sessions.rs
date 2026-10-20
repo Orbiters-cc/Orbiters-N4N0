@@ -475,13 +475,17 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
     let mut trash = false;
     let mut open_folder = false;
 
-    egui::Area::new(id).order(Order::Foreground).fixed_pos(page.min).show(ctx, |ui| {
-        let (_, backdrop) = ui.allocate_exact_size(page.size(), Sense::click());
+    // The whole window dims, sidebar and title bar included; a click anywhere but the title bar (which still moves,
+    // minimises and closes the window) closes the detail.
+    let window = ctx.content_rect();
+    let catcher = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
+    egui::Area::new(id).order(Order::Foreground).fixed_pos(catcher.min).show(ctx, |ui| {
+        let (_, backdrop) = ui.allocate_exact_size(catcher.size(), Sense::click());
         if backdrop.clicked() && !rect.contains(backdrop.interact_pointer_pos().unwrap_or_default()) {
             close = true;
         }
+        ui.painter().with_clip_rect(window).rect_filled(window, 0.0, theme::alpha(theme::INK_950, 0.7 * k));
         let p = ui.painter();
-        p.rect_filled(page, 0.0, theme::alpha(theme::INK_950, 0.7 * k));
         widgets::panel(p, rect, radius);
         let thumb_h = lerp(d.origin.width() * 9.0 / 16.0, 260.0);
         let thumb = Rect::from_min_size(rect.min, vec2(rect.width(), thumb_h));

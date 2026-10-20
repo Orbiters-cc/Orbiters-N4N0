@@ -3,8 +3,7 @@
 //! The blobs drift on [`crate::anim::clock`], so they stand still (and cost nothing) while the window is not live.
 
 use crate::anim::{self, ease, Spring};
-use crate::theme;
-use egui::{Id, Painter, Rect};
+use egui::{Color32, Id, Painter, Rect};
 use egui_wgpu::wgpu;
 use egui_wgpu::wgpu::util::DeviceExt;
 
@@ -16,9 +15,9 @@ pub enum Mood {
     Importing,
 }
 
-/// Blob colours (unmultiplied RGBA) per mood: the web's, as faint as the website's home (a violet corner on black).
+/// Blob colours (unmultiplied RGBA) per mood: the web's, fainter than the website's home (a violet corner on black).
 fn palette(mood: Mood) -> [[u8; 4]; 3] {
-    let a = |r: u8, g: u8, b: u8, alpha: f32| [r, g, b, (alpha * 0.4 * 255.0).round() as u8];
+    let a = |r: u8, g: u8, b: u8, alpha: f32| [r, g, b, (alpha * 0.28 * 255.0).round() as u8];
     match mood {
         Mood::Idle => [a(162, 89, 247, 0.55), a(79, 137, 255, 0.42), a(72, 230, 255, 0.22)],
         Mood::Recording => [a(255, 77, 109, 0.42), a(189, 101, 255, 0.45), a(255, 138, 92, 0.2)],
@@ -129,10 +128,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let q = (in.uv - vec2<f32>(0.5, 0.5)) * 2.0;
     let rr = length(q) / 1.41421356;
     col = mix(col, u.base.rgb, clamp((rr - 0.35) / 0.65, 0.0, 1.0) * u.base.w);
-    // Film grain, one value per physical pixel, so gradients never band.
+    // A faint dither, one value per physical pixel and centred on zero, so gradients never band and the black
+    // stays black.
     let px = vec2<u32>(in.pos.xy);
     let n = f32(pcg(px.x + pcg(px.y + u32(u.size.w)))) / 4294967295.0;
-    col = mix(col, vec3<f32>(n), u.size.z);
+    col = max(col + vec3<f32>((n - 0.5) * u.size.z), vec3<f32>(0.0));
     if (u.blob_blur.w > 0.5) {
         col = srgb_to_linear(col);
     }
@@ -255,10 +255,11 @@ pub fn paint(painter: &Painter, rect: Rect, mood: Mood) {
         blob_color[k] = [c[0], c[1], c[2], c[3].clamp(0.0, 1.0)];
         blob_blur[k] = b.blur;
     }
-    let base = theme::INK_950;
+    // Near-black, as the website's page, so the zinc cards stand out.
+    let base = Color32::from_rgb(0x04, 0x04, 0x05);
     let uniforms = Uniforms {
-        // Static grain, like the web's noise texture.
-        size: [w, h, 0.045, 0.0],
+        // Dither amplitude (about ±1 code of 255).
+        size: [w, h, 0.008, 0.0],
         base: [srgb(base.r()), srgb(base.g()), srgb(base.b()), 0.85],
         blob_pos,
         blob_color,

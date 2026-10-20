@@ -12,7 +12,7 @@ use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{icons, logo, toast, widgets};
 use std::sync::Arc;
 
-const TITLE_H: f32 = 40.0;
+pub(crate) const TITLE_H: f32 = 40.0;
 const SIDEBAR_W: f32 = 232.0;
 /// The splash shows for this long, then fades out over [`SPLASH_FADE`].
 const SPLASH: f64 = 1.9;

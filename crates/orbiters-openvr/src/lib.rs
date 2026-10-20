@@ -7,6 +7,8 @@
 //! A [`Client`] of type [`AppType::Background`] never starts SteamVR: it fails when SteamVR is not running.
 
 use orbiters_contracts::performance::tracking::{self, Device, Sample};
+#[cfg(windows)]
+pub mod gpu;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 
@@ -453,6 +455,15 @@ impl Client {
         })
     }
 
+    /// The DXGI adapter index of the GPU driving the headset (`GetDXGIOutputInfo`), when SteamVR knows it.
+    pub fn dxgi_adapter_index(&self) -> Option<u32> {
+        type F = unsafe extern "system" fn(*mut i32);
+        let mut index = -1;
+        // SAFETY: entry 8 is GetDXGIOutputInfo.
+        unsafe { entry::<F>(self.system, 8)(&mut index) };
+        u32::try_from(index).ok()
+    }
+
     // ------------------------------------------------------------------------------------------------ IVROverlay
 
     pub fn overlay(&self) -> Option<Overlay<'_>> {
@@ -582,7 +593,35 @@ impl Overlay<'_> {
         overlay_result(unsafe { entry::<F>(self.table, 52)(handle, &[width, height]) })
     }
 
-    /// Uploads RGBA pixels (top row first). SteamVR copies them.
+    /// Shows a D3D11 texture (`ID3D11Texture2D*`, gamma-encoded) on the overlay. Keep it alive while it is shown.
+    pub fn set_texture_d3d11(&self, handle: OverlayHandle, texture: *mut c_void) -> Result<(), i32> {
+        #[repr(C)]
+        struct Texture {
+            handle: *mut c_void,
+            kind: i32,
+            color_space: i32,
+        }
+        type F = unsafe extern "system" fn(u64, *const Texture) -> i32;
+        // TextureType_DirectX = 0, ColorSpace_Gamma = 1.
+        let t = Texture { handle: texture, kind: 0, color_space: 1 };
+        // SAFETY: entry 60 is SetOverlayTexture.
+        overlay_result(unsafe { entry::<F>(self.table, 60)(handle, &t) })
+    }
+
+    /// Places the overlay in the standing play space (the overlay's +Z faces the viewer).
+    pub fn set_transform_absolute(&self, handle: OverlayHandle, transform: &Matrix34) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64, i32, *const Matrix34) -> i32;
+        // SAFETY: entry 33 is SetOverlayTransformAbsolute; TrackingUniverseStanding = 1.
+        overlay_result(unsafe { entry::<F>(self.table, 33)(handle, 1, transform) })
+    }
+
+    pub fn set_alpha(&self, handle: OverlayHandle, alpha: f32) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64, f32) -> i32;
+        // SAFETY: entry 16 is SetOverlayAlpha.
+        overlay_result(unsafe { entry::<F>(self.table, 16)(handle, alpha) })
+    }
+
+    /// Uploads RGBA pixels (top row first). SteamVR copies them; it flickers when called every frame.
     pub fn set_raw(&self, handle: OverlayHandle, rgba: &[u8], width: u32, height: u32) -> Result<(), i32> {
         type F = unsafe extern "system" fn(u64, *mut c_void, u32, u32, u32) -> i32;
         assert_eq!(rgba.len(), (width * height * 4) as usize);

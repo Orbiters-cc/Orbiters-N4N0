@@ -461,8 +461,18 @@ impl crate::overlay::ui::Poses for StandInBody {
                 device(DeviceClass::Hmd, "head", "HMD"),
                 device(DeviceClass::Controller, "left_hand", "L"),
                 device(DeviceClass::Controller, "right_hand", "R"),
+                device(DeviceClass::Tracker, "waist", "T1"),
+                device(DeviceClass::Tracker, "left_foot", "T2"),
+                device(DeviceClass::Tracker, "right_foot", "T3"),
             ],
-            vec![at(0, [0.0, 1.63, 0.0]), at(1, [-hx, hy, 0.0]), at(2, [hx, hy + dy, 0.0])],
+            vec![
+                at(0, [0.0, 1.63, 0.0]),
+                at(1, [-hx, hy, 0.0]),
+                at(2, [hx, hy + dy, 0.0]),
+                at(3, [0.02, 0.98, 0.02]),
+                at(4, [-0.13, 0.09, 0.03]),
+                at(5, [0.13, 0.09, 0.03]),
+            ],
         )
     }
 }
@@ -520,8 +530,11 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
         for f in 0..frames {
             let t = f as f64 / 60.0;
             if let (Some((_, start)), 0) = (calibrate, f) {
-                ui_state.start_calibration(start);
+                ui_state.start_calibration(start, &mut body);
+                // The dashboard closes: the countdown starts at once.
+                ui_state.tick(start, false, &mut body, &backend);
             }
+            ui_state.tick(t, false, &mut body, &backend);
             let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)), time: Some(t), ..Default::default() };
             input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), focused: Some(true), ..Default::default() });
             let mut full = ctx.run_ui(input, |ui| ui_state.show(ui, snap, &backend, &mut body));
@@ -545,6 +558,46 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
         let path = out.join(format!("{name}.png"));
         save_png(&path, &img)?;
         println!("{}", path.display());
+
+        // The mirror and the hand targets as they stand in the play space at the last frame (on a dark ground,
+        // as the play space usually is behind them).
+        if calibrate.is_some() {
+            use crate::overlay::calibration::{self, MIRROR_PX, TARGET_PX};
+            let t = (frames - 1) as f64 / 60.0;
+            let cal = &ui_state.calibrator;
+            let mut canvas = crate::overlay::Canvas::new(MIRROR_PX[0], MIRROR_PX[1]);
+            let mut rgba = Vec::new();
+            for _ in 0..2 {
+                rgba = canvas.paint(t, |p| calibration::paint_mirror(p, cal, t)).to_vec();
+            }
+            let mirror = name.replace("overlay-", "mirror-");
+            save_png(&out.join(format!("{mirror}.png")), &over_ground(&rgba, MIRROR_PX[0], MIRROR_PX[1]))?;
+            let mut canvas = crate::overlay::Canvas::new(TARGET_PX, TARGET_PX);
+            for (i, label) in ["L", "R"].into_iter().enumerate() {
+                let on = cal.hand_on_target(i);
+                for _ in 0..2 {
+                    rgba = canvas.paint(t, |p| calibration::paint_target(p, label, on, t)).to_vec();
+                }
+                save_png(&out.join(format!("{}-target-{label}.png", mirror)), &over_ground(&rgba, TARGET_PX, TARGET_PX))?;
+            }
+            println!("{}", out.join(format!("{mirror}.png")).display());
+        }
     }
     Ok(())
+}
+
+/// A premultiplied RGBA picture over a dark grey ground.
+fn over_ground(rgba: &[u8], width: u32, height: u32) -> egui::ColorImage {
+    let ground = [38u8, 40, 46];
+    let pixels: Vec<u8> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| {
+            let a = p[3] as u32;
+            let mix = |c: u8, g: u8| (c as u32 + g as u32 * (255 - a) / 255).min(255) as u8;
+            [mix(p[0], ground[0]), mix(p[1], ground[1]), mix(p[2], ground[2]), 255]
+        })
+        .collect();
+    egui::ColorImage::from_rgba_premultiplied([width as usize, height as usize], &pixels)
 }

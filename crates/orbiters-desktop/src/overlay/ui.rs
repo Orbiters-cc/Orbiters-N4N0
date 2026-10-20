@@ -1,13 +1,12 @@
 //! What the SteamVR dashboard tab shows: the recorder, what each stream records right now, and the T-pose
 //! calibration. Laid out for a fixed 1024 × 640 point canvas, read from a metre or two away.
 
+use super::calibration::{Calibrator, Phase};
 use crate::backend::Ctl;
 use crate::state::{CaptureState, Snapshot};
 use egui::{pos2, vec2, Align2, Color32, Id, Rect, Ui, UiBuilder, Vec2};
 use orbiters_contracts::performance::tracking::{Device, Sample};
-use orbiters_core::pose::{by_role, calibration_of, TPoseCheck};
 use orbiters_core::settings::Settings;
-use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::record::{self, RecState, RecordButton};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Tone, Variant};
@@ -21,49 +20,32 @@ pub trait Poses {
     fn read(&mut self) -> (Vec<Device>, Vec<Sample>);
 }
 
-#[derive(Clone, Debug)]
-enum Calibrating {
-    Idle,
-    Countdown {
-        until: f64,
-    },
-    /// `held` is when the pose started to count (it must stay half a second).
-    Holding {
-        since: f64,
-        held: Option<f64>,
-        check: TPoseCheck,
-    },
-    Done {
-        at: f64,
-    },
-    Failed {
-        at: f64,
-        reason: &'static str,
-    },
-}
-
-const COUNTDOWN_S: f64 = 3.0;
-const HOLD_TIMEOUT_S: f64 = 12.0;
-
+#[derive(Default)]
 pub struct OverlayUi {
-    calibrating: Calibrating,
-}
-
-impl Default for OverlayUi {
-    fn default() -> Self {
-        Self { calibrating: Calibrating::Idle }
-    }
+    pub calibrator: Calibrator,
 }
 
 impl OverlayUi {
-    /// Whether frames must keep coming (a countdown, a T-pose being held).
+    /// Whether frames must keep coming (a calibration under way).
     pub fn busy(&self) -> bool {
-        matches!(self.calibrating, Calibrating::Countdown { .. } | Calibrating::Holding { .. })
+        self.calibrator.active()
     }
 
-    /// Starts a calibration as if the button was pressed (screenshots).
-    pub fn start_calibration(&mut self, now: f64) {
-        self.calibrating = Calibrating::Countdown { until: now + COUNTDOWN_S };
+    /// Starts a calibration as if the button was pressed.
+    pub fn start_calibration(&mut self, now: f64, poses: &mut dyn Poses) {
+        let (devices, samples) = poses.read();
+        self.calibrator.start(now, &devices, &samples);
+    }
+
+    /// Advances the calibration (every loop, the tab drawn or not) and saves it when a T-pose was held.
+    pub fn tick(&mut self, now: f64, dashboard_visible: bool, poses: &mut dyn Poses, ctl: &Ctl) {
+        if !self.calibrator.active() && !self.calibrator.in_world(now) && matches!(self.calibrator.phase, Phase::Idle) {
+            return;
+        }
+        let (devices, samples) = poses.read();
+        if let Some(c) = self.calibrator.tick(now, dashboard_visible, &devices, &samples) {
+            ctl.calibrated(c);
+        }
     }
 
     pub fn show(&mut self, ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, poses: &mut dyn Poses) {
@@ -75,109 +57,63 @@ impl OverlayUi {
         let streams_rect = Rect::from_min_size(right.min, vec2(right.width(), 318.0));
         streams(ui, snap, ctl, streams_rect);
         let calib_rect = Rect::from_min_max(pos2(right.left(), streams_rect.bottom() + 16.0), right.max);
-        self.calibration(ui, snap, ctl, poses, calib_rect);
+        self.calibration(ui, snap, poses, calib_rect);
     }
 
-    fn calibration(&mut self, ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, poses: &mut dyn Poses, rect: Rect) {
+    fn calibration(&mut self, ui: &mut Ui, snap: &Snapshot, poses: &mut dyn Poses, rect: Rect) {
         let now = ui.input(|i| i.time);
         widgets::card(ui.painter(), rect, theme::CARD_RADIUS);
         let p = ui.painter().clone();
         widgets::text(&p, pos2(rect.left() + 22.0, rect.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps("T-pose calibration"));
-
-        // Advance the state machine.
-        match self.calibrating.clone() {
-            Calibrating::Countdown { until } if now >= until => {
-                self.calibrating = Calibrating::Holding { since: now, held: None, check: TPoseCheck::default() };
-            }
-            Calibrating::Holding { since, mut held, .. } => {
-                let (devices, samples) = poses.read();
-                let check = match (by_role("head", &devices, &samples), by_role("left_hand", &devices, &samples), by_role("right_hand", &devices, &samples)) {
-                    (Some(h), Some(l), Some(r)) => Some(TPoseCheck::of(h, l, r)),
-                    _ => None,
-                };
-                match check {
-                    None => self.calibrating = Calibrating::Failed { at: now, reason: "The headset and both controllers need to be tracked." },
-                    Some(check) => {
-                        if check.all() {
-                            let from = *held.get_or_insert(now);
-                            if now - from >= 0.5 {
-                                ctl.calibrated(calibration_of(orbiters_core::clock::now_ns() as i64, "overlay", &devices, &samples));
-                                self.calibrating = Calibrating::Done { at: now };
-                            } else {
-                                self.calibrating = Calibrating::Holding { since, held, check };
-                            }
-                        } else if now - since > HOLD_TIMEOUT_S {
-                            self.calibrating = Calibrating::Failed { at: now, reason: "No T-pose seen: stand straight, arms out at shoulder height." };
-                        } else {
-                            self.calibrating = Calibrating::Holding { since, held: None, check };
-                        }
-                    }
-                }
-            }
-            Calibrating::Done { at } | Calibrating::Failed { at, .. } if now - at > 6.0 => self.calibrating = Calibrating::Idle,
-            _ => {}
-        }
         if self.busy() {
             ui.ctx().request_repaint();
         }
-
         let body = Rect::from_min_max(pos2(rect.left() + 22.0, rect.top() + 48.0), pos2(rect.right() - 22.0, rect.bottom() - 18.0));
-        match &self.calibrating {
-            Calibrating::Idle | Calibrating::Done { .. } | Calibrating::Failed { .. } => {
-                let (line, tone) = match (&self.calibrating, &snap.steamvr.calibration) {
-                    (Calibrating::Failed { reason, .. }, _) => (reason.to_string(), theme::DANGER),
-                    (Calibrating::Done { .. }, Some(c)) => {
-                        (format!("Calibrated: eyes at {:.2} m, hands {:.2} m apart.", c.head_height_m, c.arm_span_m), theme::OK)
-                    }
+        let button_rect = |w: f32| Rect::from_min_size(pos2(body.right() - w, body.bottom() - 40.0), vec2(w, 40.0));
+        match self.calibrator.phase.clone() {
+            Phase::Idle | Phase::Done { .. } | Phase::Failed { .. } => {
+                let (line, tone) = match (&self.calibrator.phase, &snap.steamvr.calibration) {
+                    (Phase::Failed { reason, .. }, _) => (reason.to_string(), theme::DANGER),
+                    (Phase::Done { eye, span, .. }, _) => (format!("Calibrated: eyes at {eye:.2} m, hands {span:.2} m apart."), theme::OK),
                     (_, Some(c)) => (format!("Last: eyes at {:.2} m, hands {:.2} m apart, {}.", c.head_height_m, c.arm_span_m, ago(c.utc_ms)), theme::FG_2),
                     (_, None) => ("Not calibrated yet.".into(), theme::FG_2),
                 };
                 let galley = p.layout_job(Txt::new(line, 15.0).color(tone).line_height(21.0).job(body.width()));
                 p.galley(body.min, galley, tone);
-                let hint = "Press Calibrate, then stand in a T-pose. Calibrate in VRChat at the same moment so both match.";
+                let hint = "Press Calibrate: a mirror and two hand targets appear in front of you. Calibrate in VRChat at the same moment so both match.";
                 let galley = p.layout_job(Txt::new(hint, 13.0).color(theme::FG_3).line_height(19.0).job(body.width() - 170.0));
-                p.galley(pos2(body.left(), body.bottom() - 40.0), galley, theme::FG_3);
+                p.galley(pos2(body.left(), body.bottom() - 58.0), galley, theme::FG_3);
                 let b = Button::new("Calibrate").icon(icons::PERSON).variant(Variant::Primary).enabled(snap.steamvr.running);
                 let w = b.desired_width(ui).max(150.0);
-                if b.width(w).show_at(ui, Rect::from_min_size(pos2(body.right() - w, body.bottom() - 40.0), vec2(w, 40.0))).clicked() {
-                    self.start_calibration(now);
+                if b.width(w).show_at(ui, button_rect(w)).clicked() {
+                    self.start_calibration(now, poses);
                 }
             }
-            Calibrating::Countdown { until } => {
-                let left = (until - now).ceil().max(1.0) as u32;
-                let k = 1.0 - ((until - now).fract() as f32);
-                let big = Txt::new(left.to_string(), 64.0 + 8.0 * k).weight(weight::SEMIBOLD).color(theme::FG);
-                widgets::text(&p, pos2(body.left() + 40.0, body.center().y), Align2::CENTER_CENTER, &big);
-                widgets::text(
-                    &p,
-                    pos2(body.left() + 96.0, body.center().y - 12.0),
-                    Align2::LEFT_CENTER,
-                    &Txt::new("Get into a T-pose", 20.0).weight(weight::SEMIBOLD),
-                );
-                widgets::text(
-                    &p,
-                    pos2(body.left() + 96.0, body.center().y + 16.0),
-                    Align2::LEFT_CENTER,
-                    &Txt::new("Arms straight out, hands at shoulder height.", 14.0).color(theme::FG_2),
-                );
-            }
-            Calibrating::Holding { check, .. } => {
-                widgets::text(&p, pos2(body.left(), body.top() + 12.0), Align2::LEFT_CENTER, &Txt::new("Hold the pose…", 20.0).weight(weight::SEMIBOLD));
-                let items = [
-                    ("Arms out", check.wide),
-                    ("Hands level", check.level),
-                    ("At shoulders", check.shoulders),
-                    ("Centered", check.centered),
-                    ("Still", check.still),
-                ];
-                let w = body.width() / items.len() as f32;
-                for (i, (label, ok)) in items.iter().enumerate() {
-                    let c = pos2(body.left() + w * (i as f32 + 0.5), body.top() + 70.0);
-                    let k = anim::toggle(ui.ctx(), Id::unique(("overlay-check", i)), *ok, Spring::BOUNCY);
-                    let color = lerp(theme::FG_4, theme::OK, k.clamp(0.0, 1.0));
-                    p.circle_filled(c, 15.0 + 2.0 * k, theme::alpha(color, 0.18));
-                    widgets::icon(&p, c, if *ok { icons::CHECK } else { icons::CIRCLE }, 16.0, color);
-                    widgets::text(&p, pos2(c.x, c.y + 30.0), Align2::CENTER_CENTER, &Txt::new(*label, 12.5).color(if *ok { theme::FG } else { theme::FG_3 }));
+            phase => {
+                let (big, title, line) = match phase {
+                    Phase::Waiting { .. } => (None, "Close the dashboard".to_string(), "The mirror and the two hand targets are in front of you.".to_string()),
+                    Phase::Countdown { until } => {
+                        (Some((until - now).ceil().max(1.0) as u32), "Get into a T-pose".into(), "Hands on the two targets, arms straight.".into())
+                    }
+                    _ => (None, "Hold the pose…".into(), "Follow the mirror in front of you.".into()),
+                };
+                let x = if let Some(n) = big {
+                    widgets::text(
+                        &p,
+                        pos2(body.left() + 30.0, body.top() + 50.0),
+                        Align2::CENTER_CENTER,
+                        &Txt::new(n.to_string(), 64.0).weight(weight::SEMIBOLD).color(theme::FG),
+                    );
+                    body.left() + 80.0
+                } else {
+                    body.left()
+                };
+                widgets::text(&p, pos2(x, body.top() + 38.0), Align2::LEFT_CENTER, &Txt::new(title, 20.0).weight(weight::SEMIBOLD));
+                widgets::text(&p, pos2(x, body.top() + 66.0), Align2::LEFT_CENTER, &Txt::new(line, 14.0).color(theme::FG_2));
+                let b = Button::new("Cancel").icon(icons::X).variant(Variant::Ghost);
+                let w = b.desired_width(ui).max(130.0);
+                if b.width(w).show_at(ui, button_rect(w)).clicked() {
+                    self.calibrator.cancel();
                 }
             }
         }
@@ -358,9 +294,4 @@ fn streams(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
             &Txt::new("Switches apply to the next recording", 12.0).color(theme::FG_4),
         );
     }
-}
-
-fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
-    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Color32::from_rgba_premultiplied(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()), m(a.a(), b.a()))
 }

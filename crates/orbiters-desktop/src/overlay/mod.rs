@@ -1,14 +1,16 @@
 //! The SteamVR overlay process (`orbiters-desktop --overlay --service <port> <token>`): Orbiters as a tab in
 //! SteamVR's dashboard, started by the tray service while SteamVR runs. Its egui interface is painted on the CPU
 //! ([`orbiters_ui::software`]: no GPU device, so none of a graphics driver's ~100 MB per process) and handed to
-//! SteamVR as pixels, only while the dashboard shows the tab and only when something changed. It reads the device
-//! poses itself for T-pose calibrations.
+//! SteamVR as a texture, only while the dashboard shows the tab and only when something changed. It reads the
+//! device poses itself for T-pose calibrations, which also put a mirror and two hand targets in the play space.
 
+pub mod calibration;
 pub mod ui;
 
 use crate::backend::{Ctl, Remote};
 use crate::ipc::{Client, Endpoint, Role};
 use anyhow::Context as _;
+use calibration::{MIRROR_PX, MIRROR_WIDTH_M, TARGET_PX, TARGET_WIDTH_M};
 use egui::{pos2, Event, PointerButton, RawInput, Rect, ViewportId, ViewportInfo};
 use orbiters_contracts::performance::tracking::{Device, DeviceClass, Sample};
 use orbiters_openvr::{self as vr, Pose, MAX_DEVICES};
@@ -47,6 +49,149 @@ impl ui::Poses for SteamVrPoses<'_> {
     }
 }
 
+/// Hands pictures to SteamVR: through D3D11 textures (raw pixels flicker when they change every frame), or as raw
+/// pixels when no device could be made.
+struct Presenter {
+    #[cfg(windows)]
+    gpu: Option<vr::gpu::OverlayTextures>,
+}
+
+impl Presenter {
+    fn new(steamvr: &vr::Client) -> Self {
+        #[cfg(windows)]
+        {
+            let gpu = vr::gpu::OverlayTextures::new(steamvr.dxgi_adapter_index()).map_err(|e| eprintln!("overlay textures: {e}; raw pixels instead")).ok();
+            Self { gpu }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = steamvr;
+            Self {}
+        }
+    }
+
+    fn show(&mut self, overlay: &vr::Overlay, handle: vr::OverlayHandle, rgba: &[u8], width: u32, height: u32) {
+        #[cfg(windows)]
+        if let Some(gpu) = self.gpu.as_mut() {
+            match gpu.present(overlay, handle, rgba, width, height) {
+                Ok(()) => return,
+                Err(e) => {
+                    eprintln!("{e}; raw pixels instead");
+                    self.gpu = None;
+                }
+            }
+        }
+        if let Err(code) = overlay.set_raw(handle, rgba, width, height) {
+            eprintln!("overlay pixels: SteamVR overlay error {code}");
+        }
+    }
+}
+
+/// An egui canvas painted on the CPU for one of the world overlays.
+pub struct Canvas {
+    ctx: egui::Context,
+    painter: Software,
+    size: egui::Vec2,
+}
+
+impl Canvas {
+    pub fn new(width: u32, height: u32) -> Self {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        Self { ctx, painter: Software::new(width, height), size: egui::vec2(width as f32, height as f32) }
+    }
+
+    /// Paints a frame (RGBA, premultiplied, transparent where nothing was drawn).
+    pub fn paint(&mut self, time: f64, draw: impl FnMut(&egui::Painter)) -> &[u8] {
+        let mut draw = draw;
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), self.size)), time: Some(time), ..Default::default() };
+        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), ..Default::default() });
+        let mut full = self.ctx.run_ui(input, |ui| draw(ui.painter()));
+        self.painter.set_textures(&mut full.textures_delta);
+        let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
+        self.painter.free_textures(&mut full.textures_delta);
+        self.painter.paint(&primitives, full.pixels_per_point, egui::Color32::TRANSPARENT)
+    }
+}
+
+/// The calibration's mirror and hand targets in the play space.
+struct World {
+    mirror: vr::OverlayHandle,
+    targets: [vr::OverlayHandle; 2],
+    mirror_canvas: Canvas,
+    target_canvas: Canvas,
+    /// The frame they were placed for (placed again when a new calibration starts).
+    placed: Option<[f32; 3]>,
+    shown: bool,
+    last_paint: Option<Instant>,
+}
+
+impl World {
+    fn new(overlay: &vr::Overlay) -> anyhow::Result<Self> {
+        let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}");
+        let mirror = overlay.create(&format!("{KEY}.mirror"), "Orbiters calibration mirror").map_err(|c| fail("mirror", c))?;
+        let _ = overlay.set_width_in_meters(mirror, MIRROR_WIDTH_M);
+        let mut targets = [0; 2];
+        for (i, side) in ["left", "right"].into_iter().enumerate() {
+            targets[i] = overlay.create(&format!("{KEY}.target.{side}"), &format!("Orbiters {side} hand target")).map_err(|c| fail("hand target", c))?;
+            let _ = overlay.set_width_in_meters(targets[i], TARGET_WIDTH_M);
+        }
+        Ok(Self {
+            mirror,
+            targets,
+            mirror_canvas: Canvas::new(MIRROR_PX[0], MIRROR_PX[1]),
+            target_canvas: Canvas::new(TARGET_PX, TARGET_PX),
+            placed: None,
+            shown: false,
+            last_paint: None,
+        })
+    }
+
+    fn update(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, cal: &calibration::Calibrator, now: f64) {
+        let frame = cal.frame.filter(|_| cal.in_world(now));
+        let Some(frame) = frame else {
+            if self.shown {
+                for h in [self.mirror, self.targets[0], self.targets[1]] {
+                    let _ = overlay.hide(h);
+                }
+                self.shown = false;
+            }
+            return;
+        };
+        if self.placed != Some(frame.origin) {
+            let _ = overlay.set_transform_absolute(self.mirror, &frame.mirror_transform());
+            for i in 0..2 {
+                let _ = overlay.set_transform_absolute(self.targets[i], &frame.target_transform(i));
+            }
+            self.placed = Some(frame.origin);
+        }
+        // About 30 pictures a second.
+        if self.last_paint.is_some_and(|t| t.elapsed() < Duration::from_millis(33)) {
+            return;
+        }
+        self.last_paint = Some(Instant::now());
+        let rgba = self.mirror_canvas.paint(now, |p| calibration::paint_mirror(p, cal, now)).to_vec();
+        presenter.show(overlay, self.mirror, &rgba, MIRROR_PX[0], MIRROR_PX[1]);
+        for (i, label) in ["L", "R"].into_iter().enumerate() {
+            let on = cal.hand_on_target(i);
+            let rgba = self.target_canvas.paint(now, |p| calibration::paint_target(p, label, on, now)).to_vec();
+            presenter.show(overlay, self.targets[i], &rgba, TARGET_PX, TARGET_PX);
+        }
+        if !self.shown {
+            for h in [self.mirror, self.targets[0], self.targets[1]] {
+                let _ = overlay.show(h);
+            }
+            self.shown = true;
+        }
+    }
+
+    fn destroy(&self, overlay: &vr::Overlay) {
+        for h in [self.mirror, self.targets[0], self.targets[1]] {
+            let _ = overlay.destroy(h);
+        }
+    }
+}
+
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let endpoint = Endpoint::from_args(args).context("--overlay needs --service <port> <token>")?;
     let client = Client::connect(&endpoint, Role::Overlay)?;
@@ -64,9 +209,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let ctx = egui::Context::default();
     orbiters_ui::install(&ctx);
     let mut painter = painter();
+    let mut presenter = Presenter::new(&steamvr);
     if let Some(icon) = thumbnail() {
-        let _ = overlay.set_raw(thumb, &icon, 128, 128);
+        presenter.show(&overlay, thumb, &icon, 128, 128);
     }
+    let mut world = World::new(&overlay)?;
     let mut state = ui::OverlayUi::default();
     let mut poses = SteamVrPoses { client: &steamvr, described: HashMap::new() };
     let started = Instant::now();
@@ -112,6 +259,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         let visible = overlay.is_visible(main);
         let snap = backend.view();
+        // The calibration runs whether the tab is drawn or not (the dashboard is closed while the pose is held).
+        let now = started.elapsed().as_secs_f64();
+        state.tick(now, overlay.is_dashboard_visible(), &mut poses, &backend);
+        world.update(&overlay, &mut presenter, &state.calibrator, now);
         if !shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, &snap)) {
             shown = Some(snap.clone());
             next_frame = Some(next_frame.map_or(Instant::now(), |t| t.min(Instant::now())));
@@ -132,9 +283,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             painter.set_textures(&mut full.textures_delta);
             let primitives = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
             let rgba = painter.paint(&primitives, full.pixels_per_point, orbiters_ui::theme::INK_950);
-            if let Err(code) = overlay.set_raw(main, rgba, WIDTH, HEIGHT) {
-                eprintln!("overlay pixels: SteamVR overlay error {code}");
-            }
+            presenter.show(&overlay, main, rgba, WIDTH, HEIGHT);
             painter.free_textures(&mut full.textures_delta);
             // egui says when the next frame is due (animations, springs); at most 45 frames a second.
             let delay = full.viewport_output.get(&ViewportId::ROOT).map(|v| v.repaint_delay).unwrap_or(Duration::MAX);
@@ -142,8 +291,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         } else if !visible {
             events.clear();
         }
-        std::thread::sleep(if visible { Duration::from_millis(11) } else { Duration::from_millis(100) });
+        let fast = visible || state.calibrator.in_world(now) || state.busy();
+        std::thread::sleep(if fast { Duration::from_millis(11) } else { Duration::from_millis(100) });
     }
+    world.destroy(&overlay);
     let _ = overlay.destroy(main);
     Ok(())
 }

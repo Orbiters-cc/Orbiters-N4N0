@@ -1,0 +1,573 @@
+//! SteamVR device poses of a session (contracts `Docs/performance.md`): headset, controllers and trackers
+//! (including the virtual ones of full-body estimation tools) sampled at a fixed rate on their own thread, in the
+//! standing play space converted to Unity conventions. A T-pose held still while recording (VRChat's own
+//! calibration asks for one) is kept as a calibration, so the avatar's proportions can be matched later.
+
+use orbiters_contracts::performance::calibration::{Calibration, DevicePose};
+use orbiters_contracts::performance::tracking::{self, Device, DeviceClass, Devices, Sample};
+use orbiters_openvr::{self as vr, Pose, MAX_DEVICES};
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+/// What the recorder needs from SteamVR (a stand-in drives the tests).
+pub trait PoseSource: Send {
+    /// Current poses in the standing universe; `false` once the source is gone (SteamVR quit).
+    fn sample(&mut self, out: &mut [Pose; MAX_DEVICES]) -> bool;
+    /// What a device is; `None` while it is not known yet.
+    fn describe(&mut self, index: u32) -> Option<Device>;
+}
+
+/// SteamVR as a background application: it never starts SteamVR.
+pub struct SteamVr {
+    client: vr::Client,
+    /// Roles changed: devices are described again.
+    pub roles_changed: bool,
+}
+
+impl SteamVr {
+    pub fn connect() -> Result<Self, vr::Error> {
+        Ok(Self { client: vr::Client::connect(vr::AppType::Background)?, roles_changed: false })
+    }
+}
+
+impl PoseSource for SteamVr {
+    fn sample(&mut self, out: &mut [Pose; MAX_DEVICES]) -> bool {
+        while let Some(e) = self.client.poll_event() {
+            match e.event_type {
+                vr::event::QUIT => {
+                    self.client.acknowledge_quit();
+                    return false;
+                }
+                vr::event::TRACKED_DEVICE_ROLE_CHANGED | vr::event::PROPERTY_CHANGED => self.roles_changed = true,
+                _ => {}
+            }
+        }
+        self.client.poses(vr::Universe::Standing, out);
+        true
+    }
+
+    fn describe(&mut self, index: u32) -> Option<Device> {
+        let class = match self.client.device_class(index) {
+            vr::DeviceClass::Hmd => DeviceClass::Hmd,
+            vr::DeviceClass::Controller => DeviceClass::Controller,
+            vr::DeviceClass::GenericTracker => DeviceClass::Tracker,
+            vr::DeviceClass::TrackingReference => DeviceClass::TrackingReference,
+            vr::DeviceClass::Invalid => return None,
+            _ => DeviceClass::Other,
+        };
+        let raw_class = self.client.device_class(index);
+        let controller_type = self.client.string_property(index, vr::prop::CONTROLLER_TYPE);
+        let s = |p| self.client.string_property(index, p).unwrap_or_default();
+        Some(Device {
+            index: index as u8,
+            class,
+            role: vr::role_name(raw_class, self.client.controller_role(index), controller_type.as_deref()),
+            serial: s(vr::prop::SERIAL_NUMBER),
+            model: s(vr::prop::MODEL_NUMBER),
+            manufacturer: s(vr::prop::MANUFACTURER_NAME),
+            controller_type: controller_type.unwrap_or_default(),
+            tracking_system: s(vr::prop::TRACKING_SYSTEM_NAME),
+            first_seen_ns: 0,
+        })
+    }
+}
+
+/// A pose in Unity conventions, for device number `number` of `tracking.json`.
+pub fn sample_of(time_ns: u64, number: usize, p: &Pose) -> Sample {
+    let (position, rotation) = tracking::from_openvr(&p.device_to_absolute.m);
+    let [vx, vy, vz] = p.velocity;
+    // Angular velocity is an axis (pseudovector): mirroring Z flips its x and y.
+    let [wx, wy, wz] = p.angular_velocity;
+    Sample {
+        time_ns,
+        device: number as u8,
+        flags: if p.pose_is_valid { tracking::flags::POSE_VALID } else { 0 } | if p.device_is_connected { tracking::flags::CONNECTED } else { 0 },
+        result: p.tracking_result.clamp(0, u16::MAX as i32) as u16,
+        position,
+        rotation,
+        velocity: [vx, vy, -vz],
+        angular_velocity: [-wx, -wy, wz],
+    }
+}
+
+/// Fires once when the person holds a T-pose still: hands level with the shoulders and far apart, head between
+/// them, nothing moving for half a second. Re-arms after the pose was left for a second.
+#[derive(Default)]
+pub struct TPoseDetector {
+    held_since: Option<u64>,
+    left_since: Option<u64>,
+    fired: bool,
+}
+
+impl TPoseDetector {
+    pub fn is_t_pose(head: &Sample, left: &Sample, right: &Sample) -> bool {
+        let speed = |s: &Sample| (s.velocity[0].powi(2) + s.velocity[1].powi(2) + s.velocity[2].powi(2)).sqrt();
+        let eye = head.position[1];
+        let (l, r) = (left.position, right.position);
+        let hands_y = (l[1] + r[1]) / 2.0;
+        let span = ((l[0] - r[0]).powi(2) + (l[2] - r[2]).powi(2)).sqrt();
+        let mid = [(l[0] + r[0]) / 2.0, (l[2] + r[2]) / 2.0];
+        let off_center = ((head.position[0] - mid[0]).powi(2) + (head.position[2] - mid[1]).powi(2)).sqrt();
+        [head, left, right].iter().all(|s| s.pose_valid() && speed(s) < 0.2)
+            && (l[1] - r[1]).abs() < 0.15
+            && hands_y > eye - 0.55
+            && hands_y < eye + 0.05
+            && span >= (0.75 * eye).max(0.9)
+            && off_center < 0.25
+    }
+
+    /// `true` at the moment a held T-pose counts.
+    pub fn update(&mut self, time_ns: u64, in_pose: bool) -> bool {
+        if in_pose {
+            self.left_since = None;
+            let since = *self.held_since.get_or_insert(time_ns);
+            if !self.fired && time_ns - since >= 500_000_000 {
+                self.fired = true;
+                return true;
+            }
+        } else {
+            self.held_since = None;
+            let since = *self.left_since.get_or_insert(time_ns);
+            if time_ns - since >= 1_000_000_000 {
+                self.fired = false;
+            }
+        }
+        false
+    }
+}
+
+/// What a finished recording leaves for the manifest.
+pub struct TrackingResult {
+    pub samples: u64,
+    pub devices: usize,
+    pub calibrations: Vec<Calibration>,
+}
+
+/// Connects to the pose source; `None` while it is not available (SteamVR not running).
+pub type Connect = Box<dyn FnMut() -> Option<Box<dyn PoseSource>> + Send>;
+
+/// SteamVR, retried until it runs.
+pub fn steamvr() -> Connect {
+    Box::new(|| match SteamVr::connect() {
+        Ok(s) => Some(Box::new(s) as Box<dyn PoseSource>),
+        Err(e) => {
+            if !e.not_running() {
+                eprintln!("SteamVR: {e}");
+            }
+            None
+        }
+    })
+}
+
+/// Records poses on its own thread until [`TrackingRecorder::finish`]. Waits for SteamVR when it is not running
+/// and reconnects when it restarts.
+pub struct TrackingRecorder {
+    stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    counters: Arc<Counters>,
+    thread: Option<JoinHandle<anyhow::Result<TrackingResult>>>,
+}
+
+#[derive(Default)]
+struct Counters {
+    samples: AtomicU64,
+    devices: AtomicU64,
+    calibrations: AtomicU64,
+    connected: AtomicBool,
+}
+
+/// What the interface shows while recording.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TrackingCounts {
+    pub connected: bool,
+    pub devices: u64,
+    pub samples: u64,
+    pub calibrations: u64,
+}
+
+impl TrackingRecorder {
+    /// Starts sampling at `rate_hz` into `<dir>/tracking.bin` (+ `tracking.json` when it finishes).
+    pub fn start(connect: Connect, dir: &Path, epoch_ns: u64, rate_hz: f32) -> anyhow::Result<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let counters = Arc::new(Counters::default());
+        let thread = {
+            let (stop, paused, counters, dir) = (stop.clone(), paused.clone(), counters.clone(), dir.to_path_buf());
+            std::thread::Builder::new().name("tracking".into()).spawn(move || {
+                let mut rec = Recording::new(&dir, epoch_ns, rate_hz, counters);
+                rec.run(connect, &stop, &paused)?;
+                rec.finish()
+            })?
+        };
+        Ok(Self { stop, paused, counters, thread: Some(thread) })
+    }
+
+    /// While paused nothing is written (a pause means "not this part").
+    pub fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Relaxed);
+    }
+
+    pub fn counts(&self) -> TrackingCounts {
+        let c = &self.counters;
+        TrackingCounts {
+            connected: c.connected.load(Ordering::Relaxed),
+            devices: c.devices.load(Ordering::Relaxed),
+            samples: c.samples.load(Ordering::Relaxed),
+            calibrations: c.calibrations.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn finish(mut self) -> anyhow::Result<TrackingResult> {
+        self.stop.store(true, Ordering::Relaxed);
+        match self.thread.take().expect("running").join() {
+            Ok(r) => r,
+            Err(_) => anyhow::bail!("the tracking thread panicked"),
+        }
+    }
+}
+
+impl Drop for TrackingRecorder {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// The recording's state across connections.
+struct Recording {
+    dir: std::path::PathBuf,
+    epoch_ns: u64,
+    period: Duration,
+    file: Option<BufWriter<File>>,
+    devices: Devices,
+    /// SteamVR index → device number in `tracking.json` (`None` for base stations), for the current connection.
+    known: HashMap<u32, Option<u8>>,
+    detector: TPoseDetector,
+    calibrations: Vec<Calibration>,
+    written: u64,
+    counters: Arc<Counters>,
+}
+
+impl Recording {
+    fn new(dir: &Path, epoch_ns: u64, rate_hz: f32, counters: Arc<Counters>) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            epoch_ns,
+            period: Duration::from_secs_f32(1.0 / rate_hz.clamp(1.0, 1000.0)),
+            file: None,
+            devices: Devices::new(rate_hz),
+            known: HashMap::new(),
+            detector: TPoseDetector::default(),
+            calibrations: Vec::new(),
+            written: 0,
+            counters,
+        }
+    }
+
+    fn run(&mut self, mut connect: Connect, stop: &AtomicBool, paused: &AtomicBool) -> anyhow::Result<()> {
+        while !stop.load(Ordering::Relaxed) {
+            let Some(mut source) = connect() else {
+                // Not running: look again in a few seconds.
+                for _ in 0..30 {
+                    if stop.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                continue;
+            };
+            self.counters.connected.store(true, Ordering::Relaxed);
+            self.known.clear();
+            let result = self.sample_until_gone(source.as_mut(), stop, paused);
+            self.counters.connected.store(false, Ordering::Relaxed);
+            result?;
+        }
+        Ok(())
+    }
+
+    fn sample_until_gone(&mut self, source: &mut dyn PoseSource, stop: &AtomicBool, paused: &AtomicBool) -> anyhow::Result<()> {
+        let mut poses = [Pose::default(); MAX_DEVICES];
+        let mut next = std::time::Instant::now();
+        let mut last_flush = std::time::Instant::now();
+        while !stop.load(Ordering::Relaxed) {
+            if !source.sample(&mut poses) {
+                eprintln!("SteamVR quit; waiting for it to come back");
+                return Ok(());
+            }
+            let t = orbiters_core::clock::now_ns().saturating_sub(self.epoch_ns);
+            let mut current: Vec<Sample> = Vec::new();
+            for (i, p) in poses.iter().enumerate() {
+                if !p.device_is_connected {
+                    continue;
+                }
+                if let Some(number) = self.number_of(source, i as u32, t) {
+                    current.push(sample_of(t, number as usize, p));
+                }
+            }
+            if !paused.load(Ordering::Relaxed) {
+                self.write(&current)?;
+                // A held T-pose (VRChat's calibration, or one done for Orbiters) becomes a calibration.
+                let in_pose = match (self.by_role("head", &current), self.by_role("left_hand", &current), self.by_role("right_hand", &current)) {
+                    (Some(h), Some(l), Some(r)) => TPoseDetector::is_t_pose(h, l, r),
+                    _ => false,
+                };
+                if self.detector.update(t, in_pose) {
+                    self.calibrations.push(calibration_of(t as i64, "detected", &self.devices.devices, &current));
+                    self.counters.calibrations.store(self.calibrations.len() as u64, Ordering::Relaxed);
+                }
+            }
+            if last_flush.elapsed() >= Duration::from_secs(1) {
+                if let Some(f) = self.file.as_mut() {
+                    f.flush()?;
+                }
+                last_flush = std::time::Instant::now();
+            }
+            next += self.period;
+            let now = std::time::Instant::now();
+            if next > now {
+                std::thread::sleep(next - now);
+            } else if now - next > self.period * 4 {
+                // Far behind (the machine stalled): skip ahead instead of sampling in a burst.
+                next = now;
+            }
+        }
+        Ok(())
+    }
+
+    /// The device's number in `tracking.json`, describing it the first time (a device seen before a SteamVR
+    /// restart keeps its number: same serial).
+    fn number_of(&mut self, source: &mut dyn PoseSource, index: u32, t: u64) -> Option<u8> {
+        if let Some(n) = self.known.get(&index) {
+            return *n;
+        }
+        let mut d = source.describe(index)?;
+        if d.class == DeviceClass::TrackingReference {
+            // Base stations stand still: not worth a stream.
+            self.known.insert(index, None);
+            return None;
+        }
+        let existing = self.devices.devices.iter().position(|e| !d.serial.is_empty() && e.serial == d.serial);
+        let number = match existing {
+            Some(n) => {
+                self.devices.devices[n].index = index as u8;
+                n
+            }
+            None => {
+                d.first_seen_ns = t;
+                self.devices.devices.push(d);
+                self.devices.devices.len() - 1
+            }
+        };
+        let number = u8::try_from(number).ok();
+        self.known.insert(index, number);
+        self.counters.devices.store(self.devices.devices.len() as u64, Ordering::Relaxed);
+        number
+    }
+
+    fn by_role<'a>(&self, role: &str, current: &'a [Sample]) -> Option<&'a Sample> {
+        let number = self.devices.devices.iter().position(|d| d.role == role)?;
+        current.iter().find(|s| s.device as usize == number)
+    }
+
+    fn write(&mut self, current: &[Sample]) -> anyhow::Result<()> {
+        if current.is_empty() {
+            return Ok(());
+        }
+        if self.file.is_none() {
+            let mut f = BufWriter::with_capacity(1 << 16, File::create(self.dir.join(orbiters_contracts::performance::TRACKING_FILE))?);
+            f.write_all(&tracking::header())?;
+            self.file = Some(f);
+        }
+        let f = self.file.as_mut().expect("open");
+        for s in current {
+            f.write_all(&s.to_bytes())?;
+        }
+        self.written += current.len() as u64;
+        self.counters.samples.store(self.written, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn finish(mut self) -> anyhow::Result<TrackingResult> {
+        if let Some(mut f) = self.file.take() {
+            f.flush()?;
+        }
+        if !self.devices.devices.is_empty() {
+            std::fs::write(self.dir.join(orbiters_contracts::performance::TRACKING_DEVICES), serde_json::to_vec_pretty(&self.devices)?)?;
+        }
+        Ok(TrackingResult { samples: self.written, devices: self.devices.devices.len(), calibrations: self.calibrations })
+    }
+}
+
+/// Every device's pose at a calibration.
+pub fn calibration_of(time_ns: i64, source: &str, devices: &[Device], current: &[Sample]) -> Calibration {
+    let pose_of = |role: &str| devices.iter().position(|d| d.role == role).and_then(|n| current.iter().find(|s| s.device as usize == n));
+    let head_height_m = pose_of("head").map(|s| s.position[1]).unwrap_or(0.0);
+    let arm_span_m = match (pose_of("left_hand"), pose_of("right_hand")) {
+        (Some(l), Some(r)) => {
+            ((l.position[0] - r.position[0]).powi(2) + (l.position[1] - r.position[1]).powi(2) + (l.position[2] - r.position[2]).powi(2)).sqrt()
+        }
+        _ => 0.0,
+    };
+    Calibration {
+        time_ns,
+        pose: "t_pose".into(),
+        source: source.into(),
+        head_height_m,
+        arm_span_m,
+        devices: current
+            .iter()
+            .filter_map(|s| {
+                let d = devices.get(s.device as usize)?;
+                Some(DevicePose { index: s.device, serial: d.serial.clone(), class: d.class, role: d.role.clone(), position: s.position, rotation: s.rotation })
+            })
+            .collect(),
+    }
+}
+
+/// `calibration.json` of a session: calibrations made before it (negative times) and those it caught.
+pub fn write_calibrations(dir: &Path, calibrations: Vec<Calibration>) -> anyhow::Result<u64> {
+    if calibrations.is_empty() {
+        return Ok(0);
+    }
+    let mut all = orbiters_contracts::performance::calibration::Calibrations::new();
+    all.calibrations = calibrations;
+    let json = serde_json::to_vec_pretty(&all)?;
+    std::fs::write(dir.join(orbiters_contracts::performance::CALIBRATION_FILE), &json)?;
+    Ok(json.len() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orbiters_openvr::Matrix34;
+
+    /// A headset, two controllers and a base station: standing, a T-pose from 0.6 s to 2.7 s (stand-in time), then
+    /// arms down.
+    struct StandIn {
+        t: f32,
+        step: f32,
+    }
+
+    fn pose_at(x: f32, y: f32, z: f32) -> Pose {
+        let mut m = Matrix34::IDENTITY;
+        m.m[0][3] = x;
+        m.m[1][3] = y;
+        m.m[2][3] = z;
+        Pose { device_to_absolute: m, tracking_result: 200, pose_is_valid: true, device_is_connected: true, ..Default::default() }
+    }
+
+    impl PoseSource for StandIn {
+        fn sample(&mut self, out: &mut [Pose; MAX_DEVICES]) -> bool {
+            self.t += self.step;
+            let t_pose = (0.6..2.7).contains(&self.t);
+            out[0] = pose_at(0.0, 1.62, 0.0);
+            let (hy, hx) = if t_pose { (1.40, 0.70) } else { (0.85, 0.25) };
+            out[1] = pose_at(-hx, hy, 0.0);
+            out[2] = pose_at(hx, hy, 0.0);
+            out[3] = pose_at(0.0, 0.0, 3.0);
+            out[4] = Pose::default();
+            true
+        }
+
+        fn describe(&mut self, index: u32) -> Option<Device> {
+            let (class, role) = match index {
+                0 => (DeviceClass::Hmd, "head"),
+                1 => (DeviceClass::Controller, "left_hand"),
+                2 => (DeviceClass::Controller, "right_hand"),
+                3 => (DeviceClass::TrackingReference, ""),
+                _ => return None,
+            };
+            Some(Device { index: index as u8, class, role: role.into(), serial: format!("SN{index}"), ..Default::default() })
+        }
+    }
+
+    #[test]
+    fn records_devices_and_catches_a_t_pose() {
+        let dir = std::env::temp_dir().join(format!("orbiters-tracking-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 100 Hz sampling with a stand-in whose clock advances 30 ms a sample: 3 s of motion in ~1 s.
+        let mut once = Some(Box::new(StandIn { t: 0.0, step: 0.03 }) as Box<dyn PoseSource>);
+        let rec = TrackingRecorder::start(Box::new(move || once.take()), &dir, orbiters_core::clock::now_ns(), 100.0).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(rec.counts().connected);
+        std::thread::sleep(Duration::from_millis(1200));
+        let result = rec.finish().unwrap();
+        assert_eq!(result.devices, 3, "base station left out");
+        let samples = tracking::read(&std::fs::read(dir.join("tracking.bin")).unwrap()).unwrap();
+        assert_eq!(samples.len() as u64, result.samples);
+        assert!(samples.len() >= 3 * 80, "{} samples", samples.len());
+        assert!(samples.iter().all(|s| s.device <= 2 && s.pose_valid()), "devices are numbered 0..3, base station skipped");
+        // Unity conventions: the headset at 1.62 m, OpenVR -Z forward becomes +Z.
+        let head = samples.iter().find(|s| s.device == 0).unwrap();
+        assert_eq!((head.position, head.rotation), ([0.0, 1.62, -0.0], [0.0, 0.0, 0.0, 1.0]));
+        let devices: Devices = serde_json::from_slice(&std::fs::read(dir.join("tracking.json")).unwrap()).unwrap();
+        assert_eq!(devices.devices.iter().map(|d| d.role.as_str()).collect::<Vec<_>>(), ["head", "left_hand", "right_hand"]);
+        // The T-pose (held still for ~0.7 s of real time) was caught once, with every device.
+        assert_eq!(result.calibrations.len(), 1, "{:?}", result.calibrations.len());
+        let c = &result.calibrations[0];
+        assert_eq!((c.source.as_str(), c.devices.len()), ("detected", 3));
+        assert!((c.head_height_m - 1.62).abs() < 1e-5 && (c.arm_span_m - 1.4).abs() < 1e-5);
+        assert!(write_calibrations(&dir, result.calibrations).unwrap() > 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// SteamVR restarting mid-session: the same devices come back with other indices and keep their numbers.
+    struct Restarting {
+        calls: u32,
+        shift: u32,
+    }
+
+    impl PoseSource for Restarting {
+        fn sample(&mut self, out: &mut [Pose; MAX_DEVICES]) -> bool {
+            self.calls += 1;
+            if self.calls > 5 {
+                return false;
+            }
+            *out = [Pose::default(); MAX_DEVICES];
+            out[(self.shift) as usize] = pose_at(0.0, 1.6, 0.0);
+            out[(self.shift + 1) as usize] = pose_at(0.3, 1.0, 0.0);
+            true
+        }
+
+        fn describe(&mut self, index: u32) -> Option<Device> {
+            let serial = if index == self.shift { "HMD" } else { "TRACKER" };
+            Some(Device { index: index as u8, class: DeviceClass::Tracker, serial: serial.into(), ..Default::default() })
+        }
+    }
+
+    #[test]
+    fn reconnects_and_keeps_device_numbers() {
+        let dir = std::env::temp_dir().join(format!("orbiters-tracking-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut sources = vec![Box::new(Restarting { calls: 0, shift: 7 }) as Box<dyn PoseSource>, Box::new(Restarting { calls: 0, shift: 0 })];
+        let rec = TrackingRecorder::start(Box::new(move || sources.pop()), &dir, orbiters_core::clock::now_ns(), 200.0).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let result = rec.finish().unwrap();
+        assert_eq!((result.devices, result.samples), (2, 20));
+        let devices: Devices = serde_json::from_slice(&std::fs::read(dir.join("tracking.json")).unwrap()).unwrap();
+        assert_eq!(devices.devices.iter().map(|d| (d.serial.as_str(), d.index)).collect::<Vec<_>>(), [("HMD", 7), ("TRACKER", 8)]);
+        let samples = tracking::read(&std::fs::read(dir.join("tracking.bin")).unwrap()).unwrap();
+        assert!(samples.iter().all(|s| (s.device == 0) == (s.position[1] == 1.6)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn velocities_follow_the_mirror() {
+        let mut p = pose_at(1.0, 2.0, 3.0);
+        p.velocity = [1.0, 2.0, 3.0];
+        p.angular_velocity = [0.1, 0.2, 0.3];
+        let s = sample_of(5, 1, &p);
+        assert_eq!((s.position, s.velocity, s.angular_velocity), ([1.0, 2.0, -3.0], [1.0, 2.0, -3.0], [-0.1, -0.2, 0.3]));
+        assert_eq!((s.time_ns, s.device, s.result, s.flags), (5, 1, 200, tracking::flags::POSE_VALID | tracking::flags::CONNECTED));
+    }
+}

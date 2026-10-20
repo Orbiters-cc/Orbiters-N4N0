@@ -324,9 +324,9 @@ impl StandInVrchat {
             let _ = self.socket.send_to(&rosc::encoder::encode(&packet).unwrap(), ("127.0.0.1", self.port));
         };
         send("/avatar/parameters/v2/JawOpen", vec![OscType::Float((t * 3.0).sin().abs() as f32)]);
-        if n % 4 == 0 {
-            let pose = [0.1, 1.6, 0.2, 0.0, (t * 10.0) as f32, 0.0];
-            send("/tracking/vrsystem/head/pose", pose.iter().map(|v| OscType::Float(*v as f32)).collect());
+        if n.is_multiple_of(4) {
+            let pose: [f32; 6] = [0.1, 1.6, 0.2, 0.0, (t * 10.0) as f32, 0.0];
+            send("/tracking/vrsystem/head/pose", pose.iter().map(|v| OscType::Float(*v)).collect());
         }
     }
 

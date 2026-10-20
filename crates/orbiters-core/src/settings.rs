@@ -50,7 +50,7 @@ pub struct OscSettings {
 }
 
 /// What a session records besides the frames (avatar parameters are under [`OscSettings`]).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PerformanceSettings {
     /// Record the microphone (the person's voice).
@@ -59,6 +59,16 @@ pub struct PerformanceSettings {
     pub mic_device: String,
     /// Record what VRChat plays (world sounds, other players' voices).
     pub record_game_audio: bool,
+    /// Record SteamVR headset, controller and tracker poses (body movement).
+    pub record_tracking: bool,
+    /// Samples per second of the tracking stream.
+    pub tracking_rate_hz: f32,
+}
+
+impl Default for PerformanceSettings {
+    fn default() -> Self {
+        Self { record_mic: false, mic_device: String::new(), record_game_audio: false, record_tracking: true, tracking_rate_hz: 90.0 }
+    }
 }
 
 impl Default for KeyframeSettings {

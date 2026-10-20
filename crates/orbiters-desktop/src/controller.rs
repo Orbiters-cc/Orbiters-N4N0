@@ -437,6 +437,7 @@ impl Controller {
         PerformanceSpec {
             mic: p.record_mic.then(|| p.mic_device.clone()),
             game_audio_pid: if p.record_game_audio { self.snapshot.lock().unwrap().vrchat.pid } else { None },
+            tracking_hz: p.record_tracking.then_some(p.tracking_rate_hz),
         }
     }
 

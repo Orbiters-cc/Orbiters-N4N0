@@ -2658,6 +2658,7 @@ dependencies = [
  "flate2",
  "orbiters-contracts",
  "orbiters-core",
+ "orbiters-openvr",
  "orbiters-spout",
  "serde",
  "serde_json",
@@ -2714,6 +2715,14 @@ dependencies = [
  "uuid",
  "windows 0.62.2",
  "winresource",
+]
+
+[[package]]
+name = "orbiters-openvr"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "windows 0.62.2",
 ]
 
 [[package]]

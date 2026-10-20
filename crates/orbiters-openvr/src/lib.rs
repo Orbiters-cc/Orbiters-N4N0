@@ -1,0 +1,643 @@
+//! Minimal SteamVR client. Like Valve's `openvr_api` loader (BSD, `src/openvr_api_public.cpp` in the OpenVR repo),
+//! it reads the runtime folder from `openvrpaths.vrpath`, loads that runtime's `vrclient_x64.dll`, asks its
+//! `VRClientCoreFactory` for `IVRClientCore_003` and gets the C function tables of the interfaces it uses
+//! (`FnTable:IVRSystem_026`, `FnTable:IVROverlay_028`; layouts from Valve's public `openvr_capi.h`). Nothing to
+//! ship, and the runtime's own client is always the matching one.
+//!
+//! A [`Client`] of type [`AppType::Background`] never starts SteamVR: it fails when SteamVR is not running.
+
+use std::ffi::{c_char, c_void, CStr, CString};
+use std::path::{Path, PathBuf};
+
+pub const MAX_DEVICES: usize = 64;
+
+/// `EVRApplicationType`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum AppType {
+    /// Draws overlays; starts SteamVR when it is not running.
+    Overlay = 2,
+    /// Reads poses only; fails when SteamVR is not running.
+    Background = 3,
+}
+
+/// `ETrackingUniverseOrigin`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum Universe {
+    Seated = 0,
+    Standing = 1,
+    Raw = 2,
+}
+
+/// `ETrackedDeviceClass`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceClass {
+    Invalid,
+    Hmd,
+    Controller,
+    GenericTracker,
+    TrackingReference,
+    DisplayRedirect,
+    Other(i32),
+}
+
+impl DeviceClass {
+    fn from_raw(v: i32) -> Self {
+        match v {
+            0 => Self::Invalid,
+            1 => Self::Hmd,
+            2 => Self::Controller,
+            3 => Self::GenericTracker,
+            4 => Self::TrackingReference,
+            5 => Self::DisplayRedirect,
+            other => Self::Other(other),
+        }
+    }
+}
+
+/// `ETrackedControllerRole`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControllerRole {
+    Invalid,
+    LeftHand,
+    RightHand,
+    OptOut,
+    Treadmill,
+    Stylus,
+    Other(i32),
+}
+
+impl ControllerRole {
+    fn from_raw(v: i32) -> Self {
+        match v {
+            0 => Self::Invalid,
+            1 => Self::LeftHand,
+            2 => Self::RightHand,
+            3 => Self::OptOut,
+            4 => Self::Treadmill,
+            5 => Self::Stylus,
+            other => Self::Other(other),
+        }
+    }
+}
+
+/// `ETrackedDeviceProperty` values used here.
+pub mod prop {
+    pub const TRACKING_SYSTEM_NAME: i32 = 1000;
+    pub const MODEL_NUMBER: i32 = 1001;
+    pub const SERIAL_NUMBER: i32 = 1002;
+    pub const MANUFACTURER_NAME: i32 = 1005;
+    pub const CONTROLLER_ROLE_HINT: i32 = 3007;
+    pub const CONTROLLER_TYPE: i32 = 7000;
+}
+
+/// `EVREventType` values used here.
+pub mod event {
+    pub const TRACKED_DEVICE_ACTIVATED: u32 = 100;
+    pub const TRACKED_DEVICE_DEACTIVATED: u32 = 101;
+    pub const TRACKED_DEVICE_ROLE_CHANGED: u32 = 108;
+    pub const PROPERTY_CHANGED: u32 = 111;
+    pub const MOUSE_MOVE: u32 = 300;
+    pub const MOUSE_BUTTON_DOWN: u32 = 301;
+    pub const MOUSE_BUTTON_UP: u32 = 302;
+    pub const FOCUS_ENTER: u32 = 303;
+    pub const FOCUS_LEAVE: u32 = 304;
+    pub const SCROLL_DISCRETE: u32 = 305;
+    pub const SCROLL_SMOOTH: u32 = 309;
+    pub const OVERLAY_SHOWN: u32 = 500;
+    pub const OVERLAY_HIDDEN: u32 = 501;
+    pub const DASHBOARD_ACTIVATED: u32 = 502;
+    pub const DASHBOARD_DEACTIVATED: u32 = 503;
+    pub const QUIT: u32 = 700;
+    pub const PROCESS_QUIT: u32 = 701;
+}
+
+/// `HmdMatrix34_t`: row-major 3×4, right-handed, metres.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct Matrix34 {
+    pub m: [[f32; 4]; 3],
+}
+
+impl Matrix34 {
+    pub const IDENTITY: Self = Self { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]] };
+}
+
+/// `TrackedDevicePose_t` (80 bytes).
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct Pose {
+    pub device_to_absolute: Matrix34,
+    pub velocity: [f32; 3],
+    pub angular_velocity: [f32; 3],
+    /// `ETrackingResult`: 200 running, 101 calibrating out of range, 201 out of range, 300 rotation only, ...
+    pub tracking_result: i32,
+    pub pose_is_valid: bool,
+    pub device_is_connected: bool,
+}
+
+/// `VREvent_t` (64 bytes on Windows: the data union is 8-aligned).
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct Event {
+    pub event_type: u32,
+    pub device: u32,
+    pub age_seconds: f32,
+    pub data: [u64; 6],
+}
+
+impl Default for Event {
+    fn default() -> Self {
+        Self { event_type: 0, device: 0, age_seconds: 0.0, data: [0; 6] }
+    }
+}
+
+impl Event {
+    /// `VREvent_Mouse_t`: x, y (overlay mouse scale units, origin bottom left), button (1 left, 2 right, 4 middle).
+    pub fn mouse(&self) -> (f32, f32, u32) {
+        let w = self.words();
+        (f32::from_bits(w[0]), f32::from_bits(w[1]), w[2])
+    }
+
+    /// `VREvent_Scroll_t`: x and y deltas.
+    pub fn scroll(&self) -> (f32, f32) {
+        let w = self.words();
+        (f32::from_bits(w[0]), f32::from_bits(w[1]))
+    }
+
+    fn words(&self) -> [u32; 12] {
+        let mut out = [0u32; 12];
+        for (i, d) in self.data.iter().enumerate() {
+            out[i * 2] = *d as u32;
+            out[i * 2 + 1] = (*d >> 32) as u32;
+        }
+        out
+    }
+}
+
+/// Why SteamVR could not be used.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Error {
+    NotInstalled,
+    /// `EVRInitError` from the runtime (121: SteamVR is not running, for background apps).
+    Init(i32),
+    /// The runtime lacks an interface version.
+    Interface(&'static str, i32),
+    Load(String),
+}
+
+impl Error {
+    pub fn not_running(&self) -> bool {
+        matches!(self, Error::Init(121))
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::NotInstalled => write!(f, "SteamVR is not installed"),
+            Error::Init(121) => write!(f, "SteamVR is not running"),
+            Error::Init(code) => write!(f, "SteamVR refused the connection (error {code})"),
+            Error::Interface(name, code) => write!(f, "SteamVR has no {name} (error {code})"),
+            Error::Load(e) => write!(f, "could not load SteamVR's client: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// The SteamVR runtime folder registered in `openvrpaths.vrpath` (the first `runtime` entry that exists).
+pub fn runtime_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    runtime_from_vrpath(&std::fs::read_to_string(base.join("openvr").join("openvrpaths.vrpath")).ok()?)
+}
+
+fn runtime_from_vrpath(text: &str) -> Option<PathBuf> {
+    let json: serde_json::Value = serde_json::from_str(text).ok()?;
+    json["runtime"].as_array()?.iter().filter_map(|v| v.as_str()).map(PathBuf::from).find(|p| p.is_dir())
+}
+
+/// Whether a SteamVR runtime is registered.
+pub fn installed() -> bool {
+    runtime_dir().is_some()
+}
+
+#[cfg(windows)]
+mod platform {
+    use std::path::Path;
+    use windows::core::{HSTRING, PCSTR};
+    use windows::Win32::Foundation::{FreeLibrary, HMODULE};
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_WITH_ALTERED_SEARCH_PATH};
+
+    pub struct Library(HMODULE);
+
+    // The module handle is only used to look up symbols and to free it once.
+    unsafe impl Send for Library {}
+    unsafe impl Sync for Library {}
+
+    impl Library {
+        pub fn open(runtime: &Path) -> Result<Self, String> {
+            let path = runtime.join("bin").join("vrclient_x64.dll");
+            // SAFETY: loading SteamVR's client; its dependencies sit next to it (altered search path).
+            unsafe { LoadLibraryExW(&HSTRING::from(path.as_os_str()), None, LOAD_WITH_ALTERED_SEARCH_PATH) }.map(Library).map_err(|e| e.to_string())
+        }
+
+        pub fn symbol(&self, name: &std::ffi::CStr) -> Option<*const std::ffi::c_void> {
+            // SAFETY: valid module handle and NUL-terminated name.
+            unsafe { GetProcAddress(self.0, PCSTR(name.as_ptr().cast())) }.map(|f| f as *const std::ffi::c_void)
+        }
+    }
+
+    impl Drop for Library {
+        fn drop(&mut self) {
+            // SAFETY: loaded by `open`, freed once.
+            unsafe {
+                let _ = FreeLibrary(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod platform {
+    use std::path::Path;
+
+    pub struct Library;
+
+    impl Library {
+        pub fn open(_runtime: &Path) -> Result<Self, String> {
+            Err("only Windows is supported for now".into())
+        }
+
+        pub fn symbol(&self, _name: &std::ffi::CStr) -> Option<*const std::ffi::c_void> {
+            None
+        }
+    }
+}
+
+type FactoryFn = unsafe extern "C" fn(name: *const c_char, code: *mut i32) -> *mut c_void;
+
+/// `IVRClientCore_003` virtual methods, in vtable order.
+#[repr(C)]
+struct ClientCoreVtbl {
+    init: unsafe extern "system" fn(this: *mut c_void, app: i32, startup_info: *const c_char) -> i32,
+    cleanup: unsafe extern "system" fn(this: *mut c_void),
+    is_interface_version_valid: unsafe extern "system" fn(this: *mut c_void, version: *const c_char) -> i32,
+    get_generic_interface: unsafe extern "system" fn(this: *mut c_void, name: *const c_char, error: *mut i32) -> *mut c_void,
+}
+
+/// Reads entry `index` of a C function table as a function pointer of type `F`.
+///
+/// # Safety
+/// `table` must point to a live function table with at least `index + 1` entries of type `F` at `index`.
+unsafe fn entry<F: Copy>(table: *const usize, index: usize) -> F {
+    debug_assert_eq!(std::mem::size_of::<F>(), std::mem::size_of::<usize>());
+    // SAFETY: per the caller; function pointers are pointer-sized.
+    unsafe { std::mem::transmute_copy(&*table.add(index)) }
+}
+
+/// A connection to SteamVR. Dropping it disconnects (`IVRClientCore::Cleanup`) and unloads the client.
+pub struct Client {
+    core: *mut c_void,
+    system: *const usize,
+    overlay: Option<*const usize>,
+    _library: platform::Library,
+}
+
+// SteamVR's client interfaces are thread-safe; the pointers stay valid until `Cleanup`.
+unsafe impl Send for Client {}
+unsafe impl Sync for Client {}
+
+pub const SYSTEM_VERSION: &str = "IVRSystem_026";
+pub const OVERLAY_VERSION: &str = "IVROverlay_028";
+
+impl Client {
+    pub fn connect(app: AppType) -> Result<Self, Error> {
+        let runtime = runtime_dir().ok_or(Error::NotInstalled)?;
+        Self::connect_to(&runtime, app)
+    }
+
+    pub fn connect_to(runtime: &Path, app: AppType) -> Result<Self, Error> {
+        let library = platform::Library::open(runtime).map_err(Error::Load)?;
+        let factory = library.symbol(c"VRClientCoreFactory").ok_or_else(|| Error::Load("no VRClientCoreFactory".into()))?;
+        // SAFETY: the documented factory signature of vrclient.
+        let factory: FactoryFn = unsafe { std::mem::transmute(factory) };
+        let mut code = 0;
+        // SAFETY: NUL-terminated interface name and a valid out-parameter.
+        let core = unsafe { factory(c"IVRClientCore_003".as_ptr(), &mut code) };
+        if core.is_null() {
+            return Err(Error::Interface("IVRClientCore_003", code));
+        }
+        let vtbl = Self::vtbl(core);
+        // SAFETY: `core` is a live IVRClientCore; an empty startup info is allowed.
+        let err = unsafe { (vtbl.init)(core, app as i32, c"".as_ptr()) };
+        if err != 0 {
+            return Err(Error::Init(err));
+        }
+        let mut client = Client { core, system: std::ptr::null(), overlay: None, _library: library };
+        client.system = client.interface(SYSTEM_VERSION)?;
+        if app == AppType::Overlay {
+            client.overlay = Some(client.interface(OVERLAY_VERSION)?);
+        }
+        Ok(client)
+    }
+
+    fn vtbl(core: *mut c_void) -> &'static ClientCoreVtbl {
+        // SAFETY: a C++ object starts with its vtable pointer; IVRClientCore's first four methods are declared above.
+        unsafe { &**(core as *const *const ClientCoreVtbl) }
+    }
+
+    fn interface(&self, version: &'static str) -> Result<*const usize, Error> {
+        let name = CString::new(format!("FnTable:{version}")).expect("no NUL");
+        let mut code = 0;
+        // SAFETY: live core, NUL-terminated name.
+        let table = unsafe { (Self::vtbl(self.core).get_generic_interface)(self.core, name.as_ptr(), &mut code) };
+        if table.is_null() || code != 0 {
+            return Err(Error::Interface(version, code));
+        }
+        Ok(table as *const usize)
+    }
+
+    // ------------------------------------------------------------------------------------------------ IVRSystem
+
+    /// Poses of all devices now (no prediction), in `universe`.
+    pub fn poses(&self, universe: Universe, out: &mut [Pose; MAX_DEVICES]) {
+        type F = unsafe extern "system" fn(i32, f32, *mut Pose, u32);
+        // SAFETY: IVRSystem_026 entry 12 is GetDeviceToAbsoluteTrackingPose.
+        unsafe { entry::<F>(self.system, 12)(universe as i32, 0.0, out.as_mut_ptr(), MAX_DEVICES as u32) }
+    }
+
+    pub fn device_class(&self, device: u32) -> DeviceClass {
+        type F = unsafe extern "system" fn(u32) -> i32;
+        // SAFETY: entry 20 is GetTrackedDeviceClass.
+        DeviceClass::from_raw(unsafe { entry::<F>(self.system, 20)(device) })
+    }
+
+    pub fn controller_role(&self, device: u32) -> ControllerRole {
+        type F = unsafe extern "system" fn(u32) -> i32;
+        // SAFETY: entry 19 is GetControllerRoleForTrackedDeviceIndex.
+        ControllerRole::from_raw(unsafe { entry::<F>(self.system, 19)(device) })
+    }
+
+    pub fn is_connected(&self, device: u32) -> bool {
+        type F = unsafe extern "system" fn(u32) -> bool;
+        // SAFETY: entry 21 is IsTrackedDeviceConnected.
+        unsafe { entry::<F>(self.system, 21)(device) }
+    }
+
+    pub fn int_property(&self, device: u32, property: i32) -> Option<i32> {
+        type F = unsafe extern "system" fn(u32, i32, *mut i32) -> i32;
+        let mut err = 0;
+        // SAFETY: entry 24 is GetInt32TrackedDeviceProperty.
+        let v = unsafe { entry::<F>(self.system, 24)(device, property, &mut err) };
+        (err == 0).then_some(v)
+    }
+
+    pub fn string_property(&self, device: u32, property: i32) -> Option<String> {
+        type F = unsafe extern "system" fn(u32, i32, *mut c_char, u32, *mut i32) -> u32;
+        let mut buf = vec![0u8; 256];
+        let mut err = 0;
+        // SAFETY: entry 28 is GetStringTrackedDeviceProperty; the buffer size is passed along.
+        let mut n = unsafe { entry::<F>(self.system, 28)(device, property, buf.as_mut_ptr().cast(), buf.len() as u32, &mut err) };
+        if err == 3 && n as usize > buf.len() {
+            buf.resize(n as usize, 0);
+            // SAFETY: as above, with the size the runtime asked for.
+            n = unsafe { entry::<F>(self.system, 28)(device, property, buf.as_mut_ptr().cast(), buf.len() as u32, &mut err) };
+        }
+        if err != 0 || n == 0 {
+            return None;
+        }
+        CStr::from_bytes_until_nul(&buf).ok().map(|s| s.to_string_lossy().into_owned())
+    }
+
+    /// Next event for this application, if any.
+    pub fn poll_event(&self) -> Option<Event> {
+        type F = unsafe extern "system" fn(*mut Event, u32) -> bool;
+        let mut e = Event::default();
+        // SAFETY: entry 30 is PollNextEvent; the struct size is passed along.
+        unsafe { entry::<F>(self.system, 30)(&mut e, std::mem::size_of::<Event>() as u32) }.then_some(e)
+    }
+
+    /// Tells SteamVR this application exits after a quit event.
+    pub fn acknowledge_quit(&self) {
+        type F = unsafe extern "system" fn();
+        // SAFETY: entry 47 is AcknowledgeQuit_Exiting.
+        unsafe { entry::<F>(self.system, 47)() }
+    }
+
+    // ------------------------------------------------------------------------------------------------ IVROverlay
+
+    pub fn overlay(&self) -> Option<Overlay<'_>> {
+        self.overlay.map(|table| Overlay { table, _client: self })
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        // SAFETY: live core; nothing uses the interfaces afterwards.
+        unsafe { (Self::vtbl(self.core).cleanup)(self.core) }
+    }
+}
+
+/// `VROverlayHandle_t`.
+pub type OverlayHandle = u64;
+
+/// `IVROverlay_028`, for clients connected as [`AppType::Overlay`]. Methods return the `EVROverlayError` (0 = none).
+pub struct Overlay<'a> {
+    table: *const usize,
+    _client: &'a Client,
+}
+
+/// `VROverlayFlags` used here (bit masks).
+pub mod overlay_flag {
+    pub const NO_DASHBOARD_TAB: i32 = 1 << 3;
+    pub const SEND_VR_DISCRETE_SCROLL_EVENTS: i32 = 1 << 6;
+    pub const SEND_VR_SMOOTH_SCROLL_EVENTS: i32 = 1 << 17;
+    pub const ENABLE_CLICK_STABILIZATION: i32 = 1 << 27;
+}
+
+fn overlay_result(code: i32) -> Result<(), i32> {
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(code)
+    }
+}
+
+impl Overlay<'_> {
+    /// A dashboard overlay (a tab in SteamVR's dashboard) and its thumbnail overlay.
+    pub fn create_dashboard(&self, key: &str, name: &str) -> Result<(OverlayHandle, OverlayHandle), i32> {
+        type F = unsafe extern "system" fn(*const c_char, *const c_char, *mut u64, *mut u64) -> i32;
+        let (key, name) = (CString::new(key).expect("no NUL"), CString::new(name).expect("no NUL"));
+        let (mut main, mut thumb) = (0, 0);
+        // SAFETY: entry 67 is CreateDashboardOverlay.
+        overlay_result(unsafe { entry::<F>(self.table, 67)(key.as_ptr(), name.as_ptr(), &mut main, &mut thumb) })?;
+        Ok((main, thumb))
+    }
+
+    pub fn create(&self, key: &str, name: &str) -> Result<OverlayHandle, i32> {
+        type F = unsafe extern "system" fn(*const c_char, *const c_char, *mut u64) -> i32;
+        let (key, name) = (CString::new(key).expect("no NUL"), CString::new(name).expect("no NUL"));
+        let mut handle = 0;
+        // SAFETY: entry 1 is CreateOverlay.
+        overlay_result(unsafe { entry::<F>(self.table, 1)(key.as_ptr(), name.as_ptr(), &mut handle) })?;
+        Ok(handle)
+    }
+
+    pub fn destroy(&self, handle: OverlayHandle) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64) -> i32;
+        // SAFETY: entry 3 is DestroyOverlay.
+        overlay_result(unsafe { entry::<F>(self.table, 3)(handle) })
+    }
+
+    pub fn set_flag(&self, handle: OverlayHandle, flag: i32, on: bool) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64, i32, bool) -> i32;
+        // SAFETY: entry 11 is SetOverlayFlag.
+        overlay_result(unsafe { entry::<F>(self.table, 11)(handle, flag, on) })
+    }
+
+    pub fn set_width_in_meters(&self, handle: OverlayHandle, width: f32) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64, f32) -> i32;
+        // SAFETY: entry 22 is SetOverlayWidthInMeters.
+        overlay_result(unsafe { entry::<F>(self.table, 22)(handle, width) })
+    }
+
+    pub fn set_sort_order(&self, handle: OverlayHandle, order: u32) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64, u32) -> i32;
+        // SAFETY: entry 20 is SetOverlaySortOrder.
+        overlay_result(unsafe { entry::<F>(self.table, 20)(handle, order) })
+    }
+
+    /// Places the overlay relative to a device (`0` is the headset).
+    pub fn set_transform_device_relative(&self, handle: OverlayHandle, device: u32, transform: &Matrix34) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64, u32, *const Matrix34) -> i32;
+        // SAFETY: entry 35 is SetOverlayTransformTrackedDeviceRelative.
+        overlay_result(unsafe { entry::<F>(self.table, 35)(handle, device, transform) })
+    }
+
+    pub fn show(&self, handle: OverlayHandle) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64) -> i32;
+        // SAFETY: entry 43 is ShowOverlay.
+        overlay_result(unsafe { entry::<F>(self.table, 43)(handle) })
+    }
+
+    pub fn hide(&self, handle: OverlayHandle) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64) -> i32;
+        // SAFETY: entry 44 is HideOverlay.
+        overlay_result(unsafe { entry::<F>(self.table, 44)(handle) })
+    }
+
+    pub fn is_visible(&self, handle: OverlayHandle) -> bool {
+        type F = unsafe extern "system" fn(u64) -> bool;
+        // SAFETY: entry 45 is IsOverlayVisible.
+        unsafe { entry::<F>(self.table, 45)(handle) }
+    }
+
+    pub fn poll_event(&self, handle: OverlayHandle) -> Option<Event> {
+        type F = unsafe extern "system" fn(u64, *mut Event, u32) -> bool;
+        let mut e = Event::default();
+        // SAFETY: entry 48 is PollNextOverlayEvent.
+        unsafe { entry::<F>(self.table, 48)(handle, &mut e, std::mem::size_of::<Event>() as u32) }.then_some(e)
+    }
+
+    /// Laser-pointer mouse input (`VROverlayInputMethod_Mouse`).
+    pub fn set_mouse_input(&self, handle: OverlayHandle) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64, i32) -> i32;
+        // SAFETY: entry 50 is SetOverlayInputMethod.
+        overlay_result(unsafe { entry::<F>(self.table, 50)(handle, 1) })
+    }
+
+    /// Size of the mouse coordinate space (the texture size in pixels, usually).
+    pub fn set_mouse_scale(&self, handle: OverlayHandle, width: f32, height: f32) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64, *const [f32; 2]) -> i32;
+        // SAFETY: entry 52 is SetOverlayMouseScale (HmdVector2_t).
+        overlay_result(unsafe { entry::<F>(self.table, 52)(handle, &[width, height]) })
+    }
+
+    /// Uploads RGBA pixels (top row first). SteamVR copies them.
+    pub fn set_raw(&self, handle: OverlayHandle, rgba: &[u8], width: u32, height: u32) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64, *mut c_void, u32, u32, u32) -> i32;
+        assert_eq!(rgba.len(), (width * height * 4) as usize);
+        // SAFETY: entry 62 is SetOverlayRaw; the runtime only reads the buffer.
+        overlay_result(unsafe { entry::<F>(self.table, 62)(handle, rgba.as_ptr() as *mut c_void, width, height, 4) })
+    }
+
+    pub fn is_dashboard_visible(&self) -> bool {
+        type F = unsafe extern "system" fn() -> bool;
+        // SAFETY: entry 68 is IsDashboardVisible.
+        unsafe { entry::<F>(self.table, 68)() }
+    }
+
+    pub fn is_active_dashboard_overlay(&self, handle: OverlayHandle) -> bool {
+        type F = unsafe extern "system" fn(u64) -> bool;
+        // SAFETY: entry 69 is IsActiveDashboardOverlay.
+        unsafe { entry::<F>(self.table, 69)(handle) }
+    }
+}
+
+/// The tracker role SteamVR's tracker management gave a device, from its controller type (`vive_tracker_left_foot`
+/// → `left_foot`); hands from the controller role.
+pub fn role_name(class: DeviceClass, role: ControllerRole, controller_type: Option<&str>) -> String {
+    match (class, role) {
+        (DeviceClass::Hmd, _) => "head".into(),
+        (_, ControllerRole::LeftHand) => "left_hand".into(),
+        (_, ControllerRole::RightHand) => "right_hand".into(),
+        _ => match controller_type.and_then(|t| t.strip_prefix("vive_tracker_")) {
+            Some("handed") | None => String::new(),
+            Some(role) => role.to_string(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layouts_match_openvr() {
+        assert_eq!(std::mem::size_of::<Pose>(), 80);
+        assert_eq!(std::mem::size_of::<Matrix34>(), 48);
+        assert_eq!(std::mem::size_of::<Event>(), 64);
+        assert_eq!(std::mem::offset_of!(Event, data), 16);
+        assert_eq!(std::mem::offset_of!(Pose, tracking_result), 72);
+        assert_eq!(std::mem::offset_of!(Pose, pose_is_valid), 76);
+    }
+
+    #[test]
+    fn event_payloads() {
+        let mut e = Event { event_type: event::MOUSE_MOVE, ..Default::default() };
+        e.data[0] = (0.25f32.to_bits() as u64) | ((0.75f32.to_bits() as u64) << 32);
+        e.data[1] = 1;
+        assert_eq!(e.mouse(), (0.25, 0.75, 1));
+    }
+
+    #[test]
+    fn runtime_path_and_roles() {
+        let dir = std::env::temp_dir();
+        let text = format!(r#"{{ "runtime": ["Z:\\nowhere", {:?}], "jsonid": "vrpathreg" }}"#, dir.to_string_lossy());
+        assert_eq!(runtime_from_vrpath(&text), Some(dir));
+        assert_eq!(runtime_from_vrpath("{}"), None);
+        assert_eq!(role_name(DeviceClass::GenericTracker, ControllerRole::Invalid, Some("vive_tracker_left_foot")), "left_foot");
+        assert_eq!(role_name(DeviceClass::Controller, ControllerRole::RightHand, Some("knuckles")), "right_hand");
+        assert_eq!(role_name(DeviceClass::Hmd, ControllerRole::Invalid, None), "head");
+        assert_eq!(role_name(DeviceClass::GenericTracker, ControllerRole::Invalid, Some("vive_tracker_handed")), "");
+    }
+
+    #[test]
+    fn background_client_never_starts_steamvr() {
+        // With SteamVR closed this fails with "not running" (121) instead of launching it; with SteamVR open it
+        // connects and lists the headset.
+        match Client::connect(AppType::Background) {
+            Ok(c) => {
+                let mut poses = [Pose::default(); MAX_DEVICES];
+                c.poses(Universe::Standing, &mut poses);
+                eprintln!("connected; device 0: {:?} {:?}", c.device_class(0), c.string_property(0, prop::MODEL_NUMBER));
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                assert!(matches!(e, Error::NotInstalled | Error::Init(_) | Error::Load(_)), "{e:?}");
+            }
+        }
+    }
+}

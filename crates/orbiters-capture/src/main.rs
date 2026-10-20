@@ -10,6 +10,7 @@ mod audio;
 mod performance;
 mod session;
 mod sources;
+mod tracking;
 mod verify;
 
 use crossbeam_channel::RecvTimeoutError;
@@ -160,6 +161,7 @@ fn cli_record(args: &[String]) -> anyhow::Result<()> {
         performance: PerformanceSpec {
             mic: flag(args, "--mic").map(String::from),
             game_audio_pid: flag(args, "--game-audio-pid").and_then(|p| p.parse().ok()),
+            tracking_hz: flag(args, "--tracking-hz").and_then(|p| p.parse().ok()),
         },
     };
     let mut source = match &source_spec {
@@ -307,7 +309,7 @@ fn run_worker() -> anyhow::Result<()> {
                 WorkerCommand::Pause => {
                     paused = true;
                     if let Some((session, _)) = current.as_mut() {
-                        session.set_audio_paused(true);
+                        session.set_performance_paused(true);
                     }
                 }
                 WorkerCommand::Resume => {
@@ -315,7 +317,7 @@ fn run_worker() -> anyhow::Result<()> {
                         if paused {
                             session.resume();
                         }
-                        session.set_audio_paused(false);
+                        session.set_performance_paused(false);
                     }
                     paused = false;
                 }

@@ -4,6 +4,7 @@
 
 use crate::audio::{AudioRecorder, AudioSource};
 use crate::performance::ParameterStream;
+use crate::tracking::{self, TrackingRecorder};
 use crossbeam_channel::{bounded, Receiver as ChanReceiver, Sender as ChanSender, TrySendError};
 use orbiters_contracts::frame_record::{record_flags, FrameRecord};
 use orbiters_contracts::image::{ImageView, PixelOrder};
@@ -110,6 +111,7 @@ pub struct CaptureSession {
     epoch_ns: u64,
     parameters: ParameterStream,
     audio: Vec<AudioRecorder>,
+    tracking: Option<TrackingRecorder>,
     frame_index: u64,
     prefer_flipped: bool,
     previous: Option<(u32, [f32; 12], f32)>,
@@ -163,6 +165,16 @@ impl CaptureSession {
                 }
             }
         }
+        let tracking = match p.tracking_hz {
+            Some(hz) => match TrackingRecorder::start(tracking::steamvr(), writer.dir(), epoch_ns, hz) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    stats.last_error = Some(format!("Could not record SteamVR tracking: {e:#}"));
+                    None
+                }
+            },
+            None => None,
+        };
         Ok(Self {
             writer,
             selector: KeyframeSelector::new(cmd.keyframes.clone(), cmd.quality == StorageQuality::Lossless),
@@ -171,6 +183,7 @@ impl CaptureSession {
             epoch_ns,
             parameters,
             audio,
+            tracking,
             frame_index: 0,
             prefer_flipped: false,
             previous: None,
@@ -202,10 +215,13 @@ impl CaptureSession {
         }
     }
 
-    /// While paused, the audio tracks record silence.
-    pub fn set_audio_paused(&self, paused: bool) {
+    /// While paused, the audio tracks record silence and no poses are written.
+    pub fn set_performance_paused(&self, paused: bool) {
         for a in &self.audio {
             a.set_paused(paused);
+        }
+        if let Some(t) = &self.tracking {
+            t.set_paused(paused);
         }
     }
 
@@ -335,6 +351,12 @@ impl CaptureSession {
         self.stats.parameter_changes = self.parameters.changes;
         self.stats.mic_level = self.audio.iter().find(|a| a.kind == TrackKind::Mic).map(AudioRecorder::take_level);
         self.stats.game_level = self.audio.iter().find(|a| a.kind == TrackKind::Game).map(AudioRecorder::take_level);
+        if let Some(t) = &self.tracking {
+            let c = t.counts();
+            self.stats.tracking_connected = Some(c.connected);
+            (self.stats.tracking_devices, self.stats.tracking_samples, self.stats.calibrations) = (c.devices, c.samples, c.calibrations);
+            self.stats.bytes += c.samples * 64;
+        }
         if let Err(e) = self.parameters.flush() {
             self.stats.last_error = Some(format!("parameters: {e:#}"));
         }
@@ -343,7 +365,7 @@ impl CaptureSession {
 
     /// Waits for pending files and writes the final manifest.
     pub fn finish(self) -> anyhow::Result<(PathBuf, SessionManifest)> {
-        let Self { mut writer, pool, parameters, audio, .. } = self;
+        let Self { mut writer, pool, parameters, audio, tracking, .. } = self;
         let (written, errors) = pool.finish();
         writer.add_bytes(written);
         let (changes, bytes) = parameters.finish()?;
@@ -362,6 +384,19 @@ impl CaptureSession {
         }
         if !tracks.tracks.is_empty() {
             std::fs::write(writer.dir().join(perf::AUDIO_FILE), serde_json::to_vec_pretty(&tracks)?)?;
+        }
+        if let Some(t) = tracking {
+            match t.finish() {
+                Ok(r) => {
+                    eprintln!("tracking: {} devices, {} samples, {} calibrations", r.devices, r.samples, r.calibrations.len());
+                    writer.manifest_mut().performance.tracking_samples = r.samples;
+                    writer.manifest_mut().performance.calibrations = r.calibrations.len() as u32;
+                    writer.add_bytes(perf::HEADER_SIZE as u64 * u64::from(r.samples > 0) + r.samples * 64);
+                    let bytes = tracking::write_calibrations(writer.dir(), r.calibrations)?;
+                    writer.add_bytes(bytes);
+                }
+                Err(e) => eprintln!("tracking: {e:#}"),
+            }
         }
         if errors > 0 {
             eprintln!("{errors} file(s) could not be written");

@@ -77,6 +77,8 @@ pub struct PerformanceSpec {
     pub mic: Option<String>,
     /// Record what this process (VRChat) plays.
     pub game_audio_pid: Option<u32>,
+    /// Record SteamVR device poses at this rate (waits for SteamVR when it is not running).
+    pub tracking_hz: Option<f32>,
 }
 
 /// A microphone the worker can record.
@@ -129,6 +131,12 @@ pub struct CaptureStats {
     pub mic_level: Option<f32>,
     /// Peak level of VRChat's sound since the last stats; `None` when it is not recorded.
     pub game_level: Option<f32>,
+    /// SteamVR tracking: `None` when it is not recorded, else whether SteamVR is connected.
+    pub tracking_connected: Option<bool>,
+    pub tracking_devices: u64,
+    pub tracking_samples: u64,
+    /// T-poses kept as calibrations.
+    pub calibrations: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

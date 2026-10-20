@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 orbiters-core = { workspace = true }
 orbiters-contracts = { workspace = true }
+orbiters-openvr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

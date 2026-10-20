@@ -1,0 +1,12 @@
+[package]
+name = "orbiters-openvr"
+description = "Minimal SteamVR (OpenVR) client for Orbiters desktop: loads the installed runtime's vrclient, device poses and properties, overlays."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_System_LibraryLoader"] }

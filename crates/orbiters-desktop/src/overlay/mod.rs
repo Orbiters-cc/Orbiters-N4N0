@@ -192,6 +192,33 @@ impl World {
     }
 }
 
+/// The overlay's sounds: "Reveal" as Orbiters appears in SteamVR (this process starts when SteamVR does, or with the
+/// app while SteamVR runs), "Rocker" on a press. Computed on a thread at start (about a third of a second).
+struct Sounds {
+    output: orbiters_sound::Output,
+    click: Arc<std::sync::OnceLock<Arc<orbiters_sound::Sound>>>,
+}
+
+impl Sounds {
+    fn start() -> Self {
+        let output = orbiters_sound::Output::new();
+        let click = Arc::new(std::sync::OnceLock::new());
+        let (out, slot) = (output.clone(), click.clone());
+        let _ = std::thread::Builder::new().name("overlay-sounds".into()).spawn(move || {
+            use orbiters_sound::{render, sounds, RATE};
+            out.play(&Arc::new(render(&sounds::REVEAL, RATE)));
+            let _ = slot.set(Arc::new(render(&sounds::ROCKER, RATE)));
+        });
+        Self { output, click }
+    }
+
+    fn click(&self) {
+        if let Some(s) = self.click.get() {
+            self.output.play(s);
+        }
+    }
+}
+
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let endpoint = Endpoint::from_args(args).context("--overlay needs --service <port> <token>")?;
     let client = Client::connect(&endpoint, Role::Overlay)?;
@@ -208,6 +235,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     let ctx = egui::Context::default();
     orbiters_ui::install(&ctx);
+    let sounds = Sounds::start();
     let mut painter = painter();
     let mut presenter = Presenter::new(&steamvr);
     if let Some(icon) = thumbnail() {
@@ -280,6 +308,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             };
             input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), focused: Some(true), ..Default::default() });
             let mut full = ctx.run_ui(input, |ui| state.show(ui, &snap, &backend, &mut poses));
+            if orbiters_ui::widgets::take_press(&ctx) {
+                sounds.click();
+            }
             painter.set_textures(&mut full.textures_delta);
             let primitives = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
             let rgba = painter.paint(&primitives, full.pixels_per_point, orbiters_ui::theme::INK_950);

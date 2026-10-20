@@ -2702,6 +2702,7 @@ dependencies = [
  "orbiters-contracts",
  "orbiters-core",
  "orbiters-openvr",
+ "orbiters-sound",
  "orbiters-spout",
  "orbiters-ui",
  "png",
@@ -2740,6 +2741,14 @@ dependencies = [
  "serde",
  "serde_json",
  "wgpu",
+]
+
+[[package]]
+name = "orbiters-sound"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "windows 0.62.2",
 ]
 
 [[package]]

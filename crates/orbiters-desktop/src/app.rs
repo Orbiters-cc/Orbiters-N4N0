@@ -77,6 +77,9 @@ impl App {
     }
 
     pub fn set_page(&mut self, page: Page, now: f64) {
+        if self.page == Page::Settings && page != Page::Settings {
+            self.settings.stop_mic_test();
+        }
         if page != self.page || self.visit == 0 {
             self.page = page;
             self.page_since = now;

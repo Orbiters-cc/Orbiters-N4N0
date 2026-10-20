@@ -16,6 +16,7 @@ It never asks for your VRChat login: it only reads VRChat's local log, OSC and S
 | `crates/orbiters-ui` | Interface toolkit shared by the window and the coming VR overlay: theme, fonts, springs, the glow background shader, widgets, record button, trail map, toasts, offscreen renderer |
 | `crates/orbiters-capture` | Capture worker process (`orbiters-capture`): frame sources, strip and depth decoding, session bundles |
 | `crates/orbiters-reconstruct` | Reconstruction worker process (`orbiters-reconstruct`): trains Gaussian splats from a session's keyframes, poses and depth on the GPU (WGSL kernels on wgpu, checked against an f64 reference) |
+| `crates/orbiters-sound` | Interface sounds computed at start-up (a port of React Bits' Sound Lab renderer, see its NOTICE.md), the default-output player and the settings' mic monitor |
 | `crates/orbiters-core` | Shared logic: settings, session bundles, keyframes, VRChat log, OSC/OSCQuery, worker protocols |
 | `crates/orbiters-spout` | Spout2 receiver and test sender (Direct3D 11), protocol-compatible with the Spout2 SDK |
 | `contracts/` | Submodule [OrbitersContracts](https://github.com/Orbiters-cc/OrbitersContracts): formats shared with Mixer |

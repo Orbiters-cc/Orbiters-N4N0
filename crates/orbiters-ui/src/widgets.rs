@@ -37,9 +37,22 @@ pub fn text_size(ui: &Ui, txt: &Txt) -> Vec2 {
     ui.painter().layout_job(txt.job(f32::INFINITY)).size()
 }
 
-/// True on the frame the primary button went down on this widget.
+/// True on the frame the primary button went down on this widget; also noted for [`take_press`].
 pub fn pressed(resp: &Response) -> bool {
-    resp.is_pointer_button_down_on() && resp.ctx.input(|i| i.pointer.primary_pressed())
+    let down = resp.is_pointer_button_down_on() && resp.ctx.input(|i| i.pointer.primary_pressed());
+    if down {
+        resp.ctx.data_mut(|d| d.insert_temp(press_id(), true));
+    }
+    down
+}
+
+fn press_id() -> egui::Id {
+    egui::Id::unique("orbiters-widget-press")
+}
+
+/// Whether a control was pressed since the last call (the VR overlay answers presses with a click sound).
+pub fn take_press(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|d| d.remove_temp::<bool>(press_id()).unwrap_or(false))
 }
 
 /// Status colours.
@@ -193,6 +206,9 @@ impl<'a> Button<'a> {
             ui.scope_id().with(("button", self.label, rect.min.x as i32, rect.min.y as i32)),
             if self.enabled { Sense::click() } else { Sense::hover() },
         );
+        if self.enabled {
+            pressed(&resp);
+        }
         self.paint(ui, rect, &resp, size, gap, icon_size);
         let resp = if self.enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
         match self.hint {
@@ -289,6 +305,7 @@ impl<'a> IconButton<'a> {
 
     pub fn show_at(self, ui: &mut Ui, rect: Rect) -> Response {
         let resp = ui.interact(rect, ui.scope_id().with(("icon-button", self.label)), Sense::click());
+        pressed(&resp);
         self.paint(ui, rect, &resp);
         resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(self.label)
     }

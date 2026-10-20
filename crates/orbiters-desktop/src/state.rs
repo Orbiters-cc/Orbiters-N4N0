@@ -3,9 +3,11 @@
 use orbiters_core::protocol::{CaptureStats, SpoutSourceInfo};
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::WorldState;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CaptureState {
     Idle,
     Starting,
@@ -15,14 +17,14 @@ pub enum CaptureState {
     Importing,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VrchatStatus {
     pub running: bool,
     pub world: WorldState,
     pub log_found: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct OscStatus {
     pub enabled: bool,
     pub listening: bool,
@@ -32,7 +34,7 @@ pub struct OscStatus {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CaptureStatus {
     pub state: CaptureState,
     pub session_dir: Option<PathBuf>,
@@ -45,7 +47,7 @@ pub struct CaptureStatus {
     pub from_osc: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StorageStatus {
     pub sessions_dir: PathBuf,
     pub used_bytes: u64,
@@ -54,13 +56,13 @@ pub struct StorageStatus {
     pub sessions: usize,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WorkerStatus {
     pub ready: bool,
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub version: String,
     pub vrchat: VrchatStatus,

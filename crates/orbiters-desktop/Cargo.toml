@@ -13,7 +13,9 @@ path = "src/main.rs"
 orbiters-core = { workspace = true }
 orbiters-contracts = { workspace = true }
 orbiters-ui = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
 anyhow = { workspace = true }
 time = { workspace = true }
 egui = { workspace = true }
@@ -25,7 +27,7 @@ trash = "5"
 
 [target.'cfg(windows)'.dependencies]
 orbiters-spout = { workspace = true }
-windows = { workspace = true, features = ["Win32_Graphics_Dwm"] }
+windows = { workspace = true, features = ["Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
 raw-window-handle = "0.6"
 tray-icon = "0.26"
 

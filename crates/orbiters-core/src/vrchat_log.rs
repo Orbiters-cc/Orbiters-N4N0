@@ -1,7 +1,7 @@
 //! Follows VRChat's `output_log_*.txt` (the same source VRCX uses) for the current world and instance.
 //! Reading a local log needs no VRChat account access.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ pub enum LogEvent {
 }
 
 /// What the log says about where the player is.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldState {
     pub world_id: Option<String>,
     pub world_name: Option<String>,

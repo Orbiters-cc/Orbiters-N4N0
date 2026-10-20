@@ -1,17 +1,16 @@
 //! The window: glow background, frameless title bar, sidebar with a sliding pill, the three pages with spring
-//! entrances, toasts and the opening splash. The controller does the work; this only reads its snapshot.
+//! entrances, toasts and the opening splash. The tray service does the work; this only reads its snapshot.
 
-use crate::controller::{Ctl, Notice};
+use crate::backend::Ctl;
+use crate::controller::{Notice, NoticeKind};
 use crate::pages::{self, Page};
 use crate::state::{CaptureState, Snapshot};
-use crate::tray;
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, ResizeDirection, Sense, Stroke, Ui, Vec2, ViewportCommand};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::glow::{self, Mood};
 use orbiters_ui::paint::{self, Gradient};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{icons, logo, toast, widgets};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const TITLE_H: f32 = 40.0;
@@ -22,8 +21,6 @@ const SPLASH_FADE: f64 = 0.55;
 
 pub struct App {
     ctl: Ctl,
-    tray: Option<tray::Tray>,
-    quitting: Arc<AtomicBool>,
     /// False offscreen (screenshots): no window commands.
     windowed: bool,
     page: Page,
@@ -41,7 +38,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, ctl: Ctl, quitting: Arc<AtomicBool>) -> Self {
+    /// The window of the window process; `splash` plays the opening (first window since the app started).
+    pub fn new(cc: &eframe::CreationContext<'_>, ctl: Ctl, splash: bool) -> Self {
         orbiters_ui::install(&cc.egui_ctx);
         if let Some(rs) = &cc.wgpu_render_state {
             orbiters_ui::install_wgpu(&rs.device, rs.target_format, 1, &mut rs.renderer.write().callback_resources);
@@ -49,29 +47,16 @@ impl App {
         ctl.attach(&cc.egui_ctx);
         #[cfg(windows)]
         round_corners(cc);
-        #[cfg(windows)]
-        let tray = match tray::Tray::new(ctl.clone(), cc.egui_ctx.clone(), quitting.clone()) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                eprintln!("tray icon: {e}");
-                None
-            }
-        };
-        #[cfg(not(windows))]
-        let tray: Option<tray::Tray> = None;
         let mut app = Self::offline(ctl);
-        app.tray = tray;
-        app.quitting = quitting;
         app.windowed = true;
+        app.show_splash = splash;
         app
     }
 
-    /// An app without window or tray (screenshots).
+    /// An app without a window (screenshots).
     pub fn offline(ctl: Ctl) -> Self {
         Self {
             ctl,
-            tray: None,
-            quitting: Arc::new(AtomicBool::new(false)),
             windowed: false,
             page: Page::Capture,
             page_since: 0.0,
@@ -112,7 +97,15 @@ impl App {
     fn drain_notices(&mut self, ctx: &egui::Context) {
         for n in self.ctl.take_notices() {
             match n {
-                Notice::Toast(kind, message) => self.toasts.push(ctx, kind, message),
+                Notice::Toast { kind, message } => {
+                    let kind = match kind {
+                        NoticeKind::Info => toast::Kind::Info,
+                        NoticeKind::Success => toast::Kind::Success,
+                        NoticeKind::Warning => toast::Kind::Warning,
+                        NoticeKind::Error => toast::Kind::Error,
+                    };
+                    self.toasts.push(ctx, kind, message);
+                }
                 Notice::SessionSaved { reason, frames, keyframes, depth_frames } => {
                     if reason != "restarted" {
                         self.toasts.push(
@@ -207,7 +200,8 @@ impl App {
         );
 
         // Window buttons, platform order.
-        let buttons = [(icons::MINUS, "Minimize", 15.0, false), (icons::SQUARE, "Maximize", 12.0, false), (icons::X, "Hide to the tray", 16.0, true)];
+        let close = if cfg!(windows) { "Close (Orbiters keeps running in the tray)" } else { "Quit" };
+        let buttons = [(icons::MINUS, "Minimize", 15.0, false), (icons::SQUARE, "Maximize", 12.0, false), (icons::X, close, 16.0, true)];
         for (i, (glyph, label, size, danger)) in buttons.into_iter().enumerate() {
             let b = Rect::from_min_size(pos2(rect.right() - 4.0 - 44.0 * (3 - i) as f32, rect.top() + 4.0), vec2(44.0, 32.0));
             let resp = ui.interact(b, id.with(i), Sense::click()).on_hover_text(label);
@@ -229,13 +223,8 @@ impl App {
                         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                         ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
                     }
-                    _ => {
-                        if self.tray.is_some() {
-                            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-                        } else {
-                            ctx.send_viewport_cmd(ViewportCommand::Close);
-                        }
-                    }
+                    // The window process ends; the tray service keeps running (and frees the window's memory).
+                    _ => ctx.send_viewport_cmd(ViewportCommand::Close),
                 }
             }
         }
@@ -365,15 +354,7 @@ impl App {
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(shifted).id_salt(("page", self.visit)));
         child.set_clip_rect(rect.intersect(ui.clip_rect()));
         child.multiply_opacity(v.clamp(0.0, 1.0));
-        let mut cx = pages::Cx {
-            ctl: &self.ctl,
-            snap,
-            toasts: &mut self.toasts,
-            entered: self.page_since,
-            visit: self.visit,
-            quitting: &self.quitting,
-            windowed: self.windowed,
-        };
+        let mut cx = pages::Cx { ctl: &self.ctl, snap, toasts: &mut self.toasts, entered: self.page_since, visit: self.visit, windowed: self.windowed };
         match self.page {
             Page::Capture => pages::capture::show(&mut child, &mut cx, &mut self.capture),
             Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions),
@@ -501,14 +482,11 @@ pub fn window_icon() -> egui::IconData {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // The close button and Alt+F4 hide the window to the tray; quitting comes from the tray or Settings.
-        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting.load(Ordering::Relaxed) && self.tray.is_some() {
-            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        if self.ctl.take_show() {
+            bring_to_front(ctx);
         }
-        let capturing = self.ctl.view().is_capturing();
-        if let Some(t) = &mut self.tray {
-            t.update(capturing);
+        if self.ctl.should_close() {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
         }
         self.drain_notices(ctx);
     }
@@ -520,10 +498,14 @@ impl eframe::App for App {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         theme::INK_950.to_normalized_gamma_f32()
     }
+}
 
-    fn on_exit(&mut self) {
-        self.ctl.shutdown();
-    }
+/// Shows the window and gives it focus (a second launch or the tray asked for it).
+fn bring_to_front(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+    ctx.send_viewport_cmd(ViewportCommand::Focus);
+    ctx.request_repaint();
 }
 
 impl App {

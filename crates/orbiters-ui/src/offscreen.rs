@@ -28,8 +28,15 @@ impl Offscreen {
             apply_limit_buckets: false,
         }))
         .context("no GPU adapter")?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("orbiters offscreen"), ..Default::default() }))
-            .context("no GPU device")?;
+        // Small allocator blocks and a small D3D12 view heap: the defaults reserve hundreds of MB up front.
+        let limits = wgpu::Limits { max_texture_dimension_2d: 8192, max_non_sampler_bindings: 16_384, ..wgpu::Limits::default() };
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("orbiters offscreen"),
+            required_limits: limits,
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            ..Default::default()
+        }))
+        .context("no GPU device")?;
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut renderer = egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions { msaa_samples: 1, dithering: true, ..Default::default() });
         crate::glow::install(&device, format, 1, &mut renderer.callback_resources);

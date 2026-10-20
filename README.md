@@ -12,7 +12,7 @@ It never asks for your VRChat login: it only reads VRChat's local log, OSC and S
 
 | Path | What it is |
 |---|---|
-| `crates/orbiters-desktop` | The desktop app: a native window (egui on wgpu) over a controller that owns the capture worker, watches VRChat and listens to OSC; keeps running from the tray |
+| `crates/orbiters-desktop` | The desktop app: a small tray service (controller, capture worker, VRChat watchers, OSC; no GPU) and, while it is open, the window in its own process (`--window`, egui on wgpu) talking to it over a loopback link |
 | `crates/orbiters-ui` | Interface toolkit shared by the window and the coming VR overlay: theme, fonts, springs, the glow background shader, widgets, record button, trail map, toasts, offscreen renderer |
 | `crates/orbiters-capture` | Capture worker process (`orbiters-capture`): frame sources, strip and depth decoding, session bundles |
 | `crates/orbiters-core` | Shared logic: settings, session bundles, keyframes, VRChat log, OSC/OSCQuery, worker protocol |
@@ -29,8 +29,10 @@ cargo build --release -p orbiters-desktop -p orbiters-capture
 target/release/orbiters-desktop
 ```
 
-The app looks for `orbiters-capture` next to its own executable. The interface repaints only while something
-moves; looping animations run only while the window is focused, so it costs nothing while you play.
+The app looks for `orbiters-capture` next to its own executable. What stays running is small: in the tray the
+service and the worker use about 25 MB together and no GPU. The window is a separate process that exists only
+while it is open (about 120 MB, mostly the GPU driver); it repaints only while something moves, and looping
+animations run only while it is focused. `orbiters-desktop --hidden` starts in the tray, `--quit` stops it.
 
 To review the interface without a window, render it offscreen in its main states (capture idle and recording,
 consent notice, toasts, sessions, session detail, settings, splash):

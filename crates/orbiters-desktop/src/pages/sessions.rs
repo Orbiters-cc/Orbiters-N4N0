@@ -436,11 +436,9 @@ fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: R
         close = true;
     }
     if let Some(r) = start {
-        let result = cx.ctl.import_raw_capture(r.dir.clone());
-        if cx.run(ctx, result) {
-            cx.toasts.push(ctx, toast::Kind::Info, format!("Importing {}…", r.name));
-            close = true;
-        }
+        cx.ctl.import_raw_capture(r.dir.clone());
+        cx.toasts.push(ctx, toast::Kind::Info, format!("Importing {}…", r.name));
+        close = true;
     }
     if close {
         state.import = None;
@@ -626,15 +624,13 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         cx.run(ctx, r);
     }
     if trash {
-        let r = cx.ctl.trash_session(&session.dir);
-        if cx.run(ctx, r) {
-            cx.toasts.push(ctx, toast::Kind::Success, "Session moved to the recycle bin.");
-            if let Some(l) = state.sessions.as_mut() {
-                l.retain(|s| s.dir != session.dir);
-            }
-            state.detail = None;
-            return;
+        // Gone at once; the library reload brings it back if the recycle bin refused it.
+        cx.ctl.trash_session(session.dir.clone());
+        if let Some(l) = state.sessions.as_mut() {
+            l.retain(|s| s.dir != session.dir);
         }
+        state.detail = None;
+        return;
     }
     if close {
         if let Some(d) = state.detail.as_mut() {

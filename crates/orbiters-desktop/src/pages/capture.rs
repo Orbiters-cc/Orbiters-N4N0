@@ -101,8 +101,7 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
         }
     });
     if test {
-        let r = cx.ctl.start_test_capture();
-        cx.run(ui.ctx(), r);
+        cx.ctl.start_test_capture();
     }
 }
 
@@ -225,8 +224,11 @@ fn recorder(ui: &mut Ui, cx: &mut Cx, card: Rect) {
     let rb = RecordButton { state: rec_state(c.state), disabled: !consent || c.state == CaptureState::Importing, health };
     let (_, toggled) = rb.show_at(&mut ui, button_rect);
     if toggled {
-        let r = if snap.is_capturing() { cx.ctl.stop_capture() } else { cx.ctl.start_capture(false) };
-        cx.run(&ctx, r);
+        if snap.is_capturing() {
+            cx.ctl.stop_capture();
+        } else {
+            cx.ctl.start_capture();
+        }
     }
 
     // What the button does now.
@@ -304,8 +306,7 @@ fn recorder(ui: &mut Ui, cx: &mut Cx, card: Rect) {
         let row_y = seg_top + 40.0 + 12.0 + 36.0 + 14.0;
         let x0 = card.center().x - (pw + fw) * 0.5;
         if pause.show_at(&mut ui, Rect::from_min_size(pos2(x0, row_y), vec2(pw, 32.0))).clicked() {
-            let r = cx.ctl.pause_capture(!paused);
-            cx.run(&ctx, r);
+            cx.ctl.pause_capture(!paused);
         }
         if let (Some(b), Some((dir, _))) = (folder_btn, folder.as_ref()) {
             if b.width(fw - 8.0).show_at(&mut ui, Rect::from_min_size(pos2(x0 + pw + 8.0, row_y), vec2(fw - 8.0, 32.0))).clicked() {

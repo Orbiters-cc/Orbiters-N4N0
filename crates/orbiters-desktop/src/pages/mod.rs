@@ -4,12 +4,11 @@ pub mod capture;
 pub mod sessions;
 pub mod settings;
 
-use crate::controller::Ctl;
+use crate::backend::Ctl;
 use crate::state::Snapshot;
 use egui::{pos2, vec2, Align2, Id, Rect, Sense, Ui, UiBuilder};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{toast, widgets};
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +27,6 @@ pub struct Cx<'a> {
     pub entered: f64,
     /// Bumped on every visit, so entrances replay.
     pub visit: u64,
-    pub quitting: &'a AtomicBool,
     pub windowed: bool,
 }
 

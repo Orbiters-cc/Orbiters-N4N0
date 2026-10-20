@@ -2,14 +2,13 @@
 //! once, saved in the background); text fields apply with their Save button.
 
 use super::{Cx, Job};
-use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Shape, Ui, UiBuilder, ViewportCommand};
+use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Shape, Ui, UiBuilder};
 use orbiters_core::settings::Settings;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Variant};
 use orbiters_ui::{format, icons, logo};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Folder {
@@ -22,7 +21,7 @@ pub struct State {
     /// Local copy the controls edit; refreshed whenever the saved settings change elsewhere.
     draft: Option<Settings>,
     synced: Option<Settings>,
-    log: Option<Vec<String>>,
+    log_open: bool,
     picker: Option<(Folder, Job<Option<PathBuf>>)>,
 }
 
@@ -224,7 +223,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 if Button::new("Worker log").icon(icons::SCROLL).size(Size::Sm).show(&mut bu).clicked() {
                     want_log = true;
                 }
-                if let Some(lines) = &state.log {
+                if state.log_open {
+                    let lines = cx.ctl.worker_log().unwrap_or_default();
                     let k = anim::spring_from(ui.ctx(), Id::unique("worker-log-open"), [0.0], [1.0], Spring::SOFT)[0].clamp(0.0, 1.0);
                     let h = 240.0 * k;
                     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
@@ -241,12 +241,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
             });
             if want_log {
-                state.log = if state.log.is_some() { None } else { Some(cx.ctl.worker_log()) };
+                state.log_open = !state.log_open;
+                if state.log_open {
+                    cx.ctl.request_worker_log();
+                }
             }
             if quit {
-                cx.quitting.store(true, Ordering::Relaxed);
-                cx.ctl.shutdown();
-                ctx.send_viewport_cmd(ViewportCommand::Close);
+                cx.ctl.quit();
             }
         });
     });

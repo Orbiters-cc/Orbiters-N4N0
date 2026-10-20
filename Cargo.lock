@@ -2702,11 +2702,13 @@ dependencies = [
  "png",
  "raw-window-handle",
  "rfd",
+ "serde",
  "serde_json",
  "sysinfo",
  "time",
  "trash",
  "tray-icon",
+ "uuid",
  "windows 0.62.2",
  "winresource",
 ]

@@ -2,6 +2,7 @@
 //! senders) and the session library, listens to the Action Menu over OSC, and publishes a [`Snapshot`] that
 //! the interface reads every frame. It keeps working while the window is hidden in the tray.
 
+use crate::ipc::ToClient;
 use crate::state::{self, CaptureState, Snapshot};
 use crate::worker::WorkerHandle;
 use orbiters_contracts::manifest::{ConsentInfo, WorldInfo};
@@ -10,17 +11,27 @@ use orbiters_core::osc::{OscEvent, OscService};
 use orbiters_core::protocol::{SourceSpec, StartCapture, WorkerCommand, WorkerEvent};
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::{LogEvent, LogWatcher, WorldState};
-use orbiters_ui::toast;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeKind {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
 /// Something the interface should tell the person about.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Notice {
-    Toast(toast::Kind, String),
+    Toast { kind: NoticeKind, message: String },
     SessionSaved { reason: String, frames: u64, keyframes: u64, depth_frames: u64 },
 }
 
@@ -49,13 +60,16 @@ pub struct Controller {
     last_source: Mutex<Option<SourceSpec>>,
     /// Bumped when the session library changes.
     library_version: AtomicU64,
+    /// An interface in this process (screenshots, tests) repaints on every change.
     repaint: Mutex<Option<egui::Context>>,
+    /// Interfaces in other processes (window, overlay) get every change over their link.
+    subscribers: Mutex<Vec<mpsc::Sender<ToClient>>>,
 }
 
-pub type Ctl = Arc<Controller>;
+pub type Shared = Arc<Controller>;
 
 impl Controller {
-    pub fn new(settings: Settings) -> Ctl {
+    pub fn new(settings: Settings) -> Shared {
         let snapshot = Snapshot::new(settings);
         Arc::new(Self {
             published: Mutex::new(Arc::new(snapshot.clone())),
@@ -67,11 +81,12 @@ impl Controller {
             last_source: Mutex::new(None),
             library_version: AtomicU64::new(0),
             repaint: Mutex::new(None),
+            subscribers: Mutex::new(Vec::new()),
         })
     }
 
     /// Starts OSC, the worker and the watchers.
-    pub fn start(self: &Ctl) {
+    pub fn start(self: &Shared) {
         self.start_osc();
         let c = self.clone();
         std::thread::spawn(move || {
@@ -85,6 +100,40 @@ impl Controller {
     /// The interface's context, repainted on every change.
     pub fn attach(&self, ctx: &egui::Context) {
         *self.repaint.lock().unwrap() = Some(ctx.clone());
+    }
+
+    /// Sends the current state to `tx` now and every change from then on (until the receiver is gone). Notices
+    /// that arrived while nobody listened are delivered first.
+    pub fn subscribe(&self, tx: mpsc::Sender<ToClient>) {
+        let _ = tx.send(ToClient::Snapshot { snapshot: Box::new((*self.view()).clone()) });
+        let _ = tx.send(ToClient::Library { version: self.library_version() });
+        for notice in self.take_notices() {
+            let _ = tx.send(ToClient::Notice { notice });
+        }
+        self.subscribers.lock().unwrap().push(tx);
+    }
+
+    fn broadcast(&self, msg: impl Fn() -> ToClient) -> bool {
+        let mut subs = self.subscribers.lock().unwrap();
+        subs.retain(|tx| tx.send(msg()).is_ok());
+        !subs.is_empty()
+    }
+
+    fn push_notice(&self, notice: Notice) {
+        if !self.broadcast(|| ToClient::Notice { notice: notice.clone() }) {
+            let mut pending = self.notices.lock().unwrap();
+            pending.push(notice);
+            let excess = pending.len().saturating_sub(8);
+            pending.drain(..excess);
+        }
+        if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
+            ctx.request_repaint();
+        }
+    }
+
+    fn bump_library(&self) {
+        let version = self.library_version.fetch_add(1, Ordering::Relaxed) + 1;
+        self.broadcast(|| ToClient::Library { version });
     }
 
     pub fn view(&self) -> Arc<Snapshot> {
@@ -112,7 +161,9 @@ impl Controller {
             let step = s.capture.trail.len().div_ceil(1500);
             s.capture.trail = s.capture.trail.iter().step_by(step).copied().collect();
         }
-        *self.published.lock().unwrap() = Arc::new(s);
+        let s = Arc::new(s);
+        *self.published.lock().unwrap() = s.clone();
+        self.broadcast(|| ToClient::Snapshot { snapshot: Box::new((*s).clone()) });
         if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
             ctx.request_repaint();
         }
@@ -133,11 +184,8 @@ impl Controller {
         changed
     }
 
-    pub fn notify(&self, kind: toast::Kind, message: impl Into<String>) {
-        self.notices.lock().unwrap().push(Notice::Toast(kind, message.into()));
-        if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
-            ctx.request_repaint();
-        }
+    pub fn notify(&self, kind: NoticeKind, message: impl Into<String>) {
+        self.push_notice(Notice::Toast { kind, message: message.into() });
     }
 
     pub fn settings(&self) -> Settings {
@@ -148,7 +196,7 @@ impl Controller {
         self.snapshot.lock().unwrap().is_capturing()
     }
 
-    fn ensure_worker(self: &Ctl) -> anyhow::Result<()> {
+    fn ensure_worker(self: &Shared) -> anyhow::Result<()> {
         let mut guard = self.worker.lock().unwrap();
         if let Some(w) = guard.as_mut() {
             if w.alive() {
@@ -188,13 +236,13 @@ impl Controller {
         Ok(())
     }
 
-    fn send(self: &Ctl, cmd: &WorkerCommand) -> anyhow::Result<()> {
+    fn send(self: &Shared, cmd: &WorkerCommand) -> anyhow::Result<()> {
         self.ensure_worker()?;
         let mut guard = self.worker.lock().unwrap();
         guard.as_mut().expect("worker").send(cmd)
     }
 
-    fn on_worker_event(self: &Ctl, e: WorkerEvent) {
+    fn on_worker_event(self: &Shared, e: WorkerEvent) {
         match e {
             WorkerEvent::Ready { version } => self.update(|s| {
                 s.worker.ready = true;
@@ -229,7 +277,7 @@ impl Controller {
                 // Stats arrive four times a second; that is also the interface's refresh rate while recording.
                 self.publish();
                 if over_limit {
-                    self.notify(toast::Kind::Warning, "Storage limit reached: recording stopped. Raise the limit in Settings or free space.");
+                    self.notify(NoticeKind::Warning, "Storage limit reached: recording stopped. Raise the limit in Settings or free space.");
                     let _ = self.stop_capture();
                 }
             }
@@ -243,14 +291,13 @@ impl Controller {
                     s.storage.used_bytes += manifest.stats.bytes;
                     s.storage.sessions += 1;
                 });
-                self.library_version.fetch_add(1, Ordering::Relaxed);
-                self.notices.lock().unwrap().push(Notice::SessionSaved {
+                self.bump_library();
+                self.push_notice(Notice::SessionSaved {
                     reason,
                     frames: manifest.stats.frames,
                     keyframes: manifest.stats.keyframes,
                     depth_frames: manifest.stats.depth_frames,
                 });
-                self.publish();
             }
             WorkerEvent::Error { message } => {
                 self.update(|s| {
@@ -259,7 +306,7 @@ impl Controller {
                         s.capture.state = CaptureState::Idle;
                     }
                 });
-                self.notify(toast::Kind::Error, message);
+                self.notify(NoticeKind::Error, message);
             }
             WorkerEvent::Log { .. } => {}
         }
@@ -276,7 +323,7 @@ impl Controller {
         })
     }
 
-    fn start_with(self: &Ctl, source: SourceSpec, importing: bool, from_osc: bool) -> anyhow::Result<()> {
+    fn start_with(self: &Shared, source: SourceSpec, importing: bool, from_osc: bool) -> anyhow::Result<()> {
         let settings = self.settings();
         if !importing && !settings.consent_acknowledged {
             anyhow::bail!("Please read and accept the capture notice first (Capture page).");
@@ -309,7 +356,7 @@ impl Controller {
         Ok(())
     }
 
-    pub fn start_capture(self: &Ctl, from_osc: bool) -> anyhow::Result<()> {
+    pub fn start_capture(self: &Shared, from_osc: bool) -> anyhow::Result<()> {
         if self.is_capturing() {
             return Ok(());
         }
@@ -317,18 +364,18 @@ impl Controller {
         self.start_with(SourceSpec::Spout { name }, false, from_osc)
     }
 
-    pub fn start_test_capture(self: &Ctl) -> anyhow::Result<()> {
+    pub fn start_test_capture(self: &Shared) -> anyhow::Result<()> {
         self.start_with(SourceSpec::TestPattern { width: 1920, height: 1080, fps: 30.0, depth_every: 4, frames: 0 }, false, false)
     }
 
-    pub fn import_raw_capture(self: &Ctl, dir: PathBuf) -> anyhow::Result<()> {
+    pub fn import_raw_capture(self: &Shared, dir: PathBuf) -> anyhow::Result<()> {
         if self.is_capturing() {
             anyhow::bail!("Finish the current capture first.");
         }
         self.start_with(SourceSpec::RawSequence { path: dir, realtime: false }, true, false)
     }
 
-    pub fn stop_capture(self: &Ctl) -> anyhow::Result<()> {
+    pub fn stop_capture(self: &Shared) -> anyhow::Result<()> {
         if !self.is_capturing() {
             return Ok(());
         }
@@ -336,7 +383,7 @@ impl Controller {
         self.send(&WorkerCommand::Stop)
     }
 
-    pub fn pause_capture(self: &Ctl, paused: bool) -> anyhow::Result<()> {
+    pub fn pause_capture(self: &Shared, paused: bool) -> anyhow::Result<()> {
         self.send(if paused { &WorkerCommand::Pause } else { &WorkerCommand::Resume })?;
         self.update(|s| {
             if s.capture.state == CaptureState::Recording || s.capture.state == CaptureState::Paused {
@@ -347,7 +394,7 @@ impl Controller {
     }
 
     /// Applies settings at once (the interface shows them immediately) and saves them on a background thread.
-    pub fn save_settings(self: &Ctl, settings: Settings) {
+    pub fn save_settings(self: &Shared, settings: Settings) {
         let previous = self.settings();
         if previous == settings {
             return;
@@ -359,20 +406,19 @@ impl Controller {
         let ctl = self.clone();
         std::thread::spawn(move || {
             if let Err(e) = settings.save() {
-                ctl.notify(toast::Kind::Error, format!("Could not save the settings: {e}"));
+                ctl.notify(NoticeKind::Error, format!("Could not save the settings: {e}"));
             }
             if previous.osc != settings.osc {
                 ctl.start_osc();
             }
             if previous.sessions_dir != settings.sessions_dir {
                 refresh_storage(&ctl);
-                ctl.library_version.fetch_add(1, Ordering::Relaxed);
-                ctl.publish();
+                ctl.bump_library();
             }
         });
     }
 
-    fn start_osc(self: &Ctl) {
+    fn start_osc(self: &Shared) {
         *self.osc.lock().unwrap() = None;
         let settings = self.settings();
         if !settings.osc.enabled {
@@ -389,7 +435,7 @@ impl Controller {
                     ctl.update(|s| s.osc.last_event = Some(format!("{name} = {}", if on { "on" } else { "off" })));
                     let r = if on { ctl.start_capture(true) } else { ctl.stop_capture() };
                     if let Err(err) = r {
-                        ctl.notify(toast::Kind::Error, err.to_string());
+                        ctl.notify(NoticeKind::Error, err.to_string());
                     }
                 }
             }
@@ -415,14 +461,14 @@ impl Controller {
     }
 
     /// Moves a session folder to the recycle bin (only folders inside the sessions folder with a manifest).
-    pub fn trash_session(self: &Ctl, dir: &Path) -> anyhow::Result<()> {
+    pub fn trash_session(self: &Shared, dir: &Path) -> anyhow::Result<()> {
         let root = self.settings().sessions_dir;
         if !inside(&root, dir) || !dir.join("manifest.json").is_file() {
             anyhow::bail!("Only session folders inside the sessions folder can be removed.");
         }
         trash::delete(dir)?;
         refresh_storage(self);
-        self.library_version.fetch_add(1, Ordering::Relaxed);
+        self.bump_library();
         Ok(())
     }
 }
@@ -488,7 +534,7 @@ fn inside(root: &Path, dir: &Path) -> bool {
     }
 }
 
-fn refresh_storage(ctl: &Ctl) {
+fn refresh_storage(ctl: &Shared) {
     let dir = ctl.settings().sessions_dir;
     let sessions = bundle::list_sessions(&dir);
     let used: u64 = sessions.iter().map(|s| s.size_bytes).sum();
@@ -508,7 +554,7 @@ fn refresh_storage(ctl: &Ctl) {
     });
 }
 
-fn spawn_watchers(ctl: Ctl) {
+fn spawn_watchers(ctl: Shared) {
     std::thread::Builder::new()
         .name("watchers".into())
         .spawn(move || {
@@ -519,7 +565,8 @@ fn spawn_watchers(ctl: Ctl) {
             loop {
                 // VRChat process, every 3 s (first, so the world below knows whether VRChat runs).
                 if tick.is_multiple_of(3) {
-                    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+                    // Names only: the default refresh also reads every process's command line and environment.
+                    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
                     running = system.processes().values().any(|p| {
                         let n = p.name().to_string_lossy().to_lowercase();
                         n == "vrchat.exe" || n == "vrchat"
@@ -557,7 +604,7 @@ fn spawn_watchers(ctl: Ctl) {
                             if let Some(source) = source {
                                 let from_osc = ctl.snapshot.lock().unwrap().capture.from_osc;
                                 let _ = ctl.start_with(source, false, from_osc);
-                                ctl.notify(toast::Kind::Info, "New world: started a new session.");
+                                ctl.notify(NoticeKind::Info, "New world: started a new session.");
                             }
                         } else {
                             let _ = ctl.send(&WorkerCommand::SetWorld { world: ctl.current_world() });

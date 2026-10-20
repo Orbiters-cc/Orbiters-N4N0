@@ -1,0 +1,191 @@
+//! What the interface talks to: the tray service over the IPC link (the window process), or a controller in the
+//! same process (screenshots, the end-to-end test). Actions are fire-and-forget: the interface shows them at once
+//! and failures come back as notices.
+
+use crate::controller::{self, Notice, NoticeKind};
+use crate::ipc::{Client, ToService};
+use crate::state::Snapshot;
+use orbiters_core::settings::Settings;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+pub trait Backend: Send + Sync {
+    fn view(&self) -> Arc<Snapshot>;
+    fn take_notices(&self) -> Vec<Notice>;
+    /// Bumped when the session library changes.
+    fn library_version(&self) -> u64;
+    /// Repaint `ctx` whenever something changes.
+    fn attach(&self, ctx: &egui::Context);
+    fn start_capture(&self);
+    fn stop_capture(&self);
+    fn pause_capture(&self, paused: bool);
+    fn start_test_capture(&self);
+    fn import_raw_capture(&self, dir: PathBuf);
+    fn save_settings(&self, settings: Settings);
+    fn trash_session(&self, dir: PathBuf);
+    /// Asks for the worker's log; [`Backend::worker_log`] has it once it arrived.
+    fn request_worker_log(&self);
+    fn worker_log(&self) -> Option<Vec<String>>;
+    /// Quits the whole app (the tray service and every window).
+    fn quit(&self);
+    /// The service asked this window to come to the front.
+    fn take_show(&self) -> bool {
+        false
+    }
+    /// This window should close (the app quits, or the service went away).
+    fn should_close(&self) -> bool {
+        false
+    }
+}
+
+pub type Ctl = Arc<dyn Backend>;
+
+/// The tray service, over the link.
+pub struct Remote(pub Arc<Client>);
+
+impl Backend for Remote {
+    fn view(&self) -> Arc<Snapshot> {
+        self.0.snapshot()
+    }
+
+    fn take_notices(&self) -> Vec<Notice> {
+        self.0.take_notices()
+    }
+
+    fn library_version(&self) -> u64 {
+        self.0.library_version()
+    }
+
+    fn attach(&self, ctx: &egui::Context) {
+        self.0.attach(ctx);
+    }
+
+    fn start_capture(&self) {
+        self.0.send(&ToService::StartCapture);
+    }
+
+    fn stop_capture(&self) {
+        self.0.send(&ToService::StopCapture);
+    }
+
+    fn pause_capture(&self, paused: bool) {
+        self.0.send(&ToService::Pause { paused });
+    }
+
+    fn start_test_capture(&self) {
+        self.0.send(&ToService::TestPattern);
+    }
+
+    fn import_raw_capture(&self, dir: PathBuf) {
+        self.0.send(&ToService::ImportRaw { dir });
+    }
+
+    fn save_settings(&self, settings: Settings) {
+        self.0.update_local(|s| s.settings = settings.clone());
+        self.0.send(&ToService::SaveSettings { settings: Box::new(settings) });
+    }
+
+    fn trash_session(&self, dir: PathBuf) {
+        self.0.send(&ToService::Trash { dir });
+    }
+
+    fn request_worker_log(&self) {
+        self.0.send(&ToService::WorkerLog);
+    }
+
+    fn worker_log(&self) -> Option<Vec<String>> {
+        self.0.worker_log()
+    }
+
+    fn quit(&self) {
+        self.0.send(&ToService::Quit);
+    }
+
+    fn take_show(&self) -> bool {
+        self.0.take_show()
+    }
+
+    fn should_close(&self) -> bool {
+        self.0.should_close()
+    }
+}
+
+/// A controller in this process.
+pub struct Local {
+    ctl: controller::Shared,
+    log: Mutex<Option<Vec<String>>>,
+}
+
+impl Local {
+    pub fn new(ctl: controller::Shared) -> Self {
+        Self { ctl, log: Mutex::new(None) }
+    }
+
+    fn report(&self, r: anyhow::Result<()>) {
+        if let Err(e) = r {
+            self.ctl.notify(NoticeKind::Error, e.to_string());
+        }
+    }
+}
+
+impl Backend for Local {
+    fn view(&self) -> Arc<Snapshot> {
+        self.ctl.view()
+    }
+
+    fn take_notices(&self) -> Vec<Notice> {
+        self.ctl.take_notices()
+    }
+
+    fn library_version(&self) -> u64 {
+        self.ctl.library_version()
+    }
+
+    fn attach(&self, ctx: &egui::Context) {
+        self.ctl.attach(ctx);
+    }
+
+    fn start_capture(&self) {
+        self.report(self.ctl.start_capture(false));
+    }
+
+    fn stop_capture(&self) {
+        self.report(self.ctl.stop_capture());
+    }
+
+    fn pause_capture(&self, paused: bool) {
+        self.report(self.ctl.pause_capture(paused));
+    }
+
+    fn start_test_capture(&self) {
+        self.report(self.ctl.start_test_capture());
+    }
+
+    fn import_raw_capture(&self, dir: PathBuf) {
+        self.report(self.ctl.import_raw_capture(dir));
+    }
+
+    fn save_settings(&self, settings: Settings) {
+        self.ctl.save_settings(settings);
+    }
+
+    fn trash_session(&self, dir: PathBuf) {
+        let r = self.ctl.trash_session(&dir);
+        if r.is_ok() {
+            self.ctl.notify(NoticeKind::Success, "Session moved to the recycle bin.");
+        }
+        self.report(r);
+    }
+
+    fn request_worker_log(&self) {
+        *self.log.lock().unwrap() = Some(self.ctl.worker_log());
+    }
+
+    fn worker_log(&self) -> Option<Vec<String>> {
+        self.log.lock().unwrap().clone()
+    }
+
+    fn quit(&self) {
+        self.ctl.shutdown();
+    }
+}

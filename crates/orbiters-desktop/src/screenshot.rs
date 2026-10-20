@@ -4,6 +4,7 @@
 //! instead records a real test pattern through the worker, driven by synthetic clicks.
 
 use crate::app::App;
+use crate::backend::{Ctl, Local};
 use crate::controller::{self, Controller};
 use crate::pages::Page;
 use crate::state::{CaptureState, Snapshot};
@@ -164,8 +165,9 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, path: &std::path::Path
     orbiters_ui::install(&ctx);
     let ctl = Controller::new(sc.snapshot.settings.clone());
     ctl.set_snapshot(sc.snapshot.clone());
-    ctl.attach(&ctx);
-    let mut app = App::offline(ctl);
+    let backend: Ctl = std::sync::Arc::new(Local::new(ctl));
+    backend.attach(&ctx);
+    let mut app = App::offline(backend);
     if !sc.splash {
         app.skip_splash();
     }
@@ -214,8 +216,9 @@ fn e2e(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f
     let ctx = egui::Context::default();
     orbiters_ui::install(&ctx);
     let ctl = Controller::new(settings.clone());
-    ctl.attach(&ctx);
-    let mut app = App::offline(ctl.clone());
+    let backend: Ctl = std::sync::Arc::new(Local::new(ctl.clone()));
+    backend.attach(&ctx);
+    let mut app = App::offline(backend);
     app.skip_splash();
     let before = controller::list_sessions(&settings.sessions_dir).len();
     let start = std::time::Instant::now();

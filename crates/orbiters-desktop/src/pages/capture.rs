@@ -134,7 +134,7 @@ fn chips(ui: &mut Ui, cx: &mut Cx) {
         (
             icons::BROADCAST,
             "Spout source",
-            source.map(|s| format!("{} · {}×{}", s.name, s.width, s.height)).unwrap_or_else(|| "No sender yet".into()),
+            source.map(|s| format!("{} · {}×{}", s.name, s.width, s.height)).unwrap_or_else(|| "VRChat's camera: Stream mode, Spout Stream on".into()),
             if source.is_some() { Tone::Ok } else { Tone::Warn },
         ),
         (
@@ -243,6 +243,14 @@ fn recorder(ui: &mut Ui, cx: &mut Cx, card: Rect) {
     let sub = match c.state {
         CaptureState::Idle if snap.osc.listening => "or use the Record toggle in your Action Menu".to_string(),
         CaptureState::Idle => "Spout frames are decoded and saved as a session".to_string(),
+        // Nothing comes before VRChat's camera streams (the worker names the sender once it is connected).
+        _ if snap.sources.is_empty() && c.stats.as_ref().is_none_or(|s| s.frames == 0) => {
+            if snap.settings.osc.enabled && snap.settings.osc.drive_camera {
+                "Waiting for VRChat's camera: Orbiters asked for Stream mode with Spout Stream on (OSC must be on in VRChat)".to_string()
+            } else {
+                "Waiting for VRChat's camera: open it in Stream mode and turn Spout Stream on".to_string()
+            }
+        }
         _ => c.source.clone().unwrap_or_default(),
     };
     let y = button_rect.bottom() + 8.0;

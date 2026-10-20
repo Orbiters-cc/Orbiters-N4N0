@@ -10,7 +10,7 @@ use orbiters_contracts::manifest::{ConsentInfo, WorldInfo};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::bundle::{self, SessionSummary};
 use orbiters_core::clock;
-use orbiters_core::osc::{OscEvent, OscService, OscValue, AVATAR_CHANGE, PARAMETERS_PREFIX};
+use orbiters_core::osc::{OscEvent, OscService, OscValue, AVATAR_CHANGE, DEPTH_FRAMES_PARAMETER, PARAMETERS_PREFIX};
 use orbiters_core::protocol::{OscSample, PerformanceSpec, SourceSpec, StartCapture, WorkerCommand, WorkerEvent};
 use orbiters_core::reconstruction::Event as ReconstructEvent;
 use orbiters_core::settings::Settings;
@@ -106,7 +106,33 @@ pub struct Controller {
     /// The latest T-pose calibration and when it was taken (Unix ms; the shared clock restarts with Windows).
     calibration: Mutex<Option<StoredCalibration>>,
     reconstruction: Mutex<Option<Reconstruction>>,
+    /// VRChat's camera as it was before a recording opened it in Stream mode (put back when recording ends).
+    camera_before: Mutex<Option<CameraState>>,
+    /// The capture kit's toggles as they were before a recording started from the app switched them on (Some while
+    /// the app drives them), and when the avatar last (re)loaded, which resets them.
+    avatar_before: Mutex<Option<AvatarToggles>>,
+    avatar_changed_at: Mutex<Option<Instant>>,
 }
+
+#[derive(Clone, Copy, Debug)]
+struct AvatarToggles {
+    record: bool,
+    depth: bool,
+}
+
+/// After an avatar (re)load, the record toggle's reset to off is the reload's, not the person's.
+const AVATAR_RELOAD_GRACE: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug)]
+struct CameraState {
+    mode: i32,
+    streaming: bool,
+}
+
+const CAMERA_MODE: &str = "/usercamera/Mode";
+const CAMERA_STREAMING: &str = "/usercamera/Streaming";
+/// `/usercamera/Mode` for the Stream camera (0 off, 1 photo, 2 stream).
+const STREAM_MODE: i32 = 2;
 
 /// The running reconstruction worker, and whether its end was already told (finished, failed or cancelled).
 struct Reconstruction {
@@ -155,6 +181,9 @@ impl Controller {
             subscribers: Mutex::new(Vec::new()),
             calibration: Mutex::new(calibration),
             reconstruction: Mutex::new(None),
+            camera_before: Mutex::new(None),
+            avatar_before: Mutex::new(None),
+            avatar_changed_at: Mutex::new(None),
         })
     }
 
@@ -294,6 +323,8 @@ impl Controller {
             let ctl = self.clone();
             move || {
                 ctl.osc_values.lock().unwrap().forwarding = false;
+                ctl.restore_camera();
+                ctl.restore_kit();
                 ctl.update(|s| {
                     s.worker.ready = false;
                     if s.is_capturing() {
@@ -373,6 +404,8 @@ impl Controller {
                 let restarting = reason == "restarted";
                 if !restarting {
                     self.osc_values.lock().unwrap().forwarding = false;
+                    self.restore_camera();
+                    self.restore_kit();
                 }
                 self.update(|s| {
                     if !restarting {
@@ -416,6 +449,7 @@ impl Controller {
 
     fn start_with(self: &Shared, source: SourceSpec, importing: bool, from_osc: bool) -> anyhow::Result<()> {
         let settings = self.settings();
+        let spout = matches!(source, SourceSpec::Spout { .. });
         if !importing && !settings.consent_acknowledged {
             anyhow::bail!("Please read and accept the capture notice first (Capture page).");
         }
@@ -445,7 +479,16 @@ impl Controller {
         let record_parameters = !importing && settings.osc.enabled && settings.osc.record_parameters;
         // VRChat only sends values when they change: its OSCQuery tree has the current ones.
         let fetch_started = clock::now_ns();
-        let vrchat = if record_parameters { self.vrchat_values() } else { Vec::new() };
+        let drive_camera = !importing && settings.osc.enabled && settings.osc.drive_camera && spout;
+        // Started from the app: the capture kit draws only while its record toggle is on (the Action Menu sets it).
+        let drive_avatar = !importing && settings.osc.enabled && spout && (!from_osc || self.avatar_before.lock().unwrap().is_some());
+        let vrchat = if record_parameters || drive_camera || drive_avatar { self.vrchat_values() } else { Vec::new() };
+        if drive_camera {
+            self.open_stream_camera(&vrchat);
+        }
+        if drive_avatar {
+            self.switch_kit_on(&vrchat, &settings.osc.record_parameter);
+        }
         let sent = {
             let mut osc = self.osc_values.lock().unwrap();
             // The previous session (a world change restarts it) gets its last values first.
@@ -470,6 +513,98 @@ impl Controller {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// VRChat publishes its camera over Spout only in Stream mode with Spout Stream on: switch both on over OSC
+    /// (VRChat 2025.3.3 and later), remembering how the camera was. Spout Stream goes on a moment after the camera
+    /// opens in Stream mode.
+    fn open_stream_camera(self: &Shared, vrchat: &[(String, OscValue)]) {
+        let value = |path: &str| vrchat.iter().find(|(p, _)| p == path).map(|(_, v)| v.clone());
+        let mode = match value(CAMERA_MODE) {
+            Some(OscValue::Int(m)) => m,
+            _ => 0,
+        };
+        let streaming = value(CAMERA_STREAMING).is_some_and(|v| v.truthy());
+        if mode == STREAM_MODE && streaming {
+            return;
+        }
+        self.camera_before.lock().unwrap().get_or_insert(CameraState { mode, streaming });
+        if mode != STREAM_MODE {
+            let _ = self.with_osc(|o| o.send(CAMERA_MODE, vec![rosc::OscType::Int(STREAM_MODE)]));
+        }
+        let ctl = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            let _ = ctl.with_osc(|o| o.send(CAMERA_STREAMING, vec![rosc::OscType::Bool(true)]));
+        });
+    }
+
+    /// Switches the capture kit's record and depth-frames toggles on (OSC), remembering how they were.
+    fn switch_kit_on(&self, vrchat: &[(String, OscValue)], record_parameter: &str) {
+        let on = |name: &str| vrchat.iter().any(|(p, v)| p.strip_prefix(PARAMETERS_PREFIX) == Some(name) && v.truthy());
+        let (record, depth) = (on(record_parameter), on(DEPTH_FRAMES_PARAMETER));
+        self.avatar_before.lock().unwrap().get_or_insert(AvatarToggles { record, depth });
+        let _ = self.with_osc(|o| {
+            if !record {
+                o.send(&format!("{PARAMETERS_PREFIX}{record_parameter}"), vec![rosc::OscType::Bool(true)])?;
+            }
+            if !depth {
+                o.send(&format!("{PARAMETERS_PREFIX}{DEPTH_FRAMES_PARAMETER}"), vec![rosc::OscType::Bool(true)])?;
+            }
+            anyhow::Ok(())
+        });
+    }
+
+    /// The capture kit's toggles back as they were (first forgotten, so their echo is the person's again).
+    fn restore_kit(&self) {
+        let Some(before) = self.avatar_before.lock().unwrap().take() else { return };
+        let record = self.settings().osc.record_parameter;
+        let _ = self.with_osc(|o| {
+            o.send(&format!("{PARAMETERS_PREFIX}{record}"), vec![rosc::OscType::Bool(before.record)])?;
+            o.send(&format!("{PARAMETERS_PREFIX}{DEPTH_FRAMES_PARAMETER}"), vec![rosc::OscType::Bool(before.depth)])
+        });
+    }
+
+    /// The record toggle changed in VRChat: start or stop, unless it is an avatar reload's reset of a toggle the app
+    /// drives (then switch it back on).
+    fn on_record_toggle(self: &Shared, on: bool) {
+        let driven = self.avatar_before.lock().unwrap().is_some();
+        let reloading = self.avatar_changed_at.lock().unwrap().is_some_and(|t| t.elapsed() < AVATAR_RELOAD_GRACE);
+        if driven && !on && reloading && self.is_capturing() {
+            let record = self.settings().osc.record_parameter;
+            self.switch_kit_on(&[], &record);
+            return;
+        }
+        let r = if on { self.start_capture(true) } else { self.stop_capture() };
+        if let Err(err) = r {
+            self.notify(NoticeKind::Error, err.to_string());
+        }
+    }
+
+    /// A new avatar (or the same one reloaded, as in every new world) starts with the kit's toggles off.
+    fn on_avatar_changed(self: &Shared) {
+        *self.avatar_changed_at.lock().unwrap() = Some(Instant::now());
+        if self.avatar_before.lock().unwrap().is_none() || !self.is_capturing() {
+            return;
+        }
+        let ctl = self.clone();
+        std::thread::spawn(move || {
+            // The avatar's parameters take a moment to exist after the change message.
+            std::thread::sleep(Duration::from_millis(1500));
+            if ctl.avatar_before.lock().unwrap().is_some() && ctl.is_capturing() {
+                let record = ctl.settings().osc.record_parameter;
+                ctl.switch_kit_on(&[], &record);
+            }
+        });
+    }
+
+    /// Puts VRChat's camera back as it was before recording opened it.
+    fn restore_camera(&self) {
+        let Some(before) = self.camera_before.lock().unwrap().take() else { return };
+        let _ = self.with_osc(|o| {
+            o.send(CAMERA_STREAMING, vec![rosc::OscType::Bool(before.streaming)])?;
+            o.send(CAMERA_MODE, vec![rosc::OscType::Int(before.mode)])
+        });
     }
 
     fn performance_spec(&self, settings: &Settings) -> PerformanceSpec {
@@ -651,16 +786,14 @@ impl Controller {
                         ctl.update(|s| s.osc.last_event = Some(format!("{name} = {}", if on { "on" } else { "off" })));
                         // Starting reads VRChat's current values over HTTP: not on the receiving thread.
                         let c = ctl.clone();
-                        std::thread::spawn(move || {
-                            let r = if on { c.start_capture(true) } else { c.stop_capture() };
-                            if let Err(err) = r {
-                                c.notify(NoticeKind::Error, err.to_string());
-                            }
-                        });
+                        std::thread::spawn(move || c.on_record_toggle(on));
                     }
                     (format!("{PARAMETERS_PREFIX}{name}"), vec![value])
                 }
-                OscEvent::AvatarChanged { id } => (AVATAR_CHANGE.to_string(), vec![OscValue::Text(id)]),
+                OscEvent::AvatarChanged { id } => {
+                    ctl.on_avatar_changed();
+                    (AVATAR_CHANGE.to_string(), vec![OscValue::Text(id)])
+                }
                 OscEvent::Values { address, values } => (address, values),
             };
             ctl.on_osc(address, values, at_ns);
@@ -1020,6 +1153,72 @@ fn spawn_watchers(ctl: Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OSC messages a stand-in VRChat received: (address, first argument).
+    fn received(socket: &std::net::UdpSocket, wait: Duration) -> Vec<(String, rosc::OscType)> {
+        let mut out = Vec::new();
+        let until = Instant::now() + wait;
+        let mut buf = [0u8; 1024];
+        while Instant::now() < until {
+            if let Ok(n) = socket.recv(&mut buf) {
+                if let Ok((_, rosc::OscPacket::Message(m))) = rosc::decoder::decode_udp(&buf[..n]) {
+                    out.push((m.addr, m.args[0].clone()));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn recording_opens_vrchats_stream_camera_and_puts_it_back() {
+        let vrchat = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        vrchat.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let mut settings = Settings::default();
+        settings.osc.vrchat_port = vrchat.local_addr().unwrap().port();
+        let ctl = Controller::new(settings);
+        ctl.start_osc_with(false);
+        let off = vec![(CAMERA_MODE.to_string(), OscValue::Int(1)), (CAMERA_STREAMING.to_string(), OscValue::Bool(false))];
+        ctl.open_stream_camera(&off);
+        let sent = received(&vrchat, Duration::from_millis(900));
+        assert_eq!(sent, vec![(CAMERA_MODE.into(), rosc::OscType::Int(2)), (CAMERA_STREAMING.into(), rosc::OscType::Bool(true))]);
+        // A world change restarts the session: the camera already streams and its first state is kept.
+        let streaming = vec![(CAMERA_MODE.to_string(), OscValue::Int(2)), (CAMERA_STREAMING.to_string(), OscValue::Bool(true))];
+        ctl.open_stream_camera(&streaming);
+        assert!(received(&vrchat, Duration::from_millis(600)).is_empty());
+        ctl.restore_camera();
+        assert_eq!(received(&vrchat, Duration::from_millis(300)), vec![(CAMERA_STREAMING.into(), rosc::OscType::Bool(false)), (CAMERA_MODE.into(), rosc::OscType::Int(1))]);
+        // Nothing more to put back.
+        ctl.restore_camera();
+        assert!(received(&vrchat, Duration::from_millis(200)).is_empty());
+        ctl.shutdown();
+    }
+
+    #[test]
+    fn recording_from_the_app_switches_the_kit_on_and_back() {
+        let vrchat = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        vrchat.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let mut settings = Settings::default();
+        settings.osc.vrchat_port = vrchat.local_addr().unwrap().port();
+        let ctl = Controller::new(settings);
+        ctl.start_osc_with(false);
+        let record = "/avatar/parameters/OrbitersRecord".to_string();
+        let depth = "/avatar/parameters/OrbitersDepthFrames".to_string();
+        // Depth frames already on (the person's menu choice): only the record toggle is switched.
+        ctl.switch_kit_on(&[(record.clone(), OscValue::Bool(false)), (depth.clone(), OscValue::Bool(true))], "OrbitersRecord");
+        assert_eq!(received(&vrchat, Duration::from_millis(200)), vec![(record.clone(), rosc::OscType::Bool(true))]);
+        // Recording, then the avatar reloads (a new world): its reset to off is switched back on, not a stop.
+        ctl.update(|s| s.capture.state = CaptureState::Recording);
+        *ctl.avatar_changed_at.lock().unwrap() = Some(Instant::now());
+        ctl.on_record_toggle(false);
+        assert!(ctl.is_capturing());
+        let again = received(&vrchat, Duration::from_millis(200));
+        assert!(again.contains(&(record.clone(), rosc::OscType::Bool(true))), "{again:?}");
+        // The end puts both back as they were.
+        ctl.restore_kit();
+        assert_eq!(received(&vrchat, Duration::from_millis(200)), vec![(record, rosc::OscType::Bool(false)), (depth, rosc::OscType::Bool(true))]);
+        assert!(ctl.avatar_before.lock().unwrap().is_none());
+        ctl.shutdown();
+    }
 
     #[test]
     fn initial_values_prefer_fresh_ones() {

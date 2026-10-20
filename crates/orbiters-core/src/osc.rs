@@ -67,6 +67,9 @@ pub enum OscEvent {
 
 pub const PARAMETERS_PREFIX: &str = "/avatar/parameters/";
 pub const AVATAR_CHANGE: &str = "/avatar/change";
+/// The capture kit's depth-frames toggle (Mixer's `CaptureKit.DepthParameter`); its record toggle is the record
+/// parameter of the settings.
+pub const DEPTH_FRAMES_PARAMETER: &str = "OrbitersDepthFrames";
 
 /// Turns one OSC packet (bundles included) into events.
 pub fn events_from_packet(packet: &OscPacket, out: &mut Vec<OscEvent>) {

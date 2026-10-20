@@ -183,6 +183,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     },
                 );
                 widgets::separator(ui);
+                widgets::field(
+                    ui,
+                    "Stream camera",
+                    Some("While recording, open VRChat's camera in Stream mode with Spout Stream on (the picture comes from it), then put it back."),
+                    48.0,
+                    |ui| {
+                        apply |= widgets::toggle(ui, "osc-camera", &mut draft.osc.drive_camera);
+                    },
+                );
+                widgets::separator(ui);
                 widgets::field(ui, "Record parameter", Some("Bool avatar parameter that toggles recording."), 270.0, |ui| {
                     if Button::new("Save").size(Size::Sm).show(ui).clicked() {
                         apply = true;

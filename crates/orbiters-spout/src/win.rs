@@ -5,6 +5,7 @@ use windows::core::{Interface, HSTRING, PCSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
 use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Query, D3D11_QUERY_DESC, D3D11_QUERY_EVENT,
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
     D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_RESOURCE_MISC_SHARED,
     D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
@@ -265,6 +266,8 @@ pub struct Receiver {
     access: Option<OwnedHandle>,
     counter: Option<OwnedHandle>,
     last_count: Option<i64>,
+    /// Fingerprint of the last picture, for senders without a frame counter (VRChat's).
+    last_fingerprint: Option<u64>,
     convert: Vec<u8>,
 }
 
@@ -273,7 +276,7 @@ unsafe impl Send for Receiver {}
 impl Receiver {
     pub fn new() -> Result<Self> {
         let (device, context) = create_device()?;
-        Ok(Self { device, context, info: None, shared: None, keyed: None, staging: None, access: None, counter: None, last_count: None, convert: Vec::new() })
+        Ok(Self { device, context, info: None, shared: None, keyed: None, staging: None, access: None, counter: None, last_count: None, last_fingerprint: None, convert: Vec::new() })
     }
 
     pub fn info(&self) -> Option<&SenderInfo> {
@@ -288,6 +291,7 @@ impl Receiver {
         self.access = None;
         self.counter = None;
         self.last_count = None;
+        self.last_fingerprint = None;
     }
 
     /// Opens a sender's shared texture.
@@ -368,44 +372,61 @@ impl Receiver {
         }
     }
 
-    /// Waits up to `timeout` for a new frame and lends it to `f`. `Ok(None)` when no new frame arrived.
+    /// Waits up to `timeout` for a new frame and lends it to `f`. `Ok(None)` when no new frame arrived. A sender
+    /// without a frame counter (VRChat's) is polled every few milliseconds and a picture counts as new when it
+    /// differs from the last one.
     pub fn receive<R>(&mut self, timeout: Duration, f: impl FnOnce(Frame<'_>) -> R) -> Result<Option<R>> {
         self.ensure_connected()?;
         let deadline = Instant::now() + timeout;
-        let count = loop {
-            if let Some(c) = self.poll_new_frame() {
-                break c;
+        let (count, dst, mapped, info) = loop {
+            let count = loop {
+                if let Some(c) = self.poll_new_frame() {
+                    break c;
+                }
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            let (Some(shared), Some(staging), Some(info)) = (self.shared.clone(), self.staging.clone(), self.info.clone()) else {
+                return Ok(None);
+            };
+            let locked = match (&self.keyed, &self.access) {
+                (Some(k), _) => unsafe { k.AcquireSync(0, ACCESS_TIMEOUT_MS) }.is_ok(),
+                (None, Some(m)) => lock(m, ACCESS_TIMEOUT_MS),
+                _ => true,
+            };
+            if !locked {
+                return Ok(None);
             }
+            let src: ID3D11Resource = shared.cast().map_err(|e| platform("cast", e))?;
+            let dst: ID3D11Resource = staging.cast().map_err(|e| platform("cast", e))?;
+            unsafe { self.context.CopyResource(&dst, &src) };
+            match (&self.keyed, &self.access) {
+                (Some(k), _) => unsafe {
+                    let _ = k.ReleaseSync(0);
+                },
+                (None, Some(m)) => unlock(m),
+                _ => {}
+            }
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            unsafe { self.context.Map(&dst, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }.map_err(|e| platform("Map", e))?;
+            if count.is_some() {
+                break (count, dst, mapped, info);
+            }
+            let raw = unsafe { std::slice::from_raw_parts(mapped.pData as *const u8, mapped.RowPitch as usize * info.height as usize) };
+            let bytes_per_pixel = if formats::eight_bit_order(info.format).is_some() { 4 } else { 8 };
+            let print = fingerprint(raw, mapped.RowPitch as usize, info.width as usize, info.height as usize, bytes_per_pixel);
+            if self.last_fingerprint != Some(print) {
+                self.last_fingerprint = Some(print);
+                break (count, dst, mapped, info);
+            }
+            unsafe { self.context.Unmap(&dst, 0) };
             if Instant::now() >= deadline {
                 return Ok(None);
             }
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(Duration::from_millis(2));
         };
-        let (Some(shared), Some(staging), Some(info)) = (self.shared.clone(), self.staging.clone(), self.info.clone()) else {
-            return Ok(None);
-        };
-
-        let locked = match (&self.keyed, &self.access) {
-            (Some(k), _) => unsafe { k.AcquireSync(0, ACCESS_TIMEOUT_MS) }.is_ok(),
-            (None, Some(m)) => lock(m, ACCESS_TIMEOUT_MS),
-            _ => true,
-        };
-        if !locked {
-            return Ok(None);
-        }
-        let src: ID3D11Resource = shared.cast().map_err(|e| platform("cast", e))?;
-        let dst: ID3D11Resource = staging.cast().map_err(|e| platform("cast", e))?;
-        unsafe { self.context.CopyResource(&dst, &src) };
-        match (&self.keyed, &self.access) {
-            (Some(k), _) => unsafe {
-                let _ = k.ReleaseSync(0);
-            },
-            (None, Some(m)) => unlock(m),
-            _ => {}
-        }
-
-        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        unsafe { self.context.Map(&dst, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }.map_err(|e| platform("Map", e))?;
         let height = info.height as usize;
         let stride = mapped.RowPitch as usize;
         let raw = unsafe { std::slice::from_raw_parts(mapped.pData as *const u8, stride * height) };
@@ -431,6 +452,21 @@ impl Receiver {
         unsafe { self.context.Unmap(&dst, 0) };
         Ok(Some(result))
     }
+}
+
+/// A cheap fingerprint of a picture: every other pixel of every eighth row (FNV-1a over their bytes). Enough to tell
+/// a new frame from the same one read again.
+fn fingerprint(raw: &[u8], stride: usize, width: usize, height: usize, bytes_per_pixel: usize) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for y in (0..height).step_by(8) {
+        let row = &raw[y * stride..y * stride + width * bytes_per_pixel];
+        for px in row.chunks_exact(bytes_per_pixel).step_by(2) {
+            for &b in px {
+                h = (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+    h
 }
 
 /// Publishes frames as a Spout sender (test patterns, replays).
@@ -510,6 +546,31 @@ impl Sender {
     }
 
     /// Sends a tightly packed RGBA frame of the sender's size.
+    /// Waits until the GPU has done the queued work: a receiver on another device copies the shared texture with no
+    /// other synchronisation.
+    fn finish_gpu(&self) {
+        let mut query: Option<ID3D11Query> = None;
+        let desc = D3D11_QUERY_DESC { Query: D3D11_QUERY_EVENT, MiscFlags: 0 };
+        if unsafe { self._device.CreateQuery(&desc, Some(&mut query)) }.is_err() {
+            unsafe { self.context.Flush() };
+            return;
+        }
+        let Some(query) = query else { return };
+        unsafe {
+            self.context.End(&query);
+            self.context.Flush();
+        }
+        let start = Instant::now();
+        let mut done: i32 = 0;
+        while start.elapsed() < Duration::from_millis(100) {
+            let hr = unsafe { self.context.GetData(&query, Some(&mut done as *mut i32 as *mut c_void), 4, 0) };
+            if hr.is_ok() && done != 0 {
+                return;
+            }
+            std::thread::yield_now();
+        }
+    }
+
     pub fn send_rgba(&mut self, rgba: &[u8]) -> Result<()> {
         let n = self.width as usize * self.height as usize * 4;
         if rgba.len() < n {
@@ -526,8 +587,8 @@ impl Sender {
         if lock(&self.access, ACCESS_TIMEOUT_MS) {
             unsafe {
                 self.context.UpdateSubresource(&resource, 0, None, self.bgra.as_ptr() as *const c_void, self.width * 4, 0);
-                self.context.Flush();
             }
+            self.finish_gpu();
             unlock(&self.access);
         }
         unsafe {
@@ -633,5 +694,25 @@ mod tests {
         assert!(receiver.receive(Duration::from_millis(20), |_| ()).unwrap().is_none());
         drop(sender);
         assert!(!list_senders().contains(&name), "unregistered on drop");
+    }
+    #[test]
+    fn without_a_frame_counter_only_changed_pictures_are_new() {
+        // VRChat's sender has no frame counter: the receiver must not take the same picture again and again.
+        let name = format!("OrbitersSpoutNoCounter-{}", std::process::id());
+        let (w, h) = (320u32, 180u32);
+        let mut sender = Sender::new(&name, w, h).expect("sender");
+        let mut receiver = Receiver::new().expect("receiver");
+        receiver.connect(&name).expect("connect");
+        receiver.counter = None;
+        let mut frame = vec![90u8; (w * h * 4) as usize];
+        sender.send_rgba(&frame).unwrap();
+        assert!(receiver.receive(Duration::from_millis(200), |_| ()).unwrap().is_some());
+        // The first copy may land before the sender's write does: give it two reads to settle.
+        let settled = (0..3).any(|_| receiver.receive(Duration::from_millis(50), |_| ()).unwrap().is_none());
+        assert!(settled, "the same picture keeps coming back as new");
+        assert!(receiver.receive(Duration::from_millis(50), |_| ()).unwrap().is_none(), "the same picture again");
+        frame[..4].copy_from_slice(&[10, 20, 30, 255]);
+        sender.send_rgba(&frame).unwrap();
+        assert!(receiver.receive(Duration::from_millis(200), |_| ()).unwrap().is_some(), "a changed picture");
     }
 }

@@ -49,6 +49,9 @@ pub struct OscSettings {
     pub vrchat_port: u16,
     /// Record every avatar parameter VRChat sends (face tracking, gestures, visemes, locomotion) with sessions.
     pub record_parameters: bool,
+    /// While recording from Spout, open VRChat's camera in Stream mode with Spout Stream on (OSC), and put it back
+    /// as it was afterwards.
+    pub drive_camera: bool,
 }
 
 /// What a session records besides the frames (avatar parameters are under [`OscSettings`]).
@@ -81,7 +84,7 @@ impl Default for KeyframeSettings {
 
 impl Default for OscSettings {
     fn default() -> Self {
-        Self { enabled: true, record_parameter: "OrbitersRecord".into(), vrchat_port: 9000, record_parameters: true }
+        Self { enabled: true, record_parameter: "OrbitersRecord".into(), vrchat_port: 9000, record_parameters: true, drive_camera: true }
     }
 }
 

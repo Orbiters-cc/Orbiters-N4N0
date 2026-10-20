@@ -11,6 +11,7 @@ mod backend;
 mod controller;
 mod gpu;
 mod ipc;
+mod mixer_inbox;
 mod overlay;
 mod pages;
 mod reconstruct;

@@ -815,12 +815,13 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             }
         }
         y += 52.0;
-        Button::new("Send to Mixer")
-            .icon(icons::SPARKLE)
-            .enabled(false)
-            .hint("Mixer import arrives with the Mixer link")
-            .width(side.width())
-            .show_at(&mut cu, full(y));
+        let mut send = Button::new("Send to Mixer").icon(icons::SPARKLE).enabled(session.reconstruction.is_some() && job.is_none()).width(side.width());
+        if session.reconstruction.is_none() {
+            send = send.hint("Reconstruct first: Mixer gets the splats");
+        }
+        if send.show_at(&mut cu, full(y)).clicked() {
+            cx.ctl.send_to_mixer(session.dir.clone(), title(&session));
+        }
         y += 52.0;
         let open_r = Rect::from_min_size(pos2(side.left(), y), vec2(side.width() - 48.0, 40.0));
         if Button::new("Open folder").icon(icons::FOLDER_OPEN).width(open_r.width()).show_at(&mut cu, open_r).clicked() {

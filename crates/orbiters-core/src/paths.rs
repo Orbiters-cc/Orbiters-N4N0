@@ -27,6 +27,12 @@ pub fn config_dir() -> PathBuf {
     }
 }
 
+/// Where Unity editors running Mixer take requests ("Send to Mixer"): `%LOCALAPPDATA%/Orbiters/Mixer/inbox`, one
+/// folder per editor process.
+pub fn mixer_inbox_dir() -> PathBuf {
+    dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")).join("Orbiters").join("Mixer").join("inbox")
+}
+
 pub fn settings_file() -> PathBuf {
     config_dir().join("settings.json")
 }

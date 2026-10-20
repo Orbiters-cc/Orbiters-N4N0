@@ -686,6 +686,21 @@ impl Controller {
         *self.reconstruction.lock().unwrap() = None;
     }
 
+    /// Sends a session's splats to the Unity editor that runs Mixer (the most recently loaded one when several do).
+    pub fn send_to_mixer(&self, dir: PathBuf, title: String) -> anyhow::Result<()> {
+        if bundle::read_manifest(&dir).is_err() || orbiters_core::reconstruction::read_report(&dir).is_none() {
+            anyhow::bail!("This session has no reconstruction to send.");
+        }
+        let editors = crate::mixer_inbox::endpoints(&orbiters_core::paths::mixer_inbox_dir(), crate::mixer_inbox::process_alive);
+        let Some(editor) = editors.first() else {
+            anyhow::bail!("Open your Unity project with Mixer to send the splats to it.");
+        };
+        crate::mixer_inbox::send_splats(editor, &dir, &title)?;
+        let project = if editor.project_name.is_empty() { "Unity".to_string() } else { editor.project_name.clone() };
+        self.notify(NoticeKind::Success, format!("Sent to Mixer in {project}: the splats appear in its open scene."));
+        Ok(())
+    }
+
     /// Trains splats from a session (one reconstruction at a time, never during a capture).
     pub fn reconstruct(self: &Shared, dir: PathBuf) -> anyhow::Result<()> {
         let root = self.settings().sessions_dir;

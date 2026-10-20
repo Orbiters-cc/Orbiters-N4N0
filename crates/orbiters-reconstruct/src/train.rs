@@ -74,6 +74,12 @@ pub struct Outcome {
     pub seconds: f32,
 }
 
+/// The cameras' mean position.
+fn camera_centre(data: &Dataset) -> [f32; 3] {
+    let n = data.views.len().max(1) as f32;
+    data.views.iter().map(|v| v.camera.position()).fold([0.0f32; 3], |a, p| [a[0] + p[0] / n, a[1] + p[1] / n, a[2] + p[2] / n])
+}
+
 /// A typical scene size: the larger of the cameras' spread and the median sampled depth (sets the position step).
 pub fn extent(data: &Dataset) -> f32 {
     let positions: Vec<[f32; 3]> = data.views.iter().map(|v| v.camera.position()).collect();
@@ -152,6 +158,9 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     };
     regularise(gpu, init.len());
     let max_radius = settings.max_radius * data.width as f32;
+    // The sky shell (seeded crate::init::SKY out) never spawns copies: opaque and plentiful, it would take the budget.
+    let centre = camera_centre(data);
+    let far_field = crate::init::SKY * 0.5;
     gpu.step = 0;
     let relocate_until = iterations * 8 / 10;
     for it in 1..=iterations {
@@ -183,7 +192,8 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                 eprintln!("it {it}: {} Gaussians, {dead} dead, {huge} huge, largest axis p50 {:.4} p90 {:.4} p99 {:.4} max {:.2}, {intersections} entries", current.len(), q(0.5), q(0.9), q(0.99), q(1.0));
             }
             let huge: Vec<bool> = stats.iter().map(|s| s[2] > max_radius).collect();
-            relocate(&mut current, &mut m1, &mut m2, &huge, grow_to, &mut rng);
+            let far: Vec<bool> = current.means.iter().map(|m| (0..3).map(|k| (m[k] - centre[k]).powi(2)).sum::<f32>() > far_field * far_field).collect();
+            relocate(&mut current, &mut m1, &mut m2, &huge, &far, grow_to, &mut rng);
             gpu.upload_with_moments(&current, Some((&m1, &m2)));
             regularise(gpu, current.len());
         }
@@ -218,12 +228,23 @@ fn relocation(o: f64, n: usize) -> (f64, f64) {
 }
 
 /// Moves dead Gaussians (faded, broken, or `huge` on screen) and new ones, up to `grow_to`, onto live ones sampled
-/// by opacity. Adam moments of every Gaussian touched restart at zero.
-fn relocate(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Vec<f32>, huge: &[bool], grow_to: usize, rng: &mut fastrand::Rng) -> usize {
+/// by opacity, never `far` ones (unless nothing else lives). Adam moments of every Gaussian touched restart at zero.
+fn relocate(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Vec<f32>, huge: &[bool], far: &[bool], grow_to: usize, rng: &mut fastrand::Rng) -> usize {
     let opacity: Vec<f32> = g.opacity_logits.iter().map(|&l| sigmoid(l)).collect();
     let is_dead = |i: usize| opacity[i] < DEAD || !opacity[i].is_finite() || huge[i] || g.means[i].iter().chain(&g.log_scales[i]).any(|c| !c.is_finite());
-    let (dead, alive): (Vec<usize>, Vec<usize>) = (0..g.len()).partition(|&i| is_dead(i));
-    let moves = dead.len() + grow_to.saturating_sub(g.len());
+    let (mut dead, mut alive): (Vec<usize>, Vec<usize>) = (0..g.len()).partition(|&i| is_dead(i));
+    if alive.iter().any(|&i| !far[i]) {
+        alive.retain(|&i| !far[i]);
+    }
+    // At most a twentieth of the set moves at once, and the set grows only while it uses what it has: a scene that
+    // needs fewer Gaussians than the budget would otherwise churn copies that fade again.
+    let cap = (g.len() / 20).max(1);
+    let grow = if dead.len() <= cap { grow_to.saturating_sub(g.len()) } else { 0 };
+    if dead.len() > cap {
+        rng.shuffle(&mut dead);
+        dead.truncate(cap);
+    }
+    let moves = dead.len() + grow;
     if moves == 0 || alive.is_empty() {
         return 0;
     }
@@ -315,16 +336,44 @@ mod tests {
     #[test]
     fn relocation_fills_dead_slots_then_grows() {
         let mut g = Gaussians::default();
-        for i in 0..10 {
+        for i in 0..100 {
             g.push([i as f32, 0.0, 0.0], [-2.0; 3], [1.0, 0.0, 0.0, 0.0], if i < 3 { logit(0.001) } else { logit(0.8) }, [0.5; 3]);
         }
-        let mut m1 = vec![1.0; 10 * PACKED];
-        let mut m2 = vec![1.0; 10 * PACKED];
-        let moved = relocate(&mut g, &mut m1, &mut m2, &[false; 10], 12, &mut fastrand::Rng::with_seed(1));
-        assert_eq!(moved, 5);
-        assert_eq!(g.len(), 12);
-        assert_eq!(m1.len(), 12 * PACKED);
+        let mut m1 = vec![1.0; 100 * PACKED];
+        let mut m2 = vec![1.0; 100 * PACKED];
+        let moved = relocate(&mut g, &mut m1, &mut m2, &[false; 100], &[false; 100], 104, &mut fastrand::Rng::with_seed(1));
+        assert_eq!(moved, 7);
+        assert_eq!(g.len(), 104);
+        assert_eq!(m1.len(), 104 * PACKED);
         assert!(g.opacity_logits.iter().all(|&l| sigmoid(l) >= DEAD));
         assert!(m1[..PACKED].iter().all(|&m| m == 0.0));
+    }
+
+    #[test]
+    fn a_set_with_many_dead_moves_a_twentieth_and_does_not_grow() {
+        let mut g = Gaussians::default();
+        for i in 0..100 {
+            g.push([i as f32, 0.0, 0.0], [-2.0; 3], [1.0, 0.0, 0.0, 0.0], if i < 30 { logit(0.001) } else { logit(0.8) }, [0.5; 3]);
+        }
+        let (mut m1, mut m2) = (vec![0.0; 100 * PACKED], vec![0.0; 100 * PACKED]);
+        let moved = relocate(&mut g, &mut m1, &mut m2, &[false; 100], &[false; 100], 200, &mut fastrand::Rng::with_seed(2));
+        assert_eq!(moved, 5);
+        assert_eq!(g.len(), 100);
+        assert_eq!(g.opacity_logits.iter().filter(|&&l| sigmoid(l) < DEAD).count(), 25);
+    }
+
+    #[test]
+    fn the_far_field_never_spawns_copies() {
+        // Three faded, forty opaque far ones at x = 400, the rest near x = 0..2.
+        let mut g = Gaussians::default();
+        for i in 0..100 {
+            let x = if (3..43).contains(&i) { 400.0 } else { (i % 3) as f32 };
+            g.push([x, 0.0, 0.0], [-4.0; 3], [1.0, 0.0, 0.0, 0.0], if i < 3 { logit(0.001) } else { logit(0.9) }, [0.5; 3]);
+        }
+        let far: Vec<bool> = g.means.iter().map(|m| m[0] > 100.0).collect();
+        let (mut m1, mut m2) = (vec![0.0; 100 * PACKED], vec![0.0; 100 * PACKED]);
+        relocate(&mut g, &mut m1, &mut m2, &[false; 100], &far, 104, &mut fastrand::Rng::with_seed(4));
+        assert_eq!(g.len(), 104);
+        assert_eq!(g.means.iter().filter(|m| m[0] > 100.0).count(), 40);
     }
 }

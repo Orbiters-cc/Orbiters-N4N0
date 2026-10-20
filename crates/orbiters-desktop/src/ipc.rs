@@ -73,6 +73,10 @@ pub enum ToService {
         dir: PathBuf,
     },
     StopReconstruction,
+    SendToMixer {
+        dir: PathBuf,
+        title: String,
+    },
     WorkerLog,
     /// A T-pose calibration taken in the overlay (`time_ns` is a shared-clock reading).
     Calibrated {

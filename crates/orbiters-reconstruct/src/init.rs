@@ -9,7 +9,7 @@ use crate::gaussians::{logit, quat_from_z, Gaussians};
 use std::collections::HashMap;
 
 /// Distance of the sky shell, well inside the far plane of the sort keys.
-const SKY: f32 = 400.0;
+pub const SKY: f32 = 400.0;
 
 /// Seeds at most `budget` Gaussians (a random subset when there are more).
 pub fn from_depth(data: &Dataset, budget: usize) -> Gaussians {

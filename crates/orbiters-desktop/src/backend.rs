@@ -27,6 +27,8 @@ pub trait Backend: Send + Sync {
     /// Trains splats from a session in the reconstruction worker.
     fn reconstruct(&self, dir: PathBuf);
     fn stop_reconstruction(&self);
+    /// Sends a session's splats to the Unity editor running Mixer.
+    fn send_to_mixer(&self, dir: PathBuf, title: String);
     /// Asks for the worker's log; [`Backend::worker_log`] has it once it arrived.
     fn request_worker_log(&self);
     fn worker_log(&self) -> Option<Vec<String>>;
@@ -101,6 +103,10 @@ impl Backend for Remote {
 
     fn stop_reconstruction(&self) {
         self.0.send(&ToService::StopReconstruction);
+    }
+
+    fn send_to_mixer(&self, dir: PathBuf, title: String) {
+        self.0.send(&ToService::SendToMixer { dir, title });
     }
 
     fn request_worker_log(&self) {
@@ -201,6 +207,10 @@ impl Backend for Local {
 
     fn stop_reconstruction(&self) {
         self.ctl.stop_reconstruction();
+    }
+
+    fn send_to_mixer(&self, dir: PathBuf, title: String) {
+        self.report(self.ctl.send_to_mixer(dir, title));
     }
 
     fn request_worker_log(&self) {

@@ -160,6 +160,7 @@ impl Service {
                 report(r);
             }
             ToService::Reconstruct { dir } => report(ctl.reconstruct(dir)),
+            ToService::SendToMixer { dir, title } => report(ctl.send_to_mixer(dir, title)),
             ToService::StopReconstruction => {
                 ctl.stop_reconstruction();
             }

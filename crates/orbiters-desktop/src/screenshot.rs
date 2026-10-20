@@ -621,6 +621,7 @@ impl crate::backend::Backend for Still {
     fn trash_session(&self, _dir: PathBuf) {}
     fn reconstruct(&self, _dir: PathBuf) {}
     fn stop_reconstruction(&self) {}
+    fn send_to_mixer(&self, _dir: PathBuf, _title: String) {}
     fn request_worker_log(&self) {}
     fn worker_log(&self) -> Option<Vec<String>> {
         None

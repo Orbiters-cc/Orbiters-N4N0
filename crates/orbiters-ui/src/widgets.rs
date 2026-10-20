@@ -66,15 +66,21 @@ impl Tone {
     }
 }
 
+/// A frame with squircle corners (the website's panels and cards), `radius` as for a circular corner.
+pub fn frame(painter: &Painter, rect: Rect, radius: f32, fill: Color32) {
+    paint::fill_squircle(painter, rect, theme::squircle(radius), fill);
+}
+
 /// A flat card behind `rect`.
 pub fn card(painter: &Painter, rect: Rect, radius: f32) {
-    painter.rect_filled(rect, theme::radius(radius), theme::surface());
+    frame(painter, rect, radius, theme::surface());
 }
 
 /// A raised panel (popovers, toasts, dialogs) with the website's soft shadow.
 pub fn panel(painter: &Painter, rect: Rect, radius: f32) {
     paint::shadow(painter, rect, radius, vec2(0.0, 12.0), 30.0, -8.0, theme::black(0.35));
-    painter.rect(rect, theme::radius(radius), theme::surface_strong(), theme::hairline(), StrokeKind::Inside);
+    frame(painter, rect, radius, theme::surface_strong());
+    paint::stroke_squircle(painter, rect, theme::squircle(radius), theme::hairline());
 }
 
 /// Pulsing status dot (10 points), the pulse ring only while live.
@@ -538,7 +544,7 @@ fn field_frame(ui: &mut Ui, rect: Rect, id: Id, value: &mut String, hint: &str, 
 /// Status chip of the capture page: tinted icon tile, caption and a value that slides when it changes.
 pub fn status_chip(ui: &mut Ui, rect: Rect, id: Id, glyph: &str, label: &str, value: &str, tone: Tone) {
     let p = ui.painter();
-    p.rect_filled(rect, theme::radius(16.0), theme::surface());
+    frame(p, rect, 16.0, theme::surface());
     let tile = Rect::from_min_size(pos2(rect.left() + 14.0, rect.center().y - 18.0), vec2(36.0, 36.0));
     let (bg, fg) = match tone {
         Tone::Ok => (theme::alpha(theme::OK, 0.1), theme::OK),
@@ -618,7 +624,7 @@ pub fn stat_tile(ui: &mut Ui, rect: Rect, id: Id, stat: &Stat<'_>) {
     let hover = anim::toggle(ui.ctx(), id.with("hover"), resp.hovered(), Spring::SOFT);
     let r = rect;
     let p = ui.painter();
-    p.rect_filled(r, theme::radius(theme::TILE_RADIUS), theme::mix(theme::surface(), theme::INK_800, hover));
+    frame(p, r, theme::TILE_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover));
     text(p, r.left_top() + vec2(16.0, 22.0), Align2::LEFT_CENTER, &Txt::caps(label));
     icon(p, r.right_top() + vec2(-24.0, 22.0), glyph, 16.0, accent.unwrap_or(theme::FG_4));
     text_truncated(

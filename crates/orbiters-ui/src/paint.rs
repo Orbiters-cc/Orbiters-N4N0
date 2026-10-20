@@ -96,6 +96,89 @@ pub fn rounded_rect_points_corners(rect: Rect, radii: [f32; 4]) -> Vec<Pos2> {
     pts
 }
 
+/// Outline of a rectangle with squircle corners, as the website's `corner-shape: squircle` (a superellipse of
+/// exponent 4): corner `r` is where the curve leaves each edge, like `border-radius` with that shape. A squircle
+/// looks about half as round as a circular corner of the same radius (see [`crate::theme::squircle`]).
+pub fn squircle_points_corners(rect: Rect, radii: [f32; 4]) -> Vec<Pos2> {
+    let limit = (rect.width() * 0.5).min(rect.height() * 0.5).max(0.0);
+    let r = radii.map(|r| r.clamp(0.0, limit));
+    let mut pts = Vec::with_capacity(4 * 25);
+    let corners = [
+        (pos2(rect.left() + r[0], rect.top() + r[0]), 180.0f32, r[0]),
+        (pos2(rect.right() - r[1], rect.top() + r[1]), 270.0, r[1]),
+        (pos2(rect.right() - r[2], rect.bottom() - r[2]), 0.0, r[2]),
+        (pos2(rect.left() + r[3], rect.bottom() - r[3]), 90.0, r[3]),
+    ];
+    // |x|^4 + |y|^4 = 1: (sign(cos)·√|cos|, sign(sin)·√|sin|).
+    let root = |v: f32| v.signum() * v.abs().sqrt();
+    for (c, start, r) in corners {
+        if r < 0.5 {
+            pts.push(c);
+            continue;
+        }
+        let steps = ((r * 0.5).ceil() as usize).clamp(8, 24);
+        for i in 0..=steps {
+            let a = (start + 90.0 * i as f32 / steps as f32).to_radians();
+            pts.push(c + vec2(root(a.cos()), root(a.sin())) * r);
+        }
+    }
+    pts
+}
+
+pub fn squircle_points(rect: Rect, radius: f32) -> Vec<Pos2> {
+    squircle_points_corners(rect, [radius; 4])
+}
+
+/// A rectangle with squircle corners, filled.
+pub fn fill_squircle(painter: &Painter, rect: Rect, radius: f32, color: Color32) {
+    painter.add(Shape::mesh(squircle_mesh(rect, radius, color, feather(painter))));
+}
+
+/// The fill of [`fill_squircle`] as a mesh (for shapes set later with `Painter::set`); `feather` in points.
+pub fn squircle_mesh(rect: Rect, radius: f32, color: Color32, feather: f32) -> Mesh {
+    convex_mesh(&squircle_points(rect, radius), |_| color, feather * 0.5)
+}
+
+/// A squircle outline drawn inside `rect`.
+pub fn stroke_squircle(painter: &Painter, rect: Rect, radius: f32, stroke: egui::Stroke) {
+    let inner = rect.shrink(stroke.width * 0.5);
+    painter.add(Shape::closed_line(squircle_points(inner, (radius - stroke.width * 0.5).max(0.0)), stroke));
+}
+
+/// A texture (its `uv` part) in a rectangle with squircle corners, anti-aliased at the edge.
+pub fn squircle_texture(painter: &Painter, rect: Rect, radii: [f32; 4], texture: egui::TextureId, uv: Rect, tint: Color32) {
+    let points = squircle_points_corners(rect, radii);
+    let n = points.len();
+    if n < 3 {
+        return;
+    }
+    let f = feather(painter) * 0.5;
+    let uv_at = |p: Pos2| {
+        let t = (p - rect.min) / rect.size().max(Vec2::splat(1e-3));
+        pos2(uv.min.x + t.x * uv.width(), uv.min.y + t.y * uv.height())
+    };
+    let mut mesh = Mesh::with_texture(texture);
+    let push = |mesh: &mut Mesh, p: Pos2, c: Color32| mesh.vertices.push(egui::epaint::Vertex { pos: p, uv: uv_at(p), color: c });
+    let centroid = (points.iter().fold(Vec2::ZERO, |a, p| a + p.to_vec2()) / n as f32).to_pos2();
+    push(&mut mesh, centroid, tint);
+    for i in 0..n {
+        let (prev, p, next) = (points[(i + n - 1) % n], points[i], points[(i + 1) % n]);
+        let (e1, e2) = ((p - prev).normalized(), (next - p).normalized());
+        // Clockwise on screen (y down): (-e.y, e.x) points inside.
+        let inward = (vec2(-e1.y, e1.x) + vec2(-e2.y, e2.x)).normalized();
+        push(&mut mesh, p + inward * f, tint);
+        push(&mut mesh, p - inward * f, Color32::TRANSPARENT);
+    }
+    for i in 0..n as u32 {
+        let j = (i + 1) % n as u32;
+        let (ii, io, ji, jo) = (1 + 2 * i, 2 + 2 * i, 1 + 2 * j, 2 + 2 * j);
+        mesh.add_triangle(0, ii, ji);
+        mesh.add_triangle(ii, io, jo);
+        mesh.add_triangle(ii, jo, ji);
+    }
+    painter.add(Shape::mesh(mesh));
+}
+
 pub fn circle_points(center: Pos2, radius: f32) -> Vec<Pos2> {
     let n = ((radius * 1.2).ceil() as usize).clamp(16, 160);
     (0..n).map(|i| center + Vec2::angled(TAU * i as f32 / n as f32) * radius).collect()
@@ -106,8 +189,15 @@ pub fn fill_convex(painter: &Painter, points: &[Pos2], color_at: impl Fn(Pos2) -
     if points.len() < 3 {
         return;
     }
-    let f = feather(painter) * 0.5;
+    painter.add(Shape::mesh(convex_mesh(points, color_at, feather(painter) * 0.5)));
+}
+
+/// The anti-aliased fill of a convex polygon, `f` points of feather on each side of the edge.
+pub fn convex_mesh(points: &[Pos2], color_at: impl Fn(Pos2) -> Color32, f: f32) -> Mesh {
     let n = points.len();
+    if n < 3 {
+        return Mesh::default();
+    }
     // Orientation decides which side of each edge is outside.
     let area: f32 = (0..n).map(|i| points[i].to_vec2().x * points[(i + 1) % n].y - points[(i + 1) % n].x * points[i].y).sum();
     let sign = if area >= 0.0 { 1.0 } else { -1.0 };
@@ -134,7 +224,7 @@ pub fn fill_convex(painter: &Painter, points: &[Pos2], color_at: impl Fn(Pos2) -
         mesh.add_triangle(ii, io, jo);
         mesh.add_triangle(ii, jo, ji);
     }
-    painter.add(Shape::mesh(mesh));
+    mesh
 }
 
 /// Splits a convex polygon where the gradient crosses its stops, so every piece is exactly affine in colour.

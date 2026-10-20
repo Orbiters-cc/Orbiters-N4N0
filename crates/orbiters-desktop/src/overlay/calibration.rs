@@ -267,8 +267,8 @@ impl Calibrator {
 /// The mirror panel, `MIRROR_PX` points.
 pub fn paint_mirror(p: &Painter, cal: &Calibrator, now: f64) {
     let rect = Rect::from_min_size(Pos2::ZERO, vec2(MIRROR_PX[0] as f32, MIRROR_PX[1] as f32));
-    p.rect_filled(rect.shrink(2.0), theme::radius(28.0), theme::alpha(theme::INK_900, 0.94));
-    p.rect_stroke(rect.shrink(2.0), theme::radius(28.0), Stroke::new(2.0, theme::white(0.10)), egui::StrokeKind::Inside);
+    widgets::frame(p, rect.shrink(2.0), 28.0, theme::alpha(theme::INK_900, 0.94));
+    orbiters_ui::paint::stroke_squircle(p, rect.shrink(2.0), theme::squircle(28.0), Stroke::new(2.0, theme::white(0.10)));
     let Some(frame) = cal.frame else { return };
 
     // Heading.

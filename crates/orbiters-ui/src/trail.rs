@@ -19,7 +19,7 @@ pub struct Trail<'a> {
 
 pub fn show(ui: &Ui, rect: Rect, id: Id, trail: &Trail<'_>) {
     let p = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-    p.rect_filled(rect, theme::radius(theme::TILE_RADIUS), theme::surface_soft());
+    crate::widgets::frame(&p, rect, theme::TILE_RADIUS, theme::surface_soft());
     let aspect = rect.width() / rect.height().max(1.0);
 
     // Target view: the path's bounds with a margin, at the box's aspect ratio.

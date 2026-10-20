@@ -85,6 +85,12 @@ pub fn hairline() -> Stroke {
     Stroke::new(1.0, white(0.05))
 }
 
+/// The squircle radius that looks like a circular corner of radius `r` (the website doubles its radii under
+/// `corner-shape: squircle`: 18 → 36, 24 → 48).
+pub fn squircle(r: f32) -> f32 {
+    2.0 * r
+}
+
 pub fn radius(r: f32) -> CornerRadius {
     CornerRadius::same(r.round().clamp(0.0, 255.0) as u8)
 }

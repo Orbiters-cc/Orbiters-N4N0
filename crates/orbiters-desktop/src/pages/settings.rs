@@ -346,13 +346,12 @@ fn section(ui: &mut Ui, cx: &Cx, index: usize, glyph: &str, title: &str, subtitl
     let card = Rect::from_min_size(top_left + vec2(0.0, dy), vec2(width, h));
     ui.painter().set(
         bg,
-        egui::epaint::RectShape::new(
+        Shape::mesh(orbiters_ui::paint::squircle_mesh(
             card,
-            theme::radius(theme::CARD_RADIUS),
+            theme::squircle(theme::CARD_RADIUS),
             theme::surface().gamma_multiply(alpha),
-            egui::Stroke::NONE,
-            egui::StrokeKind::Inside,
-        ),
+            1.0 / ui.ctx().pixels_per_point(),
+        )),
     );
     ui.allocate_exact_size(vec2(width, h), Sense::hover());
 }

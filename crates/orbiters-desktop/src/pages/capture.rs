@@ -325,7 +325,7 @@ fn consent_overlay(ui: &mut Ui, cx: &mut Cx, card: Rect) {
     ui.interact(card, id.with("shield"), Sense::click());
     let k = anim::spring_from(&ctx, id.with("in"), [0.0], [1.0], Spring::BOUNCY)[0];
     let p = ui.painter();
-    p.rect_filled(card, theme::radius(theme::CARD_RADIUS), theme::alpha(theme::INK_950, 0.78 * k.clamp(0.0, 1.0)));
+    widgets::frame(p, card, theme::CARD_RADIUS, theme::alpha(theme::INK_950, 0.78 * k.clamp(0.0, 1.0)));
     let w = (card.width() - 48.0).min(420.0);
     let bullets = [
         "Capture your own worlds, or worlds whose creators agreed, and keep the results private.",
@@ -459,7 +459,7 @@ fn performance(ui: &mut Ui, cx: &mut Cx) {
         let w = (rect.width() - 32.0 - gap * 3.0) / 4.0;
         for (i, row) in rows.iter().enumerate() {
             let cell = Rect::from_min_size(pos2(rect.left() + 16.0 + i as f32 * (w + gap), rect.top() + 48.0), vec2(w, rect.height() - 64.0));
-            p.rect_filled(cell, theme::radius(14.0), theme::white(0.03));
+            widgets::frame(&p, cell, 14.0, theme::white(0.03));
             let tile = Rect::from_min_size(cell.min + vec2(14.0, 14.0), vec2(36.0, 36.0));
             p.rect_filled(tile, theme::radius(11.0), theme::alpha(row.tone.color(), 0.12));
             widgets::icon(&p, tile.center(), row.glyph, 17.0, if row.tone == Tone::Off { theme::FG_3 } else { row.tone.color() });

@@ -1,7 +1,8 @@
-//! Settings page: capture, storage, VRChat and OSC, performance, interface, about. Changes apply as they are made (shown at
+//! Settings page: the Orbiters account, capture, storage, VRChat and OSC, performance, interface, about. Changes apply as they are made (shown at
 //! once, saved in the background); text fields apply with their Save button.
 
 use super::{Cx, Job};
+use crate::state::AccountState;
 use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Shape, Ui, UiBuilder};
 use orbiters_core::settings::Settings;
 use orbiters_ui::anim::{self, Spring};
@@ -24,6 +25,8 @@ pub struct State {
     log_open: bool,
     picker: Option<(Folder, Job<Option<PathBuf>>)>,
     mic: MicTest,
+    /// "Sign out" was pressed once: it asks before signing every tool out.
+    confirm_sign_out: bool,
 }
 
 /// A mic test opening its devices: for which microphone, and the monitor or why it failed.
@@ -88,8 +91,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             super::block(ui, cx, 0, 72.0, |ui, rect| super::heading(ui, rect, "Preferences", "Settings", None));
             let snap = cx.snap;
+            account(ui, cx, &mut state.confirm_sign_out);
 
-            section(ui, cx, 1, icons::GAUGE, "Capture", Some("How frames become a session"), |ui| {
+            section(ui, cx, 2, icons::GAUGE, "Capture", Some("How frames become a session"), |ui| {
                 let kf = &mut draft.keyframes;
                 widgets::field(ui, "Keyframe distance", Some("A new lossless keyframe after the camera moves this far."), 284.0, |ui| {
                     apply |= widgets::slider(ui, "kf-distance", &mut kf.min_translation, 0.05..=2.0, 0.05, |v| format!("{v:.2} m"));
@@ -136,7 +140,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 st.sessions,
                 st.free_bytes.map(|f| format!(" · {} free on the drive", format::bytes(f as f64))).unwrap_or_default()
             );
-            section(ui, cx, 2, icons::HARD_DRIVE, "Storage", Some(&storage_sub), |ui| {
+            section(ui, cx, 3, icons::HARD_DRIVE, "Storage", Some(&storage_sub), |ui| {
                 let used_gb = st.used_bytes as f64 / 1e9;
                 let limit = draft.storage_limit_gb;
                 let usage = if limit > 0.0 { (used_gb / limit).min(1.0) as f32 } else { 0.0 };
@@ -173,7 +177,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             } else {
                 osc.error.clone().unwrap_or_else(|| "Off".into())
             };
-            section(ui, cx, 3, icons::BROADCAST, "VRChat and OSC", Some(&osc_sub), |ui| {
+            section(ui, cx, 4, icons::BROADCAST, "VRChat and OSC", Some(&osc_sub), |ui| {
                 widgets::field(
                     ui,
                     "Action Menu control",
@@ -223,7 +227,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 (None, true) => "SteamVR is running: calibrate in the Orbiters tab of its dashboard".into(),
                 (None, false) => "What a session records besides the frames".into(),
             };
-            section(ui, cx, 4, icons::PERSON_ARMS_SPREAD, "Performance", Some(&perf_sub), |ui| {
+            section(ui, cx, 5, icons::PERSON_ARMS_SPREAD, "Performance", Some(&perf_sub), |ui| {
                 widgets::field(
                     ui,
                     "Face and avatar parameters",
@@ -285,7 +289,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 });
             });
 
-            section(ui, cx, 5, icons::SPARKLE, "Interface", None, |ui| {
+            section(ui, cx, 6, icons::SPARKLE, "Interface", None, |ui| {
                 widgets::field(ui, "Reduce motion", Some("Calmer transitions and a still background."), 48.0, |ui| {
                     apply |= widgets::toggle(ui, "reduce-motion", &mut draft.reduce_motion);
                 });
@@ -300,7 +304,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
             let mut want_log = false;
             let mut quit = false;
-            section(ui, cx, 6, icons::INFO, "About", None, |ui| {
+            section(ui, cx, 7, icons::INFO, "About", None, |ui| {
                 ui.add_space(8.0);
                 let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::hover());
                 let lr = Rect::from_min_size(pos2(row.left(), row.center().y - 21.0), logo::size_for_width(48.0));
@@ -404,6 +408,83 @@ fn section(ui: &mut Ui, cx: &Cx, index: usize, glyph: &str, title: &str, subtitl
         )),
     );
     ui.allocate_exact_size(vec2(width, h), Sense::hover());
+}
+
+/// The Orbiters account the Unity tools share: who is signed in, or the browser sign-in and its code.
+fn account(ui: &mut Ui, cx: &Cx, confirm_sign_out: &mut bool) {
+    let status = &cx.snap.account;
+    let server = if status.development { " · development server" } else { "" };
+    let sub = match &status.state {
+        AccountState::SignedIn { username } => format!("Signed in as {username}{server}"),
+        AccountState::Checking { username } => format!("Checking {}…", username.as_deref().unwrap_or("your sign-in")),
+        AccountState::Offline { username } => format!("Signed in as {} · Orbiters could not be reached", username.as_deref().unwrap_or("you")),
+        AccountState::Expired { .. } => "Your sign-in expired".into(),
+        AccountState::SigningIn { .. } => "Finish in your browser".into(),
+        AccountState::SignedOut | AccountState::Unknown => format!("Not signed in{server}"),
+    };
+    if !matches!(status.state, AccountState::SignedIn { .. } | AccountState::Offline { .. } | AccountState::Checking { .. }) {
+        *confirm_sign_out = false;
+    }
+    section(ui, cx, 1, icons::USER_CIRCLE, "Orbiters account", Some(&sub), |ui| {
+        match &status.state {
+            AccountState::SigningIn { code, provider } => {
+                let via = if provider == "telegram" { "Telegram" } else { "Discord" };
+                let desc = format!("Sign in with {via} on the Orbiters page that opened in your browser, then type this code there.");
+                widgets::field(ui, "Code", Some(&desc), 360.0, |ui| {
+                    if Button::new("Cancel").variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
+                        cx.ctl.cancel_sign_in();
+                    }
+                    ui.add_space(8.0);
+                    if Button::new("Open the page again").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
+                        cx.ctl.reopen_sign_in();
+                    }
+                    ui.add_space(12.0);
+                    let t = Txt::new(code, 22.0).weight(weight::SEMIBOLD).tracking(0.3).mono();
+                    let s = widgets::text_size(ui, &t);
+                    let (chip, _) = ui.allocate_exact_size(vec2(s.x + 28.0, 40.0), Sense::hover());
+                    ui.painter().rect_filled(chip, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.14));
+                    widgets::text(ui.painter(), chip.center(), Align2::CENTER_CENTER, &t.color(theme::ACCENT));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                });
+            }
+            AccountState::SignedOut | AccountState::Expired { .. } | AccountState::Unknown => {
+                let desc = "One sign-in for Orbiters desktop and your Unity tools: MCB, My Avatar, ReFit and the Logger. Uploads to the Map explorer use it.";
+                widgets::field(ui, "Sign in", Some(desc), 260.0, |ui| {
+                    if Button::new("Telegram").icon(icons::TELEGRAM_LOGO).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
+                        cx.ctl.sign_in("telegram");
+                    }
+                    ui.add_space(8.0);
+                    if Button::new("Discord").icon(icons::DISCORD_LOGO).variant(Variant::Primary).size(Size::Sm).show(ui).clicked() {
+                        cx.ctl.sign_in("discord");
+                    }
+                });
+            }
+            _ => {
+                let desc = "The account MCB, My Avatar and your other Orbiters tools use: signing in or out in one of them does it here too.";
+                widgets::field(ui, "Shared with your Unity tools", Some(desc), 300.0, |ui| {
+                    if *confirm_sign_out {
+                        if Button::new("Cancel").variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
+                            *confirm_sign_out = false;
+                        }
+                        ui.add_space(8.0);
+                        if Button::new("Sign out of every tool").icon(icons::SIGN_OUT).variant(Variant::Danger).size(Size::Sm).show(ui).clicked() {
+                            *confirm_sign_out = false;
+                            cx.ctl.sign_out();
+                        }
+                    } else if Button::new("Sign out").icon(icons::SIGN_OUT).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
+                        *confirm_sign_out = true;
+                    }
+                });
+            }
+        }
+        if let Some(error) = &status.error {
+            ui.add_space(4.0);
+            let g = ui.painter().layout_job(Txt::new(error, 12.0).color(theme::DANGER).job(ui.available_width()));
+            let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
+            ui.painter().galley(r.min, g, theme::DANGER);
+            ui.add_space(8.0);
+        }
+    });
 }
 
 /// Folder row: label, path, Change button. True when Change was clicked.

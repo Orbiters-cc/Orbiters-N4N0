@@ -78,6 +78,13 @@ pub enum ToService {
         title: String,
     },
     WorkerLog,
+    /// Signs in to Orbiters through the browser with `provider` (`discord` or `telegram`).
+    SignIn {
+        provider: String,
+    },
+    ReopenSignIn,
+    CancelSignIn,
+    SignOut,
     /// A T-pose calibration taken in the overlay (`time_ns` is a shared-clock reading).
     Calibrated {
         calibration: Box<Calibration>,

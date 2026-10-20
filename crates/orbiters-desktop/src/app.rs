@@ -4,7 +4,7 @@
 use crate::backend::Ctl;
 use crate::controller::{Notice, NoticeKind};
 use crate::pages::{self, Page};
-use crate::state::{CaptureState, Snapshot};
+use crate::state::{AccountState, CaptureState, Snapshot};
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, ResizeDirection, Sense, Ui, Vec2, ViewportCommand};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::glow::{self, Mood};
@@ -350,6 +350,14 @@ impl App {
         let vrchat_tone = if snap.vrchat.running { widgets::Tone::Ok } else { widgets::Tone::Off };
         side_status(ui, pos2(inner.left(), bottom - 34.0 - 44.0), "Action Menu", &osc_text, osc_tone, inner.width());
         side_status(ui, pos2(inner.left(), bottom - 34.0 - 88.0), "VRChat", &vrchat_text, vrchat_tone, inner.width());
+        let (account_text, account_tone) = match &snap.account.state {
+            AccountState::SignedIn { username } => (username.clone(), widgets::Tone::Ok),
+            AccountState::Checking { username } | AccountState::Offline { username } => (username.clone().unwrap_or_default(), widgets::Tone::Warn),
+            AccountState::Expired { .. } => ("Sign-in expired".into(), widgets::Tone::Warn),
+            AccountState::SigningIn { .. } => ("Finishing in your browser".into(), widgets::Tone::Warn),
+            AccountState::SignedOut | AccountState::Unknown => ("Not signed in".into(), widgets::Tone::Off),
+        };
+        side_status(ui, pos2(inner.left(), bottom - 34.0 - 132.0), "Orbiters", &account_text, account_tone, inner.width());
     }
 
     /// The intro glitch of the sidebar logo, once, right after the splash.

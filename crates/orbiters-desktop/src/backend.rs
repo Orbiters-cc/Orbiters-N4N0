@@ -29,6 +29,11 @@ pub trait Backend: Send + Sync {
     fn stop_reconstruction(&self);
     /// Sends a session's splats to the Unity editor running Mixer.
     fn send_to_mixer(&self, dir: PathBuf, title: String);
+    /// Signs in to Orbiters (the account the Unity tools share) through the browser.
+    fn sign_in(&self, provider: &str);
+    fn reopen_sign_in(&self);
+    fn cancel_sign_in(&self);
+    fn sign_out(&self);
     /// Asks for the worker's log; [`Backend::worker_log`] has it once it arrived.
     fn request_worker_log(&self);
     fn worker_log(&self) -> Option<Vec<String>>;
@@ -107,6 +112,22 @@ impl Backend for Remote {
 
     fn send_to_mixer(&self, dir: PathBuf, title: String) {
         self.0.send(&ToService::SendToMixer { dir, title });
+    }
+
+    fn sign_in(&self, provider: &str) {
+        self.0.send(&ToService::SignIn { provider: provider.to_string() });
+    }
+
+    fn reopen_sign_in(&self) {
+        self.0.send(&ToService::ReopenSignIn);
+    }
+
+    fn cancel_sign_in(&self) {
+        self.0.send(&ToService::CancelSignIn);
+    }
+
+    fn sign_out(&self) {
+        self.0.send(&ToService::SignOut);
     }
 
     fn request_worker_log(&self) {
@@ -211,6 +232,28 @@ impl Backend for Local {
 
     fn send_to_mixer(&self, dir: PathBuf, title: String) {
         self.report(self.ctl.send_to_mixer(dir, title));
+    }
+
+    fn sign_in(&self, provider: &str) {
+        let ctl = self.ctl.clone();
+        let provider = provider.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = ctl.sign_in(&provider) {
+                ctl.notify(crate::controller::NoticeKind::Error, format!("Could not start the sign-in: {e}"));
+            }
+        });
+    }
+
+    fn reopen_sign_in(&self) {
+        self.report(self.ctl.reopen_sign_in());
+    }
+
+    fn cancel_sign_in(&self) {
+        self.ctl.cancel_sign_in();
+    }
+
+    fn sign_out(&self) {
+        self.report(self.ctl.sign_out());
     }
 
     fn request_worker_log(&self) {

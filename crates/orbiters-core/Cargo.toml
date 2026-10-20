@@ -18,3 +18,7 @@ mdns-sd = { workspace = true }
 flate2 = { workspace = true }
 if-addrs = "0.15"
 socket2 = "0.6"
+ureq = { version = "3", default-features = false, features = ["json", "native-tls", "gzip", "multipart"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Security_Cryptography"] }

@@ -64,6 +64,45 @@ pub struct StorageStatus {
     pub sessions: usize,
 }
 
+/// Where the Orbiters account stands (the one the Unity tools share).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AccountState {
+    /// Not read yet.
+    #[default]
+    Unknown,
+    SignedOut,
+    /// Saved by a tool, being checked with Orbiters.
+    Checking { username: Option<String> },
+    SignedIn { username: String },
+    /// The saved sign-in was refused: expired, or signed out everywhere.
+    Expired { username: Option<String> },
+    /// Orbiters could not be reached to check it.
+    Offline { username: Option<String> },
+    /// Finishing in the browser, where `code` is typed.
+    SigningIn { code: String, provider: String },
+}
+
+impl AccountState {
+    /// The account's name when one is saved.
+    pub fn username(&self) -> Option<&str> {
+        match self {
+            AccountState::SignedIn { username } => Some(username),
+            AccountState::Checking { username } | AccountState::Expired { username } | AccountState::Offline { username } => username.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AccountStatus {
+    pub state: AccountState,
+    /// The Unity tools are set to the development server.
+    pub development: bool,
+    /// The last sign-in problem.
+    pub error: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SteamVrStatus {
     /// SteamVR's server runs.
@@ -125,6 +164,8 @@ pub struct Snapshot {
     pub worker: WorkerStatus,
     pub steamvr: SteamVrStatus,
     pub reconstruction: Option<ReconstructionJob>,
+    #[serde(default)]
+    pub account: AccountStatus,
 }
 
 impl Snapshot {
@@ -141,6 +182,7 @@ impl Snapshot {
             worker: WorkerStatus::default(),
             steamvr: SteamVrStatus::default(),
             reconstruction: None,
+            account: AccountStatus::default(),
         }
     }
 

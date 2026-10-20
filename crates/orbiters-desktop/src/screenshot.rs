@@ -215,6 +215,29 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
         },
+        // The Orbiters account: signed out, then finishing in the browser.
+        Scenario {
+            name: "settings-signed-out",
+            page: Page::Settings,
+            snapshot: with_account(&idle, crate::state::AccountState::SignedOut, None),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+        },
+        Scenario {
+            name: "settings-signing-in",
+            page: Page::Settings,
+            snapshot: with_account(&idle, crate::state::AccountState::SigningIn { code: "K7QX".into(), provider: "discord".into() }, None),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+        },
         // Content under the title bar (and the sessions under their heading): blurred, not cut.
         Scenario {
             name: "capture-scrolled",
@@ -627,8 +650,16 @@ impl StandInVrchat {
     }
 }
 
+fn with_account(base: &Snapshot, state: crate::state::AccountState, error: Option<&str>) -> Snapshot {
+    let mut s = base.clone();
+    s.account.state = state;
+    s.account.error = error.map(str::to_string);
+    s
+}
+
 fn idle_snapshot(settings: &Settings, sessions: &[orbiters_core::bundle::SessionSummary]) -> Snapshot {
     let mut s = Snapshot::new(settings.clone());
+    s.account.state = crate::state::AccountState::SignedIn { username: "Orbit".into() };
     s.vrchat.running = true;
     s.vrchat.log_found = true;
     s.vrchat.world = WorldState {
@@ -695,6 +726,10 @@ impl crate::backend::Backend for Still {
     fn reconstruct(&self, _dir: PathBuf) {}
     fn stop_reconstruction(&self) {}
     fn send_to_mixer(&self, _dir: PathBuf, _title: String) {}
+    fn sign_in(&self, _provider: &str) {}
+    fn reopen_sign_in(&self) {}
+    fn cancel_sign_in(&self) {}
+    fn sign_out(&self) {}
     fn request_worker_log(&self) {}
     fn worker_log(&self) -> Option<Vec<String>> {
         None

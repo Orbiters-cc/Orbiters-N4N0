@@ -112,6 +112,8 @@ pub struct Controller {
     /// the app drives them), and when the avatar last (re)loaded, which resets them.
     avatar_before: Mutex<Option<AvatarToggles>>,
     avatar_changed_at: Mutex<Option<Instant>>,
+    /// The Orbiters account's credential and a sign-in in progress (controller/account.rs).
+    account_runtime: Mutex<account::AccountRuntime>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -162,6 +164,8 @@ fn calibration_info(stored: &StoredCalibration) -> CalibrationInfo {
 
 pub type Shared = Arc<Controller>;
 
+mod account;
+
 impl Controller {
     pub fn new(settings: Settings) -> Shared {
         let mut snapshot = Snapshot::new(settings);
@@ -184,6 +188,7 @@ impl Controller {
             camera_before: Mutex::new(None),
             avatar_before: Mutex::new(None),
             avatar_changed_at: Mutex::new(None),
+            account_runtime: Mutex::new(account::AccountRuntime::default()),
         })
     }
 
@@ -197,6 +202,7 @@ impl Controller {
             }
         });
         spawn_watchers(self.clone());
+        self.start_account();
     }
 
     /// The interface's context, repainted on every change.

@@ -1,5 +1,6 @@
 //! Shared logic of Orbiters desktop, used by the app and its workers.
 
+pub mod account;
 pub mod bundle;
 pub mod clock;
 pub mod keyframes;

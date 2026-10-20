@@ -331,9 +331,10 @@ impl OscService {
         daemon.register(info("_osc._udp.local.", osc_port)?)?;
         if let Some(ip) = primary {
             std::thread::Builder::new().name("oscquery-ask".into()).spawn(move || {
-                // Once mdns-sd has probed the names and announced them (about a second), and once more in case.
-                for wait in [2, 3] {
-                    std::thread::sleep(Duration::from_secs(wait));
+                // After mdns-sd's probes and its two announcements (about two seconds; see `ask_for_services`
+                // on why more than a second after the last), and once more in case.
+                for wait in [3500, 3500] {
+                    std::thread::sleep(Duration::from_millis(wait));
                     if let Err(e) = ask_for_services(ip) {
                         eprintln!("OSCQuery services query failed: {e}");
                     }
@@ -389,27 +390,26 @@ fn primary_ipv4() -> Option<std::net::Ipv4Addr> {
 
 /// VRChat takes a service only from an mDNS response with the PTR record as answer and the SRV and A records as
 /// additional records (vrc-oscquery-lib's MeaModDiscovery), the way answers to queries come; it ignores
-/// announcements (every record an answer, RFC 6762) and queries only when it starts. A query for both service types
-/// from the mDNS port, on `ip`'s interface, makes every responder there (mdns-sd among them) multicast such an
-/// answer, which a running VRChat hears. mdns-sd's own browsing would not do: it lists its own records as known
-/// answers, which suppresses them.
+/// announcements (every record an answer, RFC 6762) and queries only when it starts. A query for the OSCQuery
+/// service type from the mDNS port, on `ip`'s interface, makes every responder there (mdns-sd among them) multicast
+/// such an answer, which a running VRChat hears. Only that type, and over a second after mdns-sd last sent the
+/// address: it sends a record at most once a second, so an answer right after another (or after its announcements)
+/// comes without the A record, and VRChat drops it ("no SRV Records found"). mdns-sd's own browsing would not do
+/// either: it lists its own records as known answers, which suppresses them.
 fn ask_for_services(ip: std::net::Ipv4Addr) -> std::io::Result<()> {
     let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
     socket.set_reuse_address(true)?;
     socket.bind(&SocketAddr::from(([0, 0, 0, 0], 5353)).into())?;
     socket.set_multicast_if_v4(&ip)?;
-    let group = SocketAddr::from(([224, 0, 0, 251], 5353)).into();
-    for ty in ["_oscjson._tcp", "_osc._udp"] {
-        // ID 0, flags 0, one question, no records.
-        let mut query = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
-        for label in ty.split('.').chain(["local"]) {
-            query.push(label.len() as u8);
-            query.extend_from_slice(label.as_bytes());
-        }
-        // End of the name, type PTR, class IN (multicast answer).
-        query.extend_from_slice(&[0, 0, 12, 0, 1]);
-        socket.send_to(&query, &group)?;
+    // ID 0, flags 0, one question, no records.
+    let mut query = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    for label in ["_oscjson", "_tcp", "local"] {
+        query.push(label.len() as u8);
+        query.extend_from_slice(label.as_bytes());
     }
+    // End of the name, type PTR, class IN (multicast answer).
+    query.extend_from_slice(&[0, 0, 12, 0, 1]);
+    socket.send_to(&query, &SocketAddr::from(([224, 0, 0, 251], 5353)).into())?;
     Ok(())
 }
 

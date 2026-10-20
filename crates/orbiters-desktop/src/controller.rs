@@ -7,16 +7,17 @@ use crate::state::{self, CaptureState, Snapshot};
 use crate::worker::WorkerHandle;
 use orbiters_contracts::manifest::{ConsentInfo, WorldInfo};
 use orbiters_core::bundle::{self, SessionSummary};
-use orbiters_core::osc::{OscEvent, OscService};
-use orbiters_core::protocol::{SourceSpec, StartCapture, WorkerCommand, WorkerEvent};
+use orbiters_core::clock;
+use orbiters_core::osc::{OscEvent, OscService, OscValue, AVATAR_CHANGE, PARAMETERS_PREFIX};
+use orbiters_core::protocol::{OscSample, SourceSpec, StartCapture, WorkerCommand, WorkerEvent};
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::{LogEvent, LogWatcher, WorldState};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,12 +49,47 @@ pub struct RawCaptureSummary {
     pub created_utc: String,
 }
 
+/// OSC values VRChat sent: the latest of every address (a session's initial values) and, while a session
+/// records, the batch on its way to the worker.
+#[derive(Default)]
+struct OscValues {
+    latest: HashMap<String, (Vec<OscValue>, u64)>,
+    forwarding: bool,
+    pending: Vec<OscSample>,
+    last_flush: Option<Instant>,
+}
+
+/// One sample per argument (`index` only for messages with several).
+fn osc_samples<'a>(address: &'a str, values: &'a [OscValue], at_ns: u64, initial: bool) -> impl Iterator<Item = OscSample> + 'a {
+    let several = values.len() > 1;
+    values.iter().enumerate().map(move |(i, value)| OscSample {
+        at_ns,
+        address: address.to_string(),
+        index: several.then_some(i as u8),
+        value: value.clone(),
+        initial,
+    })
+}
+
+/// Initial values of a session: what VRChat's OSCQuery tree reported (fetched from `fetch_started_ns`), and the
+/// values that arrived since or that the tree does not list (head and wrist poses).
+fn initial_samples(vrchat: Vec<(String, OscValue)>, latest: &HashMap<String, (Vec<OscValue>, u64)>, fetch_started_ns: u64) -> Vec<OscSample> {
+    let mut merged: BTreeMap<String, Vec<OscValue>> = vrchat.into_iter().map(|(a, v)| (a, vec![v])).collect();
+    for (address, (values, at)) in latest {
+        if *at >= fetch_started_ns || !merged.contains_key(address) {
+            merged.insert(address.clone(), values.clone());
+        }
+    }
+    merged.iter().flat_map(|(address, values)| osc_samples(address, values, 0, true).collect::<Vec<_>>()).collect()
+}
+
 pub struct Controller {
     snapshot: Mutex<Snapshot>,
     /// What the interface reads: a copy of the snapshot with a light trail, swapped on every change.
     published: Mutex<Arc<Snapshot>>,
     worker: Mutex<Option<WorkerHandle>>,
     osc: Mutex<Option<OscService>>,
+    osc_values: Mutex<OscValues>,
     worker_log: Mutex<VecDeque<String>>,
     notices: Mutex<Vec<Notice>>,
     /// The source of the running capture, reused when a world change starts a new segment.
@@ -76,6 +112,7 @@ impl Controller {
             snapshot: Mutex::new(snapshot),
             worker: Mutex::new(None),
             osc: Mutex::new(None),
+            osc_values: Mutex::new(OscValues::default()),
             worker_log: Mutex::new(VecDeque::new()),
             notices: Mutex::new(Vec::new()),
             last_source: Mutex::new(None),
@@ -220,6 +257,7 @@ impl Controller {
         let on_exit = {
             let ctl = self.clone();
             move || {
+                ctl.osc_values.lock().unwrap().forwarding = false;
                 ctl.update(|s| {
                     s.worker.ready = false;
                     if s.is_capturing() {
@@ -283,6 +321,9 @@ impl Controller {
             }
             WorkerEvent::Stopped { manifest, reason, .. } => {
                 let restarting = reason == "restarted";
+                if !restarting {
+                    self.osc_values.lock().unwrap().forwarding = false;
+                }
                 self.update(|s| {
                     if !restarting {
                         s.capture.state = CaptureState::Idle;
@@ -346,7 +387,27 @@ impl Controller {
             s.capture.from_osc = from_osc;
         });
         *self.last_source.lock().unwrap() = (!importing).then_some(source);
-        if let Err(e) = self.send(&WorkerCommand::Start(cmd)) {
+        let record_parameters = !importing && settings.osc.enabled && settings.osc.record_parameters;
+        // VRChat only sends values when they change: its OSCQuery tree has the current ones.
+        let fetch_started = clock::now_ns();
+        let vrchat = if record_parameters { self.vrchat_values() } else { Vec::new() };
+        let sent = {
+            let mut osc = self.osc_values.lock().unwrap();
+            // The previous session (a world change restarts it) gets its last values first.
+            self.flush_osc(&mut osc);
+            osc.forwarding = false;
+            let sent = self.send(&WorkerCommand::Start(cmd));
+            if sent.is_ok() && record_parameters {
+                let samples = initial_samples(vrchat, &osc.latest, fetch_started);
+                osc.forwarding = true;
+                osc.pending.clear();
+                if !samples.is_empty() {
+                    let _ = self.send(&WorkerCommand::Osc { samples });
+                }
+            }
+            sent
+        };
+        if let Err(e) = sent {
             self.update(|s| {
                 s.capture.state = CaptureState::Idle;
                 s.capture.error = Some(e.to_string());
@@ -354,6 +415,42 @@ impl Controller {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// Current values from VRChat's OSCQuery service (empty when it is not running or not found).
+    fn vrchat_values(&self) -> Vec<(String, OscValue)> {
+        match self.osc.lock().unwrap().as_ref().map(|o| o.vrchat_values(Duration::from_millis(500))) {
+            Some(Ok(values)) => values,
+            Some(Err(e)) => {
+                eprintln!("current OSC values: {e:#}");
+                Vec::new()
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Sends the waiting OSC samples to the worker. Callers hold the values lock, which keeps batches in order.
+    fn flush_osc(self: &Shared, osc: &mut OscValues) {
+        osc.last_flush = Some(Instant::now());
+        if osc.pending.is_empty() {
+            return;
+        }
+        let samples = std::mem::take(&mut osc.pending);
+        if let Err(e) = self.send(&WorkerCommand::Osc { samples }) {
+            eprintln!("OSC values to the worker: {e:#}");
+        }
+    }
+
+    fn on_osc(self: &Shared, address: String, values: Vec<OscValue>, at_ns: u64) {
+        let mut osc = self.osc_values.lock().unwrap();
+        if osc.forwarding {
+            let samples: Vec<OscSample> = osc_samples(&address, &values, at_ns, false).collect();
+            osc.pending.extend(samples);
+            if osc.last_flush.is_none_or(|t| t.elapsed() >= Duration::from_millis(50)) {
+                self.flush_osc(&mut osc);
+            }
+        }
+        osc.latest.insert(address, (values, at_ns));
     }
 
     pub fn start_capture(self: &Shared, from_osc: bool) -> anyhow::Result<()> {
@@ -380,6 +477,9 @@ impl Controller {
             return Ok(());
         }
         self.update(|s| s.capture.state = CaptureState::Stopping);
+        let mut osc = self.osc_values.lock().unwrap();
+        self.flush_osc(&mut osc);
+        osc.forwarding = false;
         self.send(&WorkerCommand::Stop)
     }
 
@@ -419,6 +519,16 @@ impl Controller {
     }
 
     fn start_osc(self: &Shared) {
+        self.start_osc_with(true);
+    }
+
+    /// Runs `f` with the OSC service when it runs (tests point it at a stand-in VRChat).
+    pub fn with_osc<R>(&self, f: impl FnOnce(&OscService) -> R) -> Option<R> {
+        self.osc.lock().unwrap().as_ref().map(f)
+    }
+
+    /// Starts OSC; without `advertise` nothing listens beyond the loopback interface (tests).
+    pub fn start_osc_with(self: &Shared, advertise: bool) {
         *self.osc.lock().unwrap() = None;
         let settings = self.settings();
         if !settings.osc.enabled {
@@ -428,23 +538,33 @@ impl Controller {
         let ctl = self.clone();
         let parameter = settings.osc.record_parameter.clone();
         let wanted = vec![parameter.clone()];
-        let result = OscService::start("Orbiters desktop", &wanted, settings.osc.vrchat_port, true, move |e| {
-            if let OscEvent::Parameter { name, value } = &e {
-                if *name == parameter {
-                    let on = value.truthy();
-                    ctl.update(|s| s.osc.last_event = Some(format!("{name} = {}", if on { "on" } else { "off" })));
-                    let r = if on { ctl.start_capture(true) } else { ctl.stop_capture() };
-                    if let Err(err) = r {
-                        ctl.notify(NoticeKind::Error, err.to_string());
+        let result = OscService::start("Orbiters desktop", &wanted, settings.osc.vrchat_port, advertise, move |e, at_ns| {
+            let (address, values) = match e {
+                OscEvent::Parameter { name, value } => {
+                    if name == parameter {
+                        let on = value.truthy();
+                        ctl.update(|s| s.osc.last_event = Some(format!("{name} = {}", if on { "on" } else { "off" })));
+                        // Starting reads VRChat's current values over HTTP: not on the receiving thread.
+                        let c = ctl.clone();
+                        std::thread::spawn(move || {
+                            let r = if on { c.start_capture(true) } else { c.stop_capture() };
+                            if let Err(err) = r {
+                                c.notify(NoticeKind::Error, err.to_string());
+                            }
+                        });
                     }
+                    (format!("{PARAMETERS_PREFIX}{name}"), vec![value])
                 }
-            }
+                OscEvent::AvatarChanged { id } => (AVATAR_CHANGE.to_string(), vec![OscValue::Text(id)]),
+                OscEvent::Values { address, values } => (address, values),
+            };
+            ctl.on_osc(address, values, at_ns);
         });
         match result {
             Ok(service) => {
                 let (port, adv) = (service.osc_port, service.advertising());
                 *self.osc.lock().unwrap() = Some(service);
-                self.update(|s| s.osc = state::OscStatus { enabled: true, listening: true, advertising: adv, port: Some(port), last_event: None, error: None });
+                self.update(|s| s.osc = state::OscStatus { enabled: true, listening: true, advertising: adv, port: Some(port), ..Default::default() });
             }
             Err(e) => self.update(|s| s.osc = state::OscStatus { enabled: true, error: Some(e.to_string()), ..Default::default() }),
         }
@@ -633,6 +753,23 @@ fn spawn_watchers(ctl: Shared) {
                     });
                 }
 
+                // OSC: the last values of a quiet second reach the worker, and the status follows VRChat.
+                {
+                    let mut osc = ctl.osc_values.lock().unwrap();
+                    if osc.forwarding {
+                        ctl.flush_osc(&mut osc);
+                    }
+                    let values = osc.latest.len();
+                    drop(osc);
+                    let found = ctl.osc.lock().unwrap().as_ref().is_some_and(|o| o.vrchat_query().is_some());
+                    ctl.update_if(|s| {
+                        let changed = s.osc.values != values || s.osc.vrchat_found != found;
+                        s.osc.values = values;
+                        s.osc.vrchat_found = found;
+                        changed
+                    });
+                }
+
                 // Storage, every 30 s (it walks the session folders).
                 if tick.is_multiple_of(30) {
                     refresh_storage(&ctl);
@@ -642,4 +779,35 @@ fn spawn_watchers(ctl: Shared) {
             }
         })
         .expect("watchers thread");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_values_prefer_fresh_ones() {
+        let mut latest = HashMap::new();
+        latest.insert("/avatar/parameters/Old".to_string(), (vec![OscValue::Int(1)], 10));
+        latest.insert("/avatar/parameters/Fresh".to_string(), (vec![OscValue::Float(0.9)], 120));
+        latest.insert("/tracking/vrsystem/head/pose".to_string(), (vec![OscValue::Float(0.0), OscValue::Float(1.6)], 50));
+        let vrchat = vec![
+            ("/avatar/parameters/Old".to_string(), OscValue::Int(5)),
+            ("/avatar/parameters/Fresh".to_string(), OscValue::Float(0.1)),
+            ("/avatar/change".to_string(), OscValue::Text("avtr_1".into())),
+        ];
+        let samples = initial_samples(vrchat, &latest, 100);
+        let short: Vec<(&str, Option<u8>, &OscValue)> = samples.iter().map(|s| (s.address.as_str(), s.index, &s.value)).collect();
+        assert_eq!(
+            short,
+            vec![
+                ("/avatar/change", None, &OscValue::Text("avtr_1".into())),
+                ("/avatar/parameters/Fresh", None, &OscValue::Float(0.9)),
+                ("/avatar/parameters/Old", None, &OscValue::Int(5)),
+                ("/tracking/vrsystem/head/pose", Some(0), &OscValue::Float(0.0)),
+                ("/tracking/vrsystem/head/pose", Some(1), &OscValue::Float(1.6)),
+            ]
+        );
+        assert!(samples.iter().all(|s| s.initial && s.at_ns == 0));
+    }
 }

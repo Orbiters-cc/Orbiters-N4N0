@@ -32,6 +32,10 @@ pub struct OscStatus {
     pub port: Option<u16>,
     pub last_event: Option<String>,
     pub error: Option<String>,
+    /// VRChat's own OSCQuery service was found (current values can be read at session start).
+    pub vrchat_found: bool,
+    /// Distinct OSC addresses VRChat sent values for (avatar parameters, poses).
+    pub values: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

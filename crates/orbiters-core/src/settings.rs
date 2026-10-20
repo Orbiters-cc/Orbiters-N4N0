@@ -44,6 +44,8 @@ pub struct OscSettings {
     pub record_parameter: String,
     /// Port VRChat listens on (camera and HUD messages are sent there).
     pub vrchat_port: u16,
+    /// Record every avatar parameter VRChat sends (face tracking, gestures, visemes, locomotion) with sessions.
+    pub record_parameters: bool,
 }
 
 impl Default for KeyframeSettings {
@@ -54,7 +56,7 @@ impl Default for KeyframeSettings {
 
 impl Default for OscSettings {
     fn default() -> Self {
-        Self { enabled: true, record_parameter: "OrbitersRecord".into(), vrchat_port: 9000 }
+        Self { enabled: true, record_parameter: "OrbitersRecord".into(), vrchat_port: 9000, record_parameters: true }
     }
 }
 

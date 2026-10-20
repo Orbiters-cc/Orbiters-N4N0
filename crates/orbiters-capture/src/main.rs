@@ -6,6 +6,7 @@
 //! * `orbiters-capture verify <raw capture folder> [--frames N]`
 //! * `orbiters-capture list-sources`
 
+mod performance;
 mod session;
 mod sources;
 mod verify;
@@ -292,7 +293,19 @@ fn run_worker() -> anyhow::Result<()> {
                 }
                 WorkerCommand::Stop => finish(&mut current, &mut out, "stopped"),
                 WorkerCommand::Pause => paused = true,
-                WorkerCommand::Resume => paused = false,
+                WorkerCommand::Resume => {
+                    if paused {
+                        if let Some((session, _)) = current.as_mut() {
+                            session.resume();
+                        }
+                    }
+                    paused = false;
+                }
+                WorkerCommand::Osc { samples } => {
+                    if let Some((session, _)) = current.as_mut() {
+                        session.osc(&samples, paused);
+                    }
+                }
                 WorkerCommand::SetWorld { world } => {
                     if let Some((session, _)) = current.as_mut() {
                         session.set_world(world);

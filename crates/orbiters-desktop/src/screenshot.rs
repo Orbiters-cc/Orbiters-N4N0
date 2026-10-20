@@ -1,7 +1,8 @@
 //! `orbiters-desktop --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]`
 //! renders the interface offscreen in several states and writes one PNG per state, for visual review without a
 //! window. The controller is not started: the snapshots are made up, the session library is real. `--only e2e`
-//! instead records a real test pattern through the worker, driven by synthetic clicks.
+//! instead records a real test pattern through the worker, driven by synthetic clicks, with avatar parameters
+//! from a stand-in VRChat (OSC on the loopback interface, current values from its OSCQuery tree).
 
 use crate::app::App;
 use crate::backend::{Ctl, Local};
@@ -220,6 +221,7 @@ fn e2e(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f
     backend.attach(&ctx);
     let mut app = App::offline(backend);
     app.skip_splash();
+    let vrchat = StandInVrchat::start(&ctl)?;
     let before = controller::list_sessions(&settings.sessions_dir).len();
     let start = std::time::Instant::now();
     // Where the capture page puts its Test pattern button and the record button at 1280×820.
@@ -238,6 +240,7 @@ fn e2e(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f
             input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
             release = Some(p);
         }
+        vrchat.tick(t);
         let shot = if shots.first().is_some_and(|(at, _)| t >= *at) { Some(shots.remove(0).1) } else { None };
         let image = gpu.frame(
             &ctx,
@@ -267,9 +270,92 @@ fn e2e(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f
             st.keyframes,
             st.depth_frames
         );
+        vrchat.check(&s.dir, s.manifest.performance.parameter_changes)?;
     }
     ctl.shutdown();
     Ok(())
+}
+
+/// What VRChat would do for the e2e run: an OSCQuery tree with current values (read once, when recording starts)
+/// and parameter changes sent to the app's OSC port while it records.
+struct StandInVrchat {
+    socket: std::net::UdpSocket,
+    port: u16,
+    sent: std::cell::Cell<u32>,
+}
+
+impl StandInVrchat {
+    fn start(ctl: &controller::Shared) -> anyhow::Result<Self> {
+        use std::io::{Read, Write};
+        ctl.start_osc_with(false);
+        let port = ctl.view().osc.port.context("OSC did not start")?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        ctl.with_osc(|o| o.set_vrchat_query(Some(addr)));
+        std::thread::spawn(move || {
+            let tree = serde_json::json!({ "FULL_PATH": "/avatar", "ACCESS": 0, "CONTENTS": {
+                "change": { "FULL_PATH": "/avatar/change", "TYPE": "s", "ACCESS": 3, "VALUE": ["avtr_e2e"] },
+                "parameters": { "FULL_PATH": "/avatar/parameters", "ACCESS": 0, "CONTENTS": {
+                    "Viseme": { "FULL_PATH": "/avatar/parameters/Viseme", "TYPE": "i", "ACCESS": 1, "VALUE": [7] },
+                    "Toggle": { "FULL_PATH": "/avatar/parameters/Toggle", "TYPE": "T", "ACCESS": 3, "VALUE": [true] }
+                } }
+            } })
+            .to_string();
+            for stream in listener.incoming().flatten() {
+                let mut s = stream;
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{tree}", tree.len()).as_bytes());
+            }
+        });
+        Ok(Self { socket: std::net::UdpSocket::bind("127.0.0.1:0")?, port, sent: std::cell::Cell::new(0) })
+    }
+
+    /// Between 2 and 5 s: a jaw opening and closing every frame, and a head pose every 4th.
+    fn tick(&self, t: f64) {
+        use rosc::{OscMessage, OscPacket, OscType};
+        if !(2.0..5.0).contains(&t) {
+            return;
+        }
+        let n = self.sent.get();
+        self.sent.set(n + 1);
+        let send = |addr: &str, args: Vec<OscType>| {
+            let packet = OscPacket::Message(OscMessage { addr: addr.into(), args });
+            let _ = self.socket.send_to(&rosc::encoder::encode(&packet).unwrap(), ("127.0.0.1", self.port));
+        };
+        send("/avatar/parameters/v2/JawOpen", vec![OscType::Float((t * 3.0).sin().abs() as f32)]);
+        if n % 4 == 0 {
+            let pose = [0.1, 1.6, 0.2, 0.0, (t * 10.0) as f32, 0.0];
+            send("/tracking/vrsystem/head/pose", pose.iter().map(|v| OscType::Float(*v as f32)).collect());
+        }
+    }
+
+    /// The session holds the initial values, every jaw change and the head poses.
+    fn check(&self, dir: &std::path::Path, counted: u64) -> anyhow::Result<()> {
+        use orbiters_contracts::performance::{self as perf, parameters};
+        let bin = std::fs::read(dir.join(perf::PARAMETERS_FILE)).context("parameters.bin")?;
+        let table: parameters::Table = serde_json::from_slice(&std::fs::read(dir.join(perf::PARAMETERS_TABLE)).context("parameters.json")?)?;
+        let changes = parameters::read(&bin)?;
+        let name = |c: &parameters::Change| table.parameters[c.id as usize].name.clone();
+        let initial: Vec<String> =
+            changes.iter().filter(|c| c.flags & parameters::flags::INITIAL != 0).map(|c| format!("{}={}", name(c), c.value.as_f32())).collect();
+        let jaw = changes.iter().filter(|c| name(c) == "v2/JawOpen").count();
+        let pose = changes.iter().filter(|c| name(c).starts_with("/tracking/vrsystem/head/pose[")).count();
+        println!(
+            "parameters: {} changes ({counted} in the manifest), initial {initial:?}, {jaw} jaw, {pose} head pose values, avatars {:?}",
+            changes.len(),
+            table.avatars
+        );
+        let sent = self.sent.get() as usize;
+        anyhow::ensure!(counted as usize == changes.len(), "manifest counts {counted}, file has {}", changes.len());
+        anyhow::ensure!(initial.contains(&"Viseme=7".to_string()) && initial.contains(&"Toggle=1".to_string()), "initial values {initial:?}");
+        anyhow::ensure!(jaw == sent, "{jaw} jaw changes recorded, {sent} sent");
+        anyhow::ensure!(pose == sent.div_ceil(4) * 6, "{pose} head pose values for {sent} frames");
+        anyhow::ensure!(table.avatars.first().is_some_and(|a| a.id == "avtr_e2e" && a.time_ns == 0), "avatar {:?}", table.avatars);
+        let times: Vec<u64> = changes.iter().filter(|c| c.flags == 0).map(|c| c.time_ns).collect();
+        anyhow::ensure!(times.windows(2).all(|w| w[0] <= w[1]) && times.first().is_some_and(|t| *t > 500_000_000), "times {:?}", &times[..times.len().min(5)]);
+        Ok(())
+    }
 }
 
 fn idle_snapshot(settings: &Settings, sessions: &[orbiters_core::bundle::SessionSummary]) -> Snapshot {

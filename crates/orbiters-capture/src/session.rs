@@ -2,14 +2,16 @@
 //! and writes the session bundle. Keyframe images are encoded on a small thread pool so capture never waits
 //! on disk or compression; when the pool falls behind, keyframes are dropped (and counted) instead.
 
+use crate::performance::ParameterStream;
 use crossbeam_channel::{bounded, Receiver as ChanReceiver, Sender as ChanSender, TrySendError};
 use orbiters_contracts::frame_record::{record_flags, FrameRecord};
 use orbiters_contracts::image::{ImageView, PixelOrder};
 use orbiters_contracts::manifest::{depth_file, SessionManifest, StorageQuality};
 use orbiters_contracts::{depth, qoi, strip};
 use orbiters_core::bundle::BundleWriter;
+use orbiters_core::clock;
 use orbiters_core::keyframes::{self, KeyframeSelector};
-use orbiters_core::protocol::{CaptureStats, StartCapture};
+use orbiters_core::protocol::{CaptureStats, OscSample, StartCapture};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -102,7 +104,9 @@ pub struct CaptureSession {
     selector: KeyframeSelector,
     pool: Pool,
     pub stats: CaptureStats,
-    started: Instant,
+    /// Session start on the shared clock: every stream's `time_ns` counts from here.
+    epoch_ns: u64,
+    parameters: ParameterStream,
     frame_index: u64,
     prefer_flipped: bool,
     previous: Option<(u32, [f32; 12], f32)>,
@@ -134,12 +138,14 @@ impl CaptureSession {
             writer.use_game_time_duration();
         }
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 6) / 2 + 1;
+        let parameters = ParameterStream::new(writer.dir());
         Ok(Self {
             writer,
             selector: KeyframeSelector::new(cmd.keyframes.clone(), cmd.quality == StorageQuality::Lossless),
             pool: Pool::new(threads),
             stats: CaptureStats::default(),
-            started: Instant::now(),
+            epoch_ns: clock::now_ns(),
+            parameters,
             frame_index: 0,
             prefer_flipped: false,
             previous: None,
@@ -157,16 +163,32 @@ impl CaptureSession {
         self.writer.manifest_mut().world = world;
     }
 
+    /// Nanoseconds since the session started.
+    pub fn time_ns(&self) -> u64 {
+        clock::now_ns().saturating_sub(self.epoch_ns)
+    }
+
+    /// Records OSC values from VRChat (avatar parameters, face tracking, head and wrist poses).
+    pub fn osc(&mut self, samples: &[OscSample], paused: bool) {
+        for sample in samples {
+            if let Err(e) = self.parameters.add(self.epoch_ns, sample, paused) {
+                self.stats.last_error = Some(format!("parameters: {e:#}"));
+            }
+        }
+    }
+
+    /// Recording goes on after a pause: writes what changed meanwhile.
+    pub fn resume(&mut self) {
+        if let Err(e) = self.parameters.resume(self.time_ns()) {
+            self.stats.last_error = Some(format!("parameters: {e:#}"));
+        }
+    }
+
     /// Processes one frame (called with the source's borrowed view).
     pub fn process(&mut self, view: ImageView<'_>) -> anyhow::Result<()> {
         let t0 = Instant::now();
-        let mut record = FrameRecord {
-            frame_index: self.frame_index,
-            capture_time_ns: self.started.elapsed().as_nanos() as u64,
-            width: view.width,
-            height: view.height,
-            ..Default::default()
-        };
+        let mut record =
+            FrameRecord { frame_index: self.frame_index, capture_time_ns: self.time_ns(), width: view.width, height: view.height, ..Default::default() };
         self.frame_index += 1;
         self.stats.frames += 1;
         self.stats.width = view.width;
@@ -276,16 +298,23 @@ impl CaptureSession {
             self.fps_window = (Instant::now(), self.stats.frames);
         }
         self.stats.decode_ms = if self.stats.frames > 0 { (self.decode_time_total / self.stats.frames as f64 * 1000.0) as f32 } else { 0.0 };
-        self.stats.bytes = self.writer.manifest().stats.bytes + self.pool.written.load(Ordering::Relaxed);
-        self.stats.elapsed_s = self.started.elapsed().as_secs_f64();
+        self.stats.bytes = self.writer.manifest().stats.bytes + self.pool.written.load(Ordering::Relaxed) + self.parameters.changes * 16;
+        self.stats.elapsed_s = self.time_ns() as f64 / 1e9;
+        self.stats.parameter_changes = self.parameters.changes;
+        if let Err(e) = self.parameters.flush() {
+            self.stats.last_error = Some(format!("parameters: {e:#}"));
+        }
         &self.stats
     }
 
     /// Waits for pending files and writes the final manifest.
     pub fn finish(self) -> anyhow::Result<(PathBuf, SessionManifest)> {
-        let Self { mut writer, pool, .. } = self;
+        let Self { mut writer, pool, parameters, .. } = self;
         let (written, errors) = pool.finish();
         writer.add_bytes(written);
+        let (changes, bytes) = parameters.finish()?;
+        writer.manifest_mut().performance.parameter_changes = changes;
+        writer.add_bytes(bytes);
         if errors > 0 {
             eprintln!("{errors} file(s) could not be written");
         }

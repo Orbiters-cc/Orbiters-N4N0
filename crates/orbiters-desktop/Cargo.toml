@@ -21,6 +21,7 @@ time = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true }
 png = { workspace = true }
+rosc = { workspace = true }
 rfd = "0.17"
 sysinfo = "0.37"
 trash = "5"

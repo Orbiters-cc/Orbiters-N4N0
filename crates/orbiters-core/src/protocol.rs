@@ -2,6 +2,7 @@
 //! The worker logs to stderr. Both sides must run the same app version (`Ready.version`).
 
 use crate::contracts::manifest::{CaptureMode, ConsentInfo, SessionManifest, StorageQuality, WorldInfo};
+use crate::osc::OscValue;
 use crate::settings::KeyframeSettings;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -20,7 +21,25 @@ pub enum WorkerCommand {
     SetWorld {
         world: Option<WorldInfo>,
     },
+    /// OSC values VRChat sent, for the running session's `parameters.bin`.
+    Osc {
+        samples: Vec<OscSample>,
+    },
     Quit,
+}
+
+/// One OSC value with the time it arrived ([`crate::clock::now_ns`]). Messages with several arguments
+/// (`/tracking/vrsystem/head/pose`) give one sample per argument (`index`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OscSample {
+    pub at_ns: u64,
+    pub address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u8>,
+    pub value: OscValue,
+    /// Known before the session started (written at time 0).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub initial: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -82,6 +101,8 @@ pub struct CaptureStats {
     pub flipped: bool,
     pub last_error: Option<String>,
     pub paused: bool,
+    /// Avatar parameter changes recorded from OSC.
+    pub parameter_changes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -130,5 +151,17 @@ mod tests {
         let e = WorkerEvent::Stats(CaptureStats { frames: 3, ..Default::default() });
         assert!(e.to_line().starts_with(r#"{"event":"stats","frames":3"#));
         assert_eq!(serde_json::from_str::<WorkerCommand>(r#"{"cmd":"stop"}"#).unwrap(), WorkerCommand::Stop);
+        let osc = WorkerCommand::Osc {
+            samples: vec![
+                OscSample { at_ns: 5, address: "/avatar/parameters/Viseme".into(), index: None, value: OscValue::Int(3), initial: true },
+                OscSample { at_ns: 9, address: "/tracking/vrsystem/head/pose".into(), index: Some(4), value: OscValue::Float(90.0), initial: false },
+            ],
+        };
+        let line = osc.to_line();
+        assert_eq!(
+            line,
+            r#"{"cmd":"osc","samples":[{"at_ns":5,"address":"/avatar/parameters/Viseme","value":{"type":"int","value":3},"initial":true},{"at_ns":9,"address":"/tracking/vrsystem/head/pose","index":4,"value":{"type":"float","value":90.0}}]}"#
+        );
+        assert_eq!(serde_json::from_str::<WorkerCommand>(&line).unwrap(), osc);
     }
 }

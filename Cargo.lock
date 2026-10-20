@@ -2702,6 +2702,7 @@ dependencies = [
  "png",
  "raw-window-handle",
  "rfd",
+ "rosc",
  "serde",
  "serde_json",
  "sysinfo",

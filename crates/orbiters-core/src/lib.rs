@@ -1,6 +1,7 @@
-//! Shared logic of Orbiters desktop, used by the shell (Tauri app) and the workers.
+//! Shared logic of Orbiters desktop, used by the app and its workers.
 
 pub mod bundle;
+pub mod clock;
 pub mod keyframes;
 pub mod osc;
 pub mod paths;

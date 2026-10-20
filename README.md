@@ -39,6 +39,9 @@ consent notice, toasts, sessions, session detail, settings, splash):
 target/release/orbiters-desktop --screenshot <out folder> [--sessions <sessions folder>] [--raw <raw captures folder>] [--scale 1.5] [--only sessions]
 ```
 
+`--only e2e` instead records a real test pattern through the capture worker, driven by synthetic clicks (Test
+pattern, then the record button), and writes the session into the sessions folder.
+
 ## Command-line tools
 
 ```sh

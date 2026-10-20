@@ -1,6 +1,7 @@
 //! `orbiters-desktop --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]`
 //! renders the interface offscreen in several states and writes one PNG per state, for visual review without a
-//! window. The controller is not started: the snapshots are made up, the session library is real.
+//! window. The controller is not started: the snapshots are made up, the session library is real. `--only e2e`
+//! instead records a real test pattern through the worker, driven by synthetic clicks.
 
 use crate::app::App;
 use crate::controller::{self, Controller};
@@ -46,6 +47,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     settings.consent_acknowledged = true;
     std::fs::create_dir_all(&out)?;
+    if only.as_deref() == Some("e2e") {
+        return e2e(&mut Offscreen::new()?, &out, &settings, scale);
+    }
 
     let sessions = controller::list_sessions(&settings.sessions_dir);
     let trail = sessions.first().and_then(|s| controller::session_trail(&s.dir).ok()).unwrap_or_else(spiral);
@@ -200,6 +204,68 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, path: &std::path::Path
         // Background jobs (session list, thumbnails) land between frames.
         std::thread::sleep(Duration::from_millis(3));
     }
+    Ok(())
+}
+
+/// `--only e2e`: a real test-pattern recording through the capture worker, driven by synthetic clicks in real time
+/// (Test pattern, then the record button to stop). Writes `e2e-recording.png` and `e2e-saved.png`; the session
+/// lands in the sessions folder.
+fn e2e(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {
+    let ctx = egui::Context::default();
+    orbiters_ui::install(&ctx);
+    let ctl = Controller::new(settings.clone());
+    ctl.attach(&ctx);
+    let mut app = App::offline(ctl.clone());
+    app.skip_splash();
+    let before = controller::list_sessions(&settings.sessions_dir).len();
+    let start = std::time::Instant::now();
+    // Where the capture page puts its Test pattern button and the record button at 1280×820.
+    let mut clicks = vec![(1.0, pos2(1188.0, 102.0)), (6.0, pos2(511.0, 415.0))];
+    let mut shots = vec![(5.0, "e2e-recording"), (8.5, "e2e-saved")];
+    let mut release: Option<Pos2> = None;
+    while start.elapsed().as_secs_f64() < 9.0 {
+        let t = start.elapsed().as_secs_f64();
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))), time: Some(t), ..Default::default() };
+        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(scale), focused: Some(true), ..Default::default() });
+        if let Some(p) = release.take() {
+            input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        } else if clicks.first().is_some_and(|(at, _)| t >= *at) {
+            let (_, p) = clicks.remove(0);
+            input.events.push(Event::PointerMoved(p));
+            input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+            release = Some(p);
+        }
+        let shot = if shots.first().is_some_and(|(at, _)| t >= *at) { Some(shots.remove(0).1) } else { None };
+        let image = gpu.frame(
+            &ctx,
+            input,
+            |ui| {
+                app.logic_offline(ui.ctx());
+                app.draw(ui);
+            },
+            shot.is_some(),
+        )?;
+        if let (Some(name), Some(image)) = (shot, image) {
+            let path = out.join(format!("{name}.png"));
+            save_png(&path, &image)?;
+            println!("{}", path.display());
+        }
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    let after = controller::list_sessions(&settings.sessions_dir);
+    println!("sessions: {before} before, {} after", after.len());
+    if let Some(s) = after.first() {
+        let st = &s.manifest.stats;
+        println!(
+            "newest: {} ({} frames, {} strips decoded, {} keyframes, {} depth frames)",
+            s.dir.display(),
+            st.frames,
+            st.strip_ok,
+            st.keyframes,
+            st.depth_frames
+        );
+    }
+    ctl.shutdown();
     Ok(())
 }
 

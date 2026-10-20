@@ -2,11 +2,13 @@
 //! and writes the session bundle. Keyframe images are encoded on a small thread pool so capture never waits
 //! on disk or compression; when the pool falls behind, keyframes are dropped (and counted) instead.
 
+use crate::audio::{AudioRecorder, AudioSource};
 use crate::performance::ParameterStream;
 use crossbeam_channel::{bounded, Receiver as ChanReceiver, Sender as ChanSender, TrySendError};
 use orbiters_contracts::frame_record::{record_flags, FrameRecord};
 use orbiters_contracts::image::{ImageView, PixelOrder};
 use orbiters_contracts::manifest::{depth_file, SessionManifest, StorageQuality};
+use orbiters_contracts::performance::{self as perf, audio::TrackKind};
 use orbiters_contracts::{depth, qoi, strip};
 use orbiters_core::bundle::BundleWriter;
 use orbiters_core::clock;
@@ -107,6 +109,7 @@ pub struct CaptureSession {
     /// Session start on the shared clock: every stream's `time_ns` counts from here.
     epoch_ns: u64,
     parameters: ParameterStream,
+    audio: Vec<AudioRecorder>,
     frame_index: u64,
     prefer_flipped: bool,
     previous: Option<(u32, [f32; 12], f32)>,
@@ -139,13 +142,35 @@ impl CaptureSession {
         }
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 6) / 2 + 1;
         let parameters = ParameterStream::new(writer.dir());
+        let epoch_ns = clock::now_ns();
+        let mut stats = CaptureStats::default();
+        let mut audio = Vec::new();
+        let p = &cmd.performance;
+        let wanted = [
+            p.mic.as_ref().map(|id| (TrackKind::Mic, AudioSource::Mic((!id.is_empty()).then(|| id.clone())))),
+            p.game_audio_pid.map(|pid| (TrackKind::Game, AudioSource::Process(pid))),
+        ];
+        for (kind, source) in wanted.into_iter().flatten() {
+            match AudioRecorder::start(kind, source, writer.dir(), epoch_ns) {
+                Ok(r) => {
+                    eprintln!("recording {}", r.source_name);
+                    audio.push(r);
+                }
+                Err(e) => {
+                    let what = if kind == TrackKind::Mic { "microphone" } else { "VRChat sound" };
+                    eprintln!("{what}: {e:#}");
+                    stats.last_error = Some(format!("Could not record the {what}: {e:#}"));
+                }
+            }
+        }
         Ok(Self {
             writer,
             selector: KeyframeSelector::new(cmd.keyframes.clone(), cmd.quality == StorageQuality::Lossless),
             pool: Pool::new(threads),
-            stats: CaptureStats::default(),
-            epoch_ns: clock::now_ns(),
+            stats,
+            epoch_ns,
             parameters,
+            audio,
             frame_index: 0,
             prefer_flipped: false,
             previous: None,
@@ -174,6 +199,13 @@ impl CaptureSession {
             if let Err(e) = self.parameters.add(self.epoch_ns, sample, paused) {
                 self.stats.last_error = Some(format!("parameters: {e:#}"));
             }
+        }
+    }
+
+    /// While paused, the audio tracks record silence.
+    pub fn set_audio_paused(&self, paused: bool) {
+        for a in &self.audio {
+            a.set_paused(paused);
         }
     }
 
@@ -301,6 +333,8 @@ impl CaptureSession {
         self.stats.bytes = self.writer.manifest().stats.bytes + self.pool.written.load(Ordering::Relaxed) + self.parameters.changes * 16;
         self.stats.elapsed_s = self.time_ns() as f64 / 1e9;
         self.stats.parameter_changes = self.parameters.changes;
+        self.stats.mic_level = self.audio.iter().find(|a| a.kind == TrackKind::Mic).map(AudioRecorder::take_level);
+        self.stats.game_level = self.audio.iter().find(|a| a.kind == TrackKind::Game).map(AudioRecorder::take_level);
         if let Err(e) = self.parameters.flush() {
             self.stats.last_error = Some(format!("parameters: {e:#}"));
         }
@@ -309,12 +343,26 @@ impl CaptureSession {
 
     /// Waits for pending files and writes the final manifest.
     pub fn finish(self) -> anyhow::Result<(PathBuf, SessionManifest)> {
-        let Self { mut writer, pool, parameters, .. } = self;
+        let Self { mut writer, pool, parameters, audio, .. } = self;
         let (written, errors) = pool.finish();
         writer.add_bytes(written);
         let (changes, bytes) = parameters.finish()?;
         writer.manifest_mut().performance.parameter_changes = changes;
         writer.add_bytes(bytes);
+        let mut tracks = perf::audio::Audio::new();
+        for recorder in audio {
+            match recorder.finish() {
+                Ok(track) => {
+                    writer.add_bytes(58 + track.frames * track.channels as u64 * 4);
+                    writer.manifest_mut().performance.audio.push(track.file.clone());
+                    tracks.tracks.push(track);
+                }
+                Err(e) => eprintln!("audio: {e:#}"),
+            }
+        }
+        if !tracks.tracks.is_empty() {
+            std::fs::write(writer.dir().join(perf::AUDIO_FILE), serde_json::to_vec_pretty(&tracks)?)?;
+        }
         if errors > 0 {
             eprintln!("{errors} file(s) could not be written");
         }
@@ -343,6 +391,7 @@ mod tests {
             world: None,
             consent: ConsentInfo::default(),
             folder_name: Some("pattern".into()),
+            performance: Default::default(),
         };
         let mut src = TestPatternSource::new(1280, 720, 30.0, 4, 60, false);
         let mut session = CaptureSession::start(&cmd, src.describe(), &src.folder_hint()).unwrap();

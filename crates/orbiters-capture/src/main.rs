@@ -6,6 +6,7 @@
 //! * `orbiters-capture verify <raw capture folder> [--frames N]`
 //! * `orbiters-capture list-sources`
 
+mod audio;
 mod performance;
 mod session;
 mod sources;
@@ -13,7 +14,7 @@ mod verify;
 
 use crossbeam_channel::RecvTimeoutError;
 use orbiters_contracts::manifest::{CaptureMode, ConsentInfo, StorageQuality};
-use orbiters_core::protocol::{SourceSpec, SpoutSourceInfo, StartCapture, WorkerCommand, WorkerEvent};
+use orbiters_core::protocol::{AudioDeviceInfo, PerformanceSpec, SourceSpec, SpoutSourceInfo, StartCapture, WorkerCommand, WorkerEvent};
 use orbiters_core::settings::KeyframeSettings;
 use session::CaptureSession;
 use sources::{FrameSource, Next, RawSequenceSource, TestPatternSource};
@@ -31,6 +32,9 @@ fn main() {
         Some("list-sources") => {
             for s in list_sources() {
                 println!("{}  {}x{}  DXGI {}  {}", s.name, s.width, s.height, s.format, s.description);
+            }
+            for m in list_mics() {
+                println!("mic: {}{}  {}", m.name, if m.default { " (default)" } else { "" }, m.id);
             }
             Ok(())
         }
@@ -62,6 +66,10 @@ fn list_sources() -> Vec<SpoutSourceInfo> {
     {
         Vec::new()
     }
+}
+
+fn list_mics() -> Vec<AudioDeviceInfo> {
+    audio::list_mics().into_iter().map(|d| AudioDeviceInfo { id: d.id, name: d.name, default: d.default }).collect()
 }
 
 fn open_source(spec: &SourceSpec) -> anyhow::Result<Box<dyn FrameSource>> {
@@ -149,6 +157,10 @@ fn cli_record(args: &[String]) -> anyhow::Result<()> {
         world: None,
         consent: ConsentInfo::default(),
         folder_name: flag(args, "--name").map(String::from),
+        performance: PerformanceSpec {
+            mic: flag(args, "--mic").map(String::from),
+            game_audio_pid: flag(args, "--game-audio-pid").and_then(|p| p.parse().ok()),
+        },
     };
     let mut source = match &source_spec {
         SourceSpec::TestPattern { width, height, fps, depth_every, frames } => {
@@ -276,7 +288,7 @@ fn run_worker() -> anyhow::Result<()> {
         };
         if let Some(command) = command {
             match command {
-                WorkerCommand::ListSources => out.emit(&WorkerEvent::Sources { spout: list_sources() }),
+                WorkerCommand::ListSources => out.emit(&WorkerEvent::Sources { spout: list_sources(), mics: list_mics() }),
                 WorkerCommand::Start(start) => {
                     finish(&mut current, &mut out, "restarted");
                     match open_source(&start.source).and_then(|src| {
@@ -292,12 +304,18 @@ fn run_worker() -> anyhow::Result<()> {
                     }
                 }
                 WorkerCommand::Stop => finish(&mut current, &mut out, "stopped"),
-                WorkerCommand::Pause => paused = true,
+                WorkerCommand::Pause => {
+                    paused = true;
+                    if let Some((session, _)) = current.as_mut() {
+                        session.set_audio_paused(true);
+                    }
+                }
                 WorkerCommand::Resume => {
-                    if paused {
-                        if let Some((session, _)) = current.as_mut() {
+                    if let Some((session, _)) = current.as_mut() {
+                        if paused {
                             session.resume();
                         }
+                        session.set_audio_paused(false);
                     }
                     paused = false;
                 }

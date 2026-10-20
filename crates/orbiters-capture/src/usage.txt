@@ -2,10 +2,11 @@ orbiters-capture: the capture worker of Orbiters desktop
 
   worker                        JSON-lines protocol on stdin/stdout (used by the app)
   record --source <src> [--out <sessions folder>] [--quality lossless|high|compact]
-         [--frames N] [--seconds S] [--name <folder name>]
+         [--frames N] [--seconds S] [--name <folder name>] [--mic <id, empty for the default>]
+         [--game-audio-pid <pid>]
                                 src = spout[:name] | raw:<raw capture folder> | test
   send-test [--name <sender>] [--width W] [--height H] [--fps F] [--depth-every N] [--seconds S]
                                 publish a test pattern with valid strips as a Spout sender
   verify <raw capture folder> [--frames N]
                                 decode a raw capture and compare it with its ground truth
-  list-sources                  list Spout senders
+  list-sources                  list Spout senders and microphones

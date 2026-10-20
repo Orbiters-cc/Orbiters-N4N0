@@ -64,6 +64,28 @@ pub struct StartCapture {
     pub consent: ConsentInfo,
     /// Folder name; defaults to "<world or source> <date time>".
     pub folder_name: Option<String>,
+    /// What to record besides the frames.
+    #[serde(default)]
+    pub performance: PerformanceSpec,
+}
+
+/// Performance streams of a session (avatar parameters arrive as `Osc` commands).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PerformanceSpec {
+    /// Record a microphone: its endpoint id, empty for the Windows default.
+    pub mic: Option<String>,
+    /// Record what this process (VRChat) plays.
+    pub game_audio_pid: Option<u32>,
+}
+
+/// A microphone the worker can record.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AudioDeviceInfo {
+    pub id: String,
+    pub name: String,
+    /// The Windows default microphone.
+    pub default: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -103,18 +125,40 @@ pub struct CaptureStats {
     pub paused: bool,
     /// Avatar parameter changes recorded from OSC.
     pub parameter_changes: u64,
+    /// Peak level (0–1) of the microphone since the last stats; `None` when it is not recorded.
+    pub mic_level: Option<f32>,
+    /// Peak level of VRChat's sound since the last stats; `None` when it is not recorded.
+    pub game_level: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum WorkerEvent {
-    Ready { version: String },
-    Sources { spout: Vec<SpoutSourceInfo> },
-    Started { session_dir: PathBuf, source: String },
+    Ready {
+        version: String,
+    },
+    Sources {
+        spout: Vec<SpoutSourceInfo>,
+        #[serde(default)]
+        mics: Vec<AudioDeviceInfo>,
+    },
+    Started {
+        session_dir: PathBuf,
+        source: String,
+    },
     Stats(CaptureStats),
-    Stopped { session_dir: PathBuf, manifest: Box<SessionManifest>, reason: String },
-    Error { message: String },
-    Log { level: String, message: String },
+    Stopped {
+        session_dir: PathBuf,
+        manifest: Box<SessionManifest>,
+        reason: String,
+    },
+    Error {
+        message: String,
+    },
+    Log {
+        level: String,
+        message: String,
+    },
 }
 
 impl WorkerEvent {
@@ -144,6 +188,7 @@ mod tests {
             world: None,
             consent: ConsentInfo::default(),
             folder_name: None,
+            performance: PerformanceSpec::default(),
         });
         let line = c.to_line();
         assert!(line.contains(r#""cmd":"start""#) && line.contains(r#""kind":"spout""#));

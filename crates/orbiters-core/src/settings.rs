@@ -17,6 +17,7 @@ pub struct Settings {
     /// Disk space (GB) the session library may use; capture stops when it is reached. 0 = unlimited.
     pub storage_limit_gb: f64,
     pub osc: OscSettings,
+    pub performance: PerformanceSettings,
     /// Start a new session automatically when VRChat changes world while recording.
     pub split_on_world_change: bool,
     /// The person capturing acknowledged the consent notice (own worlds or creator consent, private results).
@@ -48,6 +49,18 @@ pub struct OscSettings {
     pub record_parameters: bool,
 }
 
+/// What a session records besides the frames (avatar parameters are under [`OscSettings`]).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PerformanceSettings {
+    /// Record the microphone (the person's voice).
+    pub record_mic: bool,
+    /// Microphone endpoint id; empty for the Windows default.
+    pub mic_device: String,
+    /// Record what VRChat plays (world sounds, other players' voices).
+    pub record_game_audio: bool,
+}
+
 impl Default for KeyframeSettings {
     fn default() -> Self {
         Self { min_translation: 0.3, min_rotation_deg: 15.0, max_interval_s: 2.0 }
@@ -71,6 +84,7 @@ impl Default for Settings {
             keyframes: KeyframeSettings::default(),
             storage_limit_gb: 200.0,
             osc: OscSettings::default(),
+            performance: PerformanceSettings::default(),
             split_on_world_change: true,
             consent_acknowledged: false,
             reduce_motion: false,

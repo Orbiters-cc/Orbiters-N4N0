@@ -1,6 +1,6 @@
 //! Everything the interface shows lives in one [`Snapshot`], republished on every change.
 
-use orbiters_core::protocol::{CaptureStats, SpoutSourceInfo};
+use orbiters_core::protocol::{AudioDeviceInfo, CaptureStats, SpoutSourceInfo};
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::WorldState;
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,9 @@ pub enum CaptureState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VrchatStatus {
     pub running: bool,
+    /// Process id while it runs (its sound can be recorded).
+    #[serde(default)]
+    pub pid: Option<u32>,
     pub world: WorldState,
     pub log_found: bool,
 }
@@ -71,6 +74,8 @@ pub struct Snapshot {
     pub version: String,
     pub vrchat: VrchatStatus,
     pub sources: Vec<SpoutSourceInfo>,
+    /// Microphones the worker can record.
+    pub mics: Vec<AudioDeviceInfo>,
     pub osc: OscStatus,
     pub capture: CaptureStatus,
     pub settings: Settings,
@@ -82,8 +87,9 @@ impl Snapshot {
     pub fn new(settings: Settings) -> Self {
         Self {
             version: orbiters_core::APP_VERSION.into(),
-            vrchat: VrchatStatus { running: false, world: WorldState::default(), log_found: orbiters_core::paths::vrchat_log_dir().is_some() },
+            vrchat: VrchatStatus { running: false, pid: None, world: WorldState::default(), log_found: orbiters_core::paths::vrchat_log_dir().is_some() },
             sources: Vec::new(),
+            mics: Vec::new(),
             osc: OscStatus { enabled: settings.osc.enabled, ..Default::default() },
             capture: CaptureStatus { state: CaptureState::Idle, session_dir: None, source: None, stats: None, error: None, trail: Vec::new(), from_osc: false },
             storage: StorageStatus { sessions_dir: settings.sessions_dir.clone(), limit_gb: settings.storage_limit_gb, ..Default::default() },

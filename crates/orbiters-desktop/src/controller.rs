@@ -9,7 +9,7 @@ use orbiters_contracts::manifest::{ConsentInfo, WorldInfo};
 use orbiters_core::bundle::{self, SessionSummary};
 use orbiters_core::clock;
 use orbiters_core::osc::{OscEvent, OscService, OscValue, AVATAR_CHANGE, PARAMETERS_PREFIX};
-use orbiters_core::protocol::{OscSample, SourceSpec, StartCapture, WorkerCommand, WorkerEvent};
+use orbiters_core::protocol::{OscSample, PerformanceSpec, SourceSpec, StartCapture, WorkerCommand, WorkerEvent};
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::{LogEvent, LogWatcher, WorldState};
 use serde::{Deserialize, Serialize};
@@ -282,11 +282,25 @@ impl Controller {
 
     fn on_worker_event(self: &Shared, e: WorkerEvent) {
         match e {
-            WorkerEvent::Ready { version } => self.update(|s| {
-                s.worker.ready = true;
-                s.worker.error = (version != orbiters_core::APP_VERSION).then(|| format!("worker version {version} differs from the app"));
-            }),
-            WorkerEvent::Sources { spout } => self.update(|s| s.sources = spout),
+            WorkerEvent::Ready { version } => {
+                self.update(|s| {
+                    s.worker.ready = true;
+                    s.worker.error = (version != orbiters_core::APP_VERSION).then(|| format!("worker version {version} differs from the app"));
+                });
+                // The microphones for the settings.
+                let ctl = self.clone();
+                std::thread::spawn(move || {
+                    let _ = ctl.send(&WorkerCommand::ListSources);
+                });
+            }
+            // Spout senders are watched here (`spawn_watchers`); the worker knows the microphones.
+            WorkerEvent::Sources { mics, .. } => {
+                self.update_if(|s| {
+                    let changed = s.mics != mics;
+                    s.mics = mics;
+                    changed
+                });
+            }
             WorkerEvent::Started { session_dir, source } => self.update(|s| {
                 if s.capture.state != CaptureState::Importing {
                     s.capture.state = CaptureState::Recording;
@@ -378,6 +392,7 @@ impl Controller {
             world: if importing { None } else { self.current_world() },
             consent: ConsentInfo::default(),
             folder_name: None,
+            performance: if importing { PerformanceSpec::default() } else { self.performance_spec(&settings) },
         };
         self.update(|s| {
             s.capture.state = if importing { CaptureState::Importing } else { CaptureState::Starting };
@@ -415,6 +430,14 @@ impl Controller {
             return Err(e);
         }
         Ok(())
+    }
+
+    fn performance_spec(&self, settings: &Settings) -> PerformanceSpec {
+        let p = &settings.performance;
+        PerformanceSpec {
+            mic: p.record_mic.then(|| p.mic_device.clone()),
+            game_audio_pid: if p.record_game_audio { self.snapshot.lock().unwrap().vrchat.pid } else { None },
+        }
     }
 
     /// Current values from VRChat's OSCQuery service (empty when it is not running or not found).
@@ -687,15 +710,25 @@ fn spawn_watchers(ctl: Shared) {
                 if tick.is_multiple_of(3) {
                     // Names only: the default refresh also reads every process's command line and environment.
                     system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
-                    running = system.processes().values().any(|p| {
-                        let n = p.name().to_string_lossy().to_lowercase();
-                        n == "vrchat.exe" || n == "vrchat"
-                    });
+                    let pid = system
+                        .processes()
+                        .values()
+                        .find(|p| {
+                            let n = p.name().to_string_lossy().to_lowercase();
+                            n == "vrchat.exe" || n == "vrchat"
+                        })
+                        .map(|p| p.pid().as_u32());
+                    running = pid.is_some();
                     ctl.update_if(|s| {
-                        let c = s.vrchat.running != running;
+                        let c = s.vrchat.running != running || s.vrchat.pid != pid;
                         s.vrchat.running = running;
+                        s.vrchat.pid = pid;
                         c
                     });
+                    // Microphones come and go (headsets): ask the worker again now and then.
+                    if tick.is_multiple_of(15) && tick > 0 {
+                        let _ = ctl.send(&WorkerCommand::ListSources);
+                    }
                 }
 
                 // VRChat log: world changes (and new segments when recording). The last log keeps the last world

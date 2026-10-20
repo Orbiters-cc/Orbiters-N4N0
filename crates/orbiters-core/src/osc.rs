@@ -230,10 +230,13 @@ impl OscService {
         advertise: bool,
         on_event: impl Fn(OscEvent, u64) + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
-        let udp = UdpSocket::bind("127.0.0.1:0")?;
+        // VRChat finds the service at an address mDNS announces (this machine's own, see `advertise`): advertised,
+        // the sockets listen on every interface but take packets and connections from this machine only.
+        let bind = if advertise { "0.0.0.0:0" } else { "127.0.0.1:0" };
+        let udp = UdpSocket::bind(bind)?;
         udp.set_read_timeout(Some(Duration::from_millis(200)))?;
         let osc_port = udp.local_addr()?.port();
-        let http = TcpListener::bind("127.0.0.1:0")?;
+        let http = TcpListener::bind(bind)?;
         http.set_nonblocking(true)?;
         let query_port = http.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
@@ -248,8 +251,12 @@ impl OscService {
             threads.push(std::thread::Builder::new().name("osc-receive".into()).spawn(move || {
                 let mut buf = vec![0u8; 65536];
                 let mut events = Vec::new();
+                let mut local = LocalAddrs::default();
                 while !stop.load(Ordering::Relaxed) {
-                    let Ok((n, _)) = udp.recv_from(&mut buf) else { continue };
+                    let Ok((n, from)) = udp.recv_from(&mut buf) else { continue };
+                    if !local.contains(from.ip()) {
+                        continue;
+                    }
                     let at = crate::clock::now_ns();
                     if let Ok((_, packet)) = rosc::decoder::decode_udp(&buf[..n]) {
                         events_from_packet(&packet, &mut events);
@@ -265,12 +272,14 @@ impl OscService {
             let tree = query_tree(parameters).to_string();
             let host = host_info(name, osc_port).to_string();
             threads.push(std::thread::Builder::new().name("oscquery-http".into()).spawn(move || {
+                let mut local = LocalAddrs::default();
                 while !stop.load(Ordering::Relaxed) {
                     match http.accept() {
-                        Ok((stream, _)) => {
+                        Ok((stream, from)) if local.contains(from.ip()) => {
                             let _ = stream.set_nonblocking(false);
                             serve_http(stream, &tree, &host);
                         }
+                        Ok(_) => {}
                         Err(_) => std::thread::sleep(Duration::from_millis(50)),
                     }
                 }
@@ -301,13 +310,36 @@ impl OscService {
         Ok(Self { sender: udp, osc_port, query_port, vrchat: SocketAddr::from(([127, 0, 0, 1], vrchat_port)), stop, mdns, vrchat_query, threads })
     }
 
+    /// Announces the services with one of this machine's own addresses, the one of its default route (all of them
+    /// when it has none). mdns-sd announces an address only on the interfaces of its subnet: 127.0.0.1 alone was
+    /// never announced (Windows lists no IPv4 loopback interface). VRChat makes one client per address it finds, and
+    /// every client gets every message: one address keeps them single. Then asks for the services, so that a
+    /// VRChat already running finds them too (see [`ask_for_services`]).
     fn advertise(name: &str, osc_port: u16, query_port: u16) -> anyhow::Result<mdns_sd::ServiceDaemon> {
         let daemon = mdns_sd::ServiceDaemon::new()?;
         let instance = format!("{}-{}", name.replace(' ', "-"), osc_port);
         let host = "orbiters-desktop.local.";
         let props: &[(&str, &str)] = &[("txtvers", "1")];
-        daemon.register(mdns_sd::ServiceInfo::new("_oscjson._tcp.local.", &instance, host, "127.0.0.1", query_port, props)?)?;
-        daemon.register(mdns_sd::ServiceInfo::new("_osc._udp.local.", &instance, host, "127.0.0.1", osc_port, props)?)?;
+        let primary = primary_ipv4();
+        let info = |ty: &str, port: u16| -> anyhow::Result<mdns_sd::ServiceInfo> {
+            Ok(match primary {
+                Some(ip) => mdns_sd::ServiceInfo::new(ty, &instance, host, std::net::IpAddr::V4(ip), port, props)?,
+                None => mdns_sd::ServiceInfo::new(ty, &instance, host, "", port, props)?.enable_addr_auto(),
+            })
+        };
+        daemon.register(info("_oscjson._tcp.local.", query_port)?)?;
+        daemon.register(info("_osc._udp.local.", osc_port)?)?;
+        if let Some(ip) = primary {
+            std::thread::Builder::new().name("oscquery-ask".into()).spawn(move || {
+                // Once mdns-sd has probed the names and announced them (about a second), and once more in case.
+                for wait in [2, 3] {
+                    std::thread::sleep(Duration::from_secs(wait));
+                    if let Err(e) = ask_for_services(ip) {
+                        eprintln!("OSCQuery services query failed: {e}");
+                    }
+                }
+            })?;
+        }
         Ok(daemon)
     }
 
@@ -341,6 +373,64 @@ impl OscService {
         let bytes = rosc::encoder::encode(&packet)?;
         self.sender.send_to(&bytes, self.vrchat)?;
         Ok(())
+    }
+}
+
+/// The address this machine reaches the network from (no packet is sent: connecting a UDP socket only picks the
+/// route), or `None` offline.
+fn primary_ipv4() -> Option<std::net::Ipv4Addr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:9").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => Some(ip),
+        _ => None,
+    }
+}
+
+/// VRChat takes a service only from an mDNS response with the PTR record as answer and the SRV and A records as
+/// additional records (vrc-oscquery-lib's MeaModDiscovery), the way answers to queries come; it ignores
+/// announcements (every record an answer, RFC 6762) and queries only when it starts. A query for both service types
+/// from the mDNS port, on `ip`'s interface, makes every responder there (mdns-sd among them) multicast such an
+/// answer, which a running VRChat hears. mdns-sd's own browsing would not do: it lists its own records as known
+/// answers, which suppresses them.
+fn ask_for_services(ip: std::net::Ipv4Addr) -> std::io::Result<()> {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    socket.set_reuse_address(true)?;
+    socket.bind(&SocketAddr::from(([0, 0, 0, 0], 5353)).into())?;
+    socket.set_multicast_if_v4(&ip)?;
+    let group = SocketAddr::from(([224, 0, 0, 251], 5353)).into();
+    for ty in ["_oscjson._tcp", "_osc._udp"] {
+        // ID 0, flags 0, one question, no records.
+        let mut query = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        for label in ty.split('.').chain(["local"]) {
+            query.push(label.len() as u8);
+            query.extend_from_slice(label.as_bytes());
+        }
+        // End of the name, type PTR, class IN (multicast answer).
+        query.extend_from_slice(&[0, 0, 12, 0, 1]);
+        socket.send_to(&query, &group)?;
+    }
+    Ok(())
+}
+
+/// This machine's addresses: loopback and every interface's, read again (at most once a second) when an unknown
+/// address knocks, since interfaces come and go.
+#[derive(Default)]
+struct LocalAddrs {
+    addrs: Vec<std::net::IpAddr>,
+    read_at: Option<std::time::Instant>,
+}
+
+impl LocalAddrs {
+    fn contains(&mut self, ip: std::net::IpAddr) -> bool {
+        if ip.is_loopback() || self.addrs.contains(&ip) {
+            return true;
+        }
+        if self.read_at.is_none_or(|t| t.elapsed() > Duration::from_secs(1)) {
+            self.read_at = Some(std::time::Instant::now());
+            self.addrs = if_addrs::get_if_addrs().map(|l| l.into_iter().map(|i| i.ip()).collect()).unwrap_or_default();
+        }
+        self.addrs.contains(&ip)
     }
 }
 

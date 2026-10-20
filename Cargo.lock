@@ -2743,6 +2743,7 @@ dependencies = [
  "naga",
  "orbiters-contracts",
  "orbiters-core",
+ "png",
  "serde",
  "serde_json",
  "wgpu",

@@ -21,3 +21,4 @@ fastrand = "2"
 
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in", "hlsl-out"] }
+png = { workspace = true }

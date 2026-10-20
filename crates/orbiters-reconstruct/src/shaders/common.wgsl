@@ -17,7 +17,7 @@ struct Frame {
     counts: vec4<u32>,
     // Loss weights: colour L1, depth, unused, scene pixels or depth samples in this view.
     loss: vec4<f32>,
-    // Regulariser weights per Gaussian: opacity, scale (per metre), unused, unused.
+    // Regulariser weights per Gaussian: opacity, scale (per metre); screen-space dilation (pixels²) along x and y.
     reg: vec4<f32>,
 }
 
@@ -112,7 +112,7 @@ fn proj_math(mean: vec3<f32>, log_scale: vec3<f32>, q: vec4<f32>) -> ProjMath {
     // J Σc rows (Σc is symmetric: its columns are its rows).
     let js0 = vec3<f32>(dot(m.j0, m.sigma_c[0]), dot(m.j0, m.sigma_c[1]), dot(m.j0, m.sigma_c[2]));
     let js1 = vec3<f32>(dot(m.j1, m.sigma_c[0]), dot(m.j1, m.sigma_c[1]), dot(m.j1, m.sigma_c[2]));
-    m.cov = vec3<f32>(dot(js0, m.j0) + DILATION, dot(js0, m.j1), dot(js1, m.j1) + DILATION);
+    m.cov = vec3<f32>(dot(js0, m.j0) + frame.reg.z, dot(js0, m.j1), dot(js1, m.j1) + frame.reg.w);
     let det = m.cov.x * m.cov.z - m.cov.y * m.cov.y;
     m.ok = det > 0.0;
     return m;

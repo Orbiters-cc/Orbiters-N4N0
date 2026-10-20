@@ -18,6 +18,8 @@ struct SortInfo {
 @group(0) @binding(3) var<storage, read_write> hist: array<u32>;
 @group(0) @binding(4) var<storage, read_write> keys_out: array<u32>;
 @group(0) @binding(5) var<storage, read_write> values_out: array<u32>;
+// The entry count written on the GPU (scan.wgsl `total`: [1] is the clamped count); info.n bounds it.
+@group(0) @binding(6) var<storage, read> totals: array<u32>;
 
 var<workgroup> counts: array<atomic<u32>, 16>;
 var<workgroup> skeys: array<u32, 256>;
@@ -38,7 +40,7 @@ fn count(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: v
     }
     workgroupBarrier();
     let i = block * 256u + li;
-    if (i < info.n && block < info.blocks) {
+    if (i < min(info.n, totals[1]) && block < info.blocks) {
         let d = (keys_in[i] >> info.shift) & 15u;
         atomicAdd(&counts[d], 1u);
     }
@@ -52,7 +54,7 @@ fn count(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: v
 fn scatter(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let block = block_of(wid, nwg);
     let i = block * 256u + li;
-    let valid = i < info.n && block < info.blocks;
+    let valid = i < min(info.n, totals[1]) && block < info.blocks;
     var key = 0xffffffffu;
     var val = 0u;
     var dig = 16u;

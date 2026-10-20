@@ -7,5 +7,6 @@ pub mod dataset;
 pub mod gaussians;
 pub mod gpu;
 pub mod init;
+pub mod metrics;
 pub mod ply;
 pub mod train;

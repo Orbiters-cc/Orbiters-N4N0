@@ -144,6 +144,8 @@ pub struct CaptureStats {
     pub tracking_samples: u64,
     /// T-poses kept as calibrations.
     pub calibrations: u64,
+    /// Frames whose capture-kit skeleton band was read.
+    pub skeleton_frames: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

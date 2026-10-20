@@ -24,6 +24,8 @@ pub fn streams(snap: &Snapshot) -> [Stream; 4] {
     let s = &snap.settings;
     let p = &s.performance;
     let stats = snap.capture.stats.as_ref().filter(|_| snap.is_capturing());
+    // Frames carrying the capture kit's skeleton band: the pose VRChat gave the avatar (read whatever the switch).
+    let kit = stats.is_some_and(|st| st.skeleton_frames > 0);
     let mic_name = snap.mics.iter().find(|m| if p.mic_device.is_empty() { m.default } else { m.id == p.mic_device }).map(|m| m.name.clone());
     [
         Stream {
@@ -74,13 +76,16 @@ pub fn streams(snap: &Snapshot) -> [Stream; 4] {
             glyph: icons::PERSON_ARMS_SPREAD,
             name: "Body tracking",
             status: match stats.and_then(|st| st.tracking_connected.map(|c| (c, st.tracking_devices))) {
+                Some((true, n)) if kit => format!("VRChat's pose, {n} devices"),
                 Some((true, n)) => format!("{n} devices at {:.0} Hz", p.tracking_rate_hz),
+                _ if kit => "VRChat's pose (capture kit)".into(),
                 Some((false, _)) => "Waiting for SteamVR".into(),
                 None if !p.record_tracking => "Off".into(),
                 None if snap.steamvr.running => format!("SteamVR devices at {:.0} Hz", p.tracking_rate_hz),
                 None => "When SteamVR runs".into(),
             },
             tone: match (p.record_tracking, snap.steamvr.running) {
+                _ if kit => Tone::Ok,
                 (false, _) => Tone::Off,
                 (true, true) => Tone::Ok,
                 (true, false) => Tone::Warn,

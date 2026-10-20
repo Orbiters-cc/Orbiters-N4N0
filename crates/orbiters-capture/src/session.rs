@@ -3,14 +3,14 @@
 //! on disk or compression; when the pool falls behind, keyframes are dropped (and counted) instead.
 
 use crate::audio::{AudioRecorder, AudioSource};
-use crate::performance::ParameterStream;
+use crate::performance::{ParameterStream, SkeletonStream};
 use crate::tracking::{self, TrackingRecorder};
 use crossbeam_channel::{bounded, Receiver as ChanReceiver, Sender as ChanSender, TrySendError};
 use orbiters_contracts::frame_record::{record_flags, FrameRecord};
 use orbiters_contracts::image::{ImageView, PixelOrder};
 use orbiters_contracts::manifest::{depth_file, SessionManifest, StorageQuality};
 use orbiters_contracts::performance::{self as perf, audio::TrackKind};
-use orbiters_contracts::{depth, qoi, strip};
+use orbiters_contracts::{depth, qoi, skeleton, strip};
 use orbiters_core::bundle::BundleWriter;
 use orbiters_core::clock;
 use orbiters_core::keyframes::{self, KeyframeSelector};
@@ -110,6 +110,7 @@ pub struct CaptureSession {
     /// Session start on the shared clock: every stream's `time_ns` counts from here.
     epoch_ns: u64,
     parameters: ParameterStream,
+    skeleton: SkeletonStream,
     audio: Vec<AudioRecorder>,
     tracking: Option<TrackingRecorder>,
     /// Calibrations made in the overlay (before the session or during it), on the session clock.
@@ -146,6 +147,7 @@ impl CaptureSession {
         }
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 6) / 2 + 1;
         let parameters = ParameterStream::new(writer.dir());
+        let skeleton = SkeletonStream::new(writer.dir());
         let epoch_ns = clock::now_ns();
         let mut stats = CaptureStats::default();
         let mut audio = Vec::new();
@@ -184,6 +186,7 @@ impl CaptureSession {
             stats,
             epoch_ns,
             parameters,
+            skeleton,
             audio,
             tracking,
             calibrations: p
@@ -287,6 +290,14 @@ impl CaptureSession {
                 record.corrected_bits = d.corrected_bits;
                 record.patch = d.patch;
                 record.min_contrast = d.min_contrast;
+                // The capture kit's skeleton band rides on colour frames (depth frames use the whole picture).
+                if !p.is_depth_frame() {
+                    if let Some(Ok(pose)) = skeleton::decode(&view, d.flipped).map(|b| b.result) {
+                        if let Err(e) = self.skeleton.add(record.capture_time_ns, &pose) {
+                            self.stats.last_error = Some(format!("skeleton: {e:#}"));
+                        }
+                    }
+                }
                 let pos = p.position();
                 self.stats.position = Some(pos);
                 self.stats.heading_deg = Some(p.camera_to_world[2].atan2(p.camera_to_world[10]).to_degrees());
@@ -366,6 +377,10 @@ impl CaptureSession {
         self.stats.bytes = self.writer.manifest().stats.bytes + self.pool.written.load(Ordering::Relaxed) + self.parameters.changes * 16;
         self.stats.elapsed_s = self.time_ns() as f64 / 1e9;
         self.stats.parameter_changes = self.parameters.changes;
+        self.stats.skeleton_frames = self.skeleton.frames;
+        if let Err(e) = self.skeleton.flush() {
+            self.stats.last_error = Some(format!("skeleton: {e:#}"));
+        }
         self.stats.mic_level = self.audio.iter().find(|a| a.kind == TrackKind::Mic).map(AudioRecorder::take_level);
         self.stats.game_level = self.audio.iter().find(|a| a.kind == TrackKind::Game).map(AudioRecorder::take_level);
         if let Some(t) = &self.tracking {
@@ -382,11 +397,14 @@ impl CaptureSession {
 
     /// Waits for pending files and writes the final manifest.
     pub fn finish(self) -> anyhow::Result<(PathBuf, SessionManifest)> {
-        let Self { mut writer, pool, parameters, audio, tracking, mut calibrations, .. } = self;
+        let Self { mut writer, pool, parameters, skeleton, audio, tracking, mut calibrations, .. } = self;
         let (written, errors) = pool.finish();
         writer.add_bytes(written);
         let (changes, bytes) = parameters.finish()?;
         writer.manifest_mut().performance.parameter_changes = changes;
+        writer.add_bytes(bytes);
+        let (frames, bytes) = skeleton.finish()?;
+        writer.manifest_mut().performance.skeleton_frames = frames;
         writer.add_bytes(bytes);
         let mut tracks = perf::audio::Audio::new();
         for recorder in audio {
@@ -435,6 +453,7 @@ mod tests {
     use super::*;
     use crate::sources::{FrameSource, Next, TestPatternSource};
     use orbiters_contracts::manifest::{CaptureMode, ConsentInfo};
+    use orbiters_contracts::performance::skeleton_frames;
     use orbiters_core::protocol::SourceSpec;
     use orbiters_core::settings::KeyframeSettings;
 
@@ -486,6 +505,16 @@ mod tests {
         assert_eq!(codes.len() as u32, gw * gh);
         assert!(codes.iter().filter(|&&c| c != 0).count() > 1000);
         assert!(dir.join("thumbnail.qoi").is_file());
+        // The test pattern draws the capture kit's skeleton band on its colour frames.
+        assert_eq!(manifest.performance.skeleton_frames, 45);
+        let frames = skeleton_frames::read(&std::fs::read(dir.join(orbiters_contracts::performance::SKELETON_FILE)).unwrap()).unwrap();
+        assert_eq!(frames.len(), 45);
+        let colour: Vec<_> = records.iter().filter(|r| !r.has(record_flags::DEPTH)).collect();
+        for (frame, record) in frames.iter().zip(&colour) {
+            let want = TestPatternSource::skeleton(frame.game_time);
+            assert_eq!(frame.time_ns, record.capture_time_ns);
+            assert_eq!((frame.hips, frame.avatar, frame.mask()), (want.hips, want.avatar, want.mask()));
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 }

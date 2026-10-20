@@ -87,6 +87,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         tracking_connected: Some(true),
         tracking_devices: 6,
         tracking_samples: 44_280,
+        skeleton_frames: 3_610,
         ..Default::default()
     });
     let mut consent = idle.clone();
@@ -274,12 +275,13 @@ fn e2e(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f
     if let Some(s) = after.first() {
         let st = &s.manifest.stats;
         println!(
-            "newest: {} ({} frames, {} strips decoded, {} keyframes, {} depth frames)",
+            "newest: {} ({} frames, {} strips decoded, {} keyframes, {} depth frames, {} skeleton frames)",
             s.dir.display(),
             st.frames,
             st.strip_ok,
             st.keyframes,
-            st.depth_frames
+            st.depth_frames,
+            s.manifest.performance.skeleton_frames
         );
         vrchat.check(&s.dir, s.manifest.performance.parameter_changes)?;
     }
@@ -494,6 +496,7 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
         tracking_connected: Some(true),
         tracking_devices: 6,
         tracking_samples: 50_760,
+        skeleton_frames: 4_050,
         ..Default::default()
     });
     // (name, snapshot, calibration: (T-pose held, started at this time; the last frame is at 1.48 s)).

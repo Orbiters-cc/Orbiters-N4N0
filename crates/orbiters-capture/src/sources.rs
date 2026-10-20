@@ -3,7 +3,7 @@
 
 use orbiters_contracts::image::{ImageView, PixelOrder, RgbaImage};
 use orbiters_contracts::raw_capture::{self, RawCapture};
-use orbiters_contracts::{depth, qoi, strip};
+use orbiters_contracts::{depth, qoi, skeleton, strip};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -189,6 +189,25 @@ impl TestPatternSource {
         [right[0], 0.0, fwd[0], pos[0], right[1], 1.0, fwd[1], pos[1], right[2], 0.0, fwd[2], pos[2]]
     }
 
+    /// The pose a capture-kit avatar would draw at `t`: walking around the centre, the left elbow swinging (jaw
+    /// and upper chest missing, like many avatars).
+    pub fn skeleton(t: f32) -> skeleton::Skeleton {
+        let (s, c) = (t * 0.4).sin_cos();
+        let mut pose = skeleton::Skeleton { time: t, hips: [2.0 * s, 0.95, -2.0 * c], avatar: 0x7E57, ..Default::default() };
+        let yaw = |degrees: f32| {
+            let (h, w) = (degrees.to_radians() * 0.5).sin_cos();
+            [0.0, h, 0.0, w]
+        };
+        for (b, bone) in pose.bones.iter_mut().enumerate() {
+            if b != 23 && b != 54 {
+                *bone = Some(yaw(t * 22.9));
+            }
+        }
+        let (h, w) = ((t * 3.0).sin() * 0.6).sin_cos();
+        pose.bones[15] = Some([0.0, 0.0, h, w]);
+        pose
+    }
+
     pub fn render(&self, index: u32) -> RgbaImage {
         let t = index as f32 / self.fps.max(1.0);
         let pose = Self::pose(t);
@@ -238,6 +257,9 @@ impl TestPatternSource {
             screen_height: h,
         };
         strip::encode(&mut img, &payload);
+        if !depth_frame {
+            skeleton::draw(&mut img, &Self::skeleton(t));
+        }
         img
     }
 }
@@ -284,6 +306,27 @@ mod tests {
             if d.payload.is_depth_frame() {
                 let dd = depth::decode(&img.view(), false).unwrap();
                 assert_eq!(dd.tiles_rejected, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn colour_frames_carry_the_skeleton_band() {
+        let src = TestPatternSource::new(1280, 720, 30.0, 4, 8, false);
+        for i in 0..8 {
+            let band = skeleton::decode(&src.render(i).view(), false).map(|b| b.result);
+            if i % 4 == 3 {
+                assert!(!matches!(band, Some(Ok(_))), "depth frame {i} read as a skeleton");
+                continue;
+            }
+            let pose = band.expect("band").expect("pose");
+            let want = TestPatternSource::skeleton(i as f32 / 30.0);
+            assert_eq!((pose.time, pose.hips, pose.avatar, pose.mask()), (want.time, want.hips, want.avatar, want.mask()));
+            for (got, want) in pose.bones.iter().zip(&want.bones) {
+                if let (Some(a), Some(b)) = (got, want) {
+                    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+                    assert!(dot.abs() > 0.9999, "frame {i}: {a:?} vs {b:?}");
+                }
             }
         }
     }

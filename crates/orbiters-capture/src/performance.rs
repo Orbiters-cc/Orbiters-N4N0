@@ -111,6 +111,45 @@ impl ParameterStream {
     }
 }
 
+/// `skeleton.bin`: the avatar's pose from the capture kit's skeleton band, one record per colour frame that has it.
+pub struct SkeletonStream {
+    dir: PathBuf,
+    file: Option<BufWriter<File>>,
+    pub frames: u64,
+}
+
+impl SkeletonStream {
+    pub fn new(dir: &Path) -> Self {
+        Self { dir: dir.to_path_buf(), file: None, frames: 0 }
+    }
+
+    pub fn add(&mut self, time_ns: u64, pose: &orbiters_contracts::skeleton::Skeleton) -> anyhow::Result<()> {
+        use orbiters_contracts::performance::skeleton_frames;
+        if self.file.is_none() {
+            let mut f = BufWriter::with_capacity(1 << 16, File::create(self.dir.join(perf::SKELETON_FILE))?);
+            f.write_all(&skeleton_frames::header())?;
+            self.file = Some(f);
+        }
+        self.file.as_mut().expect("open").write_all(&skeleton_frames::Frame::from_skeleton(time_ns, pose).to_bytes())?;
+        self.frames += 1;
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> anyhow::Result<()> {
+        if let Some(f) = self.file.as_mut() {
+            f.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Closes the stream; returns the frames and bytes written.
+    pub fn finish(mut self) -> anyhow::Result<(u64, u64)> {
+        let Some(mut f) = self.file.take() else { return Ok((0, 0)) };
+        f.flush()?;
+        Ok((self.frames, (perf::HEADER_SIZE + self.frames as usize * orbiters_contracts::performance::skeleton_frames::RECORD_SIZE) as u64))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

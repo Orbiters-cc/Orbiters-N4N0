@@ -29,9 +29,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let g = i * GRAD2D;
     let d_mean2 = vec2<f32>(grad2d[g], grad2d[g + 1u]);
     let d_conic = vec3<f32>(grad2d[g + 2u], grad2d[g + 3u], grad2d[g + 4u]);
-    let op = proj[i * PROJ + 6u];
-    // The opacity regulariser (frame.reg.x · opacity) lets Gaussians nothing needs fade out, to be relocated.
-    grads[o + 10u] = (grad2d[g + 5u] + frame.reg.x) * op * (1.0 - op);
+    // Rendered opacity = s·σ(logit), s = 1/(1 − r) under dropout. The opacity regulariser (frame.reg.x · σ) lets
+    // Gaussians nothing needs fade out, to be relocated.
+    let sig = sigmoid(params[o + 10u]);
+    let lift = select(1.0, 1.0 / (1.0 - frame.background.w), frame.background.w > 0.0);
+    grads[o + 10u] = (grad2d[g + 5u] * lift + frame.reg.x) * sig * (1.0 - sig);
     grads[o + 11u] = grad2d[g + 6u];
     grads[o + 12u] = grad2d[g + 7u];
     grads[o + 13u] = grad2d[g + 8u];

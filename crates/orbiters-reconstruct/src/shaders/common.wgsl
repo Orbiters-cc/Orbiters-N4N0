@@ -10,10 +10,11 @@ struct Frame {
     focal: vec4<f32>,
     // Frustum clamp limits on x/z and y/z, near plane, far plane (depth keys).
     limits: vec4<f32>,
+    // Background colour; w: dropout rate of this colour step (DropGaussian, 0: none).
     background: vec4<f32>,
     // Width, height, tiles across, tiles down.
     size: vec4<u32>,
-    // Gaussians, intersections, depth bits of a sort key, unused.
+    // Gaussians, intersections, depth bits of a sort key, dropout seed.
     counts: vec4<u32>,
     // Loss weights: colour L1, depth, unused, scene pixels or depth samples in this view.
     loss: vec4<f32>,
@@ -120,4 +121,12 @@ fn proj_math(mean: vec3<f32>, log_scale: vec3<f32>, q: vec4<f32>) -> ProjMath {
 
 fn sigmoid(x: f32) -> f32 {
     return 1.0 / (1.0 + exp(-x));
+}
+
+// Uniform in [0, 1) from a 32-bit key (PCG hash).
+fn unit_hash(x: u32) -> f32 {
+    var v = x * 747796405u + 2891336453u;
+    v = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u;
+    v = (v >> 22u) ^ v;
+    return f32(v >> 8u) / 16777216.0;
 }

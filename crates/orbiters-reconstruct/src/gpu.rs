@@ -25,13 +25,15 @@ pub struct KernelOptions {
     /// Gradient sums as 64-bit fixed point (2⁻⁴⁰) with native i64 atomic adds (Vulkan VK_KHR_shader_atomic_int64,
     /// D3D12 SM 6.6 with DXC): the portable alternative where f32 atomics are missing.
     pub int64_atomics: bool,
+    /// Timing only (wrong gradients): plain atomic stores instead of adds, the floor of the per-pixel backward.
+    pub store_only: bool,
 }
 
 impl KernelOptions {
     pub fn from_env() -> Self {
         let v = std::env::var("ORBITERS_LAB").unwrap_or_default();
         let has = |k: &str| v.split(',').any(|x| x.trim() == k);
-        Self { float_atomics: has("float_atomics"), lane_adds: has("lane_adds"), pipelined: has("pipelined"), int64_atomics: has("int64_atomics") }
+        Self { float_atomics: has("float_atomics"), lane_adds: has("lane_adds"), pipelined: has("pipelined"), int64_atomics: has("int64_atomics"), store_only: has("store_only") }
     }
 }
 const FAR: f32 = 1000.0;
@@ -181,6 +183,8 @@ pub struct Gpu {
     /// Robust colour loss: pixels in coherent blobs erring by more than this (mean absolute, 0–1) are left out of
     /// the step; 0: off.
     pub robust: f32,
+    /// DropGaussian rate of colour training steps (0: off).
+    pub drop: f32,
     sort: Option<SortBuffers>,
     samples: Option<(usize, wgpu::Buffer)>,
     scan_levels: Vec<(usize, wgpu::Buffer, wgpu::Buffer)>,
@@ -451,6 +455,11 @@ impl Gpu {
                     .replace(cas_decl, "@group(0) @binding(7) var<storage, read_write> grad2d: array<atomic<f32>>;")
                     .replace(cas_add, "fn add(i: u32, v: f32) {\n    if (v != 0.0) {\n        atomicAdd(&grad2d[i], v);\n    }\n}");
             }
+            if options_k.store_only {
+                let start = backward_src.find("fn add(i: u32, v: f32) {").expect("add");
+                let end = start + backward_src[start..].find("\n}\n").expect("add end") + 3;
+                backward_src.replace_range(start..end, "fn add(i: u32, v: f32) {\n    if (v != 0.0) {\n        atomicStore(&grad2d[i], bitcast<u32>(v));\n    }\n}\n");
+            }
             if options_k.int64_atomics {
                 let cas_decl = "@group(0) @binding(7) var<storage, read_write> grad2d: array<atomic<u32>>;";
                 let cas_add = "fn add(i: u32, v: f32) {\n    if (v == 0.0) {\n        return;\n    }\n    var old = atomicLoad(&grad2d[i]);\n    loop {\n        let r = atomicCompareExchangeWeak(&grad2d[i], old, bitcast<u32>(bitcast<f32>(old) + v));\n        if (r.exchanged) {\n            break;\n        }\n        old = r.old_value;\n    }\n}";
@@ -537,6 +546,7 @@ impl Gpu {
             dilation: [cpu::DILATION as f32; 2],
             ssim: 0.0,
             robust: 0.0,
+            drop: 0.0,
             sort: None,
             samples: None,
             scan_levels: Vec::new(),
@@ -836,7 +846,11 @@ impl Gpu {
         let pipelined = self.options.pipelined && self.last_total.is_some();
         // Each sort copy (sized half again over the entries) must fit one storage binding.
         let max_entries = (self.device.limits().max_storage_buffer_binding_size / 4 * 2 / 3).min(u32::MAX as u64) as u32;
-        let frame = self.frame_for(cam, background, 0, loss, train);
+        let mut frame = self.frame_for(cam, background, 0, loss, train);
+        if self.drop > 0.0 && matches!(target, Target::Color { .. }) && lr.is_some() {
+            frame.background[3] = self.drop;
+            frame.counts[3] = self.step.wrapping_mul(2_246_822_519).wrapping_add(1);
+        }
         self.queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));
         let (params, proj, counts, offsets) = {
             let s = self.splats.as_ref().context("no Gaussians")?;

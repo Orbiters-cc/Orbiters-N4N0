@@ -29,7 +29,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let det = a * c - bb * bb;
     let mx = frame.focal.x * m.pc.x / m.pc.z + frame.focal.z;
     let my = frame.focal.y * m.pc.y / m.pc.z + frame.focal.w;
-    let op = sigmoid(params[b + 10u]);
+    var op = sigmoid(params[b + 10u]);
+    // DropGaussian: this step leaves the Gaussian out with probability r and lifts the others' opacity by 1/(1 − r).
+    let drop = frame.background.w;
+    if (drop > 0.0) {
+        if (unit_hash(i * 2654435769u ^ frame.counts.w) < drop) {
+            return;
+        }
+        op = op / (1.0 - drop);
+    }
     let mid = 0.5 * (a + c);
     let lambda = mid + sqrt(max(mid * mid - det, 0.1));
     // Out to α = 1/255 at this opacity (cpu::extent_sigmas).

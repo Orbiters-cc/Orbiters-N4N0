@@ -46,6 +46,8 @@ pub struct Settings {
     /// resolution until `res2_until`, then full; the position learning rate holds until full resolution. 0: off.
     pub res4_until: f32,
     pub res2_until: f32,
+    /// DropGaussian: colour steps drop Gaussians at a rate rising linearly to this (0: off; the paper's 0.2).
+    pub drop: f32,
 }
 
 impl Default for Settings {
@@ -71,6 +73,7 @@ impl Default for Settings {
             evaluate_every: 1000,
             res4_until: 0.0,
             res2_until: 0.0,
+            drop: 0.0,
         }
     }
 }
@@ -96,6 +99,7 @@ impl Settings {
             "evaluate_every" => self.evaluate_every = u()?,
             "res4_until" => self.res4_until = f()?,
             "res2_until" => self.res2_until = f()?,
+            "drop" => self.drop = f()?,
             _ => anyhow::bail!("unknown setting {key}"),
         }
         Ok(())
@@ -245,6 +249,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             colors: 0.0025,
         };
         gpu.robust = if progress >= settings.robust_from { settings.robust } else { 0.0 };
+        gpu.drop = settings.drop * progress;
         let depth_step = !depth_views.is_empty() && settings.depth_weight > 0.0 && it % settings.depth_every.max(1) == 0;
         let intersections = if depth_step {
             let d = depth_views[rng.usize(..depth_views.len())];

@@ -454,6 +454,8 @@ fn performance(ui: &mut Ui, cx: &mut Cx) {
         let right = match (&vr.calibration, vr.running, vr.overlay) {
             _ if capturing => "Switches apply to the next recording".to_string(),
             (Some(c), _, _) => format!("T-pose: eyes at {:.2} m, hands {:.2} m apart", c.head_height_m, c.arm_span_m),
+            // VRChat sends its head and hand poses: Mixer needs no T-pose for its sessions.
+            _ if snap.vrchat.running => "No T-pose needed: VRChat sends its head and hand poses".into(),
             (None, true, true) => "Calibrate in the Orbiters tab of SteamVR's dashboard".into(),
             (None, true, false) => "SteamVR is running".into(),
             (None, false, _) => "Not calibrated: start SteamVR, then calibrate in its dashboard".into(),

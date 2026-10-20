@@ -219,6 +219,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let vr = &snap.steamvr;
             let perf_sub = match (&vr.calibration, vr.running) {
                 (Some(c), _) => format!("Calibrated: eyes at {:.2} m, hands {:.2} m apart", c.head_height_m, c.arm_span_m),
+                _ if snap.vrchat.running => "No T-pose needed in VRChat: it sends its head and hand poses".into(),
                 (None, true) => "SteamVR is running: calibrate in the Orbiters tab of its dashboard".into(),
                 (None, false) => "What a session records besides the frames".into(),
             };

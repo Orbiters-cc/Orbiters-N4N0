@@ -80,7 +80,7 @@ impl OverlayUi {
                 };
                 let galley = p.layout_job(Txt::new(line, 15.0).color(tone).line_height(21.0).job(body.width()));
                 p.galley(body.min, galley, tone);
-                let hint = "Press Calibrate: a mirror and two hand targets appear in front of you. Calibrate in VRChat at the same moment so both match.";
+                let hint = "Not needed in VRChat: it sends your head and hands. In other games, press Calibrate and match the mirror.";
                 let galley = p.layout_job(Txt::new(hint, 13.0).color(theme::FG_3).line_height(19.0).job(body.width() - 170.0));
                 p.galley(pos2(body.left(), body.bottom() - 58.0), galley, theme::FG_3);
                 let b = Button::new("Calibrate").icon(icons::PERSON).variant(Variant::Primary).enabled(snap.steamvr.running);

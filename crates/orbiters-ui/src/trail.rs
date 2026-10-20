@@ -5,7 +5,7 @@ use crate::anim::{self, Spring};
 use crate::theme::{self, Txt};
 use crate::widgets;
 use egui::epaint::{PathShape, PathStroke};
-use egui::{pos2, vec2, Align2, Color32, Id, Mesh, Pos2, Rect, Shape, Stroke, StrokeKind, Ui};
+use egui::{pos2, vec2, Align2, Color32, Id, Mesh, Pos2, Rect, Shape, Stroke, Ui};
 
 pub struct Trail<'a> {
     /// Camera positions, Unity world metres (x, y, z).
@@ -19,7 +19,7 @@ pub struct Trail<'a> {
 
 pub fn show(ui: &Ui, rect: Rect, id: Id, trail: &Trail<'_>) {
     let p = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-    p.rect(rect, theme::radius(theme::TILE_RADIUS), theme::black(0.25), theme::hairline(), StrokeKind::Inside);
+    p.rect_filled(rect, theme::radius(theme::TILE_RADIUS), theme::surface_soft());
     let aspect = rect.width() / rect.height().max(1.0);
 
     // Target view: the path's bounds with a margin, at the box's aspect ratio.
@@ -66,15 +66,15 @@ pub fn show(ui: &Ui, rect: Rect, id: Id, trail: &Trail<'_>) {
         gy += grid;
     }
 
-    // Path: a soft wide glow under a crisp gradient line.
+    // Path: a crisp line, grey where it is old, green where it is new.
     if trail.points.len() > 1 {
         let pts: Vec<Pos2> = trail.points.iter().map(|q| to_screen(q[0], q[2])).collect();
         let (lo, hi) = (to_screen(min_x, 0.0).x, to_screen(max_x, 0.0).x);
         let colour = move |x: f32, a: f32| {
             let t = if hi - lo > 1.0 { (x - lo) / (hi - lo) } else { 0.5 };
-            theme::alpha(crate::paint::sample(&theme::BRAND, t), a)
+            // Older parts of the path fade to grey, the latest is Orbiters green.
+            theme::alpha(theme::mix(theme::FG_4, theme::ACCENT, t), a)
         };
-        p.add(PathShape::line(pts.clone(), PathStroke::new_uv(7.0, move |_r: Rect, pt: Pos2| colour(pt.x, 0.18))));
         p.add(PathShape::line(pts, PathStroke::new_uv(2.4, move |_r: Rect, pt: Pos2| colour(pt.x, 1.0))));
     }
 
@@ -87,10 +87,10 @@ pub fn show(ui: &Ui, rect: Rect, id: Id, trail: &Trail<'_>) {
             let t = anim::clock(ui.ctx(), 30.0);
             let k = ((t % 1.6) / 1.6) as f32;
             let e = anim::ease::out_cubic(k);
-            p.circle_filled(at, 4.0 + 11.0 * e, theme::alpha(theme::CYAN, 0.6 * (1.0 - e)));
+            p.circle_stroke(at, 4.0 + 11.0 * e, Stroke::new(1.5, theme::alpha(theme::ACCENT, 0.7 * (1.0 - e))));
         }
         p.circle_filled(at, 4.4, Color32::WHITE);
-        p.circle_stroke(at, 4.4, Stroke::new(1.6, theme::CYAN));
+        p.circle_stroke(at, 4.4, Stroke::new(1.6, theme::ACCENT));
     }
 
     if trail.points.is_empty() {
@@ -108,13 +108,13 @@ pub fn show(ui: &Ui, rect: Rect, id: Id, trail: &Trail<'_>) {
 fn cone(p: &egui::Painter, at: Pos2, heading: f32, length: f32) {
     let half = 0.42;
     let mut mesh = Mesh::default();
-    mesh.colored_vertex(at, theme::alpha(theme::CYAN, 0.55));
+    mesh.colored_vertex(at, theme::alpha(theme::ACCENT, 0.4));
     let n = 12;
     // Direction: 0 = up the screen (+Z), clockwise.
     for i in 0..=n {
         let a = heading - half + 2.0 * half * i as f32 / n as f32;
         let dir = vec2(a.sin(), -a.cos());
-        mesh.colored_vertex(at + dir * length * 0.5, theme::alpha(theme::CYAN, 0.25));
+        mesh.colored_vertex(at + dir * length * 0.5, theme::alpha(theme::ACCENT, 0.15));
         mesh.colored_vertex(at + dir * length, Color32::TRANSPARENT);
     }
     for i in 0..n as u32 {

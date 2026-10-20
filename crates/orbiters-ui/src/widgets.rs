@@ -2,7 +2,7 @@
 //! every change, and selection-like controls (segments, toggles, navigation) act on press like the web version.
 
 use crate::anim::{self, Spring};
-use crate::paint::{self, Gradient};
+use crate::paint;
 use crate::theme::{self, weight, Txt};
 use crate::{fonts, icons};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, FontId, Id, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2};
@@ -66,15 +66,15 @@ impl Tone {
     }
 }
 
-/// A glass card behind `rect`.
+/// A flat card behind `rect`.
 pub fn card(painter: &Painter, rect: Rect, radius: f32) {
-    painter.rect(rect, theme::radius(radius), theme::surface(), theme::hairline(), StrokeKind::Inside);
+    painter.rect_filled(rect, theme::radius(radius), theme::surface());
 }
 
-/// A stronger glass panel (popovers, toasts, dialogs) with a deep shadow.
+/// A raised panel (popovers, toasts, dialogs) with the website's soft shadow.
 pub fn panel(painter: &Painter, rect: Rect, radius: f32) {
-    paint::shadow(painter, rect, radius, vec2(0.0, 20.0), 30.0, -12.0, theme::black(0.7));
-    painter.rect(rect, theme::radius(radius), theme::surface_strong(), Stroke::new(1.0, theme::white(0.07)), StrokeKind::Inside);
+    paint::shadow(painter, rect, radius, vec2(0.0, 12.0), 30.0, -8.0, theme::black(0.35));
+    painter.rect(rect, theme::radius(radius), theme::surface_strong(), theme::hairline(), StrokeKind::Inside);
 }
 
 /// Pulsing status dot (10 points), the pulse ring only while live.
@@ -199,9 +199,8 @@ impl<'a> Button<'a> {
         let ctx = ui.ctx();
         let hover = anim::toggle(ctx, resp.id.with("hover"), self.enabled && resp.hovered(), Spring::SNAPPY);
         let press = anim::toggle(ctx, resp.id.with("press"), self.enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
-        let lift = -hover * (1.0 - press);
-        let scale = 1.0 - 0.06 * press;
-        let bg = Rect::from_center_size(rect.center() + vec2(0.0, lift), rect.size() * scale);
+        let scale = 1.0 - 0.04 * press;
+        let bg = Rect::from_center_size(rect.center(), rect.size() * scale);
         let mut painter = ui.painter().clone();
         if !self.enabled {
             painter.set_opacity(0.4);
@@ -209,15 +208,11 @@ impl<'a> Button<'a> {
         let r = bg.height() * 0.5;
         let fg = match self.variant {
             Variant::Primary => {
-                paint::shadow(&painter, bg, r, vec2(0.0, 8.0), 28.0, -10.0, theme::alpha(theme::INDIGO, 0.75));
-                paint::gradient_rect(&painter, bg, r, &Gradient::horizontal(bg, &theme::PRIMARY));
-                if hover > 0.0 {
-                    painter.rect_filled(bg, theme::radius(r), theme::white(0.08 * hover));
-                }
-                Color32::WHITE
+                painter.rect_filled(bg, theme::radius(r), theme::mix(theme::ACCENT, theme::ACCENT_HOVER, hover));
+                theme::ON_ACCENT
             }
             Variant::Secondary => {
-                painter.rect_filled(bg, theme::radius(r), theme::white(0.07 + 0.04 * hover));
+                painter.rect_filled(bg, theme::radius(r), theme::mix(theme::control(), theme::INK_600, hover));
                 theme::FG
             }
             Variant::Ghost => {
@@ -229,8 +224,7 @@ impl<'a> Button<'a> {
                 theme::DANGER
             }
             Variant::Glass => {
-                painter.rect(bg, theme::radius(r), theme::surface(), theme::hairline(), StrokeKind::Inside);
-                painter.rect_filled(bg, theme::radius(r), theme::white(0.08 * hover));
+                painter.rect_filled(bg, theme::radius(r), theme::mix(theme::surface_strong(), theme::INK_700, hover));
                 theme::FG
             }
         };
@@ -355,7 +349,7 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt,
     let track_w = widths.iter().sum::<f32>() + 8.0;
     let (track, _) = ui.allocate_exact_size(vec2(track_w, item_h + 8.0), Sense::hover());
     let painter = ui.painter();
-    painter.rect(track, theme::radius(track.height() * 0.5), theme::black(0.3), theme::hairline(), StrokeKind::Inside);
+    painter.rect_filled(track, theme::radius(track.height() * 0.5), theme::surface_soft());
 
     let mut rects = Vec::with_capacity(options.len());
     let mut x = track.left() + 4.0;
@@ -379,13 +373,7 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt,
         let r = rects[active];
         let [l, w] = anim::spring(ui.ctx(), id.with("pill"), [r.left() - track.left(), r.width()], Spring::BOUNCY);
         let pill = Rect::from_min_size(pos2(track.left() + l, r.top()), vec2(w, r.height()));
-        paint::shadow(painter, pill, pill.height() * 0.5, vec2(0.0, 4.0), 18.0, -6.0, theme::alpha(theme::VIOLET, 0.8));
-        paint::gradient_rect(
-            painter,
-            pill,
-            pill.height() * 0.5,
-            &Gradient::horizontal(pill, &[(0.0, theme::alpha(theme::INDIGO, 0.8)), (1.0, theme::alpha(theme::VIOLET, 0.8))]),
-        );
+        painter.rect_filled(pill, theme::radius(pill.height() * 0.5), theme::INK_600);
     }
 
     for (i, o) in options.iter().enumerate() {
@@ -425,7 +413,7 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt,
     changed
 }
 
-/// Switch: the knob springs across, the track fills with the brand gradient. Acts on press.
+/// Switch: the knob springs across, the track turns Orbiters green. Acts on press.
 pub fn toggle(ui: &mut Ui, id_salt: impl egui::AsIdSalt, on: &mut bool) -> bool {
     let id = ui.scope_id().with(id_salt);
     let (rect, _) = ui.allocate_exact_size(vec2(48.0, 28.0), Sense::hover());
@@ -441,22 +429,16 @@ pub fn toggle(ui: &mut Ui, id_salt: impl egui::AsIdSalt, on: &mut bool) -> bool 
     let press = anim::toggle(ctx, id.with("p"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let track = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.08 * press));
     let p = ui.painter();
-    p.rect_filled(track, theme::radius(track.height() * 0.5), theme::white(0.1 * (1.0 - fill)));
-    if fill > 0.01 {
-        let mut gp = p.clone();
-        gp.set_opacity(fill);
-        paint::gradient_rect(&gp, track, track.height() * 0.5, &Gradient::horizontal(track, &[(0.0, theme::INDIGO), (1.0, theme::VIOLET)]));
-    }
+    p.rect_filled(track, theme::radius(track.height() * 0.5), theme::mix(theme::INK_600, theme::ACCENT, fill));
     let knob_r = 10.0 * (1.0 - 0.08 * press);
     let x = track.left() + 4.0 + knob_r + k * (track.width() - 8.0 - knob_r * 2.0);
     let c = pos2(x, track.center().y);
-    paint::glow(p, c + vec2(0.0, 2.0), Vec2::splat(knob_r * 0.8), 4.0, theme::black(0.45));
     p.circle_filled(c, knob_r, Color32::WHITE);
     resp.on_hover_cursor(CursorIcon::PointingHand);
     changed
 }
 
-/// Slider with a gradient fill and a springy knob; the value label sits on the right.
+/// Slider with a green fill and a springy knob; the value label sits on the right.
 pub fn slider(
     ui: &mut Ui,
     id_salt: impl egui::AsIdSalt,
@@ -493,11 +475,10 @@ pub fn slider(
     p.rect_filled(bar, theme::radius(3.0), theme::white(0.09));
     if fill_t > 0.0 {
         let fill = Rect::from_min_size(bar.min, vec2((bar.width() * fill_t).max(6.0), bar.height()));
-        paint::gradient_rect(p, fill, 3.0, &Gradient::horizontal(bar, &theme::BRAND));
+        p.rect_filled(fill, theme::radius(3.0), theme::ACCENT);
     }
     let c = pos2(bar.left() + bar.width() * knob_t, bar.center().y);
     let r = 9.0 + 1.0 * hover;
-    paint::glow(p, c + vec2(0.0, 2.0), Vec2::splat(r * 0.8), 5.0, theme::black(0.5));
     p.circle_filled(c, r, Color32::WHITE);
     let label = Txt::new(format(*value), 12.5).color(theme::FG_2);
     text(p, pos2(rect.right(), rect.center().y), Align2::RIGHT_CENTER, &label);
@@ -531,9 +512,10 @@ fn field_frame(ui: &mut Ui, rect: Rect, id: Id, value: &mut String, hint: &str, 
     let focused = ui.memory(|m| m.has_focus(id));
     let ring = anim::toggle(ui.ctx(), id.with("ring"), focused, Spring::SNAPPY);
     let p = ui.painter().clone();
-    p.rect(rect, theme::radius(radius), theme::black(0.3), theme::hairline(), StrokeKind::Inside);
+    // The website's input: a flat zinc field, a green ring while focused.
+    p.rect_filled(rect, theme::radius(radius), theme::INK_750);
     if ring > 0.01 {
-        p.rect_stroke(rect, theme::radius(radius), Stroke::new(2.0, theme::alpha(theme::INDIGO, 0.6 * ring)), StrokeKind::Outside);
+        p.rect_stroke(rect, theme::radius(radius), Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.8 * ring)), StrokeKind::Outside);
     }
     let mut inner = rect.shrink2(vec2(12.0, 0.0));
     if let Some(glyph) = leading {
@@ -556,7 +538,7 @@ fn field_frame(ui: &mut Ui, rect: Rect, id: Id, value: &mut String, hint: &str, 
 /// Status chip of the capture page: tinted icon tile, caption and a value that slides when it changes.
 pub fn status_chip(ui: &mut Ui, rect: Rect, id: Id, glyph: &str, label: &str, value: &str, tone: Tone) {
     let p = ui.painter();
-    p.rect(rect, theme::radius(16.0), theme::surface(), theme::hairline(), StrokeKind::Inside);
+    p.rect_filled(rect, theme::radius(16.0), theme::surface());
     let tile = Rect::from_min_size(pos2(rect.left() + 14.0, rect.center().y - 18.0), vec2(36.0, 36.0));
     let (bg, fg) = match tone {
         Tone::Ok => (theme::alpha(theme::OK, 0.1), theme::OK),
@@ -629,18 +611,14 @@ pub struct Stat<'a> {
     pub accent: Option<Color32>,
 }
 
-/// Stat tile: caption and icon, a big counting number, a sub line; lifts and glows on hover.
+/// Stat tile: caption and icon, a big counting number, a sub line; a step lighter on hover.
 pub fn stat_tile(ui: &mut Ui, rect: Rect, id: Id, stat: &Stat<'_>) {
     let Stat { glyph, label, number, sub, accent } = *stat;
     let resp = ui.interact(rect, id, Sense::hover());
     let hover = anim::toggle(ui.ctx(), id.with("hover"), resp.hovered(), Spring::SOFT);
-    let r = rect.translate(vec2(0.0, -3.0 * hover));
+    let r = rect;
     let p = ui.painter();
-    p.rect(r, theme::radius(theme::TILE_RADIUS), theme::surface(), theme::hairline(), StrokeKind::Inside);
-    if hover > 0.01 {
-        let clip = p.with_clip_rect(r.shrink(1.0).intersect(p.clip_rect()));
-        paint::glow(&clip, r.right_top() + vec2(-16.0, 16.0), Vec2::splat(56.0), 24.0, theme::alpha(theme::INDIGO, 0.22 * hover));
-    }
+    p.rect_filled(r, theme::radius(theme::TILE_RADIUS), theme::mix(theme::surface(), theme::INK_800, hover));
     text(p, r.left_top() + vec2(16.0, 22.0), Align2::LEFT_CENTER, &Txt::caps(label));
     icon(p, r.right_top() + vec2(-24.0, 22.0), glyph, 16.0, accent.unwrap_or(theme::FG_4));
     text_truncated(
@@ -686,16 +664,13 @@ pub fn pill_at(painter: &Painter, ui: &Ui, left_center: Pos2, glyph: Option<&str
     w
 }
 
-/// Section heading of a settings card: gradient icon tile, title and subtitle.
+/// Section heading of a settings card: a tinted icon tile (as the website's forms), title and subtitle.
 pub fn section_header(ui: &mut Ui, glyph: &str, title: &str, subtitle: Option<&str>) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
     let p = ui.painter();
     let tile = Rect::from_min_size(pos2(rect.left(), rect.center().y - 18.0), vec2(36.0, 36.0));
-    paint::fill_convex(p, &paint::rounded_rect_points(tile, 12.0), {
-        let g = Gradient::css(tile, 135.0, &[(0.0, theme::alpha(theme::INDIGO, 0.25)), (1.0, theme::alpha(theme::VIOLET, 0.15))]);
-        move |pt| g.color(pt)
-    });
-    icon(p, tile.center(), glyph, 17.0, theme::VIOLET);
+    p.rect_filled(tile, theme::radius(11.0), theme::alpha(theme::ACCENT, 0.12));
+    icon(p, tile.center(), glyph, 17.0, theme::ACCENT);
     let x = tile.right() + 12.0;
     match subtitle {
         Some(sub) => {
@@ -737,7 +712,7 @@ pub fn separator(ui: &mut Ui) {
     ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, theme::white(0.05)));
 }
 
-/// Progress bar (storage usage): sprung width, brand gradient or a warning colour.
+/// Progress bar (storage usage): sprung width, green or a warning colour.
 pub fn progress(ui: &mut Ui, id: Id, fraction: f32, height: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
     let p = ui.painter();
@@ -750,7 +725,7 @@ pub fn progress(ui: &mut Ui, id: Id, fraction: f32, height: f32) {
         } else if fraction > 0.7 {
             p.rect_filled(fill, theme::radius(height * 0.5), theme::WARN);
         } else {
-            paint::gradient_rect(p, fill, height * 0.5, &Gradient::horizontal(rect, &theme::BRAND));
+            p.rect_filled(fill, theme::radius(height * 0.5), theme::ACCENT);
         }
     }
 }

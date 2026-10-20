@@ -3,7 +3,7 @@
 
 use crate::anim::{self, Spring};
 use crate::theme::{self, Txt};
-use crate::{icons, paint, widgets};
+use crate::{icons, widgets};
 use egui::{pos2, vec2, Context, CursorIcon, Id, Order, Rect, Sense};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,7 +115,7 @@ impl Toasts {
                     // Inside the rounded corners, shrinking towards the left.
                     let track = Rect::from_min_max(pos2(rect.left() + 14.0, rect.bottom() - 3.0), pos2(rect.right() - 14.0, rect.bottom() - 1.0));
                     let bar = Rect::from_min_size(track.min, vec2(track.width() * k, track.height()));
-                    paint::gradient_rect(&p, bar, 1.0, &paint::Gradient::horizontal(track, &[(0.0, theme::CYAN), (1.0, theme::VIOLET)]));
+                    p.rect_filled(bar, theme::radius(1.0), theme::white(0.35));
                 }
                 bottom = y - 10.0;
             }

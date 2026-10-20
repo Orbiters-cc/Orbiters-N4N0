@@ -294,7 +294,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     let k = anim::spring_from(ui.ctx(), Id::unique("worker-log-open"), [0.0], [1.0], Spring::SOFT)[0].clamp(0.0, 1.0);
                     let h = 240.0 * k;
                     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
-                    ui.painter().rect(r, theme::radius(12.0), theme::black(0.4), theme::hairline(), egui::StrokeKind::Inside);
+                    ui.painter().rect_filled(r, theme::radius(12.0), theme::INK_900);
                     let mut lu = ui.new_child(UiBuilder::new().max_rect(r.shrink(12.0)).id_salt("worker-log"));
                     lu.multiply_opacity(k);
                     egui::ScrollArea::vertical().id_salt("worker-log-scroll").stick_to_bottom(true).auto_shrink([false, false]).show(&mut lu, |ui| {
@@ -350,7 +350,7 @@ fn section(ui: &mut Ui, cx: &Cx, index: usize, glyph: &str, title: &str, subtitl
             card,
             theme::radius(theme::CARD_RADIUS),
             theme::surface().gamma_multiply(alpha),
-            egui::Stroke::new(1.0, theme::white(0.06 * alpha)),
+            egui::Stroke::NONE,
             egui::StrokeKind::Inside,
         ),
     );
@@ -380,7 +380,7 @@ fn source_chip(ui: &mut Ui, label: &str, active: bool) -> egui::Response {
     let hover = anim::toggle(ui.ctx(), resp.id.with("hover"), resp.hovered(), Spring::SNAPPY);
     let press = anim::toggle(ui.ctx(), resp.id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let rr = Rect::from_center_size(r.center(), r.size() * (1.0 - 0.05 * press));
-    let bg = if active { theme::alpha(theme::INDIGO, 0.3) } else { theme::white(0.06 + 0.04 * hover) };
+    let bg = if active { theme::INK_600 } else { theme::mix(theme::control(), theme::INK_600, 0.5 * hover) };
     ui.painter().rect_filled(rr, theme::radius(15.0), bg);
     widgets::text(ui.painter(), rr.center(), Align2::CENTER_CENTER, &t);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)

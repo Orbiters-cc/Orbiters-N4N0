@@ -4,7 +4,7 @@
 use super::calibration::{Calibrator, Phase};
 use crate::backend::Ctl;
 use crate::state::{CaptureState, Snapshot};
-use egui::{pos2, vec2, Align2, Color32, Id, Rect, Ui, UiBuilder, Vec2};
+use egui::{pos2, vec2, Align2, Id, Rect, Ui, UiBuilder, Vec2};
 use orbiters_contracts::performance::tracking::{Device, Sample};
 use orbiters_core::settings::Settings;
 use orbiters_ui::record::{self, RecState, RecordButton};
@@ -131,21 +131,12 @@ fn ago(utc_ms: u64) -> String {
     }
 }
 
-/// The desktop app's backdrop without its glow shader: ink with a violet corner. It never changes, so the painter
+/// The tab's backdrop: flat ink, as the website's page. It never changes, so the painter
 /// keeps it ([`orbiters_ui::software::Software::keep_as_backdrop`]) instead of drawing it every frame.
 pub fn backdrop(ui: &Ui) {
     let rect = Rect::from_min_size(pos2(0.0, 0.0), SIZE);
     let p = ui.painter();
     p.rect_filled(rect, 0.0, theme::INK_950);
-    let mut mesh = egui::Mesh::default();
-    let corner = |c: Color32, a: f32| theme::alpha(c, a);
-    mesh.colored_vertex(rect.left_top(), corner(theme::VIOLET, 0.16));
-    mesh.colored_vertex(rect.right_top(), corner(theme::INDIGO, 0.06));
-    mesh.colored_vertex(rect.right_bottom(), Color32::TRANSPARENT);
-    mesh.colored_vertex(rect.left_bottom(), corner(theme::BLUE, 0.05));
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
-    p.add(mesh);
 }
 
 fn header(ui: &mut Ui, snap: &Snapshot, rect: Rect) {

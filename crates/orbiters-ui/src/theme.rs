@@ -1,22 +1,30 @@
-//! The Orbiters look: the website's near-black with purple and blue glows, the logo's cyan and violet, the Unity
-//! tools' flat cards (radius 16-20, 1 px hairlines) and their status colours.
+//! The Orbiters look, flat like the website (zinc surfaces on black, radii 10-28, no shadows on controls) and the
+//! Unity tools (My Avatar's photoshoot, Logger, Mixer: one step lighter per level, Orbiters green for the main
+//! action and for switches that are on). No gradients or glows on controls; colour means status.
 
 use crate::fonts;
 use egui::epaint::text::{LayoutJob, TextFormat, VariationCoords};
 use egui::{Align, Color32, CornerRadius, FontFamily, FontId, Stroke, Style, TextStyle, Vec2};
 
-pub const INK_950: Color32 = Color32::from_rgb(0x07, 0x07, 0x0b);
-pub const INK_900: Color32 = Color32::from_rgb(0x0c, 0x0c, 0x12);
-pub const INK_850: Color32 = Color32::from_rgb(0x11, 0x11, 0x18);
-pub const INK_800: Color32 = Color32::from_rgb(0x16, 0x16, 0x1e);
-pub const INK_750: Color32 = Color32::from_rgb(0x1c, 0x1c, 0x26);
-pub const INK_700: Color32 = Color32::from_rgb(0x24, 0x24, 0x2f);
-pub const INK_600: Color32 = Color32::from_rgb(0x30, 0x30, 0x3d);
+// Zinc, as the website (Tailwind/HeroUI dark): page, surfaces one step lighter each.
+pub const INK_950: Color32 = Color32::from_rgb(0x09, 0x09, 0x0b);
+pub const INK_900: Color32 = Color32::from_rgb(0x10, 0x10, 0x12);
+pub const INK_850: Color32 = Color32::from_rgb(0x18, 0x18, 0x1b);
+pub const INK_800: Color32 = Color32::from_rgb(0x1f, 0x1f, 0x23);
+pub const INK_750: Color32 = Color32::from_rgb(0x27, 0x27, 0x2a);
+pub const INK_700: Color32 = Color32::from_rgb(0x30, 0x30, 0x35);
+pub const INK_600: Color32 = Color32::from_rgb(0x3f, 0x3f, 0x46);
 
-pub const FG: Color32 = Color32::from_rgb(0xf3, 0xf3, 0xf8);
-pub const FG_2: Color32 = Color32::from_rgb(0xb4, 0xb4, 0xc6);
-pub const FG_3: Color32 = Color32::from_rgb(0x7a, 0x7a, 0x8f);
-pub const FG_4: Color32 = Color32::from_rgb(0x50, 0x50, 0x5f);
+pub const FG: Color32 = Color32::from_rgb(0xec, 0xed, 0xee);
+pub const FG_2: Color32 = Color32::from_rgb(0xb4, 0xb4, 0xbb);
+pub const FG_3: Color32 = Color32::from_rgb(0x8b, 0x8b, 0x94);
+pub const FG_4: Color32 = Color32::from_rgb(0x5a, 0x5a, 0x63);
+
+/// Orbiters green (My Avatar, Logger, Mixer): the main action, switches that are on, selected things.
+pub const ACCENT: Color32 = Color32::from_rgb(0x00, 0xda, 0x6d);
+pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0x1e, 0xe6, 0x84);
+/// Text and icons on [`ACCENT`].
+pub const ON_ACCENT: Color32 = Color32::from_rgb(0x05, 0x16, 0x0c);
 
 pub const CYAN: Color32 = Color32::from_rgb(0x48, 0xe6, 0xff);
 pub const VIOLET: Color32 = Color32::from_rgb(0xbd, 0x65, 0xff);
@@ -24,7 +32,7 @@ pub const INDIGO: Color32 = Color32::from_rgb(0x74, 0x66, 0xff);
 pub const BLUE: Color32 = Color32::from_rgb(0x4f, 0x89, 0xff);
 pub const PURPLE: Color32 = Color32::from_rgb(0xa2, 0x59, 0xf7);
 
-pub const OK: Color32 = Color32::from_rgb(0x3c, 0xf2, 0x9a);
+pub const OK: Color32 = ACCENT;
 pub const WARN: Color32 = Color32::from_rgb(0xf5, 0xb7, 0x4f);
 pub const DANGER: Color32 = Color32::from_rgb(0xff, 0x6b, 0x7a);
 pub const REC: Color32 = Color32::from_rgb(0xff, 0x4d, 0x6d);
@@ -32,13 +40,8 @@ pub const REC: Color32 = Color32::from_rgb(0xff, 0x4d, 0x6d);
 /// The logo's mark colour.
 pub const MARK: Color32 = Color32::from_rgb(0xe9, 0xe9, 0xf2);
 
-pub const CARD_RADIUS: f32 = 20.0;
-pub const TILE_RADIUS: f32 = 16.0;
-
-/// The brand gradient (cyan → indigo → violet).
-pub const BRAND: [(f32, Color32); 3] = [(0.0, CYAN), (0.5, INDIGO), (1.0, VIOLET)];
-/// The primary button gradient (blue → indigo → violet).
-pub const PRIMARY: [(f32, Color32); 3] = [(0.0, BLUE), (0.5, INDIGO), (1.0, VIOLET)];
+pub const CARD_RADIUS: f32 = 18.0;
+pub const TILE_RADIUS: f32 = 14.0;
 
 /// `c` at opacity `a` (0..1), blended like CSS (in gamma space).
 pub fn alpha(c: Color32, a: f32) -> Color32 {
@@ -58,18 +61,28 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     a.lerp_to_gamma(b, t.clamp(0.0, 1.0))
 }
 
-/// Glass card fill (the web's `surface`).
+/// Card fill (the website's `--orb-surface`: content1 at 92 %).
 pub fn surface() -> Color32 {
-    alpha(INK_800, 0.78)
+    alpha(INK_850, 0.92)
 }
 
-/// Stronger glass for popovers, toasts and the session detail (the web's `surface-strong`).
+/// Popovers, toasts and the session detail (the website's raised surface).
 pub fn surface_strong() -> Color32 {
-    alpha(INK_750, 0.9)
+    INK_800
+}
+
+/// A surface inside a card (the website's `--orb-surface-soft`).
+pub fn surface_soft() -> Color32 {
+    alpha(INK_750, 0.45)
+}
+
+/// Neutral control fill (secondary buttons, the selected segment, switches that are off).
+pub fn control() -> Color32 {
+    alpha(INK_600, 0.55)
 }
 
 pub fn hairline() -> Stroke {
-    Stroke::new(1.0, white(0.06))
+    Stroke::new(1.0, white(0.05))
 }
 
 pub fn radius(r: f32) -> CornerRadius {

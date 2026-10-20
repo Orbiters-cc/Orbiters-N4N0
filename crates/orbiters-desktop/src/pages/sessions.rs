@@ -242,8 +242,7 @@ fn thumb_shape(painter: &egui::Painter, rect: Rect, radius: CornerRadius, tex: O
         }
         None => {
             let pts = paint::rounded_rect_points_corners(rect, [radius.nw as f32, radius.ne as f32, radius.se as f32, radius.sw as f32]);
-            let g = Gradient::css(rect, 135.0, &[(0.0, theme::alpha(theme::INDIGO, 0.2)), (1.0, theme::alpha(theme::VIOLET, 0.1))]);
-            paint::fill_convex(painter, &pts, |p| g.color(p));
+            paint::fill_convex(painter, &pts, |_| theme::INK_750);
             let lr = Rect::from_center_size(rect.center(), logo::size_for_width(40.0));
             logo::paint(painter, lr, logo::Look::default());
         }
@@ -270,7 +269,7 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
     let mut p = ui.painter().clone();
     p.multiply_opacity(enter.clamp(0.0, 1.0) * shown);
 
-    p.rect(r, theme::radius(theme::CARD_RADIUS), theme::surface(), theme::hairline(), egui::StrokeKind::Inside);
+    p.rect_filled(r, theme::radius(theme::CARD_RADIUS), theme::surface());
     let thumb = Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0));
     let top = CornerRadius { nw: 20, ne: 20, sw: 0, se: 0 };
     thumb_shape(&p, thumb, top, tex, 1.0 + 0.06 * ease::out_cubic(hover));
@@ -313,7 +312,7 @@ fn badge(p: &egui::Painter, ui: &Ui, at: egui::Pos2, label: &str, bg: Color32, f
 
 fn shimmer_card(ui: &Ui, rect: Rect) {
     let p = ui.painter();
-    p.rect(rect, theme::radius(theme::CARD_RADIUS), theme::surface(), theme::hairline(), egui::StrokeKind::Inside);
+    p.rect_filled(rect, theme::radius(theme::CARD_RADIUS), theme::surface());
     let t = anim::clock(ui.ctx(), 30.0);
     let k = ease::out_expo(((t % 1.6) / 1.6) as f32);
     let band =
@@ -397,8 +396,8 @@ fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: R
                         }
                         p.rect_filled(row, theme::radius(12.0), theme::white(0.06 * hover));
                         let tile = Rect::from_min_size(pos2(row.left() + 12.0, row.center().y - 18.0), vec2(36.0, 36.0));
-                        p.rect_filled(tile, theme::radius(10.0), theme::alpha(theme::CYAN, 0.1));
-                        widgets::icon(&p, tile.center(), icons::DOWNLOAD_SIMPLE, 16.0, theme::CYAN);
+                        p.rect_filled(tile, theme::radius(10.0), theme::alpha(theme::ACCENT, 0.12));
+                        widgets::icon(&p, tile.center(), icons::DOWNLOAD_SIMPLE, 16.0, theme::ACCENT);
                         let x = tile.right() + 12.0;
                         widgets::text_truncated(
                             &p,
@@ -640,7 +639,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
 }
 
 fn mini_stat(p: &egui::Painter, r: Rect, glyph: &str, label: &str, value: &str, sub: Option<&str>) {
-    p.rect(r, theme::radius(16.0), theme::black(0.25), theme::hairline(), egui::StrokeKind::Inside);
+    p.rect_filled(r, theme::radius(16.0), theme::surface_soft());
     widgets::icon(p, pos2(r.left() + 19.0, r.top() + 20.0), glyph, 14.0, theme::FG_4);
     widgets::text(p, pos2(r.left() + 32.0, r.top() + 20.0), Align2::LEFT_CENTER, &Txt::caps(label));
     widgets::text_truncated(p, pos2(r.left() + 12.0, r.top() + 44.0), Align2::LEFT_CENTER, &Txt::new(value, 18.0).weight(weight::SEMIBOLD), r.width() - 24.0);

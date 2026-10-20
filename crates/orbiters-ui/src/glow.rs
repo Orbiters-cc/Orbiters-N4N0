@@ -16,9 +16,9 @@ pub enum Mood {
     Importing,
 }
 
-/// Blob colours (unmultiplied RGBA) per mood, as on the web.
+/// Blob colours (unmultiplied RGBA) per mood: the web's, as faint as the website's home (a violet corner on black).
 fn palette(mood: Mood) -> [[u8; 4]; 3] {
-    let a = |r: u8, g: u8, b: u8, alpha: f32| [r, g, b, (alpha * 255.0).round() as u8];
+    let a = |r: u8, g: u8, b: u8, alpha: f32| [r, g, b, (alpha * 0.4 * 255.0).round() as u8];
     match mood {
         Mood::Idle => [a(162, 89, 247, 0.55), a(79, 137, 255, 0.42), a(72, 230, 255, 0.22)],
         Mood::Recording => [a(255, 77, 109, 0.42), a(189, 101, 255, 0.45), a(255, 138, 92, 0.2)],

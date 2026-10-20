@@ -341,8 +341,8 @@ fn consent_overlay(ui: &mut Ui, cx: &mut Cx, card: Rect) {
     dp.multiply_opacity(k.clamp(0.0, 1.0));
     widgets::panel(&dp, dialog, 24.0);
     let tile = Rect::from_min_size(dialog.min + vec2(24.0, 24.0), vec2(36.0, 36.0));
-    dp.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::VIOLET, 0.15));
-    widgets::icon(&dp, tile.center(), icons::SHIELD_CHECK, 18.0, theme::VIOLET);
+    dp.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12));
+    widgets::icon(&dp, tile.center(), icons::SHIELD_CHECK, 18.0, theme::ACCENT);
     widgets::text(&dp, pos2(tile.right() + 10.0, tile.center().y), Align2::LEFT_CENTER, &Txt::new("Before you capture", 16.0).weight(weight::SEMIBOLD));
     let mut y = tile.bottom() + 16.0;
     for g in galleys {

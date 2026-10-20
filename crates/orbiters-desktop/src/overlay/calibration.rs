@@ -318,7 +318,7 @@ pub fn paint_mirror(p: &Painter, cal: &Calibrator, now: f64) {
     let pulse = 0.5 + 0.5 * ((now * 4.0).sin() as f32);
     for (i, x) in [-span / 2.0, span / 2.0].into_iter().enumerate() {
         let on = cal.hand_on_target(i);
-        let c = if on { theme::OK } else { theme::VIOLET };
+        let c = if on { theme::OK } else { theme::FG };
         let r = ON_TARGET_M * s * if on { 1.0 } else { 0.9 + 0.1 * pulse };
         p.circle_filled(to(x, sh), r, theme::alpha(c, if on { 0.22 } else { 0.10 + 0.08 * pulse }));
         p.circle_stroke(to(x, sh), r, Stroke::new(3.0, theme::alpha(c, 0.9)));
@@ -397,7 +397,7 @@ fn first_fix(c: &TPoseCheck) -> &'static str {
 pub fn paint_target(p: &Painter, label: &str, on: bool, now: f64) {
     let c = pos2(TARGET_PX as f32 / 2.0, TARGET_PX as f32 / 2.0);
     let pulse = 0.5 + 0.5 * ((now * 4.0).sin() as f32);
-    let color = if on { theme::OK } else { theme::VIOLET };
+    let color = if on { theme::OK } else { theme::FG };
     let r = if on { 70.0 } else { 62.0 + 8.0 * pulse };
     p.circle_filled(c, r, theme::alpha(color, if on { 0.30 } else { 0.12 + 0.10 * pulse }));
     p.circle_stroke(c, r - 3.0, Stroke::new(6.0, color));

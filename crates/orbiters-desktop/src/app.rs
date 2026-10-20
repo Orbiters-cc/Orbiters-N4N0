@@ -5,10 +5,9 @@ use crate::backend::Ctl;
 use crate::controller::{Notice, NoticeKind};
 use crate::pages::{self, Page};
 use crate::state::{CaptureState, Snapshot};
-use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, ResizeDirection, Sense, Stroke, Ui, Vec2, ViewportCommand};
+use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, ResizeDirection, Sense, Ui, Vec2, ViewportCommand};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::glow::{self, Mood};
-use orbiters_ui::paint::{self, Gradient};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{icons, logo, toast, widgets};
 use std::sync::Arc;
@@ -268,9 +267,9 @@ impl App {
         let pill_y = anim::value(&ctx, id.with("pill"), (item_rect(active).top() - nav_top) as f32, Spring::BOUNCY);
         let pill = Rect::from_min_size(pos2(inner.left(), nav_top + pill_y), vec2(inner.width(), 44.0));
         let p = ui.painter();
-        p.rect(pill, theme::radius(16.0), theme::white(0.08), Stroke::new(1.0, theme::white(0.06)), egui::StrokeKind::Inside);
+        p.rect_filled(pill, theme::radius(14.0), theme::white(0.07));
         let bar = Rect::from_center_size(pos2(pill.left() + 1.5, pill.center().y), vec2(3.0, 20.0));
-        paint::gradient_rect(p, bar, 1.5, &Gradient::vertical(bar, &[(0.0, theme::CYAN), (1.0, theme::VIOLET)]));
+        p.rect_filled(bar, theme::radius(1.5), theme::ACCENT);
 
         let capturing = snap.is_capturing();
         for (i, (page, label, glyph)) in items.into_iter().enumerate() {
@@ -290,7 +289,7 @@ impl App {
                 theme::FG_3
             };
             let fg = anim::color(&ctx, id.with(("fg", i)), target, Spring::SNAPPY);
-            let icon_c = anim::color(&ctx, id.with(("ic", i)), if is_active { theme::CYAN } else { target }, Spring::SNAPPY);
+            let icon_c = anim::color(&ctx, id.with(("ic", i)), if is_active { theme::ACCENT } else { target }, Spring::SNAPPY);
             let mut p = ui.painter().clone();
             p.set_opacity(alpha);
             let x = r.left() + 14.0 + 2.0 * press;
@@ -408,9 +407,7 @@ fn splash(ctx: &egui::Context, full: Rect, t: f64) {
         tp.multiply_opacity(k);
         let y = logo_rect.bottom() + 24.0 + 14.0 * (1.0 - k);
         widgets::text(&tp, pos2(full.center().x, y + 16.0), Align2::CENTER_CENTER, &Txt::new("Orbiters", 28.0).weight(weight::SEMIBOLD).tracking(-0.01));
-        let base = Txt::new("", 13.0).weight(weight::MEDIUM).tracking(0.32);
-        let job = theme::gradient_job("DESKTOP", &base, &theme::BRAND);
-        let galley = tp.layout_job(job);
+        let galley = tp.layout_job(Txt::new("DESKTOP", 13.0).weight(weight::MEDIUM).tracking(0.32).color(theme::FG_3).job(f32::INFINITY));
         let at = pos2(full.center().x - galley.size().x * 0.5 + 0.16 * 13.0, y + 44.0 - galley.size().y * 0.5);
         tp.galley(at, galley, theme::FG);
     });

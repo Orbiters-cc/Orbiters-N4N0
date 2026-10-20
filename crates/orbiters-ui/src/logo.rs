@@ -3,7 +3,7 @@
 //! slide apart and back like the website's signal reveal, and breathe a violet glow while recording.
 
 use crate::anim::{self, ease};
-use crate::{paint, theme};
+use crate::theme;
 use egui::{pos2, vec2, Color32, ColorImage, Context, Id, Painter, Rect, TextureHandle, TextureOptions, Vec2};
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform};
 
@@ -214,7 +214,8 @@ pub fn paint(painter: &Painter, rect: Rect, look: Look) {
         let k = ease::keyframes(ease::mirror(t, 1.2), &[0.0, 1.0], ease::in_out);
         let a = 0.2 + 0.55 * k;
         let s = 0.9 + 0.28 * k;
-        paint::glow(painter, rect.center(), rect.size() * 0.5 * s, rect.width() * 0.35, theme::alpha(theme::VIOLET, 0.45 * a));
+        // No glow (flat look): the recording state shows in the REC chip and the record button.
+        let _ = (s, a);
     }
 
     // Echoes: x offsets [0, -14s, 8s, 0] and opacity [0, .9, .55, 0] over 0.6 + 0.3s seconds.

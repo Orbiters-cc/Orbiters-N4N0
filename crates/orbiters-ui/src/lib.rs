@@ -1,6 +1,6 @@
 //! Orbiters interface toolkit, shared by the desktop window and the VR overlay: the Orbiters look (theme, fonts,
 //! icons), springs, the glow background shader, painting helpers, widgets, the record button, the trail map,
-//! toasts, and an offscreen renderer (screenshots now, overlay textures later).
+//! toasts, an offscreen GPU renderer (screenshots) and a CPU painter (the VR overlay).
 
 pub mod anim;
 pub mod fonts;
@@ -11,6 +11,7 @@ pub mod logo;
 pub mod offscreen;
 pub mod paint;
 pub mod record;
+pub mod software;
 pub mod theme;
 pub mod toast;
 pub mod trail;

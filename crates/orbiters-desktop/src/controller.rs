@@ -3,9 +3,10 @@
 //! the interface reads every frame. It keeps working while the window is hidden in the tray.
 
 use crate::ipc::ToClient;
-use crate::state::{self, CaptureState, Snapshot};
+use crate::state::{self, CalibrationInfo, CaptureState, Snapshot};
 use crate::worker::WorkerHandle;
 use orbiters_contracts::manifest::{ConsentInfo, WorldInfo};
+use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::bundle::{self, SessionSummary};
 use orbiters_core::clock;
 use orbiters_core::osc::{OscEvent, OscService, OscValue, AVATAR_CHANGE, PARAMETERS_PREFIX};
@@ -100,13 +101,37 @@ pub struct Controller {
     repaint: Mutex<Option<egui::Context>>,
     /// Interfaces in other processes (window, overlay) get every change over their link.
     subscribers: Mutex<Vec<mpsc::Sender<ToClient>>>,
+    /// The latest T-pose calibration and when it was taken (Unix ms; the shared clock restarts with Windows).
+    calibration: Mutex<Option<StoredCalibration>>,
+}
+
+/// `calibration.json` in the config folder: the latest calibration, kept across restarts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredCalibration {
+    utc_ms: u64,
+    calibration: Calibration,
+}
+
+fn calibration_file() -> PathBuf {
+    orbiters_core::paths::config_dir().join("calibration.json")
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+fn calibration_info(stored: &StoredCalibration) -> CalibrationInfo {
+    let c = &stored.calibration;
+    CalibrationInfo { head_height_m: c.head_height_m, arm_span_m: c.arm_span_m, devices: c.devices.len(), utc_ms: stored.utc_ms }
 }
 
 pub type Shared = Arc<Controller>;
 
 impl Controller {
     pub fn new(settings: Settings) -> Shared {
-        let snapshot = Snapshot::new(settings);
+        let mut snapshot = Snapshot::new(settings);
+        let calibration = std::fs::read_to_string(calibration_file()).ok().and_then(|t| serde_json::from_str::<StoredCalibration>(&t).ok());
+        snapshot.steamvr.calibration = calibration.as_ref().map(calibration_info);
         Arc::new(Self {
             published: Mutex::new(Arc::new(snapshot.clone())),
             snapshot: Mutex::new(snapshot),
@@ -119,6 +144,7 @@ impl Controller {
             library_version: AtomicU64::new(0),
             repaint: Mutex::new(None),
             subscribers: Mutex::new(Vec::new()),
+            calibration: Mutex::new(calibration),
         })
     }
 
@@ -411,7 +437,7 @@ impl Controller {
             // The previous session (a world change restarts it) gets its last values first.
             self.flush_osc(&mut osc);
             osc.forwarding = false;
-            let sent = self.send(&WorkerCommand::Start(cmd));
+            let sent = self.send(&WorkerCommand::Start(Box::new(cmd)));
             if sent.is_ok() && record_parameters {
                 let samples = initial_samples(vrchat, &osc.latest, fetch_started);
                 osc.forwarding = true;
@@ -434,11 +460,52 @@ impl Controller {
 
     fn performance_spec(&self, settings: &Settings) -> PerformanceSpec {
         let p = &settings.performance;
+        // The stored calibration's clock reading may come from before a restart: date it by its age instead.
+        let calibration = self.calibration.lock().unwrap().clone().map(|s| {
+            let age_ns = unix_ms().saturating_sub(s.utc_ms) as i64 * 1_000_000;
+            Calibration { time_ns: clock::now_ns() as i64 - age_ns, ..s.calibration }
+        });
         PerformanceSpec {
             mic: p.record_mic.then(|| p.mic_device.clone()),
             game_audio_pid: if p.record_game_audio { self.snapshot.lock().unwrap().vrchat.pid } else { None },
             tracking_hz: p.record_tracking.then_some(p.tracking_rate_hz),
+            calibration: p.record_tracking.then_some(calibration).flatten(),
         }
+    }
+
+    /// A T-pose calibration from the overlay: kept for the next sessions, and added to the running one.
+    pub fn calibrated(self: &Shared, calibration: Calibration) {
+        let stored = StoredCalibration { utc_ms: unix_ms(), calibration };
+        let info = calibration_info(&stored);
+        *self.calibration.lock().unwrap() = Some(stored.clone());
+        self.update(|s| s.steamvr.calibration = Some(info.clone()));
+        if self.is_capturing() {
+            if let Err(e) = self.send(&WorkerCommand::Calibration { calibration: Box::new(stored.calibration.clone()) }) {
+                eprintln!("calibration to the worker: {e:#}");
+            }
+        }
+        self.notify(NoticeKind::Success, format!("Calibrated: eyes at {:.2} m, hands {:.2} m apart.", info.head_height_m, info.arm_span_m));
+        let ctl = self.clone();
+        std::thread::spawn(move || {
+            let path = calibration_file();
+            let r = path
+                .parent()
+                .map(std::fs::create_dir_all)
+                .unwrap_or(Ok(()))
+                .and_then(|_| std::fs::write(&path, serde_json::to_vec_pretty(&stored).unwrap_or_default()));
+            if let Err(e) = r {
+                ctl.notify(NoticeKind::Error, format!("Could not keep the calibration: {e}"));
+            }
+        });
+    }
+
+    /// The overlay process connected or left.
+    pub fn set_overlay_connected(&self, connected: bool) {
+        self.update_if(|s| {
+            let changed = s.steamvr.overlay != connected;
+            s.steamvr.overlay = connected;
+            changed
+        });
     }
 
     /// Current values from VRChat's OSCQuery service (empty when it is not running or not found).
@@ -711,19 +778,24 @@ fn spawn_watchers(ctl: Shared) {
                 if tick.is_multiple_of(3) {
                     // Names only: the default refresh also reads every process's command line and environment.
                     system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
-                    let pid = system
-                        .processes()
-                        .values()
-                        .find(|p| {
-                            let n = p.name().to_string_lossy().to_lowercase();
-                            n == "vrchat.exe" || n == "vrchat"
-                        })
-                        .map(|p| p.pid().as_u32());
+                    let named = |names: &[&str]| {
+                        system
+                            .processes()
+                            .values()
+                            .find(|p| {
+                                let n = p.name().to_string_lossy().to_lowercase();
+                                names.contains(&n.as_str())
+                            })
+                            .map(|p| p.pid().as_u32())
+                    };
+                    let pid = named(&["vrchat.exe", "vrchat"]);
+                    let steamvr = named(&["vrserver.exe", "vrserver"]).is_some();
                     running = pid.is_some();
                     ctl.update_if(|s| {
-                        let c = s.vrchat.running != running || s.vrchat.pid != pid;
+                        let c = s.vrchat.running != running || s.vrchat.pid != pid || s.steamvr.running != steamvr;
                         s.vrchat.running = running;
                         s.vrchat.pid = pid;
+                        s.steamvr.running = steamvr;
                         c
                     });
                     // Microphones come and go (headsets): ask the worker again now and then.

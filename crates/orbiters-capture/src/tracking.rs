@@ -3,9 +3,10 @@
 //! standing play space converted to Unity conventions. A T-pose held still while recording (VRChat's own
 //! calibration asks for one) is kept as a calibration, so the avatar's proportions can be matched later.
 
-use orbiters_contracts::performance::calibration::{Calibration, DevicePose};
+use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_contracts::performance::tracking::{self, Device, DeviceClass, Devices, Sample};
-use orbiters_openvr::{self as vr, Pose, MAX_DEVICES};
+use orbiters_core::pose::{calibration_of, TPoseDetector};
+use orbiters_openvr::{self as vr, sample_of, Pose, MAX_DEVICES};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -53,99 +54,14 @@ impl PoseSource for SteamVr {
     }
 
     fn describe(&mut self, index: u32) -> Option<Device> {
-        let class = match self.client.device_class(index) {
-            vr::DeviceClass::Hmd => DeviceClass::Hmd,
-            vr::DeviceClass::Controller => DeviceClass::Controller,
-            vr::DeviceClass::GenericTracker => DeviceClass::Tracker,
-            vr::DeviceClass::TrackingReference => DeviceClass::TrackingReference,
-            vr::DeviceClass::Invalid => return None,
-            _ => DeviceClass::Other,
-        };
-        let raw_class = self.client.device_class(index);
-        let controller_type = self.client.string_property(index, vr::prop::CONTROLLER_TYPE);
-        let s = |p| self.client.string_property(index, p).unwrap_or_default();
-        Some(Device {
-            index: index as u8,
-            class,
-            role: vr::role_name(raw_class, self.client.controller_role(index), controller_type.as_deref()),
-            serial: s(vr::prop::SERIAL_NUMBER),
-            model: s(vr::prop::MODEL_NUMBER),
-            manufacturer: s(vr::prop::MANUFACTURER_NAME),
-            controller_type: controller_type.unwrap_or_default(),
-            tracking_system: s(vr::prop::TRACKING_SYSTEM_NAME),
-            first_seen_ns: 0,
-        })
-    }
-}
-
-/// A pose in Unity conventions, for device number `number` of `tracking.json`.
-pub fn sample_of(time_ns: u64, number: usize, p: &Pose) -> Sample {
-    let (position, rotation) = tracking::from_openvr(&p.device_to_absolute.m);
-    let [vx, vy, vz] = p.velocity;
-    // Angular velocity is an axis (pseudovector): mirroring Z flips its x and y.
-    let [wx, wy, wz] = p.angular_velocity;
-    Sample {
-        time_ns,
-        device: number as u8,
-        flags: if p.pose_is_valid { tracking::flags::POSE_VALID } else { 0 } | if p.device_is_connected { tracking::flags::CONNECTED } else { 0 },
-        result: p.tracking_result.clamp(0, u16::MAX as i32) as u16,
-        position,
-        rotation,
-        velocity: [vx, vy, -vz],
-        angular_velocity: [-wx, -wy, wz],
-    }
-}
-
-/// Fires once when the person holds a T-pose still: hands level with the shoulders and far apart, head between
-/// them, nothing moving for half a second. Re-arms after the pose was left for a second.
-#[derive(Default)]
-pub struct TPoseDetector {
-    held_since: Option<u64>,
-    left_since: Option<u64>,
-    fired: bool,
-}
-
-impl TPoseDetector {
-    pub fn is_t_pose(head: &Sample, left: &Sample, right: &Sample) -> bool {
-        let speed = |s: &Sample| (s.velocity[0].powi(2) + s.velocity[1].powi(2) + s.velocity[2].powi(2)).sqrt();
-        let eye = head.position[1];
-        let (l, r) = (left.position, right.position);
-        let hands_y = (l[1] + r[1]) / 2.0;
-        let span = ((l[0] - r[0]).powi(2) + (l[2] - r[2]).powi(2)).sqrt();
-        let mid = [(l[0] + r[0]) / 2.0, (l[2] + r[2]) / 2.0];
-        let off_center = ((head.position[0] - mid[0]).powi(2) + (head.position[2] - mid[1]).powi(2)).sqrt();
-        [head, left, right].iter().all(|s| s.pose_valid() && speed(s) < 0.2)
-            && (l[1] - r[1]).abs() < 0.15
-            && hands_y > eye - 0.55
-            && hands_y < eye + 0.05
-            && span >= (0.75 * eye).max(0.9)
-            && off_center < 0.25
-    }
-
-    /// `true` at the moment a held T-pose counts.
-    pub fn update(&mut self, time_ns: u64, in_pose: bool) -> bool {
-        if in_pose {
-            self.left_since = None;
-            let since = *self.held_since.get_or_insert(time_ns);
-            if !self.fired && time_ns - since >= 500_000_000 {
-                self.fired = true;
-                return true;
-            }
-        } else {
-            self.held_since = None;
-            let since = *self.left_since.get_or_insert(time_ns);
-            if time_ns - since >= 1_000_000_000 {
-                self.fired = false;
-            }
-        }
-        false
+        self.client.describe(index)
     }
 }
 
 /// What a finished recording leaves for the manifest.
 pub struct TrackingResult {
     pub samples: u64,
-    pub devices: usize,
+    pub devices: Vec<Device>,
     pub calibrations: Vec<Calibration>,
 }
 
@@ -402,33 +318,7 @@ impl Recording {
         if !self.devices.devices.is_empty() {
             std::fs::write(self.dir.join(orbiters_contracts::performance::TRACKING_DEVICES), serde_json::to_vec_pretty(&self.devices)?)?;
         }
-        Ok(TrackingResult { samples: self.written, devices: self.devices.devices.len(), calibrations: self.calibrations })
-    }
-}
-
-/// Every device's pose at a calibration.
-pub fn calibration_of(time_ns: i64, source: &str, devices: &[Device], current: &[Sample]) -> Calibration {
-    let pose_of = |role: &str| devices.iter().position(|d| d.role == role).and_then(|n| current.iter().find(|s| s.device as usize == n));
-    let head_height_m = pose_of("head").map(|s| s.position[1]).unwrap_or(0.0);
-    let arm_span_m = match (pose_of("left_hand"), pose_of("right_hand")) {
-        (Some(l), Some(r)) => {
-            ((l.position[0] - r.position[0]).powi(2) + (l.position[1] - r.position[1]).powi(2) + (l.position[2] - r.position[2]).powi(2)).sqrt()
-        }
-        _ => 0.0,
-    };
-    Calibration {
-        time_ns,
-        pose: "t_pose".into(),
-        source: source.into(),
-        head_height_m,
-        arm_span_m,
-        devices: current
-            .iter()
-            .filter_map(|s| {
-                let d = devices.get(s.device as usize)?;
-                Some(DevicePose { index: s.device, serial: d.serial.clone(), class: d.class, role: d.role.clone(), position: s.position, rotation: s.rotation })
-            })
-            .collect(),
+        Ok(TrackingResult { samples: self.written, devices: self.devices.devices, calibrations: self.calibrations })
     }
 }
 
@@ -501,7 +391,7 @@ mod tests {
         assert!(rec.counts().connected);
         std::thread::sleep(Duration::from_millis(1200));
         let result = rec.finish().unwrap();
-        assert_eq!(result.devices, 3, "base station left out");
+        assert_eq!(result.devices.len(), 3, "base station left out");
         let samples = tracking::read(&std::fs::read(dir.join("tracking.bin")).unwrap()).unwrap();
         assert_eq!(samples.len() as u64, result.samples);
         assert!(samples.len() >= 3 * 80, "{} samples", samples.len());
@@ -553,7 +443,7 @@ mod tests {
         let rec = TrackingRecorder::start(Box::new(move || sources.pop()), &dir, orbiters_core::clock::now_ns(), 200.0).unwrap();
         std::thread::sleep(Duration::from_millis(300));
         let result = rec.finish().unwrap();
-        assert_eq!((result.devices, result.samples), (2, 20));
+        assert_eq!((result.devices.len(), result.samples), (2, 20));
         let devices: Devices = serde_json::from_slice(&std::fs::read(dir.join("tracking.json")).unwrap()).unwrap();
         assert_eq!(devices.devices.iter().map(|d| (d.serial.as_str(), d.index)).collect::<Vec<_>>(), [("HMD", 7), ("TRACKER", 8)]);
         let samples = tracking::read(&std::fs::read(dir.join("tracking.bin")).unwrap()).unwrap();

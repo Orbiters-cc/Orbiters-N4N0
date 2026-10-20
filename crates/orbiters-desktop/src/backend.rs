@@ -5,6 +5,7 @@
 use crate::controller::{self, Notice, NoticeKind};
 use crate::ipc::{Client, ToService};
 use crate::state::Snapshot;
+use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::settings::Settings;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -26,6 +27,8 @@ pub trait Backend: Send + Sync {
     /// Asks for the worker's log; [`Backend::worker_log`] has it once it arrived.
     fn request_worker_log(&self);
     fn worker_log(&self) -> Option<Vec<String>>;
+    /// A T-pose calibration taken in the overlay.
+    fn calibrated(&self, calibration: Calibration);
     /// Quits the whole app (the tray service and every window).
     fn quit(&self);
     /// The service asked this window to come to the front.
@@ -95,6 +98,10 @@ impl Backend for Remote {
 
     fn worker_log(&self) -> Option<Vec<String>> {
         self.0.worker_log()
+    }
+
+    fn calibrated(&self, calibration: Calibration) {
+        self.0.send(&ToService::Calibrated { calibration: Box::new(calibration) });
     }
 
     fn quit(&self) {
@@ -183,6 +190,10 @@ impl Backend for Local {
 
     fn worker_log(&self) -> Option<Vec<String>> {
         self.log.lock().unwrap().clone()
+    }
+
+    fn calibrated(&self, calibration: Calibration) {
+        self.ctl.calibrated(calibration);
     }
 
     fn quit(&self) {

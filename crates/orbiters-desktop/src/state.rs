@@ -64,6 +64,25 @@ pub struct StorageStatus {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SteamVrStatus {
+    /// SteamVR's server runs.
+    pub running: bool,
+    /// The Orbiters overlay is connected (a tab in SteamVR's dashboard).
+    pub overlay: bool,
+    /// The latest T-pose calibration.
+    pub calibration: Option<CalibrationInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CalibrationInfo {
+    pub head_height_m: f32,
+    pub arm_span_m: f32,
+    pub devices: usize,
+    /// Unix time in milliseconds.
+    pub utc_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WorkerStatus {
     pub ready: bool,
     pub error: Option<String>,
@@ -81,6 +100,7 @@ pub struct Snapshot {
     pub settings: Settings,
     pub storage: StorageStatus,
     pub worker: WorkerStatus,
+    pub steamvr: SteamVrStatus,
 }
 
 impl Snapshot {
@@ -95,6 +115,7 @@ impl Snapshot {
             storage: StorageStatus { sessions_dir: settings.sessions_dir.clone(), limit_gb: settings.storage_limit_gb, ..Default::default() },
             settings,
             worker: WorkerStatus::default(),
+            steamvr: SteamVrStatus::default(),
         }
     }
 

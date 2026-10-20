@@ -5,6 +5,7 @@
 
 use crate::controller::Notice;
 use crate::state::Snapshot;
+use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::settings::Settings;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
@@ -48,15 +49,31 @@ pub enum ToClient {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToService {
-    Hello { token: String, role: Role, pid: u32 },
+    Hello {
+        token: String,
+        role: Role,
+        pid: u32,
+    },
     StartCapture,
     StopCapture,
-    Pause { paused: bool },
+    Pause {
+        paused: bool,
+    },
     TestPattern,
-    SaveSettings { settings: Box<Settings> },
-    ImportRaw { dir: PathBuf },
-    Trash { dir: PathBuf },
+    SaveSettings {
+        settings: Box<Settings>,
+    },
+    ImportRaw {
+        dir: PathBuf,
+    },
+    Trash {
+        dir: PathBuf,
+    },
     WorkerLog,
+    /// A T-pose calibration taken in the overlay (`time_ns` is a shared-clock reading).
+    Calibrated {
+        calibration: Box<Calibration>,
+    },
     Quit,
 }
 

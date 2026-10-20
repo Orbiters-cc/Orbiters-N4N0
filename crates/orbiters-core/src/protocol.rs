@@ -2,6 +2,7 @@
 //! The worker logs to stderr. Both sides must run the same app version (`Ready.version`).
 
 use crate::contracts::manifest::{CaptureMode, ConsentInfo, SessionManifest, StorageQuality, WorldInfo};
+use crate::contracts::performance::calibration::Calibration;
 use crate::osc::OscValue;
 use crate::settings::KeyframeSettings;
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,7 @@ use std::path::PathBuf;
 pub enum WorkerCommand {
     /// Reply with `Sources`.
     ListSources,
-    Start(StartCapture),
+    Start(Box<StartCapture>),
     /// Finish the current session (manifest written), keep the worker running.
     Stop,
     Pause,
@@ -24,6 +25,10 @@ pub enum WorkerCommand {
     /// OSC values VRChat sent, for the running session's `parameters.bin`.
     Osc {
         samples: Vec<OscSample>,
+    },
+    /// A T-pose calibration made now (`time_ns` is a [`crate::clock::now_ns`] reading), for the running session.
+    Calibration {
+        calibration: Box<Calibration>,
     },
     Quit,
 }
@@ -79,6 +84,8 @@ pub struct PerformanceSpec {
     pub game_audio_pid: Option<u32>,
     /// Record SteamVR device poses at this rate (waits for SteamVR when it is not running).
     pub tracking_hz: Option<f32>,
+    /// The latest T-pose calibration, made before the session (`time_ns` is a [`crate::clock::now_ns`] reading).
+    pub calibration: Option<Calibration>,
 }
 
 /// A microphone the worker can record.
@@ -187,7 +194,7 @@ mod tests {
 
     #[test]
     fn json_shapes() {
-        let c = WorkerCommand::Start(StartCapture {
+        let c = WorkerCommand::Start(Box::new(StartCapture {
             source: SourceSpec::Spout { name: "VRChat".into() },
             sessions_dir: "C:/s".into(),
             mode: CaptureMode::RecordOnly,
@@ -197,7 +204,7 @@ mod tests {
             consent: ConsentInfo::default(),
             folder_name: None,
             performance: PerformanceSpec::default(),
-        });
+        }));
         let line = c.to_line();
         assert!(line.contains(r#""cmd":"start""#) && line.contains(r#""kind":"spout""#));
         assert_eq!(serde_json::from_str::<WorkerCommand>(&line).unwrap(), c);

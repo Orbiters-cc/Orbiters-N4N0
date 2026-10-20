@@ -112,6 +112,8 @@ pub struct CaptureSession {
     parameters: ParameterStream,
     audio: Vec<AudioRecorder>,
     tracking: Option<TrackingRecorder>,
+    /// Calibrations made in the overlay (before the session or during it), on the session clock.
+    calibrations: Vec<orbiters_contracts::performance::calibration::Calibration>,
     frame_index: u64,
     prefer_flipped: bool,
     previous: Option<(u32, [f32; 12], f32)>,
@@ -184,6 +186,15 @@ impl CaptureSession {
             parameters,
             audio,
             tracking,
+            calibrations: p
+                .calibration
+                .iter()
+                .cloned()
+                .map(|mut c| {
+                    c.time_ns -= epoch_ns as i64;
+                    c
+                })
+                .collect(),
             frame_index: 0,
             prefer_flipped: false,
             previous: None,
@@ -213,6 +224,12 @@ impl CaptureSession {
                 self.stats.last_error = Some(format!("parameters: {e:#}"));
             }
         }
+    }
+
+    /// A calibration made now in the overlay (`time_ns` read on the shared clock).
+    pub fn add_calibration(&mut self, mut calibration: orbiters_contracts::performance::calibration::Calibration) {
+        calibration.time_ns -= self.epoch_ns as i64;
+        self.calibrations.push(calibration);
     }
 
     /// While paused, the audio tracks record silence and no poses are written.
@@ -365,7 +382,7 @@ impl CaptureSession {
 
     /// Waits for pending files and writes the final manifest.
     pub fn finish(self) -> anyhow::Result<(PathBuf, SessionManifest)> {
-        let Self { mut writer, pool, parameters, audio, tracking, .. } = self;
+        let Self { mut writer, pool, parameters, audio, tracking, mut calibrations, .. } = self;
         let (written, errors) = pool.finish();
         writer.add_bytes(written);
         let (changes, bytes) = parameters.finish()?;
@@ -385,19 +402,27 @@ impl CaptureSession {
         if !tracks.tracks.is_empty() {
             std::fs::write(writer.dir().join(perf::AUDIO_FILE), serde_json::to_vec_pretty(&tracks)?)?;
         }
+        let mut devices = Vec::new();
         if let Some(t) = tracking {
             match t.finish() {
                 Ok(r) => {
-                    eprintln!("tracking: {} devices, {} samples, {} calibrations", r.devices, r.samples, r.calibrations.len());
+                    eprintln!("tracking: {} devices, {} samples, {} T-poses", r.devices.len(), r.samples, r.calibrations.len());
                     writer.manifest_mut().performance.tracking_samples = r.samples;
-                    writer.manifest_mut().performance.calibrations = r.calibrations.len() as u32;
                     writer.add_bytes(perf::HEADER_SIZE as u64 * u64::from(r.samples > 0) + r.samples * 64);
-                    let bytes = tracking::write_calibrations(writer.dir(), r.calibrations)?;
-                    writer.add_bytes(bytes);
+                    calibrations.extend(r.calibrations);
+                    devices = r.devices;
                 }
                 Err(e) => eprintln!("tracking: {e:#}"),
             }
         }
+        // Calibrations from the overlay name devices by serial: number them like this session's tracking.json.
+        for c in &mut calibrations {
+            orbiters_core::pose::renumber(c, &devices);
+        }
+        calibrations.sort_by_key(|c| c.time_ns);
+        writer.manifest_mut().performance.calibrations = calibrations.len() as u32;
+        let bytes = tracking::write_calibrations(writer.dir(), calibrations)?;
+        writer.add_bytes(bytes);
         if errors > 0 {
             eprintln!("{errors} file(s) could not be written");
         }

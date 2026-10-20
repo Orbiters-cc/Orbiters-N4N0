@@ -24,6 +24,8 @@ pub struct Settings {
     pub consent_acknowledged: bool,
     /// Reduce motion in the interface.
     pub reduce_motion: bool,
+    /// Show Orbiters in SteamVR's dashboard while SteamVR runs.
+    pub steamvr_overlay: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -98,6 +100,7 @@ impl Default for Settings {
             split_on_world_change: true,
             consent_acknowledged: false,
             reduce_motion: false,
+            steamvr_overlay: true,
         }
     }
 }

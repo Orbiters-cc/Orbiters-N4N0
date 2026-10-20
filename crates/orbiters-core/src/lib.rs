@@ -5,6 +5,7 @@ pub mod clock;
 pub mod keyframes;
 pub mod osc;
 pub mod paths;
+pub mod pose;
 pub mod protocol;
 pub mod settings;
 pub mod vrchat_log;

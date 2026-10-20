@@ -6,6 +6,7 @@
 //!
 //! A [`Client`] of type [`AppType::Background`] never starts SteamVR: it fails when SteamVR is not running.
 
+use orbiters_contracts::performance::tracking::{self, Device, Sample};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 
@@ -426,6 +427,32 @@ impl Client {
         unsafe { entry::<F>(self.system, 47)() }
     }
 
+    /// What a device is (class, role, serial, ...), for `tracking.json`; `None` for an empty slot.
+    pub fn describe(&self, index: u32) -> Option<Device> {
+        let class = match self.device_class(index) {
+            DeviceClass::Hmd => tracking::DeviceClass::Hmd,
+            DeviceClass::Controller => tracking::DeviceClass::Controller,
+            DeviceClass::GenericTracker => tracking::DeviceClass::Tracker,
+            DeviceClass::TrackingReference => tracking::DeviceClass::TrackingReference,
+            DeviceClass::Invalid => return None,
+            _ => tracking::DeviceClass::Other,
+        };
+        let raw_class = self.device_class(index);
+        let controller_type = self.string_property(index, prop::CONTROLLER_TYPE);
+        let s = |p| self.string_property(index, p).unwrap_or_default();
+        Some(Device {
+            index: index as u8,
+            class,
+            role: role_name(raw_class, self.controller_role(index), controller_type.as_deref()),
+            serial: s(prop::SERIAL_NUMBER),
+            model: s(prop::MODEL_NUMBER),
+            manufacturer: s(prop::MANUFACTURER_NAME),
+            controller_type: controller_type.unwrap_or_default(),
+            tracking_system: s(prop::TRACKING_SYSTEM_NAME),
+            first_seen_ns: 0,
+        })
+    }
+
     // ------------------------------------------------------------------------------------------------ IVROverlay
 
     pub fn overlay(&self) -> Option<Overlay<'_>> {
@@ -573,6 +600,24 @@ impl Overlay<'_> {
         type F = unsafe extern "system" fn(u64) -> bool;
         // SAFETY: entry 69 is IsActiveDashboardOverlay.
         unsafe { entry::<F>(self.table, 69)(handle) }
+    }
+}
+
+/// A pose in Unity conventions (`tracking.bin`), for device number `number` of `tracking.json`.
+pub fn sample_of(time_ns: u64, number: usize, p: &Pose) -> Sample {
+    let (position, rotation) = tracking::from_openvr(&p.device_to_absolute.m);
+    let [vx, vy, vz] = p.velocity;
+    // Angular velocity is an axis (pseudovector): mirroring Z flips its x and y.
+    let [wx, wy, wz] = p.angular_velocity;
+    Sample {
+        time_ns,
+        device: number as u8,
+        flags: if p.pose_is_valid { tracking::flags::POSE_VALID } else { 0 } | if p.device_is_connected { tracking::flags::CONNECTED } else { 0 },
+        result: p.tracking_result.clamp(0, u16::MAX as i32) as u16,
+        position,
+        rotation,
+        velocity: [vx, vy, -vz],
+        angular_velocity: [-wx, -wy, wz],
     }
 }
 

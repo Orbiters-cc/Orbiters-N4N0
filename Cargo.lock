@@ -2700,6 +2700,7 @@ dependencies = [
  "egui",
  "orbiters-contracts",
  "orbiters-core",
+ "orbiters-openvr",
  "orbiters-spout",
  "orbiters-ui",
  "png",
@@ -2721,6 +2722,7 @@ dependencies = [
 name = "orbiters-openvr"
 version = "0.1.0"
 dependencies = [
+ "orbiters-contracts",
  "serde_json",
  "windows 0.62.2",
 ]

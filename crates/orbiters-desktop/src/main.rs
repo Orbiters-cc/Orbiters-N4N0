@@ -1,6 +1,7 @@
-//! Orbiters desktop: captures VRChat worlds (Spout frames with the avatar's pose strip) into session bundles for
-//! Mixer. A small tray service (controller, worker, OSC) and, while it is open, a native egui window on wgpu in
-//! its own process.
+//! Orbiters desktop: captures VRChat worlds (Spout frames with the avatar's pose strip) and what the avatar does
+//! (avatar parameters, voice, sound, SteamVR tracking) into session bundles for Mixer. A small tray service
+//! (controller, worker, OSC), a native egui window on wgpu in its own process while it is open, and a SteamVR
+//! dashboard tab in another while SteamVR runs.
 
 // No console window in release builds on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -10,6 +11,7 @@ mod backend;
 mod controller;
 mod gpu;
 mod ipc;
+mod overlay;
 mod pages;
 mod screenshot;
 mod service;
@@ -24,6 +26,7 @@ fn main() -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("--screenshot") => screenshot::run(&args[1..]),
         Some("--window") => window::run(&args[1..]),
+        Some("--overlay") => overlay::run(&args[1..]),
         Some("--quit") => {
             single::signal(single::Request::Quit);
             Ok(())

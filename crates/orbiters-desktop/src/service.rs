@@ -1,6 +1,7 @@
 //! The tray service: what runs while Orbiters desktop waits in the tray. It owns the controller (capture worker,
-//! OSC, VRChat watchers), the tray icon and single-instance handling, and serves the window (and later the VR
-//! overlay) over the IPC link. It never creates a GPU device: the window process does, and exits when closed.
+//! OSC, VRChat and SteamVR watchers), the tray icon and single-instance handling, and serves the window and the VR
+//! overlay over the IPC link. It never creates a GPU device: the window process does, and exits when closed; the
+//! overlay process runs while SteamVR does.
 
 use crate::controller::{self, Controller, NoticeKind};
 use crate::ipc::{self, Endpoint, Role, ToClient, ToService};
@@ -29,6 +30,8 @@ pub struct Service {
     next_link: AtomicU64,
     /// The window process we started and when (a second request while it starts does not start another).
     window: Mutex<Option<(Child, Instant)>>,
+    /// The overlay process we started and when.
+    overlay: Mutex<Option<(Child, Instant)>>,
     quitting: AtomicBool,
     #[cfg(windows)]
     main_thread: u32,
@@ -69,6 +72,47 @@ impl Service {
                 *window = Some((child, Instant::now()));
             }
             Err(e) => eprintln!("could not start the window: {e}"),
+        }
+    }
+
+    /// Starts the SteamVR overlay process while SteamVR runs (and the setting allows it); closes it otherwise.
+    fn keep_overlay(&self) {
+        if self.quitting.load(Ordering::Relaxed) {
+            return;
+        }
+        let snap = self.ctl.view();
+        let wanted = snap.steamvr.running && snap.settings.steamvr_overlay;
+        let links = self.links.lock().unwrap();
+        let connected = links.iter().find(|l| l.role == Role::Overlay);
+        if !wanted {
+            if let Some(link) = connected {
+                if !snap.settings.steamvr_overlay {
+                    let _ = link.tx.send(ToClient::Close);
+                }
+            }
+            return;
+        }
+        if connected.is_some() {
+            return;
+        }
+        drop(links);
+        let mut overlay = self.overlay.lock().unwrap();
+        if let Some((child, started)) = overlay.as_mut() {
+            // Starting, or it failed a moment ago: try again later.
+            if matches!(child.try_wait(), Ok(None)) || started.elapsed() < Duration::from_secs(20) {
+                return;
+            }
+        }
+        let mut cmd = Command::new(&self.exe);
+        cmd.arg("--overlay").args(self.endpoint.args()).stdin(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        match cmd.spawn() {
+            Ok(child) => *overlay = Some((child, Instant::now())),
+            Err(e) => eprintln!("could not start the SteamVR overlay: {e}"),
         }
     }
 
@@ -121,6 +165,7 @@ impl Service {
                     let _ = l.tx.send(ToClient::WorkerLog { lines });
                 }
             }
+            ToService::Calibrated { calibration } => ctl.calibrated(*calibration),
             ToService::Quit => self.quit(),
         }
     }
@@ -158,8 +203,9 @@ impl Service {
         });
         let id = self.next_link.fetch_add(1, Ordering::Relaxed);
         self.links.lock().unwrap().push(Link { id, role, pid, tx: tx.clone() });
-        if role == Role::Window {
-            *self.window.lock().unwrap() = None;
+        match role {
+            Role::Window => *self.window.lock().unwrap() = None,
+            Role::Overlay => self.ctl.set_overlay_connected(true),
         }
         self.ctl.subscribe(tx);
         for line in reader.lines() {
@@ -169,6 +215,9 @@ impl Service {
             }
         }
         self.links.lock().unwrap().retain(|l| l.id != id);
+        if role == Role::Overlay && !self.links.lock().unwrap().iter().any(|l| l.role == Role::Overlay) {
+            self.ctl.set_overlay_connected(false);
+        }
         // Without a tray (Linux for now) nothing would bring the window back: closing it quits.
         if role == Role::Window && cfg!(not(windows)) {
             self.quit();
@@ -219,6 +268,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         links: Mutex::new(Vec::new()),
         next_link: AtomicU64::new(1),
         window: Mutex::new(None),
+        overlay: Mutex::new(None),
         quitting: AtomicBool::new(false),
         #[cfg(windows)]
         main_thread: unsafe { windows::Win32::System::Threading::GetCurrentThreadId() },
@@ -238,6 +288,12 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     if !hidden {
         service.show_window(true);
     }
+
+    let svc = service.clone();
+    std::thread::Builder::new().name("overlay-keeper".into()).spawn(move || loop {
+        svc.keep_overlay();
+        std::thread::sleep(Duration::from_secs(2));
+    })?;
 
     #[cfg(windows)]
     tray_loop(&service)?;

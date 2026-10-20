@@ -162,6 +162,7 @@ fn cli_record(args: &[String]) -> anyhow::Result<()> {
             mic: flag(args, "--mic").map(String::from),
             game_audio_pid: flag(args, "--game-audio-pid").and_then(|p| p.parse().ok()),
             tracking_hz: flag(args, "--tracking-hz").and_then(|p| p.parse().ok()),
+            calibration: None,
         },
     };
     let mut source = match &source_spec {
@@ -324,6 +325,11 @@ fn run_worker() -> anyhow::Result<()> {
                 WorkerCommand::Osc { samples } => {
                     if let Some((session, _)) = current.as_mut() {
                         session.osc(&samples, paused);
+                    }
+                }
+                WorkerCommand::Calibration { calibration } => {
+                    if let Some((session, _)) = current.as_mut() {
+                        session.add_calibration(*calibration);
                     }
                 }
                 WorkerCommand::SetWorld { world } => {

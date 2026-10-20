@@ -52,6 +52,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     if only.as_deref() == Some("e2e") {
         return e2e(&mut Offscreen::new()?, &out, &settings, scale);
     }
+    if only.as_deref() == Some("overlay") {
+        return overlay_shots(&out, &settings);
+    }
 
     let sessions = controller::list_sessions(&settings.sessions_dir);
     let trail = sessions.first().and_then(|s| controller::session_trail(&s.dir).ok()).unwrap_or_else(spiral);
@@ -389,4 +392,137 @@ fn spiral() -> Vec<[f32; 3]> {
             [t.cos() * (3.0 + t * 0.4), 1.6, t.sin() * (3.0 + t * 0.4)]
         })
         .collect()
+}
+
+/// A backend that does nothing: the overlay shots press buttons (Calibrate) without touching the app's files.
+struct Still;
+
+impl crate::backend::Backend for Still {
+    fn view(&self) -> std::sync::Arc<Snapshot> {
+        std::sync::Arc::new(Snapshot::new(Settings::default()))
+    }
+    fn take_notices(&self) -> Vec<controller::Notice> {
+        Vec::new()
+    }
+    fn library_version(&self) -> u64 {
+        0
+    }
+    fn attach(&self, _ctx: &egui::Context) {}
+    fn start_capture(&self) {}
+    fn stop_capture(&self) {}
+    fn pause_capture(&self, _paused: bool) {}
+    fn start_test_capture(&self) {}
+    fn import_raw_capture(&self, _dir: PathBuf) {}
+    fn save_settings(&self, _settings: Settings) {}
+    fn trash_session(&self, _dir: PathBuf) {}
+    fn request_worker_log(&self) {}
+    fn worker_log(&self) -> Option<Vec<String>> {
+        None
+    }
+    fn calibrated(&self, _calibration: orbiters_contracts::performance::calibration::Calibration) {}
+    fn quit(&self) {}
+}
+
+/// A body in a T-pose (or with the arms down) for the overlay's calibration shots.
+struct StandInBody {
+    t_pose: bool,
+}
+
+impl crate::overlay::ui::Poses for StandInBody {
+    fn read(&mut self) -> (Vec<orbiters_contracts::performance::tracking::Device>, Vec<orbiters_contracts::performance::tracking::Sample>) {
+        use orbiters_contracts::performance::tracking::{flags, Device, DeviceClass, Sample};
+        // A T-pose (the right hand a little higher), or the arms down with one hand raised.
+        let (hy, hx, dy) = if self.t_pose { (1.42, 0.68, 0.03) } else { (0.9, 0.3, 0.2) };
+        let at = |device: u8, position: [f32; 3]| Sample { device, flags: flags::POSE_VALID, position, rotation: [0.0, 0.0, 0.0, 1.0], ..Default::default() };
+        let device = |class, role: &str, serial: &str| Device { class, role: role.into(), serial: serial.into(), ..Default::default() };
+        (
+            vec![
+                device(DeviceClass::Hmd, "head", "HMD"),
+                device(DeviceClass::Controller, "left_hand", "L"),
+                device(DeviceClass::Controller, "right_hand", "R"),
+            ],
+            vec![at(0, [0.0, 1.63, 0.0]), at(1, [-hx, hy, 0.0]), at(2, [hx, hy + dy, 0.0])],
+        )
+    }
+}
+
+/// `--only overlay`: the SteamVR dashboard tab in several states, painted on the CPU as SteamVR gets it.
+fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<()> {
+    use crate::overlay::ui::{OverlayUi, SIZE};
+    use crate::state::CalibrationInfo;
+    let sessions = controller::list_sessions(&settings.sessions_dir);
+    let mut idle = idle_snapshot(settings, &sessions);
+    idle.steamvr.running = true;
+    idle.steamvr.overlay = true;
+    idle.osc.vrchat_found = true;
+    idle.osc.values = 214;
+    idle.settings.performance.record_mic = true;
+    idle.mics = vec![orbiters_core::protocol::AudioDeviceInfo { id: "1".into(), name: "Microphone (Valve Index)".into(), default: true }];
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    idle.steamvr.calibration = Some(CalibrationInfo { head_height_m: 1.63, arm_span_m: 1.41, devices: 6, utc_ms: now_ms - 7 * 60_000 });
+    let mut recording = idle.clone();
+    recording.capture.state = CaptureState::Recording;
+    recording.capture.source = Some("Spout: VRChat".into());
+    recording.settings.performance.record_game_audio = true;
+    recording.vrchat.running = true;
+    recording.capture.stats = Some(CaptureStats {
+        frames: 5_412,
+        strip_ok: 5_410,
+        elapsed_s: 94.0,
+        parameter_changes: 48_210,
+        mic_level: Some(0.42),
+        game_level: Some(0.18),
+        tracking_connected: Some(true),
+        tracking_devices: 6,
+        tracking_samples: 50_760,
+        ..Default::default()
+    });
+    // (name, snapshot, calibration: (T-pose held, started at this time; the last frame is at 1.48 s)).
+    type Shot<'a> = (&'a str, &'a Snapshot, Option<(bool, f64)>);
+    let shots: [Shot; 5] = [
+        ("overlay-idle", &idle, None),
+        ("overlay-recording", &recording, None),
+        ("overlay-countdown", &idle, Some((true, 0.0))),
+        ("overlay-holding", &idle, Some((false, -2.0))),
+        ("overlay-calibrated", &idle, Some((true, -3.0))),
+    ];
+    for (name, snap, calibrate) in shots {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let backend: Ctl = std::sync::Arc::new(Still);
+        let mut ui_state = OverlayUi::default();
+        let mut body = StandInBody { t_pose: calibrate.is_some_and(|(t_pose, _)| t_pose) };
+        let mut sw = crate::overlay::painter();
+        let frames = 90;
+        let mut image = Vec::new();
+        for f in 0..frames {
+            let t = f as f64 / 60.0;
+            if let (Some((_, start)), 0) = (calibrate, f) {
+                ui_state.start_calibration(start);
+            }
+            let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)), time: Some(t), ..Default::default() };
+            input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), focused: Some(true), ..Default::default() });
+            let mut full = ctx.run_ui(input, |ui| ui_state.show(ui, snap, &backend, &mut body));
+            sw.set_textures(&mut full.textures_delta);
+            if f == frames - 1 {
+                let prims = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
+                let started = std::time::Instant::now();
+                image = sw.paint(&prims, full.pixels_per_point, orbiters_ui::theme::INK_950).to_vec();
+                let vertices: usize = prims
+                    .iter()
+                    .map(|p| match &p.primitive {
+                        egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                        _ => 0,
+                    })
+                    .sum();
+                println!("{name}: painted in {:.1} ms ({} meshes, {vertices} vertices)", started.elapsed().as_secs_f64() * 1000.0, prims.len());
+            }
+            sw.free_textures(&mut full.textures_delta);
+        }
+        let img = egui::ColorImage::from_rgba_premultiplied([SIZE.x as usize, SIZE.y as usize], &image);
+        let path = out.join(format!("{name}.png"));
+        save_png(&path, &img)?;
+        println!("{}", path.display());
+    }
+    Ok(())
 }

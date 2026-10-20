@@ -85,6 +85,12 @@ struct Kernels {
     sort_scatter: wgpu::ComputePipeline,
     ranges: wgpu::ComputePipeline,
     forward: wgpu::ComputePipeline,
+    present: wgpu::ComputePipeline,
+    /// Only on a training device (the backward pass needs subgroup operations).
+    training: Option<Training>,
+}
+
+struct Training {
     backward: wgpu::ComputePipeline,
     loss_color: wgpu::ComputePipeline,
     depth_loss: wgpu::ComputePipeline,
@@ -205,31 +211,58 @@ impl Gpu {
                 errors.lock().unwrap().get_or_insert_with(|| e.to_string());
             }));
         }
+        let mut gpu = Self::build(device, queue, format!("{} ({:?})", info.name, info.backend), true);
+        gpu.errors = errors;
+        Ok(gpu)
+    }
+
+    /// A renderer on someone else's device (a viewer's window): projection, sort and the forward pass only, so the
+    /// device needs no features. [`Gpu::step`] takes only [`Target::None`] there.
+    pub fn renderer(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        Self::build(device, queue, String::new(), false)
+    }
+
+    fn build(device: wgpu::Device, queue: wgpu::Queue, adapter: String, train: bool) -> Self {
         let common = include_str!("shaders/common.wgsl");
-        let module = |name: &str, src: &str, with_common: bool| {
-            let code = if with_common { format!("{common}\n{src}") } else { src.to_string() };
+        let module = |name: &str, parts: &[&str]| {
+            let code = parts.join("\n");
             device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(name), source: wgpu::ShaderSource::Wgsl(code.into()) })
         };
+        // Every kernel writes its workgroup memory before reading it: without wgpu's zero-fill (one thread clearing
+        // whole arrays), D3D's FXC compiles the raster kernel in moments instead of 40 s.
+        let options = wgpu::PipelineCompilationOptions { zero_initialize_workgroup_memory: false, ..Default::default() };
         let pipe = |m: &wgpu::ShaderModule, entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: None,
                 module: m,
                 entry_point: Some(entry),
-                compilation_options: Default::default(),
+                compilation_options: options.clone(),
                 cache: None,
             })
         };
-        let project = module("project", include_str!("shaders/project.wgsl"), true);
-        let scan = module("scan", include_str!("shaders/scan.wgsl"), false);
-        let duplicate = module("duplicate", include_str!("shaders/duplicate.wgsl"), true);
-        let sort = module("sort", include_str!("shaders/sort.wgsl"), false);
-        let ranges = module("ranges", include_str!("shaders/ranges.wgsl"), true);
-        let raster = module("raster", include_str!("shaders/raster.wgsl"), true);
-        let loss = module("loss", include_str!("shaders/loss.wgsl"), true);
-        let depth_loss = module("depth_loss", include_str!("shaders/depth_loss.wgsl"), true);
-        let project_backward = module("project_backward", include_str!("shaders/project_backward.wgsl"), true);
-        let adam = module("adam", include_str!("shaders/adam.wgsl"), false);
+        let raster = include_str!("shaders/raster.wgsl");
+        let project = module("project", &[common, include_str!("shaders/project.wgsl")]);
+        let scan = module("scan", &[include_str!("shaders/scan.wgsl")]);
+        let duplicate = module("duplicate", &[common, include_str!("shaders/duplicate.wgsl")]);
+        let sort = module("sort", &[include_str!("shaders/sort.wgsl")]);
+        let ranges = module("ranges", &[common, include_str!("shaders/ranges.wgsl")]);
+        let forward = module("raster forward", &[common, raster, include_str!("shaders/raster_forward.wgsl")]);
+        let present = module("present", &[common, include_str!("shaders/present.wgsl")]);
+        let training = train.then(|| {
+            let backward = module("raster backward", &[common, raster, include_str!("shaders/raster_backward.wgsl")]);
+            let loss = module("loss", &[common, include_str!("shaders/loss.wgsl")]);
+            let depth_loss = module("depth_loss", &[common, include_str!("shaders/depth_loss.wgsl")]);
+            let project_backward = module("project_backward", &[common, include_str!("shaders/project_backward.wgsl")]);
+            let adam = module("adam", &[include_str!("shaders/adam.wgsl")]);
+            Training {
+                backward: pipe(&backward, "backward"),
+                loss_color: pipe(&loss, "color"),
+                depth_loss: pipe(&depth_loss, "main"),
+                project_backward: pipe(&project_backward, "main"),
+                adam: pipe(&adam, "main"),
+            }
+        });
         let k = Kernels {
             project: pipe(&project, "main"),
             scan_blocks: pipe(&scan, "scan_blocks"),
@@ -239,12 +272,9 @@ impl Gpu {
             sort_count: pipe(&sort, "count"),
             sort_scatter: pipe(&sort, "scatter"),
             ranges: pipe(&ranges, "main"),
-            forward: pipe(&raster, "forward"),
-            backward: pipe(&raster, "backward"),
-            loss_color: pipe(&loss, "color"),
-            depth_loss: pipe(&depth_loss, "main"),
-            project_backward: pipe(&project_backward, "main"),
-            adam: pipe(&adam, "main"),
+            forward: pipe(&forward, "forward"),
+            present: pipe(&present, "main"),
+            training,
         };
         let frame = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("frame"),
@@ -259,8 +289,8 @@ impl Gpu {
             mapped_at_creation: false,
         });
         let total_out = storage(&device, "total", 16);
-        Ok(Self {
-            adapter: format!("{} ({:?})", info.name, info.backend),
+        Self {
+            adapter,
             device,
             queue,
             k,
@@ -276,8 +306,12 @@ impl Gpu {
             step: 0,
             opacity_reg: 0.0,
             scale_reg: 0.0,
-            errors,
-        })
+            errors: Default::default(),
+        }
+    }
+
+    fn training(&self) -> anyhow::Result<&Training> {
+        self.k.training.as_ref().context("this GPU only renders")
     }
 
     fn bind(&self, pipeline: &wgpu::ComputePipeline, entries: &[(u32, &wgpu::Buffer)]) -> wgpu::BindGroup {
@@ -305,30 +339,35 @@ impl Gpu {
     /// Uploads Gaussians with their Adam moments (packed like the parameters).
     pub fn upload_with_moments(&mut self, g: &Gaussians, moments: Option<(&[f32], &[f32])>) {
         let n = g.len();
+        let train = self.k.training.is_some();
         if self.splats.as_ref().is_none_or(|s| s.cap < n) {
-            let cap = (n + n / 2).max(1024);
+            // A renderer keeps no room to spare (a viewer loads once) and no training buffers.
+            let cap = if train { (n + n / 2).max(1024) } else { n.max(1) };
             let d = &self.device;
             let f = |count: usize| (count * 4) as u64;
+            let t = |count: usize| if train { f(count) } else { 0 };
             self.splats = Some(SplatBuffers {
                 cap,
                 params: storage(d, "params", f(cap * PACKED)),
-                grads: storage(d, "grads", f(cap * PACKED)),
-                m1: storage(d, "moment1", f(cap * PACKED)),
-                m2: storage(d, "moment2", f(cap * PACKED)),
+                grads: storage(d, "grads", t(cap * PACKED)),
+                m1: storage(d, "moment1", t(cap * PACKED)),
+                m2: storage(d, "moment2", t(cap * PACKED)),
                 proj: storage(d, "projected", f(cap * 16)),
                 counts: storage(d, "tile counts", f(cap)),
                 offsets: storage(d, "tile offsets", f(cap)),
-                grad2d: storage(d, "grad2d", f(cap * GRAD2D)),
-                stats: storage(d, "stats", f(cap * 4)),
+                grad2d: storage(d, "grad2d", t(cap * GRAD2D)),
+                stats: storage(d, "stats", t(cap * 4)),
             });
         }
         let s = self.splats.as_ref().expect("allocated");
         self.queue.write_buffer(&s.params, 0, bytemuck::cast_slice(&g.pack()));
-        let zeros = vec![0f32; n * PACKED];
-        let (m1, m2) = moments.unwrap_or((&zeros, &zeros));
-        self.queue.write_buffer(&s.m1, 0, bytemuck::cast_slice(m1));
-        self.queue.write_buffer(&s.m2, 0, bytemuck::cast_slice(m2));
-        self.queue.write_buffer(&s.stats, 0, bytemuck::cast_slice(&vec![0f32; n * 4]));
+        if train {
+            let zeros = vec![0f32; n * PACKED];
+            let (m1, m2) = moments.unwrap_or((&zeros, &zeros));
+            self.queue.write_buffer(&s.m1, 0, bytemuck::cast_slice(m1));
+            self.queue.write_buffer(&s.m2, 0, bytemuck::cast_slice(m2));
+            self.queue.write_buffer(&s.stats, 0, bytemuck::cast_slice(&vec![0f32; n * 4]));
+        }
         self.count = n;
     }
 
@@ -379,14 +418,15 @@ impl Gpu {
         let d = &self.device;
         let px = (w * h) as u64;
         let tiles = (w.div_ceil(cpu::TILE) * h.div_ceil(cpu::TILE)) as u64;
+        let train = if self.k.training.is_some() { 1 } else { 0 };
         self.image = Some(ImageBuffers {
             width: w,
             height: h,
             out_color: storage(d, "out colour", px * 16),
             out_state: storage(d, "out state", px * 8),
-            d_pixel: storage(d, "d pixel", px * 16),
-            target: storage(d, "target", px * 4),
-            mask: storage(d, "mask", px * 4),
+            d_pixel: storage(d, "d pixel", train * px * 16),
+            target: storage(d, "target", train * px * 4),
+            mask: storage(d, "mask", train * px * 4),
             ranges: storage(d, "tile ranges", tiles * 8),
         });
     }
@@ -468,6 +508,9 @@ impl Gpu {
         if n == 0 {
             return Ok(0);
         }
+        if !matches!(target, Target::None) {
+            self.training()?;
+        }
         self.ensure_image(cam.width, cam.height);
         let loss = match &target {
             Target::Color { scene_pixels, weight, .. } => [*weight, 0.0, 0.0, *scene_pixels],
@@ -542,8 +585,9 @@ impl Gpu {
         match target {
             Target::Color { rgba, .. } => {
                 self.queue.write_buffer(&target_buf, 0, bytemuck::cast_slice(rgba));
-                let bind = self.bind(&self.k.loss_color, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &mask), (4, &d_pixel)]);
-                self.dispatch(&mut enc, &self.k.loss_color, &bind, groups((cam.width * cam.height) as usize));
+                let t = self.training()?;
+                let bind = self.bind(&t.loss_color, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &mask), (4, &d_pixel)]);
+                self.dispatch(&mut enc, &t.loss_color, &bind, groups((cam.width * cam.height) as usize));
             }
             Target::Depth { samples, .. } => {
                 if self.samples.as_ref().is_none_or(|(c, _)| *c < samples.len()) {
@@ -555,8 +599,9 @@ impl Gpu {
                 padded.resize(self.samples.as_ref().expect("samples").0, [0.0; 4]);
                 self.queue.write_buffer(&buf, 0, bytemuck::cast_slice(&padded));
                 enc.clear_buffer(&d_pixel, 0, None);
-                let bind = self.bind(&self.k.depth_loss, &[(0, &self.frame), (1, &out_color), (2, &buf), (3, &d_pixel)]);
-                self.dispatch(&mut enc, &self.k.depth_loss, &bind, groups(padded.len()));
+                let t = self.training()?;
+                let bind = self.bind(&t.depth_loss, &[(0, &self.frame), (1, &out_color), (2, &buf), (3, &d_pixel)]);
+                self.dispatch(&mut enc, &t.depth_loss, &bind, groups(padded.len()));
             }
             Target::None => {}
         }
@@ -583,10 +628,11 @@ impl Gpu {
     ) {
         let s = self.splats.as_ref().expect("splats");
         enc.clear_buffer(&s.grad2d, 0, None);
-        let bind = self.bind(&self.k.backward, &[(0, &self.frame), (1, proj), (2, values), (3, ranges), (5, out_state), (6, d_pixel), (7, &s.grad2d)]);
-        self.dispatch(enc, &self.k.backward, &bind, tiles);
-        let bind = self.bind(&self.k.project_backward, &[(0, &self.frame), (1, &s.params), (2, proj), (3, &s.grad2d), (4, &s.grads), (5, &s.stats)]);
-        self.dispatch(enc, &self.k.project_backward, &bind, groups(self.count));
+        let t = self.k.training.as_ref().expect("a training GPU");
+        let bind = self.bind(&t.backward, &[(0, &self.frame), (1, proj), (2, values), (3, ranges), (5, out_state), (6, d_pixel), (7, &s.grad2d)]);
+        self.dispatch(enc, &t.backward, &bind, tiles);
+        let bind = self.bind(&t.project_backward, &[(0, &self.frame), (1, &s.params), (2, proj), (3, &s.grad2d), (4, &s.grads), (5, &s.stats)]);
+        self.dispatch(enc, &t.project_backward, &bind, groups(self.count));
     }
 
     fn adam(&mut self, enc: &mut wgpu::CommandEncoder, lr: LearningRates) {
@@ -600,8 +646,9 @@ impl Gpu {
         let n = self.count * PACKED;
         let info = self.uniform(&AdamInfo { lr: rates, beta: [0.9, 0.999, 1e-15, 0.0], n: [n as u32, self.step, 0, 0] });
         let s = self.splats.as_ref().expect("splats");
-        let bind = self.bind(&self.k.adam, &[(0, &info), (1, &s.params), (2, &s.grads), (3, &s.m1), (4, &s.m2)]);
-        self.dispatch(enc, &self.k.adam, &bind, groups(n));
+        let t = self.k.training.as_ref().expect("a training GPU");
+        let bind = self.bind(&t.adam, &[(0, &info), (1, &s.params), (2, &s.grads), (3, &s.m1), (4, &s.m2)]);
+        self.dispatch(enc, &t.adam, &bind, groups(n));
     }
 
     /// Backward from given pixel gradients (r, g, b, depth per pixel) after a forward [`Gpu::step`] with
@@ -614,6 +661,25 @@ impl Gpu {
         let mut enc = self.device.create_command_encoder(&Default::default());
         let tiles = (cam.width.div_ceil(cpu::TILE), cam.height.div_ceil(cpu::TILE));
         self.backward_into(&mut enc, &splats.proj, &s.values[0], &i.ranges, &i.out_state, &i.d_pixel, tiles);
+        self.queue.submit([enc.finish()]);
+    }
+
+    /// Writes the last rendered image (colour over the background) into `target`, an RGBA8 storage texture of the
+    /// camera's size: the image a viewer shows.
+    pub fn present(&self, target: &wgpu::TextureView) {
+        let Some(i) = self.image.as_ref() else { return };
+        let layout = self.k.present.get_bind_group_layout(0);
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("present"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.frame.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: i.out_color.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(target) },
+            ],
+        });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        self.dispatch(&mut enc, &self.k.present, &bind, (i.width.div_ceil(16), i.height.div_ceil(16)));
         self.queue.submit([enc.finish()]);
     }
 
@@ -706,6 +772,55 @@ mod tests {
                 eprintln!("  {name}: worst {worst:.2e} of {scale:.3e}");
                 assert!(worst < 1e-2, "{name}: {worst}");
             }
+        }
+    }
+
+    #[test]
+    fn a_renderer_on_a_plain_device_draws_what_training_renders() {
+        let Ok(mut trainer) = Gpu::new() else { return };
+        // WGPU_BACKEND picks the viewer's backend (dx12 like the window on Windows).
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
+        let Ok(adapter) = block_on(instance.request_adapter(&Default::default())) else { return };
+        eprintln!("viewer adapter: {:?}", adapter.get_info().backend);
+        let (device, queue) = block_on(adapter.request_device(&Default::default())).expect("device");
+        let mut viewer = Gpu::renderer(device.clone(), queue);
+        let (g, cam) = scene(3000, 150, 90, 5);
+        let bg = [0.1, 0.2, 0.3];
+        trainer.upload(&g);
+        viewer.upload(&g);
+        trainer.step(&cam, bg, Target::None, None).expect("trainer");
+        viewer.step(&cam, bg, Target::None, None).expect("viewer");
+        assert!(viewer.step(&cam, bg, Target::Depth { samples: &[], weight: 1.0 }, None).is_err());
+        let (a, b) = (trainer.read_image(), viewer.read_image());
+        let worst = a.iter().zip(&b).map(|(p, q)| (0..3).map(|c| (p[c] - q[c]).abs()).fold(0f32, f32::max)).fold(0f32, f32::max);
+        assert!(worst < 1e-4, "{worst}");
+        // Presented into an RGBA8 storage texture.
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: cam.width, height: cam.height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        viewer.present(&texture.create_view(&Default::default()));
+        let row = (cam.width * 4).next_multiple_of(256);
+        let staging = storage(&device, "present readback", (row * cam.height) as u64);
+        let mut enc = device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None } },
+            wgpu::Extent3d { width: cam.width, height: cam.height, depth_or_array_layers: 1 },
+        );
+        viewer.queue.submit([enc.finish()]);
+        let bytes: Vec<u8> = viewer.read(&staging, (row * cam.height) as usize);
+        let (x, y) = (70usize, 40usize);
+        let px = &bytes[y * row as usize + x * 4..][..4];
+        let want = b[y * cam.width as usize + x];
+        for c in 0..3 {
+            assert!((px[c] as f32 / 255.0 - want[c].clamp(0.0, 1.0)).abs() < 1.5 / 255.0, "{px:?} vs {want:?}");
         }
     }
 

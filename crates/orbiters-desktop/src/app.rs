@@ -22,6 +22,7 @@ pub struct App {
     ctl: Ctl,
     /// False offscreen (screenshots): no window commands.
     windowed: bool,
+    gpu: Option<crate::gpu::Handles>,
     page: Page,
     page_since: f64,
     visit: u64,
@@ -48,6 +49,7 @@ impl App {
         round_corners(cc);
         let mut app = Self::offline(ctl);
         app.windowed = true;
+        app.gpu = cc.wgpu_render_state.as_ref().map(|rs| crate::gpu::Handles { device: rs.device.clone(), queue: rs.queue.clone() });
         app.show_splash = splash;
         app
     }
@@ -57,6 +59,7 @@ impl App {
         Self {
             ctl,
             windowed: false,
+            gpu: None,
             page: Page::Capture,
             page_since: 0.0,
             visit: 0,
@@ -85,6 +88,11 @@ impl App {
             self.page_since = now;
             self.visit += 1;
         }
+    }
+
+    /// The GPU of an offscreen renderer (screenshots).
+    pub fn set_gpu(&mut self, gpu: crate::gpu::Handles) {
+        self.gpu = Some(gpu);
     }
 
     pub fn sessions_mut(&mut self) -> &mut pages::sessions::State {
@@ -356,7 +364,7 @@ impl App {
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(shifted).id_salt(("page", self.visit)));
         child.set_clip_rect(rect.intersect(ui.clip_rect()));
         child.multiply_opacity(v.clamp(0.0, 1.0));
-        let mut cx = pages::Cx { ctl: &self.ctl, snap, toasts: &mut self.toasts, entered: self.page_since, visit: self.visit, windowed: self.windowed };
+        let mut cx = pages::Cx { ctl: &self.ctl, snap, toasts: &mut self.toasts, entered: self.page_since, visit: self.visit, windowed: self.windowed, gpu: self.gpu.as_ref() };
         match self.page {
             Page::Capture => pages::capture::show(&mut child, &mut cx, &mut self.capture),
             Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions),

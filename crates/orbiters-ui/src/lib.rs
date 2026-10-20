@@ -26,7 +26,15 @@ pub fn install(ctx: &egui::Context) {
     theme::apply(ctx);
 }
 
+/// What a renderer draws into, for paint callbacks that build their own pipelines (kept in its callback resources).
+#[derive(Clone, Copy, Debug)]
+pub struct RenderTarget {
+    pub format: egui_wgpu::wgpu::TextureFormat,
+    pub msaa_samples: u32,
+}
+
 /// GPU pipelines for a renderer drawing to `format` (once per renderer).
 pub fn install_wgpu(device: &egui_wgpu::wgpu::Device, format: egui_wgpu::wgpu::TextureFormat, msaa_samples: u32, resources: &mut egui_wgpu::CallbackResources) {
+    resources.insert(RenderTarget { format, msaa_samples });
     glow::install(device, format, msaa_samples, resources);
 }

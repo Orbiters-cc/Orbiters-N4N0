@@ -2,6 +2,7 @@
 
 pub mod capture;
 pub mod sessions;
+pub mod splats;
 pub mod settings;
 
 use crate::backend::Ctl;
@@ -28,6 +29,8 @@ pub struct Cx<'a> {
     /// Bumped on every visit, so entrances replay.
     pub visit: u64,
     pub windowed: bool,
+    /// The window's GPU, when it has one.
+    pub gpu: Option<&'a crate::gpu::Handles>,
 }
 
 impl Cx<'_> {

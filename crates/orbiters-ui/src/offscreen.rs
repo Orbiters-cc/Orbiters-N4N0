@@ -39,8 +39,17 @@ impl Offscreen {
         .context("no GPU device")?;
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut renderer = egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions { msaa_samples: 1, dithering: true, ..Default::default() });
-        crate::glow::install(&device, format, 1, &mut renderer.callback_resources);
+        crate::install_wgpu(&device, format, 1, &mut renderer.callback_resources);
         Ok(Self { device, queue, renderer, format })
+    }
+
+    /// The device frames render on (for interfaces that draw their own GPU content).
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 
     /// Runs one frame of `ui` and applies its texture changes; when `capture`, also paints it and returns the

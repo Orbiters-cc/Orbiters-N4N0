@@ -35,6 +35,28 @@ impl Camera {
         Self { r, t, fx: k.fx * scale, fy: k.fy * scale, cx: (k.cx + 0.5) * scale - 0.5, cy: (k.cy + 0.5) * scale - 0.5, width: w, height: h }
     }
 
+    /// A camera at `eye` looking along `forward`, `up` roughly up, with a vertical field of view of `fov_y` radians,
+    /// for an image of `width × height` (a viewer's free camera).
+    pub fn look(eye: [f32; 3], forward: [f32; 3], up: [f32; 3], fov_y: f32, width: u32, height: u32) -> Self {
+        let f = normalize(forward);
+        let right = normalize(cross(up, f));
+        let up = cross(f, right);
+        let r = [right, [-up[0], -up[1], -up[2]], f];
+        let t = [-dot(r[0], eye), -dot(r[1], eye), -dot(r[2], eye)];
+        let focal = 0.5 * height as f32 / (0.5 * fov_y).tan();
+        Self { r, t, fx: focal, fy: focal, cx: (width as f32 - 1.0) / 2.0, cy: (height as f32 - 1.0) / 2.0, width, height }
+    }
+
+    /// Vertical field of view in radians.
+    pub fn fov_y(&self) -> f32 {
+        2.0 * (0.5 * self.height as f32 / self.fy).atan()
+    }
+
+    /// The camera's up axis in the world.
+    pub fn up(&self) -> [f32; 3] {
+        [-self.r[1][0], -self.r[1][1], -self.r[1][2]]
+    }
+
     pub fn to_camera(&self, p: [f32; 3]) -> [f32; 3] {
         [dot(self.r[0], p) + self.t[0], dot(self.r[1], p) + self.t[1], dot(self.r[2], p) + self.t[2]]
     }
@@ -71,6 +93,15 @@ impl Camera {
     }
 }
 
+pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+pub fn normalize(a: [f32; 3]) -> [f32; 3] {
+    let l = dot(a, a).sqrt().max(1e-12);
+    a.map(|c| c / l)
+}
+
 pub fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
@@ -78,6 +109,25 @@ pub fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn look_matches_a_strip_pose() {
+        // A camera turned 30° right and tilted 10° down, at (1, 1.6, -2).
+        let (yaw, pitch) = (30f32.to_radians(), -10f32.to_radians());
+        let forward = [yaw.sin() * pitch.cos(), pitch.sin(), yaw.cos() * pitch.cos()];
+        let right = normalize(cross([0.0, 1.0, 0.0], forward));
+        let up = cross(forward, right);
+        let m = [right[0], up[0], forward[0], 1.0, right[1], up[1], forward[1], 1.6, right[2], up[2], forward[2], -2.0];
+        let strip = Camera::from_strip(&m, &[1.2, 1.2 * 16.0 / 9.0, 0.0, 0.0], 320, 180, 1.0);
+        let look = Camera::look([1.0, 1.6, -2.0], forward, [0.0, 1.0, 0.0], strip.fov_y(), 320, 180);
+        for k in 0..3 {
+            for c in 0..3 {
+                assert!((strip.r[k][c] - look.r[k][c]).abs() < 1e-5, "{strip:?} {look:?}");
+            }
+            assert!((strip.t[k] - look.t[k]).abs() < 1e-5);
+        }
+        assert!((strip.fy - look.fy).abs() < 1e-2 && (strip.cx - look.cx).abs() < 1e-3 && (strip.cy - look.cy).abs() < 1e-3, "{strip:?} {look:?}");
+    }
 
     #[test]
     fn matches_the_contracts_projection_and_round_trips() {

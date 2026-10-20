@@ -2697,11 +2697,13 @@ name = "orbiters-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "eframe",
  "egui",
  "orbiters-contracts",
  "orbiters-core",
  "orbiters-openvr",
+ "orbiters-reconstruct",
  "orbiters-sound",
  "orbiters-spout",
  "orbiters-ui",
@@ -2736,6 +2738,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "fastrand",
+ "naga",
  "orbiters-contracts",
  "orbiters-core",
  "serde",

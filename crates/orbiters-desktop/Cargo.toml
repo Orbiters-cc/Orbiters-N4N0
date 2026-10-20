@@ -14,6 +14,8 @@ orbiters-core = { workspace = true }
 orbiters-contracts = { workspace = true }
 orbiters-ui = { workspace = true }
 orbiters-sound = { workspace = true }
+orbiters-reconstruct = { path = "../orbiters-reconstruct" }
+bytemuck = { workspace = true }
 orbiters-openvr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -9,6 +9,13 @@ use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetupCreateNew};
 use eframe::wgpu;
 use std::sync::Arc;
 
+/// The window's device, for pages that draw their own GPU content (the 3D view of splats).
+#[derive(Clone)]
+pub struct Handles {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+}
+
 pub fn options() -> WgpuConfiguration {
     let mut setup = WgpuSetupCreateNew::without_display_handle();
     if wgpu::Backends::from_env().is_none() {
@@ -17,6 +24,9 @@ pub fn options() -> WgpuConfiguration {
     setup.native_adapter_selector = Some(Arc::new(|adapters: &[wgpu::Adapter], _surface: Option<&wgpu::Surface<'_>>| select(adapters)));
     setup.device_descriptor = Arc::new(|adapter: &wgpu::Adapter| {
         let base = if adapter.get_info().backend == wgpu::Backend::Gl { wgpu::Limits::downlevel_webgl2_defaults() } else { wgpu::Limits::default() };
+        // The 3D view sorts millions of tile entries: buffers as large as the GPU allows (a limit, not an allocation).
+        let gpu = adapter.limits();
+        let base = wgpu::Limits { max_buffer_size: gpu.max_buffer_size, max_storage_buffer_binding_size: gpu.max_storage_buffer_binding_size, ..base };
         wgpu::DeviceDescriptor {
             label: Some("orbiters window"),
             required_limits: limits(base),

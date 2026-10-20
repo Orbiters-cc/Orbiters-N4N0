@@ -73,6 +73,8 @@ pub struct State {
     query: String,
     thumbs: HashMap<PathBuf, Thumb>,
     detail: Option<Detail>,
+    /// The 3D view of a session's splats, over everything (the detail waits under it).
+    viewer: Option<super::splats::Viewer>,
     import: Option<Import>,
     serial: u64,
 }
@@ -231,8 +233,32 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if state.import.is_some() {
         import_popover(&ctx, cx, state, import_r);
     }
-    if state.detail.is_some() {
+    if let Some(v) = state.viewer.as_mut() {
+        let window = ctx.content_rect();
+        let rect = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
+        let mut open = true;
+        egui::Area::new(Id::unique(("splat-viewer-area", &v.session))).order(Order::Foreground).fixed_pos(rect.min).show(&ctx, |ui| {
+            ui.set_min_size(rect.size());
+            open = v.show(ui, rect);
+        });
+        if !open {
+            state.viewer = None;
+        }
+    } else if state.detail.is_some() {
         detail(&ctx, cx, state, page);
+    }
+}
+
+impl State {
+    /// Whether the 3D view shows its splats (screenshots).
+    pub fn viewer_loaded(&self) -> bool {
+        self.viewer.as_ref().is_some_and(|v| v.loaded())
+    }
+
+    /// Opens the 3D view of the open detail's session (screenshots).
+    pub fn open_viewer(&mut self, ctx: &egui::Context, gpu: &crate::gpu::Handles) {
+        let Some(s) = self.detail.as_ref().and_then(|d| self.sessions.as_ref()?.iter().find(|s| s.dir == d.dir)) else { return };
+        self.viewer = Some(super::splats::Viewer::open(ctx, gpu, &s.dir, title(s)));
     }
 }
 
@@ -623,6 +649,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
     let mut close = false;
     let mut trash = false;
     let mut open_folder = false;
+    let mut open_viewer = false;
 
     // The whole window dims, sidebar and title bar included; a click anywhere but the title bar (which still moves,
     // minimises and closes the window) closes the detail.
@@ -727,6 +754,12 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             View::Splats => {
                 let tex = preview(ctx, d, &session);
                 splats_view(&cu, map, tex.as_ref(), session.reconstruction.as_ref(), job);
+                if session.reconstruction.is_some() && job.is_none() && cx.gpu.is_some() {
+                    let r = Rect::from_min_size(pos2(map.left() + 10.0, map.top() + 12.0), vec2(124.0, 36.0));
+                    if Button::new("View in 3D").icon(icons::CUBE_FOCUS).variant(Variant::Glass).size(widgets::Size::Sm).width(r.width()).show_at(&mut cu, r).clicked() {
+                        open_viewer = true;
+                    }
+                }
             }
         }
         if splats {
@@ -815,6 +848,11 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
     });
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         close = true;
+    }
+    if open_viewer {
+        if let Some(gpu) = cx.gpu {
+            state.viewer = Some(super::splats::Viewer::open(ctx, gpu, &session.dir, title(&session)));
+        }
     }
     if open_folder {
         let r = controller::open_path(&session.dir);

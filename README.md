@@ -45,7 +45,9 @@ target/release/orbiters-desktop --screenshot <out folder> [--sessions <sessions 
 
 `--only e2e` instead records a real test pattern through the capture worker, driven by synthetic clicks (Test
 pattern, then the record button), and writes the session into the sessions folder. `--only e2e-reconstruct` opens
-the newest session and presses Reconstruct (the real worker replaces its `reconstruction/` folder).
+the newest session and presses Reconstruct (the real worker replaces its `reconstruction/` folder). `--only splats-3d`
+opens the newest session's 3D view (the splats drawn by the reconstruction's own rasteriser on the window's GPU),
+then orbits it.
 
 ## Command-line tools
 

@@ -55,6 +55,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     if only.as_deref() == Some("e2e") {
         return e2e(&mut Offscreen::new()?, &out, &settings, scale);
     }
+    if only.as_deref() == Some("splats-3d") {
+        return splats_3d(&mut Offscreen::new()?, &out, &settings, scale);
+    }
     if only.as_deref() == Some("e2e-reconstruct") {
         return e2e_reconstruct(&mut Offscreen::new()?, &out, &settings, scale);
     }
@@ -205,6 +208,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, height: f32, path: &st
     let backend: Ctl = std::sync::Arc::new(Local::new(ctl));
     backend.attach(&ctx);
     let mut app = App::offline(backend);
+    app.set_gpu(crate::gpu::Handles { device: gpu.device().clone(), queue: gpu.queue().clone() });
     if !sc.splash {
         app.skip_splash();
     }
@@ -311,6 +315,81 @@ fn e2e(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f
     }
     ctl.shutdown();
     Ok(())
+}
+
+/// The 3D view of the newest session's splats (`--only splats-3d`): as it opens, then after an orbit drag.
+fn splats_3d(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {
+    let ctx = egui::Context::default();
+    orbiters_ui::install(&ctx);
+    let ctl = Controller::new(settings.clone());
+    let sessions = controller::list_sessions(&settings.sessions_dir);
+    ctl.set_snapshot(idle_snapshot(settings, &sessions));
+    let backend: Ctl = std::sync::Arc::new(Local::new(ctl));
+    backend.attach(&ctx);
+    let mut app = App::offline(backend);
+    app.skip_splash();
+    let handles = crate::gpu::Handles { device: gpu.device().clone(), queue: gpu.queue().clone() };
+    app.set_gpu(handles.clone());
+    let start = std::time::Instant::now();
+    let (mut opened, mut viewing, mut loaded_at) = (false, false, None::<f64>);
+    let mut shots = 0;
+    let centre = pos2(640.0, 450.0);
+    loop {
+        let t = start.elapsed().as_secs_f64();
+        anyhow::ensure!(t < 120.0, "the 3D view did not load in two minutes");
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))), time: Some(t), ..Default::default() };
+        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(scale), focused: Some(true), ..Default::default() });
+        if t < 0.05 {
+            app.set_page(Page::Sessions, t);
+        }
+        if !opened && t > 0.5 && app.sessions_mut().loaded() {
+            app.sessions_mut().open_first(&ctx, Rect::from_min_size(pos2(264.0, 160.0), vec2(300.0, 265.0)));
+            opened = true;
+        }
+        if opened && !viewing && t > 1.5 {
+            app.sessions_mut().open_viewer(&ctx, &handles);
+            viewing = true;
+        }
+        if loaded_at.is_none() && app.sessions_mut().viewer_loaded() {
+            loaded_at = Some(t);
+        }
+        // After the first shot: drag right and a little up across half a second, then shoot again.
+        let drag = loaded_at.map(|l| t - l - 1.0).filter(|d| shots == 1 && (0.0..=0.6).contains(d));
+        if let Some(d) = drag {
+            let p = centre + vec2(260.0, -80.0) * (d / 0.5).min(1.0) as f32;
+            input.events.push(Event::PointerMoved(p));
+            if d < 0.05 {
+                input.events.push(Event::PointerButton { pos: centre, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+            }
+            if d > 0.55 {
+                input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+            }
+        }
+        let shot = match loaded_at {
+            Some(l) if shots == 0 && t > l + 0.6 => Some("splats-3d"),
+            Some(l) if shots == 1 && t > l + 2.0 => Some("splats-3d-orbit"),
+            _ => None,
+        };
+        let image = gpu.frame(
+            &ctx,
+            input,
+            |ui| {
+                app.logic_offline(ui.ctx());
+                app.draw(ui);
+            },
+            shot.is_some(),
+        )?;
+        if let (Some(name), Some(image)) = (shot, image) {
+            let path = out.join(format!("{name}.png"));
+            save_png(&path, &image)?;
+            println!("{}", path.display());
+            shots += 1;
+            if shots == 2 {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(16));
+    }
 }
 
 /// End to end on the newest session of `--sessions`: opens its detail, presses Reconstruct (the real worker

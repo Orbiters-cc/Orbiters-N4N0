@@ -143,45 +143,20 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         state.sessions = Some(list);
     }
 
-    // Heading and actions (fixed above the scrolling grid).
-    let head = Rect::from_min_size(pos2(page.left() + super::PAD_X, page.top() + 8.0), vec2(page.width() - super::PAD_X * 2.0, 72.0));
-    let total: u64 = state.sessions.as_ref().map(|l| l.iter().map(|s| s.size_bytes).sum()).unwrap_or(0);
-    let sub = match &state.sessions {
-        Some(l) => format!("{} session{} · {}", l.len(), if l.len() == 1 { "" } else { "s" }, format::bytes(total as f64)),
-        None => "Loading…".into(),
-    };
-    let (head_r, head_a) = super::entering(ui, cx, 0, head);
-    {
-        let mut hu = ui.new_child(UiBuilder::new().max_rect(head_r).id_salt("sessions-head"));
-        hu.multiply_opacity(head_a);
-        super::heading(&hu, head_r, "Library", "Sessions", Some(&sub));
-    }
+    // Heading and actions, fixed above the grid (drawn after it, over the cards scrolled up under them).
+    let head = Rect::from_min_size(pos2(page.left() + super::PAD_X, page.top() + cx.top + 8.0), vec2(page.width() - super::PAD_X * 2.0, 72.0));
     let actions_y = head.bottom() - 40.0;
     let folder_r = Rect::from_min_size(pos2(head.right() - 36.0, actions_y + 2.0), vec2(36.0, 36.0));
     let import_btn = Button::new("Import raw capture").icon(icons::DOWNLOAD_SIMPLE);
     let import_w = import_btn.desired_width(ui);
     let import_r = Rect::from_min_size(pos2(folder_r.left() - 8.0 - import_w, actions_y), vec2(import_w, 40.0));
     let search_r = Rect::from_min_size(pos2(import_r.left() - 8.0 - 224.0, actions_y), vec2(224.0, 40.0));
-    {
-        let mut su = ui.new_child(UiBuilder::new().max_rect(search_r).id_salt("sessions-search"));
-        widgets::search_field(&mut su, "sessions-search", &mut state.query, "Search worlds", 224.0);
-    }
-    if import_btn.show_at(ui, import_r).clicked() {
-        if state.import.is_some() {
-            state.import = None;
-        } else {
-            state.serial += 1;
-            let dir = cx.snap.settings.raw_captures_dir.clone();
-            state.import = Some(Import { serial: state.serial, raws: Job::spawn(&ctx, move || controller::list_raw_captures(&dir)) });
-        }
-    }
-    if IconButton::new(icons::FOLDER_OPEN, "Open the sessions folder").show_at(ui, folder_r).clicked() {
-        let r = controller::open_path(&cx.snap.settings.sessions_dir);
-        cx.run(&ctx, r);
-    }
 
-    // The grid.
-    let grid_rect = Rect::from_min_max(pos2(page.left(), head.bottom() + 20.0), page.max);
+    // The grid rests below the heading and scrolls on under it and the title bar.
+    let grid_top = head.bottom() + 20.0;
+    let grid_rect = Rect::from_min_max(page.min, page.max);
+    let below_head = Rect::from_min_max(pos2(page.left(), grid_top), page.max);
+    let grid_from = orbiters_ui::blur::next_shape(ui);
     let mut gu = ui.new_child(UiBuilder::new().max_rect(grid_rect).id_salt("sessions-grid"));
     let q = state.query.trim().to_lowercase();
     let filtered: Vec<SessionSummary> = state
@@ -192,11 +167,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         })
         .unwrap_or_default();
     let mut clicked: Option<(PathBuf, Rect)> = None;
-    egui::ScrollArea::vertical().id_salt("sessions").auto_shrink([false, false]).show(&mut gu, |ui| {
+    egui::ScrollArea::vertical().id_salt("sessions").auto_shrink([false, false]).scroll_bar_rect(below_head).show(&mut gu, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 32 }).show(ui, |ui| {
+            ui.add_space(grid_top - grid_rect.top());
             let w = ui.available_width();
             if state.sessions.is_some() && filtered.is_empty() {
-                empty_state(ui, cx, !q.is_empty(), grid_rect.height() * 0.6);
+                empty_state(ui, cx, !q.is_empty(), below_head.height() * 0.6);
                 return;
             }
             let cols = (((w + 16.0) / (270.0 + 16.0)).floor() as usize).max(1);
@@ -226,6 +202,37 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             }
         });
     });
+    super::under_top(&gu, cx, grid_from, grid_top);
+
+    let total: u64 = state.sessions.as_ref().map(|l| l.iter().map(|s| s.size_bytes).sum()).unwrap_or(0);
+    let sub = match &state.sessions {
+        Some(l) => format!("{} session{} · {}", l.len(), if l.len() == 1 { "" } else { "s" }, format::bytes(total as f64)),
+        None => "Loading…".into(),
+    };
+    let (head_r, head_a) = super::entering(ui, cx, 0, head);
+    {
+        let mut hu = ui.new_child(UiBuilder::new().max_rect(head_r).id_salt("sessions-head"));
+        hu.multiply_opacity(head_a);
+        super::heading(&hu, head_r, "Library", "Sessions", Some(&sub));
+    }
+    {
+        let mut su = ui.new_child(UiBuilder::new().max_rect(search_r).id_salt("sessions-search"));
+        widgets::search_field(&mut su, "sessions-search", &mut state.query, "Search worlds", 224.0);
+    }
+    if import_btn.show_at(ui, import_r).clicked() {
+        if state.import.is_some() {
+            state.import = None;
+        } else {
+            state.serial += 1;
+            let dir = cx.snap.settings.raw_captures_dir.clone();
+            state.import = Some(Import { serial: state.serial, raws: Job::spawn(&ctx, move || controller::list_raw_captures(&dir)) });
+        }
+    }
+    if IconButton::new(icons::FOLDER_OPEN, "Open the sessions folder").show_at(ui, folder_r).clicked() {
+        let r = controller::open_path(&cx.snap.settings.sessions_dir);
+        cx.run(&ctx, r);
+    }
+
     if let Some((dir, origin)) = clicked {
         state.open(&ctx, dir, origin);
     }

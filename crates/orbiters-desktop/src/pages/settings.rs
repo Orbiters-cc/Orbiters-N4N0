@@ -82,8 +82,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         }
     }
 
-    egui::ScrollArea::vertical().id_salt("settings").auto_shrink([false, false]).show(ui, |ui| {
-        egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8, bottom: 40 }).show(ui, |ui| {
+    let from = orbiters_ui::blur::next_shape(ui);
+    egui::ScrollArea::vertical().id_salt("settings").auto_shrink([false, false]).scroll_bar_rect(super::below_bar(ui, cx)).show(ui, |ui| {
+        egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 40 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             super::block(ui, cx, 0, 72.0, |ui, rect| super::heading(ui, rect, "Preferences", "Settings", None));
             let snap = cx.snap;
@@ -363,6 +364,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             }
         });
     });
+    // Down to where the content starts (its top margin).
+    super::under_top(ui, cx, from, ui.max_rect().top() + cx.top + 8.0);
 
     if apply {
         cx.ctl.save_settings(draft.clone());

@@ -18,8 +18,9 @@ pub struct State;
 const GRID_H: f32 = 500.0;
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
-    egui::ScrollArea::vertical().id_salt("capture").auto_shrink([false, false]).show(ui, |ui| {
-        egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8, bottom: 32 }).show(ui, |ui| {
+    let from = orbiters_ui::blur::next_shape(ui);
+    egui::ScrollArea::vertical().id_salt("capture").auto_shrink([false, false]).scroll_bar_rect(super::below_bar(ui, cx)).show(ui, |ui| {
+        egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 32 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             header(ui, cx);
             chips(ui, cx);
@@ -28,6 +29,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
             camera_path(ui, cx);
         });
     });
+    // Down to where the content starts (its top margin).
+    super::under_top(ui, cx, from, ui.max_rect().top() + cx.top + 8.0);
 }
 
 fn rec_state(s: CaptureState) -> RecState {

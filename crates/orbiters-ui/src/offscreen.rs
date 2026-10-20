@@ -8,7 +8,7 @@ use egui_wgpu::wgpu;
 pub struct Offscreen {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    renderer: egui_wgpu::Renderer,
+    renderer: crate::blur::Textures,
     format: wgpu::TextureFormat,
 }
 
@@ -40,7 +40,7 @@ impl Offscreen {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut renderer = egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions { msaa_samples: 1, dithering: true, ..Default::default() });
         crate::install_wgpu(&device, format, 1, &mut renderer.callback_resources);
-        Ok(Self { device, queue, renderer, format })
+        Ok(Self { device, queue, renderer: std::sync::Arc::new(egui::mutex::RwLock::new(renderer)), format })
     }
 
     /// The device frames render on (for interfaces that draw their own GPU content).
@@ -52,6 +52,11 @@ impl Offscreen {
         &self.queue
     }
 
+    /// The renderer and its textures (for the progressive blur, which draws shapes a second time).
+    pub fn textures(&self) -> &crate::blur::Textures {
+        &self.renderer
+    }
+
     /// Runs one frame of `ui` and applies its texture changes; when `capture`, also paints it and returns the
     /// pixels (sRGB, opaque).
     pub fn frame(&mut self, ctx: &egui::Context, input: RawInput, ui: impl FnMut(&mut egui::Ui), capture: bool) -> anyhow::Result<Option<ColorImage>> {
@@ -59,12 +64,12 @@ impl Offscreen {
         let mut full = ctx.run_ui(input, ui);
         for (id, deltas) in full.textures_delta.set.drain() {
             for delta in deltas {
-                self.renderer.update_texture(&self.device, &self.queue, id, &delta);
+                self.renderer.write().update_texture(&self.device, &self.queue, id, &delta);
             }
         }
         let image = if capture { Some(self.paint(ctx, &full, screen)) } else { None };
         for id in full.textures_delta.free.drain() {
-            self.renderer.free_texture(&id);
+            self.renderer.write().free_texture(&id);
         }
         image.transpose()
     }
@@ -86,7 +91,8 @@ impl Offscreen {
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("orbiters offscreen") });
-        let mut commands = self.renderer.update_buffers(&self.device, &self.queue, &mut encoder, &jobs, &desc);
+        let mut renderer = self.renderer.write();
+        let mut commands = renderer.update_buffers(&self.device, &self.queue, &mut encoder, &jobs, &desc);
         {
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("orbiters offscreen"),
@@ -101,8 +107,9 @@ impl Offscreen {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            self.renderer.render(&mut pass.forget_lifetime(), &jobs, &desc);
+            renderer.render(&mut pass.forget_lifetime(), &jobs, &desc);
         }
+        drop(renderer);
         let row = (w * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("orbiters offscreen readback"),

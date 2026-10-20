@@ -1,8 +1,9 @@
 //! Orbiters interface toolkit, shared by the desktop window and the VR overlay: the Orbiters look (theme, fonts,
-//! icons), springs, the glow background shader, painting helpers, widgets, the record button, the trail map,
-//! toasts, an offscreen GPU renderer (screenshots) and a CPU painter (the VR overlay).
+//! icons), springs, the glow background shader, the progressive blur under bars, painting helpers, widgets, the
+//! record button, the trail map, toasts, an offscreen GPU renderer (screenshots) and a CPU painter (the VR overlay).
 
 pub mod anim;
+pub mod blur;
 pub mod fonts;
 pub mod format;
 pub mod glow;
@@ -37,4 +38,5 @@ pub struct RenderTarget {
 pub fn install_wgpu(device: &egui_wgpu::wgpu::Device, format: egui_wgpu::wgpu::TextureFormat, msaa_samples: u32, resources: &mut egui_wgpu::CallbackResources) {
     resources.insert(RenderTarget { format, msaa_samples });
     glow::install(device, format, msaa_samples, resources);
+    blur::install(device, format, msaa_samples, resources);
 }

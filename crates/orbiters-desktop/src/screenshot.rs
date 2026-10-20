@@ -30,6 +30,8 @@ struct Scenario {
     open_detail: bool,
     toasts: Vec<(toast::Kind, &'static str)>,
     pointer: Option<Pos2>,
+    /// Points the page is scrolled down by (a mouse wheel over it, half a second before the capture).
+    scroll: f32,
 }
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
@@ -111,7 +113,17 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     });
 
     let scenarios = vec![
-        Scenario { name: "splash", page: Page::Capture, snapshot: idle.clone(), frames: 66, splash: true, open_detail: false, toasts: vec![], pointer: None },
+        Scenario {
+            name: "splash",
+            page: Page::Capture,
+            snapshot: idle.clone(),
+            frames: 66,
+            splash: true,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+        },
         Scenario {
             name: "capture-idle",
             page: Page::Capture,
@@ -121,6 +133,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             open_detail: false,
             toasts: vec![],
             pointer: None,
+            scroll: 0.0,
         },
         Scenario {
             name: "capture-recording",
@@ -131,6 +144,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             open_detail: false,
             toasts: vec![],
             pointer: None,
+            scroll: 0.0,
         },
         Scenario {
             name: "capture-consent",
@@ -141,6 +155,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             open_detail: false,
             toasts: vec![],
             pointer: None,
+            scroll: 0.0,
         },
         Scenario {
             name: "toasts",
@@ -154,6 +169,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 (toast::Kind::Info, "New world: started a new session."),
             ],
             pointer: None,
+            scroll: 0.0,
         },
         Scenario {
             name: "sessions",
@@ -164,6 +180,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             open_detail: false,
             toasts: vec![],
             pointer: Some(pos2(400.0, 300.0)),
+            scroll: 0.0,
         },
         Scenario {
             name: "session-detail",
@@ -174,6 +191,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             open_detail: true,
             toasts: vec![],
             pointer: None,
+            scroll: 0.0,
         },
         Scenario {
             name: "session-reconstructing",
@@ -184,8 +202,53 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             open_detail: true,
             toasts: vec![],
             pointer: None,
+            scroll: 0.0,
         },
-        Scenario { name: "settings", page: Page::Settings, snapshot: idle, frames: 90, splash: false, open_detail: false, toasts: vec![], pointer: None },
+        Scenario {
+            name: "settings",
+            page: Page::Settings,
+            snapshot: idle.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+        },
+        // Content under the title bar (and the sessions under their heading): blurred, not cut.
+        Scenario {
+            name: "capture-scrolled",
+            page: Page::Capture,
+            snapshot: idle.clone(),
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 112.0,
+        },
+        Scenario {
+            name: "settings-scrolled",
+            page: Page::Settings,
+            snapshot: idle.clone(),
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 250.0,
+        },
+        Scenario {
+            name: "sessions-scrolled",
+            page: Page::Sessions,
+            snapshot: idle,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 140.0,
+        },
     ];
 
     let mut gpu = Offscreen::new()?;
@@ -208,7 +271,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, height: f32, path: &st
     let backend: Ctl = std::sync::Arc::new(Local::new(ctl));
     backend.attach(&ctx);
     let mut app = App::offline(backend);
-    app.set_gpu(crate::gpu::Handles { device: gpu.device().clone(), queue: gpu.queue().clone() });
+    app.set_gpu(crate::gpu::Handles { device: gpu.device().clone(), queue: gpu.queue().clone(), textures: gpu.textures().clone() });
     if !sc.splash {
         app.skip_splash();
     }
@@ -219,6 +282,16 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, height: f32, path: &st
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(scale), focused: Some(true), ..Default::default() });
         if let Some(p) = sc.pointer {
             input.events.push(Event::PointerMoved(p));
+        }
+        if sc.scroll != 0.0 && f + 30 == sc.frames {
+            input.events.push(Event::PointerMoved(pos2(760.0, 500.0)));
+            input.events.push(Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(0.0, -sc.scroll),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+                source: egui::MouseWheelSource::Wheel,
+            });
         }
         if f == 0 {
             app.set_page(sc.page, t);
@@ -328,7 +401,7 @@ fn splats_3d(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, sc
     backend.attach(&ctx);
     let mut app = App::offline(backend);
     app.skip_splash();
-    let handles = crate::gpu::Handles { device: gpu.device().clone(), queue: gpu.queue().clone() };
+    let handles = crate::gpu::Handles { device: gpu.device().clone(), queue: gpu.queue().clone(), textures: gpu.textures().clone() };
     app.set_gpu(handles.clone());
     let start = std::time::Instant::now();
     let (mut opened, mut viewing, mut loaded_at) = (false, false, None::<f64>);

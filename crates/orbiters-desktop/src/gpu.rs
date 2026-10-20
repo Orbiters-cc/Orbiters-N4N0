@@ -9,11 +9,13 @@ use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetupCreateNew};
 use eframe::wgpu;
 use std::sync::Arc;
 
-/// The window's device, for pages that draw their own GPU content (the 3D view of splats).
+/// The window's device, for pages that draw their own GPU content (the 3D view of splats), and its renderer, whose
+/// textures the progressive blur under the title bar draws with.
 #[derive(Clone)]
 pub struct Handles {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    pub textures: orbiters_ui::blur::Textures,
 }
 
 pub fn options() -> WgpuConfiguration {

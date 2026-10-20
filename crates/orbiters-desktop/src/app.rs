@@ -49,7 +49,8 @@ impl App {
         round_corners(cc);
         let mut app = Self::offline(ctl);
         app.windowed = true;
-        app.gpu = cc.wgpu_render_state.as_ref().map(|rs| crate::gpu::Handles { device: rs.device.clone(), queue: rs.queue.clone() });
+        app.gpu =
+            cc.wgpu_render_state.as_ref().map(|rs| crate::gpu::Handles { device: rs.device.clone(), queue: rs.queue.clone(), textures: rs.renderer.clone() });
         app.show_splash = splash;
         app
     }
@@ -164,7 +165,8 @@ impl App {
         if content_ready {
             let since = *self.sidebar_since.get_or_insert(now);
             self.sidebar(ui, &snap, Rect::from_min_size(body.min, vec2(SIDEBAR_W, body.height())), since);
-            let page_rect = Rect::from_min_max(pos2(body.left() + SIDEBAR_W, body.top()), body.max);
+            // From the top of the window: the content scrolls on under the title bar (see `pages::under_top`).
+            let page_rect = Rect::from_min_max(pos2(body.left() + SIDEBAR_W, full.top()), body.max);
             self.page(ui, &snap, page_rect);
         }
         self.title_bar(ui, &snap, title);
@@ -364,7 +366,16 @@ impl App {
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(shifted).id_salt(("page", self.visit)));
         child.set_clip_rect(rect.intersect(ui.clip_rect()));
         child.multiply_opacity(v.clamp(0.0, 1.0));
-        let mut cx = pages::Cx { ctl: &self.ctl, snap, toasts: &mut self.toasts, entered: self.page_since, visit: self.visit, windowed: self.windowed, gpu: self.gpu.as_ref() };
+        let mut cx = pages::Cx {
+            ctl: &self.ctl,
+            snap,
+            toasts: &mut self.toasts,
+            entered: self.page_since,
+            visit: self.visit,
+            windowed: self.windowed,
+            gpu: self.gpu.as_ref(),
+            top: TITLE_H,
+        };
         match self.page {
             Page::Capture => pages::capture::show(&mut child, &mut cx, &mut self.capture),
             Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions),

@@ -8,6 +8,7 @@ pub mod settings;
 use crate::backend::Ctl;
 use crate::state::Snapshot;
 use egui::{pos2, vec2, Align2, Id, Rect, Sense, Ui, UiBuilder};
+use orbiters_ui::blur;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{toast, widgets};
 use std::sync::mpsc;
@@ -31,6 +32,8 @@ pub struct Cx<'a> {
     pub windowed: bool,
     /// The window's GPU, when it has one.
     pub gpu: Option<&'a crate::gpu::Handles>,
+    /// Height of the title bar over the top of the page: content starts below it and scrolls on under it.
+    pub top: f32,
 }
 
 impl Cx<'_> {
@@ -43,6 +46,31 @@ impl Cx<'_> {
                 false
             }
         }
+    }
+}
+
+/// Where a page's scroll bar goes: below the title bar, which the content scrolls on under.
+pub fn below_bar(ui: &Ui, cx: &Cx) -> Rect {
+    let r = ui.max_rect();
+    Rect::from_min_max(pos2(r.left(), r.top() + cx.top), r.max)
+}
+
+/// Content under the title bar and a page's heading: blurred and dimmed, the more the nearer the window's top, so
+/// that it stays in view without getting in the way of the text over it. The full look is reached this far above
+/// where the content rests.
+const UNDER_TOP: blur::Look = blur::Look { blur: 12.0, solid: 0.0, darken: 0.6, fade: 0.0 };
+const UNDER_TOP_RAMP: f32 = 32.0;
+
+/// The shapes from `from` on that scrolled up under what the page keeps above its scrolling content (the title bar,
+/// and down to `bottom` its heading) stay in view there, blurred and dimmed, and no longer take clicks. Call after
+/// the content and before what sits on it.
+pub fn under_top(ui: &Ui, cx: &Cx, from: egui::layers::ShapeIdx, bottom: f32) {
+    let page = ui.max_rect();
+    let band = Rect::from_min_max(page.min, pos2(page.right(), bottom));
+    let _ = ui.interact(band, Id::unique("orbiters-page-top"), Sense::click());
+    if let Some(gpu) = cx.gpu {
+        let look = blur::Look { solid: (band.height() - UNDER_TOP_RAMP).max(0.0), ..UNDER_TOP };
+        blur::under(ui, Id::unique("orbiters-page-top"), &gpu.textures, from, band, look);
     }
 }
 

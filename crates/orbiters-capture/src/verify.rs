@@ -37,7 +37,7 @@ fn load_gt_depth(path: &Path) -> anyhow::Result<(u32, u32, Vec<f32>)> {
     let mut raw = Vec::with_capacity((w * h * 2) as usize);
     DeflateDecoder::new(&data[offset..]).read_to_end(&mut raw)?;
     anyhow::ensure!(raw.len() >= (w * h * 2) as usize, "{}: truncated", path.display());
-    Ok((w, h, raw.chunks_exact(2).map(|b| gt_depth::half_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect()))
+    Ok((w, h, raw.as_chunks::<2>().0.iter().map(|b| gt_depth::half_to_f32(u16::from_le_bytes(*b))).collect()))
 }
 
 pub fn verify(dir: &Path, max_frames: Option<u32>) -> anyhow::Result<VerifyReport> {

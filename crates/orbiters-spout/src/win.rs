@@ -5,10 +5,9 @@ use windows::core::{Interface, HSTRING, PCSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET,
-    D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
-    D3D11_RESOURCE_MISC_SHARED, D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-    D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
+    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_RESOURCE_MISC_SHARED,
+    D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{IDXGIKeyedMutex, IDXGIResource};
@@ -18,8 +17,7 @@ use windows::Win32::System::Memory::{
 };
 use windows::Win32::System::Registry::{RegGetValueA, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::System::Threading::{
-    CreateMutexA, CreateSemaphoreA, OpenMutexW, OpenSemaphoreW, ReleaseMutex, ReleaseSemaphore, WaitForSingleObject, MUTEX_ALL_ACCESS,
-    SEMAPHORE_ALL_ACCESS,
+    CreateMutexA, CreateSemaphoreA, OpenMutexW, OpenSemaphoreW, ReleaseMutex, ReleaseSemaphore, WaitForSingleObject, MUTEX_ALL_ACCESS, SEMAPHORE_ALL_ACCESS,
 };
 
 const NAME_LEN: usize = 256;
@@ -202,14 +200,7 @@ pub fn sender_info(name: &str) -> Option<SenderInfo> {
     }
     let b = mem.bytes();
     let u = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
-    Some(SenderInfo {
-        name: name.to_string(),
-        share_handle: u(0),
-        width: u(4),
-        height: u(8),
-        format: u(12),
-        description: read_name(&b[20..20 + NAME_LEN]),
-    })
+    Some(SenderInfo { name: name.to_string(), share_handle: u(0), width: u(4), height: u(8), format: u(12), description: read_name(&b[20..20 + NAME_LEN]) })
 }
 
 fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
@@ -496,9 +487,8 @@ impl Sender {
         }
         let access = create_mutex(&format!("{name}_SpoutAccessMutex"))?;
         let c = cstring(&format!("{name}_Count_Semaphore"));
-        let counter = unsafe { CreateSemaphoreA(None, 1, i32::MAX, PCSTR(c.as_ptr() as *const u8)) }
-            .map(OwnedHandle)
-            .map_err(|e| platform("CreateSemaphore", e))?;
+        let counter =
+            unsafe { CreateSemaphoreA(None, 1, i32::MAX, PCSTR(c.as_ptr() as *const u8)) }.map(OwnedHandle).map_err(|e| platform("CreateSemaphore", e))?;
         let registration = register_name(name, true)?.expect("registration when adding");
         Ok(Self {
             _device: device,
@@ -526,7 +516,7 @@ impl Sender {
             return Err(SpoutError::Platform("frame smaller than the sender".into()));
         }
         self.bgra.resize(n, 0);
-        for (dst, src) in self.bgra.chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
+        for (dst, src) in self.bgra.as_chunks_mut::<4>().0.iter_mut().zip(rgba.as_chunks::<4>().0) {
             dst[0] = src[2];
             dst[1] = src[1];
             dst[2] = src[0];
@@ -623,7 +613,7 @@ mod tests {
         let mut receiver = Receiver::new().expect("receiver");
         receiver.connect(&name).expect("connect");
         let mut frame = vec![0u8; (w * h * 4) as usize];
-        for (i, px) in frame.chunks_exact_mut(4).enumerate() {
+        for (i, px) in frame.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             px.copy_from_slice(&[(i % 251) as u8, 40, 200, 255]);
         }
         sender.send_rgba(&frame).unwrap();

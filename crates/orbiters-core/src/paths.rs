@@ -45,9 +45,7 @@ pub fn vrchat_log_dir() -> Option<PathBuf> {
     } else if let Some(home) = dirs::home_dir() {
         // Steam Proton prefix (default library and Flatpak Steam).
         for steam in [".steam/steam", ".local/share/Steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"] {
-            candidates.push(
-                home.join(steam).join("steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat"),
-            );
+            candidates.push(home.join(steam).join("steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat"));
         }
     }
     candidates.into_iter().find(|p| p.is_dir())

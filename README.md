@@ -12,7 +12,8 @@ It never asks for your VRChat login: it only reads VRChat's local log, OSC and S
 
 | Path | What it is |
 |---|---|
-| `app/` | The desktop app: Tauri v2 shell (`app/src-tauri`, Rust) and its interface (`app/src`, React + Motion + Tailwind) |
+| `crates/orbiters-desktop` | The desktop app: a native window (egui on wgpu) over a controller that owns the capture worker, watches VRChat and listens to OSC; keeps running from the tray |
+| `crates/orbiters-ui` | Interface toolkit shared by the window and the coming VR overlay: theme, fonts, springs, the glow background shader, widgets, record button, trail map, toasts, offscreen renderer |
 | `crates/orbiters-capture` | Capture worker process (`orbiters-capture`): frame sources, strip and depth decoding, session bundles |
 | `crates/orbiters-core` | Shared logic: settings, session bundles, keyframes, VRChat log, OSC/OSCQuery, worker protocol |
 | `crates/orbiters-spout` | Spout2 receiver and test sender (Direct3D 11), protocol-compatible with the Spout2 SDK |
@@ -20,19 +21,23 @@ It never asks for your VRChat login: it only reads VRChat's local log, OSC and S
 
 ## Building
 
-Requirements: Rust (stable, MSVC toolchain on Windows), Node.js 20+, and on Windows the WebView2 runtime (part of
-Windows 11).
+Requirements: Rust (stable, MSVC toolchain on Windows). No web runtime: the interface is drawn natively.
 
 ```sh
 git submodule update --init
-cd app
-npm install
-npm run tauri dev        # builds the capture worker, starts Vite and the app
-npm run tauri build      # release build and installer
+cargo build --release -p orbiters-desktop -p orbiters-capture
+target/release/orbiters-desktop
 ```
 
-`npm run dev` alone serves the interface in a browser with a built-in simulator (no native app needed), which is
-how the interface is designed and reviewed.
+The app looks for `orbiters-capture` next to its own executable. The interface repaints only while something
+moves; looping animations run only while the window is focused, so it costs nothing while you play.
+
+To review the interface without a window, render it offscreen in its main states (capture idle and recording,
+consent notice, toasts, sessions, session detail, settings, splash):
+
+```sh
+target/release/orbiters-desktop --screenshot <out folder> [--sessions <sessions folder>] [--raw <raw captures folder>] [--scale 1.5] [--only sessions]
+```
 
 ## Command-line tools
 
@@ -48,7 +53,7 @@ cargo run -p orbiters-capture -- verify "<raw capture folder>"                  
 
 ```sh
 cargo test --workspace
-cd app && npm run typecheck
+cargo clippy --workspace --all-targets
 ```
 
 ## License

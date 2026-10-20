@@ -125,14 +125,14 @@ impl CaptureSession {
         }
         .into();
         manifest.capture.source_name = source_description.clone();
-        let base = cmd
-            .folder_name
-            .clone()
-            .unwrap_or_else(|| {
-                let world = cmd.world.as_ref().and_then(|w| w.name.clone()).unwrap_or_else(|| folder_hint.to_string());
-                format!("{world} {}", orbiters_core::now_local_for_names())
-            });
-        let writer = BundleWriter::create(&cmd.sessions_dir, &base, manifest)?;
+        let base = cmd.folder_name.clone().unwrap_or_else(|| {
+            let world = cmd.world.as_ref().and_then(|w| w.name.clone()).unwrap_or_else(|| folder_hint.to_string());
+            format!("{world} {}", orbiters_core::now_local_for_names())
+        });
+        let mut writer = BundleWriter::create(&cmd.sessions_dir, &base, manifest)?;
+        if matches!(cmd.source, orbiters_core::protocol::SourceSpec::RawSequence { realtime: false, .. }) {
+            writer.use_game_time_duration();
+        }
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 6) / 2 + 1;
         Ok(Self {
             writer,
@@ -171,6 +171,11 @@ impl CaptureSession {
         self.stats.frames += 1;
         self.stats.width = view.width;
         self.stats.height = view.height;
+        let capture = &mut self.writer.manifest_mut().capture;
+        if capture.width == 0 {
+            capture.width = view.width;
+            capture.height = view.height;
+        }
 
         match strip::decode_preferring(&view, self.prefer_flipped) {
             Err(e) => {
@@ -232,11 +237,14 @@ impl CaptureSession {
                     if !self.thumbnail_done {
                         let mut rgba = data.clone();
                         if bgra {
-                            for px in rgba.chunks_exact_mut(4) {
+                            for px in rgba.as_chunks_mut::<4>().0 {
                                 px.swap(0, 2);
                             }
                         }
-                        if self.writer.write_thumbnail(&rgba, view.width, view.height).is_ok() {
+                        // Leave the pose strip (and its reference patches) out of the picture.
+                        let top = strip::StripLayout::new(view.width, view.height).map(|l| l.reserved.y1.min(view.height - 1)).unwrap_or(0);
+                        let below = &rgba[top as usize * view.width as usize * 4..];
+                        if self.writer.write_thumbnail(below, view.width, view.height - top).is_ok() {
                             self.thumbnail_done = true;
                         }
                     }

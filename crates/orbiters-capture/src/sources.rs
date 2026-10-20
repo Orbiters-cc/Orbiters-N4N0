@@ -114,8 +114,7 @@ pub struct RawSequenceSource {
 
 impl RawSequenceSource {
     pub fn open(dir: &Path, realtime: bool) -> anyhow::Result<Self> {
-        let text = std::fs::read_to_string(dir.join(raw_capture::RAW_FILE))
-            .map_err(|e| anyhow::anyhow!("{}: no capture.json ({e})", dir.display()))?;
+        let text = std::fs::read_to_string(dir.join(raw_capture::RAW_FILE)).map_err(|e| anyhow::anyhow!("{}: no capture.json ({e})", dir.display()))?;
         let meta: RawCapture = serde_json::from_str(&text)?;
         anyhow::ensure!(meta.format == raw_capture::RAW_FORMAT, "{} is not a raw capture", dir.display());
         Ok(Self { dir: dir.to_path_buf(), meta, index: 0, realtime, started: None })
@@ -132,7 +131,11 @@ impl FrameSource for RawSequenceSource {
     }
 
     fn folder_hint(&self) -> String {
-        self.meta.world.as_ref().and_then(|w| w.name.clone()).unwrap_or_else(|| self.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Raw capture".into()))
+        self.meta
+            .world
+            .as_ref()
+            .and_then(|w| w.name.clone())
+            .unwrap_or_else(|| self.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Raw capture".into()))
     }
 
     fn next(&mut self, _timeout: Duration, f: &mut dyn FnMut(ImageView<'_>)) -> anyhow::Result<Next> {
@@ -197,8 +200,18 @@ impl TestPatternSource {
         for y in 0..h {
             for x in 0..w {
                 let ground = y > h * 2 / 3;
-                let stripe = ((x + shift) / 64) % 2 == 0;
-                let rgb = if ground { if stripe { [86, 70, 58] } else { [70, 58, 48] } } else if stripe { [70, 110, 180] } else { [96, 140, 210] };
+                let stripe = ((x + shift) / 64).is_multiple_of(2);
+                let rgb = if ground {
+                    if stripe {
+                        [86, 70, 58]
+                    } else {
+                        [70, 58, 48]
+                    }
+                } else if stripe {
+                    [70, 110, 180]
+                } else {
+                    [96, 140, 210]
+                };
                 img.set(x, y, rgb);
             }
         }

@@ -1,13 +1,24 @@
 # Third-party notices
 
 Orbiters desktop is built on the following components. Each remains under its own license; the full texts ship
-with the components (Cargo registry sources and `node_modules`) and are available from each project.
+with the components (Cargo registry sources) and are available from each project.
 
 ## Rust crates
 
 | Component | License |
 |---|---|
-| Tauri, tauri-build, tauri-plugin-dialog, tauri-plugin-opener, tauri-plugin-single-instance | Apache-2.0 OR MIT |
+| egui, eframe, egui-wgpu, egui-winit, epaint, emath, ecolor | MIT OR Apache-2.0 |
+| wgpu, naga | MIT OR Apache-2.0 |
+| winit | Apache-2.0 |
+| AccessKit | MIT OR Apache-2.0 |
+| tray-icon, muda | MIT OR Apache-2.0 |
+| rfd | MIT |
+| tiny-skia | BSD-3-Clause |
+| png | MIT OR Apache-2.0 |
+| bytemuck | Zlib OR Apache-2.0 OR MIT |
+| pollster | Apache-2.0 OR MIT |
+| raw-window-handle | MIT OR Apache-2.0 OR Zlib |
+| winresource (build tool, not shipped) | MIT |
 | windows (windows-rs, Microsoft) | MIT OR Apache-2.0 |
 | serde, serde_json | MIT OR Apache-2.0 |
 | anyhow, thiserror | MIT OR Apache-2.0 |
@@ -21,17 +32,13 @@ with the components (Cargo registry sources and `node_modules`) and are availabl
 | sysinfo | MIT |
 | trash | MIT |
 
-## Web interface
+## Fonts
 
 | Component | License |
 |---|---|
-| React, React DOM | MIT |
-| Motion (motion.dev) | MIT |
-| Tailwind CSS | MIT |
-| lucide-react icons | ISC |
-| Inter typeface (@fontsource-variable/inter) | SIL Open Font License 1.1 (font), MIT (package) |
-| @tauri-apps/api and plugins | Apache-2.0 OR MIT |
-| Vite, TypeScript (build tools, not shipped) | MIT, Apache-2.0 |
+| Phosphor Icons 2.1 (regular and fill), embedded; files from the egui-phosphor crate (MIT OR Apache-2.0) | MIT, see `crates/orbiters-ui/assets/Phosphor-LICENSE.txt` |
+| egui's fallback fonts (epaint_default_fonts): Ubuntu Light, Hack, Noto Emoji, emoji-icon-font | Ubuntu Font Licence 1.0, MIT / Bitstream Vera, SIL Open Font License 1.1, MIT |
+| Segoe UI Variable, Segoe UI, Cascadia Mono, Consolas (Windows) or the system's sans fonts (Linux) | Read from the system at run time, not distributed |
 
 ## Protocols and formats implemented from their specifications
 

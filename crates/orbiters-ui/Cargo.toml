@@ -1,0 +1,15 @@
+[package]
+name = "orbiters-ui"
+description = "Orbiters interface toolkit: theme, springs, glow background, widgets and an offscreen renderer, shared by the desktop window and the VR overlay."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
+png = { workspace = true }
+tiny-skia = { workspace = true }
+anyhow = { workspace = true }

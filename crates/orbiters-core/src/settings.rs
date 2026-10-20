@@ -109,9 +109,7 @@ mod tests {
     fn round_trip_and_defaults() {
         let dir = std::env::temp_dir().join(format!("orbiters-settings-{}", std::process::id()));
         let path = dir.join("settings.json");
-        let mut s = Settings::default();
-        s.storage_limit_gb = 12.5;
-        s.capture_mode = CaptureMode::LiveRefine;
+        let s = Settings { storage_limit_gb: 12.5, capture_mode: CaptureMode::LiveRefine, ..Default::default() };
         s.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(&path), s);
         std::fs::write(&path, r#"{"storage_limit_gb": 3}"#).unwrap();

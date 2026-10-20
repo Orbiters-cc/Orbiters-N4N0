@@ -156,7 +156,8 @@ fn cli_record(args: &[String]) -> anyhow::Result<()> {
         other => open_source(other)?,
     };
     let mut session = CaptureSession::start(&cmd, source.describe(), &source.folder_hint())?;
-    let reason = run_session(source.as_mut(), &mut session, flag(args, "--frames").and_then(|f| f.parse().ok()), flag(args, "--seconds").and_then(|f| f.parse().ok()))?;
+    let reason =
+        run_session(source.as_mut(), &mut session, flag(args, "--frames").and_then(|f| f.parse().ok()), flag(args, "--seconds").and_then(|f| f.parse().ok()))?;
     let stats = session.refresh_stats().clone();
     let (dir, manifest) = session.finish()?;
     println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "session": dir, "reason": reason, "stats": stats, "manifest_stats": manifest.stats }))?);

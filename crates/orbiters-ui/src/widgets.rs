@@ -1,0 +1,769 @@
+//! Widgets in the Orbiters style. Feedback is immediate on pointer down (press scale, highlight), springs carry
+//! every change, and selection-like controls (segments, toggles, navigation) act on press like the web version.
+
+use crate::anim::{self, Spring};
+use crate::paint::{self, Gradient};
+use crate::theme::{self, weight, Txt};
+use crate::{fonts, icons};
+use egui::{pos2, vec2, Align2, Color32, CursorIcon, FontId, Id, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2};
+
+/// Paints a Phosphor glyph centred on `center`.
+pub fn icon(painter: &Painter, center: Pos2, glyph: &str, size: f32, color: Color32) {
+    painter.text(center, Align2::CENTER_CENTER, glyph, FontId::new(size, fonts::icons()), color);
+}
+
+/// Paints the filled variant of a Phosphor glyph.
+pub fn icon_fill(painter: &Painter, center: Pos2, glyph: &str, size: f32, color: Color32) {
+    painter.text(center, Align2::CENTER_CENTER, glyph, FontId::new(size, fonts::icons_fill()), color);
+}
+
+/// Paints text with its top-left (or other anchor) at `pos`; returns the text's rect.
+pub fn text(painter: &Painter, pos: Pos2, anchor: Align2, txt: &Txt) -> Rect {
+    let galley = painter.layout_job(txt.job(f32::INFINITY));
+    let rect = anchor.anchor_size(pos, galley.size());
+    painter.galley(rect.min, galley, txt.color);
+    rect
+}
+
+/// Paints one line of text cut with an ellipsis to `max_width`.
+pub fn text_truncated(painter: &Painter, pos: Pos2, anchor: Align2, txt: &Txt, max_width: f32) -> Rect {
+    let galley = painter.layout_job(txt.job_truncated(max_width.max(1.0)));
+    let rect = anchor.anchor_size(pos, galley.size());
+    painter.galley(rect.min, galley, txt.color);
+    rect
+}
+
+pub fn text_size(ui: &Ui, txt: &Txt) -> Vec2 {
+    ui.painter().layout_job(txt.job(f32::INFINITY)).size()
+}
+
+/// True on the frame the primary button went down on this widget.
+pub fn pressed(resp: &Response) -> bool {
+    resp.is_pointer_button_down_on() && resp.ctx.input(|i| i.pointer.primary_pressed())
+}
+
+/// Status colours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Ok,
+    Warn,
+    Danger,
+    Off,
+    Rec,
+    Info,
+}
+
+impl Tone {
+    pub fn color(self) -> Color32 {
+        match self {
+            Tone::Ok => theme::OK,
+            Tone::Warn => theme::WARN,
+            Tone::Danger => theme::DANGER,
+            Tone::Off => theme::FG_4,
+            Tone::Rec => theme::REC,
+            Tone::Info => theme::CYAN,
+        }
+    }
+}
+
+/// A glass card behind `rect`.
+pub fn card(painter: &Painter, rect: Rect, radius: f32) {
+    painter.rect(rect, theme::radius(radius), theme::surface(), theme::hairline(), StrokeKind::Inside);
+}
+
+/// A stronger glass panel (popovers, toasts, dialogs) with a deep shadow.
+pub fn panel(painter: &Painter, rect: Rect, radius: f32) {
+    paint::shadow(painter, rect, radius, vec2(0.0, 20.0), 30.0, -12.0, theme::black(0.7));
+    painter.rect(rect, theme::radius(radius), theme::surface_strong(), Stroke::new(1.0, theme::white(0.07)), StrokeKind::Inside);
+}
+
+/// Pulsing status dot (10 points), the pulse ring only while live.
+pub fn status_dot(painter: &Painter, center: Pos2, tone: Tone, pulse: bool) {
+    let c = tone.color();
+    if pulse && anim::is_live(painter.ctx()) {
+        let t = anim::clock(painter.ctx(), 30.0);
+        let k = (t % 1.0) as f32;
+        let e = anim::ease::out_cubic(k);
+        painter.circle_filled(center, 5.0 * (1.0 + e), theme::alpha(c, 0.6 * (1.0 - e)));
+    }
+    painter.circle_filled(center, 5.0, c);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Variant {
+    Primary,
+    Secondary,
+    Ghost,
+    Danger,
+    Glass,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Size {
+    Sm,
+    Md,
+    Lg,
+}
+
+/// A pill button. Clicks on release (Unity's and the platform's usual behaviour); the press shows at once.
+pub struct Button<'a> {
+    label: &'a str,
+    icon: Option<&'a str>,
+    variant: Variant,
+    size: Size,
+    enabled: bool,
+    width: Option<f32>,
+    hint: Option<&'a str>,
+}
+
+impl<'a> Button<'a> {
+    pub fn new(label: &'a str) -> Self {
+        Self { label, icon: None, variant: Variant::Secondary, size: Size::Md, enabled: true, width: None, hint: None }
+    }
+
+    pub fn icon(mut self, glyph: &'a str) -> Self {
+        self.icon = Some(glyph);
+        self
+    }
+
+    pub fn variant(mut self, v: Variant) -> Self {
+        self.variant = v;
+        self
+    }
+
+    pub fn size(mut self, s: Size) -> Self {
+        self.size = s;
+        self
+    }
+
+    pub fn enabled(mut self, e: bool) -> Self {
+        self.enabled = e;
+        self
+    }
+
+    pub fn width(mut self, w: f32) -> Self {
+        self.width = Some(w);
+        self
+    }
+
+    pub fn hint(mut self, h: &'a str) -> Self {
+        self.hint = Some(h);
+        self
+    }
+
+    fn metrics(&self) -> (f32, f32, f32, f32, f32) {
+        // height, padding, text size, gap, icon size
+        match self.size {
+            Size::Sm => (32.0, 14.0, 12.5, 6.0, 14.0),
+            Size::Md => (40.0, 18.0, 13.5, 8.0, 15.0),
+            Size::Lg => (48.0, 24.0, 15.0, 10.0, 17.0),
+        }
+    }
+
+    pub fn desired_width(&self, ui: &Ui) -> f32 {
+        let (_, pad, size, gap, icon_size) = self.metrics();
+        let text_w = if self.label.is_empty() { 0.0 } else { text_size(ui, &Txt::new(self.label, size).weight(weight::MEDIUM)).x };
+        let icon_w = if self.icon.is_some() { icon_size + if self.label.is_empty() { 0.0 } else { gap } } else { 0.0 };
+        self.width.unwrap_or(text_w + icon_w + pad * 2.0)
+    }
+
+    pub fn show(self, ui: &mut Ui) -> Response {
+        let (h, _, size, gap, icon_size) = self.metrics();
+        let w = self.desired_width(ui);
+        let (rect, resp) = ui.allocate_exact_size(vec2(w, h), if self.enabled { Sense::click() } else { Sense::hover() });
+        self.paint(ui, rect, &resp, size, gap, icon_size);
+        let resp = if self.enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
+        match self.hint {
+            Some(hint) => resp.on_hover_text(hint),
+            None => resp,
+        }
+    }
+
+    /// Shows the button in a given rect (for layouts that place it themselves).
+    pub fn show_at(self, ui: &mut Ui, rect: Rect) -> Response {
+        let (_, _, size, gap, icon_size) = self.metrics();
+        let resp = ui.interact(
+            rect,
+            ui.scope_id().with(("button", self.label, rect.min.x as i32, rect.min.y as i32)),
+            if self.enabled { Sense::click() } else { Sense::hover() },
+        );
+        self.paint(ui, rect, &resp, size, gap, icon_size);
+        let resp = if self.enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
+        match self.hint {
+            Some(hint) => resp.on_hover_text(hint),
+            None => resp,
+        }
+    }
+
+    fn paint(&self, ui: &Ui, rect: Rect, resp: &Response, size: f32, gap: f32, icon_size: f32) {
+        let ctx = ui.ctx();
+        let hover = anim::toggle(ctx, resp.id.with("hover"), self.enabled && resp.hovered(), Spring::SNAPPY);
+        let press = anim::toggle(ctx, resp.id.with("press"), self.enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
+        let lift = -hover * (1.0 - press);
+        let scale = 1.0 - 0.06 * press;
+        let bg = Rect::from_center_size(rect.center() + vec2(0.0, lift), rect.size() * scale);
+        let mut painter = ui.painter().clone();
+        if !self.enabled {
+            painter.set_opacity(0.4);
+        }
+        let r = bg.height() * 0.5;
+        let fg = match self.variant {
+            Variant::Primary => {
+                paint::shadow(&painter, bg, r, vec2(0.0, 8.0), 28.0, -10.0, theme::alpha(theme::INDIGO, 0.75));
+                paint::gradient_rect(&painter, bg, r, &Gradient::horizontal(bg, &theme::PRIMARY));
+                if hover > 0.0 {
+                    painter.rect_filled(bg, theme::radius(r), theme::white(0.08 * hover));
+                }
+                Color32::WHITE
+            }
+            Variant::Secondary => {
+                painter.rect_filled(bg, theme::radius(r), theme::white(0.07 + 0.04 * hover));
+                theme::FG
+            }
+            Variant::Ghost => {
+                painter.rect_filled(bg, theme::radius(r), theme::white(0.06 * hover));
+                theme::mix(theme::FG_2, theme::FG, hover)
+            }
+            Variant::Danger => {
+                painter.rect_filled(bg, theme::radius(r), theme::alpha(theme::DANGER, 0.15 + 0.07 * hover));
+                theme::DANGER
+            }
+            Variant::Glass => {
+                painter.rect(bg, theme::radius(r), theme::surface(), theme::hairline(), StrokeKind::Inside);
+                painter.rect_filled(bg, theme::radius(r), theme::white(0.08 * hover));
+                theme::FG
+            }
+        };
+        let txt = Txt::new(self.label, size).weight(weight::MEDIUM).color(fg);
+        let text_w = if self.label.is_empty() { 0.0 } else { text_size(ui, &txt).x };
+        let icon_w = if self.icon.is_some() { icon_size + if self.label.is_empty() { 0.0 } else { gap } } else { 0.0 };
+        let mut x = bg.center().x - (text_w + icon_w) * 0.5;
+        if let Some(glyph) = self.icon {
+            icon(&painter, pos2(x + icon_size * 0.5, bg.center().y), glyph, icon_size, fg);
+            x += icon_w;
+        }
+        if !self.label.is_empty() {
+            text(&painter, pos2(x, bg.center().y), Align2::LEFT_CENTER, &txt);
+        }
+    }
+}
+
+/// Round icon button (36 points), lighter on hover, deeper press.
+pub struct IconButton<'a> {
+    glyph: &'a str,
+    label: &'a str,
+    size: f32,
+    icon_size: f32,
+    danger: bool,
+    backdrop: Option<Color32>,
+}
+
+impl<'a> IconButton<'a> {
+    pub fn new(glyph: &'a str, label: &'a str) -> Self {
+        Self { glyph, label, size: 36.0, icon_size: 17.0, danger: false, backdrop: None }
+    }
+
+    pub fn size(mut self, size: f32, icon_size: f32) -> Self {
+        self.size = size;
+        self.icon_size = icon_size;
+        self
+    }
+
+    /// Red on hover (destructive actions).
+    pub fn danger(mut self) -> Self {
+        self.danger = true;
+        self
+    }
+
+    /// A resting background (over pictures).
+    pub fn backdrop(mut self, c: Color32) -> Self {
+        self.backdrop = Some(c);
+        self
+    }
+
+    pub fn show(self, ui: &mut Ui) -> Response {
+        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(self.size), Sense::click());
+        self.paint(ui, rect, &resp);
+        resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(self.label)
+    }
+
+    pub fn show_at(self, ui: &mut Ui, rect: Rect) -> Response {
+        let resp = ui.interact(rect, ui.scope_id().with(("icon-button", self.label)), Sense::click());
+        self.paint(ui, rect, &resp);
+        resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(self.label)
+    }
+
+    fn paint(&self, ui: &Ui, rect: Rect, resp: &Response) {
+        let ctx = ui.ctx();
+        let hover = anim::toggle(ctx, resp.id.with("hover"), resp.hovered(), Spring::SNAPPY);
+        let press = anim::toggle(ctx, resp.id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
+        let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.12 * press));
+        let p = ui.painter();
+        if let Some(c) = self.backdrop {
+            p.circle_filled(r.center(), r.width() * 0.5, c);
+        }
+        let (bg, fg) = if self.danger {
+            (theme::alpha(theme::DANGER, 0.15 * hover), theme::mix(theme::FG_2, theme::DANGER, hover))
+        } else {
+            (theme::white(0.08 * hover), theme::mix(theme::FG_2, theme::FG, hover))
+        };
+        p.circle_filled(r.center(), r.width() * 0.5, bg);
+        icon(p, r.center(), self.glyph, self.icon_size, fg);
+    }
+}
+
+/// One option of a [`segmented`] control.
+pub struct SegOption<'a, T> {
+    pub value: T,
+    pub label: &'a str,
+    pub hint: Option<&'a str>,
+    pub disabled: bool,
+    pub badge: Option<&'a str>,
+}
+
+impl<'a, T> SegOption<'a, T> {
+    pub fn new(value: T, label: &'a str) -> Self {
+        Self { value, label, hint: None, disabled: false, badge: None }
+    }
+
+    pub fn hint(mut self, h: &'a str) -> Self {
+        self.hint = Some(h);
+        self
+    }
+
+    pub fn disabled(mut self, badge: &'a str) -> Self {
+        self.disabled = true;
+        self.badge = Some(badge);
+        self
+    }
+}
+
+/// Segmented control whose highlight slides between options with a bouncy spring. Returns true when the value
+/// changed (on press).
+pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut T, options: &[SegOption<'_, T>], small: bool) -> bool {
+    let id = ui.scope_id().with(id_salt);
+    let (item_h, pad_x, size) = if small { (28.0, 12.0, 12.0) } else { (32.0, 14.0, 13.0) };
+    let badge_txt = |b: &str| Txt::new(b.to_uppercase(), 9.5).weight(weight::SEMIBOLD).tracking(0.04).color(theme::FG_2);
+    let widths: Vec<f32> = options
+        .iter()
+        .map(|o| {
+            let t = text_size(ui, &Txt::new(o.label, size).weight(weight::MEDIUM)).x;
+            let b = o.badge.map(|b| text_size(ui, &badge_txt(b)).x + 12.0 + 6.0).unwrap_or(0.0);
+            t + b + pad_x * 2.0
+        })
+        .collect();
+    let track_w = widths.iter().sum::<f32>() + 8.0;
+    let (track, _) = ui.allocate_exact_size(vec2(track_w, item_h + 8.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect(track, theme::radius(track.height() * 0.5), theme::black(0.3), theme::hairline(), StrokeKind::Inside);
+
+    let mut rects = Vec::with_capacity(options.len());
+    let mut x = track.left() + 4.0;
+    for w in &widths {
+        rects.push(Rect::from_min_size(pos2(x, track.top() + 4.0), vec2(*w, item_h)));
+        x += w;
+    }
+    let mut changed = false;
+    let mut responses = Vec::with_capacity(options.len());
+    for (i, o) in options.iter().enumerate() {
+        let resp = ui.interact(rects[i], id.with(i), if o.disabled { Sense::hover() } else { Sense::click() });
+        if !o.disabled && pressed(&resp) && *value != o.value {
+            *value = o.value;
+            changed = true;
+        }
+        responses.push(resp);
+    }
+
+    // Highlight under the active option, sprung in track-local coordinates (so scrolling never animates).
+    if let Some(active) = options.iter().position(|o| o.value == *value) {
+        let r = rects[active];
+        let [l, w] = anim::spring(ui.ctx(), id.with("pill"), [r.left() - track.left(), r.width()], Spring::BOUNCY);
+        let pill = Rect::from_min_size(pos2(track.left() + l, r.top()), vec2(w, r.height()));
+        paint::shadow(painter, pill, pill.height() * 0.5, vec2(0.0, 4.0), 18.0, -6.0, theme::alpha(theme::VIOLET, 0.8));
+        paint::gradient_rect(
+            painter,
+            pill,
+            pill.height() * 0.5,
+            &Gradient::horizontal(pill, &[(0.0, theme::alpha(theme::INDIGO, 0.8)), (1.0, theme::alpha(theme::VIOLET, 0.8))]),
+        );
+    }
+
+    for (i, o) in options.iter().enumerate() {
+        let active = o.value == *value;
+        let hovered = responses[i].hovered() && !o.disabled;
+        let target = if active {
+            Color32::WHITE
+        } else if hovered {
+            theme::FG_2
+        } else {
+            theme::FG_3
+        };
+        let color = anim::color(ui.ctx(), id.with(("c", i)), target, Spring::SNAPPY);
+        let mut p = ui.painter().clone();
+        if o.disabled {
+            p.set_opacity(0.45);
+        }
+        let label = Txt::new(o.label, size).weight(weight::MEDIUM).color(color);
+        let lw = text_size(ui, &label).x;
+        let bw = o.badge.map(|b| text_size(ui, &badge_txt(b)).x + 12.0 + 6.0).unwrap_or(0.0);
+        let x0 = rects[i].center().x - (lw + bw) * 0.5;
+        text(&p, pos2(x0, rects[i].center().y), Align2::LEFT_CENTER, &label);
+        if let Some(b) = o.badge {
+            let bt = badge_txt(b);
+            let bs = text_size(ui, &bt);
+            let br = Rect::from_min_size(pos2(x0 + lw + 6.0, rects[i].center().y - 8.0), vec2(bs.x + 12.0, 16.0));
+            p.rect_filled(br, theme::radius(8.0), theme::white(0.1));
+            text(&p, br.center(), Align2::CENTER_CENTER, &bt);
+        }
+    }
+    for (i, resp) in responses.into_iter().enumerate() {
+        let resp = if options[i].disabled { resp.on_hover_cursor(CursorIcon::NotAllowed) } else { resp.on_hover_cursor(CursorIcon::PointingHand) };
+        if let Some(h) = options[i].hint {
+            resp.on_hover_text(h);
+        }
+    }
+    changed
+}
+
+/// Switch: the knob springs across, the track fills with the brand gradient. Acts on press.
+pub fn toggle(ui: &mut Ui, id_salt: impl egui::AsIdSalt, on: &mut bool) -> bool {
+    let id = ui.scope_id().with(id_salt);
+    let (rect, _) = ui.allocate_exact_size(vec2(48.0, 28.0), Sense::hover());
+    let resp = ui.interact(rect, id, Sense::click());
+    let mut changed = false;
+    if pressed(&resp) {
+        *on = !*on;
+        changed = true;
+    }
+    let ctx = ui.ctx();
+    let k = anim::toggle(ctx, id.with("k"), *on, Spring::BOUNCY);
+    let fill = anim::toggle(ctx, id.with("f"), *on, Spring::SOFT).clamp(0.0, 1.0);
+    let press = anim::toggle(ctx, id.with("p"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
+    let track = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.08 * press));
+    let p = ui.painter();
+    p.rect_filled(track, theme::radius(track.height() * 0.5), theme::white(0.1 * (1.0 - fill)));
+    if fill > 0.01 {
+        let mut gp = p.clone();
+        gp.set_opacity(fill);
+        paint::gradient_rect(&gp, track, track.height() * 0.5, &Gradient::horizontal(track, &[(0.0, theme::INDIGO), (1.0, theme::VIOLET)]));
+    }
+    let knob_r = 10.0 * (1.0 - 0.08 * press);
+    let x = track.left() + 4.0 + knob_r + k * (track.width() - 8.0 - knob_r * 2.0);
+    let c = pos2(x, track.center().y);
+    paint::glow(p, c + vec2(0.0, 2.0), Vec2::splat(knob_r * 0.8), 4.0, theme::black(0.45));
+    p.circle_filled(c, knob_r, Color32::WHITE);
+    resp.on_hover_cursor(CursorIcon::PointingHand);
+    changed
+}
+
+/// Slider with a gradient fill and a springy knob; the value label sits on the right.
+pub fn slider(
+    ui: &mut Ui,
+    id_salt: impl egui::AsIdSalt,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    step: f32,
+    format: impl Fn(f32) -> String,
+) -> bool {
+    let id = ui.scope_id().with(id_salt);
+    let (min, max) = (*range.start(), *range.end());
+    let (rect, _) = ui.allocate_exact_size(vec2(192.0 + 12.0 + 80.0, 28.0), Sense::hover());
+    let track_rect = Rect::from_min_size(rect.min, vec2(192.0, 28.0));
+    let resp = ui.interact(track_rect, id, Sense::click_and_drag());
+    let mut changed = false;
+    if let (true, Some(p)) = (resp.is_pointer_button_down_on() || resp.dragged(), resp.interact_pointer_pos()) {
+        let t = ((p.x - track_rect.left()) / track_rect.width()).clamp(0.0, 1.0);
+        let mut v = min + t * (max - min);
+        if step > 0.0 {
+            v = (v / step).round() * step;
+        }
+        v = v.clamp(min, max);
+        if (v - *value).abs() > f32::EPSILON {
+            *value = v;
+            changed = true;
+        }
+    }
+    let t = if max > min { ((*value - min) / (max - min)).clamp(0.0, 1.0) } else { 0.0 };
+    let ctx = ui.ctx();
+    let fill_t = anim::value(ctx, id.with("fill"), t, Spring::SNAPPY).clamp(0.0, 1.0);
+    let knob_t = anim::value(ctx, id.with("knob"), t, Spring::BOUNCY);
+    let hover = anim::toggle(ctx, id.with("hover"), resp.hovered() || resp.dragged(), Spring::SNAPPY);
+    let p = ui.painter();
+    let bar = Rect::from_center_size(track_rect.center(), vec2(track_rect.width(), 6.0));
+    p.rect_filled(bar, theme::radius(3.0), theme::white(0.09));
+    if fill_t > 0.0 {
+        let fill = Rect::from_min_size(bar.min, vec2((bar.width() * fill_t).max(6.0), bar.height()));
+        paint::gradient_rect(p, fill, 3.0, &Gradient::horizontal(bar, &theme::BRAND));
+    }
+    let c = pos2(bar.left() + bar.width() * knob_t, bar.center().y);
+    let r = 9.0 + 1.0 * hover;
+    paint::glow(p, c + vec2(0.0, 2.0), Vec2::splat(r * 0.8), 5.0, theme::black(0.5));
+    p.circle_filled(c, r, Color32::WHITE);
+    let label = Txt::new(format(*value), 12.5).color(theme::FG_2);
+    text(p, pos2(rect.right(), rect.center().y), Align2::RIGHT_CENTER, &label);
+    resp.on_hover_cursor(CursorIcon::PointingHand);
+    changed
+}
+
+/// Single-line text field: dark well, hairline, indigo focus ring.
+pub fn text_field(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut String, hint: &str, width: f32, mono: bool) -> Response {
+    let id = ui.scope_id().with(id_salt);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
+    field_frame(ui, rect, id, value, hint, Well { mono, leading: None, radius: 12.0 })
+}
+
+/// Search field: pill with a magnifier.
+pub fn search_field(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut String, hint: &str, width: f32) -> Response {
+    let id = ui.scope_id().with(id_salt);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
+    field_frame(ui, rect, id, value, hint, Well { mono: false, leading: Some(icons::MAGNIFYING_GLASS), radius: 20.0 })
+}
+
+/// Look of a text well.
+struct Well<'a> {
+    mono: bool,
+    leading: Option<&'a str>,
+    radius: f32,
+}
+
+fn field_frame(ui: &mut Ui, rect: Rect, id: Id, value: &mut String, hint: &str, well: Well<'_>) -> Response {
+    let Well { mono, leading, radius } = well;
+    let focused = ui.memory(|m| m.has_focus(id));
+    let ring = anim::toggle(ui.ctx(), id.with("ring"), focused, Spring::SNAPPY);
+    let p = ui.painter().clone();
+    p.rect(rect, theme::radius(radius), theme::black(0.3), theme::hairline(), StrokeKind::Inside);
+    if ring > 0.01 {
+        p.rect_stroke(rect, theme::radius(radius), Stroke::new(2.0, theme::alpha(theme::INDIGO, 0.6 * ring)), StrokeKind::Outside);
+    }
+    let mut inner = rect.shrink2(vec2(12.0, 0.0));
+    if let Some(glyph) = leading {
+        icon(&p, pos2(rect.left() + 18.0, rect.center().y), glyph, 15.0, theme::FG_4);
+        inner.min.x = rect.left() + 34.0;
+    }
+    let font = if mono { FontId::new(12.0, egui::FontFamily::Monospace) } else { theme::font(13.0, weight::REGULAR) };
+    let edit = egui::TextEdit::singleline(value)
+        .id(id)
+        .frame(egui::Frame::NONE)
+        .hint_text(egui::RichText::new(hint.to_string()).color(theme::FG_4).font(font.clone()))
+        .font(font)
+        .text_color(theme::FG)
+        .desired_width(inner.width())
+        .margin(egui::Margin::ZERO)
+        .align(egui::Align2::LEFT_CENTER);
+    ui.put(inner, edit)
+}
+
+/// Status chip of the capture page: tinted icon tile, caption and a value that slides when it changes.
+pub fn status_chip(ui: &mut Ui, rect: Rect, id: Id, glyph: &str, label: &str, value: &str, tone: Tone) {
+    let p = ui.painter();
+    p.rect(rect, theme::radius(16.0), theme::surface(), theme::hairline(), StrokeKind::Inside);
+    let tile = Rect::from_min_size(pos2(rect.left() + 14.0, rect.center().y - 18.0), vec2(36.0, 36.0));
+    let (bg, fg) = match tone {
+        Tone::Ok => (theme::alpha(theme::OK, 0.1), theme::OK),
+        Tone::Warn => (theme::alpha(theme::WARN, 0.1), theme::WARN),
+        Tone::Danger => (theme::alpha(theme::DANGER, 0.1), theme::DANGER),
+        Tone::Rec => (theme::alpha(theme::REC, 0.12), theme::REC),
+        Tone::Info => (theme::alpha(theme::CYAN, 0.1), theme::CYAN),
+        Tone::Off => (theme::white(0.05), theme::FG_4),
+    };
+    let bg = anim::color(ui.ctx(), id.with("bg"), bg, Spring::SOFT);
+    let fg = anim::color(ui.ctx(), id.with("fg"), fg, Spring::SOFT);
+    p.rect_filled(tile, theme::radius(12.0), bg);
+    icon(p, tile.center(), glyph, 16.0, fg);
+    let x = tile.right() + 12.0;
+    let max_w = rect.right() - x - 12.0;
+    text(p, pos2(x, rect.center().y - 9.0), Align2::LEFT_CENTER, &Txt::caps(label));
+    sliding_value(
+        ui,
+        id.with("value"),
+        pos2(x, rect.center().y + 9.0),
+        Align2::LEFT_CENTER,
+        value,
+        &Txt::new("", 13.0).weight(weight::MEDIUM).color(theme::FG),
+        max_w,
+    );
+}
+
+#[derive(Clone)]
+struct Slide {
+    current: String,
+    previous: Option<String>,
+    since: f64,
+}
+
+/// A line of text that slides up and fades into its new value when it changes (anchored at `pos`).
+pub fn sliding_value(ui: &Ui, id: Id, pos: Pos2, anchor: Align2, value: &str, style: &Txt, max_w: f32) {
+    let ctx = ui.ctx();
+    let now = anim::time(ctx);
+    let mut s = ctx.data_mut(|d| d.get_temp_mut_or_insert_with(id, || Slide { current: value.to_string(), previous: None, since: -10.0 }).clone());
+    if s.current != value {
+        s.previous = Some(std::mem::replace(&mut s.current, value.to_string()));
+        s.since = now;
+        ctx.data_mut(|d| d.insert_temp(id, s.clone()));
+    }
+    let dur = 0.18;
+    let k = if anim::is_live(ctx) { anim::ease::out_cubic((anim::since(ctx, s.since, dur) / dur) as f32) } else { 1.0 };
+    let p = ui.painter();
+    if let (Some(prev), true) = (&s.previous, k < 1.0) {
+        let t = Txt { text: prev.clone(), color: theme::alpha(style.color, 1.0 - k), ..style.clone() };
+        text_truncated(p, pos + vec2(0.0, -6.0 * k), anchor, &t, max_w);
+    }
+    let t = Txt { text: s.current.clone(), color: theme::alpha(style.color, k), ..style.clone() };
+    text_truncated(p, pos + vec2(0.0, 6.0 * (1.0 - k)), anchor, &t, max_w);
+}
+
+/// A number easing towards `value` (the web's AnimatedNumber); settles within display precision.
+pub fn animated_number(ui: &Ui, id: Id, value: f64) -> f64 {
+    let v = value as f32;
+    let eps = (v.abs() * 2e-4).max(0.01);
+    anim::spring_eps(ui.ctx(), id, [v], [v], Spring::NUMBER, eps)[0] as f64
+}
+
+/// What a [`stat_tile`] shows.
+pub struct Stat<'a> {
+    pub glyph: &'a str,
+    pub label: &'a str,
+    pub number: &'a str,
+    pub sub: &'a str,
+    /// Icon colour (a status), or the quiet default.
+    pub accent: Option<Color32>,
+}
+
+/// Stat tile: caption and icon, a big counting number, a sub line; lifts and glows on hover.
+pub fn stat_tile(ui: &mut Ui, rect: Rect, id: Id, stat: &Stat<'_>) {
+    let Stat { glyph, label, number, sub, accent } = *stat;
+    let resp = ui.interact(rect, id, Sense::hover());
+    let hover = anim::toggle(ui.ctx(), id.with("hover"), resp.hovered(), Spring::SOFT);
+    let r = rect.translate(vec2(0.0, -3.0 * hover));
+    let p = ui.painter();
+    p.rect(r, theme::radius(theme::TILE_RADIUS), theme::surface(), theme::hairline(), StrokeKind::Inside);
+    if hover > 0.01 {
+        let clip = p.with_clip_rect(r.shrink(1.0).intersect(p.clip_rect()));
+        paint::glow(&clip, r.right_top() + vec2(-16.0, 16.0), Vec2::splat(56.0), 24.0, theme::alpha(theme::INDIGO, 0.22 * hover));
+    }
+    text(p, r.left_top() + vec2(16.0, 22.0), Align2::LEFT_CENTER, &Txt::caps(label));
+    icon(p, r.right_top() + vec2(-24.0, 22.0), glyph, 16.0, accent.unwrap_or(theme::FG_4));
+    text_truncated(
+        p,
+        pos2(r.left() + 16.0, r.center().y + 2.0),
+        Align2::LEFT_CENTER,
+        &Txt::new(number, 28.0).weight(weight::SEMIBOLD).tracking(-0.01),
+        r.width() - 32.0,
+    );
+    text_truncated(p, pos2(r.left() + 16.0, r.bottom() - 20.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::FG_3), r.width() - 32.0);
+}
+
+/// Small rounded tag with an optional icon (counts on session cards).
+pub fn pill(ui: &mut Ui, glyph: Option<&str>, label: &str) -> Response {
+    let t = Txt::new(label, 11.5).color(theme::FG_2);
+    let ts = text_size(ui, &t);
+    let w = ts.x + 16.0 + if glyph.is_some() { 16.0 } else { 0.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, theme::radius(10.0), theme::white(0.06));
+    let mut x = rect.left() + 8.0;
+    if let Some(g) = glyph {
+        icon(p, pos2(x + 6.0, rect.center().y), g, 12.0, theme::FG_4);
+        x += 16.0;
+    }
+    text(p, pos2(x, rect.center().y), Align2::LEFT_CENTER, &t);
+    resp
+}
+
+/// Paints a small tag with its left edge centred on `left_center`; returns its width.
+pub fn pill_at(painter: &Painter, ui: &Ui, left_center: Pos2, glyph: Option<&str>, label: &str) -> f32 {
+    let t = Txt::new(label, 11.5).color(theme::FG_2);
+    let ts = text_size(ui, &t);
+    let w = ts.x + 16.0 + if glyph.is_some() { 16.0 } else { 0.0 };
+    let rect = Rect::from_min_size(pos2(left_center.x, left_center.y - 10.0), vec2(w, 20.0));
+    painter.rect_filled(rect, theme::radius(10.0), theme::white(0.06));
+    let mut x = rect.left() + 8.0;
+    if let Some(g) = glyph {
+        icon(painter, pos2(x + 6.0, rect.center().y), g, 12.0, theme::FG_4);
+        x += 16.0;
+    }
+    text(painter, pos2(x, rect.center().y), Align2::LEFT_CENTER, &t);
+    w
+}
+
+/// Section heading of a settings card: gradient icon tile, title and subtitle.
+pub fn section_header(ui: &mut Ui, glyph: &str, title: &str, subtitle: Option<&str>) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+    let p = ui.painter();
+    let tile = Rect::from_min_size(pos2(rect.left(), rect.center().y - 18.0), vec2(36.0, 36.0));
+    paint::fill_convex(p, &paint::rounded_rect_points(tile, 12.0), {
+        let g = Gradient::css(tile, 135.0, &[(0.0, theme::alpha(theme::INDIGO, 0.25)), (1.0, theme::alpha(theme::VIOLET, 0.15))]);
+        move |pt| g.color(pt)
+    });
+    icon(p, tile.center(), glyph, 17.0, theme::VIOLET);
+    let x = tile.right() + 12.0;
+    match subtitle {
+        Some(sub) => {
+            text(p, pos2(x, rect.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new(title, 15.5).weight(weight::SEMIBOLD));
+            text_truncated(p, pos2(x, rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::FG_3), rect.right() - x);
+        }
+        None => {
+            text(p, pos2(x, rect.center().y), Align2::LEFT_CENTER, &Txt::new(title, 15.5).weight(weight::SEMIBOLD));
+        }
+    }
+}
+
+/// A settings row: label and wrapped description on the left, the control on the right. `control_width` is the
+/// width the control needs.
+pub fn field(ui: &mut Ui, label: &str, description: Option<&str>, control_width: f32, control: impl FnOnce(&mut Ui)) {
+    let width = ui.available_width();
+    let text_w = (width - control_width - 24.0).max(120.0);
+    let label_txt = Txt::new(label, 13.5).weight(weight::MEDIUM);
+    let label_g = ui.painter().layout_job(label_txt.job(text_w));
+    let desc_g = description.map(|d| ui.painter().layout_job(Txt::new(d, 12.0).color(theme::FG_3).line_height(18.0).job(text_w)));
+    let text_h = label_g.size().y + desc_g.as_ref().map(|g| g.size().y + 2.0).unwrap_or(0.0);
+    let h = text_h.max(36.0) + 28.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(width, h), Sense::hover());
+    let p = ui.painter();
+    let mut y = rect.center().y - text_h * 0.5;
+    p.galley(pos2(rect.left(), y), label_g.clone(), theme::FG);
+    y += label_g.size().y + 2.0;
+    if let Some(g) = desc_g {
+        p.galley(pos2(rect.left(), y), g, theme::FG_3);
+    }
+    let control_rect = Rect::from_min_max(pos2(rect.right() - control_width, rect.top()), rect.max);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(control_rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    control(&mut child);
+}
+
+/// Hairline between rows.
+pub fn separator(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, theme::white(0.05)));
+}
+
+/// Progress bar (storage usage): sprung width, brand gradient or a warning colour.
+pub fn progress(ui: &mut Ui, id: Id, fraction: f32, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, theme::radius(height * 0.5), theme::white(0.07));
+    let f = anim::spring_from(ui.ctx(), id, [0.0], [fraction.clamp(0.0, 1.0)], Spring::SOFT)[0].clamp(0.0, 1.0);
+    if f > 0.001 {
+        let fill = Rect::from_min_size(rect.min, vec2((rect.width() * f).max(height), height));
+        if fraction > 0.9 {
+            p.rect_filled(fill, theme::radius(height * 0.5), theme::DANGER);
+        } else if fraction > 0.7 {
+            p.rect_filled(fill, theme::radius(height * 0.5), theme::WARN);
+        } else {
+            paint::gradient_rect(p, fill, height * 0.5, &Gradient::horizontal(rect, &theme::BRAND));
+        }
+    }
+}
+
+/// Opacity and vertical offset of a staggered entrance (`index` steps of 50 ms after `start`).
+pub fn entrance(ui: &Ui, id: Id, start: f64, index: usize) -> (f32, f32) {
+    let ctx = ui.ctx();
+    let delay = 0.05 + index as f64 * 0.05;
+    let elapsed = anim::time(ctx) - start;
+    let target = if elapsed >= delay { 1.0 } else { 0.0 };
+    if elapsed < delay {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(delay - elapsed));
+    }
+    let v = anim::spring_from(ctx, id, [0.0], [target], Spring::SOFT)[0];
+    (v.clamp(0.0, 1.0), 18.0 * (1.0 - v))
+}

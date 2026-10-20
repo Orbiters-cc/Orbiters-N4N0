@@ -1,0 +1,320 @@
+//! Settings page: capture, storage, VRChat and OSC, interface, about. Changes apply as they are made (shown at
+//! once, saved in the background); text fields apply with their Save button.
+
+use super::{Cx, Job};
+use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Shape, Ui, UiBuilder, ViewportCommand};
+use orbiters_core::settings::Settings;
+use orbiters_ui::anim::{self, Spring};
+use orbiters_ui::theme::{self, weight, Txt};
+use orbiters_ui::widgets::{self, Button, Size, Variant};
+use orbiters_ui::{format, icons, logo};
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Folder {
+    Sessions,
+    Raw,
+}
+
+#[derive(Default)]
+pub struct State {
+    /// Local copy the controls edit; refreshed whenever the saved settings change elsewhere.
+    draft: Option<Settings>,
+    synced: Option<Settings>,
+    log: Option<Vec<String>>,
+    picker: Option<(Folder, Job<Option<PathBuf>>)>,
+}
+
+pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
+    let ctx = ui.ctx().clone();
+    if state.synced.as_ref() != Some(&cx.snap.settings) {
+        state.draft = Some(cx.snap.settings.clone());
+        state.synced = Some(cx.snap.settings.clone());
+    }
+    let mut draft = state.draft.clone().unwrap_or_else(|| cx.snap.settings.clone());
+    let mut apply = false;
+
+    // A folder chosen in the picker.
+    if let Some((which, job)) = state.picker.as_mut() {
+        if let Some(choice) = job.take() {
+            if let Some(dir) = choice {
+                match which {
+                    Folder::Sessions => draft.sessions_dir = dir,
+                    Folder::Raw => draft.raw_captures_dir = dir,
+                }
+                apply = true;
+            }
+            state.picker = None;
+        }
+    }
+
+    egui::ScrollArea::vertical().id_salt("settings").auto_shrink([false, false]).show(ui, |ui| {
+        egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8, bottom: 40 }).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
+            super::block(ui, cx, 0, 72.0, |ui, rect| super::heading(ui, rect, "Preferences", "Settings", None));
+            let snap = cx.snap;
+
+            section(ui, cx, 1, icons::GAUGE, "Capture", Some("How frames become a session"), |ui| {
+                let kf = &mut draft.keyframes;
+                widgets::field(ui, "Keyframe distance", Some("A new lossless keyframe after the camera moves this far."), 284.0, |ui| {
+                    apply |= widgets::slider(ui, "kf-distance", &mut kf.min_translation, 0.05..=2.0, 0.05, |v| format!("{v:.2} m"));
+                });
+                widgets::separator(ui);
+                widgets::field(ui, "Keyframe turn", Some("…or after it turns this much."), 284.0, |ui| {
+                    apply |= widgets::slider(ui, "kf-turn", &mut kf.min_rotation_deg, 2.0..=60.0, 1.0, |v| format!("{v:.0}°"));
+                });
+                widgets::separator(ui);
+                widgets::field(ui, "Keyframe interval", Some("…or after this long, whatever happens."), 284.0, |ui| {
+                    apply |= widgets::slider(ui, "kf-interval", &mut kf.max_interval_s, 0.25..=10.0, 0.25, |v| format!("{v:.2} s"));
+                });
+                widgets::separator(ui);
+                widgets::field(ui, "New session on world change", Some("Each VRChat world gets its own session while you record."), 48.0, |ui| {
+                    apply |= widgets::toggle(ui, "split", &mut draft.split_on_world_change);
+                });
+                widgets::separator(ui);
+                let placeholder = snap.sources.first().map(|s| s.name.clone()).unwrap_or_else(|| "VRChat".into());
+                widgets::field(ui, "Spout sender", Some("Leave empty to pick VRChat's Stream camera automatically."), 290.0, |ui| {
+                    if Button::new("Save").size(Size::Sm).show(ui).clicked() {
+                        apply = true;
+                    }
+                    ui.add_space(8.0);
+                    widgets::text_field(ui, "spout-sender", &mut draft.spout_sender, &placeholder, 208.0, false);
+                });
+                if !snap.sources.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                        for s in &snap.sources {
+                            if source_chip(ui, &format!("{} · {}×{}", s.name, s.width, s.height), draft.spout_sender == s.name).clicked() {
+                                draft.spout_sender = s.name.clone();
+                                apply = true;
+                            }
+                        }
+                    });
+                    ui.add_space(8.0);
+                }
+            });
+
+            let st = &snap.storage;
+            let storage_sub = format!(
+                "{} in {} sessions{}",
+                format::bytes(st.used_bytes as f64),
+                st.sessions,
+                st.free_bytes.map(|f| format!(" · {} free on the drive", format::bytes(f as f64))).unwrap_or_default()
+            );
+            section(ui, cx, 2, icons::HARD_DRIVE, "Storage", Some(&storage_sub), |ui| {
+                let used_gb = st.used_bytes as f64 / 1e9;
+                let limit = draft.storage_limit_gb;
+                let usage = if limit > 0.0 { (used_gb / limit).min(1.0) as f32 } else { 0.0 };
+                ui.add_space(12.0);
+                let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
+                let p = ui.painter();
+                widgets::text(p, row.left_center(), Align2::LEFT_CENTER, &Txt::new("Library usage", 12.0).color(theme::FG_3));
+                let lim = if limit > 0.0 { format!("{limit:.0} GB") } else { "unlimited".into() };
+                widgets::text(p, row.right_center(), Align2::RIGHT_CENTER, &Txt::new(format!("{used_gb:.1} / {lim}"), 12.0).color(theme::FG_3));
+                ui.add_space(8.0);
+                widgets::progress(ui, Id::unique("storage-usage"), usage, 10.0);
+                ui.add_space(12.0);
+                widgets::separator(ui);
+                widgets::field(ui, "Storage limit", Some("Recording stops when the library reaches it (0 = no limit)."), 284.0, |ui| {
+                    let mut v = draft.storage_limit_gb as f32;
+                    if widgets::slider(ui, "limit", &mut v, 0.0..=2000.0, 10.0, |v| if v == 0.0 { "No limit".into() } else { format!("{v:.0} GB") }) {
+                        draft.storage_limit_gb = v as f64;
+                        apply = true;
+                    }
+                });
+                widgets::separator(ui);
+                if folder_field(ui, "Sessions folder", None, &draft.sessions_dir) {
+                    state.picker = Some((Folder::Sessions, pick(&ctx, &draft.sessions_dir)));
+                }
+                widgets::separator(ui);
+                if folder_field(ui, "Raw captures folder", Some("Where Mixer's capture simulator writes."), &draft.raw_captures_dir) {
+                    state.picker = Some((Folder::Raw, pick(&ctx, &draft.raw_captures_dir)));
+                }
+            });
+
+            let osc = &snap.osc;
+            let osc_sub = if osc.listening {
+                format!("Listening on port {}{}", osc.port.unwrap_or(0), if osc.advertising { ", advertised through OSCQuery" } else { "" })
+            } else {
+                osc.error.clone().unwrap_or_else(|| "Off".into())
+            };
+            section(ui, cx, 3, icons::BROADCAST, "VRChat and OSC", Some(&osc_sub), |ui| {
+                widgets::field(
+                    ui,
+                    "Action Menu control",
+                    Some("Start and stop recording from your avatar's Action Menu (OSCQuery, works next to VRCFT and other OSC apps)."),
+                    48.0,
+                    |ui| {
+                        apply |= widgets::toggle(ui, "osc", &mut draft.osc.enabled);
+                    },
+                );
+                widgets::separator(ui);
+                widgets::field(ui, "Record parameter", Some("Bool avatar parameter that toggles recording."), 270.0, |ui| {
+                    if Button::new("Save").size(Size::Sm).show(ui).clicked() {
+                        apply = true;
+                    }
+                    ui.add_space(8.0);
+                    widgets::text_field(ui, "record-parameter", &mut draft.osc.record_parameter, "OrbitersRecord", 192.0, true);
+                });
+                widgets::separator(ui);
+                let log_desc = snap.vrchat.world.log_file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| {
+                    if snap.vrchat.log_found {
+                        "Found, waiting for VRChat".into()
+                    } else {
+                        "Not found on this machine".into()
+                    }
+                });
+                widgets::field(ui, "VRChat log", Some(&log_desc), 120.0, |ui| {
+                    let (t, c) = if snap.vrchat.log_found { ("Read locally", theme::OK) } else { ("–", theme::FG_4) };
+                    let (r, _) = ui.allocate_exact_size(vec2(100.0, 20.0), Sense::hover());
+                    widgets::text(ui.painter(), r.right_center(), Align2::RIGHT_CENTER, &Txt::new(t, 12.0).color(c));
+                });
+            });
+
+            section(ui, cx, 4, icons::SPARKLE, "Interface", None, |ui| {
+                widgets::field(ui, "Reduce motion", Some("Calmer transitions and a still background."), 48.0, |ui| {
+                    apply |= widgets::toggle(ui, "reduce-motion", &mut draft.reduce_motion);
+                });
+                widgets::separator(ui);
+                widgets::field(ui, "Capture notice", Some("The consent reminder shown before the first capture."), 120.0, |ui| {
+                    if Button::new("Show again").variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
+                        draft.consent_acknowledged = false;
+                        apply = true;
+                    }
+                });
+            });
+
+            let mut want_log = false;
+            let mut quit = false;
+            section(ui, cx, 5, icons::INFO, "About", None, |ui| {
+                ui.add_space(8.0);
+                let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::hover());
+                let lr = Rect::from_min_size(pos2(row.left(), row.center().y - 21.0), logo::size_for_width(48.0));
+                logo::paint(ui.painter(), lr, logo::Look::default());
+                let x = lr.right() + 16.0;
+                let p = ui.painter();
+                widgets::text(
+                    p,
+                    pos2(x, row.center().y - 10.0),
+                    Align2::LEFT_CENTER,
+                    &Txt::new(format!("Orbiters desktop {}", snap.version), 15.0).weight(weight::SEMIBOLD),
+                );
+                widgets::text_truncated(
+                    p,
+                    pos2(x, row.center().y + 10.0),
+                    Align2::LEFT_CENTER,
+                    &Txt::new("Copyright © 2026 Enzo DUTRA / blackorbit. Free to use; see the licence for what is allowed.", 12.5).color(theme::FG_3),
+                    row.width() - (x - row.left()) - 240.0,
+                );
+                if let Some(err) = &snap.worker.error {
+                    widgets::text_truncated(
+                        p,
+                        pos2(x, row.center().y + 28.0),
+                        Align2::LEFT_CENTER,
+                        &Txt::new(err, 12.0).color(theme::DANGER),
+                        row.width() - 300.0,
+                    );
+                }
+                let mut bu = ui.new_child(UiBuilder::new().max_rect(row).layout(Layout::right_to_left(egui::Align::Center)));
+                bu.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                if cx.windowed && Button::new("Quit").icon(icons::SIGN_OUT).variant(Variant::Danger).size(Size::Sm).show(&mut bu).clicked() {
+                    quit = true;
+                }
+                if Button::new("Worker log").icon(icons::SCROLL).size(Size::Sm).show(&mut bu).clicked() {
+                    want_log = true;
+                }
+                if let Some(lines) = &state.log {
+                    let k = anim::spring_from(ui.ctx(), Id::unique("worker-log-open"), [0.0], [1.0], Spring::SOFT)[0].clamp(0.0, 1.0);
+                    let h = 240.0 * k;
+                    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
+                    ui.painter().rect(r, theme::radius(12.0), theme::black(0.4), theme::hairline(), egui::StrokeKind::Inside);
+                    let mut lu = ui.new_child(UiBuilder::new().max_rect(r.shrink(12.0)).id_salt("worker-log"));
+                    lu.multiply_opacity(k);
+                    egui::ScrollArea::vertical().id_salt("worker-log-scroll").stick_to_bottom(true).auto_shrink([false, false]).show(&mut lu, |ui| {
+                        let text = if lines.is_empty() { "No output yet.".to_string() } else { lines.join("\n") };
+                        let g = ui.painter().layout_job(Txt::new(text, 11.0).mono().color(theme::FG_2).line_height(17.0).job(r.width() - 24.0));
+                        let (gr, _) = ui.allocate_exact_size(g.size(), Sense::hover());
+                        ui.painter().galley(gr.min, g, theme::FG_2);
+                    });
+                    ui.add_space(12.0);
+                }
+            });
+            if want_log {
+                state.log = if state.log.is_some() { None } else { Some(cx.ctl.worker_log()) };
+            }
+            if quit {
+                cx.quitting.store(true, Ordering::Relaxed);
+                cx.ctl.shutdown();
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+        });
+    });
+
+    if apply {
+        cx.ctl.save_settings(draft.clone());
+    }
+    state.draft = Some(draft);
+}
+
+fn pick(ctx: &egui::Context, current: &std::path::Path) -> Job<Option<PathBuf>> {
+    let start = current.to_path_buf();
+    Job::spawn(ctx, move || rfd::FileDialog::new().set_directory(&start).pick_folder())
+}
+
+/// A card section: entrance, gradient icon tile, title and subtitle, then rows; the card is sized to its rows.
+fn section(ui: &mut Ui, cx: &Cx, index: usize, glyph: &str, title: &str, subtitle: Option<&str>, body: impl FnOnce(&mut Ui)) {
+    let width = ui.available_width().min(980.0);
+    let top_left = ui.cursor().min;
+    let (alpha, dy) = widgets::entrance(ui, Id::unique(("orbiters-enter", cx.visit, index)), cx.entered, index);
+    let bg = ui.painter().add(Shape::Noop);
+    let inner = Rect::from_min_size(top_left + vec2(24.0, 20.0 + dy), vec2(width - 48.0, 100_000.0));
+    let mut child = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::top_down(egui::Align::Min)).id_salt(("section", index)));
+    child.multiply_opacity(alpha);
+    child.spacing_mut().item_spacing = vec2(0.0, 0.0);
+    widgets::section_header(&mut child, glyph, title, subtitle);
+    child.add_space(4.0);
+    body(&mut child);
+    let h = child.min_rect().height() + 20.0 + 12.0;
+    let card = Rect::from_min_size(top_left + vec2(0.0, dy), vec2(width, h));
+    ui.painter().set(
+        bg,
+        egui::epaint::RectShape::new(
+            card,
+            theme::radius(theme::CARD_RADIUS),
+            theme::surface().gamma_multiply(alpha),
+            egui::Stroke::new(1.0, theme::white(0.06 * alpha)),
+            egui::StrokeKind::Inside,
+        ),
+    );
+    ui.allocate_exact_size(vec2(width, h), Sense::hover());
+}
+
+/// Folder row: label, path, Change button. True when Change was clicked.
+fn folder_field(ui: &mut Ui, label: &str, description: Option<&str>, value: &std::path::Path) -> bool {
+    let shown = value.display().to_string();
+    let mut clicked = false;
+    let desc = description.unwrap_or(&shown);
+    widgets::field(ui, label, Some(desc), if description.is_some() { 380.0 } else { 110.0 }, |ui| {
+        clicked = Button::new("Change").icon(icons::FOLDER).size(Size::Sm).show(ui).clicked();
+        if description.is_some() {
+            ui.add_space(8.0);
+            let (r, _) = ui.allocate_exact_size(vec2(260.0, 20.0), Sense::hover());
+            widgets::text_truncated(ui.painter(), r.right_center(), Align2::RIGHT_CENTER, &Txt::new(&shown, 12.0).color(theme::FG_3), 260.0);
+        }
+    });
+    clicked
+}
+
+fn source_chip(ui: &mut Ui, label: &str, active: bool) -> egui::Response {
+    let t = Txt::new(label, 12.0).color(if active { theme::FG } else { theme::FG_2 });
+    let s = widgets::text_size(ui, &t);
+    let (r, resp) = ui.allocate_exact_size(vec2(s.x + 24.0, 30.0), Sense::click());
+    let hover = anim::toggle(ui.ctx(), resp.id.with("hover"), resp.hovered(), Spring::SNAPPY);
+    let press = anim::toggle(ui.ctx(), resp.id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
+    let rr = Rect::from_center_size(r.center(), r.size() * (1.0 - 0.05 * press));
+    let bg = if active { theme::alpha(theme::INDIGO, 0.3) } else { theme::white(0.06 + 0.04 * hover) };
+    ui.painter().rect_filled(rr, theme::radius(15.0), bg);
+    widgets::text(ui.painter(), rr.center(), Align2::CENTER_CENTER, &t);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}

@@ -17,7 +17,9 @@ pub enum WorkerCommand {
     Pause,
     Resume,
     /// Update the world of the running session (from VRChat's log).
-    SetWorld { world: Option<WorldInfo> },
+    SetWorld {
+        world: Option<WorldInfo>,
+    },
     Quit,
 }
 

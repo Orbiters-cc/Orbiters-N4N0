@@ -3,7 +3,8 @@
 //! the interface reads every frame. It keeps working while the window is hidden in the tray.
 
 use crate::ipc::ToClient;
-use crate::state::{self, CalibrationInfo, CaptureState, Snapshot};
+use crate::reconstruct::ReconstructHandle;
+use crate::state::{self, CalibrationInfo, CaptureState, ReconstructionJob, Snapshot};
 use crate::worker::WorkerHandle;
 use orbiters_contracts::manifest::{ConsentInfo, WorldInfo};
 use orbiters_contracts::performance::calibration::Calibration;
@@ -11,6 +12,7 @@ use orbiters_core::bundle::{self, SessionSummary};
 use orbiters_core::clock;
 use orbiters_core::osc::{OscEvent, OscService, OscValue, AVATAR_CHANGE, PARAMETERS_PREFIX};
 use orbiters_core::protocol::{OscSample, PerformanceSpec, SourceSpec, StartCapture, WorkerCommand, WorkerEvent};
+use orbiters_core::reconstruction::Event as ReconstructEvent;
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::{LogEvent, LogWatcher, WorldState};
 use serde::{Deserialize, Serialize};
@@ -103,6 +105,13 @@ pub struct Controller {
     subscribers: Mutex<Vec<mpsc::Sender<ToClient>>>,
     /// The latest T-pose calibration and when it was taken (Unix ms; the shared clock restarts with Windows).
     calibration: Mutex<Option<StoredCalibration>>,
+    reconstruction: Mutex<Option<Reconstruction>>,
+}
+
+/// The running reconstruction worker, and whether its end was already told (finished, failed or cancelled).
+struct Reconstruction {
+    handle: ReconstructHandle,
+    told: bool,
 }
 
 /// `calibration.json` in the config folder: the latest calibration, kept across restarts.
@@ -145,6 +154,7 @@ impl Controller {
             repaint: Mutex::new(None),
             subscribers: Mutex::new(Vec::new()),
             calibration: Mutex::new(calibration),
+            reconstruction: Mutex::new(None),
         })
     }
 
@@ -409,6 +419,10 @@ impl Controller {
         if !importing && !settings.consent_acknowledged {
             anyhow::bail!("Please read and accept the capture notice first (Capture page).");
         }
+        // Training takes the whole GPU: the game and the recording come first.
+        if !importing && self.stop_reconstruction() {
+            self.notify(NoticeKind::Warning, "Reconstruction stopped: a capture started.");
+        }
         let cmd = StartCapture {
             source: source.clone(),
             sessions_dir: settings.sessions_dir.clone(),
@@ -665,10 +679,111 @@ impl Controller {
         self.worker_log.lock().unwrap().iter().cloned().collect()
     }
 
-    /// Stops OSC and the worker (which finishes a running session).
+    /// Stops OSC and the workers (the capture worker finishes a running session).
     pub fn shutdown(&self) {
         *self.osc.lock().unwrap() = None;
         *self.worker.lock().unwrap() = None;
+        *self.reconstruction.lock().unwrap() = None;
+    }
+
+    /// Trains splats from a session (one reconstruction at a time, never during a capture).
+    pub fn reconstruct(self: &Shared, dir: PathBuf) -> anyhow::Result<()> {
+        let root = self.settings().sessions_dir;
+        if !inside(&root, &dir) || !dir.join("manifest.json").is_file() {
+            anyhow::bail!("Only sessions inside the sessions folder can be reconstructed.");
+        }
+        if self.is_capturing() {
+            anyhow::bail!("Finish the capture first: reconstruction takes the whole GPU.");
+        }
+        let mut guard = self.reconstruction.lock().unwrap();
+        if guard.is_some() {
+            anyhow::bail!("A reconstruction is already running.");
+        }
+        let on_event = {
+            let ctl = self.clone();
+            move |e| ctl.on_reconstruct_event(e)
+        };
+        let on_log = {
+            let ctl = self.clone();
+            move |line: String| {
+                let mut log = ctl.worker_log.lock().unwrap();
+                log.push_back(format!("reconstruct: {line}"));
+                while log.len() > 400 {
+                    log.pop_front();
+                }
+            }
+        };
+        let on_exit = {
+            let ctl = self.clone();
+            move || ctl.on_reconstruct_exit()
+        };
+        self.update(|s| s.reconstruction = Some(ReconstructionJob::new(dir.clone())));
+        match ReconstructHandle::spawn(&dir, on_event, on_log, on_exit) {
+            Ok(handle) => {
+                *guard = Some(Reconstruction { handle, told: false });
+                Ok(())
+            }
+            Err(e) => {
+                self.update(|s| s.reconstruction = None);
+                Err(e)
+            }
+        }
+    }
+
+    /// Stops the running reconstruction; the session keeps its previous result. Returns whether one ran.
+    pub fn stop_reconstruction(&self) -> bool {
+        let mut guard = self.reconstruction.lock().unwrap();
+        let Some(r) = guard.as_mut() else { return false };
+        r.told = true;
+        r.handle.cancel();
+        true
+    }
+
+    fn on_reconstruct_event(self: &Shared, e: ReconstructEvent) {
+        match e {
+            ReconstructEvent::Stage { stage, progress } => self.update(|s| {
+                if let Some(j) = s.reconstruction.as_mut() {
+                    j.stage = stage;
+                    j.progress = progress;
+                }
+            }),
+            ReconstructEvent::Progress { iteration, iterations, gaussians, psnr, seconds, .. } => self.update(|s| {
+                if let Some(j) = s.reconstruction.as_mut() {
+                    j.iteration = iteration;
+                    j.iterations = iterations;
+                    j.progress = iteration as f32 / iterations.max(1) as f32;
+                    j.gaussians = gaussians;
+                    j.psnr = psnr.or(j.psnr);
+                    j.seconds = seconds;
+                }
+            }),
+            ReconstructEvent::Done { report } => {
+                self.mark_reconstruction_told();
+                let quality = report.psnr_held_out.map(|p| format!(", {p:.1} dB on views it never saw")).unwrap_or_default();
+                self.notify(NoticeKind::Success, format!("Reconstruction finished: {} splats{quality}.", orbiters_ui::format::integer(report.gaussians as f64)));
+                refresh_storage(self);
+                self.bump_library();
+            }
+            ReconstructEvent::Error { message } => {
+                self.mark_reconstruction_told();
+                self.notify(NoticeKind::Error, format!("Reconstruction failed: {message}"));
+            }
+        }
+    }
+
+    fn mark_reconstruction_told(&self) {
+        if let Some(r) = self.reconstruction.lock().unwrap().as_mut() {
+            r.told = true;
+        }
+    }
+
+    fn on_reconstruct_exit(self: &Shared) {
+        let ended = self.reconstruction.lock().unwrap().take();
+        if ended.is_some_and(|r| !r.told) {
+            self.notify(NoticeKind::Error, "The reconstruction worker stopped unexpectedly.");
+        }
+        self.update(|s| s.reconstruction = None);
+        // A cancelled run may leave its partial folder behind: the next run clears it.
     }
 
     /// Moves a session folder to the recycle bin (only folders inside the sessions folder with a manifest).

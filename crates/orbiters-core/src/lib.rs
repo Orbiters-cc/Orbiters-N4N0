@@ -7,6 +7,7 @@ pub mod osc;
 pub mod paths;
 pub mod pose;
 pub mod protocol;
+pub mod reconstruction;
 pub mod settings;
 pub mod vrchat_log;
 

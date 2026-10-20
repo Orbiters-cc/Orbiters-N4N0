@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/orbiters-core", "crates/orbiters-spout", "crates/orbiters-capture", "crates/orbiters-ui", "crates/orbiters-desktop", "crates/orbiters-openvr"]
+members = ["crates/orbiters-core", "crates/orbiters-spout", "crates/orbiters-capture", "crates/orbiters-ui", "crates/orbiters-desktop", "crates/orbiters-openvr", "crates/orbiters-reconstruct"]
 
 [workspace.package]
 version = "0.1.0"

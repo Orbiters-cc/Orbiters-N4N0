@@ -10,11 +10,11 @@ pub struct WorkerHandle {
     stdin: ChildStdin,
 }
 
-/// `orbiters-capture` next to the app executable (the same cargo target folder in development).
-pub fn worker_path() -> PathBuf {
+/// A worker executable next to the app's (the same cargo target folder in development).
+pub fn sibling_exe(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
     let dir = exe.parent().map(PathBuf::from).unwrap_or_default();
-    dir.join(format!("orbiters-capture{}", std::env::consts::EXE_SUFFIX))
+    dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
 }
 
 impl WorkerHandle {
@@ -24,7 +24,7 @@ impl WorkerHandle {
         on_log: impl Fn(String) + Send + 'static,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> anyhow::Result<Self> {
-        let path = worker_path();
+        let path = sibling_exe("orbiters-capture");
         anyhow::ensure!(path.is_file(), "capture worker not found at {}", path.display());
         let mut cmd = Command::new(&path);
         cmd.arg("worker").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());

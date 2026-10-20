@@ -55,6 +55,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     if only.as_deref() == Some("e2e") {
         return e2e(&mut Offscreen::new()?, &out, &settings, scale);
     }
+    if only.as_deref() == Some("e2e-reconstruct") {
+        return e2e_reconstruct(&mut Offscreen::new()?, &out, &settings, scale);
+    }
     if only.as_deref() == Some("overlay") {
         return overlay_shots(&out, &settings);
     }
@@ -92,6 +95,17 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     });
     let mut consent = idle.clone();
     consent.settings.consent_acknowledged = false;
+    let mut reconstructing = idle.clone();
+    reconstructing.reconstruction = sessions.first().map(|s| crate::state::ReconstructionJob {
+        session_dir: s.dir.clone(),
+        stage: orbiters_core::reconstruction::Stage::Training,
+        progress: 0.42,
+        iteration: 3780,
+        iterations: 9000,
+        gaussians: 512_400,
+        psnr: Some(33.2),
+        seconds: 41.0,
+    });
 
     let scenarios = vec![
         Scenario { name: "splash", page: Page::Capture, snapshot: idle.clone(), frames: 66, splash: true, open_detail: false, toasts: vec![], pointer: None },
@@ -152,6 +166,16 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             name: "session-detail",
             page: Page::Sessions,
             snapshot: idle.clone(),
+            frames: 150,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+        },
+        Scenario {
+            name: "session-reconstructing",
+            page: Page::Sessions,
+            snapshot: reconstructing,
             frames: 150,
             splash: false,
             open_detail: true,
@@ -284,6 +308,86 @@ fn e2e(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f
             s.manifest.performance.skeleton_frames
         );
         vrchat.check(&s.dir, s.manifest.performance.parameter_changes)?;
+    }
+    ctl.shutdown();
+    Ok(())
+}
+
+/// End to end on the newest session of `--sessions`: opens its detail, presses Reconstruct (the real worker
+/// replaces its `reconstruction/` folder) and shoots the progress and the result.
+fn e2e_reconstruct(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {
+    let ctx = egui::Context::default();
+    orbiters_ui::install(&ctx);
+    let ctl = Controller::new(settings.clone());
+    let backend: Ctl = std::sync::Arc::new(Local::new(ctl.clone()));
+    backend.attach(&ctx);
+    let mut app = App::offline(backend);
+    app.skip_splash();
+    let start = std::time::Instant::now();
+    let (mut opened, mut clicked_at, mut ran, mut done_at) = (false, None::<f64>, false, None::<f64>);
+    let mut release: Option<Pos2> = None;
+    let (mut shot_progress, mut paged) = (false, false);
+    // Where the detail puts its Reconstruct button at 1280×820.
+    let button = pos2(1072.0, 591.0);
+    loop {
+        let t = start.elapsed().as_secs_f64();
+        anyhow::ensure!(t < 900.0, "the reconstruction did not finish in 15 minutes");
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))), time: Some(t), ..Default::default() };
+        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(scale), focused: Some(true), ..Default::default() });
+        if !paged {
+            app.set_page(Page::Sessions, t);
+            paged = true;
+        }
+        if !opened && t > 0.8 && app.sessions_mut().loaded() {
+            app.sessions_mut().open_first(&ctx, Rect::from_min_size(pos2(264.0, 160.0), vec2(300.0, 265.0)));
+            opened = true;
+        }
+        if let Some(p) = release.take() {
+            input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        } else if opened && clicked_at.is_none() && t > 4.0 {
+            input.events.push(Event::PointerMoved(button));
+            input.events.push(Event::PointerButton { pos: button, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+            release = Some(button);
+            clicked_at = Some(t);
+        }
+        let job = ctl.view().reconstruction.clone();
+        ran |= job.is_some();
+        if ran && job.is_none() && done_at.is_none() {
+            done_at = Some(t);
+        }
+        let shot = if !shot_progress && job.as_ref().is_some_and(|j| j.iteration >= 1000) {
+            shot_progress = true;
+            Some("e2e-reconstructing")
+        } else if done_at.is_some_and(|d| t > d + 3.0) {
+            Some("e2e-reconstructed")
+        } else {
+            None
+        };
+        let image = gpu.frame(
+            &ctx,
+            input,
+            |ui| {
+                app.logic_offline(ui.ctx());
+                app.draw(ui);
+            },
+            shot.is_some(),
+        )?;
+        if let (Some(name), Some(image)) = (shot, image) {
+            let path = out.join(format!("{name}.png"));
+            save_png(&path, &image)?;
+            println!("{}", path.display());
+            if name == "e2e-reconstructed" {
+                break;
+            }
+        }
+        if clicked_at.is_some_and(|c| t > c + 5.0) && !ran {
+            anyhow::bail!("pressing Reconstruct started nothing: {:?}", ctl.take_notices());
+        }
+        // Light while the worker trains.
+        std::thread::sleep(Duration::from_millis(if ran { 100 } else { 16 }));
+    }
+    for n in ctl.take_notices() {
+        println!("notice: {n:?}");
     }
     ctl.shutdown();
     Ok(())
@@ -436,6 +540,8 @@ impl crate::backend::Backend for Still {
     fn import_raw_capture(&self, _dir: PathBuf) {}
     fn save_settings(&self, _settings: Settings) {}
     fn trash_session(&self, _dir: PathBuf) {}
+    fn reconstruct(&self, _dir: PathBuf) {}
+    fn stop_reconstruction(&self) {}
     fn request_worker_log(&self) {}
     fn worker_log(&self) -> Option<Vec<String>> {
         None

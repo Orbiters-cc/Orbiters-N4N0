@@ -1,6 +1,7 @@
 //! Everything the interface shows lives in one [`Snapshot`], republished on every change.
 
 use orbiters_core::protocol::{AudioDeviceInfo, CaptureStats, SpoutSourceInfo};
+use orbiters_core::reconstruction::Stage;
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::WorldState;
 use serde::{Deserialize, Serialize};
@@ -82,6 +83,28 @@ pub struct CalibrationInfo {
     pub utc_ms: u64,
 }
 
+/// The running reconstruction (one at a time).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReconstructionJob {
+    pub session_dir: PathBuf,
+    pub stage: Stage,
+    /// Of the stage: decoded frames while loading, steps while training.
+    pub progress: f32,
+    pub iteration: u32,
+    pub iterations: u32,
+    pub gaussians: usize,
+    /// The latest held-out PSNR (dB).
+    pub psnr: Option<f32>,
+    /// Training time so far.
+    pub seconds: f32,
+}
+
+impl ReconstructionJob {
+    pub fn new(session_dir: PathBuf) -> Self {
+        Self { session_dir, stage: Stage::Loading, progress: 0.0, iteration: 0, iterations: 0, gaussians: 0, psnr: None, seconds: 0.0 }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WorkerStatus {
     pub ready: bool,
@@ -101,6 +124,7 @@ pub struct Snapshot {
     pub storage: StorageStatus,
     pub worker: WorkerStatus,
     pub steamvr: SteamVrStatus,
+    pub reconstruction: Option<ReconstructionJob>,
 }
 
 impl Snapshot {
@@ -116,6 +140,7 @@ impl Snapshot {
             settings,
             worker: WorkerStatus::default(),
             steamvr: SteamVrStatus::default(),
+            reconstruction: None,
         }
     }
 

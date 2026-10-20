@@ -198,6 +198,8 @@ pub struct SessionSummary {
     pub size_bytes: u64,
     /// Seconds since the Unix epoch of the manifest's last change.
     pub modified: u64,
+    /// The latest finished reconstruction.
+    pub reconstruction: Option<crate::reconstruction::Report>,
 }
 
 pub fn read_manifest(dir: &Path) -> anyhow::Result<SessionManifest> {
@@ -239,7 +241,14 @@ pub fn list_sessions(root: &Path) -> Vec<SessionSummary> {
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        out.push(SessionSummary { has_thumbnail: dir.join(manifest::THUMBNAIL_FILE).is_file(), size_bytes: folder_size(&dir), dir, manifest, modified });
+        out.push(SessionSummary {
+            has_thumbnail: dir.join(manifest::THUMBNAIL_FILE).is_file(),
+            size_bytes: folder_size(&dir),
+            reconstruction: crate::reconstruction::read_report(&dir),
+            dir,
+            manifest,
+            modified,
+        });
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.modified));
     out

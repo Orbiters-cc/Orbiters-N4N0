@@ -159,6 +159,10 @@ impl Service {
                 }
                 report(r);
             }
+            ToService::Reconstruct { dir } => report(ctl.reconstruct(dir)),
+            ToService::StopReconstruction => {
+                ctl.stop_reconstruction();
+            }
             ToService::WorkerLog => {
                 let lines = ctl.worker_log();
                 if let Some(l) = self.links.lock().unwrap().iter().find(|l| l.id == link) {

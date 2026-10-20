@@ -1,0 +1,20 @@
+[package]
+name = "orbiters-reconstruct"
+description = "Reconstruction worker of Orbiters desktop: trains Gaussian splats from a session's lossless keyframes, exact poses and exact depth (replay mode), on the GPU through wgpu."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "orbiters-reconstruct"
+path = "src/main.rs"
+
+[dependencies]
+orbiters-core = { workspace = true }
+orbiters-contracts = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+bytemuck = { workspace = true }
+wgpu = "30"
+fastrand = "2"

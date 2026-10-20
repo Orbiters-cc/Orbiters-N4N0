@@ -69,6 +69,10 @@ pub enum ToService {
     Trash {
         dir: PathBuf,
     },
+    Reconstruct {
+        dir: PathBuf,
+    },
+    StopReconstruction,
     WorkerLog,
     /// A T-pose calibration taken in the overlay (`time_ns` is a shared-clock reading).
     Calibrated {

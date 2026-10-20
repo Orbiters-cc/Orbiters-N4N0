@@ -13,6 +13,7 @@ mod gpu;
 mod ipc;
 mod overlay;
 mod pages;
+mod reconstruct;
 mod screenshot;
 mod service;
 mod single;

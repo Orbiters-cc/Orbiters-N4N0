@@ -24,6 +24,9 @@ pub trait Backend: Send + Sync {
     fn import_raw_capture(&self, dir: PathBuf);
     fn save_settings(&self, settings: Settings);
     fn trash_session(&self, dir: PathBuf);
+    /// Trains splats from a session in the reconstruction worker.
+    fn reconstruct(&self, dir: PathBuf);
+    fn stop_reconstruction(&self);
     /// Asks for the worker's log; [`Backend::worker_log`] has it once it arrived.
     fn request_worker_log(&self);
     fn worker_log(&self) -> Option<Vec<String>>;
@@ -90,6 +93,14 @@ impl Backend for Remote {
 
     fn trash_session(&self, dir: PathBuf) {
         self.0.send(&ToService::Trash { dir });
+    }
+
+    fn reconstruct(&self, dir: PathBuf) {
+        self.0.send(&ToService::Reconstruct { dir });
+    }
+
+    fn stop_reconstruction(&self) {
+        self.0.send(&ToService::StopReconstruction);
     }
 
     fn request_worker_log(&self) {
@@ -182,6 +193,14 @@ impl Backend for Local {
             self.ctl.notify(NoticeKind::Success, "Session moved to the recycle bin.");
         }
         self.report(r);
+    }
+
+    fn reconstruct(&self, dir: PathBuf) {
+        self.report(self.ctl.reconstruct(dir));
+    }
+
+    fn stop_reconstruction(&self) {
+        self.ctl.stop_reconstruction();
     }
 
     fn request_worker_log(&self) {

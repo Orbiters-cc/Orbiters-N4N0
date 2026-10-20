@@ -3,12 +3,14 @@
 
 use super::{Cx, Job};
 use crate::controller::{self, RawCaptureSummary};
+use crate::state::ReconstructionJob;
 use egui::{pos2, vec2, Align2, Color32, ColorImage, CornerRadius, CursorIcon, Id, Order, Rect, Sense, TextureHandle, TextureOptions, Ui, UiBuilder};
 use orbiters_core::bundle::{self, SessionSummary};
+use orbiters_core::reconstruction::{self, Report, Stage};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::paint::{self, Gradient};
 use orbiters_ui::theme::{self, weight, Txt};
-use orbiters_ui::widgets::{self, Button, IconButton, Variant};
+use orbiters_ui::widgets::{self, Button, IconButton, SegOption, Variant};
 use orbiters_ui::{format, icons, logo, toast, trail};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -25,8 +27,37 @@ struct Detail {
     origin: Rect,
     serial: u64,
     closing: bool,
+    /// The morph's progress (0 the card, 1 the detail), as the last frame drew it.
+    progress: f32,
     trail: Job<Vec<[f32; 3]>>,
     confirm_trash: bool,
+    view: View,
+    /// The reconstruction's preview, keyed by the report's creation time (a new run replaces it).
+    preview: Option<(String, Thumb)>,
+    /// A reconstruction of this session was running last frame.
+    reconstructing: bool,
+}
+
+/// What the area under the stats shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    Path,
+    Splats,
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The card and the detail never blink at the swap: near the card, the card is fully drawn under the still opaque
+/// detail, which then fades out (closing) or in (opening) over it.
+fn card_opacity(progress: f32) -> f32 {
+    1.0 - smoothstep(0.15, 0.4, progress)
+}
+
+fn detail_opacity(progress: f32) -> f32 {
+    smoothstep(0.02, 0.15, progress)
 }
 
 struct Import {
@@ -64,14 +95,19 @@ impl State {
 
     fn open(&mut self, ctx: &egui::Context, dir: PathBuf, origin: Rect) {
         self.serial += 1;
+        let reconstructed = self.sessions.as_ref().and_then(|l| l.iter().find(|s| s.dir == dir)).is_some_and(|s| s.reconstruction.is_some());
         let d = dir.clone();
         self.detail = Some(Detail {
             dir,
             origin,
             serial: self.serial,
             closing: false,
+            progress: 0.0,
             trail: Job::spawn(ctx, move || controller::session_trail(&d).unwrap_or_default()),
             confirm_trash: false,
+            view: if reconstructed { View::Splats } else { View::Path },
+            preview: None,
+            reconstructing: false,
         });
     }
 }
@@ -177,9 +213,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
                 match filtered.get(i) {
                     Some(s) => {
-                        let hidden = state.detail.as_ref().is_some_and(|d| d.dir == s.dir);
+                        let shown = state.detail.as_ref().filter(|d| d.dir == s.dir).map_or(1.0, |d| card_opacity(d.progress));
                         let tex = thumbnail(&ctx, &mut state.thumbs, s);
-                        if session_card(ui, cx, i, s, r, tex.as_ref(), hidden) {
+                        if session_card(ui, cx, i, s, r, tex.as_ref(), shown) {
                             clicked = Some((s.dir.clone(), r));
                         }
                     }
@@ -224,6 +260,108 @@ fn thumbnail(ctx: &egui::Context, thumbs: &mut HashMap<PathBuf, Thumb>, s: &Sess
     }
 }
 
+/// The reconstruction's preview render as a texture (loaded off the interface thread, at most 960 px wide).
+fn preview(ctx: &egui::Context, d: &mut Detail, s: &SessionSummary) -> Option<TextureHandle> {
+    let key = s.reconstruction.as_ref()?.created_utc.clone();
+    if d.preview.as_ref().is_none_or(|(k, _)| *k != key) {
+        let dir = s.dir.clone();
+        let job = Job::spawn(ctx, move || {
+            let (w, h, rgba) = reconstruction::read_preview(&dir)?;
+            let f = w.div_ceil(960).max(1) as usize;
+            let (w, h) = (w as usize, h as usize);
+            let (sw, sh) = (w / f, h / f);
+            let mut small = vec![0u8; sw * sh * 4];
+            for y in 0..sh {
+                for x in 0..sw {
+                    let mut acc = [0u32; 4];
+                    for dy in 0..f {
+                        let row = ((y * f + dy) * w + x * f) * 4;
+                        for px in rgba[row..row + f * 4].as_chunks::<4>().0 {
+                            for c in 0..4 {
+                                acc[c] += px[c] as u32;
+                            }
+                        }
+                    }
+                    for c in 0..4 {
+                        small[(y * sw + x) * 4 + c] = (acc[c] / (f * f) as u32) as u8;
+                    }
+                }
+            }
+            Some(ColorImage::from_rgba_unmultiplied([sw, sh], &small))
+        });
+        d.preview = Some((key, Thumb::Loading(job)));
+    }
+    let (_, entry) = d.preview.as_mut()?;
+    if let Thumb::Loading(job) = entry {
+        if let Some(result) = job.take() {
+            *entry = match result {
+                Some(image) => Thumb::Ready(ctx.load_texture(format!("splats-preview-{}", s.dir.display()), image, TextureOptions::LINEAR)),
+                None => Thumb::Missing,
+            };
+        }
+    }
+    match entry {
+        Thumb::Ready(t) => Some(t.clone()),
+        _ => None,
+    }
+}
+
+fn stage_label(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Loading => "Reading frames",
+        Stage::Seeding => "Seeding splats from depth",
+        Stage::Training => "Training splats",
+        Stage::Saving => "Saving",
+    }
+}
+
+/// The whole run's progress: reading and seeding are short, training is most of it.
+fn overall_progress(j: &ReconstructionJob) -> f32 {
+    match j.stage {
+        Stage::Loading => 0.05 * j.progress,
+        Stage::Seeding => 0.05,
+        Stage::Training => 0.06 + 0.92 * j.progress,
+        Stage::Saving => 0.98,
+    }
+}
+
+/// The reconstruction: its preview (a render of a keyframe it never trained on) with its scores, or the run's
+/// progress over the previous result.
+fn splats_view(ui: &Ui, rect: Rect, tex: Option<&TextureHandle>, report: Option<&Report>, job: Option<&ReconstructionJob>) {
+    let p = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    widgets::frame(&p, rect, theme::TILE_RADIUS, theme::surface_soft());
+    if let Some(t) = tex {
+        let size = t.size_vec2();
+        let uv = cover_uv(rect, size.x / size.y.max(1.0), 1.0);
+        let tint = if job.is_some() { theme::white(0.25) } else { Color32::WHITE };
+        paint::squircle_texture(&p, rect, [theme::squircle(theme::TILE_RADIUS); 4], t.id(), uv, tint);
+    }
+    if let Some(j) = job {
+        let c = rect.center();
+        widgets::text(&p, pos2(c.x, c.y - 26.0), Align2::CENTER_CENTER, &Txt::new(stage_label(j.stage), 15.0).weight(weight::SEMIBOLD));
+        let bar = Rect::from_center_size(c, vec2((rect.width() * 0.6).min(360.0), 6.0));
+        let f = anim::spring_from(ui.ctx(), Id::unique(("splats-progress", &j.session_dir)), [0.0], [overall_progress(j)], Spring::SOFT)[0].clamp(0.0, 1.0);
+        p.rect_filled(bar, theme::radius(3.0), theme::white(0.08));
+        if f > 0.001 {
+            p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::ACCENT);
+        }
+        let detail = if j.stage == Stage::Training && j.iteration > 0 {
+            let left = j.seconds as f64 / j.iteration as f64 * j.iterations.saturating_sub(j.iteration) as f64;
+            let quality = j.psnr.map(|q| format!(" · {q:.1} dB")).unwrap_or_default();
+            format!("{} splats{quality} · {} left", format::integer(j.gaussians as f64), format::duration(left))
+        } else {
+            format!("{:.0}%", overall_progress(j) * 100.0)
+        };
+        widgets::text(&p, pos2(c.x, c.y + 24.0), Align2::CENTER_CENTER, &Txt::new(detail, 12.0).color(theme::FG_3));
+        return;
+    }
+    let Some(r) = report else { return };
+    badge(&p, ui, pos2(rect.left() + 12.0, rect.bottom() - 12.0 - 22.0), "A view it never trained on", theme::black(0.55), theme::FG_2, false);
+    let quality = r.psnr_held_out.map(|q| format!(" · {q:.1} dB")).unwrap_or_default();
+    let line = format!("{} splats{quality} · {}", format::integer(r.gaussians as f64), format::duration(r.seconds as f64));
+    badge(&p, ui, pos2(rect.right() - 12.0, rect.bottom() - 12.0 - 22.0), &line, theme::black(0.55), theme::FG_2, true);
+}
+
 /// UV rect that covers `target` with an image of `image_aspect`, zoomed by `zoom` around the centre.
 fn cover_uv(target: Rect, image_aspect: f32, zoom: f32) -> Rect {
     let ta = target.width() / target.height().max(1.0);
@@ -238,10 +376,11 @@ fn thumb_shape(painter: &egui::Painter, rect: Rect, radius: CornerRadius, tex: O
         Some(t) => {
             let size = t.size_vec2();
             let uv = cover_uv(rect, size.x / size.y.max(1.0), zoom);
-            painter.add(egui::epaint::RectShape::filled(rect, radius, Color32::WHITE).with_texture(t.id(), uv));
+            let radii = [radius.nw, radius.ne, radius.se, radius.sw].map(|r| theme::squircle(r as f32));
+            paint::squircle_texture(painter, rect, radii, t.id(), uv, Color32::WHITE);
         }
         None => {
-            let pts = paint::rounded_rect_points_corners(rect, [radius.nw as f32, radius.ne as f32, radius.se as f32, radius.sw as f32]);
+            let pts = paint::squircle_points_corners(rect, [radius.nw, radius.ne, radius.se, radius.sw].map(|r| theme::squircle(r as f32)));
             paint::fill_convex(painter, &pts, |_| theme::INK_750);
             let lr = Rect::from_center_size(rect.center(), logo::size_for_width(40.0));
             logo::paint(painter, lr, logo::Look::default());
@@ -250,7 +389,7 @@ fn thumb_shape(painter: &egui::Painter, rect: Rect, radius: CornerRadius, tex: O
 }
 
 /// One card; returns true when clicked.
-fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, tex: Option<&TextureHandle>, hidden: bool) -> bool {
+fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, tex: Option<&TextureHandle>, shown: f32) -> bool {
     let ctx = ui.ctx().clone();
     let id = Id::unique(("session-card", &s.dir));
     let resp = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
@@ -263,13 +402,12 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
     let enter = anim::spring_from(&ctx, id.with(("enter", cx.visit)), [0.0], [if elapsed >= delay { 1.0 } else { 0.0 }], Spring::SOFT)[0];
     let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SOFT);
     let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
-    let shown = anim::toggle(&ctx, id.with("shown"), !hidden, Spring::SNAPPY).clamp(0.0, 1.0);
     let scale = (0.97 + 0.03 * enter) * (1.0 - 0.03 * press);
     let r = Rect::from_center_size(rect.center() + vec2(0.0, 20.0 * (1.0 - enter) - 4.0 * hover), rect.size() * scale);
     let mut p = ui.painter().clone();
     p.multiply_opacity(enter.clamp(0.0, 1.0) * shown);
 
-    p.rect_filled(r, theme::radius(theme::CARD_RADIUS), theme::surface());
+    widgets::frame(&p, r, theme::CARD_RADIUS, theme::surface());
     let thumb = Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0));
     let top = CornerRadius { nw: 20, ne: 20, sw: 0, se: 0 };
     thumb_shape(&p, thumb, top, tex, 1.0 + 0.06 * ease::out_cubic(hover));
@@ -279,7 +417,15 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
         &shade,
         &Gradient::vertical(thumb, &[(0.0, Color32::TRANSPARENT), (0.55, theme::alpha(theme::INK_950, 0.1)), (1.0, theme::alpha(theme::INK_950, 0.9))]),
     );
-    badge(&p, ui, pos2(thumb.left() + 12.0, thumb.top() + 12.0), &format::duration(s.manifest.stats.duration_s), theme::black(0.55), theme::FG_2, false);
+    let w = badge(&p, ui, pos2(thumb.left() + 12.0, thumb.top() + 12.0), &format::duration(s.manifest.stats.duration_s), theme::black(0.55), theme::FG_2, false);
+    let job = cx.snap.reconstruction.as_ref().filter(|j| j.session_dir == s.dir);
+    let splats = match job {
+        Some(j) => Some(format!("Reconstructing {:.0}%", overall_progress(j) * 100.0)),
+        None => s.reconstruction.as_ref().map(|_| "Splats".to_string()),
+    };
+    if let Some(label) = splats {
+        badge(&p, ui, pos2(thumb.left() + 12.0 + w + 6.0, thumb.top() + 12.0), &label, theme::black(0.55), theme::ACCENT, false);
+    }
     if s.manifest.consent.own_world {
         badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), "Own world", theme::alpha(theme::OK, 0.2), theme::OK, true);
     }
@@ -301,18 +447,20 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
     resp.clicked()
 }
 
-fn badge(p: &egui::Painter, ui: &Ui, at: egui::Pos2, label: &str, bg: Color32, fg: Color32, right: bool) {
+/// A small label on a picture; returns its width.
+fn badge(p: &egui::Painter, ui: &Ui, at: egui::Pos2, label: &str, bg: Color32, fg: Color32, right: bool) -> f32 {
     let t = Txt::new(label, 10.5).weight(weight::SEMIBOLD).tracking(0.025).color(fg);
     let s = widgets::text_size(ui, &t);
     let w = s.x + 20.0;
     let r = if right { Rect::from_min_size(pos2(at.x - w, at.y), vec2(w, 22.0)) } else { Rect::from_min_size(at, vec2(w, 22.0)) };
     p.rect_filled(r, theme::radius(11.0), bg);
     widgets::text(p, r.center(), Align2::CENTER_CENTER, &t);
+    w
 }
 
 fn shimmer_card(ui: &Ui, rect: Rect) {
     let p = ui.painter();
-    p.rect_filled(rect, theme::radius(theme::CARD_RADIUS), theme::surface());
+    widgets::frame(p, rect, theme::CARD_RADIUS, theme::surface());
     let t = anim::clock(ui.ctx(), 30.0);
     let k = ease::out_expo(((t % 1.6) / 1.6) as f32);
     let band =
@@ -456,6 +604,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
     };
     let id = Id::unique(("session-detail", d.serial));
     let t = anim::spring_from(ctx, id.with("morph"), [0.0], [if d.closing { 0.0 } else { 1.0 }], Spring::MORPH)[0];
+    d.progress = t;
     if d.closing && t < 0.02 {
         state.detail = None;
         return;
@@ -485,6 +634,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             close = true;
         }
         ui.painter().with_clip_rect(window).rect_filled(window, 0.0, theme::alpha(theme::INK_950, 0.7 * k));
+        ui.multiply_opacity(detail_opacity(t));
         let p = ui.painter();
         widgets::panel(p, rect, radius);
         let thumb_h = lerp(d.origin.width() * 9.0 / 16.0, 260.0);
@@ -549,18 +699,41 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             mini_stat(&cp, r, glyph, label, value, sub.as_deref());
         }
         let map = Rect::from_min_max(pos2(main.left(), main.top() + 78.0 + 16.0), main.max);
-        let points = d.trail.poll().cloned().unwrap_or_default();
-        trail::show(
-            &cu,
-            map,
-            id.with("trail"),
-            &trail::Trail {
-                points: &points,
-                heading: None,
-                live: false,
-                empty_text: if d.trail.running() { "Reading the camera path…" } else { "No camera path in this session" },
-            },
-        );
+        let job = cx.snap.reconstruction.as_ref().filter(|j| j.session_dir == session.dir);
+        // A run of this session starting brings its progress up.
+        if job.is_some() && !d.reconstructing {
+            d.view = View::Splats;
+        }
+        d.reconstructing = job.is_some();
+        let splats = job.is_some() || session.reconstruction.is_some();
+        if !splats {
+            d.view = View::Path;
+        }
+        match d.view {
+            View::Path => {
+                let points = d.trail.poll().cloned().unwrap_or_default();
+                trail::show(
+                    &cu,
+                    map,
+                    id.with("trail"),
+                    &trail::Trail {
+                        points: &points,
+                        heading: None,
+                        live: false,
+                        empty_text: if d.trail.running() { "Reading the camera path…" } else { "No camera path in this session" },
+                    },
+                );
+            }
+            View::Splats => {
+                let tex = preview(ctx, d, &session);
+                splats_view(&cu, map, tex.as_ref(), session.reconstruction.as_ref(), job);
+            }
+        }
+        if splats {
+            let bar = Rect::from_min_max(pos2(map.left() + 10.0, map.top() + 10.0), pos2(map.right() - 10.0, map.top() + 50.0));
+            let mut bu = cu.new_child(UiBuilder::new().max_rect(bar).layout(egui::Layout::right_to_left(egui::Align::Min)).id_salt("view-switch"));
+            widgets::segmented(&mut bu, "view", &mut d.view, &[SegOption::new(View::Path, "Path"), SegOption::new(View::Splats, "Splats")], true);
+        }
 
         let c = &session.manifest.capture;
         let rows = [
@@ -580,13 +753,34 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         }
         let mut y = info.bottom() + 12.0;
         let full = |y: f32| Rect::from_min_size(pos2(side.left(), y), vec2(side.width(), 40.0));
-        Button::new("Reconstruct")
-            .icon(icons::MAGIC_WAND)
-            .variant(Variant::Primary)
-            .enabled(false)
-            .hint("The reconstruction worker is the next milestone")
-            .width(side.width())
-            .show_at(&mut cu, full(y));
+        if job.is_some() {
+            if Button::new("Stop reconstruction").icon(icons::X).width(side.width()).show_at(&mut cu, full(y)).clicked() {
+                cx.ctl.stop_reconstruction();
+            }
+        } else {
+            let blocked = if cx.snap.reconstruction.is_some() {
+                Some("Another session is being reconstructed")
+            } else if cx.snap.is_capturing() {
+                Some("Finish the capture first: reconstruction takes the whole GPU")
+            } else if st.depth_frames == 0 {
+                Some("This session has no depth frames: record with the capture kit's depth frames on")
+            } else {
+                None
+            };
+            let again = session.reconstruction.is_some();
+            let mut b = Button::new(if again { "Reconstruct again" } else { "Reconstruct" })
+                .icon(icons::MAGIC_WAND)
+                .variant(if again { Variant::Secondary } else { Variant::Primary })
+                .enabled(blocked.is_none())
+                .width(side.width());
+            if let Some(h) = blocked {
+                b = b.hint(h);
+            }
+            if b.show_at(&mut cu, full(y)).clicked() {
+                cx.ctl.reconstruct(session.dir.clone());
+                d.view = View::Splats;
+            }
+        }
         y += 52.0;
         Button::new("Send to Mixer")
             .icon(icons::SPARKLE)
@@ -643,7 +837,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
 }
 
 fn mini_stat(p: &egui::Painter, r: Rect, glyph: &str, label: &str, value: &str, sub: Option<&str>) {
-    p.rect_filled(r, theme::radius(16.0), theme::surface_soft());
+    widgets::frame(p, r, 16.0, theme::surface_soft());
     widgets::icon(p, pos2(r.left() + 19.0, r.top() + 20.0), glyph, 14.0, theme::FG_4);
     widgets::text(p, pos2(r.left() + 32.0, r.top() + 20.0), Align2::LEFT_CENTER, &Txt::caps(label));
     widgets::text_truncated(p, pos2(r.left() + 12.0, r.top() + 44.0), Align2::LEFT_CENTER, &Txt::new(value, 18.0).weight(weight::SEMIBOLD), r.width() - 24.0);

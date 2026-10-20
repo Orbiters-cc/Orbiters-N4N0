@@ -2729,6 +2729,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbiters-reconstruct"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "fastrand",
+ "orbiters-contracts",
+ "orbiters-core",
+ "serde",
+ "serde_json",
+ "wgpu",
+]
+
+[[package]]
 name = "orbiters-spout"
 version = "0.1.0"
 dependencies = [

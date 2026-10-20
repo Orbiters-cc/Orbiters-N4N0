@@ -1,4 +1,4 @@
-//! Settings page: capture, storage, VRChat and OSC, interface, about. Changes apply as they are made (shown at
+//! Settings page: capture, storage, VRChat and OSC, performance, interface, about. Changes apply as they are made (shown at
 //! once, saved in the background); text fields apply with their Save button.
 
 use super::{Cx, Job};
@@ -171,7 +171,73 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 });
             });
 
-            section(ui, cx, 4, icons::SPARKLE, "Interface", None, |ui| {
+            let vr = &snap.steamvr;
+            let perf_sub = match (&vr.calibration, vr.running) {
+                (Some(c), _) => format!("Calibrated: eyes at {:.2} m, hands {:.2} m apart", c.head_height_m, c.arm_span_m),
+                (None, true) => "SteamVR is running: calibrate in the Orbiters tab of its dashboard".into(),
+                (None, false) => "What a session records besides the frames".into(),
+            };
+            section(ui, cx, 4, icons::PERSON_ARMS_SPREAD, "Performance", Some(&perf_sub), |ui| {
+                widgets::field(
+                    ui,
+                    "Face and avatar parameters",
+                    Some("Every parameter VRChat sends over OSC: face tracking from VRCFaceTracking, gestures, visemes, movement."),
+                    48.0,
+                    |ui| {
+                        apply |= widgets::toggle(ui, "perf-parameters", &mut draft.osc.record_parameters);
+                    },
+                );
+                widgets::separator(ui);
+                widgets::field(ui, "Your voice", Some("The microphone, for your avatar's visemes in Mixer."), 48.0, |ui| {
+                    apply |= widgets::toggle(ui, "perf-mic", &mut draft.performance.record_mic);
+                });
+                if draft.performance.record_mic {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                        if source_chip(ui, "Windows default", draft.performance.mic_device.is_empty()).clicked() {
+                            draft.performance.mic_device.clear();
+                            apply = true;
+                        }
+                        for m in &snap.mics {
+                            if source_chip(ui, &m.name, draft.performance.mic_device == m.id).clicked() {
+                                draft.performance.mic_device = m.id.clone();
+                                apply = true;
+                            }
+                        }
+                    });
+                    ui.add_space(12.0);
+                }
+                widgets::separator(ui);
+                widgets::field(
+                    ui,
+                    "VRChat sound",
+                    Some("What VRChat plays, world sounds and other players' voices; nothing else on the PC. Ask the people around you first."),
+                    48.0,
+                    |ui| {
+                        apply |= widgets::toggle(ui, "perf-game", &mut draft.performance.record_game_audio);
+                    },
+                );
+                widgets::separator(ui);
+                widgets::field(ui, "Body tracking", Some("Headset, controllers and trackers from SteamVR, full-body estimation included."), 48.0, |ui| {
+                    apply |= widgets::toggle(ui, "perf-tracking", &mut draft.performance.record_tracking);
+                });
+                widgets::separator(ui);
+                widgets::field(ui, "Tracking rate", Some("Device poses recorded per second."), 284.0, |ui| {
+                    apply |= widgets::slider(ui, "perf-rate", &mut draft.performance.tracking_rate_hz, 30.0..=120.0, 10.0, |v| format!("{v:.0} Hz"));
+                });
+                widgets::separator(ui);
+                let tab = match (vr.running, vr.overlay) {
+                    (true, true) => "Orbiters is in SteamVR's dashboard: record and calibrate without leaving VR.",
+                    (true, false) => "SteamVR is running; the tab appears in a moment.",
+                    (false, _) => "Orbiters as a tab in SteamVR's dashboard while SteamVR runs.",
+                };
+                widgets::field(ui, "SteamVR dashboard tab", Some(tab), 48.0, |ui| {
+                    apply |= widgets::toggle(ui, "perf-overlay", &mut draft.steamvr_overlay);
+                });
+            });
+
+            section(ui, cx, 5, icons::SPARKLE, "Interface", None, |ui| {
                 widgets::field(ui, "Reduce motion", Some("Calmer transitions and a still background."), 48.0, |ui| {
                     apply |= widgets::toggle(ui, "reduce-motion", &mut draft.reduce_motion);
                 });
@@ -186,7 +252,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
             let mut want_log = false;
             let mut quit = false;
-            section(ui, cx, 5, icons::INFO, "About", None, |ui| {
+            section(ui, cx, 6, icons::INFO, "About", None, |ui| {
                 ui.add_space(8.0);
                 let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::hover());
                 let lr = Rect::from_min_size(pos2(row.left(), row.center().y - 21.0), logo::size_for_width(48.0));

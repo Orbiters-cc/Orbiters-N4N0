@@ -1,4 +1,5 @@
-//! `orbiters-desktop --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]`
+//! `orbiters-desktop --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]
+//! [--height <points>]`
 //! renders the interface offscreen in several states and writes one PNG per state, for visual review without a
 //! window. The controller is not started: the snapshots are made up, the session library is real. `--only e2e`
 //! instead records a real test pattern through the worker, driven by synthetic clicks, with avatar parameters
@@ -36,6 +37,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         PathBuf::from(args.first().context("usage: --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]")?);
     let mut settings = Settings::default();
     let mut scale = 1.0f32;
+    let mut height = 820.0f32;
     let mut only: Option<String> = None;
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
@@ -44,6 +46,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "--raw" => settings.raw_captures_dir = PathBuf::from(it.next().context("--raw <folder>")?),
             "--scale" => scale = it.next().context("--scale <factor>")?.parse()?,
             "--only" => only = Some(it.next().context("--only <name>")?.clone()),
+            "--height" => height = it.next().context("--height <points>")?.parse()?,
             other => anyhow::bail!("unknown option {other}"),
         }
     }
@@ -79,6 +82,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         heading_deg: Some(135.0),
         width: 1920,
         height: 1080,
+        parameter_changes: 41_870,
+        mic_level: Some(0.38),
+        tracking_connected: Some(true),
+        tracking_devices: 6,
+        tracking_samples: 44_280,
         ..Default::default()
     });
     let mut consent = idle.clone();
@@ -158,13 +166,13 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             continue;
         }
         let path = out.join(format!("{}.png", sc.name));
-        render(&mut gpu, &sc, scale, &path)?;
+        render(&mut gpu, &sc, scale, height, &path)?;
         println!("{}", path.display());
     }
     Ok(())
 }
 
-fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, path: &std::path::Path) -> anyhow::Result<()> {
+fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, height: f32, path: &std::path::Path) -> anyhow::Result<()> {
     let ctx = egui::Context::default();
     orbiters_ui::install(&ctx);
     let ctl = Controller::new(sc.snapshot.settings.clone());
@@ -175,7 +183,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, path: &std::path::Path
     if !sc.splash {
         app.skip_splash();
     }
-    let size = vec2(1280.0, 820.0);
+    let size = vec2(1280.0, height);
     for f in 0..sc.frames {
         let t = f as f64 / 60.0;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(t), ..Default::default() };
@@ -377,6 +385,17 @@ fn idle_snapshot(settings: &Settings, sessions: &[orbiters_core::bundle::Session
     s.osc.listening = true;
     s.osc.advertising = true;
     s.osc.port = Some(9001);
+    s.osc.vrchat_found = true;
+    s.osc.values = 214;
+    s.steamvr.running = true;
+    s.steamvr.overlay = true;
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    s.steamvr.calibration = Some(crate::state::CalibrationInfo { head_height_m: 1.63, arm_span_m: 1.41, devices: 6, utc_ms: now_ms - 7 * 60_000 });
+    s.settings.performance.record_mic = true;
+    s.mics = vec![
+        orbiters_core::protocol::AudioDeviceInfo { id: "index".into(), name: "Microphone (Valve Index)".into(), default: true },
+        orbiters_core::protocol::AudioDeviceInfo { id: "desk".into(), name: "Desk microphone (USB)".into(), default: false },
+    ];
     s.storage.used_bytes = sessions.iter().map(|x| x.size_bytes).sum();
     s.storage.sessions = sessions.len();
     s.storage.free_bytes = Some(512_000_000_000);

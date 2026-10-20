@@ -17,6 +17,7 @@ mod screenshot;
 mod service;
 mod single;
 mod state;
+mod streams;
 mod tray;
 mod window;
 mod worker;

@@ -302,81 +302,13 @@ fn recorder(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
     }
 }
 
-/// One stream: icon, name, what it records now, and a switch (applies to the next recording).
-struct Stream<'a> {
-    glyph: &'a str,
-    name: &'a str,
-    status: String,
-    tone: Tone,
-    level: Option<f32>,
-    switch: Option<bool>,
-}
-
 fn streams(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
     widgets::card(ui.painter(), card, theme::CARD_RADIUS);
     widgets::text(ui.painter(), pos2(card.left() + 22.0, card.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps("What is recorded"));
-    let s = &snap.settings;
-    let stats = snap.capture.stats.as_ref();
     let capturing = snap.is_capturing();
-    let rows = [
-        Stream {
-            glyph: icons::SMILEY,
-            name: "Face & avatar",
-            status: match stats {
-                Some(st) if capturing && s.osc.record_parameters => format!("{} parameter changes", format::integer(st.parameter_changes as f64)),
-                _ if !s.osc.enabled => "OSC is off".into(),
-                _ if snap.osc.vrchat_found => format!("{} values from VRChat", snap.osc.values),
-                _ => "Waiting for VRChat's OSC".into(),
-            },
-            tone: if snap.osc.vrchat_found || snap.osc.values > 0 { Tone::Ok } else { Tone::Off },
-            level: None,
-            switch: s.osc.enabled.then_some(s.osc.record_parameters),
-        },
-        Stream {
-            glyph: icons::MICROPHONE,
-            name: "Your voice",
-            status: if s.performance.record_mic {
-                snap.mics
-                    .iter()
-                    .find(|m| if s.performance.mic_device.is_empty() { m.default } else { m.id == s.performance.mic_device })
-                    .map(|m| m.name.clone())
-                    .unwrap_or_else(|| "Default microphone".into())
-            } else {
-                "Off".into()
-            },
-            tone: if s.performance.record_mic { Tone::Ok } else { Tone::Off },
-            level: stats.and_then(|st| st.mic_level),
-            switch: Some(s.performance.record_mic),
-        },
-        Stream {
-            glyph: icons::SPEAKER_HIGH,
-            name: "VRChat sound",
-            status: match (s.performance.record_game_audio, snap.vrchat.running) {
-                (false, _) => "Off".into(),
-                (true, true) => "World and other players".into(),
-                (true, false) => "When VRChat runs".into(),
-            },
-            tone: if s.performance.record_game_audio && snap.vrchat.running { Tone::Ok } else { Tone::Off },
-            level: stats.and_then(|st| st.game_level),
-            switch: Some(s.performance.record_game_audio),
-        },
-        Stream {
-            glyph: icons::PERSON_ARMS_SPREAD,
-            name: "Body tracking",
-            status: match stats.and_then(|st| st.tracking_connected.map(|c| (c, st.tracking_devices))) {
-                Some((true, n)) => format!("{n} devices at {:.0} Hz", s.performance.tracking_rate_hz),
-                Some((false, _)) => "Waiting for SteamVR".into(),
-                None if s.performance.record_tracking => format!("Headset, controllers, trackers at {:.0} Hz", s.performance.tracking_rate_hz),
-                None => "Off".into(),
-            },
-            tone: if s.performance.record_tracking { Tone::Ok } else { Tone::Off },
-            level: None,
-            switch: Some(s.performance.record_tracking),
-        },
-    ];
     let row_h = 62.0;
     let mut changed: Option<Settings> = None;
-    for (i, row) in rows.iter().enumerate() {
+    for (i, row) in crate::streams::streams(snap).iter().enumerate() {
         let r = Rect::from_min_size(pos2(card.left() + 12.0, card.top() + 50.0 + i as f32 * (row_h + 2.0)), vec2(card.width() - 24.0, row_h));
         let p = ui.painter().clone();
         if i > 0 {
@@ -394,7 +326,12 @@ fn streams(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
             r.width() - 190.0,
         );
         if let Some(level) = row.level {
-            meter(ui, Id::unique(("overlay-meter", i)), Rect::from_min_size(pos2(r.right() - 150.0, r.center().y - 3.0), vec2(70.0, 6.0)), level);
+            crate::streams::meter(
+                ui,
+                Id::unique(("overlay-meter", i)),
+                Rect::from_min_size(pos2(r.right() - 150.0, r.center().y - 3.0), vec2(70.0, 6.0)),
+                level,
+            );
         }
         if let Some(on) = row.switch {
             let mut value = on;
@@ -405,14 +342,7 @@ fn streams(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
                 sw.disable();
             }
             if widgets::toggle(&mut sw, ("overlay-switch", i), &mut value) {
-                let mut s = snap.settings.clone();
-                match i {
-                    0 => s.osc.record_parameters = value,
-                    1 => s.performance.record_mic = value,
-                    2 => s.performance.record_game_audio = value,
-                    _ => s.performance.record_tracking = value,
-                }
-                changed = Some(s);
+                changed = Some(crate::streams::with_switch(&snap.settings, i, value));
             }
         }
     }
@@ -427,18 +357,6 @@ fn streams(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
             Align2::RIGHT_CENTER,
             &Txt::new("Switches apply to the next recording", 12.0).color(theme::FG_4),
         );
-    }
-}
-
-/// A level meter: a gradient bar that follows the peak with a spring.
-fn meter(ui: &Ui, id: Id, rect: Rect, level: f32) {
-    let k = anim::value(ui.ctx(), id, level.clamp(0.0, 1.0).sqrt(), Spring::SNAPPY).clamp(0.0, 1.0);
-    let p = ui.painter();
-    p.rect_filled(rect, theme::radius(3.0), theme::white(0.08));
-    if k > 0.01 {
-        let fill = Rect::from_min_size(rect.min, vec2(rect.width() * k, rect.height()));
-        let color = if k > 0.92 { theme::WARN } else { theme::OK };
-        p.rect_filled(fill, theme::radius(3.0), color);
     }
 }
 

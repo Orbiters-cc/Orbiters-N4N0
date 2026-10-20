@@ -24,6 +24,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
             header(ui, cx);
             chips(ui, cx);
             grid(ui, cx);
+            performance(ui, cx);
             camera_path(ui, cx);
         });
     });
@@ -428,11 +429,82 @@ fn tiles(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
     }
 }
 
+/// What the session records besides the frames: avatar parameters, voice, VRChat's sound, body tracking, and the
+/// SteamVR tab with the latest T-pose calibration.
+fn performance(ui: &mut Ui, cx: &mut Cx) {
+    let snap = cx.snap;
+    let capturing = snap.is_capturing();
+    let mut changed = None;
+    block(ui, cx, 9, 164.0, |ui, rect| {
+        widgets::card(ui.painter(), rect, theme::CARD_RADIUS);
+        let p = ui.painter().clone();
+        widgets::text(&p, pos2(rect.left() + 20.0, rect.top() + 26.0), Align2::LEFT_CENTER, &Txt::caps("Performance"));
+        let vr = &snap.steamvr;
+        let right = match (&vr.calibration, vr.running, vr.overlay) {
+            _ if capturing => "Switches apply to the next recording".to_string(),
+            (Some(c), _, _) => format!("T-pose: eyes at {:.2} m, hands {:.2} m apart", c.head_height_m, c.arm_span_m),
+            (None, true, true) => "Calibrate in the Orbiters tab of SteamVR's dashboard".into(),
+            (None, true, false) => "SteamVR is running".into(),
+            (None, false, _) => "Not calibrated: start SteamVR, then calibrate in its dashboard".into(),
+        };
+        widgets::text_truncated(
+            &p,
+            pos2(rect.right() - 20.0, rect.top() + 26.0),
+            Align2::RIGHT_CENTER,
+            &Txt::new(right, 12.5).color(theme::FG_3),
+            rect.width() * 0.6,
+        );
+        let rows = crate::streams::streams(snap);
+        let gap = 12.0;
+        let w = (rect.width() - 32.0 - gap * 3.0) / 4.0;
+        for (i, row) in rows.iter().enumerate() {
+            let cell = Rect::from_min_size(pos2(rect.left() + 16.0 + i as f32 * (w + gap), rect.top() + 48.0), vec2(w, rect.height() - 64.0));
+            p.rect_filled(cell, theme::radius(14.0), theme::white(0.03));
+            let tile = Rect::from_min_size(cell.min + vec2(14.0, 14.0), vec2(36.0, 36.0));
+            p.rect_filled(tile, theme::radius(11.0), theme::alpha(row.tone.color(), 0.12));
+            widgets::icon(&p, tile.center(), row.glyph, 17.0, if row.tone == Tone::Off { theme::FG_3 } else { row.tone.color() });
+            widgets::text(&p, pos2(cell.left() + 14.0, tile.bottom() + 18.0), Align2::LEFT_CENTER, &Txt::new(row.name, 14.0).weight(weight::SEMIBOLD));
+            widgets::text_truncated(
+                &p,
+                pos2(cell.left() + 14.0, tile.bottom() + 38.0),
+                Align2::LEFT_CENTER,
+                &Txt::new(&row.status, 12.0).color(theme::FG_3),
+                cell.width() - 28.0,
+            );
+            if let Some(level) = row.level {
+                crate::streams::meter(
+                    ui,
+                    Id::unique(("capture-meter", i)),
+                    Rect::from_min_size(pos2(tile.right() + 12.0, tile.center().y - 2.5), vec2(cell.width() - 36.0 - 14.0 - 12.0 - 62.0, 5.0)),
+                    level,
+                );
+            }
+            if let Some(on) = row.switch {
+                let mut value = on;
+                let mut sw = ui.new_child(
+                    UiBuilder::new()
+                        .max_rect(Rect::from_min_size(pos2(cell.right() - 14.0 - 48.0, tile.center().y - 14.0), vec2(48.0, 28.0)))
+                        .id_salt(("capture-switch", i)),
+                );
+                if capturing {
+                    sw.disable();
+                }
+                if widgets::toggle(&mut sw, ("capture-switch", i), &mut value) {
+                    changed = Some(crate::streams::with_switch(&snap.settings, i, value));
+                }
+            }
+        }
+    });
+    if let Some(s) = changed {
+        cx.ctl.save_settings(s);
+    }
+}
+
 fn camera_path(ui: &mut Ui, cx: &mut Cx) {
     let snap = cx.snap;
     let c = &snap.capture;
     let s = c.stats.as_ref();
-    block(ui, cx, 9, 314.0, |ui, rect| {
+    block(ui, cx, 10, 314.0, |ui, rect| {
         widgets::card(ui.painter(), rect, theme::CARD_RADIUS);
         let p = ui.painter();
         widgets::text(p, pos2(rect.left() + 20.0, rect.top() + 26.0), Align2::LEFT_CENTER, &Txt::caps("Camera path"));

@@ -1,5 +1,6 @@
-//! 3D picture: a recording of about a second during which VRChat's camera swings along a short arc around what it
-//! looks at (`/usercamera/Pose`, VRChat 2025.3.3 and later), then goes back where it was. The capture kit stamps every
+//! 3D picture: a recording of two seconds during which VRChat's camera flies a full circle around what it looks at
+//! (`/usercamera/Pose`, VRChat 2025.3.3 and later), rising and dipping, so the place is seen from every side; then it
+//! goes back where it was. The capture kit stamps every
 //! frame with the camera's pose, so the session reconstructs into splats like any recording; the reconstruction starts
 //! as soon as the recording is saved.
 
@@ -12,18 +13,18 @@ use std::time::{Duration, Instant};
 pub const POSE: &str = "/usercamera/Pose";
 const FOCAL_DISTANCE: &str = "/usercamera/FocalDistance";
 const SMOOTH: &str = "/usercamera/SmoothMovement";
-/// The arc, each way from where the camera stands (degrees around the subject), and how long the swing takes.
-const ARC_DEG: f32 = 15.0;
-const RISE_M: f32 = 0.12;
-const SWING: Duration = Duration::from_millis(1000);
+/// How far the camera rises and dips along the circle, and how long the circle takes.
+const RISE_M: f32 = 0.5;
+const SWING: Duration = Duration::from_millis(2000);
 /// Poses a second while swinging.
 const RATE_HZ: u32 = 60;
 /// After the recording started, before the camera moves: Spout and the kit's first frames.
 const SETTLE: Duration = Duration::from_millis(700);
 
 /// The camera's poses along the swing: `pose` is VRChat's (x, y, z in metres, then pitch, yaw, roll in degrees, Unity's
-/// conventions), `focus` how far ahead the subject is. The camera circles the subject (left to right, rising and falling
-/// a little for parallax) and keeps looking at it; the last pose is the first one.
+/// conventions), `focus` how far ahead the subject is. The camera flies once around the subject at that distance (a
+/// circle `2 × focus` wide), rising and dipping twice, and keeps looking at it, so over the turn it looks out in every
+/// direction; the last pose is the first one.
 pub fn swing(pose: [f32; 6], focus: f32, steps: usize) -> Vec<[f32; 6]> {
     let [x, y, z, pitch, yaw, roll] = pose;
     let (p, w) = (pitch.to_radians(), yaw.to_radians());
@@ -34,9 +35,8 @@ pub fn swing(pose: [f32; 6], focus: f32, steps: usize) -> Vec<[f32; 6]> {
     (0..steps)
         .map(|i| {
             let t = if steps > 1 { i as f32 / (steps - 1) as f32 } else { 0.0 };
-            // Out to one side, across to the other and back to the start (a full sine), rising across the middle.
-            let angle = (ARC_DEG * (std::f32::consts::TAU * t).sin()).to_radians();
-            let lift = RISE_M * (std::f32::consts::PI * t).sin();
+            let angle = std::f32::consts::TAU * t;
+            let lift = RISE_M * (2.0 * std::f32::consts::TAU * t).sin();
             let (s, c) = angle.sin_cos();
             let offset = [back[0] * c + back[2] * s, back[1] + lift, -back[0] * s + back[2] * c];
             let at = [subject[0] + offset[0], subject[1] + offset[1], subject[2] + offset[2]];
@@ -157,11 +157,16 @@ mod tests {
         for p in &poses {
             assert!(looks_at(*p, subject) > 0.9999, "{p:?} looks away");
         }
-        // A quarter of the way it is out to one side (15° around the subject), and half way it is back over the start.
-        let side = poses[15];
+        // Half way it is across the circle, about 4 m from where it started, looking back; over the turn it faces every way.
         let horizontal = |p: [f32; 6]| ((p[0] - subject[0]).powi(2) + (p[2] - subject[2]).powi(2)).sqrt();
-        assert!((horizontal(side) - horizontal(pose)).abs() < 1e-3, "keeps its distance");
-        assert!((side[0] - pose[0]).abs() > 0.4, "{side:?}");
-        assert!(poses[30][1] > pose[1] + 0.1, "rises across the middle");
+        let across = poses[30];
+        assert!((horizontal(across) - horizontal(pose)).abs() < 1e-3, "keeps its distance");
+        assert!(((across[0] - pose[0]).powi(2) + (across[2] - pose[2]).powi(2)).sqrt() > 3.8, "{across:?}");
+        let mut headings: Vec<i32> = poses.iter().map(|p| (p[4].rem_euclid(360.0) / 30.0) as i32).collect();
+        headings.sort();
+        headings.dedup();
+        assert_eq!(headings.len(), 12, "looks every way: {headings:?}");
+        let (low, high) = poses.iter().fold((f32::MAX, f32::MIN), |(l, h), p| (l.min(p[1]), h.max(p[1])));
+        assert!(high > pose[1] + 0.4 && low < pose[1] - 0.4, "rises and dips: {low} {high}");
     }
 }

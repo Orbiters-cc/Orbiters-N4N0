@@ -123,6 +123,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         gaussians: 512_400,
         psnr: Some(33.2),
         seconds: 41.0,
+        integrated: true,
     });
     let job = reconstructing.reconstruction.clone();
     let waiting = |base: &Snapshot| {

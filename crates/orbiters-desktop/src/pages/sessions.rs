@@ -381,7 +381,8 @@ fn splats_view(ui: &Ui, rect: Rect, tex: Option<&TextureHandle>, report: Option<
         let detail = if j.stage == Stage::Training && j.iteration > 0 {
             let left = j.seconds as f64 / j.iteration as f64 * j.iterations.saturating_sub(j.iteration) as f64;
             let quality = j.psnr.map(|q| format!(" · {q:.1} dB")).unwrap_or_default();
-            format!("{} splats{quality} · {} left", format::integer(j.gaussians as f64), format::duration(left))
+            let on = if j.integrated { " · on the integrated GPU" } else { "" };
+            format!("{} splats{quality} · {} left{on}", format::integer(j.gaussians as f64), format::duration(left))
         } else {
             format!("{:.0}%", overall_progress(j) * 100.0)
         };

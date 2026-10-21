@@ -260,7 +260,7 @@ impl super::Controller {
         let Some(dir) = session.filter(|_| was) else { return };
         match self.queue_reconstruction(dir) {
             Ok(false) => self.notify(NoticeKind::Success, "Scan recorded: it is being reconstructed."),
-            Ok(true) => self.notify(NoticeKind::Success, "Scan recorded: its reconstruction waits for the ones before it."),
+            Ok(true) => self.notify(NoticeKind::Success, format!("Scan recorded: its reconstruction starts {}.", self.reconstruction_waits_for())),
             Err(e) => self.notify(NoticeKind::Warning, format!("Scan recorded, not reconstructed: {e}")),
         }
     }

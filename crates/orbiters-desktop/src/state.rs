@@ -150,11 +150,13 @@ pub struct ReconstructionJob {
     pub psnr: Option<f32>,
     /// Training time so far.
     pub seconds: f32,
+    /// On the integrated GPU, while VRChat runs (settings' `reconstruct_while_playing`).
+    pub integrated: bool,
 }
 
 impl ReconstructionJob {
-    pub fn new(session_dir: PathBuf) -> Self {
-        Self { session_dir, stage: Stage::Loading, progress: 0.0, iteration: 0, iterations: 0, gaussians: 0, psnr: None, seconds: 0.0 }
+    pub fn new(session_dir: PathBuf, integrated: bool) -> Self {
+        Self { session_dir, stage: Stage::Loading, progress: 0.0, iteration: 0, iterations: 0, gaussians: 0, psnr: None, seconds: 0.0, integrated }
     }
 }
 

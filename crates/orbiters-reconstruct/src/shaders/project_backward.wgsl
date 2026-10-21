@@ -1,11 +1,10 @@
 // Projection backward: each Gaussian's 2D gradients (grad2d) to gradients of its parameters (grads, laid out like
 // params), and the densification statistics (stats: accumulated screen-space gradient norm, visible count,
-// largest radius, unused).
+// largest radius, unused). The gradient buffer (binding 3) and `grad` come from one of the sums_read_*.wgsl variants.
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<storage, read> params: array<f32>;
 @group(0) @binding(2) var<storage, read> proj: array<f32>;
-@group(0) @binding(3) var<storage, read> grad2d: array<f32>;
 @group(0) @binding(4) var<storage, read_write> grads: array<f32>;
 @group(0) @binding(5) var<storage, read_write> stats: array<vec4<f32>>;
 
@@ -27,15 +26,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let q = vec4<f32>(params[o + 6u], params[o + 7u], params[o + 8u], params[o + 9u]);
     let m = proj_math(mean, log_scale, q);
     let g = i * GRAD2D;
-    let d_mean2 = vec2<f32>(grad2d[g], grad2d[g + 1u]);
-    let d_conic = vec3<f32>(grad2d[g + 2u], grad2d[g + 3u], grad2d[g + 4u]);
+    let d_mean2 = vec2<f32>(grad(g), grad(g + 1u));
+    let d_conic = vec3<f32>(grad(g + 2u), grad(g + 3u), grad(g + 4u));
     let op = proj[i * PROJ + 6u];
     // The opacity regulariser (frame.reg.x · opacity) lets Gaussians nothing needs fade out, to be relocated.
-    grads[o + 10u] = (grad2d[g + 5u] + frame.reg.x) * op * (1.0 - op);
-    grads[o + 11u] = grad2d[g + 6u];
-    grads[o + 12u] = grad2d[g + 7u];
-    grads[o + 13u] = grad2d[g + 8u];
-    let d_z = grad2d[g + 9u];
+    grads[o + 10u] = (grad(g + 5u) + frame.reg.x) * op * (1.0 - op);
+    grads[o + 11u] = grad(g + 6u);
+    grads[o + 12u] = grad(g + 7u);
+    grads[o + 13u] = grad(g + 8u);
+    let d_z = grad(g + 9u);
 
     // Conic → 2D covariance.
     let a = m.cov.x;

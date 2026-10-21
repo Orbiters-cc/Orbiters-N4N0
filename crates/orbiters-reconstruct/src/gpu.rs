@@ -1,6 +1,7 @@
 //! The splatting kernels on the GPU (wgpu: Direct3D 12 or Vulkan on Windows, Vulkan on Linux) and the buffers they
-//! work on. One forward + backward + Adam step per call; the host reads back only the intersection count (to size
-//! the sort) and, when asked, the rendered image.
+//! work on. One forward + backward + Adam step per call. Training steps are pipelined: the host never waits for a step,
+//! the sort is sized from intersection counts read back a few steps later and dispatched over the count the GPU wrote
+//! itself. Images and parameters are read back only when asked.
 
 use crate::camera::Camera;
 use crate::cpu;
@@ -8,10 +9,83 @@ use crate::gaussians::{Gaussians, PACKED};
 use anyhow::{anyhow, Context as _};
 use bytemuck::{Pod, Zeroable};
 use std::future::Future;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 const GRAD2D: usize = 10;
 const FAR: f32 = 1000.0;
+/// Readbacks of intersection counts in flight: the host runs at most this many steps ahead of the GPU.
+const RING: usize = 3;
+/// Image sizes whose buffers a training device keeps besides the current one (full, half and quarter resolution,
+/// the depth-sample grid).
+const KEPT_SIZES: usize = 4;
+
+/// How the backward pass adds up each Gaussian's gradients over the pixels of a tile. WGSL has no float atomics, so
+/// the portable way is a compare-and-swap loop on the float's bits; native atomic adds are several times faster.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GradientSums {
+    /// Native f32 atomic adds (Vulkan with VK_EXT_shader_atomic_float, Metal).
+    Float,
+    /// 64-bit fixed point (units of 2⁻⁴⁰) with native i64 atomic adds (Vulkan with VK_KHR_shader_atomic_int64,
+    /// D3D12 with Shader Model 6.6 through DXC). The sums do not depend on the order of the adds.
+    FixedPoint,
+    /// f32 adds as compare-and-swap loops (any device with subgroups).
+    CompareAndSwap,
+}
+
+impl GradientSums {
+    pub const ALL: [Self; 3] = [Self::Float, Self::FixedPoint, Self::CompareAndSwap];
+
+    /// The fastest one `features` allow.
+    pub fn best(features: wgpu::Features) -> Self {
+        Self::ALL.into_iter().find(|s| features.contains(s.features())).unwrap_or(Self::CompareAndSwap)
+    }
+
+    /// Device features it needs.
+    pub fn features(self) -> wgpu::Features {
+        match self {
+            Self::Float => wgpu::Features::SHADER_FLOAT32_ATOMIC,
+            Self::FixedPoint => wgpu::Features::SHADER_INT64 | wgpu::Features::SHADER_INT64_ATOMIC_ALL_OPS,
+            Self::CompareAndSwap => wgpu::Features::empty(),
+        }
+    }
+
+    /// Bytes of one gradient slot.
+    fn slot_bytes(self) -> u64 {
+        if self == Self::FixedPoint {
+            8
+        } else {
+            4
+        }
+    }
+
+    /// WGSL of the backward's gradient buffer and `add`, and of the projection backward's `grad`.
+    fn sources(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Float => (include_str!("shaders/sums_float.wgsl"), include_str!("shaders/sums_read_float.wgsl")),
+            Self::FixedPoint => (include_str!("shaders/sums_fixed.wgsl"), include_str!("shaders/sums_read_fixed.wgsl")),
+            Self::CompareAndSwap => (include_str!("shaders/sums_cas.wgsl"), include_str!("shaders/sums_read_float.wgsl")),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Float => "f32 atomics",
+            Self::FixedPoint => "64-bit fixed-point atomics",
+            Self::CompareAndSwap => "compare-and-swap sums",
+        }
+    }
+}
+
+/// Choices for a training device; [`Gpu::new`] takes the defaults.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DeviceOptions {
+    /// Gradient sums to use (`None`: the fastest the adapter has). One the adapter lacks is an error.
+    pub sums: Option<GradientSums>,
+    /// Time every pass with GPU timestamps ([`Gpu::profiler`]), when the adapter can.
+    pub profile: bool,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default, Debug)]
@@ -57,7 +131,9 @@ pub struct LearningRates {
 
 /// What one training step looks at: a keyframe (colour loss) or a depth frame (depth loss).
 pub enum Target<'a> {
-    Color { rgba: &'a [u32], scene_pixels: f32, weight: f32 },
+    /// Colour loss (1 − ssim)·L1 + ssim·(1 − SSIM) over the scene pixels. With `robust` > 0, pixels inside blobs that
+    /// err by more than it (mean absolute error, 0–1) leave this step's loss: what no static scene explains.
+    Color { rgba: &'a [u32], scene_pixels: f32, weight: f32, ssim: f32, robust: f32 },
     Depth { samples: &'a [[f32; 4]], weight: f32 },
     /// No loss (forward only).
     None,
@@ -91,8 +167,13 @@ struct Kernels {
 }
 
 struct Training {
+    sums: GradientSums,
     backward: wgpu::ComputePipeline,
     loss_color: wgpu::ComputePipeline,
+    ssim_partials: wgpu::ComputePipeline,
+    ssim_gradient: wgpu::ComputePipeline,
+    robust_residual: wgpu::ComputePipeline,
+    robust_inliers: wgpu::ComputePipeline,
     depth_loss: wgpu::ComputePipeline,
     project_backward: wgpu::ComputePipeline,
     adam: wgpu::ComputePipeline,
@@ -122,6 +203,11 @@ struct ImageBuffers {
     target: wgpu::Buffer,
     mask: wgpu::Buffer,
     ranges: wgpu::Buffer,
+    /// D-SSIM partial derivatives, three vec4s a pixel (training only).
+    partials: wgpu::Buffer,
+    /// Robust loss: each pixel's error and the mask of pixels kept this step (training only).
+    resid: wgpu::Buffer,
+    kept: wgpu::Buffer,
 }
 
 /// Sort entries (two copies: the radix passes ping-pong) and the per-block digit histograms.
@@ -133,6 +219,17 @@ struct SortBuffers {
     hist_offsets: wgpu::Buffer,
 }
 
+/// A readback of one pipelined step's intersection count.
+struct Readback {
+    buffer: wgpu::Buffer,
+    /// 0 idle, 1 in flight, 2 mapped, 3 failed.
+    state: Arc<AtomicU32>,
+    submission: Option<wgpu::SubmissionIndex>,
+    /// The step's image size and sort capacity.
+    size: (u32, u32),
+    cap: u32,
+}
+
 pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -140,20 +237,119 @@ pub struct Gpu {
     k: Kernels,
     splats: Option<SplatBuffers>,
     image: Option<ImageBuffers>,
+    /// Buffers of other image sizes used lately (training devices only).
+    image_cache: Vec<ImageBuffers>,
     sort: Option<SortBuffers>,
     samples: Option<(usize, wgpu::Buffer)>,
     scan_levels: Vec<(usize, wgpu::Buffer, wgpu::Buffer)>,
     frame: wgpu::Buffer,
     total_staging: wgpu::Buffer,
+    /// Written by the `total` kernel: [count, count clamped to the sort, indirect workgroups x, y, z].
     total_out: wgpu::Buffer,
+    ring: Vec<Readback>,
+    ring_next: usize,
+    /// Per image size, a slowly decaying maximum of the intersection counts read back (sizes the sort).
+    estimates: Vec<((u32, u32), u32)>,
     pub count: usize,
     /// Adam steps taken (bias correction).
     pub step: u32,
     /// Weights of the opacity and scale (per metre) regularisers per Gaussian in training steps.
     pub opacity_reg: f32,
     pub scale_reg: f32,
+    /// Screen-space dilation in pixels² along x and y: 0.3 at the training resolution; a render on a coarser grid of
+    /// the same rays scales it to keep the footprint.
+    pub dilation: [f32; 2],
+    /// Pipelined steps whose tile entries did not all fit the sort (they were dropped for that step).
+    pub overflows: u32,
+    /// GPU timestamps per section of each step ([`DeviceOptions::profile`]).
+    pub profiler: Option<Profiler>,
     /// The first GPU error since the last step (wgpu reports them out of band).
-    errors: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    errors: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+const QUERIES: u32 = 2048;
+
+/// GPU timestamps around every compute pass, summed per section of the step.
+pub struct Profiler {
+    set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    readback: wgpu::Buffer,
+    period_ns: f64,
+    used: std::cell::Cell<u32>,
+    labels: std::cell::RefCell<Vec<&'static str>>,
+    section: std::cell::Cell<&'static str>,
+    /// Milliseconds and passes per section.
+    pub totals: std::cell::RefCell<std::collections::BTreeMap<&'static str, (f64, u64)>>,
+    /// GPU milliseconds from the first pass's start to the last pass's end, summed over profiled steps, and steps.
+    pub span: std::cell::Cell<(f64, u64)>,
+}
+
+impl Profiler {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let set = device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("timestamps"), ty: wgpu::QueryType::Timestamp, count: QUERIES });
+        let bytes = QUERIES as u64 * 8;
+        let resolve = device.create_buffer(&wgpu::BufferDescriptor { label: Some("timestamps resolve"), size: bytes, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor { label: Some("timestamps readback"), size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        Self {
+            set,
+            resolve,
+            readback,
+            period_ns: queue.get_timestamp_period() as f64,
+            used: std::cell::Cell::new(0),
+            labels: Default::default(),
+            section: std::cell::Cell::new("other"),
+            totals: Default::default(),
+            span: std::cell::Cell::new((0.0, 0)),
+        }
+    }
+
+    fn next(&self) -> Option<u32> {
+        let i = self.used.get();
+        if i + 2 > QUERIES {
+            return None;
+        }
+        self.used.set(i + 2);
+        self.labels.borrow_mut().push(self.section.get());
+        Some(i)
+    }
+
+    /// Reads this step's timestamps (waits for the step).
+    fn collect(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let n = self.used.get();
+        if n == 0 {
+            return;
+        }
+        let mut enc = device.create_command_encoder(&Default::default());
+        enc.resolve_query_set(&self.set, 0..n, &self.resolve, 0);
+        enc.copy_buffer_to_buffer(&self.resolve, 0, &self.readback, 0, n as u64 * 8);
+        queue.submit([enc.finish()]);
+        self.readback.map_async(wgpu::MapMode::Read, .., |_| {});
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        let ticks: Vec<u64> = {
+            let view = self.readback.get_mapped_range(..).expect("mapped");
+            bytemuck::cast_slice::<u8, u64>(&view[..n as usize * 8]).to_vec()
+        };
+        self.readback.unmap();
+        let labels = std::mem::take(&mut *self.labels.borrow_mut());
+        let mut totals = self.totals.borrow_mut();
+        let (mut first, mut last) = (u64::MAX, 0u64);
+        for (k, label) in labels.iter().enumerate() {
+            let (a, b) = (ticks[2 * k], ticks[2 * k + 1]);
+            first = first.min(a);
+            last = last.max(b);
+            let e = totals.entry(label).or_insert((0.0, 0));
+            e.0 += b.saturating_sub(a) as f64 * self.period_ns / 1e6;
+            e.1 += 1;
+        }
+        let (s, c) = self.span.get();
+        self.span.set((s + last.saturating_sub(first) as f64 * self.period_ns / 1e6, c + 1));
+        self.used.set(0);
+    }
+
+    pub fn reset(&self) {
+        self.totals.borrow_mut().clear();
+        self.span.set((0.0, 0));
+    }
 }
 
 fn storage(device: &wgpu::Device, label: &str, bytes: u64) -> wgpu::Buffer {
@@ -186,6 +382,10 @@ fn groups_of(blocks: usize) -> (u32, u32) {
 
 impl Gpu {
     pub fn new() -> anyhow::Result<Self> {
+        Self::with_options(DeviceOptions::default())
+    }
+
+    pub fn with_options(options: DeviceOptions) -> anyhow::Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, ..wgpu::InstanceDescriptor::new_without_display_handle() });
         let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -193,36 +393,54 @@ impl Gpu {
         }))
         .map_err(|e| anyhow!("no GPU adapter: {e}"))?;
         let info = adapter.get_info();
-        if !adapter.features().contains(wgpu::Features::SUBGROUP) {
+        let available = adapter.features();
+        if !available.contains(wgpu::Features::SUBGROUP) {
             anyhow::bail!("{} has no subgroup operations, which reconstruction needs.", info.name);
         }
-        let limits = adapter.limits();
+        let sums = match options.sums {
+            Some(s) if !available.contains(s.features()) => anyhow::bail!("{} cannot do {}", info.name, s.name()),
+            Some(s) => s,
+            None => GradientSums::best(available),
+        };
+        let profile = options.profile && available.contains(wgpu::Features::TIMESTAMP_QUERY);
+        let mut features = wgpu::Features::SUBGROUP | sums.features();
+        if profile {
+            features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
         let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("orbiters-reconstruct"),
-            required_features: wgpu::Features::SUBGROUP,
-            required_limits: limits,
+            required_features: features,
+            required_limits: adapter.limits(),
             ..Default::default()
         }))
         .map_err(|e| anyhow!("GPU device: {e}"))?;
-        let errors = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let errors = Arc::new(std::sync::Mutex::new(None::<String>));
         {
             let errors = errors.clone();
-            device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
+            device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
                 errors.lock().unwrap().get_or_insert_with(|| e.to_string());
             }));
         }
-        let mut gpu = Self::build(device, queue, format!("{} ({:?})", info.name, info.backend), true);
+        let mut gpu = Self::build(device, queue, format!("{} ({:?}, {})", info.name, info.backend, sums.name()), Some(sums));
         gpu.errors = errors;
+        if profile {
+            gpu.profiler = Some(Profiler::new(&gpu.device, &gpu.queue));
+        }
         Ok(gpu)
     }
 
     /// A renderer on someone else's device (a viewer's window): projection, sort and the forward pass only, so the
     /// device needs no features. [`Gpu::step`] takes only [`Target::None`] there.
     pub fn renderer(device: wgpu::Device, queue: wgpu::Queue) -> Self {
-        Self::build(device, queue, String::new(), false)
+        Self::build(device, queue, String::new(), None)
     }
 
-    fn build(device: wgpu::Device, queue: wgpu::Queue, adapter: String, train: bool) -> Self {
+    /// The gradient sums of a training device.
+    pub fn sums(&self) -> Option<GradientSums> {
+        self.k.training.as_ref().map(|t| t.sums)
+    }
+
+    fn build(device: wgpu::Device, queue: wgpu::Queue, adapter: String, sums: Option<GradientSums>) -> Self {
         let common = include_str!("shaders/common.wgsl");
         let module = |name: &str, parts: &[&str]| {
             let code = parts.join("\n");
@@ -249,15 +467,23 @@ impl Gpu {
         let ranges = module("ranges", &[common, include_str!("shaders/ranges.wgsl")]);
         let forward = module("raster forward", &[common, raster, include_str!("shaders/raster_forward.wgsl")]);
         let present = module("present", &[common, include_str!("shaders/present.wgsl")]);
-        let training = train.then(|| {
-            let backward = module("raster backward", &[common, raster, include_str!("shaders/raster_backward.wgsl")]);
+        let training = sums.map(|sums| {
+            let (add, read) = sums.sources();
+            let backward = module("raster backward", &[common, raster, add, include_str!("shaders/raster_backward.wgsl")]);
             let loss = module("loss", &[common, include_str!("shaders/loss.wgsl")]);
+            let ssim = module("ssim", &[common, include_str!("shaders/ssim.wgsl")]);
+            let robust = module("robust", &[common, include_str!("shaders/robust.wgsl")]);
             let depth_loss = module("depth_loss", &[common, include_str!("shaders/depth_loss.wgsl")]);
-            let project_backward = module("project_backward", &[common, include_str!("shaders/project_backward.wgsl")]);
+            let project_backward = module("project_backward", &[common, read, include_str!("shaders/project_backward.wgsl")]);
             let adam = module("adam", &[include_str!("shaders/adam.wgsl")]);
             Training {
+                sums,
                 backward: pipe(&backward, "backward"),
                 loss_color: pipe(&loss, "color"),
+                ssim_partials: pipe(&ssim, "ssim_partials"),
+                ssim_gradient: pipe(&ssim, "ssim_gradient"),
+                robust_residual: pipe(&robust, "residual"),
+                robust_inliers: pipe(&robust, "inliers"),
                 depth_loss: pipe(&depth_loss, "main"),
                 project_backward: pipe(&project_backward, "main"),
                 adam: pipe(&adam, "main"),
@@ -288,7 +514,21 @@ impl Gpu {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let total_out = storage(&device, "total", 16);
+        let total_out = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("total"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::INDIRECT,
+            mapped_at_creation: false,
+        });
+        let ring = (0..RING)
+            .map(|_| Readback {
+                buffer: device.create_buffer(&wgpu::BufferDescriptor { label: Some("total readback"), size: 16, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
+                state: Default::default(),
+                submission: None,
+                size: (0, 0),
+                cap: 0,
+            })
+            .collect();
         Self {
             adapter,
             device,
@@ -296,16 +536,23 @@ impl Gpu {
             k,
             splats: None,
             image: None,
+            image_cache: Vec::new(),
             sort: None,
             samples: None,
             scan_levels: Vec::new(),
             frame,
             total_staging,
             total_out,
+            ring,
+            ring_next: 0,
+            estimates: Vec::new(),
             count: 0,
             step: 0,
             opacity_reg: 0.0,
             scale_reg: 0.0,
+            dilation: [cpu::DILATION as f32; 2],
+            overflows: 0,
+            profiler: None,
             errors: Default::default(),
         }
     }
@@ -324,28 +571,54 @@ impl Gpu {
         self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::bytes_of(v), usage: wgpu::BufferUsages::UNIFORM })
     }
 
+    /// Names the passes dispatched from now on (profiling).
+    fn section(&self, label: &'static str) {
+        if let Some(p) = &self.profiler {
+            p.section.set(label);
+        }
+    }
+
+    fn pass<'e>(&self, enc: &'e mut wgpu::CommandEncoder) -> wgpu::ComputePass<'e> {
+        let writes = self.profiler.as_ref().and_then(|p| p.next().map(|i| (p, i)));
+        enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes: writes.map(|(p, i)| wgpu::ComputePassTimestampWrites { query_set: &p.set, beginning_of_pass_write_index: Some(i), end_of_pass_write_index: Some(i + 1) }),
+        })
+    }
+
     fn dispatch(&self, enc: &mut wgpu::CommandEncoder, pipeline: &wgpu::ComputePipeline, bind: &wgpu::BindGroup, (x, y): (u32, u32)) {
-        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+        let mut pass = self.pass(enc);
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind, &[]);
         pass.dispatch_workgroups(x, y, 1);
     }
 
-    /// Uploads Gaussians (Adam moments and statistics start at zero).
+    /// A dispatch over the workgroups the `total` kernel wrote (256-wide, over the clamped count).
+    fn dispatch_counted(&self, enc: &mut wgpu::CommandEncoder, pipeline: &wgpu::ComputePipeline, bind: &wgpu::BindGroup) {
+        let mut pass = self.pass(enc);
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        pass.dispatch_workgroups_indirect(&self.total_out, 8);
+    }
+
+    /// Uploads a new set of Gaussians (Adam moments and statistics start at zero).
     pub fn upload(&mut self, g: &Gaussians) {
+        // Counts of the previous set say nothing about this one.
+        self.wait_readbacks();
+        self.estimates.clear();
         self.upload_with_moments(g, None);
     }
 
-    /// Uploads Gaussians with their Adam moments (packed like the parameters).
+    /// Uploads Gaussians with their Adam moments (packed like the parameters): the same set after relocation.
     pub fn upload_with_moments(&mut self, g: &Gaussians, moments: Option<(&[f32], &[f32])>) {
         let n = g.len();
-        let train = self.k.training.is_some();
+        let slot_bytes = self.k.training.as_ref().map(|t| t.sums.slot_bytes());
         if self.splats.as_ref().is_none_or(|s| s.cap < n) {
             // A renderer keeps no room to spare (a viewer loads once) and no training buffers.
-            let cap = if train { (n + n / 2).max(1024) } else { n.max(1) };
+            let cap = if slot_bytes.is_some() { (n + n / 2).max(1024) } else { n.max(1) };
             let d = &self.device;
             let f = |count: usize| (count * 4) as u64;
-            let t = |count: usize| if train { f(count) } else { 0 };
+            let t = |count: usize| if slot_bytes.is_some() { f(count) } else { 0 };
             self.splats = Some(SplatBuffers {
                 cap,
                 params: storage(d, "params", f(cap * PACKED)),
@@ -355,13 +628,13 @@ impl Gpu {
                 proj: storage(d, "projected", f(cap * 16)),
                 counts: storage(d, "tile counts", f(cap)),
                 offsets: storage(d, "tile offsets", f(cap)),
-                grad2d: storage(d, "grad2d", t(cap * GRAD2D)),
+                grad2d: storage(d, "grad2d", slot_bytes.unwrap_or(0) * (cap * GRAD2D) as u64),
                 stats: storage(d, "stats", t(cap * 4)),
             });
         }
         let s = self.splats.as_ref().expect("allocated");
         self.queue.write_buffer(&s.params, 0, bytemuck::cast_slice(&g.pack()));
-        if train {
+        if slot_bytes.is_some() {
             let zeros = vec![0f32; n * PACKED];
             let (m1, m2) = moments.unwrap_or((&zeros, &zeros));
             self.queue.write_buffer(&s.m1, 0, bytemuck::cast_slice(m1));
@@ -415,19 +688,36 @@ impl Gpu {
         if self.image.as_ref().is_some_and(|i| i.width == w && i.height == h) {
             return;
         }
+        let train = self.k.training.is_some();
+        if let Some(old) = self.image.take() {
+            // A viewer's sizes follow its window: it keeps none.
+            if train {
+                self.image_cache.push(old);
+                if self.image_cache.len() > KEPT_SIZES {
+                    self.image_cache.remove(0);
+                }
+            }
+        }
+        if let Some(k) = self.image_cache.iter().position(|i| i.width == w && i.height == h) {
+            self.image = Some(self.image_cache.remove(k));
+            return;
+        }
         let d = &self.device;
         let px = (w * h) as u64;
         let tiles = (w.div_ceil(cpu::TILE) * h.div_ceil(cpu::TILE)) as u64;
-        let train = if self.k.training.is_some() { 1 } else { 0 };
+        let t = if train { px } else { 0 };
         self.image = Some(ImageBuffers {
             width: w,
             height: h,
             out_color: storage(d, "out colour", px * 16),
             out_state: storage(d, "out state", px * 8),
-            d_pixel: storage(d, "d pixel", train * px * 16),
-            target: storage(d, "target", train * px * 4),
-            mask: storage(d, "mask", train * px * 4),
+            d_pixel: storage(d, "d pixel", t * 16),
+            target: storage(d, "target", t * 4),
+            mask: storage(d, "mask", t * 4),
             ranges: storage(d, "tile ranges", tiles * 8),
+            partials: storage(d, "ssim partials", t * 48),
+            resid: storage(d, "residual", t * 4),
+            kept: storage(d, "kept pixels", t * 4),
         });
     }
 
@@ -477,11 +767,12 @@ impl Gpu {
         }
     }
 
-    fn frame_for(&self, cam: &Camera, background: [f32; 3], intersections: u32, loss: [f32; 4], train: bool) -> Frame {
+    fn frame_for(&self, cam: &Camera, background: [f32; 3], loss: [f32; 4], train: bool) -> Frame {
         let tiles_x = cam.width.div_ceil(cpu::TILE);
         let tiles_y = cam.height.div_ceil(cpu::TILE);
         let tiles = (tiles_x * tiles_y).max(2);
         let tile_bits = 32 - (tiles - 1).leading_zeros();
+        let (opacity_reg, scale_reg) = if train { (self.opacity_reg, self.scale_reg) } else { (0.0, 0.0) };
         Frame {
             r0: [cam.r[0][0], cam.r[0][1], cam.r[0][2], cam.t[0]],
             r1: [cam.r[1][0], cam.r[1][1], cam.r[1][2], cam.t[1]],
@@ -495,14 +786,62 @@ impl Gpu {
             ],
             background: [background[0], background[1], background[2], 0.0],
             size: [cam.width, cam.height, tiles_x, tiles_y],
-            counts: [self.count as u32, intersections, 32 - tile_bits, 0],
+            counts: [self.count as u32, 0, 32 - tile_bits, 0],
             loss,
-            reg: if train { [self.opacity_reg, self.scale_reg, 0.0, 0.0] } else { [0.0; 4] },
+            reg: [opacity_reg, scale_reg, self.dilation[0], self.dilation[1]],
         }
     }
 
-    /// Renders (and, with a target, takes one optimisation step with `lr`). Returns the number of tile
-    /// intersections.
+    fn estimate(&self, size: (u32, u32)) -> Option<u32> {
+        self.estimates.iter().find(|(s, _)| *s == size).map(|(_, e)| *e)
+    }
+
+    /// Folds an intersection count of an image size into its estimate (a maximum that decays by a 32nd a count).
+    fn note_total(&mut self, size: (u32, u32), total: u32) {
+        match self.estimates.iter_mut().find(|(s, _)| *s == size) {
+            Some((_, e)) => *e = total.max(*e - *e / 32),
+            None => self.estimates.push((size, total)),
+        }
+    }
+
+    /// Takes the count of a readback slot that has arrived (frees the slot either way once it is no longer in flight).
+    fn take_readback(&mut self, slot: usize) {
+        let state = self.ring[slot].state.load(Ordering::SeqCst);
+        if state == 2 {
+            let r = &self.ring[slot];
+            let total = {
+                let view = r.buffer.get_mapped_range(..).expect("mapped");
+                bytemuck::cast_slice::<u8, u32>(&view)[0]
+            };
+            r.buffer.unmap();
+            let (size, cap) = (r.size, r.cap);
+            if total > cap {
+                self.overflows += 1;
+            }
+            self.note_total(size, total);
+        }
+        if state >= 2 {
+            self.ring[slot].state.store(0, Ordering::SeqCst);
+        }
+    }
+
+    /// Waits for a slot's readback if it is in flight, then takes it.
+    fn wait_readback(&mut self, slot: usize) {
+        if self.ring[slot].state.load(Ordering::SeqCst) == 1 {
+            let index = self.ring[slot].submission.clone();
+            let _ = self.device.poll(wgpu::PollType::Wait { submission_index: index, timeout: None });
+        }
+        self.take_readback(slot);
+    }
+
+    fn wait_readbacks(&mut self) {
+        for slot in 0..RING {
+            self.wait_readback(slot);
+        }
+    }
+
+    /// Renders (and, with a target, takes one optimisation step with `lr`). Returns the number of tile intersections:
+    /// on a training device the latest count read back for this image size (a few steps old, as steps do not wait).
     pub fn step(&mut self, cam: &Camera, background: [f32; 3], target: Target<'_>, lr: Option<LearningRates>) -> anyhow::Result<u32> {
         let n = self.count;
         if n == 0 {
@@ -511,83 +850,136 @@ impl Gpu {
         if !matches!(target, Target::None) {
             self.training()?;
         }
+        if let Some(e) = self.errors.lock().unwrap().take() {
+            anyhow::bail!("GPU error: {e}");
+        }
         self.ensure_image(cam.width, cam.height);
-        let loss = match &target {
-            Target::Color { scene_pixels, weight, .. } => [*weight, 0.0, 0.0, *scene_pixels],
-            Target::Depth { samples, weight } => [0.0, *weight, 0.0, samples.iter().filter(|s| s[2] > 0.0).count() as f32],
-            Target::None => [0.0; 4],
+        let size = (cam.width, cam.height);
+        let (loss, ssim, robust) = match &target {
+            // loss.y holds the robust threshold for colour steps, loss.z the D-SSIM weight.
+            Target::Color { scene_pixels, weight, ssim, robust, .. } => ([*weight, *robust, *ssim, *scene_pixels], *ssim, *robust),
+            Target::Depth { samples, weight } => ([0.0, *weight, 0.0, samples.iter().filter(|s| s[2] > 0.0).count() as f32], 0.0, 0.0),
+            Target::None => ([0.0; 4], 0.0, 0.0),
         };
         let train = !matches!(target, Target::None);
-        // Pass 1: project and count tile intersections.
-        let frame = self.frame_for(cam, background, 0, loss, train);
+        // Each sort copy (sized half again over the entries) must fit one storage binding.
+        let max_entries = (self.device.limits().max_storage_buffer_binding_size / 4 * 2 / 3).min(u32::MAX as u64) as u32;
+        let frame = self.frame_for(cam, background, loss, train);
         self.queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));
         let (params, proj, counts, offsets) = {
             let s = self.splats.as_ref().context("no Gaussians")?;
             (s.params.clone(), s.proj.clone(), s.counts.clone(), s.offsets.clone())
         };
+        // A training device sizes the sort from the counts read back for this image size, without waiting: entries
+        // past the end are dropped for this step and counted as an overflow when its count arrives, and the buffers
+        // grow for the next steps. The first step at a size, and every step of a viewer, waits for its own count.
+        if self.k.training.is_some() {
+            let _ = self.device.poll(wgpu::PollType::Poll);
+            for slot in 0..RING {
+                self.take_readback(slot);
+            }
+        }
+        let pipelined = self.k.training.is_some().then(|| self.estimate(size)).flatten();
+        let cap = match pipelined {
+            Some(est) => {
+                let est = est as usize;
+                self.ensure_sort((est + est / 4 + 4096).min(max_entries as usize));
+                self.sort.as_ref().expect("sort").cap.min(max_entries as usize) as u32
+            }
+            None => 0,
+        };
         let mut enc = self.device.create_command_encoder(&Default::default());
+        self.section("project");
         let bind = self.bind(&self.k.project, &[(0, &self.frame), (1, &params), (2, &proj), (3, &counts)]);
         self.dispatch(&mut enc, &self.k.project, &bind, groups(n));
         self.scan(&mut enc, &counts, &offsets, n, 0);
-        let info = self.uniform(&[n as u32, 0, 0, 0]);
+        let info = self.uniform(&[n as u32, cap, 0, 0]);
         let total_out = self.total_out.clone();
         let bind = self.bind(&self.k.total, &[(0, &info), (1, &counts), (2, &offsets), (3, &total_out)]);
         self.dispatch(&mut enc, &self.k.total, &bind, (1, 1));
-        enc.copy_buffer_to_buffer(&total_out, 0, &self.total_staging, 0, 16);
-        self.queue.submit([enc.finish()]);
-        self.total_staging.map_async(wgpu::MapMode::Read, .., |_| {});
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        let total = {
-            let view = self.total_staging.get_mapped_range(..).expect("mapped");
-            bytemuck::cast_slice::<u8, u32>(&view)[0]
+        // Pipelined: the sort's capacity (the kernels read the true, clamped count); else the count, waited for.
+        let total = if pipelined.is_some() {
+            cap
+        } else {
+            enc.copy_buffer_to_buffer(&total_out, 0, &self.total_staging, 0, 16);
+            self.queue.submit([enc.finish()]);
+            enc = self.device.create_command_encoder(&Default::default());
+            self.total_staging.map_async(wgpu::MapMode::Read, .., |_| {});
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            let total = {
+                let view = self.total_staging.get_mapped_range(..).expect("mapped");
+                bytemuck::cast_slice::<u8, u32>(&view)[0]
+            };
+            self.total_staging.unmap();
+            anyhow::ensure!(total <= max_entries, "{total} tile entries in one view: more than the GPU can sort ({max_entries})");
+            self.ensure_sort(total as usize);
+            self.note_total(size, total);
+            total
         };
-        self.total_staging.unmap();
-
-        // Pass 2: sort, rasterise, and with a target: loss, backward, Adam.
-        self.ensure_sort(total as usize);
-        if let Some(e) = self.errors.lock().unwrap().take() {
-            anyhow::bail!("GPU error: {e}");
-        }
-        // Each sort copy (sized half again over the entries) must fit one storage binding.
-        let max_entries = (self.device.limits().max_storage_buffer_binding_size / 4 * 2 / 3).min(u32::MAX as u64) as u32;
-        anyhow::ensure!(total <= max_entries, "{total} tile entries in one view: more than the GPU can sort ({max_entries})");
-        let frame = self.frame_for(cam, background, total, loss, train);
-        self.queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));
         let (keys, values, hist, hist_offsets) = {
             let s = self.sort.as_ref().expect("sort");
             (s.keys.clone(), s.values.clone(), s.hist.clone(), s.hist_offsets.clone())
         };
-        let (out_color, out_state, d_pixel, target_buf, mask, ranges) = {
+        let (out_color, out_state, d_pixel, target_buf, mask, ranges, partials, resid, kept) = {
             let i = self.image.as_ref().expect("image");
-            (i.out_color.clone(), i.out_state.clone(), i.d_pixel.clone(), i.target.clone(), i.mask.clone(), i.ranges.clone())
+            (i.out_color.clone(), i.out_state.clone(), i.d_pixel.clone(), i.target.clone(), i.mask.clone(), i.ranges.clone(), i.partials.clone(), i.resid.clone(), i.kept.clone())
         };
-        let mut enc = self.device.create_command_encoder(&Default::default());
         enc.clear_buffer(&ranges, 0, None);
         if total > 0 {
+            self.section("duplicate");
             let bind = self.bind(&self.k.duplicate, &[(0, &self.frame), (1, &proj), (2, &offsets), (3, &keys[0]), (4, &values[0])]);
             self.dispatch(&mut enc, &self.k.duplicate, &bind, groups(n));
+            // Pipelined, the histograms' stride is the capacity's blocks and only the counted blocks scatter.
             let blocks = (total as usize).div_ceil(256);
+            self.section("sort");
             for pass in 0..8u32 {
                 let (a, b) = ((pass % 2) as usize, ((pass + 1) % 2) as usize);
                 let info = self.uniform(&SortInfo { n: total, blocks: blocks as u32, shift: pass * 4, pad: 0 });
-                let bind = self.bind(&self.k.sort_count, &[(0, &info), (1, &keys[a]), (3, &hist)]);
+                let bind = self.bind(&self.k.sort_count, &[(0, &info), (1, &keys[a]), (3, &hist), (6, &total_out)]);
                 self.dispatch(&mut enc, &self.k.sort_count, &bind, groups_of(blocks));
                 self.scan(&mut enc, &hist, &hist_offsets, blocks * 16, 0);
-                let bind = self.bind(&self.k.sort_scatter, &[(0, &info), (1, &keys[a]), (2, &values[a]), (3, &hist_offsets), (4, &keys[b]), (5, &values[b])]);
-                self.dispatch(&mut enc, &self.k.sort_scatter, &bind, groups_of(blocks));
+                let bind = self.bind(&self.k.sort_scatter, &[(0, &info), (1, &keys[a]), (2, &values[a]), (3, &hist_offsets), (4, &keys[b]), (5, &values[b]), (6, &total_out)]);
+                if pipelined.is_some() {
+                    self.dispatch_counted(&mut enc, &self.k.sort_scatter, &bind);
+                } else {
+                    self.dispatch(&mut enc, &self.k.sort_scatter, &bind, groups_of(blocks));
+                }
             }
-            let bind = self.bind(&self.k.ranges, &[(0, &self.frame), (1, &keys[0]), (2, &ranges)]);
-            self.dispatch(&mut enc, &self.k.ranges, &bind, groups(total as usize));
+            self.section("ranges");
+            let bind = self.bind(&self.k.ranges, &[(0, &self.frame), (1, &keys[0]), (2, &ranges), (3, &total_out)]);
+            if pipelined.is_some() {
+                self.dispatch_counted(&mut enc, &self.k.ranges, &bind);
+            } else {
+                self.dispatch(&mut enc, &self.k.ranges, &bind, groups(total as usize));
+            }
         }
         let tiles = (cam.width.div_ceil(cpu::TILE), cam.height.div_ceil(cpu::TILE));
+        self.section("forward");
         let bind = self.bind(&self.k.forward, &[(0, &self.frame), (1, &proj), (2, &values[0]), (3, &ranges), (4, &out_color), (5, &out_state)]);
         self.dispatch(&mut enc, &self.k.forward, &bind, tiles);
         match target {
             Target::Color { rgba, .. } => {
                 self.queue.write_buffer(&target_buf, 0, bytemuck::cast_slice(rgba));
                 let t = self.training()?;
-                let bind = self.bind(&t.loss_color, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &mask), (4, &d_pixel)]);
-                self.dispatch(&mut enc, &t.loss_color, &bind, groups((cam.width * cam.height) as usize));
+                self.section("loss");
+                // The pixels this step trains on: the scene mask, less the robust loss's outlier blobs.
+                let mut used = mask.clone();
+                if robust > 0.0 {
+                    let bind = self.bind(&t.robust_residual, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &mask), (4, &resid)]);
+                    self.dispatch(&mut enc, &t.robust_residual, &bind, groups((cam.width * cam.height) as usize));
+                    let bind = self.bind(&t.robust_inliers, &[(0, &self.frame), (3, &mask), (4, &resid), (5, &kept)]);
+                    self.dispatch(&mut enc, &t.robust_inliers, &bind, tiles);
+                    used = kept.clone();
+                }
+                if ssim > 0.0 {
+                    let bind = self.bind(&t.ssim_partials, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &used), (4, &partials)]);
+                    self.dispatch(&mut enc, &t.ssim_partials, &bind, tiles);
+                    let bind = self.bind(&t.ssim_gradient, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &used), (4, &partials), (5, &d_pixel)]);
+                    self.dispatch(&mut enc, &t.ssim_gradient, &bind, tiles);
+                } else {
+                    let bind = self.bind(&t.loss_color, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &used), (4, &d_pixel)]);
+                    self.dispatch(&mut enc, &t.loss_color, &bind, groups((cam.width * cam.height) as usize));
+                }
             }
             Target::Depth { samples, .. } => {
                 if self.samples.as_ref().is_none_or(|(c, _)| *c < samples.len()) {
@@ -600,6 +992,7 @@ impl Gpu {
                 self.queue.write_buffer(&buf, 0, bytemuck::cast_slice(&padded));
                 enc.clear_buffer(&d_pixel, 0, None);
                 let t = self.training()?;
+                self.section("depth_loss");
                 let bind = self.bind(&t.depth_loss, &[(0, &self.frame), (1, &out_color), (2, &buf), (3, &d_pixel)]);
                 self.dispatch(&mut enc, &t.depth_loss, &bind, groups(padded.len()));
             }
@@ -611,8 +1004,27 @@ impl Gpu {
                 self.adam(&mut enc, lr);
             }
         }
-        self.queue.submit([enc.finish()]);
-        Ok(total)
+        if pipelined.is_some() {
+            // The count comes back through the ring; a slot still in flight is waited for first.
+            let slot = self.ring_next;
+            self.ring_next = (slot + 1) % RING;
+            self.wait_readback(slot);
+            enc.copy_buffer_to_buffer(&total_out, 0, &self.ring[slot].buffer, 0, 16);
+            let index = self.queue.submit([enc.finish()]);
+            let r = &mut self.ring[slot];
+            r.size = size;
+            r.cap = cap;
+            r.submission = Some(index);
+            r.state.store(1, Ordering::SeqCst);
+            let state = r.state.clone();
+            r.buffer.map_async(wgpu::MapMode::Read, .., move |res| state.store(if res.is_ok() { 2 } else { 3 }, Ordering::SeqCst));
+        } else {
+            self.queue.submit([enc.finish()]);
+        }
+        if let Some(p) = &self.profiler {
+            p.collect(&self.device, &self.queue);
+        }
+        Ok(if pipelined.is_some() { self.estimate(size).unwrap_or(0) } else { total })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -629,8 +1041,10 @@ impl Gpu {
         let s = self.splats.as_ref().expect("splats");
         enc.clear_buffer(&s.grad2d, 0, None);
         let t = self.k.training.as_ref().expect("a training GPU");
+        self.section("backward");
         let bind = self.bind(&t.backward, &[(0, &self.frame), (1, proj), (2, values), (3, ranges), (5, out_state), (6, d_pixel), (7, &s.grad2d)]);
         self.dispatch(enc, &t.backward, &bind, tiles);
+        self.section("project_backward");
         let bind = self.bind(&t.project_backward, &[(0, &self.frame), (1, &s.params), (2, proj), (3, &s.grad2d), (4, &s.grads), (5, &s.stats)]);
         self.dispatch(enc, &t.project_backward, &bind, groups(self.count));
     }
@@ -647,6 +1061,7 @@ impl Gpu {
         let info = self.uniform(&AdamInfo { lr: rates, beta: [0.9, 0.999, 1e-15, 0.0], n: [n as u32, self.step, 0, 0] });
         let s = self.splats.as_ref().expect("splats");
         let t = self.k.training.as_ref().expect("a training GPU");
+        self.section("adam");
         let bind = self.bind(&t.adam, &[(0, &info), (1, &s.params), (2, &s.grads), (3, &s.m1), (4, &s.m2)]);
         self.dispatch(enc, &t.adam, &bind, groups(n));
     }
@@ -690,6 +1105,19 @@ impl Gpu {
         self.read::<f32>(&i.out_color, px * 4).as_chunks::<4>().0.to_vec()
     }
 
+    /// The pixels the last robust colour step kept (1) or left out (0).
+    pub fn read_kept(&self) -> Vec<f32> {
+        let i = self.image.as_ref().expect("image");
+        self.read::<f32>(&i.kept, (i.width * i.height) as usize)
+    }
+
+    /// The last step's loss gradient per pixel (r, g, b, depth), for tests.
+    pub fn read_d_pixel(&self) -> Vec<[f32; 4]> {
+        let i = self.image.as_ref().expect("image");
+        let px = (i.width * i.height) as usize;
+        self.read::<f32>(&i.d_pixel, px * 4).as_chunks::<4>().0.to_vec()
+    }
+
     /// The last rendered final transmittance per pixel.
     pub fn read_transmittance(&self) -> Vec<f32> {
         let i = self.image.as_ref().expect("image");
@@ -722,55 +1150,66 @@ mod tests {
         (g, cam)
     }
 
+    /// A training device for every kind of gradient sums this adapter can do (none without a suitable GPU).
+    fn devices() -> Vec<Gpu> {
+        GradientSums::ALL
+            .into_iter()
+            .filter_map(|sums| match Gpu::with_options(DeviceOptions { sums: Some(sums), ..Default::default() }) {
+                Ok(gpu) => Some(gpu),
+                Err(e) => {
+                    eprintln!("skipped {sums:?}: {e:#}");
+                    None
+                }
+            })
+            .collect()
+    }
+
     #[test]
     fn forward_and_backward_match_the_cpu_reference() {
-        let gpu = Gpu::new();
-        let Ok(mut gpu) = gpu else {
-            eprintln!("skipped: {}", gpu.err().expect("error"));
-            return;
-        };
-        eprintln!("adapter {}", gpu.adapter);
-        let bg = [0.1f32, 0.2, 0.3];
-        for (count, w, h, seed) in [(7, 40, 30, 3), (3000, 150, 90, 5)] {
-            let (g, cam) = scene(count, w, h, seed);
-            gpu.upload(&g);
-            let total = gpu.step(&cam, bg, Target::None, None).expect("step");
-            let img = gpu.read_image();
-            let tr = gpu.read_transmittance();
-            let cpu = cpu::render(&g, &cam, bg.map(f64::from), cpu::Rules::GPU);
-            let n = (w * h) as usize;
-            let mut worst = [0f64; 3];
-            for k in 0..n {
-                for (ch, v) in img[k][..3].iter().enumerate() {
-                    worst[0] = worst[0].max((*v as f64 - cpu.color[k * 3 + ch]).abs());
+        for mut gpu in devices() {
+            eprintln!("adapter {}", gpu.adapter);
+            let bg = [0.1f32, 0.2, 0.3];
+            for (count, w, h, seed) in [(7, 40, 30, 3), (3000, 150, 90, 5)] {
+                let (g, cam) = scene(count, w, h, seed);
+                gpu.upload(&g);
+                let total = gpu.step(&cam, bg, Target::None, None).expect("step");
+                let img = gpu.read_image();
+                let tr = gpu.read_transmittance();
+                let cpu = cpu::render(&g, &cam, bg.map(f64::from), cpu::Rules::GPU);
+                let n = (w * h) as usize;
+                let mut worst = [0f64; 3];
+                for k in 0..n {
+                    for (ch, v) in img[k][..3].iter().enumerate() {
+                        worst[0] = worst[0].max((*v as f64 - cpu.color[k * 3 + ch]).abs());
+                    }
+                    worst[1] = worst[1].max((img[k][3] as f64 - cpu.depth[k]).abs() / cpu.depth[k].max(1.0));
+                    worst[2] = worst[2].max((tr[k] as f64 - cpu.transmittance[k]).abs());
                 }
-                worst[1] = worst[1].max((img[k][3] as f64 - cpu.depth[k]).abs() / cpu.depth[k].max(1.0));
-                worst[2] = worst[2].max((tr[k] as f64 - cpu.transmittance[k]).abs());
-            }
-            eprintln!("{count} Gaussians {w}×{h}: {total} intersections, worst colour {:.2e}, depth {:.2e}, T {:.2e}", worst[0], worst[1], worst[2]);
-            assert!(total > 0);
-            assert!(worst[0] < 2e-3 && worst[1] < 2e-3 && worst[2] < 2e-3, "{worst:?}");
+                eprintln!("{count} Gaussians {w}×{h}: {total} intersections, worst colour {:.2e}, depth {:.2e}, T {:.2e}", worst[0], worst[1], worst[2]);
+                assert!(total > 0);
+                assert!(worst[0] < 2e-3 && worst[1] < 2e-3 && worst[2] < 2e-3, "{worst:?}");
 
-            let mut rng = fastrand::Rng::with_seed(seed + 100);
-            let d_pixel: Vec<[f32; 4]> = (0..n).map(|_| [rng.f32() - 0.5, rng.f32() - 0.5, rng.f32() - 0.5, (rng.f32() - 0.5) * 0.2]).collect();
-            gpu.backward_from(&cam, &d_pixel);
-            let grads = gpu.read_grads();
-            let dc: Vec<f64> = d_pixel.iter().flat_map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
-            let dd: Vec<f64> = d_pixel.iter().map(|p| p[3] as f64).collect();
-            let reference = cpu::backward(&g, &cam, bg.map(f64::from), cpu::Rules::GPU, &dc, &dd);
-            // Compare each group against its largest magnitude (f32 atomics sum in any order).
-            let groups: [(&str, Vec<(usize, f64)>); 5] = [
-                ("means", (0..g.len()).flat_map(|i| (0..3).map(move |k| (i, k))).map(|(i, k)| (i * PACKED + k, reference.means[i][k])).collect()),
-                ("log_scales", (0..g.len()).flat_map(|i| (0..3).map(move |k| (i, k))).map(|(i, k)| (i * PACKED + 3 + k, reference.log_scales[i][k])).collect()),
-                ("rotations", (0..g.len()).flat_map(|i| (0..4).map(move |k| (i, k))).map(|(i, k)| (i * PACKED + 6 + k, reference.rotations[i][k])).collect()),
-                ("opacity", (0..g.len()).map(|i| (i * PACKED + 10, reference.opacity_logits[i])).collect()),
-                ("colors", (0..g.len()).flat_map(|i| (0..3).map(move |k| (i, k))).map(|(i, k)| (i * PACKED + 11 + k, reference.colors[i][k])).collect()),
-            ];
-            for (name, values) in groups {
-                let scale = values.iter().map(|(_, r)| r.abs()).fold(0.0, f64::max).max(1e-9);
-                let worst = values.iter().map(|&(slot, r)| (grads[slot] as f64 - r).abs()).fold(0.0, f64::max) / scale;
-                eprintln!("  {name}: worst {worst:.2e} of {scale:.3e}");
-                assert!(worst < 1e-2, "{name}: {worst}");
+                let mut rng = fastrand::Rng::with_seed(seed + 100);
+                let d_pixel: Vec<[f32; 4]> = (0..n).map(|_| [rng.f32() - 0.5, rng.f32() - 0.5, rng.f32() - 0.5, (rng.f32() - 0.5) * 0.2]).collect();
+                gpu.backward_from(&cam, &d_pixel);
+                let grads = gpu.read_grads();
+                let dc: Vec<f64> = d_pixel.iter().flat_map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+                let dd: Vec<f64> = d_pixel.iter().map(|p| p[3] as f64).collect();
+                let reference = cpu::backward(&g, &cam, bg.map(f64::from), cpu::Rules::GPU, &dc, &dd);
+                // Compare each group against its largest magnitude (float atomics sum in any order).
+                let groups: [(&str, Vec<(usize, f64)>); 5] = [
+                    ("means", (0..g.len()).flat_map(|i| (0..3).map(move |k| (i, k))).map(|(i, k)| (i * PACKED + k, reference.means[i][k])).collect()),
+                    ("log_scales", (0..g.len()).flat_map(|i| (0..3).map(move |k| (i, k))).map(|(i, k)| (i * PACKED + 3 + k, reference.log_scales[i][k])).collect()),
+                    ("rotations", (0..g.len()).flat_map(|i| (0..4).map(move |k| (i, k))).map(|(i, k)| (i * PACKED + 6 + k, reference.rotations[i][k])).collect()),
+                    ("opacity", (0..g.len()).map(|i| (i * PACKED + 10, reference.opacity_logits[i])).collect()),
+                    ("colors", (0..g.len()).flat_map(|i| (0..3).map(move |k| (i, k))).map(|(i, k)| (i * PACKED + 11 + k, reference.colors[i][k])).collect()),
+                ];
+                for (name, values) in groups {
+                    let scale = values.iter().map(|(_, r)| r.abs()).fold(0.0, f64::max).max(1e-9);
+                    let worst = values.iter().map(|&(slot, r)| (grads[slot] as f64 - r).abs()).fold(0.0, f64::max) / scale;
+                    eprintln!("  {name}: worst {worst:.2e} of {scale:.3e}");
+                    assert!(worst < 1e-2, "{:?} {name}: {worst}", gpu.sums());
+                }
             }
         }
     }
@@ -825,6 +1264,110 @@ mod tests {
     }
 
     #[test]
+    fn pipelined_steps_render_what_waiting_steps_render_at_every_size() {
+        let Ok(mut gpu) = Gpu::new() else { return };
+        let (g, full) = scene(20_000, 640, 360, 21);
+        let half = crate::train::scaled(&full, 2);
+        gpu.upload(&g);
+        let bg = [0.0; 3];
+        // The first step at a size waits for its count; later ones at that size do not.
+        let mut images = Vec::new();
+        for cam in [&full, &half, &half, &full, &half, &full] {
+            gpu.step(cam, bg, Target::None, None).expect("step");
+            images.push(gpu.read_image());
+        }
+        assert_eq!(images[1], images[2], "half resolution, pipelined");
+        assert_eq!(images[0], images[3], "full resolution after a size change, pipelined");
+        assert_eq!(images[1], images[4]);
+        assert_eq!(images[0], images[5]);
+        gpu.wait_readbacks();
+        assert_eq!(gpu.overflows, 0);
+    }
+
+    /// f64 reference of the colour loss (1 − λ)·mean|x − y| + λ·(1 − mean SSIM) over scene pixels and channels.
+    fn ssim_loss(x: &[f64], y: &[f64], mask: &[f32], w: usize, h: usize, lambda: f64) -> f64 {
+        let g: Vec<f64> = (0..11).map(|i| (-(((i as f64) - 5.0).powi(2)) / 4.5).exp()).collect();
+        let gs: f64 = g.iter().sum();
+        let g: Vec<f64> = g.iter().map(|v| v / gs).collect();
+        let n = mask.iter().filter(|m| **m > 0.5).count() as f64 * 3.0;
+        let at = |img: &[f64], px: i64, py: i64, ch: usize| -> f64 {
+            if px < 0 || py < 0 || px >= w as i64 || py >= h as i64 || mask[py as usize * w + px as usize] < 0.5 {
+                0.0
+            } else {
+                img[(py as usize * w + px as usize) * 3 + ch]
+            }
+        };
+        let (mut l1, mut s) = (0.0, 0.0);
+        for py in 0..h {
+            for px in 0..w {
+                if mask[py * w + px] < 0.5 {
+                    continue;
+                }
+                for ch in 0..3 {
+                    l1 += (x[(py * w + px) * 3 + ch] - y[(py * w + px) * 3 + ch]).abs();
+                    let (mut mx, mut my, mut xx, mut yy, mut xy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+                    for dy in 0..11 {
+                        for dx in 0..11 {
+                            let wgt = g[dy] * g[dx];
+                            let (qx, qy) = (px as i64 + dx as i64 - 5, py as i64 + dy as i64 - 5);
+                            let (a, b) = (at(x, qx, qy, ch), at(y, qx, qy, ch));
+                            mx += wgt * a;
+                            my += wgt * b;
+                            xx += wgt * a * a;
+                            yy += wgt * b * b;
+                            xy += wgt * a * b;
+                        }
+                    }
+                    let (c1, c2) = (0.0001, 0.0009);
+                    s += (2.0 * mx * my + c1) * (2.0 * (xy - mx * my) + c2) / ((mx * mx + my * my + c1) * ((xx - mx * mx) + (yy - my * my) + c2));
+                }
+            }
+        }
+        (1.0 - lambda) * l1 / n + lambda * (1.0 - s / n)
+    }
+
+    #[test]
+    fn ssim_gradient_matches_finite_differences() {
+        for mut gpu in devices() {
+            let (w, h) = (40u32, 30u32);
+            let (g, cam) = scene(300, w, h, 11);
+            let mut rng = fastrand::Rng::with_seed(12);
+            let target: Vec<u32> = (0..w * h).map(|_| rng.u32(..) | 0xff00_0000).collect();
+            // A masked band like the capture strip.
+            let mask: Vec<f32> = (0..w * h).map(|p| if (5..9).contains(&(p / w)) && (8..30).contains(&(p % w)) { 0.0 } else { 1.0 }).collect();
+            gpu.upload(&g);
+            gpu.set_mask(w, h, &mask);
+            let scene_pixels = mask.iter().filter(|m| **m > 0.5).count() as f32;
+            let y: Vec<f64> = target.iter().flat_map(|t| (0..3).map(move |c| ((t >> (8 * c)) & 255) as f64 / 255.0)).collect();
+            for lambda in [1.0f32, 0.2] {
+                gpu.step(&cam, [0.1, 0.2, 0.3], Target::Color { rgba: &target, scene_pixels, weight: 1.0, ssim: lambda, robust: 0.0 }, None).expect("step");
+                let img = gpu.read_image();
+                let dp = gpu.read_d_pixel();
+                let x: Vec<f64> = img.iter().flat_map(|p| (0..3).map(move |c| p[c] as f64)).collect();
+                let mut worst = 0f64;
+                let mut scale = 0f64;
+                for k in 0..40 {
+                    let p = (k * 397 + 13) % (w * h) as usize;
+                    let ch = k % 3;
+                    if mask[p] < 0.5 || (x[p * 3 + ch] - y[p * 3 + ch]).abs() < 1e-3 {
+                        continue;
+                    }
+                    let e = 1e-4;
+                    let mut xp = x.clone();
+                    xp[p * 3 + ch] += e;
+                    let mut xm = x.clone();
+                    xm[p * 3 + ch] -= e;
+                    let fd = (ssim_loss(&xp, &y, &mask, w as usize, h as usize, lambda as f64) - ssim_loss(&xm, &y, &mask, w as usize, h as usize, lambda as f64)) / (2.0 * e);
+                    worst = worst.max((dp[p][ch] as f64 - fd).abs());
+                    scale = scale.max(fd.abs());
+                }
+                eprintln!("{:?} λ {lambda}: worst {worst:.3e} of {scale:.3e}", gpu.sums());
+                assert!(worst < 2e-3 * scale.max(1e-6), "λ {lambda}: {worst} of {scale}");
+            }
+        }
+    }
+
+    #[test]
     fn large_scenes_sort_every_tile_entry() {
         let gpu = Gpu::new();
         let Ok(mut gpu) = gpu else {
@@ -833,32 +1376,37 @@ mod tests {
         };
         let (g, cam) = scene(400_000, 1280, 720, 9);
         gpu.upload(&g);
-        let start = std::time::Instant::now();
-        let total = gpu.step(&cam, [0.0; 3], Target::None, None).expect("step") as usize;
-        let _ = gpu.read_transmittance();
-        eprintln!("{total} intersections in {:?}", start.elapsed());
-        assert!(total > 1_000_000, "{total}");
-        let s = gpu.sort.as_ref().expect("sort");
-        let keys: Vec<u32> = gpu.read(&s.keys[0], total);
-        let values: Vec<u32> = gpu.read(&s.values[0], total);
-        let proj: Vec<f32> = gpu.read(&gpu.splats.as_ref().expect("splats").proj, g.len() * 16);
-        let tiles_x = cam.width.div_ceil(cpu::TILE);
-        let bits = 32 - (tiles_x * cam.height.div_ceil(cpu::TILE) - 1).leading_zeros();
-        let depth_bits = 32 - bits;
-        let mut per_gaussian = vec![0u32; g.len()];
-        for j in 0..total {
-            assert!(j == 0 || keys[j - 1] <= keys[j], "unsorted at {j}");
-            let i = values[j] as usize;
-            let p = &proj[i * 16..i * 16 + 16];
-            let tile = keys[j] >> depth_bits;
-            let (tx, ty) = (tile % tiles_x, tile / tiles_x);
-            assert!(tx >= p[11].to_bits() && tx < p[13].to_bits() && ty >= p[12].to_bits() && ty < p[14].to_bits(), "entry {j} outside its Gaussian's tiles");
-            per_gaussian[i] += 1;
+        // Once waiting for the count, once pipelined (sorted over the count the GPU wrote).
+        for pass in 0..2 {
+            let start = std::time::Instant::now();
+            gpu.step(&cam, [0.0; 3], Target::None, None).expect("step");
+            let total = gpu.read::<u32>(&gpu.total_out, 2)[1] as usize;
+            eprintln!("pass {pass}: {total} intersections in {:?}", start.elapsed());
+            assert!(total > 1_000_000, "{total}");
+            let s = gpu.sort.as_ref().expect("sort");
+            let keys: Vec<u32> = gpu.read(&s.keys[0], total);
+            let values: Vec<u32> = gpu.read(&s.values[0], total);
+            let proj: Vec<f32> = gpu.read(&gpu.splats.as_ref().expect("splats").proj, g.len() * 16);
+            let tiles_x = cam.width.div_ceil(cpu::TILE);
+            let bits = 32 - (tiles_x * cam.height.div_ceil(cpu::TILE) - 1).leading_zeros();
+            let depth_bits = 32 - bits;
+            let mut per_gaussian = vec![0u32; g.len()];
+            for j in 0..total {
+                assert!(j == 0 || keys[j - 1] <= keys[j], "unsorted at {j}");
+                let i = values[j] as usize;
+                let p = &proj[i * 16..i * 16 + 16];
+                let tile = keys[j] >> depth_bits;
+                let (tx, ty) = (tile % tiles_x, tile / tiles_x);
+                assert!(tx >= p[11].to_bits() && tx < p[13].to_bits() && ty >= p[12].to_bits() && ty < p[14].to_bits(), "entry {j} outside its Gaussian's tiles");
+                per_gaussian[i] += 1;
+            }
+            for (i, &c) in per_gaussian.iter().enumerate() {
+                let p = &proj[i * 16..i * 16 + 16];
+                let expected = if p[15] == 0.0 { 0 } else { (p[13].to_bits() - p[11].to_bits()) * (p[14].to_bits() - p[12].to_bits()) };
+                assert_eq!(c, expected, "Gaussian {i}");
+            }
         }
-        for (i, &c) in per_gaussian.iter().enumerate() {
-            let p = &proj[i * 16..i * 16 + 16];
-            let expected = if p[15] == 0.0 { 0 } else { (p[13].to_bits() - p[11].to_bits()) * (p[14].to_bits() - p[12].to_bits()) };
-            assert_eq!(c, expected, "Gaussian {i}");
-        }
+        gpu.wait_readbacks();
+        assert_eq!(gpu.overflows, 0);
     }
 }

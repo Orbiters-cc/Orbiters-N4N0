@@ -22,7 +22,7 @@ fn step_timings() {
         let start = Instant::now();
         for _ in 0..10 {
             total = if train {
-                gpu.step(&v.camera, [0.0; 3], Target::Color { rgba: &v.image, scene_pixels: px, weight: 1.0 }, Some(lr)).expect("step")
+                gpu.step(&v.camera, [0.0; 3], Target::Color { rgba: &v.image, scene_pixels: px, weight: 1.0, ssim: 0.2, robust: 0.0 }, Some(lr)).expect("step")
             } else {
                 gpu.step(&v.camera, [0.0; 3], Target::None, None).expect("step")
             };

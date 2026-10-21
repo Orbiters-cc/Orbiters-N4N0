@@ -1,10 +1,10 @@
-//! Training in replay mode: Adam on the keyframes' colour (masked L1) and the exact depth samples (relative L1),
-//! with MCMC-style relocation (Kheradmand et al. 2024): every so often, Gaussians that faded out move onto live ones
-//! picked by opacity, the copies sharing the original's opacity and footprint, while the set grows to its budget.
-//! Every `hold_out_every`-th keyframe is never trained on and scores the result.
+//! Training in replay mode: Adam on the keyframes' colour ((1 − λ)·L1 + λ·D-SSIM over the scene pixels) and the
+//! exact depth samples (relative L1), with MCMC-style relocation (Kheradmand et al. 2024): every so often, Gaussians
+//! that faded out move onto live ones picked by opacity, the copies sharing the original's opacity and footprint, while
+//! the set grows to its budget. Depth steps render only the depth samples' rays; colour steps can run coarse to fine. Every `hold_out_every`-th keyframe is never trained on and scores the result.
 
 use crate::camera::Camera;
-use crate::dataset::{channel, Dataset};
+use crate::dataset::{channel, Dataset, DepthView};
 use crate::gaussians::{logit, rotation_matrix, sigmoid, Gaussians, PACKED};
 use crate::gpu::{Gpu, LearningRates, Target};
 use std::time::Instant;
@@ -28,6 +28,18 @@ pub struct Settings {
     pub max_radius: f32,
     pub background: [f32; 3],
     pub seed: u64,
+    /// Weight λ of D-SSIM in the colour loss (0: L1 only).
+    pub ssim: f32,
+    /// Robust colour loss: from `robust_from` of the steps on, pixels inside blobs that err by more than this (mean
+    /// absolute error, 0–1) leave each colour step's loss: other players, animated posters, particles. 0: off.
+    pub robust: f32,
+    pub robust_from: f32,
+    /// Coarse to fine (after DashGaussian): colour steps at quarter resolution until this fraction of the steps, at
+    /// half resolution until `half_until`, then at full resolution; the position learning rate holds until then.
+    /// `half_until` 0 (the default): always full resolution. 0.15 / 0.4 trained 15–20 % faster at no cost on the clean
+    /// Canine capture, but cost about 1.2 dB on the best 90 % of VRChat Home's pixels in two repeats.
+    pub quarter_until: f32,
+    pub half_until: f32,
 }
 
 impl Default for Settings {
@@ -44,6 +56,11 @@ impl Default for Settings {
             max_radius: 0.1,
             background: [0.0; 3],
             seed: 1,
+            ssim: 0.2,
+            robust: 0.0,
+            robust_from: 0.25,
+            quarter_until: 0.0,
+            half_until: 0.0,
         }
     }
 }
@@ -58,7 +75,7 @@ pub struct Progress {
     pub iteration: u32,
     pub iterations: u32,
     pub gaussians: usize,
-    /// Tile entries of the last step (rendering cost).
+    /// Tile entries of a recent step (rendering cost).
     pub intersections: u32,
     /// Mean PSNR over the held-out keyframes, when measured at this report.
     pub psnr: Option<f32>,
@@ -141,16 +158,16 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let held_out: Vec<usize> = if settings.hold_out_every > 1 { (0..data.views.len()).filter(|i| i % settings.hold_out_every == settings.hold_out_every / 2).collect() } else { Vec::new() };
     let train_views: Vec<usize> = (0..data.views.len()).filter(|i| !held_out.contains(i)).collect();
     let depth_views: Vec<usize> = (0..data.depth_views.len()).filter(|&i| data.depth_views[i].valid() > 0).collect();
-    let samples: Vec<Vec<[f32; 4]>> = data
-        .depth_views
-        .iter()
-        .map(|d| d.pixels.iter().zip(&d.depth).filter(|(_, z)| **z > 0.0).map(|(p, z)| [p[0], p[1], *z, 0.0]).collect())
-        .collect();
+    let depth_targets: Vec<DepthTarget> = data.depth_views.iter().map(depth_target).collect();
     let scene_pixels = data.mask.iter().filter(|m| **m > 0.5).count() as f32;
     let extent = extent(data);
     let mut rng = fastrand::Rng::with_seed(settings.seed);
 
     gpu.upload(&init);
+    let coarse = if settings.half_until > 0.0 { levels(data) } else { Vec::new() };
+    for l in &coarse {
+        gpu.set_mask(l.width, l.height, &l.mask);
+    }
     gpu.set_mask(data.width, data.height, &data.mask);
     let regularise = |gpu: &mut Gpu, n: usize| {
         gpu.opacity_reg = settings.opacity_reg / n.max(1) as f32;
@@ -165,8 +182,17 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let relocate_until = iterations * 8 / 10;
     for it in 1..=iterations {
         let progress = (it - 1) as f32 / iterations as f32;
+        // Coarse to fine: this step's level (0 full, 1 half, 2 quarter resolution); positions decay from full on.
+        let level = if coarse.is_empty() || progress >= settings.half_until {
+            0
+        } else if progress < settings.quarter_until {
+            2
+        } else {
+            1
+        };
+        let decay = if coarse.is_empty() { progress } else { ((progress - settings.half_until) / (1.0 - settings.half_until)).max(0.0) };
         let lr = LearningRates {
-            means: 1.6e-4 * extent * (0.01f32).powf(progress),
+            means: 1.6e-4 * extent * (0.01f32).powf(decay),
             log_scales: 0.005,
             rotations: 0.001,
             opacity: 0.05,
@@ -174,11 +200,20 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
         };
         let depth_step = !depth_views.is_empty() && settings.depth_weight > 0.0 && it % settings.depth_every.max(1) == 0;
         let intersections = if depth_step {
-            let d = depth_views[rng.usize(..depth_views.len())];
-            gpu.step(&data.depth_views[d].camera, settings.background, Target::Depth { samples: &samples[d], weight: settings.depth_weight }, Some(lr))?
+            let t = &depth_targets[depth_views[rng.usize(..depth_views.len())]];
+            let full = gpu.dilation;
+            gpu.dilation = t.dilation;
+            let stepped = gpu.step(&t.camera, settings.background, Target::Depth { samples: &t.samples, weight: settings.depth_weight }, Some(lr));
+            gpu.dilation = full;
+            stepped?
         } else {
             let v = train_views[rng.usize(..train_views.len())];
-            gpu.step(&data.views[v].camera, settings.background, Target::Color { rgba: &data.views[v].image, scene_pixels, weight: 1.0 }, Some(lr))?
+            let (camera, rgba, pixels) = match level {
+                0 => (&data.views[v].camera, &data.views[v].image, scene_pixels),
+                l => (&coarse[l - 1].cameras[v], &coarse[l - 1].images[v], coarse[l - 1].scene_pixels),
+            };
+            let robust = if progress >= settings.robust_from { settings.robust } else { 0.0 };
+            gpu.step(camera, settings.background, Target::Color { rgba, scene_pixels: pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr))?
         };
         if it % settings.relocate_every == 0 && it >= 500 && it <= relocate_until {
             let (mut current, mut m1, mut m2, stats) = gpu.download();
@@ -203,10 +238,105 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
         }
     }
     let (g, _, _, _) = gpu.download();
+    if gpu.overflows > 0 {
+        eprintln!("{} steps had more tile entries than the sort expected (dropped for that step)", gpu.overflows);
+    }
     let psnr_held_out = evaluate(gpu, data, &held_out, settings.background)?;
     let sample: Vec<usize> = train_views.iter().copied().step_by((train_views.len() / 8).max(1)).collect();
     let psnr_train = evaluate(gpu, data, &sample, settings.background)?.unwrap_or(0.0);
     Ok(Outcome { gaussians: g, iterations, held_out, psnr_held_out, psnr_train, seconds: start.elapsed().as_secs_f32() })
+}
+
+/// Keyframes at a coarser resolution: images box-filtered by 2 or 4 from the training resolution, their cameras, and
+/// the mask (a coarse pixel is scene only if all its pixels are).
+struct Level {
+    width: u32,
+    height: u32,
+    mask: Vec<f32>,
+    scene_pixels: f32,
+    images: Vec<Vec<u32>>,
+    cameras: Vec<Camera>,
+}
+
+fn half_image(image: &[u32], w: u32, h: u32) -> Vec<u32> {
+    let (hw, hh) = (w / 2, h / 2);
+    let mut out = vec![0u32; (hw * hh) as usize];
+    for y in 0..hh {
+        for x in 0..hw {
+            let at = |dx: u32, dy: u32| image[((2 * y + dy) * w + 2 * x + dx) as usize];
+            let px = [at(0, 0), at(1, 0), at(0, 1), at(1, 1)];
+            let mut v = 255u32 << 24;
+            for c in 0..3 {
+                let sum: u32 = px.iter().map(|p| (p >> (8 * c)) & 255).sum();
+                v |= ((sum + 2) / 4) << (8 * c);
+            }
+            out[(y * hw + x) as usize] = v;
+        }
+    }
+    out
+}
+
+fn half_mask(mask: &[f32], w: u32, h: u32) -> Vec<f32> {
+    let (hw, hh) = (w / 2, h / 2);
+    let mut out = vec![0f32; (hw * hh) as usize];
+    for y in 0..hh {
+        for x in 0..hw {
+            let at = |dx: u32, dy: u32| mask[((2 * y + dy) * w + 2 * x + dx) as usize];
+            out[(y * hw + x) as usize] = at(0, 0).min(at(1, 0)).min(at(0, 1)).min(at(1, 1));
+        }
+    }
+    out
+}
+
+/// The camera of an image box-filtered by `factor` (pixel centres at integers on both).
+pub fn scaled(c: &Camera, factor: u32) -> Camera {
+    let f = factor as f32;
+    Camera { r: c.r, t: c.t, fx: c.fx / f, fy: c.fy / f, cx: (c.cx + 0.5) / f - 0.5, cy: (c.cy + 0.5) / f - 0.5, width: c.width / factor, height: c.height / factor }
+}
+
+fn levels(data: &Dataset) -> Vec<Level> {
+    let mut out: Vec<Level> = Vec::new();
+    let (mut w, mut h) = (data.width, data.height);
+    let mut images: Vec<Vec<u32>> = data.views.iter().map(|v| v.image.clone()).collect();
+    let mut mask = data.mask.clone();
+    for factor in [2u32, 4] {
+        images = images.iter().map(|img| half_image(img, w, h)).collect();
+        mask = half_mask(&mask, w, h);
+        w /= 2;
+        h /= 2;
+        let cameras = data.views.iter().map(|v| scaled(&v.camera, factor)).collect();
+        let scene_pixels = mask.iter().filter(|m| **m > 0.5).count() as f32;
+        out.push(Level { width: w, height: h, mask: mask.clone(), scene_pixels, images: images.clone(), cameras });
+    }
+    out
+}
+
+/// What a depth step renders: a camera, its samples (pixel x, pixel y, eye depth, 0) and its dilation.
+struct DepthTarget {
+    camera: Camera,
+    samples: Vec<[f32; 4]>,
+    dilation: [f32; 2],
+}
+
+/// A depth frame's step on a camera whose pixel centres are its sample rays: one pixel a sample, the footprint of the
+/// training resolution kept by scaling the dilation (the grid is regular up to a pixel's rounding). A frame without a
+/// regular grid renders at the training resolution.
+fn depth_target(d: &DepthView) -> DepthTarget {
+    let dil = crate::cpu::DILATION as f32;
+    let (gw, gh) = (d.grid_width as usize, d.grid_height as usize);
+    if gw >= 2 && gh >= 2 {
+        let (x0, y0) = (d.pixels[0][0], d.pixels[0][1]);
+        let sx = (d.pixels[gw - 1][0] - x0) / (gw - 1) as f32;
+        let sy = (d.pixels[(gh - 1) * gw][1] - y0) / (gh - 1) as f32;
+        if sx > 0.0 && sy > 0.0 {
+            let c = &d.camera;
+            let camera = Camera { r: c.r, t: c.t, fx: c.fx / sx, fy: c.fy / sy, cx: (c.cx - x0) / sx, cy: (c.cy - y0) / sy, width: gw as u32, height: gh as u32 };
+            let samples = (0..gw * gh).filter(|&i| d.depth[i] > 0.0).map(|i| [(i % gw) as f32, (i / gw) as f32, d.depth[i], 0.0]).collect();
+            return DepthTarget { camera, samples, dilation: [dil / (sx * sx), dil / (sy * sy)] };
+        }
+    }
+    let samples = d.pixels.iter().zip(&d.depth).filter(|(_, z)| **z > 0.0).map(|(p, z)| [p[0], p[1], *z, 0.0]).collect();
+    DepthTarget { camera: d.camera, samples, dilation: [dil; 2] }
 }
 
 /// New opacity and scale factor of a Gaussian of opacity `o` split into `n` copies, so their sum renders like the
@@ -318,6 +448,55 @@ fn normal(rng: &mut fastrand::Rng) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_depth_grid_camera_sees_every_sample_on_its_own_pixel() {
+        use orbiters_contracts::depth::DepthLayout;
+        let (w, h) = (1920u32, 1080u32);
+        let layout = DepthLayout::new(w, h).expect("layout");
+        let pose = [0.96, 0.0, 0.28, 0.5, 0.0, 1.0, 0.0, 1.6, -0.28, 0.0, 0.96, -2.0];
+        let camera = Camera::from_strip(&pose, &[1.2, 1.2 * w as f32 / h as f32, 0.0, 0.0], w, h, 1.0);
+        let (gw, gh) = (layout.tiles_x * orbiters_contracts::depth::SAMPLES_X, layout.tiles_y * orbiters_contracts::depth::SAMPLES_Y);
+        let mut pixels = Vec::new();
+        for gy in 0..gh {
+            for gx in 0..gw {
+                let (px, py) = layout.grid_pixel(gx, gy);
+                pixels.push([px as f32, py as f32]);
+            }
+        }
+        let depth: Vec<f32> = (0..pixels.len()).map(|i| 1.0 + (i % 7) as f32).collect();
+        let view = DepthView { camera, grid_width: gw, grid_height: gh, pixels: pixels.clone(), depth: depth.clone(), game_time: 0.0, spacing: 8.0 };
+        let t = depth_target(&view);
+        assert_eq!((t.camera.width, t.camera.height), (gw, gh));
+        assert_eq!(t.samples.len(), pixels.len());
+        // Each sample's world point lands on its grid pixel: exactly across, within the rows' rounding down.
+        let mut worst = [0f32; 2];
+        for s in &t.samples {
+            let i = (s[1] as u32 * gw + s[0] as u32) as usize;
+            let p = camera.unproject(pixels[i][0], pixels[i][1], depth[i]);
+            let (u, v, z) = t.camera.project(p).expect("in front");
+            assert!((z - depth[i]).abs() < 1e-3 * depth[i]);
+            worst = [worst[0].max((u - s[0]).abs()), worst[1].max((v - s[1]).abs())];
+        }
+        assert!(worst[0] < 1e-3 && worst[1] < 0.1, "{worst:?}");
+    }
+
+    #[test]
+    fn scaled_cameras_match_box_filtered_pixels() {
+        let pose = [0.96, 0.0, 0.28, 0.5, 0.0, 1.0, 0.0, 1.6, -0.28, 0.0, 0.96, -2.0];
+        let cam = Camera::from_strip(&pose, &[1.2, 2.1, 0.01, -0.02], 1920, 1080, 1.0);
+        for factor in [2u32, 4] {
+            let s = scaled(&cam, factor);
+            assert_eq!((s.width, s.height), (1920 / factor, 1080 / factor));
+            for (x, y) in [(0.0f32, 0.0f32), (957.3, 211.8), (1919.0, 1079.0)] {
+                let p = cam.unproject(x, y, 3.5);
+                let (u, v, _) = s.project(p).expect("in front");
+                // Pixel x of the coarse image averages pixels f·x .. f·x + f − 1 of the full one.
+                let f = factor as f32;
+                assert!((u - ((x + 0.5) / f - 0.5)).abs() < 1e-3 && (v - ((y + 0.5) / f - 0.5)).abs() < 1e-3, "{factor}: {u} {v}");
+            }
+        }
+    }
 
     #[test]
     fn copies_keep_the_opacity_of_the_original_where_they_overlap() {

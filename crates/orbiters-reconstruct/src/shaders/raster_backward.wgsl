@@ -1,26 +1,11 @@
 // Backward: walks the forward pass's entries back to front from each pixel's last one, recovering T by division, and
-// adds every Gaussian's 2D gradients (mean, conic, opacity, colour, depth), summed over each subgroup, with float
-// atomics.
+// adds every Gaussian's 2D gradients (mean, conic, opacity, colour, depth), summed over each subgroup, with atomics.
+// The gradient buffer (binding 7), `add` and LANE_ADDS come from one of the sums_*.wgsl variants.
 
 @group(0) @binding(6) var<storage, read> d_pixel: array<vec4<f32>>;
-@group(0) @binding(7) var<storage, read_write> grad2d: array<atomic<u32>>;
 
 // One past the last entry any pixel of the tile blended (backward starts there).
 var<workgroup> tile_last: atomic<u32>;
-
-fn add(i: u32, v: f32) {
-    if (v == 0.0) {
-        return;
-    }
-    var old = atomicLoad(&grad2d[i]);
-    loop {
-        let r = atomicCompareExchangeWeak(&grad2d[i], old, bitcast<u32>(bitcast<f32>(old) + v));
-        if (r.exchanged) {
-            break;
-        }
-        old = r.old_value;
-    }
-}
 
 // One-dimensional workgroup (subgroup builtins need one), still one 16×16 tile.
 @compute @workgroup_size(256)
@@ -96,8 +81,20 @@ fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
                 let s0 = subgroupAdd(g0);
                 let s1 = subgroupAdd(g1);
                 let s2 = subgroupAdd(g2);
-                if (lane == 0u) {
-                    let g = bitcast<u32>(bb.w) * GRAD2D;
+                let g = bitcast<u32>(bb.w) * GRAD2D;
+                if (LANE_ADDS) {
+                    // Lane k adds slot k: ten independent atomics instead of a chain of ten.
+                    if (lane < 10u) {
+                        var v = s0[lane & 3u];
+                        if (lane >= 4u) {
+                            v = s1[lane & 1u];
+                        }
+                        if (lane >= 6u) {
+                            v = s2[(lane - 6u) & 3u];
+                        }
+                        add(g + lane, v);
+                    }
+                } else if (lane == 0u) {
                     add(g, s0.x);
                     add(g + 1u, s0.y);
                     add(g + 2u, s0.z);

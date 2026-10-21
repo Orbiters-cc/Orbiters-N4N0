@@ -1,7 +1,7 @@
 //! Reconstruction worker of Orbiters desktop:
 //!
 //! ```text
-//! orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N]
+//! orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T]
 //! ```
 //!
 //! Prints one [`Event`] per line on stdout for the app and writes the session's `reconstruction/` folder: the splats
@@ -42,11 +42,12 @@ fn args() -> anyhow::Result<Args> {
             "--width" => width = number("--width")? as u32,
             "--iterations" => settings.iterations = number("--iterations")? as u32,
             "--budget" => settings.budget = number("--budget")? as usize,
+            "--robust" => settings.robust = it.next().context("--robust needs a value")?.parse().context("--robust takes a number (0–1)")?,
             _ if a.starts_with("--") => bail!("unknown option {a}"),
             _ => session = Some(PathBuf::from(a)),
         }
     }
-    Ok(Args { session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N]")?, width, settings })
+    Ok(Args { session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T]")?, width, settings })
 }
 
 fn rgb8(img: &[[f32; 4]]) -> Vec<u8> {

@@ -66,13 +66,24 @@ fn add_sums(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgrou
     dst[i] = dst[i] + sums[i / 512u];
 }
 
-// src = counts, dst = offsets; writes the total to sums[0].
+// src = counts, dst = offsets; writes the total to sums[0], the total clamped to info.y sort entries (0: no
+// clamp) to sums[1], and the workgroups of a 256-wide dispatch over the clamped total to sums[2..5] (indirect
+// arguments, split over two dimensions past 65535).
 @compute @workgroup_size(1)
 fn total() {
     let n = info.x;
-    if (n == 0u) {
-        sums[0] = 0u;
-    } else {
-        sums[0] = dst[n - 1u] + src[n - 1u];
+    var t = 0u;
+    if (n > 0u) {
+        t = dst[n - 1u] + src[n - 1u];
     }
+    sums[0] = t;
+    var c = t;
+    if (info.y > 0u) {
+        c = min(t, info.y);
+    }
+    sums[1] = c;
+    let blocks = (c + 255u) / 256u;
+    sums[2] = min(blocks, 65535u);
+    sums[3] = (blocks + 65534u) / 65535u;
+    sums[4] = 1u;
 }

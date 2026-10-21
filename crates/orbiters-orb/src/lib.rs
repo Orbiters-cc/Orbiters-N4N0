@@ -4,7 +4,10 @@
 pub mod assistant;
 pub mod context;
 pub mod controls;
+pub mod menu;
+pub mod picture;
 pub mod text;
 pub mod tools;
 pub mod videos;
 pub mod wake;
+pub mod youtube;

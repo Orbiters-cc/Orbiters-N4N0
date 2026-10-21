@@ -3644,6 +3644,8 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq 3.4.2",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

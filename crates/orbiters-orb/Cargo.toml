@@ -13,3 +13,6 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 rosc = { workspace = true }
 ureq = { version = "3", default-features = false, features = ["json", "native-tls", "gzip"] }
+# Thumbnails for the menu (already built for tiff in the lockfile).
+zune-jpeg = "0.5"
+zune-core = "0.5"

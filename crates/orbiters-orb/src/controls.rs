@@ -336,7 +336,8 @@ impl Controls {
                 OscValue::Int(i) => i.to_string(),
                 _ => format!("{v:.2}"),
             },
-            _ => if (v - control.value).abs() < 0.01 && control.value != 0.0 { "on" } else { "off" }.to_string(),
+            // As in VRChat's menu: on while the parameter holds the control's value, 0 included (an int's first choice).
+            _ => if (v - control.value).abs() < 0.01 { "on" } else { "off" }.to_string(),
         })
     }
 
@@ -419,6 +420,7 @@ mod tests {
                 { "path": ["Clothes"], "type": "submenu", "tags": ["clothing"] },
                 { "path": ["Clothes", "<b>Hoodie</b>"], "type": "toggle", "parameter": "VF1_Clothes/Hoodie", "value": 1, "tags": ["clothing"] },
                 { "path": ["Clothes", "Chapeau à plumes"], "type": "toggle", "parameter": "VF2_Hat", "value": 1, "tags": ["clothing"] },
+                { "path": ["Outfits", "Default"], "type": "toggle", "parameter": "Outfit", "value": 0 },
                 { "path": ["Outfits", "Summer"], "type": "toggle", "parameter": "Outfit", "value": 2 },
                 { "path": ["Outfits", "Winter"], "type": "toggle", "parameter": "Outfit", "value": 3 },
                 { "path": ["Size"], "type": "radial", "parameter": "Size", "sub_parameters": ["Size"] },
@@ -438,7 +440,7 @@ mod tests {
     #[test]
     fn finds_controls_by_path_label_or_words() {
         let c = Controls::from_manifest(&manifest());
-        assert_eq!(c.controls.len(), 7, "the folder sets nothing");
+        assert_eq!(c.controls.len(), 8, "the folder sets nothing");
         assert_eq!(c.find("Clothes / Hoodie").unwrap().parameter.as_deref(), Some("VF1_Clothes/Hoodie"));
         assert_eq!(c.find("hoodie").unwrap().label(), "<b>Hoodie</b>");
         assert_eq!(c.find("chapeau a plumes").unwrap().parameter.as_deref(), Some("VF2_Hat"));
@@ -474,7 +476,12 @@ mod tests {
         assert!(text.contains("Clothes / Hoodie (toggle, on) [clothing]"), "{text}");
         assert!(text.contains("Outfits / Winter (toggle, on)"));
         assert!(text.contains("Outfits / Summer (toggle, off)"));
+        assert!(text.contains("Outfits / Default (toggle, off)"));
         assert!(!text.contains("Orb / Orb"));
+        let first: HashMap<String, OscValue> = [(format!("{PARAMETERS_PREFIX}Outfit"), OscValue::Int(0))].into();
+        let text = c.summary(&first, 10_000);
+        assert!(text.contains("Outfits / Default (toggle, on)"), "an int's first choice is on at 0: {text}");
+        assert!(text.contains("Outfits / Winter (toggle, off)"));
         let short = c.summary(&latest, 60);
         assert!(short.contains("more (find_avatar_controls"), "{short}");
     }

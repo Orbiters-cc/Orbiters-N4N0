@@ -669,7 +669,7 @@ impl Controller {
 
     fn orb_turn(self: Shared, api: Api, token: String, text: String, via: &'static str) {
         let cancel = AtomicBool::new(false);
-        let mut input = Some(Input { text, via });
+        let mut input = Some(Input { text: assistant::utf16_prefix(&text, assistant::INPUT_UNITS).to_string(), via });
         let mut results: Vec<ToolResult> = Vec::new();
         let mut shown = String::new();
         let mut rounds = 0;
@@ -799,8 +799,10 @@ impl Controller {
     fn orb_run_tool(self: &Shared, call: &ToolCall) -> ToolResult {
         let outcome = tools::parse(&call.name, &call.input).and_then(|action| self.orb_action(action));
         match outcome {
-            Ok(content) => ToolResult { id: call.id.clone(), content: content.to_string(), is_error: false },
-            Err(message) => ToolResult { id: call.id.clone(), content: message, is_error: true },
+            Ok(content) => {
+                ToolResult { id: call.id.clone(), content: assistant::utf16_prefix(&content.to_string(), assistant::RESULT_UNITS).to_string(), is_error: false }
+            }
+            Err(message) => ToolResult { id: call.id.clone(), content: assistant::utf16_prefix(&message, assistant::RESULT_UNITS).to_string(), is_error: true },
         }
     }
 

@@ -8,6 +8,23 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Limits of a turn request, as the server counts them (UTF-16 units, like JavaScript's `length`).
+pub const SUMMARY_UNITS: usize = 6000;
+pub const INPUT_UNITS: usize = 4000;
+pub const RESULT_UNITS: usize = 16000;
+
+/// The longest start of `text` that is at most `max` UTF-16 units, cut between characters.
+pub fn utf16_prefix(text: &str, max: usize) -> &str {
+    let mut units = 0;
+    for (i, c) in text.char_indices() {
+        units += c.len_utf16();
+        if units > max {
+            return &text[..i];
+        }
+    }
+    text
+}
+
 /// What the desktop knows about the moment, for the assistant.
 #[derive(Clone, Debug, Serialize)]
 pub struct Context {
@@ -236,6 +253,15 @@ mod tests {
         assert_eq!(done.tool_calls[0].name, "set_avatar_control");
         assert_eq!(done.quota.unwrap().used, 3);
         assert_eq!(done.messages.len(), 1);
+    }
+
+    #[test]
+    fn cuts_where_the_server_counts() {
+        assert_eq!(utf16_prefix("abc", 2), "ab");
+        // An emoji is two UTF-16 units: it does not fit in one.
+        assert_eq!(utf16_prefix("a😀b", 2), "a");
+        assert_eq!(utf16_prefix("a😀b", 3), "a😀");
+        assert_eq!(utf16_prefix("éé", 10), "éé");
     }
 
     #[test]

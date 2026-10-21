@@ -59,8 +59,7 @@ impl Moment {
             });
             out.push_str(&self.controls);
         }
-        // The assistant's context allows 6000 characters.
-        out.chars().take(6000).collect()
+        crate::assistant::utf16_prefix(&out, crate::assistant::SUMMARY_UNITS).to_string()
     }
 }
 

@@ -31,6 +31,24 @@ with the components (Cargo registry sources) and are available from each project
 | mdns-sd | Apache-2.0 OR MIT |
 | sysinfo | MIT |
 | trash | MIT |
+| ureq | MIT OR Apache-2.0 |
+| arboard (clipboard) | MIT OR Apache-2.0 |
+| sherpa-onnx, sherpa-onnx-sys (k2-fsa; the voice worker) | Apache-2.0 |
+| tar, bzip2 (unpacking the speech models) | MIT OR Apache-2.0 |
+
+## Native libraries next to the voice worker
+
+| Component | License |
+|---|---|
+| sherpa-onnx C API (`sherpa-onnx-c-api.dll`, prebuilt by k2-fsa) | Apache-2.0 |
+| ONNX Runtime (`onnxruntime.dll`, Microsoft) | MIT |
+
+## Models downloaded when the person asks (Orb's ears), not distributed with the app
+
+| Model | License |
+|---|---|
+| Silero VAD v5 (Silero Team), from k2-fsa's sherpa-onnx releases | MIT |
+| NVIDIA Parakeet TDT 0.6B v3, int8 export by k2-fsa for sherpa-onnx | CC-BY-4.0: “parakeet-tdt-0.6b-v3” by NVIDIA, https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3, converted to ONNX and quantized by k2-fsa |
 
 ## Fonts
 
@@ -47,5 +65,6 @@ with the components (Cargo registry sources) and are available from each project
 | Spout2 (Lynn Jarvis / leadedge, BSD-2-Clause) | Orbiters desktop implements the Spout2 sender/receiver protocol (shared memory names and layout, access mutex, frame counter) in Rust, written from the published protocol; no Spout2 SDK code is included. Spout is a trademark of its authors. |
 | QOI image format (Dominic Szablewski) | Implemented from the specification (qoiformat.org). |
 | OSC 1.0 and OSCQuery | OSC messages through rosc; the OSCQuery service follows the OSCQuery proposal used by VRChat. |
+| KillFrenzy Avatar Text (KillFrenzy / Evan Tran, MIT) | Orb's text panel speaks its pointer and sync-value protocol under Orb's parameter names (contracts `Docs/orb.md`); the sender is written in Rust from the protocol, no KAT code is included. |
 
 VRChat is a trademark of VRChat Inc. Orbiters desktop is not affiliated with or endorsed by VRChat Inc.

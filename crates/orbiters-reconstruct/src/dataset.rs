@@ -149,8 +149,10 @@ pub fn load(dir: &Path, max_width: u32, mut progress: impl FnMut(f32)) -> anyhow
         progress((keyframes.len() + i + 1) as f32 / total as f32);
     }
 
-    // What is not scene: the strip (and patches), and the skeleton band when the session read one or the keyframes
-    // show it (post-processing can break its symbols, not its pixels).
+    // What is not scene: the strip (and patches), and the skeleton band when the session read one, came from the
+    // capture kit on an avatar (it draws the band into every colour frame), or the keyframes show it (post-processing
+    // can break its symbols, not its pixels).
+    let kit = records.iter().any(|r| strip::flags::source(r.strip_flags) == strip::flags::SOURCE_AVATAR);
     let mut mask = vec![1.0f32; (w * h) as usize];
     let mut cut = |x0: u32, y0: u32, x1: u32, y1: u32| {
         let (x0, y0) = ((x0 as f32 * scale).floor() as u32, (y0 as f32 * scale).floor() as u32);
@@ -164,7 +166,7 @@ pub fn load(dir: &Path, max_width: u32, mut progress: impl FnMut(f32)) -> anyhow
     if let Some(l) = strip::StripLayout::new(full_w, full_h) {
         cut(l.reserved.x0, l.reserved.y0, l.reserved.x1, l.reserved.y1);
     }
-    if manifest.performance.skeleton_frames > 0 || band_drawn(&views, w, h, scale, full_w, full_h) {
+    if manifest.performance.skeleton_frames > 0 || kit || band_drawn(&views, w, h, scale, full_w, full_h) {
         if let Some(b) = skeleton::BandLayout::new(full_w, full_h) {
             let r = b.reserved();
             cut(r.x0, r.y0, r.x1, r.y1);

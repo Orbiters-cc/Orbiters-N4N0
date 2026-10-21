@@ -317,7 +317,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(ui, "Personality and own key", Some("Orb's roast level, its language and your own AI key are on the Orbiters website."), 150.0, |ui| {
                     if Button::new("Open").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
                         let site = if snap.account.development { orbiters_core::account::Server::Development } else { orbiters_core::account::Server::Production };
-                        let _ = crate::controller::open_url(&format!("{}orb", site.website()));
+                        let _ = crate::controller::open_url(&format!("{}orb?tab=settings&section=orb", site.website()));
                     }
                 });
             });

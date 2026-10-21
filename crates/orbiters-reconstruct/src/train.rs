@@ -53,6 +53,10 @@ pub struct Settings {
     /// VRChat Home and Palm Point.
     pub fade_unseen_every: u32,
     pub unseen_weight: f32,
+    /// Covers the sky shell where no view looked (crate::sky) once training ends. On the capture simulator's off-path
+    /// views (Bench Plaza: other heights, sideways, looking up) it gained 8 dB looking up and 1.3–1.8 dB over all
+    /// views of three captures, for about a thousand Gaussians.
+    pub sky_fill: bool,
 }
 
 impl Default for Settings {
@@ -77,6 +81,7 @@ impl Default for Settings {
             relocate_until: 0.5,
             fade_unseen_every: 1000,
             unseen_weight: 0.02,
+            sky_fill: true,
         }
     }
 }
@@ -273,6 +278,10 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     // `relocate_until`) show nowhere: the result leaves them out.
     let live: Vec<bool> = g.opacity_logits.iter().map(|&l| sigmoid(l) >= DEAD).collect();
     g.retain(&live);
+    if settings.sky_fill {
+        let added = crate::sky::complete(&mut g, centre, far_field, crate::init::SKY);
+        eprintln!("sky: {added} Gaussians where no view saw the sky");
+    }
     if gpu.overflows > 0 {
         eprintln!("{} steps had more tile entries than the sort expected (dropped for that step)", gpu.overflows);
     }

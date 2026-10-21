@@ -135,7 +135,7 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
                 .variant(Variant::Secondary)
                 .size(Size::Sm)
                 .enabled(consent && snap.vrchat.running)
-                .hint("VRChat's camera looks around, then circles where it stands at three heights, looking in and out (under a minute); the recording is then reconstructed in 3D");
+                .hint("VRChat's camera looks around, then circles where it stands at three heights, looking in and out (about a minute); the recording is then reconstructed in 3D");
             let ws = bs.desired_width(ui);
             let rs = Rect::from_min_size(pos2(seg.min_rect().left() - 20.0 - ws, rect.bottom() - 34.0), vec2(ws, 32.0));
             scan = bs.show_at(ui, rs).clicked();

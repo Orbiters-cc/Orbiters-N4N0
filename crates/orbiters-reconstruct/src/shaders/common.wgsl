@@ -118,6 +118,34 @@ fn proj_math(mean: vec3<f32>, log_scale: vec3<f32>, q: vec4<f32>) -> ProjMath {
     return m;
 }
 
+// Largest quadratic form q = dᵀ·conic·d at which a Gaussian of opacity `op` still reaches α = 1/255 (capped at
+// 3.33 σ, like cpu::extent_sigmas); 0 when it never does.
+fn alpha_reach(op: f32) -> f32 {
+    let s = min(sqrt(2.0 * log(max(op / MIN_ALPHA, 1.0))), 3.33);
+    return s * s;
+}
+
+// Whether a Gaussian centred at `m` with conic (A, B, C) (q = A·dx² + 2B·dx·dy + C·dy²) reaches q ≤ tau at any pixel
+// centre of tile (tx, ty): the minimum of q over the tile's rectangle of pixel centres is at the centre when it lies
+// inside, otherwise on an edge, where q is a one-dimensional quadratic minimised in closed form.
+fn tile_hit(m: vec2<f32>, conic: vec3<f32>, tau: f32, tx: u32, ty: u32) -> bool {
+    let lo = vec2<f32>(f32(tx * TILE), f32(ty * TILE)) - m;
+    let hi = lo + vec2<f32>(f32(TILE - 1u));
+    if (lo.x <= 0.0 && hi.x >= 0.0 && lo.y <= 0.0 && hi.y >= 0.0) {
+        return true;
+    }
+    var best = 3.4e38;
+    for (var k = 0u; k < 2u; k++) {
+        let dx = select(lo.x, hi.x, k == 1u);
+        let dy = clamp(-conic.y * dx / conic.z, lo.y, hi.y);
+        best = min(best, conic.x * dx * dx + 2.0 * conic.y * dx * dy + conic.z * dy * dy);
+        let ey = select(lo.y, hi.y, k == 1u);
+        let ex = clamp(-conic.y * ey / conic.x, lo.x, hi.x);
+        best = min(best, conic.x * ex * ex + 2.0 * conic.y * ex * ey + conic.z * ey * ey);
+    }
+    return best <= tau;
+}
+
 fn sigmoid(x: f32) -> f32 {
     return 1.0 / (1.0 + exp(-x));
 }

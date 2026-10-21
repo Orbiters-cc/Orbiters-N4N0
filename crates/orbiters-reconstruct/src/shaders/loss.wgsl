@@ -22,3 +22,29 @@ fn color(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
     let k = m * frame.loss.x / (3.0 * max(frame.loss.w, 1.0));
     d_pixel[p] = vec4<f32>(sign(diff) * k, 0.0);
 }
+
+var<workgroup> s_error: array<vec2<f32>, 256>;
+
+// Scoring a render (crate::gpu::Gpu::score): per workgroup, the squared error of the clamped colour over the scene
+// pixels and their channel count, into d_pixel[workgroup] (the CPU sums the workgroups).
+@compute @workgroup_size(256)
+fn squared_error(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let p = flat_index(gid, nwg);
+    var e = vec2<f32>(0.0);
+    if (p < frame.size.x * frame.size.y && mask[p] > 0.5) {
+        let packed = target_rgb[p];
+        let target_c = vec3<f32>(f32(packed & 255u), f32((packed >> 8u) & 255u), f32((packed >> 16u) & 255u)) / 255.0;
+        let d = clamp(out_color[p].xyz, vec3<f32>(0.0), vec3<f32>(1.0)) - target_c;
+        e = vec2<f32>(dot(d, d), 3.0);
+    }
+    s_error[li] = e;
+    for (var stride = 128u; stride > 0u; stride >>= 1u) {
+        workgroupBarrier();
+        if (li < stride) {
+            s_error[li] += s_error[li + stride];
+        }
+    }
+    if (li == 0u) {
+        d_pixel[wid.x + wid.y * nwg.x] = vec4<f32>(s_error[0], 0.0, 0.0);
+    }
+}

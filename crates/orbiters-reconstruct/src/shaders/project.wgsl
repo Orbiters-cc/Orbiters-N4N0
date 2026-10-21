@@ -32,24 +32,44 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let op = sigmoid(params[b + 10u]);
     let mid = 0.5 * (a + c);
     let lambda = mid + sqrt(max(mid * mid - det, 0.1));
-    // Out to α = 1/255 at this opacity (cpu::extent_sigmas).
-    let sigmas = min(sqrt(2.0 * log(max(op / MIN_ALPHA, 1.0))), 3.33);
+    // Out to α = 1/255 at this opacity (cpu::extent_sigmas); a Gaussian that never gets there draws nothing.
+    let tau = alpha_reach(op);
+    if (tau <= 0.0) {
+        return;
+    }
+    let sigmas = sqrt(tau);
     let radius = ceil(sigmas * sqrt(lambda));
+    // The ellipse's own bounding box (per-axis extents), then only the tiles it reaches (tile_hit): flat discs seen at
+    // grazing angles would otherwise fill the square of their largest axis.
+    let rx = sigmas * sqrt(a);
+    let ry = sigmas * sqrt(c);
     let tx = f32(frame.size.z);
     let ty = f32(frame.size.w);
     let tf = f32(TILE);
-    let x0 = clamp(floor((mx - radius) / tf), 0.0, tx);
-    let y0 = clamp(floor((my - radius) / tf), 0.0, ty);
-    let x1 = clamp(floor((mx + radius) / tf + 1.0), 0.0, tx);
-    let y1 = clamp(floor((my + radius) / tf + 1.0), 0.0, ty);
+    let x0 = clamp(floor((mx - rx) / tf), 0.0, tx);
+    let y0 = clamp(floor((my - ry) / tf), 0.0, ty);
+    let x1 = clamp(floor((mx + rx) / tf + 1.0), 0.0, tx);
+    let y1 = clamp(floor((my + ry) / tf + 1.0), 0.0, ty);
     if (x1 <= x0 || y1 <= y0) {
+        return;
+    }
+    let conic = vec3<f32>(c / det, -bb / det, a / det);
+    var hits = 0u;
+    for (var row = u32(y0); row < u32(y1); row++) {
+        for (var col = u32(x0); col < u32(x1); col++) {
+            if (tile_hit(vec2<f32>(mx, my), conic, tau, col, row)) {
+                hits++;
+            }
+        }
+    }
+    if (hits == 0u) {
         return;
     }
     proj[o] = mx;
     proj[o + 1u] = my;
-    proj[o + 2u] = c / det;
-    proj[o + 3u] = -bb / det;
-    proj[o + 4u] = a / det;
+    proj[o + 2u] = conic.x;
+    proj[o + 3u] = conic.y;
+    proj[o + 4u] = conic.z;
     proj[o + 5u] = m.pc.z;
     proj[o + 6u] = op;
     proj[o + 7u] = params[b + 11u];
@@ -61,5 +81,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     proj[o + 13u] = bitcast<f32>(u32(x1));
     proj[o + 14u] = bitcast<f32>(u32(y1));
     proj[o + 15u] = 1.0;
-    counts[i] = u32(x1 - x0) * u32(y1 - y0);
+    counts[i] = hits;
 }

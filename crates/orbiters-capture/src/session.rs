@@ -127,7 +127,12 @@ pub struct CaptureSession {
     thumbnail_done: bool,
     decode_time_total: f64,
     fps_window: (Instant, u64),
+    /// Depth frames kept as received (`depth-raw/`), at most [`RAW_DEPTH_FRAMES`].
+    raw_depth_kept: u32,
 }
+
+/// Depth frames a session keeps as received when some of their tiles could not be read.
+const RAW_DEPTH_FRAMES: u32 = 3;
 
 impl CaptureSession {
     pub fn start(cmd: &StartCapture, source_description: String, folder_hint: &str) -> anyhow::Result<Self> {
@@ -211,6 +216,7 @@ impl CaptureSession {
             previous: None,
             thumbnail_done: false,
             decode_time_total: 0.0,
+            raw_depth_kept: 0,
             fps_window: (Instant::now(), 0),
         })
     }
@@ -336,6 +342,17 @@ impl CaptureSession {
                         record.flags |= record_flags::DEPTH;
                         record.depth_index = index;
                         self.stats.depth_frames += 1;
+                        // A few frames with tiles that could not be read, as received: what the world's
+                        // post-processing did to the symbols, for whoever improves the decoder next.
+                        if dd.tiles_rejected > 0 && self.raw_depth_kept < RAW_DEPTH_FRAMES {
+                            if let Ok(path) = self.writer.raw_depth_path(index) {
+                                let data = copy_upright(&view, d.flipped);
+                                let bgra = view.order == PixelOrder::Bgra;
+                                if self.pool.try_send(Job::Keyframe { path, data, width: view.width, height: view.height, bgra }) {
+                                    self.raw_depth_kept += 1;
+                                }
+                            }
+                        }
                     }
                 } else if self.selector.consider(&p.camera_to_world, p.time) {
                     let data = copy_upright(&view, d.flipped);

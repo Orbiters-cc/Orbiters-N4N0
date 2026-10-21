@@ -24,7 +24,7 @@ pub fn from_depth(data: &Dataset, budget: usize) -> Gaussians {
             }
             let i = (gy * gw + gx) as usize;
             let z = dv.depth[i];
-            (z > 0.0).then(|| dv.camera.unproject(dv.pixels[i][0], dv.pixels[i][1], z))
+            (z > 0.0 && !dv.is_dynamic(i)).then(|| dv.camera.unproject(dv.pixels[i][0], dv.pixels[i][1], z))
         };
         let cam_pos = dv.camera.position();
         for gy in 0..gh {
@@ -33,7 +33,7 @@ pub fn from_depth(data: &Dataset, budget: usize) -> Gaussians {
                 let (u, v) = (dv.pixels[i][0], dv.pixels[i][1]);
                 let z = dv.depth[i];
                 let sky = z <= 0.0;
-                if sky && !in_scene(data, u, v) {
+                if (sky && !in_scene(data, u, v)) || dv.is_dynamic(i) {
                     continue;
                 }
                 let p = if sky { add(cam_pos, scale(normalize(sub(dv.camera.unproject(u, v, 1.0), cam_pos)), SKY)) } else { dv.camera.unproject(u, v, z) };

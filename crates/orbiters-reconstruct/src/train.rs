@@ -366,11 +366,11 @@ fn depth_target(d: &DepthView) -> DepthTarget {
         if sx > 0.0 && sy > 0.0 {
             let c = &d.camera;
             let camera = Camera { r: c.r, t: c.t, fx: c.fx / sx, fy: c.fy / sy, cx: (c.cx - x0) / sx, cy: (c.cy - y0) / sy, width: gw as u32, height: gh as u32 };
-            let samples = (0..gw * gh).filter(|&i| d.depth[i] > 0.0).map(|i| [(i % gw) as f32, (i / gw) as f32, d.depth[i], 0.0]).collect();
+            let samples = (0..gw * gh).filter(|&i| d.depth[i] > 0.0 && !d.is_dynamic(i)).map(|i| [(i % gw) as f32, (i / gw) as f32, d.depth[i], 0.0]).collect();
             return DepthTarget { camera, samples, dilation: [dil / (sx * sx), dil / (sy * sy)] };
         }
     }
-    let samples = d.pixels.iter().zip(&d.depth).filter(|(_, z)| **z > 0.0).map(|(p, z)| [p[0], p[1], *z, 0.0]).collect();
+    let samples = d.pixels.iter().zip(&d.depth).enumerate().filter(|(i, (_, z))| **z > 0.0 && !d.is_dynamic(*i)).map(|(_, (p, z))| [p[0], p[1], *z, 0.0]).collect();
     DepthTarget { camera: d.camera, samples, dilation: [dil; 2] }
 }
 
@@ -550,7 +550,7 @@ mod tests {
             }
         }
         let depth: Vec<f32> = (0..pixels.len()).map(|i| 1.0 + (i % 7) as f32).collect();
-        let view = DepthView { camera, grid_width: gw, grid_height: gh, pixels: pixels.clone(), depth: depth.clone(), game_time: 0.0, spacing: 8.0 };
+        let view = DepthView { camera, grid_width: gw, grid_height: gh, pixels: pixels.clone(), depth: depth.clone(), game_time: 0.0, spacing: 8.0, dynamic: Vec::new() };
         let t = depth_target(&view);
         assert_eq!((t.camera.width, t.camera.height), (gw, gh));
         assert_eq!(t.samples.len(), pixels.len());

@@ -59,7 +59,16 @@ fn run(args: Args) -> anyhow::Result<Report> {
     // Above normal while VRChat is closed, out of its way while it runs (orbiters_reconstruct::priority).
     orbiters_reconstruct::priority::govern();
     stage(Stage::Loading, 0.0);
-    let data = dataset::load(dir, args.width, |p| stage(Stage::Loading, p))?;
+    let mut data = dataset::load(dir, args.width, |p| stage(Stage::Loading, p))?;
+    // Depth that says nothing becomes unknown, and the world's chromatic aberration leaves the keyframes.
+    let fix = orbiters_reconstruct::depthfix::mark_untrusted(&mut data, &orbiters_reconstruct::depthfix::FixParams::default());
+    eprintln!(
+        "depth validation: {} of {} tile positions never read ({} of their samples kept as sky), {} misread tiles, {} impossibly near samples; {} of {} samples unknown",
+        fix.dead_tiles, fix.tiles, fix.sky_samples, fix.misread_tiles, fix.near_samples, fix.unknown_samples, fix.samples
+    );
+    if let Some(intensity) = orbiters_reconstruct::aberration::undo(&mut data) {
+        eprintln!("chromatic aberration (intensity {intensity:.3}) undone in {} keyframes", data.views.len());
+    }
     stage(Stage::Seeding, 0.0);
     let seeded = init::from_depth(&data, args.settings.budget * 2 / 3);
     if seeded.is_empty() {

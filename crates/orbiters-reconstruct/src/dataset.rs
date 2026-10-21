@@ -30,11 +30,18 @@ pub struct DepthView {
     pub game_time: f32,
     /// Sample spacing in training pixels (for footprints).
     pub spacing: f32,
+    /// Samples that say nothing: the decoder could not read them (orbiters_contracts::depth::UNKNOWN), or depth
+    /// validation distrusts them (crate::depthfix). Neither seeds nor depth targets. Empty: none.
+    pub dynamic: Vec<bool>,
 }
 
 impl DepthView {
     pub fn valid(&self) -> usize {
         self.depth.iter().filter(|z| **z > 0.0).count()
+    }
+
+    pub fn is_dynamic(&self, i: usize) -> bool {
+        self.dynamic.get(i).copied().unwrap_or(false)
     }
 }
 
@@ -123,11 +130,14 @@ pub fn load(dir: &Path, max_width: u32, mut progress: impl FnMut(f32)) -> anyhow
         let s = w as f32 / fw as f32;
         let mut pixels = Vec::with_capacity(codes.len());
         let mut depths = Vec::with_capacity(codes.len());
+        let mut unknown = Vec::with_capacity(codes.len());
         for gy in 0..gh {
             for gx in 0..gw {
                 let (px, py) = layout.grid_pixel(gx, gy);
                 pixels.push([(px as f32 + 0.5) * s - 0.5, (py as f32 + 0.5) * s - 0.5]);
-                depths.push(depth::dequantize(codes[(gy * gw + gx) as usize]).unwrap_or(0.0));
+                let code = codes[(gy * gw + gx) as usize];
+                depths.push(depth::dequantize(code).unwrap_or(0.0));
+                unknown.push(code == depth::UNKNOWN);
             }
         }
         depth_views.push(DepthView {
@@ -138,6 +148,7 @@ pub fn load(dir: &Path, max_width: u32, mut progress: impl FnMut(f32)) -> anyhow
             depth: depths,
             game_time: r.game_time,
             spacing: layout.tile_px as f32 / depth::SAMPLES_X as f32 * s,
+            dynamic: if unknown.contains(&true) { unknown } else { Vec::new() },
         });
         progress((keyframes.len() + i + 1) as f32 / total as f32);
     }

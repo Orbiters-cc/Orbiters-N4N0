@@ -93,6 +93,13 @@ impl BundleWriter {
         (i, self.dir.join(manifest::KEYFRAMES_DIR).join(keyframe_file(i)))
     }
 
+    /// Where depth frame `index` goes as received (`depth-raw/`, created on first use).
+    pub fn raw_depth_path(&self, index: i32) -> anyhow::Result<PathBuf> {
+        let dir = self.dir.join(manifest::RAW_DEPTH_DIR);
+        fs::create_dir_all(&dir)?;
+        Ok(dir.join(keyframe_file(index)))
+    }
+
     /// Next depth index and its file path.
     pub fn reserve_depth(&mut self) -> (i32, PathBuf) {
         let i = self.next_depth;

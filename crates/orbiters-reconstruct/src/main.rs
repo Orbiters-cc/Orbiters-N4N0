@@ -1,7 +1,7 @@
 //! Reconstruction worker of Orbiters desktop:
 //!
 //! ```text
-//! orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T]
+//! orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]
 //! ```
 //!
 //! Prints one [`Event`] per line on stdout for the app and writes the session's `reconstruction/` folder: the splats
@@ -29,6 +29,7 @@ struct Args {
     session: PathBuf,
     width: u32,
     settings: train::Settings,
+    device: gpu::DeviceOptions,
 }
 
 fn args() -> anyhow::Result<Args> {
@@ -36,6 +37,7 @@ fn args() -> anyhow::Result<Args> {
     let mut session = None;
     let mut width = 1920;
     let mut settings = train::Settings::default();
+    let mut device = gpu::DeviceOptions::default();
     while let Some(a) = it.next() {
         let mut number = |name: &str| -> anyhow::Result<u64> { it.next().with_context(|| format!("{name} needs a value"))?.parse().with_context(|| format!("{name} takes a number")) };
         match a.as_str() {
@@ -43,11 +45,18 @@ fn args() -> anyhow::Result<Args> {
             "--iterations" => settings.iterations = number("--iterations")? as u32,
             "--budget" => settings.budget = number("--budget")? as usize,
             "--robust" => settings.robust = it.next().context("--robust needs a value")?.parse().context("--robust takes a number (0–1)")?,
+            "--gpu" => {
+                device.low_power = match it.next().as_deref() {
+                    Some("integrated") => true,
+                    Some("fastest") => false,
+                    _ => bail!("--gpu takes integrated or fastest"),
+                }
+            }
             _ if a.starts_with("--") => bail!("unknown option {a}"),
             _ => session = Some(PathBuf::from(a)),
         }
     }
-    Ok(Args { session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T]")?, width, settings })
+    Ok(Args { session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]")?, width, settings, device })
 }
 
 fn rgb8(img: &[[f32; 4]]) -> Vec<u8> {
@@ -74,7 +83,7 @@ fn run(args: Args) -> anyhow::Result<Report> {
     if seeded.is_empty() {
         bail!("This session has no depth frames to start from: record with the capture kit's depth frames on.");
     }
-    let mut gpu = gpu::Gpu::new()?;
+    let mut gpu = gpu::Gpu::with_options(args.device)?;
     stage(Stage::Training, 0.0);
     let outcome = train::train(&data, &mut gpu, seeded, &args.settings, |p| {
         emit(&Event::Progress { iteration: p.iteration, iterations: p.iterations, gaussians: p.gaussians, intersections: p.intersections, psnr: p.psnr, seconds: p.seconds });

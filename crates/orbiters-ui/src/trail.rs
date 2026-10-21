@@ -1,5 +1,7 @@
 //! Top-down map of a camera path (Unity X to the right, Z up the screen). The view springs towards the path's
-//! bounds so new points glide in; the current position carries a heading cone and, while recording, a pulse.
+//! bounds so new points glide in; the current position carries a heading cone and, while recording, a pulse. Under
+//! the path, [`show_with`] can draw what the depth frames have seen: each cell by how many directions it was seen
+//! from, from one or two (a smear from anywhere else) to six or more, and what stands in the way in grey.
 
 use crate::anim::{self, Spring};
 use crate::theme::{self, Txt};
@@ -17,7 +19,34 @@ pub struct Trail<'a> {
     pub empty_text: &'a str,
 }
 
+/// Cells under the path (a capture's coverage map): `width × depth` cells of `cell` metres from (`x0`, `z0`), two
+/// bytes each, how many of 16 compass directions the cell was seen from (0: not seen), then flags.
+pub struct Coverage<'a> {
+    pub x0: f32,
+    pub z0: f32,
+    pub cell: f32,
+    pub width: u32,
+    pub depth: u32,
+    pub cells: &'a [u8],
+    /// The flag of a cell holding something in the way (drawn grey).
+    pub obstacle: u8,
+}
+
+/// The colour of a cell seen from `directions` of 16: few is a warning, many is the accent.
+pub fn coverage_colour(directions: u8) -> Color32 {
+    match directions {
+        0 => Color32::TRANSPARENT,
+        1 | 2 => theme::DANGER,
+        3..=5 => theme::WARN,
+        _ => theme::ACCENT,
+    }
+}
+
 pub fn show(ui: &Ui, rect: Rect, id: Id, trail: &Trail<'_>) {
+    show_with(ui, rect, id, trail, None);
+}
+
+pub fn show_with(ui: &Ui, rect: Rect, id: Id, trail: &Trail<'_>, coverage: Option<&Coverage<'_>>) {
     let p = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
     crate::widgets::frame(&p, rect, theme::TILE_RADIUS, theme::surface_soft());
     let aspect = rect.width() / rect.height().max(1.0);
@@ -30,7 +59,18 @@ pub fn show(ui: &Ui, rect: Rect, id: Id, trail: &Trail<'_>) {
         min_z = min_z.min(q[2]);
         max_z = max_z.max(q[2]);
     }
-    let target = if trail.points.is_empty() {
+    // What was seen counts towards the view too.
+    let seen = |c: &Coverage<'_>, i: usize| c.cells.get(2 * i).is_some_and(|d| *d > 0);
+    if let Some(c) = coverage {
+        for i in (0..(c.width * c.depth) as usize).filter(|&i| seen(c, i)) {
+            let (x, z) = (c.x0 + (i % c.width as usize) as f32 * c.cell, c.z0 + (i / c.width as usize) as f32 * c.cell);
+            min_x = min_x.min(x);
+            max_x = max_x.max(x + c.cell);
+            min_z = min_z.min(z);
+            max_z = max_z.max(z + c.cell);
+        }
+    }
+    let target = if min_x > max_x {
         [0.0, 0.0, 10.0]
     } else {
         let span = 6.0f32.max((max_x - min_x) * 1.25).max((max_z - min_z) * 1.25 * aspect);
@@ -64,6 +104,17 @@ pub fn show(ui: &Ui, rect: Rect, id: Id, trail: &Trail<'_>) {
         let sy = rect.center().y + (gy - cy) * scale;
         p.hline(rect.x_range(), sy, stroke);
         gy += grid;
+    }
+
+    // What the depth frames saw, under the path.
+    if let Some(c) = coverage {
+        for i in (0..(c.width * c.depth) as usize).filter(|&i| seen(c, i)) {
+            let (x, z) = (c.x0 + (i % c.width as usize) as f32 * c.cell, c.z0 + (i / c.width as usize) as f32 * c.cell);
+            let r = Rect::from_two_pos(to_screen(x, z), to_screen(x + c.cell, z + c.cell));
+            let colour =
+                if c.cells[2 * i + 1] & c.obstacle != 0 { theme::alpha(theme::FG_3, 0.55) } else { theme::alpha(coverage_colour(c.cells[2 * i]), 0.32) };
+            p.rect_filled(r, 0.0, colour);
+        }
     }
 
     // Path: a crisp line, grey where it is old, green where it is new.

@@ -12,7 +12,7 @@ use crate::pages::Page;
 use crate::state::{CaptureState, Snapshot};
 use anyhow::Context as _;
 use egui::{pos2, vec2, Event, Pos2, RawInput, Rect, ViewportId, ViewportInfo};
-use orbiters_core::protocol::{CaptureStats, SpoutSourceInfo};
+use orbiters_core::protocol::{coverage, CaptureStats, CoverageMap, SpoutSourceInfo};
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::WorldState;
 use orbiters_ui::offscreen::{save_png, Offscreen};
@@ -110,6 +110,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         skeleton_frames: 3_610,
         ..Default::default()
     });
+    recording.capture.coverage = Some(sample_coverage(&trail));
     let mut consent = idle.clone();
     consent.settings.consent_acknowledged = false;
     let mut reconstructing = idle.clone();
@@ -1063,6 +1064,45 @@ fn idle_snapshot(settings: &Settings, sessions: &[orbiters_core::bundle::Session
 }
 
 /// A made-up camera path when no session is at hand.
+/// A coverage map for the recording shot: seen from many directions along the path, fewer farther out, from one or
+/// two at the edge, and a wall around it all; with two hints.
+fn sample_coverage(trail: &[[f32; 3]]) -> CoverageMap {
+    let cell = 0.5f32;
+    let (lo, hi) = trail.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), p| ([lo[0].min(p[0]), lo[1].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[2])]));
+    let (x0, z0) = (((lo[0] - 7.0) / cell).floor() * cell, ((lo[1] - 7.0) / cell).floor() * cell);
+    let (width, depth) = ((((hi[0] - lo[0]) + 14.0) / cell) as u32, (((hi[1] - lo[1]) + 14.0) / cell) as u32);
+    let mut cells = vec![0u8; (2 * width * depth) as usize];
+    for iz in 0..depth {
+        for ix in 0..width {
+            let (x, z) = (x0 + (ix as f32 + 0.5) * cell, z0 + (iz as f32 + 0.5) * cell);
+            let near = trail.iter().step_by(4).map(|p| ((p[0] - x).powi(2) + (p[2] - z).powi(2)).sqrt()).fold(f32::MAX, f32::min);
+            let i = (2 * (iz * width + ix)) as usize;
+            let (directions, bits) = match near {
+                d if d < 2.0 => (9, coverage::FLOOR | coverage::HIGH | coverage::LOW),
+                d if d < 3.5 => (4, coverage::FLOOR | coverage::LOW),
+                d if d < 5.0 => (2, coverage::FLOOR | coverage::GRAZING),
+                d if d < 5.5 => (2, coverage::OBSTACLE | coverage::GRAZING),
+                _ => (0, 0),
+            };
+            cells[i] = directions;
+            cells[i + 1] = bits;
+        }
+    }
+    CoverageMap {
+        cell_m: cell,
+        x0,
+        z0,
+        width,
+        depth,
+        cells,
+        floor_y: Some(0.0),
+        hints: vec![
+            "What is behind you to the left (about 5 m away) was only seen from one direction: look at it from another angle too.".into(),
+            "Crouch or raise the camera for a moment: everything so far was seen from one height.".into(),
+        ],
+    }
+}
+
 fn spiral() -> Vec<[f32; 3]> {
     (0..400)
         .map(|i| {

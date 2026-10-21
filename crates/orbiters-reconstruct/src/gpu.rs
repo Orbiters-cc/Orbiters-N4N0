@@ -85,6 +85,8 @@ pub struct DeviceOptions {
     pub sums: Option<GradientSums>,
     /// Time every pass with GPU timestamps ([`Gpu::profiler`]), when the adapter can.
     pub profile: bool,
+    /// The power-saving adapter (an integrated GPU) instead of the fastest one.
+    pub low_power: bool,
 }
 
 #[repr(C)]
@@ -403,7 +405,7 @@ impl Gpu {
     pub fn with_options(options: DeviceOptions) -> anyhow::Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, ..wgpu::InstanceDescriptor::new_without_display_handle() });
         let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: if options.low_power { wgpu::PowerPreference::LowPower } else { wgpu::PowerPreference::HighPerformance },
             ..Default::default()
         }))
         .map_err(|e| anyhow!("no GPU adapter: {e}"))?;

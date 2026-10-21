@@ -150,6 +150,7 @@ impl Service {
             ToService::StopCapture => report(ctl.stop_capture()),
             ToService::Pause { paused } => report(ctl.pause_capture(paused)),
             ToService::TestPattern => report(ctl.start_test_capture()),
+            ToService::Scan => report(ctl.take_scan()),
             ToService::ImportRaw { dir } => report(ctl.import_raw_capture(dir)),
             ToService::SaveSettings { settings } => ctl.save_settings(*settings),
             ToService::Trash { dir } => {

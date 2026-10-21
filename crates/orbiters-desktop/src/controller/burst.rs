@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 pub const POSE: &str = "/usercamera/Pose";
 const FOCAL_DISTANCE: &str = "/usercamera/FocalDistance";
-const SMOOTH: &str = "/usercamera/SmoothMovement";
+pub(super) const SMOOTH: &str = "/usercamera/SmoothMovement";
 /// How far the flight goes from where the camera stands, each way.
 pub const REACH_M: f32 = 10.0;
 /// Straight up or down, short of the pole where yaw means nothing.
@@ -187,7 +187,7 @@ pub struct BurstRuntime {
     pub(super) recording: bool,
 }
 
-fn floats(values: &[OscValue]) -> Vec<f32> {
+pub(super) fn floats(values: &[OscValue]) -> Vec<f32> {
     values.iter().filter_map(|v| if let OscValue::Float(f) = v { Some(*f) } else { None }).collect()
 }
 

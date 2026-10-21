@@ -127,6 +127,8 @@ pub struct Controller {
     performance: Mutex<performance::PerformanceRuntime>,
     /// A 3D picture under way (controller/burst.rs).
     burst: Mutex<burst::BurstRuntime>,
+    /// A scan under way (controller/scan.rs).
+    scan: Mutex<scan::ScanRuntime>,
     /// Calls with VRChat friends (controller/calls.rs).
     calls: Mutex<calls::CallsRuntime>,
 }
@@ -186,6 +188,7 @@ mod calls;
 mod maps;
 mod orb;
 mod performance;
+mod scan;
 pub(crate) mod screen;
 mod voice;
 pub use account::open_url;
@@ -220,6 +223,7 @@ impl Controller {
             voice: Mutex::new(voice::VoiceRuntime::default()),
             performance: Mutex::new(performance::PerformanceRuntime::default()),
             burst: Mutex::new(burst::BurstRuntime::default()),
+            scan: Mutex::new(scan::ScanRuntime::default()),
             calls: Mutex::new(calls::CallsRuntime::default()),
         })
     }
@@ -414,7 +418,10 @@ impl Controller {
                 s.capture.source = Some(source);
                 s.capture.error = None;
                 s.capture.trail.clear();
+                s.capture.coverage = None;
             }),
+            // Published with the next stats (four times a second).
+            WorkerEvent::Coverage(map) => self.snapshot.lock().unwrap().capture.coverage = Some(map),
             WorkerEvent::Stats(stats) => {
                 let over_limit = {
                     let mut s = self.snapshot.lock().unwrap();
@@ -460,7 +467,8 @@ impl Controller {
                     depth_frames: manifest.stats.depth_frames,
                 });
                 if !restarting {
-                    self.burst_saved(session);
+                    self.burst_saved(session.clone());
+                    self.scan_saved(session);
                     self.next_reconstruction();
                 }
             }
@@ -523,6 +531,7 @@ impl Controller {
             s.capture.error = None;
             s.capture.stats = None;
             s.capture.trail.clear();
+            s.capture.coverage = None;
             s.capture.from_osc = from_osc;
         });
         // Training takes the whole GPU: the game and the recording come first; the run starts over once they are done

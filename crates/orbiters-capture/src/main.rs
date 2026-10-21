@@ -7,6 +7,7 @@
 //! * `orbiters-capture list-sources`
 
 mod audio;
+mod coverage;
 mod performance;
 mod session;
 mod sources;
@@ -267,6 +268,7 @@ fn run_worker() -> anyhow::Result<()> {
     let mut current: Option<(CaptureSession, Box<dyn FrameSource>)> = None;
     let mut paused = false;
     let mut last_stats = Instant::now();
+    let mut last_coverage = Instant::now();
     let finish = |current: &mut Option<(CaptureSession, Box<dyn FrameSource>)>, out: &mut Output, reason: &str| {
         if let Some((session, _)) = current.take() {
             match session.finish() {
@@ -369,6 +371,12 @@ fn run_worker() -> anyhow::Result<()> {
                 stats.paused = paused;
                 out.emit(&WorkerEvent::Stats(stats));
                 last_stats = Instant::now();
+            }
+            if last_coverage.elapsed() >= Duration::from_secs(1) {
+                if let Some(map) = session.coverage_map() {
+                    out.emit(&WorkerEvent::Coverage(map));
+                }
+                last_coverage = Instant::now();
             }
         }
         if ended {

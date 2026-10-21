@@ -106,6 +106,72 @@ pub struct SpoutSourceInfo {
     pub description: String,
 }
 
+/// What a capture's depth frames have seen, from above (the capture page's coverage map): cells of `cell_m` metres on
+/// the horizontal plane (Unity world x, z), row-major from (`x0`, `z0`), `width` along x and `depth` along z. Two bytes
+/// a cell: how many of the 16 compass directions it was seen from (0: not seen), then [`coverage`] bits.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CoverageMap {
+    pub cell_m: f32,
+    pub x0: f32,
+    pub z0: f32,
+    pub width: u32,
+    pub depth: u32,
+    #[serde(with = "hex")]
+    pub cells: Vec<u8>,
+    /// The floor's height under the walked path (Unity world y), once found.
+    pub floor_y: Option<f32>,
+    /// What to do next, the most useful first (at most three).
+    pub hints: Vec<String>,
+}
+
+/// The second byte of a [`CoverageMap`] cell: from how high the camera saw it, and what lies there.
+pub mod coverage {
+    /// Seen from below (the camera more than 10° under it).
+    pub const FROM_BELOW: u8 = 1 << 0;
+    /// Seen within 10° of level: a floor seen like this was only seen from afar.
+    pub const GRAZING: u8 = 1 << 1;
+    /// Seen from 10–35° above.
+    pub const LOW: u8 = 1 << 2;
+    /// From 35–60° above.
+    pub const HIGH: u8 = 1 << 3;
+    /// From more than 60° above.
+    pub const OVERHEAD: u8 = 1 << 4;
+    /// Points about 0.4–2.5 m above the floor: something a camera at eye height would run into.
+    pub const OBSTACLE: u8 = 1 << 6;
+    /// Points at the floor's height.
+    pub const FLOOR: u8 = 1 << 7;
+}
+
+impl CoverageMap {
+    /// Compass directions and [`coverage`] bits of the cell holding world (`x`, `z`); `None` outside the map.
+    pub fn at(&self, x: f32, z: f32) -> Option<(u8, u8)> {
+        let (fx, fz) = ((x - self.x0) / self.cell_m, (z - self.z0) / self.cell_m);
+        if fx < 0.0 || fz < 0.0 || fx >= self.width as f32 || fz >= self.depth as f32 {
+            return None;
+        }
+        let i = 2 * (fz as usize * self.width as usize + fx as usize);
+        Some((*self.cells.get(i)?, *self.cells.get(i + 1)?))
+    }
+}
+
+/// Bytes as a hex string: half the size of a JSON array of numbers.
+mod hex {
+    use serde::{de::Error, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let text: String = bytes.iter().flat_map(|b| [DIGITS[(b >> 4) as usize] as char, DIGITS[(b & 15) as usize] as char]).collect();
+        s.serialize_str(&text)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(d)?;
+        (0..text.len() / 2)
+            .map(|i| u8::from_str_radix(text.get(2 * i..2 * i + 2).ok_or_else(|| D::Error::custom("hex"))?, 16).map_err(D::Error::custom))
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptureStats {
@@ -164,6 +230,8 @@ pub enum WorkerEvent {
         source: String,
     },
     Stats(CaptureStats),
+    /// About once a second while recording: what the depth frames have seen so far.
+    Coverage(CoverageMap),
     Stopped {
         session_dir: PathBuf,
         manifest: Box<SessionManifest>,

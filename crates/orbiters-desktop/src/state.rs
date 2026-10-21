@@ -1,6 +1,6 @@
 //! Everything the interface shows lives in one [`Snapshot`], republished on every change.
 
-use orbiters_core::protocol::{AudioDeviceInfo, CaptureStats, SpoutSourceInfo};
+use orbiters_core::protocol::{AudioDeviceInfo, CaptureStats, CoverageMap, SpoutSourceInfo};
 use orbiters_core::reconstruction::Stage;
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::WorldState;
@@ -53,6 +53,9 @@ pub struct CaptureStatus {
     pub trail: Vec<[f32; 3]>,
     /// Capture started by the Action Menu (OSC) rather than the interface.
     pub from_osc: bool,
+    /// What the running capture's depth frames have seen so far, with hints.
+    #[serde(default)]
+    pub coverage: Option<CoverageMap>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -455,7 +458,16 @@ impl Snapshot {
             sources: Vec::new(),
             mics: Vec::new(),
             osc: OscStatus { enabled: settings.osc.enabled, ..Default::default() },
-            capture: CaptureStatus { state: CaptureState::Idle, session_dir: None, source: None, stats: None, error: None, trail: Vec::new(), from_osc: false },
+            capture: CaptureStatus {
+                state: CaptureState::Idle,
+                session_dir: None,
+                source: None,
+                stats: None,
+                error: None,
+                trail: Vec::new(),
+                from_osc: false,
+                coverage: None,
+            },
             storage: StorageStatus { sessions_dir: settings.sessions_dir.clone(), limit_gb: settings.storage_limit_gb, ..Default::default() },
             settings,
             worker: WorkerStatus::default(),

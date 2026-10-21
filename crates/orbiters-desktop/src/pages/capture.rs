@@ -53,6 +53,7 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
     let consent = snap.settings.consent_acknowledged;
     let mut test = false;
     let mut picture = false;
+    let mut scan = false;
     block(ui, cx, 0, 72.0, |ui, rect| {
         let caption = if recording {
             "Live capture"
@@ -121,12 +122,23 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
                 SegOption::new(Photo3dLength::Full, "8 s").hint("As 4 s, plus circles around four points 8 m away"),
             ];
             let seg_w = 150.0;
-            let mut seg = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(r3.left() - 8.0 - seg_w, rect.bottom() - 36.0), vec2(seg_w, 36.0))));
+            let seg_rect = Rect::from_min_size(pos2(r3.left() - 8.0 - seg_w, rect.bottom() - 36.0), vec2(seg_w, 36.0));
+            let mut seg = ui.new_child(UiBuilder::new().max_rect(seg_rect).layout(Layout::right_to_left(Align::Center)));
             if widgets::segmented(&mut seg, "photo-3d-length", &mut length, &lengths, true) {
                 let mut settings = snap.settings.clone();
                 settings.photo_3d = length;
                 cx.ctl.save_settings(settings);
             }
+            // The camera looks around, then circles at three heights, looking in and out: views a walk never gives.
+            let bs = Button::new("Scan")
+                .icon(icons::PATH)
+                .variant(Variant::Secondary)
+                .size(Size::Sm)
+                .enabled(consent && snap.vrchat.running)
+                .hint("VRChat's camera looks around, then circles where it stands at three heights, looking in and out (under a minute); the recording is then reconstructed in 3D");
+            let ws = bs.desired_width(ui);
+            let rs = Rect::from_min_size(pos2(seg.min_rect().left() - 20.0 - ws, rect.bottom() - 34.0), vec2(ws, 32.0));
+            scan = bs.show_at(ui, rs).clicked();
         }
     });
     if test {
@@ -134,6 +146,9 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
     }
     if picture {
         cx.ctl.orb(crate::ipc::OrbCommand::Photo3D);
+    }
+    if scan {
+        cx.ctl.scan();
     }
 }
 
@@ -564,7 +579,16 @@ fn camera_path(ui: &mut Ui, cx: &mut Cx) {
             );
         }
         let map = Rect::from_min_max(pos2(rect.left() + 16.0, rect.top() + 68.0), pos2(rect.right() - 16.0, rect.bottom() - 16.0));
-        trail::show(
+        let coverage = c.coverage.as_ref().map(|m| trail::Coverage {
+            x0: m.x0,
+            z0: m.z0,
+            cell: m.cell_m,
+            width: m.width,
+            depth: m.depth,
+            cells: &m.cells,
+            obstacle: orbiters_core::protocol::coverage::OBSTACLE,
+        });
+        trail::show_with(
             ui,
             map,
             Id::unique("capture-trail"),
@@ -574,6 +598,28 @@ fn camera_path(ui: &mut Ui, cx: &mut Cx) {
                 live: c.state == CaptureState::Recording,
                 empty_text: "The camera path appears here while you record",
             },
+            coverage.as_ref(),
         );
+        // What to do next, over the map's top; else what the colours mean.
+        if let Some(m) = &c.coverage {
+            let p = ui.painter();
+            if m.hints.is_empty() {
+                let mut x = map.left() + 12.0;
+                let y = map.top() + 14.0;
+                widgets::text(p, pos2(x, y), Align2::LEFT_CENTER, &Txt::new("Seen from", 11.5).color(theme::FG_3));
+                x += 62.0;
+                for (directions, label) in [(1u8, "1–2 directions"), (3, "3–5"), (6, "6 or more")] {
+                    p.rect_filled(Rect::from_center_size(pos2(x + 5.0, y), vec2(10.0, 10.0)), 2.0, theme::alpha(trail::coverage_colour(directions), 0.7));
+                    widgets::text(p, pos2(x + 14.0, y), Align2::LEFT_CENTER, &Txt::new(label, 11.5).color(theme::FG_3));
+                    x += 24.0 + 6.5 * label.chars().count() as f32;
+                }
+            } else {
+                for (k, hint) in m.hints.iter().take(2).enumerate() {
+                    let y = map.top() + 16.0 + 22.0 * k as f32;
+                    p.circle_filled(pos2(map.left() + 16.0, y), 3.0, theme::WARN);
+                    widgets::text_truncated(p, pos2(map.left() + 26.0, y), Align2::LEFT_CENTER, &Txt::new(hint, 12.5).color(theme::FG), map.width() - 40.0);
+                }
+            }
+        }
     });
 }

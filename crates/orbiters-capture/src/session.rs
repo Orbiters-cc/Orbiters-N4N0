@@ -3,6 +3,7 @@
 //! on disk or compression; when the pool falls behind, keyframes are dropped (and counted) instead.
 
 use crate::audio::{AudioRecorder, AudioSource};
+use crate::coverage::Coverage;
 use crate::performance::{ParameterStream, SkeletonStream};
 use crate::tracking::{self, TrackingRecorder};
 use crossbeam_channel::{bounded, Receiver as ChanReceiver, Sender as ChanSender, TrySendError};
@@ -16,7 +17,7 @@ use orbiters_contracts::{depth, qoi, skeleton, strip};
 use orbiters_core::bundle::{self, BundleWriter};
 use orbiters_core::clock;
 use orbiters_core::keyframes::{self, KeyframeSelector};
-use orbiters_core::protocol::{CaptureStats, OscSample, StartCapture};
+use orbiters_core::protocol::{CaptureStats, CoverageMap, OscSample, StartCapture};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -129,6 +130,8 @@ pub struct CaptureSession {
     fps_window: (Instant, u64),
     /// Depth frames kept as received (`depth-raw/`), at most [`RAW_DEPTH_FRAMES`].
     raw_depth_kept: u32,
+    /// What the depth frames have seen, for the capture page's coverage map.
+    coverage: Coverage,
 }
 
 /// Depth frames a session keeps as received when some of their tiles could not be read.
@@ -217,6 +220,7 @@ impl CaptureSession {
             thumbnail_done: false,
             decode_time_total: 0.0,
             raw_depth_kept: 0,
+            coverage: Coverage::new(),
             fps_window: (Instant::now(), 0),
         })
     }
@@ -342,6 +346,7 @@ impl CaptureSession {
                         record.flags |= record_flags::DEPTH;
                         record.depth_index = index;
                         self.stats.depth_frames += 1;
+                        self.coverage.add_depth(&p.camera_to_world, &p.projection, &dd.layout, dd.grid_width, &dd.codes);
                         // A few frames with tiles that could not be read, as received: what the world's
                         // post-processing did to the symbols, for whoever improves the decoder next.
                         if dd.tiles_rejected > 0 && self.raw_depth_kept < RAW_DEPTH_FRAMES {
@@ -388,6 +393,11 @@ impl CaptureSession {
         self.writer.append_record(&record)?;
         self.decode_time_total += t0.elapsed().as_secs_f64();
         Ok(())
+    }
+
+    /// The coverage map so far, with hints for where the camera is now.
+    pub fn coverage_map(&self) -> Option<CoverageMap> {
+        self.coverage.map(self.stats.position, self.stats.heading_deg, self.stats.elapsed_s)
     }
 
     /// Refreshes rates and byte counts; call before sending stats.

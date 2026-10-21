@@ -21,6 +21,8 @@ pub trait Backend: Send + Sync {
     fn stop_capture(&self);
     fn pause_capture(&self, paused: bool);
     fn start_test_capture(&self);
+    /// VRChat's camera flies around where it stands, at three heights, then the recording is reconstructed.
+    fn scan(&self) {}
     fn import_raw_capture(&self, dir: PathBuf);
     fn save_settings(&self, settings: Settings);
     fn trash_session(&self, dir: PathBuf);
@@ -102,6 +104,10 @@ impl Backend for Remote {
 
     fn start_test_capture(&self) {
         self.0.send(&ToService::TestPattern);
+    }
+
+    fn scan(&self) {
+        self.0.send(&ToService::Scan);
     }
 
     fn import_raw_capture(&self, dir: PathBuf) {
@@ -251,6 +257,10 @@ impl Backend for Local {
 
     fn start_test_capture(&self) {
         self.report(self.ctl.start_test_capture());
+    }
+
+    fn scan(&self) {
+        self.report(self.ctl.take_scan());
     }
 
     fn import_raw_capture(&self, dir: PathBuf) {

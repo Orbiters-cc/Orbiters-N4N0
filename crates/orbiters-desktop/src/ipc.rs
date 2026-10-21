@@ -65,6 +65,8 @@ pub enum ToService {
         paused: bool,
     },
     TestPattern,
+    /// VRChat's camera flies a scan around where it stands (controller/scan.rs).
+    Scan,
     SaveSettings {
         settings: Box<Settings>,
     },

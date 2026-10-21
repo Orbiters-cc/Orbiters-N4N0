@@ -1,0 +1,23 @@
+[package]
+name = "orbiters-voice"
+description = "Orb's ears: the voice worker of Orbiters desktop. Listens to the microphone, finds sentences (Silero VAD) and transcribes them on this computer (NVIDIA Parakeet through sherpa-onnx)."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "orbiters-voice"
+path = "src/main.rs"
+
+[dependencies]
+orbiters-core = { workspace = true }
+orbiters-audio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+tar = "0.4"
+bzip2 = "0.4"
+# The prebuilt shared libraries (sherpa-onnx's C API and ONNX Runtime) sit next to the worker: built with the MSVC
+# runtime the Rust target uses, unlike the static ones.
+sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["shared"] }

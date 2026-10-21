@@ -1,7 +1,9 @@
-//! Follows VRChat's `output_log_*.txt` (the same source VRCX uses) for the current world and instance.
-//! Reading a local log needs no VRChat account access.
+//! Follows VRChat's `output_log_*.txt` (the same source VRCX uses) for the current world and instance, who is in it,
+//! the avatar the local player wears and the videos the world plays. Reading a local log needs no VRChat account
+//! access.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -14,6 +16,25 @@ pub enum LogEvent {
     EnteringRoom { name: String },
     /// `[Behaviour] OnLeftRoom`
     LeftRoom,
+    /// `[Behaviour] Initialized PlayerAPI "<name>" is local`
+    LocalPlayer { name: String },
+    /// `[Behaviour] OnPlayerJoined <name> (usr_…)` (the local player too)
+    PlayerJoined { name: String, user_id: String },
+    /// `[Behaviour] OnPlayerLeft <name> (usr_…)`
+    PlayerLeft { name: String, user_id: String },
+    /// `[Behaviour] Switching <name> to avatar <avatar>` (every player's avatar changes)
+    AvatarSwitched { player: String, avatar: String },
+    /// `[Video Playback] Attempting to resolve URL '<url>'`, with the line's time (Unix seconds)
+    Video { url: String, at: Option<u64> },
+}
+
+/// A video a video player of the world played.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoSeen {
+    pub url: String,
+    /// When it started (Unix seconds, from the log line).
+    #[serde(default)]
+    pub at: Option<u64>,
 }
 
 /// What the log says about where the player is.
@@ -25,6 +46,19 @@ pub struct WorldState {
     pub in_world: bool,
     /// The log file being followed.
     pub log_file: Option<PathBuf>,
+    /// The local player's display name.
+    #[serde(default)]
+    pub local_player: Option<String>,
+    /// Who is in the instance (the local player too): display names by user id (by `name:<display name>` when the
+    /// log gives no id).
+    #[serde(default)]
+    pub players: BTreeMap<String, String>,
+    /// The name of the avatar the local player wears, as the log last named it.
+    #[serde(default)]
+    pub avatar_name: Option<String>,
+    /// The last video a video player of the world played in this instance.
+    #[serde(default)]
+    pub last_video: Option<VideoSeen>,
 }
 
 impl WorldState {
@@ -37,14 +71,58 @@ impl WorldState {
                 self.world_id = Some(world_id.clone());
                 self.instance = Some(instance.clone());
                 self.in_world = true;
+                // Everyone in the new instance, the local player included, joins again.
+                self.players.clear();
+                self.last_video = None;
             }
             LogEvent::EnteringRoom { name } => {
                 self.world_name = Some(name.clone());
                 self.in_world = true;
             }
-            LogEvent::LeftRoom => self.in_world = false,
+            LogEvent::LeftRoom => {
+                self.in_world = false;
+                self.players.clear();
+            }
+            LogEvent::LocalPlayer { name } => self.local_player = Some(name.clone()),
+            LogEvent::PlayerJoined { name, user_id } => {
+                self.players.insert(player_key(name, user_id), name.clone());
+            }
+            LogEvent::PlayerLeft { name, user_id } => {
+                self.players.remove(&player_key(name, user_id));
+            }
+            LogEvent::AvatarSwitched { player, avatar } => {
+                if self.local_player.as_deref() == Some(player.as_str()) {
+                    self.avatar_name = Some(avatar.clone());
+                }
+            }
+            LogEvent::Video { url, at } => self.last_video = Some(VideoSeen { url: url.clone(), at: *at }),
         }
     }
+
+    /// People in the instance other than the local player.
+    pub fn others(&self) -> usize {
+        let local = self.local_player.as_deref();
+        self.players.values().filter(|n| Some(n.as_str()) != local).count()
+    }
+}
+
+fn player_key(name: &str, user_id: &str) -> String {
+    if user_id.is_empty() {
+        format!("name:{name}")
+    } else {
+        user_id.to_string()
+    }
+}
+
+/// `<name> (usr_…)` → name and id; a name alone has an empty id.
+fn name_and_id(rest: &str) -> (String, String) {
+    let rest = rest.trim();
+    if let Some(i) = rest.rfind(" (usr_") {
+        if let Some(id) = rest[i + 2..].strip_suffix(')') {
+            return (rest[..i].to_string(), id.to_string());
+        }
+    }
+    (rest.to_string(), String::new())
 }
 
 /// Parses one log line.
@@ -65,6 +143,31 @@ pub fn parse_line(line: &str) -> Option<LogEvent> {
     }
     if line.contains("[Behaviour] OnLeftRoom") {
         return Some(LogEvent::LeftRoom);
+    }
+    if let Some(i) = line.find("[Behaviour] OnPlayerJoined ") {
+        let (name, user_id) = name_and_id(&line[i + "[Behaviour] OnPlayerJoined ".len()..]);
+        return (!name.is_empty()).then_some(LogEvent::PlayerJoined { name, user_id });
+    }
+    if let Some(i) = line.find("[Behaviour] OnPlayerLeft ") {
+        let (name, user_id) = name_and_id(&line[i + "[Behaviour] OnPlayerLeft ".len()..]);
+        return (!name.is_empty()).then_some(LogEvent::PlayerLeft { name, user_id });
+    }
+    if let Some(i) = line.find("[Behaviour] Initialized PlayerAPI \"") {
+        let rest = &line[i + "[Behaviour] Initialized PlayerAPI \"".len()..];
+        if let Some(name) = rest.trim_end().strip_suffix("\" is local") {
+            return Some(LogEvent::LocalPlayer { name: name.to_string() });
+        }
+        return None;
+    }
+    if let Some(i) = line.find("[Behaviour] Switching ") {
+        let rest = &line[i + "[Behaviour] Switching ".len()..];
+        let (player, avatar) = rest.split_once(" to avatar ")?;
+        return Some(LogEvent::AvatarSwitched { player: player.to_string(), avatar: avatar.trim_end().to_string() });
+    }
+    if let Some(i) = line.find("[Video Playback] Attempting to resolve URL '") {
+        let rest = &line[i + "[Video Playback] Attempting to resolve URL '".len()..];
+        let url = rest.trim_end().strip_suffix('\'')?;
+        return (!url.is_empty()).then(|| LogEvent::Video { url: url.to_string(), at: crate::visited::log_time(line) });
     }
     None
 }
@@ -156,6 +259,61 @@ mod tests {
         );
         assert_eq!(parse_line("[Behaviour] OnLeftRoom"), Some(LogEvent::LeftRoom));
         assert_eq!(parse_line("2026.10.18 20:23:18 Warning    -  Path already exists, skipping: /usercamera/Pose"), None);
+    }
+
+    #[test]
+    fn parses_people_avatars_and_videos() {
+        assert_eq!(
+            parse_line("2026.10.18 20:23:34 Debug      -  [Behaviour] OnPlayerJoined Some One (2) (usr_8784f94a-27ed)"),
+            Some(LogEvent::PlayerJoined { name: "Some One (2)".into(), user_id: "usr_8784f94a-27ed".into() })
+        );
+        assert_eq!(
+            parse_line("2026.10.18 20:34:02 Debug      -  [Behaviour] OnPlayerLeft Old Name"),
+            Some(LogEvent::PlayerLeft { name: "Old Name".into(), user_id: String::new() })
+        );
+        assert_eq!(parse_line("[Behaviour] OnPlayerLeftRoom"), None);
+        assert_eq!(
+            parse_line("2026.10.18 20:23:34 Debug      -  [Behaviour] Initialized PlayerAPI \"Me Myself\" is local"),
+            Some(LogEvent::LocalPlayer { name: "Me Myself".into() })
+        );
+        assert_eq!(parse_line("2026.10.18 20:23:34 Debug      -  [Behaviour] Initialized PlayerAPI \"You\" is remote"), None);
+        assert_eq!(
+            parse_line("2026.10.18 20:23:33 Debug      -  [Behaviour] Switching Me Myself to avatar Orbit v4"),
+            Some(LogEvent::AvatarSwitched { player: "Me Myself".into(), avatar: "Orbit v4".into() })
+        );
+        let video = parse_line("2026.10.18 21:33:13 Debug      -  [Video Playback] Attempting to resolve URL 'https://www.youtube.com/watch?v=36YnV9STBqc'");
+        match video {
+            Some(LogEvent::Video { url, at }) => {
+                assert_eq!(url, "https://www.youtube.com/watch?v=36YnV9STBqc");
+                assert!(at.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn knows_who_is_there_and_what_i_wear() {
+        let mut s = WorldState::default();
+        for line in [
+            "[Behaviour] Joining wrld_a:1",
+            "[Behaviour] Initialized PlayerAPI \"Me\" is local",
+            "[Behaviour] OnPlayerJoined Me (usr_me)",
+            "[Behaviour] OnPlayerJoined Friend (usr_f)",
+            "[Behaviour] Switching Friend to avatar Fox",
+            "[Behaviour] Switching Me to avatar Orbit",
+            "[Video Playback] Attempting to resolve URL 'https://youtu.be/x'",
+        ] {
+            s.apply(&parse_line(line).unwrap());
+        }
+        assert_eq!(s.players.len(), 2);
+        assert_eq!(s.others(), 1);
+        assert_eq!(s.avatar_name.as_deref(), Some("Orbit"));
+        assert_eq!(s.last_video.as_ref().map(|v| v.url.as_str()), Some("https://youtu.be/x"));
+        s.apply(&parse_line("[Behaviour] OnPlayerLeft Friend (usr_f)").unwrap());
+        assert_eq!(s.others(), 0);
+        s.apply(&parse_line("[Behaviour] Joining wrld_b:2").unwrap());
+        assert!(s.players.is_empty() && s.last_video.is_none(), "a new instance starts empty");
+        assert_eq!(s.avatar_name.as_deref(), Some("Orbit"), "the avatar stays");
     }
 
     #[test]

@@ -33,6 +33,22 @@ pub fn mixer_inbox_dir() -> PathBuf {
     dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")).join("Orbiters").join("Mixer").join("inbox")
 }
 
+/// `%LOCALAPPDATA%/Orbiters` (`~/.local/share/Orbiters` on Linux): data shared by the Orbiters apps and tools on
+/// this computer, too big or too local for the config folder.
+pub fn local_data_root() -> PathBuf {
+    dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")).join("Orbiters")
+}
+
+/// Avatar manifests Orbiters Toolkit writes while the VRChat SDK builds an avatar (contracts `Docs/avatar-manifest.md`).
+pub fn avatars_dir() -> PathBuf {
+    local_data_root().join("Avatars")
+}
+
+/// Speech models Orb downloads when the person asks for them.
+pub fn models_dir() -> PathBuf {
+    local_data_root().join("Models")
+}
+
 pub fn settings_file() -> PathBuf {
     config_dir().join("settings.json")
 }

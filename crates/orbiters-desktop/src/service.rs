@@ -186,6 +186,7 @@ impl Service {
             ToService::UploadPreview { world_id, world_name, session } => report(ctl.upload_preview(world_id, world_name, session)),
             ToService::Maps => ctl.refresh_maps(),
             ToService::Calibrated { calibration } => ctl.calibrated(*calibration),
+            ToService::Orb { command } => ctl.orb_command(command),
             ToService::Quit => self.quit(),
         }
     }

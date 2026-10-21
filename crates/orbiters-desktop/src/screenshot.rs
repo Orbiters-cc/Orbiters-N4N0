@@ -145,7 +145,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         maps.worlds.push(orbiters_core::maps::MineWorld {
             world_id: w.id.clone(),
             preview: None,
-            pictures: first.iter().filter_map(|p| hashes.get(p)).enumerate().map(|(i, h)| orbiters_core::maps::MinePicture { id: i as u64 + 1, source_hash: h.clone() }).collect(),
+            pictures: first
+                .iter()
+                .filter_map(|p| hashes.get(p))
+                .enumerate()
+                .map(|(i, h)| orbiters_core::maps::MinePicture { id: i as u64 + 1, source_hash: h.clone() })
+                .collect(),
         });
         sharing.uploads.push(crate::state::UploadStatus {
             id: 1,
@@ -159,7 +164,51 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         });
     }
 
+    let orb_busy = orb_snapshot(&signed_in);
+    let orb_new = {
+        let mut s = with_account(&idle, crate::state::AccountState::SignedOut, None);
+        s.vrchat.world.avatar_name = Some("Rexouium".into());
+        s.orb.avatar_id = Some("avtr_7f3c2b1e-0d4a-4a7b-9c55-1f0e9a2b6c11".into());
+        s
+    };
+
     let scenarios = vec![
+        Scenario {
+            name: "orb",
+            page: Page::Orb,
+            snapshot: orb_busy.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+        },
+        Scenario {
+            name: "orb-scrolled",
+            page: Page::Orb,
+            snapshot: orb_busy,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 760.0,
+            world: None,
+        },
+        Scenario {
+            name: "orb-new",
+            page: Page::Orb,
+            snapshot: orb_new,
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+        },
         Scenario {
             name: "splash",
             page: Page::Capture,
@@ -484,7 +533,11 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, height: f32, path: &st
             if sc.open_detail && !world_opened && f >= 45 && app.worlds_mut().loaded() {
                 world_opened = true;
                 let visited = crate::worlds::load(&sc.snapshot.settings.sessions_dir);
-                let pick = if ws.pictures { visited.iter().max_by_key(|w| w.shots.len()) } else { visited.iter().max_by_key(|w| (w.reconstructed(), w.sessions.len())) };
+                let pick = if ws.pictures {
+                    visited.iter().max_by_key(|w| w.shots.len())
+                } else {
+                    visited.iter().max_by_key(|w| (w.reconstructed(), w.sessions.len()))
+                };
                 if let Some(w) = pick {
                     app.worlds_mut().open_world(&ctx, &w.id, Rect::from_min_size(pos2(264.0, 152.0), vec2(300.0, 169.0)));
                 }
@@ -822,6 +875,61 @@ impl StandInVrchat {
     }
 }
 
+/// Orb on an avatar with its prop and menu, a conversation under way, saved videos and the speech models installed.
+fn orb_snapshot(base: &Snapshot) -> Snapshot {
+    use crate::state::{OrbConfirmation, OrbFace, OrbLine, OrbWho, ProcessUsage};
+    let mut s = base.clone();
+    s.vrchat.world.avatar_name = Some("Rexouium".into());
+    s.vrchat.world.last_video = Some(orbiters_core::vrchat_log::VideoSeen { url: "https://www.youtube.com/watch?v=36YnV9STBqc".into(), at: None });
+    s.settings.orb.afk_message_enabled = true;
+    s.settings.orb.afk_message = "Getting food, back in 10!".into();
+    s.settings.orb.pins = vec![orbiters_core::settings::Pin { parameter: "Hoodie".into(), value: orbiters_core::osc::OscValue::Bool(true) }];
+    let line = |who, text: &str| OrbLine { who, text: text.into(), at_ms: 0 };
+    let o = &mut s.orb;
+    o.avatar_id = Some("avtr_7f3c2b1e-0d4a-4a7b-9c55-1f0e9a2b6c11".into());
+    o.prop_sync = Some(8);
+    o.manifest = true;
+    o.controls = 42;
+    o.face = OrbFace::Talking;
+    o.panel = Some("Done, hoodie on. Now go find\nyour friends instead of\ntalking to a floating ball.".into());
+    o.lines = vec![
+        line(OrbWho::You, "Orb, mets mon sweat à capuche"),
+        line(OrbWho::Note, "Orb set Clothes / Hoodie"),
+        line(OrbWho::Orb, "Done, hoodie on. Now go find your friends instead of talking to a floating ball."),
+        line(OrbWho::You, "Plan a movie night for my community on Saturday at 9 pm"),
+        line(OrbWho::Note, "Orb: create event draft…"),
+        line(OrbWho::Orb, "Drafted “Movie night” for Saturday 21:00 in Cozy Cinema. Approve it on Orbiters and I'll announce it."),
+    ];
+    o.confirmations = vec![OrbConfirmation {
+        id: "c1".into(),
+        title: "Publish “Movie night”".into(),
+        summary: "Saturday 21:00 · Cozy Cinema · announced in #events".into(),
+        approve_url: "https://orbiters.cc/confirm/c1".into(),
+    }];
+    o.quota = Some(orbiters_orb::assistant::Quota { used: 13, limit: 80, resets_at: None, own_key: false });
+    o.voice = crate::state::VoiceStatus { installed: true, running: true, ..Default::default() };
+    o.videos = vec![
+        orbiters_orb::videos::SavedVideo {
+            url: "https://www.youtube.com/watch?v=36YnV9STBqc".into(),
+            title: Some("Lo-fi beats to sit in a VRChat club to".into()),
+            world: Some("The Black Cat".into()),
+            saved_utc: "2026-10-20T22:14:03Z".into(),
+        },
+        orbiters_orb::videos::SavedVideo {
+            url: "https://youtu.be/pUaeOcyzDrA".into(),
+            title: None,
+            world: Some("Palm Point - Night".into()),
+            saved_utc: "2026-10-18T21:33:48Z".into(),
+        },
+    ];
+    o.resources = vec![
+        ProcessUsage { name: "Orbiters desktop".into(), cpu_percent: 1.2, memory_mb: 148.0 },
+        ProcessUsage { name: "Orb's ears".into(), cpu_percent: 0.4, memory_mb: 912.0 },
+        ProcessUsage { name: "VRChat".into(), cpu_percent: 187.0, memory_mb: 6840.0 },
+    ];
+    s
+}
+
 fn with_account(base: &Snapshot, state: crate::state::AccountState, error: Option<&str>) -> Snapshot {
     let mut s = base.clone();
     s.account.state = state;
@@ -840,6 +948,7 @@ fn idle_snapshot(settings: &Settings, sessions: &[orbiters_core::bundle::Session
         instance: Some("12345~private".into()),
         in_world: true,
         log_file: Some(PathBuf::from(r"C:\Users\Enzo\AppData\LocalLow\VRChat\VRChat\output_log_2026-10-20_01-12-44.txt")),
+        ..Default::default()
     };
     s.sources = vec![SpoutSourceInfo { name: "VRChat".into(), width: 1920, height: 1080, format: 87, description: String::new() }];
     s.osc.enabled = true;
@@ -878,6 +987,8 @@ fn spiral() -> Vec<[f32; 3]> {
 struct Still;
 
 impl crate::backend::Backend for Still {
+    fn orb(&self, _command: crate::ipc::OrbCommand) {}
+
     fn view(&self) -> std::sync::Arc<Snapshot> {
         std::sync::Arc::new(Snapshot::new(Settings::default()))
     }
@@ -981,9 +1092,16 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
         skeleton_frames: 4_050,
         ..Default::default()
     });
+    let mut talking = orb_snapshot(&with_account(&idle, crate::state::AccountState::SignedIn { username: "Desktop Tester".into() }, None));
+    talking.vrchat.running = true;
+    let mut listening = talking.clone();
+    listening.orb.listening = true;
+    listening.orb.voice.level = 0.55;
     // (name, snapshot, calibration: (T-pose held, started at this time; the last frame is at 1.48 s)).
     type Shot<'a> = (&'a str, &'a Snapshot, Option<(bool, f64)>);
-    let shots: [Shot; 5] = [
+    let shots: [Shot; 7] = [
+        ("overlay-orb", &talking, None),
+        ("overlay-orb-listening", &listening, None),
         ("overlay-idle", &idle, None),
         ("overlay-recording", &recording, None),
         ("overlay-countdown", &idle, Some((true, 0.0))),
@@ -995,6 +1113,9 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
         orbiters_ui::install(&ctx);
         let backend: Ctl = std::sync::Arc::new(Still);
         let mut ui_state = OverlayUi::default();
+        if name.starts_with("overlay-orb") {
+            ui_state.page = crate::overlay::ui::Page::Orb;
+        }
         let mut body = StandInBody { t_pose: calibrate.is_some_and(|(t_pose, _)| t_pose) };
         let mut sw = crate::overlay::painter();
         let frames = 90;

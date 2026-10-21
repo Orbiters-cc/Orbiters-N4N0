@@ -12,6 +12,7 @@ pub mod protocol;
 pub mod reconstruction;
 pub mod settings;
 pub mod visited;
+pub mod voice;
 pub mod vrchat_log;
 
 pub use orbiters_contracts as contracts;

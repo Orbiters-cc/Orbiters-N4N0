@@ -34,6 +34,7 @@ pub struct App {
     sessions: pages::sessions::State,
     worlds: pages::worlds::State,
     settings: pages::settings::State,
+    orb: pages::orb::State,
     logo_glitch: Option<(f64, f32)>,
     logo_hovered: bool,
 }
@@ -73,6 +74,7 @@ impl App {
             sessions: Default::default(),
             worlds: Default::default(),
             settings: Default::default(),
+            orb: Default::default(),
             logo_glitch: None,
             logo_hovered: false,
         }
@@ -85,6 +87,9 @@ impl App {
     pub fn set_page(&mut self, page: Page, now: f64) {
         if self.page == Page::Settings && page != Page::Settings {
             self.settings.stop_mic_test();
+        }
+        if self.page == Page::Orb && page != Page::Orb {
+            self.orb.leave(&self.ctl);
         }
         if page != self.page || self.visit == 0 {
             self.page = page;
@@ -278,6 +283,7 @@ impl App {
         let nav_top = logo_rect.bottom() + 28.0;
         let items = [
             (Page::Capture, "Capture", icons::APERTURE),
+            (Page::Orb, "Orb", icons::SMILEY),
             (Page::Sessions, "Sessions", icons::FOLDER_OPEN),
             (Page::Worlds, "Visited worlds", icons::GLOBE),
             (Page::Settings, "Settings", icons::SLIDERS_HORIZONTAL),
@@ -393,6 +399,7 @@ impl App {
         };
         match self.page {
             Page::Capture => pages::capture::show(&mut child, &mut cx, &mut self.capture),
+            Page::Orb => pages::orb::show(&mut child, &mut cx, &mut self.orb),
             Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions),
             Page::Worlds => pages::worlds::show(&mut child, &mut cx, &mut self.worlds),
             Page::Settings => pages::settings::show(&mut child, &mut cx, &mut self.settings),

@@ -3,7 +3,7 @@
 //! and failures come back as notices.
 
 use crate::controller::{self, Notice, NoticeKind};
-use crate::ipc::{Client, ToService};
+use crate::ipc::{Client, OrbCommand, ToService};
 use crate::state::{MapsMine, Snapshot};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::settings::Settings;
@@ -46,6 +46,8 @@ pub trait Backend: Send + Sync {
     fn maps(&self) -> Option<MapsMine>;
     /// A T-pose calibration taken in the overlay.
     fn calibrated(&self, calibration: Calibration);
+    /// Orb: a question, the Talk button, the panel, saved videos.
+    fn orb(&self, command: OrbCommand);
     /// Quits the whole app (the tray service and every window).
     fn quit(&self);
     /// The service asked this window to come to the front.
@@ -163,6 +165,10 @@ impl Backend for Remote {
 
     fn calibrated(&self, calibration: Calibration) {
         self.0.send(&ToService::Calibrated { calibration: Box::new(calibration) });
+    }
+
+    fn orb(&self, command: OrbCommand) {
+        self.0.send(&ToService::Orb { command });
     }
 
     fn quit(&self) {
@@ -305,6 +311,10 @@ impl Backend for Local {
 
     fn calibrated(&self, calibration: Calibration) {
         self.ctl.calibrated(calibration);
+    }
+
+    fn orb(&self, command: OrbCommand) {
+        self.ctl.orb_command(command);
     }
 
     fn quit(&self) {

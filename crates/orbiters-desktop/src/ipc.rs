@@ -108,7 +108,45 @@ pub enum ToService {
     Calibrated {
         calibration: Box<Calibration>,
     },
+    /// Orb: a question, the Talk button, the panel, saved videos.
+    Orb {
+        command: OrbCommand,
+    },
     Quit,
+}
+
+/// What the window and the overlay ask of Orb.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OrbCommand {
+    /// A question typed in the window or the overlay.
+    Ask {
+        text: String,
+    },
+    /// The window's or the overlay's Talk button, pressed or let go.
+    Talk {
+        down: bool,
+    },
+    /// Shows a text on the panel as it is (tries the panel).
+    Say {
+        text: String,
+    },
+    HidePanel,
+    /// Starts a new conversation (Orb forgets the current one).
+    NewConversation,
+    SaveVideo,
+    RemoveVideo {
+        url: String,
+    },
+    CopyText {
+        text: String,
+    },
+    /// Opens a page of the Orbiters website (an approval).
+    OpenLink {
+        url: String,
+    },
+    /// Downloads the speech models.
+    InstallVoice,
 }
 
 /// Longest Hello a client may send, and how long it has to send it. Any local process can connect: before it proves

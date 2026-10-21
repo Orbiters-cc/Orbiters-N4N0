@@ -118,6 +118,9 @@ pub struct Controller {
     /// What this member added to the Map explorer, and the uploads' numbering (controller/maps.rs).
     maps_mine: Mutex<Option<MapsMine>>,
     upload_serial: AtomicU64,
+    /// Orb, the companion on the avatar (controller/orb.rs), and its ears (controller/voice.rs).
+    orb: Mutex<orb::OrbRuntime>,
+    voice: Mutex<voice::VoiceRuntime>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -170,6 +173,8 @@ pub type Shared = Arc<Controller>;
 
 mod account;
 mod maps;
+mod orb;
+mod voice;
 pub use account::open_url;
 
 impl Controller {
@@ -197,6 +202,8 @@ impl Controller {
             account_runtime: Mutex::new(account::AccountRuntime::default()),
             maps_mine: Mutex::new(None),
             upload_serial: AtomicU64::new(0),
+            orb: Mutex::new(orb::OrbRuntime::default()),
+            voice: Mutex::new(voice::VoiceRuntime::default()),
         })
     }
 
@@ -211,6 +218,7 @@ impl Controller {
         });
         spawn_watchers(self.clone());
         self.start_account();
+        self.start_orb();
     }
 
     /// The interface's context, repainted on every change.
@@ -817,6 +825,7 @@ impl Controller {
         let result = OscService::start("Orbiters desktop", &wanted, settings.osc.vrchat_port, advertise, move |e, at_ns| {
             let (address, values) = match e {
                 OscEvent::Parameter { name, value } => {
+                    ctl.orb_on_parameter(&name, &value);
                     if name == parameter {
                         let on = value.truthy();
                         ctl.update(|s| s.osc.last_event = Some(format!("{name} = {}", if on { "on" } else { "off" })));
@@ -828,6 +837,7 @@ impl Controller {
                 }
                 OscEvent::AvatarChanged { id } => {
                     ctl.on_avatar_changed();
+                    ctl.orb_on_avatar(id.clone());
                     (AVATAR_CHANGE.to_string(), vec![OscValue::Text(id)])
                 }
                 OscEvent::Values { address, values } => (address, values),
@@ -852,6 +862,8 @@ impl Controller {
     /// back first, while OSC can still tell VRChat; OSC then stops before the worker finishes, so VRChat's echo of the
     /// record toggle starts or stops nothing.
     pub fn shutdown(self: &Shared) {
+        self.voice_stop();
+        self.orb_stop();
         {
             let mut osc = self.osc_values.lock().unwrap();
             if osc.forwarding {
@@ -953,7 +965,10 @@ impl Controller {
             ReconstructEvent::Done { report } => {
                 self.mark_reconstruction_told();
                 let quality = report.psnr_held_out.map(|p| format!(", {p:.1} dB on views it never saw")).unwrap_or_default();
-                self.notify(NoticeKind::Success, format!("Reconstruction finished: {} splats{quality}.", orbiters_ui::format::integer(report.gaussians as f64)));
+                self.notify(
+                    NoticeKind::Success,
+                    format!("Reconstruction finished: {} splats{quality}.", orbiters_ui::format::integer(report.gaussians as f64)),
+                );
                 refresh_storage(self);
                 self.bump_library();
             }
@@ -1245,7 +1260,10 @@ mod tests {
         ctl.open_stream_camera(&streaming);
         assert!(received(&vrchat, Duration::from_millis(600)).is_empty());
         ctl.restore_camera();
-        assert_eq!(received(&vrchat, Duration::from_millis(300)), vec![(CAMERA_STREAMING.into(), rosc::OscType::Bool(false)), (CAMERA_MODE.into(), rosc::OscType::Int(1))]);
+        assert_eq!(
+            received(&vrchat, Duration::from_millis(300)),
+            vec![(CAMERA_STREAMING.into(), rosc::OscType::Bool(false)), (CAMERA_MODE.into(), rosc::OscType::Int(1))]
+        );
         // Nothing more to put back.
         ctl.restore_camera();
         assert!(received(&vrchat, Duration::from_millis(200)).is_empty());

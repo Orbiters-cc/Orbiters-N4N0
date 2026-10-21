@@ -1,14 +1,16 @@
 //! The pages, plus what they share: the page context, background jobs and staggered entrances.
 
 pub mod capture;
+pub mod mic;
+pub mod orb;
 pub mod sessions;
-pub mod splats;
 pub mod settings;
+pub mod splats;
 pub mod worlds;
 
 use crate::backend::Ctl;
 use crate::state::Snapshot;
-use egui::{pos2, vec2, Align2, Id, Rect, Sense, Ui, UiBuilder};
+use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Shape, Ui, UiBuilder};
 use orbiters_ui::blur;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{toast, widgets};
@@ -17,6 +19,7 @@ use std::sync::mpsc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Capture,
+    Orb,
     Sessions,
     Worlds,
     Settings,
@@ -147,6 +150,33 @@ pub fn heading(ui: &Ui, rect: Rect, caption: &str, title: &str, sub: Option<&str
     if let Some(sub) = sub {
         widgets::text_truncated(p, pos2(rect.left(), rect.top() + 62.0), Align2::LEFT_CENTER, &Txt::new(sub, 13.0).color(theme::FG_3), rect.width() * 0.6);
     }
+}
+
+/// A card section: entrance, gradient icon tile, title and subtitle, then rows; the card is sized to its rows.
+pub fn section(ui: &mut Ui, cx: &Cx, index: usize, glyph: &str, title: &str, subtitle: Option<&str>, body: impl FnOnce(&mut Ui)) {
+    let width = ui.available_width().min(980.0);
+    let top_left = ui.cursor().min;
+    let (alpha, dy) = widgets::entrance(ui, Id::unique(("orbiters-enter", cx.visit, index)), cx.entered, index);
+    let bg = ui.painter().add(Shape::Noop);
+    let inner = Rect::from_min_size(top_left + vec2(24.0, 20.0 + dy), vec2(width - 48.0, 100_000.0));
+    let mut child = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::top_down(egui::Align::Min)).id_salt(("section", index)));
+    child.multiply_opacity(alpha);
+    child.spacing_mut().item_spacing = vec2(0.0, 0.0);
+    widgets::section_header(&mut child, glyph, title, subtitle);
+    child.add_space(4.0);
+    body(&mut child);
+    let h = child.min_rect().height() + 20.0 + 12.0;
+    let card = Rect::from_min_size(top_left + vec2(0.0, dy), vec2(width, h));
+    ui.painter().set(
+        bg,
+        Shape::mesh(orbiters_ui::paint::squircle_mesh(
+            card,
+            theme::squircle(theme::CARD_RADIUS),
+            theme::surface().gamma_multiply(alpha),
+            1.0 / ui.ctx().pixels_per_point(),
+        )),
+    );
+    ui.allocate_exact_size(vec2(width, h), Sense::hover());
 }
 
 /// Inner margins of every page.

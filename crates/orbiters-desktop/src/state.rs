@@ -73,14 +73,25 @@ pub enum AccountState {
     Unknown,
     SignedOut,
     /// Saved by a tool, being checked with Orbiters.
-    Checking { username: Option<String> },
-    SignedIn { username: String },
+    Checking {
+        username: Option<String>,
+    },
+    SignedIn {
+        username: String,
+    },
     /// The saved sign-in was refused: expired, or signed out everywhere.
-    Expired { username: Option<String> },
+    Expired {
+        username: Option<String>,
+    },
     /// Orbiters could not be reached to check it.
-    Offline { username: Option<String> },
+    Offline {
+        username: Option<String>,
+    },
     /// Finishing in the browser, where `code` is typed.
-    SigningIn { code: String, provider: String },
+    SigningIn {
+        code: String,
+        provider: String,
+    },
 }
 
 impl AccountState {
@@ -158,8 +169,13 @@ pub enum UploadState {
     /// Building the web preview of the splats.
     Preparing,
     Sending,
-    Done { added: usize, skipped: usize },
-    Failed { message: String },
+    Done {
+        added: usize,
+        skipped: usize,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 /// An upload to the Map explorer (the latest ones stay listed once finished).
@@ -198,6 +214,101 @@ pub struct MapsMine {
     pub error: Option<String>,
 }
 
+/// What the orb shows (`Orb/State`, contracts `Docs/orb.md`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrbFace {
+    #[default]
+    Idle,
+    Listening,
+    Thinking,
+    Talking,
+    Sleeping,
+    Happy,
+    Annoyed,
+    Surprised,
+}
+
+/// Who said a line of Orb's conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrbWho {
+    You,
+    Orb,
+    /// Something Orb did or noticed (a tool ran, a video was saved).
+    Note,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OrbLine {
+    pub who: OrbWho,
+    pub text: String,
+    /// Unix time in milliseconds.
+    pub at_ms: u64,
+}
+
+/// An action of Orb's (publishing an event…) waiting for the member's approval on Orbiters.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OrbConfirmation {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    pub approve_url: String,
+}
+
+/// The speech models and the voice worker.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct VoiceStatus {
+    /// The speech models are on this computer.
+    pub installed: bool,
+    /// The voice worker runs (listening for the wake word, or ready for the Talk button).
+    pub running: bool,
+    /// The models are downloading: the fraction done.
+    pub downloading: Option<f32>,
+    /// The microphone's level while Orb listens (0 to 1).
+    pub level: f32,
+    pub error: Option<String>,
+}
+
+/// A process's share of this computer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessUsage {
+    pub name: String,
+    /// Percent of one core.
+    pub cpu_percent: f32,
+    pub memory_mb: f32,
+}
+
+/// Orb, the companion on the avatar (controller/orb.rs).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OrbStatus {
+    /// The avatar VRChat loaded.
+    pub avatar_id: Option<String>,
+    /// The avatar carries the Orb prop, with this many text sync values.
+    pub prop_sync: Option<u8>,
+    /// The avatar's manifest was found: its menu is known by label.
+    pub manifest: bool,
+    /// Controls Orb can reach on the avatar.
+    pub controls: usize,
+    pub face: OrbFace,
+    /// What the panel shows now.
+    pub panel: Option<String>,
+    pub listening: bool,
+    pub thinking: bool,
+    pub afk: bool,
+    /// The conversation as shown, the newest last.
+    pub lines: Vec<OrbLine>,
+    pub confirmations: Vec<OrbConfirmation>,
+    /// The free quota of Orb's assistant, as the last answer told it.
+    pub quota: Option<orbiters_orb::assistant::Quota>,
+    pub voice: VoiceStatus,
+    /// Saved videos, the newest first.
+    pub videos: Vec<orbiters_orb::videos::SavedVideo>,
+    /// Orbiters' processes and VRChat's.
+    pub resources: Vec<ProcessUsage>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WorkerStatus {
     pub ready: bool,
@@ -221,6 +332,8 @@ pub struct Snapshot {
     #[serde(default)]
     pub account: AccountStatus,
     pub uploads: Vec<UploadStatus>,
+    #[serde(default)]
+    pub orb: OrbStatus,
 }
 
 impl Snapshot {
@@ -239,6 +352,7 @@ impl Snapshot {
             reconstruction: None,
             account: AccountStatus::default(),
             uploads: Vec::new(),
+            orb: OrbStatus::default(),
         }
     }
 

@@ -26,6 +26,79 @@ pub struct Settings {
     pub reduce_motion: bool,
     /// Show Orbiters in SteamVR's dashboard while SteamVR runs.
     pub steamvr_overlay: bool,
+    /// Orb, the Orbiters companion on the avatar.
+    pub orb: OrbSettings,
+}
+
+/// Orb, the Orbiters companion (contracts `Docs/orb.md`): its helpers, and its assistant.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OrbSettings {
+    /// Orb's helpers run: the text panel, the AFK message, held and carried parameters, saved videos.
+    pub enabled: bool,
+    /// Orb's assistant: listening and answers. Off, Orb is a tool without AI: nothing is transcribed or sent.
+    pub assistant: bool,
+    /// Listen for the wake word in everything the microphone hears. Sentences are transcribed on this computer; only
+    /// those that start with a wake word go further.
+    pub wake_word: bool,
+    /// The words that wake Orb at the start of a sentence ("hey", "ok" or "dis" before them are fine).
+    pub wake_words: Vec<String>,
+    /// Mute VRChat's microphone while the menu's Talk button is held, so the sentence for Orb stays out of the world.
+    pub mute_while_talking: bool,
+    /// Microphone Orb listens to (endpoint id; empty for the Windows default).
+    pub mic_device: String,
+    /// Milliseconds between two steps of the text panel (VRChat loses faster ones for other players).
+    pub text_step_ms: u64,
+    /// While VRChat says you are away, the panel shows `afk_message`.
+    pub afk_message_enabled: bool,
+    pub afk_message: String,
+    /// Parameters whose values follow you to your next avatar (GoGoLoco's pose and height by default).
+    pub carry_parameters: Vec<String>,
+    /// Parameters held at a value: put back whenever something else changes them.
+    pub pins: Vec<Pin>,
+}
+
+/// A parameter held at a value.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Pin {
+    pub parameter: String,
+    pub value: crate::osc::OscValue,
+}
+
+/// GoGoLoco's parameters that hold a pose, its height and its puppet: carried to the next avatar. `VRCEmote` (the
+/// pose itself) is carried only to an avatar that has GoGoLoco too.
+pub const GOGOLOCO_PARAMETERS: &[&str] = &[
+    "VRCEmote",
+    "Go/Stationary",
+    "Go/StandIdle",
+    "Go/CrouchIdle",
+    "Go/ProneIdle",
+    "Go/Float",
+    "Go/Height",
+    "Go/PuppetX",
+    "Go/PuppetY",
+    "Go/Horizon",
+    "Go/Locomotion",
+    "Go/PoseRadius",
+    "Go/PoseY",
+];
+
+impl Default for OrbSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            assistant: true,
+            wake_word: false,
+            wake_words: vec!["orb".into(), "orbe".into()],
+            mute_while_talking: true,
+            mic_device: String::new(),
+            text_step_ms: 300,
+            afk_message_enabled: false,
+            afk_message: "Away for a moment, back soon!".into(),
+            carry_parameters: GOGOLOCO_PARAMETERS.iter().map(|s| s.to_string()).collect(),
+            pins: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -104,6 +177,7 @@ impl Default for Settings {
             consent_acknowledged: false,
             reduce_motion: false,
             steamvr_overlay: true,
+            orb: OrbSettings::default(),
         }
     }
 }
@@ -148,6 +222,7 @@ mod tests {
         let partial = Settings::load_from(&path);
         assert_eq!(partial.storage_limit_gb, 3.0);
         assert_eq!(partial.osc.record_parameter, "OrbitersRecord");
+        assert_eq!(partial.orb, OrbSettings::default(), "settings from before Orb get its defaults");
         std::fs::remove_dir_all(dir).ok();
     }
 }

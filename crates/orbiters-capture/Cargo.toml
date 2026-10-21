@@ -13,6 +13,7 @@ path = "src/main.rs"
 orbiters-core = { workspace = true }
 orbiters-contracts = { workspace = true }
 orbiters-openvr = { workspace = true }
+orbiters-audio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
@@ -22,5 +23,3 @@ flate2 = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 orbiters-spout = { workspace = true }
-windows = { workspace = true, features = ["Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem"] }
-windows-core = "0.62"

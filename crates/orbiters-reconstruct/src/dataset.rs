@@ -142,7 +142,11 @@ pub fn load(dir: &Path, max_width: u32, mut progress: impl FnMut(f32)) -> anyhow
         progress((keyframes.len() + i + 1) as f32 / total as f32);
     }
 
-    // What is not scene: the strip (and patches), and the skeleton band when the session read one.
+    // What is not scene: the strip (and patches), and the skeleton band when the session read one, came from the
+    // capture kit on an avatar (it draws the band into every colour frame), or the keyframes show it. A world whose
+    // post-processing breaks the band's symbols (chromatic aberration at the bottom of the frame) decodes no skeleton
+    // frame, and an unmasked band trains its codes as bright specks on the floor ahead of every camera.
+    let kit = records.iter().any(|r| strip::flags::source(r.strip_flags) == strip::flags::SOURCE_AVATAR);
     let mut mask = vec![1.0f32; (w * h) as usize];
     let mut cut = |x0: u32, y0: u32, x1: u32, y1: u32| {
         let (x0, y0) = ((x0 as f32 * scale).floor() as u32, (y0 as f32 * scale).floor() as u32);
@@ -156,13 +160,54 @@ pub fn load(dir: &Path, max_width: u32, mut progress: impl FnMut(f32)) -> anyhow
     if let Some(l) = strip::StripLayout::new(full_w, full_h) {
         cut(l.reserved.x0, l.reserved.y0, l.reserved.x1, l.reserved.y1);
     }
-    if manifest.performance.skeleton_frames > 0 {
+    if manifest.performance.skeleton_frames > 0 || kit || band_drawn(&views, w, h, scale, full_w, full_h) {
         if let Some(b) = skeleton::BandLayout::new(full_w, full_h) {
             let r = b.reserved();
             cut(r.x0, r.y0, r.x1, r.y1);
         }
     }
     Ok(Dataset { dir: dir.to_path_buf(), views, depth_views, width: w, height: h, mask })
+}
+
+/// Whether most keyframes show the skeleton band: the pilot rows of its tiles (levels 0, 1, 2, 3 repeated) follow
+/// that ramp. Read in the red channel, which PPv2's chromatic aberration smears least.
+fn band_drawn(views: &[View], w: u32, h: u32, scale: f32, full_w: u32, full_h: u32) -> bool {
+    let Some(b) = skeleton::BandLayout::new(full_w, full_h) else { return false };
+    let ramp: Vec<f32> = (0..depth::TILE_CELLS).map(|j| (j % depth::LEVELS as u32) as f32).collect();
+    let sampled: Vec<&View> = views.iter().step_by((views.len() / 16).max(1)).collect();
+    let shows = |v: &View| {
+        let tiles = (b.per_row * b.rows) as usize;
+        let mut sum = 0.0;
+        for p in 0..tiles {
+            let (x0, y0) = b.tile_origin(p);
+            let cells: Vec<f32> = (0..depth::TILE_CELLS)
+                .map(|j| {
+                    let x = (((x0 + j * b.cell) as f32 + b.cell as f32 / 2.0) * scale) as u32;
+                    let y = ((y0 as f32 + b.cell as f32 / 2.0) * scale) as u32;
+                    channel(v.image[(y.min(h - 1) * w + x.min(w - 1)) as usize], 0)
+                })
+                .collect();
+            sum += correlation(&cells, &ramp);
+        }
+        sum / tiles as f32 > 0.5
+    };
+    2 * sampled.iter().filter(|v| shows(v)).count() > sampled.len()
+}
+
+fn correlation(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len() as f32;
+    let (ma, mb) = (a.iter().sum::<f32>() / n, b.iter().sum::<f32>() / n);
+    let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
+    for (x, y) in a.iter().zip(b) {
+        ab += (x - ma) * (y - mb);
+        aa += (x - ma) * (x - ma);
+        bb += (y - mb) * (y - mb);
+    }
+    if aa <= 1e-9 || bb <= 1e-9 {
+        0.0
+    } else {
+        ab / (aa * bb).sqrt()
+    }
 }
 
 /// Box-filters RGBA to RGB floats by an integer `factor`.
@@ -210,4 +255,65 @@ pub fn sample_rgb(image: &[u32], width: u32, height: u32, u: f32, v: f32) -> Opt
         *o = top * (1.0 - fy) + bottom * fy;
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orbiters_contracts::image::RgbaImage;
+
+    fn view(img: &RgbaImage) -> View {
+        let (w, h) = (img.width, img.height);
+        let image = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).map(|(x, y)| {
+            let p = img.get(x, y);
+            p[0] as u32 | (p[1] as u32) << 8 | (p[2] as u32) << 16 | 255 << 24
+        });
+        View { camera: Camera::look([0.0; 3], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 1.0, w, h), image: image.collect(), game_time: 0.0, keyframe: 0 }
+    }
+
+    /// The band is found in pictures whose band does not decode: with green and blue displaced towards the centre
+    /// (chromatic aberration), and not in pictures without one.
+    #[test]
+    fn band_found_without_decoding() {
+        let (w, h) = (1920u32, 1080u32);
+        let mut rng = fastrand::Rng::with_seed(5);
+        let noise = |rng: &mut fastrand::Rng| {
+            let mut img = RgbaImage::new(w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    img.set(x, y, [rng.u8(..), rng.u8(..), rng.u8(..)]);
+                }
+            }
+            img
+        };
+        let skeleton = skeleton::Skeleton { time: 3.5, hips: [0.0, 1.0, 0.0], avatar: 7, ..Default::default() };
+        let (mut plain, mut banded, mut smeared) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..4 {
+            let img = noise(&mut rng);
+            plain.push(view(&img));
+            let mut b = img;
+            skeleton::draw(&mut b, &skeleton).expect("band");
+            banded.push(view(&b));
+            // Green taken from 4 px and blue from 8 px nearer the centre, as chromatic aberration does.
+            let mut s = b.clone();
+            for y in 0..h {
+                for x in 0..w {
+                    let towards = |d: i64| (x as i64 + if x < w / 2 { d } else { -d }).clamp(0, w as i64 - 1) as u32;
+                    let (g, bl) = (b.get(towards(4), y)[1], b.get(towards(8), y)[2]);
+                    let r = b.get(x, y)[0];
+                    s.set(x, y, [r, g, bl]);
+                }
+            }
+            smeared.push(view(&s));
+        }
+        assert!(!band_drawn(&plain, w, h, 1.0, w, h));
+        assert!(band_drawn(&banded, w, h, 1.0, w, h));
+        assert!(band_drawn(&smeared, w, h, 1.0, w, h));
+        // At half the training resolution too.
+        let half: Vec<View> = banded
+            .iter()
+            .map(|v| View { camera: v.camera, image: downscale(&v.image.iter().flat_map(|p| p.to_le_bytes()).collect::<Vec<u8>>(), w, h, 2), game_time: 0.0, keyframe: 0 })
+            .collect();
+        assert!(band_drawn(&half, w / 2, h / 2, 0.5, w, h));
+    }
 }

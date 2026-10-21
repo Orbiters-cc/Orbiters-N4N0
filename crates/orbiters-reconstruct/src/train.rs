@@ -5,9 +5,9 @@
 
 use crate::camera::Camera;
 use crate::dataset::{channel, Dataset, DepthView};
-use crate::gaussians::{logit, Gaussians};
+use crate::gaussians::{logit, sigmoid, Gaussians};
 #[cfg(test)]
-use crate::gaussians::{rotation_matrix, sigmoid, PACKED};
+use crate::gaussians::{rotation_matrix, PACKED};
 use crate::gpu::{Gpu, LearningRates, Relocation, Target};
 use std::time::Instant;
 
@@ -46,6 +46,13 @@ pub struct Settings {
     /// on the Canine orbit (two seeds) and was neutral on VRChat Home: while rounds continue, the moved copies never
     /// settle.
     pub relocate_until: f32,
+    /// Every this many steps from step 1000 while relocation runs (0: never), the Gaussians whose blending weight
+    /// reaches `unseen_weight` in no scene pixel of any training view are faded, so the next relocations reuse them
+    /// where the model is seen. A third of the budget sat where nothing sees it; reusing it gained 0.2–0.9 dB on four
+    /// captures (VRChat Home +0.9 dB over two seeds), and with it half the budget matched the full budget without it on
+    /// VRChat Home and Palm Point.
+    pub fade_unseen_every: u32,
+    pub unseen_weight: f32,
 }
 
 impl Default for Settings {
@@ -68,6 +75,8 @@ impl Default for Settings {
             quarter_until: 0.0,
             half_until: 0.0,
             relocate_until: 0.5,
+            fade_unseen_every: 1000,
+            unseen_weight: 0.02,
         }
     }
 }
@@ -225,6 +234,15 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             let robust = if progress >= settings.robust_from { settings.robust } else { 0.0 };
             gpu.step(camera, settings.background, Target::Color { rgba, scene_pixels: pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr))?
         };
+        if settings.fade_unseen_every > 0 && it % settings.fade_unseen_every == 0 && it >= 1000 && it + settings.relocate_every <= relocate_until {
+            let _cpu = crate::priority::CpuWork::start();
+            let cams: Vec<Camera> = train_views.iter().map(|&i| data.views[i].camera).collect();
+            let seen = gpu.visibility(&cams, settings.background)?;
+            let faded = logit(1e-4).to_bits();
+            let adjust: Vec<[u32; 4]> = seen.iter().enumerate().filter(|(_, w)| **w < settings.unseen_weight).map(|(i, _)| [i as u32, faded, 0f32.to_bits(), 0]).collect();
+            eprintln!("it {it}: fading {} of {} Gaussians no training pixel sees", adjust.len(), seen.len());
+            gpu.apply_relocation(&Relocation { adjust, copies: Vec::new(), len: seen.len() })?;
+        }
         if it % 50 == 0 || it == iterations {
             let psnr = if it % 1000 == 0 || it == iterations {
                 let _cpu = crate::priority::CpuWork::start();
@@ -250,7 +268,11 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
         }
     }
     let _cpu = crate::priority::CpuWork::start();
-    let (g, _, _, _) = gpu.download();
+    let (mut g, _, _, _) = gpu.download();
+    // Faded Gaussians that relocation never reused (it moves at most a twentieth per round, and stops at
+    // `relocate_until`) show nowhere: the result leaves them out.
+    let live: Vec<bool> = g.opacity_logits.iter().map(|&l| sigmoid(l) >= DEAD).collect();
+    g.retain(&live);
     if gpu.overflows > 0 {
         eprintln!("{} steps had more tile entries than the sort expected (dropped for that step)", gpu.overflows);
     }

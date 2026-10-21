@@ -181,6 +181,7 @@ struct Training {
     relocate_adjust: wgpu::ComputePipeline,
     relocate_copy: wgpu::ComputePipeline,
     squared_error: wgpu::ComputePipeline,
+    visibility: wgpu::ComputePipeline,
 }
 
 /// A relocation round decided on the CPU (crate::train::plan_relocation) for [`Gpu::apply_relocation`]: sources' new
@@ -496,6 +497,7 @@ impl Gpu {
             let project_backward = module("project_backward", &[common, read, include_str!("shaders/project_backward.wgsl")]);
             let adam = module("adam", &[include_str!("shaders/adam.wgsl")]);
             let relocate = module("relocate", &[include_str!("shaders/relocate.wgsl")]);
+            let visibility = module("raster visibility", &[common, raster, include_str!("shaders/raster_visibility.wgsl")]);
             Training {
                 sums,
                 backward: pipe(&backward, "backward"),
@@ -511,6 +513,7 @@ impl Gpu {
                 relocate_adjust: pipe(&relocate, "adjust"),
                 relocate_copy: pipe(&relocate, "copy"),
                 squared_error: pipe(&loss, "squared_error"),
+                visibility: pipe(&visibility, "visibility"),
             }
         });
         let k = Kernels {
@@ -1187,6 +1190,25 @@ impl Gpu {
         self.read::<f32>(&i.out_color, px * 4).as_chunks::<4>().0.to_vec()
     }
 
+    /// The largest blending weight each Gaussian reaches in a scene pixel (the mask set for the image size) of any of
+    /// these views: what training ever sees of it (raster_visibility.wgsl).
+    pub fn visibility(&mut self, cams: &[Camera], background: [f32; 3]) -> anyhow::Result<Vec<f32>> {
+        let n = self.count;
+        let seen = storage(&self.device, "seen", (n * 4) as u64);
+        for cam in cams {
+            self.step(cam, background, Target::None, None)?;
+            let t = self.training()?;
+            let (Some(s), Some(sort), Some(i)) = (&self.splats, &self.sort, &self.image) else { continue };
+            let tiles = (cam.width.div_ceil(cpu::TILE), cam.height.div_ceil(cpu::TILE));
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            let bind = self.bind(&t.visibility, &[(0, &self.frame), (1, &s.proj), (2, &sort.values[0]), (3, &i.ranges), (8, &i.mask), (9, &seen)]);
+            self.dispatch(&mut enc, &t.visibility, &bind, tiles);
+            self.queue.submit([enc.finish()]);
+        }
+        let bits: Vec<u32> = self.read(&seen, n);
+        Ok(bits.into_iter().map(f32::from_bits).collect())
+    }
+
     /// PSNR of a render from `cam` against a keyframe over the scene pixels (the mask set for its size), computed on
     /// the device: only one partial sum per 256 pixels crosses the bus.
     pub fn score(&mut self, cam: &Camera, background: [f32; 3], rgba: &[u32]) -> anyhow::Result<f32> {
@@ -1573,5 +1595,33 @@ mod tests {
         let cpu = crate::train::psnr(&img, &target, &mask);
         let device = gpu.score(&cam, bg, &target).expect("score");
         assert!((cpu - device).abs() < 1e-3, "PSNR {cpu} on the CPU, {device} on the device");
+    }
+
+    #[test]
+    fn visibility_sees_only_what_scene_pixels_show() {
+        let Some(mut gpu) = devices().into_iter().next() else { return };
+        let (w, h) = (64u32, 48u32);
+        let (mut g, cam) = scene(1, w, h, 41);
+        g.means.clear();
+        g.log_scales.clear();
+        g.rotations.clear();
+        g.opacity_logits.clear();
+        g.colors.clear();
+        // In front, in the open: seen. Behind it, fully hidden: unseen. Off screen: unseen. Under the masked rows: unseen.
+        let ahead = |x: f32, y: f32, z: f32| cam.unproject(x, y, z);
+        let opaque = crate::gaussians::logit(0.99);
+        g.push(ahead(32.0, 30.0, 3.0), [-1.0; 3], [1.0, 0.0, 0.0, 0.0], opaque, [0.5; 3]);
+        g.push(ahead(32.0, 30.0, 6.0), [-3.0; 3], [1.0, 0.0, 0.0, 0.0], opaque, [0.5; 3]);
+        g.push(ahead(500.0, 30.0, 3.0), [-3.0; 3], [1.0, 0.0, 0.0, 0.0], opaque, [0.5; 3]);
+        g.push(ahead(32.0, 3.0, 3.0), [-4.0; 3], [1.0, 0.0, 0.0, 0.0], opaque, [0.5; 3]);
+        gpu.upload(&g);
+        let mask: Vec<f32> = (0..w * h).map(|p| if p / w < 8 { 0.0 } else { 1.0 }).collect();
+        gpu.set_mask(w, h, &mask);
+        let seen = gpu.visibility(&[cam], [0.0; 3]).expect("visibility");
+        assert!(seen[0] > 0.9, "front Gaussian: {}", seen[0]);
+        // Behind an α = 0.99 splat: at most 1 % of the light reaches it.
+        assert!(seen[1] < 0.011, "hidden Gaussian: {}", seen[1]);
+        assert_eq!(seen[2], 0.0, "off-screen Gaussian");
+        assert!(seen[3] < 1e-3, "Gaussian under the masked rows: {}", seen[3]);
     }
 }

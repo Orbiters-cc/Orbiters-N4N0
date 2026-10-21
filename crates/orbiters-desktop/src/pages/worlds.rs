@@ -608,6 +608,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                     match session_row(&mut cu, cx, r.translate(vec2(0.0, dy)), s, tex.as_ref(), &sharing) {
                         Some(RowAction::Share) => share_preview = Some(s.dir.clone()),
                         Some(RowAction::Reconstruct) => reconstruct = Some(s.dir.clone()),
+                        Some(RowAction::Unqueue) => cx.ctl.unqueue_reconstruction(s.dir.clone()),
                         None => {}
                     }
                     ui.add_space(10.0);
@@ -694,8 +695,11 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         o.viewer = Some(i);
     }
     if let Some(dir) = reconstruct {
+        // Waiting its turn: the service says so.
+        if cx.snap.reconstruction.is_none() && !cx.snap.is_capturing() {
+            cx.toasts.push(&ctx, toast::Kind::Info, "Reconstruction started: follow it here or in Sessions.");
+        }
         cx.ctl.reconstruct(dir);
-        cx.toasts.push(&ctx, toast::Kind::Info, "Reconstruction started: follow it here or in Sessions.");
     }
     if let Some(dir) = share_preview {
         cx.ctl.upload_preview(world.id.clone(), world.name.clone(), dir);
@@ -868,6 +872,7 @@ fn note(ui: &Ui, rect: Rect, glyph: &str, title: &str, text: &str) {
 enum RowAction {
     Share,
     Reconstruct,
+    Unqueue,
 }
 
 /// A session recorded in the world: its thumbnail, when, and what can be done with it.
@@ -883,8 +888,11 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
     let mut line = format!("{} · {} keyframes", format::duration(st.duration_s), format::integer(st.keyframes as f64));
     let job = cx.snap.reconstruction.as_ref().filter(|j| j.session_dir == s.dir);
     let upload = sharing.preview_upload(&s.dir);
+    let waiting = cx.snap.reconstruct_queue.contains(&s.dir);
     let (state_text, state_color) = if let Some(j) = job {
         (format!("{} · {:.0}%", stage_label(j.stage), overall_progress(j) * 100.0), theme::ACCENT)
+    } else if waiting {
+        ("Waiting to reconstruct".to_string(), theme::FG_2)
     } else if let Some(u) = upload.filter(|u| u.running()) {
         match u.state {
             UploadState::Preparing => ("Preparing the web preview…".to_string(), theme::ACCENT),
@@ -921,7 +929,11 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
     if job.is_some() || upload.is_some_and(|u| u.running()) {
         return None;
     }
-    if s.reconstruction.is_some() {
+    if waiting {
+        if Button::new("Waiting · cancel").icon(icons::X).variant(Variant::Secondary).width(b.width()).show_at(ui, b).clicked() {
+            return Some(RowAction::Unqueue);
+        }
+    } else if s.reconstruction.is_some() {
         let replace = sharing.mine.is_some_and(|m| m.preview.is_some());
         let mut button = Button::new(if replace { "Replace 3D preview" } else { "Share in 3D" })
             .icon(icons::CLOUD_ARROW_UP)
@@ -943,15 +955,7 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
             return Some(RowAction::Share);
         }
     } else {
-        let blocked = if cx.snap.reconstruction.is_some() {
-            Some("Another session is being reconstructed")
-        } else if cx.snap.is_capturing() {
-            Some("Finish the capture first: reconstruction takes the whole GPU")
-        } else if st.depth_frames == 0 {
-            Some("This session has no depth frames: record with the capture kit's depth frames on")
-        } else {
-            None
-        };
+        let blocked = (st.depth_frames == 0).then_some("This session has no depth frames: record with the capture kit's depth frames on");
         let mut button = Button::new("Reconstruct").icon(icons::MAGIC_WAND).variant(Variant::Secondary).enabled(blocked.is_none()).width(b.width());
         if let Some(h) = blocked {
             button = button.hint(h);

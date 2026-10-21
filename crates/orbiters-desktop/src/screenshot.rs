@@ -123,6 +123,13 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         psnr: Some(33.2),
         seconds: 41.0,
     });
+    let job = reconstructing.reconstruction.clone();
+    let waiting = |base: &Snapshot| {
+        let mut s = base.clone();
+        s.reconstruction = sessions.get(1).zip(job.clone()).map(|(r, j)| crate::state::ReconstructionJob { session_dir: r.dir.clone(), ..j });
+        s.reconstruct_queue = sessions.iter().enumerate().filter(|(i, _)| *i != 1).map(|(_, r)| r.dir.clone()).collect();
+        s
+    };
 
     // Visited worlds: the world with the most captures has a 3D preview shared; in the one with the most pictures, the
     // first two count as shared and the next two as being sent.
@@ -326,6 +333,30 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             world: None,
         },
         Scenario {
+            name: "sessions-waiting",
+            page: Page::Sessions,
+            snapshot: waiting(&idle),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+        },
+        Scenario {
+            name: "session-waiting",
+            page: Page::Sessions,
+            snapshot: waiting(&idle),
+            frames: 150,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+        },
+        Scenario {
             name: "session-reconstructing",
             page: Page::Sessions,
             snapshot: reconstructing,
@@ -445,6 +476,18 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             name: "world-detail",
             page: Page::Worlds,
             snapshot: signed_in.clone(),
+            frames: 170,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: Some(WorldShot { maps: Some(maps.clone()), ..Default::default() }),
+        },
+        Scenario {
+            name: "world-waiting",
+            page: Page::Worlds,
+            snapshot: waiting(&signed_in),
             frames: 170,
             splash: false,
             open_detail: true,
@@ -1054,6 +1097,7 @@ impl crate::backend::Backend for Still {
     fn trash_session(&self, _dir: PathBuf) {}
     fn reconstruct(&self, _dir: PathBuf) {}
     fn stop_reconstruction(&self) {}
+    fn unqueue_reconstruction(&self, _dir: PathBuf) {}
     fn send_to_mixer(&self, _dir: PathBuf, _title: String) {}
     fn sign_in(&self, _provider: &str) {}
     fn reopen_sign_in(&self) {}

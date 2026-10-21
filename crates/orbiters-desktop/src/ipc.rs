@@ -78,6 +78,10 @@ pub enum ToService {
         dir: PathBuf,
     },
     StopReconstruction,
+    /// Takes a session off the reconstruction waiting list.
+    Unqueue {
+        dir: PathBuf,
+    },
     SendToMixer {
         dir: PathBuf,
         title: String,

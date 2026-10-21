@@ -438,6 +438,8 @@ pub struct Snapshot {
     pub worker: WorkerStatus,
     pub steamvr: SteamVrStatus,
     pub reconstruction: Option<ReconstructionJob>,
+    /// Sessions waiting to be reconstructed, next first.
+    pub reconstruct_queue: Vec<PathBuf>,
     #[serde(default)]
     pub account: AccountStatus,
     pub uploads: Vec<UploadStatus>,
@@ -459,6 +461,7 @@ impl Snapshot {
             worker: WorkerStatus::default(),
             steamvr: SteamVrStatus::default(),
             reconstruction: None,
+            reconstruct_queue: Vec::new(),
             account: AccountStatus::default(),
             uploads: Vec::new(),
             orb: OrbStatus::default(),

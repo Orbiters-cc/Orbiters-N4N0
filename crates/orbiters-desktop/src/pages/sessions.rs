@@ -453,11 +453,12 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
     let w = badge(&p, ui, pos2(thumb.left() + 12.0, thumb.top() + 12.0), &format::duration(s.manifest.stats.duration_s), theme::black(0.55), theme::FG_2, false);
     let job = cx.snap.reconstruction.as_ref().filter(|j| j.session_dir == s.dir);
     let splats = match job {
-        Some(j) => Some(format!("Reconstructing {:.0}%", overall_progress(j) * 100.0)),
-        None => s.reconstruction.as_ref().map(|_| "Splats".to_string()),
+        Some(j) => Some((format!("Reconstructing {:.0}%", overall_progress(j) * 100.0), theme::ACCENT)),
+        None if cx.snap.reconstruct_queue.contains(&s.dir) => Some(("Waiting to reconstruct".to_string(), theme::FG_2)),
+        None => s.reconstruction.as_ref().map(|_| ("Splats".to_string(), theme::ACCENT)),
     };
-    if let Some(label) = splats {
-        badge(&p, ui, pos2(thumb.left() + 12.0 + w + 6.0, thumb.top() + 12.0), &label, theme::black(0.55), theme::ACCENT, false);
+    if let Some((label, color)) = splats {
+        badge(&p, ui, pos2(thumb.left() + 12.0 + w + 6.0, thumb.top() + 12.0), &label, theme::black(0.55), color, false);
     }
     if s.manifest.consent.own_world {
         badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), "Own world", theme::alpha(theme::OK, 0.2), theme::OK, true);
@@ -797,16 +798,13 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             if Button::new("Stop reconstruction").icon(icons::X).width(side.width()).show_at(&mut cu, full(y)).clicked() {
                 cx.ctl.stop_reconstruction();
             }
+        } else if cx.snap.reconstruct_queue.contains(&session.dir) {
+            let hint = if cx.snap.is_capturing() { "Starts when the capture ends" } else { "Starts after the reconstructions before it" };
+            if Button::new("Waiting · cancel").icon(icons::X).variant(Variant::Secondary).hint(hint).width(side.width()).show_at(&mut cu, full(y)).clicked() {
+                cx.ctl.unqueue_reconstruction(session.dir.clone());
+            }
         } else {
-            let blocked = if cx.snap.reconstruction.is_some() {
-                Some("Another session is being reconstructed")
-            } else if cx.snap.is_capturing() {
-                Some("Finish the capture first: reconstruction takes the whole GPU")
-            } else if st.depth_frames == 0 {
-                Some("This session has no depth frames: record with the capture kit's depth frames on")
-            } else {
-                None
-            };
+            let blocked = (st.depth_frames == 0).then_some("This session has no depth frames: record with the capture kit's depth frames on");
             let again = session.reconstruction.is_some();
             let mut b = Button::new(if again { "Reconstruct again" } else { "Reconstruct" })
                 .icon(icons::MAGIC_WAND)

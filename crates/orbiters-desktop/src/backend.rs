@@ -24,9 +24,11 @@ pub trait Backend: Send + Sync {
     fn import_raw_capture(&self, dir: PathBuf);
     fn save_settings(&self, settings: Settings);
     fn trash_session(&self, dir: PathBuf);
-    /// Trains splats from a session in the reconstruction worker.
+    /// Trains splats from a session in the reconstruction worker, after the ones waiting before it.
     fn reconstruct(&self, dir: PathBuf);
     fn stop_reconstruction(&self);
+    /// Takes a waiting session off the reconstruction list.
+    fn unqueue_reconstruction(&self, dir: PathBuf);
     /// Sends a session's splats to the Unity editor running Mixer.
     fn send_to_mixer(&self, dir: PathBuf, title: String);
     /// Signs in to Orbiters (the account the Unity tools share) through the browser.
@@ -121,6 +123,10 @@ impl Backend for Remote {
 
     fn stop_reconstruction(&self) {
         self.0.send(&ToService::StopReconstruction);
+    }
+
+    fn unqueue_reconstruction(&self, dir: PathBuf) {
+        self.0.send(&ToService::Unqueue { dir });
     }
 
     fn send_to_mixer(&self, dir: PathBuf, title: String) {
@@ -269,6 +275,10 @@ impl Backend for Local {
 
     fn stop_reconstruction(&self) {
         self.ctl.stop_reconstruction();
+    }
+
+    fn unqueue_reconstruction(&self, dir: PathBuf) {
+        self.ctl.unqueue_reconstruction(&dir);
     }
 
     fn send_to_mixer(&self, dir: PathBuf, title: String) {

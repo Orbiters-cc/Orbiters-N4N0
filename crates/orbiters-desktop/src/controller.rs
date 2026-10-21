@@ -530,7 +530,7 @@ impl Controller {
         if !importing {
             if let Some(dir) = self.running_reconstruction() {
                 self.stop_reconstruction();
-                self.reconstruct_queue.lock().unwrap().push_front(dir);
+                self.change_queue(|q| q.push_front(dir));
                 self.notify(NoticeKind::Warning, "Reconstruction paused: a capture started. It starts again when the capture ends.");
             }
         }
@@ -920,7 +920,7 @@ impl Controller {
         *self.osc.lock().unwrap() = None;
         *self.worker.lock().unwrap() = None;
         *self.reconstruction.lock().unwrap() = None;
-        self.reconstruct_queue.lock().unwrap().clear();
+        self.change_queue(VecDeque::clear);
     }
 
     /// Sends a session's splats to the Unity editor that runs Mixer (the most recently loaded one when several do).
@@ -938,8 +938,17 @@ impl Controller {
         Ok(())
     }
 
-    /// Trains splats from a session (one reconstruction at a time, never during a capture).
+    /// Trains splats from a session: now when nothing runs and nothing records, else once its turn comes.
     pub fn reconstruct(self: &Shared, dir: PathBuf) -> anyhow::Result<()> {
+        if self.queue_reconstruction(dir)? {
+            let after = if self.is_capturing() { "the capture" } else { "the reconstruction under way" };
+            self.notify(NoticeKind::Info, format!("Waiting its turn: the reconstruction starts after {after}."));
+        }
+        Ok(())
+    }
+
+    /// Starts the reconstruction worker on a session (one at a time, never during a capture).
+    fn start_reconstruction(self: &Shared, dir: PathBuf) -> anyhow::Result<()> {
         let root = self.settings().sessions_dir;
         if !inside(&root, &dir) || !dir.join("manifest.json").is_file() {
             anyhow::bail!("Only sessions inside the sessions folder can be reconstructed.");
@@ -994,14 +1003,29 @@ impl Controller {
         if !inside(&root, &dir) || !dir.join("manifest.json").is_file() {
             anyhow::bail!("Only sessions inside the sessions folder can be reconstructed.");
         }
-        {
-            let mut queue = self.reconstruct_queue.lock().unwrap();
-            if !queue.contains(&dir) && self.running_reconstruction().as_ref() != Some(&dir) {
-                queue.push_back(dir.clone());
+        let running = self.running_reconstruction();
+        self.change_queue(|q| {
+            if !q.contains(&dir) && running.as_ref() != Some(&dir) {
+                q.push_back(dir.clone());
             }
-        }
+        });
         self.next_reconstruction();
         Ok(self.running_reconstruction().as_ref() != Some(&dir))
+    }
+
+    /// Takes a session off the waiting list (it was not started yet).
+    pub fn unqueue_reconstruction(&self, dir: &Path) {
+        self.change_queue(|q| q.retain(|d| d != dir));
+    }
+
+    /// Changes the waiting list and shows it.
+    fn change_queue<R>(&self, f: impl FnOnce(&mut VecDeque<PathBuf>) -> R) -> R {
+        let mut queue = self.reconstruct_queue.lock().unwrap();
+        let r = f(&mut queue);
+        let waiting: Vec<PathBuf> = queue.iter().cloned().collect();
+        drop(queue);
+        self.update(|s| s.reconstruct_queue = waiting);
+        r
     }
 
     /// Starts the first waiting session when nothing runs and nothing records.
@@ -1010,8 +1034,8 @@ impl Controller {
             if self.is_capturing() || self.reconstruction.lock().unwrap().is_some() {
                 return;
             }
-            let Some(dir) = self.reconstruct_queue.lock().unwrap().pop_front() else { return };
-            match self.reconstruct(dir.clone()) {
+            let Some(dir) = self.change_queue(VecDeque::pop_front) else { return };
+            match self.start_reconstruction(dir.clone()) {
                 Ok(()) => return,
                 Err(e) => {
                     let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

@@ -176,6 +176,7 @@ impl Service {
             ToService::StopReconstruction => {
                 ctl.stop_reconstruction();
             }
+            ToService::Unqueue { dir } => ctl.unqueue_reconstruction(&dir),
             ToService::WorkerLog => {
                 let lines = ctl.worker_log();
                 if let Some(l) = self.links.lock().unwrap().iter().find(|l| l.id == link) {

@@ -254,8 +254,9 @@ impl super::Controller {
     pub(super) fn burst_saved(self: &Shared, session: Option<PathBuf>) {
         let was = std::mem::take(&mut self.burst.lock().unwrap().recording);
         let Some(dir) = session.filter(|_| was) else { return };
-        match self.reconstruct(dir) {
-            Ok(()) => self.notify(NoticeKind::Success, "3D picture taken: it is being reconstructed."),
+        match self.queue_reconstruction(dir) {
+            Ok(false) => self.notify(NoticeKind::Success, "3D picture taken: it is being reconstructed."),
+            Ok(true) => self.notify(NoticeKind::Success, "3D picture taken: it is reconstructed after the ones before it."),
             Err(e) => self.notify(NoticeKind::Warning, format!("3D picture taken, not reconstructed: {e}")),
         }
     }

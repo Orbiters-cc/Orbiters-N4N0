@@ -107,6 +107,8 @@ pub struct Controller {
     /// The latest T-pose calibration and when it was taken (Unix ms; the shared clock restarts with Windows).
     calibration: Mutex<Option<StoredCalibration>>,
     reconstruction: Mutex<Option<Reconstruction>>,
+    /// Sessions waiting to be reconstructed, first first: 3D pictures taken while one ran, and a run a capture stopped.
+    reconstruct_queue: Mutex<VecDeque<PathBuf>>,
     /// VRChat's camera as it was before a recording opened it in Stream mode (put back when recording ends).
     camera_before: Mutex<Option<CameraState>>,
     /// The capture kit's toggles as they were before a recording started from the app switched them on (Some while
@@ -152,6 +154,7 @@ const STREAM_MODE: i32 = 2;
 /// The running reconstruction worker, and whether its end was already told (finished, failed or cancelled).
 struct Reconstruction {
     handle: ReconstructHandle,
+    dir: PathBuf,
     told: bool,
 }
 
@@ -205,6 +208,7 @@ impl Controller {
             subscribers: Mutex::new(Vec::new()),
             calibration: Mutex::new(calibration),
             reconstruction: Mutex::new(None),
+            reconstruct_queue: Mutex::new(VecDeque::new()),
             camera_before: Mutex::new(None),
             avatar_before: Mutex::new(None),
             avatar_changed_at: Mutex::new(None),
@@ -456,6 +460,7 @@ impl Controller {
                 });
                 if !restarting {
                     self.burst_saved(session);
+                    self.next_reconstruction();
                 }
             }
             WorkerEvent::StartFailed { message } => {
@@ -468,6 +473,7 @@ impl Controller {
                         s.capture.from_osc = false;
                     }
                 });
+                self.next_reconstruction();
                 self.notify(NoticeKind::Error, message);
             }
             WorkerEvent::Error { message } => {
@@ -500,10 +506,6 @@ impl Controller {
         if !importing && !settings.consent_acknowledged {
             anyhow::bail!("Please read and accept the capture notice first (Capture page).");
         }
-        // Training takes the whole GPU: the game and the recording come first.
-        if !importing && self.stop_reconstruction() {
-            self.notify(NoticeKind::Warning, "Reconstruction stopped: a capture started.");
-        }
         let cmd = StartCapture {
             source: source.clone(),
             sessions_dir: settings.sessions_dir.clone(),
@@ -522,6 +524,15 @@ impl Controller {
             s.capture.trail.clear();
             s.capture.from_osc = from_osc;
         });
+        // Training takes the whole GPU: the game and the recording come first; the run starts over once they are done
+        // (stopped once the state says capturing, so the run's exit does not start it again).
+        if !importing {
+            if let Some(dir) = self.running_reconstruction() {
+                self.stop_reconstruction();
+                self.reconstruct_queue.lock().unwrap().push_front(dir);
+                self.notify(NoticeKind::Warning, "Reconstruction paused: a capture started. It starts again when the capture ends.");
+            }
+        }
         *self.last_source.lock().unwrap() = (!importing).then_some(source);
         let record_parameters = !importing && settings.osc.enabled && settings.osc.record_parameters;
         // VRChat only sends values when they change: its OSCQuery tree has the current ones.
@@ -558,6 +569,7 @@ impl Controller {
                 s.capture.state = CaptureState::Idle;
                 s.capture.error = Some(e.to_string());
             });
+            self.next_reconstruction();
             return Err(e);
         }
         Ok(())
@@ -907,6 +919,7 @@ impl Controller {
         *self.osc.lock().unwrap() = None;
         *self.worker.lock().unwrap() = None;
         *self.reconstruction.lock().unwrap() = None;
+        self.reconstruct_queue.lock().unwrap().clear();
     }
 
     /// Sends a session's splats to the Unity editor that runs Mixer (the most recently loaded one when several do).
@@ -958,12 +971,51 @@ impl Controller {
         self.update(|s| s.reconstruction = Some(ReconstructionJob::new(dir.clone())));
         match ReconstructHandle::spawn(&dir, on_event, on_log, on_exit) {
             Ok(handle) => {
-                *guard = Some(Reconstruction { handle, told: false });
+                *guard = Some(Reconstruction { handle, dir, told: false });
                 Ok(())
             }
             Err(e) => {
                 self.update(|s| s.reconstruction = None);
                 Err(e)
+            }
+        }
+    }
+
+    /// The session being reconstructed.
+    fn running_reconstruction(&self) -> Option<PathBuf> {
+        self.reconstruction.lock().unwrap().as_ref().map(|r| r.dir.clone())
+    }
+
+    /// Reconstructs `dir` after the sessions already waiting (now when nothing runs and nothing records). Whether it
+    /// has to wait.
+    pub fn queue_reconstruction(self: &Shared, dir: PathBuf) -> anyhow::Result<bool> {
+        let root = self.settings().sessions_dir;
+        if !inside(&root, &dir) || !dir.join("manifest.json").is_file() {
+            anyhow::bail!("Only sessions inside the sessions folder can be reconstructed.");
+        }
+        {
+            let mut queue = self.reconstruct_queue.lock().unwrap();
+            if !queue.contains(&dir) && self.running_reconstruction().as_ref() != Some(&dir) {
+                queue.push_back(dir.clone());
+            }
+        }
+        self.next_reconstruction();
+        Ok(self.running_reconstruction().as_ref() != Some(&dir))
+    }
+
+    /// Starts the first waiting session when nothing runs and nothing records.
+    fn next_reconstruction(self: &Shared) {
+        loop {
+            if self.is_capturing() || self.reconstruction.lock().unwrap().is_some() {
+                return;
+            }
+            let Some(dir) = self.reconstruct_queue.lock().unwrap().pop_front() else { return };
+            match self.reconstruct(dir.clone()) {
+                Ok(()) => return,
+                Err(e) => {
+                    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    self.notify(NoticeKind::Error, format!("{name} was not reconstructed: {e}"));
+                }
             }
         }
     }
@@ -1025,6 +1077,7 @@ impl Controller {
         }
         self.update(|s| s.reconstruction = None);
         // A cancelled run may leave its partial folder behind: the next run clears it.
+        self.next_reconstruction();
     }
 
     /// Moves a session folder to the recycle bin (only folders inside the sessions folder with a manifest).

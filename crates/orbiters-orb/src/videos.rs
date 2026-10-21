@@ -84,7 +84,7 @@ pub fn canonical(url: &str) -> String {
 }
 
 /// A URL's query component, percent-encoded.
-fn encode(value: &str) -> String {
+pub(crate) fn encode(value: &str) -> String {
     let mut out = String::new();
     for b in value.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
@@ -99,7 +99,7 @@ fn encode(value: &str) -> String {
 /// A YouTube video's title through YouTube's oEmbed endpoint (no key), `None` for other sites or on failure.
 pub fn youtube_title(url: &str) -> Option<String> {
     let id = youtube_id(url)?;
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(5))).build().into();
+    let agent = orbiters_core::http_agent(None, Some(std::time::Duration::from_secs(5)));
     let link = format!("https://www.youtube.com/watch?v={id}");
     let mut response = agent.get(&format!("https://www.youtube.com/oembed?format=json&url={}", encode(&link))).call().ok()?;
     if response.status().as_u16() != 200 {

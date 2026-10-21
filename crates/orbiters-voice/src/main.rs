@@ -301,7 +301,7 @@ impl Worker {
 /// temporary name first, so a cut download is never taken for a model.
 fn install(models: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(models)?;
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_connect(Some(Duration::from_secs(20))).build().into();
+    let agent = orbiters_core::http_agent(Some(Duration::from_secs(20)), None);
     let mut done = 0u64;
     let mut last = -1i32;
     let mut progress = |n: u64| {

@@ -21,6 +21,18 @@ pub use orbiters_contracts as contracts;
 /// Version of the app and its workers (they must match: the shell refuses a worker of another version).
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// TLS for HTTP clients: the build carries ureq's native TLS only (Windows' SChannel, certificates checked against
+/// Windows' store). An agent left on ureq's default provider, rustls, panics at its first `https` request.
+pub fn http_tls() -> ureq::tls::TlsConfig {
+    use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+    TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier).build()
+}
+
+/// An HTTP client that can reach `https` addresses ([`http_tls`]), with these timeouts.
+pub fn http_agent(connect: Option<std::time::Duration>, whole: Option<std::time::Duration>) -> ureq::Agent {
+    ureq::Agent::config_builder().tls_config(http_tls()).timeout_connect(connect).timeout_global(whole).build().new_agent()
+}
+
 /// Current time as ISO 8601 UTC with second precision, e.g. `2026-10-20T01:23:45Z`.
 pub fn now_utc_iso() -> String {
     let now = time::OffsetDateTime::now_utc();

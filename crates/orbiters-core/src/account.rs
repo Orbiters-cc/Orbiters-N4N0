@@ -323,8 +323,7 @@ impl Api {
 
     /// An API at another address (a disposable server in tests).
     pub fn at(base: &str) -> Self {
-        use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
-        let tls = TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier).build();
+        let tls = crate::http_tls();
         let agent = ureq::Agent::config_builder()
             .tls_config(tls)
             .http_status_as_error(false)

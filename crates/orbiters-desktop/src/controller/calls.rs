@@ -293,7 +293,7 @@ impl super::Controller {
 
     /// Reads the server's event stream until it ends.
     fn calls_events(self: &Shared, api: &Api, token: &str) -> anyhow::Result<()> {
-        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_connect(Some(Duration::from_secs(15))).build().into();
+        let agent = orbiters_core::http_agent(Some(Duration::from_secs(15)), None);
         let response =
             agent.get(&api.url("orb/calls/events")).header("Authorization", &format!("Bearer {token}")).header("Accept", "text/event-stream").call()?;
         let reader = BufReader::new(response.into_body().into_reader());

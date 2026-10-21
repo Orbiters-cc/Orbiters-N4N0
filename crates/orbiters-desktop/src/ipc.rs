@@ -8,11 +8,12 @@ use crate::state::{MapsMine, Snapshot};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::settings::Settings;
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Which kind of process is talking.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +109,39 @@ pub enum ToService {
         calibration: Box<Calibration>,
     },
     Quit,
+}
+
+/// Longest Hello a client may send, and how long it has to send it. Any local process can connect: before it proves
+/// it was started by the service, it must not make the service read without end.
+const HELLO_LIMIT: usize = 4096;
+pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Reads a client's Hello line (token, role, pid): at most [`HELLO_LIMIT`] bytes, all within `timeout`. Byte by
+/// byte, so nothing after the line is taken from the stream.
+pub fn read_hello(stream: &TcpStream, timeout: Duration) -> Option<(String, Role, u32)> {
+    let deadline = Instant::now() + timeout;
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    let mut reader = stream;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || line.len() >= HELLO_LIMIT {
+            return None;
+        }
+        stream.set_read_timeout(Some(left)).ok()?;
+        match reader.read(&mut byte) {
+            Ok(0) => return None,
+            Ok(_) if byte[0] == b'\n' => break,
+            Ok(_) => line.push(byte[0]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+    stream.set_read_timeout(None).ok()?;
+    match serde_json::from_slice(&line) {
+        Ok(ToService::Hello { token, role, pid }) => Some((token, role, pid)),
+        _ => None,
+    }
 }
 
 pub fn write_line<T: Serialize>(w: &mut impl Write, msg: &T) -> std::io::Result<()> {
@@ -290,5 +324,59 @@ mod tests {
         }
         assert_eq!(client.library_version(), 7);
         assert!(matches!(client.take_notices().as_slice(), [Notice::Toast { kind: NoticeKind::Warning, .. }]));
+    }
+
+    #[test]
+    fn hello_is_short_and_quick_or_refused() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Reads the Hello of a client that does `client`; how long that took.
+        let hello = |client: fn(TcpStream), timeout: Duration| {
+            let peer = std::thread::spawn(move || client(TcpStream::connect(("127.0.0.1", port)).unwrap()));
+            let (stream, _) = listener.accept().unwrap();
+            let started = Instant::now();
+            let got = read_hello(&stream, timeout);
+            let took = started.elapsed();
+            drop(stream);
+            let _ = peer.join();
+            (got, took)
+        };
+        // A line that never ends: refused after a few kilobytes, long before the timeout.
+        let (got, took) = hello(
+            |mut s| {
+                let _ = s.write_all(&vec![b'a'; 1 << 20]);
+            },
+            Duration::from_secs(5),
+        );
+        assert!(got.is_none() && took < Duration::from_secs(2), "{took:?}");
+        // Nothing at all, or a byte now and then: refused when the time is up, whatever arrives meanwhile.
+        let (got, took) = hello(|_s| std::thread::sleep(Duration::from_secs(1)), Duration::from_millis(200));
+        assert!(got.is_none() && took < Duration::from_millis(800), "{took:?}");
+        let (got, took) = hello(
+            |mut s| {
+                for _ in 0..40 {
+                    if s.write_all(b"{").is_err() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            },
+            Duration::from_millis(300),
+        );
+        assert!(got.is_none() && took < Duration::from_millis(900), "{took:?}");
+
+        // A real Hello, and the line after it is still there to read.
+        let peer = std::thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write_line(&mut s, &ToService::Hello { token: "t0ken".into(), role: Role::Overlay, pid: 7 }).unwrap();
+            write_line(&mut s, &ToService::StopCapture).unwrap();
+            s
+        });
+        let (stream, _) = listener.accept().unwrap();
+        assert_eq!(read_hello(&stream, Duration::from_secs(2)), Some(("t0ken".into(), Role::Overlay, 7)));
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        assert!(matches!(serde_json::from_str(&line).unwrap(), ToService::StopCapture));
+        drop(peer.join());
     }
 }

@@ -193,16 +193,12 @@ impl Service {
     /// One client: check its token, then stream every change to it and act on what it asks.
     fn serve(self: &Arc<Self>, stream: TcpStream) {
         let _ = stream.set_nodelay(true);
-        let Ok(read_half) = stream.try_clone() else { return };
-        let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        if reader.read_line(&mut line).is_err() {
-            return;
-        }
-        let Ok(ToService::Hello { token, role, pid }) = serde_json::from_str(&line) else { return };
+        let Some((token, role, pid)) = ipc::read_hello(&stream, ipc::HELLO_TIMEOUT) else { return };
         if token != self.endpoint.token {
             return;
         }
+        let Ok(read_half) = stream.try_clone() else { return };
+        let reader = BufReader::new(read_half);
         let (tx, rx) = mpsc::channel::<ToClient>();
         let mut writer = stream;
         std::thread::spawn(move || {

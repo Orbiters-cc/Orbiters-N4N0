@@ -16,6 +16,14 @@ the window's Orb page turns it off for a tool without AI. You talk to it by hold
 Talk button in the window or the SteamVR tab, or by starting a sentence with "Orb"; speech is transcribed on this
 computer and only the sentences meant for Orb go to the assistant.
 
+In VR it also offers **walk boost**: while you push the stick you walk with, your play space moves along with you, so
+you cover more ground in VRChat. The chaperone stays on your room's walls, and the play space goes back when you
+change world. Its strength is a slider in the SteamVR tab, in Settings, and in Orb's Walk boost radial on your avatar.
+And, when you turn it on in Settings, it shares **your frame rate per world** with Orbiters: a summary a minute with
+the world, your avatar, how many people were there and the names of their avatars (never who they are), plus your
+graphics card, processor and headset (contracts `Docs/world-performance.md`). The Map explorer shows which worlds run
+well.
+
 ## Layout
 
 | Path | What it is |

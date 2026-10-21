@@ -36,14 +36,38 @@ struct SignIn {
     polled: Option<Instant>,
 }
 
-/// Opens a web page in the default browser.
+/// Opens a web page (http or https only) in the default browser.
 pub fn open_url(url: &str) -> anyhow::Result<()> {
+    let lower = url.to_ascii_lowercase();
+    anyhow::ensure!(lower.starts_with("https://") || lower.starts_with("http://"), "Not a web page: {url}");
     #[cfg(windows)]
-    std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn()?;
+    open_with_browser(url)?;
     #[cfg(target_os = "linux")]
     std::process::Command::new("xdg-open").arg(url).spawn()?;
     #[cfg(target_os = "macos")]
     std::process::Command::new("open").arg(url).spawn()?;
+    Ok(())
+}
+
+/// The shell's "open" of a web address: the browser registered for http(s). Unlike url.dll's FileProtocolHandler,
+/// which takes any path or protocol, only web addresses get here.
+#[cfg(windows)]
+fn open_with_browser(url: &str) -> anyhow::Result<()> {
+    use windows::core::{w, HSTRING, PCWSTR};
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    // SAFETY: plain calls with valid, null-terminated strings; COM is released only when this call initialised it.
+    unsafe {
+        // The shell may hand the address to COM handlers: initialise COM on this thread when it is not yet.
+        let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        let result = ShellExecuteW(None, w!("open"), &HSTRING::from(url), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+        if com.is_ok() {
+            CoUninitialize();
+        }
+        // Values above 32 mean success.
+        anyhow::ensure!(result.0 as usize > 32, "Could not open the browser (error {}).", result.0 as usize);
+    }
     Ok(())
 }
 
@@ -124,6 +148,8 @@ impl Controller {
     pub fn sign_in(self: &Shared, provider: &str) -> anyhow::Result<()> {
         let server = Server::current();
         let link = Api::new(server).begin_link(provider)?;
+        // The link comes from the API: open it only when it is the website's own page.
+        anyhow::ensure!(server.is_website_page(&link.link_url), "Orbiters answered with a sign-in link that is not on its website.");
         let generation = {
             let mut rt = self.account_runtime.lock().unwrap();
             rt.generation += 1;
@@ -148,10 +174,10 @@ impl Controller {
 
     /// Opens the sign-in page again (closed by mistake).
     pub fn reopen_sign_in(&self) -> anyhow::Result<()> {
-        let url = self.account_runtime.lock().unwrap().signing_in.as_ref().map(|s| s.link_url.clone());
-        match url {
-            Some(url) => open_url(&url),
-            None => Ok(()),
+        let link = self.account_runtime.lock().unwrap().signing_in.as_ref().map(|s| (s.server, s.link_url.clone()));
+        match link {
+            Some((server, url)) if server.is_website_page(&url) => open_url(&url),
+            _ => Ok(()),
         }
     }
 
@@ -256,6 +282,16 @@ impl Controller {
                     s.account.error = Some(e.to_string());
                 });
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_web_pages_are_opened() {
+        for other in ["file:///C:/Windows/System32/calc.exe", "C:/Windows/System32/calc.exe", "//host/share/x.exe", "ms-msdt:/id PCWDiagnostic", "search-ms:query=x", ""] {
+            assert!(super::open_url(other).is_err(), "{other}");
         }
     }
 }

@@ -52,6 +52,30 @@ impl Server {
         }
     }
 
+    /// Whether `url` is a page of this server's website: https on its host, or, against the development API (a
+    /// server on this machine), also a website on this machine. A sign-in link comes from the API: anything else
+    /// (another scheme, a file, a share, another host) is never opened.
+    pub fn is_website_page(self, url: &str) -> bool {
+        // What the browser gets is what is checked here: no user info, spaces, quotes or backslashes to read twice.
+        if url.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '\\' | '"' | '<' | '>' | '^' | '`' | '{' | '|' | '}')) {
+            return false;
+        }
+        let Some((scheme, rest)) = url.split_once("://") else { return false };
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default().to_ascii_lowercase();
+        if authority.contains('@') {
+            return false;
+        }
+        let website = self.website().trim_start_matches("https://").trim_end_matches('/');
+        if scheme.eq_ignore_ascii_case("https") && authority == website {
+            return true;
+        }
+        let host = match authority.rsplit_once(':') {
+            Some((host, port)) if port.parse::<u16>().is_ok() => host,
+            _ => authority.as_str(),
+        };
+        self == Server::Development && (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) && matches!(host, "127.0.0.1" | "localhost")
+    }
+
     fn file_name(self) -> &'static str {
         match self {
             Server::Production => "account.dat",
@@ -388,6 +412,39 @@ mod tests {
     fn editor_prefs_names_match_unity() {
         // Read from the registry of a machine where Toolkit set the switch.
         assert_eq!(editor_prefs_name("MCB_DevEnvironment"), "MCB_DevEnvironment_h3740056980");
+    }
+
+    #[test]
+    fn sign_in_links_open_only_on_the_website() {
+        let prod = Server::Production;
+        assert!(prod.is_website_page("https://orbiters.cc/link-editor?token=abc&provider=discord&app=desktop"));
+        assert!(prod.is_website_page("https://orbiters.cc/fr/link-editor?token=abc"));
+        assert!(prod.is_website_page("HTTPS://Orbiters.cc/link-editor"));
+        for bad in [
+            "http://orbiters.cc/link-editor",
+            "https://dev.orbiters.cc/link-editor",
+            "https://orbiters.cc.example.com/link-editor",
+            "https://orbiters.cc@example.com/link-editor",
+            "https://example.com/?https://orbiters.cc/",
+            "file:///C:/Windows/System32/calc.exe",
+            r"\\host\share\x.exe",
+            r"https://orbiters.cc\..\x",
+            "search-ms:query=x",
+            "ms-msdt:/id PCWDiagnostic",
+            "https://orbiters.cc/ x.exe",
+            "https://127.0.0.1:3000/link-editor",
+            "",
+        ] {
+            assert!(!prod.is_website_page(bad), "{bad}");
+        }
+        // The development website, and a website on this machine when the API is the local one.
+        let dev = Server::Development;
+        assert!(dev.is_website_page("https://dev.orbiters.cc/link-editor?token=abc"));
+        assert!(dev.is_website_page("http://127.0.0.1:3000/link-editor?token=abc"));
+        assert!(dev.is_website_page("http://localhost:4200/link-editor"));
+        assert!(!dev.is_website_page("https://orbiters.cc/link-editor"));
+        assert!(!dev.is_website_page("http://127.0.0.1.example.com/link-editor"));
+        assert!(!dev.is_website_page("file://127.0.0.1/C$/x.exe"));
     }
 
     #[test]

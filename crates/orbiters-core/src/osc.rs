@@ -306,13 +306,14 @@ impl OscService {
         on_event: impl Fn(OscEvent, u64) + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
         // VRChat finds the OSCQuery service at an address mDNS announces (this machine's own, see `advertise`):
-        // advertised, it listens on every interface but takes connections from this machine only. VRChat sends OSC
-        // where HOST_INFO says, 127.0.0.1, and UDP has no handshake to tell a spoofed source: OSC listens on the
-        // loopback interface only.
-        let udp = UdpSocket::bind("127.0.0.1:0")?;
+        // advertised, it listens on every interface but takes packets and connections from this machine only. OSC
+        // stays on every interface too until a live check shows VRChat sends it to HOST_INFO's 127.0.0.1 rather than
+        // to the announced address (review DSK-13: UDP cannot tell a source spoofed from the LAN).
+        let bind = if advertise { "0.0.0.0:0" } else { "127.0.0.1:0" };
+        let udp = UdpSocket::bind(bind)?;
         udp.set_read_timeout(Some(Duration::from_millis(200)))?;
         let osc_port = udp.local_addr()?.port();
-        let http = TcpListener::bind(if advertise { "0.0.0.0:0" } else { "127.0.0.1:0" })?;
+        let http = TcpListener::bind(bind)?;
         http.set_nonblocking(true)?;
         let query_port = http.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
@@ -327,9 +328,10 @@ impl OscService {
             threads.push(std::thread::Builder::new().name("osc-receive".into()).spawn(move || {
                 let mut buf = vec![0u8; 65536];
                 let mut events = Vec::new();
+                let mut local = LocalAddrs::default();
                 while !stop.load(Ordering::Relaxed) {
                     let Ok((n, from)) = udp.recv_from(&mut buf) else { continue };
-                    if !from.ip().is_loopback() || !nesting_within_limit(&buf[..n]) {
+                    if !local.contains(from.ip()) || !nesting_within_limit(&buf[..n]) {
                         continue;
                     }
                     let at = crate::clock::now_ns();
@@ -748,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn osc_listens_on_the_loopback_interface_only() {
+    fn a_service_not_advertised_listens_on_the_loopback_interface_only() {
         let got = Arc::new(Mutex::new(Vec::new()));
         let sink = got.clone();
         let svc = OscService::start("Orbiters desktop test", &[], 9, false, move |e, at| sink.lock().unwrap().push((e, at))).unwrap();

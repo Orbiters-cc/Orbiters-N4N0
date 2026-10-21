@@ -1,0 +1,20 @@
+[package]
+name = "orbiters-call"
+description = "Orb's calls, a worker process: WebRTC audio (Opus) between two Orbiters desktops, through Cloudflare Realtime TURN when needed."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+orbiters-sound = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The runtime-agnostic rewrite: tokio runtime and ring crypto (its defaults).
+webrtc = "0.21"
+# The sans-I/O core under webrtc: the codec, track and sample types it does not re-export (its crypto comes from webrtc's features).
+rtc = { version = "0.21.1", default-features = false }
+async-trait = "0.1"
+bytes = "1"
+audiopus = "0.3.0-rc.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-std", "io-util"] }

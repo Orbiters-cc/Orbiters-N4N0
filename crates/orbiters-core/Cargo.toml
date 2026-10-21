@@ -19,6 +19,7 @@ flate2 = { workspace = true }
 if-addrs = "0.15"
 socket2 = "0.6"
 sha2 = "0.10"
+rusqlite = { version = "0.40", features = ["bundled"] }
 ureq = { version = "3", default-features = false, features = ["json", "native-tls", "gzip", "multipart"] }
 
 [target.'cfg(windows)'.dependencies]

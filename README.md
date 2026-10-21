@@ -16,6 +16,15 @@ the window's Orb page turns it off for a tool without AI. You talk to it by hold
 Talk button in the window or the SteamVR tab, or by starting a sentence with "Orb"; speech is transcribed on this
 computer and only the sentences meant for Orb go to the assistant.
 
+Calling Orb also opens **Orb's menu**: the SteamVR binding "Open Orb's menu" (a double press of the left stick unless
+you change it in SteamVR's controller settings), the wake word on its own, or a hand on the orb. It has fast walk (walk
+boost on or off), YouTube (a keyboard with YouTube's suggestions as you type, five results a page with their thumbnail,
+channel and duration, and "Copy link" to paste in a world's video player; a sentence you say on the search page is what
+it searches), calls, and a 3D picture with a timer. It opens in the SteamVR overlay in front of you, and SteamVR's laser
+works on it; when your orb has the projected screen ("Replace Orbiters overlay" on the orb's card in My Avatar), it
+opens on that screen in VRChat instead, where you touch it with your index finger and people around see it too
+(contracts `Docs/orb.md`, Menu and Screen). YouTube is read without an account or a key, as YouTube's own website does.
+
 In VR it also offers **walk boost**: while you push the stick you walk with, your play space moves along with you, so
 you cover more ground in VRChat. The chaperone stays on your room's walls, and the play space goes back when you
 change world. Its strength is a slider in the SteamVR tab, in Settings, and in Orb's Walk boost radial on your avatar.
@@ -87,7 +96,12 @@ cargo run -p orbiters-capture -- record --source "spout:Orbiters Test Pattern" -
 cargo run -p orbiters-capture -- record --source "raw:<raw capture folder>"          # replay a Mixer simulator capture
 cargo run -p orbiters-capture -- verify "<raw capture folder>"                        # compare with its ground truth
 cargo run --release -p orbiters-reconstruct -- "<session folder>" [--iterations N] [--budget N] [--width N]
+cargo run -p orbiters-desktop -- --orb-menu <folder>    # Orb's screen pages and layout table (for Toolkit), sample pages
 ```
+
+`--orb-menu` writes `Orb screen pages.png` and `Orb screen layout.png`, which Orbiters Toolkit carries as
+`Editor/VRChat/OrbScreenPages.png.bytes` and `OrbScreenLayout.png.bytes`: run it and copy them over whenever the
+menu's layout or look changes, so the avatar's screen matches the overlay.
 
 ## Tests
 

@@ -147,6 +147,10 @@ impl MenuOverlay {
         let before = self.menu.clone();
         let m = &mut self.menu;
         m.listening = snap.orb.listening;
+        // What Orb says shows on Home too.
+        if let Some(panel) = &snap.orb.panel {
+            m.heard = Some(panel.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
         m.fast_walk = snap.settings.walk_boost.enabled;
         m.countdown = snap.orb.photo_countdown;
         m.photo_timer = snap.settings.photo_3d_timer;

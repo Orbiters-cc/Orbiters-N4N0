@@ -393,6 +393,15 @@ impl super::Controller {
         photo_due: &mut bool,
     ) -> Vec<Message> {
         let mut out = Vec::new();
+        // The screen stands where the panel would show: what Orb says goes on the screen's Home instead.
+        if rt.screen.available && rt.screen.menu.open {
+            if let Some(sender) = rt.sender.as_mut().filter(|s| s.busy() && !s.sticky()) {
+                if let Some(text) = sender.current_text() {
+                    rt.screen.menu.heard = Some(text.split_whitespace().collect::<Vec<_>>().join(" "));
+                }
+                sender.hide();
+            }
+        }
         let listening = rt.listening.is_some();
         let thinking = rt.thinking;
         let s = &mut rt.screen;

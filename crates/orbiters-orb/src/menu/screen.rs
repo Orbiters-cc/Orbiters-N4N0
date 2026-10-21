@@ -271,11 +271,13 @@ fn parameter(name: &str) -> String {
 
 /// The screen's local parameters (contracts `Docs/orb.md`, Screen).
 pub mod local {
-    pub const OPEN: &str = "Orb/Screen/Open";
-    pub const POINTER: &str = "Orb/Screen/Pointer";
-    pub const VALUE_PREFIX: &str = "Orb/Screen/Value";
+    use orbiters_contracts::orb::params;
+
+    pub const OPEN: &str = params::SCREEN_OPEN;
+    pub const POINTER: &str = params::SCREEN_POINTER;
+    pub const VALUE_PREFIX: &str = params::SCREEN_VALUE_PREFIX;
     /// `Orb/Screen/Touch/L0` …: how near the left (`L`) or right (`R`) index finger is to each touch point (0 to 1).
-    pub const TOUCH_PREFIX: &str = "Orb/Screen/Touch/";
+    pub const TOUCH_PREFIX: &str = params::SCREEN_TOUCH_PREFIX;
 
     pub fn value(i: usize) -> String {
         format!("{VALUE_PREFIX}{i}")

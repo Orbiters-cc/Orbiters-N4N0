@@ -199,6 +199,36 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
             });
 
+            // Orb's menu: fast walk, YouTube, calls, a 3D picture.
+            let menu_sub = if orb.screen {
+                "Opens on the screen your orb projects (\"Replace Orbiters overlay\" in My Avatar)"
+            } else {
+                "Opens in the SteamVR overlay, in front of you"
+            };
+            section(ui, cx, 8, icons::STACK, "Orb's menu", Some(menu_sub), |ui| {
+                widgets::field(
+                    ui,
+                    "Controller button",
+                    Some("SteamVR's \"Open Orb's menu\" binding for Orbiters: a double press of the left stick, unless you change it in SteamVR's controller settings."),
+                    48.0,
+                    |ui| {
+                        apply |= widgets::toggle(ui, "orb-menu-button", &mut draft.orb.menu.button);
+                    },
+                );
+                widgets::field(ui, "Say \"Orb\"", Some("The wake word on its own opens the menu (while Orb listens for its name)."), 48.0, |ui| {
+                    apply |= widgets::toggle(ui, "orb-menu-wake", &mut draft.orb.menu.wake_word);
+                });
+                widgets::field(ui, "Touch the orb", Some("A hand on the orb opens the menu; touching it again closes it."), 48.0, |ui| {
+                    apply |= widgets::toggle(ui, "orb-menu-touch", &mut draft.orb.menu.touch);
+                });
+                widgets::separator(ui);
+                widgets::field(ui, "Keyboard", Some("The letters of the search keyboard. Automatic follows this computer's keyboard."), 284.0, |ui| {
+                    use orbiters_core::settings::KeyboardLayout as K;
+                    let options = [widgets::SegOption::new(K::Auto, "Automatic"), widgets::SegOption::new(K::Qwerty, "QWERTY"), widgets::SegOption::new(K::Azerty, "AZERTY")];
+                    apply |= widgets::segmented(ui, "orb-menu-keyboard", &mut draft.orb.menu.keyboard, &options, true);
+                });
+            });
+
             let calls = &orb.calls;
             let calls_sub = match (&calls.call, &calls.link) {
                 (Some(c), _) => call_line(c),

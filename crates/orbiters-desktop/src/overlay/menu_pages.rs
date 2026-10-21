@@ -4,13 +4,16 @@
 //!   empty; slice `n` is page `n`), top first: Toolkit imports it as the projected screen's page texture array.
 //! - `Orb screen layout.png`: where each page's changing parts go, a row per page, for the screen's shader (see
 //!   [`layout_table`]).
-//! - `menu-<page>.png`: each page as the SteamVR overlay shows it with sample content, for reviewing the design.
+//! - `menu-<page>.png`: each page as the SteamVR overlay shows it with sample content, for reviewing the design;
+//!   `bank-<page>.bin`: what the avatar's screen is sent for the same page (its 744 bytes), to draw it with the screen's
+//!   shader and compare.
 
 use super::menu_ui::{self, View};
 use super::Canvas;
 use egui::{pos2, ColorImage, TextureHandle, TextureId, TextureOptions};
 use orbiters_orb::menu::layout::{self, ScreenPage, MAX_ELEMENTS, MAX_SLOTS, PICTURES};
-use orbiters_orb::menu::{Call, Contact, KeyboardLayout, Keys, Menu, Page, PhotoLength, Target};
+use orbiters_orb::menu::{screen, Call, Contact, KeyboardLayout, Keys, Menu, Page, PhotoLength, Target};
+use orbiters_orb::picture;
 use orbiters_orb::youtube::{Results, Video};
 use std::path::Path;
 
@@ -105,8 +108,8 @@ pub fn page_pictures() -> Vec<u8> {
     out
 }
 
-/// A stand-in thumbnail: bands of colour.
-fn sample_thumbnail(ctx: &egui::Context, seed: usize) -> TextureHandle {
+/// A stand-in thumbnail: bands of colour (160 × 90, RGBA), with a disc so the screen's black and white shows a shape.
+fn sample_rgba(seed: usize) -> (usize, usize, Vec<u8>) {
     let (w, h) = (160usize, 90usize);
     let palette = [[226, 120, 82], [92, 140, 220], [120, 200, 140], [200, 110, 200], [230, 200, 90]];
     let base = palette[seed % palette.len()];
@@ -114,11 +117,32 @@ fn sample_thumbnail(ctx: &egui::Context, seed: usize) -> TextureHandle {
     for y in 0..h {
         for x in 0..w {
             let t = (x as f32 / w as f32 + y as f32 / h as f32 * 0.5 + seed as f32 * 0.13).fract();
-            let k = 0.45 + 0.55 * t;
-            rgba.extend([(base[0] as f32 * k) as u8, (base[1] as f32 * k) as u8, (base[2] as f32 * k) as u8, 255]);
+            let disc = ((x as f32 - 50.0 - seed as f32 * 12.0).powi(2) + (y as f32 - 45.0).powi(2)).sqrt() < 26.0;
+            let k = if disc { 1.0 } else { 0.25 + 0.55 * t };
+            rgba.extend([(base[0] as f32 * k).min(255.0) as u8, (base[1] as f32 * k).min(255.0) as u8, (base[2] as f32 * k).min(255.0) as u8, 255]);
         }
     }
+    (w, h, rgba)
+}
+
+fn sample_thumbnail(ctx: &egui::Context, seed: usize) -> TextureHandle {
+    let (w, h, rgba) = sample_rgba(seed);
     ctx.load_texture(format!("thumb{seed}"), ColorImage::from_rgba_unmultiplied([w, h], &rgba), TextureOptions::LINEAR)
+}
+
+/// The stand-in thumbnail as the avatar's screen gets it: grey, fitted, dithered, packed.
+fn sample_picture(seed: usize) -> screen::Picture {
+    let (w, h, rgba) = sample_rgba(seed);
+    let grey = picture::Grey {
+        width: w,
+        height: h,
+        pixels: rgba.chunks_exact(4).map(|p| (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) as u8).collect(),
+    };
+    let values = picture::fit(&grey, screen::PICTURE_W, screen::PICTURE_H);
+    let bits = picture::dither(&values, screen::PICTURE_W, screen::PICTURE_H, 2);
+    let mut out = [0u8; screen::PICTURE_BYTES];
+    out.copy_from_slice(&picture::pack(&bits, 1));
+    out
 }
 
 /// Menus with sample content, one per page, with the element hovered and pressed.
@@ -213,6 +237,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let path = out.join(format!("menu-{}.png", page.name()));
         write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
         println!("{}", path.display());
+        let pictures = |id: &str| -> Option<screen::Picture> { id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).map(sample_picture) };
+        let flags = screen::Flags { listening: menu.listening, loading: menu.loading(), thinking: false };
+        let bank = screen::Frame::new(&menu, hover, pressed, flags, &pictures).bank;
+        std::fs::write(out.join(format!("bank-{}.bin", page.name())), bank)?;
     }
     Ok(())
 }

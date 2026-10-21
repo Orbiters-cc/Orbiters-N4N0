@@ -35,7 +35,8 @@ fn scene(px: i32, py: i32) -> i32 {
         return -1;
     }
     let p = u32(py) * frame.size.x + u32(px);
-    if (mask[p] < 0.5) {
+    // Not scene: the strip, the band, or a keyframe pixel left out by its alpha byte (crate::transients).
+    if (mask[p] < 0.5 || (target_rgb[p] >> 24u) < 128u) {
         return -1;
     }
     return i32(p);

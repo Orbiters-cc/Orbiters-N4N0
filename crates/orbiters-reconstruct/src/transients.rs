@@ -30,16 +30,16 @@ impl Default for Params {
 }
 
 /// The regular sample grid of a depth frame: origin and spacing in pixels (see train::depth_target).
-struct Grid {
-    gw: usize,
-    gh: usize,
-    x0: f32,
-    y0: f32,
-    sx: f32,
-    sy: f32,
+pub(crate) struct Grid {
+    pub gw: usize,
+    pub gh: usize,
+    pub x0: f32,
+    pub y0: f32,
+    pub sx: f32,
+    pub sy: f32,
 }
 
-fn grid(d: &DepthView) -> Option<Grid> {
+pub(crate) fn grid(d: &DepthView) -> Option<Grid> {
     let (gw, gh) = (d.grid_width as usize, d.grid_height as usize);
     if gw < 2 || gh < 2 {
         return None;
@@ -52,7 +52,7 @@ fn grid(d: &DepthView) -> Option<Grid> {
 
 /// Whether a depth frame's sample measured anything: samples under the capture strip or the skeleton band carry no
 /// depth symbols and read as "no depth" like the sky, so they say nothing.
-fn known(g: &DepthView, i: usize, mask: &[f32], width: u32, height: u32) -> bool {
+pub(crate) fn known(g: &DepthView, i: usize, mask: &[f32], width: u32, height: u32) -> bool {
     let (x, y) = (g.pixels[i][0].round(), g.pixels[i][1].round());
     x >= 0.0 && y >= 0.0 && (x as u32) < width && (y as u32) < height && mask[(y as u32 * width + x as u32) as usize] > 0.5
 }

@@ -19,7 +19,8 @@ fn residual(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgrou
     let packed = target_rgb[p];
     let t = vec3<f32>(f32(packed & 255u), f32((packed >> 8u) & 255u), f32((packed >> 16u) & 255u)) / 255.0;
     let d = abs(out_color[p].xyz - t);
-    resid[p] = select(0.0, (d.x + d.y + d.z) / 3.0, mask[p] > 0.5);
+    // −1: not in the loss (strip, band, or a keyframe pixel left out by its alpha byte).
+    resid[p] = select(-1.0, (d.x + d.y + d.z) / 3.0, mask[p] > 0.5 && (packed >> 24u) >= 128u);
 }
 
 @compute @workgroup_size(16, 16)
@@ -40,7 +41,7 @@ fn inliers(@builtin(global_invocation_id) gid: vec3<u32>) {
             let yy = y + dy;
             if (xx >= 0 && yy >= 0 && xx < w && yy < h) {
                 let q = u32(yy * w + xx);
-                if (mask[q] > 0.5) {
+                if (mask[q] > 0.5 && resid[q] >= 0.0) {
                     all += 1u;
                     if (resid[q] > threshold) {
                         bad += 1u;
@@ -50,5 +51,5 @@ fn inliers(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     let p = u32(y * w + x);
-    kept[p] = select(mask[p], 0.0, 2u * bad > all);
+    kept[p] = select(mask[p], 0.0, 2u * bad > all || resid[p] < 0.0);
 }

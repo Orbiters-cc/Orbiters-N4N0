@@ -2,6 +2,7 @@
 //! exact poses and exact depth samples train a set of 3D Gaussians on the GPU; the result is a splat PLY.
 
 pub mod camera;
+pub mod coverage;
 pub mod cpu;
 pub mod dataset;
 pub mod gaussians;
@@ -9,6 +10,7 @@ pub mod gpu;
 pub mod init;
 pub mod metrics;
 pub mod ply;
+pub mod sky;
 pub mod priority;
 pub mod train;
 pub mod transients;

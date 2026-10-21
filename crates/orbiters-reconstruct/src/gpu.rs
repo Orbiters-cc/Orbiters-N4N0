@@ -177,6 +177,32 @@ struct Training {
     depth_loss: wgpu::ComputePipeline,
     project_backward: wgpu::ComputePipeline,
     adam: wgpu::ComputePipeline,
+    relocate_classify: wgpu::ComputePipeline,
+    relocate_adjust: wgpu::ComputePipeline,
+    relocate_copy: wgpu::ComputePipeline,
+    squared_error: wgpu::ComputePipeline,
+    sky_composite: wgpu::ComputePipeline,
+    sky_gradient: wgpu::ComputePipeline,
+}
+
+/// Lab: a sky cubemap behind the splats (crate::sky): 6·n² texels of four floats (rgb, unused), Adam moments and
+/// gradient sums.
+struct SkyBuffers {
+    n: u32,
+    texels: wgpu::Buffer,
+    m1: wgpu::Buffer,
+    m2: wgpu::Buffer,
+    grads: wgpu::Buffer,
+}
+
+/// A relocation round decided on the CPU (crate::train::plan_relocation) for [`Gpu::apply_relocation`]: sources' new
+/// opacity logits and log-scale deltas (`[index, logit bits, delta bits, 0]`), copies (`[target, source, three standard
+/// normal offsets as bits, 0, 0, 0]`; targets are dead slots, then the slots past the end) and the new set's size.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Relocation {
+    pub adjust: Vec<[u32; 4]>,
+    pub copies: Vec<[u32; 8]>,
+    pub len: usize,
 }
 
 /// Buffers that grow with the number of Gaussians.
@@ -263,6 +289,12 @@ pub struct Gpu {
     pub overflows: u32,
     /// Exact ellipse-tile tests (per-axis bounds and a test per tile) instead of a square around the largest axis.
     pub exact_tiles: bool,
+    /// Lab: sort key width, 32 or 24 bits (tile id above, log depth in the rest); 24 sorts in 6 passes instead of 8.
+    pub key_bits: u32,
+    /// Lab: the sky cubemap ([`Gpu::set_sky`]), its Adam learning rate, and what the kernels bind without one.
+    sky: Option<SkyBuffers>,
+    pub sky_lr: f32,
+    no_sky: wgpu::Buffer,
     /// GPU timestamps per section of each step ([`DeviceOptions::profile`]).
     pub profiler: Option<Profiler>,
     /// The first GPU error since the last step (wgpu reports them out of band).
@@ -444,9 +476,17 @@ impl Gpu {
 
     fn build(device: wgpu::Device, queue: wgpu::Queue, adapter: String, sums: Option<GradientSums>) -> Self {
         let common = include_str!("shaders/common.wgsl");
+        // Lab: RECONSTRUCT_SHADER_CHECKS=off compiles without wgpu's injected bounds, loop and division checks.
+        let unchecked = std::env::var("RECONSTRUCT_SHADER_CHECKS").is_ok_and(|v| v == "off");
         let module = |name: &str, parts: &[&str]| {
             let code = parts.join("\n");
-            device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(name), source: wgpu::ShaderSource::Wgsl(code.into()) })
+            let desc = wgpu::ShaderModuleDescriptor { label: Some(name), source: wgpu::ShaderSource::Wgsl(code.into()) };
+            if unchecked {
+                // SAFETY: every kernel guards its own indices (lab experiment).
+                unsafe { device.create_shader_module_trusted(desc, wgpu::ShaderRuntimeChecks::unchecked()) }
+            } else {
+                device.create_shader_module(desc)
+            }
         };
         // Every kernel writes its workgroup memory before reading it: without wgpu's zero-fill (one thread clearing
         // whole arrays), D3D's FXC compiles the raster kernel in moments instead of 40 s.
@@ -471,13 +511,19 @@ impl Gpu {
         let present = module("present", &[common, include_str!("shaders/present.wgsl")]);
         let training = sums.map(|sums| {
             let (add, read) = sums.sources();
-            let backward = module("raster backward", &[common, raster, add, include_str!("shaders/raster_backward.wgsl")]);
+            let sky_lookup = include_str!("shaders/sky_lookup.wgsl");
+            // Lab: RECONSTRUCT_BACKWARD_PROBE=1 (no subgroup sums), 2 (no atomics), 3 (walk only), 4 (plain subgroupAdd sums)
+            // times parts of the backward.
+            let probe = format!("const PROBE: u32 = {}u;\n", std::env::var("RECONSTRUCT_BACKWARD_PROBE").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0));
+            let backward = module("raster backward", &[common, raster, add, sky_lookup, &probe, include_str!("shaders/raster_backward.wgsl")]);
+            let sky = module("sky", &[common, add, sky_lookup, include_str!("shaders/sky.wgsl")]);
             let loss = module("loss", &[common, include_str!("shaders/loss.wgsl")]);
             let ssim = module("ssim", &[common, include_str!("shaders/ssim.wgsl")]);
             let robust = module("robust", &[common, include_str!("shaders/robust.wgsl")]);
             let depth_loss = module("depth_loss", &[common, include_str!("shaders/depth_loss.wgsl")]);
             let project_backward = module("project_backward", &[common, read, include_str!("shaders/project_backward.wgsl")]);
             let adam = module("adam", &[include_str!("shaders/adam.wgsl")]);
+            let relocate = module("relocate", &[include_str!("shaders/relocate.wgsl")]);
             Training {
                 sums,
                 backward: pipe(&backward, "backward"),
@@ -489,6 +535,12 @@ impl Gpu {
                 depth_loss: pipe(&depth_loss, "main"),
                 project_backward: pipe(&project_backward, "main"),
                 adam: pipe(&adam, "main"),
+                relocate_classify: pipe(&relocate, "classify"),
+                relocate_adjust: pipe(&relocate, "adjust"),
+                relocate_copy: pipe(&relocate, "copy"),
+                squared_error: pipe(&loss, "squared_error"),
+                sky_composite: pipe(&sky, "composite"),
+                sky_gradient: pipe(&sky, "gradient"),
             }
         });
         let k = Kernels {
@@ -531,6 +583,7 @@ impl Gpu {
                 cap: 0,
             })
             .collect();
+        let no_sky = storage(&device, "no sky", 16);
         Self {
             adapter,
             device,
@@ -555,6 +608,10 @@ impl Gpu {
             dilation: [cpu::DILATION as f32; 2],
             overflows: 0,
             exact_tiles: true,
+            key_bits: 32,
+            sky: None,
+            sky_lr: 0.01,
+            no_sky,
             profiler: None,
             errors: Default::default(),
         }
@@ -617,23 +674,7 @@ impl Gpu {
         let n = g.len();
         let slot_bytes = self.k.training.as_ref().map(|t| t.sums.slot_bytes());
         if self.splats.as_ref().is_none_or(|s| s.cap < n) {
-            // A renderer keeps no room to spare (a viewer loads once) and no training buffers.
-            let cap = if slot_bytes.is_some() { (n + n / 2).max(1024) } else { n.max(1) };
-            let d = &self.device;
-            let f = |count: usize| (count * 4) as u64;
-            let t = |count: usize| if slot_bytes.is_some() { f(count) } else { 0 };
-            self.splats = Some(SplatBuffers {
-                cap,
-                params: storage(d, "params", f(cap * PACKED)),
-                grads: storage(d, "grads", t(cap * PACKED)),
-                m1: storage(d, "moment1", t(cap * PACKED)),
-                m2: storage(d, "moment2", t(cap * PACKED)),
-                proj: storage(d, "projected", f(cap * 16)),
-                counts: storage(d, "tile counts", f(cap)),
-                offsets: storage(d, "tile offsets", f(cap)),
-                grad2d: storage(d, "grad2d", slot_bytes.unwrap_or(0) * (cap * GRAD2D) as u64),
-                stats: storage(d, "stats", t(cap * 4)),
-            });
+            self.splats = Some(self.splat_buffers(n));
         }
         let s = self.splats.as_ref().expect("allocated");
         self.queue.write_buffer(&s.params, 0, bytemuck::cast_slice(&g.pack()));
@@ -679,6 +720,79 @@ impl Gpu {
         let m2: Vec<f32> = self.read(&s.m2, n * PACKED);
         let stats: Vec<[f32; 4]> = self.read(&s.stats, n * 4).as_chunks::<4>().0.to_vec();
         (Gaussians::unpack(&params), m1, m2, stats)
+    }
+
+    /// Buffers for at least `n` Gaussians. A renderer keeps no room to spare (a viewer loads once) and no training
+    /// buffers.
+    fn splat_buffers(&self, n: usize) -> SplatBuffers {
+        let slot_bytes = self.k.training.as_ref().map(|t| t.sums.slot_bytes());
+        let cap = if slot_bytes.is_some() { (n + n / 2).max(1024) } else { n.max(1) };
+        let d = &self.device;
+        let f = |count: usize| (count * 4) as u64;
+        let t = |count: usize| if slot_bytes.is_some() { f(count) } else { 0 };
+        SplatBuffers {
+            cap,
+            params: storage(d, "params", f(cap * PACKED)),
+            grads: storage(d, "grads", t(cap * PACKED)),
+            m1: storage(d, "moment1", t(cap * PACKED)),
+            m2: storage(d, "moment2", t(cap * PACKED)),
+            proj: storage(d, "projected", f(cap * 16)),
+            counts: storage(d, "tile counts", f(cap)),
+            offsets: storage(d, "tile offsets", f(cap)),
+            grad2d: storage(d, "grad2d", slot_bytes.unwrap_or(0) * (cap * GRAD2D) as u64),
+            stats: storage(d, "stats", t(cap * 4)),
+        }
+    }
+
+    /// Relocation on the device, first half (crate::train::plan_relocation decides from what it reads back): per
+    /// Gaussian −1 if dead (faded, broken, or wider on screen than `max_radius` pixels since the last round), −2 − its
+    /// opacity if alive farther than `far` from `centre`, else its opacity.
+    pub fn relocation_weights(&self, max_radius: f32, centre: [f32; 3], far: f32) -> anyhow::Result<Vec<f32>> {
+        let t = self.training()?;
+        let s = self.splats.as_ref().context("no Gaussians")?;
+        let n = self.count;
+        let weights = storage(&self.device, "relocation weights", (n * 4) as u64);
+        let info = self.uniform(&[n as u32, 0, max_radius.to_bits(), (far * far).to_bits(), centre[0].to_bits(), centre[1].to_bits(), centre[2].to_bits(), 0]);
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let bind = self.bind(&t.relocate_classify, &[(0, &info), (1, &s.params), (2, &s.stats), (3, &weights)]);
+        self.dispatch(&mut enc, &t.relocate_classify, &bind, groups(n));
+        self.queue.submit([enc.finish()]);
+        Ok(self.read(&weights, n))
+    }
+
+    /// Relocation on the device, second half: applies the plan (sources first, then their copies, whose Adam moments
+    /// restart at zero like the sources'), clears the screen-size statistics and grows the set to `plan.len`.
+    pub fn apply_relocation(&mut self, plan: &Relocation) -> anyhow::Result<()> {
+        let n = self.count;
+        if self.splats.as_ref().is_some_and(|s| s.cap < plan.len) {
+            // Grow, keeping the parameters and moments of the current set.
+            let grown = self.splat_buffers(plan.len);
+            let old = self.splats.as_ref().expect("uploaded");
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            let bytes = (n * PACKED * 4) as u64;
+            for (from, to) in [(&old.params, &grown.params), (&old.m1, &grown.m1), (&old.m2, &grown.m2)] {
+                enc.copy_buffer_to_buffer(from, 0, to, 0, bytes);
+            }
+            self.queue.submit([enc.finish()]);
+            self.splats = Some(grown);
+        }
+        let t = self.training()?;
+        let s = self.splats.as_ref().context("no Gaussians")?;
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let passes: [(&wgpu::ComputePipeline, &[u8], usize); 2] = [(&t.relocate_adjust, bytemuck::cast_slice(&plan.adjust), plan.adjust.len()), (&t.relocate_copy, bytemuck::cast_slice(&plan.copies), plan.copies.len())];
+        for (pipeline, contents, count) in passes {
+            if count == 0 {
+                continue;
+            }
+            let entries = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("relocation plan"), contents, usage: wgpu::BufferUsages::STORAGE });
+            let info = self.uniform(&[n as u32, count as u32, 0, 0, 0, 0, 0, 0]);
+            let bind = self.bind(pipeline, &[(0, &info), (1, &s.params), (4, &entries), (5, &s.m1), (6, &s.m2)]);
+            self.dispatch(&mut enc, pipeline, &bind, groups(count));
+        }
+        enc.clear_buffer(&s.stats, 0, None);
+        self.queue.submit([enc.finish()]);
+        self.count = plan.len;
+        Ok(())
     }
 
     /// The last step's parameter gradients (packed), for tests.
@@ -790,7 +904,7 @@ impl Gpu {
             ],
             background: [background[0], background[1], background[2], 0.0],
             size: [cam.width, cam.height, tiles_x, tiles_y],
-            counts: [self.count as u32, 0, 32 - tile_bits, u32::from(self.exact_tiles)],
+            counts: [self.count as u32, self.sky.as_ref().map_or(0, |s| s.n), self.key_bits - tile_bits, u32::from(self.exact_tiles)],
             loss,
             reg: [opacity_reg, scale_reg, self.dilation[0], self.dilation[1]],
         }
@@ -936,7 +1050,8 @@ impl Gpu {
             // Pipelined, the histograms' stride is the capacity's blocks and only the counted blocks scatter.
             let blocks = (total as usize).div_ceil(256);
             self.section("sort");
-            for pass in 0..8u32 {
+            // Four bits per pass over the key's width; an even number of passes leaves the result in the first copy.
+            for pass in 0..self.key_bits / 4 {
                 let (a, b) = ((pass % 2) as usize, ((pass + 1) % 2) as usize);
                 let info = self.uniform(&SortInfo { n: total, blocks: blocks as u32, shift: pass * 4, pad: 0 });
                 let bind = self.bind(&self.k.sort_count, &[(0, &info), (1, &keys[a]), (3, &hist), (6, &total_out)]);
@@ -961,6 +1076,12 @@ impl Gpu {
         self.section("forward");
         let bind = self.bind(&self.k.forward, &[(0, &self.frame), (1, &proj), (2, &values[0]), (3, &ranges), (4, &out_color), (5, &out_state)]);
         self.dispatch(&mut enc, &self.k.forward, &bind, tiles);
+        let color_step = matches!(target, Target::Color { .. });
+        if let (Some(sky), Some(t)) = (&self.sky, &self.k.training) {
+            self.section("sky");
+            let bind = self.bind(&t.sky_composite, &[(0, &self.frame), (4, &out_color), (5, &out_state), (8, &sky.texels)]);
+            self.dispatch(&mut enc, &t.sky_composite, &bind, groups((cam.width * cam.height) as usize));
+        }
         match target {
             Target::Color { rgba, .. } => {
                 self.queue.write_buffer(&target_buf, 0, bytemuck::cast_slice(rgba));
@@ -1006,6 +1127,9 @@ impl Gpu {
             self.backward_into(&mut enc, &proj, &values[0], &ranges, &out_state, &d_pixel, tiles);
             if let Some(lr) = lr {
                 self.adam(&mut enc, lr);
+                if color_step {
+                    self.sky_step(&mut enc, &out_state, &d_pixel, (cam.width * cam.height) as usize);
+                }
             }
         }
         if pipelined.is_some() {
@@ -1046,11 +1170,60 @@ impl Gpu {
         enc.clear_buffer(&s.grad2d, 0, None);
         let t = self.k.training.as_ref().expect("a training GPU");
         self.section("backward");
-        let bind = self.bind(&t.backward, &[(0, &self.frame), (1, proj), (2, values), (3, ranges), (5, out_state), (6, d_pixel), (7, &s.grad2d)]);
+        let sky = self.sky.as_ref().map_or(&self.no_sky, |s| &s.texels);
+        let bind = self.bind(&t.backward, &[(0, &self.frame), (1, proj), (2, values), (3, ranges), (5, out_state), (6, d_pixel), (7, &s.grad2d), (8, sky)]);
         self.dispatch(enc, &t.backward, &bind, tiles);
         self.section("project_backward");
         let bind = self.bind(&t.project_backward, &[(0, &self.frame), (1, &s.params), (2, proj), (3, &s.grad2d), (4, &s.grads), (5, &s.stats)]);
         self.dispatch(enc, &t.project_backward, &bind, groups(self.count));
+    }
+
+    /// Lab: the sky's gradient from this colour step's pixel gradients, then its Adam step.
+    fn sky_step(&self, enc: &mut wgpu::CommandEncoder, out_state: &wgpu::Buffer, d_pixel: &wgpu::Buffer, pixels: usize) {
+        let (Some(sky), Some(t)) = (&self.sky, &self.k.training) else { return };
+        self.section("sky");
+        enc.clear_buffer(&sky.grads, 0, None);
+        let bind = self.bind(&t.sky_gradient, &[(0, &self.frame), (5, out_state), (6, d_pixel), (7, &sky.grads)]);
+        self.dispatch(enc, &t.sky_gradient, &bind, groups(pixels));
+        let mut rates = [0f32; 16];
+        for texel in rates.chunks_mut(4) {
+            texel[..3].fill(self.sky_lr);
+        }
+        let n = 6 * (sky.n * sky.n) as usize * 4;
+        let info = self.uniform(&AdamInfo { lr: rates, beta: [0.9, 0.999, 1e-15, 0.0], n: [n as u32, self.step, 0, 0] });
+        let bind = self.bind(&t.adam, &[(0, &info), (1, &sky.texels), (2, &sky.grads), (3, &sky.m1), (4, &sky.m2)]);
+        self.dispatch(enc, &t.adam, &bind, groups(n));
+    }
+
+    /// Lab: a sky cubemap of 6·n² texels (crate::sky's layout) behind the splats from now on; `None` removes it. Its
+    /// gradient sums are read as f32, so the device must not sum in fixed point.
+    pub fn set_sky(&mut self, sky: Option<(u32, &[[f32; 4]])>) -> anyhow::Result<()> {
+        let Some((n, texels)) = sky else {
+            self.sky = None;
+            return Ok(());
+        };
+        anyhow::ensure!(texels.len() == 6 * (n * n) as usize, "{} texels for a cubemap of 6 × {n}²", texels.len());
+        anyhow::ensure!(self.sums() != Some(GradientSums::FixedPoint), "the sky needs f32 gradient sums");
+        let bytes = (texels.len() * 16) as u64;
+        let d = &self.device;
+        let buffers = SkyBuffers { n, texels: storage(d, "sky", bytes), m1: storage(d, "sky moment1", bytes), m2: storage(d, "sky moment2", bytes), grads: storage(d, "sky grads", bytes) };
+        self.queue.write_buffer(&buffers.texels, 0, bytemuck::cast_slice(texels));
+        self.sky = Some(buffers);
+        Ok(())
+    }
+
+    /// The sky's gradient sums of the last colour step, for tests.
+    #[cfg(test)]
+    fn read_sky_grads(&self) -> Vec<f32> {
+        let s = self.sky.as_ref().expect("sky");
+        self.read(&s.grads, 6 * (s.n * s.n) as usize * 4)
+    }
+
+    /// Lab: the sky cubemap's texels.
+    pub fn read_sky(&self) -> Option<(u32, Vec<[f32; 4]>)> {
+        let s = self.sky.as_ref()?;
+        let floats: Vec<f32> = self.read(&s.texels, 6 * (s.n * s.n) as usize * 4);
+        Some((s.n, floats.as_chunks::<4>().0.to_vec()))
     }
 
     fn adam(&mut self, enc: &mut wgpu::CommandEncoder, lr: LearningRates) {
@@ -1107,6 +1280,24 @@ impl Gpu {
         let i = self.image.as_ref().expect("image");
         let px = (i.width * i.height) as usize;
         self.read::<f32>(&i.out_color, px * 4).as_chunks::<4>().0.to_vec()
+    }
+
+    /// PSNR of a render from `cam` against a keyframe over the scene pixels (the mask set for its size), computed on
+    /// the device: only one partial sum per 256 pixels crosses the bus.
+    pub fn score(&mut self, cam: &Camera, background: [f32; 3], rgba: &[u32]) -> anyhow::Result<f32> {
+        self.step(cam, background, Target::None, None)?;
+        let t = self.training()?;
+        let i = self.image.as_ref().expect("image");
+        self.queue.write_buffer(&i.target, 0, bytemuck::cast_slice(rgba));
+        let (gx, gy) = groups((cam.width * cam.height) as usize);
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let bind = self.bind(&t.squared_error, &[(0, &self.frame), (1, &i.out_color), (2, &i.target), (3, &i.mask), (4, &i.d_pixel)]);
+        self.dispatch(&mut enc, &t.squared_error, &bind, (gx, gy));
+        self.queue.submit([enc.finish()]);
+        let partial: Vec<f32> = self.read(&i.d_pixel, (gx * gy) as usize * 4);
+        let (se, count) = partial.as_chunks::<4>().0.iter().fold((0f64, 0f64), |(s, c), p| (s + p[0] as f64, c + p[1] as f64));
+        let mse = (se / count.max(1.0)).max(1e-10);
+        Ok((10.0 * (1.0 / mse).log10()) as f32)
     }
 
     /// The pixels the last robust colour step kept (1) or left out (0).
@@ -1419,5 +1610,143 @@ mod tests {
         }
         gpu.wait_readbacks();
         assert_eq!(gpu.overflows, 0);
+    }
+
+    #[test]
+    fn relocation_on_the_device_matches_the_cpu() {
+        let Some(mut gpu) = devices().into_iter().next() else { return };
+        let (mut g, _) = scene(3000, 64, 48, 11);
+        // Faded ones, a broken one and opaque far ones; growth to twice the set outgrows the buffers.
+        for i in (0..g.len()).step_by(40) {
+            g.opacity_logits[i] = crate::gaussians::logit(0.001);
+        }
+        g.means[7][0] = f32::NAN;
+        for i in (3..g.len()).step_by(13) {
+            g.means[i] = [500.0, 1.0, 2.0];
+        }
+        let n = g.len();
+        let ones = vec![1.0f32; n * PACKED];
+        gpu.upload_with_moments(&g, Some((&ones, &ones)));
+        let far = 200.0f32;
+        let weights = gpu.relocation_weights(1e9, [0.0; 3], far).expect("weights");
+        let far_flags: Vec<bool> = g.means.iter().map(|m| m.iter().map(|c| c * c).sum::<f32>() > far * far).collect();
+        let expected_weights = crate::train::weights(&g, &vec![false; n], &far_flags);
+        for (i, (a, b)) in weights.iter().zip(&expected_weights).enumerate() {
+            assert!((a - b).abs() < 1e-5, "Gaussian {i}: weight {a} on the device, {b} on the CPU");
+        }
+        let plan = crate::train::plan_relocation(&weights, 2 * n, &mut fastrand::Rng::with_seed(3));
+        assert!(!plan.adjust.is_empty() && plan.len == 2 * n, "{} adjusted, {} Gaussians", plan.adjust.len(), plan.len);
+        let mut expected = g.clone();
+        let (mut m1, mut m2) = (ones.clone(), ones.clone());
+        crate::train::apply_relocation(&mut expected, &mut m1, &mut m2, &plan);
+        gpu.apply_relocation(&plan).expect("apply");
+        let (got, got_m1, got_m2, stats) = gpu.download();
+        assert_eq!(got.len(), expected.len());
+        let (a, b) = (got.pack(), expected.pack());
+        for (k, (x, y)) in a.iter().zip(&b).enumerate() {
+            let same = x == y || (x.is_nan() && y.is_nan()) || (x - y).abs() <= 1e-5 * y.abs().max(1.0);
+            assert!(same, "Gaussian {} float {}: {x} on the device, {y} on the CPU", k / PACKED, k % PACKED);
+        }
+        assert_eq!(got_m1, m1);
+        assert_eq!(got_m2, m2);
+        assert!(stats.iter().all(|s| *s == [0.0; 4]));
+    }
+
+    #[test]
+    fn device_scores_match_the_cpu_psnr() {
+        let Some(mut gpu) = devices().into_iter().next() else { return };
+        let (w, h) = (150u32, 90u32);
+        let (g, cam) = scene(3000, w, h, 21);
+        gpu.upload(&g);
+        let mut rng = fastrand::Rng::with_seed(22);
+        let target: Vec<u32> = (0..w * h).map(|_| rng.u32(..) | 0xff00_0000).collect();
+        // Part of the frame is not scene (a strip).
+        let mask: Vec<f32> = (0..w * h).map(|p| if p / w < 10 { 0.0 } else { 1.0 }).collect();
+        gpu.set_mask(w, h, &mask);
+        let bg = [0.1, 0.2, 0.3];
+        let img = crate::train::render(&mut gpu, &cam, bg).expect("render");
+        let cpu = crate::train::psnr(&img, &target, &mask);
+        let device = gpu.score(&cam, bg, &target).expect("score");
+        assert!((cpu - device).abs() < 1e-3, "PSNR {cpu} on the CPU, {device} on the device");
+    }
+
+    #[test]
+    fn sky_renders_behind_the_splats_and_its_gradient_matches_finite_differences() {
+        let Some(mut gpu) = devices().into_iter().find(|g| g.sums() != Some(GradientSums::FixedPoint)) else { return };
+        let (w, h) = (48u32, 36u32);
+        let (g, cam) = scene(40, w, h, 31);
+        gpu.upload(&g);
+        let n = 3u32;
+        let mut rng = fastrand::Rng::with_seed(32);
+        // Away from 0, so no rendered colour comes near the L1 kink at the black target below.
+        let texels: Vec<[f32; 4]> = (0..6 * n * n).map(|_| [0.1 + 0.9 * rng.f32(), 0.1 + 0.9 * rng.f32(), 0.1 + 0.9 * rng.f32(), 0.0]).collect();
+        gpu.set_sky(Some((n, &texels))).expect("sky");
+        gpu.sky_lr = 0.0;
+        let mask = vec![1.0f32; (w * h) as usize];
+        gpu.set_mask(w, h, &mask);
+        // Black: every rendered colour lies above it, so no L1 sign flips under the finite differences.
+        let target = vec![0xff00_0000u32; (w * h) as usize];
+        let bg = [0.0f32; 3];
+        let loss = |gpu: &mut Gpu| -> f64 {
+            let img = crate::train::render(gpu, &cam, bg).expect("render");
+            let mut l = 0.0;
+            for (k, p) in img.iter().enumerate() {
+                for c in 0..3 {
+                    l += (p[c] as f64 - crate::dataset::channel(target[k], c) as f64).abs();
+                }
+            }
+            l / (3.0 * (w * h) as f64)
+        };
+        // Where no splat covers a pixel, it shows the sky's bilinear lookup in its direction.
+        let img = crate::train::render(&mut gpu, &cam, bg).expect("render");
+        let tr = gpu.read_transmittance();
+        let mut checked = 0;
+        for (k, p) in img.iter().enumerate() {
+            if tr[k] < 0.999_999 {
+                continue;
+            }
+            let (x, y) = ((k as u32 % w) as f32, (k as u32 / w) as f32);
+            let far = cam.unproject(x, y, 1e3);
+            let o = cam.position();
+            let (face, u, v) = crate::sky::face_uv([far[0] - o[0], far[1] - o[1], far[2] - o[2]]);
+            let nf = n as f32;
+            let (s, t) = ((u + 1.0) * 0.5 * nf - 0.5, (v + 1.0) * 0.5 * nf - 0.5);
+            let (fx, fy) = (s - s.floor(), t - t.floor());
+            let at = |c: f32| c.clamp(0.0, nf - 1.0) as u32;
+            let texel = |xx: f32, yy: f32| texels[(face as u32 * n * n + at(yy) * n + at(xx)) as usize];
+            for c in 0..3 {
+                let top = texel(s.floor(), t.floor())[c] * (1.0 - fx) + texel(s.floor() + 1.0, t.floor())[c] * fx;
+                let bottom = texel(s.floor(), t.floor() + 1.0)[c] * (1.0 - fx) + texel(s.floor() + 1.0, t.floor() + 1.0)[c] * fx;
+                let expected = top * (1.0 - fy) + bottom * fy;
+                assert!((p[c] - expected).abs() < 1e-4, "pixel {k} channel {c}: {} rendered, {expected} expected", p[c]);
+            }
+            checked += 1;
+        }
+        assert!(checked > 100, "only {checked} uncovered pixels");
+        // One colour step (L1, no D-SSIM, zero learning rates) leaves the sky's gradient sums in place.
+        let zero = LearningRates { means: 0.0, log_scales: 0.0, rotations: 0.0, opacity: 0.0, colors: 0.0 };
+        gpu.step(&cam, bg, Target::Color { rgba: &target, scene_pixels: (w * h) as f32, weight: 1.0, ssim: 0.0, robust: 0.0 }, Some(zero)).expect("step");
+        let grads = gpu.read_sky_grads();
+        let eps = 1e-3f32;
+        let mut compared = 0;
+        for i in 0..texels.len() {
+            for c in 0..3 {
+                let analytic = grads[i * 4 + c] as f64;
+                if analytic == 0.0 {
+                    continue;
+                }
+                let mut t = texels.clone();
+                t[i][c] += eps;
+                gpu.set_sky(Some((n, &t))).expect("sky");
+                let up = loss(&mut gpu);
+                t[i][c] -= 2.0 * eps;
+                gpu.set_sky(Some((n, &t))).expect("sky");
+                let down = loss(&mut gpu);
+                let numeric = (up - down) / (2.0 * eps as f64);
+                assert!((numeric - analytic).abs() < 2e-3 * analytic.abs().max(1e-3), "texel {i} channel {c}: {analytic} analytic, {numeric} numeric");
+                compared += 1;
+            }
+        }
+        assert!(compared > 10, "only {compared} texels with a gradient");
     }
 }

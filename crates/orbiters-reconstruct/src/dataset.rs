@@ -30,11 +30,17 @@ pub struct DepthView {
     pub game_time: f32,
     /// Sample spacing in training pixels (for footprints).
     pub spacing: f32,
+    /// Samples of something that moved (crate::transients): neither seeds nor depth targets. Empty: none.
+    pub dynamic: Vec<bool>,
 }
 
 impl DepthView {
     pub fn valid(&self) -> usize {
         self.depth.iter().filter(|z| **z > 0.0).count()
+    }
+
+    pub fn is_dynamic(&self, i: usize) -> bool {
+        self.dynamic.get(i).copied().unwrap_or(false)
     }
 }
 
@@ -138,6 +144,7 @@ pub fn load(dir: &Path, max_width: u32, mut progress: impl FnMut(f32)) -> anyhow
             depth: depths,
             game_time: r.game_time,
             spacing: layout.tile_px as f32 / depth::SAMPLES_X as f32 * s,
+            dynamic: Vec::new(),
         });
         progress((keyframes.len() + i + 1) as f32 / total as f32);
     }

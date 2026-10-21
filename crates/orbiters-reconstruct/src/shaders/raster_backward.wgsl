@@ -7,9 +7,57 @@
 // One past the last entry any pixel of the tile blended (backward starts there).
 var<workgroup> tile_last: atomic<u32>;
 
+struct Sum10 {
+    total: f32,
+    slot: u32,
+    owner: bool,
+}
+
+// The ten gradient slots (v0: 0–3, v1: 4–5, v2: 6–9) summed over a 32-lane subgroup by transposed butterflies: at each
+// step a lane keeps part of its values and swaps the rest with its partner, so the sums spread over the lanes: 12
+// shuffles instead of 10 × 5. Lane bit 4 picks slots 5–9 or 0–4, bits 3–1 one of those five; `owner` marks one lane per
+// slot.
+fn sum10(v0: vec4<f32>, v1: vec2<f32>, v2: vec4<f32>, lane: u32) -> Sum10 {
+    let b4 = (lane & 16u) != 0u;
+    let b3 = (lane & 8u) != 0u;
+    let b2 = (lane & 4u) != 0u;
+    let b1 = (lane & 2u) != 0u;
+    // Across 16: keep slots 0–4 or 5–9 (a0..a4), send the other five.
+    let a0 = select(v0.x, v1.y, b4) + subgroupShuffleXor(select(v1.y, v0.x, b4), 16u);
+    let a1 = select(v0.y, v2.x, b4) + subgroupShuffleXor(select(v2.x, v0.y, b4), 16u);
+    let a2 = select(v0.z, v2.y, b4) + subgroupShuffleXor(select(v2.y, v0.z, b4), 16u);
+    let a3 = select(v0.w, v2.z, b4) + subgroupShuffleXor(select(v2.z, v0.w, b4), 16u);
+    let a4 = select(v1.x, v2.w, b4) + subgroupShuffleXor(select(v2.w, v1.x, b4), 16u);
+    // Across 8: keep a0..a2 (c0..c2) or a3, a4 (c0, c1).
+    let c0 = select(a0, a3, b3) + subgroupShuffleXor(select(a3, a0, b3), 8u);
+    let c1 = select(a1, a4, b3) + subgroupShuffleXor(select(a4, a1, b3), 8u);
+    let c2 = a2 + subgroupShuffleXor(select(0.0, a2, b3), 8u);
+    // Across 4: of a0..a2 keep a0, a1 (d0, d1) or a2 (d0); of a3, a4 keep one (d0).
+    let s1 = subgroupShuffleXor(select(select(c2, c0, b2), select(c1, c0, b2), b3), 4u);
+    let s2 = subgroupShuffleXor(select(select(0.0, c1, b2), 0.0, b3), 4u);
+    let d0 = select(select(c0, c2, b2), select(c0, c1, b2), b3) + s1;
+    let d1 = c1 + s2;
+    // Across 2: lanes still holding two values keep one; then across 1 every lane holds one whole sum.
+    let two = !b3 && !b2;
+    let e = select(d0, select(d0, d1, b1), two) + subgroupShuffleXor(select(d0, select(d1, d0, b1), two), 2u);
+    var out: Sum10;
+    out.total = e + subgroupShuffleXor(e, 1u);
+    var k = 4u;
+    if (two) {
+        k = select(0u, 1u, b1);
+    } else if (!b3) {
+        k = 2u;
+    } else if (!b2) {
+        k = 3u;
+    }
+    out.slot = select(0u, 5u, b4) + k;
+    out.owner = (lane & 1u) == 0u && (two || !b1);
+    return out;
+}
+
 // One-dimensional workgroup (subgroup builtins need one), still one 16×16 tile.
 @compute @workgroup_size(256)
-fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(subgroup_invocation_id) lane: u32) {
+fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(subgroup_invocation_id) lane: u32, @builtin(subgroup_size) lanes: u32) {
     let tile = wid.x + wid.y * frame.size.z;
     let px = wid.x * TILE + li % TILE;
     let py = wid.y * TILE + li / TILE;
@@ -32,7 +80,7 @@ fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
     workgroupBarrier();
     atomicMax(&tile_last, last);
     let used_end = workgroupUniformLoad(&tile_last);
-    var acc_c = frame.background.xyz;
+    var acc_c = background_at(f32(px), f32(py));
     var acc_d = 0.0;
     let pix = vec2<f32>(f32(px), f32(py));
     let batches = (used_end - first + 255u) / 256u;
@@ -62,6 +110,13 @@ fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
             var g1 = vec2<f32>(0.0);
             var g2 = vec4<f32>(0.0);
             let hit = inside && entry < last && power <= 0.0 && alpha >= MIN_ALPHA;
+            if (PROBE == 3u) {
+                // Probe: the walk and the transmittance only (no gradients, no sums).
+                if (hit) {
+                    t = t / (1.0 - alpha);
+                }
+                continue;
+            }
             if (hit) {
                 let tb = t / (1.0 - alpha);
                 let w = alpha * tb;
@@ -76,13 +131,47 @@ fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
                     g1 = vec2<f32>(d_power * (-0.5 * d.y * d.y), d_alpha * gauss);
                 }
             }
-            // Sum over the subgroup first: one atomic per subgroup instead of one per pixel.
-            if (subgroupAny(hit)) {
-                let s0 = subgroupAdd(g0);
-                let s1 = subgroupAdd(g1);
-                let s2 = subgroupAdd(g2);
+            // Sum over the subgroup first: one atomic per subgroup instead of one per pixel. Other subgroup sizes, the
+            // compare-and-swap sums and probe 4 sum each slot with subgroupAdd.
+            if (subgroupAny(hit) && LANE_ADDS && lanes == 32u && PROBE == 0u) {
+                // A lone contributing lane adds its own values; more are summed first (transposed, sum10).
                 let g = bitcast<u32>(bb.w) * GRAD2D;
-                if (LANE_ADDS) {
+                if (countOneBits(subgroupBallot(hit).x) == 1u) {
+                    if (hit) {
+                        add(g, g0.x);
+                        add(g + 1u, g0.y);
+                        add(g + 2u, g0.z);
+                        add(g + 3u, g0.w);
+                        add(g + 4u, g1.x);
+                        add(g + 5u, g1.y);
+                        add(g + 6u, g2.x);
+                        add(g + 7u, g2.y);
+                        add(g + 8u, g2.z);
+                        add(g + 9u, g2.w);
+                    }
+                } else {
+                    let s = sum10(g0, g1, g2, lane);
+                    if (s.owner) {
+                        add(g + s.slot, s.total);
+                    }
+                }
+            } else if (subgroupAny(hit)) {
+                var s0 = g0;
+                var s1 = g1;
+                var s2 = g2;
+                // Probe 1: no subgroup sums (each lane adds its own values: timing only).
+                if (PROBE != 1u) {
+                    s0 = subgroupAdd(g0);
+                    s1 = subgroupAdd(g1);
+                    s2 = subgroupAdd(g2);
+                }
+                let g = bitcast<u32>(bb.w) * GRAD2D;
+                if (PROBE == 2u) {
+                    // Probe 2: sums but no atomics (an add nobody expects keeps the sums alive).
+                    if (s0.x + s1.x + s2.x == 1234.5) {
+                        add(g, s0.y + s1.y + s2.y + s0.z + s0.w + s2.z + s2.w);
+                    }
+                } else if (LANE_ADDS) {
                     // Lane k adds slot k: ten independent atomics instead of a chain of ten.
                     if (lane < 10u) {
                         var v = s0[lane & 3u];

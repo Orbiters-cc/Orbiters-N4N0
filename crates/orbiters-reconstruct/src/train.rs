@@ -6,7 +6,7 @@
 use crate::camera::Camera;
 use crate::dataset::{channel, Dataset, DepthView};
 use crate::gaussians::{logit, rotation_matrix, sigmoid, Gaussians, PACKED};
-use crate::gpu::{Gpu, LearningRates, Target};
+use crate::gpu::{Gpu, LearningRates, Relocation, Target};
 use std::time::Instant;
 
 #[derive(Clone, Debug)]
@@ -44,6 +44,15 @@ pub struct Settings {
     pub relocate_until: f32,
     /// Lab: keyframes held out instead of every `hold_out_every`-th.
     pub held_out: Option<Vec<usize>>,
+    /// Lab: relocation decided from per-Gaussian weights and applied on the device (else downloaded and re-uploaded).
+    pub device_relocation: bool,
+    /// Lab: learning-rate multipliers at the first step, decaying geometrically to 1 at `boost_until` of the steps.
+    pub boost_means: f32,
+    pub boost_scales: f32,
+    pub boost_rotations: f32,
+    pub boost_opacity: f32,
+    pub boost_colors: f32,
+    pub boost_until: f32,
 }
 
 impl Default for Settings {
@@ -67,6 +76,13 @@ impl Default for Settings {
             half_until: 0.0,
             relocate_until: 0.8,
             held_out: None,
+            device_relocation: true,
+            boost_means: 1.0,
+            boost_scales: 1.0,
+            boost_rotations: 1.0,
+            boost_opacity: 1.0,
+            boost_colors: 1.0,
+            boost_until: 0.5,
         }
     }
 }
@@ -90,6 +106,13 @@ impl Settings {
             "robust_from" => self.robust_from = f()?,
             "quarter_until" => self.quarter_until = f()?,
             "half_until" => self.half_until = f()?,
+            "device_relocation" => self.device_relocation = u()? != 0,
+            "boost_means" => self.boost_means = f()?,
+            "boost_scales" => self.boost_scales = f()?,
+            "boost_rotations" => self.boost_rotations = f()?,
+            "boost_opacity" => self.boost_opacity = f()?,
+            "boost_colors" => self.boost_colors = f()?,
+            "boost_until" => self.boost_until = f()?,
             _ => anyhow::bail!("unknown setting {key}"),
         }
         Ok(())
@@ -120,6 +143,9 @@ pub struct Outcome {
     pub psnr_held_out: Option<f32>,
     pub psnr_train: f32,
     pub seconds: f32,
+    /// Of `seconds`: relocation rounds (download, CPU, upload) and held-out evaluations during training.
+    pub relocate_seconds: f32,
+    pub evaluate_seconds: f32,
 }
 
 /// The cameras' mean position.
@@ -177,8 +203,7 @@ pub fn evaluate(gpu: &mut Gpu, data: &Dataset, views: &[usize], background: [f32
     }
     let mut sum = 0.0;
     for &i in views {
-        let img = render(gpu, &data.views[i].camera, background)?;
-        sum += psnr(&img, &data.views[i].image, &data.mask);
+        sum += gpu.score(&data.views[i].camera, background, &data.views[i].image)?;
     }
     Ok(Some(sum / views.len() as f32))
 }
@@ -217,6 +242,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let far_field = crate::init::SKY * 0.5;
     gpu.step = 0;
     let relocate_until = (iterations as f32 * settings.relocate_until) as u32;
+    let (mut relocate_seconds, mut evaluate_seconds) = (0f32, 0f32);
     for it in 1..=iterations {
         let progress = (it - 1) as f32 / iterations as f32;
         // Coarse to fine: this step's level (0 full, 1 half, 2 quarter resolution); positions decay from full on.
@@ -228,12 +254,14 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             1
         };
         let decay = if coarse.is_empty() { progress } else { ((progress - settings.half_until) / (1.0 - settings.half_until)).max(0.0) };
+        // Lab: boosted early rates (GRay-style) decay geometrically to the 3DGS ones by `boost_until`.
+        let boost = |b: f32| b.powf(1.0 - (progress / settings.boost_until.max(1e-6)).min(1.0));
         let lr = LearningRates {
-            means: 1.6e-4 * extent * (0.01f32).powf(decay),
-            log_scales: 0.005,
-            rotations: 0.001,
-            opacity: 0.05,
-            colors: 0.0025,
+            means: 1.6e-4 * extent * (0.01f32).powf(decay) * boost(settings.boost_means),
+            log_scales: 0.005 * boost(settings.boost_scales),
+            rotations: 0.001 * boost(settings.boost_rotations),
+            opacity: 0.05 * boost(settings.boost_opacity),
+            colors: 0.0025 * boost(settings.boost_colors),
         };
         let depth_step = !depth_views.is_empty() && settings.depth_weight > 0.0 && it % settings.depth_every.max(1) == 0;
         let intersections = if depth_step {
@@ -254,6 +282,20 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
         };
         if it % settings.relocate_every == 0 && it >= 500 && it <= relocate_until {
             let _cpu = crate::priority::CpuWork::start();
+            let began = Instant::now();
+            if settings.device_relocation {
+                // The device classifies, the CPU samples, the device moves: a few MB cross the bus instead of 400.
+                let weights = gpu.relocation_weights(max_radius, centre, far_field)?;
+                let n = weights.len();
+                if it % 500 == 0 {
+                    let dead = weights.iter().filter(|w| **w == -1.0).count();
+                    eprintln!("it {it}: {n} Gaussians, {dead} dead or huge, {intersections} entries");
+                }
+                let plan = plan_relocation(&weights, (n + n / 20).min(settings.budget), &mut rng);
+                gpu.apply_relocation(&plan)?;
+                regularise(gpu, plan.len);
+                relocate_seconds += began.elapsed().as_secs_f32();
+            } else {
             let (mut current, mut m1, mut m2, stats) = gpu.download();
             let grow_to = (current.len() + current.len() / 20).min(settings.budget);
             if it % 500 == 0 {
@@ -269,11 +311,16 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             relocate(&mut current, &mut m1, &mut m2, &huge, &far, grow_to, &mut rng);
             gpu.upload_with_moments(&current, Some((&m1, &m2)));
             regularise(gpu, current.len());
+            relocate_seconds += began.elapsed().as_secs_f32();
+            }
         }
         if it % 50 == 0 || it == iterations {
             let psnr = if it % 1000 == 0 || it == iterations {
                 let _cpu = crate::priority::CpuWork::start();
-                evaluate(gpu, data, &held_out, settings.background)?
+                let began = Instant::now();
+                let psnr = evaluate(gpu, data, &held_out, settings.background)?;
+                evaluate_seconds += began.elapsed().as_secs_f32();
+                psnr
             } else {
                 None
             };
@@ -288,7 +335,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let psnr_held_out = evaluate(gpu, data, &held_out, settings.background)?;
     let sample: Vec<usize> = train_views.iter().copied().step_by((train_views.len() / 8).max(1)).collect();
     let psnr_train = evaluate(gpu, data, &sample, settings.background)?.unwrap_or(0.0);
-    Ok(Outcome { gaussians: g, iterations, held_out, psnr_held_out, psnr_train, seconds: start.elapsed().as_secs_f32() })
+    Ok(Outcome { gaussians: g, iterations, held_out, psnr_held_out, psnr_train, seconds: start.elapsed().as_secs_f32(), relocate_seconds, evaluate_seconds })
 }
 
 /// Keyframes at a coarser resolution: images box-filtered by 2 or 4 from the training resolution, their cameras, and
@@ -375,11 +422,11 @@ fn depth_target(d: &DepthView) -> DepthTarget {
         if sx > 0.0 && sy > 0.0 {
             let c = &d.camera;
             let camera = Camera { r: c.r, t: c.t, fx: c.fx / sx, fy: c.fy / sy, cx: (c.cx - x0) / sx, cy: (c.cy - y0) / sy, width: gw as u32, height: gh as u32 };
-            let samples = (0..gw * gh).filter(|&i| d.depth[i] > 0.0).map(|i| [(i % gw) as f32, (i / gw) as f32, d.depth[i], 0.0]).collect();
+            let samples = (0..gw * gh).filter(|&i| d.depth[i] > 0.0 && !d.is_dynamic(i)).map(|i| [(i % gw) as f32, (i / gw) as f32, d.depth[i], 0.0]).collect();
             return DepthTarget { camera, samples, dilation: [dil / (sx * sx), dil / (sy * sy)] };
         }
     }
-    let samples = d.pixels.iter().zip(&d.depth).filter(|(_, z)| **z > 0.0).map(|(p, z)| [p[0], p[1], *z, 0.0]).collect();
+    let samples = d.pixels.iter().zip(&d.depth).enumerate().filter(|(i, (_, z))| **z > 0.0 && !d.is_dynamic(*i)).map(|(_, (p, z))| [p[0], p[1], *z, 0.0]).collect();
     DepthTarget { camera: d.camera, samples, dilation: [dil; 2] }
 }
 
@@ -401,34 +448,53 @@ fn relocation(o: f64, n: usize) -> (f64, f64) {
     (new_o, o / denom)
 }
 
-/// Moves dead Gaussians (faded, broken, or `huge` on screen) and new ones, up to `grow_to`, onto live ones sampled
-/// by opacity, never `far` ones (unless nothing else lives). Adam moments of every Gaussian touched restart at zero.
-fn relocate(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Vec<f32>, huge: &[bool], far: &[bool], grow_to: usize, rng: &mut fastrand::Rng) -> usize {
-    let opacity: Vec<f32> = g.opacity_logits.iter().map(|&l| sigmoid(l)).collect();
-    let is_dead = |i: usize| opacity[i] < DEAD || !opacity[i].is_finite() || huge[i] || g.means[i].iter().chain(&g.log_scales[i]).any(|c| !c.is_finite());
-    let (mut dead, mut alive): (Vec<usize>, Vec<usize>) = (0..g.len()).partition(|&i| is_dead(i));
-    if alive.iter().any(|&i| !far[i]) {
-        alive.retain(|&i| !far[i]);
+/// Each Gaussian's relocation weight, as relocate.wgsl's `classify` computes it on the device: −1 if dead (faded,
+/// broken, or `huge` on screen), −2 − its opacity if alive in the `far` field, else its opacity.
+pub(crate) fn weights(g: &Gaussians, huge: &[bool], far: &[bool]) -> Vec<f32> {
+    (0..g.len())
+        .map(|i| {
+            let opacity = sigmoid(g.opacity_logits[i]);
+            let broken = g.means[i].iter().chain(&g.log_scales[i]).chain(std::iter::once(&g.opacity_logits[i])).any(|c| !c.is_finite());
+            if broken || opacity < DEAD || huge[i] {
+                -1.0
+            } else if far[i] {
+                -2.0 - opacity
+            } else {
+                opacity
+            }
+        })
+        .collect()
+}
+
+/// Decides a relocation round from the Gaussians' [`weights`]: dead ones and new ones, up to `grow_to`, become copies
+/// of live ones sampled by opacity, never far ones (unless nothing else lives).
+pub fn plan_relocation(weights: &[f32], grow_to: usize, rng: &mut fastrand::Rng) -> Relocation {
+    let n = weights.len();
+    let opacity = |i: usize| if weights[i] >= 0.0 { weights[i] } else { -2.0 - weights[i] };
+    let (mut dead, mut alive): (Vec<usize>, Vec<usize>) = (0..n).partition(|&i| weights[i] == -1.0);
+    if alive.iter().any(|&i| weights[i] >= 0.0) {
+        alive.retain(|&i| weights[i] >= 0.0);
     }
     // At most a twentieth of the set moves at once, and the set grows only while it uses what it has: a scene that
     // needs fewer Gaussians than the budget would otherwise churn copies that fade again.
-    let cap = (g.len() / 20).max(1);
-    let grow = if dead.len() <= cap { grow_to.saturating_sub(g.len()) } else { 0 };
+    let cap = (n / 20).max(1);
+    let grow = if dead.len() <= cap { grow_to.saturating_sub(n) } else { 0 };
     if dead.len() > cap {
         rng.shuffle(&mut dead);
         dead.truncate(cap);
     }
+    let mut plan = Relocation { adjust: Vec::new(), copies: Vec::new(), len: n };
     let moves = dead.len() + grow;
     if moves == 0 || alive.is_empty() {
-        return 0;
+        return plan;
     }
     let mut cdf = Vec::with_capacity(alive.len());
     let mut acc = 0.0f64;
     for &i in &alive {
-        acc += opacity[i] as f64;
+        acc += opacity(i) as f64;
         cdf.push(acc);
     }
-    let mut ratio = vec![1usize; g.len()];
+    let mut ratio = vec![1usize; n];
     let mut picks = Vec::with_capacity(moves);
     while picks.len() < moves {
         let r = rng.f64() * acc;
@@ -441,45 +507,72 @@ fn relocate(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Vec<f32>, huge: &[boo
     }
     for &j in &alive {
         if ratio[j] > 1 {
-            let (new_o, factor) = relocation(opacity[j] as f64, ratio[j]);
-            g.opacity_logits[j] = logit((new_o as f32).clamp(DEAD, 1.0 - 1e-4));
-            let f = (factor as f32).max(1e-6).ln();
-            for s in &mut g.log_scales[j] {
-                *s += f;
-            }
-            m1[j * PACKED..(j + 1) * PACKED].fill(0.0);
-            m2[j * PACKED..(j + 1) * PACKED].fill(0.0);
+            let (new_o, factor) = relocation(opacity(j) as f64, ratio[j]);
+            let new_logit = logit((new_o as f32).clamp(DEAD, 1.0 - 1e-4));
+            plan.adjust.push([j as u32, new_logit.to_bits(), (factor as f32).max(1e-6).ln().to_bits(), 0]);
         }
     }
     let mut free = dead.into_iter();
     for &j in &picks {
         // Somewhere inside the source's footprint, so the copies don't share every gradient forever.
+        let e = [normal(rng), normal(rng), normal(rng)];
+        let target = free.next().unwrap_or_else(|| {
+            plan.len += 1;
+            plan.len - 1
+        });
+        plan.copies.push([target as u32, j as u32, e[0].to_bits(), e[1].to_bits(), e[2].to_bits(), 0, 0, 0]);
+    }
+    plan
+}
+
+/// Applies a relocation plan on the CPU (what relocate.wgsl does on the device): sources first, then copies of the
+/// adjusted sources. Adam moments of every Gaussian touched restart at zero.
+pub(crate) fn apply_relocation(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Vec<f32>, plan: &Relocation) {
+    let restart = |m: &mut Vec<f32>, i: usize| {
+        if m.len() < (i + 1) * PACKED {
+            m.resize((i + 1) * PACKED, 0.0);
+        }
+        m[i * PACKED..(i + 1) * PACKED].fill(0.0);
+    };
+    for a in &plan.adjust {
+        let j = a[0] as usize;
+        g.opacity_logits[j] = f32::from_bits(a[1]);
+        for s in &mut g.log_scales[j] {
+            *s += f32::from_bits(a[2]);
+        }
+        restart(m1, j);
+        restart(m2, j);
+    }
+    for c in &plan.copies {
+        let (t, j) = (c[0] as usize, c[1] as usize);
         let r = rotation_matrix(g.rotations[j]);
         let s = g.log_scales[j].map(f32::exp);
-        let e = [normal(rng) * s[0], normal(rng) * s[1], normal(rng) * s[2]];
+        let e = [f32::from_bits(c[2]) * s[0], f32::from_bits(c[3]) * s[1], f32::from_bits(c[4]) * s[2]];
         let mut mean = g.means[j];
         for (row, m) in r.iter().zip(mean.iter_mut()) {
             *m += row[0] * e[0] + row[1] * e[1] + row[2] * e[2];
         }
         let (log_scale, rotation, opacity_logit, color) = (g.log_scales[j], g.rotations[j], g.opacity_logits[j], g.colors[j]);
-        match free.next() {
-            Some(i) => {
-                g.means[i] = mean;
-                g.log_scales[i] = log_scale;
-                g.rotations[i] = rotation;
-                g.opacity_logits[i] = opacity_logit;
-                g.colors[i] = color;
-                m1[i * PACKED..(i + 1) * PACKED].fill(0.0);
-                m2[i * PACKED..(i + 1) * PACKED].fill(0.0);
-            }
-            None => {
-                g.push(mean, log_scale, rotation, opacity_logit, color);
-                m1.extend_from_slice(&[0.0; PACKED]);
-                m2.extend_from_slice(&[0.0; PACKED]);
-            }
+        if t < g.len() {
+            g.means[t] = mean;
+            g.log_scales[t] = log_scale;
+            g.rotations[t] = rotation;
+            g.opacity_logits[t] = opacity_logit;
+            g.colors[t] = color;
+        } else {
+            g.push(mean, log_scale, rotation, opacity_logit, color);
         }
+        restart(m1, t);
+        restart(m2, t);
     }
-    picks.len()
+}
+
+/// Moves dead Gaussians (faded, broken, or `huge` on screen) and new ones, up to `grow_to`, onto live ones sampled
+/// by opacity, never `far` ones (unless nothing else lives), on the CPU. Returns the number of copies.
+fn relocate(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Vec<f32>, huge: &[bool], far: &[bool], grow_to: usize, rng: &mut fastrand::Rng) -> usize {
+    let plan = plan_relocation(&weights(g, huge, far), grow_to, rng);
+    apply_relocation(g, m1, m2, &plan);
+    plan.copies.len()
 }
 
 fn normal(rng: &mut fastrand::Rng) -> f32 {
@@ -509,7 +602,7 @@ mod tests {
             }
         }
         let depth: Vec<f32> = (0..pixels.len()).map(|i| 1.0 + (i % 7) as f32).collect();
-        let view = DepthView { camera, grid_width: gw, grid_height: gh, pixels: pixels.clone(), depth: depth.clone(), game_time: 0.0, spacing: 8.0 };
+        let view = DepthView { camera, grid_width: gw, grid_height: gh, pixels: pixels.clone(), depth: depth.clone(), game_time: 0.0, spacing: 8.0, dynamic: Vec::new() };
         let t = depth_target(&view);
         assert_eq!((t.camera.width, t.camera.height), (gw, gh));
         assert_eq!(t.samples.len(), pixels.len());

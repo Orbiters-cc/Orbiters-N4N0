@@ -7,7 +7,7 @@ use super::mic::{mic_test, MicTest};
 use super::settings::source_chip;
 use super::{section, Cx};
 use crate::ipc::OrbCommand;
-use crate::state::{AccountState, OrbFace, OrbLine, OrbStatus, OrbWho};
+use crate::state::{AccountState, CallLink, CallPhase, CallView, OrbFace, OrbLine, OrbStatus, OrbWho};
 use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder};
 use orbiters_core::settings::{Settings, GOGOLOCO_PARAMETERS};
 use orbiters_ui::anim;
@@ -195,6 +195,71 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     if let Some(i) = remove {
                         draft.orb.pins.remove(i);
                         apply = true;
+                    }
+                }
+            });
+
+            let calls = &orb.calls;
+            let calls_sub = match (&calls.call, &calls.link) {
+                (Some(c), _) => call_line(c),
+                (None, CallLink::Linked { .. }) if calls.contacts.is_empty() => "No friend with Orbiters and Orb on right now".to_string(),
+                (None, CallLink::Linked { .. }) => format!("{} friends can be called", calls.contacts.len()),
+                (None, CallLink::Off) => "Call VRChat friends who have Orbiters and Orb too".to_string(),
+                (None, CallLink::SignedOut) => "Sign in to Orbiters to use calls".to_string(),
+                (None, CallLink::NoAccount) => "Open VRChat, VRCX or VRCNext once so Orbiters knows your VRChat account".to_string(),
+                (None, CallLink::NotLinked { .. }) => "Link your VRChat account on Orbiters to be called".to_string(),
+            };
+            section(ui, cx, 9, icons::BROADCAST, "Calls", Some(&calls_sub), |ui| {
+                widgets::field(
+                    ui,
+                    "Calls",
+                    Some("Your presence and your VRChat friends (as hashes, from VRCX and VRCNext) go to Orbiters, to find friends you can call. Calls go straight between you two."),
+                    48.0,
+                    |ui| {
+                        apply |= widgets::toggle(ui, "orb-calls", &mut draft.orb.calls);
+                    },
+                );
+                if let CallLink::NotLinked { account, source } = &calls.link {
+                    widgets::separator(ui);
+                    let desc = format!("{source} says this computer uses {account}. Confirm it's yours on Orbiters (a friend request, once) so friends can call you.");
+                    widgets::field(ui, "Link your VRChat account", Some(&desc), 160.0, |ui| {
+                        if Button::new("Link on Orbiters").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).size(Size::Sm).show(ui).clicked() {
+                            let site = if snap.account.development { orbiters_core::account::Server::Development } else { orbiters_core::account::Server::Production };
+                            let _ = crate::controller::open_url(&format!("{}account?tab=overview", site.website()));
+                        }
+                    });
+                }
+                if let Some(call) = &calls.call {
+                    widgets::separator(ui);
+                    let title = call.name.clone();
+                    let line = call_line(call);
+                    widgets::field(ui, &title, Some(&line), 260.0, |ui| {
+                        let ringing = call.incoming && call.phase == CallPhase::Ringing;
+                        let end = if ringing { "Decline" } else { "Hang up" };
+                        if Button::new(end).icon(icons::X).variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
+                            cx.ctl.orb(OrbCommand::EndCall);
+                        }
+                        ui.add_space(8.0);
+                        if ringing {
+                            if Button::new("Answer").icon(icons::MICROPHONE).variant(Variant::Primary).size(Size::Sm).show(ui).clicked() {
+                                cx.ctl.orb(OrbCommand::AnswerCall);
+                            }
+                        } else {
+                            let label = if call.muted { "Unmute" } else { "Mute" };
+                            if Button::new(label).icon(icons::MICROPHONE).size(Size::Sm).show(ui).clicked() {
+                                cx.ctl.orb(OrbCommand::MuteCall { on: !call.muted });
+                            }
+                        }
+                    });
+                }
+                if matches!(calls.link, CallLink::Linked { .. }) {
+                    for contact in &calls.contacts {
+                        widgets::separator(ui);
+                        widgets::field(ui, &contact.name, Some("Has Orbiters and Orb on now"), 100.0, |ui| {
+                            if Button::new("Call").icon(icons::BROADCAST).size(Size::Sm).enabled(calls.call.is_none()).show(ui).clicked() {
+                                cx.ctl.orb(OrbCommand::Call { contact: contact.id.clone() });
+                            }
+                        });
                     }
                 }
             });
@@ -445,6 +510,23 @@ fn avatar_line(snap: &crate::state::Snapshot) -> String {
         (None, _) if orb.avatar_id.is_some() => "No Orb prop on this avatar".into(),
         _ => "No avatar yet".into(),
     }
+}
+
+/// Where a call stands, in a few words.
+fn call_line(call: &CallView) -> String {
+    match call.phase {
+        CallPhase::Calling => format!("Calling {}…", call.name),
+        CallPhase::Ringing => format!("{} is calling", call.name),
+        CallPhase::Connecting => "Connecting…".to_string(),
+        CallPhase::Connected => {
+            let since = call.connected_at_ms.map(|t| (now_ms().saturating_sub(t) / 1000) as u64).unwrap_or(0);
+            format!("On a call · {}:{:02}{}", since / 60, since % 60, if call.muted { " · muted" } else { "" })
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 /// A state's name in the Testing section.

@@ -329,6 +329,69 @@ pub struct OrbStatus {
     /// Testing: the whole orb is hidden (`Orb/Visible` sent false).
     #[serde(default)]
     pub test_hidden: bool,
+    /// Calls with VRChat friends (controller/calls.rs).
+    #[serde(default)]
+    pub calls: CallsStatus,
+}
+
+/// Orb calls as the interface shows them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CallsStatus {
+    pub link: CallLink,
+    /// Friends who can be called now.
+    pub contacts: Vec<CallContact>,
+    pub call: Option<CallView>,
+    /// The Orb's panel lists the contacts, and which one is chosen.
+    pub menu_open: bool,
+    pub picked: usize,
+}
+
+/// Whether this member can use calls.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CallLink {
+    #[default]
+    Off,
+    SignedOut,
+    /// Neither VRCX, VRCNext nor VRChat's log says which VRChat account is used here.
+    NoAccount,
+    /// This VRChat account is not the member's verified link on Orbiters yet.
+    NotLinked {
+        account: String,
+        source: String,
+    },
+    Linked {
+        account: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CallContact {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallPhase {
+    /// Our call rings at the friend's.
+    Calling,
+    /// A friend's call rings here.
+    Ringing,
+    Connecting,
+    Connected,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CallView {
+    pub name: String,
+    pub phase: CallPhase,
+    pub incoming: bool,
+    /// When it connected (Unix ms).
+    pub connected_at_ms: Option<u64>,
+    pub muted: bool,
+    pub mic_level: f32,
+    pub remote_level: f32,
 }
 
 impl OrbFace {

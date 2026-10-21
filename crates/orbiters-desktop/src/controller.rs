@@ -125,6 +125,8 @@ pub struct Controller {
     performance: Mutex<performance::PerformanceRuntime>,
     /// A 3D picture under way (controller/burst.rs).
     burst: Mutex<burst::BurstRuntime>,
+    /// Calls with VRChat friends (controller/calls.rs).
+    calls: Mutex<calls::CallsRuntime>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -177,6 +179,7 @@ pub type Shared = Arc<Controller>;
 
 mod account;
 mod burst;
+mod calls;
 mod maps;
 mod orb;
 mod performance;
@@ -212,6 +215,7 @@ impl Controller {
             voice: Mutex::new(voice::VoiceRuntime::default()),
             performance: Mutex::new(performance::PerformanceRuntime::default()),
             burst: Mutex::new(burst::BurstRuntime::default()),
+            calls: Mutex::new(calls::CallsRuntime::default()),
         })
     }
 
@@ -227,6 +231,7 @@ impl Controller {
         spawn_watchers(self.clone());
         self.start_account();
         self.start_orb();
+        self.start_calls();
     }
 
     /// The interface's context, repainted on every change.
@@ -891,6 +896,7 @@ impl Controller {
     pub fn shutdown(self: &Shared) {
         self.voice_stop();
         self.orb_stop();
+        self.calls_stop();
         {
             let mut osc = self.osc_values.lock().unwrap();
             if osc.forwarding {

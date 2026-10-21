@@ -407,6 +407,28 @@ impl OverlayUi {
         }
         // Buttons.
         let r2 = row(2);
+        let call = snap.orb.calls.call.as_ref();
+        if let Some(call) = call {
+            let ringing = call.incoming && call.phase == crate::state::CallPhase::Ringing;
+            let (first, first_cmd) = if ringing { ("Answer", OrbCommand::AnswerCall) } else { ("Hang up", OrbCommand::EndCall) };
+            let b = Button::new(first).icon(if ringing { icons::MICROPHONE } else { icons::X }).variant(if ringing {
+                Variant::Primary
+            } else {
+                Variant::Secondary
+            });
+            let w1 = b.desired_width(ui).max(150.0);
+            if b.width(w1).show_at(ui, Rect::from_min_size(pos2(r2.left(), r2.top() + 2.0), vec2(w1, 40.0))).clicked() {
+                ctl.orb(first_cmd);
+            }
+            if ringing {
+                let d = Button::new("Decline").icon(icons::X).variant(Variant::Ghost);
+                let w2 = d.desired_width(ui).max(120.0);
+                if d.width(w2).show_at(ui, Rect::from_min_size(pos2(r2.left() + w1 + 12.0, r2.top() + 2.0), vec2(w2, 40.0))).clicked() {
+                    ctl.orb(OrbCommand::EndCall);
+                }
+            }
+            return;
+        }
         let save = Button::new("Save this video").icon(icons::DOWNLOAD_SIMPLE).enabled(snap.vrchat.world.last_video.is_some());
         let w = save.desired_width(ui).max(180.0);
         if save.width(w).show_at(ui, Rect::from_min_size(pos2(r2.left(), r2.top() + 2.0), vec2(w, 40.0))).clicked() {

@@ -147,6 +147,7 @@ impl OrbRuntime {
             test_cycle: self.test_cycle.is_some(),
             test_afk: self.test_afk,
             test_hidden: self.test_hidden,
+            calls: Default::default(),
         }
     }
 
@@ -372,12 +373,23 @@ impl Controller {
     }
 
     pub(super) fn orb_publish(&self) {
-        let status = self.orb.lock().unwrap().status();
+        let mut status = self.orb.lock().unwrap().status();
         self.update_if(|s| {
+            // Calls publish their own part.
+            status.calls = s.orb.calls.clone();
             let changed = s.orb != status;
             s.orb = status;
             changed
         });
+    }
+
+    /// Shows `text` on the panel (nothing without the prop).
+    pub(super) fn orb_say(&self, text: &str) {
+        let mut rt = self.orb.lock().unwrap();
+        rt.afk_showing = false;
+        if let Some(sender) = rt.sender.as_mut() {
+            sender.show(text);
+        }
     }
 
     fn orb_line(&self, who: OrbWho, text: impl Into<String>) {
@@ -395,6 +407,23 @@ impl Controller {
                 }
             }
             "AFK" => self.orb.lock().unwrap().afk = value.truthy(),
+            params::CALL_MENU | params::CALL_GO | params::CALL_END if value.truthy() => {
+                // Not on the OSC receiving thread: calls send to Orbiters and VRChat.
+                let (ctl, name) = (self.clone(), name.to_string());
+                std::thread::spawn(move || match name.as_str() {
+                    params::CALL_MENU => ctl.calls_menu(),
+                    params::CALL_GO => {
+                        ctl.calls_go();
+                    }
+                    _ => ctl.call_end(),
+                });
+            }
+            params::CALL_PICK => {
+                if let OscValue::Float(v) = value {
+                    let (ctl, v) = (self.clone(), *v);
+                    std::thread::spawn(move || ctl.calls_pick(v));
+                }
+            }
             params::PHOTO_3D => {
                 if value.truthy() {
                     // Not on the OSC receiving thread: taking it sends to VRChat.
@@ -557,6 +586,12 @@ impl Controller {
 
     /// A hand touched the orb: Orb listens to one sentence.
     fn orb_touch(self: &Shared) {
+        // A ringing call: touching the orb answers it.
+        if self.call_ringing_in() {
+            let ctl = self.clone();
+            std::thread::spawn(move || ctl.call_answer());
+            return;
+        }
         let settings = self.settings().orb;
         if !settings.enabled || !settings.assistant || self.orb.lock().unwrap().listening.is_some() || !self.orb_can_listen() {
             return;
@@ -683,6 +718,10 @@ impl Controller {
                 rt.test_cycle = None;
                 rt.test_face = face;
             }
+            OrbCommand::Call { contact } => self.call_contact(contact),
+            OrbCommand::AnswerCall => self.call_answer(),
+            OrbCommand::EndCall => self.call_end(),
+            OrbCommand::MuteCall { on } => self.call_mute(on),
             OrbCommand::Photo3D => {
                 if let Err(e) = self.take_3d_picture() {
                     self.notify(super::NoticeKind::Warning, e.to_string());

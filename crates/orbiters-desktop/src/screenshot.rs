@@ -174,6 +174,18 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     let scenarios = vec![
         Scenario {
+            name: "orb-calls",
+            page: Page::Orb,
+            snapshot: with_calls(&orb_busy, true),
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 1060.0,
+            world: None,
+        },
+        Scenario {
             name: "orb",
             page: Page::Orb,
             snapshot: orb_busy.clone(),
@@ -1133,13 +1145,15 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
     let mut listening = talking.clone();
     listening.orb.listening = true;
     listening.orb.voice.level = 0.55;
+    let calling = with_calls(&talking, true);
     let mut walking = talking.clone();
     walking.vrchat.world.in_world = true;
     walking.settings.walk_boost.enabled = true;
     walking.settings.walk_boost.strength = 0.35;
     // (name, snapshot, calibration: (T-pose held, started at this time; the last frame is at 1.48 s)).
     type Shot<'a> = (&'a str, &'a Snapshot, Option<(bool, f64)>);
-    let shots: [Shot; 8] = [
+    let shots: [Shot; 9] = [
+        ("overlay-orb-call", &calling, None),
         ("overlay-walk", &walking, None),
         ("overlay-orb", &talking, None),
         ("overlay-orb-listening", &listening, None),
@@ -1237,4 +1251,26 @@ fn over_ground(rgba: &[u8], width: u32, height: u32) -> egui::ColorImage {
         })
         .collect();
     egui::ColorImage::from_rgba_premultiplied([width as usize, height as usize], &pixels)
+}
+
+/// A member with calls on, three friends who can be called and one calling.
+fn with_calls(snap: &Snapshot, ringing: bool) -> Snapshot {
+    use crate::state::{CallContact, CallLink, CallPhase, CallView};
+    let mut s = snap.clone();
+    s.settings.orb.calls = true;
+    s.orb.calls.link = CallLink::Linked { account: "usr_1339e525-d75d-4832-9104-98dd89287681".into() };
+    s.orb.calls.contacts =
+        ["Kiri", "Nova Fox", "Rexouium Fan"].iter().enumerate().map(|(i, n)| CallContact { id: format!("c_{i}"), name: n.to_string() }).collect();
+    if ringing {
+        s.orb.calls.call = Some(CallView {
+            name: "Nova Fox".into(),
+            phase: CallPhase::Ringing,
+            incoming: true,
+            connected_at_ms: None,
+            muted: false,
+            mic_level: 0.0,
+            remote_level: 0.0,
+        });
+    }
+    s
 }

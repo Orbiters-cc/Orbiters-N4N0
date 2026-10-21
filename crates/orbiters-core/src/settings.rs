@@ -100,6 +100,9 @@ pub struct OrbSettings {
     pub carry_parameters: Vec<String>,
     /// Parameters held at a value: put back whenever something else changes them.
     pub pins: Vec<Pin>,
+    /// Calls with VRChat friends who have Orbiters and Orb too (contracts `Docs/orb-calls.md`): presence and the
+    /// friends this computer's VRCX and VRCNext know go to Orbiters (as hashes) while on.
+    pub calls: bool,
 }
 
 /// A parameter held at a value.
@@ -141,6 +144,7 @@ impl Default for OrbSettings {
             afk_message: "Away for a moment, back soon!".into(),
             carry_parameters: GOGOLOCO_PARAMETERS.iter().map(|s| s.to_string()).collect(),
             pins: Vec::new(),
+            calls: false,
         }
     }
 }

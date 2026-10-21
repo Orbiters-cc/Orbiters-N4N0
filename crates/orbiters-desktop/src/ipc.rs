@@ -161,6 +161,17 @@ pub enum OrbCommand {
     InstallVoice,
     /// A 3D picture with VRChat's camera where it stands (recorded, then reconstructed).
     Photo3D,
+    /// Calls a friend (a contact id from the calls status).
+    Call {
+        contact: String,
+    },
+    /// Answers the ringing call.
+    AnswerCall,
+    /// Declines the ringing call or hangs up.
+    EndCall,
+    MuteCall {
+        on: bool,
+    },
     /// Testing: holds the orb in a state (`None`: back to what Orb is doing).
     TestFace {
         face: Option<crate::state::OrbFace>,

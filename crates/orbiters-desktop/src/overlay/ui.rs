@@ -530,6 +530,14 @@ fn recorder(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
         if b.width(w).show_at(ui, Rect::from_min_size(pos2(card.center().x - w / 2.0, card.bottom() - 64.0), vec2(w, 40.0))).clicked() {
             ctl.pause_capture(!paused);
         }
+    } else if c.state == CaptureState::Idle {
+        // A second of the camera swinging around its subject, reconstructed: a picture you can walk around.
+        let b = Button::new("3D picture").icon(icons::CUBE_FOCUS).variant(Variant::Secondary).size(Size::Md).enabled(consent && snap.vrchat.running);
+        let w = b.desired_width(ui).max(160.0);
+        let r = b.width(w).show_at(ui, Rect::from_min_size(pos2(card.center().x - w / 2.0, card.bottom() - 64.0), vec2(w, 40.0)));
+        if r.clicked() {
+            ctl.orb(OrbCommand::Photo3D);
+        }
     }
 }
 

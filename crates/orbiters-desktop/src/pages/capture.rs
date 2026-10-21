@@ -52,6 +52,7 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
     let capturing = snap.is_capturing() || c.state == CaptureState::Stopping;
     let consent = snap.settings.consent_acknowledged;
     let mut test = false;
+    let mut picture = false;
     block(ui, cx, 0, 72.0, |ui, rect| {
         let caption = if recording {
             "Live capture"
@@ -102,10 +103,23 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
             let w = b.desired_width(ui);
             let r = Rect::from_min_size(pos2(rect.right() - w, rect.bottom() - 34.0), vec2(w, 32.0));
             test = b.show_at(ui, r).clicked();
+            // A second of VRChat's camera swinging around what it looks at, reconstructed.
+            let b3 = Button::new("3D picture")
+                .icon(icons::CUBE_FOCUS)
+                .variant(Variant::Secondary)
+                .size(Size::Sm)
+                .enabled(consent && snap.vrchat.running)
+                .hint("VRChat's camera swings around what it looks at for a second, then it is reconstructed in 3D");
+            let w3 = b3.desired_width(ui);
+            let r3 = Rect::from_min_size(pos2(r.left() - 8.0 - w3, rect.bottom() - 34.0), vec2(w3, 32.0));
+            picture = b3.show_at(ui, r3).clicked();
         }
     });
     if test {
         cx.ctl.start_test_capture();
+    }
+    if picture {
+        cx.ctl.orb(crate::ipc::OrbCommand::Photo3D);
     }
 }
 

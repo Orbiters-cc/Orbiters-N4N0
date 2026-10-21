@@ -395,6 +395,17 @@ impl Controller {
                 }
             }
             "AFK" => self.orb.lock().unwrap().afk = value.truthy(),
+            params::PHOTO_3D => {
+                if value.truthy() {
+                    // Not on the OSC receiving thread: taking it sends to VRChat.
+                    let ctl = self.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = ctl.take_3d_picture() {
+                            ctl.notify(super::NoticeKind::Warning, e.to_string());
+                        }
+                    });
+                }
+            }
             params::WALK_BOOST => {
                 if let OscValue::Float(v) = value {
                     self.set_walk_boost(*v);
@@ -671,6 +682,11 @@ impl Controller {
                 let mut rt = self.orb.lock().unwrap();
                 rt.test_cycle = None;
                 rt.test_face = face;
+            }
+            OrbCommand::Photo3D => {
+                if let Err(e) = self.take_3d_picture() {
+                    self.notify(super::NoticeKind::Warning, e.to_string());
+                }
             }
             OrbCommand::TestCycle => {
                 let mut rt = self.orb.lock().unwrap();

@@ -3,8 +3,9 @@
 //! device that changes (SteamVR switching to the headset) is followed.
 
 use crate::synth::Sound;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 
 /// The rate everything is rendered and played at (Windows converts to the device's own).
 pub const RATE: u32 = 48_000;
@@ -81,6 +82,58 @@ impl Drop for MicMonitor {
     }
 }
 
+/// A call's audio while it lives: the microphone handed to `mic` (mono, [`RATE`], as it comes) and `speaker` (mono,
+/// [`RATE`], filled by the caller) played on the default output. The speaker waits for 60 ms before it starts and drops
+/// what waits beyond 200 ms, so a late network burst never piles up delay.
+pub struct Duplex {
+    stop: Arc<AtomicBool>,
+    level: Arc<AtomicU32>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Duplex {
+    pub fn start(device: Option<String>, mut mic: impl FnMut(&[f32]) + Send + 'static, speaker: Arc<Mutex<VecDeque<f32>>>) -> anyhow::Result<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let level = Arc::new(AtomicU32::new(0));
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let thread = {
+            let (stop, level) = (stop.clone(), level.clone());
+            std::thread::Builder::new().name("call-audio".into()).spawn(move || {
+                let buffering = Buffering { start: RATE as usize * 6 / 100, keep: RATE as usize / 5 };
+                if let Err(e) = imp::duplex(device.as_deref(), &stop, &level, &ready_tx, &mut mic, &speaker, buffering) {
+                    let _ = ready_tx.try_send(Err(format!("{e:#}")));
+                }
+            })?
+        };
+        match ready_rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(Ok(())) => Ok(Self { stop, level, thread: Some(thread) }),
+            Ok(Err(e)) => anyhow::bail!("{e}"),
+            Err(_) => anyhow::bail!("the microphone did not start"),
+        }
+    }
+
+    /// The microphone's loudest sample since the last call (0..1).
+    pub fn take_level(&self) -> f32 {
+        f32::from_bits(self.level.swap(0, Ordering::Relaxed))
+    }
+}
+
+impl Drop for Duplex {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// How much the speaker gathers before it starts and the most it lets wait (samples).
+#[derive(Clone, Copy)]
+struct Buffering {
+    start: usize,
+    keep: usize,
+}
+
 /// Mixes the playing sounds into `out` (interleaved stereo) and drops the finished ones.
 fn mix(voices: &mut Vec<(Arc<Sound>, usize)>, out: &mut [f32]) {
     out.fill(0.0);
@@ -97,10 +150,10 @@ fn mix(voices: &mut Vec<(Arc<Sound>, usize)>, out: &mut [f32]) {
 
 #[cfg(windows)]
 mod imp {
-    use super::{mix, Command, RATE};
+    use super::{mix, Buffering, Command, RATE};
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::sync::{mpsc, Arc};
+    use std::sync::{mpsc, Arc, Mutex};
     use std::time::{Duration, Instant};
     use windows::core::HSTRING;
     use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
@@ -217,7 +270,23 @@ mod imp {
         }
     }
 
+    /// The mic test: the microphone straight to the output, about 20 ms behind, never more than 80 ms.
     pub fn monitor(device: Option<&str>, stop: &AtomicBool, level: &AtomicU32, ready: &mpsc::SyncSender<Result<(), String>>) -> anyhow::Result<()> {
+        let queue = Mutex::new(VecDeque::new());
+        let buffering = Buffering { start: RATE as usize / 50, keep: RATE as usize * 8 / 100 };
+        duplex(device, stop, level, ready, &mut |samples| queue.lock().unwrap().extend(samples), &queue, buffering)
+    }
+
+    /// The microphone to `mic`, `speaker` to the default output, until `stop`.
+    pub fn duplex(
+        device: Option<&str>,
+        stop: &AtomicBool,
+        level: &AtomicU32,
+        ready: &mpsc::SyncSender<Result<(), String>>,
+        on_mic: &mut dyn FnMut(&[f32]),
+        playback: &Mutex<VecDeque<f32>>,
+        buffering: Buffering,
+    ) -> anyhow::Result<()> {
         unsafe {
             CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
             let devices = enumerator()?;
@@ -231,10 +300,8 @@ mod imp {
             let output = Stream::open(&speaker, 2, 300_000)?;
             let render: IAudioRenderClient = output.client.GetService()?;
             let size = output.client.GetBufferSize()?;
-            let mut queue: VecDeque<f32> = VecDeque::new();
-            // About 20 ms gathered before the output starts; more than 80 ms waiting is dropped (latency stays low).
-            let (start_at, keep) = (RATE as usize / 50, RATE as usize * 8 / 100);
             let mut started = false;
+            let silence = vec![0.0f32; RATE as usize / 10];
             input.client.Start()?;
             let _ = ready.try_send(Ok(()));
             while !stop.load(Ordering::Relaxed) {
@@ -246,20 +313,21 @@ mod imp {
                     capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None)?;
                     let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || data.is_null();
                     if silent {
-                        queue.extend(std::iter::repeat_n(0.0, frames as usize));
+                        on_mic(&silence[..(frames as usize).min(silence.len())]);
                     } else {
                         let samples = std::slice::from_raw_parts(data.cast::<f32>(), frames as usize);
                         let peak = samples.iter().fold(0.0f32, |m, v| m.max(v.abs()));
                         // Non-negative floats order like their bits.
                         level.fetch_max(peak.min(1.0).to_bits(), Ordering::Relaxed);
-                        queue.extend(samples);
+                        on_mic(samples);
                     }
                     capture.ReleaseBuffer(frames)?;
                 }
-                while queue.len() > keep {
+                let mut queue = playback.lock().unwrap();
+                while queue.len() > buffering.keep {
                     queue.pop_front();
                 }
-                if !started && queue.len() >= start_at {
+                if !started && queue.len() >= buffering.start {
                     started = true;
                     feed(&output, &render, size, &mut |out| take(&mut queue, out))?;
                     output.client.Start()?;
@@ -293,6 +361,18 @@ mod imp {
 
     pub fn monitor(_device: Option<&str>, _stop: &AtomicBool, _level: &AtomicU32, _ready: &mpsc::SyncSender<Result<(), String>>) -> anyhow::Result<()> {
         anyhow::bail!("the mic test needs Windows for now")
+    }
+
+    pub fn duplex(
+        _device: Option<&str>,
+        _stop: &AtomicBool,
+        _level: &AtomicU32,
+        _ready: &mpsc::SyncSender<Result<(), String>>,
+        _mic: &mut dyn FnMut(&[f32]),
+        _speaker: &std::sync::Mutex<std::collections::VecDeque<f32>>,
+        _buffering: super::Buffering,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("calls need Windows for now")
     }
 }
 

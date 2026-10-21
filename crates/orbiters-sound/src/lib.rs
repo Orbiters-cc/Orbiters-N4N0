@@ -6,5 +6,5 @@ mod fft;
 pub mod sounds;
 pub mod synth;
 
-pub use device::{MicMonitor, Output, RATE};
+pub use device::{Duplex, MicMonitor, Output, RATE};
 pub use synth::{render, Sound};

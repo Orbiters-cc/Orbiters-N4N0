@@ -159,6 +159,8 @@ pub enum OrbCommand {
     },
     /// Downloads the speech models.
     InstallVoice,
+    /// A 3D picture with VRChat's camera where it stands (recorded, then reconstructed).
+    Photo3D,
     /// Testing: holds the orb in a state (`None`: back to what Orb is doing).
     TestFace {
         face: Option<crate::state::OrbFace>,

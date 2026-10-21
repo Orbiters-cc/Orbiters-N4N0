@@ -123,6 +123,8 @@ pub struct Controller {
     voice: Mutex<voice::VoiceRuntime>,
     /// VRChat's frame rate per world, gathered for Orbiters (controller/performance.rs).
     performance: Mutex<performance::PerformanceRuntime>,
+    /// A 3D picture under way (controller/burst.rs).
+    burst: Mutex<burst::BurstRuntime>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -174,6 +176,7 @@ fn calibration_info(stored: &StoredCalibration) -> CalibrationInfo {
 pub type Shared = Arc<Controller>;
 
 mod account;
+mod burst;
 mod maps;
 mod orb;
 mod performance;
@@ -208,6 +211,7 @@ impl Controller {
             orb: Mutex::new(orb::OrbRuntime::default()),
             voice: Mutex::new(voice::VoiceRuntime::default()),
             performance: Mutex::new(performance::PerformanceRuntime::default()),
+            burst: Mutex::new(burst::BurstRuntime::default()),
         })
     }
 
@@ -426,6 +430,7 @@ impl Controller {
             }
             WorkerEvent::Stopped { manifest, reason, .. } => {
                 let restarting = reason == "restarted";
+                let session = self.snapshot.lock().unwrap().capture.session_dir.clone();
                 if !restarting {
                     self.put_vrchat_back();
                 }
@@ -444,6 +449,9 @@ impl Controller {
                     keyframes: manifest.stats.keyframes,
                     depth_frames: manifest.stats.depth_frames,
                 });
+                if !restarting {
+                    self.burst_saved(session);
+                }
             }
             WorkerEvent::StartFailed { message } => {
                 // Nothing records: VRChat's camera and the kit were switched on for nothing.

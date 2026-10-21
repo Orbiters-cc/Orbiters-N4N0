@@ -35,6 +35,7 @@ well.
 | `crates/orbiters-sound` | Interface sounds computed at start-up (a port of React Bits' Sound Lab renderer, see its NOTICE.md), the default-output player and the settings' mic monitor |
 | `crates/orbiters-orb` | Orb, the companion on the avatar (contracts `Docs/orb.md`): its text panel's sender, avatar controls found by label, the tools and client of its assistant, the wake word, saved videos |
 | `crates/orbiters-voice` | Orb's ears, a worker process (`orbiters-voice`): the microphone while Orb listens, Silero VAD and NVIDIA Parakeet through sherpa-onnx, on the CPU; it also installs the speech models |
+| `crates/orbiters-call` | Orb's calls, a worker process (`orbiters-call`): WebRTC voice (webrtc-rs, Opus) between two Orbiters desktops, through Cloudflare Realtime TURN when needed (contracts `Docs/orb-calls.md`) |
 | `crates/orbiters-audio` | Microphones and a process's sound through WASAPI, for the capture worker and the voice worker |
 | `crates/orbiters-core` | Shared logic: settings, session bundles, keyframes, VRChat log, OSC/OSCQuery, worker protocols |
 | `crates/orbiters-spout` | Spout2 receiver and test sender (Direct3D 11), protocol-compatible with the Spout2 SDK |
@@ -46,7 +47,7 @@ Requirements: Rust (stable, MSVC toolchain on Windows). No web runtime: the inte
 
 ```sh
 git submodule update --init
-cargo build --release -p orbiters-desktop -p orbiters-capture -p orbiters-reconstruct -p orbiters-voice
+cargo build --release -p orbiters-desktop -p orbiters-capture -p orbiters-reconstruct -p orbiters-voice -p orbiters-call
 target/release/orbiters-desktop
 ```
 
@@ -55,7 +56,11 @@ releases) and places `sherpa-onnx-c-api.dll` and `onnxruntime.dll` next to it; s
 (about 490 MB) are not part of the app: the Orb page installs them into `%LOCALAPPDATA%/Orbiters/Models` when the
 person asks. `orbiters-voice transcribe <file.wav>` checks them on 16 kHz recordings.
 
-The app looks for `orbiters-capture`, `orbiters-reconstruct` and `orbiters-voice` next to its own executable. What stays running is small: in the tray the
+Building `orbiters-call` compiles the Opus codec from source and needs CMake on the PATH (3.x; the portable zip from
+Kitware's releases is enough).
+
+The app looks for `orbiters-capture`, `orbiters-reconstruct`, `orbiters-voice` and `orbiters-call` next to its own
+executable. What stays running is small: in the tray the
 service and the worker use about 25 MB together and no GPU. The window is a separate process that exists only
 while it is open (about 120 MB, mostly the GPU driver); it repaints only while something moves, and looping
 animations run only while it is focused. `orbiters-desktop --hidden` starts in the tray, `--quit` stops it.

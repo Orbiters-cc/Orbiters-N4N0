@@ -35,6 +35,12 @@ with the components (Cargo registry sources) and are available from each project
 | arboard (clipboard) | MIT OR Apache-2.0 |
 | sherpa-onnx, sherpa-onnx-sys (k2-fsa; the voice worker) | Apache-2.0 |
 | tar, bzip2 (unpacking the speech models) | MIT OR Apache-2.0 |
+| webrtc, rtc (webrtc-rs; Orb's calls) | MIT OR Apache-2.0 |
+| tokio, async-trait, bytes (the call worker) | MIT, MIT OR Apache-2.0, MIT |
+| audiopus, audiopus_sys (Opus bindings) | ISC |
+| Opus (libopus, built into the call worker) | BSD-3-Clause |
+| rusqlite (reading VRCX's and VRCNext's databases) | MIT |
+| SQLite (bundled with rusqlite) | Public domain |
 
 ## Native libraries next to the voice worker
 

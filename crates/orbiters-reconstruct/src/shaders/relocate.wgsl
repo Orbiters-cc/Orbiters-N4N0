@@ -23,7 +23,7 @@ struct Info {
 @group(0) @binding(6) var<storage, read_write> m2: array<f32>;
 
 const DEAD: f32 = 0.005;
-const PARAM: u32 = 16u;
+const PARAM: u32 = 24u;
 
 // The same as common.wgsl's (which needs the frame uniform).
 fn flat_index(gid: vec3<u32>, nwg: vec3<u32>) -> u32 {

@@ -116,7 +116,7 @@ struct SortInfo {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct AdamInfo {
-    lr: [f32; 16],
+    lr: [f32; 24],
     beta: [f32; 4],
     n: [u32; 4],
 }
@@ -129,6 +129,8 @@ pub struct LearningRates {
     pub rotations: f32,
     pub opacity: f32,
     pub colors: f32,
+    /// Degree-1 harmonics (0: a degree-0 model).
+    pub sh: f32,
 }
 
 /// What one training step looks at: a keyframe (colour loss) or a depth frame (depth loss).
@@ -1138,12 +1140,13 @@ impl Gpu {
 
     fn adam(&mut self, enc: &mut wgpu::CommandEncoder, lr: LearningRates) {
         self.step += 1;
-        let mut rates = [0f32; 16];
+        let mut rates = [0f32; 24];
         rates[0..3].fill(lr.means);
         rates[3..6].fill(lr.log_scales);
         rates[6..10].fill(lr.rotations);
         rates[10] = lr.opacity;
         rates[11..14].fill(lr.colors);
+        rates[14..23].fill(lr.sh);
         let n = self.count * PACKED;
         let info = self.uniform(&AdamInfo { lr: rates, beta: [0.9, 0.999, 1e-15, 0.0], n: [n as u32, self.step, 0, 0] });
         let s = self.splats.as_ref().expect("splats");
@@ -1270,6 +1273,7 @@ mod tests {
                 -1.5 + rng.f32() * 3.0,
                 [rng.f32(), rng.f32(), rng.f32()],
             );
+            *g.sh1.last_mut().unwrap() = std::array::from_fn(|_| rng.f32() - 0.5);
         }
         (g, cam)
     }
@@ -1321,12 +1325,13 @@ mod tests {
                 let dd: Vec<f64> = d_pixel.iter().map(|p| p[3] as f64).collect();
                 let reference = cpu::backward(&g, &cam, bg.map(f64::from), cpu::Rules::GPU, &dc, &dd);
                 // Compare each group against its largest magnitude (float atomics sum in any order).
-                let groups: [(&str, Vec<(usize, f64)>); 5] = [
+                let groups: [(&str, Vec<(usize, f64)>); 6] = [
                     ("means", (0..g.len()).flat_map(|i| (0..3).map(move |k| (i, k))).map(|(i, k)| (i * PACKED + k, reference.means[i][k])).collect()),
                     ("log_scales", (0..g.len()).flat_map(|i| (0..3).map(move |k| (i, k))).map(|(i, k)| (i * PACKED + 3 + k, reference.log_scales[i][k])).collect()),
                     ("rotations", (0..g.len()).flat_map(|i| (0..4).map(move |k| (i, k))).map(|(i, k)| (i * PACKED + 6 + k, reference.rotations[i][k])).collect()),
                     ("opacity", (0..g.len()).map(|i| (i * PACKED + 10, reference.opacity_logits[i])).collect()),
                     ("colors", (0..g.len()).flat_map(|i| (0..3).map(move |k| (i, k))).map(|(i, k)| (i * PACKED + 11 + k, reference.colors[i][k])).collect()),
+                    ("sh1", (0..g.len()).flat_map(|i| (0..9).map(move |k| (i, k))).map(|(i, k)| (i * PACKED + 14 + k, reference.sh1[i][k])).collect()),
                 ];
                 for (name, values) in groups {
                     let scale = values.iter().map(|(_, r)| r.abs()).fold(0.0, f64::max).max(1e-9);

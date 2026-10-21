@@ -1,7 +1,7 @@
-// Adam on every parameter, with one learning rate per slot of the 16-float layout (padding slots have 0).
+// Adam on every parameter, with one learning rate per slot of the 24-float layout (padding slots have 0).
 
 struct AdamInfo {
-    lr: array<vec4<f32>, 4>,
+    lr: array<vec4<f32>, 6>,
     // β1, β2, ε, unused.
     beta: vec4<f32>,
     // Parameters (floats), step (for bias correction), unused, unused.
@@ -20,7 +20,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     if (k >= info.n.x) {
         return;
     }
-    let slot = k % 16u;
+    let slot = k % 24u;
     let lr = info.lr[slot / 4u][slot % 4u];
     if (lr == 0.0) {
         return;

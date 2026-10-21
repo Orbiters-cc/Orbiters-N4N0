@@ -9,10 +9,21 @@ pub struct Gaussians {
     pub rotations: Vec<[f32; 4]>,
     pub opacity_logits: Vec<f32>,
     pub colors: Vec<[f32; 3]>,
+    /// Degree-1 spherical harmonics: `sh1[k * 3 + c]` scales [`sh1_basis`]`[k]` of the direction from the camera in
+    /// channel c, on top of the colour (all zero for a degree-0 model).
+    pub sh1: Vec<[f32; 9]>,
 }
 
 /// Floats per Gaussian in the packed GPU layout (see [`Gaussians::pack`]).
-pub const PACKED: usize = 16;
+pub const PACKED: usize = 24;
+
+/// Degree-1 spherical harmonic constant.
+pub const SH_C1: f32 = 0.488_602_5;
+
+/// The degree-1 basis of a unit direction from the camera to a Gaussian (the reference 3DGS order, in Unity's world).
+pub fn sh1_basis(d: [f32; 3]) -> [f32; 3] {
+    [-SH_C1 * d[1], SH_C1 * d[2], -SH_C1 * d[0]]
+}
 
 impl Gaussians {
     pub fn len(&self) -> usize {
@@ -29,6 +40,7 @@ impl Gaussians {
         self.rotations.push(rotation);
         self.opacity_logits.push(opacity_logit);
         self.colors.push(color);
+        self.sh1.push([0.0; 9]);
     }
 
     pub fn swap_remove(&mut self, i: usize) {
@@ -37,6 +49,7 @@ impl Gaussians {
         self.rotations.swap_remove(i);
         self.opacity_logits.swap_remove(i);
         self.colors.swap_remove(i);
+        self.sh1.swap_remove(i);
     }
 
     /// Keeps the Gaussians for which `keep` is true, in order.
@@ -54,9 +67,11 @@ impl Gaussians {
         filter(&mut self.rotations, keep);
         filter(&mut self.opacity_logits, keep);
         filter(&mut self.colors, keep);
+        filter(&mut self.sh1, keep);
     }
 
-    /// The parameters as 16 floats each: mean (3), log scales (3), rotation (4), opacity logit (1), colour (3), pad (2).
+    /// The parameters as 24 floats each: mean (3), log scales (3), rotation (4), opacity logit (1), colour (3), degree-1
+    /// harmonics (9), pad (1).
     pub fn pack(&self) -> Vec<f32> {
         let mut out = Vec::with_capacity(self.len() * PACKED);
         for i in 0..self.len() {
@@ -65,7 +80,8 @@ impl Gaussians {
             out.extend_from_slice(&self.rotations[i]);
             out.push(self.opacity_logits[i]);
             out.extend_from_slice(&self.colors[i]);
-            out.extend_from_slice(&[0.0, 0.0]);
+            out.extend_from_slice(&self.sh1[i]);
+            out.push(0.0);
         }
         out
     }
@@ -74,6 +90,7 @@ impl Gaussians {
         let mut g = Self::default();
         for p in data.as_chunks::<PACKED>().0 {
             g.push([p[0], p[1], p[2]], [p[3], p[4], p[5]], [p[6], p[7], p[8], p[9]], p[10], [p[11], p[12], p[13]]);
+            *g.sh1.last_mut().expect("just pushed") = std::array::from_fn(|k| p[14 + k]);
         }
         g
     }

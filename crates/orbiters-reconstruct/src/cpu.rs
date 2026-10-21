@@ -66,6 +66,7 @@ pub struct Grads {
     pub rotations: Vec<[f64; 4]>,
     pub opacity_logits: Vec<f64>,
     pub colors: Vec<[f64; 3]>,
+    pub sh1: Vec<[f64; 9]>,
 }
 
 type M3 = [[f64; 3]; 3];
@@ -119,6 +120,25 @@ struct Proj {
     clamp_y: bool,
     u: f64,
     v: f64,
+}
+
+/// The direction from the camera to Gaussian `i` (unit) and its distance.
+fn view_dir(g: &Gaussians, i: usize, cam: &Camera) -> ([f64; 3], f64) {
+    let c = cam.position();
+    let d = [0, 1, 2].map(|k| g.means[i][k] as f64 - c[k] as f64);
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-12);
+    (d.map(|v| v / len), len)
+}
+
+fn sh1_basis(d: [f64; 3]) -> [f64; 3] {
+    let c1 = crate::gaussians::SH_C1 as f64;
+    [-c1 * d[1], c1 * d[2], -c1 * d[0]]
+}
+
+/// Gaussian `i`'s colour from this camera: base colour and degree-1 harmonics.
+fn view_color(g: &Gaussians, i: usize, cam: &Camera) -> [f64; 3] {
+    let b = sh1_basis(view_dir(g, i, cam).0);
+    [0, 1, 2].map(|c| g.colors[i][c] as f64 + (0..3).map(|k| b[k] * g.sh1[i][k * 3 + c] as f64).sum::<f64>())
 }
 
 fn project_one(g: &Gaussians, i: usize, cam: &Camera) -> Proj {
@@ -195,7 +215,7 @@ fn project_one(g: &Gaussians, i: usize, cam: &Camera) -> Proj {
         conic: [c / det, -b / det, a / det],
         depth: z,
         opacity: op,
-        color: g.colors[i].map(|v| v as f64),
+        color: view_color(g, i, cam),
         radius,
         tiles: [tx0 as u32, ty0 as u32, tx1 as u32, ty1 as u32],
     };
@@ -345,8 +365,29 @@ pub fn backward(g: &Gaussians, cam: &Camera, background: [f64; 3], rules: Rules,
         log_scales: vec![[0.0; 3]; n],
         rotations: vec![[0.0; 4]; n],
         opacity_logits: vec![0.0; n],
-        colors: d_col,
+        colors: d_col.clone(),
+        sh1: vec![[0.0; 9]; n],
     };
+    // Degree-1 harmonics, and the mean through the view direction (d colour_c / d dir = C1 (−sh2c, −sh0c, sh1c)).
+    let c1 = crate::gaussians::SH_C1 as f64;
+    let mut d_mean_sh = vec![[0.0; 3]; n];
+    for i in 0..n {
+        let (dir, dist) = view_dir(g, i, cam);
+        let b = sh1_basis(dir);
+        let mut d_dir = [0.0; 3];
+        for c in 0..3 {
+            for k in 0..3 {
+                out.sh1[i][k * 3 + c] = d_col[i][c] * b[k];
+            }
+            let sh = |k: usize| g.sh1[i][k * 3 + c] as f64;
+            let dc = [-sh(2), -sh(0), sh(1)];
+            for k in 0..3 {
+                d_dir[k] += d_col[i][c] * c1 * dc[k];
+            }
+        }
+        let along = dir[0] * d_dir[0] + dir[1] * d_dir[1] + dir[2] * d_dir[2];
+        d_mean_sh[i] = [0, 1, 2].map(|k| (d_dir[k] - dir[k] * along) / dist);
+    }
     let (fx, fy) = (cam.fx as f64, cam.fy as f64);
     for i in 0..n {
         let pr = &projs[i];
@@ -403,7 +444,7 @@ pub fn backward(g: &Gaussians, cam: &Camera, background: [f64; 3], rules: Rules,
             d_pc[2] += d_j[1][2] * (2.0 * fy * y / (z * z * z));
         }
         let wm = pr.w;
-        out.means[i] = [0, 1, 2].map(|k| (0..3).map(|r| wm[r][k] * d_pc[r]).sum());
+        out.means[i] = [0, 1, 2].map(|k| (0..3).map(|r| wm[r][k] * d_pc[r]).sum::<f64>() + d_mean_sh[i][k]);
         // dL/dΣw = Wᵀ dL/dΣc W; M = Rq S; dL/dM = 2 dL/dΣw M.
         let d_sigma_w = mul(&mul(&transpose(&wm), &d_sigma_c), &wm);
         let mut ms = pr.rq;
@@ -453,6 +494,7 @@ mod tests {
                 -0.6 + rng.f32() * 0.9 + 0.1 * k as f32,
                 [rng.f32(), rng.f32(), rng.f32()],
             );
+            *g.sh1.last_mut().unwrap() = std::array::from_fn(|_| rng.f32() - 0.5);
         }
         (g, cam)
     }
@@ -487,6 +529,9 @@ mod tests {
                 params.push((format!("rotation[{i}][{k}]"), grads.rotations[i][k], Box::new(move |g: &mut Gaussians, d| g.rotations[i][k] += d)));
             }
             params.push((format!("opacity[{i}]"), grads.opacity_logits[i], Box::new(move |g: &mut Gaussians, d| g.opacity_logits[i] += d)));
+            for k in 0..9 {
+                params.push((format!("sh1[{i}][{k}]"), grads.sh1[i][k], Box::new(move |g: &mut Gaussians, d| g.sh1[i][k] += d)));
+            }
             for (name, analytic, nudge) in params {
                 let mut plus = g.clone();
                 nudge(&mut plus, eps);

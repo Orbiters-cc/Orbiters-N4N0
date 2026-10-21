@@ -72,9 +72,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     proj[o + 4u] = conic.z;
     proj[o + 5u] = m.pc.z;
     proj[o + 6u] = op;
-    proj[o + 7u] = params[b + 11u];
-    proj[o + 8u] = params[b + 12u];
-    proj[o + 9u] = params[b + 13u];
+    // Colour as seen from this camera: the base colour and the degree-1 harmonics.
+    let basis = sh1_basis(normalize(mean - camera_centre(frame)));
+    for (var c = 0u; c < 3u; c++) {
+        proj[o + 7u + c] = params[b + 11u + c] + basis.x * params[b + 14u + c] + basis.y * params[b + 17u + c] + basis.z * params[b + 20u + c];
+    }
     proj[o + 10u] = radius;
     proj[o + 11u] = bitcast<f32>(u32(x0));
     proj[o + 12u] = bitcast<f32>(u32(y0));

@@ -55,6 +55,8 @@ pub struct Settings {
     pub unseen_weight: f32,
     /// Covers the sky shell where no view looked (crate::sky) once training ends.
     pub sky_fill: bool,
+    /// Spherical harmonics degree of the colour: 0 (one colour) or 1 (view-dependent, three more per channel).
+    pub sh_degree: u32,
 }
 
 impl Default for Settings {
@@ -80,6 +82,7 @@ impl Default for Settings {
             fade_unseen_every: 1000,
             unseen_weight: 0.02,
             sky_fill: false,
+            sh_degree: 0,
         }
     }
 }
@@ -219,6 +222,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             rotations: 0.001,
             opacity: 0.05,
             colors: 0.0025,
+            sh: if settings.sh_degree >= 1 { 0.0025 / 20.0 } else { 0.0 },
         };
         let depth_step = !depth_views.is_empty() && settings.depth_weight > 0.0 && it % settings.depth_every.max(1) == 0;
         let intersections = if depth_step {
@@ -505,15 +509,17 @@ pub(crate) fn apply_relocation(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Ve
         for (row, m) in r.iter().zip(mean.iter_mut()) {
             *m += row[0] * e[0] + row[1] * e[1] + row[2] * e[2];
         }
-        let (log_scale, rotation, opacity_logit, color) = (g.log_scales[j], g.rotations[j], g.opacity_logits[j], g.colors[j]);
+        let (log_scale, rotation, opacity_logit, color, sh1) = (g.log_scales[j], g.rotations[j], g.opacity_logits[j], g.colors[j], g.sh1[j]);
         if t < g.len() {
             g.means[t] = mean;
             g.log_scales[t] = log_scale;
             g.rotations[t] = rotation;
             g.opacity_logits[t] = opacity_logit;
             g.colors[t] = color;
+            g.sh1[t] = sh1;
         } else {
             g.push(mean, log_scale, rotation, opacity_logit, color);
+            *g.sh1.last_mut().expect("just pushed") = sh1;
         }
         restart(m1, t);
         restart(m2, t);

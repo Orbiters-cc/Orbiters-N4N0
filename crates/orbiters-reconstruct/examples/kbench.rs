@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
     gpu.upload(&g);
     gpu.set_mask(data.width, data.height, &data.mask);
     let px = data.mask.iter().filter(|m| **m > 0.5).count() as f32;
-    let zero = LearningRates { means: 0.0, log_scales: 0.0, rotations: 0.0, opacity: 0.0, colors: 0.0 };
+    let zero = LearningRates { means: 0.0, log_scales: 0.0, rotations: 0.0, opacity: 0.0, colors: 0.0, sh: 0.0 };
     let samples: Vec<Vec<[f32; 4]>> = data
         .depth_views
         .iter()

@@ -16,7 +16,7 @@ fn step_timings() {
     gpu.set_mask(data.width, data.height, &data.mask);
     let v = &data.views[3];
     let px = data.mask.iter().filter(|m| **m > 0.5).count() as f32;
-    let lr = LearningRates { means: 0.0, log_scales: 0.0, rotations: 0.0, opacity: 0.0, colors: 0.0 };
+    let lr = LearningRates { means: 0.0, log_scales: 0.0, rotations: 0.0, opacity: 0.0, colors: 0.0, sh: 0.0 };
     for (name, train) in [("forward", false), ("forward+backward", true)] {
         let mut total = 0;
         let start = Instant::now();

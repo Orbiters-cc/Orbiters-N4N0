@@ -27,9 +27,21 @@ const MAX_ALPHA: f32 = 0.99;
 const MIN_ALPHA: f32 = 0.003921569;
 const MIN_T: f32 = 0.0001;
 // Floats per Gaussian: parameters (and their gradients and Adam moments), projected values, 2D gradients.
-const PARAM: u32 = 16u;
+const PARAM: u32 = 24u;
+// Degree-1 spherical harmonics: params[b + 14 + 3k + c] scales sh1_basis(dir)[k] in channel c.
+const SH_C1: f32 = 0.48860251;
 const PROJ: u32 = 16u;
 const GRAD2D: u32 = 10u;
+
+// The camera's centre in the world: −Rᵀt.
+fn camera_centre(f: Frame) -> vec3<f32> {
+    return -(f.r0.xyz * f.r0.w + f.r1.xyz * f.r1.w + f.r2.xyz * f.r2.w);
+}
+
+// The degree-1 basis of a unit direction from the camera (the reference 3DGS order, in Unity's world).
+fn sh1_basis(d: vec3<f32>) -> vec3<f32> {
+    return SH_C1 * vec3<f32>(-d.y, d.z, -d.x);
+}
 
 // Linear invocation index of a (possibly two-dimensional) dispatch of 256-wide workgroups.
 fn flat_index(gid: vec3<u32>, nwg: vec3<u32>) -> u32 {

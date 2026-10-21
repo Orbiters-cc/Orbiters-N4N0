@@ -34,6 +34,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     grads[o + 11u] = grad(g + 6u);
     grads[o + 12u] = grad(g + 7u);
     grads[o + 13u] = grad(g + 8u);
+    // Degree-1 harmonics, and the mean through the view direction: d colour_c / d dir = C1 (−sh2c, −sh0c, sh1c).
+    let d_col = vec3<f32>(grad(g + 6u), grad(g + 7u), grad(g + 8u));
+    let to_mean = mean - camera_centre(frame);
+    let dist = max(length(to_mean), 1e-6);
+    let dir = to_mean / dist;
+    let basis = sh1_basis(dir);
+    var d_dir = vec3<f32>(0.0);
+    for (var c = 0u; c < 3u; c++) {
+        grads[o + 14u + c] = d_col[c] * basis.x;
+        grads[o + 17u + c] = d_col[c] * basis.y;
+        grads[o + 20u + c] = d_col[c] * basis.z;
+        d_dir += d_col[c] * SH_C1 * vec3<f32>(-params[o + 20u + c], -params[o + 14u + c], params[o + 17u + c]);
+    }
+    let d_mean_sh = (d_dir - dir * dot(dir, d_dir)) / dist;
     let d_z = grad(g + 9u);
 
     // Conic → 2D covariance.
@@ -86,7 +100,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     }
     let w = array<vec3<f32>, 3>(frame.r0.xyz, frame.r1.xyz, frame.r2.xyz);
     for (var k = 0u; k < 3u; k++) {
-        grads[o + k] = dot(column(w, k), d_pc);
+        grads[o + k] = dot(column(w, k), d_pc) + d_mean_sh[k];
     }
     // dL/dΣw = Wᵀ dL/dΣc W.
     var d_sw: array<vec3<f32>, 3>;

@@ -30,6 +30,8 @@ struct Args {
     width: u32,
     settings: train::Settings,
     device: gpu::DeviceOptions,
+    /// Realign the keyframes' channels when the world has chromatic aberration (`--keep-aberration`: no).
+    undo_aberration: bool,
 }
 
 fn args() -> anyhow::Result<Args> {
@@ -38,6 +40,7 @@ fn args() -> anyhow::Result<Args> {
     let mut width = 1920;
     let mut settings = train::Settings::default();
     let mut device = gpu::DeviceOptions::default();
+    let mut undo_aberration = true;
     while let Some(a) = it.next() {
         let mut number = |name: &str| -> anyhow::Result<u64> { it.next().with_context(|| format!("{name} needs a value"))?.parse().with_context(|| format!("{name} takes a number")) };
         match a.as_str() {
@@ -46,6 +49,8 @@ fn args() -> anyhow::Result<Args> {
             "--budget" => settings.budget = number("--budget")? as usize,
             "--robust" => settings.robust = it.next().context("--robust needs a value")?.parse().context("--robust takes a number (0–1)")?,
             "--sky-fill" => settings.sky_fill = true,
+            "--keep-aberration" => undo_aberration = false,
+            "--sh" => settings.sh_degree = number("--sh")? as u32,
             "--seed" => settings.seed = number("--seed")?,
             "--gpu" => {
                 device.low_power = match it.next().as_deref() {
@@ -58,7 +63,7 @@ fn args() -> anyhow::Result<Args> {
             _ => session = Some(PathBuf::from(a)),
         }
     }
-    Ok(Args { session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]")?, width, settings, device })
+    Ok(Args { session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]")?, width, settings, device, undo_aberration })
 }
 
 fn rgb8(img: &[[f32; 4]]) -> Vec<u8> {
@@ -77,7 +82,7 @@ fn run(args: Args) -> anyhow::Result<Report> {
         "depth validation: {} of {} tile positions never read ({} of their samples kept as sky), {} misread tiles, {} impossibly near samples; {} of {} samples unknown",
         fix.dead_tiles, fix.tiles, fix.sky_samples, fix.misread_tiles, fix.near_samples, fix.unknown_samples, fix.samples
     );
-    if let Some(intensity) = orbiters_reconstruct::aberration::undo(&mut data) {
+    if let Some(intensity) = args.undo_aberration.then(|| orbiters_reconstruct::aberration::undo(&mut data)).flatten() {
         eprintln!("chromatic aberration (intensity {intensity:.3}) undone in {} keyframes", data.views.len());
     }
     stage(Stage::Seeding, 0.0);

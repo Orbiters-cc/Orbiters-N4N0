@@ -619,6 +619,11 @@ impl Controller {
                     }
                 }
             }
+            OrbCommand::Photo { delay_seconds } => {
+                if let Err(e) = self.orb_photo(delay_seconds) {
+                    self.notify(super::NoticeKind::Warning, e);
+                }
+            }
             OrbCommand::InstallVoice => self.voice_install(),
         }
         self.orb_publish();

@@ -138,6 +138,10 @@ pub enum OrbCommand {
     RemoveVideo {
         url: String,
     },
+    /// A picture with VRChat's camera after `delay_seconds`.
+    Photo {
+        delay_seconds: u32,
+    },
     CopyText {
         text: String,
     },

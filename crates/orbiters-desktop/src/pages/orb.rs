@@ -134,6 +134,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 if Button::new("Clear").icon(icons::X).variant(Variant::Ghost).size(Size::Sm).enabled(orb.panel.is_some()).show(&mut bu).clicked() {
                     cx.ctl.orb(OrbCommand::HidePanel);
                 }
+                let camera = snap.vrchat.running && !snap.is_capturing();
+                if Button::new("Picture in 3 s").icon(icons::CAMERA).variant(Variant::Ghost).size(Size::Sm).enabled(camera).show(&mut bu).clicked() {
+                    cx.ctl.orb(OrbCommand::Photo { delay_seconds: 3 });
+                }
                 ui.add_space(12.0);
                 widgets::separator(ui);
                 let menu = if orb.avatar_id.is_none() {

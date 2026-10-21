@@ -298,9 +298,13 @@ impl OverlayUi {
         if save.width(w).show_at(ui, Rect::from_min_size(pos2(r2.left(), r2.top() + 2.0), vec2(w, 40.0))).clicked() {
             ctl.orb(OrbCommand::SaveVideo);
         }
-        let clear = Button::new("Clear the panel").icon(icons::X).variant(Variant::Ghost).enabled(orb.panel.is_some());
-        let w2 = clear.desired_width(ui).max(170.0);
-        if clear.width(w2).show_at(ui, Rect::from_min_size(pos2(r2.left() + w + 12.0, r2.top() + 2.0), vec2(w2, 40.0))).clicked() {
+        let photo = Button::new("Picture in 3 s").icon(icons::CAMERA).enabled(snap.vrchat.running && !snap.is_capturing());
+        let w2 = photo.desired_width(ui).max(160.0);
+        if photo.width(w2).show_at(ui, Rect::from_min_size(pos2(r2.left() + w + 12.0, r2.top() + 2.0), vec2(w2, 40.0))).clicked() {
+            ctl.orb(OrbCommand::Photo { delay_seconds: 3 });
+        }
+        let clear = Button::new("").icon(icons::X).variant(Variant::Ghost).hint("Clear the panel").enabled(orb.panel.is_some());
+        if clear.width(48.0).show_at(ui, Rect::from_min_size(pos2(r2.right() - 48.0, r2.top() + 2.0), vec2(48.0, 40.0))).clicked() {
             ctl.orb(OrbCommand::HidePanel);
         }
     }

@@ -188,6 +188,19 @@ pub enum OrbCommand {
     TestVisible {
         on: bool,
     },
+    /// The overlay's Orb menu opened or closed, and whether a sentence Orb hears is what to search for (its search
+    /// page is up). Opening it makes Orb listen.
+    MenuState {
+        open: bool,
+        dictation: bool,
+    },
+    /// The SteamVR button for Orb's menu while the avatar has Orb's screen: opens the screen, or closes it.
+    ToggleScreen,
+    /// A 3D picture after `seconds` (Orb's menu's timer).
+    #[serde(rename = "photo_3d_in")]
+    Photo3DIn {
+        seconds: u32,
+    },
 }
 
 /// Longest Hello a client may send, and how long it has to send it. Any local process can connect: before it proves

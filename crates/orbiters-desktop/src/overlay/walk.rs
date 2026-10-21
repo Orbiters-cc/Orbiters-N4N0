@@ -4,11 +4,10 @@
 //! play space goes back where it was when VRChat loads another world (the avatar respawns anyway), when VRChat
 //! closes and when the overlay ends.
 
+use super::actions::Walk;
 use orbiters_core::settings::{Follow, Hand, WalkBoostSettings};
 use orbiters_openvr::chaperone::Quad;
-use orbiters_openvr::input::{ActionHandle, ActionSetHandle};
 use orbiters_openvr::{self as vr, Matrix34, Pose, Universe, MAX_DEVICES};
-use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// VRChat's running speed (m/s), reached with the stick pushed all the way.
@@ -82,62 +81,6 @@ impl Carried {
     }
 }
 
-/// Where the action manifest and its default bindings are written for SteamVR.
-fn manifest_dir() -> PathBuf {
-    orbiters_core::paths::local_data_root().join("SteamVR")
-}
-
-const ACTIONS: &str = r#"{
-  "default_bindings": [
-    { "controller_type": "knuckles", "binding_url": "bindings_knuckles.json" },
-    { "controller_type": "oculus_touch", "binding_url": "bindings_oculus_touch.json" },
-    { "controller_type": "vive_controller", "binding_url": "bindings_vive_controller.json" },
-    { "controller_type": "holographic_controller", "binding_url": "bindings_holographic_controller.json" },
-    { "controller_type": "hpmotioncontroller", "binding_url": "bindings_hpmotioncontroller.json" },
-    { "controller_type": "vive_cosmos_controller", "binding_url": "bindings_vive_cosmos_controller.json" }
-  ],
-  "actions": [
-    { "name": "/actions/walk/in/move_left", "type": "vector2" },
-    { "name": "/actions/walk/in/move_right", "type": "vector2" }
-  ],
-  "action_sets": [ { "name": "/actions/walk", "usage": "leftright" } ],
-  "localization": [ { "language_tag": "en_US", "/actions/walk": "Walk boost",
-    "/actions/walk/in/move_left": "Walking stick (left hand)", "/actions/walk/in/move_right": "Walking stick (right hand)" } ]
-}"#;
-
-/// Default bindings: each hand's stick (a Vive wand's trackpad) to its move action.
-fn bindings(controller: &str, input: &str, mode: &str) -> String {
-    let source = |hand: &str| {
-        format!(
-            r#"{{ "path": "/user/hand/{hand}/input/{input}", "mode": "{mode}", "inputs": {{ "position": {{ "output": "/actions/walk/in/move_{hand}" }} }} }}"#
-        )
-    };
-    format!(
-        r#"{{ "controller_type": "{controller}", "name": "Orbiters walk boost", "description": "The sticks VRChat walks with",
-  "bindings": {{ "/actions/walk": {{ "sources": [ {}, {} ] }} }} }}"#,
-        source("left"),
-        source("right")
-    )
-}
-
-fn write_manifest(dir: &Path) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let files = [
-        ("knuckles", "thumbstick", "joystick"),
-        ("oculus_touch", "joystick", "joystick"),
-        ("vive_controller", "trackpad", "trackpad"),
-        ("holographic_controller", "joystick", "joystick"),
-        ("hpmotioncontroller", "joystick", "joystick"),
-        ("vive_cosmos_controller", "joystick", "joystick"),
-    ];
-    for (controller, input, mode) in files {
-        std::fs::write(dir.join(format!("bindings_{controller}.json")), bindings(controller, input, mode))?;
-    }
-    let path = dir.join("actions.json");
-    std::fs::write(&path, ACTIONS)?;
-    Ok(path)
-}
-
 /// What the overlay loop knows of VRChat for walking.
 pub struct Moment<'a> {
     pub settings: &'a WalkBoostSettings,
@@ -148,7 +91,7 @@ pub struct Moment<'a> {
 }
 
 pub struct WalkBoost {
-    actions: Option<(ActionSetHandle, ActionHandle, ActionHandle)>,
+    actions: Option<Walk>,
     carried: Option<Carried>,
     place: Option<String>,
     last: Option<Instant>,
@@ -157,23 +100,8 @@ pub struct WalkBoost {
 }
 
 impl WalkBoost {
-    pub fn new(steamvr: &vr::Client) -> Self {
-        let actions = (|| -> Result<_, String> {
-            let input = steamvr.input().map_err(|e| e.to_string())?;
-            let path = write_manifest(&manifest_dir()).map_err(|e| e.to_string())?;
-            input.set_action_manifest(&path).map_err(|c| format!("SteamVR input error {c}"))?;
-            let set = input.action_set("/actions/walk").map_err(|c| format!("SteamVR input error {c}"))?;
-            let left = input.action("/actions/walk/in/move_left").map_err(|c| format!("SteamVR input error {c}"))?;
-            let right = input.action("/actions/walk/in/move_right").map_err(|c| format!("SteamVR input error {c}"))?;
-            Ok((set, left, right))
-        })();
-        let (actions, failed) = match actions {
-            Ok(a) => (Some(a), None),
-            Err(e) => (None, Some(e)),
-        };
-        if let Some(e) = &failed {
-            eprintln!("walk boost unavailable: {e}");
-        }
+    /// Walk boost with the overlay's actions (none when SteamVR's input could not load them: `failed` says why).
+    pub fn new(actions: Option<Walk>, failed: Option<String>) -> Self {
         Self { actions, carried: None, place: None, last: None, failed }
     }
 
@@ -197,15 +125,13 @@ impl WalkBoost {
             self.place = m.place.map(str::to_string);
             self.reset(steamvr);
         }
-        let Some((set, left, right)) = self.actions else { return };
+        let Some(walk) = self.actions else { return };
         if !self.active(m) || dt == 0.0 {
             return;
         }
+        // The overlay loop read every action set this frame (actions::Actions::update).
         let Ok(input) = steamvr.input() else { return };
-        if input.update(set).is_err() {
-            return;
-        }
-        let action = if m.settings.hand == Hand::Left { left } else { right };
+        let action = if m.settings.hand == Hand::Left { walk.left } else { walk.right };
         let Ok(stick) = input.analog(action) else { return };
         if !stick.active {
             return;
@@ -308,17 +234,5 @@ mod tests {
         // A wall corner sits at the same place in the room.
         let room = |z: &Matrix34, c: [f32; 3]| [0, 1, 2].map(|r| z.m[r][0] * c[0] + z.m[r][1] * c[1] + z.m[r][2] * c[2] + z.m[r][3]);
         assert!(close(room(&standing, wall.corners[0]), room(&moved, bounds[0].corners[0])));
-    }
-
-    #[test]
-    fn bindings_are_json() {
-        let dir = std::env::temp_dir().join(format!("orbiters-walk-{}", std::process::id()));
-        let path = write_manifest(&dir).unwrap();
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
-            serde_json::from_str::<serde_json::Value>(&text).unwrap();
-        }
-        assert!(path.ends_with("actions.json"));
-        std::fs::remove_dir_all(dir).ok();
     }
 }

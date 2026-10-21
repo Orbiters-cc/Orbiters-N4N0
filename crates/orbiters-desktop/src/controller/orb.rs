@@ -58,7 +58,7 @@ pub enum Source {
 
 #[derive(Default)]
 pub struct OrbRuntime {
-    sender: Option<TextSender>,
+    pub(super) sender: Option<TextSender>,
     avatar_id: Option<String>,
     /// The avatar's parameter names, as VRChat listed them when it settled.
     params: HashSet<String>,
@@ -76,7 +76,7 @@ pub struct OrbRuntime {
     afk_showing: bool,
     pub(super) listening: Option<(Source, Instant)>,
     muted_by_orb: bool,
-    thinking: bool,
+    pub(super) thinking: bool,
     conversation: Vec<Value>,
     lines: Vec<OrbLine>,
     confirmations: Vec<OrbConfirmation>,
@@ -95,6 +95,8 @@ pub struct OrbRuntime {
     test_hidden: bool,
     /// The orb thread ends (the app quits).
     stop: bool,
+    /// Orb's menu on the avatar's screen, and the overlay menu's requests (controller/screen.rs).
+    pub(super) screen: super::screen::ScreenRuntime,
     /// A stand-in Orbiters server and credential (tests).
     #[cfg(test)]
     test_server: Option<(String, String)>,
@@ -148,6 +150,12 @@ impl OrbRuntime {
             test_afk: self.test_afk,
             test_hidden: self.test_hidden,
             calls: Default::default(),
+            screen: self.screen.available,
+            screen_open: self.screen.menu.open,
+            menu_request: self.screen.menu_request,
+            menu_toggle: self.screen.menu_toggle,
+            dictation: self.screen.dictation.clone(),
+            photo_countdown: self.screen.countdown(Instant::now()),
         }
     }
 
@@ -211,7 +219,7 @@ fn pin_messages(pins: &[Pin], present: &HashSet<String>) -> Vec<Message> {
 }
 
 /// This computer's language (`fr-FR`), for the assistant.
-fn locale() -> String {
+pub(super) fn locale() -> String {
     #[cfg(windows)]
     {
         use windows::Win32::Globalization::GetUserDefaultLocaleName;
@@ -248,7 +256,9 @@ impl Controller {
         let _ = std::thread::Builder::new().name("orb".into()).spawn(move || {
             while !ctl.orb.lock().unwrap().stop {
                 ctl.orb_tick(Instant::now());
-                std::thread::sleep(TICK);
+                // Faster while the avatar's screen is open: its owner gets a block every few frames.
+                let fast = ctl.orb.lock().unwrap().screen.menu.open;
+                std::thread::sleep(if fast { super::screen::FAST_TICK } else { TICK });
             }
         });
         // The slower checks run apart, so the panel's steps never wait for them.
@@ -272,8 +282,14 @@ impl Controller {
     }
 
     fn orb_tick(self: &Shared, now: Instant) {
-        let settings = self.settings().orb;
-        let vrchat = self.snapshot.lock().unwrap().vrchat.running;
+        let all = self.settings();
+        let settings = all.orb.clone();
+        let (vrchat, calls) = {
+            let snap = self.snapshot.lock().unwrap();
+            (snap.vrchat.running, snap.orb.calls.clone())
+        };
+        let mut screen_effects = Vec::new();
+        let mut photo_due = false;
         let mut out: Vec<Message> = Vec::new();
         let mut check_avatar = false;
         let before;
@@ -301,8 +317,13 @@ impl Controller {
             let busy_before = rt.sender.as_ref().is_some_and(TextSender::busy);
             if let Some(sender) = rt.sender.as_mut() {
                 sender.set_step(Duration::from_millis(settings.text_step_ms));
+            }
+            // The text channel: the screen's turn first (it holds the panel back for a step when it takes it).
+            out.extend(Self::screen_synced(&mut rt, now));
+            if let Some(sender) = rt.sender.as_mut() {
                 out.extend(sender.tick(now));
             }
+            out.extend(Self::screen_tick(&mut rt, now, &calls, all.walk_boost.enabled, &mut screen_effects, &mut photo_due));
             // The answer's mood ends with it.
             if busy_before && !rt.sender.as_ref().is_some_and(TextSender::busy) {
                 rt.mood = None;
@@ -332,12 +353,17 @@ impl Controller {
             after = (rt.face(), rt.sender.as_ref().and_then(TextSender::current_text), rt.listening.is_some());
         }
         self.orb_send(&out);
+        let screen_changed = !screen_effects.is_empty() || photo_due;
+        self.screen_effects(screen_effects);
+        if photo_due {
+            self.photo_3d_in(0);
+        }
         if check_avatar {
             // VRChat was running before Orb listened: ask it which avatar it wears.
             let ctl = self.clone();
             std::thread::spawn(move || ctl.orb_refresh_avatar(None, HashMap::new()));
         }
-        if before != after {
+        if before != after || screen_changed {
             self.orb_publish();
         }
     }
@@ -399,6 +425,9 @@ impl Controller {
 
     /// An avatar parameter VRChat sent (on the OSC receiving thread: record, never send).
     pub(super) fn orb_on_parameter(self: &Shared, name: &str, value: &OscValue) {
+        if self.screen_parameter(name, value) {
+            return;
+        }
         match name {
             params::TALK => self.orb_talk(value.truthy(), Source::Menu),
             params::TOUCH => {
@@ -476,6 +505,8 @@ impl Controller {
             if let Some(sender) = rt.sender.as_mut() {
                 sender.reset();
             }
+            // Until the new avatar is looked at: no screen.
+            rt.screen.avatar(false, None);
             rt.face_sent = None;
             rt.afk_showing = false;
             rt.outbox.clear();
@@ -501,6 +532,7 @@ impl Controller {
         let parameters: Vec<(&str, &OscValue)> = values.iter().filter(|(a, _)| a.starts_with(PARAMETERS_PREFIX)).map(|(a, v)| (a.as_str(), v)).collect();
         let names: HashSet<String> = parameters.iter().map(|(a, _)| a[PARAMETERS_PREFIX.len()..].to_string()).collect();
         let manifest = read_manifest(&id);
+        let manifest_screen = manifest.as_ref().and_then(|m| m.orb).is_some_and(|o| o.screen > 0);
         let synced = names.iter().filter(|n| n.starts_with(params::TEXT_SYNC_PREFIX)).count();
         let sync = if contract::SYNC_COUNTS.contains(&synced) {
             Some(synced)
@@ -538,6 +570,10 @@ impl Controller {
                 Some(_) => {}
                 None => rt.sender = None,
             }
+            // The projected screen ("Replace Orbiters overlay" on the orb in My Avatar): its local pointer is listed, or
+            // the manifest says so.
+            let screen = rt.params.contains(orbiters_orb::menu::screen::local::POINTER) || manifest_screen;
+            rt.screen.avatar(screen, sync);
             rt.face_sent = None;
             rt.send_now(out);
         }
@@ -593,6 +629,11 @@ impl Controller {
             return;
         }
         let settings = self.settings().orb;
+        // Orb's menu opens (on the avatar's screen or in the overlay) and Orb listens; touched again, it closes.
+        if settings.enabled && settings.menu.touch {
+            self.menu_open(true);
+            return;
+        }
         if !settings.enabled || !settings.assistant || self.orb.lock().unwrap().listening.is_some() || !self.orb_can_listen() {
             return;
         }
@@ -627,20 +668,29 @@ impl Controller {
         let listening = self.orb.lock().unwrap().listening.take();
         if listening.is_some() {
             self.orb_publish();
-            if !text.is_empty() {
+            // A menu's search page takes it as what to search for.
+            if !text.is_empty() && !self.menu_heard(&text) {
                 self.orb_ask(text, "voice");
             }
             return;
         }
         if wake_word_mode && settings.wake_word {
             match orbiters_orb::wake::command(&text, &settings.wake_words) {
+                Some(command) if command.is_empty() && settings.menu.wake_word => {
+                    // Only the name: Orb's menu opens and Orb listens to the next sentence.
+                    self.menu_open(false);
+                }
                 Some(command) if command.is_empty() => {
                     // Only the name: Orb listens to the next sentence.
                     self.orb.lock().unwrap().listening = Some((Source::WakeWord, Instant::now()));
                     self.voice_listen(Source::WakeWord);
                     self.orb_publish();
                 }
-                Some(command) => self.orb_ask(command, "voice"),
+                Some(command) => {
+                    if !self.menu_heard(&command) {
+                        self.orb_ask(command, "voice");
+                    }
+                }
                 None => {}
             }
         }
@@ -734,6 +784,9 @@ impl Controller {
             }
             OrbCommand::TestAfk { on } => self.orb.lock().unwrap().test_afk = on,
             OrbCommand::TestTouch => self.orb_touch(),
+            OrbCommand::MenuState { open, dictation } => self.menu_overlay_state(open, dictation),
+            OrbCommand::ToggleScreen => self.menu_open(true),
+            OrbCommand::Photo3DIn { seconds } => self.photo_3d_in(seconds),
             OrbCommand::TestVisible { on } => {
                 let mut rt = self.orb.lock().unwrap();
                 rt.test_hidden = !on;
@@ -1103,7 +1156,7 @@ fn read_manifest(avatar_id: &str) -> Option<AvatarManifest> {
     }
 }
 
-fn copy_to_clipboard(text: &str) -> Result<(), String> {
+pub(super) fn copy_to_clipboard(text: &str) -> Result<(), String> {
     arboard::Clipboard::new().and_then(|mut c| c.set_text(text.to_string())).map_err(|e| format!("Could not copy: {e}"))
 }
 

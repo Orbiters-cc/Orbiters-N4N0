@@ -135,19 +135,33 @@ pub enum Effect {
     Suggest(String),
     Search(String),
     /// The next page of results for `query`.
-    More { query: String, token: String },
+    More {
+        query: String,
+        token: String,
+    },
     /// Thumbnails the page shows (video ids); the host fetches those it does not have.
     Thumbnails(Vec<String>),
     /// Put a video's link in the clipboard.
-    Copy { link: String, title: String },
+    Copy {
+        link: String,
+        title: String,
+    },
     FastWalk(bool),
-    CallContact { id: String },
+    CallContact {
+        id: String,
+    },
     Answer,
     HangUp,
     /// Take a 3D picture after `timer` seconds.
-    Photo3d { timer: u32, length: PhotoLength },
+    Photo3d {
+        timer: u32,
+        length: PhotoLength,
+    },
     /// Keep the picked timer and length.
-    PhotoChoice { timer: u32, length: PhotoLength },
+    PhotoChoice {
+        timer: u32,
+        length: PhotoLength,
+    },
     /// The menu closed.
     Close,
 }
@@ -453,6 +467,11 @@ impl Menu {
     /// Pages of results, counting one more while YouTube has more.
     pub fn result_pages(&self) -> usize {
         self.results.len().div_ceil(RESULTS_PER_PAGE).max(1)
+    }
+
+    /// YouTube has results past those fetched.
+    pub fn more_available(&self) -> bool {
+        self.continuation.is_some()
     }
 
     pub fn has_previous(&self) -> bool {

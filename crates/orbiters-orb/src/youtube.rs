@@ -50,11 +50,7 @@ pub fn thumbnail_url(id: &str) -> String {
 
 /// The suggestions endpoint for `query` in `language` (an ISO 639-1 code such as `en` or `fr`).
 pub fn suggestions_url(query: &str, language: &str) -> String {
-    format!(
-        "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&hl={}&q={}",
-        crate::videos::encode(language),
-        crate::videos::encode(query)
-    )
+    format!("https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&hl={}&q={}", crate::videos::encode(language), crate::videos::encode(query))
 }
 
 /// The suggestions in the endpoint's answer: `["query", ["suggestion", …], …]`.
@@ -262,7 +258,13 @@ mod tests {
         assert_eq!(results.videos.len(), 2, "a video listed twice (top result and shelf) counts once; a malformed id is left out");
         assert_eq!(
             results.videos[0],
-            Video { id: "n61ULEU7CO0".into(), title: "Best of lofi hip hop 2021 ✨".into(), channel: "Lofi Girl".into(), duration: Some("6:10:58".into()), live: false }
+            Video {
+                id: "n61ULEU7CO0".into(),
+                title: "Best of lofi hip hop 2021 ✨".into(),
+                channel: "Lofi Girl".into(),
+                duration: Some("6:10:58".into()),
+                live: false
+            }
         );
         assert!(results.videos[1].live && results.videos[1].duration.is_none());
         assert_eq!(results.videos[0].link(), "https://www.youtube.com/watch?v=n61ULEU7CO0");

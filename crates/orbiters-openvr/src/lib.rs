@@ -503,7 +503,11 @@ pub struct Overlay<'a> {
 pub mod overlay_flag {
     pub const NO_DASHBOARD_TAB: i32 = 1 << 3;
     pub const SEND_VR_DISCRETE_SCROLL_EVENTS: i32 = 1 << 6;
+    /// SteamVR's laser works on the overlay whenever it is shown, dashboard open or not (a menu in the play space).
+    pub const MAKE_OVERLAYS_INTERACTIVE_IF_VISIBLE: i32 = 1 << 16;
     pub const SEND_VR_SMOOTH_SCROLL_EVENTS: i32 = 1 << 17;
+    /// The pixels are premultiplied by their alpha (as the CPU painter makes them).
+    pub const IS_PREMULTIPLIED: i32 = 1 << 21;
     pub const ENABLE_CLICK_STABILIZATION: i32 = 1 << 27;
 }
 

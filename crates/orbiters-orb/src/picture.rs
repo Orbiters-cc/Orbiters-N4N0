@@ -115,10 +115,7 @@ pub fn pack(values: &[u8], bits: u8) -> Vec<u8> {
     assert!(matches!(bits, 1 | 2 | 4 | 8), "pixels are packed 1, 2, 4 or 8 bits each");
     let per = 8 / bits as usize;
     let mask = ((1u16 << bits) - 1) as u8;
-    values
-        .chunks(per)
-        .map(|chunk| chunk.iter().enumerate().fold(0u8, |byte, (i, v)| byte | ((v & mask) << (8 - bits as usize * (i + 1)))))
-        .collect()
+    values.chunks(per).map(|chunk| chunk.iter().enumerate().fold(0u8, |byte, (i, v)| byte | ((v & mask) << (8 - bits as usize * (i + 1))))).collect()
 }
 
 /// The inverse of [`pack`] for `count` values.

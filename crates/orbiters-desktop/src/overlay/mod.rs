@@ -4,8 +4,12 @@
 //! SteamVR as a texture, only while the dashboard shows the tab and only when something changed. It reads the
 //! device poses itself for T-pose calibrations, which also put a mirror and two hand targets in the play space.
 
+mod actions;
 pub mod calibration;
 mod frames;
+mod menu;
+pub mod menu_pages;
+pub mod menu_ui;
 pub mod ui;
 pub mod walk;
 
@@ -101,6 +105,11 @@ impl Canvas {
         let ctx = egui::Context::default();
         orbiters_ui::install(&ctx);
         Self { ctx, painter: Software::new(width, height), size: egui::vec2(width as f32, height as f32) }
+    }
+
+    /// The canvas's egui context (textures it paints are loaded through it).
+    pub fn ctx(&self) -> &egui::Context {
+        &self.ctx
     }
 
     /// Paints a frame (RGBA, premultiplied, transparent where nothing was drawn).
@@ -245,8 +254,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     let mut state = ui::OverlayUi::default();
     let mut world = World::new(&overlay)?;
-    let mut walk = walk::WalkBoost::new(&steamvr);
+    let mut actions = actions::Actions::load(&steamvr);
+    let mut walk = walk::WalkBoost::new(actions.walk, actions.failed.clone());
     state.walk_unavailable = walk.unavailable().map(str::to_string);
+    let mut menu = menu::MenuOverlay::new(&overlay, KEY)?;
     let mut frames = frames::FrameSampler::new(&steamvr);
 
     let mut poses = SteamVrPoses { client: &steamvr, described: HashMap::new() };
@@ -310,8 +321,14 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let place = snap.vrchat.running.then(|| snap.vrchat.world.instance.clone()).flatten();
         let moment =
             walk::Moment { settings: &snap.settings.walk_boost, walking_allowed: vrchat_scene && !overlay.is_dashboard_visible(), place: place.as_deref() };
+        // Every action set at once, then what reads them.
+        actions.update(&steamvr);
         walk.update(&steamvr, &moment);
         let walking = walk.active(&moment);
+        let button = actions.menu_pressed(&steamvr);
+        if menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button) {
+            sounds.click();
+        }
         if !shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, &snap)) {
             shown = Some(snap.clone());
             next_frame = Some(next_frame.map_or(Instant::now(), |t| t.min(Instant::now())));
@@ -343,11 +360,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         } else if !visible {
             events.clear();
         }
-        let fast = visible || walking || state.calibrator.in_world(now) || state.busy();
+        let fast = visible || walking || menu.shown() || state.calibrator.in_world(now) || state.busy();
         std::thread::sleep(if fast { Duration::from_millis(11) } else { Duration::from_millis(100) });
     }
     walk.reset(&steamvr);
     world.destroy(&overlay);
+    menu.destroy(&overlay);
     let _ = overlay.destroy(main);
     Ok(())
 }

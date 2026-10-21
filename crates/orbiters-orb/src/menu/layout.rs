@@ -4,7 +4,7 @@
 //! pressed, on or hidden). A page is [`WIDTH`] × [`HEIGHT`] pixels; every position is on a 4-pixel grid, so the screen's
 //! layout table holds it in a byte.
 
-use super::{Call, Keys, KeyboardLayout, Menu, Page, Target, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, TIMERS};
+use super::{Call, KeyboardLayout, Keys, Menu, Page, Target, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, TIMERS};
 
 pub const WIDTH: u16 = 1024;
 pub const HEIGHT: u16 = 576;
@@ -436,12 +436,12 @@ pub fn layout(page: ScreenPage) -> Layout {
             elements.push(round(Target::Previous, 808, Icon::Previous));
             elements.push(round(Target::Next, 936, Icon::Next));
             for i in 0..CONTACTS_PER_PAGE as u8 {
-                elements.push(element(Target::Contact(i), Rect::new(32, 96 + i as u16 * 92, 960, 84), Look::Row));
+                // The row carries the friend's picture (at its left), so it goes with the row.
+                elements.push(with(element(Target::Contact(i), Rect::new(32, 96 + i as u16 * 92, 960, 84), Look::Row), Some(Icon::User), None));
             }
             for i in 0..CONTACTS_PER_PAGE as u8 {
                 let y = 96 + i as u16 * 92;
                 elements.push(with(element(Target::Contact(i), Rect::new(840, y + 20, 136, 48), Look::Accent), Some(Icon::Phone), Some("Call")));
-                icons.push((Rect::new(52, y + 20, 48, 48), Icon::User, None));
             }
             slots.add(104, 40, 52, 24, Style::Primary, Content::CallsTitle);
             slots.add(868, 40, 5, 24, Style::Secondary, Content::PageLabel).centered();
@@ -531,7 +531,8 @@ pub fn text(menu: &Menu, content: Content) -> String {
             }
         }
         Content::PageLabel => match menu.page {
-            Page::Results => format!("{}/{}", menu.result_page + 1, menu.result_pages()),
+            // "+": YouTube has more than the pages fetched so far.
+            Page::Results => format!("{}/{}{}", menu.result_page + 1, menu.result_pages(), if menu.more_available() { "+" } else { "" }),
             Page::Call => format!("{}/{}", menu.contact_page + 1, menu.contacts.len().div_ceil(CONTACTS_PER_PAGE).max(1)),
             _ => String::new(),
         },
@@ -596,9 +597,10 @@ pub fn ellipsis(text: &str, cols: usize) -> String {
     cut
 }
 
-/// What a slot shows, cut to its cells (the screen shows exactly this; the overlay too).
+/// What a slot shows, cut to its cells: the screen shows exactly this, and the overlay too (characters the screen's
+/// font has no glyph for are folded or dropped, as on Orb's panel).
 pub fn slot_text(menu: &Menu, slot: &Slot) -> String {
-    let text = text(menu, slot.content);
+    let text = orbiters_contracts::orb::panel_text(&text(menu, slot.content)).replace('\n', " ");
     match slot.content {
         // The field keeps the end in view, with the caret.
         Content::Query => {
@@ -607,7 +609,8 @@ pub fn slot_text(menu: &Menu, slot: &Slot) -> String {
             let start = shown.len().saturating_sub(room);
             shown[start..].iter().collect::<String>() + "|"
         }
-        _ => ellipsis(&text, slot.cols as usize),
+        // One space where a dropped character (an emoji) left two.
+        _ => ellipsis(&text.split_whitespace().collect::<Vec<_>>().join(" "), slot.cols as usize),
     }
 }
 
@@ -671,12 +674,14 @@ mod tests {
     fn keyboards_have_every_letter_once() {
         for page in [ScreenPage::SearchQwerty, ScreenPage::SearchAzerty] {
             let l = layout(page);
-            let mut letters: Vec<char> = l.elements.iter().filter_map(|e| if let Target::Key(c) = e.target { Some(c) } else { None }).filter(|c| c.is_ascii_lowercase()).collect();
+            let mut letters: Vec<char> =
+                l.elements.iter().filter_map(|e| if let Target::Key(c) = e.target { Some(c) } else { None }).filter(|c| c.is_ascii_lowercase()).collect();
             letters.sort();
             letters.dedup();
             assert_eq!(letters.len(), 26, "{page:?}");
             // Keys do not overlap.
-            let keys: Vec<Rect> = l.elements.iter().filter(|e| matches!(e.look, Look::Key | Look::KeyDark) || e.target == Target::Search).map(|e| e.rect).collect();
+            let keys: Vec<Rect> =
+                l.elements.iter().filter(|e| matches!(e.look, Look::Key | Look::KeyDark) || e.target == Target::Search).map(|e| e.rect).collect();
             for (i, a) in keys.iter().enumerate() {
                 for b in &keys[i + 1..] {
                     let apart = a.right() <= b.x || b.right() <= a.x || a.bottom() <= b.y || b.bottom() <= a.y;

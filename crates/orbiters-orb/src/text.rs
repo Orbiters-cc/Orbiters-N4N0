@@ -117,6 +117,21 @@ impl TextSender {
         self.next_step = None;
     }
 
+    /// Whether a step is due at `now` and would send something (a page, a clear).
+    pub fn wants_step(&self, now: Instant) -> bool {
+        self.next_step.is_none_or(|t| now >= t) && (self.busy() || !self.known || self.clear)
+    }
+
+    /// Something else uses the text channel until `at` (Orb's screen takes its turns): no step before then.
+    pub fn hold_until(&mut self, at: Instant) {
+        self.next_step = Some(self.next_step.map_or(at, |t| t.max(at)));
+    }
+
+    /// The time between two steps.
+    pub fn step(&self) -> Duration {
+        self.step
+    }
+
     /// Whether a page is up or waiting.
     pub fn busy(&self) -> bool {
         self.current.is_some() || !self.queue.is_empty()

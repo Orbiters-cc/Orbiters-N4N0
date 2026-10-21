@@ -169,7 +169,7 @@ fn calibration_file() -> PathBuf {
     orbiters_core::paths::config_dir().join("calibration.json")
 }
 
-fn unix_ms() -> u64 {
+pub(crate) fn unix_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
@@ -186,6 +186,7 @@ mod calls;
 mod maps;
 mod orb;
 mod performance;
+pub(crate) mod screen;
 mod voice;
 pub use account::open_url;
 

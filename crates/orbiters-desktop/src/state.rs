@@ -332,6 +332,24 @@ pub struct OrbStatus {
     /// Calls with VRChat friends (controller/calls.rs).
     #[serde(default)]
     pub calls: CallsStatus,
+    /// The avatar's Orb prop has the projected screen: Orb's menu opens there instead of in the overlay.
+    #[serde(default)]
+    pub screen: bool,
+    /// Orb's menu is open on the avatar's screen.
+    #[serde(default)]
+    pub screen_open: bool,
+    /// Bumped when something asks the overlay to open Orb's menu (the wake word alone, a hand on the orb).
+    #[serde(default)]
+    pub menu_request: u32,
+    /// The last request may close the overlay's menu when it is open (asked again).
+    #[serde(default)]
+    pub menu_toggle: bool,
+    /// The last sentence for the overlay menu's search field, numbered.
+    #[serde(default)]
+    pub dictation: Option<(u32, String)>,
+    /// Seconds before the 3D picture a menu's timer started.
+    #[serde(default)]
+    pub photo_countdown: Option<u32>,
 }
 
 /// Orb calls as the interface shows them.

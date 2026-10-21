@@ -34,6 +34,8 @@ pub struct Settings {
     pub walk_boost: WalkBoostSettings,
     /// How long a 3D picture's camera flight lasts (more seconds, more of the place seen).
     pub photo_3d: Photo3dLength,
+    /// Seconds before a 3D picture taken from Orb's menu starts (0: at once).
+    pub photo_3d_timer: u32,
 }
 
 /// A 3D picture's length: a gentle 1 s sweep, 4 s that circle you and fly 10 m out every way, or 8 s that also circle
@@ -116,6 +118,41 @@ pub struct OrbSettings {
     /// Calls with VRChat friends who have Orbiters and Orb too (contracts `Docs/orb-calls.md`): presence and the
     /// friends this computer's VRCX and VRCNext know go to Orbiters (as hashes) while on.
     pub calls: bool,
+    /// Orb's menu (fast walk, YouTube, calls, a 3D picture): what opens it, the keyboard's letters.
+    pub menu: MenuSettings,
+}
+
+/// What opens Orb's menu: in the SteamVR overlay, or on the avatar's projected screen when the Orb prop has one (the
+/// "Replace Orbiters overlay" option of the orb in My Avatar). Opening it also starts Orb listening.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MenuSettings {
+    /// The SteamVR controller binding "Open Orb's menu" (by default a double press of the left stick, changed in
+    /// SteamVR's controller settings for Orbiters).
+    pub button: bool,
+    /// Saying the wake word on its own ("Orb!") while the wake word is on.
+    pub wake_word: bool,
+    /// Touching the orb with a hand.
+    pub touch: bool,
+    /// The search keyboard's letters.
+    pub keyboard: KeyboardLayout,
+}
+
+impl Default for MenuSettings {
+    fn default() -> Self {
+        Self { button: true, wake_word: true, touch: true, keyboard: KeyboardLayout::Auto }
+    }
+}
+
+/// The order of the letters on Orb's keyboard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyboardLayout {
+    /// As this computer's keyboard: AZERTY for French and Belgian layouts, QWERTY otherwise.
+    #[default]
+    Auto,
+    Qwerty,
+    Azerty,
 }
 
 /// A parameter held at a value.
@@ -158,6 +195,7 @@ impl Default for OrbSettings {
             carry_parameters: GOGOLOCO_PARAMETERS.iter().map(|s| s.to_string()).collect(),
             pins: Vec::new(),
             calls: false,
+            menu: MenuSettings::default(),
         }
     }
 }
@@ -242,6 +280,7 @@ impl Default for Settings {
             world_performance: false,
             walk_boost: WalkBoostSettings::default(),
             photo_3d: Photo3dLength::default(),
+            photo_3d_timer: 0,
         }
     }
 }

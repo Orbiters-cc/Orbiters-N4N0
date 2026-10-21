@@ -330,7 +330,13 @@ mod tests {
         let mut menu = Menu::default();
         menu.open();
         menu.search_for("lofi");
-        let videos = (0..7).map(|i| Video { id: format!("video{i:06}"), title: format!("Song {i}"), channel: "Lofi Girl".into(), duration: Some("1:00".into()), live: false });
+        let videos = (0..7).map(|i| Video {
+            id: format!("video{i:06}"),
+            title: format!("Song {i}"),
+            channel: "Lofi Girl".into(),
+            duration: Some("1:00".into()),
+            live: false,
+        });
         menu.results_arrived("lofi", Results { videos: videos.collect(), continuation: None }, false);
         menu
     }

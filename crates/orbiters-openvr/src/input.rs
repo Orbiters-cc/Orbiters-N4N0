@@ -36,6 +36,19 @@ pub struct AnalogData {
     pub update_time: f32,
 }
 
+/// `InputDigitalActionData_t` (24 bytes).
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct DigitalData {
+    pub active: bool,
+    pub active_origin: u64,
+    /// Pressed.
+    pub state: bool,
+    /// Pressed or let go since the last update.
+    pub changed: bool,
+    pub update_time: f32,
+}
+
 pub struct Input<'a> {
     table: *const usize,
     _client: &'a Client,
@@ -89,10 +102,26 @@ impl Input<'_> {
 
     /// Reads the actions of `set` for this frame (call before reading them).
     pub fn update(&self, set: ActionSetHandle) -> Result<(), i32> {
+        self.update_sets(&[set])
+    }
+
+    /// Reads the actions of every set in `sets` for this frame (once a frame, all of them together).
+    pub fn update_sets(&self, sets: &[ActionSetHandle]) -> Result<(), i32> {
         type F = unsafe extern "system" fn(*mut ActiveActionSet, u32, u32) -> i32;
-        let mut active = ActiveActionSet { action_set: set, ..Default::default() };
-        // SAFETY: entry 4 is UpdateActionState; one set of the given size.
-        result(unsafe { entry::<F>(self.table, 4)(&mut active, std::mem::size_of::<ActiveActionSet>() as u32, 1) })
+        let mut active: Vec<ActiveActionSet> = sets.iter().map(|&s| ActiveActionSet { action_set: s, ..Default::default() }).collect();
+        if active.is_empty() {
+            return Ok(());
+        }
+        // SAFETY: entry 4 is UpdateActionState; `active.len()` sets of the given size.
+        result(unsafe { entry::<F>(self.table, 4)(active.as_mut_ptr(), std::mem::size_of::<ActiveActionSet>() as u32, active.len() as u32) })
+    }
+
+    pub fn digital(&self, action: ActionHandle) -> Result<DigitalData, i32> {
+        type F = unsafe extern "system" fn(u64, *mut DigitalData, u32, u64) -> i32;
+        let mut data = DigitalData::default();
+        // SAFETY: entry 5 is GetDigitalActionData; no device restriction.
+        result(unsafe { entry::<F>(self.table, 5)(action, &mut data, std::mem::size_of::<DigitalData>() as u32, 0) })?;
+        Ok(data)
     }
 
     pub fn analog(&self, action: ActionHandle) -> Result<AnalogData, i32> {
@@ -111,5 +140,9 @@ mod tests {
         assert_eq!(std::mem::size_of::<super::ActiveActionSet>(), 32);
         assert_eq!(std::mem::size_of::<super::AnalogData>(), 48);
         assert_eq!(std::mem::offset_of!(super::AnalogData, x), 16);
+        assert_eq!(std::mem::size_of::<super::DigitalData>(), 24);
+        assert_eq!(std::mem::offset_of!(super::DigitalData, state), 16);
+        assert_eq!(std::mem::offset_of!(super::DigitalData, changed), 17);
+        assert_eq!(std::mem::offset_of!(super::DigitalData, update_time), 20);
     }
 }

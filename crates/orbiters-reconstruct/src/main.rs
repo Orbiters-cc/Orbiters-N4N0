@@ -45,6 +45,8 @@ fn args() -> anyhow::Result<Args> {
             "--iterations" => settings.iterations = number("--iterations")? as u32,
             "--budget" => settings.budget = number("--budget")? as usize,
             "--robust" => settings.robust = it.next().context("--robust needs a value")?.parse().context("--robust takes a number (0–1)")?,
+            "--sky-fill" => settings.sky_fill = true,
+            "--seed" => settings.seed = number("--seed")?,
             "--gpu" => {
                 device.low_power = match it.next().as_deref() {
                     Some("integrated") => true,

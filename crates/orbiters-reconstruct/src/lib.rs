@@ -12,5 +12,6 @@ pub mod init;
 pub mod metrics;
 pub mod ply;
 pub mod priority;
+pub mod sky;
 pub mod train;
 pub mod web;

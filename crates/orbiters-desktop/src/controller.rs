@@ -671,16 +671,18 @@ impl Controller {
         });
     }
 
-    /// Current values from VRChat's OSCQuery service (empty when it is not running or not found).
+    /// Current values from VRChat's OSCQuery service (empty when it is not running or not found). The request runs
+    /// without the OSC lock: camera and kit messages, and the watchers, never wait for VRChat's answer.
     fn vrchat_values(&self) -> Vec<(String, OscValue)> {
-        match self.osc.lock().unwrap().as_ref().map(|o| o.vrchat_values(Duration::from_millis(500))) {
-            Some(Ok(values)) => values,
-            Some(Err(e)) => {
-                eprintln!("current OSC values: {e:#}");
-                Vec::new()
-            }
-            None => Vec::new(),
-        }
+        let result = match self.with_osc(|o| o.vrchat_query()) {
+            None => return Vec::new(),
+            Some(None) => Err(anyhow::anyhow!("VRChat's OSCQuery service was not found")),
+            Some(Some(addr)) => orbiters_core::osc::vrchat_values(addr, Duration::from_secs(1)),
+        };
+        result.unwrap_or_else(|e| {
+            eprintln!("current OSC values: {e:#}");
+            Vec::new()
+        })
     }
 
     /// Sends the waiting OSC samples to the worker. Callers hold the values lock, which keeps batches in order.
@@ -1245,6 +1247,25 @@ mod tests {
         ctl.restore_kit();
         assert_eq!(received(&vrchat, Duration::from_millis(200)), vec![(record, rosc::OscType::Bool(false)), (depth, rosc::OscType::Bool(true))]);
         assert!(ctl.avatar_before.lock().unwrap().is_none());
+        ctl.shutdown();
+    }
+
+    #[test]
+    fn reading_vrchats_values_never_holds_the_osc_lock() {
+        let ctl = Controller::new(Settings::default());
+        ctl.start_osc_with(false);
+        // A VRChat that takes the connection and never answers.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        ctl.with_osc(|o| o.set_vrchat_query(Some(silent.local_addr().unwrap())));
+        let c = ctl.clone();
+        let started = Instant::now();
+        let reader = std::thread::spawn(move || c.vrchat_values());
+        std::thread::sleep(Duration::from_millis(200));
+        let waited = Instant::now();
+        assert!(ctl.with_osc(|_| ()).is_some());
+        assert!(waited.elapsed() < Duration::from_millis(100), "{:?}", waited.elapsed());
+        assert!(reader.join().unwrap().is_empty());
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
         ctl.shutdown();
     }
 

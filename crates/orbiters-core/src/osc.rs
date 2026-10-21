@@ -13,7 +13,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
@@ -71,31 +71,79 @@ pub const AVATAR_CHANGE: &str = "/avatar/change";
 /// parameter of the settings.
 pub const DEPTH_FRAMES_PARAMETER: &str = "OrbitersDepthFrames";
 
-/// Turns one OSC packet (bundles included) into events.
+/// Turns one OSC packet (bundles included) into events, in the packet's order.
 pub fn events_from_packet(packet: &OscPacket, out: &mut Vec<OscEvent>) {
-    match packet {
-        OscPacket::Message(m) => {
-            if let Some(name) = m.addr.strip_prefix(PARAMETERS_PREFIX) {
-                if let Some(value) = m.args.first().and_then(OscValue::from_osc) {
-                    out.push(OscEvent::Parameter { name: name.to_string(), value });
-                }
-            } else if m.addr == AVATAR_CHANGE {
-                if let Some(OscValue::Text(id)) = m.args.first().and_then(OscValue::from_osc) {
-                    out.push(OscEvent::AvatarChanged { id });
-                }
-            } else {
-                let values: Vec<OscValue> = m.args.iter().filter_map(OscValue::from_osc).collect();
-                if !values.is_empty() {
-                    out.push(OscEvent::Values { address: m.addr.clone(), values });
+    // A list instead of recursion: how deep bundles nest is up to the sender.
+    let mut todo = vec![packet];
+    while let Some(packet) = todo.pop() {
+        match packet {
+            OscPacket::Message(m) => {
+                if let Some(name) = m.addr.strip_prefix(PARAMETERS_PREFIX) {
+                    if let Some(value) = m.args.first().and_then(OscValue::from_osc) {
+                        out.push(OscEvent::Parameter { name: name.to_string(), value });
+                    }
+                } else if m.addr == AVATAR_CHANGE {
+                    if let Some(OscValue::Text(id)) = m.args.first().and_then(OscValue::from_osc) {
+                        out.push(OscEvent::AvatarChanged { id });
+                    }
+                } else {
+                    let values: Vec<OscValue> = m.args.iter().filter_map(OscValue::from_osc).collect();
+                    if !values.is_empty() {
+                        out.push(OscEvent::Values { address: m.addr.clone(), values });
+                    }
                 }
             }
-        }
-        OscPacket::Bundle(b) => {
-            for p in &b.content {
-                events_from_packet(p, out);
-            }
+            OscPacket::Bundle(b) => todo.extend(b.content.iter().rev()),
         }
     }
+}
+
+/// Deepest nesting of bundles, and of arrays in a message's arguments, that the receiver decodes. rosc decodes
+/// bundles recursively and nested arrays are dropped recursively: one datagram nested a few thousand deep would
+/// overflow the receiving thread's stack. VRChat sends plain messages.
+const MAX_NESTING: usize = 16;
+
+/// Whether the bundles and arrays of a datagram nest at most [`MAX_NESTING`] deep, found without recursing.
+/// Malformed sizes end the scan there: rosc refuses the packet before it reaches anything deeper.
+fn nesting_within_limit(data: &[u8]) -> bool {
+    // Elements still to look at: their bytes and how many bundles hold them.
+    let mut todo = vec![(data, 0usize)];
+    while let Some((element, depth)) = todo.pop() {
+        if element.starts_with(b"#bundle\0") {
+            if depth >= MAX_NESTING {
+                return false;
+            }
+            // After the tag and the time tag: elements, each a big-endian size, then that many bytes.
+            let mut rest = element.get(16..).unwrap_or(&[]);
+            while let Some((size, after)) = rest.split_first_chunk::<4>() {
+                let Some(inner) = after.get(..u32::from_be_bytes(*size) as usize) else { break };
+                todo.push((inner, depth + 1));
+                rest = &after[inner.len()..];
+            }
+        } else if array_depth(element) > MAX_NESTING {
+            return false;
+        }
+    }
+    true
+}
+
+/// How deep a message's arguments nest arrays (`[` in its type tags).
+fn array_depth(message: &[u8]) -> usize {
+    // The address, null-terminated and padded to four bytes, then the type tags (",f[ii]").
+    let Some(end) = message.iter().position(|&b| b == 0) else { return 0 };
+    let tags = message.get((end + 4) & !3..).unwrap_or(&[]);
+    let (mut depth, mut deepest) = (0usize, 0usize);
+    for &tag in tags.iter().take_while(|&&t| t != 0) {
+        match tag {
+            b'[' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
 }
 
 /// OSCQuery node tree: all of `/avatar` (avatar changes and every parameter), the headset and wrist poses, and
@@ -153,15 +201,33 @@ fn serve_http(mut stream: TcpStream, tree: &str, host: &str) {
     let _ = stream.write_all(response.as_bytes());
 }
 
-/// `GET path` over HTTP/1.1 (identity or chunked body), for OSCQuery trees.
+/// Largest answer [`http_get`] reads: VRChat's `/avatar` tree with every parameter of a big avatar is a few
+/// hundred kilobytes.
+const MAX_ANSWER: usize = 8 << 20;
+
+/// `GET path` over HTTP/1.1 (identity or chunked body), for OSCQuery trees. `timeout` bounds the whole request,
+/// answer included, which may be at most [`MAX_ANSWER`] bytes.
 pub fn http_get(addr: SocketAddr, path: &str, timeout: Duration) -> anyhow::Result<String> {
+    let deadline = Instant::now() + timeout;
     let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
-    stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     // One write: `write!` would send every piece in its own segment.
     stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nAccept: application/json\r\nConnection: close\r\n\r\n").as_bytes())?;
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw)?;
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        anyhow::ensure!(!left.is_zero(), "no complete answer from {addr} within {} ms", timeout.as_millis());
+        stream.set_read_timeout(Some(left))?;
+        let n = match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        };
+        anyhow::ensure!(raw.len() + n <= MAX_ANSWER, "the answer from {addr} is over {} MB", MAX_ANSWER >> 20);
+        raw.extend_from_slice(&chunk[..n]);
+    }
     let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| anyhow::anyhow!("no HTTP header"))?;
     let head = String::from_utf8_lossy(&raw[..split]).to_ascii_lowercase();
     anyhow::ensure!(head.starts_with("http/1.") && head.split_whitespace().nth(1) == Some("200"), "HTTP status {}", head.lines().next().unwrap_or(""));
@@ -184,6 +250,15 @@ fn dechunk(mut data: &[u8]) -> anyhow::Result<Vec<u8>> {
         out.extend_from_slice(&data[..size]);
         data = data.get(size + 2..).unwrap_or(&[]);
     }
+}
+
+/// Current values VRChat reports through its OSCQuery tree at `addr` ([`OscService::vrchat_query`]): the avatar
+/// (`/avatar/change`) and every avatar parameter, by address. `timeout` bounds the whole request.
+pub fn vrchat_values(addr: SocketAddr, timeout: Duration) -> anyhow::Result<Vec<(String, OscValue)>> {
+    let tree: serde_json::Value = serde_json::from_str(&http_get(addr, "/avatar", timeout)?)?;
+    let mut out = Vec::new();
+    tree_values(&tree, &mut out);
+    Ok(out)
 }
 
 /// Current values of an OSCQuery tree: every node with a `VALUE`, by full path (first value of each node).
@@ -230,13 +305,14 @@ impl OscService {
         advertise: bool,
         on_event: impl Fn(OscEvent, u64) + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
-        // VRChat finds the service at an address mDNS announces (this machine's own, see `advertise`): advertised,
-        // the sockets listen on every interface but take packets and connections from this machine only.
-        let bind = if advertise { "0.0.0.0:0" } else { "127.0.0.1:0" };
-        let udp = UdpSocket::bind(bind)?;
+        // VRChat finds the OSCQuery service at an address mDNS announces (this machine's own, see `advertise`):
+        // advertised, it listens on every interface but takes connections from this machine only. VRChat sends OSC
+        // where HOST_INFO says, 127.0.0.1, and UDP has no handshake to tell a spoofed source: OSC listens on the
+        // loopback interface only.
+        let udp = UdpSocket::bind("127.0.0.1:0")?;
         udp.set_read_timeout(Some(Duration::from_millis(200)))?;
         let osc_port = udp.local_addr()?.port();
-        let http = TcpListener::bind(bind)?;
+        let http = TcpListener::bind(if advertise { "0.0.0.0:0" } else { "127.0.0.1:0" })?;
         http.set_nonblocking(true)?;
         let query_port = http.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
@@ -251,10 +327,9 @@ impl OscService {
             threads.push(std::thread::Builder::new().name("osc-receive".into()).spawn(move || {
                 let mut buf = vec![0u8; 65536];
                 let mut events = Vec::new();
-                let mut local = LocalAddrs::default();
                 while !stop.load(Ordering::Relaxed) {
                     let Ok((n, from)) = udp.recv_from(&mut buf) else { continue };
-                    if !local.contains(from.ip()) {
+                    if !from.ip().is_loopback() || !nesting_within_limit(&buf[..n]) {
                         continue;
                     }
                     let at = crate::clock::now_ns();
@@ -358,16 +433,6 @@ impl OscService {
         *self.vrchat_query.lock().unwrap() = addr;
     }
 
-    /// Current values VRChat reports through its OSCQuery tree: the avatar (`/avatar/change`) and every avatar
-    /// parameter, by address.
-    pub fn vrchat_values(&self, timeout: Duration) -> anyhow::Result<Vec<(String, OscValue)>> {
-        let addr = self.vrchat_query().ok_or_else(|| anyhow::anyhow!("VRChat's OSCQuery service was not found"))?;
-        let tree: serde_json::Value = serde_json::from_str(&http_get(addr, "/avatar", timeout)?)?;
-        let mut out = Vec::new();
-        tree_values(&tree, &mut out);
-        Ok(out)
-    }
-
     /// Sends one message to VRChat's input port.
     pub fn send(&self, address: &str, args: Vec<OscType>) -> anyhow::Result<()> {
         let packet = OscPacket::Message(OscMessage { addr: address.to_string(), args });
@@ -434,20 +499,30 @@ impl LocalAddrs {
     }
 }
 
-/// Keeps `found` pointing at VRChat's OSCQuery service (`VRChat-Client-*`) while mDNS announces it.
+/// Where to reach a `VRChat-Client-*` OSCQuery service announced with `addresses`: VRChat serves it on the loopback
+/// interface, preferred over the LAN address it announces too. Only this machine's VRChat counts: an announcement
+/// whose addresses are all another machine's (another PC running VRChat, or a host posing as one) gives `None`.
+fn vrchat_address(addresses: &[Ipv4Addr], port: u16, local: &mut LocalAddrs) -> Option<SocketAddr> {
+    let ip = if addresses.iter().any(|a| a.is_loopback()) {
+        Ipv4Addr::LOCALHOST
+    } else {
+        *addresses.iter().find(|a| local.contains(std::net::IpAddr::V4(**a)))?
+    };
+    Some(SocketAddr::from((ip, port)))
+}
+
+/// Keeps `found` pointing at this machine's VRChat OSCQuery service (`VRChat-Client-*`) while mDNS announces it.
 fn watch_vrchat(events: mdns_sd::Receiver<mdns_sd::ServiceEvent>, stop: &AtomicBool, found: &Mutex<Option<SocketAddr>>) {
     let mut current: Option<String> = None;
+    let mut local = LocalAddrs::default();
     while !stop.load(Ordering::Relaxed) {
         match events.recv_timeout(Duration::from_millis(250)) {
             Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) if info.get_fullname().starts_with("VRChat-Client-") => {
-                // VRChat serves OSCQuery on the loopback interface; prefer it over the announced LAN address.
-                let ip = if info.get_addresses_v4().iter().any(|a| a.is_loopback()) || info.get_addresses_v4().is_empty() {
-                    Ipv4Addr::LOCALHOST
-                } else {
-                    *info.get_addresses_v4().iter().next().expect("one address")
-                };
-                *found.lock().unwrap() = Some(SocketAddr::from((ip, info.get_port())));
-                current = Some(info.get_fullname().to_string());
+                let addresses: Vec<Ipv4Addr> = info.get_addresses_v4().into_iter().collect();
+                if let Some(addr) = vrchat_address(&addresses, info.get_port(), &mut local) {
+                    *found.lock().unwrap() = Some(addr);
+                    current = Some(info.get_fullname().to_string());
+                }
             }
             Ok(mdns_sd::ServiceEvent::ServiceRemoved(_, name)) if current.as_deref() == Some(name.as_str()) => {
                 *found.lock().unwrap() = None;
@@ -548,10 +623,7 @@ mod tests {
             let body = format!("{:x}\r\n{a}\r\n{:x}\r\n{b}\r\n0\r\n\r\n", a.len(), b.len());
             s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{body}").as_bytes()).unwrap();
         });
-        let svc = OscService::start("Orbiters desktop test", &[], 9, false, |_, _| {}).unwrap();
-        assert!(svc.vrchat_values(Duration::from_secs(1)).is_err());
-        svc.set_vrchat_query(Some(addr));
-        let mut values = svc.vrchat_values(Duration::from_secs(2)).unwrap();
+        let mut values = vrchat_values(addr, Duration::from_secs(2)).unwrap();
         server.join().unwrap();
         values.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
@@ -563,5 +635,133 @@ mod tests {
                 ("/avatar/parameters/v2/JawOpen".into(), OscValue::Float(0.25)),
             ]
         );
+    }
+
+    #[test]
+    fn answers_that_never_end_or_grow_too_big_are_refused() {
+        // One byte every 100 ms, forever: every read is quick, the whole answer never comes.
+        let slow = TcpListener::bind("127.0.0.1:0").unwrap();
+        let slow_addr = slow.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = slow.accept().unwrap();
+            let _ = s.read(&mut [0u8; 1024]);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n");
+            while s.write_all(b" ").is_ok() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let started = Instant::now();
+        assert!(http_get(slow_addr, "/avatar", Duration::from_millis(500)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+
+        // A body larger than any OSCQuery tree.
+        let big = TcpListener::bind("127.0.0.1:0").unwrap();
+        let big_addr = big.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = big.accept().unwrap();
+            let _ = s.read(&mut [0u8; 1024]);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\n\r\n");
+            let block = vec![b' '; 1 << 20];
+            for _ in 0..(MAX_ANSWER >> 20) + 2 {
+                if s.write_all(&block).is_err() {
+                    break;
+                }
+            }
+            // Closed only once the client gave up.
+            let _ = s.read(&mut [0u8; 16]);
+        });
+        let err = http_get(big_addr, "/avatar", Duration::from_secs(10)).unwrap_err();
+        assert!(err.to_string().contains("MB"), "{err}");
+    }
+
+    #[test]
+    fn only_this_machines_vrchat_counts() {
+        let mut local = LocalAddrs::default();
+        // VRChat announces the loopback address with its LAN one: loopback wins.
+        let addr = vrchat_address(&[Ipv4Addr::new(192, 0, 2, 7), Ipv4Addr::LOCALHOST], 50000, &mut local);
+        assert_eq!(addr, Some(SocketAddr::from(([127, 0, 0, 1], 50000))));
+        // Another machine's VRChat (TEST-NET-1, never this machine's), or an announcement without an address.
+        assert_eq!(vrchat_address(&[Ipv4Addr::new(192, 0, 2, 7)], 50000, &mut local), None);
+        assert_eq!(vrchat_address(&[], 50000, &mut local), None);
+        // One of this machine's own addresses.
+        if let Some(ip) = primary_ipv4() {
+            assert_eq!(vrchat_address(&[Ipv4Addr::new(192, 0, 2, 7), ip], 50000, &mut local), Some(SocketAddr::from((ip, 50000))));
+        }
+    }
+
+    /// `depth` bundles, one inside the other, around a message.
+    fn nested_bundles(depth: usize, message: &OscMessage) -> Vec<u8> {
+        let mut packet = rosc::encoder::encode(&OscPacket::Message(message.clone())).unwrap();
+        for _ in 0..depth {
+            let mut outer = b"#bundle\0".to_vec();
+            outer.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+            outer.extend_from_slice(&(packet.len() as u32).to_be_bytes());
+            outer.extend_from_slice(&packet);
+            packet = outer;
+        }
+        packet
+    }
+
+    #[test]
+    fn deep_nesting_is_dropped_without_recursing() {
+        let message = OscMessage { addr: "/avatar/parameters/Viseme".into(), args: vec![OscType::Int(3)] };
+        let shallow = nested_bundles(3, &message);
+        assert!(nesting_within_limit(&shallow));
+        assert!(nesting_within_limit(&nested_bundles(MAX_NESTING, &message)));
+        assert!(!nesting_within_limit(&nested_bundles(MAX_NESTING + 1, &message)));
+        // Arrays nested in a message's arguments.
+        let arrays = |depth: usize| {
+            let mut content = vec![OscType::Int(1)];
+            for _ in 0..depth {
+                content = vec![OscType::Array(rosc::OscArray { content })];
+            }
+            rosc::encoder::encode(&OscPacket::Message(OscMessage { addr: "/x".into(), args: content })).unwrap()
+        };
+        assert!(nesting_within_limit(&arrays(2)) && !nesting_within_limit(&arrays(MAX_NESTING + 1)));
+
+        // Bundles are walked in order, at any depth they are allowed.
+        let (_, packet) = rosc::decoder::decode_udp(&shallow).unwrap();
+        let second = OscPacket::Message(OscMessage { addr: "/avatar/eyeheight".into(), args: vec![OscType::Float(1.5)] });
+        let both = OscPacket::Bundle(rosc::OscBundle { timetag: (0, 1).into(), content: vec![packet, second] });
+        let mut events = Vec::new();
+        events_from_packet(&both, &mut events);
+        assert_eq!(
+            events,
+            vec![
+                OscEvent::Parameter { name: "Viseme".into(), value: OscValue::Int(3) },
+                OscEvent::Values { address: "/avatar/eyeheight".into(), values: vec![OscValue::Float(1.5)] },
+            ]
+        );
+
+        // A datagram nested 3,000 deep (rosc alone would overflow the receiving thread's stack) is dropped, and the
+        // service keeps receiving.
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink = got.clone();
+        let svc = OscService::start("Orbiters desktop test", &[], 9, false, move |e, at| sink.lock().unwrap().push((e, at))).unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let deep = nested_bundles(3000, &message);
+        assert!(deep.len() < 65_000);
+        client.send_to(&deep, ("127.0.0.1", svc.osc_port)).unwrap();
+        client.send_to(&shallow, ("127.0.0.1", svc.osc_port)).unwrap();
+        wait_for(&got, 1);
+        std::thread::sleep(Duration::from_millis(100));
+        let got = got.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, OscEvent::Parameter { name: "Viseme".into(), value: OscValue::Int(3) });
+    }
+
+    #[test]
+    fn osc_listens_on_the_loopback_interface_only() {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink = got.clone();
+        let svc = OscService::start("Orbiters desktop test", &[], 9, false, move |e, at| sink.lock().unwrap().push((e, at))).unwrap();
+        assert!(svc.sender.local_addr().unwrap().ip().is_loopback());
+        let Some(ip) = primary_ipv4() else { return };
+        // Sent to this machine's LAN address: nothing listens there.
+        let client = UdpSocket::bind((ip, 0)).unwrap();
+        let msg = rosc::encoder::encode(&OscPacket::Message(OscMessage { addr: "/avatar/parameters/OrbitersRecord".into(), args: vec![OscType::Bool(true)] })).unwrap();
+        let _ = client.send_to(&msg, (ip, svc.osc_port));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(got.lock().unwrap().is_empty());
     }
 }

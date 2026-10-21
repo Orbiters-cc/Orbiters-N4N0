@@ -557,8 +557,23 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                             _ => None,
                         },
                     ),
+                    (
+                        icons::GAUGE,
+                        "Frame rate",
+                        match &info {
+                            Some(Info::Listed(p)) => p.world.performance.as_ref().map(|f| format!("{} fps", f.fps)).unwrap_or_else(|| "–".into()),
+                            _ => "–".into(),
+                        },
+                        match &info {
+                            Some(Info::Listed(p)) => Some(match &p.world.performance {
+                                Some(f) => format!("{:.0} % of the headset's rate", f.ratio * 100.0),
+                                None => "not measured yet".into(),
+                            }),
+                            _ => None,
+                        },
+                    ),
                 ];
-                let mw = (w - 36.0) / 4.0;
+                let mw = (w - 48.0) / 5.0;
                 for (i, (glyph, label, value, sub)) in minis.iter().enumerate() {
                     let r = Rect::from_min_size(pos2(stats_r.left() + i as f32 * (mw + 12.0), stats_r.top()), vec2(mw, 78.0));
                     mini_stat(cu.painter(), r, glyph, label, value, sub.as_deref());

@@ -29,6 +29,28 @@ pub struct World {
     pub favorites: Option<u64>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// How smoothly VRChat runs there for members who share their frame rate (contracts `Docs/world-performance.md`).
+    #[serde(default)]
+    pub performance: Option<WorldPerformance>,
+}
+
+/// A world's frame rate statistics (snake_case, as the contract writes them).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorldPerformance {
+    pub fps: u32,
+    pub fps_low: u32,
+    /// Typical frame rate over the headset's refresh rate (0 to 1).
+    pub ratio: f32,
+    pub minutes: u32,
+    pub members: u32,
+    #[serde(default)]
+    pub by_crowd: Vec<CrowdPerformance>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CrowdPerformance {
+    pub players: String,
+    pub fps: u32,
 }
 
 /// A world's page on the Map explorer, reduced to what the desktop shows.

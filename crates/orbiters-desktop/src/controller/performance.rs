@@ -207,6 +207,10 @@ impl super::Controller {
             if !due || pending.is_empty() {
                 return;
             }
+            // Orbiters refuses summaries without the headset's refresh rate: they wait until the overlay reported it.
+            if rt.hardware.refresh_hz.is_none() {
+                return;
+            }
             rt.last_sent = Some(Instant::now());
             let mut hardware = rt.hardware.clone();
             fill_host(&mut hardware);

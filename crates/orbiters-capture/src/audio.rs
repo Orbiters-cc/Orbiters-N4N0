@@ -10,9 +10,9 @@ use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Where a track's sound comes from.
 #[derive(Clone, Debug, PartialEq)]
@@ -26,6 +26,13 @@ pub enum AudioSource {
 /// Silence longer than this between packets is written as zeros; shorter offsets are clock drift, left to `sync`.
 const GAP_NS: u64 = 20_000_000;
 
+/// How often a track's header gets the frames written so far ([`TrackWriter::checkpoint`]).
+const CHECKPOINT_EVERY: Duration = Duration::from_secs(2);
+
+/// The track as its last checkpoint left it on disk, for `audio.json` while recording (`file`, `kind` and `source`
+/// are the recorder's).
+type Published = Arc<Mutex<Option<Track>>>;
+
 /// Places packets on the session clock and writes them (format-independent, so it is tested without a device).
 struct TrackWriter {
     file: BufWriter<File>,
@@ -36,16 +43,29 @@ struct TrackWriter {
     sync: Vec<[i64; 2]>,
     last_sync_ns: u64,
     zeros: Vec<f32>,
+    published: Published,
+    checkpointed: Instant,
 }
 
 impl TrackWriter {
-    fn create(path: &Path, rate: u32, channels: u16) -> anyhow::Result<Self> {
+    fn create(path: &Path, rate: u32, channels: u16, published: Published) -> anyhow::Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let mut file = BufWriter::with_capacity(1 << 16, File::create(path)?);
         file.write_all(&audio::wav_header(rate, channels, 0))?;
-        Ok(Self { file, rate, channels, frames: 0, first_ns: None, sync: Vec::new(), last_sync_ns: 0, zeros: Vec::new() })
+        Ok(Self {
+            file,
+            rate,
+            channels,
+            frames: 0,
+            first_ns: None,
+            sync: Vec::new(),
+            last_sync_ns: 0,
+            zeros: Vec::new(),
+            published,
+            checkpointed: Instant::now(),
+        })
     }
 
     fn write_zeros(&mut self, frames: u64) -> anyhow::Result<()> {
@@ -80,24 +100,45 @@ impl TrackWriter {
             None => self.write_zeros(frames as u64)?,
         }
         self.frames += frames as u64;
+        if self.checkpointed.elapsed() >= CHECKPOINT_EVERY {
+            self.checkpoint()?;
+        }
         Ok(())
     }
 
-    fn finish(mut self, file: String, kind: TrackKind, source: String) -> anyhow::Result<Track> {
+    /// Makes the file readable as it stands: its header gets the frames written so far, and `published` the track
+    /// as `audio.json` gives it (the session writes that file at its own checkpoints). A recording that never
+    /// finishes (the worker killed, Windows shut down) keeps its sound up to here.
+    fn checkpoint(&mut self) -> anyhow::Result<()> {
+        self.checkpointed = Instant::now();
         self.file.flush()?;
-        let mut f = self.file.into_inner().map_err(|e| e.into_error())?;
+        let f = self.file.get_mut();
         f.seek(SeekFrom::Start(0))?;
         f.write_all(&audio::wav_header(self.rate, self.channels, self.frames))?;
-        Ok(Track {
-            file,
-            kind,
-            source,
+        f.seek(SeekFrom::End(0))?;
+        *self.published.lock().unwrap() = Some(self.track());
+        Ok(())
+    }
+
+    /// The track so far, without its file, kind and source.
+    fn track(&self) -> Track {
+        Track {
             sample_rate: self.rate,
             channels: self.channels,
             frames: self.frames,
             first_frame_ns: self.first_ns.unwrap_or(0) as i64,
-            sync: self.sync,
-        })
+            sync: self.sync.clone(),
+            ..Default::default()
+        }
+    }
+
+    fn finish(mut self, file: String, kind: TrackKind, source: String) -> anyhow::Result<Track> {
+        self.file.flush()?;
+        let track = self.track();
+        let mut f = self.file.into_inner().map_err(|e| e.into_error())?;
+        f.seek(SeekFrom::Start(0))?;
+        f.write_all(&audio::wav_header(self.rate, self.channels, self.frames))?;
+        Ok(Track { file, kind, source, ..track })
     }
 }
 
@@ -110,6 +151,9 @@ fn bytemuck_f32(s: &[f32]) -> &[u8] {
 pub struct AudioRecorder {
     pub kind: TrackKind,
     pub source_name: String,
+    /// Relative to the bundle (`audio/mic.wav`).
+    file: String,
+    published: Published,
     stop: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     /// Peak level since the last [`AudioRecorder::take_level`], as f32 bits.
@@ -130,11 +174,12 @@ impl AudioRecorder {
         let stop = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let level = Arc::new(AtomicU32::new(0));
+        let published = Published::default();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let thread = {
-            let (stop, paused, level) = (stop.clone(), paused.clone(), level.clone());
+            let (stop, paused, level, published, file) = (stop.clone(), paused.clone(), level.clone(), published.clone(), file.clone());
             std::thread::Builder::new().name(format!("audio-{name}")).spawn(move || {
-                let (writer, source_name) = match imp::run(&source, &path, epoch_ns, &stop, &paused, &level, &ready_tx) {
+                let (writer, source_name) = match imp::run(&source, &path, epoch_ns, &stop, &paused, &level, &published, &ready_tx) {
                     Ok(r) => r,
                     Err(e) => {
                         let _ = ready_tx.try_send(Err(format!("{e:#}")));
@@ -145,7 +190,7 @@ impl AudioRecorder {
             })?
         };
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(source_name)) => Ok(Self { kind, source_name, stop, paused, level, thread: Some(thread) }),
+            Ok(Ok(source_name)) => Ok(Self { kind, source_name, file, published, stop, paused, level, thread: Some(thread) }),
             Ok(Err(e)) => {
                 let _ = thread.join();
                 anyhow::bail!("{e}")
@@ -165,6 +210,13 @@ impl AudioRecorder {
     /// Peak level (0–1) since the last call.
     pub fn take_level(&self) -> f32 {
         f32::from_bits(self.level.swap(0, Ordering::Relaxed))
+    }
+
+    /// The track as its file on disk holds it (its last checkpoint), for `audio.json` while recording; `None`
+    /// before the first.
+    pub fn track(&self) -> Option<Track> {
+        let track = self.published.lock().unwrap().clone()?;
+        Some(Track { file: self.file.clone(), kind: self.kind, source: self.source_name.clone(), ..track })
     }
 
     /// Stops recording and completes the file.
@@ -198,7 +250,7 @@ pub use imp::list_mics;
 
 #[cfg(windows)]
 mod imp {
-    use super::{AudioSource, Device, TrackWriter};
+    use super::{AudioSource, Device, Published, TrackWriter};
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::mpsc;
@@ -310,6 +362,7 @@ mod imp {
     }
 
     /// Records until `stop`; returns the writer to complete and the source's name.
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         source: &AudioSource,
         path: &Path,
@@ -317,6 +370,7 @@ mod imp {
         stop: &AtomicBool,
         paused: &AtomicBool,
         level: &AtomicU32,
+        published: &Published,
         ready: &mpsc::SyncSender<Result<String, String>>,
     ) -> anyhow::Result<(TrackWriter, String)> {
         unsafe {
@@ -352,7 +406,7 @@ mod imp {
             let result = (|| -> anyhow::Result<TrackWriter> {
                 client.SetEventHandle(event)?;
                 let capture: IAudioCaptureClient = client.GetService()?;
-                let mut writer = TrackWriter::create(path, rate, channels)?;
+                let mut writer = TrackWriter::create(path, rate, channels, published.clone())?;
                 client.Start()?;
                 let _ = ready.try_send(Ok(name.clone()));
                 let mut samples: Vec<f32> = Vec::new();
@@ -402,7 +456,7 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    use super::{AudioSource, Device, TrackWriter};
+    use super::{AudioSource, Device, Published, TrackWriter};
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicU32};
     use std::sync::mpsc;
@@ -411,6 +465,7 @@ mod imp {
         Vec::new()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         _source: &AudioSource,
         _path: &Path,
@@ -418,6 +473,7 @@ mod imp {
         _stop: &AtomicBool,
         _paused: &AtomicBool,
         _level: &AtomicU32,
+        _published: &Published,
         _ready: &mpsc::SyncSender<Result<String, String>>,
     ) -> anyhow::Result<(TrackWriter, String)> {
         anyhow::bail!("audio recording is only available on Windows for now")
@@ -432,7 +488,7 @@ mod tests {
     fn packets_land_on_the_session_clock() {
         let dir = std::env::temp_dir().join(format!("orbiters-audio-{}", std::process::id()));
         let path = dir.join("audio/mic.wav");
-        let mut w = TrackWriter::create(&path, 1000, 1).unwrap();
+        let mut w = TrackWriter::create(&path, 1000, 1, Published::default()).unwrap();
         let tone: Vec<f32> = (0..100).map(|i| i as f32 / 100.0).collect();
         // Continuous 100 ms packets from t = 5 ms (the second one silent): a sync point a second.
         for i in 0..12u64 {
@@ -449,6 +505,39 @@ mod tests {
         assert_eq!(bytes.len(), 58 + 1600 * 4);
         let sample = |i: usize| f32::from_le_bytes(bytes[58 + i * 4..62 + i * 4].try_into().unwrap());
         assert_eq!((sample(50), sample(150), sample(250), sample(1300), sample(1550)), (0.5, 0.0, 0.5, 0.0, 0.5));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_track_that_never_finishes_reads_up_to_its_last_checkpoint() {
+        let dir = std::env::temp_dir().join(format!("orbiters-audio-unfinished-{}", std::process::id()));
+        let path = dir.join("audio/game.wav");
+        let published = Published::default();
+        let mut w = TrackWriter::create(&path, 1000, 2, published.clone()).unwrap();
+        let tone = vec![0.25f32; 200];
+        for i in 0..12u64 {
+            w.packet(i * 100_000_000, 100, Some(&tone)).unwrap();
+        }
+        assert!(published.lock().unwrap().is_none(), "no checkpoint yet");
+        w.checkpoint().unwrap();
+        // Read while recording (or after the worker was killed): the header covers what is on disk.
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..58], &audio::wav_header(1000, 2, 1200));
+        assert_eq!(bytes.len(), 58 + 1200 * 2 * 4);
+        let track = published.lock().unwrap().clone().unwrap();
+        assert_eq!((track.frames, track.sample_rate, track.channels, track.sync.len()), (1200, 1000, 2, 2));
+        // More sound after the checkpoint: the file grows past its header, which still reads as the first 1.2 s.
+        w.packet(1_200_000_000, 100, Some(&tone)).unwrap();
+        w.file.flush().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!((&bytes[..58], bytes.len()), (&audio::wav_header(1000, 2, 1200)[..], 58 + 1300 * 2 * 4));
+        // Every couple of seconds on its own.
+        w.checkpointed = Instant::now().checked_sub(CHECKPOINT_EVERY).unwrap();
+        w.packet(1_300_000_000, 100, Some(&tone)).unwrap();
+        assert_eq!(published.lock().unwrap().as_ref().map(|t| t.frames), Some(1400));
+        let track = w.finish("audio/game.wav".into(), TrackKind::Game, "VRChat".into()).unwrap();
+        assert_eq!((track.frames, track.file.as_str()), (1400, "audio/game.wav"));
+        assert_eq!(&std::fs::read(&path).unwrap()[..58], &audio::wav_header(1000, 2, 1400));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

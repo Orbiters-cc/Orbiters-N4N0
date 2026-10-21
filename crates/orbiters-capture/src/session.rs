@@ -9,9 +9,11 @@ use crossbeam_channel::{bounded, Receiver as ChanReceiver, Sender as ChanSender,
 use orbiters_contracts::frame_record::{record_flags, FrameRecord};
 use orbiters_contracts::image::{ImageView, PixelOrder};
 use orbiters_contracts::manifest::{depth_file, SessionManifest, StorageQuality};
+use orbiters_contracts::performance::calibration::Calibration;
+use orbiters_contracts::performance::tracking::Device;
 use orbiters_contracts::performance::{self as perf, audio::TrackKind};
 use orbiters_contracts::{depth, qoi, skeleton, strip};
-use orbiters_core::bundle::BundleWriter;
+use orbiters_core::bundle::{self, BundleWriter};
 use orbiters_core::clock;
 use orbiters_core::keyframes::{self, KeyframeSelector};
 use orbiters_core::protocol::{CaptureStats, OscSample, StartCapture};
@@ -114,7 +116,11 @@ pub struct CaptureSession {
     audio: Vec<AudioRecorder>,
     tracking: Option<TrackingRecorder>,
     /// Calibrations made in the overlay (before the session or during it), on the session clock.
-    calibrations: Vec<orbiters_contracts::performance::calibration::Calibration>,
+    calibrations: Vec<Calibration>,
+    /// When the side streams' tables and the manifest were last written ([`CaptureSession::checkpoint`]), and the
+    /// calibrations and devices `calibration.json` was written with.
+    checkpointed: Instant,
+    calibrations_written: (usize, usize),
     frame_index: u64,
     prefer_flipped: bool,
     previous: Option<(u32, [f32; 12], f32)>,
@@ -198,6 +204,8 @@ impl CaptureSession {
                     c
                 })
                 .collect(),
+            checkpointed: Instant::now(),
+            calibrations_written: (0, 0),
             frame_index: 0,
             prefer_flipped: false,
             previous: None,
@@ -230,7 +238,7 @@ impl CaptureSession {
     }
 
     /// A calibration made now in the overlay (`time_ns` read on the shared clock).
-    pub fn add_calibration(&mut self, mut calibration: orbiters_contracts::performance::calibration::Calibration) {
+    pub fn add_calibration(&mut self, mut calibration: Calibration) {
         calibration.time_ns -= self.epoch_ns as i64;
         self.calibrations.push(calibration);
     }
@@ -392,12 +400,47 @@ impl CaptureSession {
         if let Err(e) = self.parameters.flush() {
             self.stats.last_error = Some(format!("parameters: {e:#}"));
         }
+        if self.checkpointed.elapsed() >= bundle::CHECKPOINT_EVERY {
+            if let Err(e) = self.checkpoint() {
+                self.stats.last_error = Some(format!("saving the session so far: {e:#}"));
+            }
+        }
         &self.stats
+    }
+
+    /// Writes what the session holds so far, every few seconds: the streams' tables (`parameters.json`,
+    /// `audio.json` as the WAVE headers stand, `calibration.json`; `tracking.json` is kept by its thread), the
+    /// manifest with its performance block, and the frame records. A session that never finishes (the worker
+    /// killed or crashed, Windows shut down) stays readable up to here.
+    fn checkpoint(&mut self) -> anyhow::Result<()> {
+        self.checkpointed = Instant::now();
+        self.parameters.flush()?;
+        self.skeleton.flush()?;
+        let tracks: Vec<_> = self.audio.iter().filter_map(AudioRecorder::track).collect();
+        if !tracks.is_empty() {
+            let mut index = perf::audio::Audio::new();
+            index.tracks = tracks.clone();
+            orbiters_core::write_atomic(&self.writer.dir().join(perf::AUDIO_FILE), &serde_json::to_vec_pretty(&index)?)?;
+        }
+        let (devices, detected) = self.tracking.as_ref().map(TrackingRecorder::found).unwrap_or_default();
+        let calibrations = session_calibrations(&self.calibrations, detected, &devices);
+        let written = (calibrations.len(), devices.len());
+        if written != self.calibrations_written {
+            tracking::write_calibrations(self.writer.dir(), calibrations)?;
+            self.calibrations_written = written;
+        }
+        let performance = &mut self.writer.manifest_mut().performance;
+        performance.parameter_changes = self.parameters.changes;
+        performance.skeleton_frames = self.skeleton.frames;
+        performance.tracking_samples = self.tracking.as_ref().map_or(0, |t| t.counts().samples);
+        performance.calibrations = written.0 as u32;
+        performance.audio = tracks.into_iter().map(|t| t.file).collect();
+        self.writer.checkpoint()
     }
 
     /// Waits for pending files and writes the final manifest.
     pub fn finish(self) -> anyhow::Result<(PathBuf, SessionManifest)> {
-        let Self { mut writer, pool, parameters, skeleton, audio, tracking, mut calibrations, .. } = self;
+        let Self { mut writer, pool, parameters, skeleton, audio, tracking, calibrations, .. } = self;
         let (written, errors) = pool.finish();
         writer.add_bytes(written);
         let (changes, bytes) = parameters.finish()?;
@@ -418,26 +461,22 @@ impl CaptureSession {
             }
         }
         if !tracks.tracks.is_empty() {
-            std::fs::write(writer.dir().join(perf::AUDIO_FILE), serde_json::to_vec_pretty(&tracks)?)?;
+            orbiters_core::write_atomic(&writer.dir().join(perf::AUDIO_FILE), &serde_json::to_vec_pretty(&tracks)?)?;
         }
-        let mut devices = Vec::new();
+        let (mut devices, mut detected) = (Vec::new(), Vec::new());
         if let Some(t) = tracking {
             match t.finish() {
                 Ok(r) => {
                     eprintln!("tracking: {} devices, {} samples, {} T-poses", r.devices.len(), r.samples, r.calibrations.len());
                     writer.manifest_mut().performance.tracking_samples = r.samples;
                     writer.add_bytes(perf::HEADER_SIZE as u64 * u64::from(r.samples > 0) + r.samples * 64);
-                    calibrations.extend(r.calibrations);
+                    detected = r.calibrations;
                     devices = r.devices;
                 }
                 Err(e) => eprintln!("tracking: {e:#}"),
             }
         }
-        // Calibrations from the overlay name devices by serial: number them like this session's tracking.json.
-        for c in &mut calibrations {
-            orbiters_core::pose::renumber(c, &devices);
-        }
-        calibrations.sort_by_key(|c| c.time_ns);
+        let calibrations = session_calibrations(&calibrations, detected, &devices);
         writer.manifest_mut().performance.calibrations = calibrations.len() as u32;
         let bytes = tracking::write_calibrations(writer.dir(), calibrations)?;
         writer.add_bytes(bytes);
@@ -448,6 +487,17 @@ impl CaptureSession {
     }
 }
 
+/// A session's calibrations: those from the overlay (they name devices by serial: numbered like this session's
+/// `tracking.json`) and the T-poses caught while recording, in time order.
+fn session_calibrations(overlay: &[Calibration], detected: Vec<Calibration>, devices: &[Device]) -> Vec<Calibration> {
+    let mut all: Vec<Calibration> = overlay.iter().cloned().chain(detected).collect();
+    for c in &mut all {
+        orbiters_core::pose::renumber(c, devices);
+    }
+    all.sort_by_key(|c| c.time_ns);
+    all
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,6 +506,54 @@ mod tests {
     use orbiters_contracts::performance::skeleton_frames;
     use orbiters_core::protocol::SourceSpec;
     use orbiters_core::settings::KeyframeSettings;
+
+    #[test]
+    fn a_session_that_never_finishes_reads_up_to_its_last_checkpoint() {
+        let root = std::env::temp_dir().join(format!("orbiters-capture-unfinished-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // A T-pose from the overlay a second before the session.
+        let calibration =
+            Calibration { time_ns: clock::now_ns() as i64 - 1_000_000_000, pose: "t_pose".into(), source: "overlay".into(), ..Default::default() };
+        let cmd = StartCapture {
+            source: SourceSpec::TestPattern { width: 1280, height: 720, fps: 30.0, depth_every: 4, frames: 20 },
+            sessions_dir: root.clone(),
+            mode: CaptureMode::RecordOnly,
+            quality: StorageQuality::High,
+            keyframes: KeyframeSettings::default(),
+            world: None,
+            consent: ConsentInfo::default(),
+            folder_name: Some("unfinished".into()),
+            performance: orbiters_core::protocol::PerformanceSpec { calibration: Some(calibration), ..Default::default() },
+        };
+        let mut src = TestPatternSource::new(1280, 720, 30.0, 4, 20, false);
+        let mut session = CaptureSession::start(&cmd, src.describe(), &src.folder_hint()).unwrap();
+        let viseme = OscSample {
+            at_ns: clock::now_ns(),
+            address: "/avatar/parameters/Viseme".into(),
+            index: None,
+            value: orbiters_core::osc::OscValue::Int(3),
+            initial: false,
+        };
+        session.osc(&[viseme], false);
+        while !matches!(src.next(std::time::Duration::from_millis(10), &mut |v| session.process(v).unwrap()), Ok(Next::End)) {}
+        // Five seconds on: the stats refresh writes a checkpoint. Then the worker is killed: no finish.
+        session.checkpointed = Instant::now().checked_sub(bundle::CHECKPOINT_EVERY).unwrap();
+        session.refresh_stats();
+        assert_eq!(session.stats.last_error, None);
+        let dir = session.dir();
+        let manifest = bundle::read_manifest(&dir).unwrap();
+        assert_eq!(manifest.stats.frames, 20);
+        assert_eq!(bundle::read_records(&dir).unwrap().len(), 20);
+        let p = &manifest.performance;
+        assert_eq!((p.parameter_changes, p.skeleton_frames, p.calibrations), (1, 15, 1));
+        let table: perf::parameters::Table = serde_json::from_slice(&std::fs::read(dir.join(perf::PARAMETERS_TABLE)).unwrap()).unwrap();
+        assert_eq!(table.parameters[0].name, "Viseme");
+        let calibrations: perf::calibration::Calibrations = serde_json::from_slice(&std::fs::read(dir.join(perf::CALIBRATION_FILE)).unwrap()).unwrap();
+        assert_eq!(calibrations.calibrations.len(), 1);
+        assert!(calibrations.calibrations[0].time_ns < 0, "made before the session");
+        drop(session);
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn test_pattern_session_end_to_end() {

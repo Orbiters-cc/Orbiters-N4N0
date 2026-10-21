@@ -18,11 +18,23 @@ pub struct ParameterStream {
     pub changes: u64,
     /// Last value of each parameter that changed while the session was paused, written on resume.
     held: BTreeMap<u16, parameters::Value>,
+    /// Parameters and avatar changes in `parameters.json` on disk, and its size.
+    table_written: (usize, usize),
+    table_bytes: u64,
 }
 
 impl ParameterStream {
     pub fn new(dir: &Path) -> Self {
-        Self { dir: dir.to_path_buf(), file: None, table: parameters::Table::new(), ids: HashMap::new(), changes: 0, held: BTreeMap::new() }
+        Self {
+            dir: dir.to_path_buf(),
+            file: None,
+            table: parameters::Table::new(),
+            ids: HashMap::new(),
+            changes: 0,
+            held: BTreeMap::new(),
+            table_written: (0, 0),
+            table_bytes: 0,
+        }
     }
 
     /// Name in the table: the animator's parameter name for `/avatar/parameters/<name>`, else the address, with
@@ -51,8 +63,25 @@ impl ParameterStream {
             f.write_all(&parameters::header())?;
             self.file = Some(f);
         }
+        // The buffer is about to reach the file: the table first, so that it names every id on disk.
+        if self.file.as_ref().is_some_and(|f| f.buffer().len() + parameters::RECORD_SIZE > f.capacity()) {
+            self.write_table()?;
+        }
         self.file.as_mut().expect("open").write_all(&change.to_bytes())?;
         self.changes += 1;
+        Ok(())
+    }
+
+    /// Writes `parameters.json` when it has ids or avatar changes the file on disk lacks.
+    fn write_table(&mut self) -> anyhow::Result<()> {
+        let counts = (self.table.parameters.len(), self.table.avatars.len());
+        if counts == self.table_written {
+            return Ok(());
+        }
+        let json = serde_json::to_vec_pretty(&self.table)?;
+        orbiters_core::write_atomic(&self.dir.join(perf::PARAMETERS_TABLE), &json)?;
+        self.table_written = counts;
+        self.table_bytes = json.len() as u64;
         Ok(())
     }
 
@@ -87,27 +116,24 @@ impl ParameterStream {
         Ok(())
     }
 
-    /// Flushes `parameters.bin` (readers can follow a running session).
+    /// Writes `parameters.json` (when it changed) and then `parameters.bin` as they stand: readers can follow a
+    /// running session, and one that never finishes keeps every value up to here, with its name.
     pub fn flush(&mut self) -> anyhow::Result<()> {
+        self.write_table()?;
         if let Some(f) = self.file.as_mut() {
             f.flush()?;
         }
         Ok(())
     }
 
-    /// Closes the stream and writes `parameters.json`; returns the number of changes and the bytes written.
+    /// Closes the stream with its final `parameters.json`; returns the number of changes and the bytes written.
     pub fn finish(mut self) -> anyhow::Result<(u64, u64)> {
-        let mut bytes = 0;
-        if let Some(mut f) = self.file.take() {
-            f.flush()?;
+        self.flush()?;
+        let mut bytes = self.table_bytes;
+        if self.file.take().is_some() {
             bytes += (perf::HEADER_SIZE + self.changes as usize * parameters::RECORD_SIZE) as u64;
         }
-        if bytes == 0 && self.table.avatars.is_empty() {
-            return Ok((0, 0));
-        }
-        let json = serde_json::to_vec_pretty(&self.table)?;
-        std::fs::write(self.dir.join(perf::PARAMETERS_TABLE), &json)?;
-        Ok((self.changes, bytes + json.len() as u64))
+        Ok((self.changes, bytes))
     }
 }
 
@@ -196,6 +222,30 @@ mod tests {
         assert_eq!(table.parameters[2].address, "/tracking/vrsystem/head/pose");
         assert_eq!(table.parameters[0].kind, parameters::Kind::Int);
         assert_eq!(table.avatars, vec![parameters::AvatarChange { time_ns: 0, id: "avtr_a".into() }]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_stream_that_never_finishes_names_every_id_it_holds() {
+        let dir = std::env::temp_dir().join(format!("orbiters-perf-unfinished-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = ParameterStream::new(&dir);
+        s.add(0, &sample(0, AVATAR_CHANGE, None, OscValue::Text("avtr_a".into()), true), false).unwrap();
+        s.add(0, &sample(5, "/avatar/parameters/Viseme", None, OscValue::Int(4), false), false).unwrap();
+        s.flush().unwrap();
+        // Then many more parameters, enough for the file's buffer to reach the disk on its own, and the worker is
+        // killed: no flush, no finish.
+        for i in 0..5000u64 {
+            s.add(0, &sample(10 + i, &format!("/avatar/parameters/P{}", i % 3000), None, OscValue::Float(0.5), false), false).unwrap();
+        }
+        let bin = std::fs::read(dir.join(perf::PARAMETERS_FILE)).unwrap();
+        let table: parameters::Table = serde_json::from_slice(&std::fs::read(dir.join(perf::PARAMETERS_TABLE)).unwrap()).unwrap();
+        let read = parameters::read(&bin).unwrap();
+        assert!(read.len() > 1000, "{} records on disk", read.len());
+        assert!(read.iter().all(|c| (c.id as usize) < table.parameters.len()), "every id on disk is named");
+        assert_eq!(table.avatars, vec![parameters::AvatarChange { time_ns: 0, id: "avtr_a".into() }]);
+        drop(s);
         std::fs::remove_dir_all(&dir).ok();
     }
 

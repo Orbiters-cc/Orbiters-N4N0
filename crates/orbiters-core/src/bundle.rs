@@ -9,7 +9,10 @@ use serde::Serialize;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
+
+/// How often a recording's frame records and manifest reach the disk ([`BundleWriter::checkpoint`]).
+pub const CHECKPOINT_EVERY: Duration = Duration::from_secs(5);
 
 pub fn keyframe_file(index: i32) -> String {
     format!("{index:06}.qoi")
@@ -118,11 +121,28 @@ impl BundleWriter {
         if record.has(record_flags::GATED) {
             s.gated += 1;
         }
-        if self.last_manifest_write.elapsed().as_secs() >= 5 {
-            self.frames.flush()?;
-            self.write_manifest()?;
+        if self.last_manifest_write.elapsed() >= CHECKPOINT_EVERY {
+            self.checkpoint()?;
         }
         Ok(())
+    }
+
+    /// Writes the frame records and the manifest as they stand (duration so far), so a session that never
+    /// finishes (the worker killed or crashed, Windows shut down) reads up to here. Tried again after
+    /// [`CHECKPOINT_EVERY`] when it fails.
+    pub fn checkpoint(&mut self) -> anyhow::Result<()> {
+        self.last_manifest_write = Instant::now();
+        self.frames.flush()?;
+        self.measure_duration();
+        self.write_manifest()
+    }
+
+    fn measure_duration(&mut self) {
+        let s = &mut self.manifest.stats;
+        s.duration_s = match (self.game_time_duration, s.first_game_time, s.last_game_time) {
+            (true, Some(first), Some(last)) => f64::from((last - first).max(0.0)),
+            _ => self.started.elapsed().as_secs_f64(),
+        };
     }
 
     /// Bytes written by other threads (keyframes, depth files).
@@ -138,10 +158,7 @@ impl BundleWriter {
     }
 
     pub fn write_manifest(&self) -> anyhow::Result<()> {
-        let path = self.dir.join(manifest::MANIFEST_FILE);
-        let tmp = self.dir.join("manifest.json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(&self.manifest)?)?;
-        fs::rename(&tmp, &path)?;
+        crate::write_atomic(&self.dir.join(manifest::MANIFEST_FILE), serde_json::to_string_pretty(&self.manifest)?.as_bytes())?;
         Ok(())
     }
 
@@ -152,11 +169,7 @@ impl BundleWriter {
 
     pub fn finish(mut self) -> anyhow::Result<(PathBuf, SessionManifest)> {
         self.frames.flush()?;
-        let s = &mut self.manifest.stats;
-        s.duration_s = match (self.game_time_duration, s.first_game_time, s.last_game_time) {
-            (true, Some(first), Some(last)) => f64::from((last - first).max(0.0)),
-            _ => self.started.elapsed().as_secs_f64(),
-        };
+        self.measure_duration();
         self.write_manifest()?;
         Ok((self.dir, self.manifest))
     }
@@ -296,6 +309,29 @@ mod tests {
         // A second session with the same name gets a numbered folder.
         let w2 = BundleWriter::create(&root, "World: test", SessionManifest::default()).unwrap();
         assert!(w2.dir().ends_with("World_ test (2)"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn records_and_manifest_reach_the_disk_every_few_seconds_not_every_frame() {
+        let root = std::env::temp_dir().join(format!("orbiters-bundle-checkpoint-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut w = BundleWriter::create(&root, "Checkpoints", SessionManifest::new("id-2".into(), crate::now_utc_iso(), "0.1.0")).unwrap();
+        let r = FrameRecord { flags: record_flags::STRIP_OK, ..Default::default() };
+        w.append_record(&r).unwrap();
+        // Not due yet: the manifest on disk is the first one.
+        assert_eq!(read_manifest(w.dir()).unwrap().stats.frames, 0);
+        // Due: records and manifest are written once, and not again on the next frame.
+        w.last_manifest_write = Instant::now().checked_sub(CHECKPOINT_EVERY).unwrap();
+        w.append_record(&r).unwrap();
+        let saved = read_manifest(w.dir()).unwrap();
+        assert_eq!((saved.stats.frames, read_records(w.dir()).unwrap().len()), (2, 2));
+        assert!(saved.stats.duration_s > 0.0);
+        w.append_record(&r).unwrap();
+        assert_eq!(read_manifest(w.dir()).unwrap().stats.frames, 2);
+        let (dir, manifest) = w.finish().unwrap();
+        assert_eq!((manifest.stats.frames, read_manifest(&dir).unwrap().stats.frames), (3, 3));
+        assert!(!dir.join("manifest.json.tmp").exists());
         fs::remove_dir_all(&root).ok();
     }
 }

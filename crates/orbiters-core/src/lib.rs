@@ -31,6 +31,15 @@ pub fn now_local_for_names() -> String {
     format!("{:04}-{:02}-{:02} {:02}-{:02}-{:02}", now.year(), now.month() as u8, now.day(), now.hour(), now.minute(), now.second())
 }
 
+/// Writes a file through a temporary one beside it and a rename: a reader (or a crash) finds the old content or the
+/// new one, never part of it.
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
 /// Makes a string safe as a single folder name on Windows and Linux.
 pub fn safe_file_name(name: &str) -> String {
     let cleaned: String = name.chars().map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();

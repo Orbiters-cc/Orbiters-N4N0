@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -96,6 +96,8 @@ struct Counters {
     devices: AtomicU64,
     calibrations: AtomicU64,
     connected: AtomicBool,
+    /// The devices and the T-poses caught so far, for the session's checkpoints.
+    found: Mutex<(Vec<Device>, Vec<Calibration>)>,
 }
 
 /// What the interface shows while recording.
@@ -127,6 +129,11 @@ impl TrackingRecorder {
     /// While paused nothing is written (a pause means "not this part").
     pub fn set_paused(&self, paused: bool) {
         self.paused.store(paused, Ordering::Relaxed);
+    }
+
+    /// The devices numbered so far and the T-poses caught so far (the session's `calibration.json` while recording).
+    pub fn found(&self) -> (Vec<Device>, Vec<Calibration>) {
+        self.counters.found.lock().unwrap().clone()
     }
 
     pub fn counts(&self) -> TrackingCounts {
@@ -170,6 +177,8 @@ struct Recording {
     calibrations: Vec<Calibration>,
     written: u64,
     counters: Arc<Counters>,
+    /// A device got its number or a new SteamVR index since `tracking.json` was written.
+    devices_changed: bool,
 }
 
 impl Recording {
@@ -185,6 +194,7 @@ impl Recording {
             calibrations: Vec::new(),
             written: 0,
             counters,
+            devices_changed: false,
         }
     }
 
@@ -228,6 +238,12 @@ impl Recording {
                     current.push(sample_of(t, number as usize, p));
                 }
             }
+            // Before any sample uses a new number: tracking.bin never holds a device tracking.json does not name.
+            if self.devices_changed {
+                if let Err(e) = self.write_devices() {
+                    eprintln!("tracking.json: {e:#}");
+                }
+            }
             if !paused.load(Ordering::Relaxed) {
                 self.write(&current)?;
                 // A held T-pose (VRChat's calibration, or one done for Orbiters) becomes a calibration.
@@ -238,6 +254,7 @@ impl Recording {
                 if self.detector.update(t, in_pose) {
                     self.calibrations.push(calibration_of(t as i64, "detected", &self.devices.devices, &current));
                     self.counters.calibrations.store(self.calibrations.len() as u64, Ordering::Relaxed);
+                    self.counters.found.lock().unwrap().1 = self.calibrations.clone();
                 }
             }
             if last_flush.elapsed() >= Duration::from_secs(1) {
@@ -271,6 +288,7 @@ impl Recording {
             return None;
         }
         let existing = self.devices.devices.iter().position(|e| !d.serial.is_empty() && e.serial == d.serial);
+        self.devices_changed = true;
         let number = match existing {
             Some(n) => {
                 self.devices.devices[n].index = index as u8;
@@ -311,12 +329,20 @@ impl Recording {
         Ok(())
     }
 
+    /// Writes `tracking.json` as it stands.
+    fn write_devices(&mut self) -> anyhow::Result<()> {
+        self.devices_changed = false;
+        orbiters_core::write_atomic(&self.dir.join(orbiters_contracts::performance::TRACKING_DEVICES), &serde_json::to_vec_pretty(&self.devices)?)?;
+        self.counters.found.lock().unwrap().0 = self.devices.devices.clone();
+        Ok(())
+    }
+
     fn finish(mut self) -> anyhow::Result<TrackingResult> {
         if let Some(mut f) = self.file.take() {
             f.flush()?;
         }
         if !self.devices.devices.is_empty() {
-            std::fs::write(self.dir.join(orbiters_contracts::performance::TRACKING_DEVICES), serde_json::to_vec_pretty(&self.devices)?)?;
+            self.write_devices()?;
         }
         Ok(TrackingResult { samples: self.written, devices: self.devices.devices, calibrations: self.calibrations })
     }
@@ -330,7 +356,7 @@ pub fn write_calibrations(dir: &Path, calibrations: Vec<Calibration>) -> anyhow:
     let mut all = orbiters_contracts::performance::calibration::Calibrations::new();
     all.calibrations = calibrations;
     let json = serde_json::to_vec_pretty(&all)?;
-    std::fs::write(dir.join(orbiters_contracts::performance::CALIBRATION_FILE), &json)?;
+    orbiters_core::write_atomic(&dir.join(orbiters_contracts::performance::CALIBRATION_FILE), &json)?;
     Ok(json.len() as u64)
 }
 
@@ -389,7 +415,12 @@ mod tests {
         let rec = TrackingRecorder::start(Box::new(move || once.take()), &dir, orbiters_core::clock::now_ns(), 100.0).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         assert!(rec.counts().connected);
+        // While recording, tracking.json already names every device (a session that never finishes keeps them).
+        let early: Devices = serde_json::from_slice(&std::fs::read(dir.join("tracking.json")).unwrap()).unwrap();
+        assert_eq!(early.devices.len(), 3);
         std::thread::sleep(Duration::from_millis(1200));
+        let (devices, caught) = rec.found();
+        assert_eq!((devices.len(), caught.len()), (3, 1));
         let result = rec.finish().unwrap();
         assert_eq!(result.devices.len(), 3, "base station left out");
         let samples = tracking::read(&std::fs::read(dir.join("tracking.bin")).unwrap()).unwrap();

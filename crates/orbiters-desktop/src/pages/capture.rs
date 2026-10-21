@@ -4,7 +4,7 @@ use super::{block, entering, Cx};
 use crate::state::CaptureState;
 use egui::{pos2, vec2, Align, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder, Vec2};
 use orbiters_contracts::manifest::{CaptureMode, StorageQuality};
-use orbiters_core::settings::Settings;
+use orbiters_core::settings::{Photo3dLength, Settings};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::format;
 use orbiters_ui::record::{self, RecState, RecordButton};
@@ -113,6 +113,20 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
             let w3 = b3.desired_width(ui);
             let r3 = Rect::from_min_size(pos2(r.left() - 8.0 - w3, rect.bottom() - 34.0), vec2(w3, 32.0));
             picture = b3.show_at(ui, r3).clicked();
+            // How long the camera flies: 1 s gentle, 4 s around you and out every way, 8 s with far circles too.
+            let mut length = snap.settings.photo_3d;
+            let lengths = [
+                SegOption::new(Photo3dLength::Quick, "1 s").hint("A gentle sweep around what the camera aims at"),
+                SegOption::new(Photo3dLength::Standard, "4 s").hint("Around you, then straight up and down and 10 m out every way"),
+                SegOption::new(Photo3dLength::Full, "8 s").hint("As 4 s, plus circles around four points 8 m away"),
+            ];
+            let seg_w = 150.0;
+            let mut seg = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(r3.left() - 8.0 - seg_w, rect.bottom() - 36.0), vec2(seg_w, 36.0))));
+            if widgets::segmented(&mut seg, "photo-3d-length", &mut length, &lengths, true) {
+                let mut settings = snap.settings.clone();
+                settings.photo_3d = length;
+                cx.ctl.save_settings(settings);
+            }
         }
     });
     if test {

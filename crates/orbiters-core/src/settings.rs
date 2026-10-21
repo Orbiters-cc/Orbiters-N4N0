@@ -32,6 +32,19 @@ pub struct Settings {
     pub world_performance: bool,
     /// Walk boost: the play space moves along with the movement stick, so walking in VRChat goes faster.
     pub walk_boost: WalkBoostSettings,
+    /// How long a 3D picture's camera flight lasts (more seconds, more of the place seen).
+    pub photo_3d: Photo3dLength,
+}
+
+/// A 3D picture's length: a gentle 1 s sweep, 4 s that circle you and fly 10 m out every way, or 8 s that also circle
+/// four points 8 m away.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Photo3dLength {
+    Quick,
+    #[default]
+    Standard,
+    Full,
 }
 
 /// Walk boost (the SteamVR overlay): while the stick VRChat walks with is pushed, the play space is dragged the same
@@ -228,6 +241,7 @@ impl Default for Settings {
             orb: OrbSettings::default(),
             world_performance: false,
             walk_boost: WalkBoostSettings::default(),
+            photo_3d: Photo3dLength::default(),
         }
     }
 }

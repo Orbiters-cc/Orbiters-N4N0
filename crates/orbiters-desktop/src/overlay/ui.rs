@@ -554,9 +554,21 @@ fn recorder(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
         }
     } else if c.state == CaptureState::Idle {
         // A second of the camera swinging around its subject, reconstructed: a picture you can walk around.
+        // The length (1 s, 4 s or 8 s) on the left, the button on the right.
+        use orbiters_core::settings::Photo3dLength;
         let b = Button::new("3D picture").icon(icons::CUBE_FOCUS).variant(Variant::Secondary).size(Size::Md).enabled(consent && snap.vrchat.running);
         let w = b.desired_width(ui).max(160.0);
-        let r = b.width(w).show_at(ui, Rect::from_min_size(pos2(card.center().x - w / 2.0, card.bottom() - 64.0), vec2(w, 40.0)));
+        let seg_w = 168.0;
+        let left = card.center().x - (w + 12.0 + seg_w) / 2.0;
+        let mut length = snap.settings.photo_3d;
+        let lengths = [SegOption::new(Photo3dLength::Quick, "1 s"), SegOption::new(Photo3dLength::Standard, "4 s"), SegOption::new(Photo3dLength::Full, "8 s")];
+        let mut seg = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(left, card.bottom() - 64.0), vec2(seg_w, 40.0))).id_salt("overlay-photo-length"));
+        if widgets::segmented(&mut seg, "overlay-photo-length", &mut length, &lengths, false) {
+            let mut settings = snap.settings.clone();
+            settings.photo_3d = length;
+            ctl.save_settings(settings);
+        }
+        let r = b.width(w).show_at(ui, Rect::from_min_size(pos2(left + seg_w + 12.0, card.bottom() - 64.0), vec2(w, 40.0)));
         if r.clicked() {
             ctl.orb(OrbCommand::Photo3D);
         }

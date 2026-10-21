@@ -7,7 +7,7 @@
 //! - [`measure`]: the intensity, from the pictures alone: the blue channel's shift against the red one in textured
 //!   patches follows `0.64·diff`.
 //! - [`realign`]: each channel resampled from where PPv2 took it (first order: shifts, not the blur along the
-//!   segment).
+//!   segment); the [`offsets`] are the same for every frame.
 //! - [`aberrate`]: PPv2's effect on a render, to score a model of the realigned world against the captured frames.
 //!
 //! Offsets are in training pixels; the tap count uses the training size (the capture's at full width).
@@ -66,15 +66,26 @@ fn sample(image: &[u32], w: usize, h: usize, ch: usize, x: f32, y: f32) -> f32 {
     top * (1.0 - fy) + bottom * fy
 }
 
-/// A keyframe with each channel moved back to where PPv2 took it from (alpha kept).
-pub fn realign(image: &[u32], w: usize, h: usize, intensity: f32) -> Vec<u32> {
+/// Per pixel, where each channel takes its colour from (the same for every frame of a session): `channel_offset`
+/// for red, green and blue.
+pub fn offsets(w: usize, h: usize, intensity: f32) -> Vec<[(f32, f32); 3]> {
+    (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let (x, y) = ((i % w) as f32 + 0.5, (i / w) as f32 + 0.5);
+            [0, 1, 2].map(|ch| channel_offset(ch, x, y, w, h, intensity))
+        })
+        .collect()
+}
+
+/// A keyframe with each channel moved back to where PPv2 took it from (alpha kept), given [`offsets`].
+pub fn realign(image: &[u32], w: usize, h: usize, offsets: &[[(f32, f32); 3]]) -> Vec<u32> {
     (0..w * h)
         .into_par_iter()
         .map(|i| {
             let (x, y) = ((i % w) as f32 + 0.5, (i / w) as f32 + 0.5);
             let mut packed = image[i] & 0xFF00_0000;
-            for ch in 0..3 {
-                let (ox, oy) = channel_offset(ch, x, y, w, h, intensity);
+            for (ch, &(ox, oy)) in offsets[i].iter().enumerate() {
                 let v = sample(image, w, h, ch, x - ox, y - oy);
                 packed |= ((v * 255.0 + 0.5).clamp(0.0, 255.0) as u32) << (8 * ch);
             }
@@ -258,7 +269,7 @@ mod tests {
         assert!(m.patches > 20, "{} patches", m.patches);
         assert!((m.intensity - intensity).abs() < 0.05, "measured {}", m.intensity);
         // Red against blue, away from the centre, before and after realigning.
-        let fixed = realign(&packed, w, h, intensity);
+        let fixed = realign(&packed, w, h, &offsets(w, h, intensity));
         let spread = |img: &[u32]| -> f32 {
             let mut e = 0.0;
             for y in 0..h {

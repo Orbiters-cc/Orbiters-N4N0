@@ -331,9 +331,12 @@ fn simulate(args: &[String]) -> anyhow::Result<()> {
             println!("\nintensity {intensity}{}", if fast { " (fast mode)" } else { "" });
             let mut header: Vec<String> = bands.windows(2).map(|b| format!("{:.1}–{:.1}", b[0], b[1])).collect();
             header.push("all".into());
+            header.push("all, ECC 5 %".into());
             println!("  {:<16} {}", "decoder", header.iter().map(|s| format!("{s:>13}")).collect::<String>());
             for d in DECODERS {
-                let results: Vec<Option<[u16; SAMPLES_PER_TILE as usize]>> = (0..tx * ty)
+                // Per tile: the decoder's codes when it accepts the tile, and the best read whenever the pilots are
+                // readable (what an error-correcting code could repair).
+                let results: Vec<(Option<[u16; SAMPLES_PER_TILE as usize]>, Option<[u16; SAMPLES_PER_TILE as usize]>)> = (0..tx * ty)
                     .into_par_iter()
                     .map(|t| {
                         let (x0, y0) = ((t % tx) as f32 * tile, (t / tx) as f32 * tile);
@@ -367,7 +370,9 @@ fn simulate(args: &[String]) -> anyhow::Result<()> {
                                 }
                             }
                         }
-                        best.filter(|(b, _)| b.gap >= MIN_LEVEL_SPACING && (!d.strict || b.ambiguous <= 0.05)).map(|(b, _)| b.codes)
+                        let readable = best.as_ref().filter(|(b, _)| b.gap >= MIN_LEVEL_SPACING).map(|(b, _)| b.codes);
+                        let accepted = best.filter(|(b, _)| b.gap >= MIN_LEVEL_SPACING && (!d.strict || b.ambiguous <= 0.05)).map(|(b, _)| b.codes);
+                        (accepted, readable)
                     })
                     .collect();
                 let count = |lo: f32, hi: f32| {
@@ -377,7 +382,7 @@ fn simulate(args: &[String]) -> anyhow::Result<()> {
                             continue;
                         }
                         total += SAMPLES_PER_TILE as usize;
-                        if let Some(codes) = &results[t] {
+                        if let Some(codes) = &results[t].0 {
                             for (s, &c) in codes.iter().enumerate() {
                                 if close(c, truth[t][s]) {
                                     good += 1;
@@ -395,6 +400,19 @@ fn simulate(args: &[String]) -> anyhow::Result<()> {
                     cells += &count(b[0], b[1]);
                 }
                 cells += &count(0.0, 9.0);
+                // With a code that repairs up to 5 % wrong symbols per tile: every readable tile with at most 12 of its
+                // 240 data symbols wrong counts as good.
+                let (mut repaired, mut total) = (0usize, 0usize);
+                for t in 0..tx * ty {
+                    total += SAMPLES_PER_TILE as usize;
+                    if let Some(codes) = &results[t].1 {
+                        let wrong: u32 = codes.iter().zip(&truth[t]).map(|(&a, &b)| (0..8).filter(|k| ((a >> (2 * k)) & 3) != ((b >> (2 * k)) & 3)).count() as u32).sum();
+                        if wrong <= 12 {
+                            repaired += SAMPLES_PER_TILE as usize;
+                        }
+                    }
+                }
+                cells += &format!("{:>13}", format!("{:.0}", 100.0 * repaired as f32 / total.max(1) as f32));
                 println!("  {:<16} {cells}", d.name);
             }
         }

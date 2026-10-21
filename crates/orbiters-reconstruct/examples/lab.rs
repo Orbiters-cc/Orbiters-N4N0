@@ -36,6 +36,7 @@ struct Args {
     dark: bool,
     /// Chromatic aberration to undo: None off, Some(None) measured, Some(Some(intensity)).
     ca: Option<Option<f32>>,
+    plane_fill: bool,
     renders: usize,
     loose: bool,
     transients: bool,
@@ -63,6 +64,7 @@ fn args() -> anyhow::Result<Args> {
         validate: false,
         dark: false,
         ca: None,
+        plane_fill: false,
         renders: 3,
         loose: false,
         transients: false,
@@ -90,6 +92,7 @@ fn args() -> anyhow::Result<Args> {
             "--mvs" => a.mvs = true,
             "--validate" => a.validate = true,
             "--dark" => a.dark = true,
+            "--plane-fill" => a.plane_fill = true,
             "--ca" => {
                 let v = value("--ca")?;
                 a.ca = Some(if v == "auto" { None } else { Some(v.parse()?) });
@@ -194,8 +197,9 @@ fn main() -> anyhow::Result<()> {
             }
         };
         ca_originals = data.views.iter().map(|v| v.image.clone()).collect();
+        let offsets = orbiters_reconstruct::aberration::offsets(w, h, ca_intensity);
         for v in data.views.iter_mut() {
-            v.image = orbiters_reconstruct::aberration::realign(&v.image, w, h, ca_intensity);
+            v.image = orbiters_reconstruct::aberration::realign(&v.image, w, h, &offsets);
         }
         eprintln!("chromatic aberration {ca_intensity:.3} undone in {} keyframes, {:.1} s", data.views.len(), t.elapsed().as_secs_f32());
         aberration = serde_json::json!({ "intensity": ca_intensity, "measured": ca.is_none(), "seconds": t.elapsed().as_secs_f32() });
@@ -210,6 +214,14 @@ fn main() -> anyhow::Result<()> {
         let st = orbiters_reconstruct::depthfix::mark_untrusted(&mut data, &orbiters_reconstruct::depthfix::FixParams::default());
         eprintln!("depth validation: {} of {} tile positions never read ({} of their samples kept as sky), {} misread tiles, {} impossibly near samples; {} of {} samples unknown ({:.1} %)", st.dead_tiles, st.tiles, st.sky_samples, st.misread_tiles, st.near_samples, st.unknown_samples, st.samples, 100.0 * st.unknown_samples as f64 / st.samples.max(1) as f64);
         validation = serde_json::json!({ "dead_tiles": st.dead_tiles, "tiles": st.tiles, "sky_samples": st.sky_samples, "misread_tiles": st.misread_tiles, "near_samples": st.near_samples, "unknown_samples": st.unknown_samples, "samples": st.samples });
+    }
+    // Unknown samples on each depth frame's dominant plane get its depth.
+    let mut plane_fill = serde_json::Value::Null;
+    if a.plane_fill {
+        let t = Instant::now();
+        let st = orbiters_reconstruct::planefill::fill(&mut data, &orbiters_reconstruct::planefill::FillParams::default());
+        eprintln!("plane fill {:.1} s: {} of {} depth frames have a dominant plane; of {} unknown samples {} are candidates, {} filled (confirmed by other frames), {} unconfirmed, {} seen through elsewhere", t.elapsed().as_secs_f32(), st.frames_with_plane, st.frames, st.unknown, st.candidates, st.filled, st.unconfirmed, st.contradicted);
+        plane_fill = serde_json::json!({ "seconds": t.elapsed().as_secs_f32(), "frames": st.frames, "frames_with_plane": st.frames_with_plane, "unknown": st.unknown, "candidates": st.candidates, "filled": st.filled, "unconfirmed": st.unconfirmed, "contradicted": st.contradicted });
     }
     let (flags, mut left_out, depth_only, transient_stats) = leave_out(&data);
     // Sparser depth: keep one sample in `depth_density` (2: a checkerboard, 4: every second along both axes).
@@ -254,7 +266,7 @@ fn main() -> anyhow::Result<()> {
             candidates.iter().copied().filter(|i| i % a.keyframes_every == 0).collect()
         };
         selection = serde_json::json!(chosen.iter().map(|&i| data.views[i].keyframe).collect::<Vec<_>>());
-        let (mut views, mut masks, mut held) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut views, mut masks, mut held, mut kept) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (i, (v, m)) in std::mem::take(&mut data.views).into_iter().zip(std::mem::take(&mut left_out)).enumerate() {
             if is_held(i) || chosen.contains(&i) {
                 if is_held(i) {
@@ -262,10 +274,14 @@ fn main() -> anyhow::Result<()> {
                 }
                 views.push(v);
                 masks.push(m);
+                kept.push(i);
             }
         }
         data.views = views;
         left_out = masks;
+        if !ca_originals.is_empty() {
+            ca_originals = kept.iter().map(|&i| std::mem::take(&mut ca_originals[i])).collect();
+        }
         a.settings.held_out = Some(held);
     }
     // Plane-sweep depth where the depth frames have none: extra depth frames for seeding and depth steps.
@@ -404,6 +420,7 @@ fn main() -> anyhow::Result<()> {
         "mvs": mvs_stats,
         "validation": validation,
         "aberration": aberration,
+        "plane_fill": plane_fill,
         "iterations": outcome.iterations,
         "seconds": outcome.seconds,
         "relocate_seconds": outcome.relocate_seconds,

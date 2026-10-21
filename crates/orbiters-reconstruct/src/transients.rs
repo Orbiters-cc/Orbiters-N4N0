@@ -62,7 +62,7 @@ pub(crate) fn known(g: &DepthView, i: usize, mask: &[f32], width: u32, height: u
 /// (all four neighbouring samples farther, or no hit), `Some(false)` it saw the point (a neighbour at about its depth),
 /// `None` occluded, outside, or under the strip.
 #[allow(clippy::too_many_arguments)]
-fn verdict(g: &DepthView, gg: &Grid, u: f32, v: f32, z: f32, p: &Params, mask: &[f32], size: (u32, u32)) -> Option<bool> {
+pub(crate) fn verdict(g: &DepthView, gg: &Grid, u: f32, v: f32, z: f32, p: &Params, mask: &[f32], size: (u32, u32)) -> Option<bool> {
     let fx = (u - gg.x0) / gg.sx;
     let fy = (v - gg.y0) / gg.sy;
     if !(fx >= 0.0 && fy >= 0.0) || fx > (gg.gw - 1) as f32 || fy > (gg.gh - 1) as f32 {

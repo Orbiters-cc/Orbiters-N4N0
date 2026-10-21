@@ -13,6 +13,7 @@ pub mod gpu;
 pub mod init;
 pub mod metrics;
 pub mod mvs;
+pub mod planefill;
 pub mod ply;
 pub mod sky;
 pub mod priority;

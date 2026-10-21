@@ -303,7 +303,7 @@ fn run_worker() -> anyhow::Result<()> {
                             current = Some((session, src));
                             paused = false;
                         }
-                        Err(e) => out.emit(&WorkerEvent::Error { message: format!("{e:#}") }),
+                        Err(e) => out.emit(&WorkerEvent::StartFailed { message: format!("{e:#}") }),
                     }
                 }
                 WorkerCommand::Stop => finish(&mut current, &mut out, "stopped"),

@@ -169,6 +169,10 @@ pub enum WorkerEvent {
         manifest: Box<SessionManifest>,
         reason: String,
     },
+    /// `Start` could not open its source or create its session: nothing records (a previous session was finished).
+    StartFailed {
+        message: String,
+    },
     Error {
         message: String,
     },

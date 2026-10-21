@@ -336,9 +336,7 @@ impl Controller {
         let on_exit = {
             let ctl = self.clone();
             move || {
-                ctl.osc_values.lock().unwrap().forwarding = false;
-                ctl.restore_camera();
-                ctl.restore_kit();
+                ctl.put_vrchat_back();
                 ctl.update(|s| {
                     s.worker.ready = false;
                     if s.is_capturing() {
@@ -417,9 +415,7 @@ impl Controller {
             WorkerEvent::Stopped { manifest, reason, .. } => {
                 let restarting = reason == "restarted";
                 if !restarting {
-                    self.osc_values.lock().unwrap().forwarding = false;
-                    self.restore_camera();
-                    self.restore_kit();
+                    self.put_vrchat_back();
                 }
                 self.update(|s| {
                     if !restarting {
@@ -436,6 +432,18 @@ impl Controller {
                     keyframes: manifest.stats.keyframes,
                     depth_frames: manifest.stats.depth_frames,
                 });
+            }
+            WorkerEvent::StartFailed { message } => {
+                // Nothing records: VRChat's camera and the kit were switched on for nothing.
+                self.put_vrchat_back();
+                self.update(|s| {
+                    s.capture.error = Some(message.clone());
+                    if matches!(s.capture.state, CaptureState::Starting | CaptureState::Importing) {
+                        s.capture.state = CaptureState::Idle;
+                        s.capture.from_osc = false;
+                    }
+                });
+                self.notify(NoticeKind::Error, message);
             }
             WorkerEvent::Error { message } => {
                 self.update(|s| {
@@ -520,6 +528,7 @@ impl Controller {
             sent
         };
         if let Err(e) = sent {
+            self.put_vrchat_back();
             self.update(|s| {
                 s.capture.state = CaptureState::Idle;
                 s.capture.error = Some(e.to_string());
@@ -527,6 +536,14 @@ impl Controller {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// The recording ended or never started: no more values to the worker, and VRChat's camera and the capture
+    /// kit's toggles back as they were.
+    fn put_vrchat_back(&self) {
+        self.osc_values.lock().unwrap().forwarding = false;
+        self.restore_camera();
+        self.restore_kit();
     }
 
     /// VRChat publishes its camera over Spout only in Stream mode with Spout Stream on: switch both on over OSC
@@ -549,7 +566,10 @@ impl Controller {
         let ctl = self.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(400));
-            let _ = ctl.with_osc(|o| o.send(CAMERA_STREAMING, vec![rosc::OscType::Bool(true)]));
+            // Unless the camera was put back meanwhile (the start failed).
+            if ctl.camera_before.lock().unwrap().is_some() {
+                let _ = ctl.with_osc(|o| o.send(CAMERA_STREAMING, vec![rosc::OscType::Bool(true)]));
+            }
         });
     }
 
@@ -828,8 +848,17 @@ impl Controller {
         self.worker_log.lock().unwrap().iter().cloned().collect()
     }
 
-    /// Stops OSC and the workers (the capture worker finishes a running session).
-    pub fn shutdown(&self) {
+    /// Stops OSC and the workers (the capture worker finishes a running session). VRChat's camera and the kit go
+    /// back first, while OSC can still tell VRChat; OSC then stops before the worker finishes, so VRChat's echo of the
+    /// record toggle starts or stops nothing.
+    pub fn shutdown(self: &Shared) {
+        {
+            let mut osc = self.osc_values.lock().unwrap();
+            if osc.forwarding {
+                self.flush_osc(&mut osc);
+            }
+        }
+        self.put_vrchat_back();
         *self.osc.lock().unwrap() = None;
         *self.worker.lock().unwrap() = None;
         *self.reconstruction.lock().unwrap() = None;
@@ -1247,6 +1276,68 @@ mod tests {
         ctl.restore_kit();
         assert_eq!(received(&vrchat, Duration::from_millis(200)), vec![(record, rosc::OscType::Bool(false)), (depth, rosc::OscType::Bool(true))]);
         assert!(ctl.avatar_before.lock().unwrap().is_none());
+        ctl.shutdown();
+    }
+
+    /// A controller talking to a stand-in VRChat, recording with the Stream camera and the kit switched on.
+    fn driving_vrchat() -> (Shared, std::net::UdpSocket) {
+        let vrchat = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        vrchat.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let mut settings = Settings::default();
+        settings.osc.vrchat_port = vrchat.local_addr().unwrap().port();
+        let ctl = Controller::new(settings);
+        ctl.start_osc_with(false);
+        ctl.open_stream_camera(&[(CAMERA_MODE.to_string(), OscValue::Int(1)), (CAMERA_STREAMING.to_string(), OscValue::Bool(false))]);
+        ctl.switch_kit_on(&[], "OrbitersRecord");
+        ctl.osc_values.lock().unwrap().forwarding = true;
+        ctl.update(|s| s.capture.state = CaptureState::Starting);
+        // Mode 2, record and depth on, then Spout Stream on.
+        assert_eq!(received(&vrchat, Duration::from_millis(700)).len(), 4);
+        (ctl, vrchat)
+    }
+
+    /// Camera and kit as they were: Stream off, photo mode, record and depth frames off.
+    fn put_back() -> Vec<(String, rosc::OscType)> {
+        vec![
+            (CAMERA_STREAMING.into(), rosc::OscType::Bool(false)),
+            (CAMERA_MODE.into(), rosc::OscType::Int(1)),
+            ("/avatar/parameters/OrbitersRecord".into(), rosc::OscType::Bool(false)),
+            ("/avatar/parameters/OrbitersDepthFrames".into(), rosc::OscType::Bool(false)),
+        ]
+    }
+
+    #[test]
+    fn quitting_puts_vrchats_camera_and_kit_back() {
+        let (ctl, vrchat) = driving_vrchat();
+        ctl.shutdown();
+        assert_eq!(received(&vrchat, Duration::from_millis(300)), put_back());
+        assert!(ctl.with_osc(|_| ()).is_none());
+    }
+
+    #[test]
+    fn a_failed_start_puts_vrchats_camera_and_kit_back() {
+        let (ctl, vrchat) = driving_vrchat();
+        ctl.on_worker_event(WorkerEvent::StartFailed { message: "The Spout receiver could not start.".into() });
+        assert_eq!(received(&vrchat, Duration::from_millis(300)), put_back());
+        assert!(!ctl.osc_values.lock().unwrap().forwarding);
+        assert_eq!(ctl.view().capture.state, CaptureState::Idle);
+        ctl.shutdown();
+
+        // A start that cannot reach the worker (no worker next to the test binary) puts them back too, also the
+        // Spout Stream switch that follows the camera a moment later.
+        let vrchat = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        vrchat.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let mut settings = Settings::default();
+        settings.osc.vrchat_port = vrchat.local_addr().unwrap().port();
+        settings.consent_acknowledged = true;
+        settings.sessions_dir = std::env::temp_dir().join(format!("orbiters-failed-start-{}", std::process::id()));
+        let ctl = Controller::new(settings);
+        ctl.start_osc_with(false);
+        assert!(ctl.start_capture(false).is_err());
+        let sent = received(&vrchat, Duration::from_millis(700));
+        assert_eq!(sent.last(), Some(&("/avatar/parameters/OrbitersDepthFrames".into(), rosc::OscType::Bool(false))), "{sent:?}");
+        assert!(!sent.contains(&(CAMERA_STREAMING.into(), rosc::OscType::Bool(true))), "{sent:?}");
+        assert_eq!(ctl.view().capture.state, CaptureState::Idle);
         ctl.shutdown();
     }
 

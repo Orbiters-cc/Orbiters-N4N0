@@ -1162,4 +1162,32 @@ mod tests {
         ctl.orb_stop();
         ctl.shutdown();
     }
+
+    #[test]
+    fn the_wake_word_starts_a_turn_and_other_sentences_stay_here() {
+        let mut settings = Settings::default();
+        settings.orb.wake_word = true;
+        let ctl = Controller::new(settings);
+        let (base, bodies) = orbiters(vec![format!(
+            "event: done
+data: {}
+
+",
+            json!({ "messages": [], "tool_calls": [] })
+        )]);
+        ctl.orb.lock().unwrap().test_server = Some((base, "orbit-test".into()));
+        // Heard while the wake word is on, but not for Orb: nothing goes anywhere.
+        ctl.orb_heard("I saw a cool orb in that world".into(), true);
+        // Misheard "Orb" still wakes it; the request carries what follows.
+        ctl.orb_heard("O Herb, mets mon sweat à capuche.".into(), true);
+        let started = Instant::now();
+        while bodies.lock().unwrap().is_empty() && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["input"]["text"], "mets mon sweat à capuche.");
+        assert_eq!(bodies[0]["input"]["via"], "voice");
+        assert!(bodies[0]["context"]["display"].is_null(), "no Orb prop: no panel limits");
+    }
 }

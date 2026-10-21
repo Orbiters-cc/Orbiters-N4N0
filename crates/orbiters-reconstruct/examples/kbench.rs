@@ -13,13 +13,14 @@ use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {
     let mut it = std::env::args().skip(1);
-    let (mut session, mut ply_path, mut steps, mut width, mut depth, mut sums) = (None, None, 40usize, 1920u32, false, None);
+    let (mut session, mut ply_path, mut steps, mut width, mut depth, mut sums, mut loose) = (None, None, 40usize, 1920u32, false, None, false);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--ply" => ply_path = Some(PathBuf::from(it.next().context("--ply")?)),
             "--steps" => steps = it.next().context("--steps")?.parse()?,
             "--width" => width = it.next().context("--width")?.parse()?,
             "--depth" => depth = true,
+            "--loose" => loose = true,
             "--sums" => {
                 sums = Some(match it.next().context("--sums")?.as_str() {
                     "float" => GradientSums::Float,
@@ -35,6 +36,7 @@ fn main() -> anyhow::Result<()> {
     let data = dataset::load(&session, width, |_| {})?;
     let g = ply::read(&ply_path.unwrap_or_else(|| session.join("reconstruction").join("splats.ply")))?;
     let mut gpu = Gpu::with_options(DeviceOptions { sums, profile: true })?;
+    gpu.exact_tiles = !loose;
     gpu.upload(&g);
     gpu.set_mask(data.width, data.height, &data.mask);
     let px = data.mask.iter().filter(|m| **m > 0.5).count() as f32;

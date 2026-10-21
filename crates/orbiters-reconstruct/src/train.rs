@@ -40,6 +40,10 @@ pub struct Settings {
     /// Canine capture, but cost about 1.2 dB on the best 90 % of VRChat Home's pixels in two repeats.
     pub quarter_until: f32,
     pub half_until: f32,
+    /// Lab: relocation stops after this fraction of the steps (the rest only refines).
+    pub relocate_until: f32,
+    /// Lab: keyframes held out instead of every `hold_out_every`-th.
+    pub held_out: Option<Vec<usize>>,
 }
 
 impl Default for Settings {
@@ -61,7 +65,34 @@ impl Default for Settings {
             robust_from: 0.25,
             quarter_until: 0.0,
             half_until: 0.0,
+            relocate_until: 0.8,
+            held_out: None,
         }
+    }
+}
+
+impl Settings {
+    /// Lab: sets one knob by name.
+    pub fn set(&mut self, key: &str, value: &str) -> anyhow::Result<()> {
+        let f = || value.parse::<f32>().map_err(|e| anyhow::anyhow!("{key}={value}: {e}"));
+        let u = || value.parse::<u32>().map_err(|e| anyhow::anyhow!("{key}={value}: {e}"));
+        match key {
+            "depth_every" => self.depth_every = u()?,
+            "depth_weight" => self.depth_weight = f()?,
+            "relocate_every" => self.relocate_every = u()?,
+            "relocate_until" => self.relocate_until = f()?,
+            "opacity_reg" => self.opacity_reg = f()?,
+            "scale_reg" => self.scale_reg = f()?,
+            "max_radius" => self.max_radius = f()?,
+            "hold_out_every" => self.hold_out_every = u()? as usize,
+            "ssim" => self.ssim = f()?,
+            "robust" => self.robust = f()?,
+            "robust_from" => self.robust_from = f()?,
+            "quarter_until" => self.quarter_until = f()?,
+            "half_until" => self.half_until = f()?,
+            _ => anyhow::bail!("unknown setting {key}"),
+        }
+        Ok(())
     }
 }
 
@@ -155,7 +186,11 @@ pub fn evaluate(gpu: &mut Gpu, data: &Dataset, views: &[usize], background: [f32
 pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings, mut report: impl FnMut(&Progress)) -> anyhow::Result<Outcome> {
     let start = Instant::now();
     let iterations = if settings.iterations == 0 { default_iterations(data) } else { settings.iterations };
-    let held_out: Vec<usize> = if settings.hold_out_every > 1 { (0..data.views.len()).filter(|i| i % settings.hold_out_every == settings.hold_out_every / 2).collect() } else { Vec::new() };
+    let held_out: Vec<usize> = match &settings.held_out {
+        Some(h) => h.clone(),
+        None if settings.hold_out_every > 1 => (0..data.views.len()).filter(|i| i % settings.hold_out_every == settings.hold_out_every / 2).collect(),
+        None => Vec::new(),
+    };
     let train_views: Vec<usize> = (0..data.views.len()).filter(|i| !held_out.contains(i)).collect();
     let depth_views: Vec<usize> = (0..data.depth_views.len()).filter(|&i| data.depth_views[i].valid() > 0).collect();
     let depth_targets: Vec<DepthTarget> = data.depth_views.iter().map(depth_target).collect();
@@ -181,7 +216,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let centre = camera_centre(data);
     let far_field = crate::init::SKY * 0.5;
     gpu.step = 0;
-    let relocate_until = iterations * 8 / 10;
+    let relocate_until = (iterations as f32 * settings.relocate_until) as u32;
     for it in 1..=iterations {
         let progress = (it - 1) as f32 / iterations as f32;
         // Coarse to fine: this step's level (0 full, 1 half, 2 quarter resolution); positions decay from full on.

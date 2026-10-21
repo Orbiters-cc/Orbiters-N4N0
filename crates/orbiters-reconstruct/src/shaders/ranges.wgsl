@@ -15,6 +15,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     }
     let bits = frame.counts.z;
     let tile = keys[j] >> bits;
+    // Sentinel keys (duplicate.wgsl) name no tile.
+    if (tile >= frame.size.z * frame.size.w) {
+        return;
+    }
     if (j == 0u || (keys[j - 1u] >> bits) != tile) {
         ranges[2u * tile] = j;
     }

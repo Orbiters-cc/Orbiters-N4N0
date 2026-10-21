@@ -261,6 +261,8 @@ pub struct Gpu {
     pub dilation: [f32; 2],
     /// Pipelined steps whose tile entries did not all fit the sort (they were dropped for that step).
     pub overflows: u32,
+    /// Exact ellipse-tile tests (per-axis bounds and a test per tile) instead of a square around the largest axis.
+    pub exact_tiles: bool,
     /// GPU timestamps per section of each step ([`DeviceOptions::profile`]).
     pub profiler: Option<Profiler>,
     /// The first GPU error since the last step (wgpu reports them out of band).
@@ -552,6 +554,7 @@ impl Gpu {
             scale_reg: 0.0,
             dilation: [cpu::DILATION as f32; 2],
             overflows: 0,
+            exact_tiles: true,
             profiler: None,
             errors: Default::default(),
         }
@@ -771,7 +774,8 @@ impl Gpu {
         let tiles_x = cam.width.div_ceil(cpu::TILE);
         let tiles_y = cam.height.div_ceil(cpu::TILE);
         let tiles = (tiles_x * tiles_y).max(2);
-        let tile_bits = 32 - (tiles - 1).leading_zeros();
+        // Room for one more id than there are tiles: an all-ones key (a sentinel) names no tile.
+        let tile_bits = 32 - tiles.leading_zeros();
         let (opacity_reg, scale_reg) = if train { (self.opacity_reg, self.scale_reg) } else { (0.0, 0.0) };
         Frame {
             r0: [cam.r[0][0], cam.r[0][1], cam.r[0][2], cam.t[0]],
@@ -786,7 +790,7 @@ impl Gpu {
             ],
             background: [background[0], background[1], background[2], 0.0],
             size: [cam.width, cam.height, tiles_x, tiles_y],
-            counts: [self.count as u32, 0, 32 - tile_bits, 0],
+            counts: [self.count as u32, 0, 32 - tile_bits, u32::from(self.exact_tiles)],
             loss,
             reg: [opacity_reg, scale_reg, self.dilation[0], self.dilation[1]],
         }
@@ -927,7 +931,7 @@ impl Gpu {
         enc.clear_buffer(&ranges, 0, None);
         if total > 0 {
             self.section("duplicate");
-            let bind = self.bind(&self.k.duplicate, &[(0, &self.frame), (1, &proj), (2, &offsets), (3, &keys[0]), (4, &values[0])]);
+            let bind = self.bind(&self.k.duplicate, &[(0, &self.frame), (1, &proj), (2, &offsets), (3, &keys[0]), (4, &values[0]), (5, &counts)]);
             self.dispatch(&mut enc, &self.k.duplicate, &bind, groups(n));
             // Pipelined, the histograms' stride is the capacity's blocks and only the counted blocks scatter.
             let blocks = (total as usize).div_ceil(256);
@@ -1388,11 +1392,13 @@ mod tests {
             let values: Vec<u32> = gpu.read(&s.values[0], total);
             let proj: Vec<f32> = gpu.read(&gpu.splats.as_ref().expect("splats").proj, g.len() * 16);
             let tiles_x = cam.width.div_ceil(cpu::TILE);
-            let bits = 32 - (tiles_x * cam.height.div_ceil(cpu::TILE) - 1).leading_zeros();
+            let bits = 32 - (tiles_x * cam.height.div_ceil(cpu::TILE)).leading_zeros();
             let depth_bits = 32 - bits;
+            let counted: Vec<u32> = gpu.read(&gpu.splats.as_ref().expect("splats").counts, g.len());
             let mut per_gaussian = vec![0u32; g.len()];
             for j in 0..total {
                 assert!(j == 0 || keys[j - 1] <= keys[j], "unsorted at {j}");
+                assert_ne!(keys[j], u32::MAX, "sentinel at {j}: counting and emitting disagree");
                 let i = values[j] as usize;
                 let p = &proj[i * 16..i * 16 + 16];
                 let tile = keys[j] >> depth_bits;
@@ -1400,11 +1406,16 @@ mod tests {
                 assert!(tx >= p[11].to_bits() && tx < p[13].to_bits() && ty >= p[12].to_bits() && ty < p[14].to_bits(), "entry {j} outside its Gaussian's tiles");
                 per_gaussian[i] += 1;
             }
+            let (mut exact, mut boxes) = (0u64, 0u64);
             for (i, &c) in per_gaussian.iter().enumerate() {
                 let p = &proj[i * 16..i * 16 + 16];
-                let expected = if p[15] == 0.0 { 0 } else { (p[13].to_bits() - p[11].to_bits()) * (p[14].to_bits() - p[12].to_bits()) };
-                assert_eq!(c, expected, "Gaussian {i}");
+                let area = if p[15] == 0.0 { 0 } else { (p[13].to_bits() - p[11].to_bits()) * (p[14].to_bits() - p[12].to_bits()) };
+                assert_eq!(c, counted[i], "Gaussian {i}");
+                assert!(c <= area, "Gaussian {i}: {c} entries in a box of {area} tiles");
+                exact += c as u64;
+                boxes += area as u64;
             }
+            eprintln!("  {exact} entries, {boxes} in the tile boxes");
         }
         gpu.wait_readbacks();
         assert_eq!(gpu.overflows, 0);

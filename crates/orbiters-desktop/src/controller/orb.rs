@@ -87,6 +87,12 @@ pub struct OrbRuntime {
     last_avatar_check: Option<Instant>,
     voice_hint_shown: bool,
     enabled: bool,
+    /// Testing (the Orb page): the state the orb is held in, when every state began to show in turn, the owner acted as
+    /// away, the whole orb hidden.
+    test_face: Option<OrbFace>,
+    test_cycle: Option<Instant>,
+    test_afk: bool,
+    test_hidden: bool,
     /// The orb thread ends (the app quits).
     stop: bool,
     /// A stand-in Orbiters server and credential (tests).
@@ -96,7 +102,9 @@ pub struct OrbRuntime {
 
 impl OrbRuntime {
     fn face(&self) -> OrbFace {
-        if self.listening.is_some() {
+        if let Some(face) = self.test_face {
+            face
+        } else if self.listening.is_some() {
             OrbFace::Listening
         } else if self.thinking {
             OrbFace::Thinking
@@ -106,11 +114,16 @@ impl OrbRuntime {
             } else {
                 self.mood.unwrap_or(OrbFace::Talking)
             }
-        } else if self.afk {
+        } else if self.away() {
             OrbFace::Sleeping
         } else {
             OrbFace::Idle
         }
+    }
+
+    /// VRChat says the owner is away, or testing acts as if.
+    fn away(&self) -> bool {
+        self.afk || self.test_afk
     }
 
     fn status(&self) -> OrbStatus {
@@ -130,6 +143,10 @@ impl OrbRuntime {
             voice: self.voice.clone(),
             videos: self.videos.videos.clone(),
             resources: self.resources.clone(),
+            test_face: self.test_face,
+            test_cycle: self.test_cycle.is_some(),
+            test_afk: self.test_afk,
+            test_hidden: self.test_hidden,
         }
     }
 
@@ -148,6 +165,9 @@ impl OrbRuntime {
         self.outbox.extend(messages.into_iter().map(|m| (at, m)));
     }
 }
+
+/// How long each state shows while testing shows them all.
+const TEST_CYCLE_STEP: Duration = Duration::from_secs(2);
 
 fn parameter(name: &str) -> String {
     format!("{PARAMETERS_PREFIX}{name}")
@@ -264,6 +284,14 @@ impl Controller {
                 rt.afk_showing = false;
             }
             rt.enabled = settings.enabled;
+            if let Some(start) = rt.test_cycle {
+                // Every state for two seconds, then back to what Orb is doing.
+                let step = (now.duration_since(start).as_millis() / TEST_CYCLE_STEP.as_millis()) as usize;
+                rt.test_face = OrbFace::ALL.get(step).copied();
+                if rt.test_face.is_none() {
+                    rt.test_cycle = None;
+                }
+            }
             self.orb_afk(&mut rt, &settings);
             let busy_before = rt.sender.as_ref().is_some_and(TextSender::busy);
             if let Some(sender) = rt.sender.as_mut() {
@@ -311,7 +339,7 @@ impl Controller {
 
     /// Shows the AFK message while VRChat says the person is away (and nothing else is up), takes it down after.
     fn orb_afk(&self, rt: &mut OrbRuntime, settings: &OrbSettings) {
-        let wanted = settings.enabled && settings.afk_message_enabled && rt.afk && !settings.afk_message.trim().is_empty();
+        let wanted = settings.enabled && settings.afk_message_enabled && rt.away() && !settings.afk_message.trim().is_empty();
         let free = !rt.thinking && rt.listening.is_none();
         let Some(sender) = rt.sender.as_mut() else { return };
         if wanted && !rt.afk_showing && free && !sender.busy() {
@@ -625,6 +653,23 @@ impl Controller {
                 }
             }
             OrbCommand::InstallVoice => self.voice_install(),
+            OrbCommand::TestFace { face } => {
+                let mut rt = self.orb.lock().unwrap();
+                rt.test_cycle = None;
+                rt.test_face = face;
+            }
+            OrbCommand::TestCycle => {
+                let mut rt = self.orb.lock().unwrap();
+                rt.test_cycle = Some(Instant::now());
+                rt.test_face = Some(OrbFace::ALL[0]);
+            }
+            OrbCommand::TestAfk { on } => self.orb.lock().unwrap().test_afk = on,
+            OrbCommand::TestTouch => self.orb_touch(),
+            OrbCommand::TestVisible { on } => {
+                let mut rt = self.orb.lock().unwrap();
+                rt.test_hidden = !on;
+                rt.outbox.push((Instant::now(), (parameter(params::VISIBLE), OscType::Bool(on))));
+            }
         }
         self.orb_publish();
     }
@@ -1085,6 +1130,25 @@ mod tests {
         assert_eq!(visible, Some(true), "{sent:?}");
         assert_eq!(first_row(&cells), "Bonjour ! Ça va ?");
         assert!(sent.contains(&(parameter(params::STATE), OscType::Int(3))), "the orb talks while it shows");
+        ctl.orb_stop();
+        ctl.shutdown();
+    }
+
+    #[test]
+    fn testing_holds_a_state_then_plays_them_all() {
+        let (ctl, vrchat) = orb_with_vrchat();
+        ctl.orb_command(OrbCommand::TestFace { face: Some(OrbFace::Happy) });
+        let sent = received(&vrchat, Duration::from_millis(400));
+        assert!(sent.contains(&(parameter(params::STATE), OscType::Int(5))), "held happy: {sent:?}");
+        assert_eq!(ctl.view().orb.test_face, Some(OrbFace::Happy));
+        ctl.orb_command(OrbCommand::TestCycle);
+        let sent = received(&vrchat, Duration::from_millis(2600));
+        let states: Vec<i32> =
+            sent.iter().filter(|(a, _)| *a == parameter(params::STATE)).filter_map(|(_, v)| if let OscType::Int(i) = v { Some(*i) } else { None }).collect();
+        assert_eq!(states, vec![0, 1], "idle, then listening two seconds later");
+        ctl.orb_command(OrbCommand::TestVisible { on: false });
+        let sent = received(&vrchat, Duration::from_millis(300));
+        assert!(sent.contains(&(parameter(params::VISIBLE), OscType::Bool(false))));
         ctl.orb_stop();
         ctl.shutdown();
     }

@@ -186,6 +186,23 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             world: None,
         },
         Scenario {
+            name: "orb-testing",
+            page: Page::Orb,
+            snapshot: {
+                let mut s = orb_busy.clone();
+                s.orb.test_face = Some(crate::state::OrbFace::Happy);
+                s.orb.test_afk = true;
+                s
+            },
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 100_000.0,
+            world: None,
+        },
+        Scenario {
             name: "orb-scrolled",
             page: Page::Orb,
             snapshot: orb_busy,

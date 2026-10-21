@@ -1,12 +1,13 @@
 //! Orb page: talking to Orb (typed, or held to speak), what Orb knows of the avatar (the Orb prop and its panel, the
 //! AFK message, carried and held parameters), saved videos, Orb's ears (speech models, microphone, wake word), its
-//! assistant (on, or off for a tool without AI) and what Orbiters costs this computer. Changes apply as they are made.
+//! assistant (on, or off for a tool without AI), what Orbiters costs this computer, and testing what everyone sees of
+//! the orb (its states, sample texts, away, hidden, touched). Changes apply as they are made.
 
 use super::mic::{mic_test, MicTest};
 use super::settings::source_chip;
 use super::{section, Cx};
 use crate::ipc::OrbCommand;
-use crate::state::{AccountState, OrbLine, OrbStatus, OrbWho};
+use crate::state::{AccountState, OrbFace, OrbLine, OrbStatus, OrbWho};
 use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder};
 use orbiters_core::settings::{Settings, GOGOLOCO_PARAMETERS};
 use orbiters_ui::anim;
@@ -338,6 +339,78 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     widgets::text(painter, row.right_center(), Align2::RIGHT_CENTER, &Txt::new(usage, 12.5).color(theme::FG_2).mono());
                 }
             });
+
+            let prop = orb.prop_sync.is_some();
+            let testing_sub = match orb.prop_sync {
+                Some(n) => format!("What everyone sees of your orb · {n} text slots"),
+                None => "Wear an avatar with the Orb prop in VRChat to test it".to_string(),
+            };
+            section(ui, cx, 7, icons::FLASK, "Testing", Some(&testing_sub), |ui| {
+                widgets::field(
+                    ui,
+                    "States",
+                    Some("Hold the orb in one state, as everyone sees it, or play them all, two seconds each. Automatic follows what Orb is doing."),
+                    150.0,
+                    |ui| {
+                        if Button::new("Play every state").icon(icons::PLAY).size(Size::Sm).enabled(prop && !orb.test_cycle).show(ui).clicked() {
+                            cx.ctl.orb(OrbCommand::TestCycle);
+                        }
+                    },
+                );
+                ui.add_space(8.0);
+                let mut face = orb.test_face;
+                let mut options = vec![widgets::SegOption::new(None, "Automatic")];
+                options.extend(OrbFace::ALL.iter().map(|f| widgets::SegOption::new(Some(*f), state_label(*f))));
+                ui.add_enabled_ui(prop, |ui| {
+                    if widgets::segmented(ui, "orb-test-face", &mut face, &options, true) {
+                        cx.ctl.orb(OrbCommand::TestFace { face });
+                    }
+                });
+                ui.add_space(12.0);
+                widgets::separator(ui);
+                widgets::field(ui, "Panel text", Some("Sample texts on the panel: a short line, a full panel (its edges marked), several pages, every glyph."), 0.0, |_| {});
+                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
+                let mut bu = ui.new_child(UiBuilder::new().max_rect(r).layout(Layout::left_to_right(egui::Align::Center)));
+                bu.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                for (label, text) in [("Short", TEST_SHORT.to_string()), ("Full panel", test_full_panel()), ("Several pages", TEST_PAGES.to_string()), ("Every glyph", test_every_glyph())] {
+                    if Button::new(label).variant(Variant::Secondary).size(Size::Sm).enabled(prop).show(&mut bu).clicked() {
+                        cx.ctl.orb(OrbCommand::Say { text });
+                    }
+                }
+                if Button::new("Clear").icon(icons::X).variant(Variant::Ghost).size(Size::Sm).enabled(orb.panel.is_some()).show(&mut bu).clicked() {
+                    cx.ctl.orb(OrbCommand::HidePanel);
+                }
+                ui.add_space(12.0);
+                widgets::separator(ui);
+                let mut step = draft.orb.text_step_ms as f32;
+                widgets::field(ui, "Panel speed", Some("Time between two blocks of text. Faster than 250 ms, people around you miss blocks."), 284.0, |ui| {
+                    if widgets::slider(ui, "orb-test-step", &mut step, 250.0..=1000.0, 50.0, |v| format!("{v:.0} ms")) {
+                        draft.orb.text_step_ms = step as u64;
+                        apply = true;
+                    }
+                });
+                widgets::separator(ui);
+                let mut away = orb.test_afk;
+                widgets::field(ui, "Act as away", Some("The sleeping orb and your AFK message, as when VRChat says you are away."), 48.0, |ui| {
+                    if widgets::toggle(ui, "orb-test-afk", &mut away) {
+                        cx.ctl.orb(OrbCommand::TestAfk { on: away });
+                    }
+                });
+                widgets::separator(ui);
+                let mut shown = !orb.test_hidden;
+                widgets::field(ui, "Show the orb", Some("Off hides the whole orb and its panel (Orb/Visible), like Show Orb in its menu."), 48.0, |ui| {
+                    if widgets::toggle(ui, "orb-test-visible", &mut shown) {
+                        cx.ctl.orb(OrbCommand::TestVisible { on: shown });
+                    }
+                });
+                widgets::separator(ui);
+                widgets::field(ui, "Touch the orb", Some("As if your hand touched it: Orb listens for one sentence."), 110.0, |ui| {
+                    let ears = orb.voice.installed && snap.settings.orb.assistant;
+                    if Button::new("Touch").icon(icons::CROSSHAIR).variant(Variant::Secondary).size(Size::Sm).enabled(prop && ears).show(ui).clicked() {
+                        cx.ctl.orb(OrbCommand::TestTouch);
+                    }
+                });
+            });
         });
     });
     super::under_top(ui, cx, from, ui.max_rect().top() + cx.top + 8.0);
@@ -372,6 +445,35 @@ fn avatar_line(snap: &crate::state::Snapshot) -> String {
         (None, _) if orb.avatar_id.is_some() => "No Orb prop on this avatar".into(),
         _ => "No avatar yet".into(),
     }
+}
+
+/// A state's name in the Testing section.
+fn state_label(face: OrbFace) -> &'static str {
+    match face {
+        OrbFace::Idle => "Idle",
+        OrbFace::Listening => "Listening",
+        OrbFace::Thinking => "Thinking",
+        OrbFace::Talking => "Talking",
+        OrbFace::Sleeping => "Sleeping",
+        OrbFace::Happy => "Happy",
+        OrbFace::Annoyed => "Annoyed",
+        OrbFace::Surprised => "Surprised",
+    }
+}
+
+const TEST_SHORT: &str = "Testing, testing. Is this thing on?";
+const TEST_PAGES: &str = "This is page one of a test that runs over several pages, to check that each page stays up long enough to read. \
+Here comes page two: accents à é è ù ç ô, a little Cyrillic, Привет, and symbols ♥ ★ ♪ → ✓. \
+And this is the third and last page. When it has been read, the panel goes away on its own.";
+
+/// Four rows of exactly 32 characters, their first and last cells marked: the panel's edges.
+fn test_full_panel() -> String {
+    (1..=4).map(|r| format!("[{r}{}]", "·".repeat(29))).collect::<Vec<_>>().join("\n")
+}
+
+/// Every glyph of the panel but the space, in table order (two pages).
+fn test_every_glyph() -> String {
+    orbiters_contracts::orb::glyphs().iter().enumerate().filter(|(i, c)| *i > 0 && **c != '\0').map(|(_, c)| *c).collect()
 }
 
 fn face_word(face: crate::state::OrbFace) -> &'static str {

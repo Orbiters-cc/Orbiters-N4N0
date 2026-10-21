@@ -307,6 +307,22 @@ pub struct OrbStatus {
     pub videos: Vec<orbiters_orb::videos::SavedVideo>,
     /// Orbiters' processes and VRChat's.
     pub resources: Vec<ProcessUsage>,
+    /// Testing: the state the orb is held in, every state shown in turn, the owner acted as away.
+    #[serde(default)]
+    pub test_face: Option<OrbFace>,
+    #[serde(default)]
+    pub test_cycle: bool,
+    #[serde(default)]
+    pub test_afk: bool,
+    /// Testing: the whole orb is hidden (`Orb/Visible` sent false).
+    #[serde(default)]
+    pub test_hidden: bool,
+}
+
+impl OrbFace {
+    /// Every state, in `Orb/State`'s order.
+    pub const ALL: [OrbFace; 8] =
+        [OrbFace::Idle, OrbFace::Listening, OrbFace::Thinking, OrbFace::Talking, OrbFace::Sleeping, OrbFace::Happy, OrbFace::Annoyed, OrbFace::Surprised];
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

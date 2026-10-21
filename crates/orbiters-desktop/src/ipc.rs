@@ -151,6 +151,22 @@ pub enum OrbCommand {
     },
     /// Downloads the speech models.
     InstallVoice,
+    /// Testing: holds the orb in a state (`None`: back to what Orb is doing).
+    TestFace {
+        face: Option<crate::state::OrbFace>,
+    },
+    /// Testing: shows every state in turn, two seconds each.
+    TestCycle,
+    /// Testing: acts as if VRChat said the owner is away (the sleeping orb and the AFK message).
+    TestAfk {
+        on: bool,
+    },
+    /// Testing: acts as if the owner touched the orb.
+    TestTouch,
+    /// Testing: shows or hides the whole orb (`Orb/Visible`).
+    TestVisible {
+        on: bool,
+    },
 }
 
 /// Longest Hello a client may send, and how long it has to send it. Any local process can connect: before it proves

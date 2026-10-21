@@ -27,8 +27,10 @@ impl ReconstructHandle {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            // CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS: its CPU work never gets ahead of the app or the game.
-            cmd.creation_flags(0x0800_0000 | 0x0000_4000);
+            // CREATE_NO_WINDOW, normal priority class: the worker picks its own class right away (above normal while
+            // VRChat is closed, normal while it runs: orbiters_reconstruct::priority). Started below normal, it could
+            // not even reach that while another program keeps every core busy.
+            cmd.creation_flags(0x0800_0000);
         }
         let mut child = cmd.spawn()?;
         let stdout = child.stdout.take().expect("piped stdout");

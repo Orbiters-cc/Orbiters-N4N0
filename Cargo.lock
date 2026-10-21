@@ -3095,7 +3095,9 @@ dependencies = [
  "png",
  "serde",
  "serde_json",
+ "sysinfo",
  "wgpu",
+ "windows 0.62.2",
 ]
 
 [[package]]

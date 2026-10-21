@@ -63,7 +63,7 @@ pub fn load(dir: &Path, max_width: u32, mut progress: impl FnMut(f32)) -> anyhow
     let scale = w as f32 / full_w as f32;
 
     // Keyframes, decoded on every core.
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
+    let threads = crate::priority::loading_threads();
     let done = std::sync::atomic::AtomicUsize::new(0);
     let total = keyframes.len() + depth_frames.len();
     let chunks: Vec<&[&FrameRecord]> = keyframes.chunks(keyframes.len().div_ceil(threads)).collect();

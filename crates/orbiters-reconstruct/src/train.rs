@@ -163,6 +163,8 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let extent = extent(data);
     let mut rng = fastrand::Rng::with_seed(settings.seed);
 
+    // Feed the GPU even while another program keeps every core busy (crate::priority).
+    let _feeding = crate::priority::Feeding::start();
     gpu.upload(&init);
     let coarse = if settings.half_until > 0.0 { levels(data) } else { Vec::new() };
     for l in &coarse {
@@ -216,6 +218,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             gpu.step(camera, settings.background, Target::Color { rgba, scene_pixels: pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr))?
         };
         if it % settings.relocate_every == 0 && it >= 500 && it <= relocate_until {
+            let _cpu = crate::priority::CpuWork::start();
             let (mut current, mut m1, mut m2, stats) = gpu.download();
             let grow_to = (current.len() + current.len() / 20).min(settings.budget);
             if it % 500 == 0 {
@@ -233,10 +236,16 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             regularise(gpu, current.len());
         }
         if it % 50 == 0 || it == iterations {
-            let psnr = if it % 1000 == 0 || it == iterations { evaluate(gpu, data, &held_out, settings.background)? } else { None };
+            let psnr = if it % 1000 == 0 || it == iterations {
+                let _cpu = crate::priority::CpuWork::start();
+                evaluate(gpu, data, &held_out, settings.background)?
+            } else {
+                None
+            };
             report(&Progress { iteration: it, iterations, gaussians: gpu.count, intersections, psnr, seconds: start.elapsed().as_secs_f32() });
         }
     }
+    let _cpu = crate::priority::CpuWork::start();
     let (g, _, _, _) = gpu.download();
     if gpu.overflows > 0 {
         eprintln!("{} steps had more tile entries than the sort expected (dropped for that step)", gpu.overflows);

@@ -56,6 +56,8 @@ fn rgb8(img: &[[f32; 4]]) -> Vec<u8> {
 
 fn run(args: Args) -> anyhow::Result<Report> {
     let dir = &args.session;
+    // Above normal while VRChat is closed, out of its way while it runs (orbiters_reconstruct::priority).
+    orbiters_reconstruct::priority::govern();
     stage(Stage::Loading, 0.0);
     let data = dataset::load(dir, args.width, |p| stage(Stage::Loading, p))?;
     stage(Stage::Seeding, 0.0);

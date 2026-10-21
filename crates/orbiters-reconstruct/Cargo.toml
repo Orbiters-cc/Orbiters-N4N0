@@ -19,6 +19,10 @@ bytemuck = { workspace = true }
 wgpu = "30"
 fastrand = "2"
 
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+sysinfo = "0.37"
+
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in", "hlsl-out"] }
 png = { workspace = true }

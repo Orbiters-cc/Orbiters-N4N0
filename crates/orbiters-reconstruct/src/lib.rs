@@ -9,5 +9,6 @@ pub mod gpu;
 pub mod init;
 pub mod metrics;
 pub mod ply;
+pub mod priority;
 pub mod train;
 pub mod web;

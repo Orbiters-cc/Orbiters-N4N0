@@ -112,6 +112,14 @@ pub enum ToService {
     Orb {
         command: OrbCommand,
     },
+    /// VRChat's frames the overlay saw, for world performance statistics.
+    Frames {
+        chunk: crate::state::FrameChunk,
+    },
+    /// The overlay changed the walk boost's strength (also sent to the avatar's `Orb/WalkBoost`).
+    WalkBoost {
+        strength: f32,
+    },
     Quit,
 }
 

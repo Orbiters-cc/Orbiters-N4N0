@@ -376,6 +376,23 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             world: None,
         },
         Scenario {
+            name: "settings-walk",
+            page: Page::Settings,
+            snapshot: {
+                let mut s = idle.clone();
+                s.settings.walk_boost.enabled = true;
+                s.settings.world_performance = true;
+                s
+            },
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 1750.0,
+            world: None,
+        },
+        Scenario {
             name: "settings-scrolled",
             page: Page::Settings,
             snapshot: idle.clone(),
@@ -1041,6 +1058,8 @@ impl crate::backend::Backend for Still {
         None
     }
     fn calibrated(&self, _calibration: orbiters_contracts::performance::calibration::Calibration) {}
+    fn frames(&self, _chunk: crate::state::FrameChunk) {}
+    fn walk_boost(&self, _strength: f32) {}
     fn quit(&self) {}
 }
 
@@ -1114,9 +1133,14 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
     let mut listening = talking.clone();
     listening.orb.listening = true;
     listening.orb.voice.level = 0.55;
+    let mut walking = talking.clone();
+    walking.vrchat.world.in_world = true;
+    walking.settings.walk_boost.enabled = true;
+    walking.settings.walk_boost.strength = 0.35;
     // (name, snapshot, calibration: (T-pose held, started at this time; the last frame is at 1.48 s)).
     type Shot<'a> = (&'a str, &'a Snapshot, Option<(bool, f64)>);
-    let shots: [Shot; 7] = [
+    let shots: [Shot; 8] = [
+        ("overlay-walk", &walking, None),
         ("overlay-orb", &talking, None),
         ("overlay-orb-listening", &listening, None),
         ("overlay-idle", &idle, None),
@@ -1132,6 +1156,9 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
         let mut ui_state = OverlayUi::default();
         if name.starts_with("overlay-orb") {
             ui_state.page = crate::overlay::ui::Page::Orb;
+        }
+        if name == "overlay-walk" {
+            ui_state.page = crate::overlay::ui::Page::Walk;
         }
         let mut body = StandInBody { t_pose: calibrate.is_some_and(|(t_pose, _)| t_pose) };
         let mut sw = crate::overlay::painter();

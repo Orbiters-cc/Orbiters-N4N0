@@ -28,6 +28,50 @@ pub struct Settings {
     pub steamvr_overlay: bool,
     /// Orb, the Orbiters companion on the avatar.
     pub orb: OrbSettings,
+    /// Share VRChat's frame rate in each world with Orbiters, a summary a minute (contracts `Docs/world-performance.md`).
+    pub world_performance: bool,
+    /// Walk boost: the play space moves along with the movement stick, so walking in VRChat goes faster.
+    pub walk_boost: WalkBoostSettings,
+}
+
+/// Walk boost (the SteamVR overlay): while the stick VRChat walks with is pushed, the play space is dragged the same
+/// way, so the avatar covers more ground. The chaperone stays on the room's walls.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WalkBoostSettings {
+    pub enabled: bool,
+    /// 0 to 1: how much faster, up to [`WalkBoostSettings::MAX_EXTRA`] times VRChat's running speed on top of it.
+    pub strength: f32,
+    /// The hand whose stick VRChat walks with.
+    pub hand: Hand,
+    /// Which way "forward" is: where the head looks (VRChat's default) or where that hand points.
+    pub follow: Follow,
+}
+
+impl WalkBoostSettings {
+    pub const MAX_EXTRA: f32 = 2.0;
+}
+
+impl Default for WalkBoostSettings {
+    fn default() -> Self {
+        Self { enabled: false, strength: 0.5, hand: Hand::Left, follow: Follow::Head }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Hand {
+    #[default]
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Follow {
+    #[default]
+    Head,
+    Hand,
 }
 
 /// Orb, the Orbiters companion (contracts `Docs/orb.md`): its helpers, and its assistant.
@@ -178,6 +222,8 @@ impl Default for Settings {
             reduce_motion: false,
             steamvr_overlay: true,
             orb: OrbSettings::default(),
+            world_performance: false,
+            walk_boost: WalkBoostSettings::default(),
         }
     }
 }

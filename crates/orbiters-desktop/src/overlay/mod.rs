@@ -5,7 +5,9 @@
 //! device poses itself for T-pose calibrations, which also put a mirror and two hand targets in the play space.
 
 pub mod calibration;
+mod frames;
 pub mod ui;
+pub mod walk;
 
 use crate::backend::{Ctl, Remote};
 use crate::ipc::{Client, Endpoint, Role};
@@ -241,8 +243,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     if let Some(icon) = thumbnail() {
         presenter.show(&overlay, thumb, &icon, 128, 128);
     }
-    let mut world = World::new(&overlay)?;
     let mut state = ui::OverlayUi::default();
+    let mut world = World::new(&overlay)?;
+    let mut walk = walk::WalkBoost::new(&steamvr);
+    state.walk_unavailable = walk.unavailable().map(str::to_string);
+    let mut frames = frames::FrameSampler::new(&steamvr);
+
     let mut poses = SteamVrPoses { client: &steamvr, described: HashMap::new() };
     let started = Instant::now();
     let mut events: Vec<Event> = Vec::new();
@@ -254,6 +260,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         while let Some(e) = steamvr.poll_event() {
             if e.event_type == vr::event::QUIT {
+                walk.reset(&steamvr);
                 steamvr.acknowledge_quit();
                 return Ok(());
             }
@@ -291,6 +298,20 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let now = started.elapsed().as_secs_f64();
         state.tick(now, overlay.is_dashboard_visible(), &mut poses, &backend);
         world.update(&overlay, &mut presenter, &state.calibrator, now);
+        // VRChat has the scene (not a loading screen): its frames count, and walking may be boosted.
+        let compositor = steamvr.compositor().ok();
+        let vrchat_scene = compositor.as_ref().is_some_and(|c| snap.vrchat.pid.is_some_and(|pid| c.scene_focus_process() == pid) && !c.is_scene_loading())
+            && snap.vrchat.world.in_world;
+        if snap.settings.world_performance {
+            if let Some(chunk) = frames.update(&steamvr, vrchat_scene) {
+                backend.frames(chunk);
+            }
+        }
+        let place = snap.vrchat.running.then(|| snap.vrchat.world.instance.clone()).flatten();
+        let moment =
+            walk::Moment { settings: &snap.settings.walk_boost, walking_allowed: vrchat_scene && !overlay.is_dashboard_visible(), place: place.as_deref() };
+        walk.update(&steamvr, &moment);
+        let walking = walk.active(&moment);
         if !shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, &snap)) {
             shown = Some(snap.clone());
             next_frame = Some(next_frame.map_or(Instant::now(), |t| t.min(Instant::now())));
@@ -322,9 +343,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         } else if !visible {
             events.clear();
         }
-        let fast = visible || state.calibrator.in_world(now) || state.busy();
+        let fast = visible || walking || state.calibrator.in_world(now) || state.busy();
         std::thread::sleep(if fast { Duration::from_millis(11) } else { Duration::from_millis(100) });
     }
+    walk.reset(&steamvr);
     world.destroy(&overlay);
     let _ = overlay.destroy(main);
     Ok(())

@@ -56,6 +56,9 @@ pub struct WorldState {
     /// The name of the avatar the local player wears, as the log last named it.
     #[serde(default)]
     pub avatar_name: Option<String>,
+    /// The avatar each person in the instance wears, as the log last named it, by display name (the local player too).
+    #[serde(default)]
+    pub avatars: BTreeMap<String, String>,
     /// The last video a video player of the world played in this instance.
     #[serde(default)]
     pub last_video: Option<VideoSeen>,
@@ -73,6 +76,7 @@ impl WorldState {
                 self.in_world = true;
                 // Everyone in the new instance, the local player included, joins again.
                 self.players.clear();
+                self.avatars.clear();
                 self.last_video = None;
             }
             LogEvent::EnteringRoom { name } => {
@@ -82,6 +86,7 @@ impl WorldState {
             LogEvent::LeftRoom => {
                 self.in_world = false;
                 self.players.clear();
+                self.avatars.clear();
             }
             LogEvent::LocalPlayer { name } => self.local_player = Some(name.clone()),
             LogEvent::PlayerJoined { name, user_id } => {
@@ -89,14 +94,28 @@ impl WorldState {
             }
             LogEvent::PlayerLeft { name, user_id } => {
                 self.players.remove(&player_key(name, user_id));
+                self.avatars.remove(name);
             }
             LogEvent::AvatarSwitched { player, avatar } => {
                 if self.local_player.as_deref() == Some(player.as_str()) {
                     self.avatar_name = Some(avatar.clone());
                 }
+                self.avatars.insert(player.clone(), avatar.clone());
             }
             LogEvent::Video { url, at } => self.last_video = Some(VideoSeen { url: url.clone(), at: *at }),
         }
+    }
+
+    /// The avatars the other people wear, by avatar name, with how many wear each: who wears them stays out.
+    pub fn other_avatars(&self) -> BTreeMap<String, usize> {
+        let local = self.local_player.as_deref();
+        let mut out = BTreeMap::new();
+        for (player, avatar) in &self.avatars {
+            if Some(player.as_str()) != local {
+                *out.entry(avatar.clone()).or_insert(0) += 1;
+            }
+        }
+        out
     }
 
     /// People in the instance other than the local player.
@@ -309,8 +328,10 @@ mod tests {
         assert_eq!(s.others(), 1);
         assert_eq!(s.avatar_name.as_deref(), Some("Orbit"));
         assert_eq!(s.last_video.as_ref().map(|v| v.url.as_str()), Some("https://youtu.be/x"));
+        assert_eq!(s.other_avatars(), [("Fox".to_string(), 1)].into(), "names of avatars only, mine left out");
         s.apply(&parse_line("[Behaviour] OnPlayerLeft Friend (usr_f)").unwrap());
         assert_eq!(s.others(), 0);
+        assert!(s.other_avatars().is_empty());
         s.apply(&parse_line("[Behaviour] Joining wrld_b:2").unwrap());
         assert!(s.players.is_empty() && s.last_video.is_none(), "a new instance starts empty");
         assert_eq!(s.avatar_name.as_deref(), Some("Orbit"), "the avatar stays");

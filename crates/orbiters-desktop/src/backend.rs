@@ -48,6 +48,10 @@ pub trait Backend: Send + Sync {
     fn calibrated(&self, calibration: Calibration);
     /// Orb: a question, the Talk button, the panel, saved videos.
     fn orb(&self, command: OrbCommand);
+    /// VRChat's frames the overlay saw, for world performance statistics.
+    fn frames(&self, chunk: crate::state::FrameChunk);
+    /// Sets the walk boost's strength (0 to 1), saved and sent to the avatar's `Orb/WalkBoost`.
+    fn walk_boost(&self, strength: f32);
     /// Quits the whole app (the tray service and every window).
     fn quit(&self);
     /// The service asked this window to come to the front.
@@ -161,6 +165,14 @@ impl Backend for Remote {
 
     fn maps(&self) -> Option<MapsMine> {
         self.0.maps()
+    }
+
+    fn frames(&self, chunk: crate::state::FrameChunk) {
+        self.0.send(&ToService::Frames { chunk });
+    }
+
+    fn walk_boost(&self, strength: f32) {
+        self.0.send(&ToService::WalkBoost { strength });
     }
 
     fn calibrated(&self, calibration: Calibration) {
@@ -307,6 +319,14 @@ impl Backend for Local {
 
     fn maps(&self) -> Option<MapsMine> {
         self.ctl.maps()
+    }
+
+    fn frames(&self, chunk: crate::state::FrameChunk) {
+        self.ctl.frames(chunk);
+    }
+
+    fn walk_boost(&self, strength: f32) {
+        self.ctl.set_walk_boost(strength);
     }
 
     fn calibrated(&self, calibration: Calibration) {

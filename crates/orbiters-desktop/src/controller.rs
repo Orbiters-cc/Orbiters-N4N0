@@ -121,6 +121,8 @@ pub struct Controller {
     /// Orb, the companion on the avatar (controller/orb.rs), and its ears (controller/voice.rs).
     orb: Mutex<orb::OrbRuntime>,
     voice: Mutex<voice::VoiceRuntime>,
+    /// VRChat's frame rate per world, gathered for Orbiters (controller/performance.rs).
+    performance: Mutex<performance::PerformanceRuntime>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -174,6 +176,7 @@ pub type Shared = Arc<Controller>;
 mod account;
 mod maps;
 mod orb;
+mod performance;
 mod voice;
 pub use account::open_url;
 
@@ -204,6 +207,7 @@ impl Controller {
             upload_serial: AtomicU64::new(0),
             orb: Mutex::new(orb::OrbRuntime::default()),
             voice: Mutex::new(voice::VoiceRuntime::default()),
+            performance: Mutex::new(performance::PerformanceRuntime::default()),
         })
     }
 
@@ -787,6 +791,10 @@ impl Controller {
             s.settings = settings.clone();
             s.storage.limit_gb = settings.storage_limit_gb;
         });
+        if previous.walk_boost.strength != settings.walk_boost.strength {
+            // The avatar's Walk boost radial (Orb's option) follows the slider.
+            self.orb_send_parameter(orbiters_contracts::orb::params::WALK_BOOST, rosc::OscType::Float(settings.walk_boost.strength));
+        }
         let ctl = self.clone();
         std::thread::spawn(move || {
             if let Err(e) = settings.save() {
@@ -800,6 +808,17 @@ impl Controller {
                 ctl.bump_library();
             }
         });
+    }
+
+    /// Sets the walk boost's strength (0 to 1): the SteamVR tab's slider, or the avatar's Walk boost radial.
+    pub fn set_walk_boost(self: &Shared, strength: f32) {
+        let mut settings = self.settings();
+        let strength = strength.clamp(0.0, 1.0);
+        if (settings.walk_boost.strength - strength).abs() < 0.005 {
+            return;
+        }
+        settings.walk_boost.strength = strength;
+        self.save_settings(settings);
     }
 
     fn start_osc(self: &Shared) {

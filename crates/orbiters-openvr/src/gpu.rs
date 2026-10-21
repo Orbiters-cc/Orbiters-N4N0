@@ -14,6 +14,16 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory1};
 
+/// The name of DXGI adapter `adapter` (the first one when unknown), as Windows reports it ("NVIDIA GeForce RTX 4080").
+pub fn adapter_name(adapter: Option<u32>) -> Option<String> {
+    // SAFETY: plain DXGI factory and adapter queries.
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+    let desc = unsafe { factory.EnumAdapters1(adapter.unwrap_or(0)).ok()?.GetDesc1().ok()? };
+    let end = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+    let name = String::from_utf16_lossy(&desc.Description[..end]).trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
 struct Slot {
     textures: [ID3D11Texture2D; 2],
     size: (u32, u32),

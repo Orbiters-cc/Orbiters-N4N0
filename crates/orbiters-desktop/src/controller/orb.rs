@@ -260,6 +260,10 @@ impl Controller {
                 if beat.is_multiple_of(3) {
                     ctl.orb_resources(&mut system);
                 }
+                if beat.is_multiple_of(60) && ctl.settings().world_performance {
+                    // World performance summaries still waiting (VRChat closed before they were sent).
+                    ctl.performance_send_if_due(false);
+                }
                 beat += 1;
                 std::thread::sleep(Duration::from_secs(1));
             }
@@ -391,6 +395,11 @@ impl Controller {
                 }
             }
             "AFK" => self.orb.lock().unwrap().afk = value.truthy(),
+            params::WALK_BOOST => {
+                if let OscValue::Float(v) = value {
+                    self.set_walk_boost(*v);
+                }
+            }
             "MuteSelf" => self.orb.lock().unwrap().mute_self = value.truthy(),
             _ => {
                 let settings = self.settings().orb;
@@ -589,6 +598,11 @@ impl Controller {
                 None => {}
             }
         }
+    }
+
+    /// Sends one avatar parameter to VRChat from the orb thread (never from the OSC receiving thread).
+    pub(super) fn orb_send_parameter(&self, name: &str, value: OscType) {
+        self.orb.lock().unwrap().outbox.push((Instant::now(), (parameter(name), value)));
     }
 
     /// What the window and the overlay ask.

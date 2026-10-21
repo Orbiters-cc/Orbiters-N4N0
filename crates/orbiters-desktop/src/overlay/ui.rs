@@ -28,6 +28,7 @@ pub enum Page {
     #[default]
     Capture,
     Orb,
+    Walk,
 }
 
 #[derive(Default)]
@@ -39,6 +40,8 @@ pub struct OverlayUi {
     /// "Hear yourself": the microphone played in the headset.
     hear: Option<orbiters_sound::MicMonitor>,
     hear_error: Option<String>,
+    /// Why walk boost cannot work here (SteamVR input refused the actions), if it cannot.
+    pub walk_unavailable: Option<String>,
 }
 
 impl OverlayUi {
@@ -71,9 +74,15 @@ impl OverlayUi {
         let mut page = self.page;
         // The control's width: its labels with their padding, and the track's.
         let label = |t: &str| widgets::text_size(ui, &Txt::new(t, 13.0).weight(weight::MEDIUM)).x + 28.0;
-        let track = label("Capture") + label("Orb") + 8.0;
+        let track = label("Capture") + label("Orb") + label("Walk boost") + 8.0;
         let mut tabs = ui.new_child(UiBuilder::new().max_rect(Rect::from_center_size(pos2(rect.center().x, 46.0), vec2(track, 36.0))).id_salt("overlay-pages"));
-        widgets::segmented(&mut tabs, "overlay-page", &mut page, &[SegOption::new(Page::Capture, "Capture"), SegOption::new(Page::Orb, "Orb")], false);
+        widgets::segmented(
+            &mut tabs,
+            "overlay-page",
+            &mut page,
+            &[SegOption::new(Page::Capture, "Capture"), SegOption::new(Page::Orb, "Orb"), SegOption::new(Page::Walk, "Walk boost")],
+            false,
+        );
         if page != self.page {
             self.page = page;
             if self.talking {
@@ -85,6 +94,10 @@ impl OverlayUi {
         let right = Rect::from_min_max(pos2(left.right() + 20.0, left.top()), pos2(rect.right() - 24.0, left.bottom()));
         if self.page == Page::Orb {
             self.orb(ui, snap, ctl, left, right);
+            return;
+        }
+        if self.page == Page::Walk {
+            self.walk(ui, snap, ctl, left, right);
             return;
         }
         recorder(ui, snap, ctl, left);
@@ -156,6 +169,107 @@ impl OverlayUi {
 
 impl OverlayUi {
     /// Orb's page: hold to talk on the left, what Orb said and its panel at the top right, quick actions under it.
+    /// Walk boost: on or off and how strong (left), which stick and which way is forward (right).
+    fn walk(&mut self, ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, left: Rect, right: Rect) {
+        use orbiters_core::settings::{Follow, Hand, WalkBoostSettings};
+        let boost = &snap.settings.walk_boost;
+        let p = ui.painter().clone();
+        widgets::card(&p, left, theme::CARD_RADIUS);
+        widgets::text(&p, pos2(left.left() + 22.0, left.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps("Walk boost"));
+        let extra = (boost.strength * WalkBoostSettings::MAX_EXTRA * 100.0).round();
+        let big = if boost.enabled && boost.strength > 0.0 { format!("+{extra:.0} %") } else { "Off".to_string() };
+        let center = pos2(left.center().x, left.top() + 150.0);
+        let tone = if boost.enabled && boost.strength > 0.0 { theme::ACCENT } else { theme::FG_3 };
+        widgets::text(&p, center, Align2::CENTER_CENTER, &Txt::new(big, 64.0).weight(weight::SEMIBOLD).color(tone));
+        let (line, color) = if let Some(why) = &self.walk_unavailable {
+            (format!("SteamVR refused the controls: {why}"), theme::WARN)
+        } else if !snap.vrchat.running {
+            ("Works in VRChat: start it to walk faster.".to_string(), theme::FG_3)
+        } else if !snap.vrchat.world.in_world {
+            ("Works once you are in a world.".to_string(), theme::FG_3)
+        } else {
+            ("Push your stick: the room moves with you.".to_string(), theme::FG_3)
+        };
+        widgets::text_truncated(&p, pos2(left.center().x, center.y + 62.0), Align2::CENTER_CENTER, &Txt::new(line, 14.0).color(color), left.width() - 40.0);
+
+        // On or off, then the strength.
+        let row = |y: f32| Rect::from_min_size(pos2(left.left() + 22.0, y), vec2(left.width() - 44.0, 40.0));
+        let on_row = row(left.top() + 290.0);
+        widgets::text(&p, on_row.left_center(), Align2::LEFT_CENTER, &Txt::new("Boost my walking", 16.0).weight(weight::MEDIUM));
+        let mut on = boost.enabled;
+        let mut child = ui.new_child(UiBuilder::new().max_rect(on_row).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        if widgets::toggle(&mut child, "overlay-walk-on", &mut on) {
+            let mut settings = snap.settings.clone();
+            settings.walk_boost.enabled = on;
+            ctl.save_settings(settings);
+        }
+        let strength_row = row(on_row.bottom() + 24.0);
+        widgets::text(&p, strength_row.left_center(), Align2::LEFT_CENTER, &Txt::new("Strength", 16.0).weight(weight::MEDIUM));
+        let mut strength = boost.strength;
+        let mut child = ui.new_child(UiBuilder::new().max_rect(strength_row).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        child.add_enabled_ui(boost.enabled, |ui| {
+            if widgets::slider(ui, "overlay-walk-strength", &mut strength, 0.0..=1.0, 0.05, |v| format!("+{:.0} %", v * WalkBoostSettings::MAX_EXTRA * 100.0)) {
+                ctl.walk_boost(strength);
+            }
+        });
+        widgets::text_truncated(
+            &p,
+            pos2(left.left() + 22.0, left.bottom() - 28.0),
+            Align2::LEFT_CENTER,
+            &Txt::new("Orb's Walk boost radial on your avatar sets it too.", 12.5).color(theme::FG_4),
+            left.width() - 44.0,
+        );
+
+        // The stick and the way forward.
+        widgets::card(&p, right, theme::CARD_RADIUS);
+        widgets::text(&p, pos2(right.left() + 22.0, right.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps("Your stick"));
+        let mut y = right.top() + 64.0;
+        let choice = |ui: &mut Ui, title: &str, sub: &str, y: f32, draw: &mut dyn FnMut(&mut Ui)| {
+            widgets::text(&p, pos2(right.left() + 22.0, y + 12.0), Align2::LEFT_CENTER, &Txt::new(title, 16.0).weight(weight::MEDIUM));
+            widgets::text_truncated(
+                &p,
+                pos2(right.left() + 22.0, y + 36.0),
+                Align2::LEFT_CENTER,
+                &Txt::new(sub, 13.0).color(theme::FG_3),
+                right.width() - 44.0,
+            );
+            let area = Rect::from_min_size(pos2(right.left() + 22.0, y + 56.0), vec2(right.width() - 44.0, 40.0));
+            let mut child = ui.new_child(UiBuilder::new().max_rect(area).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            draw(&mut child);
+        };
+        let mut hand = boost.hand;
+        choice(ui, "Walking hand", "The hand whose stick moves you in VRChat.", y, &mut |ui| {
+            if widgets::segmented(ui, "overlay-walk-hand", &mut hand, &[SegOption::new(Hand::Left, "Left"), SegOption::new(Hand::Right, "Right")], true) {
+                let mut settings = snap.settings.clone();
+                settings.walk_boost.hand = hand;
+                ctl.save_settings(settings);
+            }
+        });
+        y += 130.0;
+        let mut follow = boost.follow;
+        choice(ui, "Forward is", "Where you look (VRChat's default), or where that hand points.", y, &mut |ui| {
+            if widgets::segmented(
+                ui,
+                "overlay-walk-follow",
+                &mut follow,
+                &[SegOption::new(Follow::Head, "Where I look"), SegOption::new(Follow::Hand, "Where my hand points")],
+                true,
+            ) {
+                let mut settings = snap.settings.clone();
+                settings.walk_boost.follow = follow;
+                ctl.save_settings(settings);
+            }
+        });
+        y += 130.0;
+        let g = p.layout_job(
+            Txt::new("Your play space follows you, and the chaperone stays on your room's walls. It goes back when you change world.", 13.5)
+                .color(theme::FG_3)
+                .line_height(19.0)
+                .job(right.width() - 44.0),
+        );
+        p.galley(pos2(right.left() + 22.0, y + 8.0), g, theme::FG_3);
+    }
+
     fn orb(&mut self, ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, left: Rect, right: Rect) {
         let orb = &snap.orb;
         let settings = &snap.settings.orb;

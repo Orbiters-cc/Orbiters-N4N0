@@ -280,6 +280,18 @@ pub struct ProcessUsage {
     pub memory_mb: f32,
 }
 
+/// VRChat's frames the SteamVR overlay saw, about ten seconds of them (contracts `Docs/world-performance.md`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FrameChunk {
+    /// Time between VRChat's frames, oldest first.
+    pub intervals_ms: Vec<f32>,
+    pub refresh_hz: Option<f32>,
+    /// The headset's model (SteamVR's model number).
+    pub headset: Option<String>,
+    /// The graphics card driving the headset.
+    pub gpu: Option<String>,
+}
+
 /// Orb, the companion on the avatar (controller/orb.rs).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct OrbStatus {

@@ -7,8 +7,11 @@
 //! A [`Client`] of type [`AppType::Background`] never starts SteamVR: it fails when SteamVR is not running.
 
 use orbiters_contracts::performance::tracking::{self, Device, Sample};
+pub mod chaperone;
+pub mod compositor;
 #[cfg(windows)]
 pub mod gpu;
+pub mod input;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 
@@ -89,6 +92,7 @@ impl ControllerRole {
 pub mod prop {
     pub const TRACKING_SYSTEM_NAME: i32 = 1000;
     pub const MODEL_NUMBER: i32 = 1001;
+    pub const DISPLAY_FREQUENCY: i32 = 2002;
     pub const SERIAL_NUMBER: i32 = 1002;
     pub const MANUFACTURER_NAME: i32 = 1005;
     pub const CONTROLLER_ROLE_HINT: i32 = 3007;
@@ -394,6 +398,14 @@ impl Client {
         let mut err = 0;
         // SAFETY: entry 24 is GetInt32TrackedDeviceProperty.
         let v = unsafe { entry::<F>(self.system, 24)(device, property, &mut err) };
+        (err == 0).then_some(v)
+    }
+
+    pub fn float_property(&self, device: u32, property: i32) -> Option<f32> {
+        type F = unsafe extern "system" fn(u32, i32, *mut i32) -> f32;
+        let mut err = 0;
+        // SAFETY: entry 23 is GetFloatTrackedDeviceProperty.
+        let v = unsafe { entry::<F>(self.system, 23)(device, property, &mut err) };
         (err == 0).then_some(v)
     }
 

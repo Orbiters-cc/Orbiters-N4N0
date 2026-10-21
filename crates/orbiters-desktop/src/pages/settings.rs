@@ -193,6 +193,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     let (r, _) = ui.allocate_exact_size(vec2(100.0, 20.0), Sense::hover());
                     widgets::text(ui.painter(), r.right_center(), Align2::RIGHT_CENTER, &Txt::new(t, 12.0).color(c));
                 });
+                widgets::separator(ui);
+                widgets::field(
+                    ui,
+                    "Share my frame rate per world",
+                    Some("In VR, a summary a minute: the world, your FPS, your avatar, how many people were there and the names of their avatars, never who they are, plus your graphics card, processor and headset. It shows which worlds run well on the Map explorer."),
+                    48.0,
+                    |ui| {
+                        apply |= widgets::toggle(ui, "world-performance", &mut draft.world_performance);
+                    },
+                );
             });
 
             let vr = &snap.steamvr;
@@ -262,6 +272,23 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(ui, "SteamVR dashboard tab", Some(tab), 48.0, |ui| {
                     apply |= widgets::toggle(ui, "perf-overlay", &mut draft.steamvr_overlay);
                 });
+                widgets::separator(ui);
+                widgets::field(
+                    ui,
+                    "Walk boost",
+                    Some("In VR, your play space moves along with your walking stick, so you walk faster in VRChat. Also in the SteamVR tab and Orb's menu."),
+                    48.0,
+                    |ui| {
+                        apply |= widgets::toggle(ui, "walk-boost", &mut draft.walk_boost.enabled);
+                    },
+                );
+                if draft.walk_boost.enabled {
+                    widgets::separator(ui);
+                    let max = orbiters_core::settings::WalkBoostSettings::MAX_EXTRA * 100.0;
+                    widgets::field(ui, "Strength", Some("How much faster than VRChat's own walking."), 284.0, |ui| {
+                        apply |= widgets::slider(ui, "walk-strength", &mut draft.walk_boost.strength, 0.0..=1.0, 0.05, |v| format!("+{:.0} %", v * max));
+                    });
+                }
             });
 
             section(ui, cx, 6, icons::SPARKLE, "Interface", None, |ui| {

@@ -291,6 +291,9 @@ pub struct Gpu {
     pub exact_tiles: bool,
     /// Lab: sort key width, 32 or 24 bits (tile id above, log depth in the rest); 24 sorts in 6 passes instead of 8.
     pub key_bits: u32,
+    /// Lab: seconds spent inside [`Gpu::step`], and of those waiting for the GPU (readbacks of earlier steps).
+    pub step_seconds: f64,
+    pub wait_seconds: f64,
     /// Lab: the sky cubemap ([`Gpu::set_sky`]), its Adam learning rate, and what the kernels bind without one.
     sky: Option<SkyBuffers>,
     pub sky_lr: f32,
@@ -609,6 +612,8 @@ impl Gpu {
             overflows: 0,
             exact_tiles: true,
             key_bits: 32,
+            step_seconds: 0.0,
+            wait_seconds: 0.0,
             sky: None,
             sky_lr: 0.01,
             no_sky,
@@ -946,8 +951,10 @@ impl Gpu {
     /// Waits for a slot's readback if it is in flight, then takes it.
     fn wait_readback(&mut self, slot: usize) {
         if self.ring[slot].state.load(Ordering::SeqCst) == 1 {
+            let began = std::time::Instant::now();
             let index = self.ring[slot].submission.clone();
             let _ = self.device.poll(wgpu::PollType::Wait { submission_index: index, timeout: None });
+            self.wait_seconds += began.elapsed().as_secs_f64();
         }
         self.take_readback(slot);
     }
@@ -961,6 +968,13 @@ impl Gpu {
     /// Renders (and, with a target, takes one optimisation step with `lr`). Returns the number of tile intersections:
     /// on a training device the latest count read back for this image size (a few steps old, as steps do not wait).
     pub fn step(&mut self, cam: &Camera, background: [f32; 3], target: Target<'_>, lr: Option<LearningRates>) -> anyhow::Result<u32> {
+        let began = std::time::Instant::now();
+        let stepped = self.step_inner(cam, background, target, lr);
+        self.step_seconds += began.elapsed().as_secs_f64();
+        stepped
+    }
+
+    fn step_inner(&mut self, cam: &Camera, background: [f32; 3], target: Target<'_>, lr: Option<LearningRates>) -> anyhow::Result<u32> {
         let n = self.count;
         if n == 0 {
             return Ok(0);

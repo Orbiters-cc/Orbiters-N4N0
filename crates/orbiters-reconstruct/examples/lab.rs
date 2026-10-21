@@ -242,6 +242,8 @@ fn main() -> anyhow::Result<()> {
         outcome.psnr_train,
         gpu.overflows
     );
+    eprintln!("inside steps {:.1} s, of which waiting for the GPU {:.1} s", gpu.step_seconds, gpu.wait_seconds);
+    let (step_seconds, wait_seconds) = (gpu.step_seconds, gpu.wait_seconds);
     ply::write(&a.out.join("splats.ply"), &outcome.gaussians)?;
     if let Some((n, texels)) = gpu.read_sky() {
         // The six faces side by side.
@@ -293,6 +295,8 @@ fn main() -> anyhow::Result<()> {
         "seconds": outcome.seconds,
         "relocate_seconds": outcome.relocate_seconds,
         "evaluate_seconds": outcome.evaluate_seconds,
+        "step_seconds": step_seconds,
+        "gpu_wait_seconds": wait_seconds,
         "load_seconds": load_seconds,
         "seed_seconds": seed_seconds,
         "gaussians": outcome.gaussians.len(),

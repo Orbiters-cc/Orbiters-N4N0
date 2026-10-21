@@ -14,7 +14,7 @@ use orbiters_core::clock;
 use orbiters_core::osc::{OscEvent, OscService, OscValue, AVATAR_CHANGE, DEPTH_FRAMES_PARAMETER, PARAMETERS_PREFIX};
 use orbiters_core::protocol::{OscSample, PerformanceSpec, SourceSpec, StartCapture, WorkerCommand, WorkerEvent};
 use orbiters_core::reconstruction::Event as ReconstructEvent;
-use orbiters_core::settings::Settings;
+use orbiters_core::settings::{Settings, WhilePlaying};
 use orbiters_core::visited;
 use orbiters_core::vrchat_log::{LogEvent, LogWatcher, WorldState};
 use serde::{Deserialize, Serialize};
@@ -211,6 +211,8 @@ struct Reconstruction {
     handle: ReconstructHandle,
     dir: PathBuf,
     told: bool,
+    /// Training on the integrated GPU (VRChat was running).
+    integrated: bool,
 }
 
 /// `calibration.json` in the config folder: the latest calibration, kept across restarts.
@@ -1240,6 +1242,10 @@ impl Controller {
         if echo && previous.walk_boost.strength != settings.walk_boost.strength {
             self.orb_send_parameter(orbiters_contracts::orb::params::WALK_BOOST, rosc::OscType::Float(settings.walk_boost.strength));
         }
+        if previous.reconstruct_while_playing != settings.reconstruct_while_playing {
+            // Reconstructions held while VRChat runs may start now.
+            self.next_reconstruction();
+        }
         let (osc_changed, sessions_changed) = (previous.osc != settings.osc, previous.sessions_dir != settings.sessions_dir);
         self.queue_save(settings);
         if osc_changed || sessions_changed {
@@ -1416,10 +1422,51 @@ impl Controller {
     /// Trains splats from a session: now when nothing runs and nothing records, else once its turn comes.
     pub fn reconstruct(self: &Shared, dir: PathBuf) -> anyhow::Result<()> {
         if self.queue_reconstruction(dir)? {
-            let after = if self.is_capturing() { "the capture" } else { "the reconstruction under way" };
-            self.notify(NoticeKind::Info, format!("Waiting its turn: the reconstruction starts after {after}."));
+            self.notify(NoticeKind::Info, format!("Waiting its turn: the reconstruction starts {}.", self.reconstruction_waits_for()));
         }
         Ok(())
+    }
+
+    /// What a waiting reconstruction waits for, as the end of "it starts …".
+    pub(crate) fn reconstruction_waits_for(&self) -> &'static str {
+        if self.is_capturing() {
+            "after the capture"
+        } else if self.reconstruction.lock().unwrap().is_some() {
+            "after the ones before it"
+        } else {
+            "once VRChat closes"
+        }
+    }
+
+    /// Reconstructions wait for VRChat to close (settings' `reconstruct_while_playing`).
+    fn held_for_vrchat(&self) -> bool {
+        self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.running
+    }
+
+    /// VRChat started or closed. Once it closes, a reconstruction training on the integrated GPU starts again on the
+    /// graphics card (a minute or two there instead of an hour), and the ones held for VRChat start.
+    fn vrchat_changed(self: &Shared, running: bool) {
+        if running {
+            return;
+        }
+        let moved = {
+            let mut guard = self.reconstruction.lock().unwrap();
+            match guard.as_mut() {
+                Some(r) if r.integrated => {
+                    r.told = true;
+                    // Its turn again first, once the stopped worker has exited (on_reconstruct_exit).
+                    let dir = r.dir.clone();
+                    self.change_queue(|q| q.push_front(dir));
+                    r.handle.cancel();
+                    true
+                }
+                _ => false,
+            }
+        };
+        if moved {
+            self.notify(NoticeKind::Info, "VRChat closed: the reconstruction starts again on the graphics card.");
+        }
+        self.next_reconstruction();
     }
 
     /// Starts the reconstruction worker on a session (one at a time, never during a capture).
@@ -1431,6 +1478,7 @@ impl Controller {
         if self.is_capturing() {
             anyhow::bail!("Finish the capture first: reconstruction takes the whole GPU.");
         }
+        let integrated = self.settings().reconstruct_while_playing == WhilePlaying::IntegratedGpu && self.snapshot.lock().unwrap().vrchat.running;
         let mut guard = self.reconstruction.lock().unwrap();
         if guard.is_some() {
             anyhow::bail!("A reconstruction is already running.");
@@ -1453,10 +1501,10 @@ impl Controller {
             let ctl = self.clone();
             move || ctl.on_reconstruct_exit()
         };
-        self.update(|s| s.reconstruction = Some(ReconstructionJob::new(dir.clone())));
-        match ReconstructHandle::spawn(&dir, on_event, on_log, on_exit) {
+        self.update(|s| s.reconstruction = Some(ReconstructionJob::new(dir.clone(), integrated)));
+        match ReconstructHandle::spawn(&dir, integrated, on_event, on_log, on_exit) {
             Ok(handle) => {
-                *guard = Some(Reconstruction { handle, dir, told: false });
+                *guard = Some(Reconstruction { handle, dir, told: false, integrated });
                 Ok(())
             }
             Err(e) => {
@@ -1503,10 +1551,10 @@ impl Controller {
         r
     }
 
-    /// Starts the first waiting session when nothing runs and nothing records.
+    /// Starts the first waiting session when nothing runs, nothing records and VRChat does not hold them.
     fn next_reconstruction(self: &Shared) {
         loop {
-            if self.is_capturing() || self.reconstruction.lock().unwrap().is_some() {
+            if self.is_capturing() || self.reconstruction.lock().unwrap().is_some() || self.held_for_vrchat() {
                 return;
             }
             let Some(dir) = self.change_queue(VecDeque::pop_front) else { return };
@@ -1766,6 +1814,7 @@ fn spawn_watchers(ctl: Shared) {
                     let pid = named(&["vrchat.exe", "vrchat"]);
                     let steamvr_pid = named(&["vrserver.exe", "vrserver"]);
                     let steamvr = steamvr_pid.is_some();
+                    let was = running;
                     running = pid.is_some();
                     vrchat_since = if running { vrchat_since.or(Some(Instant::now())) } else { None };
                     let mut started = None;
@@ -1789,6 +1838,9 @@ fn spawn_watchers(ctl: Shared) {
                     });
                     if let Some(pid) = started {
                         let _ = ctl.send_if_running(&WorkerCommand::GameAudio { pid });
+                    }
+                    if was != running {
+                        ctl.vrchat_changed(running);
                     }
                     // Microphones come and go (headsets): ask the worker again now and then.
                     if tick.is_multiple_of(15) && tick > 0 {

@@ -36,6 +36,21 @@ pub struct Settings {
     pub photo_3d: Photo3dLength,
     /// Seconds before a 3D picture taken from Orb's menu starts (0: at once).
     pub photo_3d_timer: u32,
+    /// Where reconstructions train while VRChat runs.
+    pub reconstruct_while_playing: WhilePlaying,
+}
+
+/// Where a reconstruction trains while VRChat runs. The graphics card takes the GPU from the game: on an RTX 4080,
+/// VRChat's GPU time per frame went from about 27 to 46 ms and a third of its frames came late while Canine trained.
+/// The processor's integrated GPU left the game's frames as they were (within a few percent) but trains about 40 times
+/// slower (Canine: 29 s on the RTX 4080, about 18 min on an Intel UHD 770). Or reconstructions wait for VRChat to close.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhilePlaying {
+    #[default]
+    GraphicsCard,
+    IntegratedGpu,
+    AfterVrchat,
 }
 
 /// A 3D picture's length: a gentle 1 s sweep, 4 s that circle you and fly 10 m out every way, or 8 s that also circle
@@ -285,6 +300,7 @@ impl Default for Settings {
             walk_boost: WalkBoostSettings::default(),
             photo_3d: Photo3dLength::default(),
             photo_3d_timer: 0,
+            reconstruct_while_playing: WhilePlaying::default(),
         }
     }
 }

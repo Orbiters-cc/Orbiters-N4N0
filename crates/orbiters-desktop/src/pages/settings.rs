@@ -6,9 +6,10 @@ use super::mic::{mic_test, MicTest};
 use super::{section, Cx, Job};
 use crate::state::AccountState;
 use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder};
+use orbiters_core::settings::WhilePlaying;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
-use orbiters_ui::widgets::{self, Button, Size, Variant};
+use orbiters_ui::widgets::{self, Button, SegOption, Size, Variant};
 use orbiters_ui::{format, icons, logo};
 use std::path::PathBuf;
 
@@ -104,6 +105,22 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     });
                     ui.add_space(8.0);
                 }
+                widgets::separator(ui);
+                let places = [
+                    SegOption::new(WhilePlaying::GraphicsCard, "Graphics card").hint("Fastest; VRChat stutters while it trains"),
+                    SegOption::new(WhilePlaying::IntegratedGpu, "Integrated GPU")
+                        .hint("About 40 times slower, and VRChat keeps its frame rate; once VRChat closes it starts again on the graphics card"),
+                    SegOption::new(WhilePlaying::AfterVrchat, "After VRChat").hint("Reconstructions wait until VRChat closes"),
+                ];
+                widgets::field(
+                    ui,
+                    "Reconstruct while VRChat runs",
+                    Some("Training on the graphics card makes VRChat stutter; the processor's integrated GPU leaves the game alone but is about 40 times slower."),
+                    360.0,
+                    |ui| {
+                        apply |= widgets::segmented(ui, "while-playing", &mut draft.reconstruct_while_playing, &places, true);
+                    },
+                );
             });
 
             let st = &snap.storage;

@@ -12,10 +12,11 @@ pub struct ReconstructHandle {
 }
 
 impl ReconstructHandle {
-    /// Starts the worker on a session. `on_event` runs on a reader thread for every event, `on_exit` once when the
-    /// worker's output ends.
+    /// Starts the worker on a session, on the integrated GPU when `integrated`. `on_event` runs on a reader thread for
+    /// every event, `on_exit` once when the worker's output ends.
     pub fn spawn(
         session: &Path,
+        integrated: bool,
         on_event: impl Fn(Event) + Send + 'static,
         on_log: impl Fn(String) + Send + 'static,
         on_exit: impl FnOnce() + Send + 'static,
@@ -24,6 +25,9 @@ impl ReconstructHandle {
         anyhow::ensure!(path.is_file(), "reconstruction worker not found at {}", path.display());
         let mut cmd = Command::new(&path);
         cmd.arg(session).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if integrated {
+            cmd.args(["--gpu", "integrated"]);
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

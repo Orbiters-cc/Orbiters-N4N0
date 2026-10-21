@@ -176,8 +176,28 @@ fn priority() -> Vec<std::ops::Range<usize>> {
     out
 }
 
+/// What one step of a screen channel sends (contracts `Docs/orb.md`, Screen): the pointer or the values, never both.
+/// VRChat may apply values a frame or more before a pointer sent with them, which wrote a block with the next one's
+/// bytes; so a block goes in three steps: the pointer to 0 (nothing written), its values, the pointer to it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Send {
+    /// The pointer to 0: the next block's values follow.
+    Rest,
+    /// The values of a block (from 0), written once the pointer moves to it.
+    Values(usize, Vec<u8>),
+    /// The pointer to a block (from 0).
+    Pointer(usize),
+}
+
+impl Send {
+    /// Whether this step moves the pointer onto a block (which then stays there a whole step).
+    pub fn moves_to_block(&self) -> bool {
+        matches!(self, Send::Pointer(_))
+    }
+}
+
 /// One audience's copy of the screen's memory, as the steps sent it: the owner (local values) or everyone else (the
-/// synced text channel). Each step sends the most urgent block that differs from what it should hold.
+/// synced text channel). Each block sent is the most urgent one that differs from what it should hold.
 pub struct Audience {
     /// Bytes a step writes.
     block: usize,
@@ -187,11 +207,16 @@ pub struct Audience {
     /// The next block resent when nothing differs.
     resync: usize,
     order: Vec<std::ops::Range<usize>>,
+    /// The block whose values go next (the pointer rests at 0), and the block the pointer moves to next.
+    queued: Option<usize>,
+    pending: Option<usize>,
+    /// The pointer rests at 0.
+    resting: bool,
 }
 
 impl Audience {
     pub fn new(block: usize) -> Self {
-        Self { block: block.max(2), sent: [0; BANK], known: false, resync: 0, order: priority() }
+        Self { block: block.max(2), sent: [0; BANK], known: false, resync: 0, order: priority(), queued: None, pending: None, resting: false }
     }
 
     pub fn blocks(&self) -> usize {
@@ -201,6 +226,37 @@ impl Audience {
     /// The screen's memory is unknown again (an avatar load, the screen reopened): it is cleared first.
     pub fn forget(&mut self) {
         self.known = false;
+        self.queued = None;
+        self.pending = None;
+        self.resting = false;
+    }
+
+    /// Whether a block is between its steps: nothing else may use the channel until it is done.
+    pub fn mid_block(&self) -> bool {
+        self.queued.is_some() || self.pending.is_some()
+    }
+
+    /// The next step for `want`: the next block (a changed one by urgency, else one in turn) goes in three steps, the
+    /// pointer to 0, its values, the pointer to it.
+    pub fn step(&mut self, want: &[u8; BANK]) -> Send {
+        if let Some(block) = self.pending.take() {
+            self.resting = false;
+            return Send::Pointer(block);
+        }
+        let block = match self.queued.take() {
+            Some(block) => block,
+            None => {
+                let block = self.next(want).unwrap_or_else(|| self.resend());
+                if !self.resting {
+                    self.resting = true;
+                    self.queued = Some(block);
+                    return Send::Rest;
+                }
+                block
+            }
+        };
+        self.pending = Some(block);
+        Send::Values(block, self.bytes(block))
     }
 
     /// Whether the memory must be cleared before writing (and is then taken as clear).
@@ -284,11 +340,13 @@ pub mod local {
     }
 }
 
-/// The owner's step: block `block` (from 0) through the local pointer and values.
-pub fn local_messages(block: usize, bytes: &[u8]) -> Vec<Message> {
-    let mut out = vec![(parameter(local::POINTER), OscType::Int(block as i32 + 1))];
-    out.extend(bytes.iter().enumerate().map(|(i, &b)| (parameter(&local::value(i)), OscType::Float(orb::sync_value(b)))));
-    out
+/// The owner's step through the local pointer (block `b` is pointer `b + 1`) or values.
+pub fn local_messages(send: &Send) -> Vec<Message> {
+    match send {
+        Send::Rest => vec![(parameter(local::POINTER), OscType::Int(0))],
+        Send::Values(_, bytes) => bytes.iter().enumerate().map(|(i, &b)| (parameter(&local::value(i)), OscType::Float(orb::sync_value(b)))).collect(),
+        Send::Pointer(block) => vec![(parameter(local::POINTER), OscType::Int(*block as i32 + 1))],
+    }
 }
 
 /// The owner's screen memory cleared.
@@ -310,11 +368,16 @@ pub fn fits(sync: usize) -> bool {
     first_pointer(sync) + BANK.div_ceil(sync) - 1 < POINTER_SCREEN_CLOSE as usize
 }
 
-/// Everyone else's step: block `block` (from 0) through the text panel's synced pointer and values.
-pub fn synced_messages(sync: usize, block: usize, bytes: &[u8]) -> Vec<Message> {
-    let mut out = vec![(parameter(params::TEXT_POINTER), OscType::Int((first_pointer(sync) + block) as i32))];
-    out.extend(bytes.iter().take(sync).enumerate().map(|(i, &b)| (parameter(&params::text_sync(i)), OscType::Float(orb::sync_value(b)))));
-    out
+/// Everyone else's step through the text panel's synced pointer (block `b` is pointer `first_pointer(sync) + b`) or
+/// values.
+pub fn synced_messages(sync: usize, send: &Send) -> Vec<Message> {
+    match send {
+        Send::Rest => vec![(parameter(params::TEXT_POINTER), OscType::Int(0))],
+        Send::Values(_, bytes) => {
+            bytes.iter().take(sync).enumerate().map(|(i, &b)| (parameter(&params::text_sync(i)), OscType::Float(orb::sync_value(b)))).collect()
+        }
+        Send::Pointer(block) => vec![(parameter(params::TEXT_POINTER), OscType::Int((first_pointer(sync) + block) as i32))],
+    }
 }
 
 /// Everyone else's screen closes (and clears).
@@ -439,13 +502,55 @@ mod tests {
     fn messages_and_pointers() {
         assert!(fits(4) && fits(8) && fits(16));
         assert_eq!(first_pointer(8), 17);
-        let m = synced_messages(8, 2, &[0, 1, 255, 129, 4, 5, 6, 7]);
-        assert_eq!(m[0], (format!("{}Orb/Text/Pointer", orbiters_core::osc::PARAMETERS_PREFIX), OscType::Int(19)));
-        assert_eq!(m.len(), 9);
-        assert_eq!(m[3].1, OscType::Float(orb::sync_value(255)));
-        let l = local_messages(0, &[1; LOCAL_VALUES]);
-        assert_eq!(l.len(), 17);
-        assert_eq!(l[0].1, OscType::Int(1));
-        assert!(l[16].0.ends_with("Orb/Screen/Value15"));
+        let pointer = format!("{}Orb/Text/Pointer", orbiters_core::osc::PARAMETERS_PREFIX);
+        assert_eq!(synced_messages(8, &Send::Pointer(2)), vec![(pointer.clone(), OscType::Int(19))]);
+        assert_eq!(synced_messages(8, &Send::Rest), vec![(pointer, OscType::Int(0))]);
+        let m = synced_messages(8, &Send::Values(2, vec![0, 1, 255, 129, 4, 5, 6, 7]));
+        assert_eq!(m.len(), 8);
+        assert_eq!(m[2].1, OscType::Float(orb::sync_value(255)));
+        let l = local_messages(&Send::Values(0, vec![1; LOCAL_VALUES]));
+        assert_eq!(l.len(), 16);
+        assert!(l[15].0.ends_with("Orb/Screen/Value15"));
+        assert_eq!(local_messages(&Send::Pointer(0))[0].1, OscType::Int(1));
+    }
+
+    /// The owner's screen memory as the animator writes it: a block takes the values while the pointer is on it,
+    /// whichever arrived last; pointer 0 writes nothing.
+    fn write(memory: &mut [u8; BANK], pointer: &mut Option<usize>, values: &mut Vec<u8>, size: usize, send: &Send) {
+        match send {
+            Send::Rest => *pointer = None,
+            Send::Pointer(b) => *pointer = Some(*b),
+            Send::Values(_, bytes) => *values = bytes.clone(),
+        }
+        if let Some(b) = *pointer {
+            for (i, &v) in values.iter().enumerate() {
+                if b * size + i < BANK {
+                    memory[b * size + i] = v;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn blocks_go_in_three_steps_that_never_mix_pointer_and_values() {
+        let menu = results_menu();
+        let want = Frame::new(&menu, None, None, Flags::default(), &|_| Some(picture(3))).bank;
+        for size in [8, LOCAL_VALUES] {
+            let mut audience = Audience::new(size);
+            audience.take_clear();
+            let (mut memory, mut pointer, mut values) = ([0u8; BANK], None, Vec::new());
+            let mut kinds = Vec::new();
+            for _ in 0..3 * 400 {
+                let send = audience.step(&want);
+                kinds.push(std::mem::discriminant(&send));
+                write(&mut memory, &mut pointer, &mut values, size, &send);
+            }
+            assert_eq!(memory, want, "{size} bytes a block");
+            assert!(!audience.mid_block() || kinds.len() % 3 != 0);
+            // Rest, values, pointer, in turn.
+            assert_eq!(kinds[0], std::mem::discriminant(&Send::Rest));
+            assert_eq!(kinds[1], std::mem::discriminant(&Send::Values(0, Vec::new())));
+            assert_eq!(kinds[2], std::mem::discriminant(&Send::Pointer(0)));
+        }
     }
 }

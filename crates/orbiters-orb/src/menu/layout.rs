@@ -464,16 +464,17 @@ pub fn layout(page: ScreenPage) -> Layout {
         ScreenPage::Photo => {
             elements.push(round(Target::Back, 32, Icon::Back));
             for (i, label) in ["Off", "3 s", "5 s", "10 s"].into_iter().enumerate() {
-                elements.push(with(element(Target::Timer(i as u8), Rect::new(100 + i as u16 * 152, 156, 140, 56), Look::Chip), None, Some(label)));
+                elements.push(with(element(Target::Timer(i as u8), Rect::new(100 + i as u16 * 136, 156, 124, 56), Look::Chip), None, Some(label)));
             }
             for (i, label) in ["1 s", "4 s", "8 s"].into_iter().enumerate() {
-                elements.push(with(element(Target::Length(i as u8), Rect::new(100 + i as u16 * 152, 292, 140, 56), Look::Chip), None, Some(label)));
+                elements.push(with(element(Target::Length(i as u8), Rect::new(100 + i as u16 * 136, 292, 124, 56), Look::Chip), None, Some(label)));
             }
             elements.push(with(element(Target::Take, Rect::new(100, 400, 444, 76), Look::Accent), Some(Icon::Cube), Some("Take 3D picture")));
             labels.push(Label { x: 104, y: 34, size: 32, text: "3D picture", style: Style::Primary, bold: true });
             labels.push(Label { x: 100, y: 116, size: 24, text: "Timer", style: Style::Secondary, bold: false });
             labels.push(Label { x: 100, y: 252, size: 24, text: "Camera flight", style: Style::Secondary, bold: false });
-            icons.push((Rect::new(680, 140, 260, 260), Icon::Cube, Some(Tint::Violet)));
+            // Clear of the chips (the last one ends at 632).
+            icons.push((Rect::new(712, 140, 240, 240), Icon::Cube, Some(Tint::Violet)));
             slots.add(100, 504, 56, 28, Style::Accent, Content::PhotoStatus);
         }
     }

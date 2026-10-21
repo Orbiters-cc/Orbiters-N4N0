@@ -506,32 +506,34 @@ impl super::Controller {
             if s.owner.take_clear() {
                 out.extend(screen::local_clear());
             } else {
-                // A changed block, else one in turn (a block VRChat dropped comes back within a round).
-                let block = s.owner.next(&frame.bank).unwrap_or_else(|| s.owner.resend());
-                out.extend(screen::local_messages(block, &s.owner.bytes(block)));
+                // A changed block, else one in turn (a block VRChat dropped comes back within a round), in three steps.
+                out.extend(screen::local_messages(&s.owner.step(&frame.bank)));
             }
         }
         out
     }
 
-    /// The screen's turn on the text channel, when it is due: everyone else's screen, a block a step.
+    /// The screen's turn on the text channel, when it is due: everyone else's screen, a block a step (its three steps
+    /// a phase apart, then the pointer stays on it a whole step).
     pub(super) fn screen_synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
         let panel_wants = rt.sender.as_ref().is_some_and(|p| p.wants_step(now));
+        // A panel block between its steps finishes first.
+        let panel_mid_block = rt.sender.as_ref().is_some_and(TextSender::mid_block);
         let step = rt.sender.as_ref().map_or(Duration::from_millis(300), TextSender::step);
         let s = &mut rt.screen;
         let Some(everyone) = s.everyone.as_mut() else { return Vec::new() };
         let screen_wants = s.close_everyone || s.menu.open;
-        if !screen_wants || now < s.next_synced {
+        if !screen_wants || now < s.next_synced || panel_mid_block {
             return Vec::new();
         }
-        // Both want the channel: they take turns.
-        if panel_wants && !s.screen_turn {
+        // Both want the channel: they take turns, a whole block each.
+        if panel_wants && !s.screen_turn && !everyone.mid_block() {
             s.screen_turn = true;
             s.next_synced = now + step;
             return Vec::new();
         }
         s.screen_turn = false;
-        s.next_synced = now + step;
+        let mut wait = step;
         let out = if s.close_everyone {
             s.close_everyone = false;
             everyone.forget();
@@ -543,11 +545,15 @@ impl super::Controller {
                 });
             // Everyone else's memory starts clear (closing cleared it): the screen opens with its first block.
             everyone.take_clear();
-            let block = everyone.next(&frame.bank).unwrap_or_else(|| everyone.resend());
-            screen::synced_messages(rt.sender.as_ref().map_or(8, TextSender::sync), block, &everyone.bytes(block))
+            let send = everyone.step(&frame.bank);
+            if !send.moves_to_block() {
+                wait = orbiters_orb::text::PHASE_GAP;
+            }
+            screen::synced_messages(rt.sender.as_ref().map_or(8, TextSender::sync), &send)
         };
+        s.next_synced = now + wait;
         if let Some(sender) = rt.sender.as_mut() {
-            sender.hold_until(now + step);
+            sender.hold_until(now + wait);
         }
         out
     }

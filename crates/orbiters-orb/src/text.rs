@@ -10,6 +10,19 @@ use std::time::{Duration, Instant};
 /// One OSC message to VRChat: an avatar parameter (full address) and its value.
 pub type Message = (String, OscType);
 
+/// Time between the phases of a block (contracts `Docs/orb.md`, Text). VRChat may apply sync values a frame or more
+/// before a pointer sent with them, which wrote each block with the next one's letters; so no message batch changes
+/// both: the pointer goes to 0 (nothing written), then the values change, then the pointer moves to the block.
+pub const PHASE_GAP: Duration = Duration::from_millis(80);
+
+/// What a block still has to send.
+enum Phase {
+    /// The pointer is at 0: the block's values go next.
+    Values(usize),
+    /// Its values were sent (these cells): the pointer goes to the block next.
+    Pointer(usize, Vec<u8>),
+}
+
 fn parameter(name: &str) -> String {
     format!("{}{name}", orbiters_core::osc::PARAMETERS_PREFIX)
 }
@@ -41,6 +54,10 @@ pub struct TextSender {
     clear: bool,
     /// The last page stays up until replaced or hidden (the AFK message).
     sticky: bool,
+    /// The block being sent and when its next phase is due.
+    phase: Option<(Instant, Phase)>,
+    /// `Orb/Text/Pointer` as this sender last set it; unknown after a reload or when something else used the channel.
+    pointer: Option<i32>,
 }
 
 impl TextSender {
@@ -60,6 +77,8 @@ impl TextSender {
             next_step: None,
             clear: false,
             sticky: false,
+            phase: None,
+            pointer: None,
         }
     }
 
@@ -107,6 +126,7 @@ impl TextSender {
         self.current = None;
         self.queue.clear();
         self.clear = true;
+        self.phase = None;
     }
 
     /// The avatar was (re)loaded: its panel's cells are unknown until cleared; what was being shown starts again.
@@ -115,16 +135,26 @@ impl TextSender {
         self.visible = false;
         self.complete_at = None;
         self.next_step = None;
+        self.phase = None;
+        self.pointer = None;
     }
 
-    /// Whether a step is due at `now` and would send something (a page, a clear).
+    /// Whether a step is due at `now` and would send something (a page, a clear), or a block is between its phases.
     pub fn wants_step(&self, now: Instant) -> bool {
-        self.next_step.is_none_or(|t| now >= t) && (self.busy() || !self.known || self.clear)
+        self.phase.is_some() || self.next_step.is_none_or(|t| now >= t) && (self.busy() || !self.known || self.clear)
     }
 
-    /// Something else uses the text channel until `at` (Orb's screen takes its turns): no step before then.
+    /// Whether a block is between its phases: nothing else may use the text channel until it is done.
+    pub fn mid_block(&self) -> bool {
+        self.phase.is_some()
+    }
+
+    /// Something else uses the text channel until `at` (Orb's screen takes its turns): no step before then, and the
+    /// pointer is no longer known (the next block moves it to 0 first). A block between its phases starts again later.
     pub fn hold_until(&mut self, at: Instant) {
         self.next_step = Some(self.next_step.map_or(at, |t| t.max(at)));
+        self.phase = None;
+        self.pointer = None;
     }
 
     /// The time between two steps.
@@ -149,6 +179,13 @@ impl TextSender {
 
     /// The messages of the step due at `now` (none between steps or with nothing to do).
     pub fn tick(&mut self, now: Instant) -> Vec<Message> {
+        if let Some((at, phase)) = self.phase.take() {
+            if now < at {
+                self.phase = Some((at, phase));
+                return Vec::new();
+            }
+            return self.phase_messages(phase, now);
+        }
         if self.next_step.is_some_and(|t| now < t) {
             return Vec::new();
         }
@@ -159,10 +196,42 @@ impl TextSender {
         out
     }
 
+    fn set_pointer(&mut self, pointer: i32) -> Message {
+        self.pointer = Some(pointer);
+        (parameter(params::TEXT_POINTER), OscType::Int(pointer))
+    }
+
+    /// A block's next phase: its values (the pointer is at 0), or the pointer moving to it, after which the step's time
+    /// starts (the pointer stays on the block a whole step, for people who receive it late).
+    fn phase_messages(&mut self, phase: Phase, now: Instant) -> Vec<Message> {
+        match phase {
+            Phase::Values(block) => {
+                let page = self.current.unwrap_or([0; TEXT_LENGTH]);
+                let n = self.sync;
+                let cells = page[block * n..(block + 1) * n].to_vec();
+                let out = cells.iter().enumerate().map(|(i, &g)| (parameter(&params::text_sync(i)), OscType::Float(orb::sync_value(g)))).collect();
+                self.phase = Some((now + PHASE_GAP, Phase::Pointer(block, cells)));
+                out
+            }
+            Phase::Pointer(block, cells) => {
+                let n = self.sync;
+                self.sent[block * n..(block + 1) * n].copy_from_slice(&cells);
+                self.next_step = Some(now + self.step);
+                // Complete once its last block went: its reading time starts now.
+                if let Some(page) = self.current {
+                    if self.complete_at.is_none() && (0..orb::pointer_count(n)).all(|b| page[b * n..(b + 1) * n] == self.sent[b * n..(b + 1) * n]) {
+                        self.complete_at = Some(now);
+                    }
+                }
+                vec![self.set_pointer(block as i32 + 1)]
+            }
+        }
+    }
+
     fn step_messages(&mut self, now: Instant) -> Vec<Message> {
         let mut out = Vec::new();
         if !self.known || self.clear {
-            out.push((parameter(params::TEXT_POINTER), OscType::Int(POINTER_CLEAR)));
+            out.push(self.set_pointer(POINTER_CLEAR));
             self.sent = [0; TEXT_LENGTH];
             self.known = true;
             self.clear = false;
@@ -182,11 +251,7 @@ impl TextSender {
         let pointers = orb::pointer_count(n);
         let differs = |sent: &Page, b: usize| page[b * n..(b + 1) * n] != sent[b * n..(b + 1) * n];
         if let Some(block) = (0..pointers).find(|&b| differs(&self.sent, b)) {
-            out.extend(self.block(&page, block));
-            // Complete once its last block went: its reading time starts now.
-            if !(0..pointers).any(|b| differs(&self.sent, b)) {
-                self.complete_at = Some(now);
-            }
+            out.extend(self.block(block, now));
             return out;
         }
         let complete = *self.complete_at.get_or_insert(now);
@@ -203,7 +268,7 @@ impl TextSender {
                 }
                 None => {
                     self.current = None;
-                    out.push((parameter(params::TEXT_POINTER), OscType::Int(POINTER_CLEAR)));
+                    out.push(self.set_pointer(POINTER_CLEAR));
                     out.push((parameter(params::TEXT_VISIBLE), OscType::Bool(false)));
                     self.sent = [0; TEXT_LENGTH];
                     self.visible = false;
@@ -214,47 +279,76 @@ impl TextSender {
         // Up and whole: resend a block in turn for whoever loaded the avatar after it was sent.
         let block = self.resync % pointers;
         self.resync = (block + 1) % pointers;
-        out.extend(self.block(&page, block));
+        out.extend(self.block(block, now));
         out
     }
 
-    fn block(&mut self, page: &Page, block: usize) -> Vec<Message> {
-        let n = self.sync;
-        let mut out = vec![(parameter(params::TEXT_POINTER), OscType::Int(block as i32 + 1))];
-        for i in 0..n {
-            let cell = block * n + i;
-            out.push((parameter(&params::text_sync(i)), OscType::Float(orb::sync_value(page[cell]))));
-            self.sent[cell] = page[cell];
+    /// Starts sending `block`: its values at once when the pointer writes nothing (0, or 255 that clears), else the
+    /// pointer to 0 first.
+    fn block(&mut self, block: usize, now: Instant) -> Vec<Message> {
+        if matches!(self.pointer, Some(0) | Some(POINTER_CLEAR)) {
+            return self.phase_messages(Phase::Values(block), now);
         }
-        out
+        self.phase = Some((now + PHASE_GAP, Phase::Values(block)));
+        vec![self.set_pointer(0)]
     }
 }
 
-/// What a panel shows after `messages` were applied to cells `cells` (the prop's animator, for tests and previews).
-pub fn apply(cells: &mut Page, sync: usize, messages: &[Message]) -> Option<bool> {
-    let mut visible = None;
-    let mut pointer = 0i32;
-    let prefix = orbiters_core::osc::PARAMETERS_PREFIX;
-    for (address, value) in messages {
-        let Some(name) = address.strip_prefix(prefix) else { continue };
-        match (name, value) {
-            (n, OscType::Bool(v)) if n == params::TEXT_VISIBLE => visible = Some(*v),
-            (n, OscType::Int(p)) if n == params::TEXT_POINTER => {
-                pointer = *p;
-                if pointer == POINTER_CLEAR {
-                    *cells = [0; TEXT_LENGTH];
-                }
-            }
-            (n, OscType::Float(v)) => {
-                if let Some(i) = n.strip_prefix(params::TEXT_SYNC_PREFIX).and_then(|i| i.parse::<usize>().ok()) {
-                    if (1..=orb::pointer_count(sync) as i32).contains(&pointer) && i < sync {
-                        cells[(pointer as usize - 1) * sync + i] = orb::glyph_of_value(*v);
+/// The prop's animator as far as the panel goes (for tests and previews): the pointer and values it last received,
+/// and its cells. A cell takes value i while the pointer is at its block, whichever of the two arrived last.
+#[derive(Clone, Debug)]
+pub struct PanelModel {
+    pub cells: Page,
+    pointer: i32,
+    values: [Option<u8>; 16],
+}
+
+impl PanelModel {
+    pub fn new(cells: Page) -> Self {
+        Self { cells, pointer: 0, values: [None; 16] }
+    }
+
+    /// Applies `messages` in order; returns the last visibility they set.
+    pub fn apply(&mut self, sync: usize, messages: &[Message]) -> Option<bool> {
+        let mut visible = None;
+        let prefix = orbiters_core::osc::PARAMETERS_PREFIX;
+        for (address, value) in messages {
+            let Some(name) = address.strip_prefix(prefix) else { continue };
+            match (name, value) {
+                (n, OscType::Bool(v)) if n == params::TEXT_VISIBLE => visible = Some(*v),
+                (n, OscType::Int(p)) if n == params::TEXT_POINTER => {
+                    self.pointer = *p;
+                    if self.pointer == POINTER_CLEAR {
+                        self.cells = [0; TEXT_LENGTH];
+                    }
+                    for i in 0..sync.min(16) {
+                        self.write(sync, i);
                     }
                 }
+                (n, OscType::Float(v)) => {
+                    if let Some(i) = n.strip_prefix(params::TEXT_SYNC_PREFIX).and_then(|i| i.parse::<usize>().ok()).filter(|&i| i < sync.min(16)) {
+                        self.values[i] = Some(orb::glyph_of_value(*v));
+                        self.write(sync, i);
+                    }
+                }
+                _ => {}
             }
-            _ => {}
+        }
+        visible
+    }
+
+    fn write(&mut self, sync: usize, i: usize) {
+        if let (true, Some(g)) = ((1..=orb::pointer_count(sync) as i32).contains(&self.pointer), self.values[i]) {
+            self.cells[(self.pointer as usize - 1) * sync + i] = g;
         }
     }
+}
+
+/// What a panel shows after `messages` (all of them, in order) were applied to `cells`.
+pub fn apply(cells: &mut Page, sync: usize, messages: &[Message]) -> Option<bool> {
+    let mut panel = PanelModel::new(*cells);
+    let visible = panel.apply(sync, messages);
+    *cells = panel.cells;
     visible
 }
 
@@ -263,17 +357,23 @@ mod tests {
     use super::*;
 
     const STEP: Duration = Duration::from_millis(300);
+    // The desktop's loop: the sender is asked every 50 ms.
+    const TICK: Duration = Duration::from_millis(50);
+    // A block at most: the pointer to 0, the values, the pointer to it, then the step.
+    const BLOCK: Duration = Duration::from_millis(300 + 2 * 80 + 100);
 
-    /// Runs `steps` steps from `start`; returns the time after them and the last visibility a step set.
-    fn run(sender: &mut TextSender, cells: &mut Page, start: Instant, steps: usize) -> (Instant, Option<bool>) {
+    /// Ticks from `start` for `time`; returns the time after it and the last visibility set. Each tick's messages reach
+    /// the panel in reverse order, as VRChat may apply them: the phases make it harmless.
+    fn run(sender: &mut TextSender, panel: &mut PanelModel, start: Instant, time: Duration) -> (Instant, Option<bool>) {
         let mut t = start;
         let mut visible = None;
-        for _ in 0..steps {
-            let out = sender.tick(t);
-            if let Some(v) = apply(cells, sender.sync(), &out) {
+        while t < start + time {
+            let mut out = sender.tick(t);
+            out.reverse();
+            if let Some(v) = panel.apply(sender.sync(), &out) {
                 visible = Some(v);
             }
-            t += STEP;
+            t += TICK;
         }
         (t, visible)
     }
@@ -286,65 +386,83 @@ mod tests {
     fn a_page_arrives_block_by_block_then_hides() {
         for sync in orb::SYNC_COUNTS {
             let mut sender = TextSender::new(sync, STEP);
-            let mut cells: Page = [7; TEXT_LENGTH];
+            let mut panel = PanelModel::new([7; TEXT_LENGTH]);
             sender.show("Ça marche ! Je mets ton sweat.");
             // The first step clears what the panel held before and shows it.
             let t0 = Instant::now();
-            assert_eq!(apply(&mut cells, sync, &sender.tick(t0)), Some(true));
-            assert_eq!(cells, [0; TEXT_LENGTH]);
-            // One block per step: 30 characters take 32 / sync steps.
-            let (t, _) = run(&mut sender, &mut cells, t0 + STEP, 32 / sync);
-            assert_eq!(first_row(&cells), "Ça marche ! Je mets ton sweat.", "{sync} sync values");
+            assert_eq!(panel.apply(sync, &sender.tick(t0)), Some(true));
+            assert_eq!(panel.cells, [0; TEXT_LENGTH]);
+            // A block at a time: 30 characters take 32 / sync blocks.
+            let (t, _) = run(&mut sender, &mut panel, t0 + STEP, BLOCK * (32 / sync) as u32);
+            assert_eq!(first_row(&panel.cells), "Ça marche ! Je mets ton sweat.", "{sync} sync values");
             assert!(sender.busy());
             // Up long enough to read, then cleared and hidden.
-            let (_, visible) = run(&mut sender, &mut cells, t + Duration::from_secs(4), 1);
+            let (_, visible) = run(&mut sender, &mut panel, t + Duration::from_secs(4), BLOCK);
             assert_eq!(visible, Some(false));
             assert!(!sender.busy());
-            assert_eq!(cells, [0; TEXT_LENGTH]);
+            assert_eq!(panel.cells, [0; TEXT_LENGTH]);
         }
+    }
+
+    #[test]
+    fn no_batch_changes_the_pointer_and_the_values_together() {
+        let mut sender = TextSender::new(8, STEP);
+        sender.show("one two three four five six seven eight nine ten eleven twelve thirteen fourteen");
+        let mut t = Instant::now();
+        let mut pointers = 0;
+        for _ in 0..400 {
+            let out = sender.tick(t);
+            let pointer = out.iter().any(|(a, _)| a.ends_with(params::TEXT_POINTER));
+            let values = out.iter().any(|(a, _)| a.contains(params::TEXT_SYNC_PREFIX));
+            assert!(!(pointer && values), "{out:?}");
+            pointers += pointer as usize;
+            t += TICK;
+        }
+        assert!(pointers > 10);
     }
 
     #[test]
     fn only_changed_blocks_are_sent_and_pages_follow() {
         let mut sender = TextSender::new(8, STEP);
-        let mut cells: Page = [0; TEXT_LENGTH];
+        let mut panel = PanelModel::new([0; TEXT_LENGTH]);
         let text = (1..=6).map(|i| format!("ligne {i}")).collect::<Vec<_>>().join("\n");
         sender.show(&text);
         assert_eq!(sender.pages_waiting(), 1);
         let t0 = Instant::now();
-        apply(&mut cells, 8, &sender.tick(t0));
-        // Rows hold "ligne n" in their first block only: four steps for four rows.
-        let (t, _) = run(&mut sender, &mut cells, t0 + STEP, 4);
-        assert_eq!(orb::page_text(&cells).lines().filter(|l| l.starts_with("ligne")).count(), 4);
-        // After the first page's reading time the second replaces it, again one changed block per step.
-        let (_, _) = run(&mut sender, &mut cells, t + Duration::from_secs(5), 4);
-        let shown: Vec<String> = orb::page_text(&cells).lines().map(|l| l.trim_end().to_string()).collect();
+        panel.apply(8, &sender.tick(t0));
+        // Rows hold "ligne n" in their first block only: four blocks for four rows.
+        let (t, _) = run(&mut sender, &mut panel, t0 + STEP, BLOCK * 4);
+        assert_eq!(orb::page_text(&panel.cells).lines().filter(|l| l.starts_with("ligne")).count(), 4);
+        // After the first page's reading time the second replaces it, again one changed block at a time.
+        let (_, _) = run(&mut sender, &mut panel, t + Duration::from_secs(5), BLOCK * 4);
+        let shown: Vec<String> = orb::page_text(&panel.cells).lines().map(|l| l.trim_end().to_string()).collect();
         assert_eq!(shown, vec!["ligne 5", "ligne 6", "", ""]);
     }
 
     #[test]
     fn a_whole_page_is_resent_while_it_is_up() {
         let mut sender = TextSender::new(16, STEP);
-        let mut cells: Page = [0; TEXT_LENGTH];
+        let mut panel = PanelModel::new([0; TEXT_LENGTH]);
         let text = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen";
-        sender.show(text);
-        let (t, _) = run(&mut sender, &mut cells, Instant::now(), 1 + orb::pointer_count(16));
+        // Kept up (sticky) for as long as the round takes.
+        sender.show_sticky(text);
+        let (t, _) = run(&mut sender, &mut panel, Instant::now(), BLOCK * (1 + orb::pointer_count(16)) as u32);
         // Someone who loads the avatar now starts from an empty panel and gets every block within one round.
-        let mut late: Page = [0; TEXT_LENGTH];
+        let mut late = PanelModel::new([0; TEXT_LENGTH]);
         let mut pointers = std::collections::HashSet::new();
         let mut now = t;
-        for _ in 0..orb::pointer_count(16) {
+        while now < t + BLOCK * orb::pointer_count(16) as u32 {
             let out = sender.tick(now);
             for (a, v) in &out {
                 if let (true, OscType::Int(p)) = (a.ends_with(params::TEXT_POINTER), v) {
                     pointers.insert(*p);
                 }
             }
-            apply(&mut late, 16, &out);
-            now += STEP;
+            late.apply(16, &out);
+            now += TICK;
         }
-        assert_eq!(pointers.len(), orb::pointer_count(16));
-        assert_eq!(late, cells);
+        assert!(pointers.len() >= orb::pointer_count(16));
+        assert_eq!(late.cells, panel.cells);
     }
 
     #[test]
@@ -356,27 +474,44 @@ mod tests {
         assert!(sender.tick(t0 + Duration::from_millis(100)).is_empty(), "too early");
         assert!(!sender.tick(t0 + STEP).is_empty());
         sender.reset();
-        let mut cells: Page = [9; TEXT_LENGTH];
+        let mut panel = PanelModel::new([9; TEXT_LENGTH]);
         let out = sender.tick(t0 + Duration::from_millis(310));
         assert_eq!(out[0], (parameter(params::TEXT_POINTER), OscType::Int(POINTER_CLEAR)));
-        assert_eq!(apply(&mut cells, 8, &out), Some(true));
+        assert_eq!(panel.apply(8, &out), Some(true));
         // What was shown comes back after the clear.
-        run(&mut sender, &mut cells, t0 + Duration::from_millis(620), 2);
-        assert_eq!(first_row(&cells), "Hello");
+        run(&mut sender, &mut panel, t0 + Duration::from_millis(620), BLOCK * 2);
+        assert_eq!(first_row(&panel.cells), "Hello");
+    }
+
+    #[test]
+    fn a_block_cut_short_by_the_screen_starts_again() {
+        let mut sender = TextSender::new(8, STEP);
+        let mut panel = PanelModel::new([0; TEXT_LENGTH]);
+        sender.show("Hello there, how are you today?");
+        let t0 = Instant::now();
+        let (t, _) = run(&mut sender, &mut panel, t0, BLOCK + STEP);
+        // Mid block, something else takes the channel: the pointer is unknown, the block is sent again from 0.
+        sender.hold_until(t + STEP);
+        assert!(!sender.mid_block());
+        panel.apply(8, &[(parameter(params::TEXT_POINTER), OscType::Int(20)), (parameter(&params::text_sync(0)), OscType::Float(0.5))]);
+        let out = sender.tick(t + STEP);
+        assert_eq!(out, vec![(parameter(params::TEXT_POINTER), OscType::Int(0))], "the pointer goes to 0 before any value");
+        run(&mut sender, &mut panel, t + STEP, BLOCK * 4);
+        assert_eq!(first_row(&panel.cells), "Hello there, how are you today?");
     }
 
     #[test]
     fn a_sticky_page_stays_up() {
         let mut sender = TextSender::new(8, STEP);
-        let mut cells: Page = [0; TEXT_LENGTH];
+        let mut panel = PanelModel::new([0; TEXT_LENGTH]);
         sender.show_sticky("AFK: back soon");
-        let (t, _) = run(&mut sender, &mut cells, Instant::now(), 3);
-        let (t, visible) = run(&mut sender, &mut cells, t + Duration::from_secs(600), 5);
+        let (t, _) = run(&mut sender, &mut panel, Instant::now(), BLOCK * 3);
+        let (t, visible) = run(&mut sender, &mut panel, t + Duration::from_secs(600), BLOCK * 3);
         assert_eq!(visible, None, "never hidden");
         assert!(sender.sticky());
-        assert_eq!(first_row(&cells), "AFK: back soon");
+        assert_eq!(first_row(&panel.cells), "AFK: back soon");
         sender.hide();
-        let (_, visible) = run(&mut sender, &mut cells, t, 1);
+        let (_, visible) = run(&mut sender, &mut panel, t, BLOCK);
         assert_eq!(visible, Some(false));
         assert!(!sender.sticky());
     }
@@ -384,12 +519,12 @@ mod tests {
     #[test]
     fn blank_text_hides() {
         let mut sender = TextSender::new(8, STEP);
-        let mut cells: Page = [0; TEXT_LENGTH];
+        let mut panel = PanelModel::new([0; TEXT_LENGTH]);
         sender.show("Yo");
-        let (t, _) = run(&mut sender, &mut cells, Instant::now(), 3);
+        let (t, _) = run(&mut sender, &mut panel, Instant::now(), BLOCK * 3);
         sender.show("   ");
-        let out = sender.tick(t + STEP);
-        assert_eq!(apply(&mut cells, 8, &out), Some(false));
+        let (_, visible) = run(&mut sender, &mut panel, t, BLOCK);
+        assert_eq!(visible, Some(false));
         assert!(!sender.busy());
     }
 }

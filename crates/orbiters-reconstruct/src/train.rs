@@ -65,6 +65,10 @@ pub struct Settings {
     /// VRChat Home and Palm Point.
     pub fade_unseen_every: u32,
     pub unseen_weight: f32,
+    /// Covers the sky shell where no view looked (crate::sky) once training ends. On the capture simulator's off-path
+    /// views (Bench Plaza: other heights, sideways, looking up) it gained 8 dB looking up and 1.3–1.8 dB over all
+    /// views of three captures, for about a thousand Gaussians.
+    pub sky_fill: bool,
 }
 
 impl Default for Settings {
@@ -91,6 +95,7 @@ impl Default for Settings {
             relocate_until: 0.5,
             fade_unseen_every: 1000,
             unseen_weight: 0.02,
+            sky_fill: true,
         }
     }
 }
@@ -137,6 +142,12 @@ fn evenly(items: &[usize], k: usize) -> Vec<usize> {
         return items.to_vec();
     }
     (0..k).map(|j| items[j * items.len() / k]).collect()
+}
+
+/// The cameras' mean position.
+fn camera_centre(data: &Dataset) -> [f32; 3] {
+    let n = data.views.len().max(1) as f32;
+    data.views.iter().map(|v| v.camera.position()).fold([0.0f32; 3], |a, p| [a[0] + p[0] / n, a[1] + p[1] / n, a[2] + p[2] / n])
 }
 
 /// A typical scene size: the larger of the cameras' spread and the median sampled depth (sets the position step).
@@ -362,6 +373,11 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let mut g = gpu.download_params()?;
     g.retain(&live(&g));
     ensure!(!g.is_empty(), "training left no Gaussian that shows anywhere");
+    if settings.sky_fill {
+        // The sky shell's far field, as the measurements took it: beyond half the shell's distance from the cameras.
+        let added = crate::sky::complete(&mut g, camera_centre(data), crate::init::SKY * 0.5, crate::init::SKY);
+        eprintln!("sky: {added} Gaussians where no view saw the sky");
+    }
     // From here on the device holds the result: what the PLY keeps is what scores.
     gpu.upload(&g);
     if gpu.overflows > 0 {

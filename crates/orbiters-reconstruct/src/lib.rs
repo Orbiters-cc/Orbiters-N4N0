@@ -13,5 +13,6 @@ pub mod metrics;
 pub mod ply;
 pub mod prepare;
 pub mod priority;
+pub mod sky;
 pub mod train;
 pub mod web;

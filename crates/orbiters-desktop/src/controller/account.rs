@@ -290,7 +290,9 @@ impl Controller {
 mod tests {
     #[test]
     fn only_web_pages_are_opened() {
-        for other in ["file:///C:/Windows/System32/calc.exe", "C:/Windows/System32/calc.exe", "//host/share/x.exe", "ms-msdt:/id PCWDiagnostic", "search-ms:query=x", ""] {
+        for other in
+            ["file:///C:/Windows/System32/calc.exe", "C:/Windows/System32/calc.exe", "//host/share/x.exe", "ms-msdt:/id PCWDiagnostic", "search-ms:query=x", ""]
+        {
             assert!(super::open_url(other).is_err(), "{other}");
         }
     }

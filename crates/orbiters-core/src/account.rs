@@ -73,7 +73,9 @@ impl Server {
             Some((host, port)) if port.parse::<u16>().is_ok() => host,
             _ => authority.as_str(),
         };
-        self == Server::Development && (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) && matches!(host, "127.0.0.1" | "localhost")
+        self == Server::Development
+            && (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+            && matches!(host, "127.0.0.1" | "localhost")
     }
 
     fn file_name(self) -> &'static str {

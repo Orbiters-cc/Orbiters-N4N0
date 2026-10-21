@@ -503,11 +503,8 @@ impl LocalAddrs {
 /// interface, preferred over the LAN address it announces too. Only this machine's VRChat counts: an announcement
 /// whose addresses are all another machine's (another PC running VRChat, or a host posing as one) gives `None`.
 fn vrchat_address(addresses: &[Ipv4Addr], port: u16, local: &mut LocalAddrs) -> Option<SocketAddr> {
-    let ip = if addresses.iter().any(|a| a.is_loopback()) {
-        Ipv4Addr::LOCALHOST
-    } else {
-        *addresses.iter().find(|a| local.contains(std::net::IpAddr::V4(**a)))?
-    };
+    let ip =
+        if addresses.iter().any(|a| a.is_loopback()) { Ipv4Addr::LOCALHOST } else { *addresses.iter().find(|a| local.contains(std::net::IpAddr::V4(**a)))? };
     Some(SocketAddr::from((ip, port)))
 }
 
@@ -759,7 +756,8 @@ mod tests {
         let Some(ip) = primary_ipv4() else { return };
         // Sent to this machine's LAN address: nothing listens there.
         let client = UdpSocket::bind((ip, 0)).unwrap();
-        let msg = rosc::encoder::encode(&OscPacket::Message(OscMessage { addr: "/avatar/parameters/OrbitersRecord".into(), args: vec![OscType::Bool(true)] })).unwrap();
+        let msg = rosc::encoder::encode(&OscPacket::Message(OscMessage { addr: "/avatar/parameters/OrbitersRecord".into(), args: vec![OscType::Bool(true)] }))
+            .unwrap();
         let _ = client.send_to(&msg, (ip, svc.osc_port));
         std::thread::sleep(Duration::from_millis(300));
         assert!(got.lock().unwrap().is_empty());

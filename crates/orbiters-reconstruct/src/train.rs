@@ -53,6 +53,19 @@ pub struct Settings {
     pub boost_opacity: f32,
     pub boost_colors: f32,
     pub boost_until: f32,
+    /// Lab: flatness regulariser weight (0: off), in the units of `scale_reg`.
+    pub flat_reg: f32,
+    /// Lab: at the end, drop Gaussians whose blending weight never reached this in a scene pixel of a training view
+    /// (0: keep all) — what lies only under the capture strip and band, or behind everything.
+    pub prune_unseen: f32,
+    /// Lab: every this many steps from step 1000 (0: never), fade the Gaussians behind every measured surface
+    /// (crate::carve).
+    pub carve_every: u32,
+    /// Lab: every this many steps from step 1000 while relocation runs (0: never), fade the Gaussians whose blending
+    /// weight reaches `unseen_weight` in no scene pixel of any training view: the next relocations reuse them where
+    /// the model is opaque (relocating the least visible primitives instead of only the transparent ones).
+    pub fade_unseen_every: u32,
+    pub unseen_weight: f32,
 }
 
 impl Default for Settings {
@@ -74,7 +87,7 @@ impl Default for Settings {
             robust_from: 0.25,
             quarter_until: 0.0,
             half_until: 0.0,
-            relocate_until: 0.8,
+            relocate_until: 0.5,
             held_out: None,
             device_relocation: true,
             boost_means: 1.0,
@@ -83,6 +96,11 @@ impl Default for Settings {
             boost_opacity: 1.0,
             boost_colors: 1.0,
             boost_until: 0.5,
+            flat_reg: 0.0,
+            prune_unseen: 0.0,
+            carve_every: 0,
+            fade_unseen_every: 0,
+            unseen_weight: 0.02,
         }
     }
 }
@@ -113,6 +131,11 @@ impl Settings {
             "boost_opacity" => self.boost_opacity = f()?,
             "boost_colors" => self.boost_colors = f()?,
             "boost_until" => self.boost_until = f()?,
+            "flat_reg" => self.flat_reg = f()?,
+            "prune_unseen" => self.prune_unseen = f()?,
+            "carve_every" => self.carve_every = u()?,
+            "fade_unseen_every" => self.fade_unseen_every = u()?,
+            "unseen_weight" => self.unseen_weight = f()?,
             _ => anyhow::bail!("unknown setting {key}"),
         }
         Ok(())
@@ -171,7 +194,7 @@ pub fn extent(data: &Dataset) -> f32 {
 }
 
 pub fn default_iterations(data: &Dataset) -> u32 {
-    (data.views.len() as u32 * 150).clamp(3_000, 30_000)
+    (data.views.len() as u32 * 100).clamp(3_000, 30_000)
 }
 
 /// PSNR over the scene pixels (rendered colour clamped to 0..1).
@@ -234,6 +257,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let regularise = |gpu: &mut Gpu, n: usize| {
         gpu.opacity_reg = settings.opacity_reg / n.max(1) as f32;
         gpu.scale_reg = settings.scale_reg / (n.max(1) as f32 * extent);
+        gpu.flat_reg = settings.flat_reg / (n.max(1) as f32 * extent);
     };
     regularise(gpu, init.len());
     let max_radius = settings.max_radius * data.width as f32;
@@ -280,6 +304,36 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             let robust = if progress >= settings.robust_from { settings.robust } else { 0.0 };
             gpu.step(camera, settings.background, Target::Color { rgba, scene_pixels: pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr))?
         };
+        if settings.carve_every > 0 && it % settings.carve_every == 0 && it >= 1000 {
+            let _cpu = crate::priority::CpuWork::start();
+            let (g, _, _, _) = gpu.download();
+            let kill = crate::carve::behind_surfaces(&g, data, &crate::carve::CarveParams::default());
+            eprintln!("it {it}: fading {} of {} Gaussians behind every measured surface", kill.len(), g.len());
+            let faded = logit(1e-4).to_bits();
+            let plan = Relocation { adjust: kill.iter().map(|&i| [i, faded, 0f32.to_bits(), 0]).collect(), copies: Vec::new(), len: g.len() };
+            gpu.apply_relocation(&plan)?;
+        }
+        if settings.fade_unseen_every > 0 && it % settings.fade_unseen_every == 0 && it >= 1000 && it + settings.relocate_every <= relocate_until {
+            let _cpu = crate::priority::CpuWork::start();
+            let cams: Vec<Camera> = train_views.iter().map(|&i| data.views[i].camera).collect();
+            let seen = gpu.visibility(&cams, settings.background)?;
+            let faded = logit(1e-4).to_bits();
+            let adjust: Vec<[u32; 4]> = seen.iter().enumerate().filter(|(_, w)| **w < settings.unseen_weight).map(|(i, _)| [i as u32, faded, 0f32.to_bits(), 0]).collect();
+            eprintln!("it {it}: fading {} of {} Gaussians no training pixel sees at weight {} or more", adjust.len(), seen.len(), settings.unseen_weight);
+            gpu.apply_relocation(&Relocation { adjust, copies: Vec::new(), len: seen.len() })?;
+        }
+        if it % 50 == 0 || it == iterations {
+            let psnr = if it % 1000 == 0 || it == iterations {
+                let _cpu = crate::priority::CpuWork::start();
+                let began = Instant::now();
+                let psnr = evaluate(gpu, data, &held_out, settings.background)?;
+                evaluate_seconds += began.elapsed().as_secs_f32();
+                psnr
+            } else {
+                None
+            };
+            report(&Progress { iteration: it, iterations, gaussians: gpu.count, intersections, psnr, seconds: start.elapsed().as_secs_f32() });
+        }
         if it % settings.relocate_every == 0 && it >= 500 && it <= relocate_until {
             let _cpu = crate::priority::CpuWork::start();
             let began = Instant::now();
@@ -314,21 +368,21 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             relocate_seconds += began.elapsed().as_secs_f32();
             }
         }
-        if it % 50 == 0 || it == iterations {
-            let psnr = if it % 1000 == 0 || it == iterations {
-                let _cpu = crate::priority::CpuWork::start();
-                let began = Instant::now();
-                let psnr = evaluate(gpu, data, &held_out, settings.background)?;
-                evaluate_seconds += began.elapsed().as_secs_f32();
-                psnr
-            } else {
-                None
-            };
-            report(&Progress { iteration: it, iterations, gaussians: gpu.count, intersections, psnr, seconds: start.elapsed().as_secs_f32() });
-        }
     }
     let _cpu = crate::priority::CpuWork::start();
-    let (g, _, _, _) = gpu.download();
+    let seen = if settings.prune_unseen > 0.0 {
+        let cams: Vec<Camera> = train_views.iter().map(|&i| data.views[i].camera).collect();
+        Some(gpu.visibility(&cams, settings.background)?)
+    } else {
+        None
+    };
+    let (mut g, _, _, _) = gpu.download();
+    if let Some(seen) = seen {
+        let keep: Vec<bool> = seen.iter().map(|&w| w >= settings.prune_unseen).collect();
+        let before = g.len();
+        g.retain(&keep);
+        eprintln!("pruned {} of {before} Gaussians that no training pixel saw at weight {} or more", before - g.len(), settings.prune_unseen);
+    }
     if gpu.overflows > 0 {
         eprintln!("{} steps had more tile entries than the sort expected (dropped for that step)", gpu.overflows);
     }

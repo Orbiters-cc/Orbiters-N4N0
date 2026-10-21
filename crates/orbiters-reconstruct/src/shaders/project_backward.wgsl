@@ -110,7 +110,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         d_log_scale += m.rq[r] * dm * m.s;
     }
     // The scale regulariser (frame.reg.y · Σ scales) keeps Gaussians from growing where nothing holds them back.
-    let d_scale = d_log_scale + frame.reg.y * m.s;
+    // Lab: flatness (frame.background.w · the thinnest scale, as 2DGS/PGSR flatten Gaussians onto surfaces).
+    var flat = vec3<f32>(0.0);
+    if (m.s.x <= m.s.y && m.s.x <= m.s.z) {
+        flat.x = m.s.x;
+    } else if (m.s.y <= m.s.z) {
+        flat.y = m.s.y;
+    } else {
+        flat.z = m.s.z;
+    }
+    let d_scale = d_log_scale + frame.reg.y * m.s + frame.background.w * flat;
     grads[o + 3u] = d_scale.x;
     grads[o + 4u] = d_scale.y;
     grads[o + 5u] = d_scale.z;

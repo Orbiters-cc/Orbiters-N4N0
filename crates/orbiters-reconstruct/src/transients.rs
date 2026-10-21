@@ -54,7 +54,8 @@ pub(crate) fn grid(d: &DepthView) -> Option<Grid> {
 /// depth symbols and read as "no depth" like the sky, so they say nothing.
 pub(crate) fn known(g: &DepthView, i: usize, mask: &[f32], width: u32, height: u32) -> bool {
     let (x, y) = (g.pixels[i][0].round(), g.pixels[i][1].round());
-    x >= 0.0 && y >= 0.0 && (x as u32) < width && (y as u32) < height && mask[(y as u32 * width + x as u32) as usize] > 0.5
+    // Samples marked unknown (crate::depthfix: unreadable or misread tiles) say nothing either.
+    !g.is_dynamic(i) && x >= 0.0 && y >= 0.0 && (x as u32) < width && (y as u32) < height && mask[(y as u32 * width + x as u32) as usize] > 0.5
 }
 
 /// What depth frame `g` says about a world point at its depth `z` seen at pixel (u, v): `Some(true)` it saw through

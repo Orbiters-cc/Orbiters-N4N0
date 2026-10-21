@@ -146,6 +146,16 @@ fn tile_hit(m: vec2<f32>, conic: vec3<f32>, tau: f32, tx: u32, ty: u32) -> bool 
     return best <= tau;
 }
 
+// Lab (frame.counts.w bit 1): dark pixels weigh up to 4× in the colour loss (1 at luminance 0.25 and above), so dark,
+// low-contrast surfaces keep pulling on their Gaussians.
+fn dark_weight(c: vec3<f32>) -> f32 {
+    if ((frame.counts.w & 2u) == 0u) {
+        return 1.0;
+    }
+    let lum = dot(c, vec3<f32>(0.299, 0.587, 0.114));
+    return clamp(0.3 / (lum + 0.05), 1.0, 4.0);
+}
+
 fn sigmoid(x: f32) -> f32 {
     return 1.0 / (1.0 + exp(-x));
 }

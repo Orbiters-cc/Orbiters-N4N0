@@ -20,7 +20,7 @@ fn color(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
     let m = select(0.0, mask[p], (packed >> 24u) >= 128u);
     let target_c = vec3<f32>(f32(packed & 255u), f32((packed >> 8u) & 255u), f32((packed >> 16u) & 255u)) / 255.0;
     let diff = out_color[p].xyz - target_c;
-    let k = m * frame.loss.x / (3.0 * max(frame.loss.w, 1.0));
+    let k = m * frame.loss.x / (3.0 * max(frame.loss.w, 1.0)) * dark_weight(target_c);
     d_pixel[p] = vec4<f32>(sign(diff) * k, 0.0);
 }
 

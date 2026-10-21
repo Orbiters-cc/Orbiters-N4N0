@@ -183,6 +183,7 @@ struct Training {
     squared_error: wgpu::ComputePipeline,
     sky_composite: wgpu::ComputePipeline,
     sky_gradient: wgpu::ComputePipeline,
+    visibility: wgpu::ComputePipeline,
 }
 
 /// Lab: a sky cubemap behind the splats (crate::sky): 6·n² texels of four floats (rgb, unused), Adam moments and
@@ -282,6 +283,8 @@ pub struct Gpu {
     /// Weights of the opacity and scale (per metre) regularisers per Gaussian in training steps.
     pub opacity_reg: f32,
     pub scale_reg: f32,
+    /// Lab: weight per Gaussian of the flatness regulariser (the thinnest scale, per metre).
+    pub flat_reg: f32,
     /// Screen-space dilation in pixels² along x and y: 0.3 at the training resolution; a render on a coarser grid of
     /// the same rays scales it to keep the footprint.
     pub dilation: [f32; 2],
@@ -291,6 +294,8 @@ pub struct Gpu {
     pub exact_tiles: bool,
     /// Lab: sort key width, 32 or 24 bits (tile id above, log depth in the rest); 24 sorts in 6 passes instead of 8.
     pub key_bits: u32,
+    /// Lab: dark pixels weigh more in the colour loss (common.wgsl `dark_weight`).
+    pub dark_weight: bool,
     /// Lab: seconds spent inside [`Gpu::step`], and of those waiting for the GPU (readbacks of earlier steps).
     pub step_seconds: f64,
     pub wait_seconds: f64,
@@ -520,6 +525,7 @@ impl Gpu {
             let probe = format!("const PROBE: u32 = {}u;\n", std::env::var("RECONSTRUCT_BACKWARD_PROBE").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0));
             let backward = module("raster backward", &[common, raster, add, sky_lookup, &probe, include_str!("shaders/raster_backward.wgsl")]);
             let sky = module("sky", &[common, add, sky_lookup, include_str!("shaders/sky.wgsl")]);
+            let visibility = module("raster visibility", &[common, raster, include_str!("shaders/raster_visibility.wgsl")]);
             let loss = module("loss", &[common, include_str!("shaders/loss.wgsl")]);
             let ssim = module("ssim", &[common, include_str!("shaders/ssim.wgsl")]);
             let robust = module("robust", &[common, include_str!("shaders/robust.wgsl")]);
@@ -544,6 +550,7 @@ impl Gpu {
                 squared_error: pipe(&loss, "squared_error"),
                 sky_composite: pipe(&sky, "composite"),
                 sky_gradient: pipe(&sky, "gradient"),
+                visibility: pipe(&visibility, "visibility"),
             }
         });
         let k = Kernels {
@@ -608,10 +615,12 @@ impl Gpu {
             step: 0,
             opacity_reg: 0.0,
             scale_reg: 0.0,
+            flat_reg: 0.0,
             dilation: [cpu::DILATION as f32; 2],
             overflows: 0,
             exact_tiles: true,
             key_bits: 32,
+            dark_weight: false,
             step_seconds: 0.0,
             wait_seconds: 0.0,
             sky: None,
@@ -907,9 +916,9 @@ impl Gpu {
                 cpu::NEAR as f32,
                 FAR,
             ],
-            background: [background[0], background[1], background[2], 0.0],
+            background: [background[0], background[1], background[2], if train { self.flat_reg } else { 0.0 }],
             size: [cam.width, cam.height, tiles_x, tiles_y],
-            counts: [self.count as u32, self.sky.as_ref().map_or(0, |s| s.n), self.key_bits - tile_bits, u32::from(self.exact_tiles)],
+            counts: [self.count as u32, self.sky.as_ref().map_or(0, |s| s.n), self.key_bits - tile_bits, u32::from(self.exact_tiles) | (u32::from(self.dark_weight) << 1)],
             loss,
             reg: [opacity_reg, scale_reg, self.dilation[0], self.dilation[1]],
         }
@@ -1231,6 +1240,25 @@ impl Gpu {
     fn read_sky_grads(&self) -> Vec<f32> {
         let s = self.sky.as_ref().expect("sky");
         self.read(&s.grads, 6 * (s.n * s.n) as usize * 4)
+    }
+
+    /// Lab: the largest blending weight each Gaussian reaches in a scene pixel (the mask set for the image size) of
+    /// any of these views — what training ever saw of it (raster_visibility.wgsl).
+    pub fn visibility(&mut self, cams: &[Camera], background: [f32; 3]) -> anyhow::Result<Vec<f32>> {
+        let n = self.count;
+        let seen = storage(&self.device, "seen", (n * 4) as u64);
+        for cam in cams {
+            self.step(cam, background, Target::None, None)?;
+            let t = self.training()?;
+            let (Some(s), Some(sort), Some(i)) = (&self.splats, &self.sort, &self.image) else { continue };
+            let tiles = (cam.width.div_ceil(cpu::TILE), cam.height.div_ceil(cpu::TILE));
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            let bind = self.bind(&t.visibility, &[(0, &self.frame), (1, &s.proj), (2, &sort.values[0]), (3, &i.ranges), (8, &i.mask), (9, &seen)]);
+            self.dispatch(&mut enc, &t.visibility, &bind, tiles);
+            self.queue.submit([enc.finish()]);
+        }
+        let bits: Vec<u32> = self.read(&seen, n);
+        Ok(bits.into_iter().map(f32::from_bits).collect())
     }
 
     /// Lab: the sky cubemap's texels.
@@ -1762,5 +1790,33 @@ mod tests {
             }
         }
         assert!(compared > 10, "only {compared} texels with a gradient");
+    }
+
+    #[test]
+    fn visibility_sees_only_what_scene_pixels_show() {
+        let Some(mut gpu) = devices().into_iter().next() else { return };
+        let (w, h) = (64u32, 48u32);
+        let (mut g, cam) = scene(1, w, h, 41);
+        g.means.clear();
+        g.log_scales.clear();
+        g.rotations.clear();
+        g.opacity_logits.clear();
+        g.colors.clear();
+        // In front, in the open: seen. Behind it, fully hidden: unseen. Off screen: unseen. Under the masked rows: unseen.
+        let ahead = |x: f32, y: f32, z: f32| cam.unproject(x, y, z);
+        let opaque = crate::gaussians::logit(0.99);
+        g.push(ahead(32.0, 30.0, 3.0), [-1.0; 3], [1.0, 0.0, 0.0, 0.0], opaque, [0.5; 3]);
+        g.push(ahead(32.0, 30.0, 6.0), [-3.0; 3], [1.0, 0.0, 0.0, 0.0], opaque, [0.5; 3]);
+        g.push(ahead(500.0, 30.0, 3.0), [-3.0; 3], [1.0, 0.0, 0.0, 0.0], opaque, [0.5; 3]);
+        g.push(ahead(32.0, 3.0, 3.0), [-4.0; 3], [1.0, 0.0, 0.0, 0.0], opaque, [0.5; 3]);
+        gpu.upload(&g);
+        let mask: Vec<f32> = (0..w * h).map(|p| if p / w < 8 { 0.0 } else { 1.0 }).collect();
+        gpu.set_mask(w, h, &mask);
+        let seen = gpu.visibility(&[cam], [0.0; 3]).expect("visibility");
+        assert!(seen[0] > 0.9, "front Gaussian: {}", seen[0]);
+        // Behind an α = 0.99 splat: at most 1 % of the light reaches it.
+        assert!(seen[1] < 0.011, "hidden Gaussian: {}", seen[1]);
+        assert_eq!(seen[2], 0.0, "off-screen Gaussian");
+        assert!(seen[3] < 1e-3, "Gaussian under the masked rows: {}", seen[3]);
     }
 }

@@ -149,7 +149,8 @@ pub fn load(dir: &Path, max_width: u32, mut progress: impl FnMut(f32)) -> anyhow
         progress((keyframes.len() + i + 1) as f32 / total as f32);
     }
 
-    // What is not scene: the strip (and patches), and the skeleton band when the session read one.
+    // What is not scene: the strip (and patches), and the skeleton band when the session read one or the keyframes
+    // show it (post-processing can break its symbols, not its pixels).
     let mut mask = vec![1.0f32; (w * h) as usize];
     let mut cut = |x0: u32, y0: u32, x1: u32, y1: u32| {
         let (x0, y0) = ((x0 as f32 * scale).floor() as u32, (y0 as f32 * scale).floor() as u32);
@@ -163,13 +164,54 @@ pub fn load(dir: &Path, max_width: u32, mut progress: impl FnMut(f32)) -> anyhow
     if let Some(l) = strip::StripLayout::new(full_w, full_h) {
         cut(l.reserved.x0, l.reserved.y0, l.reserved.x1, l.reserved.y1);
     }
-    if manifest.performance.skeleton_frames > 0 {
+    if manifest.performance.skeleton_frames > 0 || band_drawn(&views, w, h, scale, full_w, full_h) {
         if let Some(b) = skeleton::BandLayout::new(full_w, full_h) {
             let r = b.reserved();
             cut(r.x0, r.y0, r.x1, r.y1);
         }
     }
     Ok(Dataset { dir: dir.to_path_buf(), views, depth_views, width: w, height: h, mask })
+}
+
+/// Whether most keyframes show the skeleton band: the pilot rows of its tiles (levels 0, 1, 2, 3 repeated) follow
+/// that ramp. Read in the red channel, which PPv2's chromatic aberration smears least.
+fn band_drawn(views: &[View], w: u32, h: u32, scale: f32, full_w: u32, full_h: u32) -> bool {
+    let Some(b) = skeleton::BandLayout::new(full_w, full_h) else { return false };
+    let ramp: Vec<f32> = (0..depth::TILE_CELLS).map(|j| (j % depth::LEVELS as u32) as f32).collect();
+    let sampled: Vec<&View> = views.iter().step_by((views.len() / 16).max(1)).collect();
+    let shows = |v: &View| {
+        let tiles = (b.per_row * b.rows) as usize;
+        let mut sum = 0.0;
+        for p in 0..tiles {
+            let (x0, y0) = b.tile_origin(p);
+            let cells: Vec<f32> = (0..depth::TILE_CELLS)
+                .map(|j| {
+                    let x = (((x0 + j * b.cell) as f32 + b.cell as f32 / 2.0) * scale) as u32;
+                    let y = ((y0 as f32 + b.cell as f32 / 2.0) * scale) as u32;
+                    channel(v.image[(y.min(h - 1) * w + x.min(w - 1)) as usize], 0)
+                })
+                .collect();
+            sum += correlation(&cells, &ramp);
+        }
+        sum / tiles as f32 > 0.5
+    };
+    2 * sampled.iter().filter(|v| shows(v)).count() > sampled.len()
+}
+
+fn correlation(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len() as f32;
+    let (ma, mb) = (a.iter().sum::<f32>() / n, b.iter().sum::<f32>() / n);
+    let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
+    for (x, y) in a.iter().zip(b) {
+        ab += (x - ma) * (y - mb);
+        aa += (x - ma) * (x - ma);
+        bb += (y - mb) * (y - mb);
+    }
+    if aa <= 1e-9 || bb <= 1e-9 {
+        0.0
+    } else {
+        ab / (aa * bb).sqrt()
+    }
 }
 
 /// Box-filters RGBA to RGB floats by an integer `factor`.

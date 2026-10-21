@@ -4,9 +4,13 @@
 //! ```text
 //! cargo run --release --example lab -- <session> --out <dir> [--width N] [--iterations N] [--budget N] [--seed N]
 //!     [--keyframes-every N] [--renders N] [--sums float|fixed|cas] [--profile] [--loose] [--transients] [--key-bits 24|32]
-//!     [--sky N] [--sky-lr X]
+//!     [--sky N] [--sky-lr X] [--ca <intensity|auto>]
 //!     [--set key=value]...
 //! ```
+//!
+//! `--ca` undoes the world's chromatic aberration (orbiters_reconstruct::aberration; `auto` measures it from the
+//! keyframes) before anything else reads the keyframes, and scores held-out renders aberrated the same way against the
+//! keyframes as captured.
 //!
 //! Every run detects transients (orbiters_reconstruct::transients) to score the held-out views on their static pixels
 //! too; `--transients` also trains without them (keyframe pixels left out, depth samples neither seeds nor targets),
@@ -25,6 +29,13 @@ struct Args {
     keyframes_every: usize,
     select: usize,
     select_coverage: bool,
+    depth_frames_every: usize,
+    depth_density: usize,
+    mvs: bool,
+    validate: bool,
+    dark: bool,
+    /// Chromatic aberration to undo: None off, Some(None) measured, Some(Some(intensity)).
+    ca: Option<Option<f32>>,
     renders: usize,
     loose: bool,
     transients: bool,
@@ -46,6 +57,12 @@ fn args() -> anyhow::Result<Args> {
         keyframes_every: 1,
         select: 0,
         select_coverage: false,
+        depth_frames_every: 1,
+        depth_density: 1,
+        mvs: false,
+        validate: false,
+        dark: false,
+        ca: None,
         renders: 3,
         loose: false,
         transients: false,
@@ -68,6 +85,15 @@ fn args() -> anyhow::Result<Args> {
             "--seed" => a.settings.seed = value("--seed")?.parse()?,
             "--keyframes-every" => a.keyframes_every = value("--keyframes-every")?.parse()?,
             "--select" => a.select = value("--select")?.parse()?,
+            "--depth-frames-every" => a.depth_frames_every = value("--depth-frames-every")?.parse()?,
+            "--depth-density" => a.depth_density = value("--depth-density")?.parse()?,
+            "--mvs" => a.mvs = true,
+            "--validate" => a.validate = true,
+            "--dark" => a.dark = true,
+            "--ca" => {
+                let v = value("--ca")?;
+                a.ca = Some(if v == "auto" { None } else { Some(v.parse()?) });
+            }
             "--select-mode" => {
                 a.select_coverage = match value("--select-mode")?.as_str() {
                     "uniform" => false,
@@ -154,7 +180,50 @@ fn main() -> anyhow::Result<()> {
     let mut data = dataset::load(&a.session, a.width, |_| {})?;
     let load_seconds = t0.elapsed().as_secs_f32();
     let all_views = data.views.len();
+    // The world's chromatic aberration undone in the keyframes (originals kept for scoring).
+    let (mut ca_intensity, mut ca_originals, mut aberration) = (0f32, Vec::new(), serde_json::Value::Null);
+    if let Some(ca) = a.ca {
+        let (w, h) = (data.width as usize, data.height as usize);
+        let t = Instant::now();
+        ca_intensity = match ca {
+            Some(v) => v,
+            None => {
+                let m = orbiters_reconstruct::aberration::measure(&data.views, &data.mask, w, h, 6);
+                eprintln!("chromatic aberration measured: intensity {:.3} ({} patches, median of the outer ones {:.3})", m.intensity, m.patches, m.median_outer);
+                m.intensity.max(0.0)
+            }
+        };
+        ca_originals = data.views.iter().map(|v| v.image.clone()).collect();
+        for v in data.views.iter_mut() {
+            v.image = orbiters_reconstruct::aberration::realign(&v.image, w, h, ca_intensity);
+        }
+        eprintln!("chromatic aberration {ca_intensity:.3} undone in {} keyframes, {:.1} s", data.views.len(), t.elapsed().as_secs_f32());
+        aberration = serde_json::json!({ "intensity": ca_intensity, "measured": ca.is_none(), "seconds": t.elapsed().as_secs_f32() });
+    }
+    if a.depth_frames_every > 1 {
+        let k = a.depth_frames_every;
+        data.depth_views = std::mem::take(&mut data.depth_views).into_iter().enumerate().filter(|(i, _)| i % k == 0).map(|(_, d)| d).collect();
+    }
+    // Depth that says nothing (unreadable tiles stored as "no hit", misread ones) becomes unknown first.
+    let mut validation = serde_json::Value::Null;
+    if a.validate {
+        let st = orbiters_reconstruct::depthfix::mark_untrusted(&mut data, &orbiters_reconstruct::depthfix::FixParams::default());
+        eprintln!("depth validation: {} of {} tile positions never read ({} of their samples kept as sky), {} misread tiles, {} impossibly near samples; {} of {} samples unknown ({:.1} %)", st.dead_tiles, st.tiles, st.sky_samples, st.misread_tiles, st.near_samples, st.unknown_samples, st.samples, 100.0 * st.unknown_samples as f64 / st.samples.max(1) as f64);
+        validation = serde_json::json!({ "dead_tiles": st.dead_tiles, "tiles": st.tiles, "sky_samples": st.sky_samples, "misread_tiles": st.misread_tiles, "near_samples": st.near_samples, "unknown_samples": st.unknown_samples, "samples": st.samples });
+    }
     let (flags, mut left_out, depth_only, transient_stats) = leave_out(&data);
+    // Sparser depth: keep one sample in `depth_density` (2: a checkerboard, 4: every second along both axes).
+    if a.depth_density > 1 {
+        for d in data.depth_views.iter_mut() {
+            let gw = d.grid_width as usize;
+            let keep = |i: usize| {
+                let (x, y) = (i % gw, i / gw);
+                if a.depth_density == 2 { (x + y) % 2 == 0 } else { x % 2 == 0 && y % 2 == 0 }
+            };
+            let n = d.depth.len();
+            d.dynamic = (0..n).map(|i| !keep(i) || d.dynamic.get(i).copied().unwrap_or(false)).collect();
+        }
+    }
     if a.transients || a.transients_depth {
         let train_masks = if a.transients { &left_out } else { &depth_only };
         for (v, m) in data.views.iter_mut().zip(train_masks) {
@@ -165,7 +234,8 @@ fn main() -> anyhow::Result<()> {
             }
         }
         for (d, f) in data.depth_views.iter_mut().zip(flags) {
-            d.dynamic = f;
+            // Keep the samples already unknown (validation).
+            d.dynamic = f.iter().enumerate().map(|(i, x)| *x || d.is_dynamic(i)).collect();
         }
     }
     // Fewer-views experiments: every n-th training keyframe, or `select` of them (spread evenly, or most new coverage
@@ -198,6 +268,14 @@ fn main() -> anyhow::Result<()> {
         left_out = masks;
         a.settings.held_out = Some(held);
     }
+    // Plane-sweep depth where the depth frames have none: extra depth frames for seeding and depth steps.
+    let mut mvs_stats = serde_json::Value::Null;
+    if a.mvs {
+        let (extra, st) = orbiters_reconstruct::mvs::pseudo_depth(&data, &orbiters_reconstruct::mvs::MvsParams::default());
+        eprintln!("mvs {:.1} s: {} samples without depth tried, {} texture-less, {} kept ({:.1} %), {} extra depth frames", st.seconds, st.tried, st.textureless, st.kept, 100.0 * st.kept as f64 / st.tried.max(1) as f64, extra.len());
+        mvs_stats = serde_json::json!({ "seconds": st.seconds, "tried": st.tried, "textureless": st.textureless, "kept": st.kept, "frames": extra.len() });
+        data.depth_views.extend(extra);
+    }
     let t1 = Instant::now();
     let mut seeded = init::from_depth(&data, a.settings.budget * 2 / 3);
     // With a sky cubemap, the far shell of discs goes.
@@ -212,6 +290,7 @@ fn main() -> anyhow::Result<()> {
     let mut gpu = Gpu::with_options(a.device)?;
     gpu.exact_tiles = !a.loose;
     gpu.key_bits = a.key_bits;
+    gpu.dark_weight = a.dark;
     gpu.sky_lr = a.sky_lr;
     gpu.set_sky(sky.as_deref().map(|t| (a.sky, t)))?;
     eprintln!("{}: {} keyframes ({} in the session), {} depth frames, {} seeds, load {load_seconds:.1} s, seed {seed_seconds:.1} s, {}", a.session.display(), data.views.len(), all_views, data.depth_views.len(), seeded.len(), gpu.adapter);
@@ -262,13 +341,21 @@ fn main() -> anyhow::Result<()> {
     let n = outcome.held_out.len();
     let picks: Vec<usize> = if n == 0 { Vec::new() } else { (0..a.renders.min(n)).map(|k| outcome.held_out[k * (n - 1) / (a.renders.min(n) - 1).max(1)]).collect() };
     let (mut sf, mut st, mut ss, mut sp, mut per_view) = (0f64, 0f64, 0f64, 0f64, Vec::new());
+    let mut ca_raw: Vec<(f64, f64, f64)> = Vec::new();
     let (w, h) = (data.width as usize, data.height as usize);
     for &i in &outcome.held_out {
         let img = train::render(&mut gpu, &data.views[i].camera, a.settings.background)?;
-        let (f, t, s) = metrics::metrics(&img, &data.views[i].image, &data.mask, w, h);
+        // With the aberration undone for training, the render aberrated as the world does against the keyframe as
+        // captured (and, for reference, the plain render against the realigned keyframe).
+        let (scored, truth) = if ca_intensity > 0.0 { (orbiters_reconstruct::aberration::aberrate(&img, w, h, ca_intensity), &ca_originals[i]) } else { (img.clone(), &data.views[i].image) };
+        let (f, t, s) = metrics::metrics(&scored, truth, &data.mask, w, h);
+        if ca_intensity > 0.0 {
+            let (fr, tr, sr) = metrics::metrics(&img, &data.views[i].image, &data.mask, w, h);
+            ca_raw.push((fr, tr, sr));
+        }
         // Static pixels: the scene less this keyframe's transients (the same pixels for every run).
         let still: Vec<f32> = data.mask.iter().zip(&left_out[i]).map(|(m, t)| if *t > 0.5 { 0.0 } else { *m }).collect();
-        let (fs, _, _) = metrics::metrics(&img, &data.views[i].image, &still, w, h);
+        let (fs, _, _) = metrics::metrics(&scored, truth, &still, w, h);
         sf += f;
         st += t;
         ss += s;
@@ -276,10 +363,30 @@ fn main() -> anyhow::Result<()> {
         per_view.push(serde_json::json!({ "keyframe": data.views[i].keyframe, "psnr": f, "psnr_trimmed90": t, "ssim": s, "psnr_static": fs }));
         if picks.contains(&i) {
             write_png(&a.out.join(format!("render_{:06}.png", data.views[i].keyframe)), &img, data.width, data.height)?;
+            let cam = &data.views[i].camera;
+            let (eye, fwd) = (cam.position(), cam.forward());
+            let target = [eye[0] + 4.0 * fwd[0], eye[1] + 4.0 * fwd[1], eye[2] + 4.0 * fwd[2]];
+            let right = cam.r[0];
+            for (tag, moved) in [("up", [eye[0], eye[1] + 0.6, eye[2]]), ("side", [eye[0] + right[0], eye[1] + right[1], eye[2] + right[2]])] {
+                let look = [target[0] - moved[0], target[1] - moved[1], target[2] - moved[2]];
+                let novel = orbiters_reconstruct::camera::Camera::look(moved, look, [0.0, 1.0, 0.0], cam.fov_y(), data.width, data.height);
+                let img = train::render(&mut gpu, &novel, a.settings.background)?;
+                write_png(&a.out.join(format!("novel_{tag}_{:06}.png", data.views[i].keyframe)), &img, data.width, data.height)?;
+            }
         }
     }
     let nh = n.max(1) as f64;
     eprintln!("held-out: PSNR {:.2} dB, trimmed-90% PSNR {:.2} dB, SSIM {:.4}, static-pixel PSNR {:.2} dB", sf / nh, st / nh, ss / nh, sp / nh);
+    if !ca_raw.is_empty() {
+        let k = ca_raw.len() as f64;
+        let (fr, tr, sr) = ca_raw.iter().fold((0.0, 0.0, 0.0), |acc, v| (acc.0 + v.0, acc.1 + v.1, acc.2 + v.2));
+        eprintln!("held-out against the realigned keyframes (plain renders): PSNR {:.2} dB, trimmed-90% PSNR {:.2} dB, SSIM {:.4}", fr / k, tr / k, sr / k);
+        if let serde_json::Value::Object(m) = &mut aberration {
+            m.insert("realigned_psnr".into(), serde_json::json!(fr / k));
+            m.insert("realigned_psnr_trimmed90".into(), serde_json::json!(tr / k));
+            m.insert("realigned_ssim".into(), serde_json::json!(sr / k));
+        }
+    }
     let result = serde_json::json!({
         "session": a.session.display().to_string(),
         "sets": a.sets,
@@ -291,6 +398,12 @@ fn main() -> anyhow::Result<()> {
         "transient_detection": transient_stats,
         "keyframes": data.views.len(),
         "selected_keyframes": selection,
+        "depth_frames": data.depth_views.len(),
+        "depth_frames_every": a.depth_frames_every,
+        "depth_density": a.depth_density,
+        "mvs": mvs_stats,
+        "validation": validation,
+        "aberration": aberration,
         "iterations": outcome.iterations,
         "seconds": outcome.seconds,
         "relocate_seconds": outcome.relocate_seconds,

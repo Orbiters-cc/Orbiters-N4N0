@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
     let session = session.context("usage: kbench <session> [--ply p] [--steps n]")?;
     let data = dataset::load(&session, width, |_| {})?;
     let g = ply::read(&ply_path.unwrap_or_else(|| session.join("reconstruction").join("splats.ply")))?;
-    let mut gpu = Gpu::with_options(DeviceOptions { sums, profile: true })?;
+    let mut gpu = Gpu::with_options(DeviceOptions { sums, profile: true, ..Default::default() })?;
     gpu.upload(&g);
     gpu.set_mask(data.width, data.height, &data.mask);
     let px = data.mask.iter().filter(|m| **m > 0.5).count() as f32;

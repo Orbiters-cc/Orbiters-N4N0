@@ -17,19 +17,20 @@ pub const ASR_FILES: [&str; 4] = ["encoder.int8.onnx", "decoder.int8.onnx", "joi
 pub const VAD_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad_v5.onnx";
 pub const ASR_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2";
 
-/// What a model file must be: its size and, once pinned, its SHA-256 (lowercase hex). The sizes are those of the
-/// release assets the installer was written against (a release tag can be changed: a file that differs is refused,
-/// and the installer says so). The SHA-256 of each is computed while it downloads and logged, for pinning.
+/// What a model file must be: its size and SHA-256 (lowercase hex), those of the release assets the installer was
+/// written against (a release tag can be changed: a file that differs is refused, and the installer says so). The
+/// SHA-256 of each download is computed while it comes and logged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Expected {
     pub size: u64,
     pub sha256: Option<&'static str>,
 }
 
-/// Silero VAD's model (one file, [`VAD_URL`]).
-pub const VAD: Expected = Expected { size: 2_313_101, sha256: None };
-/// Parakeet's archive ([`ASR_URL`], bzip2 tar).
-pub const ASR_ARCHIVE: Expected = Expected { size: 487_170_055, sha256: None };
+/// Silero VAD's model (one file, [`VAD_URL`]). GitHub keeps no digest of assets uploaded before mid-2025: this is the
+/// SHA-256 of the asset as downloaded on 2026-10-22 (the copy the installer had put on this computer matched).
+pub const VAD: Expected = Expected { size: 2_313_101, sha256: Some("6b99cbfd39246b6706f98ec13c7c50c6b299181f2474fa05cbc8046acc274396") };
+/// Parakeet's archive ([`ASR_URL`], bzip2 tar): the SHA-256 is GitHub's own digest of the release asset.
+pub const ASR_ARCHIVE: Expected = Expected { size: 487_170_055, sha256: Some("5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf") };
 /// The recogniser's files ([`ASR_FILES`], in that order) as the archive holds them.
 pub const ASR_SIZES: [u64; 4] = [652_184_281, 11_845_275, 6_355_277, 93_939];
 /// Bytes to download, for the progress shown before the server says.

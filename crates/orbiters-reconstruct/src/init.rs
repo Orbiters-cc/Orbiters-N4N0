@@ -37,7 +37,8 @@ pub fn from_depth(data: &Dataset, budget: usize) -> Gaussians {
                     continue;
                 }
                 let p = if sky { add(cam_pos, scale(normalize(sub(dv.camera.unproject(u, v, 1.0), cam_pos)), SKY)) } else { dv.camera.unproject(u, v, z) };
-                let footprint = if sky { SKY } else { z } * dv.spacing / dv.camera.fx;
+                let step = dv.step(i);
+                let footprint = if sky { SKY } else { z } * dv.spacing * step as f32 / dv.camera.fx;
                 // Merge: one disc per cell of about its own size (levels in powers of two, so sizes stay comparable).
                 let level = footprint.max(1e-3).log2().round() as i32;
                 let cell = 2f32.powi(level);
@@ -46,7 +47,7 @@ pub fn from_depth(data: &Dataset, budget: usize) -> Gaussians {
                     continue;
                 }
                 let view = normalize(sub(cam_pos, p));
-                let normal = if sky { None } else { surface_normal(&world, gx, gy, p, z) }.map(|n| if dot(n, view) < 0.0 { neg(n) } else { n }).unwrap_or(view);
+                let normal = if sky { None } else { surface_normal(&world, gx, gy, step as i32, p, z) }.map(|n| if dot(n, view) < 0.0 { neg(n) } else { n }).unwrap_or(view);
                 let color = color_at(data, p, dv.game_time).unwrap_or([0.5, 0.5, 0.5]);
                 let s = (footprint * 0.75).max(1e-3).ln();
                 g.push(p, [s, s, (footprint * 0.1).max(1e-4).ln()], quat_from_z(normal), opacity, color);
@@ -68,17 +69,18 @@ fn in_scene(data: &Dataset, u: f32, v: f32) -> bool {
     x >= 0.0 && y >= 0.0 && (x as u32) < data.width && (y as u32) < data.height && data.mask[(y as u32 * data.width + x as u32) as usize] > 0.5
 }
 
-/// Normal from the neighbouring samples, unless they sit across a depth edge.
-fn surface_normal(world: &impl Fn(i32, i32) -> Option<[f32; 3]>, gx: i32, gy: i32, p: [f32; 3], z: f32) -> Option<[f32; 3]> {
-    let near = |q: [f32; 3]| (dot(sub(q, p), sub(q, p))).sqrt() < 0.15 * z;
+/// Normal from the neighbouring samples, `step` grid cells away (those of the same tile), unless they sit across a
+/// depth edge.
+fn surface_normal(world: &impl Fn(i32, i32) -> Option<[f32; 3]>, gx: i32, gy: i32, step: i32, p: [f32; 3], z: f32) -> Option<[f32; 3]> {
+    let near = |q: [f32; 3]| (dot(sub(q, p), sub(q, p))).sqrt() < 0.15 * z * step as f32;
     let pick = |a: Option<[f32; 3]>, b: Option<[f32; 3]>| match (a.filter(|q| near(*q)), b.filter(|q| near(*q))) {
         (Some(a), Some(b)) => Some(sub(a, b)),
         (Some(a), None) => Some(sub(a, p)),
         (None, Some(b)) => Some(sub(p, b)),
         (None, None) => None,
     };
-    let du = pick(world(gx + 1, gy), world(gx - 1, gy))?;
-    let dv = pick(world(gx, gy + 1), world(gx, gy - 1))?;
+    let du = pick(world(gx + step, gy), world(gx - step, gy))?;
+    let dv = pick(world(gx, gy + step), world(gx, gy - step))?;
     let n = cross(du, dv);
     let len = dot(n, n).sqrt();
     (len > 1e-12).then(|| n.map(|c| c / len))

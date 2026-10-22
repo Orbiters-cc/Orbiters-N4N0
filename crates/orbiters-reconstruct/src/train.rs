@@ -559,7 +559,7 @@ mod tests {
             }
         }
         let depth: Vec<f32> = (0..pixels.len()).map(|i| 1.0 + (i % 7) as f32).collect();
-        let view = DepthView { camera, grid_width: gw, grid_height: gh, pixels: pixels.clone(), depth: depth.clone(), game_time: 0.0, spacing: 8.0, dynamic: Vec::new() };
+        let view = DepthView { camera, grid_width: gw, grid_height: gh, pixels: pixels.clone(), depth: depth.clone(), game_time: 0.0, spacing: 8.0, steps: Vec::new(), dynamic: Vec::new() };
         let t = depth_target(&view);
         assert_eq!((t.camera.width, t.camera.height), (gw, gh));
         assert_eq!(t.samples.len(), pixels.len());

@@ -1,5 +1,6 @@
 //! What the depth frames have seen so far, from above: the capture page's coverage map and its hints. Every known depth
-//! sample (every second one along both axes) lands in a 0.5 m cell of the horizontal plane (Unity world x, z), which
+//! sample (in a grid tile every second one along both axes; every one of the sparser larger tiles towards the frame's
+//! edges) lands in a 0.5 m cell of the horizontal plane (Unity world x, z), which
 //! remembers from which of 16 compass sectors and from how high above it the camera saw it, and at which heights its
 //! points lie. A surface seen from one side only, or a floor seen only at grazing angles from afar, reconstructs into
 //! smears from any other viewpoint: the hints name the nearest such place, and a scan flight
@@ -55,9 +56,12 @@ impl Coverage {
         let k = intrinsics_from_projection(projection, layout.width, layout.height);
         let base = *self.base_y.get_or_insert(pos[1] - SLICES as f32 * SLICE_M / 2.0);
         self.path.push(pos);
-        let grid_height = codes.len() as u32 / grid_width.max(1);
-        for gy in (0..grid_height).step_by(2) {
-            for gx in (0..grid_width).step_by(2) {
+        for r in layout.regions() {
+            for s in 0..depth::SAMPLES_PER_TILE {
+                if r.level == 0 && (s % depth::SAMPLES_X % 2 == 1 || s / depth::SAMPLES_X % 2 == 1) {
+                    continue;
+                }
+                let (gx, gy) = layout.region_sample(r, s);
                 let Some(z) = depth::dequantize(codes[(gy * grid_width + gx) as usize]) else { continue };
                 let (u, v) = layout.grid_pixel(gx, gy);
                 let (x, y) = ((u as f32 - k.cx) / k.fx * z, (v as f32 - k.cy) / k.fy * z);

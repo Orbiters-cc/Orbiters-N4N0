@@ -78,7 +78,9 @@ pub fn mark_untrusted(data: &mut Dataset, p: &FixParams) -> FixStats {
         }
     }
     let centre = (tx as f32 - 1.0) / 2.0;
-    let dead: Vec<bool> = (0..tx * ty).map(|t| frames >= p.min_frames && reads[t] == 0 && ((t % tx) as f32 - centre).abs() > p.min_offset * (centre + 0.5)).collect();
+    // Grid tiles inside a larger layout tile that carry no sample (in blocks of 8 × 8) never read and are not dead.
+    let carries = |t: usize| first.steps.is_empty() || (0..sy).any(|y| (0..sx).any(|x| first.steps[((t / tx) * sy + y) * gw + (t % tx) * sx + x] > 0));
+    let dead: Vec<bool> = (0..tx * ty).map(|t| carries(t) && frames >= p.min_frames && reads[t] == 0 && ((t % tx) as f32 - centre).abs() > p.min_offset * (centre + 0.5)).collect();
     stats.tiles = tx * ty;
     stats.dead_tiles = dead.iter().filter(|x| **x).count();
     // What the decoding tiles saw along each world direction (1° bins): hits and votes.
@@ -131,13 +133,14 @@ pub fn mark_untrusted(data: &mut Dataset, p: &FixParams) -> FixStats {
                 }
                 continue;
             }
-            // Rule 2: a misread tile.
+            // Rule 2: a misread tile (neighbours: the samples next to each one in its layout tile, one or more grid cells
+            // away).
             let (mut valid, mut odd) = (0usize, 0usize);
             for &i in &samples {
                 let Some(z) = at((i % gw) as i64, (i / gw) as i64) else { continue };
                 valid += 1;
-                let (x, y) = ((i % gw) as i64, (i / gw) as i64);
-                let near: Vec<f32> = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().filter_map(|(dx, dy)| at(x + dx, y + dy)).collect();
+                let (x, y, step) = ((i % gw) as i64, (i / gw) as i64, d.step(i) as i64);
+                let near: Vec<f32> = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().filter_map(|(dx, dy)| at(x + dx * step, y + dy * step)).collect();
                 if !near.is_empty() && near.iter().all(|&o| (o - z).abs() > p.neighbour_tolerance * z) {
                     odd += 1;
                 }
@@ -203,7 +206,7 @@ mod tests {
                 depth.push(if drop > 1e-3 { (1.6 / drop).min(900.0) } else { 0.0 });
             }
         }
-        DepthView { camera, grid_width: GW as u32, grid_height: GH as u32, pixels, depth, game_time: k as f32, spacing: 10.0, dynamic: Vec::new() }
+        DepthView { camera, grid_width: GW as u32, grid_height: GH as u32, pixels, depth, game_time: k as f32, spacing: 10.0, steps: Vec::new(), dynamic: Vec::new() }
     }
 
     #[test]

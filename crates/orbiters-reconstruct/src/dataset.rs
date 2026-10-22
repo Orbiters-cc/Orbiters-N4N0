@@ -28,8 +28,12 @@ pub struct DepthView {
     pub pixels: Vec<[f32; 2]>,
     pub depth: Vec<f32>,
     pub game_time: f32,
-    /// Sample spacing in training pixels (for footprints).
+    /// Sample spacing in training pixels (for footprints), in a grid tile.
     pub spacing: f32,
+    /// Per grid cell, that spacing's multiple between its sample and the next ones of its tile: 2, 4 or 8 in the larger
+    /// tiles towards the frame's edges (orbiters_contracts::depth::DepthLayout::grid_steps), 0 where the grid cell
+    /// carries no sample. Empty: 1 everywhere.
+    pub steps: Vec<u8>,
     /// Samples that say nothing: the decoder could not read them (orbiters_contracts::depth::UNKNOWN), or depth
     /// validation distrusts them (crate::depthfix). Neither seeds nor depth targets. Empty: none.
     pub dynamic: Vec<bool>,
@@ -42,6 +46,11 @@ impl DepthView {
 
     pub fn is_dynamic(&self, i: usize) -> bool {
         self.dynamic.get(i).copied().unwrap_or(false)
+    }
+
+    /// Grid cells between sample `i` and the next ones of its tile (1 in a grid tile).
+    pub fn step(&self, i: usize) -> u32 {
+        self.steps.get(i).map_or(1, |&s| s.max(1) as u32)
     }
 }
 
@@ -122,11 +131,17 @@ pub fn load(dir: &Path, max_width: u32, mut progress: impl FnMut(f32)) -> anyhow
     views.sort_by_key(|v| v.keyframe);
 
     let mut depth_views = Vec::with_capacity(depth_frames.len());
+    // Every depth frame of a session has the same size, so one step map does.
+    let mut steps: Option<(u32, u32, Vec<u8>)> = None;
     for (i, r) in depth_frames.iter().enumerate() {
         let path = dir.join("depth").join(bundle::depth_file(r.depth_index));
         let Ok(data) = std::fs::read(&path) else { continue };
         let Some((gw, gh, fw, fh, codes)) = depth_file::read(&data) else { continue };
         let Some(layout) = DepthLayout::new(fw, fh) else { continue };
+        if steps.as_ref().is_none_or(|(sw, sh, _)| (*sw, *sh) != (fw, fh)) {
+            steps = Some((fw, fh, layout.grid_steps()));
+        }
+        let frame_steps = steps.as_ref().map(|(_, _, v)| v).filter(|v| v.len() == codes.len()).cloned().unwrap_or_default();
         let s = w as f32 / fw as f32;
         let mut pixels = Vec::with_capacity(codes.len());
         let mut depths = Vec::with_capacity(codes.len());
@@ -148,6 +163,7 @@ pub fn load(dir: &Path, max_width: u32, mut progress: impl FnMut(f32)) -> anyhow
             depth: depths,
             game_time: r.game_time,
             spacing: layout.tile_px as f32 / depth::SAMPLES_X as f32 * s,
+            steps: frame_steps,
             dynamic: if unknown.contains(&true) { unknown } else { Vec::new() },
         });
         progress((keyframes.len() + i + 1) as f32 / total as f32);

@@ -106,11 +106,25 @@ fn run(args: Args) -> anyhow::Result<Report> {
     let budget = settings.budget * 2 / 3;
     let mut seeded = orbiters_reconstruct::priority::on_loading_threads(|| init::from_depth(data, budget, &held_out, |p| stage(Stage::Seeding, p)));
     if settings.sky_map > 0 {
-        // Lab: the map takes the sky shell's place, and completes it itself.
-        let keep: Vec<bool> = seeded.sky.iter().map(|s| !s).collect();
-        seeded.retain(&keep);
+        // Lab: the map takes the sky shell's place where the parallax test found true sky, and completes the sky
+        // itself; elsewhere (finite content without depth, or directions the test could not judge) the shell's discs
+        // stay in front of it.
         settings.sky_fill = false;
         let (map, found) = orbiters_reconstruct::sky::seed_map(data, settings.sky_map, &held_out);
+        let n = data.views.len().max(1) as f32;
+        let centre = data.views.iter().fold([0f32; 3], |c, v| {
+            let p = v.camera.position();
+            [c[0] + p[0] / n, c[1] + p[1] / n, c[2] + p[2] / n]
+        });
+        let keep: Vec<bool> = (0..seeded.len())
+            .map(|i| {
+                let m = seeded.means[i];
+                !seeded.sky[i] || !found.sky_cells[orbiters_reconstruct::sky::texel([m[0] - centre[0], m[1] - centre[1], m[2] - centre[2]], orbiters_reconstruct::sky::PARALLAX_CELLS)]
+            })
+            .collect();
+        let before = seeded.len();
+        seeded.retain(&keep);
+        eprintln!("sky map: {} of the shell's discs leave for the map", before - seeded.len());
         eprintln!(
             "sky map: {} across from {} sky pixels, {} texels seen; {} of the {} 5.6° cells seen from both halves of the walk differ between them",
             map.width, found.pixels, found.texels_seen, found.cells_parallax, found.cells_tested

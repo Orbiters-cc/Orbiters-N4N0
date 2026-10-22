@@ -155,13 +155,15 @@ pub struct SkyMap {
 /// What seeding a [`SkyMap`] found: keyframe pixels whose rays hit nothing in the depth frame nearest in time, the
 /// texels they reached, and of the 5.6° cells (a map [`PARALLAX_CELLS`] across) seen from both halves of the walk
 /// (split at its median position along its longest extent) those whose colour differs between the halves: finite
-/// content without depth shows parallax.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// content without depth shows parallax. `sky_cells` marks the cells (a map [`PARALLAX_CELLS`] across) the test found
+/// the same from both halves: true sky, which the map may take over.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SkySeeding {
     pub pixels: usize,
     pub texels_seen: usize,
     pub cells_tested: usize,
     pub cells_parallax: usize,
+    pub sky_cells: Vec<bool>,
 }
 
 /// A cell whose colour differs by more than this (0–1, any channel) between the walk's halves shows parallax.
@@ -269,11 +271,14 @@ pub fn seed_map(data: &Dataset, width: u32, held_out: &[usize]) -> (SkyMap, SkyS
             found.texels_seen += 1;
         }
     }
-    for s in &cells {
+    found.sky_cells = vec![false; cells.len()];
+    for (c, s) in cells.iter().enumerate() {
         if s[0][3] >= TESTED && s[1][3] >= TESTED {
             found.cells_tested += 1;
             if (0..3).any(|k| (s[0][k] / s[0][3] - s[1][k] / s[1][3]).abs() > PARALLAX) {
                 found.cells_parallax += 1;
+            } else {
+                found.sky_cells[c] = true;
             }
         }
     }

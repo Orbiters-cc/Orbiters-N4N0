@@ -100,7 +100,8 @@ fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
     workgroupBarrier();
     atomicMax(&tile_last, select(first, last, live));
     let used_end = workgroupUniformLoad(&tile_last);
-    var acc_c = frame.background.xyz;
+    // Behind the last splat: the sky map, else the constant background (sky_lookup.wgsl).
+    var acc_c = background_at(f32(px), f32(py));
     var acc_d = 0.0;
     let pix = vec2<f32>(f32(px), f32(py));
     let batches = (used_end - first + 255u) / 256u;

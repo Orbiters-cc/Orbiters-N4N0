@@ -81,6 +81,9 @@ pub struct Settings {
     /// Leaves out what the exact depth says is not there once training ends: floaters in front of measured surfaces and
     /// islands no depth saw that do not join the ground under the walked path (crate::cleanup).
     pub cleanup: bool,
+    /// Lab: the sky as a map this many texels across behind the splats (crate::sky::SkyMap) instead of the shell of
+    /// discs (0: the shell).
+    pub sky_map: u32,
 }
 
 impl Default for Settings {
@@ -110,6 +113,7 @@ impl Default for Settings {
             sky_fill: true,
             filter_3d: 0.0,
             cleanup: false,
+            sky_map: 0,
         }
     }
 }

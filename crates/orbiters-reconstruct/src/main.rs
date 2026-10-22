@@ -59,6 +59,8 @@ fn args() -> anyhow::Result<Args> {
             "--filter-3d" => settings.filter_3d = it.next().context("--filter-3d needs a value")?.parse().context("--filter-3d takes a number")?,
             // What the exact depth says is not there leaves the result (orbiters_reconstruct::cleanup).
             "--cleanup" => settings.cleanup = true,
+            // Lab: the sky as a map this many texels across (orbiters_reconstruct::sky::SkyMap).
+            "--sky-map" => settings.sky_map = number("--sky-map")? as u32,
             "--gpu" => {
                 device.low_power = match it.next().as_deref() {
                     Some("integrated") => true,
@@ -102,7 +104,19 @@ fn run(args: Args) -> anyhow::Result<Report> {
     }
     stage(Stage::Seeding, 0.0);
     let budget = settings.budget * 2 / 3;
-    let seeded = orbiters_reconstruct::priority::on_loading_threads(|| init::from_depth(data, budget, &held_out, |p| stage(Stage::Seeding, p)));
+    let mut seeded = orbiters_reconstruct::priority::on_loading_threads(|| init::from_depth(data, budget, &held_out, |p| stage(Stage::Seeding, p)));
+    if settings.sky_map > 0 {
+        // Lab: the map takes the sky shell's place, and completes it itself.
+        let keep: Vec<bool> = seeded.sky.iter().map(|s| !s).collect();
+        seeded.retain(&keep);
+        settings.sky_fill = false;
+        let (map, found) = orbiters_reconstruct::sky::seed_map(data, settings.sky_map, &held_out);
+        eprintln!(
+            "sky map: {} across from {} sky pixels, {} texels seen; {} of the {} seen from both halves of the walk differ between them",
+            map.width, found.pixels, found.texels_seen, found.texels_parallax, found.texels_tested
+        );
+        gpu.set_sky(Some((map.width, &map.rgb)))?;
+    }
     if seeded.is_empty() {
         bail!("{}", prepared.nothing_to_seed());
     }
@@ -118,6 +132,9 @@ fn run(args: Args) -> anyhow::Result<Report> {
     }
     std::fs::create_dir_all(partial.join(rec::HELD_OUT_DIR))?;
     ply::write(&partial.join(rec::PLY_FILE), &outcome.gaussians)?;
+    if let Some((width, rgb)) = gpu.sky()? {
+        orbiters_reconstruct::sky::SkyMap { width, rgb }.write(&partial.join("sky.bin"))?;
+    }
     // One render of each held-out keyframe: its preview and its score (the device holds the result).
     let write = |i: usize, img: &[[f32; 4]], preview: bool| -> anyhow::Result<()> {
         let encoded = qoi::encode(&rgb8(img), data.width, data.height, 3);

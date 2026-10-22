@@ -117,6 +117,8 @@ fn run(args: Args) -> anyhow::Result<Report> {
         eprintln!("depth seeded {from_depth} Gaussians: {} more along the keyframes' rays", seeded.len() - from_depth);
         settings.starved = true;
     }
+    // The texels of the sky map that seeding saw (sky::SkyMap::fill keeps them).
+    let mut sky_seen = Vec::new();
     if settings.sky_map > 0 {
         // The sky as a map, which completes the sky itself: the shell's discs give way to it where the parallax test
         // found true sky (orbiters_reconstruct::sky). A capture none of whose pixels saw the sky keeps the shell.
@@ -129,6 +131,7 @@ fn run(args: Args) -> anyhow::Result<Report> {
                 map.width, found.pixels, found.texels_seen, found.cells_parallax, found.cells_tested
             );
             gpu.set_sky(Some((map.width, &map.rgb)))?;
+            sky_seen = found.texels;
         } else {
             eprintln!("sky map: no keyframe pixel saw the sky: the shell of discs stays");
         }
@@ -149,7 +152,14 @@ fn run(args: Args) -> anyhow::Result<Report> {
     std::fs::create_dir_all(partial.join(rec::HELD_OUT_DIR))?;
     ply::write(&partial.join(rec::PLY_FILE), &outcome.gaussians)?;
     if let Some((width, rgb)) = gpu.sky()? {
-        sky::SkyMap { width, rgb }.write(&partial.join(rec::SKY_FILE))?;
+        // What neither seeding nor training saw takes the sky's colour at its elevation, carried smoothly on from what
+        // they saw (sky::SkyMap::fill): the map as viewers draw it, and as the held-out keyframes are scored.
+        let trained = gpu.sky_trained()?.unwrap_or_default();
+        let known: Vec<bool> = (0..rgb.len()).map(|t| trained.get(t).copied().unwrap_or(false) || sky_seen.get(t).copied().unwrap_or(false)).collect();
+        let mut map = sky::SkyMap { width, rgb };
+        map.fill(&known);
+        gpu.set_sky(Some((map.width, &map.rgb)))?;
+        map.write(&partial.join(rec::SKY_FILE))?;
     }
     // One render of each held-out keyframe: its preview and its score (the device holds the result).
     let write = |i: usize, img: &[[f32; 4]], preview: bool| -> anyhow::Result<()> {

@@ -1813,6 +1813,15 @@ impl Gpu {
         Ok(())
     }
 
+    /// Which texels of the sky map training moved (their Adam moments are no longer zero), or `None` without a map
+    /// trained on this device.
+    pub fn sky_trained(&self) -> anyhow::Result<Option<Vec<bool>>> {
+        let Some((s, l)) = self.sky.as_ref().and_then(|s| Some((s, s.learning.as_ref()?))) else { return Ok(None) };
+        let n = s.width as usize * (s.width as usize / 2);
+        let m2: Vec<[f32; 4]> = self.read(&l.m2, n)?;
+        Ok(Some(m2.iter().map(|m| m[0] != 0.0 || m[1] != 0.0 || m[2] != 0.0).collect()))
+    }
+
     /// The sky map as it is now (rgb per texel), or `None` without one.
     pub fn sky(&self) -> anyhow::Result<Option<(u32, Vec<[f32; 3]>)>> {
         let Some(s) = self.sky.as_ref() else { return Ok(None) };
@@ -2632,6 +2641,8 @@ mod tests {
             // Texels no pixel looked up (behind the camera) never move.
             let behind = crate::sky::texel([0.0, 0.0, -1.0], width as usize);
             assert_eq!(texels[behind], [0.2, 0.3, 0.9], "{sums:?}");
+            let trained = gpu.sky_trained().expect("read").expect("a trained map");
+            assert!(!trained[behind] && trained[crate::sky::texel([0.0, 0.3, 1.0], width as usize)], "{sums:?}: which texels moved");
         }
     }
 

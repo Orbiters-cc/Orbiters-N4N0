@@ -12,7 +12,7 @@
 use anyhow::{bail, Context as _};
 use orbiters_contracts::qoi;
 use orbiters_core::reconstruction::{self as rec, Event, Report, Stage};
-use orbiters_reconstruct::{gpu, init, ply, prepare, train};
+use orbiters_reconstruct::{gpu, init, ply, prepare, sky, train};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -59,7 +59,7 @@ fn args() -> anyhow::Result<Args> {
             "--filter-3d" => settings.filter_3d = it.next().context("--filter-3d needs a value")?.parse().context("--filter-3d takes a number")?,
             // What the exact depth says is not there leaves the result (orbiters_reconstruct::cleanup).
             "--cleanup" => settings.cleanup = true,
-            // Lab: the sky as a map this many texels across (orbiters_reconstruct::sky::SkyMap).
+            // The sky map's width (orbiters_reconstruct::sky::SkyMap; 0: the shell of discs).
             "--sky-map" => settings.sky_map = number("--sky-map")? as u32,
             "--gpu" => {
                 device.low_power = match it.next().as_deref() {
@@ -106,30 +106,20 @@ fn run(args: Args) -> anyhow::Result<Report> {
     let budget = settings.budget * 2 / 3;
     let mut seeded = orbiters_reconstruct::priority::on_loading_threads(|| init::from_depth(data, budget, &held_out, |p| stage(Stage::Seeding, p)));
     if settings.sky_map > 0 {
-        // Lab: the map takes the sky shell's place where the parallax test found true sky, and completes the sky
-        // itself; elsewhere (finite content without depth, or directions the test could not judge) the shell's discs
-        // stay in front of it.
-        settings.sky_fill = false;
-        let (map, found) = orbiters_reconstruct::sky::seed_map(data, settings.sky_map, &held_out);
-        let n = data.views.len().max(1) as f32;
-        let centre = data.views.iter().fold([0f32; 3], |c, v| {
-            let p = v.camera.position();
-            [c[0] + p[0] / n, c[1] + p[1] / n, c[2] + p[2] / n]
-        });
-        let keep: Vec<bool> = (0..seeded.len())
-            .map(|i| {
-                let m = seeded.means[i];
-                !seeded.sky[i] || !found.sky_cells[orbiters_reconstruct::sky::texel([m[0] - centre[0], m[1] - centre[1], m[2] - centre[2]], orbiters_reconstruct::sky::PARALLAX_CELLS)]
-            })
-            .collect();
-        let before = seeded.len();
-        seeded.retain(&keep);
-        eprintln!("sky map: {} of the shell's discs leave for the map", before - seeded.len());
-        eprintln!(
-            "sky map: {} across from {} sky pixels, {} texels seen; {} of the {} 5.6° cells seen from both halves of the walk differ between them",
-            map.width, found.pixels, found.texels_seen, found.cells_parallax, found.cells_tested
-        );
-        gpu.set_sky(Some((map.width, &map.rgb)))?;
+        // The sky as a map, which completes the sky itself: the shell's discs give way to it where the parallax test
+        // found true sky (orbiters_reconstruct::sky). A capture none of whose pixels saw the sky keeps the shell.
+        let (map, found) = sky::seed_map(data, settings.sky_map, &held_out);
+        if found.pixels > 0 {
+            settings.sky_fill = false;
+            let left = sky::give_way(&mut seeded, &found, train::camera_centre(data));
+            eprintln!(
+                "sky map: {} across from {} sky pixels, {} texels seen; {} of the {} 5.6° cells seen from both halves of the walk differ between them; {left} of the shell's discs leave for the map",
+                map.width, found.pixels, found.texels_seen, found.cells_parallax, found.cells_tested
+            );
+            gpu.set_sky(Some((map.width, &map.rgb)))?;
+        } else {
+            eprintln!("sky map: no keyframe pixel saw the sky: the shell of discs stays");
+        }
     }
     if seeded.is_empty() {
         bail!("{}", prepared.nothing_to_seed());
@@ -147,7 +137,7 @@ fn run(args: Args) -> anyhow::Result<Report> {
     std::fs::create_dir_all(partial.join(rec::HELD_OUT_DIR))?;
     ply::write(&partial.join(rec::PLY_FILE), &outcome.gaussians)?;
     if let Some((width, rgb)) = gpu.sky()? {
-        orbiters_reconstruct::sky::SkyMap { width, rgb }.write(&partial.join("sky.bin"))?;
+        sky::SkyMap { width, rgb }.write(&partial.join(rec::SKY_FILE))?;
     }
     // One render of each held-out keyframe: its preview and its score (the device holds the result).
     let write = |i: usize, img: &[[f32; 4]], preview: bool| -> anyhow::Result<()> {
@@ -262,6 +252,13 @@ fn replace(dir: &Path, partial: &Path) -> anyhow::Result<()> {
 /// previous ones; renders of keyframes the new run did not hold out are deleted where possible.
 fn replace_files(out: &Path, partial: &Path) -> anyhow::Result<()> {
     retry(|| std::fs::rename(partial.join(rec::PLY_FILE), out.join(rec::PLY_FILE))).with_context(|| format!("{} is open in another program: close it and reconstruct again", out.join(rec::PLY_FILE).display()))?;
+    // The sky map goes with the splats it was trained with: a result without one leaves none behind.
+    let sky = out.join(rec::SKY_FILE);
+    if partial.join(rec::SKY_FILE).exists() {
+        retry(|| std::fs::rename(partial.join(rec::SKY_FILE), &sky)).with_context(|| format!("{} is open in another program: close it and reconstruct again", sky.display()))?;
+    } else if sky.exists() {
+        retry(|| std::fs::remove_file(&sky)).with_context(|| format!("{} is open in another program: close it and reconstruct again", sky.display()))?;
+    }
     let _ = retry(|| std::fs::rename(partial.join(rec::PREVIEW_FILE), out.join(rec::PREVIEW_FILE)));
     let (from, to) = (partial.join(rec::HELD_OUT_DIR), out.join(rec::HELD_OUT_DIR));
     std::fs::create_dir_all(&to)?;
@@ -398,6 +395,30 @@ mod tests {
         drop(held);
         assert_eq!((read(&dir, rec::PLY_FILE), read(&dir, rec::REPORT_FILE)), ("newer".into(), "r2".into()));
         recover(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The sky map goes with its splats, file by file too (a viewer holding a render open): a new map replaces the
+    /// previous one, and a result without one leaves none behind.
+    #[cfg(windows)]
+    #[test]
+    fn the_sky_map_goes_with_its_splats() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const SHARE_READ: u32 = 1;
+        let dir = session("sky");
+        result(&dir, rec::DIR, "old", "r0");
+        std::fs::write(rec::dir(&dir).join(rec::SKY_FILE), "sky0").unwrap();
+        for (ply, report, sky) in [("new", "r1", Some("sky1")), ("newer", "r2", None)] {
+            result(&dir, rec::PARTIAL_DIR, ply, report);
+            if let Some(s) = sky {
+                std::fs::write(dir.join(rec::PARTIAL_DIR).join(rec::SKY_FILE), s).unwrap();
+            }
+            let held = std::fs::OpenOptions::new().read(true).share_mode(SHARE_READ).open(rec::dir(&dir).join(rec::PREVIEW_FILE)).unwrap();
+            replace(&dir, &dir.join(rec::PARTIAL_DIR)).expect("replaced");
+            drop(held);
+            assert_eq!(read(&dir, rec::PLY_FILE), ply);
+            assert_eq!(std::fs::read_to_string(rec::dir(&dir).join(rec::SKY_FILE)).ok().as_deref(), sky);
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

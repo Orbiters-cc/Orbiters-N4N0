@@ -1,4 +1,4 @@
-// The sky map behind the splats (crate::sky::SkyMap, lab): an equirectangular map of frame.horizon.w × half as many
+// The sky map behind the splats (crate::sky::SkyMap): an equirectangular map of frame.horizon.w × half as many
 // texels (rgb, unused) looked up by world direction, bilinear, around in longitude and clamped at the poles. Width 0:
 // the constant background. Needs `frame` (common.wgsl).
 

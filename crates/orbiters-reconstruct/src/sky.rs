@@ -5,6 +5,11 @@
 //! like the cell's own sky where it was seen, else like the nearest seen sky of its elevation band (else the nearest
 //! band that has any): the gradient of the seen sky carries on instead of a hole, and behind a sparsely seen cell its
 //! gaps show sky instead of the black training background (the dark streaks along the edge of what was seen).
+//!
+//! By default the sky is a map instead ([`SkyMap`], `sky.png` beside the PLY): seeded from the keyframe pixels whose
+//! rays hit nothing ([`seed_map`]), trained behind the splats (crate::gpu::Gpu::set_sky), and drawn behind them by
+//! every viewer. The shell's discs give way to it only in the directions a parallax test confirms as sky
+//! ([`give_way`]); the completion is for the shell alone.
 
 use crate::dataset::{sample_rgb, Dataset, DepthGrid};
 use crate::gaussians::{logit, sigmoid, Gaussians};
@@ -142,10 +147,12 @@ pub fn complete(g: &mut Gaussians, centre: [f32; 3], far_field: f32, distance: f
     added
 }
 
-/// Lab: the sky as an equirectangular map behind the splats (crate::gpu::Gpu::set_sky, shaders/sky_lookup.wgsl) in
-/// place of the shell of discs crate::init::SKY out, which slides by f·b/R pixels as the eye moves b (31 px over a 10 m
-/// walk at 1233 px) and never densifies. `width` × `width / 2` texels of encoded sRGB, longitude `atan2(x, z)` across
-/// from −180°, elevation from +90° down.
+/// The sky as an equirectangular map behind the splats (crate::gpu::Gpu::set_sky, shaders/sky_lookup.wgsl) in place
+/// of the shell of discs crate::init::SKY out, which slides by f·b/R pixels as the eye moves b (31 px over a 10 m walk
+/// at 1233 px) and never densifies. `width` × `width / 2` texels of encoded sRGB, longitude `atan2(x, z)` across from
+/// −180°, elevation from +90° down. On the off-path benchmark (2026-10-22, three runs each) it gained 0.10 dB off-path,
+/// 1.26 dB looking up and 0.56 dB on held-out keyframes on the plaza walk, 0.13 dB on VRChat Home and 0.96 dB on
+/// Canine with half the splats; Exoplanet was neutral (−0.06 dB).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SkyMap {
     pub width: u32,
@@ -293,28 +300,76 @@ pub fn seed_map(data: &Dataset, width: u32, held_out: &[usize]) -> (SkyMap, SkyS
     (SkyMap { width, rgb }, found)
 }
 
+/// The rows of the band the horizon's colour is read from: from 2° below the horizon to 12° above, as
+/// [`horizon`] reads the shell.
+const HORIZON_DEG: std::ops::RangeInclusive<f32> = -2.0..=12.0;
+
+/// The shell's discs give way to the map in the cells the parallax test found to be sky (`found.sky_cells`, by
+/// direction from `centre`, the cameras' mean position); elsewhere (finite content without depth, directions the test
+/// could not judge) they stay in front of it. Returns how many left.
+pub fn give_way(g: &mut Gaussians, found: &SkySeeding, centre: [f32; 3]) -> usize {
+    let keep: Vec<bool> = (0..g.len())
+        .map(|i| {
+            let m = g.means[i];
+            !g.sky[i] || !found.sky_cells.get(texel([m[0] - centre[0], m[1] - centre[1], m[2] - centre[2]], PARALLAX_CELLS)).copied().unwrap_or(false)
+        })
+        .collect();
+    let before = g.len();
+    g.retain(&keep);
+    before - g.len()
+}
+
 impl SkyMap {
-    /// `sky.bin` beside the PLY: "OSKY", the width (u32, little-endian), then each texel's rgb as f32.
-    pub fn write(&self, path: &Path) -> anyhow::Result<()> {
-        let mut bytes = Vec::with_capacity(8 + self.rgb.len() * 12);
-        bytes.extend_from_slice(b"OSKY");
-        bytes.extend_from_slice(&self.width.to_le_bytes());
-        for c in &self.rgb {
-            for v in c {
-                bytes.extend_from_slice(&v.to_le_bytes());
+    /// The colour of the sky at the horizon (encoded sRGB), for a viewer's fog (crate::gpu::FarField): the mean of the
+    /// texel rows from 2° below the horizon to 12° above.
+    pub fn horizon(&self) -> [f32; 3] {
+        let (w, h) = (self.width as usize, self.width as usize / 2);
+        let (mut sum, mut n) = ([0f64; 3], 0usize);
+        for y in 0..h {
+            let elevation = 90.0 - (y as f32 + 0.5) / h as f32 * 180.0;
+            if !HORIZON_DEG.contains(&elevation) {
+                continue;
             }
+            for c in &self.rgb[y * w..(y + 1) * w] {
+                for (s, v) in sum.iter_mut().zip(c) {
+                    *s += v.clamp(0.0, 1.0) as f64;
+                }
+            }
+            n += w;
         }
-        std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
+        sum.map(|s| (s / n.max(1) as f64) as f32)
     }
 
+    /// Writes the map as an 8-bit sRGB PNG (orbiters_core::reconstruction::SKY_FILE, contracts Docs/session-bundle.md).
+    pub fn write(&self, path: &Path) -> anyhow::Result<()> {
+        let file = std::fs::File::create(path).with_context(|| format!("writing {}", path.display()))?;
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), self.width, self.width / 2);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+        let bytes: Vec<u8> = self.rgb.iter().flat_map(|c| c.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)).collect();
+        let mut writer = encoder.write_header().with_context(|| format!("writing {}", path.display()))?;
+        writer.write_image_data(&bytes).with_context(|| format!("writing {}", path.display()))?;
+        writer.finish().with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// Reads a map [`SkyMap::write`] wrote (any 8-bit PNG twice as wide as high, a width a multiple of 4).
     pub fn read(path: &Path) -> anyhow::Result<Self> {
-        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        anyhow::ensure!(bytes.len() >= 8 && &bytes[..4] == b"OSKY", "{} is no sky map", path.display());
-        let width = u32::from_le_bytes(bytes[4..8].try_into().expect("four bytes"));
-        let n = width as usize * (width as usize / 2);
-        anyhow::ensure!(bytes.len() == 8 + n * 12, "{}: {} bytes for a map {width} across", path.display(), bytes.len());
-        let f = |i: usize| f32::from_le_bytes(bytes[8 + 4 * i..12 + 4 * i].try_into().expect("four bytes"));
-        Ok(Self { width, rgb: (0..n).map(|t| [f(3 * t), f(3 * t + 1), f(3 * t + 2)]).collect() })
+        let file = std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+        let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+        decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+        let mut reader = decoder.read_info().with_context(|| format!("reading {}", path.display()))?;
+        let mut buf = vec![0; reader.output_buffer_size().context("a sky map too large")?];
+        let info = reader.next_frame(&mut buf).with_context(|| format!("reading {}", path.display()))?;
+        let (width, height) = (info.width, info.height);
+        anyhow::ensure!(width >= 4 && width % 4 == 0 && width == 2 * height, "{}: a sky map is twice as wide as high ({width} × {height})", path.display());
+        let channels = match info.color_type {
+            png::ColorType::Rgb => 3,
+            png::ColorType::Rgba => 4,
+            other => anyhow::bail!("{}: a sky map is RGB, not {other:?}", path.display()),
+        };
+        let rgb = buf[..info.buffer_size()].chunks_exact(channels).map(|p| [0, 1, 2].map(|c| p[c] as f32 / 255.0)).collect();
+        Ok(Self { width, rgb })
     }
 }
 
@@ -391,10 +446,61 @@ mod tests {
         assert_eq!(texel([0.0, -1.0, 0.0], w) / w, w / 2 - 1);
         assert_eq!(texel([-1.0, 0.0, 0.0], w) % w, w / 4);
         assert_eq!(texel([0.0, 0.0, -1.0], w) % w, 0);
-        let map = SkyMap { width: 8, rgb: (0..32).map(|i| [i as f32, 0.5, -1.0]).collect() };
-        let path = std::env::temp_dir().join(format!("orbiters-sky-{}.bin", std::process::id()));
+    }
+
+    /// sky.png keeps each texel to the nearest of 256 levels (out of range clamped), rows from the top.
+    #[test]
+    fn a_sky_map_round_trips_through_its_png() {
+        let map = SkyMap { width: 8, rgb: (0..32).map(|i| [i as f32 / 31.0, 0.5, if i < 8 { -1.0 } else { 2.0 }]).collect() };
+        let path = std::env::temp_dir().join(format!("orbiters-sky-{}.png", std::process::id()));
         map.write(&path).unwrap();
-        assert_eq!(SkyMap::read(&path).unwrap(), map);
+        let back = SkyMap::read(&path).unwrap();
         std::fs::remove_file(&path).ok();
+        assert_eq!(back.width, 8);
+        for (a, b) in map.rgb.iter().zip(&back.rgb) {
+            for c in 0..3 {
+                assert!((a[c].clamp(0.0, 1.0) - b[c]).abs() <= 0.5 / 255.0 + 1e-6, "{a:?} {b:?}");
+            }
+        }
+    }
+
+    /// The horizon's colour is the band's around the horizon, not the zenith's or the ground's.
+    #[test]
+    fn the_horizon_is_read_from_the_band_around_it() {
+        let (w, h) = (64usize, 32usize);
+        let rgb = (0..w * h)
+            .map(|t| {
+                let elevation = 90.0 - (((t / w) as f32 + 0.5) / h as f32) * 180.0;
+                if (-2.0..=12.0).contains(&elevation) {
+                    [0.8, 0.6, 0.4]
+                } else if elevation > 0.0 {
+                    [0.1, 0.2, 0.9]
+                } else {
+                    [0.0; 3]
+                }
+            })
+            .collect();
+        let c = SkyMap { width: w as u32, rgb }.horizon();
+        assert!((c[0] - 0.8).abs() < 1e-5 && (c[1] - 0.6).abs() < 1e-5 && (c[2] - 0.4).abs() < 1e-5, "{c:?}");
+    }
+
+    /// Discs on the shell leave in the cells the parallax test confirmed as sky; elsewhere, and the scene's own
+    /// Gaussians everywhere, stay.
+    #[test]
+    fn shell_discs_give_way_only_where_the_test_found_sky() {
+        let mut g = Gaussians::default();
+        let up = [0.0, 400.0, 0.0];
+        let ahead = [0.0, 0.0, 400.0];
+        for p in [up, ahead] {
+            g.push(p, [1.0; 3], [1.0, 0.0, 0.0, 0.0], logit(0.9), [0.5; 3]);
+            *g.sky.last_mut().unwrap() = true;
+        }
+        g.push([0.0, 0.0, 5.0], [0.0; 3], [1.0, 0.0, 0.0, 0.0], logit(0.9), [0.5; 3]);
+        let mut found = SkySeeding { sky_cells: vec![false; PARALLAX_CELLS * PARALLAX_CELLS / 2], ..Default::default() };
+        found.sky_cells[texel(up, PARALLAX_CELLS)] = true;
+        found.sky_cells[texel([0.0, 0.0, 1.0], PARALLAX_CELLS)] = true;
+        assert_eq!(give_way(&mut g, &found, [0.0; 3]), 2, "both shell discs are in sky cells");
+        assert_eq!(g.len(), 1);
+        assert_eq!(g.means[0], [0.0, 0.0, 5.0], "the scene's own Gaussian stays, in a sky cell too");
     }
 }

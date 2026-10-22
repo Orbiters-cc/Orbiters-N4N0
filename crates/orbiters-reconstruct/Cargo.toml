@@ -22,6 +22,8 @@ wgpu = "30"
 ash = "0.38"
 fastrand = "2"
 rayon = { workspace = true }
+# The sky map's sky.png (crate::sky).
+png = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
@@ -29,4 +31,3 @@ sysinfo = "0.37"
 
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in", "hlsl-out", "spv-out"] }
-png = { workspace = true }

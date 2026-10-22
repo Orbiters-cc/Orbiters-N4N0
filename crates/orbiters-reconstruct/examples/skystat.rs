@@ -1,4 +1,4 @@
-//! Lab: what seeding a sky map finds in a session (crate::sky::seed_map), without training: sky pixels, texels seen, and
+//! What seeding a sky map finds in a session (crate::sky::seed_map), without training: sky pixels, texels seen, and
 //! the parallax test's cells.
 //!
 //! ```text

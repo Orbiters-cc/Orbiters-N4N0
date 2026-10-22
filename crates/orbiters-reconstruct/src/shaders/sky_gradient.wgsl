@@ -1,4 +1,4 @@
-// The sky map's gradient from a colour step (lab, crate::sky::SkyMap; a sums_*.wgsl variant, whose `add` writes the
+// The sky map's gradient from a colour step (crate::sky::SkyMap; a sums_*.wgsl variant, whose `add` writes the
 // map's gradient buffer at binding 7, and sky_lookup.wgsl come first): ∂L/∂S = T·∂L/∂C of every pixel, added into the
 // four texels it was looked up from with their bilinear weights, four floats a texel (rgb, unused).
 

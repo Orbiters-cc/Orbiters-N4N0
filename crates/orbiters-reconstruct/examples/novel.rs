@@ -5,7 +5,7 @@
 //! ```text
 //! cargo run --release --example novel -- <session> <splats.ply> <out dir> <keyframe>[,<keyframe>...] [--width N]
 //! ```
-//! A `sky.bin` beside the PLY (the sky-map lab) is drawn behind the splats.
+//! A `sky.png` beside the PLY (orbiters_reconstruct::sky::SkyMap) is drawn behind the splats.
 
 use anyhow::Context as _;
 use orbiters_reconstruct::camera::Camera;
@@ -41,7 +41,7 @@ fn main() -> anyhow::Result<()> {
     let g = ply::read(&splats)?;
     let mut gpu = gpu::Gpu::new()?;
     gpu.upload(&g);
-    let map = splats.with_file_name("sky.bin");
+    let map = splats.with_file_name(orbiters_core::reconstruction::SKY_FILE);
     if map.is_file() {
         let sky = orbiters_reconstruct::sky::SkyMap::read(&map)?;
         gpu.set_sky(Some((sky.width, &sky.rgb)))?;

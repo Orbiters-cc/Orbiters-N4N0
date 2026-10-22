@@ -81,8 +81,9 @@ pub struct Settings {
     /// Leaves out what the exact depth says is not there once training ends: floaters in front of measured surfaces and
     /// islands no depth saw that do not join the ground under the walked path (crate::cleanup).
     pub cleanup: bool,
-    /// Lab: the sky as a map this many texels across behind the splats (crate::sky::SkyMap) instead of the shell of
-    /// discs (0: the shell).
+    /// The sky as a map this many texels across behind the splats (crate::sky::SkyMap), seeded and trained beside
+    /// them; the shell's discs stay only where the parallax test cannot confirm sky (crate::sky::give_way). 0, or a
+    /// capture none of whose pixels saw the sky: the shell of discs and its completion ([`Settings::sky_fill`]).
     pub sky_map: u32,
 }
 
@@ -113,7 +114,7 @@ impl Default for Settings {
             sky_fill: true,
             filter_3d: 0.0,
             cleanup: false,
-            sky_map: 0,
+            sky_map: 2048,
         }
     }
 }
@@ -163,7 +164,7 @@ fn evenly(items: &[usize], k: usize) -> Vec<usize> {
 }
 
 /// The cameras' mean position.
-fn camera_centre(data: &Dataset) -> [f32; 3] {
+pub fn camera_centre(data: &Dataset) -> [f32; 3] {
     let n = data.views.len().max(1) as f32;
     data.views.iter().map(|v| v.camera.position()).fold([0.0f32; 3], |a, p| [a[0] + p[0] / n, a[1] + p[1] / n, a[2] + p[2] / n])
 }

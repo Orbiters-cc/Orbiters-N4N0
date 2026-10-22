@@ -1,4 +1,4 @@
-// The sky map in place of the constant background, after the forward pass (lab, crate::sky::SkyMap; sky_lookup.wgsl
+// The sky map in place of the constant background, after the forward pass (crate::sky::SkyMap; sky_lookup.wgsl
 // comes first): C += T·(S(d) − b) at every pixel, T the transmittance left behind the splats.
 
 @group(0) @binding(0) var<uniform> frame: Frame;

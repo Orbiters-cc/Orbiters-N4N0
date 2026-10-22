@@ -222,6 +222,12 @@ pub enum OrbCommand {
     Photo3DIn {
         seconds: u32,
     },
+    /// The orb's light as Orb's menu set it (its Light page): `Orb/Light`, its colour and level.
+    Light {
+        on: bool,
+        color: u8,
+        level: f32,
+    },
 }
 
 /// Longest Hello a client may send, and how long it has to send it. Any local process can connect: before it proves

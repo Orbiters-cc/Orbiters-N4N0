@@ -12,6 +12,7 @@ mod controller;
 mod gpu;
 mod ipc;
 mod mailbox;
+mod media;
 mod mixer_inbox;
 mod overlay;
 mod pages;

@@ -3662,6 +3662,7 @@ dependencies = [
  "anyhow",
  "orbiters-contracts",
  "orbiters-core",
+ "png",
  "rosc",
  "serde",
  "serde_json",

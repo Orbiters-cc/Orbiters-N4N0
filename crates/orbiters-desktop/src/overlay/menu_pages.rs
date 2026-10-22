@@ -13,7 +13,7 @@ use super::menu_ui::{self, View};
 use super::Canvas;
 use egui::{pos2, ColorImage, TextureHandle, TextureId, TextureOptions};
 use orbiters_orb::menu::layout::{self, ScreenPage, MAX_ELEMENTS, MAX_SLOTS, PICTURES};
-use orbiters_orb::menu::{screen, Call, Contact, KeyboardLayout, Keys, Menu, Page, PhotoLength, Target};
+use orbiters_orb::menu::{screen, Call, Contact, KeyboardLayout, Keys, Light, Media, Menu, Page, PhotoLength, Target, Volume};
 use orbiters_orb::picture;
 use orbiters_orb::youtube::{Results, Video};
 use std::path::Path;
@@ -142,6 +142,23 @@ fn sample_picture(seed: usize) -> screen::Picture {
     screen::picture_from_rgb(&rgb)
 }
 
+/// A stand-in for music art: a square, as most art is, whole on the menu's 16:9 card (as the media reading gives it).
+fn sample_art() -> picture::Rgb {
+    let size = 160usize;
+    let mut pixels = Vec::with_capacity(size * size * 3);
+    for y in 0..size {
+        for x in 0..size {
+            let ring = ((x as f32 - 80.0).powi(2) + (y as f32 - 80.0).powi(2)).sqrt();
+            let k = if (ring - 44.0).abs() < 10.0 { 1.0 } else { 0.35 + 0.4 * (y as f32 / size as f32) };
+            pixels.extend([(250.0 * k) as u8, (96.0 * k) as u8, (170.0 * k) as u8]);
+        }
+    }
+    picture::letterbox(&picture::Rgb { width: size, height: size, pixels }, crate::media::ART_WIDTH, crate::media::ART_HEIGHT, [0x10, 0x10, 0x12])
+}
+
+/// The sample music art's key.
+const SAMPLE_ART: &str = "art:sample";
+
 /// Menus with sample content, one per page, with the element hovered and pressed.
 fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     let mut out = Vec::new();
@@ -211,6 +228,37 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     photo.page = Page::Photo;
     photo.countdown = Some(3);
     out.push((ScreenPage::Photo, photo, Some(2), None));
+    // The overlay's Home and screens from version 3: six tiles, music playing, the orb's light on.
+    let more = || {
+        let mut m = base();
+        m.six_tiles = true;
+        m.media = Some(Media {
+            title: "Midnight City".into(),
+            artist: "M83".into(),
+            album: "Hurry Up, We're Dreaming".into(),
+            app: "Spotify".into(),
+            playing: true,
+            can_play_pause: true,
+            can_previous: true,
+            can_next: true,
+            position: Some(83),
+            duration: Some(243),
+            art: Some(SAMPLE_ART.into()),
+        });
+        m.volume = Some(Volume { percent: 40, muted: false });
+        m.light = Some(Light { on: true, color: 1, level: 0.6 });
+        m
+    };
+    let mut home = more();
+    home.fast_walk = true;
+    home.heard = Some("play some music".into());
+    out.push((ScreenPage::HomeSix, home, Some(4), None));
+    let mut music = more();
+    music.page = Page::Music;
+    out.push((ScreenPage::Music, music, Some(3), None));
+    let mut light = more();
+    light.page = Page::Light;
+    out.push((ScreenPage::Light, light, Some(5), None));
     out
 }
 
@@ -227,19 +275,33 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     let mut canvas = Canvas::new(WIDTH, HEIGHT);
     let thumbs: Vec<TextureHandle> = (0..PICTURES).map(|i| sample_thumbnail(canvas.ctx(), i)).collect();
+    let art = sample_art();
+    let art_texture = {
+        let rgba: Vec<u8> = art.pixels.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
+        canvas.ctx().load_texture(SAMPLE_ART, ColorImage::from_rgba_unmultiplied([art.width, art.height], &rgba), TextureOptions::LINEAR)
+    };
     for (page, menu, hover, pressed) in samples() {
         assert_eq!(ScreenPage::of(&menu), page, "the sample shows its page");
-        let picture =
-            |id: &str| -> Option<TextureId> { id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).and_then(|i| thumbs.get(i)).map(|t| t.id()) };
+        let picture = |id: &str| -> Option<TextureId> {
+            if id == SAMPLE_ART {
+                return Some(art_texture.id());
+            }
+            id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).and_then(|i| thumbs.get(i)).map(|t| t.id())
+        };
         let rgba = paint(&mut canvas, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &picture, time: 0.4 }));
         let path = out.join(format!("menu-{}.png", page.name()));
         write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
         println!("{}", path.display());
-        let pictures = |id: &str| -> Option<screen::Picture> { id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).map(sample_picture) };
+        let pictures = |id: &str| -> Option<screen::Picture> {
+            if id == SAMPLE_ART {
+                return Some(screen::picture_from_rgb(&art));
+            }
+            id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).map(sample_picture)
+        };
         let flags = screen::Flags { listening: menu.listening, loading: menu.loading(), thinking: false };
         let bank = screen::Frame::new(&menu, hover, pressed, flags, 72, &pictures).bank;
         std::fs::write(out.join(format!("bank-{}.bin", page.name())), &bank[..screen::bank_bytes(72)])?;
-        if page == ScreenPage::Results {
+        if matches!(page, ScreenPage::Results | ScreenPage::Music) {
             let bank = screen::Frame::new(&menu, hover, pressed, flags, 128, &pictures).bank;
             std::fs::write(out.join(format!("bank-{}-128.bin", page.name())), &bank[..screen::bank_bytes(128)])?;
         }

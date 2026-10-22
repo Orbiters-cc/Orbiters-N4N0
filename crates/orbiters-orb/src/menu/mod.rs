@@ -1,6 +1,7 @@
 //! Orb's menu (contracts `Docs/orb.md`, Menu): what opens when the person calls Orb (a controller button, the wake word
-//! on its own, touching the orb): fast walk, YouTube, calls and a 3D picture. Orbiters desktop's SteamVR overlay shows
-//! it, or the avatar's projected screen when the Orb prop has one; both draw the same pages from [`layout`].
+//! on its own, touching the orb): fast walk, YouTube, calls, a 3D picture, the computer's music and the orb's light.
+//! Orbiters desktop's SteamVR overlay shows it, or the avatar's projected screen when the Orb prop has one; both draw
+//! the same pages from [`layout`].
 //!
 //! This module holds what the menu shows and what each press does, without IO: presses and typing return [`Effect`]s
 //! that the host carries out (fetching suggestions and results, copying a link, starting a call), and the host hands the
@@ -23,6 +24,8 @@ pub const CONTACTS_PER_PAGE: usize = 5;
 pub const QUERY_MAX: usize = 40;
 /// The 3D picture's timer choices, in seconds (0: at once).
 pub const TIMERS: [u32; 4] = [0, 3, 5, 10];
+/// How much a volume button turns the computer's volume, in percent.
+pub const VOLUME_STEP: u8 = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Page {
@@ -34,6 +37,10 @@ pub enum Page {
     /// Friends to call; a call under way shows instead.
     Call,
     Photo,
+    /// What the computer plays (Windows' media controls) and its volume.
+    Music,
+    /// The orb as a light: on or off, its colour and brightness.
+    Light,
 }
 
 /// The letters' order on the keyboard.
@@ -76,6 +83,63 @@ impl PhotoLength {
     }
 }
 
+/// What the computer plays, as Windows' media controls tell it (the app playing last, or playing now).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Media {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    /// The app playing it ("Spotify").
+    pub app: String,
+    pub playing: bool,
+    pub can_play_pause: bool,
+    pub can_previous: bool,
+    pub can_next: bool,
+    /// Where it is and how long it lasts, in seconds, when the app says.
+    pub position: Option<u32>,
+    pub duration: Option<u32>,
+    /// The art's picture key (the hosts keep the pictures by key), once there is art.
+    pub art: Option<String>,
+}
+
+/// The computer's volume (its default speakers), in percent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Volume {
+    pub percent: u8,
+    pub muted: bool,
+}
+
+/// What the music page (or Orb's assistant) asks of the computer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaCommand {
+    PlayPause,
+    Play,
+    Pause,
+    Previous,
+    Next,
+    /// The volume to this percent (unmuted).
+    Volume(u8),
+    Mute(bool),
+}
+
+/// The orb's light as the avatar holds it (`Orb/Light`, `Orb/Light/Color`, `Orb/Light/Level`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Light {
+    pub on: bool,
+    /// An index into contracts `orb::LIGHT_COLORS`.
+    pub color: u8,
+    /// 0 to 1.
+    pub level: f32,
+}
+
+impl Light {
+    /// The brightness choice (contracts `orb::LIGHT_LEVELS`) nearest the level.
+    pub fn level_choice(&self) -> usize {
+        let levels = orbiters_contracts::orb::LIGHT_LEVELS;
+        (0..levels.len()).min_by(|&a, &b| (levels[a].1 - self.level).abs().total_cmp(&(levels[b].1 - self.level).abs())).unwrap_or(0)
+    }
+}
+
 /// A friend who can be called.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Contact {
@@ -104,6 +168,8 @@ pub enum Target {
     YouTube,
     Call,
     Photo,
+    Music,
+    Light,
     // Search.
     Field,
     Search,
@@ -127,6 +193,17 @@ pub enum Target {
     Timer(u8),
     Length(u8),
     Take,
+    // Music.
+    MediaPrevious,
+    MediaPlayPause,
+    MediaNext,
+    VolumeDown,
+    VolumeUp,
+    Mute,
+    // Light.
+    LightSwitch,
+    LightColor(u8),
+    LightLevel(u8),
 }
 
 /// What the host does for the menu. Requests are numbered, and their answers carry the number back: an answer to an
@@ -172,6 +249,10 @@ pub enum Effect {
         timer: u32,
         length: PhotoLength,
     },
+    /// Tell the computer's media controls or its volume.
+    Media(MediaCommand),
+    /// Set the orb's light so (its three parameters).
+    Light(Light),
     /// The menu closed.
     Close,
 }
@@ -225,6 +306,14 @@ pub struct Menu {
     /// `heard` holds the owner's own words: everyone else's screen does not show them (a sentence for Orb may have
     /// been kept out of the world, VRChat's microphone muted while it was said).
     pub heard_private: bool,
+    /// Home has six tiles (music and light): the overlay always, the avatar's screen from version 3
+    /// (`Orb/Screen/Version`); older screens have the first four.
+    pub six_tiles: bool,
+    /// What the computer plays (`None`: nothing, or not known yet) and its volume.
+    pub media: Option<Media>,
+    pub volume: Option<Volume>,
+    /// The orb's light, when the avatar has it (the Light option on the orb's card).
+    pub light: Option<Light>,
 }
 
 impl Menu {
@@ -286,6 +375,14 @@ impl Menu {
             }
             Target::Photo => {
                 self.go(Page::Photo);
+                Vec::new()
+            }
+            Target::Music => {
+                self.go(Page::Music);
+                Vec::new()
+            }
+            Target::Light => {
+                self.go(Page::Light);
                 Vec::new()
             }
             Target::Field => Vec::new(),
@@ -353,6 +450,63 @@ impl Menu {
                 }
                 vec![Effect::Photo3d { timer: self.photo_timer, length: self.photo_length }]
             }
+            // What the music page shows changes at once; the computer follows.
+            Target::MediaPlayPause => match self.media.as_mut() {
+                Some(media) if media.can_play_pause => {
+                    media.playing = !media.playing;
+                    vec![Effect::Media(MediaCommand::PlayPause)]
+                }
+                _ => Vec::new(),
+            },
+            Target::MediaPrevious => match &self.media {
+                Some(media) if media.can_previous => vec![Effect::Media(MediaCommand::Previous)],
+                _ => Vec::new(),
+            },
+            Target::MediaNext => match &self.media {
+                Some(media) if media.can_next => vec![Effect::Media(MediaCommand::Next)],
+                _ => Vec::new(),
+            },
+            Target::VolumeDown | Target::VolumeUp => match self.volume.as_mut() {
+                Some(volume) => {
+                    let percent = if target == Target::VolumeUp {
+                        volume.percent.saturating_add(VOLUME_STEP).min(100)
+                    } else {
+                        volume.percent.saturating_sub(VOLUME_STEP)
+                    };
+                    *volume = Volume { percent, muted: false };
+                    vec![Effect::Media(MediaCommand::Volume(percent))]
+                }
+                None => Vec::new(),
+            },
+            Target::Mute => match self.volume.as_mut() {
+                Some(volume) => {
+                    volume.muted = !volume.muted;
+                    vec![Effect::Media(MediaCommand::Mute(volume.muted))]
+                }
+                None => Vec::new(),
+            },
+            // Choosing a colour or a brightness turns the light on.
+            Target::LightSwitch | Target::LightColor(_) | Target::LightLevel(_) => match self.light.as_mut() {
+                Some(light) => {
+                    match target {
+                        Target::LightColor(i) if (i as usize) < orbiters_contracts::orb::LIGHT_COLORS.len() => {
+                            light.color = i;
+                            light.on = true;
+                        }
+                        Target::LightLevel(i) => match orbiters_contracts::orb::LIGHT_LEVELS.get(i as usize) {
+                            Some(&(_, level)) => {
+                                light.level = level;
+                                light.on = true;
+                            }
+                            None => return Vec::new(),
+                        },
+                        Target::LightSwitch => light.on = !light.on,
+                        _ => return Vec::new(),
+                    }
+                    vec![Effect::Light(*light)]
+                }
+                None => Vec::new(),
+            },
         }
     }
 
@@ -738,6 +892,33 @@ pub fn clock(seconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn music_and_light_presses_show_at_once_and_ask_the_hosts() {
+        let mut menu = Menu { six_tiles: true, ..Default::default() };
+        menu.open();
+        menu.press(Target::Music);
+        assert!(menu.press(Target::MediaPlayPause).is_empty(), "nothing to play or pause");
+        menu.media = Some(Media { title: "A song".into(), playing: true, can_play_pause: true, ..Default::default() });
+        menu.volume = Some(Volume { percent: 98, muted: true });
+        assert_eq!(menu.press(Target::MediaPlayPause), vec![Effect::Media(MediaCommand::PlayPause)]);
+        assert!(!menu.media.as_ref().unwrap().playing, "paused at once");
+        assert!(menu.press(Target::MediaNext).is_empty(), "the app can't go to the next one");
+        assert_eq!(menu.press(Target::VolumeUp), vec![Effect::Media(MediaCommand::Volume(100))]);
+        assert_eq!(menu.volume, Some(Volume { percent: 100, muted: false }), "turning it up unmutes");
+        assert_eq!(menu.press(Target::Mute), vec![Effect::Media(MediaCommand::Mute(true))]);
+        menu.press(Target::Back);
+        assert_eq!(menu.page, Page::Home);
+
+        menu.press(Target::Light);
+        assert!(menu.press(Target::LightSwitch).is_empty(), "no light on this avatar");
+        menu.light = Some(Light { on: false, color: 0, level: 0.6 });
+        let effects = menu.press(Target::LightColor(3));
+        assert_eq!(effects, vec![Effect::Light(Light { on: true, color: 3, level: 0.6 })], "a colour turns it on");
+        assert_eq!(menu.press(Target::LightLevel(2)), vec![Effect::Light(Light { on: true, color: 3, level: 1.0 })]);
+        assert_eq!(menu.press(Target::LightSwitch), vec![Effect::Light(Light { on: false, color: 3, level: 1.0 })]);
+        assert!(menu.press(Target::LightColor(8)).is_empty(), "no ninth colour");
+    }
 
     fn video(id: &str) -> Video {
         Video { id: format!("{id:0>11}"), title: format!("Title {id}"), channel: "Channel".into(), duration: Some("3:21".into()), live: false }

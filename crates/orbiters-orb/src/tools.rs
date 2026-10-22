@@ -16,16 +16,50 @@ pub enum Mood {
 /// What a tool call asks the desktop to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    SetControl { control: String, on: Option<bool>, value: Option<f32> },
-    FindControls { query: String },
-    SetParameter { name: String, value: f32 },
-    TakePhoto { delay_seconds: u32 },
+    SetControl {
+        control: String,
+        on: Option<bool>,
+        value: Option<f32>,
+    },
+    FindControls {
+        query: String,
+    },
+    SetParameter {
+        name: String,
+        value: f32,
+    },
+    TakePhoto {
+        delay_seconds: u32,
+    },
     SaveVideo,
     ListSavedVideos,
-    CopyToClipboard { text: String },
-    SetAfkMessage { text: Option<String>, enabled: Option<bool> },
-    Hold { control: String, on: Option<bool>, value: Option<f32>, release: bool },
-    Mood { mood: Mood },
+    CopyToClipboard {
+        text: String,
+    },
+    SetAfkMessage {
+        text: Option<String>,
+        enabled: Option<bool>,
+    },
+    Hold {
+        control: String,
+        on: Option<bool>,
+        value: Option<f32>,
+        release: bool,
+    },
+    Mood {
+        mood: Mood,
+    },
+    /// The computer's music: `None` only tells what plays.
+    Media {
+        command: Option<crate::menu::MediaCommand>,
+        volume_change: Option<i8>,
+    },
+    /// The orb's light: what is given changes, the rest stays.
+    Light {
+        on: Option<bool>,
+        color: Option<u8>,
+        level: Option<f32>,
+    },
 }
 
 /// The client tools, for `tools` of a turn. `bare_parameters`: the avatar has no manifest, so its parameters are
@@ -85,6 +119,23 @@ pub fn specs(bare_parameters: bool) -> Vec<Value> {
             } }
         }),
         json!({
+            "name": "control_media",
+            "description": "The music or video playing on the owner's computer (Spotify, a browser, any app Windows' media controls know): play, pause, next, previous, the computer's volume (up or down by about 10 %, or to a percent), mute. Returns what plays and the volume. No action: just tell what plays.",
+            "input_schema": { "type": "object", "properties": {
+                "action": { "enum": ["status", "play", "pause", "toggle", "next", "previous", "volume_up", "volume_down", "mute", "unmute"] },
+                "volume": { "type": "integer", "minimum": 0, "maximum": 100, "description": "Set the volume to this percent." }
+            } }
+        }),
+        json!({
+            "name": "orb_light",
+            "description": "Make the orb a light (for a dark world, or a photo): on or off, its colour and brightness. Everyone around sees it. Only for an orb with the Light option (the avatar lists Orb/Light); the result says when it has none.",
+            "input_schema": { "type": "object", "properties": {
+                "on": { "type": "boolean" },
+                "color": { "enum": ["white", "warm", "sunset", "pink", "violet", "blue", "cyan", "green"] },
+                "brightness": { "type": "number", "minimum": 0, "maximum": 1 }
+            } }
+        }),
+        json!({
             "name": "orb_mood",
             "description": "How the orb looks while your answer is up.",
             "input_schema": { "type": "object", "properties": { "mood": { "enum": ["neutral", "happy", "annoyed", "surprised", "sleepy"] } }, "required": ["mood"] }
@@ -136,6 +187,36 @@ pub fn parse(name: &str, input: &Value) -> Result<Action, String> {
                 _ => Mood::Neutral,
             },
         },
+        "control_media" => {
+            use crate::menu::MediaCommand;
+            let volume = number(input, "volume").map(|v| v.clamp(0.0, 100.0).round() as u8);
+            let (command, volume_change) = match text(input, "action").as_deref() {
+                None | Some("status") => (volume.map(MediaCommand::Volume), None),
+                Some("play") => (Some(MediaCommand::Play), None),
+                Some("pause") => (Some(MediaCommand::Pause), None),
+                Some("toggle") => (Some(MediaCommand::PlayPause), None),
+                Some("next") => (Some(MediaCommand::Next), None),
+                Some("previous") => (Some(MediaCommand::Previous), None),
+                Some("volume_up") => (None, Some(10)),
+                Some("volume_down") => (None, Some(-10)),
+                Some("mute") => (Some(MediaCommand::Mute(true)), None),
+                Some("unmute") => (Some(MediaCommand::Mute(false)), None),
+                Some(other) => return Err(format!("control_media has no action \"{other}\".")),
+            };
+            Action::Media { command, volume_change }
+        }
+        "orb_light" => {
+            let color = match text(input, "color") {
+                Some(name) => Some(
+                    orbiters_contracts::orb::LIGHT_COLORS
+                        .iter()
+                        .position(|(n, _)| n.eq_ignore_ascii_case(&name))
+                        .ok_or_else(|| format!("The orb's light has no colour \"{name}\"."))? as u8,
+                ),
+                None => None,
+            };
+            Action::Light { on: flag(input, "on"), color, level: number(input, "brightness").map(|v| v.clamp(0.0, 1.0)) }
+        }
         other => return Err(format!("Orbiters desktop has no tool \"{other}\".")),
     })
 }
@@ -174,6 +255,14 @@ mod tests {
         assert_eq!(parse("take_photo", &json!({ "delay_seconds": 99 })), Ok(Action::TakePhoto { delay_seconds: 10 }));
         assert_eq!(parse("orb_mood", &json!({ "mood": "annoyed" })), Ok(Action::Mood { mood: Mood::Annoyed }));
         assert!(parse("set_avatar_control", &json!({})).unwrap_err().contains("control"));
+        assert_eq!(parse("control_media", &json!({})), Ok(Action::Media { command: None, volume_change: None }));
+        assert_eq!(parse("control_media", &json!({ "action": "volume_down" })), Ok(Action::Media { command: None, volume_change: Some(-10) }));
+        assert_eq!(
+            parse("control_media", &json!({ "volume": 140 })),
+            Ok(Action::Media { command: Some(crate::menu::MediaCommand::Volume(100)), volume_change: None })
+        );
+        assert_eq!(parse("orb_light", &json!({ "color": "Pink", "brightness": 2 })), Ok(Action::Light { on: None, color: Some(3), level: Some(1.0) }));
+        assert!(parse("orb_light", &json!({ "color": "plaid" })).is_err());
         assert!(parse("format_disk", &json!({})).is_err());
     }
 }

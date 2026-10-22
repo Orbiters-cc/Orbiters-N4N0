@@ -219,6 +219,8 @@ pub struct ScreenRuntime {
     menu_param: Option<bool>,
     menu_sent: Vec<(bool, Instant)>,
     menu_settle_until: Option<Instant>,
+    /// The media reading the menu shows (its version: [`crate::media::Watcher::reading`]).
+    media_seen: u64,
 }
 
 impl Default for ScreenRuntime {
@@ -276,6 +278,7 @@ impl Default for ScreenRuntime {
             menu_param: None,
             menu_sent: Vec::new(),
             menu_settle_until: None,
+            media_seen: 0,
         }
     }
 }
@@ -847,6 +850,12 @@ impl super::Controller {
                         self.photo_3d_in(timer);
                     }
                 }
+                Effect::Media(command) => crate::media::watcher().command(command),
+                Effect::Light(light) => {
+                    if let Err(e) = self.orb_set_light(light) {
+                        self.notify(NoticeKind::Warning, e);
+                    }
+                }
                 Effect::Close => {
                     let mut rt = self.orb.lock().unwrap();
                     rt.screen.hover = None;
@@ -871,7 +880,8 @@ impl super::Controller {
         // at a time.
         if rt.screen.available && rt.screen.menu.open {
             if let Some(text) = rt.sender.as_mut().filter(|s| s.busy() && !s.sticky()).and_then(TextSender::take_text) {
-                let cols = layout::cached(ScreenPage::Home).slots.iter().find(|s| s.content == Content::Heard).map_or(60, |s| s.cols as usize - 2);
+                let home = if rt.screen.menu.six_tiles { ScreenPage::HomeSix } else { ScreenPage::Home };
+                let cols = layout::cached(home).slots.iter().find(|s| s.content == Content::Heard).map_or(60, |s| s.cols as usize - 2);
                 rt.screen.answer = menu::pieces(&text, cols).into();
                 rt.screen.answer_next = Some(now);
             }
@@ -883,7 +893,25 @@ impl super::Controller {
         }
         let listening = rt.listening.is_some();
         let thinking = rt.thinking();
+        let light = rt.light;
         let s = &mut rt.screen;
+        // The light as the avatar holds it; the music while the menu shows it (read on the media thread).
+        s.menu.light = light;
+        if s.menu.open && s.menu.six_tiles {
+            let media = crate::media::watcher();
+            media.want();
+            let (version, reading) = media.reading();
+            if version != s.media_seen {
+                s.media_seen = version;
+                s.menu.media = reading.media;
+                s.menu.volume = reading.volume;
+                if let Some(art) = reading.art {
+                    if !matches!(s.pictures.get(&art.key), Some(Thumb::Ready(_))) {
+                        s.pictures.insert(art.key.clone(), Thumb::Ready(screen::picture_from_rgb(&art.rgb)));
+                    }
+                }
+            }
+        }
         if s.photo_at.is_some_and(|at| now >= at) {
             s.photo_at = None;
             followups.photo_due = true;

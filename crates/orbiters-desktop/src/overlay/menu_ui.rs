@@ -5,7 +5,7 @@
 use egui::epaint::RectShape;
 use egui::{pos2, vec2, Align2, Color32, Painter, Pos2, Rect, Stroke, StrokeKind, TextureId};
 use orbiters_orb::menu::layout::{self, Align, Element, Icon, Layout, Look, ScreenPage, Style, Tint};
-use orbiters_orb::menu::Menu;
+use orbiters_orb::menu::{Menu, Page};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{icons, widgets};
 
@@ -18,7 +18,7 @@ pub struct View<'a> {
     /// Element indices of the page's layout.
     pub hover: Option<usize>,
     pub pressed: Option<usize>,
-    /// A result's thumbnail by video id, once loaded.
+    /// A thumbnail by its key (a result's video id, the music's art key: `layout::picture_key`), once loaded.
     pub picture: &'a dyn Fn(&str) -> Option<TextureId>,
     /// Seconds, for what moves (Orb listening).
     pub time: f64,
@@ -46,6 +46,14 @@ pub fn glyph(icon: Icon) -> &'static str {
         Icon::Fill => icons::ARROW_UP_LEFT,
         Icon::Timer => icons::TIMER,
         Icon::Microphone => icons::MICROPHONE,
+        Icon::Music => icons::MUSIC_NOTES,
+        Icon::Lightbulb => icons::LIGHTBULB,
+        Icon::PlayPause => icons::PLAY_PAUSE,
+        Icon::SkipBack => icons::SKIP_BACK,
+        Icon::SkipForward => icons::SKIP_FORWARD,
+        Icon::SpeakerLow => icons::SPEAKER_LOW,
+        Icon::SpeakerHigh => icons::SPEAKER_HIGH,
+        Icon::SpeakerOff => icons::SPEAKER_X,
     }
 }
 
@@ -55,6 +63,12 @@ pub fn tint(t: Tint) -> Color32 {
         Tint::Red => theme::REC,
         Tint::Blue => theme::BLUE,
         Tint::Violet => theme::VIOLET,
+        Tint::Cyan => theme::CYAN,
+        Tint::Amber => theme::WARN,
+        Tint::Light(i) => {
+            let [r, g, b] = orbiters_contracts::orb::LIGHT_COLORS.get(i as usize).map_or([255; 3], |c| c.1);
+            Color32::from_rgb(r, g, b)
+        }
     }
 }
 
@@ -120,13 +134,17 @@ fn element(p: &Painter, e: &Element, origin: Pos2) {
     match e.look {
         Look::Tile => {
             let tint = e.tint.map(tint).unwrap_or(theme::ACCENT);
-            let tile = Rect::from_min_size(r.min + vec2(24.0, 24.0), vec2(72.0, 72.0));
+            // A tall tile (four-tile Home): the icon at its top, the title low (its note under it); a wide one (six tiles):
+            // the icon at its left, the title beside it (its note under the title).
+            let wide = r.width() > r.height();
+            let tile = Rect::from_min_size(r.min + if wide { vec2(24.0, (r.height() - 72.0) / 2.0) } else { vec2(24.0, 24.0) }, vec2(72.0, 72.0));
             p.rect_filled(tile, theme::radius(20.0), theme::alpha(tint, 0.16));
             if let Some(icon) = e.icon {
                 widgets::icon(p, tile.center(), glyph(icon), 40.0, tint);
             }
             if let Some(title) = e.label {
-                widgets::text(p, r.min + vec2(24.0, 232.0), Align2::LEFT_TOP, &Txt::new(title, 30.0).weight(weight::SEMIBOLD).color(theme::FG));
+                let at = r.min + if wide { vec2(116.0, 40.0) } else { vec2(24.0, 232.0) };
+                widgets::text(p, at, Align2::LEFT_TOP, &Txt::new(title, 30.0).weight(weight::SEMIBOLD).color(theme::FG));
             }
         }
         Look::Field => {
@@ -147,7 +165,18 @@ fn element(p: &Painter, e: &Element, origin: Pos2) {
         Look::Key => icon_and_label(p, r, e.icon, e.label, 24.0, weight::REGULAR, ink(e.look)),
         Look::KeyDark => icon_and_label(p, r, e.icon, e.label, 22.0, weight::MEDIUM, ink(e.look)),
         Look::Round => icon_and_label(p, r, e.icon, None, 24.0, weight::REGULAR, theme::FG),
-        Look::Chip => icon_and_label(p, r, e.icon, e.label, 22.0, weight::MEDIUM, ink(e.look)),
+        Look::Chip => match (e.tint, e.label) {
+            // A colour's chip: its swatch before its name.
+            (Some(t), Some(label)) => {
+                let txt = Txt::new(label, 22.0).weight(weight::MEDIUM).color(ink(e.look));
+                let width = p.layout_job(txt.job(f32::INFINITY)).size().x;
+                let (dot, gap) = (18.0, 10.0);
+                let left = r.center().x - (dot + gap + width) / 2.0;
+                p.circle_filled(pos2(left + dot / 2.0, r.center().y), dot / 2.0, tint(t));
+                widgets::text(p, pos2(left + dot + gap, r.center().y), Align2::LEFT_CENTER, &txt);
+            }
+            _ => icon_and_label(p, r, e.icon, e.label, 22.0, weight::MEDIUM, ink(e.look)),
+        },
         Look::Accent | Look::Danger => icon_and_label(p, r, e.icon, e.label, if e.rect.h >= 64 { 26.0 } else { 21.0 }, weight::SEMIBOLD, ink(e.look)),
     }
     // A key's character (its label when it has none).
@@ -183,6 +212,19 @@ pub fn draw_chrome(p: &Painter, origin: Pos2, layout: &Layout) {
     for e in &layout.elements {
         element(p, e, origin);
     }
+    // The music's place for its art, which the art covers once it came (the screen leaves this page's placeholder to
+    // the picture).
+    if layout.page == ScreenPage::Music {
+        for pic in &layout.pictures {
+            art_placeholder(p, rect(pic.rect, origin));
+        }
+    }
+}
+
+/// Music without art: a note on the picture's place.
+fn art_placeholder(p: &Painter, r: Rect) {
+    p.rect_filled(r, theme::radius(10.0), theme::INK_750);
+    widgets::icon(p, r.center(), glyph(Icon::Music), r.height() * 0.32, theme::FG_4);
 }
 
 /// A slot's text, as the overlay writes it: the same characters the screen gets, in Orbiters' font.
@@ -238,8 +280,15 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
         slot(p, s, &layout::slot_text(menu, s), origin);
     }
     for pic in &layout.pictures {
-        if let Some(video) = menu.page_results().get(pic.result as usize) {
-            picture(p, rect(pic.rect, origin), (view.picture)(&video.id));
+        let r = rect(pic.rect, origin);
+        match (layout::picture_key(menu, pic), menu.page) {
+            (Some(key), _) => match (view.picture)(key) {
+                Some(texture) => picture(p, r, Some(texture)),
+                None if menu.page == Page::Music => art_placeholder(p, r),
+                None => picture(p, r, None),
+            },
+            (None, Page::Music) => art_placeholder(p, r),
+            (None, _) => {}
         }
     }
 }

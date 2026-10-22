@@ -79,6 +79,8 @@ pub struct MenuOverlay {
     /// When the menu last closed: a request to close it that comes just after (sent before the service heard) finds
     /// it closed, and must not open it again.
     closed_at: Option<Instant>,
+    /// The media reading the menu shows (its version: [`crate::media::Watcher::reading`]).
+    media_seen: u64,
 }
 
 /// A toggling request this soon after the menu closed is the close it meant, already done.
@@ -128,6 +130,7 @@ impl MenuOverlay {
             dictation_seen: None,
             reported: None,
             closed_at: None,
+            media_seen: 0,
         })
     }
 
@@ -148,6 +151,8 @@ impl MenuOverlay {
         self.menu.layout = shared::keyboard(settings.orb.menu.keyboard);
         self.menu.photo_timer = settings.photo_3d_timer;
         self.menu.photo_length = shared::photo_length(settings.photo_3d);
+        // The overlay draws every page: Home has its six tiles.
+        self.menu.six_tiles = true;
         self.menu.open();
         self.hover = None;
         self.pressed = None;
@@ -179,6 +184,7 @@ impl MenuOverlay {
             }
         }
         changed |= set(&mut m.fast_walk, snap.settings.walk_boost.enabled);
+        changed |= set(&mut m.light, snap.orb.light.map(|l| orbiters_orb::menu::Light { on: l.on, color: l.color, level: l.level }));
         changed |= set(&mut m.countdown, snap.orb.photo_countdown);
         changed |= set(&mut m.photo_timer, snap.settings.photo_3d_timer);
         changed |= set(&mut m.photo_length, shared::photo_length(snap.settings.photo_3d));
@@ -213,6 +219,29 @@ impl MenuOverlay {
         if changed {
             self.dirty = true;
         }
+    }
+
+    /// The music the menu shows, from this process's media reading (read only while the menu is open), and its art as a
+    /// texture.
+    fn follow_media(&mut self) {
+        let media = crate::media::watcher();
+        media.want();
+        let (version, reading) = media.reading();
+        if version == self.media_seen {
+            return;
+        }
+        self.media_seen = version;
+        self.menu.media = reading.media;
+        self.menu.volume = reading.volume;
+        if let Some(art) = reading.art {
+            if !matches!(self.thumbs.get(&art.key), Some(Thumb::Ready(_))) {
+                let rgba: Vec<u8> = art.rgb.pixels.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
+                let image = ColorImage::from_rgba_unmultiplied([art.rgb.width, art.rgb.height], &rgba);
+                let texture = self.canvas.ctx().load_texture(art.key.clone(), image, TextureOptions::LINEAR);
+                self.thumbs.insert(art.key.clone(), Thumb::Ready(texture));
+            }
+        }
+        self.dirty = true;
     }
 
     /// Fetches the thumbnails among `ids` not here yet (one that failed is tried again a little later, a few times).
@@ -279,6 +308,8 @@ impl MenuOverlay {
                         backend.orb(OrbCommand::Photo3DIn { seconds: timer });
                     }
                 }
+                Effect::Media(command) => crate::media::watcher().command(command),
+                Effect::Light(light) => backend.orb(OrbCommand::Light { on: light.on, color: light.color, level: light.level }),
                 Effect::Close => self.close(overlay),
             }
         }
@@ -325,6 +356,7 @@ impl MenuOverlay {
             return false;
         }
         self.follow(snap);
+        self.follow_media();
         let mut effects = Vec::new();
         if let Some((n, text)) = &snap.orb.dictation {
             if self.dictation_seen.is_some_and(|seen| seen != *n) {

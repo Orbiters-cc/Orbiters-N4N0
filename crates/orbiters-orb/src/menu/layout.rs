@@ -5,6 +5,7 @@
 //! layout table holds it in a byte.
 
 use super::{Call, KeyboardLayout, Keys, Menu, Page, Target, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, TIMERS};
+use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
 use std::sync::OnceLock;
 
 pub const WIDTH: u16 = 1024;
@@ -27,10 +28,14 @@ pub enum ScreenPage {
     CallRinging = 7,
     CallActive = 8,
     Photo = 9,
+    /// Home with six tiles (music and light): screens from version 3, and the overlay.
+    HomeSix = 10,
+    Music = 11,
+    Light = 12,
 }
 
 impl ScreenPage {
-    pub const ALL: [ScreenPage; 9] = [
+    pub const ALL: [ScreenPage; 12] = [
         ScreenPage::Home,
         ScreenPage::SearchQwerty,
         ScreenPage::SearchAzerty,
@@ -40,6 +45,9 @@ impl ScreenPage {
         ScreenPage::CallRinging,
         ScreenPage::CallActive,
         ScreenPage::Photo,
+        ScreenPage::HomeSix,
+        ScreenPage::Music,
+        ScreenPage::Light,
     ];
 
     /// The page picture's file stem and the overlay screenshot's name.
@@ -54,13 +62,19 @@ impl ScreenPage {
             ScreenPage::CallRinging => "call-ringing",
             ScreenPage::CallActive => "call-active",
             ScreenPage::Photo => "photo",
+            ScreenPage::HomeSix => "home-six",
+            ScreenPage::Music => "music",
+            ScreenPage::Light => "light",
         }
     }
 
     /// The page `menu` shows.
     pub fn of(menu: &Menu) -> ScreenPage {
         match menu.page {
-            Page::Home => ScreenPage::Home,
+            Page::Home | Page::Music | Page::Light if !menu.six_tiles => ScreenPage::Home,
+            Page::Home => ScreenPage::HomeSix,
+            Page::Music => ScreenPage::Music,
+            Page::Light => ScreenPage::Light,
             Page::Search => match (menu.keys, menu.layout) {
                 (Keys::Symbols, _) => ScreenPage::SearchSymbols,
                 (Keys::Letters, KeyboardLayout::Qwerty) => ScreenPage::SearchQwerty,
@@ -147,6 +161,14 @@ pub enum Icon {
     Fill,
     Timer,
     Microphone,
+    Music,
+    Lightbulb,
+    PlayPause,
+    SkipBack,
+    SkipForward,
+    SpeakerLow,
+    SpeakerHigh,
+    SpeakerOff,
 }
 
 /// A tinted icon tile's colour (home tiles).
@@ -156,6 +178,10 @@ pub enum Tint {
     Red,
     Blue,
     Violet,
+    Cyan,
+    Amber,
+    /// One of the light's colours (contracts `orb::LIGHT_COLORS`): a chip shows it as a swatch.
+    Light(u8),
 }
 
 /// Something that can be pressed.
@@ -225,6 +251,16 @@ pub enum Content {
     CallName,
     CallState,
     PhotoStatus,
+    /// Music: what plays, who by, its album, then whether it plays, where and which app.
+    MediaTitle,
+    MediaArtist,
+    MediaAlbum,
+    MediaState,
+    /// The computer's volume.
+    VolumeLabel,
+    /// Light: on or off, its colour and brightness; or why there is none.
+    LightState,
+    LightNote,
 }
 
 /// A line of changing text: `cols` cells of `size` pixels high and half as wide, from (`x`, `y`). On the screen, cell
@@ -247,11 +283,11 @@ impl Slot {
     }
 }
 
-/// A result's thumbnail.
+/// A thumbnail: a result's, or the music's art (thumbnail 0 of the music page).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Picture {
     pub rect: Rect,
-    /// The result on the page (0 to 4).
+    /// The thumbnail's place in the screen's memory: the result on the page (0 to 4).
     pub result: u8,
 }
 
@@ -485,8 +521,79 @@ pub fn layout(page: ScreenPage) -> Layout {
             icons.push((Rect::new(712, 140, 240, 240), Icon::Cube, Some(Tint::Violet)));
             slots.add(100, 504, 56, 28, Style::Accent, Content::PhotoStatus);
         }
+        ScreenPage::HomeSix => {
+            // Two rows of three: the first four as on the four-tile Home, then music and light.
+            let tiles = [
+                (Target::FastWalk, Icon::Walk, "Fast walk", Tint::Green),
+                (Target::YouTube, Icon::YouTube, "YouTube", Tint::Red),
+                (Target::Call, Icon::Phone, "Call", Tint::Blue),
+                (Target::Photo, Icon::Cube, "3D picture", Tint::Violet),
+                (Target::Music, Icon::Music, "Music", Tint::Cyan),
+                (Target::Light, Icon::Lightbulb, "Light", Tint::Amber),
+            ];
+            for (i, (target, icon, title, tint)) in tiles.into_iter().enumerate() {
+                let (x, y) = (32 + (i as u16 % 3) * 324, 104 + (i as u16 / 3) * 176);
+                let mut tile = with(element(target, Rect::new(x, y, 312, 160), Look::Tile), Some(icon), Some(title));
+                tile.tint = Some(tint);
+                elements.push(tile);
+            }
+            elements.push(round(Target::Close, 936, Icon::Close));
+            icons.push((Rect::new(32, 24, 56, 56), Icon::Microphone, Some(Tint::Green)));
+            labels.push(Label { x: 104, y: 34, size: 32, text: "Orb", style: Style::Primary, bold: true });
+            slots.add(188, 40, 48, 24, Style::Accent, Content::Status);
+            for i in 0..6u16 {
+                slots.add(32 + (i % 3) * 324 + 116, 104 + (i / 3) * 176 + 92, 15, 24, Style::Secondary, Content::TileNote(i as u8));
+            }
+            slots.add(32, 472, 64, 28, Style::Secondary, Content::Heard);
+        }
+        ScreenPage::Music => {
+            elements.push(round(Target::Back, 32, Icon::Back));
+            // Playback in the middle under the art and the texts, the speakers' mute at the left, the volume at the right.
+            elements.push(with(element(Target::Mute, Rect::new(32, 400, 88, 72), Look::KeyDark), Some(Icon::SpeakerOff), None));
+            elements.push(with(element(Target::MediaPrevious, Rect::new(316, 388, 96, 96), Look::Round), Some(Icon::SkipBack), None));
+            elements.push(with(element(Target::MediaPlayPause, Rect::new(424, 388, 176, 96), Look::Accent), Some(Icon::PlayPause), None));
+            elements.push(with(element(Target::MediaNext, Rect::new(612, 388, 96, 96), Look::Round), Some(Icon::SkipForward), None));
+            elements.push(with(element(Target::VolumeDown, Rect::new(800, 400, 92, 72), Look::KeyDark), Some(Icon::SpeakerLow), None));
+            elements.push(with(element(Target::VolumeUp, Rect::new(900, 400, 92, 72), Look::KeyDark), Some(Icon::SpeakerHigh), None));
+            labels.push(Label { x: 104, y: 34, size: 32, text: "Music", style: Style::Primary, bold: true });
+            pictures.push(Picture { rect: Rect::new(32, 104, 448, 252), result: 0 });
+            slots.add(512, 112, 30, 32, Style::Primary, Content::MediaTitle);
+            slots.add(512, 160, 40, 24, Style::Primary, Content::MediaArtist);
+            slots.add(512, 196, 40, 24, Style::Secondary, Content::MediaAlbum);
+            slots.add(512, 244, 40, 24, Style::Accent, Content::MediaState);
+            slots.add(800, 484, 16, 24, Style::Secondary, Content::VolumeLabel).centered();
+        }
+        ScreenPage::Light => {
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(with(element(Target::LightSwitch, Rect::new(100, 112, 236, 64), Look::Chip), Some(Icon::Lightbulb), Some("Light")));
+            for (i, (name, _)) in LIGHT_COLORS.into_iter().enumerate() {
+                let (x, y) = (100 + (i as u16 % 4) * 136, 248 + (i as u16 / 4) * 68);
+                let mut chip = with(element(Target::LightColor(i as u8), Rect::new(x, y, 124, 56), Look::Chip), None, Some(name));
+                chip.tint = Some(Tint::Light(i as u8));
+                elements.push(chip);
+            }
+            for (i, (name, _)) in LIGHT_LEVELS.into_iter().enumerate() {
+                elements.push(with(element(Target::LightLevel(i as u8), Rect::new(100 + i as u16 * 136, 428, 124, 56), Look::Chip), None, Some(name)));
+            }
+            labels.push(Label { x: 104, y: 34, size: 32, text: "Light", style: Style::Primary, bold: true });
+            labels.push(Label { x: 100, y: 212, size: 24, text: "Colour", style: Style::Secondary, bold: false });
+            labels.push(Label { x: 100, y: 392, size: 24, text: "Brightness", style: Style::Secondary, bold: false });
+            // Clear of the chips (the last colour ends at 632).
+            icons.push((Rect::new(712, 140, 240, 240), Icon::Lightbulb, Some(Tint::Amber)));
+            slots.add(356, 132, 28, 24, Style::Accent, Content::LightState);
+            slots.add(100, 512, 72, 24, Style::Secondary, Content::LightNote);
+        }
     }
     Layout { page, elements, slots: slots.slots, pictures, labels, icons }
+}
+
+/// The thumbnail a page's picture shows, by the key the hosts keep pictures under (a video id, the music's art key).
+pub fn picture_key<'a>(menu: &'a Menu, picture: &Picture) -> Option<&'a str> {
+    match menu.page {
+        Page::Results => menu.page_results().get(picture.result as usize).map(|v| v.id.as_str()),
+        Page::Music if picture.result == 0 => menu.media.as_ref().and_then(|m| m.art.as_deref()),
+        _ => None,
+    }
 }
 
 /// A tile's note on Home.
@@ -508,11 +615,29 @@ fn tile_note(menu: &Menu, tile: u8) -> String {
                 n => format!("{n} friends"),
             },
         },
-        _ => match menu.countdown {
+        3 => match menu.countdown {
             Some(n) => format!("In {n} s"),
             None if menu.photo_timer == 0 => "No timer".into(),
             None => format!("Timer {} s", menu.photo_timer),
         },
+        4 => match &menu.media {
+            Some(m) if !m.title.is_empty() => m.title.clone(),
+            _ => "Nothing playing".into(),
+        },
+        _ => match menu.light {
+            Some(light) if light.on => format!("On · {}", LIGHT_COLORS.get(light.color as usize).map_or("", |c| c.0)),
+            Some(_) => "Off".into(),
+            None => "Not on this orb".into(),
+        },
+    }
+}
+
+/// The time of what plays: `1:23 / 3:45`, or where it is alone, or nothing.
+fn media_time(position: Option<u32>, duration: Option<u32>) -> String {
+    match (position, duration) {
+        (Some(at), Some(length)) if length > 0 => format!("{} / {}", super::clock(at.min(length) as u64), super::clock(length as u64)),
+        (Some(at), _) => super::clock(at as u64),
+        _ => String::new(),
     }
 }
 
@@ -612,6 +737,39 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             Some(n) => format!("Starting in {n}… hold still"),
             None => menu.notice.clone().unwrap_or_else(|| "VRChat's camera flies around what it looks at".into()),
         },
+        Content::MediaTitle => match &menu.media {
+            Some(m) if !m.title.is_empty() => m.title.clone(),
+            _ => "Nothing is playing".into(),
+        },
+        Content::MediaArtist => match &menu.media {
+            Some(m) if !m.title.is_empty() => m.artist.clone(),
+            _ => "Play music on this computer: it shows here".into(),
+        },
+        Content::MediaAlbum => menu.media.as_ref().filter(|m| !m.title.is_empty()).map(|m| m.album.clone()).unwrap_or_default(),
+        Content::MediaState => match &menu.media {
+            Some(m) if !m.title.is_empty() || !m.app.is_empty() => {
+                let parts = [if m.playing { "Playing".to_string() } else { "Paused".to_string() }, media_time(m.position, m.duration), m.app.clone()];
+                parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" · ")
+            }
+            _ => String::new(),
+        },
+        Content::VolumeLabel => match menu.volume {
+            Some(v) if v.muted => "Muted".into(),
+            Some(v) => format!("Volume {} %", v.percent),
+            None => String::new(),
+        },
+        Content::LightState => match menu.light {
+            Some(light) if light.on => {
+                let color = LIGHT_COLORS.get(light.color as usize).map_or("", |c| c.0);
+                format!("On · {color} · {}", LIGHT_LEVELS[light.level_choice()].0)
+            }
+            Some(_) => "Off".into(),
+            None => String::new(),
+        },
+        Content::LightNote => match menu.light {
+            Some(_) => "Everyone around sees your orb's light".into(),
+            None => "Turn Light on for the orb in My Avatar (its card's options)".into(),
+        },
     }
 }
 
@@ -666,6 +824,10 @@ pub fn state(menu: &Menu, element: &Element) -> State {
         Target::FastWalk => menu.fast_walk,
         Target::Timer(i) => TIMERS.get(i as usize) == Some(&menu.photo_timer),
         Target::Length(i) => super::PhotoLength::ALL.get(i as usize) == Some(&menu.photo_length),
+        Target::Light | Target::LightSwitch => menu.light.is_some_and(|l| l.on),
+        Target::LightColor(i) => menu.light.is_some_and(|l| l.color == i),
+        Target::LightLevel(i) => menu.light.is_some_and(|l| l.level_choice() == i as usize),
+        Target::Mute => menu.volume.is_some_and(|v| v.muted),
         _ => false,
     };
     let hidden = match element.target {
@@ -675,6 +837,11 @@ pub fn state(menu: &Menu, element: &Element) -> State {
         Target::Previous => !menu.has_previous(),
         Target::Next => !menu.has_next(),
         Target::Take => menu.countdown.is_some(),
+        Target::MediaPlayPause => !menu.media.as_ref().is_some_and(|m| m.can_play_pause),
+        Target::MediaPrevious => !menu.media.as_ref().is_some_and(|m| m.can_previous),
+        Target::MediaNext => !menu.media.as_ref().is_some_and(|m| m.can_next),
+        Target::Mute | Target::VolumeDown | Target::VolumeUp => menu.volume.is_none(),
+        Target::LightSwitch | Target::LightColor(_) | Target::LightLevel(_) => menu.light.is_none(),
         _ => false,
     };
     State { on, hidden }
@@ -778,6 +945,70 @@ mod tests {
         assert!(state(&menu, copy).hidden, "one result: the second row is hidden");
         assert!(state(&menu, &l.elements[2]).hidden, "no next page");
         assert_eq!(cached(ScreenPage::Results), &l, "built once, the same");
+    }
+
+    #[test]
+    fn six_tiles_only_where_the_display_has_them() {
+        let mut menu = Menu::default();
+        menu.open();
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::Home, "an older screen: four tiles");
+        menu.six_tiles = true;
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSix);
+        let home = cached(ScreenPage::HomeSix);
+        let four = cached(ScreenPage::Home);
+        let targets = |l: &Layout| l.elements.iter().map(|e| e.target).collect::<Vec<_>>();
+        assert_eq!(targets(home)[..4], targets(four)[..4], "the first four tiles keep their order (and their element indices)");
+        assert_eq!(hit(home, 900.0, 400.0).map(|h| h.1), Some(Target::Light));
+        menu.press(Target::Music);
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::Music);
+        menu.six_tiles = false;
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::Home, "a screen without the page shows Home");
+    }
+
+    #[test]
+    fn music_shows_what_plays_and_hides_what_it_cannot_do() {
+        let mut menu = Menu { six_tiles: true, ..Default::default() };
+        menu.open();
+        menu.press(Target::Music);
+        let l = cached(ScreenPage::Music);
+        let shown = |menu: &Menu| l.elements.iter().filter(|e| !state(menu, e).hidden).map(|e| e.target).collect::<Vec<_>>();
+        assert_eq!(shown(&menu), vec![Target::Back], "nothing plays, no volume known");
+        assert_eq!(text(&menu, Content::MediaTitle), "Nothing is playing");
+        menu.media = Some(super::super::Media {
+            title: "Midnight City".into(),
+            artist: "M83".into(),
+            album: "Hurry Up, We're Dreaming".into(),
+            app: "Spotify".into(),
+            playing: true,
+            can_play_pause: true,
+            can_next: true,
+            position: Some(83),
+            duration: Some(243),
+            ..Default::default()
+        });
+        menu.volume = Some(super::super::Volume { percent: 40, muted: false });
+        assert!(!shown(&menu).contains(&Target::MediaPrevious) && shown(&menu).contains(&Target::MediaNext));
+        assert_eq!(text(&menu, Content::MediaState), "Playing · 1:23 / 4:03 · Spotify");
+        assert_eq!(text(&menu, Content::VolumeLabel), "Volume 40 %");
+        assert_eq!(text(&menu, Content::TileNote(4)), "Midnight City");
+        assert_eq!(picture_key(&menu, &l.pictures[0]), None, "no art yet");
+        menu.media.as_mut().unwrap().art = Some("art:1".into());
+        assert_eq!(picture_key(&menu, &l.pictures[0]), Some("art:1"));
+    }
+
+    #[test]
+    fn light_chips_show_the_light_as_the_avatar_holds_it() {
+        let mut menu = Menu { six_tiles: true, ..Default::default() };
+        menu.open();
+        menu.press(Target::Light);
+        let l = cached(ScreenPage::Light);
+        assert!(l.elements.iter().filter(|e| e.target != Target::Back).all(|e| state(&menu, e).hidden), "no light on this avatar");
+        assert!(text(&menu, Content::LightNote).contains("My Avatar"));
+        menu.light = Some(super::super::Light { on: true, color: 1, level: 0.62 });
+        let on = l.elements.iter().filter(|e| state(&menu, e).on).map(|e| e.target).collect::<Vec<_>>();
+        assert_eq!(on, vec![Target::LightSwitch, Target::LightColor(1), Target::LightLevel(1)]);
+        assert_eq!(text(&menu, Content::LightState), "On · Warm · Medium");
+        assert_eq!(text(&menu, Content::TileNote(5)), "On · Warm");
     }
 
     #[test]

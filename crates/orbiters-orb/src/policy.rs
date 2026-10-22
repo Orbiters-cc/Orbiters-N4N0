@@ -34,6 +34,8 @@ enum Kind {
     Clipboard,
     Afk,
     Mood,
+    Media,
+    Light,
 }
 
 fn kind(action: &Action) -> Kind {
@@ -47,6 +49,8 @@ fn kind(action: &Action) -> Kind {
         Action::CopyToClipboard { .. } => Kind::Clipboard,
         Action::SetAfkMessage { .. } => Kind::Afk,
         Action::Mood { .. } => Kind::Mood,
+        Action::Media { .. } => Kind::Media,
+        Action::Light { .. } => Kind::Light,
     }
 }
 
@@ -62,6 +66,8 @@ fn limit(kind: Kind) -> (usize, &'static str) {
         Kind::Clipboard => (1, "clipboard copies"),
         Kind::Afk => (1, "AFK message changes"),
         Kind::Mood => (3, "moods"),
+        Kind::Media => (6, "music controls"),
+        Kind::Light => (4, "light changes"),
     }
 }
 
@@ -173,13 +179,15 @@ pub fn what(action: &Action, control: Option<&Control>) -> String {
         Action::SaveVideo => "save the video".into(),
         Action::ListSavedVideos => "read your saved videos".into(),
         Action::Mood { .. } => "change the orb's look".into(),
+        Action::Media { .. } => "control the music".into(),
+        Action::Light { .. } => "change the orb's light".into(),
     }
 }
 
 /// Whether `action` changes something (the avatar, the settings, the clipboard, a picture taken), which the assistant
 /// must hear of even when its turn fails afterwards.
 pub fn changes(action: &Action) -> bool {
-    !matches!(action, Action::FindControls { .. } | Action::ListSavedVideos | Action::Mood { .. })
+    !matches!(action, Action::FindControls { .. } | Action::ListSavedVideos | Action::Mood { .. } | Action::Media { command: None, volume_change: None })
 }
 
 /// The question the desktop puts to the owner for actions waiting for their yes.

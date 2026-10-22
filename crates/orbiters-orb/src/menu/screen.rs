@@ -122,7 +122,8 @@ fn cells(text: &str, cols: usize, align: layout::Align) -> Vec<u8> {
 
 impl Frame {
     /// The owner's screen memory for `menu` on its page: `hover` and `pressed` are element indices of that page's
-    /// layout, `size` the bytes of each thumbnail the prop keeps, `pictures` the thumbnails known by video id.
+    /// layout, `size` the bytes of each thumbnail the prop keeps, `pictures` the thumbnails known by key (a video id,
+    /// the music's art key: [`layout::picture_key`]).
     pub fn new(menu: &Menu, hover: Option<usize>, pressed: Option<usize>, flags: Flags, size: usize, pictures: &dyn Fn(&str) -> Option<Picture>) -> Self {
         Self::build(menu, hover, pressed, flags, size, pictures, false)
     }
@@ -167,14 +168,12 @@ impl Frame {
             let at = TEXT + slot.offset as usize;
             bank[at..at + slot.cols as usize].copy_from_slice(&cells(&text, slot.cols as usize, slot.align));
         }
-        if page == ScreenPage::Results {
-            for picture in &layout.pictures {
-                let Some(video) = menu.page_results().get(picture.result as usize) else { continue };
-                let Some(thumb) = pictures(&video.id) else { continue };
-                let at = PICTURES_AT + picture.result as usize * size;
-                bank[at..at + size].copy_from_slice(thumb.bytes(size));
-                bank[LAYER_COUNTS + picture.result as usize] = thumbnail::layers_in(size) as u8;
-            }
+        // The results' thumbnails, the music's art.
+        for picture in &layout.pictures {
+            let Some(thumb) = layout::picture_key(menu, picture).and_then(pictures) else { continue };
+            let at = PICTURES_AT + picture.result as usize * size;
+            bank[at..at + size].copy_from_slice(thumb.bytes(size));
+            bank[LAYER_COUNTS + picture.result as usize] = thumbnail::layers_in(size) as u8;
         }
         Self { bank }
     }

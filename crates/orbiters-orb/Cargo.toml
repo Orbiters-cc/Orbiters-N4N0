@@ -16,3 +16,5 @@ ureq = { version = "3", default-features = false, features = ["json", "native-tl
 # Thumbnails for the menu (already built for tiff in the lockfile).
 zune-jpeg = "0.5"
 zune-core = "0.5"
+# Music art (apps hand PNG as often as JPEG).
+png = { workspace = true }

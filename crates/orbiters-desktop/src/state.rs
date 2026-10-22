@@ -393,6 +393,17 @@ pub struct OrbStatus {
     /// Seconds before the 3D picture a menu's timer started.
     #[serde(default)]
     pub photo_countdown: Option<u32>,
+    /// The orb's light, when the avatar's orb has one (the Light option).
+    #[serde(default)]
+    pub light: Option<OrbLight>,
+}
+
+/// The orb's light as the avatar holds it (`Orb/Light`, `Orb/Light/Color`, `Orb/Light/Level`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OrbLight {
+    pub on: bool,
+    pub color: u8,
+    pub level: f32,
 }
 
 /// Orb calls as the interface shows them.

@@ -163,7 +163,7 @@ pub struct SkyMap {
 /// texels they reached, and of the 5.6° cells (a map [`PARALLAX_CELLS`] across) seen from both halves of the walk
 /// (split at its median position along its longest extent) those whose colour differs between the halves: finite
 /// content without depth shows parallax. `sky_cells` marks the cells (a map [`PARALLAX_CELLS`] across) the test found
-/// the same from both halves: true sky, which the map may take over.
+/// the same from both halves: true sky, which the map may take over. `texels` marks the texels seeding saw.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SkySeeding {
     pub pixels: usize,
@@ -171,6 +171,7 @@ pub struct SkySeeding {
     pub cells_tested: usize,
     pub cells_parallax: usize,
     pub sky_cells: Vec<bool>,
+    pub texels: Vec<bool>,
 }
 
 /// A cell whose colour differs by more than this (0–1, any channel) between the walk's halves shows parallax.
@@ -278,6 +279,7 @@ pub fn seed_map(data: &Dataset, width: u32, held_out: &[usize]) -> (SkyMap, SkyS
             found.texels_seen += 1;
         }
     }
+    found.texels = seen.iter().map(Option::is_some).collect();
     found.sky_cells = vec![false; cells.len()];
     for (c, s) in cells.iter().enumerate() {
         if s[0][3] >= TESTED && s[1][3] >= TESTED {
@@ -304,6 +306,147 @@ pub fn seed_map(data: &Dataset, width: u32, held_out: &[usize]) -> (SkyMap, SkyS
 /// [`horizon`] reads the shell.
 const HORIZON_DEG: std::ops::RangeInclusive<f32> = -2.0..=12.0;
 
+/// A row of the map counts in [`SkyMap::profile`] when this many of its texels are known (and a hundredth of the row
+/// at least).
+const ROW_KNOWN: usize = 8;
+/// [`SkyMap::profile`] averages the known texels of the rows within this many degrees of each row.
+const SMOOTH_DEG: f32 = 2.0;
+/// [`SkyMap::profile`] reads how the sky's brightness changes with elevation from the top this many degrees of the
+/// rows that set it...
+const TREND_DEG: f32 = 8.0;
+/// ...and carries that change on above them, fading it out over this many degrees...
+const TREND_FADE_DEG: f32 = 10.0;
+/// ...by a factor between e^−0.3 and e^0.3 at most.
+const TREND_MAX: f32 = 0.3;
+/// [`SkyMap::fill`] carries the known texels' differences from the sky's colour this many degrees from them,
+/// fading out (e^−1 at this distance).
+const CARRY_DEG: f32 = 3.0;
+/// Rounds of neighbour averaging per pyramid level in [`spread`].
+const RELAX: usize = 24;
+
+/// Each texel's distance from the nearest `known` one, in texels of a map `w` × `h` (chamfer 3-4 over two sweeps
+/// each way, around in longitude; none known: infinite).
+fn distance_to_known(known: &[bool], w: usize, h: usize) -> Vec<f32> {
+    let far = u32::MAX / 2;
+    let mut d: Vec<u32> = known.iter().map(|&k| if k { 0 } else { far }).collect();
+    let left = |x: usize| (x + w - 1) % w;
+    let right = |x: usize| (x + 1) % w;
+    for _ in 0..2 {
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                let mut v = d[i].min(d[y * w + left(x)] + 3);
+                if y > 0 {
+                    let up = (y - 1) * w;
+                    v = v.min(d[up + left(x)] + 4).min(d[up + x] + 3).min(d[up + right(x)] + 4);
+                }
+                d[i] = v;
+            }
+        }
+        for y in (0..h).rev() {
+            for x in (0..w).rev() {
+                let i = y * w + x;
+                let mut v = d[i].min(d[y * w + right(x)] + 3);
+                if y + 1 < h {
+                    let down = (y + 1) * w;
+                    v = v.min(d[down + right(x)] + 4).min(d[down + x] + 3).min(d[down + left(x)] + 4);
+                }
+                d[i] = v;
+            }
+        }
+    }
+    d.into_iter().map(|v| if v >= far { f32::INFINITY } else { v as f32 / 3.0 }).collect()
+}
+
+/// One level of [`spread`]'s pyramid: each texel's value and how much of it is known (0 to 1).
+struct Level {
+    w: usize,
+    h: usize,
+    rgb: Vec<[f32; 3]>,
+    weight: Vec<f32>,
+}
+
+impl Level {
+    /// The value at texel coordinates (`x`, `y`), bilinear, around in longitude and clamped at the poles.
+    fn sample(&self, x: f32, y: f32) -> [f32; 3] {
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = (x - x0, y - y0);
+        let col = |i: f32| (i as isize).rem_euclid(self.w as isize) as usize;
+        let row = |j: f32| (j.max(0.0) as usize).min(self.h - 1);
+        let at = |i: f32, j: f32| self.rgb[row(j) * self.w + col(i)];
+        let (a, b, c, d) = (at(x0, y0), at(x0 + 1.0, y0), at(x0, y0 + 1.0), at(x0 + 1.0, y0 + 1.0));
+        [0, 1, 2].map(|k| (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy)
+    }
+}
+
+/// The values of a map `w` × `h` texels whose `known` ones are set, carried smoothly into the others: a pyramid of the
+/// known values averaged two by two, then from its top down each texel keeps its own value by the share of it that is
+/// known and takes the coarser level's (bilinear, around in longitude) for the rest, and the texels nothing reached
+/// take their neighbours' mean a few times over. Known texels keep their values.
+fn spread(values: Vec<[f32; 3]>, known: &[bool], w: usize, h: usize) -> Vec<[f32; 3]> {
+    let mut levels = vec![Level { w, h, rgb: values, weight: known.iter().map(|&k| if k { 1.0 } else { 0.0 }).collect() }];
+    while let Some(p) = levels.last().filter(|l| l.w >= 4 && l.h >= 2) {
+        let (cw, ch) = (p.w / 2, p.h / 2);
+        let (mut rgb, mut weight) = (vec![[0f32; 3]; cw * ch], vec![0f32; cw * ch]);
+        for y in 0..ch {
+            for x in 0..cw {
+                let (mut sum, mut total) = ([0f32; 3], 0f32);
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let i = (2 * y + dy) * p.w + 2 * x + dx;
+                    for (s, v) in sum.iter_mut().zip(p.rgb[i]) {
+                        *s += v * p.weight[i];
+                    }
+                    total += p.weight[i];
+                }
+                if total > 0.0 {
+                    rgb[y * cw + x] = sum.map(|s| s / total);
+                }
+                weight[y * cw + x] = total.min(1.0);
+            }
+        }
+        levels.push(Level { w: cw, h: ch, rgb, weight });
+    }
+    // The top: what no known texel reaches takes the known texels' mean (nothing known: zero).
+    let top = levels.last_mut().expect("level 0");
+    let total: f32 = top.weight.iter().sum();
+    let mean = if total > 0.0 { [0, 1, 2].map(|k| top.rgb.iter().zip(&top.weight).map(|(c, a)| c[k] * a).sum::<f32>() / total) } else { [0.0; 3] };
+    for (c, a) in top.rgb.iter_mut().zip(&mut top.weight) {
+        *c = [0, 1, 2].map(|k| *a * c[k] + (1.0 - *a) * mean[k]);
+        *a = 1.0;
+    }
+    for l in (0..levels.len() - 1).rev() {
+        let (fine, coarse) = levels.split_at_mut(l + 1);
+        let (f, c) = (&mut fine[l], &coarse[0]);
+        let mut unknown = Vec::new();
+        for y in 0..f.h {
+            for x in 0..f.w {
+                let i = y * f.w + x;
+                let a = f.weight[i];
+                if a < 1.0 {
+                    let up = c.sample((x as f32 + 0.5) / 2.0 - 0.5, (y as f32 + 0.5) / 2.0 - 0.5);
+                    f.rgb[i] = [0, 1, 2].map(|k| a * f.rgb[i][k] + (1.0 - a) * up[k]);
+                    f.weight[i] = 1.0;
+                    if a == 0.0 {
+                        unknown.push(i);
+                    }
+                }
+            }
+        }
+        // The coarser levels' averages reach into the known texels: next to them the values would step. Each texel
+        // nothing reached at this level takes its neighbours' mean a few times over, so the fill starts where the known
+        // texels end.
+        for _ in 0..RELAX {
+            for &i in &unknown {
+                let (x, y) = (i % f.w, i / f.w);
+                let (left, right) = (y * f.w + (x + f.w - 1) % f.w, y * f.w + (x + 1) % f.w);
+                let (up, down) = (y.saturating_sub(1) * f.w + x, (y + 1).min(f.h - 1) * f.w + x);
+                f.rgb[i] = [0, 1, 2].map(|k| 0.25 * (f.rgb[left][k] + f.rgb[right][k] + f.rgb[up][k] + f.rgb[down][k]));
+            }
+        }
+    }
+    std::mem::take(&mut levels[0].rgb)
+}
+
 /// The shell's discs give way to the map in the cells the parallax test found to be sky (`found.sky_cells`, by
 /// direction from `centre`, the cameras' mean position); elsewhere (finite content without depth, directions the test
 /// could not judge) they stay in front of it. Returns how many left.
@@ -320,6 +463,113 @@ pub fn give_way(g: &mut Gaussians, found: &SkySeeding, centre: [f32; 3]) -> usiz
 }
 
 impl SkyMap {
+    /// Fills the texels neither seeding nor training saw (`known` false) from those that were, without the edges
+    /// seeding's row means left (the trained sky met them at an edge above the highest view, and in each row beside
+    /// what the views saw). Each texel takes the sky's colour at its elevation ([`SkyMap::profile`]) plus the known
+    /// texels' differences from it, carried smoothly into the rest ([`spread`]) and fading out away from them. Below the
+    /// lowest rows seen the colour stays theirs: a fade to black there cost 1.35 dB on Canine's held-out keyframes and
+    /// 0.16 dB on the plaza's (2026-10-22), whose views see the map through the floor's last transparency.
+    pub fn fill(&mut self, known: &[bool]) {
+        let (w, h) = (self.width as usize, self.width as usize / 2);
+        assert_eq!(known.len(), w * h, "a known flag per texel");
+        let Some(profile) = self.profile(known) else { return };
+        let residual = (0..w * h).map(|t| if known[t] { [0, 1, 2].map(|k| self.rgb[t][k] - profile[t / w][k]) } else { [0.0; 3] }).collect();
+        let carried = spread(residual, known, w, h);
+        let distance = distance_to_known(known, w, h);
+        let degrees = 180.0 / h as f32;
+        for t in 0..w * h {
+            if !known[t] {
+                let keep = (-distance[t] * degrees / CARRY_DEG).exp();
+                self.rgb[t] = [0, 1, 2].map(|k| (profile[t / w][k] + keep * carried[t][k]).clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    /// The sky's colour by elevation, one per row, from the `known` texels of the rows with [`ROW_KNOWN`] of them (a
+    /// hundredth of the row at least): from the highest such row to the lowest, the mean of those within
+    /// [`SMOOTH_DEG`] (every texel counting once, so a sparse row at the edge of what the views saw sets neither a line
+    /// across the map nor the zenith: the plaza walk's two highest rows were 12 codes darker than the rows below them),
+    /// linear across wider gaps; below, the lowest row's colour; above, the highest row's colour carried on with the
+    /// change of brightness the top [`TREND_DEG`] show (a weighted fit of the logarithm of the mean of R, G and B
+    /// against elevation), fading that change out over [`TREND_FADE_DEG`] and holding it within e^±[`TREND_MAX`]: a
+    /// daylight sky keeps darkening towards the zenith, where the row means stopped at the highest view's colour (the
+    /// plaza's true sky is 0.84 times as bright 24° above it). `None` without such a row.
+    fn profile(&self, known: &[bool]) -> Option<Vec<[f32; 3]>> {
+        let (w, h) = (self.width as usize, self.width as usize / 2);
+        let elevation = |y: usize| 90.0 - (y as f32 + 0.5) / h as f32 * 180.0;
+        let enough = ROW_KNOWN.max(w / 100);
+        let rows: Vec<Option<([f32; 3], usize)>> = (0..h)
+            .map(|y| {
+                let (mut sum, mut n) = ([0f64; 3], 0usize);
+                for (c, _) in self.rgb[y * w..(y + 1) * w].iter().zip(&known[y * w..(y + 1) * w]).filter(|(_, k)| **k) {
+                    for (s, v) in sum.iter_mut().zip(c) {
+                        *s += *v as f64;
+                    }
+                    n += 1;
+                }
+                (n >= enough).then(|| (sum.map(|s| (s / n as f64) as f32), n))
+            })
+            .collect();
+        let top = rows.iter().position(Option::is_some)?;
+        let bottom = rows.iter().rposition(Option::is_some)?;
+        let span = (SMOOTH_DEG * h as f32 / 180.0).round() as usize;
+        let smoothed: Vec<Option<[f32; 3]>> = (top..=bottom)
+            .map(|y| {
+                let (mut sum, mut n) = ([0f64; 3], 0usize);
+                for (c, k) in rows[y.saturating_sub(span).max(top)..=(y + span).min(bottom)].iter().flatten() {
+                    for j in 0..3 {
+                        sum[j] += c[j] as f64 * *k as f64;
+                    }
+                    n += k;
+                }
+                (n > 0).then(|| sum.map(|s| (s / n as f64) as f32))
+            })
+            .collect();
+        let mut out = vec![[0f32; 3]; h];
+        let mut last: Option<(usize, [f32; 3])> = None;
+        for (i, row) in smoothed.iter().enumerate() {
+            let y = top + i;
+            let Some(c) = *row else { continue };
+            if let Some((l, lc)) = last {
+                for (r, o) in out.iter_mut().enumerate().take(y).skip(l + 1) {
+                    let f = (r - l) as f32 / (y - l) as f32;
+                    *o = [0, 1, 2].map(|k| lc[k] + (c[k] - lc[k]) * f);
+                }
+            }
+            out[y] = c;
+            last = Some((y, c));
+        }
+        for y in bottom + 1..h {
+            out[y] = out[bottom];
+        }
+        let summit = elevation(top);
+        let out_top = out[top];
+        let (mut sw, mut sx, mut sy, mut sxx, mut sxy, mut fitted) = (0f64, 0f64, 0f64, 0f64, 0f64, 0usize);
+        for (y, row) in rows.iter().enumerate().skip(top) {
+            let e = elevation(y);
+            if e < summit - TREND_DEG {
+                break;
+            }
+            let Some((c, n)) = *row else { continue };
+            let b = ((c[0] + c[1] + c[2]) / 3.0).max(1e-3).ln() as f64;
+            let (x, wt) = (e as f64, n as f64);
+            sw += wt;
+            sx += wt * x;
+            sy += wt * b;
+            sxx += wt * x * x;
+            sxy += wt * x * b;
+            fitted += 1;
+        }
+        let det = sw * sxx - sx * sx;
+        let slope = if fitted >= 3 && det > 0.0 { ((sw * sxy - sx * sy) / det) as f32 } else { 0.0 };
+        let change = (slope * TREND_FADE_DEG).clamp(-TREND_MAX, TREND_MAX);
+        for (y, o) in out.iter_mut().enumerate().take(top) {
+            let gain = (change * (1.0 - (-(elevation(y) - summit) / TREND_FADE_DEG).exp())).exp();
+            *o = out_top.map(|v| (v * gain).clamp(0.0, 1.0));
+        }
+        Some(out)
+    }
+
     /// The colour of the sky at the horizon (encoded sRGB), for a viewer's fog (crate::gpu::FarField): the mean of the
     /// texel rows from 2° below the horizon to 12° above.
     pub fn horizon(&self) -> [f32; 3] {
@@ -461,6 +711,112 @@ mod tests {
             for c in 0..3 {
                 assert!((a[c].clamp(0.0, 1.0) - b[c]).abs() <= 0.5 / 255.0 + 1e-6, "{a:?} {b:?}");
             }
+        }
+    }
+
+    /// The filled sky carries on from what was seen without an edge, and what was seen stays as it was.
+    #[test]
+    fn the_fill_carries_on_from_what_was_seen() {
+        let (w, h) = (64usize, 32usize);
+        // Rows 8 to 15 seen (45° down to the horizon), lighter towards the horizon; the zenith and the ground not.
+        let value = |y: usize| 0.3 + 0.02 * (y as f32 - 8.0);
+        let known: Vec<bool> = (0..w * h).map(|t| (8..16).contains(&(t / w))).collect();
+        let rgb = (0..w * h).map(|t| if known[t] { [value(t / w); 3] } else { [0.9, 0.0, 0.9] }).collect();
+        let mut map = SkyMap { width: w as u32, rgb };
+        map.fill(&known);
+        for t in (0..w * h).filter(|&t| known[t]) {
+            assert_eq!(map.rgb[t], [value(t / w); 3], "seen texels stay");
+        }
+        // Just above the seen rows, the sky goes on as the highest seen row has it.
+        for x in 0..w {
+            let above = map.rgb[7 * w + x][0];
+            assert!((above - value(8)).abs() < 0.03, "row 7, column {x}: {above}");
+        }
+        // Straight up, the seen sky's colour, never the seeding placeholder.
+        assert!(map.rgb.iter().take(w).all(|c| (0.25..0.5).contains(&c[0]) && c[1] == c[0]), "{:?}", map.rgb[0]);
+    }
+
+    /// Below the lowest rows seen, what nobody saw keeps their colour, never fading out (a fade to black cost 1.35 dB on
+    /// Canine's held-out keyframes, which see the map through the floor); a texel seen far below stays as it was.
+    #[test]
+    fn below_the_lowest_rows_seen_the_sky_keeps_their_colour() {
+        let (w, h) = (64usize, 32usize);
+        let elevation = |y: usize| 90.0 - (y as f32 + 0.5) / h as f32 * 180.0;
+        let mut known: Vec<bool> = (0..w * h).map(|t| elevation(t / w) > 0.0).collect();
+        let mut rgb: Vec<[f32; 3]> = (0..w * h).map(|t| if known[t] { [0.6; 3] } else { [0.0; 3] }).collect();
+        // One texel seen far below the horizon (a void seen through a gap).
+        let deep = 28 * w + 5;
+        known[deep] = true;
+        rgb[deep] = [0.9, 0.2, 0.1];
+        let mut map = SkyMap { width: w as u32, rgb };
+        map.fill(&known);
+        assert_eq!(map.rgb[deep], [0.9, 0.2, 0.1]);
+        for y in 0..h {
+            let c = map.rgb[y * w + 37];
+            if elevation(y) > 0.0 {
+                assert_eq!(c, [0.6; 3]);
+            } else {
+                assert!(c.iter().all(|v| (v - 0.6).abs() < 0.05), "row {y} at {}°: {c:?}", elevation(y));
+            }
+        }
+    }
+
+    /// A sky that darkens towards the top of the views keeps darkening above them by the same change of brightness,
+    /// fading out (the plaza's true sky goes on darkening; the row means stopped at the highest view's colour); a
+    /// sky that seems to brighten fast at the top of the views brightens by e^0.3 at most.
+    #[test]
+    fn the_zenith_carries_the_trend_of_the_highest_rows_on() {
+        let (w, h) = (128usize, 64usize);
+        let elevation = |y: usize| 90.0 - (y as f32 + 0.5) / h as f32 * 180.0;
+        let known: Vec<bool> = (0..w * h).map(|t| (0.0..30.0).contains(&elevation(t / w))).collect();
+        let top = (0..h).find(|&y| (0.0..30.0).contains(&elevation(y))).expect("a seen row");
+        let span = (SMOOTH_DEG * h as f32 / 180.0).round() as usize;
+        for (rate, change) in [(-0.015f32, -0.15f32), (0.08, 0.3)] {
+            let value = |e: f32| if rate < 0.0 { 0.5 } else { 0.05 } * (rate * e).exp();
+            let rgb: Vec<[f32; 3]> = (0..w * h).map(|t| if known[t] { [value(elevation(t / w)); 3] } else { [0.9, 0.0, 0.9] }).collect();
+            let mut map = SkyMap { width: w as u32, rgb };
+            map.fill(&known);
+            for t in (0..w * h).filter(|&t| known[t]) {
+                assert_eq!(map.rgb[t], [value(elevation(t / w)); 3], "seen texels stay");
+            }
+            // Above the views: the top rows' colour (the rows within SMOOTH_DEG, every row full), then the trend.
+            let base = (top..=top + span).map(|y| value(elevation(y))).sum::<f32>() / (span + 1) as f32;
+            let mut previous = base;
+            for y in (0..top).rev() {
+                let c = map.rgb[y * w + 3];
+                assert!(c[0] == c[1] && c[1] == c[2], "row {y}: {c:?}");
+                assert!(if rate < 0.0 { c[0] <= previous + 1e-6 } else { c[0] >= previous - 1e-6 }, "row {y}: {} after {previous}", c[0]);
+                previous = c[0];
+            }
+            let zenith = map.rgb[3][0];
+            let expected = base * (change * (1.0 - (-(elevation(0) - elevation(top)) / TREND_FADE_DEG).exp())).exp();
+            assert!((zenith - expected).abs() < 0.01 * expected, "rate {rate}: zenith {zenith}, expected {expected}");
+        }
+    }
+
+    /// A sparse row at the top of what the views saw, darker than the rows below it (the plaza walk's two highest rows
+    /// were 12 codes darker), sets neither a line across the map nor the sky above: the rest of its row and the rows
+    /// above take the colour of the rows below, near enough.
+    #[test]
+    fn a_sparse_edge_row_sets_neither_a_line_nor_the_zenith() {
+        let (w, h) = (512usize, 256usize);
+        let elevation = |y: usize| 90.0 - (y as f32 + 0.5) / h as f32 * 180.0;
+        let band = |y: usize| (0.0..20.0).contains(&elevation(y));
+        let top = (0..h).find(|&y| band(y)).expect("a seen row");
+        // The band's rows fully seen in 0.6, but its top row seen in 12 texels only, in 0.45.
+        let known: Vec<bool> = (0..w * h).map(|t| band(t / w) && (t / w != top || t % w < 12)).collect();
+        let shade = |t: usize| match (known[t], t / w == top) {
+            (false, _) => 0.0,
+            (true, true) => 0.45,
+            (true, false) => 0.6,
+        };
+        let rgb: Vec<[f32; 3]> = (0..w * h).map(|t| [shade(t); 3]).collect();
+        let mut map = SkyMap { width: w as u32, rgb };
+        map.fill(&known);
+        // Far from the 12 dark texels, the top row and the zenith take the band's colour (the trend is flat).
+        for y in [top, top - 1, 0] {
+            let c = map.rgb[y * w + w / 2][0];
+            assert!((c - 0.6).abs() < 0.01, "row {y}: {c}");
         }
     }
 

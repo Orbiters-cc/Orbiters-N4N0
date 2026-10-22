@@ -56,15 +56,17 @@ pub fn from_depth(data: &Dataset, budget: usize, held_out: &[usize], mut progres
     g
 }
 
-/// A sample's point and the footprint of its disc: on the sky shell when it hit nothing.
+/// A sample's point and the footprint of its disc (the spacing of its tile's samples): on the sky shell when it hit
+/// nothing.
 fn point(dv: &DepthView, i: usize) -> ([f32; 3], f32, bool) {
     let [u, v] = dv.grid.pixels[i];
     let z = dv.depth[i];
     let cam_pos = dv.camera.position();
+    let spacing = dv.grid.spacing * dv.grid.step(i) as f32;
     if z <= 0.0 {
-        (add(cam_pos, scale(normalize(sub(dv.camera.unproject(u, v, 1.0), cam_pos)), SKY)), SKY * dv.grid.spacing / dv.camera.fx, true)
+        (add(cam_pos, scale(normalize(sub(dv.camera.unproject(u, v, 1.0), cam_pos)), SKY)), SKY * spacing / dv.camera.fx, true)
     } else {
-        (dv.camera.unproject(u, v, z), z * dv.grid.spacing / dv.camera.fx, false)
+        (dv.camera.unproject(u, v, z), z * spacing / dv.camera.fx, false)
     }
 }
 
@@ -153,7 +155,7 @@ fn seed(data: &Dataset, dv: &DepthView, i: usize, views: &[usize]) -> Seed {
     let (p, footprint, sky) = point(dv, i);
     let view = normalize(sub(dv.camera.position(), p));
     let (gx, gy) = ((i % gw as usize) as i32, (i / gw as usize) as i32);
-    let normal = if sky { None } else { surface_normal(&world, gx, gy, p, dv.depth[i]) }.map(|n| if dot(n, view) < 0.0 { neg(n) } else { n }).unwrap_or(view);
+    let normal = if sky { None } else { surface_normal(&world, gx, gy, dv.grid.step(i) as i32, p, dv.depth[i]) }.map(|n| if dot(n, view) < 0.0 { neg(n) } else { n }).unwrap_or(view);
     let s = (footprint * 0.75).max(1e-3).ln();
     Seed { mean: p, log_scale: [s, s, (footprint * 0.1).max(1e-4).ln()], rotation: quat_from_z(normal), color: color_at(data, p, views).unwrap_or([0.5, 0.5, 0.5]), sky }
 }
@@ -164,17 +166,18 @@ fn in_scene(data: &Dataset, u: f32, v: f32) -> bool {
     x >= 0.0 && y >= 0.0 && (x as u32) < data.width && (y as u32) < data.height && data.mask[(y as u32 * data.width + x as u32) as usize] > 0.5
 }
 
-/// Normal from the neighbouring samples, unless they sit across a depth edge.
-fn surface_normal(world: &impl Fn(i32, i32) -> Option<[f32; 3]>, gx: i32, gy: i32, p: [f32; 3], z: f32) -> Option<[f32; 3]> {
-    let near = |q: [f32; 3]| (dot(sub(q, p), sub(q, p))).sqrt() < 0.15 * z;
+/// Normal from the neighbouring samples, `step` grid cells away (those of the same tile), unless they sit across a
+/// depth edge.
+fn surface_normal(world: &impl Fn(i32, i32) -> Option<[f32; 3]>, gx: i32, gy: i32, step: i32, p: [f32; 3], z: f32) -> Option<[f32; 3]> {
+    let near = |q: [f32; 3]| (dot(sub(q, p), sub(q, p))).sqrt() < 0.15 * z * step as f32;
     let pick = |a: Option<[f32; 3]>, b: Option<[f32; 3]>| match (a.filter(|q| near(*q)), b.filter(|q| near(*q))) {
         (Some(a), Some(b)) => Some(sub(a, b)),
         (Some(a), None) => Some(sub(a, p)),
         (None, Some(b)) => Some(sub(p, b)),
         (None, None) => None,
     };
-    let du = pick(world(gx + 1, gy), world(gx - 1, gy))?;
-    let dv = pick(world(gx, gy + 1), world(gx, gy - 1))?;
+    let du = pick(world(gx + step, gy), world(gx - step, gy))?;
+    let dv = pick(world(gx, gy + step), world(gx, gy - step))?;
     let n = cross(du, dv);
     let len = dot(n, n).sqrt();
     (len > 1e-12).then(|| n.map(|c| c / len))

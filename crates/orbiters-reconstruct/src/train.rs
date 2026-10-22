@@ -449,7 +449,7 @@ fn levels(data: &Dataset) -> Vec<Level> {
     out
 }
 
-/// What a depth step renders: a camera, its samples (pixel x, pixel y, eye depth, 0) and its dilation.
+/// What a depth step renders: a camera, its samples (pixel x, pixel y, eye depth, weight) and its dilation.
 pub struct DepthTarget {
     pub camera: Camera,
     pub samples: Vec<[f32; 4]>,
@@ -465,6 +465,10 @@ pub fn depth_target(d: &DepthView) -> DepthTarget {
     let px = &d.grid.pixels;
     let n = d.depth.len().min(px.len());
     let trusted = |i: &usize| d.depth[*i] > 0.0 && !d.is_unknown(*i);
+    // A sample of a larger tile towards the frame's edges stands for more of the frame: it weighs its tile's sample
+    // spacing (1 in a grid tile). By the spacing, not the area, which put up to 64 times a grid sample's weight on one
+    // pixel: on the off-path benchmark area weights gained 0.5 dB over equal ones, spacing weights 1.3 dB.
+    let weight = |i: usize| d.grid.step(i) as f32;
     if gw >= 2 && gh >= 2 && n == gw * gh {
         let (x0, y0) = (px[0][0], px[0][1]);
         let sx = (px[gw - 1][0] - x0) / (gw - 1) as f32;
@@ -472,7 +476,7 @@ pub fn depth_target(d: &DepthView) -> DepthTarget {
         if sx > 0.0 && sy > 0.0 {
             let c = &d.camera;
             let camera = Camera { r: c.r, t: c.t, fx: c.fx / sx, fy: c.fy / sy, cx: (c.cx - x0) / sx, cy: (c.cy - y0) / sy, width: gw as u32, height: gh as u32 };
-            let samples = (0..n).filter(trusted).map(|i| [(i % gw) as f32, (i / gw) as f32, d.depth[i], 0.0]).collect();
+            let samples = (0..n).filter(trusted).map(|i| [(i % gw) as f32, (i / gw) as f32, d.depth[i], weight(i)]).collect();
             return DepthTarget { camera, samples, dilation: [dil / (sx * sx), dil / (sy * sy)] };
         }
     }

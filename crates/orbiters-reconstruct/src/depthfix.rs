@@ -234,15 +234,16 @@ fn validate(d: &mut DepthView, dead: &[bool], hits: &[u32], votes: &[u32], p: &F
             }
             continue;
         }
-        // Rule 2: a misread tile.
+        // Rule 2: a misread tile (each sample against the samples next to it in its layout tile, one or more grid cells
+        // away).
         let (mut valid, mut odd) = (0usize, 0usize);
         for i in tile_samples(t, tx, gw) {
-            let (x, y) = ((i % gw) as i64, (i / gw) as i64);
+            let (x, y, step) = ((i % gw) as i64, (i / gw) as i64, d.grid.step(i) as i64);
             let Some(z) = at(x, y) else { continue };
             valid += 1;
             let (mut neighbours, mut agree) = (0, false);
             for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                if let Some(o) = at(x + dx, y + dy) {
+                if let Some(o) = at(x + dx * step, y + dy * step) {
                     neighbours += 1;
                     agree |= (o - z).abs() <= p.neighbour_tolerance * z;
                 }
@@ -481,6 +482,7 @@ mod tests {
             pixels: (0..25).flat_map(|y| (0..48).map(move |x| [x as f32 * 20.0 + 10.0, y as f32 * 20.0 + 10.0])).collect(),
             spacing: 20.0,
             unused: Marks::default(),
+            steps: Vec::new(),
         });
         let mut views: Vec<DepthView> = (0..30).map(|k| frame(k, &big, false)).collect();
         views.extend((0..30).map(|k| frame(k, &small, false)));

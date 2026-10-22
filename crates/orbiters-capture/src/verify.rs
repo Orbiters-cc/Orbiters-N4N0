@@ -97,9 +97,10 @@ pub fn verify(dir: &Path, max_frames: Option<u32>) -> anyhow::Result<VerifyRepor
                     continue;
                 }
             };
+            let steps = dd.layout.grid_steps();
             for gy in 0..dd.grid_height {
                 for gx in 0..dd.grid_width {
-                    if !dd.layout.tile_used(gx / depth::SAMPLES_X, gy / depth::SAMPLES_Y) {
+                    if steps[(gy * dd.grid_width + gx) as usize] == 0 {
                         continue;
                     }
                     report.depth_samples += 1;

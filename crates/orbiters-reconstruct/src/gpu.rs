@@ -1204,7 +1204,8 @@ impl Gpu {
         let (loss, ssim, robust) = match &target {
             // loss.y holds the robust threshold for colour steps, loss.z the D-SSIM weight.
             Target::Color { scene_pixels, weight, ssim, robust, .. } => ([*weight, *robust, *ssim, *scene_pixels], *ssim, *robust),
-            Target::Depth { samples, weight } => ([0.0, *weight, 0.0, samples.iter().filter(|s| s[2] > 0.0).count() as f32], 0.0, 0.0),
+            // Each sample by its weight (at least 1: crate::train::depth_target), over the view's total.
+            Target::Depth { samples, weight } => ([0.0, *weight, 0.0, samples.iter().filter(|s| s[2] > 0.0).map(|s| s[3].max(1.0)).sum::<f32>()], 0.0, 0.0),
             Target::None => ([0.0; 4], 0.0, 0.0),
         };
         let train = !matches!(target, Target::None);

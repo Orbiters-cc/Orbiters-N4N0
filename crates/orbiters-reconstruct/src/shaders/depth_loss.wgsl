@@ -1,4 +1,5 @@
-// Depth loss of a depth view: relative L1 at each exact sample's nearest pixel (see loss.wgsl).
+// Depth loss of a depth view: relative L1 at each exact sample's nearest pixel (see loss.wgsl), each sample by its
+// weight (samples.w, at least 1) over the view's total (frame.loss.w).
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<storage, read> out_color: array<vec4<f32>>;
@@ -33,5 +34,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     }
     let p = u32(y) * frame.size.x + u32(x);
     let d = out_color[p].w;
-    add(p * 4u + 3u, sign(d - smp.z) / smp.z * frame.loss.y / max(frame.loss.w, 1.0));
+    add(p * 4u + 3u, sign(d - smp.z) / smp.z * frame.loss.y * max(smp.w, 1.0) / max(frame.loss.w, 1.0));
 }

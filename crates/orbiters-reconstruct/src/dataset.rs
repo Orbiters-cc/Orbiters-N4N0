@@ -5,7 +5,7 @@
 
 use crate::camera::{Camera, Geometry};
 use anyhow::{anyhow, bail, ensure, Context as _};
-use orbiters_contracts::depth::{self, DepthLayout, SAMPLES_X, SAMPLES_Y};
+use orbiters_contracts::depth::{self, DepthLayout, SAMPLES_X};
 use orbiters_contracts::frame_record::{record_flags, FrameRecord};
 use orbiters_contracts::manifest::{depth_file, DEPTH_DIR, KEYFRAMES_DIR};
 use orbiters_contracts::{qoi, skeleton, strip};
@@ -56,11 +56,15 @@ pub struct DepthGrid {
     pub height: u32,
     /// Each sample's pixel position at the training resolution (pixel centres at integers), row-major.
     pub pixels: Vec<[f32; 2]>,
-    /// Sample spacing in training pixels (for footprints).
+    /// Sample spacing in training pixels (for footprints), in a grid tile.
     pub spacing: f32,
-    /// Samples of tiles that touch the capture strip's area: depth frames carry nothing there, and their code 0 there
-    /// does not mean "nothing there".
+    /// Grid cells that carry no sample: tiles that touch the capture strip's area, and a larger tile's other cells
+    /// towards the frame's edges. Depth frames carry nothing there, and their code 0 there does not mean "nothing there".
     pub unused: Marks,
+    /// Per sample, that spacing's multiple between it and the next samples of its tile: 1 in a grid tile, 2, 4 or 8 in
+    /// the larger tiles towards the frame's edges (orbiters_contracts::depth::DepthLayout::grid_steps), 0 where nothing
+    /// is carried. Empty: 1 everywhere.
+    pub steps: Vec<u8>,
 }
 
 impl DepthGrid {
@@ -69,16 +73,22 @@ impl DepthGrid {
         let (gw, gh) = layout.grid_size();
         let mut pixels = Vec::with_capacity((gw * gh) as usize);
         let mut unused = Marks::default();
+        let steps = layout.grid_steps();
         for gy in 0..gh {
             for gx in 0..gw {
                 let (px, py) = layout.grid_pixel(gx, gy);
                 pixels.push([geometry.to_training(px as f32), geometry.to_training(py as f32)]);
-                if !layout.tile_used(gx / SAMPLES_X, gy / SAMPLES_Y) {
+                if steps[(gy * gw + gx) as usize] == 0 {
                     unused.insert((gy * gw + gx) as usize);
                 }
             }
         }
-        Self { width: gw, height: gh, pixels, spacing: layout.tile_px as f32 / SAMPLES_X as f32 / geometry.factor as f32, unused }
+        Self { width: gw, height: gh, pixels, spacing: layout.tile_px as f32 / SAMPLES_X as f32 / geometry.factor as f32, unused, steps }
+    }
+
+    /// Grid cells between sample `i` and the next samples of its tile (1 in a grid tile).
+    pub fn step(&self, i: usize) -> u32 {
+        self.steps.get(i).map_or(1, |&s| s.max(1) as u32)
     }
 
     pub fn len(&self) -> usize {
@@ -623,8 +633,9 @@ mod tests {
         assert!((d.grid.spacing - layout.tile_px as f32 / SAMPLES_X as f32 / 3.0).abs() < 1e-6);
     }
 
-    /// Code 0 is "nothing there"; 65535 is the decoder's unknown; tiles under the strip's area carry nothing and say
-    /// nothing either; a depth file whose grid is not the layout's is left out.
+    /// Code 0 is "nothing there"; 65535 is the decoder's unknown; grid cells without a sample (tiles under the strip's
+    /// area, a larger tile's other cells) carry nothing and say nothing either; a depth file whose grid is not the
+    /// layout's is left out.
     #[test]
     fn depth_codes_tell_sky_from_unknown_and_unused_tiles() {
         let (w, h) = (960u32, 540u32);
@@ -632,8 +643,10 @@ mod tests {
         let (gw, gh) = layout.grid_size();
         let n = (gw * gh) as usize;
         let mut codes = vec![depth::quantize(5.0); n];
-        let used = (0..n).find(|&i| layout.tile_used(i as u32 % gw / SAMPLES_X, i as u32 / gw / SAMPLES_Y)).unwrap();
-        let unused = (0..n).find(|&i| !layout.tile_used(i as u32 % gw / SAMPLES_X, i as u32 / gw / SAMPLES_Y)).expect("tiles under the strip");
+        let sampled = |i: usize| layout.grid_sampled(i as u32 % gw, i as u32 / gw);
+        let used = (0..n - 2).find(|&i| (i..i + 3).all(sampled)).unwrap();
+        let unused = (0..n).find(|&i| !sampled(i)).expect("cells without a sample");
+        assert!((0..n).any(|i| !sampled(i) && !layout.tile_used(i as u32 % gw / SAMPLES_X, i as u32 / gw / depth::SAMPLES_Y)), "tiles under the strip");
         codes[used] = 0;
         codes[used + 1] = depth::UNKNOWN;
         let s = fixture::session("codes", w, h, 2, &[Some(codes.clone()), None, None]);

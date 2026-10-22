@@ -2588,11 +2588,12 @@ data: {}
     struct FakeMouse(Arc<Mutex<(bool, bool, usize)>>);
 
     impl super::super::screen::Mouse for FakeMouse {
-        fn read(&mut self, vrchat: u32) -> (bool, bool) {
+        fn read(&mut self, vrchat: u32) -> super::super::screen::MouseState {
             assert_eq!(vrchat, VRCHAT_PID);
             let mut m = self.0.lock().unwrap();
             m.2 += 1;
-            (m.0, m.1)
+            // VRChat in mouse-look: its cursor hidden.
+            super::super::screen::MouseState { down: m.0, front: m.1, cursor: false }
         }
     }
 

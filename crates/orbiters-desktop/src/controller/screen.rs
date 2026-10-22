@@ -44,24 +44,43 @@ const MENU_SETTLE: Duration = Duration::from_secs(2);
 const OVERLAY_ANSWER: Duration = Duration::from_secs(2);
 /// While looking points, the mouse is read this often (a click is down about a tenth of a second).
 const GAZE_POLL: Duration = Duration::from_millis(15);
+/// Clicks count only this long after the menu opened on the screen: the Action Menu's click that opened it is one, and
+/// something is under the dot as it opens.
+const CLICK_AFTER_OPEN: Duration = Duration::from_millis(500);
+/// A click presses what the gaze rested on this long, not what it crossed mid-turn.
+const GAZE_REST: Duration = Duration::from_millis(150);
 
-/// The left mouse button and whether VRChat's window is in front, as desktop mode's clicks read them (tests feed their
-/// own).
+/// The mouse at a reading.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct MouseState {
+    /// The left button is down.
+    pub down: bool,
+    /// The window in front is VRChat's.
+    pub front: bool,
+    /// VRChat shows the cursor: its Action Menu or Quick Menu is open, the view frozen (in mouse-look it hides it). Read
+    /// only with VRChat in front.
+    pub cursor: bool,
+}
+
+/// The left mouse button, the window in front and the cursor, as desktop mode's clicks read them (tests feed their own).
 pub(super) trait Mouse: Send {
-    /// The button is down; the window in front is VRChat's (process `vrchat`).
-    fn read(&mut self, vrchat: u32) -> (bool, bool);
+    /// The mouse now, VRChat being process `vrchat`.
+    fn read(&mut self, vrchat: u32) -> MouseState;
 }
 
 /// This computer's mouse.
 struct WindowsMouse;
 
 impl Mouse for WindowsMouse {
-    fn read(&mut self, vrchat: u32) -> (bool, bool) {
+    fn read(&mut self, vrchat: u32) -> MouseState {
         #[cfg(windows)]
         {
             use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
-            use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SM_SWAPBUTTON};
-            // SAFETY: plain reads of the input state; the process id is written to a local that outlives the call.
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetCursorInfo, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, CURSORINFO, CURSOR_SHOWING, SM_SWAPBUTTON,
+            };
+            // SAFETY: plain reads of the input state; the process id and the cursor's state are written to locals that
+            // outlive the calls.
             unsafe {
                 // The left button as the owner set it up (swapped: the physical right one).
                 let button = if GetSystemMetrics(SM_SWAPBUTTON) != 0 { VK_RBUTTON } else { VK_LBUTTON };
@@ -69,13 +88,17 @@ impl Mouse for WindowsMouse {
                 let window = GetForegroundWindow();
                 let mut pid = 0u32;
                 let front = !window.is_invalid() && GetWindowThreadProcessId(window, Some(&mut pid as *mut u32)) != 0 && pid == vrchat;
-                (down, front)
+                let cursor = front && {
+                    let mut info = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
+                    GetCursorInfo(&mut info).is_ok() && info.flags.0 & CURSOR_SHOWING.0 != 0
+                };
+                MouseState { down, front, cursor }
             }
         }
         #[cfg(not(windows))]
         {
             let _ = vrchat;
-            (false, false)
+            MouseState::default()
         }
     }
 }
@@ -157,6 +180,10 @@ pub struct ScreenRuntime {
     /// The button at the last reading (`None`: not read since looking began), and a click holds its press.
     mouse_down: Option<bool>,
     clicking: bool,
+    /// Since when looking points with the menu open (clicks count [`CLICK_AFTER_OPEN`] later), and the element looked
+    /// at, on its page, since when.
+    look_began: Option<Instant>,
+    rested: Option<(ScreenPage, usize, Instant)>,
     pictures: HashMap<String, Thumb>,
     suggest: SuggestQueue,
     /// What Orb says while the menu is open: on Home, a line at a time, the next once the last was read.
@@ -224,6 +251,8 @@ impl Default for ScreenRuntime {
             mouse: Box::new(WindowsMouse),
             mouse_down: None,
             clicking: false,
+            look_began: None,
+            rested: None,
             pictures: HashMap::new(),
             suggest: SuggestQueue::default(),
             answer: VecDeque::new(),
@@ -424,6 +453,8 @@ impl ScreenRuntime {
         self.looked_at = None;
         self.mouse_down = None;
         self.clicking = false;
+        self.look_began = None;
+        self.rested = None;
         self.hover = None;
     }
 
@@ -445,14 +476,19 @@ impl ScreenRuntime {
     }
 
     /// Desktop mode's looking and clicking at a step (`vrchat`: VRChat's process): where the owner looks is hovered, and
-    /// a left click with VRChat in front presses it (nothing when nothing is looked at); letting go ends the press.
+    /// a left click presses it; letting go ends the press. A click counts with VRChat in front and its cursor hidden
+    /// (mouse-look), [`CLICK_AFTER_OPEN`] after the menu opened, on what the gaze rested on for [`GAZE_REST`]; else it
+    /// presses nothing, as with nothing looked at.
     fn look_and_click(&mut self, vrchat: Option<u32>, now: Instant, effects: &mut Vec<Effect>) {
         if !(self.gaze && self.available && self.menu.open) {
             // The mouse is not read: a click before looking began is no click.
             self.mouse_down = None;
             self.clicking = false;
+            self.look_began = None;
+            self.rested = None;
             return;
         }
+        let began = *self.look_began.get_or_insert(now);
         let layout = Frame::layout(&self.menu);
         if std::mem::take(&mut self.gazed) {
             self.looked_at = touch::look(self.eye, self.gaze_point);
@@ -460,20 +496,27 @@ impl ScreenRuntime {
         let menu = &self.menu;
         let looked = self.looked_at.and_then(|(x, y)| layout::hit(layout, x, y)).filter(|(i, _)| !layout::state(menu, &layout.elements[*i]).hidden);
         self.hover = looked.map(|(i, _)| i);
+        // How long the gaze rests on what it looks at.
+        let page = ScreenPage::of(&self.menu);
+        self.rested = match (looked, self.rested) {
+            (Some((i, _)), Some((p, j, since))) if p == page && j == i => Some((p, j, since)),
+            (Some((i, _)), _) => Some((page, i, now)),
+            (None, _) => None,
+        };
         let Some(vrchat) = vrchat else { return };
-        let (down, front) = self.mouse.read(vrchat);
-        if self.mouse_down == Some(false) && down && front {
-            if let Some((index, target)) = looked {
-                self.last_activity = now;
-                self.pressed = Some((index, now));
-                self.clicking = true;
-                effects.extend(self.menu.press(target));
-            }
+        let mouse = self.mouse.read(vrchat);
+        let click = self.mouse_down == Some(false) && mouse.down && mouse.front && !mouse.cursor && now.duration_since(began) >= CLICK_AFTER_OPEN;
+        let rested = self.rested.is_some_and(|(_, _, since)| now.duration_since(since) >= GAZE_REST);
+        if let Some((index, target)) = looked.filter(|_| click && rested) {
+            self.last_activity = now;
+            self.pressed = Some((index, now));
+            self.clicking = true;
+            effects.extend(self.menu.press(target));
         }
-        if !down {
+        if !mouse.down {
             self.clicking = false;
         }
-        self.mouse_down = Some(down);
+        self.mouse_down = Some(mouse.down);
     }
 
     /// The owner's index finger near the screen: one of the eight touch points (`Orb/Screen/Touch/L0` …).
@@ -1112,5 +1155,118 @@ mod tests {
         assert_eq!(s.next_due(now), Some(now + LOCAL_IDLE), "the owner's next resend, nothing sooner");
         s.menu.page = Page::Home;
         assert_eq!(s.next_due(now), Some(past), "on Home the next line is due");
+    }
+
+    /// The stand-in mouse: as a test sets it.
+    #[derive(Clone, Default)]
+    struct FakeMouse(std::sync::Arc<std::sync::Mutex<MouseState>>);
+
+    impl Mouse for FakeMouse {
+        fn read(&mut self, _vrchat: u32) -> MouseState {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    /// Home on the screen in desktop mode, the stand-in mouse up, VRChat in front in mouse-look.
+    fn looking(mouse: &FakeMouse) -> ScreenRuntime {
+        let mut s = ScreenRuntime::default();
+        s.avatar(true, Some(8));
+        s.set_gaze(true);
+        s.menu.open();
+        s.mouse = Box::new(mouse.clone());
+        *mouse.0.lock().unwrap() = MouseState { down: false, front: true, cursor: false };
+        s
+    }
+
+    /// What VRChat sends of the eyes (at rest) and the gaze point when the owner looks at pixel (`x`, `y`) of the page.
+    fn look_at(s: &mut ScreenRuntime, x: f32, y: f32) {
+        let eyes = orbiters_contracts::orb::params::GAZE_EYES;
+        let on =
+            [x as f64 / layout::WIDTH as f64 * touch::WIDTH - touch::WIDTH / 2.0, touch::HEIGHT / 2.0 - y as f64 / layout::HEIGHT as f64 * touch::HEIGHT, 0.0];
+        let ahead = [on[0] - eyes[0], on[1] - eyes[1], on[2] - eyes[2]];
+        let length = (ahead[0].powi(2) + ahead[1].powi(2) + ahead[2].powi(2)).sqrt();
+        let gaze = [eyes[0] + 0.38 * ahead[0] / length, eyes[1] + 0.38 * ahead[1] / length, eyes[2] + 0.38 * ahead[2] / length];
+        for (prefix, at) in [(screen::local::EYE_PREFIX, eyes), (screen::local::GAZE_PREFIX, gaze)] {
+            for (i, receiver) in touch::RECEIVERS.iter().enumerate() {
+                let d = ((at[0] - receiver[0]).powi(2) + (at[1] - receiver[1]).powi(2) + (at[2] - receiver[2]).powi(2)).sqrt() - 0.01;
+                assert!(s.gaze_value(&format!("{prefix}{i}"), (1.0 - d / touch::RADIUS).clamp(0.0, 1.0) as f32));
+            }
+        }
+    }
+
+    /// Home's YouTube tile, its middle on the page.
+    fn youtube_tile() -> (f32, f32) {
+        let tile = layout::cached(ScreenPage::Home).elements.iter().find(|e| e.target == menu::Target::YouTube).unwrap();
+        (tile.rect.x as f32 + tile.rect.w as f32 / 2.0, tile.rect.y as f32 + tile.rect.h as f32 / 2.0)
+    }
+
+    /// A step `ms` after `start` with the mouse so; whether it pressed the tile (and the search page opened).
+    fn step(s: &mut ScreenRuntime, mouse: &FakeMouse, start: Instant, ms: u64, state: MouseState) -> bool {
+        *mouse.0.lock().unwrap() = state;
+        let now = start + Duration::from_millis(ms);
+        s.look_and_click(Some(1), now, &mut Vec::new());
+        let pressed = s.pressed.is_some_and(|(_, at)| at == now);
+        assert!(!pressed || s.menu.page == Page::Search, "the tile's press opens the search page");
+        pressed
+    }
+
+    const UP: MouseState = MouseState { down: false, front: true, cursor: false };
+    const DOWN: MouseState = MouseState { down: true, front: true, cursor: false };
+
+    #[test]
+    fn a_click_just_after_the_menu_opened_presses_nothing() {
+        let mouse = FakeMouse::default();
+        let mut s = looking(&mouse);
+        let (x, y) = youtube_tile();
+        look_at(&mut s, x, y);
+        let start = Instant::now();
+        assert!(!step(&mut s, &mouse, start, 0, UP));
+        assert!(s.hover.is_some(), "the tile looked at is hovered");
+        // The Action Menu's click, or one at once: within half a second of opening, nothing.
+        assert!(!step(&mut s, &mouse, start, 300, DOWN));
+        assert!(!step(&mut s, &mouse, start, 400, UP));
+        assert!(s.pressed.is_none());
+        // Later, the same click presses the tile.
+        assert!(step(&mut s, &mouse, start, 700, DOWN));
+        // The menu opened again: half a second again.
+        s.menu.close();
+        assert!(!step(&mut s, &mouse, start, 800, UP));
+        s.menu.open();
+        assert!(!step(&mut s, &mouse, start, 900, UP));
+        assert!(!step(&mut s, &mouse, start, 1000, DOWN), "home again, too soon");
+    }
+
+    #[test]
+    fn a_click_presses_only_what_the_gaze_rested_on() {
+        let mouse = FakeMouse::default();
+        let mut s = looking(&mouse);
+        let (x, y) = youtube_tile();
+        let start = Instant::now();
+        // Above the screen first, then onto the tile mid-turn: a click at once presses nothing.
+        look_at(&mut s, x, -100.0);
+        assert!(!step(&mut s, &mouse, start, 0, UP));
+        assert!(!step(&mut s, &mouse, start, 600, UP));
+        look_at(&mut s, x, y);
+        assert!(!step(&mut s, &mouse, start, 610, UP));
+        assert!(!step(&mut s, &mouse, start, 660, DOWN), "50 ms on the tile");
+        assert!(!step(&mut s, &mouse, start, 700, UP));
+        // Resting on it: the click presses it.
+        assert!(step(&mut s, &mouse, start, 800, DOWN), "190 ms on the tile");
+    }
+
+    #[test]
+    fn no_click_counts_while_vrchat_shows_its_cursor() {
+        let mouse = FakeMouse::default();
+        let mut s = looking(&mouse);
+        let (x, y) = youtube_tile();
+        look_at(&mut s, x, y);
+        let start = Instant::now();
+        assert!(!step(&mut s, &mouse, start, 0, UP));
+        // VRChat's Quick Menu open: its cursor shows, the click is VRChat's.
+        let shown = MouseState { cursor: true, ..DOWN };
+        assert!(!step(&mut s, &mouse, start, 600, shown));
+        assert!(!step(&mut s, &mouse, start, 700, MouseState { cursor: true, ..UP }));
+        // Back in mouse-look.
+        assert!(step(&mut s, &mouse, start, 800, DOWN));
     }
 }

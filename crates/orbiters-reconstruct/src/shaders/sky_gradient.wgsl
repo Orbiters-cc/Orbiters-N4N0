@@ -8,6 +8,8 @@
 
 // sin(−6°): the lowest elevation whose texels learn (crate::sky's completion backs cells from −6° up too).
 const SKY_LOWEST: f32 = -0.1045;
+// The transmittance a pixel needs behind the splats to teach the sky.
+const SKY_OPEN: f32 = 0.5;
 
 @compute @workgroup_size(256)
 fn gradient(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
@@ -15,7 +17,13 @@ fn gradient(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgrou
     if (p >= frame.size.x * frame.size.y) {
         return;
     }
-    let g = d_pixel[p].xyz * bitcast<f32>(out_state[p].x);
+    // Only pixels the splats leave mostly open teach the sky: behind nearly opaque ones the gradient is tiny, but Adam
+    // takes full steps on it, and the texels drifted to the colours of what stands in front (or out of 0..1).
+    let t = bitcast<f32>(out_state[p].x);
+    if (t < SKY_OPEN) {
+        return;
+    }
+    let g = d_pixel[p].xyz * t;
     if (g.x == 0.0 && g.y == 0.0 && g.z == 0.0) {
         return;
     }

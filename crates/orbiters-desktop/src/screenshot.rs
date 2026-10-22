@@ -874,7 +874,19 @@ fn splats_3d(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, sc
         }
     }
     run.wait(1.4)?;
-    run.shoot(out, "splats-3d-orbit")
+    run.shoot(out, "splats-3d-orbit")?;
+    // What the keyframes saw poorly, faded, then hazed, from the recorded view again: the control shows where the PLY
+    // says what they saw.
+    run.click("Recorded view", 3.0)?;
+    run.wait(0.8)?;
+    for (label, name) in [("Fade", "splats-3d-fade"), ("Haze", "splats-3d-haze"), ("Fog", "splats-3d-fog"), ("Crop", "splats-3d-crop")] {
+        if run.click(label, 3.0).is_err() {
+            break;
+        }
+        run.wait(0.8)?;
+        run.shoot(out, name)?;
+    }
+    Ok(())
 }
 
 /// End to end on the newest session of `--sessions`: opens its detail, presses Reconstruct (the real worker
@@ -1203,6 +1215,7 @@ impl crate::backend::Backend for Still {
     }
     fn calibrated(&self, _calibration: orbiters_contracts::performance::calibration::Calibration) {}
     fn frames(&self, _chunk: crate::state::FrameChunk) {}
+    fn headset(&self, _in_use: bool) {}
     fn walk_boost(&self, _strength: f32) {}
     fn osc_reconnect(&self) {}
     fn quit(&self) {}

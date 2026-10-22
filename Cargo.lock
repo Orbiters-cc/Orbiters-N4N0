@@ -3675,11 +3675,13 @@ name = "orbiters-reconstruct"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ash",
  "bytemuck",
  "fastrand",
  "naga",
  "orbiters-contracts",
  "orbiters-core",
+ "orbiters-openvr",
  "png",
  "rayon",
  "serde",

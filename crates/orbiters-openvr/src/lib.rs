@@ -33,6 +33,38 @@ pub enum AppType {
     Background = 3,
 }
 
+/// `EDeviceActivityLevel`: whether a device is being used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Activity {
+    Unknown,
+    /// No activity for the last 10 seconds.
+    Idle,
+    UserInteraction,
+    /// No activity for the last half second.
+    UserInteractionTimeout,
+    /// Idle long enough for SteamVR's standby (its power management setting).
+    Standby,
+    IdleTimeout,
+}
+
+impl Activity {
+    fn from_raw(v: i32) -> Self {
+        match v {
+            0 => Self::Idle,
+            1 => Self::UserInteraction,
+            2 => Self::UserInteractionTimeout,
+            3 => Self::Standby,
+            4 => Self::IdleTimeout,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Someone wears or moves it (or did half a second ago).
+    pub fn in_use(self) -> bool {
+        matches!(self, Self::UserInteraction | Self::UserInteractionTimeout)
+    }
+}
+
 /// `ETrackingUniverseOrigin`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
@@ -450,6 +482,13 @@ impl Client {
         type F = unsafe extern "system" fn(u32) -> bool;
         // SAFETY: entry 21 is IsTrackedDeviceConnected.
         unsafe { entry::<F>(self.system, 21)(device) }
+    }
+
+    /// Whether someone is using `device` (`EDeviceActivityLevel`): the headset's proximity sensor and motion.
+    pub fn activity(&self, device: u32) -> Activity {
+        type F = unsafe extern "system" fn(u32) -> i32;
+        // SAFETY: entry 16 is GetTrackedDeviceActivityLevel.
+        Activity::from_raw(unsafe { entry::<F>(self.system, 16)(device) })
     }
 
     pub fn int_property(&self, device: u32, property: i32) -> Option<i32> {

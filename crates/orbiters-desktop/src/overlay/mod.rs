@@ -532,6 +532,9 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let mut steamvr_seen = Instant::now();
     let mut vrchat_scene = false;
     let mut vrchat_read: Option<Instant> = None;
+    // Whether someone wears the headset, read every second and told when it changes.
+    let mut worn: Option<bool> = None;
+    let mut worn_read: Option<Instant> = None;
     // A frame of the headset, the longest wait for the compositor's next one (its advice).
     let frame_ms = steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0).map_or(11, |hz| (1000.0 / hz).ceil() as u32).clamp(4, 50);
     loop {
@@ -628,6 +631,14 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             let compositor = steamvr.compositor().ok();
             vrchat_scene = compositor.is_some_and(|c| snap.vrchat.pid.is_some_and(|pid| c.scene_focus_process() == pid) && !c.is_scene_loading())
                 && snap.vrchat.world.in_world;
+        }
+        if worn_read.is_none_or(|r| r.elapsed() >= Duration::from_secs(1)) {
+            worn_read = Some(Instant::now());
+            let activity = steamvr.activity(0);
+            if activity != vr::Activity::Unknown && worn != Some(activity.in_use()) {
+                worn = Some(activity.in_use());
+                backend.headset(activity.in_use());
+            }
         }
         // VRChat's frame times also pace Orb's projected screen (the owner's steps follow the frame rate).
         if snap.settings.world_performance || snap.settings.orb.enabled {

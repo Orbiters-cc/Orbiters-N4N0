@@ -144,6 +144,9 @@ pub struct SteamVrStatus {
     pub pid: Option<u32>,
     /// The Orbiters overlay is connected (a tab in SteamVR's dashboard).
     pub overlay: bool,
+    /// Someone wears the headset (SteamVR's activity level, read by the overlay); `None` without the overlay.
+    #[serde(default)]
+    pub headset_in_use: Option<bool>,
     /// The latest T-pose calibration.
     pub calibration: Option<CalibrationInfo>,
 }

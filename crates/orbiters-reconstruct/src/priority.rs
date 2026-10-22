@@ -108,6 +108,14 @@ pub fn govern() {
     imp::govern();
 }
 
+/// Whether VRChat runs, as [`govern`] last looked (false before it ran, and on other systems).
+pub fn vrchat() -> bool {
+    #[cfg(windows)]
+    return imp::vrchat();
+    #[cfg(not(windows))]
+    false
+}
+
 /// Threads to decode keyframes on: every core (up to 16), but few while VRChat runs.
 pub fn loading_threads() -> usize {
     let all = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);

@@ -2,8 +2,10 @@
 //! 64 MB host blocks (system RAM on an integrated GPU), and the D3D12 backend maps a million-entry descriptor heap
 //! (32 MB). The window asks for small blocks and a small heap instead (it then costs about the driver's own floor),
 //! renders on the adapter that drives the primary display (no copy between GPUs; on a laptop that is the integrated
-//! GPU that owns the panel), on Windows loads only the DX12 drivers (no Vulkan or OpenGL probing), and reports GPU
-//! errors instead of closing ([`report_errors`]).
+//! GPU that owns the panel) unless it opens while VRChat runs: then on the processor's integrated GPU where it can show
+//! the window, it and the 3D view on its device leave VRChat's graphics card alone (Windows copies the frames to the
+//! display's GPU). On Windows it loads only the DX12 drivers (no Vulkan or OpenGL probing), and it reports GPU errors
+//! instead of closing ([`report_errors`]).
 
 use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetupCreateNew};
 use eframe::wgpu;
@@ -33,12 +35,21 @@ pub struct Handles {
     pub textures: orbiters_ui::blur::Textures,
 }
 
-pub fn options() -> WgpuConfiguration {
+/// `integrated`: the window opens while VRChat runs (see the module).
+pub fn options(integrated: bool) -> WgpuConfiguration {
     let mut setup = WgpuSetupCreateNew::without_display_handle();
     if wgpu::Backends::from_env().is_none() {
         setup.instance_descriptor.backends = if cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::VULKAN | wgpu::Backends::GL };
     }
-    setup.native_adapter_selector = Some(Arc::new(|adapters: &[wgpu::Adapter], _surface: Option<&wgpu::Surface<'_>>| select(adapters)));
+    setup.native_adapter_selector = Some(Arc::new(move |adapters: &[wgpu::Adapter], surface: Option<&wgpu::Surface<'_>>| {
+        if integrated {
+            let shows = |a: &wgpu::Adapter| a.get_info().device_type == wgpu::DeviceType::IntegratedGpu && surface.is_none_or(|s| a.is_surface_supported(s));
+            if let Some(a) = adapters.iter().find(|a| shows(a)) {
+                return Ok(a.clone());
+            }
+        }
+        select(adapters)
+    }));
     setup.device_descriptor = Arc::new(|adapter: &wgpu::Adapter| {
         let base = if adapter.get_info().backend == wgpu::Backend::Gl { wgpu::Limits::downlevel_webgl2_defaults() } else { wgpu::Limits::default() };
         // The 3D view sorts millions of tile entries: buffers as large as the GPU allows (a limit, not an allocation).

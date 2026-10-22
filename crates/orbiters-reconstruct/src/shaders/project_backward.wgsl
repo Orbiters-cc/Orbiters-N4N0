@@ -8,6 +8,7 @@
 @group(0) @binding(2) var<storage, read> proj: array<f32>;
 @group(0) @binding(4) var<storage, read_write> grads: array<f32>;
 @group(0) @binding(5) var<storage, read_write> stats: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> filter3d: array<f32>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
@@ -36,7 +37,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let mean = vec3<f32>(params[o], params[o + 1u], params[o + 2u]);
     let log_scale = vec3<f32>(params[o + 3u], params[o + 4u], params[o + 5u]);
     let q = vec4<f32>(params[o + 6u], params[o + 7u], params[o + 8u], params[o + 9u]);
-    let m = proj_math(mean, log_scale, q);
+    let filter_var = filter3d[i];
+    let m = proj_math(mean, log_scale, q, filter_var);
     let g = i * GRAD2D;
     let d_mean2 = vec2<f32>(grad(g), grad(g + 1u));
     let d_conic = vec3<f32>(grad(g + 2u), grad(g + 3u), grad(g + 4u));
@@ -45,7 +47,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let d_z = grad(g + 9u);
     // The next step's sums start from zero (this was the only reader).
     clear_grads(g);
-    grads[o + 10u] = (d_op + frame.reg.x) * op * (1.0 - op);
+    // The pixels saw op·c3·c2 (project.wgsl): d_op is that product's gradient.
+    grads[o + 10u] = (d_op * m.c3 * m.c2 + frame.reg.x) * op * (1.0 - op);
+    let d_c2 = d_op * op * m.c3;
+    let d_c3 = d_op * op * m.c2;
     grads[o + 11u] = d_color.x;
     grads[o + 12u] = d_color.y;
     grads[o + 13u] = d_color.z;
@@ -56,9 +61,26 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let ka = proj[i * PROJ + 2u];
     let kb = proj[i * PROJ + 3u];
     let kc = proj[i * PROJ + 4u];
-    let g00 = -(ka * ka * d_conic.x + ka * kb * d_conic.y + kb * kb * d_conic.z);
-    let g01 = -(ka * kb * d_conic.x + 0.5 * (kb * kb + ka * kc) * d_conic.y + kb * kc * d_conic.z);
-    let g11 = -(kb * kb * d_conic.x + kb * kc * d_conic.y + kc * kc * d_conic.z);
+    var g00 = -(ka * ka * d_conic.x + ka * kb * d_conic.y + kb * kb * d_conic.z);
+    var g01 = -(ka * kb * d_conic.x + 0.5 * (kb * kb + ka * kc) * d_conic.y + kb * kc * d_conic.z);
+    var g11 = -(kb * kb * d_conic.x + kb * kc * d_conic.y + kc * kc * d_conic.z);
+    // The 2D filter's compensation c2 = √(det A / det(A + F)): ∂c2/∂A = ½·c2·A⁻¹ F K, or −½·c2·K for a flat A
+    // (cpu::backward).
+    let h = 0.5 * d_c2 * m.c2;
+    if (m.det_a > flat_det()) {
+        let p = m.a.z / m.det_a;
+        let qq = -m.a.y / m.det_a;
+        let r = m.a.x / m.det_a;
+        let fx2 = frame.reg.z;
+        let fy2 = frame.reg.w;
+        g00 += h * (p * fx2 * ka + qq * fy2 * kb);
+        g01 += h * 0.5 * ((p * fx2 * kb + qq * fy2 * kc) + (qq * fx2 * ka + r * fy2 * kb));
+        g11 += h * (qq * fx2 * kb + r * fy2 * kc);
+    } else {
+        g00 -= h * ka;
+        g01 -= h * kb;
+        g11 -= h * kc;
+    }
     let j0 = m.j0;
     let j1 = m.j1;
     // dL/dΣc = Jᵀ G J.
@@ -111,15 +133,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         }
         d_sw[k] = row;
     }
-    // M = Rq S; dL/dM = 2 dL/dΣw M.
-    let mr = array<vec3<f32>, 3>(m.rq[0] * m.s, m.rq[1] * m.s, m.rq[2] * m.s);
+    // M = Rq S' (the filtered scales); dL/dM = 2 dL/dΣw M.
+    let mr = array<vec3<f32>, 3>(m.rq[0] * m.sf, m.rq[1] * m.sf, m.rq[2] * m.sf);
     var dr: array<vec3<f32>, 3>;
-    var d_log_scale = vec3<f32>(0.0);
+    var d_sf = vec3<f32>(0.0);
     for (var r = 0u; r < 3u; r++) {
         let dm = 2.0 * (d_sw[r].x * mr[0] + d_sw[r].y * mr[1] + d_sw[r].z * mr[2]);
-        dr[r] = dm * m.s;
-        d_log_scale += m.rq[r] * dm * m.s;
+        dr[r] = dm * m.sf;
+        d_sf += m.rq[r] * dm;
     }
+    // s' = √(s² + σ²): ∂s'/∂log s = s²/s'; c3 = Π s/s' adds c3·σ²/s'² per axis.
+    let d_log_scale = d_sf * m.s * m.s / m.sf + d_c3 * m.c3 * filter_var / (m.sf * m.sf);
     // With the scale regulariser (frame.reg.y · Σ scales), which keeps Gaussians from growing where nothing holds them.
     let d_scale = d_log_scale + frame.reg.y * m.s;
     grads[o + 3u] = d_scale.x;

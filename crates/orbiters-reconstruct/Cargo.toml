@@ -12,11 +12,14 @@ path = "src/main.rs"
 [dependencies]
 orbiters-core = { workspace = true }
 orbiters-contracts = { workspace = true }
+orbiters-openvr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 bytemuck = { workspace = true }
 wgpu = "30"
+# wgpu-hal's: the Vulkan device's queue priority and the memory budget (crate::gpu).
+ash = "0.38"
 fastrand = "2"
 rayon = { workspace = true }
 

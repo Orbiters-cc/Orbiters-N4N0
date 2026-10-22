@@ -40,10 +40,13 @@ pub struct Settings {
     pub reconstruct_while_playing: WhilePlaying,
 }
 
-/// Where a reconstruction trains while VRChat runs. The graphics card takes the GPU from the game: on an RTX 4080,
-/// VRChat's GPU time per frame went from about 27 to 46 ms and a third of its frames came late while Canine trained.
-/// The processor's integrated GPU left the game's frames as they were (within a few percent) but trains about 40 times
-/// slower (Canine: 29 s on the RTX 4080, about 18 min on an Intel UHD 770). Or reconstructions wait for VRChat to close.
+/// Where a reconstruction trains while VRChat runs. On the graphics card, unpaced, training took the GPU from the game:
+/// on an RTX 4080, VRChat's GPU time per frame went from about 27 to 46 ms and a third of its frames came late while
+/// Canine trained; so there it now asks for a low-priority queue, fits its budget to the graphics memory VRChat leaves,
+/// and in VR waits for the idle GPU time SteamVR's frame timing shows between VRChat's frames (orbiters-reconstruct's
+/// governor). The processor's integrated GPU left the game's frames as they were (within a few percent) but trains
+/// about 40 times slower (Canine: 29 s on the RTX 4080, about 18 min on an Intel UHD 770). Or reconstructions wait for
+/// VRChat to close, or for the headset to have been off for a minute.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WhilePlaying {

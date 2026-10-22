@@ -123,6 +123,8 @@ pub struct Controller {
     /// The latest T-pose calibration and when it was taken (Unix ms; the shared clock restarts with Windows).
     calibration: Mutex<Option<StoredCalibration>>,
     reconstruction: Mutex<Option<Reconstruction>>,
+    /// Since when the headset has been off (SteamVR's activity level, from the overlay).
+    headset_off_since: Mutex<Option<Instant>>,
     /// Sessions waiting to be reconstructed, first first: 3D pictures taken while one ran, and a run a capture stopped.
     reconstruct_queue: Mutex<VecDeque<PathBuf>>,
     /// VRChat's camera as it was before a recording opened it in Stream mode (put back when recording ends).
@@ -213,7 +215,13 @@ struct Reconstruction {
     told: bool,
     /// Training on the integrated GPU (VRChat was running).
     integrated: bool,
+    /// Started while VRChat ran because the headset was off ([`HEADSET_BREAK`]): putting it back on puts it back in
+    /// the queue.
+    on_break: bool,
 }
+
+/// How long the headset stays off before reconstructions held for VRChat start.
+const HEADSET_BREAK: Duration = Duration::from_secs(60);
 
 /// `calibration.json` in the config folder: the latest calibration, kept across restarts.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -291,6 +299,7 @@ impl Controller {
             publishing: Mutex::new(()),
             calibration: Mutex::new(calibration),
             reconstruction: Mutex::new(None),
+            headset_off_since: Mutex::new(None),
             reconstruct_queue: Mutex::new(VecDeque::new()),
             camera_before: Mutex::new(None),
             avatar_before: Mutex::new(None),
@@ -950,13 +959,59 @@ impl Controller {
         });
     }
 
-    /// The overlay process connected or left.
-    pub fn set_overlay_connected(&self, connected: bool) {
+    /// The overlay process connected or left (with it, whether the headset is worn is unknown).
+    pub fn set_overlay_connected(self: &Shared, connected: bool) {
         self.update_if(|s| {
             let changed = s.steamvr.overlay != connected;
             s.steamvr.overlay = connected;
             changed
         });
+        if !connected {
+            self.set_headset(None);
+        }
+    }
+
+    /// Someone put the headset on or took it off (`None`: unknown). Put back on, a reconstruction that started because
+    /// it was off goes back to the head of the queue, to wait for VRChat to close (or the next break).
+    pub fn set_headset(self: &Shared, in_use: Option<bool>) {
+        self.update_if(|s| {
+            let changed = s.steamvr.headset_in_use != in_use;
+            s.steamvr.headset_in_use = in_use;
+            changed
+        });
+        {
+            let mut since = self.headset_off_since.lock().unwrap();
+            match in_use {
+                Some(false) => {
+                    since.get_or_insert_with(Instant::now);
+                }
+                _ => *since = None,
+            }
+        }
+        if in_use != Some(true) {
+            return;
+        }
+        let moved = {
+            let mut guard = self.reconstruction.lock().unwrap();
+            match guard.as_mut() {
+                Some(r) if r.on_break && !r.told && self.held_for_vrchat() => {
+                    r.told = true;
+                    let dir = r.dir.clone();
+                    self.change_queue(|q| q.push_front(dir));
+                    r.handle.cancel();
+                    true
+                }
+                _ => false,
+            }
+        };
+        if moved {
+            self.notify(NoticeKind::Info, "The headset is back on: the reconstruction waits until VRChat closes.");
+        }
+    }
+
+    /// The headset has been off long enough for reconstructions held for VRChat to start ([`HEADSET_BREAK`]).
+    fn headset_on_break(&self) -> bool {
+        self.headset_off_since.lock().unwrap().is_some_and(|t| t.elapsed() >= HEADSET_BREAK)
     }
 
     /// Current values from VRChat's OSCQuery service (empty when it is not running or not found). The request runs
@@ -1434,13 +1489,14 @@ impl Controller {
         } else if self.reconstruction.lock().unwrap().is_some() {
             "after the ones before it"
         } else {
-            "once VRChat closes"
+            "once VRChat closes or the headset has been off a minute"
         }
     }
 
-    /// Reconstructions wait for VRChat to close (settings' `reconstruct_while_playing`).
+    /// Reconstructions wait for VRChat to close (settings' `reconstruct_while_playing`), or for a break: the headset off
+    /// for a minute.
     fn held_for_vrchat(&self) -> bool {
-        self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.running
+        self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.running && !self.headset_on_break()
     }
 
     /// VRChat started or closed. Once it closes, a reconstruction training on the integrated GPU starts again on the
@@ -1479,6 +1535,7 @@ impl Controller {
             anyhow::bail!("Finish the capture first: reconstruction takes the whole GPU.");
         }
         let integrated = self.settings().reconstruct_while_playing == WhilePlaying::IntegratedGpu && self.snapshot.lock().unwrap().vrchat.running;
+        let on_break = self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.running;
         let mut guard = self.reconstruction.lock().unwrap();
         if guard.is_some() {
             anyhow::bail!("A reconstruction is already running.");
@@ -1504,7 +1561,7 @@ impl Controller {
         self.update(|s| s.reconstruction = Some(ReconstructionJob::new(dir.clone(), integrated)));
         match ReconstructHandle::spawn(&dir, integrated, on_event, on_log, on_exit) {
             Ok(handle) => {
-                *guard = Some(Reconstruction { handle, dir, told: false, integrated });
+                *guard = Some(Reconstruction { handle, dir, told: false, integrated, on_break });
                 Ok(())
             }
             Err(e) => {
@@ -1841,6 +1898,10 @@ fn spawn_watchers(ctl: Shared) {
                     }
                     if was != running {
                         ctl.vrchat_changed(running);
+                    }
+                    // A minute into a break from the headset, what waited for VRChat to close starts.
+                    if running && ctl.headset_on_break() {
+                        ctl.next_reconstruction();
                     }
                     // Microphones come and go (headsets): ask the worker again now and then.
                     if tick.is_multiple_of(15) && tick > 0 {

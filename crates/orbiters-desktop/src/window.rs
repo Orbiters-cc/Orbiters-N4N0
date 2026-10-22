@@ -22,7 +22,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             .with_icon(app::window_icon()),
         renderer: eframe::Renderer::Wgpu,
         centered: true,
-        wgpu_options: gpu::options(),
+        // While VRChat runs, on the integrated GPU: off the game's graphics card.
+        wgpu_options: gpu::options(backend.view().vrchat.running),
         // `orbiters_ui::install` brings its own (the system's fonts for other scripts, opened as needed): eframe's
         // stand-in would only log that it has none.
         system_font_fallback: false,

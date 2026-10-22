@@ -1,19 +1,21 @@
 //! The 3D view of a session's reconstruction: its splats drawn by the same GPU rasteriser that trained them
 //! (`orbiters_reconstruct::gpu::Gpu` in render-only mode, on the window's own device), through a paint callback.
 //! It opens on the camera of the keyframe the preview shows; drag to orbit, right-drag to pan, scroll to zoom,
-//! WASD/QE to fly, and step through the recorded keyframe views.
+//! WASD/QE to fly, and step through the recorded keyframe views. What the keyframes saw poorly (weakly, rarely, from
+//! one side, or from much farther than the view now is) can be faded, blurred or turned to haze, and what lies beyond
+//! the reach of the depth frames fogged towards the sky's horizon or cropped; both show as trained again.
 
 use super::Job;
 use crate::gpu::Handles;
 use eframe::egui_wgpu::{self, wgpu};
-use egui::{pos2, vec2, Align2, Color32, Id, Rect, Sense, Ui};
+use egui::{pos2, vec2, Align2, Color32, Id, Rect, Sense, Ui, UiBuilder};
 use crate::views::{self, View};
 use orbiters_core::reconstruction;
 use orbiters_reconstruct::camera::{normalize, Camera};
-use orbiters_reconstruct::gpu::{Gpu, Target};
+use orbiters_reconstruct::gpu::{Confidence, ConfidenceMode, FarField, FarMode, Gpu, Target};
 use orbiters_reconstruct::ply;
 use orbiters_ui::theme::{self, weight, Txt};
-use orbiters_ui::widgets::{self, Button, IconButton, Variant};
+use orbiters_ui::widgets::{self, Button, IconButton, SegOption, Variant};
 use orbiters_ui::{format, icons};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -29,6 +31,22 @@ struct Loaded {
     /// The view to start from and how far ahead its subject is.
     start: usize,
     depth: f32,
+    /// Whether the PLY says what the keyframes saw of its splats (what the confidence control needs), and whether any
+    /// lies beyond the depth frames' reach (what the far field control needs).
+    seen: bool,
+    far: bool,
+    /// The sky's colour at the horizon (orbiters_reconstruct::sky::horizon), else the background's: what fog and haze
+    /// turn to.
+    horizon: [f32; 3],
+}
+
+/// What the confidence control shows poorly seen splats as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unsure {
+    Shown,
+    Faded,
+    Blurred,
+    Hazed,
 }
 
 /// The renderer and the texture it presents into (shared with the paint callback).
@@ -88,13 +106,31 @@ pub struct Viewer {
     error: Option<String>,
     orbit: Option<Orbit>,
     view: usize,
+    unsure: Unsure,
+    /// How strongly the control acts, 0 to 1.
+    amount: f32,
+    far: FarMode,
+    /// The far field's distance: fog's thickness, the crop's soft edge (metres).
+    far_distance: f32,
 }
 
 impl Viewer {
     pub fn open(ctx: &egui::Context, gpu: &Handles, session: &Path, title: String) -> Self {
         let (device, queue, dir) = (gpu.device.clone(), gpu.queue.clone(), session.to_path_buf());
         let loading = Job::spawn(ctx, move || load(&dir, device, queue).map_err(|e| format!("{e:#}")));
-        Self { session: session.to_path_buf(), title, loading: Some(loading), loaded: None, error: None, orbit: None, view: 0 }
+        Self {
+            session: session.to_path_buf(),
+            title,
+            loading: Some(loading),
+            loaded: None,
+            error: None,
+            orbit: None,
+            view: 0,
+            unsure: Unsure::Shown,
+            amount: 0.75,
+            far: FarMode::Shown,
+            far_distance: 20.0,
+        }
     }
 
     pub fn loaded(&self) -> bool {
@@ -131,7 +167,15 @@ impl Viewer {
                 }
             }
             let camera = orbit.camera(w, h);
-            p.add(egui_wgpu::Callback::new_paint_callback(rect, SplatCallback { renderer: l.renderer.clone(), camera }));
+            let mode = match self.unsure {
+                Unsure::Shown => None,
+                Unsure::Faded => Some(ConfidenceMode::Fade),
+                Unsure::Blurred => Some(ConfidenceMode::Blur),
+                Unsure::Hazed => Some(ConfidenceMode::Haze),
+            };
+            let confidence = mode.map(|mode| Confidence { amount: self.amount, mode }).unwrap_or_default();
+            let far = FarField { mode: self.far, distance: self.far_distance, horizon: l.horizon };
+            p.add(egui_wgpu::Callback::new_paint_callback(rect, SplatCallback { renderer: l.renderer.clone(), camera, confidence, far }));
             let (error, checking) = l.renderer.lock().map(|r| (r.error.clone(), r.checks > 0)).unwrap_or_default();
             if let Some(e) = error {
                 widgets::text(&p, rect.center(), Align2::CENTER_CENTER, &Txt::new(format!("This view could not be drawn: {e}"), 13.0).color(theme::DANGER));
@@ -201,11 +245,73 @@ impl Viewer {
             let hint_r = Rect::from_min_size(pos2(rect.left() + 16.0, rect.bottom() - 16.0 - 30.0), vec2(hs.x + 28.0, 30.0));
             chip(&p, hint_r);
             widgets::text(&p, hint_r.center(), Align2::CENTER_CENTER, &hint_t);
+            if l.seen {
+                let far = l.far;
+                self.controls(ui, &p, rect, hint_r, far);
+            }
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             open = false;
         }
         open
+    }
+}
+
+/// A slider beside a segmented control: its value, range, step and how its value reads.
+type ChipSlider<'a> = (&'a mut f32, std::ops::RangeInclusive<f32>, f32, &'a dyn Fn(f32) -> String);
+
+/// A labelled segmented control in a chip ending at `right` with its bottom at `bottom`, with a slider after it while
+/// `slider` is given; returns the chip.
+#[allow(clippy::too_many_arguments)]
+fn control_chip<T: PartialEq + Copy>(
+    ui: &mut Ui,
+    p: &egui::Painter,
+    id: &str,
+    right: f32,
+    bottom: f32,
+    label: &str,
+    value: &mut T,
+    options: &[SegOption<'_, T>],
+    slider: Option<ChipSlider<'_>>,
+) -> Rect {
+    let label = Txt::new(label, 12.0).color(theme::FG_3);
+    let label_w = widgets::text_size(ui, &label).x;
+    // The segmented track's width for these labels (widgets::segmented: small labels, 12 px padding, 4 px inset).
+    let seg_w = options.iter().map(|o| widgets::text_size(ui, &Txt::new(o.label, 12.0).weight(weight::MEDIUM)).x + 24.0).sum::<f32>() + 8.0;
+    let slider_w = if slider.is_some() { 284.0 + 16.0 } else { 0.0 };
+    let (w, h) = (18.0 + label_w + 12.0 + seg_w + slider_w + 6.0, 44.0);
+    let r = Rect::from_min_size(pos2(right - w, bottom - h), vec2(w, h));
+    p.rect_filled(r, theme::radius(h * 0.5), theme::black(0.55));
+    widgets::text(p, pos2(r.left() + 18.0, r.center().y), Align2::LEFT_CENTER, &label);
+    let seg_r = Rect::from_min_size(pos2(r.left() + 18.0 + label_w + 12.0, r.center().y - 18.0), vec2(seg_w, 36.0));
+    let mut seg = ui.new_child(UiBuilder::new().max_rect(seg_r).id_salt(id));
+    widgets::segmented(&mut seg, id, value, options, true);
+    if let Some((v, range, step, format)) = slider {
+        let slider_r = Rect::from_min_size(pos2(seg_r.right() + 16.0, r.center().y - 14.0), vec2(284.0, 28.0));
+        let mut s = ui.new_child(UiBuilder::new().max_rect(slider_r).id_salt((id, "amount")));
+        widgets::slider(&mut s, (id, "amount"), v, range, step, format);
+    }
+    r
+}
+
+impl Viewer {
+    /// The display controls in chips at the bottom right (above the hint where the first does not fit beside it): what
+    /// poorly seen splats show as and how strongly, and above it, with `far`, the far field and its distance.
+    fn controls(&mut self, ui: &mut Ui, p: &egui::Painter, rect: Rect, hint: Rect, far: bool) {
+        let unsure = [SegOption::new(Unsure::Shown, "Show"), SegOption::new(Unsure::Faded, "Fade"), SegOption::new(Unsure::Blurred, "Blur"), SegOption::new(Unsure::Hazed, "Haze")];
+        let percent = |v: f32| format!("{:.0} %", v * 100.0);
+        let right = rect.right() - 16.0;
+        // Beside the hint when the widest chip fits there.
+        let widest = 18.0 + 90.0 + 12.0 + 230.0 + 300.0 + 6.0;
+        let bottom = if hint.right() + 12.0 + widest <= right { rect.bottom() - 16.0 + 7.0 } else { hint.top() - 10.0 };
+        let amount = (self.unsure != Unsure::Shown).then_some((&mut self.amount, 0.0..=1.0, 0.05, &percent as &dyn Fn(f32) -> String));
+        let first = control_chip(ui, p, "splat-unsure", right, bottom, "Poorly seen", &mut self.unsure, &unsure, amount);
+        if far {
+            let options = [SegOption::new(FarMode::Shown, "Show"), SegOption::new(FarMode::Fog, "Fog"), SegOption::new(FarMode::Crop, "Crop")];
+            let metres = |v: f32| format!("{v:.0} m");
+            let distance = (self.far != FarMode::Shown).then_some((&mut self.far_distance, 5.0..=100.0, 5.0, &metres as &dyn Fn(f32) -> String));
+            control_chip(ui, p, "splat-far", right, first.top() - 10.0, "Far away", &mut self.far, &options, distance);
+        }
     }
 }
 
@@ -258,7 +364,10 @@ fn load(dir: &Path, device: wgpu::Device, queue: wgpu::Queue) -> anyhow::Result<
     let depth = views::depth_ahead(&g, &views[start]);
     let mut gpu = Gpu::renderer(device, queue);
     gpu.upload(&g);
-    Ok(Loaded { renderer: Arc::new(Mutex::new(Renderer { gpu, target: None, last: None, error: None, checks: 0 })), splats: g.len(), views, start, depth })
+    let seen = g.seen.iter().any(|s| s.weight >= 0.0);
+    let far = g.seen.iter().any(|s| s.beyond > 0.0);
+    let horizon = orbiters_reconstruct::sky::horizon(&g).unwrap_or(BACKGROUND);
+    Ok(Loaded { renderer: Arc::new(Mutex::new(Renderer { gpu, target: None, last: None, error: None, checks: 0 })), splats: g.len(), views, start, depth, seen, far, horizon })
 }
 
 const BLIT: &str = r#"
@@ -357,6 +466,8 @@ impl Blit {
 struct SplatCallback {
     renderer: Arc<Mutex<Renderer>>,
     camera: Camera,
+    confidence: Confidence,
+    far: FarField,
 }
 
 impl egui_wgpu::CallbackTrait for SplatCallback {
@@ -399,7 +510,10 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
             r.target = Some(Presented { size, view, bind_group });
             r.last = None;
         }
-        let moved = r.last != Some(self.camera);
+        let changed = r.gpu.confidence != self.confidence || r.gpu.far != self.far;
+        r.gpu.confidence = self.confidence;
+        r.gpu.far = self.far;
+        let moved = r.last != Some(self.camera) || changed;
         let left_out = !moved && r.checks > 0 && {
             r.checks -= 1;
             r.gpu.needs_redraw()

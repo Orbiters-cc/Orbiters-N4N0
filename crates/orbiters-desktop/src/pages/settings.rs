@@ -107,15 +107,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
                 widgets::separator(ui);
                 let places = [
-                    SegOption::new(WhilePlaying::GraphicsCard, "Graphics card").hint("Fastest; VRChat stutters while it trains"),
+                    SegOption::new(WhilePlaying::GraphicsCard, "Graphics card")
+                        .hint("Fastest; in VR it trains in the time VRChat's frames leave idle, so slower while the game is busy"),
                     SegOption::new(WhilePlaying::IntegratedGpu, "Integrated GPU")
                         .hint("About 40 times slower, and VRChat keeps its frame rate; once VRChat closes it starts again on the graphics card"),
-                    SegOption::new(WhilePlaying::AfterVrchat, "After VRChat").hint("Reconstructions wait until VRChat closes"),
+                    SegOption::new(WhilePlaying::AfterVrchat, "After VRChat").hint("Reconstructions wait until VRChat closes or the headset has been off a minute"),
                 ];
                 widgets::field(
                     ui,
                     "Reconstruct while VRChat runs",
-                    Some("Training on the graphics card makes VRChat stutter; the processor's integrated GPU leaves the game alone but is about 40 times slower."),
+                    Some("On the graphics card training gives way to VRChat's frames; the processor's integrated GPU leaves the game alone but is about 40 times slower."),
                     360.0,
                     |ui| {
                         apply |= widgets::segmented(ui, "while-playing", &mut draft.reconstruct_while_playing, &places, true);

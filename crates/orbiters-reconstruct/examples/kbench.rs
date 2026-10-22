@@ -56,10 +56,10 @@ fn main() -> anyhow::Result<()> {
     for k in 0..steps {
         entries += if depth_steps && !depth.is_empty() {
             let t = &depth[k * 7 % depth.len()];
-            let full = gpu.dilation;
-            gpu.dilation = t.dilation;
+            let full = gpu.filter_2d;
+            gpu.filter_2d = t.filter_2d;
             let stepped = gpu.step(&t.camera, [0.0; 3], Target::Depth { samples: &t.samples, weight: 0.3 }, Some(zero));
-            gpu.dilation = full;
+            gpu.filter_2d = full;
             stepped?
         } else {
             let v = &data.views[k * 7 % data.views.len()];

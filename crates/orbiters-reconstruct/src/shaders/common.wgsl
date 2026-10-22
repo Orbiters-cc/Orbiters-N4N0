@@ -13,19 +13,57 @@ struct Frame {
     background: vec4<f32>,
     // Width, height, tiles across, tiles down.
     size: vec4<u32>,
-    // Gaussians, unused, depth bits of a sort key, 1 to regularise the Gaussians a training step does not show too.
+    // Gaussians, 1 for a viewer's guards (project.wgsl), depth bits of a sort key, 1 to regularise the Gaussians a
+    // training step does not show too.
     counts: vec4<u32>,
     // Loss weights: colour L1, depth, unused, scene pixels or depth samples in this view.
     loss: vec4<f32>,
-    // Regulariser weights per Gaussian: opacity, scale (per metre); screen-space dilation in pixels² along x and y
-    // (0.3 at the training resolution; renders on the depth-sample grid scale it to keep the same footprint).
+    // Regulariser weights per Gaussian: opacity, scale (per metre); the 2D filter's variance in pixels² along x and y
+    // (cpu::FILTER_2D at the training resolution; renders on the depth-sample grid scale it to keep the same
+    // footprint).
     reg: vec4<f32>,
+    // A viewer's confidence control (crate::gpu::Confidence): amount (0 to 1), mode (0 fade, 1 blur, 2 haze), unused.
+    confidence: vec4<f32>,
+    // A viewer's far field (crate::gpu::FarField): mode (0 shown, 1 fog, 2 crop), distance (metres), unused; the
+    // horizon's colour (rgb).
+    far: vec4<f32>,
+    horizon: vec4<f32>,
 }
 
 const TILE: u32 = 16u;
 const MAX_ALPHA: f32 = 0.99;
 const MIN_ALPHA: f32 = 0.003921569;
 const MIN_T: f32 = 0.0001;
+// Below this share of the 2D filter's own determinant a projected covariance counts as flat (cpu::FLAT).
+const FLAT: f32 = 1e-6;
+// A viewer's guards (crate::gpu::Gpu::guards): splats fade in from the near plane to this distance (metres), and none
+// reaches further on screen than this many pixels (nor than the image's shorter side).
+const GUARD_FADE: f32 = 0.2;
+const GUARD_RADIUS: f32 = 1024.0;
+// The confidence control's blur at no trust at all: this much variance (pixels²) more along each axis.
+const CONFIDENCE_BLUR: f32 = 16.0;
+
+// How far a viewer can trust a splat (crate::gaussians::Seen: largest weight, keyframes, sector bits, finest rate),
+// from 1 down to 0, seen from the eye `toward_eye` away (world, from the splat): RadSplat's importance thresholds on its
+// weight; half as much seen in one keyframe; 0.2 less for each compass sector between the eye's and the nearest one a
+// keyframe looked from (a surface seen from one side smears seen from another, not from the same; at most three); and
+// none once the eye samples it four times as finely as the nearest keyframe did (magnified beyond what was observed).
+fn trust(s: vec4<f32>, toward_eye: vec3<f32>) -> f32 {
+    let strength = smoothstep(0.001, 0.01, s.x);
+    let views = mix(0.5, 1.0, clamp((s.y - 1.0) / 4.0, 0.0, 1.0));
+    let eye = min(u32(fract(atan2(toward_eye.x, toward_eye.z) / 6.283185307 + 1.0) * 16.0), 15u);
+    let bits = u32(s.z);
+    var nearest = 3u;
+    for (var k = 0u; k < 16u; k++) {
+        if ((bits & (1u << k)) != 0u) {
+            let d = max(eye, k) - min(eye, k);
+            nearest = min(nearest, min(d, 16u - d));
+        }
+    }
+    let side = 1.0 - 0.2 * f32(nearest);
+    let finer = max(frame.focal.x, frame.focal.y) / max(length(toward_eye), 1e-6) / max(s.w, 1e-6);
+    return strength * views * side * (1.0 - smoothstep(1.0, 4.0, finer));
+}
 // Floats per Gaussian: parameters (and their gradients and Adam moments), projected values, 2D gradients.
 const PARAM: u32 = 16u;
 const PROJ: u32 = 16u;
@@ -55,11 +93,19 @@ struct ProjMath {
     qn: vec4<f32>,
     qlen: f32,
     rq: array<vec3<f32>, 3>,
+    // Scales, and widened by the 3D filter (its variance added to their squares); its compensation c3 = Π s / s'.
     s: vec3<f32>,
+    sf: vec3<f32>,
+    c3: f32,
     sigma_c: array<vec3<f32>, 3>,
     j0: vec3<f32>,
     j1: vec3<f32>,
+    // The projected covariance A = J Σc Jᵀ and its determinant, A with the 2D filter (cov), and the 2D filter's
+    // compensation c2 = √(det A / det cov) (det A floored at flat_det()).
+    a: vec3<f32>,
+    det_a: f32,
     cov: vec3<f32>,
+    c2: f32,
     clamp_x: bool,
     clamp_y: bool,
     u: f32,
@@ -70,8 +116,13 @@ fn column(rows: array<vec3<f32>, 3>, k: u32) -> vec3<f32> {
     return vec3<f32>(rows[0][k], rows[1][k], rows[2][k]);
 }
 
-// Projection of Gaussian parameters `p` (mean, log scales, rotation) with the frame's camera.
-fn proj_math(mean: vec3<f32>, log_scale: vec3<f32>, q: vec4<f32>) -> ProjMath {
+// The determinant under which the 2D filter's compensation counts a projected covariance as flat.
+fn flat_det() -> f32 {
+    return FLAT * frame.reg.z * frame.reg.w;
+}
+
+// Projection of a Gaussian (mean, log scales, rotation, 3D filter variance) with the frame's camera.
+fn proj_math(mean: vec3<f32>, log_scale: vec3<f32>, q: vec4<f32>, filter_var: f32) -> ProjMath {
     var m: ProjMath;
     let w = array<vec3<f32>, 3>(frame.r0.xyz, frame.r1.xyz, frame.r2.xyz);
     m.pc = vec3<f32>(dot(w[0], mean) + frame.r0.w, dot(w[1], mean) + frame.r1.w, dot(w[2], mean) + frame.r2.w);
@@ -79,12 +130,14 @@ fn proj_math(mean: vec3<f32>, log_scale: vec3<f32>, q: vec4<f32>) -> ProjMath {
     m.qn = q / m.qlen;
     m.rq = quat_rows(m.qn);
     m.s = exp(log_scale);
+    m.sf = sqrt(m.s * m.s + vec3<f32>(filter_var));
+    m.c3 = (m.s.x / m.sf.x) * (m.s.y / m.sf.y) * (m.s.z / m.sf.z);
     m.ok = false;
     if (m.pc.z < frame.limits.z) {
         return m;
     }
-    // M = Rq S (columns scaled); Σw = M Mᵀ; Σc = W Σw Wᵀ.
-    let mr = array<vec3<f32>, 3>(m.rq[0] * m.s, m.rq[1] * m.s, m.rq[2] * m.s);
+    // M = Rq S' (columns scaled by the filtered scales); Σw = M Mᵀ; Σc = W Σw Wᵀ.
+    let mr = array<vec3<f32>, 3>(m.rq[0] * m.sf, m.rq[1] * m.sf, m.rq[2] * m.sf);
     var sw: array<vec3<f32>, 3>;
     for (var r = 0u; r < 3u; r++) {
         sw[r] = vec3<f32>(dot(mr[r], mr[0]), dot(mr[r], mr[1]), dot(mr[r], mr[2]));
@@ -112,9 +165,14 @@ fn proj_math(mean: vec3<f32>, log_scale: vec3<f32>, q: vec4<f32>) -> ProjMath {
     // J Σc rows (Σc is symmetric: its columns are its rows).
     let js0 = vec3<f32>(dot(m.j0, m.sigma_c[0]), dot(m.j0, m.sigma_c[1]), dot(m.j0, m.sigma_c[2]));
     let js1 = vec3<f32>(dot(m.j1, m.sigma_c[0]), dot(m.j1, m.sigma_c[1]), dot(m.j1, m.sigma_c[2]));
-    m.cov = vec3<f32>(dot(js0, m.j0) + frame.reg.z, dot(js0, m.j1), dot(js1, m.j1) + frame.reg.w);
+    m.a = vec3<f32>(dot(js0, m.j0), dot(js0, m.j1), dot(js1, m.j1));
+    m.cov = m.a + vec3<f32>(frame.reg.z, 0.0, frame.reg.w);
     let det = m.cov.x * m.cov.z - m.cov.y * m.cov.y;
+    m.det_a = m.a.x * m.a.z - m.a.y * m.a.y;
     m.ok = det > 0.0;
+    if (m.ok) {
+        m.c2 = sqrt(max(m.det_a, flat_det()) / det);
+    }
     return m;
 }
 

@@ -2,8 +2,9 @@
 //! by tile_hit, thresholds and order; the GPU decides borderline tiles in f32), slow and simple. Tests check its
 //! gradients against finite differences, and the GPU against it.
 //!
-//! Model (3DGS): a Gaussian projects to a 2D Gaussian (EWA splatting with the 3DGS frustum clamp and 0.3 px
-//! dilation); pixels blend the Gaussians front to back, `C = Σ cᵢ αᵢ Tᵢ + T·background`, with
+//! Model (3DGS with Mip-Splatting's filters): a Gaussian, its axes widened by its 3D filter, projects to a 2D Gaussian
+//! (EWA splatting with the 3DGS frustum clamp) convolved with the 2D filter; both filters scale its opacity so that it
+//! keeps its weight. Pixels blend the Gaussians front to back, `C = Σ cᵢ αᵢ Tᵢ + T·background`, with
 //! `αᵢ = min(0.99, opacityᵢ · exp(powerᵢ))`, skipping `α < 1/255` and stopping before `T` would drop under 10⁻⁴.
 //! The depth channel is `D = Σ zᵢ αᵢ Tᵢ` (unnormalised: an opaque surface renders its depth).
 
@@ -15,7 +16,18 @@ use crate::gaussians::Gaussians;
 
 pub const TILE: u32 = 16;
 pub const NEAR: f64 = 0.05;
-pub const DILATION: f64 = 0.3;
+/// Mip-Splatting's 2D filter: every splat is convolved with a screen-space Gaussian of this variance (pixels², about a
+/// pixel's box), its opacity scaled by `√(det Σ / det(Σ + filter))` so that it keeps its weight. Unlike 3DGS's 0.3 px
+/// dilation, a splat smaller than a pixel then fades instead of growing, so renders at other distances and
+/// resolutions than the keyframes' neither thicken nor brighten it.
+pub const FILTER_2D: f64 = 0.1;
+/// Below this share of the 2D filter's own determinant, a projected covariance counts as flat for the filter's
+/// compensation (which has an infinite slope at 0).
+pub const FLAT: f64 = 1e-6;
+/// Mip-Splatting's 3D filter: each Gaussian's axes get the variance `FILTER_3D · (depth / focal)²` of the training
+/// camera that samples it most finely, a fifth of a pixel² there, so that no Gaussian is finer than the keyframes could
+/// show: up close it stays smooth instead of turning into needles.
+pub const FILTER_3D: f64 = 0.2;
 pub const MAX_ALPHA: f64 = 0.99;
 pub const MIN_ALPHA: f64 = 1.0 / 255.0;
 pub const MIN_T: f64 = 1e-4;
@@ -155,7 +167,16 @@ struct Proj {
     pc: [f64; 3],
     w: M3,
     rq: M3,
+    /// Scales, and with the 3D filter's variance `filter` added to their squares; the compensations c3 = Π s / s'
+    /// (3D) and c2 = √(det A / det(A + F)) (2D, A the projected covariance), and the opacity before them.
     s: [f64; 3],
+    sf: [f64; 3],
+    filter: f64,
+    c3: f64,
+    c2: f64,
+    a: [f64; 3],
+    det_a: f64,
+    op: f64,
     qn: [f64; 4],
     qlen: f64,
     sigma_c: M3,
@@ -176,12 +197,22 @@ fn project_one(g: &Gaussians, i: usize, cam: &Camera) -> Proj {
     let qn = q.map(|c| c / qlen);
     let rq = quat_matrix(qn);
     let s = g.log_scales[i].map(|v| (v as f64).exp());
+    let filter = g.filter(i) as f64;
+    let sf = s.map(|v| (v * v + filter).sqrt());
+    let c3 = (0..3).map(|k| s[k] / sf[k]).product();
     let mut proj = Proj {
         p: Projected::default(),
         pc,
         w,
         rq,
         s,
+        sf,
+        filter,
+        c3,
+        c2: 0.0,
+        a: [0.0; 3],
+        det_a: 0.0,
+        op: 0.0,
         qn,
         qlen,
         sigma_c: [[0.0; 3]; 3],
@@ -196,11 +227,11 @@ fn project_one(g: &Gaussians, i: usize, cam: &Camera) -> Proj {
         return proj;
     }
     let (fx, fy) = (cam.fx as f64, cam.fy as f64);
-    // Σw = (Rq S)(Rq S)ᵀ, Σc = W Σw Wᵀ.
+    // Σw = (Rq S')(Rq S')ᵀ with the filtered scales, Σc = W Σw Wᵀ.
     let mut ms = rq;
     for row in &mut ms {
         for (k, v) in row.iter_mut().enumerate() {
-            *v *= s[k];
+            *v *= sf[k];
         }
     }
     let sigma_w = mul(&ms, &transpose(&ms));
@@ -210,17 +241,20 @@ fn project_one(g: &Gaussians, i: usize, cam: &Camera) -> Proj {
     let (ux, uy) = (x / z, y / z);
     let (u, v) = (ux.clamp(-lim_x, lim_x), uy.clamp(-lim_y, lim_y));
     let j = [[fx / z, 0.0, -fx * u / z], [0.0, fy / z, -fy * v / z]];
-    // cov2D = J Σc Jᵀ + dilation.
+    // cov2D = A + F with A = J Σc Jᵀ and F the 2D filter.
     let js = [0, 1].map(|r| [0, 1, 2].map(|c| (0..3).map(|k| j[r][k] * sigma_c[k][c]).sum::<f64>()));
-    let a = (0..3).map(|k| js[0][k] * j[0][k]).sum::<f64>() + DILATION;
-    let b = (0..3).map(|k| js[0][k] * j[1][k]).sum::<f64>();
-    let c = (0..3).map(|k| js[1][k] * j[1][k]).sum::<f64>() + DILATION;
+    let raw = [(0..3).map(|k| js[0][k] * j[0][k]).sum::<f64>(), (0..3).map(|k| js[0][k] * j[1][k]).sum::<f64>(), (0..3).map(|k| js[1][k] * j[1][k]).sum::<f64>()];
+    let (a, b, c) = (raw[0] + FILTER_2D, raw[1], raw[2] + FILTER_2D);
     let det = a * c - b * b;
     if det <= 0.0 {
         return proj;
     }
     let mean = [fx * x / z + cam.cx as f64, fy * y / z + cam.cy as f64];
-    let op = 1.0 / (1.0 + (-(g.opacity_logits[i] as f64)).exp());
+    let det_a = raw[0] * raw[2] - raw[1] * raw[1];
+    let c2 = (det_a.max(FLAT * FILTER_2D * FILTER_2D) / det).sqrt();
+    let op_raw = 1.0 / (1.0 + (-(g.opacity_logits[i] as f64)).exp());
+    // The opacity the pixels see.
+    let op = op_raw * c3 * c2;
     let mid = 0.5 * (a + c);
     let lambda = mid + (mid * mid - det).max(0.1).sqrt();
     // Out to α = 1/255 at this opacity; one that never gets there draws nothing (project.wgsl).
@@ -247,6 +281,10 @@ fn project_one(g: &Gaussians, i: usize, cam: &Camera) -> Proj {
         return proj;
     }
     proj.p = Projected { valid: true, mean, conic, depth: z, opacity: op, color: g.colors[i].map(|v| v as f64), radius, tiles, reach };
+    proj.c2 = c2;
+    proj.a = raw;
+    proj.det_a = det_a;
+    proj.op = op_raw;
     proj.sigma_c = sigma_c;
     proj.j = j;
     proj.clamp_x = ux != u;
@@ -261,6 +299,35 @@ fn project_one(g: &Gaussians, i: usize, cam: &Camera) -> Proj {
 pub fn extent_sigmas(op: f64) -> f64 {
     let k = 2.0 * (op / MIN_ALPHA).max(1.0).ln();
     k.sqrt().min(3.33)
+}
+
+/// Mip-Splatting's 3D filter of each Gaussian (filter3d.wgsl): `scale / ν̂²`, ν̂ the highest focal / depth among the
+/// cameras that hold its centre beyond the near plane in their view widened by 15 % past each edge; 0 where none does.
+pub fn filter_3d(g: &Gaussians, cams: &[Camera], scale: f64) -> Vec<f64> {
+    g.means
+        .iter()
+        .map(|m| {
+            let m = m.map(|v| v as f64);
+            let mut rate = 0.0f64;
+            for c in cams {
+                let pc = [0, 1, 2].map(|k| (0..3).map(|l| c.r[k][l] as f64 * m[l]).sum::<f64>() + c.t[k] as f64);
+                if pc[2] <= NEAR {
+                    continue;
+                }
+                let x = pc[0] / pc[2] * c.fx as f64 + c.cx as f64;
+                let y = pc[1] / pc[2] * c.fy as f64 + c.cy as f64;
+                let (w, h) = (c.width as f64, c.height as f64);
+                if x >= -0.15 * w && x <= 1.15 * w && y >= -0.15 * h && y <= 1.15 * h {
+                    rate = rate.max(c.fx.max(c.fy) as f64 / pc[2]);
+                }
+            }
+            if rate > 0.0 {
+                scale / (rate * rate)
+            } else {
+                0.0
+            }
+        })
+        .collect()
 }
 
 pub fn project(g: &Gaussians, cam: &Camera) -> Vec<Projected> {
@@ -400,8 +467,11 @@ pub fn backward(g: &Gaussians, cam: &Camera, background: [f64; 3], rules: Rules,
         if !pr.p.valid {
             continue;
         }
-        let op = pr.p.opacity;
-        out.opacity_logits[i] = d_op[i] * op * (1.0 - op);
+        // The pixels saw op·c3·c2: d_op is that product's gradient.
+        let op = pr.op;
+        out.opacity_logits[i] = d_op[i] * pr.c3 * pr.c2 * op * (1.0 - op);
+        let d_c2 = d_op[i] * op * pr.c3;
+        let d_c3 = d_op[i] * op * pr.c2;
         let [x, y, z] = pr.pc;
         // Conic → 2D covariance: dL/dΣ = −K·(dL/dK)·K with the conic K = (A, B; B, C) (dL/dB counts B once, so the
         // off-diagonal of dL/dK is half of it), as project_backward.wgsl computes it: no 1/det².
@@ -409,7 +479,21 @@ pub fn backward(g: &Gaussians, cam: &Camera, background: [f64; 3], rules: Rules,
         let [g0, g1, g2] = d_conic[i];
         let off = -(ka * kb * g0 + 0.5 * (kb * kb + ka * kc) * g1 + kb * kc * g2);
         // Symmetric gradient matrix of cov2D (b appears twice).
-        let gm = [[-(ka * ka * g0 + ka * kb * g1 + kb * kb * g2), off], [off, -(kb * kb * g0 + kb * kc * g1 + kc * kc * g2)]];
+        let mut gm = [[-(ka * ka * g0 + ka * kb * g1 + kb * kb * g2), off], [off, -(kb * kb * g0 + kb * kc * g1 + kc * kc * g2)]];
+        // The 2D filter's compensation c2 = √(det A / det(A + F)): ∂c2/∂A = ½·c2·(A⁻¹ − (A + F)⁻¹) = ½·c2·A⁻¹ F K (the
+        // product spares the difference its cancellation); for a flat A (its determinant floored), only −½·c2·K.
+        let h = 0.5 * d_c2 * pr.c2;
+        let comp = if pr.det_a > FLAT * FILTER_2D * FILTER_2D {
+            let [p, q, r] = [pr.a[2] / pr.det_a, -pr.a[1] / pr.det_a, pr.a[0] / pr.det_a];
+            let f = FILTER_2D;
+            [p * f * ka + q * f * kb, 0.5 * ((p * f * kb + q * f * kc) + (q * f * ka + r * f * kb)), q * f * kb + r * f * kc]
+        } else {
+            [-ka, -kb, -kc]
+        };
+        gm[0][0] += h * comp[0];
+        gm[0][1] += h * comp[1];
+        gm[1][0] += h * comp[1];
+        gm[1][1] += h * comp[2];
         let j = pr.j;
         // dL/dΣc = Jᵀ G J.
         let mut d_sigma_c = [[0.0; 3]; 3];
@@ -448,21 +532,26 @@ pub fn backward(g: &Gaussians, cam: &Camera, background: [f64; 3], rules: Rules,
         }
         let wm = pr.w;
         out.means[i] = [0, 1, 2].map(|k| (0..3).map(|r| wm[r][k] * d_pc[r]).sum());
-        // dL/dΣw = Wᵀ dL/dΣc W; M = Rq S; dL/dM = 2 dL/dΣw M.
+        // dL/dΣw = Wᵀ dL/dΣc W; M = Rq S' (the filtered scales); dL/dM = 2 dL/dΣw M.
         let d_sigma_w = mul(&mul(&transpose(&wm), &d_sigma_c), &wm);
         let mut ms = pr.rq;
         for row in &mut ms {
             for (k, v) in row.iter_mut().enumerate() {
-                *v *= pr.s[k];
+                *v *= pr.sf[k];
             }
         }
         let d_m = mul(&d_sigma_w, &ms).map(|row| row.map(|v| 2.0 * v));
         let mut d_r = [[0.0; 3]; 3];
+        let mut d_sf = [0.0; 3];
         for r in 0..3 {
             for k in 0..3 {
-                d_r[r][k] = d_m[r][k] * pr.s[k];
-                out.log_scales[i][k] += pr.rq[r][k] * d_m[r][k] * pr.s[k];
+                d_r[r][k] = d_m[r][k] * pr.sf[k];
+                d_sf[k] += pr.rq[r][k] * d_m[r][k];
             }
+        }
+        // s' = √(s² + σ²): ∂s'/∂log s = s²/s'; c3 = Π s/s' adds c3·σ²/s'² per axis.
+        for k in 0..3 {
+            out.log_scales[i][k] = d_sf[k] * pr.s[k] * pr.s[k] / pr.sf[k] + d_c3 * pr.c3 * pr.filter / (pr.sf[k] * pr.sf[k]);
         }
         let [qw, qx, qy, qz] = pr.qn;
         let dq_hat = [
@@ -511,6 +600,22 @@ mod tests {
     #[test]
     fn gradients_match_finite_differences() {
         let (g, cam) = scene();
+        gradients_match(&g, &cam);
+    }
+
+    /// With 3D filters about as wide as the Gaussians (their variance from a third to the whole of a typical axis's).
+    #[test]
+    fn filtered_gradients_match_finite_differences() {
+        let (mut g, cam) = scene();
+        let mut rng = fastrand::Rng::with_seed(5);
+        for f in &mut g.filter_3d {
+            *f = (0.04 + rng.f32() * 0.06).powi(2);
+        }
+        gradients_match(&g, &cam);
+    }
+
+    fn gradients_match(g: &Gaussians, cam: &Camera) {
+        let (g, cam) = (g.clone(), *cam);
         let bg = [0.1, 0.2, 0.3];
         let mut rng = fastrand::Rng::with_seed(11);
         let n = (cam.width * cam.height) as usize;
@@ -590,6 +695,45 @@ mod tests {
                 assert!(!reaches || tile_hit(m, conic, tau, tx, ty), "{m:?} {conic:?} {tau} tile ({tx}, {ty})");
             }
         }
+    }
+
+    /// Fusing the 3D filter into the scales and opacity renders the same image.
+    #[test]
+    fn a_fused_filter_renders_what_the_filter_did() {
+        let (mut g, cam) = scene();
+        for (k, f) in g.filter_3d.iter_mut().enumerate() {
+            *f = (0.03 + 0.01 * k as f32).powi(2);
+        }
+        let mut fused = g.clone();
+        fused.fuse_filter();
+        assert!(fused.filter_3d.iter().all(|f| *f == 0.0));
+        let (a, b) = (render(&g, &cam, [0.1; 3], Rules::SMOOTH), render(&fused, &cam, [0.1; 3], Rules::SMOOTH));
+        let worst = a.color.iter().zip(&b.color).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+        assert!(worst < 1e-5, "{worst}");
+        // The filter widens and fades: the fused Gaussians are larger and fainter.
+        assert!((0..g.len()).all(|i| fused.log_scales[i].iter().zip(&g.log_scales[i]).all(|(f, s)| f > s) && fused.opacity_logits[i] < g.opacity_logits[i]));
+    }
+
+    /// A splat smaller than a pixel keeps its weight: its opacity falls with its area instead of the 2D filter
+    /// spreading it at full opacity (3DGS's dilation rendered 0.1 and 0.2 px splats alike).
+    #[test]
+    fn a_subpixel_splat_keeps_its_weight() {
+        let cam = Camera::from_strip(&[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], &[1.0, 1.0, 0.0, 0.0], 32, 32, 1.0);
+        // The weight a splat of `px` pixels (σ) leaves in the image, over 8 × 8 positions within a pixel: the integral
+        // of its footprint, which pixel centres alone sample unevenly.
+        let weight = |px: f32| {
+            let mut sum = 0.0;
+            for k in 0..64 {
+                let mut g = Gaussians::default();
+                let at = cam.unproject(15.0 + (k % 8) as f32 / 8.0, 15.0 + (k / 8) as f32 / 8.0, 4.0);
+                g.push(at, [(px * 4.0 / cam.fx).ln(); 3], [1.0, 0.0, 0.0, 0.0], crate::gaussians::logit(0.99), [1.0; 3]);
+                sum += render(&g, &cam, [0.0; 3], Rules::SMOOTH).color.iter().step_by(3).sum::<f64>();
+            }
+            sum / 64.0
+        };
+        // Twice as wide, four times the area (less what the 1/255 cut-off leaves out of each).
+        let (big, small) = (weight(0.2), weight(0.1));
+        assert!((big / small - 4.0).abs() < 0.25, "{big} {small}");
     }
 
     #[test]

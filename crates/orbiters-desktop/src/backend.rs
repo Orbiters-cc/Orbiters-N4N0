@@ -63,6 +63,8 @@ pub trait Backend: Send + Sync {
     fn orb(&self, command: OrbCommand);
     /// VRChat's frames the overlay saw, for world performance statistics.
     fn frames(&self, chunk: crate::state::FrameChunk);
+    /// Whether someone wears the headset (the overlay reads SteamVR's activity level).
+    fn headset(&self, in_use: bool);
     /// Sets the walk boost's strength (0 to 1), saved and sent to the avatar's `Orb/WalkBoost`.
     fn walk_boost(&self, strength: f32);
     /// Makes VRChat find the OSC service again (it sends avatar parameters only to services it found).
@@ -192,6 +194,10 @@ impl Backend for Remote {
 
     fn frames(&self, chunk: crate::state::FrameChunk) {
         self.0.send(&ToService::Frames { chunk });
+    }
+
+    fn headset(&self, in_use: bool) {
+        self.0.send(&ToService::Headset { in_use });
     }
 
     fn walk_boost(&self, strength: f32) {
@@ -358,6 +364,10 @@ impl Backend for Local {
 
     fn frames(&self, chunk: crate::state::FrameChunk) {
         self.ctl.frames(chunk);
+    }
+
+    fn headset(&self, in_use: bool) {
+        self.ctl.set_headset(Some(in_use));
     }
 
     fn walk_boost(&self, strength: f32) {

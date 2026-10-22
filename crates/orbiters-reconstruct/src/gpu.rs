@@ -217,6 +217,8 @@ struct Kernels {
     ranges: wgpu::ComputePipeline,
     forward: wgpu::ComputePipeline,
     present: wgpu::ComputePipeline,
+    /// Lab: the sky map in place of the constant background (crate::sky::SkyMap).
+    sky_composite: wgpu::ComputePipeline,
     /// Only on a training device (the backward pass needs subgroup operations).
     training: Option<Training>,
 }
@@ -239,6 +241,7 @@ struct Training {
     visibility: wgpu::ComputePipeline,
     filter_3d: wgpu::ComputePipeline,
     seen: wgpu::ComputePipeline,
+    sky_gradient: wgpu::ComputePipeline,
 }
 
 /// A relocation round decided on the CPU (crate::train::plan_relocation) for [`Gpu::apply_relocation`]: sources' new
@@ -295,6 +298,16 @@ struct SortBuffers {
     hist_offsets: wgpu::Buffer,
 }
 
+/// Lab: the sky map behind the splats (crate::sky::SkyMap): `width` × `width / 2` texels of four floats (rgb, unused),
+/// their gradients (f32 sums) and Adam moments.
+struct SkyBuffers {
+    width: u32,
+    texels: wgpu::Buffer,
+    grads: wgpu::Buffer,
+    m1: wgpu::Buffer,
+    m2: wgpu::Buffer,
+}
+
 /// A readback of one pipelined step's intersection count.
 struct Readback {
     buffer: wgpu::Buffer,
@@ -343,6 +356,10 @@ pub struct Gpu {
     /// With the guards: how the splats the keyframes saw poorly show, and the far field.
     pub confidence: Confidence,
     pub far: FarField,
+    /// Lab: the sky map ([`Gpu::set_sky`]), its Adam learning rate, and what the kernels bind without one.
+    sky: Option<SkyBuffers>,
+    pub sky_lr: f32,
+    no_sky: wgpu::Buffer,
     /// The 2D filter's variance in pixels² along x and y: cpu::FILTER_2D at the training resolution; a render on a
     /// coarser grid of the same rays scales it to keep the footprint.
     pub filter_2d: [f32; 2],
@@ -571,13 +588,15 @@ fn kernel_sources(sums: Option<GradientSums>, sum_lanes: u32) -> Vec<KernelSourc
         source("ranges", &[common, include_str!("shaders/ranges.wgsl")], &["main"]),
         source("raster forward", &[common, raster, include_str!("shaders/raster_forward.wgsl")], &["forward"]),
         source("present", &[common, include_str!("shaders/present.wgsl")], &["main"]),
+        source("sky composite", &[common, include_str!("shaders/sky_lookup.wgsl"), include_str!("shaders/sky_composite.wgsl")], &["composite"]),
     ];
     if let Some(sums) = sums {
         let (add, read) = sums.sources();
         // The 32-lane transposed sums, and how many lanes add the ten sums otherwise (0: the subgroup's).
         let lanes = format!("const SUM10: bool = {};\nconst ADD_LANES: u32 = {sum_lanes}u;\n", sum_lanes == 0);
         out.extend([
-            source("raster backward", &[common, raster, add, lanes.as_str(), include_str!("shaders/raster_backward.wgsl")], &["backward"]),
+            source("raster backward", &[common, raster, add, lanes.as_str(), include_str!("shaders/sky_lookup.wgsl"), include_str!("shaders/raster_backward.wgsl")], &["backward"]),
+            source("sky gradient", &[common, add, include_str!("shaders/sky_lookup.wgsl"), include_str!("shaders/sky_gradient.wgsl")], &["gradient"]),
             source("loss", &[common, include_str!("shaders/loss.wgsl")], &["color", "squared_error"]),
             source("ssim", &[common, include_str!("shaders/ssim.wgsl")], &["ssim_partials", "ssim_gradient"]),
             source("robust", &[common, include_str!("shaders/robust.wgsl")], &["residual", "inliers"]),
@@ -768,6 +787,7 @@ impl Gpu {
             visibility: pipe("raster visibility", "visibility"),
             filter_3d: pipe("filter3d", "main"),
             seen: pipe("seen", "main"),
+            sky_gradient: pipe("sky gradient", "gradient"),
         });
         let k = Kernels {
             project: pipe("project", "main"),
@@ -780,8 +800,10 @@ impl Gpu {
             ranges: pipe("ranges", "main"),
             forward: pipe("raster forward", "forward"),
             present: pipe("present", "main"),
+            sky_composite: pipe("sky composite", "composite"),
             training,
         };
+        let no_sky = storage(&device, "no sky", 16);
         let frame = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("frame"),
             size: std::mem::size_of::<Frame>() as u64,
@@ -835,6 +857,9 @@ impl Gpu {
             guards: false,
             confidence: Confidence::default(),
             far: FarField::default(),
+            sky: None,
+            sky_lr: 0.01,
+            no_sky,
             filter_2d: [cpu::FILTER_2D as f32; 2],
             overflows: 0,
             redraw: false,
@@ -1338,7 +1363,7 @@ impl Gpu {
                 0.0,
                 0.0,
             ],
-            horizon: [self.far.horizon[0], self.far.horizon[1], self.far.horizon[2], 0.0],
+            horizon: [self.far.horizon[0], self.far.horizon[1], self.far.horizon[2], self.sky.as_ref().map_or(0.0, |s| s.width as f32)],
         }
     }
 
@@ -1567,6 +1592,12 @@ impl Gpu {
         self.section("forward");
         let bind = self.bind_cached(&self.k.forward, &[(0, &self.frame), (1, &proj), (2, &values[0]), (3, &ranges), (4, &out_color), (5, &out_state)]);
         self.dispatch(&mut enc, &self.k.forward, &bind, tiles);
+        if let Some(texels) = self.sky.as_ref().map(|s| s.texels.clone()) {
+            self.section("sky");
+            let bind = self.bind_cached(&self.k.sky_composite, &[(0, &self.frame), (4, &out_color), (5, &out_state), (8, &texels)]);
+            self.dispatch(&mut enc, &self.k.sky_composite, &bind, groups((cam.width * cam.height) as usize));
+        }
+        let colour_step = matches!(target, Target::Color { .. });
         match target {
             Target::Color { rgba, .. } => {
                 let mask = mask.expect("checked above");
@@ -1620,6 +1651,9 @@ impl Gpu {
             self.backward_into(&mut enc, &proj, &values[0], &ranges, &out_state, &d_pixel, tiles);
             if let Some(lr) = lr {
                 self.adam(&mut enc, lr);
+                if colour_step {
+                    self.sky_step(&mut enc, &out_state, &d_pixel, (cam.width * cam.height) as usize);
+                }
             }
         }
         if pipelined.is_some() {
@@ -1696,7 +1730,8 @@ impl Gpu {
         // No clear of grad2d: it is zero here, as project_backward zeroes the sums it reads (new buffers start zeroed).
         let t = self.k.training.as_ref().expect("a training GPU");
         self.section("backward");
-        let bind = self.bind_cached(&t.backward, &[(0, &self.frame), (1, proj), (2, values), (3, ranges), (5, out_state), (6, d_pixel), (7, &s.grad2d)]);
+        let sky = self.sky.as_ref().map_or(&self.no_sky, |s| &s.texels);
+        let bind = self.bind_cached(&t.backward, &[(0, &self.frame), (1, proj), (2, values), (3, ranges), (5, out_state), (6, d_pixel), (7, &s.grad2d), (8, sky)]);
         self.dispatch(enc, &t.backward, &bind, tiles);
         self.section("project_backward");
         let bind = self.bind_cached(&t.project_backward, &[(0, &self.frame), (1, &s.params), (2, proj), (3, &s.grad2d), (4, &s.grads), (5, &s.stats), (6, &s.filter)]);
@@ -1718,6 +1753,54 @@ impl Gpu {
         self.section("adam");
         let bind = self.bind_cached(&t.adam, &[(0, &info), (1, &s.params), (2, &s.grads), (3, &s.m1), (4, &s.m2)]);
         self.dispatch(enc, &t.adam, &bind, groups(n));
+    }
+
+    /// Lab: the sky map's gradient from this colour step's pixel gradients, then its Adam step (at the splats' step).
+    fn sky_step(&mut self, enc: &mut wgpu::CommandEncoder, out_state: &wgpu::Buffer, d_pixel: &wgpu::Buffer, pixels: usize) {
+        let Some((width, texels, grads, m1, m2)) = self.sky.as_ref().map(|s| (s.width, s.texels.clone(), s.grads.clone(), s.m1.clone(), s.m2.clone())) else {
+            return;
+        };
+        let mut rates = [0f32; 16];
+        for k in 0..4 {
+            rates[4 * k..4 * k + 3].fill(self.sky_lr);
+        }
+        let floats = width as usize * (width as usize / 2) * 4;
+        let info = self.uniform_at(("sky adam", 0), &AdamInfo { lr: rates, beta: [0.9, 0.999, 1e-15, 0.0], n: [floats as u32, self.step, 0, 0] });
+        let t = self.k.training.as_ref().expect("a training GPU");
+        self.section("sky");
+        enc.clear_buffer(&grads, 0, None);
+        let bind = self.bind_cached(&t.sky_gradient, &[(0, &self.frame), (5, out_state), (6, d_pixel), (7, &grads)]);
+        self.dispatch(enc, &t.sky_gradient, &bind, groups(pixels));
+        let bind = self.bind_cached(&t.adam, &[(0, &info), (1, &texels), (2, &grads), (3, &m1), (4, &m2)]);
+        self.dispatch(enc, &t.adam, &bind, groups(floats));
+    }
+
+    /// Lab: a sky map of `width` × `width / 2` texels (rgb, crate::sky::SkyMap's layout) behind the splats from now on;
+    /// `None` takes it away. Training it needs f32 gradient sums (its gradient buffer is read as floats by Adam).
+    pub fn set_sky(&mut self, sky: Option<(u32, &[[f32; 3]])>) -> anyhow::Result<()> {
+        let Some((width, rgb)) = sky else {
+            self.sky = None;
+            self.forget_binds();
+            return Ok(());
+        };
+        anyhow::ensure!(width >= 4 && width % 4 == 0 && rgb.len() == (width as usize) * (width as usize / 2), "a sky map of {} texels for {} across", rgb.len(), width);
+        anyhow::ensure!(self.k.training.as_ref().is_none_or(|t| t.sums != GradientSums::FixedPoint), "the sky map needs f32 gradient sums");
+        let texels: Vec<[f32; 4]> = rgb.iter().map(|c| [c[0], c[1], c[2], 0.0]).collect();
+        let bytes = (texels.len() * 16) as u64;
+        let buffer = |label| storage(&self.device, label, bytes);
+        let (t, g, m1, m2) = (buffer("sky texels"), buffer("sky grads"), buffer("sky m1"), buffer("sky m2"));
+        self.queue.write_buffer(&t, 0, bytemuck::cast_slice(&texels));
+        self.sky = Some(SkyBuffers { width, texels: t, grads: g, m1, m2 });
+        self.forget_binds();
+        Ok(())
+    }
+
+    /// Lab: the sky map as it is now (rgb per texel), or `None` without one.
+    pub fn sky(&self) -> anyhow::Result<Option<(u32, Vec<[f32; 3]>)>> {
+        let Some(s) = self.sky.as_ref() else { return Ok(None) };
+        let n = s.width as usize * (s.width as usize / 2);
+        let texels: Vec<[f32; 4]> = self.read(&s.texels, n)?;
+        Ok(Some((s.width, texels.iter().map(|t| [t[0], t[1], t[2]]).collect())))
     }
 
     /// Backward from given pixel gradients (r, g, b, depth per pixel) after a forward [`Gpu::step`] with
@@ -2492,6 +2575,43 @@ mod tests {
             let p = img[(y * w + x) as usize];
             assert!(p[1] > 0.8 && p[0] < 0.2, "({x}, {y}): {p:?}");
         }
+    }
+
+    /// Lab: the sky map shows where the splats leave the view open, and colour steps teach it the colour seen there
+    /// (each pixel's gradient goes to the texels it looked up), leaving the colour behind the splats alone.
+    #[test]
+    fn the_sky_map_shows_behind_the_splats_and_learns() {
+        let Some(mut gpu) = devices().into_iter().find(|g| g.sums() != Some(GradientSums::FixedPoint)) else { return };
+        let (w, h) = (64u32, 48u32);
+        let cam = Camera::look([0.0; 3], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 1.0, w, h);
+        let mut g = Gaussians::default();
+        // An opaque green disc in the middle; around it, the sky.
+        g.push(cam.unproject(32.0, 24.0, 3.0), [-1.3, -1.3, -4.0], [1.0, 0.0, 0.0, 0.0], crate::gaussians::logit(0.99), [0.0, 1.0, 0.0]);
+        gpu.upload(&g);
+        gpu.set_mask(w, h, &vec![1.0; (w * h) as usize]).expect("mask");
+        let width = 32u32;
+        gpu.set_sky(Some((width, &vec![[0.2, 0.3, 0.9]; (width * width / 2) as usize]))).expect("sky");
+        gpu.step(&cam, [0.0; 3], Target::None, None).expect("step");
+        let img = gpu.read_image().expect("image");
+        assert!((img[0][2] - 0.9).abs() < 1e-3 && (img[0][0] - 0.2).abs() < 1e-3, "the sky behind an open pixel: {:?}", img[0]);
+        assert!(img[(24 * w + 32) as usize][1] > 0.9, "the disc in front: {:?}", img[(24 * w + 32) as usize]);
+        // An orange sky to learn; the disc green as it is (colour steps with the splats' learning rates at 0).
+        let orange = 0xff00_80ffu32;
+        let target: Vec<u32> = img.iter().map(|p| if p[1] > 0.9 { 0xff00_ff00 } else { orange }).collect();
+        let still = LearningRates { means: 0.0, log_scales: 0.0, rotations: 0.0, opacity: 0.0, colors: 0.0 };
+        gpu.sky_lr = 0.02;
+        for _ in 0..200 {
+            gpu.step(&cam, [0.0; 3], Target::Color { rgba: &target, scene_pixels: (w * h) as f32, weight: 1.0, ssim: 0.0, robust: 0.0 }, Some(still)).expect("step");
+        }
+        gpu.step(&cam, [0.0; 3], Target::None, None).expect("step");
+        let img = gpu.read_image().expect("image");
+        let corner = img[0];
+        assert!((corner[0] - 1.0).abs() < 0.05 && (corner[1] - 0.5).abs() < 0.05 && corner[2] < 0.05, "learnt sky: {corner:?}");
+        assert!(img[(24 * w + 32) as usize][1] > 0.9, "the disc stays green");
+        let (_, texels) = gpu.sky().expect("read").expect("a map");
+        // Texels no pixel looked up (behind the camera) never move.
+        let behind = crate::sky::texel([0.0, 0.0, -1.0], width as usize);
+        assert_eq!(texels[behind], [0.2, 0.3, 0.9]);
     }
 
     #[test]

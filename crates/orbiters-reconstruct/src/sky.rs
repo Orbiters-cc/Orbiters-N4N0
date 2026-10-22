@@ -6,7 +6,10 @@
 //! band that has any): the gradient of the seen sky carries on instead of a hole, and behind a sparsely seen cell its
 //! gaps show sky instead of the black training background (the dark streaks along the edge of what was seen).
 
+use crate::dataset::{sample_rgb, Dataset, DepthGrid};
 use crate::gaussians::{logit, sigmoid, Gaussians};
+use anyhow::Context as _;
+use std::path::Path;
 
 const AZIMUTHS: usize = 64;
 const ELEVATIONS: usize = 32;
@@ -139,6 +142,171 @@ pub fn complete(g: &mut Gaussians, centre: [f32; 3], far_field: f32, distance: f
     added
 }
 
+/// Lab: the sky as an equirectangular map behind the splats (crate::gpu::Gpu::set_sky, shaders/sky_lookup.wgsl) in
+/// place of the shell of discs crate::init::SKY out, which slides by f·b/R pixels as the eye moves b (31 px over a 10 m
+/// walk at 1233 px) and never densifies. `width` × `width / 2` texels of encoded sRGB, longitude `atan2(x, z)` across
+/// from −180°, elevation from +90° down.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkyMap {
+    pub width: u32,
+    pub rgb: Vec<[f32; 3]>,
+}
+
+/// What seeding a [`SkyMap`] found: keyframe pixels whose rays hit nothing in the depth frame nearest in time, the
+/// texels they reached, and of the texels seen from both halves of the walk (split at its median position along its
+/// longest extent) those whose colour differs between the halves: finite content without depth shows parallax.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SkySeeding {
+    pub pixels: usize,
+    pub texels_seen: usize,
+    pub texels_tested: usize,
+    pub texels_parallax: usize,
+}
+
+/// A texel whose colour differs by more than this (0–1, any channel) between the walk's halves shows parallax.
+const PARALLAX: f64 = 0.05;
+/// Pixels a texel needs from each half of the walk to be tested.
+const TESTED: f64 = 4.0;
+
+/// The texel holding direction `d` on a map `width` texels across (the one whose square holds it).
+pub fn texel(d: [f32; 3], width: usize) -> usize {
+    let h = width / 2;
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-12);
+    let u = (d[0].atan2(d[2]) / std::f32::consts::TAU + 0.5) * width as f32;
+    let v = (0.5 - (d[1] / len).clamp(-1.0, 1.0).asin() / std::f32::consts::PI) * h as f32;
+    let x = (u.floor() as isize).rem_euclid(width as isize) as usize;
+    let y = (v.floor().max(0.0) as usize).min(h - 1);
+    y * width + x
+}
+
+/// A depth grid's samples as a regular grid: first pixel, spacing, size (crate::train::depth_target reads it alike).
+struct Regular {
+    x0: f32,
+    y0: f32,
+    sx: f32,
+    sy: f32,
+    w: usize,
+    h: usize,
+}
+
+impl Regular {
+    fn of(g: &DepthGrid) -> Option<Self> {
+        let (w, h) = (g.width as usize, g.height as usize);
+        if w < 2 || h < 2 || g.pixels.len() != w * h {
+            return None;
+        }
+        let (x0, y0) = (g.pixels[0][0], g.pixels[0][1]);
+        let (sx, sy) = ((g.pixels[w - 1][0] - x0) / (w - 1) as f32, (g.pixels[(h - 1) * w][1] - y0) / (h - 1) as f32);
+        (sx > 0.0 && sy > 0.0).then_some(Self { x0, y0, sx, sy, w, h })
+    }
+}
+
+/// Seeds a map `width` texels across from the training keyframes (not `held_out`): each pixel (every second one each
+/// way) whose ray hit nothing at the four samples around it in the depth frame nearest in time (far along the ray, a
+/// depth frame a few centimetres away sees the same direction) adds its colour to its texel. Texels nobody saw take
+/// their row's mean (a sky changes most with elevation), rows nobody saw the nearest seen row's.
+pub fn seed_map(data: &Dataset, width: u32, held_out: &[usize]) -> (SkyMap, SkySeeding) {
+    let (w, h) = (width as usize, width as usize / 2);
+    let positions: Vec<[f32; 3]> = data.views.iter().map(|v| v.camera.position()).collect();
+    let extent = |k: usize| {
+        let (lo, hi) = positions.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[k]), hi.max(p[k])));
+        hi - lo
+    };
+    let axis = if extent(0) >= extent(2) { 0 } else { 2 };
+    let mut along: Vec<f32> = positions.iter().map(|p| p[axis]).collect();
+    along.sort_by(f32::total_cmp);
+    let split = along.get(along.len() / 2).copied().unwrap_or(0.0);
+    let mut sum = vec![[[0f64; 4]; 2]; w * h];
+    let mut found = SkySeeding::default();
+    let (iw, ih) = (data.width, data.height);
+    for (i, v) in data.views.iter().enumerate() {
+        if held_out.contains(&i) {
+            continue;
+        }
+        let Some(d) = data.depth_views.iter().min_by(|a, b| (a.game_time - v.game_time).abs().total_cmp(&(b.game_time - v.game_time).abs())) else { continue };
+        let Some(g) = Regular::of(&d.grid) else { continue };
+        let origin = v.camera.position();
+        let half = usize::from(positions[i][axis] > split);
+        for y in (0..ih).step_by(2) {
+            for x in (0..iw).step_by(2) {
+                if data.mask[(y * iw + x) as usize] < 0.5 {
+                    continue;
+                }
+                let far = v.camera.unproject(x as f32, y as f32, 1e4);
+                let Some((u, vv, _)) = d.camera.project(far) else { continue };
+                let (fx, fy) = ((u - g.x0) / g.sx, (vv - g.y0) / g.sy);
+                if !(fx >= 0.0 && fy >= 0.0 && fx <= (g.w - 1) as f32 && fy <= (g.h - 1) as f32) {
+                    continue;
+                }
+                let (i0, j0) = ((fx as usize).min(g.w - 2), (fy as usize).min(g.h - 2));
+                let sky = [(0, 0), (1, 0), (0, 1), (1, 1)].iter().all(|&(di, dj)| {
+                    let k = (j0 + dj) * g.w + i0 + di;
+                    d.depth[k] <= 0.0 && !d.is_unknown(k)
+                });
+                if !sky {
+                    continue;
+                }
+                let Some(c) = sample_rgb(&v.image, iw, ih, x as f32, y as f32) else { continue };
+                let t = &mut sum[texel([far[0] - origin[0], far[1] - origin[1], far[2] - origin[2]], w)][half];
+                for k in 0..3 {
+                    t[k] += c[k] as f64;
+                }
+                t[3] += 1.0;
+                found.pixels += 1;
+            }
+        }
+    }
+    let mut seen: Vec<Option<[f32; 3]>> = vec![None; w * h];
+    for (t, s) in sum.iter().enumerate() {
+        let n = s[0][3] + s[1][3];
+        if n == 0.0 {
+            continue;
+        }
+        seen[t] = Some([0, 1, 2].map(|k| ((s[0][k] + s[1][k]) / n) as f32));
+        found.texels_seen += 1;
+        if s[0][3] >= TESTED && s[1][3] >= TESTED {
+            found.texels_tested += 1;
+            if (0..3).any(|k| (s[0][k] / s[0][3] - s[1][k] / s[1][3]).abs() > PARALLAX) {
+                found.texels_parallax += 1;
+            }
+        }
+    }
+    let row_mean: Vec<Option<[f32; 3]>> = (0..h)
+        .map(|y| {
+            let row: Vec<[f32; 3]> = seen[y * w..(y + 1) * w].iter().flatten().copied().collect();
+            (!row.is_empty()).then(|| [0, 1, 2].map(|k| row.iter().map(|c| c[k]).sum::<f32>() / row.len() as f32))
+        })
+        .collect();
+    let fill: Vec<[f32; 3]> = (0..h).map(|y| (0..h).filter_map(|r| row_mean[r].map(|m| (r.abs_diff(y), m))).min_by_key(|(dist, _)| *dist).map_or([0.5; 3], |(_, m)| m)).collect();
+    let rgb = seen.iter().enumerate().map(|(t, c)| c.unwrap_or(fill[t / w])).collect();
+    (SkyMap { width, rgb }, found)
+}
+
+impl SkyMap {
+    /// `sky.bin` beside the PLY: "OSKY", the width (u32, little-endian), then each texel's rgb as f32.
+    pub fn write(&self, path: &Path) -> anyhow::Result<()> {
+        let mut bytes = Vec::with_capacity(8 + self.rgb.len() * 12);
+        bytes.extend_from_slice(b"OSKY");
+        bytes.extend_from_slice(&self.width.to_le_bytes());
+        for c in &self.rgb {
+            for v in c {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
+    }
+
+    pub fn read(path: &Path) -> anyhow::Result<Self> {
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        anyhow::ensure!(bytes.len() >= 8 && &bytes[..4] == b"OSKY", "{} is no sky map", path.display());
+        let width = u32::from_le_bytes(bytes[4..8].try_into().expect("four bytes"));
+        let n = width as usize * (width as usize / 2);
+        anyhow::ensure!(bytes.len() == 8 + n * 12, "{}: {} bytes for a map {width} across", path.display(), bytes.len());
+        let f = |i: usize| f32::from_le_bytes(bytes[8 + 4 * i..12 + 4 * i].try_into().expect("four bytes"));
+        Ok(Self { width, rgb: (0..n).map(|t| [f(3 * t), f(3 * t + 1), f(3 * t + 2)]).collect() })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +368,22 @@ mod tests {
             let r = m.iter().map(|c| c * c).sum::<f32>().sqrt();
             cell([m[0] / r, m[1] / r, m[2] / r]) == ring
         }));
+    }
+
+    /// The map's texels as the shader's bilinear taps find them: a direction at a texel's centre lands in that texel.
+    #[test]
+    fn map_texels_follow_longitude_and_elevation() {
+        let w = 64;
+        // Straight ahead (+z) is the middle column; up is row 0; west (−x) the first quarter.
+        assert_eq!(texel([0.0, 0.0, 1.0], w) % w, w / 2);
+        assert_eq!(texel([0.0, 1.0, 0.0], w) / w, 0);
+        assert_eq!(texel([0.0, -1.0, 0.0], w) / w, w / 2 - 1);
+        assert_eq!(texel([-1.0, 0.0, 0.0], w) % w, w / 4);
+        assert_eq!(texel([0.0, 0.0, -1.0], w) % w, 0);
+        let map = SkyMap { width: 8, rgb: (0..32).map(|i| [i as f32, 0.5, -1.0]).collect() };
+        let path = std::env::temp_dir().join(format!("orbiters-sky-{}.bin", std::process::id()));
+        map.write(&path).unwrap();
+        assert_eq!(SkyMap::read(&path).unwrap(), map);
+        std::fs::remove_file(&path).ok();
     }
 }

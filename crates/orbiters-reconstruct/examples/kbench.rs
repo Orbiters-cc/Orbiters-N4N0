@@ -36,9 +36,16 @@ fn main() -> anyhow::Result<()> {
     let session = session.context("usage: kbench <session> [--ply p] [--steps n]")?;
     let prepared = prepare::prepare(&session, &prepare::Options { width, ..Default::default() }, |_| {})?;
     let data = &prepared.data;
-    let g = ply::read(&ply_path.unwrap_or_else(|| session.join("reconstruction").join("splats.ply")))?;
+    let g = ply::read(&ply_path.clone().unwrap_or_else(|| session.join("reconstruction").join("splats.ply")))?;
     let mut gpu = Gpu::with_options(DeviceOptions { sums, profile: true, ..Default::default() })?;
     gpu.upload(&g);
+    // The sky map trained with the splats, when there is one: its passes are timed too.
+    let sky_file = ply_path.as_ref().map_or_else(|| session.join("reconstruction"), |p| p.parent().map(PathBuf::from).unwrap_or_default()).join(orbiters_core::reconstruction::SKY_FILE);
+    if sky_file.is_file() {
+        let map = orbiters_reconstruct::sky::SkyMap::read(&sky_file)?;
+        gpu.set_sky(Some((map.width, &map.rgb)))?;
+        println!("with the sky map ({} across)", map.width);
+    }
     gpu.set_mask(data.width, data.height, &data.mask)?;
     let px = data.mask.iter().filter(|m| **m > 0.5).count() as f32;
     let zero = LearningRates { means: 1e-20, log_scales: 1e-20, rotations: 1e-20, opacity: 1e-20, colors: 1e-20 };

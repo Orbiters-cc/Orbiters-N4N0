@@ -1609,7 +1609,7 @@ impl Gpu {
         let bind = self.bind_cached(&self.k.forward, &[(0, &self.frame), (1, &proj), (2, &values[0]), (3, &ranges), (4, &out_color), (5, &out_state)]);
         self.dispatch(&mut enc, &self.k.forward, &bind, tiles);
         if let Some(texels) = self.sky.as_ref().map(|s| s.texels.clone()) {
-            self.section("sky");
+            self.section("sky composite");
             let bind = self.bind_cached(&self.k.sky_composite, &[(0, &self.frame), (4, &out_color), (5, &out_state), (8, &texels)]);
             self.dispatch(&mut enc, &self.k.sky_composite, &bind, groups((cam.width * cam.height) as usize));
         }
@@ -1782,9 +1782,10 @@ impl Gpu {
         let count = width as usize * (width as usize / 2);
         let info = self.uniform_at(("sky adam", 0), &SkyAdamInfo { rate: [self.sky_lr, 0.9, 0.999, 1e-15], n: [count as u32, self.step, 0, 0] });
         let t = self.k.training.as_ref().expect("a training GPU");
-        self.section("sky");
+        self.section("sky gradient");
         let bind = self.bind_cached(&t.sky_gradient, &[(0, &self.frame), (5, out_state), (6, d_pixel), (7, &grads)]);
         self.dispatch(enc, &t.sky_gradient, &bind, groups(pixels));
+        self.section("sky adam");
         let bind = self.bind_cached(&t.sky_adam, &[(0, &info), (1, &texels), (2, &m1), (3, &grads), (4, &m2)]);
         self.dispatch(enc, &t.sky_adam, &bind, groups(count));
     }

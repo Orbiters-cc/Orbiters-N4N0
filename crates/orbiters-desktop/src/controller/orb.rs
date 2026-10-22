@@ -34,6 +34,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar};
 use std::time::{Duration, Instant};
 
+/// Most messages a bundle carries: a screen step (16 values and a pointer) in one, under 1.2 KB, which any OSC receiver
+/// takes in one datagram.
+const BUNDLE_MESSAGES: usize = 20;
 /// The orb thread sleeps at most this long (what the settings or VRChat changed shows by then), shorter while the
 /// avatar's screen is open, and never less than the floor.
 const MAX_WAIT: Duration = Duration::from_millis(250);
@@ -642,11 +645,17 @@ impl Controller {
         if messages.is_empty() {
             return;
         }
+        // A step's messages in as few datagrams as fit (review item 8: a screen step was 17): VRChat applies a bundle's
+        // messages together, in order (tests/vrchat_live.rs), and the protocols never put two steps in one tick.
         let all = self.with_osc(|o| {
             let mut all = true;
-            for (address, arg) in messages {
-                if let Err(e) = o.send(address, vec![arg.clone()]) {
-                    eprintln!("orb: {address}: {e}");
+            for chunk in messages.chunks(BUNDLE_MESSAGES) {
+                let sent = match chunk {
+                    [(address, arg)] => o.send(address, vec![arg.clone()]),
+                    _ => o.send_bundle(chunk.iter().map(|(address, arg)| (address.clone(), vec![arg.clone()])).collect()),
+                };
+                if let Err(e) = sent {
+                    eprintln!("orb: {} messages from {}: {e}", chunk.len(), chunk[0].0);
                     all = false;
                 }
             }

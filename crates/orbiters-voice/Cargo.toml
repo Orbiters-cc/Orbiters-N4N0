@@ -12,6 +12,10 @@ path = "src/main.rs"
 [dependencies]
 orbiters-core = { workspace = true }
 orbiters-audio = { workspace = true }
+# The wake word's rules: a long sentence is transcribed whole only when its start holds one.
+orbiters-orb = { workspace = true }
+# The models' SHA-256, computed while they download.
+sha2 = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

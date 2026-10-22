@@ -33,14 +33,16 @@ impl ReconstructHandle {
             cmd.creation_flags(0x0800_0000);
         }
         let mut child = cmd.spawn()?;
+        crate::worker::keep_with_service(&child);
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         std::thread::Builder::new().name("reconstruct-stdout".into()).spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
-                match serde_json::from_str::<Event>(&line) {
-                    Ok(e) => on_event(e),
-                    Err(_) => eprintln!("reconstruct: unexpected output: {line}"),
+                // A report with a number written as null (NaN) still ends the run (`Event::from_line`).
+                match Event::from_line(&line) {
+                    Some(e) => on_event(e),
+                    None => eprintln!("reconstruct: unexpected output: {line}"),
                 }
             }
             on_exit();

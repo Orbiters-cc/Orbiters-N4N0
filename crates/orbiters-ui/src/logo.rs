@@ -1,6 +1,6 @@
 //! The Orbiters mark (paths of the official logo), rasterised with tiny-skia at the exact pixel size so it stays
 //! crisp. It can draw itself in (strokes tracing the outline, then the fill) while its cyan and violet echoes
-//! slide apart and back like the website's signal reveal, and breathe a violet glow while recording.
+//! slide apart and back like the website's signal reveal.
 
 use crate::anim::{self, ease};
 use crate::theme;
@@ -166,22 +166,42 @@ fn rasterize(w: u32, h: u32, color: Color32, outline: bool, intro_t: Option<f32>
 
 #[derive(Clone)]
 struct Textures {
-    size: [u32; 2],
     mark: TextureHandle,
     cyan: TextureHandle,
     violet: TextureHandle,
 }
 
+/// The sets of textures by pixel size, the most recently drawn first.
+#[derive(Clone, Default)]
+struct Cache(Vec<([u32; 2], Textures)>);
+
+/// Sizes kept: the marks on screen at once. A size seen once (a window being resized, a DPI change) is let go
+/// instead of holding its three textures for the window's life.
+const KEEP: usize = 6;
+
 fn textures(ctx: &Context, size: [u32; 2]) -> Textures {
-    let id = Id::unique(("orbiters-logo", size));
-    if let Some(t) = ctx.data(|d| d.get_temp::<Textures>(id)) {
+    let id = Id::unique("orbiters-logo");
+    let hit = ctx.data_mut(|d| {
+        let cache = d.get_temp_mut_or_default::<Cache>(id);
+        let i = cache.0.iter().position(|(s, _)| *s == size)?;
+        let entry = cache.0.remove(i);
+        let t = entry.1.clone();
+        cache.0.insert(0, entry);
+        Some(t)
+    });
+    if let Some(t) = hit {
         return t;
     }
     let load = |name: &str, c: Color32| {
         ctx.load_texture(format!("orbiters-logo-{name}-{}x{}", size[0], size[1]), rasterize(size[0], size[1], c, name == "mark", None), TextureOptions::LINEAR)
     };
-    let t = Textures { size, mark: load("mark", theme::MARK), cyan: load("cyan", theme::CYAN), violet: load("violet", theme::VIOLET) };
-    ctx.data_mut(|d| d.insert_temp(id, t.clone()));
+    let t = Textures { mark: load("mark", theme::MARK), cyan: load("cyan", theme::CYAN), violet: load("violet", theme::VIOLET) };
+    ctx.data_mut(|d| {
+        let cache = d.get_temp_mut_or_default::<Cache>(id);
+        cache.0.insert(0, (size, t.clone()));
+        // Dropping a size's handles frees its textures.
+        cache.0.truncate(KEEP);
+    });
     t
 }
 
@@ -190,10 +210,9 @@ fn textures(ctx: &Context, size: [u32; 2]) -> Textures {
 pub struct Look {
     /// Draw-in started at this time ([`anim::time`]); `None` shows the finished mark.
     pub intro_start: Option<f64>,
-    /// Signal glitch started at this time, with a strength (1.2 for the intro, 0.8 on hover).
+    /// Signal glitch started at this time, with a strength (1.2 for the intro, 0.8 on hover). Recording shows in the
+    /// REC chip and the record button: the mark itself stays still.
     pub glitch: Option<(f64, f32)>,
-    /// Breathing violet glow (while recording).
-    pub pulse: bool,
 }
 
 /// Size of the mark for a given width (keeps the 1010:900 aspect).
@@ -203,20 +222,23 @@ pub fn size_for_width(width: f32) -> Vec2 {
 
 /// Paints the mark into `rect`.
 pub fn paint(painter: &Painter, rect: Rect, look: Look) {
+    draw(painter, rect, rect, look);
+}
+
+/// Paints the mark rasterised for `rect`, shown `zoom` times as large around its centre: a mark whose size
+/// changes every frame (the splash's) keeps one set of textures instead of making one per size.
+pub fn paint_zoomed(painter: &Painter, rect: Rect, zoom: f32, look: Look) {
+    let zoom = if zoom.is_finite() { zoom.max(0.0) } else { 1.0 };
+    draw(painter, rect, Rect::from_center_size(rect.center(), rect.size() * zoom), look);
+}
+
+/// The mark rasterised at `raster`'s pixel size, drawn into `shown`.
+fn draw(painter: &Painter, raster: Rect, shown: Rect, look: Look) {
     let ctx = painter.ctx().clone();
     let ppp = ctx.pixels_per_point();
-    let size = [(rect.width() * ppp).round().max(1.0) as u32, (rect.height() * ppp).round().max(1.0) as u32];
+    let size = [(raster.width() * ppp).round().clamp(1.0, 4096.0) as u32, (raster.height() * ppp).round().clamp(1.0, 4096.0) as u32];
     let tex = textures(&ctx, size);
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-
-    if look.pulse {
-        let t = anim::clock(&ctx, 30.0);
-        let k = ease::keyframes(ease::mirror(t, 1.2), &[0.0, 1.0], ease::in_out);
-        let a = 0.2 + 0.55 * k;
-        let s = 0.9 + 0.28 * k;
-        // No glow (flat look): the recording state shows in the REC chip and the record button.
-        let _ = (s, a);
-    }
 
     // Echoes: x offsets [0, -14s, 8s, 0] and opacity [0, .9, .55, 0] over 0.6 + 0.3s seconds.
     if let Some((start, strength)) = look.glitch {
@@ -225,36 +247,73 @@ pub fn paint(painter: &Painter, rect: Rect, look: Look) {
         if t < duration {
             let k = (t / duration) as f32;
             let times = [0.0, 0.3, 0.65, 1.0];
-            let dx = ease::keyframes_at(k, &times, &[0.0, -14.0 * strength, 8.0 * strength, 0.0], ease::out_cubic) * rect.width() / 34.0;
+            let dx = ease::keyframes_at(k, &times, &[0.0, -14.0 * strength, 8.0 * strength, 0.0], ease::out_cubic) * shown.width() / 34.0;
             let alpha = ease::keyframes_at(k, &times, &[0.0, 0.9, 0.55, 0.0], ease::out_cubic);
-            painter.image(tex.cyan.id(), rect.translate(vec2(dx, 0.0)), uv, Color32::WHITE.gamma_multiply(alpha));
-            painter.image(tex.violet.id(), rect.translate(vec2(-dx, 0.0)), uv, Color32::WHITE.gamma_multiply(alpha));
+            painter.image(tex.cyan.id(), shown.translate(vec2(dx, 0.0)), uv, Color32::WHITE.gamma_multiply(alpha));
+            painter.image(tex.violet.id(), shown.translate(vec2(-dx, 0.0)), uv, Color32::WHITE.gamma_multiply(alpha));
         }
     }
 
+    // One texture for the draw-in, whatever its size, changed in place every frame while it plays and let go after.
+    let intro = Id::unique("orbiters-logo-intro");
     match look.intro_start {
         Some(start) if (anim::time(&ctx) - start) < INTRO as f64 => {
             let t = anim::since(&ctx, start, INTRO as f64) as f32;
-            // A texture per frame only during the intro.
             let image = rasterize(size[0], size[1], theme::MARK, true, Some(t));
-            let id = Id::unique(("orbiters-logo-intro", size));
-            let handle = ctx.data(|d| d.get_temp::<TextureHandle>(id));
-            let handle = match handle {
+            let handle = match ctx.data(|d| d.get_temp::<TextureHandle>(intro)) {
                 Some(mut h) => {
                     h.set(image, TextureOptions::LINEAR);
                     h
                 }
                 None => {
                     let h = ctx.load_texture("orbiters-logo-intro", image, TextureOptions::LINEAR);
-                    ctx.data_mut(|d| d.insert_temp(id, h.clone()));
+                    ctx.data_mut(|d| d.insert_temp(intro, h.clone()));
                     h
                 }
             };
-            painter.image(handle.id(), rect, uv, Color32::WHITE);
+            painter.image(handle.id(), shown, uv, Color32::WHITE);
         }
-        _ => {
-            painter.image(tex.mark.id(), rect, uv, Color32::WHITE);
+        Some(_) => {
+            ctx.data_mut(|d| d.remove::<TextureHandle>(intro));
+            painter.image(tex.mark.id(), shown, uv, Color32::WHITE);
+        }
+        None => {
+            painter.image(tex.mark.id(), shown, uv, Color32::WHITE);
         }
     }
-    let _ = tex.size;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A frame at `t` painting the mark with `f`; returns how many textures the context holds after it.
+    fn frame(ctx: &Context, t: f64, f: impl Fn(&Painter)) -> usize {
+        let mut out = ctx.run_ui(egui::RawInput { time: Some(t), ..Default::default() }, |ui| f(ui.painter()));
+        out.textures_delta.clear();
+        ctx.tex_manager().read().num_allocated()
+    }
+
+    #[test]
+    fn a_mark_changing_size_leaves_no_textures_behind() {
+        let ctx = Context::default();
+        let at = |w: f32| Rect::from_min_size(pos2(10.0, 10.0), size_for_width(w));
+        let base = frame(&ctx, 0.0, |_| {});
+        // Twenty sizes in a row (a window being resized): only the last few keep their three textures.
+        let mut held = 0;
+        for k in 0..20 {
+            held = frame(&ctx, 0.1 * k as f64, |p| paint(p, at(30.0 + k as f32), Look::default()));
+        }
+        assert_eq!(held, base + 3 * KEEP);
+        // The splash: a mark growing every frame keeps one set, and the draw-in one texture, let go when it ends.
+        let ctx = Context::default();
+        let base = frame(&ctx, 0.0, |_| {});
+        let intro = Look { intro_start: Some(0.0), ..Default::default() };
+        for k in 1..30 {
+            held = frame(&ctx, k as f64 / 30.0, |p| paint_zoomed(p, at(128.0), 0.82 + 0.006 * k as f32, intro));
+        }
+        assert_eq!(held, base + 3 + 1);
+        held = frame(&ctx, 2.0, |p| paint_zoomed(p, at(128.0), 1.0, intro));
+        assert_eq!(held, base + 3);
+    }
 }

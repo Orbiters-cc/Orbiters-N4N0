@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 pub const DIR: &str = "reconstruction";
 /// Where a run writes before it replaces [`DIR`].
 pub const PARTIAL_DIR: &str = "reconstruction.partial";
+/// Where the previous result waits while a finished run's moves into [`DIR`]; a swap stopped halfway (the worker
+/// killed) leaves the previous result here, put back by the next run.
+pub const OLD_DIR: &str = "reconstruction.old";
 pub const PLY_FILE: &str = "splats.ply";
 pub const REPORT_FILE: &str = "report.json";
 /// A render of the first held-out keyframe (QOI, RGB).
@@ -15,8 +18,10 @@ pub const PREVIEW_FILE: &str = "preview.qoi";
 /// Renders of every held-out keyframe, named after the keyframe (`000004.qoi`).
 pub const HELD_OUT_DIR: &str = "held-out";
 
-/// `report.json`: what a finished run produced.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// `report.json`: what a finished run produced. A field missing (a report from another version) is left at its
+/// default rather than the report being unread.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Report {
     pub gaussians: usize,
     pub iterations: u32,
@@ -30,20 +35,59 @@ pub struct Report {
     pub height: u32,
     pub adapter: String,
     pub created_utc: String,
+    /// Keyframes and depth frames the session holds, and how many of them trained.
+    pub keyframes_total: usize,
+    pub keyframes_used: usize,
+    pub depth_frames_total: usize,
+    pub depth_frames_used: usize,
+    /// The world's chromatic aberration undone in the keyframes (PPv2 intensity), if any.
+    pub chromatic_aberration: Option<f32>,
+    /// Depth samples the frames carry, and of those unknown after validation (the decoder's included).
+    pub depth_samples: Option<usize>,
+    pub depth_unknown: Option<usize>,
 }
 
+/// Where a run puts its result (the worker writes here). Readers take [`result_dir`].
 pub fn dir(session: &Path) -> PathBuf {
     session.join(DIR)
 }
 
-pub fn read_report(session: &Path) -> Option<Report> {
-    serde_json::from_str(&std::fs::read_to_string(dir(session).join(REPORT_FILE)).ok()?).ok()
+/// Where a session's latest result is: [`DIR`], or [`OLD_DIR`] while a swap stopped halfway left it there (until the
+/// next run puts it back).
+pub fn result_dir(session: &Path) -> PathBuf {
+    let current = dir(session);
+    if current.is_dir() {
+        return current;
+    }
+    let old = session.join(OLD_DIR);
+    if old.is_dir() {
+        old
+    } else {
+        current
+    }
 }
 
-/// The preview render as top-down RGBA: (width, height, pixels).
+/// The latest finished run's report: what fits of it ([`crate::json_lenient`]), a number written as `null` (NaN)
+/// costing that field only; `None` without one, or when it is not JSON.
+pub fn read_report(session: &Path) -> Option<Report> {
+    let text = crate::read_text(&result_dir(session).join(REPORT_FILE)).ok()??;
+    let (report, dropped) = crate::json_lenient::<Report>(&text);
+    dropped.iter().all(|d| d != "(not JSON)").then_some(report)
+}
+
+/// A preview read without a report to give its size is at most this large (4K).
+const PREVIEW_PIXELS: u64 = 3840 * 2160;
+
+/// The preview render as top-down RGBA: (width, height, pixels). It is rendered at the training's size, which the
+/// report gives: a file of another size is not the preview, and gets no memory.
 pub fn read_preview(session: &Path) -> Option<(u32, u32, Vec<u8>)> {
-    let data = std::fs::read(dir(session).join(PREVIEW_FILE)).ok()?;
-    let (h, rgba) = crate::contracts::qoi::decode_rgba(&data).ok()?;
+    use crate::contracts::qoi;
+    let data = std::fs::read(result_dir(session).join(PREVIEW_FILE)).ok()?;
+    let decoded = match read_report(session).filter(|r| r.width > 0 && r.height > 0) {
+        Some(report) => qoi::decode_rgba_sized(&data, report.width, report.height),
+        None => qoi::decode_rgba_max(&data, PREVIEW_PIXELS),
+    };
+    let (h, rgba) = decoded.ok()?;
     Some((h.width, h.height, rgba))
 }
 
@@ -90,6 +134,16 @@ impl Event {
     pub fn to_line(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
+
+    /// Reads one line of the worker's output: a `Done` whose report holds a number written as `null` (NaN) keeps the
+    /// rest of it, rather than the run's end being lost.
+    pub fn from_line(line: &str) -> Option<Event> {
+        if let Ok(event) = serde_json::from_str(line) {
+            return Some(event);
+        }
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        (value["event"] == "done").then(|| Event::Done { report: crate::json_lenient::<Report>(&value["report"].to_string()).0 })
+    }
 }
 
 #[cfg(test)]
@@ -104,5 +158,43 @@ mod tests {
         assert_eq!(serde_json::from_str::<Event>(&line).unwrap(), e);
         let s: Event = serde_json::from_str(r#"{"event":"stage","stage":"seeding"}"#).unwrap();
         assert_eq!(s, Event::Stage { stage: Stage::Seeding, progress: 0.0 });
+        // A report with a number written as null (NaN) still ends the run.
+        let done = Event::Done { report: Report { gaussians: 5, psnr_train: f32::NAN, ..Default::default() } }.to_line();
+        assert!(matches!(Event::from_line(&done), Some(Event::Done { report }) if report.gaussians == 5 && report.psnr_train == 0.0));
+    }
+
+    #[test]
+    fn a_preview_is_read_at_the_trainings_size_only() {
+        use crate::contracts::qoi;
+        let session = std::env::temp_dir().join(format!("orbiters-preview-{}", std::process::id()));
+        let out = dir(&session);
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join(PREVIEW_FILE), qoi::encode(&[9u8; 8 * 8 * 3], 8, 8, 3)).unwrap();
+        assert_eq!(read_preview(&session).map(|(w, h, _)| (w, h)), Some((8, 8)), "no report: any size up to 4K");
+        let report = Report { width: 4, height: 2, ..Default::default() };
+        std::fs::write(out.join(REPORT_FILE), serde_json::to_vec(&report).unwrap()).unwrap();
+        assert!(read_preview(&session).is_none(), "another size than the training's");
+        std::fs::write(out.join(PREVIEW_FILE), qoi::encode(&[9u8; 4 * 2 * 3], 4, 2, 3)).unwrap();
+        assert_eq!(read_preview(&session).map(|(w, h, p)| (w, h, p.len())), Some((4, 2, 32)));
+        std::fs::remove_dir_all(&session).ok();
+    }
+
+    #[test]
+    fn a_result_left_aside_by_a_swap_stopped_halfway_is_read() {
+        let session = std::env::temp_dir().join(format!("orbiters-result-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&session);
+        let old = session.join(OLD_DIR);
+        std::fs::create_dir_all(&old).unwrap();
+        // A report from a worker of this version: its counts are read too.
+        let written = r#"{"gaussians":7,"keyframes_total":40,"keyframes_used":38,"chromatic_aberration":0.4,"depth_samples":900,"depth_unknown":12}"#;
+        std::fs::write(old.join(REPORT_FILE), written).unwrap();
+        assert_eq!(result_dir(&session), old);
+        let report = read_report(&session).unwrap();
+        assert_eq!((report.gaussians, report.keyframes_used, report.chromatic_aberration, report.depth_unknown), (7, 38, Some(0.4), Some(12)));
+        // Once the result is in place again, that is the one.
+        std::fs::create_dir_all(dir(&session)).unwrap();
+        std::fs::write(dir(&session).join(REPORT_FILE), r#"{"gaussians":9}"#).unwrap();
+        assert_eq!(read_report(&session).map(|r| (r.gaussians, r.keyframes_total)), Some((9, 0)));
+        std::fs::remove_dir_all(&session).ok();
     }
 }

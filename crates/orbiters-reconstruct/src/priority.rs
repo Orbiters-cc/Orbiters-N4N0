@@ -5,12 +5,13 @@
 //! training thread), took 19.9 s in the normal class, 9.2 s in the normal class with a time-critical training thread,
 //! and 7.3 s in the above-normal class (7 s with the cores free). Loading starves the same way below normal.
 //!
-//! The app starts the worker below normal so it never gets ahead of VRChat. [`govern`] lifts it as soon as it runs
-//! and then watches for VRChat (every 3 s): while VRChat is closed the worker runs above normal; while it runs, in the
-//! normal class, never above it, and loading decodes on at most [`VRCHAT_LOADING_THREADS`] threads. The thread that
-//! feeds the GPU runs at time-critical priority while it trains ([`Feeding`]) and at the normal level for long CPU work
-//! between steps ([`CpuWork`]: relocation, evaluation). On other systems this does nothing: their schedulers share by
-//! weight and never starve a process.
+//! The app starts the worker in the normal class. [`govern`] then watches for VRChat (every 3 s): while VRChat is
+//! closed the worker runs above normal; while it runs, in the normal class, never above it, and loading (decoding,
+//! depth validation, the aberration undo, seeding: [`loading_threads`], [`on_loading_threads`]) runs on at most
+//! [`VRCHAT_LOADING_THREADS`] threads. The thread that feeds the GPU runs at time-critical priority while it trains
+//! ([`Feeding`]) and VRChat is closed, at the normal level while VRChat runs (a time-critical thread would get ahead of
+//! VRChat's own), and at the normal level for long CPU work between steps ([`CpuWork`]: relocation, evaluation). On
+//! other systems this does nothing: their schedulers share by weight and never starve a process.
 
 /// Most keyframe-decoding threads while VRChat runs.
 pub const VRCHAT_LOADING_THREADS: usize = 4;
@@ -68,11 +69,36 @@ mod imp {
         VRCHAT.get().is_some_and(|f| f.load(Ordering::SeqCst))
     }
 
+    thread_local! {
+        /// The level this thread was last set to (a change costs a system call; following VRChat checks every step).
+        static LEVEL: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+    }
+
     pub fn set_thread(priority: THREAD_PRIORITY) {
+        if LEVEL.get() == Some(priority.0) {
+            return;
+        }
         unsafe {
             let _ = SetThreadPriority(GetCurrentThread(), priority);
         }
+        LEVEL.set(Some(priority.0));
     }
+}
+
+/// The level the feeding thread runs at now: time-critical while VRChat is closed, normal while it runs.
+#[cfg(windows)]
+fn feeding_level() -> windows::Win32::System::Threading::THREAD_PRIORITY {
+    use windows::Win32::System::Threading::{THREAD_PRIORITY_NORMAL, THREAD_PRIORITY_TIME_CRITICAL};
+    if imp::vrchat() {
+        THREAD_PRIORITY_NORMAL
+    } else {
+        THREAD_PRIORITY_TIME_CRITICAL
+    }
+}
+
+thread_local! {
+    /// Whether this thread feeds the GPU now ([`Feeding`]).
+    static FEEDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Lifts the worker out of the app's below-normal class and adjusts it to VRChat from then on (see the module docs).
@@ -92,19 +118,36 @@ pub fn loading_threads() -> usize {
     all
 }
 
-/// While alive, the calling thread feeds the GPU at time-critical priority.
+/// Runs `f`, and the parallel work it starts (rayon), on [`loading_threads`] threads rather than every core.
+pub fn on_loading_threads<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    match rayon::ThreadPoolBuilder::new().num_threads(loading_threads()).thread_name(|i| format!("loading {i}")).build() {
+        Ok(pool) => pool.install(f),
+        Err(_) => f(),
+    }
+}
+
+/// While alive, the calling thread feeds the GPU: at time-critical priority while VRChat is closed, at the normal
+/// level while it runs ([`Feeding::follow`] keeps up with it starting and closing).
 pub struct Feeding(());
 
 impl Feeding {
     pub fn start() -> Self {
+        FEEDING.set(true);
+        let f = Self(());
+        f.follow();
+        f
+    }
+
+    /// Follows VRChat starting or closing: cheap (a flag read; the priority changes only when VRChat did).
+    pub fn follow(&self) {
         #[cfg(windows)]
-        imp::set_thread(windows::Win32::System::Threading::THREAD_PRIORITY_TIME_CRITICAL);
-        Self(())
+        imp::set_thread(feeding_level());
     }
 }
 
 impl Drop for Feeding {
     fn drop(&mut self) {
+        FEEDING.set(false);
         #[cfg(windows)]
         imp::set_thread(windows::Win32::System::Threading::THREAD_PRIORITY_NORMAL);
     }
@@ -124,7 +167,9 @@ impl CpuWork {
 impl Drop for CpuWork {
     fn drop(&mut self) {
         #[cfg(windows)]
-        imp::set_thread(windows::Win32::System::Threading::THREAD_PRIORITY_TIME_CRITICAL);
+        if FEEDING.get() {
+            imp::set_thread(feeding_level());
+        }
     }
 }
 
@@ -141,15 +186,22 @@ mod tests {
         let expected = if imp::vrchat() { NORMAL_PRIORITY_CLASS.0 } else { ABOVE_NORMAL_PRIORITY_CLASS.0 };
         assert_eq!(class, expected);
         assert_eq!(thread(), THREAD_PRIORITY_NORMAL.0);
+        // Time-critical only while VRChat is closed (this test may run while it plays).
+        let feeding = if imp::vrchat() { THREAD_PRIORITY_NORMAL.0 } else { THREAD_PRIORITY_TIME_CRITICAL.0 };
         {
-            let _feeding = Feeding::start();
-            assert_eq!(thread(), THREAD_PRIORITY_TIME_CRITICAL.0);
+            let f = Feeding::start();
+            assert_eq!(thread(), feeding);
+            f.follow();
+            assert_eq!(thread(), feeding);
             {
                 let _cpu = CpuWork::start();
                 assert_eq!(thread(), THREAD_PRIORITY_NORMAL.0);
             }
-            assert_eq!(thread(), THREAD_PRIORITY_TIME_CRITICAL.0);
+            assert_eq!(thread(), feeding);
         }
+        assert_eq!(thread(), THREAD_PRIORITY_NORMAL.0);
+        // CPU work outside a feeding stretch leaves the thread at the normal level.
+        drop(CpuWork::start());
         assert_eq!(thread(), THREAD_PRIORITY_NORMAL.0);
     }
 }

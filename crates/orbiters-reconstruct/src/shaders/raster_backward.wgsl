@@ -1,9 +1,24 @@
 // Backward: walks the forward pass's entries back to front from each pixel's last one, recovering T by division, and
 // adds every Gaussian's 2D gradients (mean, conic, opacity, colour, depth), summed over each subgroup, with atomics.
 // The sums cost more than the atomics: on 32-lane subgroups they are transposed (sum10).
-// The gradient buffer (binding 7), `add` and LANE_ADDS come from one of the sums_*.wgsl variants.
+// The gradient buffer (binding 7), `add` and LANE_ADDS come from one of the sums_*.wgsl variants; SUM10 (use the
+// transposed sums on 32 lanes) and ADD_LANES (how many lanes add the ten sums, 0: the subgroup's size) from gpu.rs.
+// Pixels without a loss gradient (masked, or without a depth sample) add nothing, so they neither walk nor vote: a
+// tile with none skips its walk.
 
 @group(0) @binding(6) var<storage, read> d_pixel: array<vec4<f32>>;
+
+// Slot k (0–9) of the ten gradient sums (no dynamically indexed array: it would live in slow memory).
+fn slot10(s0: vec4<f32>, s1: vec2<f32>, s2: vec4<f32>, k: u32) -> f32 {
+    var v = s0[k & 3u];
+    if (k >= 4u) {
+        v = s1[k & 1u];
+    }
+    if (k >= 6u) {
+        v = s2[(k - 6u) & 3u];
+    }
+    return v;
+}
 
 // One past the last entry any pixel of the tile blended (backward starts there).
 var<workgroup> tile_last: atomic<u32>;
@@ -56,7 +71,9 @@ fn sum10(v0: vec4<f32>, v1: vec2<f32>, v2: vec4<f32>, lane: u32) -> Sum10 {
     return out;
 }
 
-// One-dimensional workgroup (subgroup builtins need one), still one 16×16 tile.
+// One-dimensional workgroup (subgroup builtins need one), still one 16×16 tile. The subgroup operations run under
+// `subgroupAny(hit)`, which is the same in every lane of a subgroup, and every lane reaches them for every entry.
+@diagnostic(off, subgroup_uniformity)
 @compute @workgroup_size(256)
 fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(subgroup_invocation_id) lane: u32, @builtin(subgroup_size) lanes: u32) {
     let tile = wid.x + wid.y * frame.size.z;
@@ -75,11 +92,13 @@ fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
         last = state.y;
         dp = d_pixel[p];
     }
+    // Only pixels with a gradient walk: the walk starts after the last entry one of them blended (none: no walk).
+    let live = inside && any(dp != vec4<f32>(0.0));
     if (li == 0u) {
         atomicStore(&tile_last, first);
     }
     workgroupBarrier();
-    atomicMax(&tile_last, last);
+    atomicMax(&tile_last, select(first, last, live));
     let used_end = workgroupUniformLoad(&tile_last);
     var acc_c = frame.background.xyz;
     var acc_d = 0.0;
@@ -110,7 +129,7 @@ fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
             var g0 = vec4<f32>(0.0);
             var g1 = vec2<f32>(0.0);
             var g2 = vec4<f32>(0.0);
-            let hit = inside && entry < last && power <= 0.0 && alpha >= MIN_ALPHA;
+            let hit = live && entry < last && power <= 0.0 && alpha >= MIN_ALPHA;
             if (hit) {
                 let tb = t / (1.0 - alpha);
                 let w = alpha * tb;
@@ -127,7 +146,8 @@ fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
             }
             // Sum over the subgroup first: one atomic per subgroup instead of one per pixel. Other subgroup sizes and the
             // compare-and-swap sums sum each slot with subgroupAdd.
-            if (subgroupAny(hit) && LANE_ADDS && lanes == 32u) {
+            let any_hit = subgroupAny(hit);
+            if (any_hit && LANE_ADDS && SUM10 && lanes == 32u) {
                 // A lone contributing lane adds its own values; more are summed first (transposed, sum10).
                 let g = bitcast<u32>(bb.w) * GRAD2D;
                 if (countOneBits(subgroupBallot(hit).x) == 1u) {
@@ -149,22 +169,19 @@ fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
                         add(g + s.slot, s.total);
                     }
                 }
-            } else if (subgroupAny(hit)) {
+            } else if (any_hit) {
                 let s0 = subgroupAdd(g0);
                 let s1 = subgroupAdd(g1);
                 let s2 = subgroupAdd(g2);
                 let g = bitcast<u32>(bb.w) * GRAD2D;
                 if (LANE_ADDS) {
-                    // Lane k adds slot k: ten independent atomics instead of a chain of ten.
-                    if (lane < 10u) {
-                        var v = s0[lane & 3u];
-                        if (lane >= 4u) {
-                            v = s1[lane & 1u];
+                    // Lane k adds slot k (and on subgroups narrower than ten, k + lanes, …): ten independent atomics
+                    // instead of a chain of ten, whatever the subgroup's size.
+                    let adders = select(lanes, min(ADD_LANES, lanes), ADD_LANES > 0u);
+                    if (lane < adders) {
+                        for (var k = lane; k < 10u; k += adders) {
+                            add(g + k, slot10(s0, s1, s2, k));
                         }
-                        if (lane >= 6u) {
-                            v = s2[(lane - 6u) & 3u];
-                        }
-                        add(g + lane, v);
                     }
                 } else if (lane == 0u) {
                     add(g, s0.x);

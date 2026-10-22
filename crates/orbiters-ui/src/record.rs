@@ -21,6 +21,9 @@ pub enum RecState {
 /// Size of the whole widget (orbits included).
 pub const SIZE: f32 = 252.0;
 
+/// The button's label for automated runs ([`crate::widgets::control`]).
+pub const LABEL: &str = "Record";
+
 #[derive(Clone, Copy, Default)]
 struct Spin {
     orbit_a: f32,
@@ -58,6 +61,7 @@ impl RecordButton {
         let button = Rect::from_center_size(c, Vec2::splat(140.0 * s));
         let resp = ui.interact(button, id, if self.disabled || busy { Sense::hover() } else { Sense::click() });
         let toggled = !self.disabled && !busy && crate::widgets::pressed(&resp);
+        crate::widgets::note_control(&ctx, LABEL, button, !self.disabled && !busy);
 
         // Rotations integrate their speed, so speeding up (recording) never makes them jump.
         let clock = anim::clock(&ctx, 30.0);
@@ -145,7 +149,8 @@ impl RecordButton {
         // The face: flat, a step lighter on hover, ringed in red while recording.
         let face = theme::mix(theme::mix(theme::INK_800, theme::INK_750, hover), theme::mix(theme::INK_800, theme::REC, 0.12), rec_k);
         let mut face_painter = p.clone();
-        face_painter.set_opacity(1.0 - 0.5 * disabled_k);
+        // On top of the card's entrance and the page's fade (set_opacity would replace them: the disc popped in).
+        face_painter.multiply_opacity(1.0 - 0.5 * disabled_k);
         face_painter.circle_filled(c, 70.0 * scale, face);
         paint::ring(&face_painter, c, 69.0 * scale, 2.0 * scale, theme::mix(theme::INK_600, theme::REC, rec_k));
 

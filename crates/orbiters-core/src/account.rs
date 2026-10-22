@@ -38,6 +38,8 @@ impl Server {
         }
     }
 
+    /// The API's address. The development server is the one a developer runs on this machine, over plain HTTP: its
+    /// credential goes to whatever listens on that port (only while Unity's switch says Development).
     pub fn api(self) -> &'static str {
         match self {
             Server::Production => "https://api.orbiters.cc/",
@@ -95,7 +97,7 @@ impl Server {
 }
 
 /// A signed-in account, as the tools store it (field names are Toolkit's `AuthData`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     pub token: String,
     /// The account's numeric id, as a string.
@@ -105,6 +107,18 @@ pub struct Account {
     pub username: Option<String>,
     #[serde(default, rename = "avatarUrl")]
     pub avatar_url: Option<String>,
+}
+
+/// Without the credential: an account printed in a log or a test's failure shows who, never the token.
+impl std::fmt::Debug for Account {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Account")
+            .field("token", &"(hidden)")
+            .field("user", &self.user)
+            .field("username", &self.username)
+            .field("avatar_url", &self.avatar_url)
+            .finish()
+    }
 }
 
 /// Unity's preferences folder (`InternalEditorUtility.unityPreferencesFolder`), shared by every project and version.
@@ -160,32 +174,17 @@ fn read_file(path: &Path) -> Option<Account> {
     (!account.token.trim().is_empty()).then_some(account)
 }
 
+/// Writes the account whole, through a temporary file renamed over the old one ([`crate::write_atomic_private`]): a
+/// Unity tool reading it meanwhile, a crash or a power cut never finds half a blob, which every tool reads as signed
+/// out.
 fn write_file(path: &Path, account: &Account) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     // Toolkit writes nulls for empty fields; serde does the same for `None`.
     let json = serde_json::to_vec(account)?;
-    if cfg!(windows) {
-        std::fs::write(path, protect::protect(&json)?)?;
-    } else {
-        write_private(path, &json)?;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn write_private(path: &Path, data: &[u8]) -> anyhow::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
-    f.write_all(data)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_private(path: &Path, data: &[u8]) -> anyhow::Result<()> {
-    std::fs::write(path, data)?;
+    let data = if cfg!(windows) { protect::protect(&json)? } else { json };
+    crate::write_atomic_private(path, &data)?;
     Ok(())
 }
 
@@ -233,7 +232,11 @@ mod protect {
     }
 
     fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
-        // SAFETY: DPAPI allocated `cbData` bytes at `pbData` with LocalAlloc; they are copied, then freed once.
+        if out.pbData.is_null() {
+            return Vec::new();
+        }
+        // SAFETY: DPAPI allocated `cbData` bytes at `pbData` (not null, checked above) with LocalAlloc; they are copied,
+        // then freed once.
         unsafe {
             let bytes = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
             let _ = LocalFree(Some(HLOCAL(out.pbData.cast())));
@@ -268,13 +271,21 @@ mod protect {
 }
 
 /// A browser sign-in in progress: open `link_url`, show `code`, poll with `poll_token`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Link {
     #[serde(rename = "linkUrl")]
     pub link_url: String,
     #[serde(rename = "pollToken")]
     pub poll_token: String,
     pub code: String,
+}
+
+/// Without its secrets: the poll token, and the link's query (which holds the link's own token).
+impl std::fmt::Debug for Link {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let page = self.link_url.split(['?', '#']).next().unwrap_or_default();
+        f.debug_struct("Link").field("link_url", &format_args!("{page}?(hidden)")).field("poll_token", &"(hidden)").field("code", &self.code).finish()
+    }
 }
 
 /// Where a browser sign-in stands.
@@ -321,8 +332,16 @@ impl Api {
         Self::at(server.api())
     }
 
-    /// An API at another address (a disposable server in tests).
+    /// An API at another address (a disposable server in tests). Every `Api` of one address shares one HTTP client
+    /// for the life of the process, so connections are kept and reused from call to call: no TCP and TLS handshake
+    /// for each account check, each sign-in poll every two seconds, each upload.
     pub fn at(base: &str) -> Self {
+        static AGENTS: std::sync::Mutex<Vec<(String, ureq::Agent)>> = std::sync::Mutex::new(Vec::new());
+        let base = format!("{}/", base.trim_end_matches('/'));
+        let mut agents = AGENTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, agent)) = agents.iter().find(|(b, _)| *b == base) {
+            return Self { agent: agent.clone(), base };
+        }
         let tls = crate::http_tls();
         let agent = ureq::Agent::config_builder()
             .tls_config(tls)
@@ -331,7 +350,8 @@ impl Api {
             .user_agent(concat!("OrbitersDesktop/", env!("CARGO_PKG_VERSION")))
             .build()
             .new_agent();
-        Self { agent, base: format!("{}/", base.trim_end_matches('/')) }
+        agents.push((base.clone(), agent.clone()));
+        Self { agent, base }
     }
 
     pub fn url(&self, path: &str) -> String {
@@ -459,7 +479,13 @@ mod tests {
             avatar_url: None,
         };
         write_file(&path, &account).unwrap();
-        assert_eq!(read_file(&path), Some(account));
+        assert_eq!(read_file(&path), Some(account.clone()));
+        assert!(!format!("{account:?} {:?}", Poll::Done(account.clone())).contains("orbit-"), "no credential in what is printed");
+        let link = Link { link_url: "https://orbiters.cc/link-editor?token=secret".into(), poll_token: "poll-secret".into(), code: "AB12".into() };
+        assert!(!format!("{link:?}").contains("secret") && format!("{link:?}").contains("AB12"));
+        // Written again over itself: no temporary file is left beside.
+        write_file(&path, &account).unwrap();
+        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
         let raw = std::fs::read(&path).unwrap();
         if cfg!(windows) {
             // A DPAPI blob (version 1, the DPAPI provider's GUID), not readable JSON.

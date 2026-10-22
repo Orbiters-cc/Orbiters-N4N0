@@ -46,13 +46,12 @@ pub fn endpoints(root: &Path, alive: impl Fn(u32) -> bool) -> Vec<Endpoint> {
     found
 }
 
-/// Drops an import request for a session's splats into `endpoint`'s inbox (written whole, then renamed into view).
+/// Drops an import request for a session's splats into `endpoint`'s inbox (written whole, flushed to the disk, then
+/// renamed into view: Mixer never reads half a request).
 pub fn send_splats(endpoint: &Endpoint, session: &Path, title: &str) -> anyhow::Result<()> {
     let request = Request { kind: REQUEST_KIND, action: IMPORT_SPLATS, session, title };
     let name = uuid::Uuid::new_v4().to_string();
-    let part = endpoint.dir.join(format!("{name}.json.part"));
-    std::fs::write(&part, serde_json::to_vec_pretty(&request)?)?;
-    std::fs::rename(&part, endpoint.dir.join(format!("{name}.json")))?;
+    orbiters_core::write_atomic(&endpoint.dir.join(format!("{name}.json")), &serde_json::to_vec_pretty(&request)?)?;
     Ok(())
 }
 

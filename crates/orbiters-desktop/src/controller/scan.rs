@@ -187,7 +187,7 @@ impl super::Controller {
     /// Scans the place around VRChat's camera where it stands now.
     pub fn take_scan(self: &Shared) -> anyhow::Result<()> {
         anyhow::ensure!(self.snapshot.lock().unwrap().vrchat.running, "Start VRChat and open its camera first.");
-        anyhow::ensure!(!self.is_capturing(), "A recording is under way: stop it first.");
+        self.ensure_capture_idle()?;
         let (pose, smooth) = {
             let osc = self.osc_values.lock().unwrap();
             let pose = osc.latest.get(super::burst::POSE).map(|(v, _)| super::burst::floats(v)).filter(|v| v.len() == 6 && v.iter().any(|f| *f != 0.0));

@@ -5,7 +5,44 @@ use crate::anim::{self, Spring};
 use crate::paint;
 use crate::theme::{self, weight, Txt};
 use crate::{fonts, icons};
-use egui::{pos2, vec2, Align2, Color32, CursorIcon, FontId, Id, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2};
+use egui::{pos2, vec2, Align2, Color32, CursorIcon, FontId, Id, IdSalt, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set by an automated run (the end-to-end test) that clicks controls like a person, by their labels.
+static WATCH: AtomicBool = AtomicBool::new(false);
+
+/// Where each control was drawn: rect, whether it took clicks, the pass it was drawn in.
+#[derive(Clone, Default)]
+struct Drawn(HashMap<String, (Rect, bool, u64)>);
+
+fn drawn_id() -> Id {
+    Id::unique("orbiters-widget-drawn")
+}
+
+/// From now on, buttons, icon buttons, segments and the record button note where they are drawn, for [`control`]
+/// (for automated runs; nothing is noted otherwise).
+pub fn watch_controls() {
+    WATCH.store(true, Ordering::Relaxed);
+}
+
+/// Where the control labelled `label` (an icon button by its tooltip) was drawn in the last frame, and whether it
+/// took clicks then.
+pub fn control(ctx: &egui::Context, label: &str) -> Option<(Rect, bool)> {
+    let pass = ctx.cumulative_pass_nr();
+    let drawn = ctx.data(|d| d.get_temp::<Drawn>(drawn_id()))?;
+    drawn.0.get(label).filter(|(_, _, p)| p + 1 >= pass).map(|(r, enabled, _)| (*r, *enabled))
+}
+
+pub(crate) fn note_control(ctx: &egui::Context, label: &str, rect: Rect, enabled: bool) {
+    if !WATCH.load(Ordering::Relaxed) {
+        return;
+    }
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| {
+        d.get_temp_mut_or_default::<Drawn>(drawn_id()).0.insert(label.to_string(), (rect, enabled, pass));
+    });
+}
 
 /// Paints a Phosphor glyph centred on `center`.
 pub fn icon(painter: &Painter, center: Pos2, glyph: &str, size: f32, color: Color32) {
@@ -133,11 +170,19 @@ pub struct Button<'a> {
     enabled: bool,
     width: Option<f32>,
     hint: Option<&'a str>,
+    id_salt: Option<IdSalt>,
 }
 
 impl<'a> Button<'a> {
     pub fn new(label: &'a str) -> Self {
-        Self { label, icon: None, variant: Variant::Secondary, size: Size::Md, enabled: true, width: None, hint: None }
+        Self { label, icon: None, variant: Variant::Secondary, size: Size::Md, enabled: true, width: None, hint: None, id_salt: None }
+    }
+
+    /// What tells this button from others with the same label and icon in one place (rows of a list), for
+    /// [`Button::show_at`]; also keeps a button whose label changes (Hold to talk, Listening…) the same button.
+    pub fn id_salt(mut self, salt: impl egui::AsIdSalt) -> Self {
+        self.id_salt = Some(IdSalt::new(salt));
+        self
     }
 
     pub fn icon(mut self, glyph: &'a str) -> Self {
@@ -190,6 +235,7 @@ impl<'a> Button<'a> {
         let (h, _, size, gap, icon_size) = self.metrics();
         let w = self.desired_width(ui);
         let (rect, resp) = ui.allocate_exact_size(vec2(w, h), if self.enabled { Sense::click() } else { Sense::hover() });
+        note_control(ui.ctx(), self.label, rect, self.enabled);
         self.paint(ui, rect, &resp, size, gap, icon_size);
         let resp = if self.enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
         match self.hint {
@@ -198,17 +244,17 @@ impl<'a> Button<'a> {
         }
     }
 
-    /// Shows the button in a given rect (for layouts that place it themselves).
+    /// Shows the button in a given rect (for layouts that place it themselves). Its id comes from its label and icon
+    /// (or [`Button::id_salt`]), never from where it is: a button that moves (scrolling, an entrance, a scale-in)
+    /// stays one widget, so a press on it still clicks and no state is left behind at every position it passed.
     pub fn show_at(self, ui: &mut Ui, rect: Rect) -> Response {
         let (_, _, size, gap, icon_size) = self.metrics();
-        let resp = ui.interact(
-            rect,
-            ui.scope_id().with(("button", self.label, rect.min.x as i32, rect.min.y as i32)),
-            if self.enabled { Sense::click() } else { Sense::hover() },
-        );
+        let key = self.id_salt.unwrap_or_else(|| IdSalt::new((self.label, self.icon)));
+        let resp = ui.interact(rect, ui.scope_id().with("button").with_salt(key), if self.enabled { Sense::click() } else { Sense::hover() });
         if self.enabled {
             pressed(&resp);
         }
+        note_control(ui.ctx(), self.label, rect, self.enabled);
         self.paint(ui, rect, &resp, size, gap, icon_size);
         let resp = if self.enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
         match self.hint {
@@ -225,7 +271,8 @@ impl<'a> Button<'a> {
         let bg = Rect::from_center_size(rect.center(), rect.size() * scale);
         let mut painter = ui.painter().clone();
         if !self.enabled {
-            painter.set_opacity(0.4);
+            // On top of the fade of what it sits in (a card's entrance), not instead of it.
+            painter.multiply_opacity(0.4);
         }
         let r = bg.height() * 0.5;
         let fg = match self.variant {
@@ -272,11 +319,18 @@ pub struct IconButton<'a> {
     icon_size: f32,
     danger: bool,
     backdrop: Option<Color32>,
+    id_salt: Option<IdSalt>,
 }
 
 impl<'a> IconButton<'a> {
     pub fn new(glyph: &'a str, label: &'a str) -> Self {
-        Self { glyph, label, size: 36.0, icon_size: 17.0, danger: false, backdrop: None }
+        Self { glyph, label, size: 36.0, icon_size: 17.0, danger: false, backdrop: None, id_salt: None }
+    }
+
+    /// What tells this button from others with the same icon and label in one place, for [`IconButton::show_at`].
+    pub fn id_salt(mut self, salt: impl egui::AsIdSalt) -> Self {
+        self.id_salt = Some(IdSalt::new(salt));
+        self
     }
 
     pub fn size(mut self, size: f32, icon_size: f32) -> Self {
@@ -299,13 +353,18 @@ impl<'a> IconButton<'a> {
 
     pub fn show(self, ui: &mut Ui) -> Response {
         let (rect, resp) = ui.allocate_exact_size(Vec2::splat(self.size), Sense::click());
+        note_control(ui.ctx(), self.label, rect, true);
         self.paint(ui, rect, &resp);
         resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(self.label)
     }
 
+    /// Shows the button in a given rect; its id comes from its icon and label (or [`IconButton::id_salt`]), never
+    /// from where it is.
     pub fn show_at(self, ui: &mut Ui, rect: Rect) -> Response {
-        let resp = ui.interact(rect, ui.scope_id().with(("icon-button", self.label)), Sense::click());
+        let key = self.id_salt.unwrap_or_else(|| IdSalt::new((self.glyph, self.label)));
+        let resp = ui.interact(rect, ui.scope_id().with("icon-button").with_salt(key), Sense::click());
         pressed(&resp);
+        note_control(ui.ctx(), self.label, rect, true);
         self.paint(ui, rect, &resp);
         resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(self.label)
     }
@@ -388,13 +447,17 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt,
             *value = o.value;
             changed = true;
         }
+        note_control(ui.ctx(), o.label, rects[i], !o.disabled);
         responses.push(resp);
     }
 
-    // Highlight under the active option, sprung in track-local coordinates (so scrolling never animates).
+    // Highlight under the active option, sprung in track-local coordinates (so scrolling never animates). The bounce
+    // overshoots by a fifth of the move: it stays inside the track.
     if let Some(active) = options.iter().position(|o| o.value == *value) {
         let r = rects[active];
         let [l, w] = anim::spring(ui.ctx(), id.with("pill"), [r.left() - track.left(), r.width()], Spring::BOUNCY);
+        let w = w.clamp(0.0, (track.width() - 8.0).max(0.0));
+        let l = l.clamp(4.0, (track.width() - 4.0 - w).max(4.0));
         let pill = Rect::from_min_size(pos2(track.left() + l, r.top()), vec2(w, r.height()));
         painter.rect_filled(pill, theme::radius(pill.height() * 0.5), theme::INK_600);
     }
@@ -412,7 +475,7 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt,
         let color = anim::color(ui.ctx(), id.with(("c", i)), target, Spring::SNAPPY);
         let mut p = ui.painter().clone();
         if o.disabled {
-            p.set_opacity(0.45);
+            p.multiply_opacity(0.45);
         }
         let label = Txt::new(o.label, size).weight(weight::MEDIUM).color(color);
         let lw = text_size(ui, &label).x;
@@ -491,7 +554,8 @@ pub fn slider(
     let t = if max > min { ((*value - min) / (max - min)).clamp(0.0, 1.0) } else { 0.0 };
     let ctx = ui.ctx();
     let fill_t = anim::value(ctx, id.with("fill"), t, Spring::SNAPPY).clamp(0.0, 1.0);
-    let knob_t = anim::value(ctx, id.with("knob"), t, Spring::BOUNCY);
+    // The knob bounces, but never off the bar's ends (into the value's label).
+    let knob_t = anim::value(ctx, id.with("knob"), t, Spring::BOUNCY).clamp(0.0, 1.0);
     let hover = anim::toggle(ctx, id.with("hover"), resp.hovered() || resp.dragged(), Spring::SNAPPY);
     let p = ui.painter();
     let bar = Rect::from_center_size(track_rect.center(), vec2(track_rect.width(), 6.0));

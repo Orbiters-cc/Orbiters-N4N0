@@ -1,13 +1,16 @@
 [package]
 name = "orbiters-call"
-description = "Orb's calls, a worker process: WebRTC audio (Opus) between two Orbiters desktops, through Cloudflare Realtime TURN when needed."
+description = "Orb's calls, a worker process: WebRTC audio (Opus) between two Orbiters desktops, through Cloudflare Realtime TURN (only, unless a call is direct)."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+orbiters-core = { workspace = true }
 orbiters-sound = { workspace = true }
 anyhow = { workspace = true }
+# WebRTC's own warnings (a relay it skips, a socket it could not bind) on stderr, which the service logs.
+log = "0.4"
 serde = { workspace = true }
 serde_json = { workspace = true }
 # The runtime-agnostic rewrite: tokio runtime and ring crypto (its defaults).

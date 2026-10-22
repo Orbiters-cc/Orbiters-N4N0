@@ -8,6 +8,12 @@
 //! changes nothing, as receivers and fingers scale together): x to the right, y up, z away from the person (the screen's
 //! face looks at −z).
 
+use std::time::{Duration, Instant};
+
+/// How long a finger may go unfound (a fit rejected on a mix of new and old readings, a hand moving fast) before it
+/// counts as gone: shorter gaps change nothing, so they never let go of a press nor start another.
+pub const LOST_GRACE: Duration = Duration::from_millis(100);
+
 /// The screen's size.
 pub const WIDTH: f64 = 0.48;
 pub const HEIGHT: f64 = 0.27;
@@ -43,14 +49,49 @@ pub struct Finger {
 
 /// The finger from the four proximities (0 to 1), or `None` when one is out of reach or they do not agree.
 pub fn locate(proximity: [f32; 4]) -> Option<Finger> {
+    let [x, y, depth] = point(proximity, [0.0, 0.0, -0.05])?;
+    let (x, y) = on_page(x, y);
+    Some(Finger { x, y, depth })
+}
+
+/// A point of the screen's plane on the page, in pixels.
+fn on_page(x: f64, y: f64) -> (f32, f32) {
+    (((x + WIDTH / 2.0) / WIDTH * super::layout::WIDTH as f64) as f32, ((HEIGHT / 2.0 - y) / HEIGHT * super::layout::HEIGHT as f64) as f32)
+}
+
+/// Where the owner looks on the page in desktop mode (contracts `Docs/orb.md`, Looking and clicking), in pixels: the
+/// eyes and the gaze point from their receivers' proximities, and where the line from the eyes through the gaze point
+/// meets the screen's plane. Eyes not found: the eyes at rest stand in. `None` when the gaze point is not found or the
+/// line meets the plane nowhere ahead of the eyes.
+pub fn look(eyes: [f32; 4], gaze: [f32; 4]) -> Option<(f32, f32)> {
+    let gaze = point(gaze, [0.0, 0.1, -0.1])?;
+    looked_at(point(eyes, GAZE_EYES), gaze)
+}
+
+/// The eyes at rest, in the screen's space.
+const GAZE_EYES: [f64; 3] = orbiters_contracts::orb::params::GAZE_EYES;
+
+/// Where the line from `eyes` (else the eyes at rest) through `gaze` meets the screen's plane, in pixels.
+fn looked_at(eyes: Option<[f64; 3]>, gaze: [f64; 3]) -> Option<(f32, f32)> {
+    let c = eyes.unwrap_or(GAZE_EYES);
+    let along = gaze[2] - c[2];
+    if c[2] >= 0.0 || along <= 1e-6 {
+        return None;
+    }
+    let t = -c[2] / along;
+    Some(on_page(c[0] + (gaze[0] - c[0]) * t, c[1] + (gaze[1] - c[1]) * t))
+}
+
+/// A contact's centre in the screen's space from the four proximities (0 to 1), fitted from `start`, or `None` when
+/// one is out of reach or they do not agree.
+fn point(proximity: [f32; 4], start: [f64; 3]) -> Option<[f64; 3]> {
     if proximity.iter().any(|&p| !(p > 0.0 && p <= 1.0)) {
         return None;
     }
-    // Distance from each receiver's centre to the finger contact's surface.
+    // Distance from each receiver's centre to the contact's surface.
     let d: Vec<f64> = proximity.iter().map(|&p| RADIUS * (1.0 - p as f64)).collect();
-    // Unknowns: the finger (x, y, z) and its contact's radius r: |f − c_i| = d_i + r. Gauss–Newton from in front of the
-    // screen's middle.
-    let mut u = [0.0, 0.0, -0.05, 0.01];
+    // Unknowns: the contact's centre (x, y, z) and its radius r: |f − c_i| = d_i + r. Gauss–Newton from `start`.
+    let mut u = [start[0], start[1], start[2], 0.01];
     for _ in 0..30 {
         let mut jtj = [[0.0f64; 4]; 4];
         let mut jtr = [0.0f64; 4];
@@ -83,9 +124,7 @@ pub fn locate(proximity: [f32; 4]) -> Option<Finger> {
     if !worst.is_finite() || worst > 0.01 || !(-0.01..0.06).contains(&u[3]) {
         return None;
     }
-    let x = ((u[0] + WIDTH / 2.0) / WIDTH * super::layout::WIDTH as f64) as f32;
-    let y = ((HEIGHT / 2.0 - u[1]) / HEIGHT * super::layout::HEIGHT as f64) as f32;
-    Some(Finger { x, y, depth: u[2] })
+    Some([u[0], u[1], u[2]])
 }
 
 /// `a × x = b` for a 4 × 4 system (Gaussian elimination with pivoting).
@@ -97,10 +136,11 @@ fn solve(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> Option<[f64; 4]> {
         }
         a.swap(col, pivot);
         b.swap(col, pivot);
+        let pivot_row = a[col];
         for row in col + 1..4 {
-            let f = a[row][col] / a[col][col];
-            for k in col..4 {
-                a[row][k] -= f * a[col][k];
+            let f = a[row][col] / pivot_row[col];
+            for (value, p) in a[row][col..].iter_mut().zip(&pivot_row[col..]) {
+                *value -= f * p;
             }
             b[row] -= f * b[col];
         }
@@ -113,11 +153,19 @@ fn solve(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> Option<[f64; 4]> {
     Some(x)
 }
 
-/// A hand's touch: hovering, pressing, letting go.
+/// A hand's touch: hovering, pressing, letting go. A press needs the finger seen in front of the screen first (a hand
+/// that comes in from the side or from behind presses nothing until it is seen in front again), lasts while the finger
+/// stays at or past the face however deep it goes, and ends only once it is back in front.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Touch {
     pressing: bool,
     pub finger: Option<Finger>,
+    /// The finger's last reading was in front of the screen's face, over it: what may press next.
+    hovering: bool,
+    /// The finger reached the face without coming from in front: it presses nothing until it is clearly in front again.
+    blocked: bool,
+    /// Since when the finger is not found.
+    lost_since: Option<Instant>,
 }
 
 /// What a hand did this update.
@@ -134,31 +182,64 @@ pub enum Gesture {
 }
 
 impl Touch {
-    /// The hand's new proximities.
-    pub fn update(&mut self, proximity: [f32; 4]) -> Gesture {
-        let finger = locate(proximity);
-        self.finger = finger;
-        let Some(f) = finger else {
-            self.pressing = false;
-            return Gesture::Away;
-        };
+    /// The hand's new proximities, read at `now`.
+    pub fn update(&mut self, proximity: [f32; 4], now: Instant) -> Gesture {
+        let Some(f) = locate(proximity) else { return self.unfound(now) };
+        self.lost_since = None;
+        self.finger = Some(f);
         let inside = f.x >= 0.0 && f.y >= 0.0 && f.x < super::layout::WIDTH as f32 && f.y < super::layout::HEIGHT as f32;
-        if !inside || f.depth < HOVER_DEPTH || f.depth > 0.08 {
-            self.pressing = false;
-            return Gesture::Away;
-        }
         if self.pressing {
-            if f.depth < RELEASE_DEPTH {
-                self.pressing = false;
-                return Gesture::Hover { x: f.x, y: f.y };
+            if f.depth >= RELEASE_DEPTH {
+                // Still at the face, or past it however deep: the same press.
+                return Gesture::Hold { x: f.x, y: f.y };
             }
-            return Gesture::Hold { x: f.x, y: f.y };
+            self.pressing = false;
         }
         if f.depth > PRESS_DEPTH {
-            self.pressing = true;
-            return Gesture::Press { x: f.x, y: f.y };
+            // At the face or past it. A press only when the finger came from in front, over the screen.
+            if inside && self.hovering && !self.blocked {
+                self.pressing = true;
+                self.hovering = false;
+                return Gesture::Press { x: f.x, y: f.y };
+            }
+            self.blocked = true;
+            self.hovering = false;
+            return if inside && f.depth <= 0.08 { Gesture::Hover { x: f.x, y: f.y } } else { Gesture::Away };
         }
-        Gesture::Hover { x: f.x, y: f.y }
+        // In front of the face: hovering when over the screen and near enough. A blocked finger is free once it is
+        // clearly back in front.
+        if f.depth < RELEASE_DEPTH {
+            self.blocked = false;
+        }
+        self.hovering = inside && f.depth >= HOVER_DEPTH;
+        if self.hovering {
+            Gesture::Hover { x: f.x, y: f.y }
+        } else {
+            Gesture::Away
+        }
+    }
+
+    /// No new reading came: a finger unfound for [`LOST_GRACE`] is gone (`Some(Away)`), the touch starting afresh.
+    pub fn tick(&mut self, now: Instant) -> Option<Gesture> {
+        let gone = self.lost_since.is_some_and(|since| now.duration_since(since) >= LOST_GRACE);
+        (gone && (self.finger.is_some() || self.pressing || self.hovering || self.blocked)).then(|| {
+            *self = Touch::default();
+            Gesture::Away
+        })
+    }
+
+    /// A reading that did not find the finger: a short gap keeps the touch as it was, a longer one ends it.
+    fn unfound(&mut self, now: Instant) -> Gesture {
+        let since = *self.lost_since.get_or_insert(now);
+        if now.duration_since(since) >= LOST_GRACE {
+            *self = Touch { lost_since: Some(since), ..Touch::default() };
+            return Gesture::Away;
+        }
+        match self.finger {
+            Some(f) if self.pressing => Gesture::Hold { x: f.x, y: f.y },
+            Some(f) if self.hovering => Gesture::Hover { x: f.x, y: f.y },
+            _ => Gesture::Away,
+        }
     }
 }
 
@@ -199,16 +280,118 @@ mod tests {
         assert_eq!(locate([left[0], right[1], left[2], right[3]]), None);
     }
 
+    /// Readings 14 ms apart, as the host takes them.
+    struct Clock(Instant);
+
+    impl Clock {
+        fn next(&mut self) -> Instant {
+            self.0 += Duration::from_millis(14);
+            self.0
+        }
+    }
+
     #[test]
     fn presses_once_and_lets_go() {
         let mut touch = Touch::default();
+        let mut clock = Clock(Instant::now());
         let at = |z: f64| read([0.0, 0.0, z], 0.01);
-        assert!(matches!(touch.update(at(-0.2)), Gesture::Away), "too far");
-        assert!(matches!(touch.update(at(-0.05)), Gesture::Hover { .. }));
-        assert!(matches!(touch.update(at(-0.005)), Gesture::Press { .. }));
-        assert!(matches!(touch.update(at(0.01)), Gesture::Hold { .. }), "pushing through holds");
-        assert!(matches!(touch.update(at(-0.018)), Gesture::Hold { .. }), "between the depths it still holds");
-        assert!(matches!(touch.update(at(-0.03)), Gesture::Hover { .. }));
-        assert!(matches!(touch.update(at(-0.005)), Gesture::Press { .. }), "and presses again");
+        assert!(matches!(touch.update(at(-0.2), clock.next()), Gesture::Away), "too far");
+        assert!(matches!(touch.update(at(-0.05), clock.next()), Gesture::Hover { .. }));
+        assert!(matches!(touch.update(at(-0.005), clock.next()), Gesture::Press { .. }));
+        assert!(matches!(touch.update(at(0.01), clock.next()), Gesture::Hold { .. }), "pushing through holds");
+        assert!(matches!(touch.update(at(-0.018), clock.next()), Gesture::Hold { .. }), "between the depths it still holds");
+        assert!(matches!(touch.update(at(-0.03), clock.next()), Gesture::Hover { .. }));
+        assert!(matches!(touch.update(at(-0.005), clock.next()), Gesture::Press { .. }), "and presses again");
+    }
+
+    #[test]
+    fn a_hand_from_the_side_or_behind_presses_nothing() {
+        let mut touch = Touch::default();
+        let mut clock = Clock(Instant::now());
+        // Beside the screen, at its face, then over it: no approach from the front.
+        assert!(matches!(touch.update(read([0.4, 0.0, -0.005], 0.01), clock.next()), Gesture::Away));
+        assert!(matches!(touch.update(read([0.2, 0.0, -0.005], 0.01), clock.next()), Gesture::Hover { .. }));
+        // From behind, coming through.
+        assert!(!matches!(touch.update(read([0.0, 0.0, 0.05], 0.01), clock.next()), Gesture::Press { .. }));
+        assert!(!matches!(touch.update(read([0.0, 0.0, -0.005], 0.01), clock.next()), Gesture::Press { .. }));
+        assert!(!matches!(touch.update(read([0.0, 0.0, -0.018], 0.01), clock.next()), Gesture::Press { .. }), "not clearly out yet");
+        assert!(!matches!(touch.update(read([0.0, 0.0, -0.005], 0.01), clock.next()), Gesture::Press { .. }));
+        // Clearly in front, then in: a press.
+        assert!(matches!(touch.update(read([0.0, 0.0, -0.04], 0.01), clock.next()), Gesture::Hover { .. }));
+        assert!(matches!(touch.update(read([0.0, 0.0, -0.005], 0.01), clock.next()), Gesture::Press { .. }));
+    }
+
+    #[test]
+    fn deep_pushes_and_short_gaps_keep_one_press() {
+        let mut touch = Touch::default();
+        let mut clock = Clock(Instant::now());
+        let at = |z: f64| read([0.05, 0.02, z], 0.01);
+        touch.update(at(-0.05), clock.next());
+        assert!(matches!(touch.update(at(-0.005), clock.next()), Gesture::Press { .. }));
+        // Far through the screen and back: one press.
+        for z in [0.05, 0.12, 0.2, 0.09, 0.03, -0.01] {
+            assert!(matches!(touch.update(at(z), clock.next()), Gesture::Hold { .. }), "{z}");
+        }
+        // A reading that finds nothing (two hands on the receivers), then the finger again: still the same press.
+        assert!(matches!(touch.update([0.0, 0.5, 0.5, 0.5], clock.next()), Gesture::Hold { .. }));
+        assert_eq!(touch.tick(clock.next()), None, "a short gap");
+        assert!(matches!(touch.update(at(-0.005), clock.next()), Gesture::Hold { .. }));
+        // Gone for longer than the grace: the touch ends, once.
+        let lost = clock.next();
+        assert!(matches!(touch.update([0.0; 4], lost), Gesture::Hold { .. }));
+        assert_eq!(touch.tick(lost + LOST_GRACE), Some(Gesture::Away));
+        assert_eq!(touch.tick(lost + LOST_GRACE * 2), None);
+        // Back at the face without an approach: nothing.
+        assert!(!matches!(touch.update(at(-0.005), lost + LOST_GRACE * 3), Gesture::Press { .. }));
+    }
+
+    /// `v` turned down by `pitch` then right by `yaw` (radians), as the head bone turns.
+    fn turned(v: [f64; 3], pitch: f64, yaw: f64) -> [f64; 3] {
+        let (y, z) = (v[1] * pitch.cos() - v[2] * pitch.sin(), v[1] * pitch.sin() + v[2] * pitch.cos());
+        [v[0] * yaw.cos() + z * yaw.sin(), y, -v[0] * yaw.sin() + z * yaw.cos()]
+    }
+
+    /// Where the line of sight from `eyes` along `ahead` meets the screen's plane, on the page.
+    fn sight(eyes: [f64; 3], ahead: [f64; 3]) -> (f32, f32) {
+        let t = -eyes[2] / ahead[2];
+        on_page(eyes[0] + ahead[0] * t, eyes[1] + ahead[1] * t)
+    }
+
+    /// Within 1 mm on the screen.
+    fn near(found: (f32, f32), wanted: (f32, f32)) -> bool {
+        let mm = super::super::layout::WIDTH as f32 / (WIDTH as f32 * 1000.0);
+        (found.0 - wanted.0).abs() < mm && (found.1 - wanted.1).abs() < mm
+    }
+
+    #[test]
+    fn the_gaze_point_follows_the_line_of_sight_onto_the_screen() {
+        // The head bone turns about the neck, below and behind the eyes; the gaze point sits 0.38 m ahead of them.
+        let neck = [GAZE_EYES[0], GAZE_EYES[1] - 0.1, GAZE_EYES[2] + 0.08];
+        for pitch in [5.0f64, 15.0, 25.0, 32.0, 40.0] {
+            for yaw in [-25.0f64, -10.0, 0.0, 12.0, 25.0] {
+                let (pitch, yaw) = (pitch.to_radians(), yaw.to_radians());
+                let offset = turned([0.0, 0.1, -0.08], pitch, yaw);
+                let eyes = [neck[0] + offset[0], neck[1] + offset[1], neck[2] + offset[2]];
+                let ahead = turned([0.0, 0.0, 1.0], pitch, yaw);
+                let gaze = [eyes[0] + 0.38 * ahead[0], eyes[1] + 0.38 * ahead[1], eyes[2] + 0.38 * ahead[2]];
+                assert!(gaze[2] < 0.0, "the gaze point stays in front of the screen");
+                let found = look(read(eyes, 0.01), read(gaze, 0.01)).unwrap_or_else(|| panic!("{pitch} {yaw}"));
+                let wanted = sight(eyes, ahead);
+                assert!(near(found, wanted), "pitch {pitch}, yaw {yaw}: {found:?} vs {wanted:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn eyes_not_found_stand_at_rest() {
+        for (pitch, yaw) in [(25.0f64, 0.0f64), (20.0, -15.0), (35.0, 20.0)] {
+            let ahead = turned([0.0, 0.0, 1.0], pitch.to_radians(), yaw.to_radians());
+            let gaze = [GAZE_EYES[0] + 0.38 * ahead[0], GAZE_EYES[1] + 0.38 * ahead[1], GAZE_EYES[2] + 0.38 * ahead[2]];
+            let found = look([0.0; 4], read(gaze, 0.01)).unwrap();
+            assert!(near(found, sight(GAZE_EYES, ahead)), "{pitch} {yaw}: {found:?}");
+        }
+        // No gaze point: nowhere; looking away from the screen: nowhere.
+        assert_eq!(look(read(GAZE_EYES, 0.01), [0.0; 4]), None);
+        assert_eq!(looked_at(Some(GAZE_EYES), [0.0, 0.2, -0.5]), None);
     }
 }

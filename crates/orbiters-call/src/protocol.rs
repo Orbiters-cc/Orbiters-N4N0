@@ -1,176 +1,120 @@
-//! The worker's protocol: one JSON object a line, commands on stdin (`{"cmd": …}`), events on stdout
-//! (`{"event": …}`). Candidates are WebRTC's `RTCIceCandidateInit` JSON, ICE servers WebRTC's `RTCIceServer` JSON.
+//! The worker's side of `orbiters_core::call` (one JSON object a line, commands on stdin, events on stdout): the
+//! protocol's relay servers and candidates to WebRTC's and back, and what this side keeps out of what it hands the
+//! other one.
 
-use serde::{Deserialize, Serialize};
+use orbiters_core::call::{IceCandidate, IceServer};
+use rtc::ice::url::{ProtoType, SchemeType, Url};
 use webrtc::peer_connection::{RTCIceCandidateInit, RTCIceServer};
 
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(tag = "cmd", rename_all = "snake_case")]
-pub enum Command {
-    /// Starts a call as the caller: answers with `offer`.
-    Offer {
-        #[serde(default)]
-        ice_servers: Vec<IceServer>,
-        #[serde(default)]
-        mic: Option<String>,
-    },
-    /// Takes a call: answers with `answer`.
-    Answer {
-        offer: String,
-        #[serde(default)]
-        ice_servers: Vec<IceServer>,
-        #[serde(default)]
-        mic: Option<String>,
-    },
-    /// The callee's answer, on the caller's side.
-    RemoteAnswer { sdp: String },
-    /// The other side's ICE candidates.
-    Candidates { candidates: Vec<RTCIceCandidateInit> },
-    /// Stops (or restarts) sending the microphone: silence goes out instead.
-    Mute { on: bool },
-    Hangup,
-    Quit,
+/// The relay servers this WebRTC can use.
+#[derive(Debug, Default)]
+pub struct Servers {
+    pub servers: Vec<RTCIceServer>,
+    /// A TURN server over UDP is among them.
+    pub relay: bool,
+    /// STUN or TURN URLs left out: TURN over TCP or TLS and STUN over TLS (webrtc-rs 0.21 allocates over UDP only,
+    /// and one URL it cannot read would cost every relay of the call), TURN without credentials, malformed ones.
+    pub skipped: usize,
 }
 
-/// A STUN or TURN server as WebRTC writes it: `urls` is one URL or a list.
-#[derive(Debug, Deserialize, PartialEq, Clone)]
-pub struct IceServer {
-    pub urls: Urls,
-    #[serde(default)]
-    pub username: Option<String>,
-    #[serde(default)]
-    pub credential: Option<String>,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Clone)]
-#[serde(untagged)]
-pub enum Urls {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl From<IceServer> for RTCIceServer {
-    fn from(server: IceServer) -> Self {
-        RTCIceServer {
-            urls: match server.urls {
-                Urls::One(url) => vec![url],
-                Urls::Many(urls) => urls,
-            },
-            username: server.username.unwrap_or_default(),
-            credential: server.credential.unwrap_or_default(),
+/// The servers of `list` WebRTC can use.
+pub fn servers(list: &[IceServer]) -> Servers {
+    let mut out = Servers::default();
+    for server in list {
+        let mut urls = Vec::new();
+        for raw in &server.urls {
+            // A `?transport=udp` on a STUN URL is common and means nothing; WebRTC refuses it.
+            let url = if raw.starts_with("stun:") { raw.split('?').next().unwrap_or(raw) } else { raw.as_str() };
+            match Url::parse_url(url) {
+                Ok(u) if u.scheme == SchemeType::Stun => urls.push(url.to_string()),
+                Ok(u) if u.scheme == SchemeType::Turn && u.proto == ProtoType::Udp && !server.username.is_empty() && !server.credential.is_empty() => {
+                    out.relay = true;
+                    urls.push(url.to_string());
+                }
+                _ => out.skipped += 1,
+            }
+        }
+        if !urls.is_empty() {
+            out.servers.push(RTCIceServer { urls, username: server.username.clone(), credential: server.credential.clone() });
         }
     }
+    out
 }
 
-#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum EndReason {
-    /// This side hung up.
-    Hangup,
-    /// The connection could not be made, or was lost.
-    Failed,
-    /// The other side closed it.
-    Closed,
+pub fn rtc_candidate(c: IceCandidate) -> RTCIceCandidateInit {
+    RTCIceCandidateInit { candidate: c.candidate, sdp_mid: c.sdp_mid, sdp_mline_index: c.sdp_mline_index, username_fragment: c.username_fragment, url: None }
 }
 
-#[derive(Debug, Serialize, PartialEq)]
-#[serde(tag = "event", rename_all = "snake_case")]
-pub enum Event {
-    Ready,
-    Offer { sdp: String },
-    Answer { sdp: String },
-    Candidate { candidate: RTCIceCandidateInit },
-    /// ICE and DTLS are up: audio flows.
-    Connected,
-    /// Peaks (0..1) of the microphone as sent and of the other side as heard, about five times a second.
-    Levels { mic: f32, remote: f32 },
-    Ended { reason: EndReason },
-    Error { message: String },
+pub fn candidate(c: RTCIceCandidateInit) -> IceCandidate {
+    IceCandidate { candidate: c.candidate, sdp_mid: c.sdp_mid, sdp_mline_index: c.sdp_mline_index, username_fragment: c.username_fragment }
 }
 
-impl Event {
-    pub fn to_line(&self) -> String {
-        serde_json::to_string(self).expect("events always serialize")
-    }
+/// `sdp` without its candidates: they go to the other side one by one, when the service chooses (never with the
+/// offer of a call that only rings).
+pub fn without_candidates(sdp: &str) -> String {
+    sdp.split_inclusive('\n')
+        .filter(|line| {
+            let line = line.trim_start();
+            !line.starts_with("a=candidate:") && !line.starts_with("a=end-of-candidates")
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn parse(line: &str) -> Command {
-        serde_json::from_str(line).unwrap()
+    #[test]
+    fn only_what_webrtc_here_can_use() {
+        let list = vec![
+            IceServer { urls: vec!["stun:stun.cloudflare.com:3478".into(), "stun:stun.cloudflare.com:53?transport=udp".into()], ..Default::default() },
+            IceServer {
+                urls: vec![
+                    "turn:turn.cloudflare.com:3478?transport=udp".into(),
+                    "turn:turn.cloudflare.com:3478?transport=tcp".into(),
+                    "turns:turn.cloudflare.com:5349?transport=tcp".into(),
+                    "turn:turn.cloudflare.com:53".into(),
+                    "nonsense".into(),
+                ],
+                username: "u".into(),
+                credential: "p".into(),
+            },
+            // TURN without credentials would refuse the whole configuration.
+            IceServer { urls: vec!["turn:turn.example:3478".into()], ..Default::default() },
+        ];
+        let s = servers(&list);
+        assert!(s.relay);
+        assert_eq!(s.skipped, 4);
+        assert_eq!(s.servers.len(), 2);
+        assert_eq!(s.servers[0].urls, vec!["stun:stun.cloudflare.com:3478", "stun:stun.cloudflare.com:53"]);
+        assert_eq!(s.servers[1].urls, vec!["turn:turn.cloudflare.com:3478?transport=udp", "turn:turn.cloudflare.com:53"]);
+        assert_eq!((s.servers[1].username.as_str(), s.servers[1].credential.as_str()), ("u", "p"));
+        // Every URL WebRTC is given parses, credentials included.
+        for server in &s.servers {
+            assert!(server.urls().is_ok(), "{server:?}");
+        }
+        let stun_only = servers(&list[..1]);
+        assert!(!stun_only.relay);
+        assert!(servers(&[]).servers.is_empty());
     }
 
     #[test]
-    fn offer_with_ice_servers_in_both_shapes() {
-        let c = parse(
-            r#"{"cmd":"offer","mic":null,"ice_servers":[
-                {"urls":"stun:stun.cloudflare.com:3478"},
-                {"urls":["turn:turn.cloudflare.com:3478?transport=udp","turns:turn.cloudflare.com:5349?transport=tcp"],"username":"u","credential":"p"}]}"#,
-        );
-        let Command::Offer { ice_servers, mic } = c else { panic!("{c:?}") };
-        assert_eq!(mic, None);
-        let servers: Vec<RTCIceServer> = ice_servers.into_iter().map(Into::into).collect();
-        assert_eq!(servers[0].urls, vec!["stun:stun.cloudflare.com:3478"]);
-        assert_eq!(servers[0].username, "");
-        assert_eq!(servers[1].urls.len(), 2);
-        assert_eq!((servers[1].username.as_str(), servers[1].credential.as_str()), ("u", "p"));
+    fn descriptions_go_without_candidates() {
+        let sdp = "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\na=candidate:1 1 udp 2130706431 192.168.1.2 50000 typ host\r\n\
+                   a=candidate:2 1 udp 1694498815 1.2.3.4 50001 typ srflx raddr 192.168.1.2 rport 50000\r\na=end-of-candidates\r\na=rtpmap:111 opus/48000/2\r\n";
+        let out = without_candidates(sdp);
+        assert_eq!(out, "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\na=rtpmap:111 opus/48000/2\r\n");
+        assert!(!out.contains("192.168"));
     }
 
     #[test]
-    fn offer_without_optional_fields() {
-        assert_eq!(parse(r#"{"cmd":"offer"}"#), Command::Offer { ice_servers: vec![], mic: None });
-    }
-
-    #[test]
-    fn answer_with_mic() {
-        let c = parse(r#"{"cmd":"answer","offer":"v=0\r\n","ice_servers":[],"mic":"{0.0.1.00000000}.{abc}"}"#);
-        assert_eq!(c, Command::Answer { offer: "v=0\r\n".into(), ice_servers: vec![], mic: Some("{0.0.1.00000000}.{abc}".into()) });
-    }
-
-    #[test]
-    fn remote_answer_mute_hangup_quit() {
-        assert_eq!(parse(r#"{"cmd":"remote_answer","sdp":"x"}"#), Command::RemoteAnswer { sdp: "x".into() });
-        assert_eq!(parse(r#"{"cmd":"mute","on":true}"#), Command::Mute { on: true });
-        assert_eq!(parse(r#"{"cmd":"hangup"}"#), Command::Hangup);
-        assert_eq!(parse(r#"{"cmd":"quit"}"#), Command::Quit);
-    }
-
-    #[test]
-    fn candidates_as_browsers_write_them() {
-        let c = parse(
-            r#"{"cmd":"candidates","candidates":[
-                {"candidate":"candidate:1 1 udp 2130706431 192.168.1.2 50000 typ host","sdpMid":"0","sdpMLineIndex":0},
-                {"candidate":"candidate:2 1 udp 1694498815 1.2.3.4 50001 typ srflx raddr 0.0.0.0 rport 0","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":"abcd"}]}"#,
-        );
-        let Command::Candidates { candidates } = c else { panic!("{c:?}") };
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0].sdp_mid.as_deref(), Some("0"));
-        assert_eq!(candidates[0].sdp_mline_index, Some(0));
-        assert_eq!(candidates[1].username_fragment.as_deref(), Some("abcd"));
-    }
-
-    #[test]
-    fn unknown_or_incomplete_commands_are_refused() {
-        assert!(serde_json::from_str::<Command>(r#"{"cmd":"dial"}"#).is_err());
-        assert!(serde_json::from_str::<Command>(r#"{"cmd":"answer"}"#).is_err());
-        assert!(serde_json::from_str::<Command>(r#"{"cmd":"mute"}"#).is_err());
-        assert!(serde_json::from_str::<Command>(r#"{"cmd":"offer","ice_servers":[{"urls":3}]}"#).is_err());
-    }
-
-    #[test]
-    fn events_are_tagged_lines() {
-        assert_eq!(Event::Ready.to_line(), r#"{"event":"ready"}"#);
-        assert_eq!(Event::Connected.to_line(), r#"{"event":"connected"}"#);
-        assert_eq!(Event::Offer { sdp: "v=0".into() }.to_line(), r#"{"event":"offer","sdp":"v=0"}"#);
-        assert_eq!(Event::Ended { reason: EndReason::Failed }.to_line(), r#"{"event":"ended","reason":"failed"}"#);
-        assert_eq!(Event::Levels { mic: 0.5, remote: 0.25 }.to_line(), r#"{"event":"levels","mic":0.5,"remote":0.25}"#);
-        assert_eq!(Event::Error { message: "no".into() }.to_line(), r#"{"event":"error","message":"no"}"#);
-        let candidate = RTCIceCandidateInit { candidate: "candidate:1".into(), sdp_mid: Some("0".into()), sdp_mline_index: Some(0), ..Default::default() };
-        assert_eq!(
-            Event::Candidate { candidate }.to_line(),
-            r#"{"event":"candidate","candidate":{"candidate":"candidate:1","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":null}}"#
-        );
+    fn candidates_cross_unchanged() {
+        let c = IceCandidate {
+            candidate: "candidate:1 1 udp 1 1.2.3.4 9 typ relay".into(),
+            sdp_mid: Some("0".into()),
+            sdp_mline_index: Some(0),
+            username_fragment: Some("ab".into()),
+        };
+        assert_eq!(candidate(rtc_candidate(c.clone())), c);
     }
 }

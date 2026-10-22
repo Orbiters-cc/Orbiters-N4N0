@@ -9,10 +9,7 @@ use serde::Serialize;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
-
-/// How often a recording's frame records and manifest reach the disk ([`BundleWriter::checkpoint`]).
-pub const CHECKPOINT_EVERY: Duration = Duration::from_secs(5);
+use std::time::{Instant, SystemTime};
 
 pub fn keyframe_file(index: i32) -> String {
     format!("{index:06}.qoi")
@@ -37,7 +34,8 @@ pub fn unique_dir(parent: &Path, name: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// Writes one session bundle. Keyframe and depth files are written by the caller (often on other threads) at
-/// the paths this writer hands out; records are appended in frame order here.
+/// the paths this writer hands out; records are appended in frame order here. The caller checkpoints now and then
+/// ([`BundleWriter::checkpoint`]: the recording session does every few seconds).
 pub struct BundleWriter {
     dir: PathBuf,
     manifest: SessionManifest,
@@ -45,7 +43,6 @@ pub struct BundleWriter {
     next_keyframe: i32,
     next_depth: i32,
     started: Instant,
-    last_manifest_write: Instant,
     /// Duration measured in game time instead of wall time (sources replayed faster than real time).
     game_time_duration: bool,
 }
@@ -56,16 +53,7 @@ impl BundleWriter {
         fs::create_dir_all(dir.join(manifest::KEYFRAMES_DIR))?;
         fs::create_dir_all(dir.join(manifest::DEPTH_DIR))?;
         let frames = BufWriter::with_capacity(1 << 16, File::create(dir.join(manifest::FRAMES_FILE))?);
-        let writer = Self {
-            dir,
-            manifest,
-            frames,
-            next_keyframe: 0,
-            next_depth: 0,
-            started: Instant::now(),
-            last_manifest_write: Instant::now(),
-            game_time_duration: false,
-        };
+        let writer = Self { dir, manifest, frames, next_keyframe: 0, next_depth: 0, started: Instant::now(), game_time_duration: false };
         writer.write_manifest()?;
         Ok(writer)
     }
@@ -128,20 +116,25 @@ impl BundleWriter {
         if record.has(record_flags::GATED) {
             s.gated += 1;
         }
-        if self.last_manifest_write.elapsed() >= CHECKPOINT_EVERY {
-            self.checkpoint()?;
-        }
         Ok(())
     }
 
     /// Writes the frame records and the manifest as they stand (duration so far), so a session that never
-    /// finishes (the worker killed or crashed, Windows shut down) reads up to here. Tried again after
-    /// [`CHECKPOINT_EVERY`] when it fails.
+    /// finishes (the worker killed or crashed, Windows shut down) reads up to here. The caller calls it every few
+    /// seconds, and again later when it fails.
     pub fn checkpoint(&mut self) -> anyhow::Result<()> {
-        self.last_manifest_write = Instant::now();
         self.frames.flush()?;
         self.measure_duration();
         self.write_manifest()
+    }
+
+    /// [`BundleWriter::checkpoint`] for a caller that writes the manifest on another thread (a recording's thread
+    /// does not wait for the disk to flush it): the frame records go to their file, and the manifest as it stands
+    /// (duration so far) comes back as the path and bytes of `manifest.json`, to write with [`crate::write_atomic`].
+    pub fn checkpoint_deferred(&mut self) -> anyhow::Result<(PathBuf, Vec<u8>)> {
+        self.frames.flush()?;
+        self.measure_duration();
+        Ok((self.dir.join(manifest::MANIFEST_FILE), serde_json::to_vec_pretty(&self.manifest)?))
     }
 
     fn measure_duration(&mut self) {
@@ -174,17 +167,31 @@ impl BundleWriter {
         self.game_time_duration = true;
     }
 
-    pub fn finish(mut self) -> anyhow::Result<(PathBuf, SessionManifest)> {
-        self.frames.flush()?;
+    pub fn finish(self) -> anyhow::Result<(PathBuf, SessionManifest)> {
+        let (dir, manifest, error) = self.finish_keeping();
+        match error {
+            Some(e) => Err(e),
+            None => Ok((dir, manifest)),
+        }
+    }
+
+    /// Flushes the frame records and writes the final manifest, both tried whatever the other did; the manifest
+    /// comes back even when it could not be written (a full disk), with why.
+    pub fn finish_keeping(mut self) -> (PathBuf, SessionManifest, Option<anyhow::Error>) {
+        let flushed = self.frames.flush().map_err(anyhow::Error::from);
         self.measure_duration();
-        self.write_manifest()?;
-        Ok((self.dir, self.manifest))
+        let written = self.write_manifest();
+        (self.dir, self.manifest, flushed.err().or(written.err()))
     }
 }
 
-/// Box-filter downscale of RGBA to at most `max_width` wide; returns RGB.
+/// Box-filter downscale of RGBA to at most `max_width` wide; returns RGB. An empty image (or fewer pixels than its
+/// size says) gives an empty one.
 pub fn downscale(rgba: &[u8], width: u32, height: u32, max_width: u32) -> (u32, u32, Vec<u8>) {
-    let factor = width.div_ceil(max_width).max(1);
+    if width == 0 || height == 0 || (rgba.len() as u64) < width as u64 * height as u64 * 4 {
+        return (0, 0, Vec::new());
+    }
+    let factor = width.div_ceil(max_width.max(1)).max(1);
     let (tw, th) = ((width / factor).max(1), (height / factor).max(1));
     let mut out = vec![0u8; (tw * th * 3) as usize];
     for ty in 0..th {
@@ -220,11 +227,57 @@ pub struct SessionSummary {
     pub modified: u64,
     /// The latest finished reconstruction.
     pub reconstruction: Option<crate::reconstruction::Report>,
+    /// Why the session's manifest could not be read (cut short by a crash or a power cut, or not JSON): the session is
+    /// listed all the same, with what its folder shows and an empty manifest, so it can be seen, opened and removed
+    /// rather than hide its gigabytes. `None` for a session read as it should be.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub damaged: Option<String>,
 }
 
+/// A session's manifest. One written by another version (a field it does not know the shape of) keeps every field
+/// that fits rather than leaving the session out of the library ([`crate::json_lenient`]); a file that is not JSON is
+/// an error.
 pub fn read_manifest(dir: &Path) -> anyhow::Result<SessionManifest> {
-    let text = fs::read_to_string(dir.join(manifest::MANIFEST_FILE))?;
-    Ok(serde_json::from_str(&text)?)
+    let path = dir.join(manifest::MANIFEST_FILE);
+    let text = crate::read_text(&path)?.ok_or_else(|| anyhow::anyhow!("{} not found", path.display()))?;
+    let (manifest, dropped) = crate::json_lenient::<SessionManifest>(&text);
+    anyhow::ensure!(dropped.iter().all(|d| d != "(not JSON)"), "{} is not a manifest", path.display());
+    Ok(manifest)
+}
+
+/// What a session folder's size was measured with: when its manifest, the folder itself (files added or removed
+/// there) and its latest reconstruction's report last changed. A recording rewrites the manifest every few seconds, a
+/// finished reconstruction is renamed into the folder with a report of its own.
+type Stamp = [Option<SystemTime>; 3];
+
+fn stamp(dir: &Path) -> Stamp {
+    let modified = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    let report = crate::reconstruction::result_dir(dir).join(crate::reconstruction::REPORT_FILE);
+    [modified(&dir.join(manifest::MANIFEST_FILE)), modified(dir), modified(&report)]
+}
+
+/// [`folder_size`] of a session, measured again only once something in it changed ([`Stamp`]): the library's size is
+/// known again without stating every file of every session (thousands of keyframes each).
+pub fn session_size(dir: &Path) -> u64 {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static SIZES: Mutex<Option<HashMap<PathBuf, (Stamp, u64)>>> = Mutex::new(None);
+    let now = stamp(dir);
+    let known = SIZES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().and_then(|sizes| sizes.get(dir).copied());
+    if let Some((then, size)) = known {
+        if then == now && now[0].is_some() {
+            return size;
+        }
+    }
+    let size = folder_size(dir);
+    let mut sizes = SIZES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let sizes = sizes.get_or_insert_with(HashMap::new);
+    // Folders gone (trashed, another library) are forgotten now and then.
+    if sizes.len() > 4096 {
+        sizes.retain(|d, _| d.is_dir());
+    }
+    sizes.insert(dir.to_path_buf(), (now, size));
+    size
 }
 
 /// Total size of a folder's files (recursive).
@@ -242,48 +295,62 @@ pub fn folder_size(dir: &Path) -> u64 {
     total
 }
 
-/// Sessions under `root`, newest first.
+/// Sessions under `root`, newest first. A folder with a manifest of another program's format is not a session; one
+/// whose manifest cannot be read at all is listed as [`SessionSummary::damaged`].
 pub fn list_sessions(root: &Path) -> Vec<SessionSummary> {
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(root) else { return out };
     for e in entries.flatten() {
         let dir = e.path();
-        if !dir.is_dir() {
+        let manifest_file = dir.join(manifest::MANIFEST_FILE);
+        if !dir.is_dir() || !manifest_file.is_file() {
             continue;
         }
-        let Ok(manifest) = read_manifest(&dir) else { continue };
-        if manifest.format != manifest::MANIFEST_FORMAT {
-            continue;
-        }
-        let modified = fs::metadata(dir.join(manifest::MANIFEST_FILE))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let (manifest, damaged) = match read_manifest(&dir) {
+            Ok(manifest) if manifest.format == manifest::MANIFEST_FORMAT => (manifest, None),
+            Ok(_) => continue,
+            Err(e) => (SessionManifest { format: manifest::MANIFEST_FORMAT.into(), ..Default::default() }, Some(format!("{e:#}"))),
+        };
+        let changed = fs::metadata(&manifest_file).and_then(|m| m.modified()).or_else(|_| fs::metadata(&dir).and_then(|m| m.modified()));
+        let modified = changed.ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
         out.push(SessionSummary {
             has_thumbnail: dir.join(manifest::THUMBNAIL_FILE).is_file(),
-            size_bytes: folder_size(&dir),
+            size_bytes: session_size(&dir),
             reconstruction: crate::reconstruction::read_report(&dir),
             dir,
             manifest,
             modified,
+            damaged,
         });
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.modified));
     out
 }
 
-/// All frame records of a bundle.
+/// The frame records of a bundle that read as records ([`read_records_counted`]).
 pub fn read_records(dir: &Path) -> anyhow::Result<Vec<FrameRecord>> {
-    let bytes = fs::read(dir.join(manifest::FRAMES_FILE))?;
-    bytes.as_chunks::<RECORD_SIZE>().0.iter().map(|c| FrameRecord::from_bytes(c).map_err(anyhow::Error::from)).collect()
+    read_records_counted(dir).map(|(records, _)| records)
 }
+
+/// The frame records of a bundle, and how many did not read as one. Records have a fixed size, so one that does not
+/// read (zeros a power cut left, a version this one does not know) is passed over and the next ones still read; a
+/// record cut short at the end (the worker stopped mid-write) is left out. Only a file that cannot be read is an error.
+pub fn read_records_counted(dir: &Path) -> anyhow::Result<(Vec<FrameRecord>, usize)> {
+    let bytes = fs::read(dir.join(manifest::FRAMES_FILE))?;
+    let chunks = bytes.as_chunks::<RECORD_SIZE>().0;
+    let records: Vec<FrameRecord> = chunks.iter().filter_map(|c| FrameRecord::from_bytes(c).ok()).collect();
+    let bad = chunks.len() - records.len();
+    Ok((records, bad))
+}
+
+/// The largest session thumbnail read: [`BundleWriter::write_thumbnail`] makes them at most 480 wide (a picture
+/// standing up, four times as tall). A file saying it is larger is not one, and gets no memory.
+const THUMBNAIL_PIXELS: u64 = 480 * 480 * 4;
 
 /// The session thumbnail as top-down RGBA: (width, height, pixels).
 pub fn read_thumbnail(dir: &Path) -> Option<(u32, u32, Vec<u8>)> {
     let data = fs::read(dir.join(manifest::THUMBNAIL_FILE)).ok()?;
-    let (h, rgba) = qoi::decode_rgba(&data).ok()?;
+    let (h, rgba) = qoi::decode_rgba_max(&data, THUMBNAIL_PIXELS).ok()?;
     Some((h.width, h.height, rgba))
 }
 
@@ -291,6 +358,37 @@ pub fn read_thumbnail(dir: &Path) -> Option<(u32, u32, Vec<u8>)> {
 mod tests {
     use super::*;
     use crate::contracts::manifest::SessionManifest;
+    use std::time::Duration;
+
+    #[test]
+    fn a_damaged_session_is_listed_and_its_good_records_read() {
+        let root = std::env::temp_dir().join(format!("orbiters-bundle-damaged-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut w = BundleWriter::create(&root, "Damaged", SessionManifest::new("id-4".into(), crate::now_utc_iso(), "0.1.0")).unwrap();
+        let good = |i: u64| FrameRecord { frame_index: i, flags: record_flags::STRIP_OK, ..Default::default() };
+        w.append_record(&good(0)).unwrap();
+        let (dir, _) = w.finish().unwrap();
+        // Zeros where a record should be (a power cut), a good record after them, and one cut short at the end.
+        let mut bytes = fs::read(dir.join(manifest::FRAMES_FILE)).unwrap();
+        bytes.extend_from_slice(&[0u8; RECORD_SIZE]);
+        bytes.extend_from_slice(&good(2).to_bytes());
+        bytes.extend_from_slice(&good(3).to_bytes()[..RECORD_SIZE / 2]);
+        fs::write(dir.join(manifest::FRAMES_FILE), bytes).unwrap();
+        let (records, bad) = read_records_counted(&dir).unwrap();
+        assert_eq!((records.iter().map(|r| r.frame_index).collect::<Vec<_>>(), bad), (vec![0, 2], 1));
+        assert_eq!(read_records(&dir).unwrap().len(), 2);
+        // A manifest that is no longer JSON: the session is still listed, flagged, with its size.
+        fs::write(dir.join(manifest::MANIFEST_FILE), [0u8; 64]).unwrap();
+        let list = list_sessions(&root);
+        assert_eq!(list.len(), 1);
+        assert!(list[0].damaged.is_some() && list[0].size_bytes > 0, "{:?}", list[0].damaged);
+        // A folder without a manifest, or with another program's, is no session.
+        fs::create_dir_all(root.join("notes")).unwrap();
+        fs::create_dir_all(root.join("other")).unwrap();
+        fs::write(root.join("other").join(manifest::MANIFEST_FILE), r#"{"format":"something.else"}"#).unwrap();
+        assert_eq!(list_sessions(&root).len(), 1);
+        fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn write_list_read() {
@@ -313,6 +411,12 @@ mod tests {
         assert_eq!(read_records(&dir).unwrap()[0], r);
         let (tw, th, pixels) = read_thumbnail(&dir).unwrap();
         assert_eq!((tw, th, pixels.len()), (64, 32, 64 * 32 * 4));
+        // One that says it is larger than any thumbnail made is not read (nor given the memory it asks for).
+        let mut big = qoi::encode(&[0u8; 3], 1, 1, 3);
+        big[4..8].copy_from_slice(&4000u32.to_be_bytes());
+        big[8..12].copy_from_slice(&4000u32.to_be_bytes());
+        fs::write(dir.join(manifest::THUMBNAIL_FILE), big).unwrap();
+        assert!(read_thumbnail(&dir).is_none());
         // A second session with the same name gets a numbered folder.
         let w2 = BundleWriter::create(&root, "World: test", SessionManifest::default()).unwrap();
         assert!(w2.dir().ends_with("World_ test (2)"));
@@ -320,25 +424,70 @@ mod tests {
     }
 
     #[test]
-    fn records_and_manifest_reach_the_disk_every_few_seconds_not_every_frame() {
+    fn a_manifest_from_another_version_still_lists_and_sizes_follow_changes() {
+        let root = std::env::temp_dir().join(format!("orbiters-bundle-lenient-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let w = BundleWriter::create(&root, "Later", SessionManifest::new("id-3".into(), crate::now_utc_iso(), "0.1.0")).unwrap();
+        let (dir, _) = w.finish().unwrap();
+        // A field of a shape this version does not know: the rest of the manifest is read.
+        let mut value: serde_json::Value = serde_json::from_str(&fs::read_to_string(dir.join(manifest::MANIFEST_FILE)).unwrap()).unwrap();
+        value["stats"]["frames"] = serde_json::json!("many");
+        fs::write(dir.join(manifest::MANIFEST_FILE), value.to_string()).unwrap();
+        let read = read_manifest(&dir).unwrap();
+        assert_eq!((read.id.as_str(), read.stats.frames), ("id-3", 0));
+        assert_eq!(list_sessions(&root).len(), 1);
+        fs::write(dir.join(manifest::MANIFEST_FILE), "not json").unwrap();
+        assert!(read_manifest(&dir).is_err());
+        // The size is measured again once the folder changes.
+        let before = session_size(&dir);
+        assert_eq!(session_size(&dir), before);
+        // Past the file system clock's tick (about 16 ms on Windows), so the change has a time of its own.
+        std::thread::sleep(Duration::from_millis(40));
+        fs::write(dir.join("extra.bin"), vec![0u8; 1000]).unwrap();
+        assert_eq!(session_size(&dir), before + 1000);
+        fs::remove_dir_all(&root).ok();
+        assert_eq!(downscale(&[], 0, 0, 0), (0, 0, Vec::new()));
+        assert_eq!(downscale(&[1, 2, 3, 4], 1, 1, 0).0, 1, "no division by a width of 0");
+    }
+
+    #[test]
+    fn records_and_manifest_reach_the_disk_at_checkpoints_not_every_frame() {
         let root = std::env::temp_dir().join(format!("orbiters-bundle-checkpoint-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let mut w = BundleWriter::create(&root, "Checkpoints", SessionManifest::new("id-2".into(), crate::now_utc_iso(), "0.1.0")).unwrap();
         let r = FrameRecord { flags: record_flags::STRIP_OK, ..Default::default() };
         w.append_record(&r).unwrap();
-        // Not due yet: the manifest on disk is the first one.
+        // A frame writes neither: the manifest on disk is the first one.
         assert_eq!(read_manifest(w.dir()).unwrap().stats.frames, 0);
-        // Due: records and manifest are written once, and not again on the next frame.
-        w.last_manifest_write = Instant::now().checked_sub(CHECKPOINT_EVERY).unwrap();
-        w.append_record(&r).unwrap();
+        // A checkpoint (the recording makes one every few seconds) writes both.
+        w.checkpoint().unwrap();
         let saved = read_manifest(w.dir()).unwrap();
-        assert_eq!((saved.stats.frames, read_records(w.dir()).unwrap().len()), (2, 2));
+        assert_eq!((saved.stats.frames, read_records(w.dir()).unwrap().len()), (1, 1));
         assert!(saved.stats.duration_s > 0.0);
         w.append_record(&r).unwrap();
-        assert_eq!(read_manifest(w.dir()).unwrap().stats.frames, 2);
+        assert_eq!(read_manifest(w.dir()).unwrap().stats.frames, 1);
         let (dir, manifest) = w.finish().unwrap();
-        assert_eq!((manifest.stats.frames, read_manifest(&dir).unwrap().stats.frames), (3, 3));
+        assert_eq!((manifest.stats.frames, read_manifest(&dir).unwrap().stats.frames), (2, 2));
         assert!(!dir.join("manifest.json.tmp").exists());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A deferred checkpoint writes the records and hands the manifest over, for another thread to write.
+    #[test]
+    fn a_deferred_checkpoint_hands_the_manifest_over() {
+        let root = std::env::temp_dir().join(format!("orbiters-bundle-deferred-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut w = BundleWriter::create(&root, "Deferred", SessionManifest::new("id-4".into(), crate::now_utc_iso(), "0.1.0")).unwrap();
+        w.append_record(&FrameRecord { flags: record_flags::STRIP_OK, ..Default::default() }).unwrap();
+        let (path, bytes) = w.checkpoint_deferred().unwrap();
+        assert_eq!(path, w.dir().join(manifest::MANIFEST_FILE));
+        assert_eq!(read_records(w.dir()).unwrap().len(), 1, "the records are on disk");
+        assert_eq!(read_manifest(w.dir()).unwrap().stats.frames, 0, "the manifest is not yet");
+        let handed: SessionManifest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!((handed.id.as_str(), handed.stats.frames), ("id-4", 1));
+        crate::write_atomic(&path, &bytes).unwrap();
+        assert_eq!(read_manifest(w.dir()).unwrap().stats.frames, 1);
+        drop(w);
         fs::remove_dir_all(&root).ok();
     }
 }

@@ -1,6 +1,6 @@
-//! The reference renderer, in f64: forward and backward exactly as the GPU kernels compute them (same culling,
-//! thresholds and order), slow and simple. Tests check its gradients against finite differences, and the GPU
-//! against it.
+//! The reference renderer, in f64: forward and backward exactly as the GPU kernels compute them (the same culling
+//! by tile_hit, thresholds and order; the GPU decides borderline tiles in f32), slow and simple. Tests check its
+//! gradients against finite differences, and the GPU against it.
 //!
 //! Model (3DGS): a Gaussian projects to a 2D Gaussian (EWA splatting with the 3DGS frustum clamp and 0.3 px
 //! dilation); pixels blend the Gaussians front to back, `C = Σ cᵢ αᵢ Tᵢ + T·background`, with
@@ -36,6 +36,10 @@ impl Rules {
     pub const SMOOTH: Self = Self { cull_tiles: false, min_alpha: 0.0 };
 }
 
+/// D-SSIM's stabilising constants (C1 = 0.01², C2 = 0.03²), as ssim.wgsl uses them.
+pub const SSIM_C1: f64 = 0.0001;
+pub const SSIM_C2: f64 = 0.0009;
+
 /// A Gaussian as the image sees it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Projected {
@@ -47,8 +51,50 @@ pub struct Projected {
     pub opacity: f64,
     pub color: [f64; 3],
     pub radius: f64,
-    /// Tile rectangle touched (x0, y0, x1, y1), half-open.
+    /// Tile rectangle of the ellipse's own extent (x0, y0, x1, y1), half-open; within it, the tiles [`tile_hit`] passes.
     pub tiles: [u32; 4],
+    /// Largest quadratic form at which this Gaussian still reaches α = 1/255 (common.wgsl `alpha_reach`).
+    pub reach: f64,
+}
+
+/// Whether a Gaussian centred at `m` with conic (A, B, C) reaches the quadratic form `tau` at any pixel centre of
+/// tile (`tx`, `ty`): common.wgsl's `tile_hit`, which decides the tiles a Gaussian is drawn in.
+pub fn tile_hit(m: [f64; 2], conic: [f64; 3], tau: f64, tx: u32, ty: u32) -> bool {
+    let lo = [(tx * TILE) as f64 - m[0], (ty * TILE) as f64 - m[1]];
+    let hi = [lo[0] + (TILE - 1) as f64, lo[1] + (TILE - 1) as f64];
+    if lo[0] <= 0.0 && hi[0] >= 0.0 && lo[1] <= 0.0 && hi[1] >= 0.0 {
+        return true;
+    }
+    let q = |x: f64, y: f64| conic[0] * x * x + 2.0 * conic[1] * x * y + conic[2] * y * y;
+    let mut best = f64::MAX;
+    for k in 0..2 {
+        let dx = if k == 1 { hi[0] } else { lo[0] };
+        best = best.min(q(dx, (-conic[1] * dx / conic[2]).clamp(lo[1], hi[1])));
+        let ey = if k == 1 { hi[1] } else { lo[1] };
+        best = best.min(q((-conic[1] * ey / conic[0]).clamp(lo[0], hi[0]), ey));
+    }
+    best <= tau
+}
+
+/// SSIM of one window from its means μx, μy and moments E[x²], E[y²], E[xy].
+pub fn ssim(mx: f64, my: f64, exx: f64, eyy: f64, exy: f64) -> f64 {
+    let a = 2.0 * mx * my + SSIM_C1;
+    let b = 2.0 * (exy - mx * my) + SSIM_C2;
+    let c = mx * mx + my * my + SSIM_C1;
+    let d = (exx - mx * mx) + (eyy - my * my) + SSIM_C2;
+    a * b / (c * d)
+}
+
+/// [`ssim`]'s partial derivatives ∂S/∂μx, ∂S/∂E[x²], ∂S/∂E[xy], as ssim.wgsl computes them (fused-ssim's algebra):
+/// divided only by c ≥ C1 and d ≳ C2, never by a or b, which cross zero in anti-correlated windows.
+pub fn ssim_partials(mx: f64, my: f64, exx: f64, eyy: f64, exy: f64) -> [f64; 3] {
+    let a = 2.0 * mx * my + SSIM_C1;
+    let b = 2.0 * (exy - mx * my) + SSIM_C2;
+    let c = mx * mx + my * my + SSIM_C1;
+    let d = (exx - mx * mx) + (eyy - my * my) + SSIM_C2;
+    let cd = c * d;
+    let s = a * b / cd;
+    [2.0 * my * (b - a) / cd - 2.0 * mx * s * (1.0 / c - 1.0 / d), -s / d, 2.0 * a / cd]
 }
 
 pub struct Image {
@@ -114,7 +160,6 @@ struct Proj {
     qlen: f64,
     sigma_c: M3,
     j: [[f64; 3]; 2],
-    cov: [f64; 3],
     clamp_x: bool,
     clamp_y: bool,
     u: f64,
@@ -141,7 +186,6 @@ fn project_one(g: &Gaussians, i: usize, cam: &Camera) -> Proj {
         qlen,
         sigma_c: [[0.0; 3]; 3],
         j: [[0.0; 3]; 2],
-        cov: [0.0; 3],
         clamp_x: false,
         clamp_y: false,
         u: 0.0,
@@ -179,29 +223,32 @@ fn project_one(g: &Gaussians, i: usize, cam: &Camera) -> Proj {
     let op = 1.0 / (1.0 + (-(g.opacity_logits[i] as f64)).exp());
     let mid = 0.5 * (a + c);
     let lambda = mid + (mid * mid - det).max(0.1).sqrt();
-    let radius = (extent_sigmas(op) * lambda.sqrt()).ceil();
+    // Out to α = 1/255 at this opacity; one that never gets there draws nothing (project.wgsl).
+    let sigmas = extent_sigmas(op);
+    let reach = sigmas * sigmas;
+    if reach <= 0.0 {
+        return proj;
+    }
+    let radius = (sigmas * lambda.sqrt()).ceil();
+    // The ellipse's own extent per axis, then only the tiles it reaches (tile_hit), as project.wgsl counts them.
+    let (rx, ry) = (sigmas * a.sqrt(), sigmas * c.sqrt());
     let tiles_x = cam.width.div_ceil(TILE) as f64;
     let tiles_y = cam.height.div_ceil(TILE) as f64;
-    let tx0 = ((mean[0] - radius) / TILE as f64).floor().clamp(0.0, tiles_x);
-    let ty0 = ((mean[1] - radius) / TILE as f64).floor().clamp(0.0, tiles_y);
-    let tx1 = ((mean[0] + radius) / TILE as f64 + 1.0).floor().clamp(0.0, tiles_x);
-    let ty1 = ((mean[1] + radius) / TILE as f64 + 1.0).floor().clamp(0.0, tiles_y);
+    let tx0 = ((mean[0] - rx) / TILE as f64).floor().clamp(0.0, tiles_x);
+    let ty0 = ((mean[1] - ry) / TILE as f64).floor().clamp(0.0, tiles_y);
+    let tx1 = ((mean[0] + rx) / TILE as f64 + 1.0).floor().clamp(0.0, tiles_x);
+    let ty1 = ((mean[1] + ry) / TILE as f64 + 1.0).floor().clamp(0.0, tiles_y);
     if tx1 <= tx0 || ty1 <= ty0 {
         return proj;
     }
-    proj.p = Projected {
-        valid: true,
-        mean,
-        conic: [c / det, -b / det, a / det],
-        depth: z,
-        opacity: op,
-        color: g.colors[i].map(|v| v as f64),
-        radius,
-        tiles: [tx0 as u32, ty0 as u32, tx1 as u32, ty1 as u32],
-    };
+    let conic = [c / det, -b / det, a / det];
+    let tiles = [tx0 as u32, ty0 as u32, tx1 as u32, ty1 as u32];
+    if !(tiles[1]..tiles[3]).any(|ty| (tiles[0]..tiles[2]).any(|tx| tile_hit(mean, conic, reach, tx, ty))) {
+        return proj;
+    }
+    proj.p = Projected { valid: true, mean, conic, depth: z, opacity: op, color: g.colors[i].map(|v| v as f64), radius, tiles, reach };
     proj.sigma_c = sigma_c;
     proj.j = j;
-    proj.cov = [a, b, c];
     proj.clamp_x = ux != u;
     proj.clamp_y = uy != v;
     proj.u = u;
@@ -237,7 +284,7 @@ fn contributions(proj: &[Projected], ord: &[usize], px: u32, py: u32, rules: Rul
     let mut out = Vec::new();
     for &i in ord {
         let p = &proj[i];
-        if rules.cull_tiles && !(tx >= p.tiles[0] && tx < p.tiles[2] && ty >= p.tiles[1] && ty < p.tiles[3]) {
+        if rules.cull_tiles && !(tx >= p.tiles[0] && tx < p.tiles[2] && ty >= p.tiles[1] && ty < p.tiles[3] && tile_hit(p.mean, p.conic, p.reach, tx, ty)) {
             continue;
         }
         let (dx, dy) = (px as f64 - p.mean[0], py as f64 - p.mean[1]);
@@ -356,16 +403,13 @@ pub fn backward(g: &Gaussians, cam: &Camera, background: [f64; 3], rules: Rules,
         let op = pr.p.opacity;
         out.opacity_logits[i] = d_op[i] * op * (1.0 - op);
         let [x, y, z] = pr.pc;
-        // Conic → 2D covariance (a, b, c) with det = ac − b².
-        let [a, b, c] = pr.cov;
-        let det = a * c - b * b;
-        let inv2 = 1.0 / (det * det);
+        // Conic → 2D covariance: dL/dΣ = −K·(dL/dK)·K with the conic K = (A, B; B, C) (dL/dB counts B once, so the
+        // off-diagonal of dL/dK is half of it), as project_backward.wgsl computes it: no 1/det².
+        let [ka, kb, kc] = pr.p.conic;
         let [g0, g1, g2] = d_conic[i];
-        let da = inv2 * (-c * c * g0 + b * c * g1 - b * b * g2);
-        let db = inv2 * (2.0 * b * c * g0 - (det + 2.0 * b * b) * g1 + 2.0 * a * b * g2);
-        let dcc = inv2 * (-b * b * g0 + a * b * g1 - a * a * g2);
+        let off = -(ka * kb * g0 + 0.5 * (kb * kb + ka * kc) * g1 + kb * kc * g2);
         // Symmetric gradient matrix of cov2D (b appears twice).
-        let gm = [[da, 0.5 * db], [0.5 * db, dcc]];
+        let gm = [[-(ka * ka * g0 + ka * kb * g1 + kb * kb * g2), off], [off, -(kb * kb * g0 + kb * kc * g1 + kc * kc * g2)]];
         let j = pr.j;
         // dL/dΣc = Jᵀ G J.
         let mut d_sigma_c = [[0.0; 3]; 3];
@@ -501,6 +545,51 @@ mod tests {
         }
         assert!(checked > 80, "{checked}");
         eprintln!("worst relative error {worst:.2e} over {checked} parameters");
+    }
+
+    /// SSIM's partials where its numerator's factors cross zero (an anti-correlated window, B1 = 0; negative rendered
+    /// colour, A1 = 0): finite, and what finite differences say; elsewhere what the quotient rule says.
+    #[test]
+    fn ssim_partials_are_finite_where_the_numerator_vanishes() {
+        let fd = |f: &dyn Fn(f64) -> f64| (f(1e-7) - f(-1e-7)) / 2e-7;
+        let (mx, my, exx, eyy) = (0.4, 0.6, 0.4 * 0.4 + 0.01, 0.6 * 0.6 + 0.02);
+        for exy in [mx * my - SSIM_C2 / 2.0, mx * my - 0.003, mx * my + 0.004] {
+            let p = ssim_partials(mx, my, exx, eyy, exy);
+            let want = [fd(&|e| ssim(mx + e, my, exx, eyy, exy)), fd(&|e| ssim(mx, my, exx + e, eyy, exy)), fd(&|e| ssim(mx, my, exx, eyy, exy + e))];
+            for k in 0..3 {
+                assert!(p[k].is_finite() && (p[k] - want[k]).abs() < 1e-5 * want[k].abs().max(1.0), "E[xy] {exy}: {p:?} vs {want:?}");
+            }
+        }
+        // A1 = 0: μx·μy = −C1/2 (a render that went negative).
+        let (mx, my) = (-SSIM_C1 / 2.0 / 0.5, 0.5);
+        let p = ssim_partials(mx, my, mx * mx + 0.01, my * my + 0.01, mx * my + 0.002);
+        assert!(p.iter().all(|v| v.is_finite()), "{p:?}");
+        let s = ssim(0.3, 0.7, 0.1, 0.5, 0.25);
+        let (a, b) = (2.0 * 0.3 * 0.7 + SSIM_C1, 2.0 * (0.25 - 0.21) + SSIM_C2);
+        let (c, d) = (0.09 + 0.49 + SSIM_C1, (0.1 - 0.09) + (0.5 - 0.49) + SSIM_C2);
+        let quotient = s * (2.0 * 0.7 / a - 2.0 * 0.7 / b - 2.0 * 0.3 / c + 2.0 * 0.3 / d);
+        assert!((ssim_partials(0.3, 0.7, 0.1, 0.5, 0.25)[0] - quotient).abs() < 1e-9);
+    }
+
+    /// Every tile with a pixel centre the Gaussian reaches passes tile_hit (it never drops a pixel a splat draws).
+    #[test]
+    fn tile_hit_misses_no_pixel() {
+        let mut rng = fastrand::Rng::with_seed(17);
+        for _ in 0..300 {
+            let m = [rng.f64() * 64.0 - 8.0, rng.f64() * 64.0 - 8.0];
+            let (a, c) = (0.5 + rng.f64() * 400.0, 0.5 + rng.f64() * 400.0);
+            let b = (rng.f64() * 2.0 - 1.0) * 0.95 * (a * c).sqrt();
+            let det = a * c - b * b;
+            let conic = [c / det, -b / det, a / det];
+            let tau = 1.0 + rng.f64() * 10.0;
+            for (tx, ty) in [(0u32, 0u32), (1, 0), (0, 1), (2, 2), (3, 1)] {
+                let reaches = (0..16).any(|y| (0..16).any(|x| {
+                    let (dx, dy) = ((tx * TILE + x) as f64 - m[0], (ty * TILE + y) as f64 - m[1]);
+                    conic[0] * dx * dx + 2.0 * conic[1] * dx * dy + conic[2] * dy * dy <= tau
+                }));
+                assert!(!reaches || tile_hit(m, conic, tau, tx, ty), "{m:?} {conic:?} {tau} tile ({tx}, {ty})");
+            }
+        }
     }
 
     #[test]

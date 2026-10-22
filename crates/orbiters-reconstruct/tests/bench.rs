@@ -13,7 +13,7 @@ fn step_timings() {
     let g = ply::read(&dir.join("reconstruction").join("splats.ply")).expect("ply");
     let mut gpu = Gpu::new().expect("gpu");
     gpu.upload(&g);
-    gpu.set_mask(data.width, data.height, &data.mask);
+    gpu.set_mask(data.width, data.height, &data.mask).expect("mask");
     let v = &data.views[3];
     let px = data.mask.iter().filter(|m| **m > 0.5).count() as f32;
     let lr = LearningRates { means: 0.0, log_scales: 0.0, rotations: 0.0, opacity: 0.0, colors: 0.0 };

@@ -1,5 +1,5 @@
-//! Renders egui frames without a window: screenshots for visual review and tests now, the VR overlay's texture
-//! later. Uses the same egui-wgpu renderer and glow pipeline as the desktop window.
+//! Renders egui frames without a window: the screenshots for visual review and the end-to-end runs. Uses the same
+//! egui-wgpu renderer, glow and blur pipelines as the desktop window (the VR overlay paints on the CPU instead).
 
 use anyhow::Context as _;
 use egui::{ColorImage, RawInput};

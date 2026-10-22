@@ -34,7 +34,7 @@ pub fn specs(bare_parameters: bool) -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "set_avatar_control",
-            "description": "Change the owner's VRChat avatar through its expression menu: turn a toggle on or off, press a button (a pose, an emote), or set a radial from 0 to 1. Name the control by its path from the avatar controls in the context (\"Clothes / Hoodie\") or call find_avatar_controls first. Others in the world see the change.",
+            "description": "Change the owner's VRChat avatar through its expression menu: turn a toggle on or off, press a button (a pose, an emote), or set a radial from 0 to 1. Name the control by its path from the avatar controls in the context (\"Clothes / Hoodie\") or call find_avatar_controls first. Others in the world see the change. A control tagged nsfw waits for the owner's yes.",
             "input_schema": { "type": "object", "properties": {
                 "control": { "type": "string", "description": "The control's path or label." },
                 "on": { "type": "boolean", "description": "Toggles: true turns it on, false off. Buttons: true presses it." },
@@ -43,12 +43,12 @@ pub fn specs(bare_parameters: bool) -> Vec<Value> {
         }),
         json!({
             "name": "find_avatar_controls",
-            "description": "Search the owner's avatar menu for controls whose path holds these words (empty: list them all). Returns paths, kinds and current states.",
+            "description": "Search the owner's avatar menu for controls whose path holds these words (empty: list them all). Returns paths, kinds and current states. Orb's own controls and the capture kit's are never listed: they are not yours to press.",
             "input_schema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }
         }),
         json!({
             "name": "hold_avatar_control",
-            "description": "Keep an avatar control at a value: the desktop puts it back whenever VRChat, a world or an avatar change resets it. release: true stops holding it.",
+            "description": "Keep an avatar control at a value: the desktop puts it back whenever VRChat, a world or an avatar change resets it, until released. It waits for the owner's yes. release: true stops holding it.",
             "input_schema": { "type": "object", "properties": {
                 "control": { "type": "string" },
                 "on": { "type": "boolean" },
@@ -73,12 +73,12 @@ pub fn specs(bare_parameters: bool) -> Vec<Value> {
         }),
         json!({
             "name": "copy_to_clipboard",
-            "description": "Put text (such as a video link) in the clipboard of the owner's computer, so they can paste it into a world's video player or VRChat's keyboard.",
+            "description": "Put text (such as a video link) in the clipboard of the owner's computer, so they can paste it into a world's video player or VRChat's keyboard. Orbiters desktop shows the owner the text and copies it once they say yes.",
             "input_schema": { "type": "object", "properties": { "text": { "type": "string", "maxLength": 2000 } }, "required": ["text"] }
         }),
         json!({
             "name": "set_afk_message",
-            "description": "Set the message the orb's panel shows to people while the owner is away (AFK), and/or turn it on or off.",
+            "description": "Set the message the orb's panel shows to people while the owner is away (AFK), and/or turn it on or off. A new text waits for the owner's yes.",
             "input_schema": { "type": "object", "properties": {
                 "text": { "type": "string", "maxLength": 120 },
                 "enabled": { "type": "boolean" }

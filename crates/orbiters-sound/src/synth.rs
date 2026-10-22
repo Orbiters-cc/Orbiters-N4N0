@@ -122,7 +122,7 @@ impl Ramp {
             Ramp::Fixed(v) => v,
             Ramp::Glide { from, to, time: span, curve } => {
                 let y = (time / span.max(1e-4)).clamp(0.0, 1.0);
-                let e = if curve >= 1.0 { 1.0 - (1.0 - y).powf(curve) } else { y.powf(1.0 / curve) };
+                let e = if curve >= 1.0 { 1.0 - (1.0 - y).powf(curve) } else { y.powf(1.0 / curve.max(1e-3)) };
                 if log && from > 0.0 && to > 0.0 {
                     from * (to / from).powf(e)
                 } else {
@@ -158,6 +158,10 @@ impl Envelope {
         let t = time - attack;
         if t < decay {
             let k = self.curve;
+            // No curve is a straight line (the exponential's limit, where its formula divides 0 by 0).
+            if k.abs() < 1e-9 {
+                return 1.0 - t / decay;
+            }
             ((-k * t / decay).exp() - (-k).exp()) / (1.0 - (-k).exp())
         } else {
             0.0
@@ -169,6 +173,8 @@ impl Envelope {
 struct Biquad {
     kind: FilterKind,
     rate: f64,
+    /// 1 / 2Q, with Q as Web Audio reads it for this kind (computed once: a glide sets the frequency every sample).
+    half_inv_q: f64,
     b: [f64; 3],
     a: [f64; 2],
     x: [f64; 2],
@@ -177,18 +183,19 @@ struct Biquad {
 
 impl Biquad {
     fn new(kind: FilterKind, freq: f64, q: f64, rate: f64) -> Self {
-        let mut f = Self { kind, rate, b: [0.0; 3], a: [0.0; 2], x: [0.0; 2], y: [0.0; 2] };
-        f.set(freq, q);
+        let q = match kind {
+            FilterKind::Bandpass => q.max(1e-4),
+            _ => 10f64.powf(q / 20.0),
+        };
+        let mut f = Self { kind, rate, half_inv_q: 0.5 / q, b: [0.0; 3], a: [0.0; 2], x: [0.0; 2], y: [0.0; 2] };
+        f.set(freq);
         f
     }
 
-    fn set(&mut self, freq: f64, q: f64) {
+    fn set(&mut self, freq: f64) {
         let w0 = TAU * (freq / self.rate).clamp(0.0, 0.5);
         let (s, c) = w0.sin_cos();
-        let alpha = match self.kind {
-            FilterKind::Bandpass => s / (2.0 * q.max(1e-4)),
-            _ => s / (2.0 * 10f64.powf(q / 20.0)),
-        };
+        let alpha = s * self.half_inv_q;
         let (b0, b1, b2) = match self.kind {
             FilterKind::Lowpass => ((1.0 - c) / 2.0, 1.0 - c, (1.0 - c) / 2.0),
             FilterKind::Highpass => ((1.0 + c) / 2.0, -(1.0 + c), (1.0 + c) / 2.0),
@@ -230,6 +237,8 @@ fn pink_noise(frames: usize, seed: u64) -> Vec<f64> {
 /// The reverb's impulse response per channel: damped noise decaying by 60 dB over `decay`, a few early taps, unit
 /// energy.
 fn impulse(rate: f64, decay: f64, predelay: f64, damp: f64, seed: u64) -> [Vec<f64>; 2] {
+    // A reverb without a tail would divide by zero below.
+    let decay = decay.max(1e-3);
     let length = ((decay * 1.15 + predelay) * rate).ceil() as usize;
     let taps = [0.0071, 0.0113, 0.0167, 0.0229, 0.0311, 0.0373];
     std::array::from_fn(|channel| {
@@ -280,6 +289,15 @@ impl Curve {
         let k = (x as usize).min(self.values.len() - 2);
         self.values[k] + (self.values[k + 1] - self.values[k]) * (x - k as f64)
     }
+
+    /// The time from which [`Curve::at`] returns the same value every time (a glide that ended).
+    fn settles_at(&self) -> f64 {
+        let last = self.values[self.values.len() - 1];
+        match self.values.iter().rposition(|v| *v != last) {
+            Some(i) => (i + 1) as f64 / (self.values.len() - 1) as f64 * self.span,
+            None => 0.0,
+        }
+    }
 }
 
 fn oscillator(wave: Wave, phase: f64) -> f64 {
@@ -305,7 +323,8 @@ fn layer(bus: &mut [f64], l: &Layer, index: usize, recipe: &Recipe, rate: f64, b
     if span <= 0.0 {
         return;
     }
-    let nyquist = rate / 2.0 - 100.0;
+    // (At absurdly low rates the clamps below still get a range.)
+    let nyquist = (rate / 2.0 - 100.0).max(10.0);
     let first = (start * rate).ceil() as usize;
     let last = (((start + span) * rate).ceil() as usize).min(bus.len());
     let mut signal = vec![0f64; bus.len() - first.min(bus.len())];
@@ -323,6 +342,23 @@ fn layer(bus: &mut [f64], l: &Layer, index: usize, recipe: &Recipe, rate: f64, b
         Source::Tone { freq, wave, partials } => {
             for &(ratio, gain, decay_scale) in partials {
                 let env = Curve::new(span, 600.0, |t| l.env.at(t, decay_scale) * gain);
+                if let (Ramp::Fixed(f), Wave::Sine) = (freq, wave) {
+                    // A steady sine turns by the same angle every sample: a phasor rotated by it, instead of a sine
+                    // per sample (the bells' partials, most of the reveal's oscillators).
+                    let (ds, dc) = (TAU * (f * ratio).clamp(1.0, nyquist) / rate).sin_cos();
+                    let (mut s, mut c) = (0f64, 1f64);
+                    for i in first..last {
+                        let t = i as f64 / rate - start;
+                        signal[i - first] += s * env.at(t);
+                        (s, c) = (s * dc + c * ds, c * dc - s * ds);
+                        // Rounding slowly changes its length: back onto the unit circle now and then.
+                        if (i - first) % 1024 == 1023 {
+                            let r = (s * s + c * c).sqrt().recip();
+                            (s, c) = (s * r, c * r);
+                        }
+                    }
+                    continue;
+                }
                 let pitch = Curve::new(span, 400.0, |t| (freq.at(t, true) * ratio).clamp(1.0, nyquist));
                 let mut phase = 0.0;
                 for i in first..last {
@@ -338,9 +374,11 @@ fn layer(bus: &mut [f64], l: &Layer, index: usize, recipe: &Recipe, rate: f64, b
     for spec in l.filters {
         let freq = Curve::new(span, 400.0, |t| spec.freq.at(t, true).clamp(10.0, nyquist));
         let mut f = Biquad::new(spec.kind, freq.at(0.0), spec.q, rate);
+        // A glide moves the filter until its curve settles; the coefficients then stay what they are.
+        let moving = if spec.freq.fixed() { 0 } else { (freq.settles_at() * rate).ceil() as usize + 1 };
         for (k, v) in signal.iter_mut().enumerate() {
-            if !spec.freq.fixed() {
-                f.set(freq.at(k as f64 / rate), spec.q);
+            if k < moving {
+                f.set(freq.at(k as f64 / rate));
             }
             *v = f.run(*v);
         }
@@ -365,7 +403,7 @@ pub fn render(recipe: &Recipe, rate: u32) -> Sound {
 
     // Master: highpass, lowpass (the shelves are flat at the default tone), drive.
     let mut hp = Biquad::new(FilterKind::Highpass, recipe.highpass, 0.6, r);
-    let mut lp = Biquad::new(FilterKind::Lowpass, recipe.lowpass.clamp(400.0, r / 2.0 - 200.0), 0.5, r);
+    let mut lp = Biquad::new(FilterKind::Lowpass, recipe.lowpass.clamp(400.0, (r / 2.0 - 200.0).max(400.0)), 0.5, r);
     let drive = recipe.drive.clamp(0.0, 1.0);
     let (k, norm) = (1.0 + drive * 6.0, (1.0 + drive * 6.0).tanh());
     for v in bus.iter_mut() {
@@ -378,10 +416,11 @@ pub fn render(recipe: &Recipe, rate: u32) -> Sound {
 
     let mut channels = [bus.clone(), bus];
     if let Some(rv) = reverb {
+        // Both channels start as the same dry bus: one convolution gives both wet sides.
         let ir = impulse(r, rv.decay, rv.predelay, rv.damp, recipe.seed as u64);
-        for (c, h) in channels.iter_mut().zip(ir) {
-            let wet = fft::convolve(c, &h);
-            for (v, w) in c.iter_mut().zip(wet) {
+        let wet = fft::convolve_pair(&channels[0], [ir[0].as_slice(), ir[1].as_slice()]);
+        for (c, w) in channels.iter_mut().zip(wet) {
+            for (v, w) in c.iter_mut().zip(w) {
                 *v += w * space_mix * 2.2;
             }
         }
@@ -477,5 +516,49 @@ mod tests {
         assert!(gain(FilterKind::Lowpass, 100.0) > 0.95 && gain(FilterKind::Lowpass, 10_000.0) < 0.02);
         assert!(gain(FilterKind::Highpass, 10_000.0) > 0.95 && gain(FilterKind::Highpass, 100.0) < 0.02);
         assert!(gain(FilterKind::Bandpass, 1000.0) > 0.95 && gain(FilterKind::Bandpass, 100.0) < 0.2);
+    }
+
+    #[test]
+    fn a_glide_settles_where_it_ends() {
+        // The reveal's noise sweep: its filter stops being set once the sweep is over.
+        let glide = Ramp::Glide { from: 400.0, to: 3800.0, time: 1.1, curve: 0.7 };
+        let curve = Curve::new(1.5, 400.0, |t| glide.at(t, true));
+        let at = curve.settles_at();
+        assert!(at > 1.09 && at < 1.11, "{at}");
+        assert_eq!(curve.at(at + 0.01), curve.at(1.5));
+        assert_ne!(curve.at(at - 0.01), curve.at(1.5));
+        assert_eq!(Curve::new(1.0, 400.0, |_| 700.0).settles_at(), 0.0);
+    }
+
+    #[test]
+    fn odd_settings_neither_panic_nor_give_nan() {
+        // No curve: a straight decay.
+        let env = Envelope { attack: 0.01, rise: None, decay: 0.1, curve: 0.0 };
+        assert!((env.at(0.06, 1.0) - 0.5).abs() < 1e-9);
+        // A low sample rate squeezes every clamp's range.
+        let s = render(&crate::sounds::ROCKER, 800);
+        assert!(!s.frames.is_empty() && s.frames.iter().all(|f| f[0].is_finite() && f[1].is_finite()));
+    }
+
+    #[test]
+    fn a_steady_sine_rotates_like_the_sine_it_replaces() {
+        // One bell partial: the phasor's samples against sin() of the accumulated phase, over two seconds.
+        const BELL: &[Layer] = &[Layer {
+            source: Source::Tone { freq: Ramp::Fixed(440.0), wave: Wave::Sine, partials: &[(1.0, 1.0, 1.0)] },
+            at: 0.0,
+            gain_db: 0.0,
+            env: Envelope { attack: 0.004, rise: None, decay: 2.0, curve: 6.0 },
+            filters: &[],
+        }];
+        let recipe = Recipe { duration: 2.1, seed: 1, loudness_db: -15.0, lowpass: 8000.0, highpass: 30.0, drive: 0.0, reverb: None, layers: BELL };
+        let rate = 48_000.0;
+        let mut bus = vec![0f64; (2.1 * rate) as usize];
+        layer(&mut bus, &BELL[0], 0, &recipe, rate, recipe.duration);
+        let env = Curve::new(2.014, 600.0, |t| BELL[0].env.at(t, 1.0));
+        for (i, v) in bus.iter().enumerate().step_by(97) {
+            let t = i as f64 / rate;
+            let expected = (TAU * 440.0 * t).sin() * env.at(t);
+            assert!((v - expected).abs() < 1e-9, "{i}: {v} vs {expected}");
+        }
     }
 }

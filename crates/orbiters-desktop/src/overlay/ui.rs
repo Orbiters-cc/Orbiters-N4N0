@@ -22,7 +22,7 @@ pub trait Poses {
     fn read(&mut self) -> (Vec<Device>, Vec<Sample>);
 }
 
-/// The tab's two pages.
+/// The tab's pages: the recorder, Orb, walk boost.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
     #[default]
@@ -39,6 +39,8 @@ pub struct OverlayUi {
     talking: bool,
     /// "Hear yourself": the microphone played in the headset.
     hear: Option<orbiters_sound::MicMonitor>,
+    /// Its devices opening, on a thread of their own (up to 3 s that the overlay's loop does not wait).
+    hear_starting: Option<crate::pages::Job<Result<orbiters_sound::MicMonitor, String>>>,
     hear_error: Option<String>,
     /// Why walk boost cannot work here (SteamVR input refused the actions), if it cannot.
     pub walk_unavailable: Option<String>,
@@ -54,6 +56,14 @@ impl OverlayUi {
     pub fn start_calibration(&mut self, now: f64, poses: &mut dyn Poses) {
         let (devices, samples) = poses.read();
         self.calibrator.start(now, &devices, &samples);
+    }
+
+    /// The tab stops seeing the laser (the dashboard hid, the laser left it, the overlay is going): a held Talk
+    /// button is let go, as the press's end will never come.
+    pub fn release(&mut self, ctl: &Ctl) {
+        if std::mem::take(&mut self.talking) {
+            ctl.orb(OrbCommand::Talk { down: false });
+        }
     }
 
     /// Advances the calibration (every loop, the tab drawn or not) and saves it when a T-pose was held.
@@ -201,7 +211,7 @@ impl OverlayUi {
         if widgets::toggle(&mut child, "overlay-walk-on", &mut on) {
             let mut settings = snap.settings.clone();
             settings.walk_boost.enabled = on;
-            ctl.save_settings(settings);
+            ctl.save_changes(&snap.settings, &settings);
         }
         let strength_row = row(on_row.bottom() + 24.0);
         widgets::text(&p, strength_row.left_center(), Align2::LEFT_CENTER, &Txt::new("Strength", 16.0).weight(weight::MEDIUM));
@@ -242,7 +252,7 @@ impl OverlayUi {
             if widgets::segmented(ui, "overlay-walk-hand", &mut hand, &[SegOption::new(Hand::Left, "Left"), SegOption::new(Hand::Right, "Right")], true) {
                 let mut settings = snap.settings.clone();
                 settings.walk_boost.hand = hand;
-                ctl.save_settings(settings);
+                ctl.save_changes(&snap.settings, &settings);
             }
         });
         y += 130.0;
@@ -257,7 +267,7 @@ impl OverlayUi {
             ) {
                 let mut settings = snap.settings.clone();
                 settings.walk_boost.follow = follow;
-                ctl.save_settings(settings);
+                ctl.save_changes(&snap.settings, &settings);
             }
         });
         y += 130.0;
@@ -320,9 +330,37 @@ impl OverlayUi {
         let y = disc.bottom() + 28.0;
         widgets::text_truncated(&p, pos2(left.center().x, y), Align2::CENTER_CENTER, &Txt::new(title, 20.0).weight(weight::SEMIBOLD), left.width() - 40.0);
         widgets::text_truncated(&p, pos2(left.center().x, y + 28.0), Align2::CENTER_CENTER, &Txt::new(sub, 13.5).color(theme::FG_3), left.width() - 40.0);
-        if let Some(q) = orb.quota.as_ref().filter(|q| q.limit > 0 && !q.own_key) {
+        let quota = orb.quota.as_ref().filter(|q| q.limit > 0 && !q.own_key);
+        if let Some(q) = quota {
             let line = format!("{} of {} free answers left today", q.limit.saturating_sub(q.used), q.limit);
             widgets::text(&p, pos2(left.center().x, left.bottom() - 28.0), Align2::CENTER_CENTER, &Txt::new(line, 12.5).color(theme::FG_4));
+        }
+        // VRChat sends avatar parameters only to OSC services it found: without them, a hand on the orb and the menu's
+        // Talk button never arrive.
+        let quiet = snap.vrchat.running && snap.osc.enabled && !snap.osc.receiving;
+        if quiet {
+            let g = p.layout_job(
+                Txt::new("VRChat sends Orbiters nothing: touching the orb and Talk in its menu cannot reach Orb. Is OSC on in VRChat's Action Menu?", 12.5)
+                    .color(theme::WARN)
+                    .line_height(17.0)
+                    .job(left.width() - 44.0),
+            );
+            p.galley(pos2(left.left() + 22.0, y + 52.0), g, theme::WARN);
+        }
+        // Orb's menu from here too (it opens in front of you), and asking VRChat again when it is quiet.
+        let by = left.bottom() - if quota.is_some() { 96.0 } else { 64.0 };
+        let menu_button = Button::new("Orb's menu").icon(icons::STACK).variant(Variant::Secondary).enabled(settings.enabled);
+        let w = menu_button.desired_width(ui).max(150.0);
+        let reconnect_w = 150.0;
+        let x0 = left.center().x - (w + if quiet { 12.0 + reconnect_w } else { 0.0 }) / 2.0;
+        if menu_button.width(w).show_at(ui, Rect::from_min_size(pos2(x0, by), vec2(w, 40.0))).clicked() {
+            ctl.orb(OrbCommand::ToggleScreen);
+        }
+        if quiet {
+            let b = Button::new("Reconnect").icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Ghost);
+            if b.width(reconnect_w).show_at(ui, Rect::from_min_size(pos2(x0 + w + 12.0, by), vec2(reconnect_w, 40.0))).clicked() {
+                ctl.osc_reconnect();
+            }
         }
         if orb.listening || orb.thinking || held {
             ui.ctx().request_repaint();
@@ -371,20 +409,27 @@ impl OverlayUi {
         // Hear yourself: the microphone in the headset.
         let r0 = row(0);
         widgets::text(&p, pos2(r0.left(), r0.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new("Hear yourself", 15.5).weight(weight::SEMIBOLD));
+        if let Some(result) = self.hear_starting.as_mut().and_then(|job| job.take()) {
+            self.hear_starting = None;
+            match result {
+                Ok(m) => self.hear = Some(m),
+                Err(e) => self.hear_error = Some(format!("The microphone did not start: {e}")),
+            }
+        }
         let hint = self.hear_error.clone().unwrap_or_else(|| "Your microphone in the headset, as others hear it".into());
         widgets::text_truncated(&p, pos2(r0.left(), r0.center().y + 12.0), Align2::LEFT_CENTER, &Txt::new(hint, 12.5).color(theme::FG_3), r0.width() - 80.0);
-        let mut on = self.hear.is_some();
+        let mut on = self.hear.is_some() || self.hear_starting.is_some();
         let mut sw = ui
             .new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(r0.right() - 48.0, r0.center().y - 14.0), vec2(48.0, 28.0))).id_salt("overlay-hear"));
         if widgets::toggle(&mut sw, "overlay-hear", &mut on) {
             self.hear = None;
+            // A start still under way is let go: its monitor stops as soon as it opens.
+            self.hear_starting = None;
             self.hear_error = None;
             if on {
                 let device = (!settings.mic_device.is_empty()).then(|| settings.mic_device.clone());
-                match orbiters_sound::MicMonitor::start(device) {
-                    Ok(m) => self.hear = Some(m),
-                    Err(e) => self.hear_error = Some(format!("The microphone did not start: {e:#}")),
-                }
+                self.hear_starting =
+                    Some(crate::pages::Job::spawn(ui.ctx(), move || orbiters_sound::MicMonitor::start(device).map_err(|e| format!("{e:#}"))));
             }
         }
         // AFK message.
@@ -403,7 +448,7 @@ impl OverlayUi {
         if widgets::toggle(&mut sw, "overlay-afk", &mut afk) {
             let mut s = snap.settings.clone();
             s.orb.afk_message_enabled = afk;
-            ctl.save_settings(s);
+            ctl.save_changes(&snap.settings, &s);
         }
         // Buttons.
         let r2 = row(2);
@@ -446,15 +491,10 @@ impl OverlayUi {
     }
 }
 
+/// How long ago `utc_ms` was, as the desktop window says it.
 fn ago(utc_ms: u64) -> String {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(utc_ms);
-    let s = now.saturating_sub(utc_ms) / 1000;
-    match s {
-        0..=59 => "just now".into(),
-        60..=3599 => format!("{} min ago", s / 60),
-        3600..=86_399 => format!("{} h ago", s / 3600),
-        _ => format!("{} days ago", s / 86_400),
-    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(utc_ms / 1000, |d| d.as_secs());
+    format::relative_time(utc_ms / 1000, now)
 }
 
 /// The tab's backdrop: flat ink, as the website's page. It never changes, so the painter
@@ -469,7 +509,7 @@ fn header(ui: &mut Ui, snap: &Snapshot, rect: Rect) {
     let p = ui.painter().clone();
     let recording = matches!(snap.capture.state, CaptureState::Recording | CaptureState::Paused);
     let mark = Rect::from_min_size(pos2(28.0, 26.0), logo::size_for_width(44.0));
-    logo::paint(&p, mark, logo::Look { pulse: recording, ..Default::default() });
+    logo::paint(&p, mark, logo::Look::default());
     widgets::text(&p, pos2(mark.right() + 14.0, 38.0), Align2::LEFT_CENTER, &Txt::new("Orbiters", 22.0).weight(weight::SEMIBOLD).tracking(-0.01));
     let world = snap.vrchat.world.world_name.clone().filter(|_| snap.vrchat.world.in_world);
     let sub = match (&world, snap.vrchat.running) {
@@ -566,7 +606,7 @@ fn recorder(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
         if widgets::segmented(&mut seg, "overlay-photo-length", &mut length, &lengths, false) {
             let mut settings = snap.settings.clone();
             settings.photo_3d = length;
-            ctl.save_settings(settings);
+            ctl.save_changes(&snap.settings, &settings);
         }
         let r = b.width(w).show_at(ui, Rect::from_min_size(pos2(left + seg_w + 12.0, card.bottom() - 64.0), vec2(w, 40.0)));
         if r.clicked() {
@@ -620,7 +660,7 @@ fn streams(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
         }
     }
     if let Some(s) = changed {
-        ctl.save_settings(s);
+        ctl.save_changes(&snap.settings, &s);
     }
     if capturing {
         let p = ui.painter();

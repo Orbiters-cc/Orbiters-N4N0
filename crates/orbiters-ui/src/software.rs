@@ -1,28 +1,46 @@
-//! Paints egui frames on the CPU, for the VR overlay: no GPU device, so none of the ~100 MB a graphics driver
-//! keeps per process. Triangles with per-vertex colours and textures, multiplied and blended premultiplied in gamma
-//! space like egui's own renderers do on a gamma framebuffer. Paint callbacks (the glow shader) are skipped.
+//! Paints egui frames on the CPU, for the VR overlay: no rendering pipeline to set up (SteamVR gets the pictures as
+//! textures of a small D3D11 device, or as raw pixels). Triangles with per-vertex colours and textures, multiplied and
+//! blended premultiplied in gamma space like egui's own renderers do on a gamma framebuffer. Paint callbacks (the
+//! glow shader) are skipped.
+//!
+//! Only what changed is painted again: each frame is compared with the last one tile by tile (the triangles over a
+//! tile, in painting order), the changed tiles are painted again, and [`Software::damage`] says where, so that only
+//! that part needs to be handed on. A pulsing dot repaints a few tiles, not the whole tab.
 
 use egui::epaint::{ClippedPrimitive, ImageData, Primitive, TextureId, Vertex};
-use egui::{Color32, TextureFilter, TexturesDelta};
+use egui::{Color32, TextureFilter, TextureWrapMode, TexturesDelta};
 use std::collections::HashMap;
+
+/// The side of the square tiles frames are compared in (pixels).
+const TILE: usize = 32;
+/// More separate changed areas than this are painted as the one rectangle around them.
+const MAX_AREAS: usize = 8;
 
 struct Texture {
     width: usize,
     height: usize,
     texels: Vec<Color32>,
-    nearest: bool,
+    /// The nearest texel rather than four blended, where texels are larger than pixels (magnified) and smaller.
+    nearest_magnified: bool,
+    nearest_minified: bool,
+    wrap: TextureWrapMode,
 }
 
 impl Texture {
-    /// Premultiplied texel at normalised `uv` (bilinear unless the texture asks for nearest), as 0–255 floats.
-    fn sample(&self, u: f32, v: f32) -> [f32; 4] {
+    /// Premultiplied texel at normalised `uv`, as 0–255 floats: bilinear or nearest as the texture asks for
+    /// `minified` (texels smaller than pixels there) or magnified texels, beyond the edges as its wrap mode says.
+    /// Nothing from a texture without texels.
+    fn sample(&self, u: f32, v: f32, minified: bool) -> [f32; 4] {
+        if self.width == 0 || self.height == 0 {
+            return [0.0; 4];
+        }
         let x = u * self.width as f32 - 0.5;
         let y = v * self.height as f32 - 0.5;
         let get = |x: i32, y: i32| {
-            let c = self.texels[y.clamp(0, self.height as i32 - 1) as usize * self.width + x.clamp(0, self.width as i32 - 1) as usize];
+            let c = self.texels[wrap(y, self.height, self.wrap) * self.width + wrap(x, self.width, self.wrap)];
             [c.r() as f32, c.g() as f32, c.b() as f32, c.a() as f32]
         };
-        if self.nearest {
+        if if minified { self.nearest_minified } else { self.nearest_magnified } {
             return get((x + 0.5).floor() as i32, (y + 0.5).floor() as i32);
         }
         let (x0, y0) = (x.floor(), y.floor());
@@ -42,6 +60,16 @@ pub struct Software {
     /// Painted under every frame instead of a plain colour (a backdrop that never changes is copied, not redrawn).
     backdrop: Option<Vec<[u8; 4]>>,
     textures: HashMap<TextureId, Texture>,
+    /// What covered each tile of the last frame: a hash of the triangles over it, in painting order (row by row).
+    tiles: Vec<u64>,
+    /// The same for the frame being painted (kept to reuse its memory).
+    next_tiles: Vec<u64>,
+    /// The next frame is painted whole: nothing was painted yet, a texture or the backdrop changed, or asked for.
+    stale: bool,
+    /// The colour the last frame was cleared to.
+    clear: Option<Color32>,
+    /// What the last frame changed (x0, y0, x1, y1).
+    damage: Option<[u32; 4]>,
 }
 
 impl Software {
@@ -52,30 +80,67 @@ impl Software {
             pixels: vec![[0; 4]; width as usize * height as usize],
             backdrop: None,
             textures: HashMap::new(),
+            tiles: Vec::new(),
+            next_tiles: Vec::new(),
+            stale: true,
+            clear: None,
+            damage: None,
         }
     }
 
     /// Keeps the last painted frame as the backdrop of the following ones.
     pub fn keep_as_backdrop(&mut self) {
         self.backdrop = Some(self.pixels.clone());
+        self.stale = true;
     }
 
     pub fn size(&self) -> (u32, u32) {
         (self.width as u32, self.height as u32)
     }
 
+    /// The next frame is painted whole, and its damage is all of it (the picture handed on was lost, say).
+    pub fn invalidate(&mut self) {
+        self.stale = true;
+    }
+
+    /// The last frame painted: RGBA bytes, premultiplied, top row first.
+    pub fn pixels(&self) -> &[u8] {
+        self.pixels.as_flattened()
+    }
+
+    /// What the last [`Software::paint`] changed (x0, y0, x1, y1 in pixels), `None` when the frame is the one before
+    /// again: nothing needs to be handed on, or only that part.
+    pub fn damage(&self) -> Option<[u32; 4]> {
+        self.damage
+    }
+
     /// Applies new and changed textures (before painting); takes them out of `delta`.
     pub fn set_textures(&mut self, delta: &mut TexturesDelta) {
+        if !delta.set.is_empty() {
+            // Triangles over a changed texture look different with the same vertices.
+            self.stale = true;
+        }
         for (id, deltas) in delta.set.drain() {
             for d in deltas {
                 let ImageData::Color(image) = &d.image;
-                let nearest = d.options.magnification == TextureFilter::Nearest;
                 match d.pos {
                     None => {
-                        self.textures.insert(id, Texture { width: image.size[0], height: image.size[1], texels: image.pixels.clone(), nearest });
+                        let texture = Texture {
+                            width: image.size[0],
+                            height: image.size[1],
+                            texels: image.pixels.clone(),
+                            nearest_magnified: d.options.magnification == TextureFilter::Nearest,
+                            nearest_minified: d.options.minification == TextureFilter::Nearest,
+                            wrap: d.options.wrap_mode,
+                        };
+                        self.textures.insert(id, texture);
                     }
                     Some([px, py]) => {
                         let Some(t) = self.textures.get_mut(&id) else { continue };
+                        if px >= t.width {
+                            // Wholly beyond the right edge: nothing of it lands in the texture.
+                            continue;
+                        }
                         for row in 0..image.size[1] {
                             let (dst_y, src) = (py + row, &image.pixels[row * image.size[0]..(row + 1) * image.size[0]]);
                             if dst_y >= t.height {
@@ -97,42 +162,105 @@ impl Software {
         }
     }
 
-    /// Paints the frame over the backdrop (or `clear`) and returns RGBA bytes (premultiplied).
+    /// Paints the frame over the backdrop (or `clear`) and returns RGBA bytes (premultiplied): only the tiles that
+    /// changed since the last frame are painted again ([`Software::damage`] says where).
     pub fn paint(&mut self, primitives: &[ClippedPrimitive], pixels_per_point: f32, clear: Color32) -> &[u8] {
-        match &self.backdrop {
-            Some(b) => self.pixels.copy_from_slice(b),
-            None => self.pixels.fill([clear.r(), clear.g(), clear.b(), clear.a()]),
-        }
-        for p in primitives {
-            let Primitive::Mesh(mesh) = &p.primitive else { continue };
-            let clip = [
-                ((p.clip_rect.min.x * pixels_per_point).round().max(0.0) as usize).min(self.width),
-                ((p.clip_rect.min.y * pixels_per_point).round().max(0.0) as usize).min(self.height),
-                ((p.clip_rect.max.x * pixels_per_point).round().max(0.0) as usize).min(self.width),
-                ((p.clip_rect.max.y * pixels_per_point).round().max(0.0) as usize).min(self.height),
-            ];
-            if clip[0] >= clip[2] || clip[1] >= clip[3] {
-                continue;
-            }
-            let texture = self.textures.remove(&mesh.texture_id);
-            for t in mesh.indices.as_chunks::<3>().0 {
-                let (a, b, c) = (&mesh.vertices[t[0] as usize], &mesh.vertices[t[1] as usize], &mesh.vertices[t[2] as usize]);
-                self.triangle(clip, [a, b, c], pixels_per_point, texture.as_ref());
-            }
-            if let Some(texture) = texture {
+        let areas = self.changed_areas(primitives, pixels_per_point, clear);
+        self.damage = areas.iter().copied().reduce(around).map(|a| a.map(|v| v as u32));
+        for area in areas {
+            self.fill(area, clear);
+            for p in primitives {
+                let Primitive::Mesh(mesh) = &p.primitive else { continue };
+                let Some(clip) = self.clip(p, pixels_per_point).and_then(|c| within(c, area)) else { continue };
+                // A mesh whose texture is not there (never set, or freed) is skipped, as egui's GPU painters do.
+                let Some(texture) = self.textures.remove(&mesh.texture_id) else { continue };
+                for t in mesh.indices.as_chunks::<3>().0 {
+                    let (a, b, c) = (&mesh.vertices[t[0] as usize], &mesh.vertices[t[1] as usize], &mesh.vertices[t[2] as usize]);
+                    self.triangle(clip, [a, b, c], pixels_per_point, &texture);
+                }
                 self.textures.insert(mesh.texture_id, texture);
             }
         }
-        // SAFETY: [u8; 4] has no padding; the slice covers exactly the pixel buffer.
-        unsafe { std::slice::from_raw_parts(self.pixels.as_ptr().cast::<u8>(), self.pixels.len() * 4) }
+        self.pixels.as_flattened()
     }
 
-    fn triangle(&mut self, clip: [usize; 4], v: [&Vertex; 3], ppp: f32, texture: Option<&Texture>) {
+    /// A primitive's clip rectangle in pixels (x0, y0, x1, y1), `None` when it shows nothing.
+    fn clip(&self, p: &ClippedPrimitive, ppp: f32) -> Option<[usize; 4]> {
+        let clip = [
+            ((p.clip_rect.min.x * ppp).round().max(0.0) as usize).min(self.width),
+            ((p.clip_rect.min.y * ppp).round().max(0.0) as usize).min(self.height),
+            ((p.clip_rect.max.x * ppp).round().max(0.0) as usize).min(self.width),
+            ((p.clip_rect.max.y * ppp).round().max(0.0) as usize).min(self.height),
+        ];
+        (clip[0] < clip[2] && clip[1] < clip[3]).then_some(clip)
+    }
+
+    /// What to paint again (x0, y0, x1, y1 rectangles): the tiles whose triangles, in painting order, are not the
+    /// last frame's (the same triangles over the same backdrop and textures paint the same pixels), merged into a
+    /// few rectangles; the whole frame when it cannot be compared.
+    fn changed_areas(&mut self, primitives: &[ClippedPrimitive], ppp: f32, clear: Color32) -> Vec<[usize; 4]> {
+        let (cols, rows) = (self.width.div_ceil(TILE), self.height.div_ceil(TILE));
+        let mut next = std::mem::take(&mut self.next_tiles);
+        next.clear();
+        next.resize(cols * rows, 0);
+        let scale = mix(0, ppp.to_bits() as u64);
+        for p in primitives {
+            let Primitive::Mesh(mesh) = &p.primitive else { continue };
+            let Some(clip) = self.clip(p, ppp) else { continue };
+            let texture = match mesh.texture_id {
+                TextureId::Managed(id) => id << 1,
+                TextureId::User(id) => (id << 1) | 1,
+            };
+            let place = clip.iter().fold(0u64, |h, &c| (h << 16) | (c as u64 & 0xffff));
+            let base = mix(mix(scale, texture), place);
+            for t in mesh.indices.as_chunks::<3>().0 {
+                let v = [&mesh.vertices[t[0] as usize], &mesh.vertices[t[1] as usize], &mesh.vertices[t[2] as usize]];
+                let Some([x0, y0, x1, y1]) = bounds(v.map(|v| [v.pos.x * ppp, v.pos.y * ppp]), clip) else { continue };
+                let h = v.iter().fold(base, |h, v| vertex_hash(h, v));
+                for row in y0 / TILE..=(y1 - 1) / TILE {
+                    for tile in &mut next[row * cols + x0 / TILE..=row * cols + (x1 - 1) / TILE] {
+                        *tile = mix(*tile, h);
+                    }
+                }
+            }
+        }
+        let whole = self.stale || self.clear != Some(clear) || self.tiles.len() != next.len();
+        let changed: Vec<bool> = if whole { vec![true; next.len()] } else { self.tiles.iter().zip(&next).map(|(a, b)| a != b).collect() };
+        self.next_tiles = std::mem::replace(&mut self.tiles, next);
+        self.stale = false;
+        self.clear = Some(clear);
+        let mut areas: Vec<[usize; 4]> = tile_areas(&changed, cols, rows)
+            .into_iter()
+            .map(|[c0, r0, c1, r1]| [c0 * TILE, r0 * TILE, (c1 * TILE).min(self.width), (r1 * TILE).min(self.height)])
+            .collect();
+        // Many areas, or areas filling most of the rectangle around them: that rectangle in one pass.
+        if let Some(all) = areas.iter().copied().reduce(around) {
+            let size = |a: &[usize; 4]| (a[2] - a[0]) * (a[3] - a[1]);
+            if areas.len() > MAX_AREAS || 2 * areas.iter().map(size).sum::<usize>() >= size(&all) {
+                areas = vec![all];
+            }
+        }
+        areas
+    }
+
+    /// The backdrop (or `clear`) back over `area`.
+    fn fill(&mut self, [x0, y0, x1, y1]: [usize; 4], clear: Color32) {
+        for y in y0..y1 {
+            let row = y * self.width;
+            match &self.backdrop {
+                Some(b) => self.pixels[row + x0..row + x1].copy_from_slice(&b[row + x0..row + x1]),
+                None => self.pixels[row + x0..row + x1].fill([clear.r(), clear.g(), clear.b(), clear.a()]),
+            }
+        }
+    }
+
+    fn triangle(&mut self, clip: [usize; 4], v: [&Vertex; 3], ppp: f32, texture: &Texture) {
         let mut p = v.map(|v| [v.pos.x * ppp, v.pos.y * ppp]);
         let mut v = v;
         let edge = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
         let mut area = edge(p[0], p[1], p[2]);
-        if area.abs() < 1e-6 {
+        // Flat, or a corner that is not a number (it would scan the whole clip finding nothing inside).
+        if area.is_nan() || area.abs() < 1e-6 {
             return;
         }
         if area < 0.0 {
@@ -140,13 +268,7 @@ impl Software {
             v.swap(1, 2);
             area = -area;
         }
-        let min_x = (p[0][0].min(p[1][0]).min(p[2][0]).floor().max(clip[0] as f32)) as usize;
-        let min_y = (p[0][1].min(p[1][1]).min(p[2][1]).floor().max(clip[1] as f32)) as usize;
-        let max_x = (p[0][0].max(p[1][0]).max(p[2][0]).ceil().min(clip[2] as f32)) as usize;
-        let max_y = (p[0][1].max(p[1][1]).max(p[2][1]).ceil().min(clip[3] as f32)) as usize;
-        if min_x >= max_x || min_y >= max_y {
-            return;
-        }
+        let Some([min_x, min_y, max_x, max_y]) = bounds(p, clip) else { return };
         // Edge functions w_i(x, y) = A_i x + B_i y + C_i, positive inside; w_0 is opposite vertex 0.
         let coeffs = |a: [f32; 2], b: [f32; 2]| (a[1] - b[1], b[0] - a[0], a[0] * b[1] - a[1] * b[0]);
         let e = [coeffs(p[1], p[2]), coeffs(p[2], p[0]), coeffs(p[0], p[1])];
@@ -161,16 +283,17 @@ impl Software {
         let flat_color = color[0] == color[1] && color[1] == color[2];
         let flat_uv = uv[0] == uv[1] && uv[1] == uv[2];
         // A plain shape (one colour, one texel: egui's white) needs no interpolation per pixel.
-        let flat = match (flat_color, flat_uv, texture) {
-            (true, true, Some(t)) => Some(modulate(color[0], t.sample(uv[0][0], uv[0][1]))),
-            (true, _, None) => Some(color[0]),
-            _ => None,
-        };
+        let flat = (flat_color && flat_uv).then(|| modulate(color[0], texture.sample(uv[0][0], uv[0][1], false)));
         let inv_area = 1.0 / area;
         // Change of colour and uv per pixel to the right (the barycentric weights change by A_i / area).
         let dl = [e[0].0 * inv_area, e[1].0 * inv_area, e[2].0 * inv_area];
         let dc: [f32; 4] = std::array::from_fn(|i| color[0][i] * dl[0] + color[1][i] * dl[1] + color[2][i] * dl[2]);
         let duv = [0, 1].map(|j| uv[0][j] * dl[0] + uv[1][j] * dl[1] + uv[2][j] * dl[2]);
+        // Texels per pixel, across and down: more than one, the texture is minified here.
+        let down = [e[0].1 * inv_area, e[1].1 * inv_area, e[2].1 * inv_area];
+        let duv_down = [0, 1].map(|j| uv[0][j] * down[0] + uv[1][j] * down[1] + uv[2][j] * down[2]);
+        let texels = |d: [f32; 2]| ((d[0] * texture.width as f32).powi(2) + (d[1] * texture.height as f32).powi(2)).sqrt();
+        let minified = texels(duv).max(texels(duv_down)) > 1.0;
         let inside = |w: [f32; 3]| (0..3).all(|i| w[i] > 0.0 || (w[i] == 0.0 && tl[i]));
         for y in min_y..max_y {
             let py = y as f32 + 0.5;
@@ -205,9 +328,10 @@ impl Software {
                     if src[3] >= 255 {
                         row.fill([src[0] as u8, src[1] as u8, src[2] as u8, 255]);
                     } else if src[3] > 0 || src[..3].iter().any(|v| *v > 0) {
-                        let keep = 255 - src[3];
+                        // One colour over the run: the four channels blended at once.
+                        let (lanes, keep) = (spread(src), 255 - src[3] as u64);
                         for px in row {
-                            blend(px, src, keep);
+                            blend_lanes(px, lanes, keep);
                         }
                     }
                 }
@@ -216,35 +340,116 @@ impl Software {
                     let l = w_at(first).map(|w| w * inv_area);
                     let mut c: [f32; 4] = std::array::from_fn(|i| color[0][i] * l[0] + color[1][i] * l[1] + color[2][i] * l[2]);
                     let mut t_uv = [0, 1].map(|j| uv[0][j] * l[0] + uv[1][j] * l[1] + uv[2][j] * l[2]);
-                    match texture {
-                        Some(t) if !flat_uv => {
-                            for px in row {
-                                let src = to_u32(modulate(c, t.sample(t_uv[0], t_uv[1])));
-                                blend(px, src, 255 - src[3]);
-                                for i in 0..4 {
-                                    c[i] += dc[i];
-                                }
-                                t_uv[0] += duv[0];
-                                t_uv[1] += duv[1];
+                    if flat_uv {
+                        // One texel (egui's white for shapes): it only scales the colour.
+                        let texel = texture.sample(uv[0][0], uv[0][1], false);
+                        let scale: [f32; 4] = std::array::from_fn(|i| texel[i] * (1.0 / 255.0));
+                        for px in row {
+                            let src = to_u32(std::array::from_fn(|i| c[i] * scale[i]));
+                            blend(px, src, 255 - src[3]);
+                            for i in 0..4 {
+                                c[i] += dc[i];
                             }
                         }
-                        _ => {
-                            // One texel (egui's white for shapes): it only scales the colour.
-                            let texel = texture.map(|t| t.sample(uv[0][0], uv[0][1])).unwrap_or([255.0; 4]);
-                            let scale: [f32; 4] = std::array::from_fn(|i| texel[i] * (1.0 / 255.0));
-                            for px in row {
-                                let src = to_u32(std::array::from_fn(|i| c[i] * scale[i]));
-                                blend(px, src, 255 - src[3]);
-                                for i in 0..4 {
-                                    c[i] += dc[i];
-                                }
+                    } else {
+                        for px in row {
+                            let src = to_u32(modulate(c, texture.sample(t_uv[0], t_uv[1], minified)));
+                            blend(px, src, 255 - src[3]);
+                            for i in 0..4 {
+                                c[i] += dc[i];
                             }
+                            t_uv[0] += duv[0];
+                            t_uv[1] += duv[1];
                         }
                     }
                 }
             }
         }
     }
+}
+
+/// The pixels a triangle (its corners in pixels) can touch inside `clip` (x0, y0, x1, y1), as
+/// [`Software::triangle`] scans them; `None` when none (a corner that is not a number touches none).
+fn bounds(p: [[f32; 2]; 3], clip: [usize; 4]) -> Option<[usize; 4]> {
+    if !p.as_flattened().iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let min_x = (p[0][0].min(p[1][0]).min(p[2][0]).floor().max(clip[0] as f32)) as usize;
+    let min_y = (p[0][1].min(p[1][1]).min(p[2][1]).floor().max(clip[1] as f32)) as usize;
+    let max_x = (p[0][0].max(p[1][0]).max(p[2][0]).ceil().min(clip[2] as f32)) as usize;
+    let max_y = (p[0][1].max(p[1][1]).max(p[2][1]).ceil().min(clip[3] as f32)) as usize;
+    (min_x < max_x && min_y < max_y).then_some([min_x, min_y, max_x, max_y])
+}
+
+/// Texel `i` of a row or column of `n` (at least one), as `mode` reaches it from beyond the edges.
+fn wrap(i: i32, n: usize, mode: TextureWrapMode) -> usize {
+    let n = n as i32;
+    match mode {
+        TextureWrapMode::ClampToEdge => i.clamp(0, n - 1) as usize,
+        TextureWrapMode::Repeat => i.rem_euclid(n) as usize,
+        TextureWrapMode::MirroredRepeat => {
+            let i = i.rem_euclid(2 * n);
+            (if i < n { i } else { 2 * n - 1 - i }) as usize
+        }
+    }
+}
+
+/// The part of `a` inside `b`, if any.
+fn within(a: [usize; 4], b: [usize; 4]) -> Option<[usize; 4]> {
+    let r = [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
+    (r[0] < r[2] && r[1] < r[3]).then_some(r)
+}
+
+/// The rectangle around both.
+fn around<T: Ord + Copy>(a: [T; 4], b: [T; 4]) -> [T; 4] {
+    [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
+}
+
+/// One step of a fast hash (FxHash's): order matters, so a tile's hash changes when its triangles swap.
+#[inline]
+fn mix(h: u64, v: u64) -> u64 {
+    (h.rotate_left(5) ^ v).wrapping_mul(0x517c_c1b7_2722_0a95)
+}
+
+#[inline]
+fn vertex_hash(h: u64, v: &Vertex) -> u64 {
+    let h = mix(h, v.pos.x.to_bits() as u64 | (v.pos.y.to_bits() as u64) << 32);
+    let h = mix(h, v.uv.x.to_bits() as u64 | (v.uv.y.to_bits() as u64) << 32);
+    mix(h, u32::from_le_bytes(v.color.to_array()) as u64)
+}
+
+/// The changed tiles (`cols` × `rows`, row by row) as rectangles of tiles (c0, r0, c1, r1): runs along a row,
+/// grown down while the rows below have the same run.
+fn tile_areas(changed: &[bool], cols: usize, rows: usize) -> Vec<[usize; 4]> {
+    let mut done = Vec::new();
+    let mut open: Vec<[usize; 4]> = Vec::new();
+    for r in 0..rows {
+        let row = &changed[r * cols..(r + 1) * cols];
+        let mut grown = Vec::new();
+        let mut c = 0;
+        while c < cols {
+            if !row[c] {
+                c += 1;
+                continue;
+            }
+            let start = c;
+            while c < cols && row[c] {
+                c += 1;
+            }
+            match open.iter().position(|o| o[0] == start && o[2] == c) {
+                Some(i) => {
+                    let mut o = open.swap_remove(i);
+                    o[3] = r + 1;
+                    grown.push(o);
+                }
+                None => grown.push([start, r, c, r + 1]),
+            }
+        }
+        done.append(&mut open);
+        open = grown;
+    }
+    done.append(&mut open);
+    done
 }
 
 /// Vertex colour × texel, both premultiplied 0–255.
@@ -270,6 +475,31 @@ fn blend(dst: &mut [u8; 4], src: [u32; 4], keep: u32) {
     for i in 0..4 {
         dst[i] = (src[i] + div255(dst[i] as u32 * keep)).min(255) as u8;
     }
+}
+
+/// The four lanes of a `u64`, 16 bits each, that [`blend_lanes`] works in: one channel (0–255) per lane.
+const LANES: u64 = 0x00ff_00ff_00ff_00ff;
+
+/// Channels (0–255 each) into 16-bit lanes.
+#[inline]
+fn spread(c: [u32; 4]) -> u64 {
+    c[0] as u64 | (c[1] as u64) << 16 | (c[2] as u64) << 32 | (c[3] as u64) << 48
+}
+
+/// [`blend`] on the four channels at once: each lane holds 255 × 255 without spilling into the next, so the
+/// multiplication, the rounded division by 255 and the clamp are done for all four in a few operations, bit for bit
+/// the same.
+#[inline]
+fn blend_lanes(dst: &mut [u8; 4], src: u64, keep: u64) {
+    let d = u32::from_le_bytes(*dst) as u64;
+    let d = (d | d << 16) & 0x0000_ffff_0000_ffff;
+    let d = (d | d << 8) & LANES;
+    let t = d * keep + 0x0080_0080_0080_0080;
+    let kept = ((t + ((t >> 8) & LANES)) >> 8) & LANES;
+    let sum = kept + src;
+    let sum = (sum | (((sum >> 8) & 0x0001_0001_0001_0001) * 0xff)) & LANES;
+    let packed = (sum | sum >> 8) & 0x0000_ffff_0000_ffff;
+    *dst = (((packed | packed >> 16) & 0xffff_ffff) as u32).to_le_bytes();
 }
 
 #[cfg(test)]
@@ -307,5 +537,158 @@ mod tests {
         });
         let lit = img.as_chunks::<4>().0.iter().filter(|p| p[0] > 128).count();
         assert!(lit > 20 && lit < 64 * 32 / 2, "{lit} lit pixels");
+    }
+
+    /// Paints a `size` frame of `ui` over black: the pixels, and what changed.
+    fn frame(ctx: &egui::Context, sw: &mut Software, size: [f32; 2], ui: impl FnMut(&mut egui::Ui)) -> (Vec<u8>, Option<[u32; 4]>) {
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(size[0], size[1]))), ..Default::default() };
+        let mut full = ctx.run_ui(input, ui);
+        sw.set_textures(&mut full.textures_delta);
+        let prims = ctx.tessellate(full.shapes, full.pixels_per_point);
+        let out = sw.paint(&prims, full.pixels_per_point, Color32::BLACK).to_vec();
+        sw.free_textures(&mut full.textures_delta);
+        (out, sw.damage())
+    }
+
+    #[test]
+    fn paints_again_only_what_changed() {
+        let ctx = egui::Context::default();
+        let mut sw = Software::new(256, 128);
+        let scene = |dot: f32| {
+            move |ui: &mut egui::Ui| {
+                ui.painter().rect_filled(Rect::from_min_max(pos2(0.0, 0.0), pos2(256.0, 128.0)), 0.0, Color32::from_rgb(20, 30, 40));
+                ui.painter().circle_filled(pos2(dot, 64.0), 6.0, Color32::from_rgb(220, 40, 40));
+            }
+        };
+        let (first, damage) = frame(&ctx, &mut sw, [256.0, 128.0], scene(40.0));
+        assert_eq!(damage, Some([0, 0, 256, 128]), "the first frame is painted whole");
+        let (same, damage) = frame(&ctx, &mut sw, [256.0, 128.0], scene(40.0));
+        assert_eq!(damage, None, "the same frame again changes nothing");
+        assert_eq!(same, first);
+        // The dot moves: the tiles it left and those it reached are painted again, in two areas.
+        let (moved, damage) = frame(&ctx, &mut sw, [256.0, 128.0], scene(200.0));
+        assert_eq!(damage, Some([32, 32, 224, 96]));
+        let px = |img: &[u8], x: usize, y: usize| img[(y * 256 + x) * 4..(y * 256 + x) * 4 + 4].to_vec();
+        assert_eq!(px(&moved, 40, 64), vec![20, 30, 40, 255], "the old dot is gone");
+        assert_eq!(px(&moved, 200, 64), vec![220, 40, 40, 255]);
+        assert_eq!(px(&moved, 120, 64), px(&first, 120, 64), "between them nothing was painted");
+        // Painted whole, the same picture (to the rounding of colours stepped along a row).
+        sw.invalidate();
+        let (whole, damage) = frame(&ctx, &mut sw, [256.0, 128.0], scene(200.0));
+        assert_eq!(damage, Some([0, 0, 256, 128]));
+        assert!(moved.iter().zip(&whole).all(|(a, b)| a.abs_diff(*b) <= 2));
+        // New glyphs change the font texture: everything is painted again.
+        let (_, damage) = frame(&ctx, &mut sw, [256.0, 128.0], |ui| {
+            scene(200.0)(ui);
+            ui.painter().text(pos2(4.0, 4.0), egui::Align2::LEFT_TOP, "Orbiters", egui::FontId::proportional(18.0), Color32::WHITE);
+        });
+        assert_eq!(damage, Some([0, 0, 256, 128]));
+    }
+
+    #[test]
+    fn a_change_of_order_is_painted() {
+        let ctx = egui::Context::default();
+        let mut sw = Software::new(64, 64);
+        let scene = |blue_on_top: bool| {
+            move |ui: &mut egui::Ui| {
+                let red = (Rect::from_min_max(pos2(4.0, 4.0), pos2(40.0, 40.0)), Color32::RED);
+                let blue = (Rect::from_min_max(pos2(24.0, 24.0), pos2(60.0, 60.0)), Color32::BLUE);
+                let order = if blue_on_top { [red, blue] } else { [blue, red] };
+                for (rect, color) in order {
+                    ui.painter().rect_filled(rect, 0.0, color);
+                }
+            }
+        };
+        frame(&ctx, &mut sw, [64.0, 64.0], scene(false));
+        let (img, damage) = frame(&ctx, &mut sw, [64.0, 64.0], scene(true));
+        assert!(damage.is_some());
+        assert_eq!(img[(30 * 64 + 30) * 4..(30 * 64 + 30) * 4 + 4], [0, 0, 255, 255], "blue is on top where they overlap");
+    }
+
+    /// Paints one mesh over black on a 64 × 32 painter.
+    fn mesh_frame(sw: &mut Software, mesh: egui::Mesh) -> Vec<u8> {
+        let prim = ClippedPrimitive { clip_rect: Rect::from_min_size(pos2(0.0, 0.0), vec2(64.0, 32.0)), primitive: Primitive::Mesh(mesh) };
+        sw.paint(&[prim], 1.0, Color32::BLACK).to_vec()
+    }
+
+    fn texture(sw: &mut Software, id: TextureId, delta: egui::epaint::ImageDelta) {
+        let mut d = TexturesDelta::default();
+        d.set.entry(id).or_default().push(delta);
+        sw.set_textures(&mut d);
+    }
+
+    #[test]
+    fn odd_meshes_and_textures_are_harmless() {
+        let mut sw = Software::new(64, 32);
+        let rect = Rect::from_min_max(pos2(4.0, 4.0), pos2(20.0, 20.0));
+        // A texture that was never set: nothing is drawn (not a solid rectangle).
+        let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        let mut mesh = egui::Mesh::with_texture(TextureId::User(7));
+        mesh.add_rect_with_uv(rect, whole, Color32::RED);
+        assert!(mesh_frame(&mut sw, mesh).as_chunks::<4>().0.iter().all(|p| *p == [0, 0, 0, 255]));
+        // A texture without texels, and an update past its right edge: no panic.
+        let empty = TextureId::User(8);
+        texture(&mut sw, empty, egui::epaint::ImageDelta::full(egui::ColorImage::new([0, 4], Vec::new()), egui::TextureOptions::LINEAR));
+        let mut mesh = egui::Mesh::with_texture(empty);
+        mesh.add_rect_with_uv(rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        mesh_frame(&mut sw, mesh);
+        let small = TextureId::User(9);
+        let opts = egui::TextureOptions::NEAREST;
+        texture(&mut sw, small, egui::epaint::ImageDelta::full(egui::ColorImage::filled([4, 4], Color32::GREEN), opts));
+        texture(&mut sw, small, egui::epaint::ImageDelta::partial([6, 3], egui::ColorImage::filled([2, 2], Color32::BLUE), opts));
+        // A corner that is not a number: the triangle is skipped at once.
+        let mut mesh = egui::Mesh::with_texture(small);
+        mesh.add_rect_with_uv(rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        mesh.vertices[0].pos.x = f32::NAN;
+        let started = std::time::Instant::now();
+        let img = mesh_frame(&mut sw, mesh);
+        assert!(started.elapsed() < std::time::Duration::from_millis(50));
+        // The other triangle of the quad still shows the green texture.
+        assert!(img.as_chunks::<4>().0.contains(&[0, 255, 0, 255]));
+    }
+
+    #[test]
+    fn wrap_modes() {
+        let at = |mode, i| wrap(i, 4, mode);
+        assert_eq!([-1, 0, 3, 4, 9].map(|i| at(TextureWrapMode::ClampToEdge, i)), [0, 0, 3, 3, 3]);
+        assert_eq!([-1, 0, 3, 4, 9].map(|i| at(TextureWrapMode::Repeat, i)), [3, 0, 3, 0, 1]);
+        assert_eq!([-1, 0, 3, 4, 5, 8].map(|i| at(TextureWrapMode::MirroredRepeat, i)), [0, 0, 3, 3, 2, 0]);
+    }
+
+    #[test]
+    fn blending_four_lanes_at_once_is_exact() {
+        // Every source, kept fraction and destination, against the channel-by-channel blend.
+        for keep in 0..=255u32 {
+            for s in 0..=255u32 {
+                let src = [s, 255 - s, s / 3, (s * 7) & 255];
+                for d in 0..=255u32 {
+                    let dst = [d as u8, (255 - d) as u8, ((d * 13) & 255) as u8, (d ^ s) as u8];
+                    let (mut a, mut b) = (dst, dst);
+                    blend(&mut a, src, keep);
+                    blend_lanes(&mut b, spread(src), keep as u64);
+                    assert_eq!(a, b, "src {src:?} keep {keep} dst {dst:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn changed_tiles_merge_into_few_areas() {
+        let t = true;
+        let f = false;
+        // Two blocks: a 2 × 2 one at the top left, a column at the right.
+        #[rustfmt::skip]
+        let changed = [
+            t, t, f, t,
+            t, t, f, t,
+            f, f, f, t,
+        ];
+        let mut areas = tile_areas(&changed, 4, 3);
+        areas.sort();
+        assert_eq!(areas, vec![[0, 0, 2, 2], [3, 0, 4, 3]]);
+        // A run that changes width ends one area and starts another.
+        let areas = tile_areas(&[t, t, f, t, f, f], 3, 2);
+        assert_eq!(areas.len(), 2);
+        assert!(tile_areas(&[f; 6], 3, 2).is_empty());
     }
 }

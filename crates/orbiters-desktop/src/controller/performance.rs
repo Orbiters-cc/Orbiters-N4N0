@@ -86,6 +86,24 @@ fn pending_file() -> PathBuf {
     orbiters_core::paths::config_dir().join("world-performance-pending.json")
 }
 
+/// What waits to be sent, as kept; a file that cannot be read is kept beside before the next save replaces it.
+fn read_pending() -> Vec<Sample> {
+    let path = pending_file();
+    let Ok(Some(text)) = orbiters_core::read_text(&path) else { return Vec::new() };
+    serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text)).unwrap_or_else(|e| {
+        eprintln!("world performance: {}: {e}; kept as {:?}", path.display(), orbiters_core::keep_aside(&path));
+        Vec::new()
+    })
+}
+
+/// Writes what waits to be sent, whole or not at all (a crash mid-write would lose it all). Under the runtime's lock,
+/// so that an older list never lands after a newer one.
+fn keep_pending(pending: &[Sample]) {
+    if let Err(e) = orbiters_core::write_atomic(&pending_file(), serde_json::to_string(pending).unwrap_or_default().as_bytes()) {
+        eprintln!("world performance: could not keep the summaries waiting: {e}");
+    }
+}
+
 fn utc(unix: u64) -> String {
     time::OffsetDateTime::from_unix_timestamp(unix as i64).ok().and_then(|t| t.format(&time::format_description::well_known::Rfc3339).ok()).unwrap_or_default()
 }
@@ -134,8 +152,9 @@ impl Minute {
 impl super::Controller {
     /// VRChat's frames from the overlay: added to this minute in this world (the setting on).
     pub fn frames(self: &Shared, chunk: FrameChunk) {
-        let settings = self.settings();
-        if !settings.world_performance {
+        // They pace Orb's projected screen whether or not they are gathered for Orbiters.
+        self.screen_frames(&chunk.intervals_ms);
+        if !self.with_settings(|s| s.world_performance) {
             return;
         }
         let (world, avatar_id) = {
@@ -187,35 +206,32 @@ impl super::Controller {
 
     fn performance_keep(&self, sample: Sample) {
         let mut rt = self.performance.lock().unwrap();
-        let pending =
-            rt.pending.get_or_insert_with(|| std::fs::read_to_string(pending_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default());
+        let pending = rt.pending.get_or_insert_with(read_pending);
         pending.push(sample);
         if pending.len() > MAX_PENDING {
             let extra = pending.len() - MAX_PENDING;
             pending.drain(..extra);
         }
         let _ = std::fs::create_dir_all(orbiters_core::paths::config_dir());
-        let _ = std::fs::write(pending_file(), serde_json::to_string(pending).unwrap_or_default());
+        keep_pending(pending);
     }
 
     /// Sends what was gathered when it is time (or `now`), on a thread of its own.
     pub(super) fn performance_send_if_due(self: &Shared, now: bool) {
         let batch = {
             let mut rt = self.performance.lock().unwrap();
+            // Asked with every chunk of frames: nothing is copied until it is time.
             let due = now || rt.last_sent.is_none_or(|t| t.elapsed() >= SEND_EVERY);
-            let pending = rt.pending.clone().unwrap_or_default();
-            if !due || pending.is_empty() {
-                return;
-            }
             // Orbiters refuses summaries without the headset's refresh rate: they wait until the overlay reported it.
-            if rt.hardware.refresh_hz.is_none() {
+            if !due || rt.pending.as_ref().is_none_or(Vec::is_empty) || rt.hardware.refresh_hz.is_none() {
                 return;
             }
             rt.last_sent = Some(Instant::now());
             let mut hardware = rt.hardware.clone();
             fill_host(&mut hardware);
             rt.hardware = hardware.clone();
-            (pending.into_iter().take(MAX_PER_REQUEST).collect::<Vec<_>>(), hardware)
+            let samples: Vec<Sample> = rt.pending.iter().flatten().take(MAX_PER_REQUEST).cloned().collect();
+            (samples, hardware)
         };
         let Some((api, token)) = self.account_api() else { return };
         let ctl = self.clone();
@@ -224,7 +240,7 @@ impl super::Controller {
                 let mut rt = ctl.performance.lock().unwrap();
                 if let Some(pending) = rt.pending.as_mut() {
                     pending.retain(|s| !batch.0.contains(s));
-                    let _ = std::fs::write(pending_file(), serde_json::to_string(pending).unwrap_or_default());
+                    keep_pending(pending);
                 }
             }
             Err(e) => eprintln!("world performance: {e:#}"),

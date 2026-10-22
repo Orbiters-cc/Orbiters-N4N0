@@ -118,6 +118,9 @@ pub struct OrbSettings {
     /// Calls with VRChat friends who have Orbiters and Orb too (contracts `Docs/orb-calls.md`): presence and the
     /// friends this computer's VRCX and VRCNext know go to Orbiters (as hashes) while on.
     pub calls: bool,
+    /// Calls may go straight between the two computers (a little faster on one network), each side then seeing the
+    /// other's addresses. Off, they go through the relay, which shows the friend only its own.
+    pub direct_calls: bool,
     /// Orb's menu (fast walk, YouTube, calls, a 3D picture): what opens it, the keyboard's letters.
     pub menu: MenuSettings,
 }
@@ -195,6 +198,7 @@ impl Default for OrbSettings {
             carry_parameters: GOGOLOCO_PARAMETERS.iter().map(|s| s.to_string()).collect(),
             pins: Vec::new(),
             calls: false,
+            direct_calls: false,
             menu: MenuSettings::default(),
         }
     }
@@ -286,28 +290,116 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Reads the settings: a field that does not fit (hand-edited, or written by a newer version) gets its default
+    /// and every other keeps its value ([`crate::json_lenient`]). Such a file is first kept beside as
+    /// `settings.json.bad-<time>`, so that the next save loses nothing for good. No file gives the defaults.
     pub fn load_from(path: &Path) -> Self {
-        std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        let text = match crate::read_text(path) {
+            Ok(Some(text)) => text,
+            Ok(None) => return Self::default(),
+            Err(e) => {
+                // Unreadable for now: the defaults, and the file kept, as the next save will replace it.
+                eprintln!("settings: {}: {e}", path.display());
+                crate::keep_aside(path);
+                return Self::default();
+            }
+        };
+        let (settings, dropped) = crate::json_lenient::<Self>(&text);
+        if !dropped.is_empty() {
+            let aside = crate::keep_aside(path);
+            eprintln!("settings: {} left at their default ({}), the file kept as {:?}", dropped.join(", "), path.display(), aside);
+        }
+        settings
     }
 
     pub fn load() -> Self {
         Self::load_from(&crate::paths::settings_file())
     }
 
-    /// Writes atomically (temporary file, then rename).
+    /// Writes the whole file at once ([`crate::write_atomic`]): a crash, a power cut or another save at the same time
+    /// leaves the old settings or the new ones.
     pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        std::fs::rename(&tmp, path)?;
+        crate::write_atomic(path, serde_json::to_string_pretty(self)?.as_bytes())?;
         Ok(())
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
         self.save_to(&crate::paths::settings_file())
     }
+
+    /// These settings with what `patch` changes: a JSON object of the fields to change and their values, a section as
+    /// an object of its own changed fields (`{"orb": {"wake_word": true}}`; a list, the pins say, is replaced whole).
+    /// Each field goes onto the settings as they are, so whatever else changed meanwhile stays; a field the settings do
+    /// not have, or a value that does not fit it, is left out. Returns the settings and the fields left out.
+    pub fn patched(&self, patch: &serde_json::Value) -> (Settings, Vec<String>) {
+        let (Ok(mut current), Some(fields)) = (serde_json::to_value(self), patch.as_object()) else { return (self.clone(), vec!["(not an object)".into()]) };
+        // The values to set, by path: a section is walked into while the settings have a section there too.
+        let mut changes = Vec::new();
+        let mut todo: Vec<(Vec<String>, &serde_json::Value)> = fields.iter().map(|(k, v)| (vec![k.clone()], v)).collect();
+        while let Some((path, value)) = todo.pop() {
+            match (value.as_object(), field(&current, &path).is_some_and(serde_json::Value::is_object)) {
+                (Some(inner), true) => todo.extend(inner.iter().map(|(k, v)| ([path.as_slice(), std::slice::from_ref(k)].concat(), v))),
+                _ => changes.push((path, value)),
+            }
+        }
+        changes.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut left_out = Vec::new();
+        for (path, value) in changes {
+            let mut candidate = current.clone();
+            match field_mut(&mut candidate, &path) {
+                Some(slot) => *slot = value.clone(),
+                None => {
+                    left_out.push(path.join("."));
+                    continue;
+                }
+            }
+            if serde_json::from_value::<Settings>(candidate.clone()).is_ok() {
+                current = candidate;
+            } else {
+                left_out.push(path.join("."));
+            }
+        }
+        (serde_json::from_value(current).unwrap_or_else(|_| self.clone()), left_out)
+    }
+}
+
+impl Settings {
+    /// What changed from these settings to `other`, as a patch for [`Settings::patched`]: the changed fields, a section
+    /// as an object of its own changed fields, a list or a text whole, and `null` for a value `other` no longer has.
+    /// A window that changed its copy sends this rather than the copy: `base.patched(&base.diff(&mine))` is `mine`,
+    /// and on settings that changed meanwhile it changes only what the window did.
+    pub fn diff(&self, other: &Settings) -> serde_json::Value {
+        let empty = || serde_json::Value::Object(serde_json::Map::new());
+        match (serde_json::to_value(self), serde_json::to_value(other)) {
+            (Ok(a), Ok(b)) => changed(&a, &b).unwrap_or_else(empty),
+            _ => empty(),
+        }
+    }
+}
+
+/// `b` where it differs from `a`: objects field by field, keeping only what changed; anything else whole.
+fn changed(a: &serde_json::Value, b: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    if a == b {
+        return None;
+    }
+    let (Value::Object(a), Value::Object(b)) = (a, b) else { return Some(b.clone()) };
+    let mut fields: serde_json::Map<String, Value> =
+        b.iter().filter_map(|(k, v)| match a.get(k) { Some(old) => changed(old, v).map(|c| (k.clone(), c)), None => Some((k.clone(), v.clone())) }).collect();
+    fields.extend(a.keys().filter(|k| !b.contains_key(*k)).map(|k| (k.clone(), Value::Null)));
+    Some(Value::Object(fields))
+}
+
+/// The value at `path` in a JSON object, when there is one.
+fn field<'v>(value: &'v serde_json::Value, path: &[String]) -> Option<&'v serde_json::Value> {
+    path.iter().try_fold(value, |v, key| v.as_object()?.get(key))
+}
+
+fn field_mut<'v>(value: &'v mut serde_json::Value, path: &[String]) -> Option<&'v mut serde_json::Value> {
+    path.iter().try_fold(value, |v, key| v.as_object_mut()?.get_mut(key))
 }
 
 #[cfg(test)]
@@ -326,6 +418,76 @@ mod tests {
         assert_eq!(partial.storage_limit_gb, 3.0);
         assert_eq!(partial.osc.record_parameter, "OrbitersRecord");
         assert_eq!(partial.orb, OrbSettings::default(), "settings from before Orb get its defaults");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_patch_changes_its_fields_only() {
+        let mut now = Settings::default();
+        // Changed by the service since the window read its copy.
+        now.walk_boost.strength = 0.9;
+        now.orb.pins = vec![Pin { parameter: "Hoodie".into(), value: crate::osc::OscValue::Bool(true) }];
+        let patch = serde_json::json!({
+            "storage_limit_gb": 50,
+            "orb": { "wake_word": true, "menu": { "keyboard": "azerty", "layout": "dvorak" }, "pins": [] },
+            "walk_boost": { "enabled": true, "hand": "both" },
+            "osc": { "vrchat_port": 70000 },
+            "no_such_setting": 1,
+        });
+        let (patched, left_out) = now.patched(&patch);
+        assert_eq!(patched.storage_limit_gb, 50.0);
+        assert!(patched.orb.wake_word && patched.walk_boost.enabled);
+        assert_eq!(patched.orb.menu.keyboard, KeyboardLayout::Azerty);
+        assert!(patched.orb.pins.is_empty(), "a list is replaced whole");
+        assert_eq!(patched.walk_boost.strength, 0.9, "what changed meanwhile stays");
+        assert_eq!((patched.walk_boost.hand, patched.osc.vrchat_port), (Hand::Left, 9000), "values that do not fit are left out");
+        assert_eq!(left_out, vec!["no_such_setting", "orb.menu.layout", "osc.vrchat_port", "walk_boost.hand"]);
+        assert_eq!(now.patched(&serde_json::json!([1])).0, now, "not an object: nothing changes");
+    }
+
+    #[test]
+    fn a_diff_carries_only_what_changed() {
+        let base = Settings::default();
+        // A window flips a switch, types an AFK message and replaces the pins on its copy.
+        let mut mine = base.clone();
+        mine.reduce_motion = !base.reduce_motion;
+        mine.orb.afk_message = "Back soon".into();
+        mine.orb.pins = vec![Pin { parameter: "Hoodie".into(), value: crate::osc::OscValue::Bool(true) }];
+        let patch = base.diff(&mine);
+        assert_eq!(
+            patch,
+            serde_json::json!({ "reduce_motion": mine.reduce_motion, "orb": { "afk_message": "Back soon", "pins": serde_json::to_value(&mine.orb.pins).unwrap() } })
+        );
+        assert_eq!(base.patched(&patch), (mine.clone(), vec![]));
+        // Meanwhile the avatar's radial moved: the patch keeps that.
+        let mut now = base.clone();
+        now.walk_boost.strength = 0.8;
+        let (patched, left_out) = now.patched(&patch);
+        assert!(left_out.is_empty());
+        assert_eq!((patched.walk_boost.strength, patched.reduce_motion, patched.orb.afk_message.as_str()), (0.8, mine.reduce_motion, "Back soon"));
+        // Nothing changed: an empty patch.
+        assert_eq!(base.diff(&base), serde_json::json!({}));
+    }
+
+    #[test]
+    fn a_field_that_does_not_fit_keeps_the_others() {
+        let dir = std::env::temp_dir().join(format!("orbiters-settings-lenient-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        // A port out of range, a keyboard from a newer version, a byte order mark from an editor.
+        let text = "\u{feff}{\"consent_acknowledged\": true, \"storage_limit_gb\": 7, \
+                    \"osc\": {\"vrchat_port\": 70000, \"record_parameter\": \"MyRecord\"}, \
+                    \"orb\": {\"wake_word\": true, \"menu\": {\"keyboard\": \"dvorak\"}}}";
+        std::fs::write(&path, text).unwrap();
+        let s = Settings::load_from(&path);
+        assert!(s.consent_acknowledged, "consent survives a bad field elsewhere");
+        assert_eq!(s.storage_limit_gb, 7.0);
+        assert_eq!(s.osc.record_parameter, "MyRecord");
+        assert_eq!(s.osc.vrchat_port, OscSettings::default().vrchat_port);
+        assert!(s.orb.wake_word);
+        assert_eq!(s.orb.menu, MenuSettings::default());
+        let kept = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().starts_with("settings.json.bad-"));
+        assert!(kept, "the file that needed repair is kept beside");
         std::fs::remove_dir_all(dir).ok();
     }
 }

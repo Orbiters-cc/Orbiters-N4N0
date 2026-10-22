@@ -24,7 +24,16 @@ pub trait Backend: Send + Sync {
     /// VRChat's camera flies around where it stands, at three heights, then the recording is reconstructed.
     fn scan(&self) {}
     fn import_raw_capture(&self, dir: PathBuf);
-    fn save_settings(&self, settings: Settings);
+    /// Changes only the fields in `patch` ([`Settings::diff`], [`Settings::patched`]), on the settings as they are when
+    /// it arrives.
+    fn patch_settings(&self, patch: serde_json::Value);
+    /// Saves what `settings` changed against `base`, the copy it was changed from (a snapshot's): only those fields,
+    /// so that whatever changed meanwhile (the avatar's radial, Orb, the other window) stays.
+    fn save_changes(&self, base: &Settings, settings: &Settings) {
+        if base != settings {
+            self.patch_settings(base.diff(settings));
+        }
+    }
     fn trash_session(&self, dir: PathBuf);
     /// Trains splats from a session in the reconstruction worker, after the ones waiting before it.
     fn reconstruct(&self, dir: PathBuf);
@@ -56,6 +65,8 @@ pub trait Backend: Send + Sync {
     fn frames(&self, chunk: crate::state::FrameChunk);
     /// Sets the walk boost's strength (0 to 1), saved and sent to the avatar's `Orb/WalkBoost`.
     fn walk_boost(&self, strength: f32);
+    /// Makes VRChat find the OSC service again (it sends avatar parameters only to services it found).
+    fn osc_reconnect(&self);
     /// Quits the whole app (the tray service and every window).
     fn quit(&self);
     /// The service asked this window to come to the front.
@@ -114,9 +125,9 @@ impl Backend for Remote {
         self.0.send(&ToService::ImportRaw { dir });
     }
 
-    fn save_settings(&self, settings: Settings) {
-        self.0.update_local(|s| s.settings = settings.clone());
-        self.0.send(&ToService::SaveSettings { settings: Box::new(settings) });
+    fn patch_settings(&self, patch: serde_json::Value) {
+        self.0.update_local(|s| s.settings = s.settings.patched(&patch).0);
+        self.0.send(&ToService::PatchSettings { patch });
     }
 
     fn trash_session(&self, dir: PathBuf) {
@@ -185,6 +196,10 @@ impl Backend for Remote {
 
     fn walk_boost(&self, strength: f32) {
         self.0.send(&ToService::WalkBoost { strength });
+    }
+
+    fn osc_reconnect(&self) {
+        self.0.send(&ToService::OscReconnect);
     }
 
     fn calibrated(&self, calibration: Calibration) {
@@ -267,8 +282,8 @@ impl Backend for Local {
         self.report(self.ctl.import_raw_capture(dir));
     }
 
-    fn save_settings(&self, settings: Settings) {
-        self.ctl.save_settings(settings);
+    fn patch_settings(&self, patch: serde_json::Value) {
+        self.ctl.patch_settings(&patch);
     }
 
     fn trash_session(&self, dir: PathBuf) {
@@ -346,7 +361,11 @@ impl Backend for Local {
     }
 
     fn walk_boost(&self, strength: f32) {
-        self.ctl.set_walk_boost(strength);
+        self.ctl.set_walk_boost(strength, false);
+    }
+
+    fn osc_reconnect(&self) {
+        self.ctl.osc_rediscover();
     }
 
     fn calibrated(&self, calibration: Calibration) {

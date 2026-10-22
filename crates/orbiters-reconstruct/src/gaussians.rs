@@ -9,10 +9,18 @@ pub struct Gaussians {
     pub rotations: Vec<[f32; 4]>,
     pub opacity_logits: Vec<f32>,
     pub colors: Vec<[f32; 3]>,
+    /// Seeded on the sky shell (crate::init::SKY): relocation never copies these (opaque and plentiful, they would
+    /// take the budget). Training only; the PLY does not keep it.
+    pub sky: Vec<bool>,
 }
 
 /// Floats per Gaussian in the packed GPU layout (see [`Gaussians::pack`]).
 pub const PACKED: usize = 16;
+/// Packed slot of the sky flag (1: sky), which no learning rate moves.
+pub const SKY_SLOT: usize = 14;
+/// Packed slot the device keeps for itself: the Adam step at which this Gaussian's moments last restarted
+/// (relocate.wgsl, adam.wgsl). Uploads write 0.
+pub const RESTART_SLOT: usize = 15;
 
 impl Gaussians {
     pub fn len(&self) -> usize {
@@ -29,6 +37,7 @@ impl Gaussians {
         self.rotations.push(rotation);
         self.opacity_logits.push(opacity_logit);
         self.colors.push(color);
+        self.sky.push(false);
     }
 
     pub fn swap_remove(&mut self, i: usize) {
@@ -37,6 +46,14 @@ impl Gaussians {
         self.rotations.swap_remove(i);
         self.opacity_logits.swap_remove(i);
         self.colors.swap_remove(i);
+        if i < self.sky.len() {
+            self.sky.swap_remove(i);
+        }
+    }
+
+    /// Whether every parameter of Gaussian `i` is a number (a NaN or infinite one renders nowhere and holds a slot).
+    pub fn is_finite(&self, i: usize) -> bool {
+        self.means[i].iter().chain(&self.log_scales[i]).chain(&self.rotations[i]).chain(&self.colors[i]).chain(std::iter::once(&self.opacity_logits[i])).all(|v| v.is_finite())
     }
 
     /// Keeps the Gaussians for which `keep` is true, in order.
@@ -54,9 +71,11 @@ impl Gaussians {
         filter(&mut self.rotations, keep);
         filter(&mut self.opacity_logits, keep);
         filter(&mut self.colors, keep);
+        filter(&mut self.sky, keep);
     }
 
-    /// The parameters as 16 floats each: mean (3), log scales (3), rotation (4), opacity logit (1), colour (3), pad (2).
+    /// The parameters as 16 floats each: mean (3), log scales (3), rotation (4), opacity logit (1), colour (3), the
+    /// sky flag ([`SKY_SLOT`]) and the device's own slot ([`RESTART_SLOT`], 0).
     pub fn pack(&self) -> Vec<f32> {
         let mut out = Vec::with_capacity(self.len() * PACKED);
         for i in 0..self.len() {
@@ -65,7 +84,7 @@ impl Gaussians {
             out.extend_from_slice(&self.rotations[i]);
             out.push(self.opacity_logits[i]);
             out.extend_from_slice(&self.colors[i]);
-            out.extend_from_slice(&[0.0, 0.0]);
+            out.extend_from_slice(&[if self.sky.get(i).copied().unwrap_or(false) { 1.0 } else { 0.0 }, 0.0]);
         }
         out
     }
@@ -74,6 +93,7 @@ impl Gaussians {
         let mut g = Self::default();
         for p in data.as_chunks::<PACKED>().0 {
             g.push([p[0], p[1], p[2]], [p[3], p[4], p[5]], [p[6], p[7], p[8], p[9]], p[10], [p[11], p[12], p[13]]);
+            *g.sky.last_mut().expect("pushed") = p[SKY_SLOT] > 0.5;
         }
         g
     }
@@ -132,9 +152,14 @@ mod tests {
             let f = i as f32;
             g.push([f, f + 1.0, f + 2.0], [-f; 3], [1.0, 0.0, 0.0, f], f * 0.1, [0.5; 3]);
         }
+        g.sky[3] = true;
         assert_eq!(Gaussians::unpack(&g.pack()), g);
+        assert_eq!(g.pack()[3 * PACKED + SKY_SLOT], 1.0);
         let mut h = g.clone();
-        h.retain(&[true, false, true, false, true]);
-        assert_eq!(h.means.iter().map(|m| m[0]).collect::<Vec<_>>(), vec![0.0, 2.0, 4.0]);
+        h.retain(&[true, false, true, true, true]);
+        assert_eq!(h.means.iter().map(|m| m[0]).collect::<Vec<_>>(), vec![0.0, 2.0, 3.0, 4.0]);
+        assert_eq!(h.sky, vec![false, false, true, false]);
+        h.colors[1][2] = f32::NAN;
+        assert!(h.is_finite(0) && !h.is_finite(1));
     }
 }

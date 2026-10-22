@@ -17,6 +17,7 @@ rosc = { workspace = true }
 mdns-sd = { workspace = true }
 flate2 = { workspace = true }
 if-addrs = "0.15"
+memchr = "2"
 socket2 = "0.6"
 sha2 = "0.10"
 rusqlite = { version = "0.40", features = ["bundled"] }

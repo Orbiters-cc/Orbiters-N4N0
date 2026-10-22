@@ -88,8 +88,10 @@ pub struct Quota {
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct Done {
+    /// The conversation as it now stands. A `done` without it (an error answered with a success status) is no answer:
+    /// it never replaces the conversation.
     #[serde(default)]
-    pub messages: Vec<Value>,
+    pub messages: Option<Vec<Value>>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
     #[serde(default)]
@@ -171,6 +173,10 @@ pub fn send(api: &Api, token: &str, request: &Request, cancel: &AtomicBool, mut 
     if json {
         let text = body.with_config().limit(8 << 20).read_to_string()?;
         let done: Done = serde_json::from_str(&text).context("unexpected answer from Orbiters")?;
+        if done.messages.is_none() {
+            // An error object answered as a success: its words when it has some.
+            return Err(error_from(status, &text).into());
+        }
         if let Some(t) = &done.text {
             on_event(Event::Text(t.clone()));
         }
@@ -231,11 +237,39 @@ fn dispatch(event: &str, data: &str, on_event: &mut impl FnMut(Event)) -> anyhow
                 on_event(Event::Confirmation(c));
             }
         }
-        "done" => return Ok(Some(serde_json::from_value(value).context("unexpected end of answer")?)),
+        "done" => {
+            let done: Done = serde_json::from_value(value).context("unexpected end of answer")?;
+            anyhow::ensure!(done.messages.is_some(), "the answer ended without the conversation");
+            return Ok(Some(done));
+        }
         "error" => return Err(error_from(200, data).into()),
         _ => {}
     }
     Ok(None)
+}
+
+/// Whether `message` starts a turn: the member's own message, not a tool's result (`tool_result` blocks, a `tool`
+/// role, a call id), whatever the provider's shape the server keeps the conversation in.
+pub fn starts_turn(message: &Value) -> bool {
+    let role = message.get("role").and_then(Value::as_str);
+    let result_block =
+        |content: &Value| content.as_array().is_some_and(|blocks| blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")));
+    role == Some("user") && message.get("tool_call_id").is_none() && message.get("tool_use_id").is_none() && !message.get("content").is_some_and(result_block)
+}
+
+/// The conversation's last `max` messages or fewer, starting where a turn starts: never with a tool's result, whose
+/// call was cut away (providers refuse a conversation that starts so). A turn longer than `max` is kept whole.
+pub fn trim(mut messages: Vec<Value>, max: usize) -> Vec<Value> {
+    if messages.len() <= max {
+        return messages;
+    }
+    let earliest = messages.len() - max;
+    let start = (earliest..messages.len()).find(|&i| starts_turn(&messages[i])).or_else(|| (0..earliest).rev().find(|&i| starts_turn(&messages[i])));
+    match start {
+        Some(start) => messages.split_off(start),
+        // No turn starts anywhere: nothing can be cut safely.
+        None => messages,
+    }
 }
 
 #[cfg(test)]
@@ -252,7 +286,30 @@ mod tests {
         assert!(matches!(&events[3], Event::Confirmation(c) if c.approve_url == "https://orbiters.cc/x"));
         assert_eq!(done.tool_calls[0].name, "set_avatar_control");
         assert_eq!(done.quota.unwrap().used, 3);
-        assert_eq!(done.messages.len(), 1);
+        assert_eq!(done.messages.map(|m| m.len()), Some(1));
+        // A done without the conversation is not an answer: the conversation it would replace stays.
+        let empty = "event: done\ndata: {\"tool_calls\":[]}\n\n";
+        assert!(read_events(empty.as_bytes(), &AtomicBool::new(false), &mut |_| {}).is_err());
+        assert!(read_events(stream.as_bytes(), &AtomicBool::new(true), &mut |_| {}).is_err(), "cancelled");
+    }
+
+    #[test]
+    fn trims_where_a_turn_starts() {
+        let user = |t: &str| serde_json::json!({ "role": "user", "content": t });
+        let call = serde_json::json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": "c1", "name": "orb_mood", "input": {} }] });
+        let result = serde_json::json!({ "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "c1", "content": "{}" }] });
+        let answer = serde_json::json!({ "role": "assistant", "content": "ok" });
+        assert!(starts_turn(&user("hi")) && !starts_turn(&result) && !starts_turn(&answer));
+        assert!(!starts_turn(&serde_json::json!({ "role": "tool", "tool_call_id": "c1", "content": "{}" })));
+        // Two turns of four messages: cut to five, the second turn starts the conversation, not its tool result.
+        let conversation = vec![user("one"), call.clone(), result.clone(), answer.clone(), user("two"), call.clone(), result.clone(), answer.clone()];
+        let kept = trim(conversation.clone(), 5);
+        assert_eq!(kept.len(), 4);
+        assert_eq!(kept[0], user("two"));
+        assert_eq!(trim(conversation.clone(), 40).len(), 8, "short enough: as it is");
+        // One turn longer than the limit stays whole rather than starting with a result.
+        let long = vec![user("one"), call.clone(), result.clone(), call, result, answer];
+        assert_eq!(trim(long, 3)[0], user("one"));
     }
 
     #[test]

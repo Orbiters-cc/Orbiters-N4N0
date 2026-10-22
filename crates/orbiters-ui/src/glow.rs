@@ -1,6 +1,7 @@
 //! The glow background: the website's three swirling colour blobs, slowed down for a desktop app and tinted by
 //! what the app is doing, with a vignette and film grain, drawn by one fragment shader as an egui paint callback.
-//! The blobs drift on [`crate::anim::clock`], so they stand still (and cost nothing) while the window is not live.
+//! The blobs drift on [`crate::anim::clock`], so they stand still (and cost nothing) while the window is not live or
+//! has not been used for a while.
 
 use crate::anim::{self, ease, Spring};
 use egui::{Color32, Id, Painter, Rect};
@@ -238,8 +239,8 @@ fn srgb(c: u8) -> f32 {
 /// drift while the window is live.
 pub fn paint(painter: &Painter, rect: Rect, mood: Mood) {
     let ctx = painter.ctx();
-    // The drift is a few points per second: 20 frames a second are plenty.
-    let t = anim::clock(ctx, 20.0);
+    // The drift is a few points per second: the decorations' shared frame rate is plenty.
+    let t = anim::clock(ctx, anim::DECOR_FPS);
     let mut blob_pos = [[0.0f32; 4]; 3];
     let mut blob_color = [[0.0f32; 4]; 3];
     let mut blob_blur = [0.0f32; 4];

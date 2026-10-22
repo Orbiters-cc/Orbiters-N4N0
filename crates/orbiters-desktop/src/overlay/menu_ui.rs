@@ -215,8 +215,8 @@ fn picture(p: &Painter, r: Rect, texture: Option<TextureId>) {
 pub fn draw(p: &Painter, origin: Pos2, view: &View) {
     let menu = view.menu;
     let page = ScreenPage::of(menu);
-    let layout = layout::layout(page);
-    backdrop(p, origin, &layout, menu.listening.then_some(view.time));
+    let layout = layout::cached(page);
+    backdrop(p, origin, layout, menu.listening.then_some(view.time));
     for (i, e) in layout.elements.iter().enumerate() {
         let state = layout::state(menu, e);
         if state.hidden {

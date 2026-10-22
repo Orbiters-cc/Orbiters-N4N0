@@ -48,6 +48,8 @@ pub struct State {
     list: Job<Vec<VisitedWorld>>,
     worlds: Option<Vec<Arc<VisitedWorld>>>,
     query: String,
+    /// The worlds the search shows (indices into `worlds`), for the search it was worked out for.
+    shown: Option<(String, Vec<usize>)>,
     infos: Option<Infos>,
     pictures: Option<Pictures>,
     open: Option<Open>,
@@ -60,8 +62,14 @@ impl State {
     pub fn loaded(&mut self) -> bool {
         if let Some(list) = self.list.take() {
             self.worlds = Some(list.into_iter().map(Arc::new).collect());
+            self.shown = None;
         }
         self.worlds.is_some()
+    }
+
+    /// Whether something is still being read (the worlds, pictures): the screenshots wait for it.
+    pub fn busy(&self) -> bool {
+        self.list.running() || self.pictures.as_ref().is_some_and(|p| p.loading())
     }
 
     /// Opens a world as if its card was clicked (screenshots).
@@ -164,6 +172,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     if let Some(list) = state.list.take() {
         state.worlds = Some(list.into_iter().map(Arc::new).collect());
+        state.shown = None;
     }
     state.infos.get_or_insert_with(|| Infos::new(&ctx));
     state.pictures.get_or_insert_with(|| Pictures::new(&ctx));
@@ -200,11 +209,18 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
 
     let mine = cx.ctl.maps();
     let q = state.query.trim().to_lowercase();
-    let filtered: Vec<Arc<VisitedWorld>> = state
-        .worlds
-        .as_ref()
-        .map(|l| l.iter().filter(|w| q.is_empty() || w.name.to_lowercase().contains(&q) || w.id.contains(&q)).cloned().collect())
-        .unwrap_or_default();
+    if state.shown.as_ref().is_none_or(|(asked, _)| *asked != q) {
+        let shown = state
+            .worlds
+            .as_ref()
+            .map(|l| l.iter().enumerate().filter(|(_, w)| q.is_empty() || w.name.to_lowercase().contains(&q) || w.id.contains(&q)).map(|(i, _)| i).collect())
+            .unwrap_or_default();
+        state.shown = Some((q.clone(), shown));
+    }
+    let filtered: Vec<Arc<VisitedWorld>> = match (&state.shown, &state.worlds) {
+        (Some((_, shown)), Some(l)) => shown.iter().filter_map(|&i| l.get(i).cloned()).collect(),
+        _ => Vec::new(),
+    };
     let mut clicked = None;
     let from = orbiters_ui::blur::next_shape(ui);
     let mut gu = ui.new_child(UiBuilder::new().max_rect(page).id_salt("worlds-grid"));
@@ -245,7 +261,7 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
             }
         });
     });
-    super::under_top(&gu, cx, from, grid_top);
+    super::under_top(&gu, cx, "worlds", from, grid_top);
 
     let sub = match &state.worlds {
         Some(l) => {
@@ -676,7 +692,8 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
             });
         },
     );
-    super::under_top(&du, cx, from, page.top() + cx.top);
+    // Its own band: while the card flies open or closed, the grid draws one in the same frame.
+    super::under_top(&du, cx, "world", from, page.top() + cx.top);
 
     // Actions gathered while drawing.
     let Some(o) = state.open.as_mut() else { return };
@@ -929,8 +946,10 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
     if job.is_some() || upload.is_some_and(|u| u.running()) {
         return None;
     }
+    // Every row has the same buttons in the same place: the session tells them apart.
+    let salt = ("session-row", &s.dir);
     if waiting {
-        if Button::new("Waiting · cancel").icon(icons::X).variant(Variant::Secondary).width(b.width()).show_at(ui, b).clicked() {
+        if Button::new("Waiting · cancel").icon(icons::X).variant(Variant::Secondary).width(b.width()).id_salt(salt).show_at(ui, b).clicked() {
             return Some(RowAction::Unqueue);
         }
     } else if s.reconstruction.is_some() {
@@ -951,7 +970,7 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
         } else {
             button = button.hint("Public on the Map explorer: everyone in the capture becomes visible to everyone");
         }
-        if button.show_at(ui, b).clicked() {
+        if button.id_salt(salt).show_at(ui, b).clicked() {
             return Some(RowAction::Share);
         }
     } else {
@@ -960,7 +979,7 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
         if let Some(h) = blocked {
             button = button.hint(h);
         }
-        if button.show_at(ui, b).clicked() {
+        if button.id_salt(salt).show_at(ui, b).clicked() {
             return Some(RowAction::Reconstruct);
         }
     }

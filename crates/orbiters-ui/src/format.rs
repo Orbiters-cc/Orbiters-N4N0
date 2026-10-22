@@ -1,25 +1,24 @@
 //! Number and time formatting shared by the interfaces.
 
-/// Bytes in SI units: "82.1 MB".
+/// Bytes in SI units, one decimal under ten: "8.2 MB", "82 MB".
 pub fn bytes(n: f64) -> String {
     if !n.is_finite() {
         return "–".into();
     }
     let units = ["B", "KB", "MB", "GB", "TB"];
-    let mut v = n;
+    let sign = if n < 0.0 { "-" } else { "" };
+    let mut v = n.abs();
     let mut i = 0;
-    while v >= 1000.0 && i < units.len() - 1 {
+    loop {
+        // Decimals as the value will be shown: 9,960 bytes is "10 KB", not "10.0 KB", and 999,950 "1.0 MB".
+        let digits = if i == 0 || v >= 9.95 { 0 } else { 1 };
+        let shown = if digits == 0 { v.round() } else { (v * 10.0).round() / 10.0 };
+        if shown < 1000.0 || i == units.len() - 1 {
+            return format!("{sign}{v:.digits$} {}", units[i]);
+        }
         v /= 1000.0;
         i += 1;
     }
-    let digits = if i == 0 {
-        0
-    } else if v < 10.0 {
-        1
-    } else {
-        0
-    };
-    format!("{v:.digits$} {}", units[i])
 }
 
 /// "1:05" or "1:02:03".
@@ -57,15 +56,15 @@ pub fn integer(n: f64) -> String {
     }
 }
 
-/// "92.5%" (or "100%").
+/// "92.5%", "100%" once complete: what is not complete never rounds up to it ("99.9%").
 pub fn percent(part: f64, total: f64) -> String {
-    if total <= 0.0 {
+    if total.is_nan() || total <= 0.0 || !part.is_finite() {
         return "–".into();
     }
     if part >= total {
         return "100%".into();
     }
-    format!("{:.1}%", part / total * 100.0)
+    format!("{:.1}%", (part / total * 100.0).min(99.9))
 }
 
 /// "just now", "5 min ago", "3 h ago", "2 d ago", then the date ("12 Oct 2026", UTC).
@@ -106,6 +105,29 @@ pub fn folder_name(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_round_into_the_next_unit() {
+        assert_eq!(bytes(8_212_830.0), "8.2 MB");
+        assert_eq!(bytes(9_960.0), "10 KB");
+        assert_eq!(bytes(9_940.0), "9.9 KB");
+        assert_eq!(bytes(999_950.0), "1.0 MB");
+        assert_eq!(bytes(999_400.0), "999 KB");
+        assert_eq!(bytes(999.6), "1.0 KB");
+        assert_eq!(bytes(-5_000.0), "-5.0 KB");
+        assert_eq!(bytes(0.0), "0 B");
+        assert_eq!(bytes(3.2e15), "3200 TB");
+        assert_eq!(bytes(f64::NAN), "–");
+    }
+
+    #[test]
+    fn percent_is_complete_only_when_it_is() {
+        assert_eq!(percent(99.96, 100.0), "99.9%");
+        assert_eq!(percent(100.0, 100.0), "100%");
+        assert_eq!(percent(0.0, 100.0), "0.0%");
+        assert_eq!(percent(1.0, 0.0), "–");
+        assert_eq!(percent(f64::NAN, 1.0), "–");
+    }
 
     #[test]
     fn formats() {

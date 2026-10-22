@@ -4,23 +4,33 @@
 //! overlay process runs while SteamVR does.
 
 use crate::controller::{self, Controller, NoticeKind};
-use crate::ipc::{self, Endpoint, Role, ToClient, ToService};
+use crate::ipc::{self, Endpoint, OrbCommand, Role, ToClient, ToService};
+use crate::mailbox::Mailbox;
 use crate::single;
 use orbiters_core::settings::Settings;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+#[cfg(not(windows))]
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 struct Link {
     id: u64,
     role: Role,
     pid: u32,
-    tx: mpsc::Sender<ToClient>,
+    mailbox: Arc<Mailbox>,
 }
+
+/// Connections that have not said their token yet, at most: each holds a thread for up to `HELLO_TIMEOUT`.
+const MAX_UNAUTHENTICATED: usize = 16;
+/// The longest line a client may send (settings, a list of picture paths).
+const MAX_COMMAND: usize = 4 << 20;
+/// The window's link waits this long after a snapshot before the next.
+const WINDOW_PACE: Duration = Duration::from_millis(33);
 
 pub struct Service {
     pub ctl: controller::Shared,
@@ -28,10 +38,12 @@ pub struct Service {
     exe: PathBuf,
     links: Mutex<Vec<Link>>,
     next_link: AtomicU64,
+    /// Connections waiting to say their token.
+    unauthenticated: AtomicUsize,
     /// The window process we started and when (a second request while it starts does not start another).
     window: Mutex<Option<(Child, Instant)>>,
-    /// The overlay process we started and when.
-    overlay: Mutex<Option<(Child, Instant)>>,
+    /// The overlay process we started, when, and for which SteamVR (its `vrserver` process id).
+    overlay: Mutex<Option<(Child, Instant, Option<u32>)>>,
     quitting: AtomicBool,
     #[cfg(windows)]
     main_thread: u32,
@@ -47,7 +59,7 @@ impl Service {
         }
         if let Some(link) = self.links.lock().unwrap().iter().find(|l| l.role == Role::Window) {
             allow_foreground(link.pid);
-            let _ = link.tx.send(ToClient::Show);
+            link.mailbox.post(ToClient::Show);
             return;
         }
         let mut window = self.window.lock().unwrap();
@@ -68,6 +80,7 @@ impl Service {
         }
         match cmd.spawn() {
             Ok(child) => {
+                crate::worker::keep_with_service(&child);
                 allow_foreground(child.id());
                 *window = Some((child, Instant::now()));
             }
@@ -87,7 +100,7 @@ impl Service {
         if !wanted {
             if let Some(link) = connected {
                 if !snap.settings.steamvr_overlay {
-                    let _ = link.tx.send(ToClient::Close);
+                    link.mailbox.post(ToClient::Close);
                 }
             }
             return;
@@ -97,9 +110,13 @@ impl Service {
         }
         drop(links);
         let mut overlay = self.overlay.lock().unwrap();
-        if let Some((child, started)) = overlay.as_mut() {
-            // Starting, or it failed a moment ago: try again later.
-            if matches!(child.try_wait(), Ok(None)) || started.elapsed() < Duration::from_secs(20) {
+        if let Some((child, started, steamvr)) = overlay.as_mut() {
+            let exited = match child.try_wait() {
+                Ok(None) => None,
+                Ok(Some(status)) => Some(status.code()),
+                Err(_) => Some(None),
+            };
+            if !overlay_due(exited, started.elapsed(), *steamvr, snap.steamvr.pid) {
                 return;
             }
         }
@@ -111,7 +128,10 @@ impl Service {
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
         match cmd.spawn() {
-            Ok(child) => *overlay = Some((child, Instant::now())),
+            Ok(child) => {
+                crate::worker::keep_with_service(&child);
+                *overlay = Some((child, Instant::now(), snap.steamvr.pid));
+            }
             Err(e) => eprintln!("could not start the SteamVR overlay: {e}"),
         }
     }
@@ -122,7 +142,7 @@ impl Service {
             return;
         }
         for link in self.links.lock().unwrap().iter() {
-            let _ = link.tx.send(ToClient::Close);
+            link.mailbox.post(ToClient::Close);
         }
         self.ctl.shutdown();
         #[cfg(windows)]
@@ -137,7 +157,7 @@ impl Service {
         }
     }
 
-    fn handle(&self, link: u64, msg: ToService) {
+    fn handle(&self, link: u64, role: Role, msg: ToService) {
         let ctl = &self.ctl;
         let report = |r: anyhow::Result<()>| {
             if let Err(e) = r {
@@ -153,6 +173,7 @@ impl Service {
             ToService::Scan => report(ctl.take_scan()),
             ToService::ImportRaw { dir } => report(ctl.import_raw_capture(dir)),
             ToService::SaveSettings { settings } => ctl.save_settings(*settings),
+            ToService::PatchSettings { patch } => ctl.patch_settings(&patch),
             ToService::Trash { dir } => {
                 let r = ctl.trash_session(&dir);
                 if r.is_ok() {
@@ -181,7 +202,7 @@ impl Service {
             ToService::WorkerLog => {
                 let lines = ctl.worker_log();
                 if let Some(l) = self.links.lock().unwrap().iter().find(|l| l.id == link) {
-                    let _ = l.tx.send(ToClient::WorkerLog { lines });
+                    l.mailbox.post(ToClient::WorkerLog { lines });
                 }
             }
             ToService::UploadPictures { world_id, world_name, paths } => report(ctl.upload_pictures(world_id, world_name, paths)),
@@ -189,60 +210,93 @@ impl Service {
             ToService::Maps => ctl.refresh_maps(),
             ToService::Calibrated { calibration } => ctl.calibrated(*calibration),
             ToService::Frames { chunk } => ctl.frames(chunk),
-            ToService::WalkBoost { strength } => ctl.set_walk_boost(strength),
+            ToService::WalkBoost { strength } => ctl.set_walk_boost(strength, false),
+            // Which Talk button is held matters: the service lets it go when that window or overlay goes away.
+            ToService::Orb { command: OrbCommand::Talk { down } } => ctl.orb_app_talk(down, role == Role::Overlay),
             ToService::Orb { command } => ctl.orb_command(command),
+            ToService::OscReconnect => ctl.osc_rediscover(),
             ToService::Quit => self.quit(),
         }
     }
 
-    /// One client: check its token, then stream every change to it and act on what it asks.
+    /// One client: check its token (the accept loop counted it among the unauthenticated), then stream every change
+    /// to it and act on what it asks.
     fn serve(self: &Arc<Self>, stream: TcpStream) {
         let _ = stream.set_nodelay(true);
-        let Some((token, role, pid)) = ipc::read_hello(&stream, ipc::HELLO_TIMEOUT) else { return };
-        if token != self.endpoint.token {
+        let hello = ipc::read_hello(&stream, ipc::HELLO_TIMEOUT);
+        self.unauthenticated.fetch_sub(1, Ordering::Relaxed);
+        let Some((token, role, pid)) = hello else { return };
+        if !ipc::same_token(&token, &self.endpoint.token) {
             return;
         }
         let Ok(read_half) = stream.try_clone() else { return };
-        let reader = BufReader::new(read_half);
-        let (tx, rx) = mpsc::channel::<ToClient>();
+        let mut reader = BufReader::new(read_half);
+        // The client's mailbox: the newest state first (a client reads a snapshot first), then the other messages in
+        // order. A client that stops reading leaves one snapshot waiting, never a growing queue.
+        let mailbox = Mailbox::new(true);
+        let out = mailbox.clone();
         let mut writer = stream;
+        // The window gets the state about 30 times a second at most (an open Orb menu republishes 70 times): the newest
+        // waits in the mailbox meanwhile. The overlay, in the headset, gets every one it can read.
+        let pace = (role == Role::Window).then_some(WINDOW_PACE);
         std::thread::spawn(move || {
-            while let Ok(first) = rx.recv() {
-                // Of a burst of snapshots only the newest matters.
-                let mut batch = vec![first];
-                batch.extend(rx.try_iter());
-                let newest = batch.iter().rposition(|m| matches!(m, ToClient::Snapshot { .. }));
-                for (i, msg) in batch.iter().enumerate() {
-                    if matches!(msg, ToClient::Snapshot { .. }) && Some(i) != newest {
-                        continue;
-                    }
-                    if ipc::write_line(&mut writer, msg).is_err() {
-                        return;
-                    }
+            while let Some((messages, snapshot)) = out.take() {
+                let paced = pace.filter(|_| snapshot.is_some());
+                let written = snapshot
+                    .map_or(Ok(()), |s| ipc::write_snapshot(&mut writer, &s))
+                    .and_then(|_| messages.iter().try_for_each(|m| ipc::write_line(&mut writer, m)));
+                if written.is_err() {
+                    out.close();
+                    return;
+                }
+                if let Some(pace) = paced {
+                    std::thread::sleep(pace);
                 }
             }
         });
+        // Subscribed before it is listed: the snapshot is in its mailbox before anything else can be (a Show).
+        self.ctl.subscribe(mailbox.clone());
         let id = self.next_link.fetch_add(1, Ordering::Relaxed);
-        self.links.lock().unwrap().push(Link { id, role, pid, tx: tx.clone() });
+        self.links.lock().unwrap().push(Link { id, role, pid, mailbox: mailbox.clone() });
         match role {
             Role::Window => *self.window.lock().unwrap() = None,
             Role::Overlay => self.ctl.set_overlay_connected(true),
         }
-        self.ctl.subscribe(tx);
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
+        // Lines of a bounded length: a client cannot make the service hold an endless one.
+        while let Ok(Some(line)) = ipc::read_line_capped(&mut reader, MAX_COMMAND) {
             if let Ok(msg) = serde_json::from_str::<ToService>(&line) {
-                self.handle(id, msg);
+                self.handle(id, role, msg);
             }
         }
+        mailbox.close();
         self.links.lock().unwrap().retain(|l| l.id != id);
-        if role == Role::Overlay && !self.links.lock().unwrap().iter().any(|l| l.role == Role::Overlay) {
+        let still_there = self.links.lock().unwrap().iter().any(|l| l.role == role);
+        if role == Role::Overlay && !still_there {
             self.ctl.set_overlay_connected(false);
+        }
+        if !still_there {
+            // What it held (a Talk button, the overlay's open menu) ends with it.
+            self.ctl.orb_link_closed(role == Role::Overlay);
         }
         // Without a tray (Linux for now) nothing would bring the window back: closing it quits.
         if role == Role::Window && cfg!(not(windows)) {
             self.quit();
         }
+    }
+}
+
+/// An overlay that failed is started again after this.
+const OVERLAY_RETRY: Duration = Duration::from_secs(20);
+
+/// Whether to start an overlay again, the last one started `since` ago for the SteamVR `started_for` (its process id)
+/// having `exited` (`None` while it runs; its exit code, if any), SteamVR now being `steamvr`. Not while it runs; not
+/// for the SteamVR it left because that one was gone or quitting ([`crate::overlay::EXIT_STEAMVR_GONE`]), which would
+/// start SteamVR again or meet it going: only another SteamVR brings it back; after another failure, in a while.
+fn overlay_due(exited: Option<Option<i32>>, since: Duration, started_for: Option<u32>, steamvr: Option<u32>) -> bool {
+    match exited {
+        None => false,
+        Some(Some(crate::overlay::EXIT_STEAMVR_GONE)) => steamvr != started_for,
+        Some(_) => since >= OVERLAY_RETRY,
     }
 }
 
@@ -288,6 +342,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         exe: std::env::current_exe()?,
         links: Mutex::new(Vec::new()),
         next_link: AtomicU64::new(1),
+        unauthenticated: AtomicUsize::new(0),
         window: Mutex::new(None),
         overlay: Mutex::new(None),
         quitting: AtomicBool::new(false),
@@ -301,8 +356,17 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     let svc = service.clone();
     std::thread::Builder::new().name("ipc".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
+            // Each one waits up to `HELLO_TIMEOUT` for its token on a thread: a flood of connections that never
+            // say it is turned away rather than given threads.
+            if svc.unauthenticated.fetch_add(1, Ordering::Relaxed) >= MAX_UNAUTHENTICATED {
+                svc.unauthenticated.fetch_sub(1, Ordering::Relaxed);
+                continue;
+            }
             let s = svc.clone();
-            let _ = std::thread::Builder::new().name("ipc-client".into()).spawn(move || s.serve(stream));
+            let spawned = std::thread::Builder::new().name("ipc-client".into()).spawn(move || s.serve(stream));
+            if spawned.is_err() {
+                svc.unauthenticated.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     })?;
 
@@ -340,14 +404,15 @@ fn tray_loop(service: &Arc<Service>) -> anyhow::Result<()> {
             None
         }
     };
-    // Tell the loop when capturing starts or stops (menu items live on this thread).
-    let (tx, rx) = mpsc::channel();
-    service.ctl.subscribe(tx);
+    // Tell the loop when capturing starts or stops (menu items live on this thread). The tray shows no notice: one
+    // that comes while no window is open waits for the next.
+    let mailbox = Mailbox::new(false);
+    service.ctl.subscribe(mailbox.clone());
     let main_thread = service.main_thread;
     std::thread::Builder::new().name("tray-watch".into()).spawn(move || {
         let mut capturing = false;
-        for msg in rx {
-            if let ToClient::Snapshot { snapshot } = msg {
+        while let Some((_, snapshot)) = mailbox.take() {
+            if let Some(snapshot) = snapshot {
                 if snapshot.is_capturing() != capturing {
                     capturing = snapshot.is_capturing();
                     unsafe {
@@ -376,4 +441,33 @@ fn tray_loop(service: &Arc<Service>) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_overlay_that_left_with_steamvr_waits_for_another_steamvr() {
+        let gone = Some(Some(crate::overlay::EXIT_STEAMVR_GONE));
+        let (soon, later) = (Duration::from_secs(1), OVERLAY_RETRY);
+        // Running, or still starting.
+        assert!(!overlay_due(None, later, Some(7), Some(7)));
+        // It left because SteamVR quit or was gone: not for that SteamVR, at once for another.
+        assert!(!overlay_due(gone, later * 10, Some(7), Some(7)));
+        assert!(overlay_due(gone, soon, Some(7), Some(8)));
+        // Another failure: tried again after a while.
+        assert!(!overlay_due(Some(Some(1)), soon, Some(7), Some(7)));
+        assert!(overlay_due(Some(Some(1)), later, Some(7), Some(7)));
+        assert!(overlay_due(Some(None), later, Some(7), Some(7)), "ended without a code");
+    }
+
+    #[test]
+    fn a_settings_patch_reaches_the_service_as_a_patch() {
+        let line = r#"{"type":"patch_settings","patch":{"orb":{"wake_word":true}}}"#;
+        match serde_json::from_str::<ToService>(line).unwrap() {
+            ToService::PatchSettings { patch } => assert_eq!(patch["orb"]["wake_word"], true),
+            other => panic!("{other:?}"),
+        }
+    }
 }

@@ -44,6 +44,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, ctl: Ctl, splash: bool) -> Self {
         orbiters_ui::install(&cc.egui_ctx);
         if let Some(rs) = &cc.wgpu_render_state {
+            crate::gpu::report_errors(&rs.device);
             orbiters_ui::install_wgpu(&rs.device, rs.target_format, 1, &mut rs.renderer.write().callback_resources);
         }
         ctl.attach(&cc.egui_ctx);
@@ -115,6 +116,15 @@ impl App {
         &mut self.toasts
     }
 
+    /// Whether the page still reads something it will show (a list, pictures): screenshots wait for it.
+    pub fn page_busy(&self) -> bool {
+        match self.page {
+            Page::Sessions => self.sessions.busy(),
+            Page::Worlds => self.worlds.busy(),
+            _ => false,
+        }
+    }
+
     /// Notices from the controller become toasts.
     fn drain_notices(&mut self, ctx: &egui::Context) {
         for n in self.ctl.take_notices() {
@@ -129,7 +139,8 @@ impl App {
                     self.toasts.push(ctx, kind, message);
                 }
                 Notice::SessionSaved { reason, frames, keyframes, depth_frames } => {
-                    if reason != "restarted" {
+                    // A part the recording goes on after (a new world, a new resolution) is no end to tell of.
+                    if reason != "restarted" && reason != "resized" {
                         self.toasts.push(
                             ctx,
                             toast::Kind::Success,
@@ -268,8 +279,7 @@ impl App {
         }
         self.logo_hovered = hovered;
         let intro = self.sidebar_intro(now);
-        let recording = snap.capture.state == CaptureState::Recording;
-        logo::paint(ui.painter(), logo_rect, logo::Look { intro_start: None, glitch: self.logo_glitch.or(intro), pulse: recording });
+        logo::paint(ui.painter(), logo_rect, logo::Look { glitch: self.logo_glitch.or(intro), ..Default::default() });
         let p = ui.painter();
         widgets::text(
             p,
@@ -317,7 +327,7 @@ impl App {
             let fg = anim::color(&ctx, id.with(("fg", i)), target, Spring::SNAPPY);
             let icon_c = anim::color(&ctx, id.with(("ic", i)), if is_active { theme::ACCENT } else { target }, Spring::SNAPPY);
             let mut p = ui.painter().clone();
-            p.set_opacity(alpha);
+            p.multiply_opacity(alpha);
             let x = r.left() + 14.0 + 2.0 * press;
             if is_active {
                 widgets::icon_fill(&p, pos2(x + 9.0, r.center().y), glyph, 18.0, icon_c);
@@ -436,17 +446,18 @@ fn splash(ctx: &egui::Context, full: Rect, t: f64) {
     egui::Area::new(Id::unique("orbiters-splash")).order(egui::Order::Foreground).fixed_pos(full.min).interactable(true).show(ctx, |ui| {
         let (_, _) = ui.allocate_exact_size(full.size(), Sense::click_and_drag());
         let mut p = ui.painter().clone();
-        p.set_opacity(fade);
+        p.multiply_opacity(fade);
         p.rect_filled(full, 0.0, theme::INK_950);
         let start = anim::time(ctx) - t;
         let scale_k = anim::spring_from(ctx, Id::unique("orbiters-splash-scale"), [0.82], [1.0], Spring { stiffness: 180.0, damping: 18.0, mass: 1.0 })[0];
         let lift = 1.0 + 0.04 * (1.0 - fade);
-        let size = logo::size_for_width(128.0) * scale_k * lift;
         let center = full.center() - vec2(0.0, 36.0);
-        let logo_rect = Rect::from_center_size(center, size);
+        // Rasterised at its resting size and scaled as it grows: one set of textures, not one per frame's size.
+        let rest = Rect::from_center_size(center, logo::size_for_width(128.0));
+        let logo_rect = Rect::from_center_size(center, rest.size() * scale_k * lift);
         let mut lp = p.clone();
         lp.multiply_opacity(((t / 0.35) as f32).clamp(0.0, 1.0));
-        logo::paint(&lp, logo_rect, logo::Look { intro_start: Some(start), glitch: Some((start + 0.3, 1.2)), pulse: false });
+        logo::paint_zoomed(&lp, rest, scale_k * lift, logo::Look { intro_start: Some(start), glitch: Some((start + 0.3, 1.2)) });
         let k = ease::segment(t as f32, 0.75, 0.6, ease::out_expo);
         let mut tp = p.clone();
         tp.multiply_opacity(k);
@@ -535,6 +546,11 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
+    }
+
+    /// The window closes with Talk held: let go of it, or VRChat would stay muted and Orb go on listening.
+    fn on_exit(&mut self) {
+        self.orb.leave(&self.ctl);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

@@ -2,23 +2,29 @@
 //!
 //! ```text
 //! orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]
+//!     [--regularise-unseen]
 //! ```
 //!
 //! Prints one [`Event`] per line on stdout for the app and writes the session's `reconstruction/` folder: the splats
 //! (PLY), the report, a preview and a render of every held-out keyframe. The folder is replaced only once everything
-//! is written.
+//! is written, and never left half deleted ([`replace`]).
 
 use anyhow::{bail, Context as _};
 use orbiters_contracts::qoi;
 use orbiters_core::reconstruction::{self as rec, Event, Report, Stage};
-use orbiters_reconstruct::{dataset, gpu, init, ply, train};
+use orbiters_reconstruct::{gpu, init, ply, prepare, train};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+/// Where the previous result waits while the new one moves into place (`reconstruction.old`).
+const BACKUP_DIR: &str = "reconstruction.old";
+
 fn emit(e: &Event) {
     let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "{}", e.to_line());
-    let _ = out.flush();
+    // The app reads these lines: once its end of the pipe is gone, so is the reason to keep the GPU busy.
+    if writeln!(out, "{}", e.to_line()).and_then(|_| out.flush()).is_err() {
+        std::process::exit(3);
+    }
 }
 
 fn stage(stage: Stage, progress: f32) {
@@ -45,6 +51,10 @@ fn args() -> anyhow::Result<Args> {
             "--iterations" => settings.iterations = number("--iterations")? as u32,
             "--budget" => settings.budget = number("--budget")? as usize,
             "--robust" => settings.robust = it.next().context("--robust needs a value")?.parse().context("--robust takes a number (0–1)")?,
+            // Lab A/Bs: the regularisers on every Gaussian every step (orbiters_reconstruct::train::Settings).
+            "--regularise-unseen" => settings.regularise_unseen = true,
+            // Adam's bias correction per Gaussian from its restart, rather than from the run's first step.
+            "--adam-restart" => settings.adam_restart = true,
             "--gpu" => {
                 device.low_power = match it.next().as_deref() {
                     Some("integrated") => true,
@@ -67,25 +77,26 @@ fn run(args: Args) -> anyhow::Result<Report> {
     let dir = &args.session;
     // Above normal while VRChat is closed, out of its way while it runs (orbiters_reconstruct::priority).
     orbiters_reconstruct::priority::govern();
+    // A swap an earlier run stopped in the middle of: its previous result is back in place first.
+    recover(dir);
     stage(Stage::Loading, 0.0);
-    let mut data = dataset::load(dir, args.width, |p| stage(Stage::Loading, p))?;
-    // Depth that says nothing becomes unknown, and the world's chromatic aberration leaves the keyframes.
-    let fix = orbiters_reconstruct::depthfix::mark_untrusted(&mut data, &orbiters_reconstruct::depthfix::FixParams::default());
-    eprintln!(
-        "depth validation: {} of {} tile positions never read ({} of their samples kept as sky), {} misread tiles, {} impossibly near samples; {} of {} samples unknown",
-        fix.dead_tiles, fix.tiles, fix.sky_samples, fix.misread_tiles, fix.near_samples, fix.unknown_samples, fix.samples
-    );
-    if let Some(intensity) = orbiters_reconstruct::aberration::undo(&mut data) {
-        eprintln!("chromatic aberration (intensity {intensity:.3}) undone in {} keyframes", data.views.len());
+    // Within the memory budget; depth that says nothing becomes unknown, the world's chromatic aberration leaves the
+    // keyframes.
+    let prepared = prepare::prepare(dir, &prepare::Options { width: args.width, ..Default::default() }, |p| stage(Stage::Loading, p))?;
+    for line in prepared.describe() {
+        eprintln!("{line}");
     }
+    let data = &prepared.data;
+    let held_out = train::held_out(data.views.len(), args.settings.hold_out_every);
     stage(Stage::Seeding, 0.0);
-    let seeded = init::from_depth(&data, args.settings.budget * 2 / 3);
+    let budget = args.settings.budget * 2 / 3;
+    let seeded = orbiters_reconstruct::priority::on_loading_threads(|| init::from_depth(data, budget, &held_out, |p| stage(Stage::Seeding, p)));
     if seeded.is_empty() {
-        bail!("This session has no depth frames to start from: record with the capture kit's depth frames on.");
+        bail!("{}", prepared.nothing_to_seed());
     }
     let mut gpu = gpu::Gpu::with_options(args.device)?;
     stage(Stage::Training, 0.0);
-    let outcome = train::train(&data, &mut gpu, seeded, &args.settings, |p| {
+    let outcome = train::train(data, &mut gpu, seeded, &args.settings, |p| {
         emit(&Event::Progress { iteration: p.iteration, iterations: p.iterations, gaussians: p.gaussians, intersections: p.intersections, psnr: p.psnr, seconds: p.seconds });
     })?;
 
@@ -96,40 +107,117 @@ fn run(args: Args) -> anyhow::Result<Report> {
     }
     std::fs::create_dir_all(partial.join(rec::HELD_OUT_DIR))?;
     ply::write(&partial.join(rec::PLY_FILE), &outcome.gaussians)?;
-    gpu.upload(&outcome.gaussians);
-    let previews: Vec<usize> = if outcome.held_out.is_empty() { vec![0] } else { outcome.held_out.clone() };
-    for (k, &i) in previews.iter().enumerate() {
-        let view = &data.views[i];
-        let img = train::render(&mut gpu, &view.camera, args.settings.background)?;
-        let encoded = qoi::encode(&rgb8(&img), data.width, data.height, 3);
-        if k == 0 {
+    // One render of each held-out keyframe: its preview and its score (the device holds the result).
+    let write = |i: usize, img: &[[f32; 4]], preview: bool| -> anyhow::Result<()> {
+        let encoded = qoi::encode(&rgb8(img), data.width, data.height, 3);
+        if preview {
             std::fs::write(partial.join(rec::PREVIEW_FILE), &encoded)?;
         }
-        std::fs::write(partial.join(rec::HELD_OUT_DIR).join(format!("{:06}.qoi", view.keyframe)), &encoded)?;
+        std::fs::write(partial.join(rec::HELD_OUT_DIR).join(format!("{:06}.qoi", data.views[i].keyframe)), &encoded)?;
+        Ok(())
+    };
+    let mut first = true;
+    let psnr_held_out = train::score_held_out(&mut gpu, data, prepared.undo.as_ref(), &outcome.held_out, args.settings.background, |i, img| {
+        write(i, img, std::mem::take(&mut first))
+    })?;
+    if outcome.held_out.is_empty() {
+        write(0, &train::render(&mut gpu, &data.views[0].camera, args.settings.background)?, true)?;
     }
     let report = Report {
         gaussians: outcome.gaussians.len(),
         iterations: outcome.iterations,
         seconds: outcome.seconds,
-        psnr_held_out: outcome.psnr_held_out,
+        psnr_held_out,
         psnr_train: outcome.psnr_train,
         held_out_keyframes: outcome.held_out.iter().map(|&i| data.views[i].keyframe).collect(),
         width: data.width,
         height: data.height,
         adapter: gpu.adapter.clone(),
         created_utc: orbiters_core::now_utc_iso(),
+        keyframes_total: data.loaded.keyframes,
+        keyframes_used: data.views.len(),
+        depth_frames_total: data.loaded.depth_frames,
+        depth_frames_used: data.depth_views.len(),
+        chromatic_aberration: prepared.undo.as_ref().map(|u| u.intensity),
+        depth_samples: prepared.depth.as_ref().map(|f| f.samples),
+        depth_unknown: prepared.depth.as_ref().map(|f| f.unknown_samples),
     };
     std::fs::write(partial.join(rec::REPORT_FILE), serde_json::to_string_pretty(&report)?)?;
     replace(dir, &partial)?;
     Ok(report)
 }
 
+/// Retries a file operation that another program (an indexer, an antivirus scan, a viewer just closing) holds for a
+/// moment.
+fn retry(mut f: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+    let mut wait = std::time::Duration::from_millis(50);
+    for _ in 0..4 {
+        if f().is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(wait);
+        wait *= 2;
+    }
+    f()
+}
+
+/// Puts back a previous result that a swap left in [`BACKUP_DIR`] (the run stopped between moving it out and moving
+/// the new one in), and clears a backup whose swap finished.
+fn recover(dir: &Path) {
+    let (out, backup) = (rec::dir(dir), dir.join(BACKUP_DIR));
+    if !backup.exists() {
+        return;
+    }
+    if out.exists() {
+        let _ = std::fs::remove_dir_all(&backup);
+    } else if let Err(e) = std::fs::rename(&backup, &out) {
+        eprintln!("could not put the previous result back from {}: {e}", backup.display());
+    }
+}
+
+/// Moves the finished result in `partial` into place without ever deleting the previous one first: the previous
+/// folder moves aside, the new one moves in, and only then is the previous one deleted (best effort; a backup left
+/// behind is cleared by the next run). When the previous folder cannot move (a program has one of its files open),
+/// its files are replaced one by one, the splats first: if even those cannot be replaced, the previous result stays
+/// whole and the run fails saying so.
 fn replace(dir: &Path, partial: &Path) -> anyhow::Result<()> {
     let out = rec::dir(dir);
-    if out.exists() {
-        std::fs::remove_dir_all(&out).with_context(|| format!("removing the previous {}", out.display()))?;
+    let backup = dir.join(BACKUP_DIR);
+    recover(dir);
+    if out.exists() && retry(|| std::fs::rename(&out, &backup)).is_err() {
+        return replace_files(&out, partial).with_context(|| format!("replacing the previous result in {}", out.display()));
     }
-    std::fs::rename(partial, &out).with_context(|| format!("moving the result to {}", out.display()))
+    if let Err(e) = retry(|| std::fs::rename(partial, &out)) {
+        // Back as it was.
+        let _ = std::fs::rename(&backup, &out);
+        return Err(e).with_context(|| format!("moving the result to {}", out.display()));
+    }
+    if backup.exists() {
+        let _ = std::fs::remove_dir_all(&backup);
+    }
+    Ok(())
+}
+
+/// The fallback of [`replace`]: each file of `partial` over its namesake in `out`, the splats first (the file a viewer
+/// keeps open) and the report last (it says what the folder holds). Held-out renders that cannot be replaced keep the
+/// previous ones; renders of keyframes the new run did not hold out are deleted where possible.
+fn replace_files(out: &Path, partial: &Path) -> anyhow::Result<()> {
+    retry(|| std::fs::rename(partial.join(rec::PLY_FILE), out.join(rec::PLY_FILE))).with_context(|| format!("{} is open in another program: close it and reconstruct again", out.join(rec::PLY_FILE).display()))?;
+    let _ = retry(|| std::fs::rename(partial.join(rec::PREVIEW_FILE), out.join(rec::PREVIEW_FILE)));
+    let (from, to) = (partial.join(rec::HELD_OUT_DIR), out.join(rec::HELD_OUT_DIR));
+    std::fs::create_dir_all(&to)?;
+    let fresh: Vec<std::ffi::OsString> = std::fs::read_dir(&from).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default();
+    for name in &fresh {
+        let _ = retry(|| std::fs::rename(from.join(name), to.join(name)));
+    }
+    if let Ok(old) = std::fs::read_dir(&to) {
+        for e in old.flatten().filter(|e| !fresh.contains(&e.file_name())) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    retry(|| std::fs::rename(partial.join(rec::REPORT_FILE), out.join(rec::REPORT_FILE)))?;
+    let _ = std::fs::remove_dir_all(partial);
+    Ok(())
 }
 
 /// `orbiters-reconstruct --web-preview <splats.ply> <out.splat> [--max N]`: the reconstruction as a web preview
@@ -150,6 +238,7 @@ fn web_preview(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn main() {
+    orbiters_core::panic_log::install();
     let all: Vec<String> = std::env::args().skip(1).collect();
     if all.first().map(String::as_str) == Some("--web-preview") {
         if let Err(e) = web_preview(&all[1..]) {
@@ -164,5 +253,92 @@ fn main() {
             emit(&Event::Error { message: format!("{e:#}") });
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("orbiters-reconstruct-swap-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A result folder `name` in `dir` whose splats read `ply` and whose report, preview and one render read `report`.
+    fn result(dir: &Path, name: &str, ply: &str, report: &str) {
+        let d = dir.join(name);
+        std::fs::create_dir_all(d.join(rec::HELD_OUT_DIR)).unwrap();
+        std::fs::write(d.join(rec::PLY_FILE), ply).unwrap();
+        std::fs::write(d.join(rec::REPORT_FILE), report).unwrap();
+        std::fs::write(d.join(rec::PREVIEW_FILE), report).unwrap();
+        std::fs::write(d.join(rec::HELD_OUT_DIR).join(format!("{report}.qoi")), report).unwrap();
+    }
+
+    fn read(dir: &Path, file: &str) -> String {
+        std::fs::read_to_string(rec::dir(dir).join(file)).unwrap()
+    }
+
+    #[test]
+    fn a_new_result_replaces_the_previous_one_whole() {
+        let dir = session("whole");
+        result(&dir, rec::PARTIAL_DIR, "new-1", "r1");
+        replace(&dir, &dir.join(rec::PARTIAL_DIR)).unwrap();
+        assert_eq!(read(&dir, rec::PLY_FILE), "new-1");
+        result(&dir, rec::PARTIAL_DIR, "new-2", "r2");
+        replace(&dir, &dir.join(rec::PARTIAL_DIR)).unwrap();
+        assert_eq!((read(&dir, rec::PLY_FILE), read(&dir, rec::REPORT_FILE)), ("new-2".into(), "r2".into()));
+        assert!(!dir.join(BACKUP_DIR).exists() && !dir.join(rec::PARTIAL_DIR).exists());
+        let renders = rec::dir(&dir).join(rec::HELD_OUT_DIR);
+        assert!(renders.join("r2.qoi").exists() && !renders.join("r1.qoi").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A run stopped between moving the previous result aside and moving the new one in: the previous one comes back.
+    #[test]
+    fn a_swap_cut_short_puts_the_previous_result_back() {
+        let dir = session("cut");
+        result(&dir, BACKUP_DIR, "old", "r0");
+        recover(&dir);
+        assert_eq!(read(&dir, rec::PLY_FILE), "old");
+        assert!(!dir.join(BACKUP_DIR).exists());
+        // Both there (the swap finished, its backup stayed): the backup goes.
+        result(&dir, BACKUP_DIR, "older", "r-1");
+        recover(&dir);
+        assert_eq!(read(&dir, rec::PLY_FILE), "old");
+        assert!(!dir.join(BACKUP_DIR).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A viewer holding the previous splats open without delete sharing (as most programs open files): the previous
+    /// result stays whole and the run says why. With only a render held open, the splats and report are the new ones.
+    #[cfg(windows)]
+    #[test]
+    fn a_result_held_open_by_another_program_is_never_left_half_replaced() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const SHARE_READ: u32 = 1;
+        let dir = session("held");
+        result(&dir, rec::DIR, "old", "r0");
+        result(&dir, rec::PARTIAL_DIR, "new", "r1");
+        let held = std::fs::OpenOptions::new().read(true).share_mode(SHARE_READ).open(rec::dir(&dir).join(rec::PLY_FILE)).unwrap();
+        let outcome = replace(&dir, &dir.join(rec::PARTIAL_DIR));
+        let (ply, report) = (read(&dir, rec::PLY_FILE), read(&dir, rec::REPORT_FILE));
+        match outcome {
+            Ok(()) => assert_eq!((ply.as_str(), report.as_str()), ("new", "r1")),
+            Err(e) => {
+                assert_eq!((ply.as_str(), report.as_str()), ("old", "r0"), "{e:#}");
+                assert!(format!("{e:#}").contains("open in another program"), "{e:#}");
+            }
+        }
+        drop(held);
+        result(&dir, rec::PARTIAL_DIR, "newer", "r2");
+        let held = std::fs::OpenOptions::new().read(true).share_mode(SHARE_READ).open(rec::dir(&dir).join(rec::PREVIEW_FILE)).unwrap();
+        replace(&dir, &dir.join(rec::PARTIAL_DIR)).expect("replaced");
+        drop(held);
+        assert_eq!((read(&dir, rec::PLY_FILE), read(&dir, rec::REPORT_FILE)), ("newer".into(), "r2".into()));
+        recover(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

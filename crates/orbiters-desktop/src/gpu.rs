@@ -1,13 +1,28 @@
 //! GPU setup for the window. wgpu's defaults suit games: the "performance" memory hint reserves 128 MB device and
 //! 64 MB host blocks (system RAM on an integrated GPU), and the D3D12 backend maps a million-entry descriptor heap
-//! (32 MB). With small blocks and a small heap a window costs about the driver's own floor.
-//! The window asks for small blocks instead, renders on the adapter that drives the primary display (no copy
-//! between GPUs; on a laptop that is the integrated GPU that owns the panel), and on Windows loads only the
-//! DX12 drivers (no Vulkan or OpenGL probing).
+//! (32 MB). The window asks for small blocks and a small heap instead (it then costs about the driver's own floor),
+//! renders on the adapter that drives the primary display (no copy between GPUs; on a laptop that is the integrated
+//! GPU that owns the panel), on Windows loads only the DX12 drivers (no Vulkan or OpenGL probing), and reports GPU
+//! errors instead of closing ([`report_errors`]).
 
 use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetupCreateNew};
 use eframe::wgpu;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// wgpu answers an error nobody was set to catch with a panic: one frame of the 3D view the GPU refused (a sort over
+/// its limits, an allocation the driver turned down, a device lost under VRChat's load) closed the whole window.
+/// They are printed instead (the first few, then one in a hundred) and the window carries on; the 3D view says
+/// what it could not draw.
+pub fn report_errors(device: &wgpu::Device) {
+    let count = Arc::new(AtomicU64::new(0));
+    device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
+        let n = count.fetch_add(1, Ordering::Relaxed);
+        if n < 5 || n.is_multiple_of(100) {
+            eprintln!("window GPU error ({}): {e}", n + 1);
+        }
+    }));
+}
 
 /// The window's device, for pages that draw their own GPU content (the 3D view of splats), and its renderer, whose
 /// textures the progressive blur under the title bar draws with.

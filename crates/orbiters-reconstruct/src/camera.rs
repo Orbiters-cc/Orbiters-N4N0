@@ -18,9 +18,62 @@ pub struct Camera {
     pub height: u32,
 }
 
+/// The training resolution of a capture: the captured frame box-filtered by an integer `factor`, its last
+/// `full_width % factor` columns and `full_height % factor` rows left out. Keyframes, cameras, depth-sample positions
+/// and the loss mask all follow it, so they line up pixel for pixel whatever the capture's size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Geometry {
+    pub full_width: u32,
+    pub full_height: u32,
+    pub factor: u32,
+}
+
+impl Default for Geometry {
+    fn default() -> Self {
+        Self { full_width: 0, full_height: 0, factor: 1 }
+    }
+}
+
+impl Geometry {
+    pub fn new(full_width: u32, full_height: u32, factor: u32) -> Self {
+        Self { full_width, full_height, factor: factor.max(1) }
+    }
+
+    /// The largest training size at most `max_width` wide (64 at least) that divides the capture by an integer.
+    pub fn at_most(full_width: u32, full_height: u32, max_width: u32) -> Self {
+        Self::new(full_width, full_height, full_width.div_ceil(max_width.max(64)).max(1))
+    }
+
+    pub fn width(&self) -> u32 {
+        self.full_width / self.factor
+    }
+
+    pub fn height(&self) -> u32 {
+        self.full_height / self.factor
+    }
+
+    /// A captured pixel coordinate (pixel centres at integers) at the training resolution: training pixel `x` averages
+    /// captured pixels `factor·x .. factor·x + factor − 1`.
+    pub fn to_training(&self, x: f32) -> f32 {
+        (x + 0.5) / self.factor as f32 - 0.5
+    }
+
+    /// The training pixels a captured rectangle (half-open, captured pixels) touches, clipped to the image.
+    pub fn cover(&self, x0: u32, y0: u32, x1: u32, y1: u32) -> (u32, u32, u32, u32) {
+        let f = self.factor;
+        ((x0 / f).min(self.width()), (y0 / f).min(self.height()), x1.div_ceil(f).min(self.width()), y1.div_ceil(f).min(self.height()))
+    }
+
+    /// The training camera of a strip pose (Unity camera-to-world, row-major 3×4) and projection terms.
+    pub fn camera(&self, camera_to_world: &[f32; 12], projection: &[f32; 4]) -> Camera {
+        Camera::from_strip(camera_to_world, projection, self.full_width, self.full_height, 1.0).scaled(self.factor)
+    }
+}
+
 impl Camera {
     /// From a strip pose (Unity camera-to-world, row-major 3×4) and projection terms, for an image of
-    /// `width × height` scaled by `scale` (training resolution / captured resolution).
+    /// `width × height` scaled by `scale` about the pixel centres, its size rounded (a viewer's camera; training
+    /// cameras come from [`Geometry::camera`], which crops like the keyframes do).
     pub fn from_strip(camera_to_world: &[f32; 12], projection: &[f32; 4], width: u32, height: u32, scale: f32) -> Self {
         let m = camera_to_world;
         let right = [m[0], m[4], m[8]];
@@ -45,6 +98,23 @@ impl Camera {
         let t = [-dot(r[0], eye), -dot(r[1], eye), -dot(r[2], eye)];
         let focal = 0.5 * height as f32 / (0.5 * fov_y).tan();
         Self { r, t, fx: focal, fy: focal, cx: (width as f32 - 1.0) / 2.0, cy: (height as f32 - 1.0) / 2.0, width, height }
+    }
+
+    /// The camera of this image box-filtered by an integer `factor` (pixel centres at integers on both; the last
+    /// `width % factor` columns and `height % factor` rows left out).
+    pub fn scaled(&self, factor: u32) -> Camera {
+        let factor = factor.max(1);
+        let f = factor as f32;
+        Camera {
+            r: self.r,
+            t: self.t,
+            fx: self.fx / f,
+            fy: self.fy / f,
+            cx: (self.cx + 0.5) / f - 0.5,
+            cy: (self.cy + 0.5) / f - 0.5,
+            width: self.width / factor,
+            height: self.height / factor,
+        }
     }
 
     /// Vertical field of view in radians.
@@ -147,5 +217,29 @@ mod tests {
         let (uh, vh, _) = half.project(p).unwrap();
         assert!(((uh + 0.5) * 2.0 - (u + 0.5)).abs() < 1e-3 && ((vh + 0.5) * 2.0 - (v + 0.5)).abs() < 1e-3);
         assert_eq!((half.width, half.height), (960, 540));
+    }
+
+    /// Capture sizes the factor does not divide: the training camera is exactly the size of the cropped, box-filtered
+    /// keyframe, and its pixel centres sit where the captured pixels they average are.
+    #[test]
+    fn training_cameras_match_cropped_keyframes_at_odd_capture_sizes() {
+        let a = 0.3f32;
+        let pose = [a.cos(), 0.0, a.sin(), 1.0, 0.0, 1.0, 0.0, 1.6, -a.sin(), 0.0, a.cos(), -2.0];
+        for (w, h, max) in [(2560u32, 1441u32, 1280u32), (2561, 1440, 1280), (1923, 1083, 640), (1920, 1080, 1920)] {
+            let g = Geometry::at_most(w, h, max);
+            let full = Camera::from_strip(&pose, &[1.2, 1.2 * w as f32 / h as f32, 0.01, -0.02], w, h, 1.0);
+            let cam = g.camera(&pose, &[1.2, 1.2 * w as f32 / h as f32, 0.01, -0.02]);
+            assert_eq!((cam.width, cam.height), (g.width(), g.height()), "{w}×{h}");
+            assert_eq!((g.width(), g.height()), (w / g.factor, h / g.factor));
+            for (x, y) in [(0.0f32, 0.0f32), (811.3, 402.7), ((w - 1) as f32, (h - 1) as f32)] {
+                let p = full.unproject(x, y, 4.0);
+                let (u, v, _) = cam.project(p).expect("in front");
+                assert!((u - g.to_training(x)).abs() < 2e-3 && (v - g.to_training(y)).abs() < 2e-3, "{w}×{h} at ({x}, {y}): {u} {v}");
+            }
+        }
+        // The rectangle a captured area covers at the training resolution.
+        let g = Geometry::new(1921, 1081, 2);
+        assert_eq!(g.cover(0, 0, 3, 5), (0, 0, 2, 3));
+        assert_eq!(g.cover(1900, 1070, 1921, 1081), (950, 535, 960, 540));
     }
 }

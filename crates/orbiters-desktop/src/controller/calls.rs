@@ -1,31 +1,68 @@
 //! Orb calls in the tray service (contracts `Docs/orb-calls.md`): presence and the friends this computer's VRCX and
 //! VRCNext know (as hashes) go to Orbiters every minute while calls are on; the server's event stream brings incoming
-//! calls and the other side's answer and candidates; the `orbiters-call` worker carries the audio peer to peer. The
-//! Orb's panel lists the contacts while its Call menu is open and says who is calling.
+//! calls and the other side's answer and candidates; the `orbiters-call` worker carries the audio peer to peer
+//! (protocol `orbiters_core::call`). The Orb's panel lists the contacts while its Call menu is open and says who is
+//! calling.
+//!
+//! Each call has a number of this side's own, which the worker's commands and events carry, and the server's events
+//! are checked against the call's id: nothing a call that ended (or the worker that carried it) says acts on the next
+//! one. The rules are [`CallsRuntime`]'s: its methods change the state and return what to do ([`Acts`]), which
+//! [`Controller::calls_act`](super::Controller) does: the worker's commands, the requests to Orbiters (sent in order
+//! by one thread, candidates batched) and what the panel says.
+//!
+//! This computer's addresses reach no one who only lets a call ring: the worker leaves the candidates out of the
+//! descriptions, and each side's own wait until both took the call. Calls go through the relay only unless direct
+//! calls are on (`OrbSettings::direct_calls`), so the other side does not learn them then either.
 
 use super::{NoticeKind, Shared};
 use crate::state::{CallContact, CallLink, CallPhase, CallView};
-use orbiters_core::account::Api;
+use orbiters_core::account::{Api, ApiError};
+use orbiters_core::call::{self, CallCommand, CallEvent, EndReason, IceCandidate, IceServer};
 use orbiters_core::vrchat_accounts::{self, LocalVrchat};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{mpsc, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PRESENCE_EVERY: Duration = Duration::from_secs(60);
 const CONTACTS_EVERY: Duration = Duration::from_secs(30);
 /// VRCX and VRCNext are read again after this.
 const FRIENDS_EVERY: Duration = Duration::from_secs(5 * 60);
+/// The most friends a presence report carries (the contract's limit).
+const FRIENDS_MOST: usize = 5000;
 /// Contacts shown on the panel at once.
 pub const PAGE: usize = 4;
+/// How long each phase may last before the call is given up: our call ringing at the friend's (Orbiters rings it
+/// 30 s), a friend's ringing here, connecting once answered.
+const CALLING_FOR: Duration = Duration::from_secs(40);
+const RINGING_FOR: Duration = Duration::from_secs(35);
+const CONNECTING_FOR: Duration = Duration::from_secs(30);
+/// Candidates kept for a call while they cannot go yet.
+const KEPT_MOST: usize = 64;
+/// The event stream is opened again when nothing came for this long (Orbiters pings every 20 s): a connection that
+/// died without a word (the computer slept, another network) would never ring again otherwise.
+const STREAM_IDLE: Duration = Duration::from_secs(60);
+/// A stream that failed is opened again after this, doubling up to [`STREAM_RETRY_MOST`].
+const STREAM_RETRY: Duration = Duration::from_secs(2);
+const STREAM_RETRY_MOST: Duration = Duration::from_secs(60);
+/// The longest line of the event stream (a description is a few kB).
+const EVENT_MOST: usize = 256 * 1024;
+/// This side's candidates that come within this of each other go in one request.
+const BATCH: Duration = Duration::from_millis(100);
+/// Requests about a call give up after this; the relay servers' too (a caller waits on them).
+const SIGNAL_TIMEOUT: Duration = Duration::from_secs(15);
+const ICE_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Worker {
     child: Child,
     stdin: ChildStdin,
+    /// Which worker this is: the end of an earlier one's output says nothing about the calls of this one.
+    number: u64,
 }
 
 impl Worker {
-    fn spawn(ctl: Shared) -> anyhow::Result<Self> {
+    fn spawn(ctl: Shared, number: u64) -> anyhow::Result<Self> {
         let path = crate::worker::sibling_exe("orbiters-call");
         anyhow::ensure!(path.is_file(), "The call worker was not found at {}", path.display());
         let mut cmd = Command::new(&path);
@@ -36,38 +73,39 @@ impl Worker {
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
         let mut child = cmd.spawn()?;
+        crate::worker::keep_with_service(&child);
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         std::thread::Builder::new().name("call-stdout".into()).spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
-                match serde_json::from_str::<Value>(&line) {
+                match serde_json::from_str::<CallEvent>(&line) {
                     Ok(e) => ctl.on_call_worker(e),
-                    Err(_) => eprintln!("call: unexpected output: {line}"),
+                    // Not the line: it may hold a description (addresses).
+                    Err(e) => eprintln!("call: unexpected output ({} bytes): {e}", line.len()),
                 }
             }
-            ctl.on_call_worker(json!({ "event": "ended", "reason": "closed" }));
+            ctl.on_call_worker_exit(number);
         })?;
         std::thread::Builder::new().name("call-stderr".into()).spawn(move || {
             for line in BufReader::new(stderr).lines() {
                 let Ok(line) = line else { break };
-                eprintln!("call: {line}");
+                eprintln!("call: {}", line.strip_prefix("call: ").unwrap_or(&line));
             }
         })?;
-        Ok(Self { child, stdin })
+        Ok(Self { child, stdin, number })
     }
 
-    fn send(&mut self, command: Value) -> anyhow::Result<()> {
-        writeln!(self.stdin, "{command}")?;
-        self.stdin.flush()?;
-        Ok(())
+    fn send(&mut self, command: &CallCommand) -> std::io::Result<()> {
+        writeln!(self.stdin, "{}", command.to_line())?;
+        self.stdin.flush()
     }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        let _ = self.send(json!({ "cmd": "quit" }));
+        let _ = self.send(&CallCommand::Quit);
         for _ in 0..20 {
             if matches!(self.child.try_wait(), Ok(Some(_))) {
                 return;
@@ -79,27 +117,130 @@ impl Drop for Worker {
 }
 
 /// The call under way.
+#[derive(Debug)]
 struct Call {
-    /// The server's id, once it gave one (a caller's offer is sent before).
+    /// This side's number for it: the worker's commands and events carry it.
+    number: u64,
+    /// The server's id, once it gave one (a caller's offer goes before).
     id: Option<String>,
     contact: String,
     name: String,
     phase: CallPhase,
     incoming: bool,
+    /// When the phase began (its deadline counts from there).
+    since: Instant,
     /// An incoming call's offer and relay servers, until it is answered.
-    offer: Option<(String, Value)>,
-    /// Candidates of this side waiting for the call's id.
-    candidates: Vec<Value>,
+    offer: Option<(String, Vec<IceServer>)>,
+    /// The worker that took the call's offer or answer command: mute goes to it from then on, and its end ends the
+    /// call.
+    worker: Option<u64>,
+    /// Both sides took the call: this side's candidates go to the other one as they come. Until then they wait in
+    /// `outbox` (a caller's until the friend answered, a callee's until it answered itself).
+    open: bool,
+    outbox: Vec<IceCandidate>,
+    /// The caller's candidates that came while the call rang here, for the worker once it is answered.
+    inbox: Vec<IceCandidate>,
     connected_at: Option<u64>,
     muted: bool,
     levels: (f32, f32),
+}
+
+impl Call {
+    fn new(number: u64, contact: String, name: String, incoming: bool, now: Instant) -> Self {
+        Self {
+            number,
+            id: None,
+            contact,
+            name,
+            phase: if incoming { CallPhase::Ringing } else { CallPhase::Calling },
+            incoming,
+            since: now,
+            offer: None,
+            worker: None,
+            open: false,
+            outbox: Vec::new(),
+            inbox: Vec::new(),
+            connected_at: None,
+            muted: false,
+            levels: (0.0, 0.0),
+        }
+    }
+
+    fn ringing_in(&self) -> bool {
+        self.incoming && self.phase == CallPhase::Ringing
+    }
+}
+
+/// How a call ended, for the panel (which everyone around reads).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ending {
+    /// The friend declined our call.
+    Declined,
+    /// We declined theirs.
+    DeclinedHere,
+    /// Our call rang out.
+    Unanswered,
+    /// Theirs rang out, or they gave up before it was answered.
+    Missed,
+    Ended,
+    /// The friend is in another call.
+    Busy,
+    Failed,
+    /// Nothing got through this network.
+    Unreachable,
+}
+
+impl Ending {
+    fn text(self, name: &str, connected: bool) -> String {
+        match self {
+            Ending::Declined => format!("{name} can't talk right now."),
+            Ending::DeclinedHere => format!("Call from {name} declined."),
+            Ending::Unanswered => format!("{name} didn't answer."),
+            Ending::Missed => format!("Missed call from {name}."),
+            Ending::Ended => format!("Call with {name} ended."),
+            Ending::Busy => format!("{name} is on another call."),
+            Ending::Failed if connected => format!("The call with {name} dropped."),
+            Ending::Failed => format!("The call with {name} could not connect."),
+            Ending::Unreachable => format!("The call with {name} could not connect: this network seems to block calls."),
+        }
+    }
+}
+
+/// A request to Orbiters about a call, sent in order by one thread.
+#[derive(Debug, PartialEq)]
+enum Signal {
+    /// `POST /orb/calls`: our offer; the answer gives the call its id.
+    Create { number: u64, contact: String, offer: String },
+    /// `POST /orb/calls/:id/answer`: the call is over when it fails.
+    Answer { number: u64, id: String, sdp: String },
+    /// `POST /orb/calls/:id/candidates`, with those that follow within [`BATCH`].
+    Candidates { id: String, candidates: Vec<IceCandidate> },
+    /// `POST /orb/calls/:id/decline` or `/end` (the call is over here: a failure is only logged).
+    Close { id: String, decline: bool },
+}
+
+/// What a change of the calls asks for.
+#[derive(Debug, Default)]
+struct Acts {
+    /// The worker's commands, in order.
+    worker: Vec<CallCommand>,
+    /// Requests to Orbiters, in order.
+    signals: Vec<Signal>,
+    /// What the panel says.
+    say: Option<String>,
+    notice: Option<(NoticeKind, String)>,
+    /// What the window and the overlay show changed.
+    publish: bool,
 }
 
 #[derive(Default)]
 pub struct CallsRuntime {
     local: LocalVrchat,
     local_read: Option<Instant>,
-    /// The friend hashes Orbiters has (sent again when they change or the server lost them).
+    /// The friends' hashes for presence (made again only when VRCX and VRCNext are read again), and their digest.
+    friend_hashes: Vec<String>,
+    friends_digest: u64,
+    /// The digest of the friend hashes Orbiters has (sent again when they change or the server lost them).
     friends_sent: Option<u64>,
     link: CallLink,
     contacts: Vec<CallContact>,
@@ -107,17 +248,298 @@ pub struct CallsRuntime {
     presence_sent: Option<Instant>,
     available_sent: Option<bool>,
     call: Option<Call>,
+    /// The last number given to a call.
+    numbered: u64,
     worker: Option<Worker>,
+    /// The last number given to a worker.
+    workers: u64,
+    /// The thread that sends the requests about calls.
+    signals: Option<mpsc::Sender<Signal>>,
+    /// One client for Orbiters while the server stays the same: its connections are kept between requests.
+    client: Option<Api>,
+    /// Direct calls are allowed (the Orb setting, read before each offer and answer). Off, calls go through the relay
+    /// only: the other side sees the relay's address, never this computer's.
+    direct: bool,
     /// The panel lists the contacts (the Orb's Call menu is open), and which one is chosen.
     pub(super) menu_open: bool,
     pub(super) picked: usize,
-    /// The event stream is open.
-    streaming: bool,
+    /// The event stream open (or opening): its number and the credential it was opened with. A stream whose number
+    /// is not this one any more ends at its next line (calls turned off, signed out, another account).
+    streaming: Option<(u64, String)>,
+    streams: u64,
+    stream_failures: u32,
+    stream_retry_at: Option<Instant>,
     stop: bool,
+}
+
+impl CallsRuntime {
+    fn current(&mut self, number: u64) -> Option<&mut Call> {
+        self.call.as_mut().filter(|c| c.number == number)
+    }
+
+    /// Our call to `contact` starts (its relay servers come next): its number. None while another call is on.
+    fn dial(&mut self, contact: &str, name: &str, now: Instant) -> Option<u64> {
+        if self.call.is_some() {
+            return None;
+        }
+        self.numbered += 1;
+        self.call = Some(Call::new(self.numbered, contact.to_string(), name.to_string(), false, now));
+        Some(self.numbered)
+    }
+
+    /// The worker's command that starts our call `number`, now that its relay servers came (none when it ended
+    /// meanwhile).
+    fn offer(&mut self, number: u64, ice_servers: Vec<IceServer>, mic: Option<String>) -> Option<CallCommand> {
+        let c = self.current(number).filter(|c| !c.incoming && c.phase == CallPhase::Calling && c.worker.is_none())?;
+        Some(CallCommand::Offer { call: number, ice_servers, mic, muted: c.muted, relay_only: !self.direct })
+    }
+
+    /// The ringing call is answered here: the worker takes it, with the caller's candidates that came meanwhile.
+    fn answer(&mut self, mic: Option<String>, now: Instant) -> Acts {
+        let Some(c) = self.call.as_mut().filter(|c| c.ringing_in()) else { return Acts::default() };
+        let Some((offer, ice_servers)) = c.offer.take() else { return Acts::default() };
+        c.phase = CallPhase::Connecting;
+        c.since = now;
+        let mut acts = Acts { publish: true, ..Default::default() };
+        acts.worker.push(CallCommand::Answer { call: c.number, offer, ice_servers, mic, muted: c.muted, relay_only: !self.direct });
+        if !c.inbox.is_empty() {
+            acts.worker.push(CallCommand::Candidates { call: c.number, candidates: std::mem::take(&mut c.inbox) });
+        }
+        acts
+    }
+
+    /// This side declines the ringing call, or hangs up.
+    fn hang_up(&mut self) -> Acts {
+        let Some(c) = &self.call else { return Acts::default() };
+        let ending = if c.ringing_in() { Ending::DeclinedHere } else { Ending::Ended };
+        self.finish(ending, true)
+    }
+
+    fn mute(&mut self, on: bool) -> Acts {
+        let Some(c) = self.call.as_mut() else { return Acts::default() };
+        c.muted = on;
+        let mut acts = Acts { publish: true, ..Default::default() };
+        // Before the worker has the call, the muting goes with its start command.
+        if c.worker.is_some() {
+            acts.worker.push(CallCommand::Mute { call: c.number, on });
+        }
+        acts
+    }
+
+    /// The call is over: the panel says how, the worker hangs up and, when this side ends it (`tell`), Orbiters
+    /// hears it (declined when it rang here).
+    fn finish(&mut self, ending: Ending, tell: bool) -> Acts {
+        let mut acts = Acts { publish: true, ..Default::default() };
+        let Some(c) = self.call.take() else { return acts };
+        if c.worker.is_some() {
+            acts.worker.push(CallCommand::Hangup { call: c.number });
+        }
+        if let (true, Some(id)) = (tell, c.id.clone()) {
+            acts.signals.push(Signal::Close { id, decline: c.ringing_in() });
+        }
+        acts.say = Some(ending.text(&c.name, c.connected_at.is_some()));
+        acts
+    }
+
+    /// One event of the server's stream. Those about another call than this one do nothing (an incoming one is
+    /// declined: one call at a time).
+    fn server_event(&mut self, event: &str, v: &Value, now: Instant) -> Acts {
+        let id = v["call"].as_str().unwrap_or_default();
+        if id.is_empty() {
+            return Acts::default();
+        }
+        if event == "incoming" {
+            return self.incoming(id, v, now);
+        }
+        let Some(c) = self.call.as_mut().filter(|c| c.id.as_deref() == Some(id)) else { return Acts::default() };
+        let ending = match event {
+            "answered" if !c.incoming && c.phase == CallPhase::Calling => {
+                c.phase = CallPhase::Connecting;
+                c.since = now;
+                c.open = true;
+                let mut acts = Acts { publish: true, ..Default::default() };
+                acts.worker.push(CallCommand::RemoteAnswer { call: c.number, sdp: v["answer"].as_str().unwrap_or_default().to_string() });
+                // Our candidates waited for this: the friend took the call.
+                if !c.outbox.is_empty() {
+                    acts.signals.push(Signal::Candidates { id: id.to_string(), candidates: std::mem::take(&mut c.outbox) });
+                }
+                return acts;
+            }
+            "candidates" => {
+                let list: Vec<IceCandidate> = v["candidates"].as_array().map(|a| a.iter().filter_map(IceCandidate::from_value).collect()).unwrap_or_default();
+                if list.is_empty() {
+                    return Acts::default();
+                }
+                if c.worker.is_some() && !c.ringing_in() {
+                    return Acts { worker: vec![CallCommand::Candidates { call: c.number, candidates: list }], ..Default::default() };
+                }
+                // It rings here: the worker gets them with the answer.
+                c.inbox.extend(list);
+                c.inbox.truncate(KEPT_MOST);
+                return Acts::default();
+            }
+            "declined" => Ending::Declined,
+            "ended" if c.ringing_in() => Ending::Missed,
+            "ended" if v["reason"] == "timeout" => {
+                if c.incoming {
+                    Ending::Missed
+                } else {
+                    Ending::Unanswered
+                }
+            }
+            "ended" => Ending::Ended,
+            _ => return Acts::default(),
+        };
+        self.finish(ending, false)
+    }
+
+    fn incoming(&mut self, id: &str, v: &Value, now: Instant) -> Acts {
+        let offer = v["offer"].as_str().unwrap_or_default();
+        if let Some(c) = &self.call {
+            if c.id.as_deref() == Some(id) {
+                // The same call again (a stream that opened again).
+                return Acts::default();
+            }
+        }
+        if self.call.is_some() || offer.is_empty() {
+            // One call at a time (and a call without an offer cannot be answered): the caller hears this side is busy.
+            return Acts { signals: vec![Signal::Close { id: id.to_string(), decline: true }], ..Default::default() };
+        }
+        let name = v["from"]["name"].as_str().map(str::trim).filter(|n| !n.is_empty()).unwrap_or("A friend").to_string();
+        self.numbered += 1;
+        let mut c = Call::new(self.numbered, v["from"]["id"].as_str().unwrap_or_default().to_string(), name.clone(), true, now);
+        c.id = Some(id.to_string());
+        c.offer = Some((offer.to_string(), call::ice_servers(&v["ice_servers"])));
+        self.call = Some(c);
+        Acts {
+            say: Some(format!("{name} is calling. Touch me or press Call to answer.")),
+            notice: Some((NoticeKind::Info, format!("{name} is calling: answer on the Orb page, in the SteamVR tab or by touching the orb."))),
+            publish: true,
+            ..Default::default()
+        }
+    }
+
+    /// One event of the call worker. Those about another call than this one do nothing.
+    fn worker_event(&mut self, e: CallEvent, now: Instant) -> Acts {
+        match e {
+            CallEvent::Ready => Acts::default(),
+            CallEvent::Error { call, message } => {
+                if call != 0 && self.current(call).is_none() {
+                    return Acts::default();
+                }
+                Acts { notice: Some((NoticeKind::Warning, format!("Call: {message}"))), ..Default::default() }
+            }
+            CallEvent::Offer { call, sdp } => match self.current(call).filter(|c| !c.incoming) {
+                Some(c) => Acts { signals: vec![Signal::Create { number: call, contact: c.contact.clone(), offer: sdp }], ..Default::default() },
+                None => Acts::default(),
+            },
+            CallEvent::Answer { call, sdp } => {
+                let Some(c) = self.current(call).filter(|c| c.incoming) else { return Acts::default() };
+                let Some(id) = c.id.clone() else { return Acts::default() };
+                c.open = true;
+                let mut acts = Acts::default();
+                acts.signals.push(Signal::Answer { number: call, id: id.clone(), sdp });
+                if !c.outbox.is_empty() {
+                    acts.signals.push(Signal::Candidates { id, candidates: std::mem::take(&mut c.outbox) });
+                }
+                acts
+            }
+            CallEvent::Candidate { call, candidate } => {
+                let Some(c) = self.current(call) else { return Acts::default() };
+                match (&c.id, c.open) {
+                    (Some(id), true) => Acts { signals: vec![Signal::Candidates { id: id.clone(), candidates: vec![candidate] }], ..Default::default() },
+                    _ => {
+                        if c.outbox.len() < KEPT_MOST {
+                            c.outbox.push(candidate);
+                        }
+                        Acts::default()
+                    }
+                }
+            }
+            CallEvent::Connected { call } => {
+                let Some(c) = self.current(call) else { return Acts::default() };
+                c.phase = CallPhase::Connected;
+                c.connected_at = Some(now_ms());
+                c.since = now;
+                Acts { say: Some(format!("On a call with {}.", c.name)), publish: true, ..Default::default() }
+            }
+            CallEvent::Levels { call, mic, remote } => {
+                let Some(c) = self.current(call) else { return Acts::default() };
+                // Coarse steps: the meters move, and an unchanged level is not published again.
+                let levels = (quantize(mic), quantize(remote));
+                let changed = c.levels != levels;
+                c.levels = levels;
+                Acts { publish: changed, ..Default::default() }
+            }
+            CallEvent::Ended { call, reason } => {
+                if self.current(call).is_none() {
+                    return Acts::default();
+                }
+                let ending = match reason {
+                    EndReason::Hangup | EndReason::Closed => Ending::Ended,
+                    EndReason::Failed => Ending::Failed,
+                    EndReason::Unreachable => Ending::Unreachable,
+                };
+                self.finish(ending, true)
+            }
+        }
+    }
+
+    /// Worker `number` ended: the call it carried is over.
+    fn worker_exit(&mut self, number: u64) -> Acts {
+        if !self.call.as_ref().is_some_and(|c| c.worker == Some(number)) {
+            return Acts::default();
+        }
+        let mut acts = self.finish(Ending::Failed, true);
+        acts.notice = Some((NoticeKind::Warning, "Call: the call worker stopped.".into()));
+        acts
+    }
+
+    /// Orbiters gave our call `number` its id, or refused it.
+    fn created(&mut self, number: u64, answer: Result<String, Ending>) -> Acts {
+        match (answer, self.current(number).is_some()) {
+            (Ok(id), true) => {
+                if let Some(c) = self.current(number) {
+                    c.id = Some(id);
+                }
+                Acts::default()
+            }
+            // Ended here before Orbiters answered: the friend's ringing ends too.
+            (Ok(id), false) => Acts { signals: vec![Signal::Close { id, decline: false }], ..Default::default() },
+            (Err(ending), true) => self.finish(ending, false),
+            (Err(_), false) => Acts::default(),
+        }
+    }
+
+    /// A request call `number` needed failed (its answer): the call is over.
+    fn signal_failed(&mut self, number: u64) -> Acts {
+        if self.current(number).is_none() {
+            return Acts::default();
+        }
+        self.finish(Ending::Failed, true)
+    }
+
+    /// A call whose phase lasted too long ends (a ring whose end never came, a connection that never completes).
+    fn deadlines(&mut self, now: Instant) -> Acts {
+        let Some(c) = &self.call else { return Acts::default() };
+        let waited = now.saturating_duration_since(c.since);
+        let ending = match c.phase {
+            CallPhase::Calling if waited > CALLING_FOR => Ending::Unanswered,
+            CallPhase::Ringing if waited > RINGING_FOR => Ending::Missed,
+            CallPhase::Connecting if waited > CONNECTING_FOR => Ending::Failed,
+            _ => return Acts::default(),
+        };
+        self.finish(ending, true)
+    }
 }
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// A level in twentieths.
+fn quantize(level: f32) -> f32 {
+    (level.clamp(0.0, 1.0) * 20.0).round() / 20.0
 }
 
 fn friends_digest(hashes: &[String]) -> u64 {
@@ -129,7 +551,7 @@ fn friends_digest(hashes: &[String]) -> u64 {
 
 /// Orbiters refused: this VRChat account is not the member's verified link (403 on calls).
 fn not_linked(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<orbiters_core::account::ApiError>().is_some_and(|a| a.status == 403)
+    e.downcast_ref::<ApiError>().is_some_and(|a| a.status == 403)
 }
 
 /// The panel's text for the call menu: four contacts around the chosen one, `>` before it.
@@ -155,6 +577,153 @@ pub fn pick(value: f32, count: usize) -> usize {
     ((value.clamp(0.0, 1.0) * count as f32) as usize).min(count - 1)
 }
 
+/// Server-sent events, a line at a time.
+#[derive(Default)]
+struct Sse {
+    event: String,
+    data: String,
+    too_big: bool,
+}
+
+impl Sse {
+    /// The event a blank line completes: its name and data. Comments (`: ping`) and other fields give nothing; an
+    /// event whose data passes [`EVENT_MOST`] is dropped.
+    fn line(&mut self, line: &str) -> Option<(String, String)> {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() {
+            let done = (!self.event.is_empty() && !self.too_big).then(|| (std::mem::take(&mut self.event), std::mem::take(&mut self.data)));
+            self.event.clear();
+            self.data.clear();
+            self.too_big = false;
+            return done;
+        }
+        if let Some(v) = line.strip_prefix("event:") {
+            self.event = v.trim().to_string();
+        } else if let Some(v) = line.strip_prefix("data:") {
+            if !self.data.is_empty() {
+                self.data.push('\n');
+            }
+            self.data.push_str(v.strip_prefix(' ').unwrap_or(v));
+            if self.data.len() > EVENT_MOST {
+                self.data.clear();
+                self.too_big = true;
+            }
+        }
+        None
+    }
+}
+
+/// One line of `input` into `line` (without its end), at most `most` bytes: a longer one is skipped whole (false).
+/// `None` at the end.
+fn read_line(input: &mut impl BufRead, line: &mut Vec<u8>, most: usize) -> std::io::Result<Option<bool>> {
+    line.clear();
+    let (mut any, mut skipped) = (false, false);
+    loop {
+        let buf = match input.fill_buf() {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if buf.is_empty() {
+            return Ok(any.then_some(!skipped));
+        }
+        any = true;
+        let newline = buf.iter().position(|&b| b == b'\n');
+        let chunk = &buf[..newline.unwrap_or(buf.len())];
+        if !skipped && line.len() + chunk.len() <= most {
+            line.extend_from_slice(chunk);
+        } else {
+            skipped = true;
+            line.clear();
+        }
+        let used = newline.map_or(buf.len(), |i| i + 1);
+        input.consume(used);
+        if newline.is_some() {
+            return Ok(Some(!skipped));
+        }
+    }
+}
+
+/// An HTTP client whose reads give up after `idle` without a byte: a connection that died without a word ends
+/// instead of waiting forever. (ureq has only overall timeouts; this wraps its transport.)
+fn idle_agent(connect: Duration, idle: Duration) -> ureq::Agent {
+    use ureq::unversioned::resolver::DefaultResolver;
+    use ureq::unversioned::transport::{Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport};
+
+    #[derive(Debug)]
+    struct Idle(Duration);
+
+    #[derive(Debug)]
+    struct IdleTransport<T> {
+        inner: T,
+        idle: Duration,
+    }
+
+    impl<In: Transport> Connector<In> for Idle {
+        type Out = IdleTransport<In>;
+
+        fn connect(&self, _: &ConnectionDetails, chained: Option<In>) -> Result<Option<Self::Out>, ureq::Error> {
+            Ok(chained.map(|inner| IdleTransport { inner, idle: self.0 }))
+        }
+    }
+
+    impl<T: Transport> Transport for IdleTransport<T> {
+        fn buffers(&mut self) -> &mut dyn Buffers {
+            self.inner.buffers()
+        }
+
+        fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
+            self.inner.transmit_output(amount, timeout)
+        }
+
+        fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
+            let idle = NextTimeout { after: self.idle.into(), reason: ureq::Timeout::RecvBody };
+            self.inner.await_input(if idle.after < timeout.after { idle } else { timeout })
+        }
+
+        fn is_open(&mut self) -> bool {
+            self.inner.is_open()
+        }
+
+        fn is_tls(&self) -> bool {
+            self.inner.is_tls()
+        }
+    }
+
+    let config = ureq::Agent::config_builder().tls_config(orbiters_core::http_tls()).timeout_connect(Some(connect)).build();
+    ureq::Agent::with_parts(config, DefaultConnector::new().chain(Idle(idle)), DefaultResolver::default())
+}
+
+/// A request about a call, its answer as JSON (`null` when it has none).
+fn post(api: &Api, token: &str, path: &str, body: &Value) -> anyhow::Result<Value> {
+    let response = api
+        .agent()
+        .post(&api.url(path))
+        .config()
+        .timeout_global(Some(SIGNAL_TIMEOUT))
+        .build()
+        .header("Authorization", &format!("Bearer {token}"))
+        .send_json(body)?;
+    if response.status().as_u16() == 204 {
+        return Ok(Value::Null);
+    }
+    Api::json::<Value>(response)
+}
+
+/// The relay servers a call is made with.
+fn ice_servers(api: &Api, token: &str) -> anyhow::Result<Vec<IceServer>> {
+    let response = api
+        .agent()
+        .get(&api.url("orb/calls/ice-servers"))
+        .config()
+        .timeout_global(Some(ICE_TIMEOUT))
+        .build()
+        .header("Authorization", &format!("Bearer {token}"))
+        .call()?;
+    let v: Value = Api::json(response)?;
+    Ok(call::ice_servers(&v["ice_servers"]))
+}
+
 impl super::Controller {
     /// Starts the presence thread (it does nothing while calls are off).
     pub(super) fn start_calls(self: &Shared) {
@@ -168,27 +737,72 @@ impl super::Controller {
         });
     }
 
+    /// Calls stop (the app quits): the call worker ends, the call under way ends for the friend too, and this
+    /// computer leaves the callable list.
     pub(super) fn calls_stop(self: &Shared) {
-        let (api, was_on) = {
+        let (api, was_on, worker, call_id) = {
             let mut rt = self.calls.lock().unwrap();
             rt.stop = true;
-            rt.worker = None;
-            (self.account_api(), rt.available_sent.is_some())
+            rt.streaming = None;
+            rt.signals = None;
+            let call_id = rt.call.take().and_then(|c| c.id);
+            (self.account_api(), rt.available_sent.is_some(), rt.worker.take(), call_id)
         };
-        if let (Some((api, token)), true) = (api, was_on) {
-            let _ = api.agent().delete(&api.url("orb/calls/presence")).header("Authorization", &format!("Bearer {token}")).call();
+        // Its end waits a moment for the process: not under the lock.
+        drop(worker);
+        let Some((api, token)) = api else { return };
+        // Quitting never waits long on the network: Orbiters drops a presence that stopped coming anyway.
+        let (done, wait) = mpsc::channel();
+        let _ = std::thread::Builder::new().name("calls-leave".into()).spawn(move || {
+            let agent = orbiters_core::http_agent(Some(Duration::from_secs(2)), Some(Duration::from_secs(3)));
+            let auth = format!("Bearer {token}");
+            if let Some(id) = call_id {
+                let _ = agent.post(&api.url(&format!("orb/calls/{id}/end"))).header("Authorization", &auth).send_json(json!({}));
+            }
+            if was_on {
+                let _ = agent.delete(&api.url("orb/calls/presence")).header("Authorization", &auth).call();
+            }
+            let _ = done.send(());
+        });
+        let _ = wait.recv_timeout(Duration::from_secs(4));
+    }
+
+    /// The API and credential for calls (signed in), through the client kept for the server.
+    fn calls_api(self: &Shared) -> Option<(Api, String)> {
+        let (fresh, token) = self.account_api()?;
+        let mut rt = self.calls.lock().unwrap();
+        if !rt.client.as_ref().is_some_and(|c| c.url("") == fresh.url("")) {
+            rt.client = Some(fresh);
         }
+        rt.client.clone().map(|api| (api, token))
     }
 
     fn calls_tick(self: &Shared) {
         let settings = self.settings();
         let on = settings.orb.enabled && settings.orb.calls;
-        let account = self.account_api();
-        let Some((api, token)) = account.filter(|_| on) else {
-            let was = self.calls.lock().unwrap().available_sent.take().is_some();
+        // A phase that lasted too long ends.
+        {
+            let mut rt = self.calls.lock().unwrap();
+            let acts = rt.deadlines(Instant::now());
+            self.calls_act(rt, acts);
+        }
+        let account = if on { self.calls_api() } else { None };
+        let Some((api, token)) = account else {
+            let was = {
+                let mut rt = self.calls.lock().unwrap();
+                // No calls any more: the stream ends at its next line, a call under way ends.
+                rt.streaming = None;
+                let was = rt.available_sent.take().is_some();
+                if rt.call.is_some() {
+                    let acts = rt.hang_up();
+                    self.calls_act(rt, acts);
+                }
+                was
+            };
             if was {
                 if let Some((api, token)) = self.account_api() {
-                    let _ = api.agent().delete(&api.url("orb/calls/presence")).header("Authorization", &format!("Bearer {token}")).call();
+                    let agent = orbiters_core::http_agent(Some(Duration::from_secs(5)), Some(Duration::from_secs(10)));
+                    let _ = agent.delete(&api.url("orb/calls/presence")).header("Authorization", &format!("Bearer {token}")).call();
                 }
             }
             let link = if !on { CallLink::Off } else { CallLink::SignedOut };
@@ -207,12 +821,20 @@ impl super::Controller {
                 w.local_player.as_ref().and_then(|me| w.players.iter().find(|(_, n)| *n == me).map(|(id, _)| id.clone()))
             };
             let local = vrchat_accounts::read(log_account.as_deref());
+            // Hashed once per read, not at every tick (up to 5000 of them).
+            let hashes: Vec<String> = local.friends.iter().take(FRIENDS_MOST).map(|f| vrchat_accounts::friend_hash(f)).collect();
+            let digest = friends_digest(&hashes);
             let mut rt = self.calls.lock().unwrap();
             rt.local = local;
             rt.local_read = Some(Instant::now());
+            rt.friend_hashes = hashes;
+            rt.friends_digest = digest;
         }
         let Some((account, source)) = self.calls.lock().unwrap().local.account.clone() else {
-            self.calls_publish(|rt| rt.link = CallLink::NoAccount);
+            self.calls_publish(|rt| {
+                rt.link = CallLink::NoAccount;
+                rt.streaming = None;
+            });
             return;
         };
         let available = {
@@ -221,25 +843,31 @@ impl super::Controller {
         };
         let (due, friends) = {
             let rt = self.calls.lock().unwrap();
-            let hashes: Vec<String> = rt.local.friends.iter().map(|f| vrchat_accounts::friend_hash(f)).collect();
-            let changed = rt.friends_sent != Some(friends_digest(&hashes));
+            let changed = rt.friends_sent != Some(rt.friends_digest);
             let due = rt.presence_sent.is_none_or(|t| t.elapsed() >= PRESENCE_EVERY) || rt.available_sent != Some(available) || changed;
-            (due, changed.then_some(hashes))
+            (due, changed.then(|| (rt.friend_hashes.clone(), rt.friends_digest)))
         };
         if due {
             let mut body = json!({ "available": available, "vrchat_id": account });
-            if let Some(hashes) = &friends {
+            if let Some((hashes, _)) = &friends {
                 body["friends"] = json!(hashes);
                 body["friends_changed"] = json!(true);
             }
-            let answer = api.agent().put(&api.url("orb/calls/presence")).header("Authorization", &format!("Bearer {token}")).send_json(&body);
+            let answer = api
+                .agent()
+                .put(&api.url("orb/calls/presence"))
+                .config()
+                .timeout_global(Some(SIGNAL_TIMEOUT))
+                .build()
+                .header("Authorization", &format!("Bearer {token}"))
+                .send_json(&body);
             match answer.map_err(anyhow::Error::from).and_then(Api::json::<Value>) {
                 Ok(v) => {
                     let mut rt = self.calls.lock().unwrap();
                     rt.presence_sent = Some(Instant::now());
                     rt.available_sent = Some(available);
-                    if let Some(hashes) = &friends {
-                        rt.friends_sent = Some(friends_digest(hashes));
+                    if let Some((_, digest)) = friends {
+                        rt.friends_sent = Some(digest);
                     }
                     if v["friends_known"] == json!(false) {
                         rt.friends_sent = None;
@@ -260,24 +888,20 @@ impl super::Controller {
         }
         let linked = matches!(self.calls.lock().unwrap().link, CallLink::Linked { .. });
         if !linked {
-            self.calls_publish(|_| {});
+            self.calls_publish(|rt| rt.streaming = None);
             return;
         }
-        // The event stream, kept open on a thread of its own.
-        let start_stream = !std::mem::replace(&mut self.calls.lock().unwrap().streaming, true);
-        if start_stream {
-            let ctl = self.clone();
-            let (api, token) = (api.clone(), token.clone());
-            let _ = std::thread::Builder::new().name("calls-events".into()).spawn(move || {
-                if let Err(e) = ctl.calls_events(&api, &token) {
-                    eprintln!("calls events: {e:#}");
-                }
-                ctl.calls.lock().unwrap().streaming = false;
-            });
-        }
+        self.calls_stream(&api, &token);
         let contacts_due = self.calls.lock().unwrap().contacts_read.is_none_or(|t| t.elapsed() >= CONTACTS_EVERY);
         if contacts_due && available {
-            let answer = api.agent().get(&api.url("orb/calls/contacts")).header("Authorization", &format!("Bearer {token}")).call();
+            let answer = api
+                .agent()
+                .get(&api.url("orb/calls/contacts"))
+                .config()
+                .timeout_global(Some(SIGNAL_TIMEOUT))
+                .build()
+                .header("Authorization", &format!("Bearer {token}"))
+                .call();
             if let Ok(v) = answer.map_err(anyhow::Error::from).and_then(Api::json::<Value>) {
                 let contacts: Vec<CallContact> = v["contacts"]
                     .as_array()
@@ -291,337 +915,347 @@ impl super::Controller {
         self.calls_publish(|_| {});
     }
 
-    /// Reads the server's event stream until it ends.
-    fn calls_events(self: &Shared, api: &Api, token: &str) -> anyhow::Result<()> {
-        let agent = orbiters_core::http_agent(Some(Duration::from_secs(15)), None);
+    /// Keeps the event stream open on a thread of its own: opened again (for this credential) when it ended,
+    /// failed or went silent, after a pause that grows while it keeps failing.
+    fn calls_stream(self: &Shared, api: &Api, token: &str) {
+        let number = {
+            let mut rt = self.calls.lock().unwrap();
+            if rt.streaming.as_ref().is_some_and(|(_, t)| t != token) {
+                // Another account: that stream ends at its next line.
+                rt.streaming = None;
+            }
+            if rt.streaming.is_some() || rt.stream_retry_at.is_some_and(|t| Instant::now() < t) {
+                return;
+            }
+            rt.streams += 1;
+            let number = rt.streams;
+            rt.streaming = Some((number, token.to_string()));
+            number
+        };
+        let ctl = self.clone();
+        let (api, token) = (api.clone(), token.to_string());
+        let _ = std::thread::Builder::new().name("calls-events".into()).spawn(move || {
+            let result = ctl.calls_events(&api, &token, number);
+            let mut rt = ctl.calls.lock().unwrap();
+            if rt.streaming.as_ref().is_some_and(|(n, _)| *n == number) {
+                rt.streaming = None;
+            }
+            match result {
+                // It ran: opened again in a moment.
+                Ok(true) => {
+                    rt.stream_failures = 0;
+                    rt.stream_retry_at = Some(Instant::now() + STREAM_RETRY);
+                }
+                Ok(false) | Err(_) => {
+                    if let Err(e) = &result {
+                        eprintln!("calls events: {e:#}");
+                    }
+                    rt.stream_failures += 1;
+                    let pause = STREAM_RETRY.saturating_mul(1 << (rt.stream_failures - 1).min(5)).min(STREAM_RETRY_MOST);
+                    rt.stream_retry_at = Some(Instant::now() + pause);
+                }
+            }
+        });
+    }
+
+    /// Reads the server's event stream until it ends, fails, stays silent past [`STREAM_IDLE`] or is replaced. True
+    /// when it delivered something.
+    fn calls_events(self: &Shared, api: &Api, token: &str, number: u64) -> anyhow::Result<bool> {
+        let agent = idle_agent(Duration::from_secs(15), STREAM_IDLE);
         let response =
             agent.get(&api.url("orb/calls/events")).header("Authorization", &format!("Bearer {token}")).header("Accept", "text/event-stream").call()?;
-        let reader = BufReader::new(response.into_body().into_reader());
-        let (mut event, mut data) = (String::new(), String::new());
-        for line in reader.lines() {
-            if self.calls.lock().unwrap().stop {
-                break;
+        let mut reader = BufReader::new(response.into_body().into_with_config().limit(u64::MAX).reader());
+        let mut sse = Sse::default();
+        let mut line = Vec::new();
+        let mut delivered = false;
+        while let Some(whole) = read_line(&mut reader, &mut line, EVENT_MOST)? {
+            delivered = true;
+            {
+                let rt = self.calls.lock().unwrap();
+                if rt.stop || rt.streaming.as_ref().is_none_or(|(n, _)| *n != number) {
+                    break;
+                }
             }
-            let line = line?;
-            if line.is_empty() {
-                if !event.is_empty() {
-                    let value: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
-                    self.on_call_event(&event, value);
-                }
-                event.clear();
-                data.clear();
-            } else if let Some(v) = line.strip_prefix("event:") {
-                event = v.trim().to_string();
-            } else if let Some(v) = line.strip_prefix("data:") {
-                if !data.is_empty() {
-                    data.push('\n');
-                }
-                data.push_str(v.strip_prefix(' ').unwrap_or(v));
+            if !whole {
+                continue;
+            }
+            if let Some((event, data)) = sse.line(&String::from_utf8_lossy(&line)) {
+                let value: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
+                self.on_call_event(&event, value);
             }
         }
-        Ok(())
+        Ok(delivered)
     }
 
     /// One event of the server's stream.
     fn on_call_event(self: &Shared, event: &str, v: Value) {
-        let call_id = v["call"].as_str().unwrap_or_default().to_string();
-        match event {
-            "incoming" => {
-                let name = v["from"]["name"].as_str().unwrap_or("A friend").to_string();
-                let busy = self.calls.lock().unwrap().call.is_some();
-                if busy {
-                    let ctl = self.clone();
-                    std::thread::spawn(move || ctl.calls_post(&format!("orb/calls/{call_id}/decline"), json!({})));
-                    return;
-                }
-                let offer = v["offer"].as_str().unwrap_or_default().to_string();
-                {
-                    let mut rt = self.calls.lock().unwrap();
-                    rt.call = Some(Call {
-                        id: Some(call_id),
-                        contact: v["from"]["id"].as_str().unwrap_or_default().to_string(),
-                        name: name.clone(),
-                        phase: CallPhase::Ringing,
-                        incoming: true,
-                        offer: Some((offer, v["ice_servers"].clone())),
-                        candidates: Vec::new(),
-                        connected_at: None,
-                        muted: false,
-                        levels: (0.0, 0.0),
-                    });
-                }
-                self.orb_say(&format!("{name} is calling. Touch me or press Call to answer."));
-                self.notify(NoticeKind::Info, format!("{name} is calling: answer on the Orb page, in the SteamVR tab or by touching the orb."));
-            }
-            "answered" => {
-                let answer = v["answer"].as_str().unwrap_or_default().to_string();
-                self.calls_worker_send(json!({ "cmd": "remote_answer", "sdp": answer }));
-                self.calls_publish(|rt| {
-                    if let Some(c) = rt.call.as_mut() {
-                        c.phase = CallPhase::Connecting;
-                    }
-                });
-            }
-            "candidates" => {
-                if let Some(list) = v["candidates"].as_array() {
-                    let list: Vec<Value> = list.iter().map(|c| if c.is_string() { json!({ "candidate": c }) } else { c.clone() }).collect();
-                    self.calls_worker_send(json!({ "cmd": "candidates", "candidates": list }));
-                }
-            }
-            "declined" => self.calls_finish("declined"),
-            "ended" => self.calls_finish(if v["reason"] == "timeout" { "unanswered" } else { "ended" }),
-            _ => {}
-        }
-    }
-
-    fn calls_post(self: &Shared, path: &str, body: Value) -> Option<Value> {
-        let (api, token) = self.account_api()?;
-        match api
-            .agent()
-            .post(&api.url(path))
-            .header("Authorization", &format!("Bearer {token}"))
-            .send_json(&body)
-            .map_err(anyhow::Error::from)
-            .and_then(Api::json::<Value>)
-        {
-            Ok(v) => Some(v),
-            Err(e) => {
-                eprintln!("calls {path}: {e:#}");
-                self.notify(NoticeKind::Warning, format!("Call: {e}"));
-                None
-            }
-        }
-    }
-
-    fn calls_worker_send(self: &Shared, command: Value) {
         let mut rt = self.calls.lock().unwrap();
-        if rt.worker.is_none() {
-            match Worker::spawn(self.clone()) {
-                Ok(w) => rt.worker = Some(w),
+        let acts = rt.server_event(event, &v, Instant::now());
+        self.calls_act(rt, acts);
+    }
+
+    /// One event of the call worker.
+    fn on_call_worker(self: &Shared, e: CallEvent) {
+        let mut rt = self.calls.lock().unwrap();
+        let acts = rt.worker_event(e, Instant::now());
+        self.calls_act(rt, acts);
+    }
+
+    /// Worker `number`'s output ended: it is gone, and so is the call it carried.
+    fn on_call_worker_exit(self: &Shared, number: u64) {
+        let mut rt = self.calls.lock().unwrap();
+        let gone = if rt.worker.as_ref().is_some_and(|w| w.number == number) { rt.worker.take() } else { None };
+        let acts = rt.worker_exit(number);
+        self.calls_act(rt, acts);
+        drop(gone);
+    }
+
+    /// Does what a change of the calls asks: the worker's commands and the requests to Orbiters in order, under the
+    /// lock (so two threads' changes never cross), then what the panel says and the published status.
+    fn calls_act(self: &Shared, mut rt: MutexGuard<'_, CallsRuntime>, mut acts: Acts) {
+        let mut gone = Vec::new();
+        let mut said = Vec::new();
+        let mut notices = Vec::new();
+        let mut publish = false;
+        loop {
+            let mut next = None;
+            for command in std::mem::take(&mut acts.worker) {
+                if let Err(e) = self.calls_send(&mut rt, &command, &mut gone) {
+                    notices.push((NoticeKind::Error, e));
+                    // Nothing carries the call it starts.
+                    if command.call().is_some_and(|n| rt.current(n).is_some()) {
+                        next = Some(rt.finish(Ending::Failed, true));
+                    }
+                    break;
+                }
+            }
+            for signal in std::mem::take(&mut acts.signals) {
+                self.calls_signal(&mut rt, signal);
+            }
+            said.extend(acts.say.take());
+            notices.extend(acts.notice.take());
+            publish |= acts.publish;
+            match next {
+                Some(more) => acts = more,
+                None => break,
+            }
+        }
+        drop(rt);
+        drop(gone);
+        for text in said {
+            self.orb_say(&text);
+        }
+        for (kind, message) in notices {
+            self.notify(kind, message);
+        }
+        if publish {
+            self.calls_publish(|_| {});
+        }
+    }
+
+    /// Sends `command` to the call worker. A command that starts a call starts the worker when there is none, and
+    /// goes to a new one when the current one cannot be written to (it ended); another command is lost with the
+    /// call it was for, whose end the old worker's exit reports. The workers that went are left in `gone`, to be
+    /// dropped once the lock is let go.
+    fn calls_send(self: &Shared, rt: &mut CallsRuntime, command: &CallCommand, gone: &mut Vec<Worker>) -> Result<(), String> {
+        let starts = matches!(command, CallCommand::Offer { .. } | CallCommand::Answer { .. });
+        for _ in 0..2 {
+            if rt.worker.is_none() {
+                if !starts {
+                    return Ok(());
+                }
+                rt.workers += 1;
+                match Worker::spawn(self.clone(), rt.workers) {
+                    Ok(w) => rt.worker = Some(w),
+                    Err(e) => return Err(format!("{e:#}")),
+                }
+            }
+            let w = rt.worker.as_mut().expect("there is one");
+            match w.send(command) {
+                Ok(()) => {
+                    let number = w.number;
+                    if starts {
+                        if let Some(c) = command.call().and_then(|n| rt.current(n)) {
+                            c.worker = Some(number);
+                        }
+                    }
+                    return Ok(());
+                }
                 Err(e) => {
-                    drop(rt);
-                    self.notify(NoticeKind::Error, e.to_string());
-                    return;
+                    eprintln!("call worker: {e}");
+                    gone.extend(rt.worker.take());
+                    if !starts {
+                        return Ok(());
+                    }
                 }
             }
         }
-        if let Some(w) = rt.worker.as_mut() {
-            if let Err(e) = w.send(command) {
-                eprintln!("call worker: {e:#}");
-                rt.worker = None;
+        Err("The call worker could not be started.".into())
+    }
+
+    /// Hands a request to the thread that sends them (started when there is none; none once calls stopped).
+    fn calls_signal(self: &Shared, rt: &mut CallsRuntime, signal: Signal) {
+        if rt.stop {
+            return;
+        }
+        let signal = match &rt.signals {
+            Some(tx) => match tx.send(signal) {
+                Ok(()) => return,
+                Err(mpsc::SendError(s)) => s,
+            },
+            None => signal,
+        };
+        let (tx, rx) = mpsc::channel();
+        let ctl = self.clone();
+        if std::thread::Builder::new().name("call-signals".into()).spawn(move || ctl.calls_signals(rx)).is_ok() {
+            let _ = tx.send(signal);
+            rt.signals = Some(tx);
+        }
+    }
+
+    /// The requests about calls, in order; a call's candidates that come within [`BATCH`] go in one request.
+    fn calls_signals(self: &Shared, rx: mpsc::Receiver<Signal>) {
+        let mut carried: Option<Signal> = None;
+        loop {
+            let signal = match carried.take() {
+                Some(s) => s,
+                None => match rx.recv() {
+                    Ok(s) => s,
+                    Err(_) => return,
+                },
+            };
+            // Signed out: nothing can be sent (and the call cannot go on either).
+            let Some((api, token)) = self.calls_api() else { continue };
+            match signal {
+                Signal::Candidates { id, mut candidates } => {
+                    let until = Instant::now() + BATCH;
+                    loop {
+                        match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
+                            Ok(Signal::Candidates { id: more_id, candidates: more }) if more_id == id => candidates.extend(more),
+                            Ok(other) => {
+                                carried = Some(other);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if let Err(e) = post(&api, &token, &format!("orb/calls/{id}/candidates"), &json!({ "candidates": candidates })) {
+                        eprintln!("calls candidates: {e:#}");
+                    }
+                }
+                Signal::Create { number, contact, offer } => {
+                    let answer = match post(&api, &token, "orb/calls", &json!({ "contact": contact, "offer": offer })) {
+                        Ok(v) => v["call"].as_str().filter(|id| !id.is_empty()).map(str::to_string).ok_or(Ending::Failed),
+                        Err(e) if e.downcast_ref::<ApiError>().is_some_and(|a| a.status == 409) => Err(Ending::Busy),
+                        Err(e) => {
+                            eprintln!("calls orb/calls: {e:#}");
+                            self.notify(NoticeKind::Warning, format!("Call: {e}"));
+                            Err(Ending::Failed)
+                        }
+                    };
+                    let mut rt = self.calls.lock().unwrap();
+                    let acts = rt.created(number, answer);
+                    self.calls_act(rt, acts);
+                }
+                Signal::Answer { number, id, sdp } => {
+                    if let Err(e) = post(&api, &token, &format!("orb/calls/{id}/answer"), &json!({ "answer": sdp })) {
+                        eprintln!("calls answer: {e:#}");
+                        self.notify(NoticeKind::Warning, format!("Call: {e}"));
+                        let mut rt = self.calls.lock().unwrap();
+                        let acts = rt.signal_failed(number);
+                        self.calls_act(rt, acts);
+                    }
+                }
+                Signal::Close { id, decline } => {
+                    let path = format!("orb/calls/{id}/{}", if decline { "decline" } else { "end" });
+                    if let Err(e) = post(&api, &token, &path, &json!({})) {
+                        eprintln!("calls {path}: {e:#}");
+                    }
+                }
             }
         }
     }
 
     /// Calls a contact (the window, the overlay or the Orb's menu).
     pub fn call_contact(self: &Shared, contact: String) {
-        let name = {
-            let rt = self.calls.lock().unwrap();
-            if rt.call.is_some() {
+        let (number, name) = {
+            let mut rt = self.calls.lock().unwrap();
+            let Some(name) = rt.contacts.iter().find(|c| c.id == contact).map(|c| c.name.clone()) else {
+                drop(rt);
+                self.notify(NoticeKind::Warning, "This friend cannot be called right now.");
                 return;
-            }
-            rt.contacts.iter().find(|c| c.id == contact).map(|c| c.name.clone())
-        };
-        let Some(name) = name else {
-            self.notify(NoticeKind::Warning, "This friend cannot be called right now.");
-            return;
-        };
-        self.calls_publish(|rt| {
+            };
+            let Some(number) = rt.dial(&contact, &name, Instant::now()) else { return };
             rt.menu_open = false;
-            rt.call = Some(Call {
-                id: None,
-                contact: contact.clone(),
-                name: name.clone(),
-                phase: CallPhase::Calling,
-                incoming: false,
-                offer: None,
-                candidates: Vec::new(),
-                connected_at: None,
-                muted: false,
-                levels: (0.0, 0.0),
-            });
-        });
+            (number, name)
+        };
+        self.calls_publish(|_| {});
         self.orb_say(&format!("Calling {name}…"));
         let ctl = self.clone();
         std::thread::spawn(move || {
-            let Some((api, token)) = ctl.account_api() else { return };
-            let ice = api.agent().get(&api.url("orb/calls/ice-servers")).header("Authorization", &format!("Bearer {token}")).call();
-            let ice = ice.map_err(anyhow::Error::from).and_then(Api::json::<Value>).map(|v| v["ice_servers"].clone()).unwrap_or(json!([]));
-            let mic = ctl.settings().orb.mic_device;
-            ctl.calls_worker_send(json!({ "cmd": "offer", "ice_servers": ice, "mic": (!mic.is_empty()).then_some(mic) }));
+            let servers = match ctl.calls_api() {
+                Some((api, token)) => ice_servers(&api, &token).map_err(|e| format!("the call relay could not be reached: {e}")),
+                None => Err("sign in to Orbiters to call.".to_string()),
+            };
+            let (mic, direct) = ctl.with_settings(|s| (s.orb.mic_device.clone(), s.orb.direct_calls));
+            let mic = (!mic.is_empty()).then_some(mic);
+            let mut rt = ctl.calls.lock().unwrap();
+            rt.direct = direct;
+            let acts = match servers {
+                Ok(servers) => Acts { worker: rt.offer(number, servers, mic).into_iter().collect(), ..Default::default() },
+                // Without the relay, a call through it cannot be made (a direct one can, without servers).
+                Err(e) if rt.direct && ctl.account_api().is_some() => {
+                    eprintln!("calls ice-servers: {e}");
+                    Acts { worker: rt.offer(number, Vec::new(), mic).into_iter().collect(), ..Default::default() }
+                }
+                Err(e) => {
+                    let mut acts = if rt.current(number).is_some() { rt.finish(Ending::Failed, true) } else { Acts::default() };
+                    acts.notice = Some((NoticeKind::Warning, format!("Call: {e}")));
+                    acts
+                }
+            };
+            ctl.calls_act(rt, acts);
         });
     }
 
     /// Answers the ringing call.
     pub fn call_answer(self: &Shared) {
-        let offer = {
-            let mut rt = self.calls.lock().unwrap();
-            match rt.call.as_mut() {
-                Some(c) if c.incoming && c.phase == CallPhase::Ringing => {
-                    c.phase = CallPhase::Connecting;
-                    c.offer.take()
+        let (mic, direct) = self.with_settings(|s| (s.orb.mic_device.clone(), s.orb.direct_calls));
+        let mic = (!mic.is_empty()).then_some(mic);
+        let mut rt = self.calls.lock().unwrap();
+        rt.direct = direct;
+        let without_relays = rt.call.as_ref().filter(|c| c.ringing_in()).and_then(|c| c.offer.as_ref()).is_some_and(|(_, servers)| servers.is_empty());
+        if without_relays && !direct {
+            // The call came without relay servers: this side asks for its own first (not on this thread, which may
+            // be the one OSC arrives on).
+            drop(rt);
+            let ctl = self.clone();
+            std::thread::spawn(move || {
+                let servers = ctl.calls_api().and_then(|(api, token)| ice_servers(&api, &token).map_err(|e| eprintln!("calls ice-servers: {e:#}")).ok());
+                let mut rt = ctl.calls.lock().unwrap();
+                if let Some((_, offered)) = rt.call.as_mut().filter(|c| c.ringing_in()).and_then(|c| c.offer.as_mut()) {
+                    *offered = servers.unwrap_or_default();
                 }
-                _ => None,
-            }
-        };
-        let Some((offer, ice)) = offer else { return };
-        let mic = self.settings().orb.mic_device;
-        self.calls_worker_send(json!({ "cmd": "answer", "offer": offer, "ice_servers": ice, "mic": (!mic.is_empty()).then_some(mic) }));
-        self.calls_publish(|_| {});
+                let acts = rt.answer(mic, Instant::now());
+                ctl.calls_act(rt, acts);
+            });
+            return;
+        }
+        let acts = rt.answer(mic, Instant::now());
+        self.calls_act(rt, acts);
     }
 
     /// Declines a ringing call or hangs up.
     pub fn call_end(self: &Shared) {
-        let (id, ringing_in) = {
-            let rt = self.calls.lock().unwrap();
-            match &rt.call {
-                Some(c) => (c.id.clone(), c.incoming && c.phase == CallPhase::Ringing),
-                None => return,
-            }
-        };
-        if let Some(id) = id {
-            let ctl = self.clone();
-            std::thread::spawn(move || {
-                ctl.calls_post(&format!("orb/calls/{id}/{}", if ringing_in { "decline" } else { "end" }), json!({}));
-            });
-        }
-        self.calls_finish(if ringing_in { "declined" } else { "ended" });
+        let mut rt = self.calls.lock().unwrap();
+        let acts = rt.hang_up();
+        self.calls_act(rt, acts);
     }
 
     pub fn call_mute(self: &Shared, on: bool) {
-        self.calls_worker_send(json!({ "cmd": "mute", "on": on }));
-        self.calls_publish(|rt| {
-            if let Some(c) = rt.call.as_mut() {
-                c.muted = on;
-            }
-        });
-    }
-
-    /// The call is over (either side, or it failed): the worker hangs up and the panel says so.
-    fn calls_finish(self: &Shared, how: &str) {
-        let name = {
-            let mut rt = self.calls.lock().unwrap();
-            let call = rt.call.take();
-            if let Some(w) = rt.worker.as_mut() {
-                let _ = w.send(json!({ "cmd": "hangup" }));
-            }
-            call.map(|c| c.name)
-        };
-        if let Some(name) = name {
-            let text = match how {
-                "declined" => format!("{name} can't talk right now."),
-                "unanswered" => format!("{name} didn't answer."),
-                "failed" => format!("The call with {name} dropped."),
-                _ => format!("Call with {name} ended."),
-            };
-            self.orb_say(&text);
-        }
-        self.calls_publish(|_| {});
-    }
-
-    /// One event of the call worker.
-    fn on_call_worker(self: &Shared, e: Value) {
-        match e["event"].as_str().unwrap_or_default() {
-            "offer" => {
-                let sdp = e["sdp"].as_str().unwrap_or_default().to_string();
-                let contact = self.calls.lock().unwrap().call.as_ref().map(|c| c.contact.clone());
-                let Some(contact) = contact else { return };
-                let ctl = self.clone();
-                std::thread::spawn(move || match ctl.calls_post("orb/calls", json!({ "contact": contact, "offer": sdp })) {
-                    Some(v) => {
-                        let id = v["call"].as_str().map(str::to_string);
-                        let waiting = {
-                            let mut rt = ctl.calls.lock().unwrap();
-                            match rt.call.as_mut() {
-                                Some(c) => {
-                                    c.id = id.clone();
-                                    std::mem::take(&mut c.candidates)
-                                }
-                                None => Vec::new(),
-                            }
-                        };
-                        if let (Some(id), false) = (id, waiting.is_empty()) {
-                            ctl.calls_post(&format!("orb/calls/{id}/candidates"), json!({ "candidates": waiting }));
-                        }
-                    }
-                    None => ctl.calls_finish("failed"),
-                });
-            }
-            "answer" => {
-                let sdp = e["sdp"].as_str().unwrap_or_default().to_string();
-                let id = self.calls.lock().unwrap().call.as_ref().and_then(|c| c.id.clone());
-                if let Some(id) = id {
-                    let ctl = self.clone();
-                    std::thread::spawn(move || {
-                        if ctl.calls_post(&format!("orb/calls/{id}/answer"), json!({ "answer": sdp })).is_none() {
-                            ctl.calls_finish("failed");
-                        }
-                    });
-                }
-            }
-            "candidate" => {
-                let candidate = e["candidate"].clone();
-                let id = {
-                    let mut rt = self.calls.lock().unwrap();
-                    match rt.call.as_mut() {
-                        Some(c) if c.id.is_none() => {
-                            c.candidates.push(candidate.clone());
-                            None
-                        }
-                        Some(c) => c.id.clone(),
-                        None => None,
-                    }
-                };
-                if let Some(id) = id {
-                    let ctl = self.clone();
-                    std::thread::spawn(move || {
-                        ctl.calls_post(&format!("orb/calls/{id}/candidates"), json!({ "candidates": [candidate] }));
-                    });
-                }
-            }
-            "connected" => {
-                let name = self.calls.lock().unwrap().call.as_ref().map(|c| c.name.clone());
-                self.calls_publish(|rt| {
-                    if let Some(c) = rt.call.as_mut() {
-                        c.phase = CallPhase::Connected;
-                        c.connected_at = Some(now_ms());
-                    }
-                });
-                if let Some(name) = name {
-                    self.orb_say(&format!("On a call with {name}."));
-                }
-            }
-            "levels" => {
-                let levels = (e["mic"].as_f64().unwrap_or(0.0) as f32, e["remote"].as_f64().unwrap_or(0.0) as f32);
-                self.calls_publish(|rt| {
-                    if let Some(c) = rt.call.as_mut() {
-                        c.levels = levels;
-                    }
-                });
-            }
-            "ended" => {
-                let active = self.calls.lock().unwrap().call.is_some();
-                if active {
-                    let reason = e["reason"].as_str().unwrap_or("ended");
-                    if reason == "failed" {
-                        let id = self.calls.lock().unwrap().call.as_ref().and_then(|c| c.id.clone());
-                        if let Some(id) = id {
-                            let ctl = self.clone();
-                            std::thread::spawn(move || {
-                                ctl.calls_post(&format!("orb/calls/{id}/end"), json!({}));
-                            });
-                        }
-                        self.calls_finish("failed");
-                    }
-                }
-            }
-            "error" => {
-                if let Some(m) = e["message"].as_str() {
-                    self.notify(NoticeKind::Warning, format!("Call: {m}"));
-                }
-            }
-            _ => {}
-        }
+        let mut rt = self.calls.lock().unwrap();
+        let acts = rt.mute(on);
+        self.calls_act(rt, acts);
     }
 
     // ---- The Orb's Call menu (avatar parameters, contracts Orb/Call/*) ----
@@ -664,7 +1298,7 @@ impl super::Controller {
     pub(super) fn calls_go(self: &Shared) -> bool {
         let (ringing, chosen) = {
             let rt = self.calls.lock().unwrap();
-            let ringing = rt.call.as_ref().is_some_and(|c| c.incoming && c.phase == CallPhase::Ringing);
+            let ringing = rt.call.as_ref().is_some_and(Call::ringing_in);
             let chosen = (rt.menu_open && rt.call.is_none()).then(|| rt.contacts.get(rt.picked).map(|c| c.id.clone())).flatten();
             (ringing, chosen)
         };
@@ -681,7 +1315,7 @@ impl super::Controller {
 
     /// Whether a call rings for this member (touching the orb answers it).
     pub(super) fn call_ringing_in(&self) -> bool {
-        self.calls.lock().unwrap().call.as_ref().is_some_and(|c| c.incoming && c.phase == CallPhase::Ringing)
+        self.calls.lock().unwrap().call.as_ref().is_some_and(Call::ringing_in)
     }
 
     fn calls_publish(self: &Shared, change: impl FnOnce(&mut CallsRuntime)) {
@@ -735,5 +1369,273 @@ mod tests {
         assert_eq!(pick(0.5, 6), 3);
         assert_eq!(pick(1.0, 6), 5);
         assert_eq!(pick(0.7, 0), 0);
+    }
+
+    fn candidate(n: u32) -> IceCandidate {
+        IceCandidate { candidate: format!("candidate:{n} 1 udp 1 203.0.113.{n} 9 typ relay raddr 0.0.0.0 rport 0"), ..Default::default() }
+    }
+
+    /// Our call to Friend, its worker command sent (worker 1).
+    fn calling(rt: &mut CallsRuntime, now: Instant) -> u64 {
+        let number = rt.dial("c_1", "Friend", now).unwrap();
+        let offer = rt.offer(number, vec![], None).unwrap();
+        assert!(matches!(offer, CallCommand::Offer { call, relay_only: true, .. } if call == number));
+        rt.current(number).unwrap().worker = Some(1);
+        number
+    }
+
+    fn incoming(rt: &mut CallsRuntime, id: &str, now: Instant) -> Acts {
+        rt.server_event("incoming", &json!({ "call": id, "from": { "id": "c_9", "name": "Rexouium Fan" }, "offer": "v=0", "ice_servers": null }), now)
+    }
+
+    #[test]
+    fn a_late_event_of_an_ended_call_never_acts_on_the_next() {
+        let now = Instant::now();
+        let mut rt = CallsRuntime::default();
+        let a = calling(&mut rt, now);
+        // Hung up before Orbiters gave the call its id: nothing to tell it yet.
+        let acts = rt.hang_up();
+        assert_eq!(acts.worker, vec![CallCommand::Hangup { call: a }]);
+        assert!(acts.signals.is_empty());
+        let b = calling(&mut rt, now);
+        assert_ne!(a, b);
+        // A's offer, candidates, connection and failure change nothing for B.
+        for e in [
+            CallEvent::Offer { call: a, sdp: "v=0".into() },
+            CallEvent::Candidate { call: a, candidate: candidate(1) },
+            CallEvent::Connected { call: a },
+            CallEvent::Ended { call: a, reason: EndReason::Failed },
+            CallEvent::Error { call: a, message: "late".into() },
+        ] {
+            let acts = rt.worker_event(e, now);
+            assert!(acts.worker.is_empty() && acts.signals.is_empty() && acts.say.is_none() && acts.notice.is_none());
+        }
+        let c = rt.call.as_ref().unwrap();
+        assert_eq!((c.number, c.phase, c.outbox.len()), (b, CallPhase::Calling, 0));
+        // Orbiters' answer for A comes now: A is ended there too, so it stops ringing at the friend's.
+        let acts = rt.created(a, Ok("k_a".into()));
+        assert_eq!(acts.signals, vec![Signal::Close { id: "k_a".into(), decline: false }]);
+        assert_eq!(rt.call.as_ref().unwrap().id, None, "B keeps waiting for its own id");
+        // A worker that carried an older call ends: B goes on.
+        rt.current(b).unwrap().worker = Some(2);
+        assert!(rt.worker_exit(1).say.is_none());
+        assert!(rt.call.is_some());
+        let acts = rt.worker_exit(2);
+        assert_eq!(acts.say.as_deref(), Some("The call with Friend could not connect."));
+        assert!(rt.call.is_none());
+    }
+
+    #[test]
+    fn the_caller_holds_its_candidates_until_the_friend_answers() {
+        let now = Instant::now();
+        let mut rt = CallsRuntime::default();
+        let n = calling(&mut rt, now);
+        let acts = rt.worker_event(CallEvent::Offer { call: n, sdp: "v=0".into() }, now);
+        assert_eq!(acts.signals, vec![Signal::Create { number: n, contact: "c_1".into(), offer: "v=0".into() }]);
+        for i in 1..=2 {
+            assert!(rt.worker_event(CallEvent::Candidate { call: n, candidate: candidate(i) }, now).signals.is_empty());
+        }
+        rt.created(n, Ok("k_1".into()));
+        // The call has its id but only rings: still nothing about this computer leaves.
+        assert!(rt.worker_event(CallEvent::Candidate { call: n, candidate: candidate(3) }, now).signals.is_empty());
+        let acts = rt.server_event("answered", &json!({ "call": "k_1", "answer": "v=0 answer" }), now);
+        assert_eq!(acts.worker, vec![CallCommand::RemoteAnswer { call: n, sdp: "v=0 answer".into() }]);
+        assert_eq!(acts.signals, vec![Signal::Candidates { id: "k_1".into(), candidates: vec![candidate(1), candidate(2), candidate(3)] }]);
+        assert_eq!(rt.call.as_ref().unwrap().phase, CallPhase::Connecting);
+        // From now on they go as they come, and the friend's go to the worker.
+        assert_eq!(
+            rt.worker_event(CallEvent::Candidate { call: n, candidate: candidate(4) }, now).signals,
+            vec![Signal::Candidates { id: "k_1".into(), candidates: vec![candidate(4)] }]
+        );
+        let acts = rt.server_event("candidates", &json!({ "call": "k_1", "candidates": ["candidate:5 1 udp 1 198.51.100.5 9 typ relay"] }), now);
+        assert!(matches!(&acts.worker[..], [CallCommand::Candidates { call, candidates }] if *call == n && candidates.len() == 1));
+        let acts = rt.worker_event(CallEvent::Connected { call: n }, now);
+        assert_eq!(acts.say.as_deref(), Some("On a call with Friend."));
+        let acts = rt.server_event("ended", &json!({ "call": "k_1" }), now);
+        assert_eq!(acts.say.as_deref(), Some("Call with Friend ended."));
+        assert_eq!(acts.worker, vec![CallCommand::Hangup { call: n }]);
+        assert!(acts.signals.is_empty(), "Orbiters told this side: nothing to tell it back");
+    }
+
+    #[test]
+    fn the_callee_keeps_the_candidates_that_come_while_it_rings() {
+        let now = Instant::now();
+        let mut rt = CallsRuntime::default();
+        let acts = incoming(&mut rt, "k_7", now);
+        assert!(acts.publish, "the Answer button shows at once");
+        assert_eq!(acts.say.as_deref(), Some("Rexouium Fan is calling. Touch me or press Call to answer."));
+        // The caller's candidates (an older desktop sends them at once) wait for the answer.
+        let acts = rt.server_event(
+            "candidates",
+            &json!({ "call": "k_7", "candidates": [{ "candidate": "candidate:1 1 udp 1 203.0.113.1 9 typ srflx", "sdpMid": "0" }] }),
+            now,
+        );
+        assert!(acts.worker.is_empty());
+        rt.mute(true);
+        let acts = rt.answer(Some("mic-1".into()), now);
+        let number = rt.call.as_ref().unwrap().number;
+        assert_eq!(acts.worker.len(), 2);
+        assert!(matches!(&acts.worker[0], CallCommand::Answer { call, offer, ice_servers, mic, muted: true, relay_only: true }
+            if *call == number && offer == "v=0" && ice_servers.is_empty() && mic.as_deref() == Some("mic-1")));
+        assert!(matches!(&acts.worker[1], CallCommand::Candidates { candidates, .. } if candidates.len() == 1));
+        rt.current(number).unwrap().worker = Some(1);
+        // This side's candidates wait for its own answer to go first.
+        assert!(rt.worker_event(CallEvent::Candidate { call: number, candidate: candidate(2) }, now).signals.is_empty());
+        let acts = rt.worker_event(CallEvent::Answer { call: number, sdp: "v=0 answer".into() }, now);
+        assert_eq!(
+            acts.signals,
+            vec![
+                Signal::Answer { number, id: "k_7".into(), sdp: "v=0 answer".into() },
+                Signal::Candidates { id: "k_7".into(), candidates: vec![candidate(2)] }
+            ]
+        );
+    }
+
+    #[test]
+    fn events_about_another_call_are_ignored_and_a_second_call_is_declined() {
+        let now = Instant::now();
+        let mut rt = CallsRuntime::default();
+        incoming(&mut rt, "k_1", now);
+        for event in ["declined", "ended", "answered", "candidates"] {
+            let acts = rt.server_event(event, &json!({ "call": "k_2", "candidates": ["candidate:1"], "answer": "x" }), now);
+            assert!(acts.worker.is_empty() && acts.signals.is_empty() && acts.say.is_none(), "{event}");
+        }
+        assert!(rt.call.as_ref().is_some_and(Call::ringing_in));
+        // Another friend calls meanwhile: declined for them; the same call again (the stream reopened): nothing.
+        assert_eq!(incoming(&mut rt, "k_2", now).signals, vec![Signal::Close { id: "k_2".into(), decline: true }]);
+        assert!(incoming(&mut rt, "k_1", now).signals.is_empty());
+        // The caller gave up: a missed call, said as one.
+        let acts = rt.server_event("ended", &json!({ "call": "k_1", "reason": "hangup" }), now);
+        assert_eq!(acts.say.as_deref(), Some("Missed call from Rexouium Fan."));
+    }
+
+    #[test]
+    fn mute_before_the_call_starts_goes_with_it() {
+        let now = Instant::now();
+        let mut rt = CallsRuntime::default();
+        let n = rt.dial("c_1", "Friend", now).unwrap();
+        // Pressed while the relay servers are fetched: no worker has the call yet.
+        assert!(rt.mute(true).worker.is_empty());
+        assert!(matches!(rt.offer(n, vec![], None), Some(CallCommand::Offer { muted: true, .. })));
+        rt.current(n).unwrap().worker = Some(1);
+        assert_eq!(rt.mute(false).worker, vec![CallCommand::Mute { call: n, on: false }]);
+        // Ended meanwhile: no offer goes.
+        rt.hang_up();
+        assert!(rt.offer(n, vec![], None).is_none());
+    }
+
+    #[test]
+    fn phases_that_last_too_long_end() {
+        let now = Instant::now();
+        let mut rt = CallsRuntime::default();
+        let n = calling(&mut rt, now);
+        rt.created(n, Ok("k_1".into()));
+        assert!(rt.deadlines(now + CALLING_FOR / 2).say.is_none());
+        let acts = rt.deadlines(now + CALLING_FOR + Duration::from_secs(1));
+        assert_eq!(acts.say.as_deref(), Some("Friend didn't answer."));
+        assert_eq!(acts.signals, vec![Signal::Close { id: "k_1".into(), decline: false }]);
+        assert_eq!(acts.worker, vec![CallCommand::Hangup { call: n }]);
+        // A ring whose end never came stops, declined for the caller.
+        incoming(&mut rt, "k_2", now);
+        let acts = rt.deadlines(now + RINGING_FOR + Duration::from_secs(1));
+        assert_eq!(acts.say.as_deref(), Some("Missed call from Rexouium Fan."));
+        assert_eq!(acts.signals, vec![Signal::Close { id: "k_2".into(), decline: true }]);
+        // Answered, but never connected.
+        incoming(&mut rt, "k_3", now);
+        rt.answer(None, now);
+        let acts = rt.deadlines(now + CONNECTING_FOR + Duration::from_secs(1));
+        assert_eq!(acts.say.as_deref(), Some("The call with Rexouium Fan could not connect."));
+        assert!(rt.call.is_none());
+    }
+
+    #[test]
+    fn how_calls_end_is_said() {
+        let now = Instant::now();
+        let mut rt = CallsRuntime::default();
+        let n = calling(&mut rt, now);
+        assert_eq!(rt.created(n, Err(Ending::Busy)).say.as_deref(), Some("Friend is on another call."));
+        let n = calling(&mut rt, now);
+        rt.created(n, Ok("k_1".into()));
+        assert_eq!(rt.server_event("declined", &json!({ "call": "k_1" }), now).say.as_deref(), Some("Friend can't talk right now."));
+        let n = calling(&mut rt, now);
+        let acts = rt.worker_event(CallEvent::Ended { call: n, reason: EndReason::Unreachable }, now);
+        assert_eq!(acts.say.as_deref(), Some("The call with Friend could not connect: this network seems to block calls."));
+        incoming(&mut rt, "k_4", now);
+        let acts = rt.hang_up();
+        assert_eq!(acts.say.as_deref(), Some("Call from Rexouium Fan declined."));
+        assert_eq!(acts.signals, vec![Signal::Close { id: "k_4".into(), decline: true }]);
+        // Levels are published only when they move by a step.
+        let n = calling(&mut rt, now);
+        assert!(rt.worker_event(CallEvent::Levels { call: n, mic: 0.31, remote: 0.0 }, now).publish);
+        assert!(!rt.worker_event(CallEvent::Levels { call: n, mic: 0.32, remote: 0.01 }, now).publish);
+    }
+
+    #[test]
+    fn server_sent_events_are_read_line_by_line() {
+        let mut sse = Sse::default();
+        let mut events = Vec::new();
+        for line in [": ping", "", "event: incoming", "data: {\"call\":", "data: \"k_1\"}", "", "event: ended\r", "data: {}\r", "\r"] {
+            events.extend(sse.line(line));
+        }
+        assert_eq!(events, vec![("incoming".to_string(), "{\"call\":\n\"k_1\"}".to_string()), ("ended".to_string(), "{}".to_string())]);
+        // An event too big to be one is dropped whole.
+        let big = format!("data: {}", "x".repeat(EVENT_MOST + 1));
+        for line in ["event: candidates", big.as_str()] {
+            assert!(sse.line(line).is_none());
+        }
+        assert!(sse.line("").is_none());
+        assert_eq!(sse.line("event: declined").or(sse.line("")), Some(("declined".to_string(), String::new())));
+    }
+
+    #[test]
+    fn a_silent_event_stream_gives_up() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // The server stays silent until the test is done, so that only the idle timeout can end the read.
+        let (done, wait) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n: ping\n\n").unwrap();
+            // Then nothing, as from a server behind a connection that died.
+            let _ = wait.recv_timeout(Duration::from_secs(30));
+        });
+        let agent = idle_agent(Duration::from_secs(2), Duration::from_millis(300));
+        let response = agent.get(&format!("http://127.0.0.1:{port}/orb/calls/events")).call().unwrap();
+        let mut reader = BufReader::new(response.into_body().into_with_config().limit(u64::MAX).reader());
+        let mut line = Vec::new();
+        assert_eq!(read_line(&mut reader, &mut line, EVENT_MOST).unwrap(), Some(true));
+        assert_eq!(line, b": ping");
+        let started = Instant::now();
+        let mut ended = false;
+        for _ in 0..3 {
+            match read_line(&mut reader, &mut line, EVENT_MOST) {
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => {
+                    ended = true;
+                    break;
+                }
+            }
+        }
+        // 300 ms of silence ends it; the bound leaves room for a busy computer.
+        let waited = started.elapsed();
+        let _ = done.send(());
+        server.join().unwrap();
+        assert!(ended && waited < Duration::from_secs(10), "the read gave up after {waited:?}");
+    }
+
+    #[test]
+    fn long_lines_are_skipped_whole() {
+        let text = format!("a\n{}\nb", "x".repeat(40));
+        let mut reader = std::io::BufReader::with_capacity(8, text.as_bytes());
+        let mut line = Vec::new();
+        assert_eq!(read_line(&mut reader, &mut line, 16).unwrap(), Some(true));
+        assert_eq!(line, b"a");
+        assert_eq!(read_line(&mut reader, &mut line, 16).unwrap(), Some(false));
+        assert_eq!(read_line(&mut reader, &mut line, 16).unwrap(), Some(true));
+        assert_eq!(line, b"b");
+        assert_eq!(read_line(&mut reader, &mut line, 16).unwrap(), None);
     }
 }

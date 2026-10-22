@@ -3,12 +3,14 @@
 //! that faded out move onto live ones picked by opacity, the copies sharing the original's opacity and footprint, while
 //! the set grows to its budget. Depth steps render only the depth samples' rays; colour steps can run coarse to fine. Every `hold_out_every`-th keyframe is never trained on and scores the result.
 
+use crate::aberration::Undo;
 use crate::camera::Camera;
 use crate::dataset::{channel, Dataset, DepthView};
 use crate::gaussians::{logit, sigmoid, Gaussians};
 #[cfg(test)]
 use crate::gaussians::{rotation_matrix, PACKED};
 use crate::gpu::{Gpu, LearningRates, Relocation, Target};
+use anyhow::ensure;
 use std::time::Instant;
 
 #[derive(Clone, Debug)]
@@ -26,6 +28,16 @@ pub struct Settings {
     pub opacity_reg: f32,
     /// Per scene extent: the scale penalty is in the scene's units.
     pub scale_reg: f32,
+    /// The regularisers pull on every Gaussian every step, seen in it or not, as 3DGS-MCMC's do (off: only on the
+    /// Gaussians each step shows, so a Gaussian's regularisation follows how often it is seen, and one no view shows
+    /// is never pulled toward DEAD). Off until measured: on, a seed no step has shown yet gets only the regulariser's
+    /// gradient, which Adam turns into full opacity-rate steps, so on a long walk most seeds would fade before a view
+    /// shows them; `opacity_reg` needs retuning with it.
+    pub regularise_unseen: bool,
+    /// A relocated or faded Gaussian counts Adam's bias correction from its restart (about one learning rate a step
+    /// while it settles) instead of from the run's first step, as 3DGS-MCMC does (3 to 6 times it). Off until
+    /// measured: on, training moves away from the reference and from the runs the defaults were tuned on.
+    pub adam_restart: bool,
     /// Gaussians whose screen radius ever exceeds this fraction of the image's width are relocated.
     pub max_radius: f32,
     pub background: [f32; 3],
@@ -66,6 +78,8 @@ impl Default for Settings {
             depth_weight: 0.3,
             opacity_reg: 0.01,
             scale_reg: 0.01,
+            regularise_unseen: false,
+            adam_restart: false,
             max_radius: 0.1,
             background: [0.0; 3],
             seed: 1,
@@ -93,24 +107,36 @@ pub struct Progress {
     pub gaussians: usize,
     /// Tile entries of a recent step (rendering cost).
     pub intersections: u32,
-    /// Mean PSNR over the held-out keyframes, when measured at this report.
+    /// Mean PSNR over up to 16 held-out keyframes, when measured at this report.
     pub psnr: Option<f32>,
     pub seconds: f32,
 }
 
+/// The result of a run: its Gaussians, which are also what the device holds now (scored with [`score_held_out`]).
 pub struct Outcome {
     pub gaussians: Gaussians,
     pub iterations: u32,
     pub held_out: Vec<usize>,
-    pub psnr_held_out: Option<f32>,
     pub psnr_train: f32,
     pub seconds: f32,
 }
 
-/// The cameras' mean position.
-fn camera_centre(data: &Dataset) -> [f32; 3] {
-    let n = data.views.len().max(1) as f32;
-    data.views.iter().map(|v| v.camera.position()).fold([0.0f32; 3], |a, p| [a[0] + p[0] / n, a[1] + p[1] / n, a[2] + p[2] / n])
+/// The keyframes a run holds out (never trained on; they score the result): every `every`-th, from the middle of the
+/// first `every`.
+pub fn held_out(views: usize, every: usize) -> Vec<usize> {
+    if every > 1 {
+        (0..views).filter(|i| i % every == every / 2).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// At most `k` of `items`, spread evenly over them.
+fn evenly(items: &[usize], k: usize) -> Vec<usize> {
+    if items.len() <= k {
+        return items.to_vec();
+    }
+    (0..k).map(|j| items[j * items.len() / k]).collect()
 }
 
 /// A typical scene size: the larger of the cameras' spread and the median sampled depth (sets the position step).
@@ -119,7 +145,11 @@ pub fn extent(data: &Dataset) -> f32 {
     let n = positions.len().max(1) as f32;
     let c = positions.iter().fold([0.0f32; 3], |a, p| [a[0] + p[0] / n, a[1] + p[1] / n, a[2] + p[2] / n]);
     let spread = positions.iter().map(|p| ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2)).sqrt()).fold(0.0, f32::max) * 1.1;
-    let mut depths: Vec<f32> = data.depth_views.iter().flat_map(|d| d.depth.iter().copied().filter(|z| *z > 0.0)).collect();
+    // The median of at most about a million trusted samples (all of a long session's would take hundreds of MB).
+    let total: usize = data.depth_views.iter().map(|d| d.depth.len()).sum();
+    let stride = (total / 1_000_000).max(1);
+    let mut depths: Vec<f32> =
+        data.depth_views.iter().flat_map(|d| (0..d.depth.len()).map(move |i| (d, i))).step_by(stride).filter(|(d, i)| d.depth[*i] > 0.0 && !d.is_unknown(*i)).map(|(d, i)| d.depth[i]).collect();
     let median = if depths.is_empty() {
         1.0
     } else {
@@ -135,7 +165,7 @@ pub fn default_iterations(data: &Dataset) -> u32 {
     (data.views.len() as u32 * 100).clamp(3_000, 30_000)
 }
 
-/// PSNR over the scene pixels (rendered colour clamped to 0..1).
+/// PSNR over the scene pixels (rendered colour clamped to 0..1); NaN without any.
 pub fn psnr(render: &[[f32; 4]], truth: &[u32], mask: &[f32]) -> f32 {
     let (mut se, mut count) = (0.0f64, 0.0f64);
     for (k, px) in render.iter().enumerate() {
@@ -148,14 +178,17 @@ pub fn psnr(render: &[[f32; 4]], truth: &[u32], mask: &[f32]) -> f32 {
         }
         count += 3.0;
     }
-    let mse = (se / count.max(1.0)).max(1e-10);
+    if count == 0.0 {
+        return f32::NAN;
+    }
+    let mse = (se / count).max(1e-10);
     (10.0 * (1.0 / mse).log10()) as f32
 }
 
 /// Renders the Gaussians on the GPU from a camera: (r, g, b, depth) per pixel.
 pub fn render(gpu: &mut Gpu, cam: &Camera, background: [f32; 3]) -> anyhow::Result<Vec<[f32; 4]>> {
     gpu.step(cam, background, Target::None, None)?;
-    Ok(gpu.read_image())
+    gpu.read_image()
 }
 
 pub fn evaluate(gpu: &mut Gpu, data: &Dataset, views: &[usize], background: [f32; 3]) -> anyhow::Result<Option<f32>> {
@@ -169,37 +202,88 @@ pub fn evaluate(gpu: &mut Gpu, data: &Dataset, views: &[usize], background: [f32
     Ok(Some(sum / views.len() as f32))
 }
 
+/// Renders each of `views` once from what the device holds, hands each render to `each` (previews), and returns their
+/// mean PSNR over the scene pixels. With the world's chromatic aberration undone in the keyframes (`undo`), a render
+/// passes through that aberration and is scored against the keyframe as captured (read again from the session), as
+/// the lab scored it: a plain render against the realigned keyframe reads about 0.1 dB high, against the captured one
+/// low.
+pub fn score_held_out(gpu: &mut Gpu, data: &Dataset, undo: Option<&Undo>, views: &[usize], background: [f32; 3], mut each: impl FnMut(usize, &[[f32; 4]]) -> anyhow::Result<()>) -> anyhow::Result<Option<f32>> {
+    let mut sum = 0.0;
+    for &i in views {
+        let img = render(gpu, &data.views[i].camera, background)?;
+        // A keyframe that can no longer be read as captured (its drive gone, the file deleted since loading) is scored
+        // as loaded rather than losing the finished run.
+        let captured = undo.and_then(|u| match crate::dataset::keyframe_image(&data.dir, data.views[i].keyframe, &data.geometry) {
+            Ok(captured) => Some((u, captured)),
+            Err(e) => {
+                eprintln!("keyframe {} scored as loaded: {e:#}", data.views[i].keyframe);
+                None
+            }
+        });
+        let psnr = match captured {
+            Some((u, captured)) => {
+                let seen = crate::priority::on_loading_threads(|| crate::aberration::aberrate(&img, data.width as usize, data.height as usize, u.intensity, u.factor));
+                psnr(&seen, &captured, &u.mask)
+            }
+            None => psnr(&img, &data.views[i].image, &data.mask),
+        };
+        ensure!(psnr.is_finite(), "keyframe {} has no scene pixel to score", data.views[i].keyframe);
+        each(i, &img)?;
+        sum += psnr;
+    }
+    Ok((!views.is_empty()).then(|| sum / views.len() as f32))
+}
+
+/// Whether step `it` fades what no training pixel sees: every `fade_unseen_every` steps from step 1000, while a
+/// relocation round is still to come to reuse the slots.
+fn fade_due(it: u32, s: &Settings, relocate_until: u32) -> bool {
+    s.fade_unseen_every > 0 && it.is_multiple_of(s.fade_unseen_every) && it >= 1000 && it + s.relocate_every <= relocate_until
+}
+
+/// The Gaussians a result keeps: opaque enough to show (faded ones that relocation never reused show nowhere: it
+/// moves at most a twentieth a round, and stops at `relocate_until`), and made of numbers.
+pub fn live(g: &Gaussians) -> Vec<bool> {
+    (0..g.len()).map(|i| g.is_finite(i) && sigmoid(g.opacity_logits[i]) >= DEAD).collect()
+}
+
 pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings, mut report: impl FnMut(&Progress)) -> anyhow::Result<Outcome> {
     let start = Instant::now();
     let iterations = if settings.iterations == 0 { default_iterations(data) } else { settings.iterations };
-    let held_out: Vec<usize> = if settings.hold_out_every > 1 { (0..data.views.len()).filter(|i| i % settings.hold_out_every == settings.hold_out_every / 2).collect() } else { Vec::new() };
-    let train_views: Vec<usize> = (0..data.views.len()).filter(|i| !held_out.contains(i)).collect();
-    let depth_views: Vec<usize> = (0..data.depth_views.len()).filter(|&i| data.depth_views[i].valid() > 0).collect();
-    let depth_targets: Vec<DepthTarget> = data.depth_views.iter().map(depth_target).collect();
+    let held_out = held_out(data.views.len(), settings.hold_out_every);
+    let train_views: Vec<usize> = (0..data.views.len()).filter(|i| held_out.binary_search(i).is_err()).collect();
+    ensure!(!train_views.is_empty(), "every keyframe is held out: nothing to train on");
+    ensure!(!init.is_empty(), "no Gaussians to start from");
+    // A session's frames whose every pixel is strip or band (or a mask never set) would train on nothing and score
+    // nothing.
     let scene_pixels = data.mask.iter().filter(|m| **m > 0.5).count() as f32;
+    ensure!(scene_pixels > 0.0, "the capture strip and the skeleton band cover all of these {}×{} keyframes: nothing to train on", data.width, data.height);
+    let depth_views: Vec<usize> = (0..data.depth_views.len()).filter(|&i| data.depth_views[i].valid() > 0).collect();
     let extent = extent(data);
     let mut rng = fastrand::Rng::with_seed(settings.seed);
+    // Mid-run scores on at most 16 held-out keyframes: enough to follow, cheap at any session length.
+    let probe = evenly(&held_out, 16);
 
     // Feed the GPU even while another program keeps every core busy (crate::priority).
-    let _feeding = crate::priority::Feeding::start();
+    let feeding = crate::priority::Feeding::start();
+    // The set grows to the budget: buffers of that size from the start never grow (and copy) on the way.
+    gpu.reserve(settings.budget.max(init.len()));
     gpu.upload(&init);
     let coarse = if settings.half_until > 0.0 { levels(data) } else { Vec::new() };
     for l in &coarse {
-        gpu.set_mask(l.width, l.height, &l.mask);
+        gpu.set_mask(l.width, l.height, &l.mask)?;
     }
-    gpu.set_mask(data.width, data.height, &data.mask);
+    gpu.set_mask(data.width, data.height, &data.mask)?;
+    gpu.regularise_unseen = settings.regularise_unseen;
+    gpu.adam_restart = settings.adam_restart;
     let regularise = |gpu: &mut Gpu, n: usize| {
         gpu.opacity_reg = settings.opacity_reg / n.max(1) as f32;
         gpu.scale_reg = settings.scale_reg / (n.max(1) as f32 * extent);
     };
     regularise(gpu, init.len());
-    let max_radius = settings.max_radius * data.width as f32;
-    // The sky shell (seeded crate::init::SKY out) never spawns copies: opaque and plentiful, it would take the budget.
-    let centre = camera_centre(data);
-    let far_field = crate::init::SKY * 0.5;
     gpu.step = 0;
     let relocate_until = (iterations as f32 * settings.relocate_until) as u32;
     for it in 1..=iterations {
+        feeding.follow();
         let progress = (it - 1) as f32 / iterations as f32;
         // Coarse to fine: this step's level (0 full, 1 half, 2 quarter resolution); positions decay from full on.
         let level = if coarse.is_empty() || progress >= settings.half_until {
@@ -219,7 +303,8 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
         };
         let depth_step = !depth_views.is_empty() && settings.depth_weight > 0.0 && it % settings.depth_every.max(1) == 0;
         let intersections = if depth_step {
-            let t = &depth_targets[depth_views[rng.usize(..depth_views.len())]];
+            // Built for the step (all of a long session's targets at once would take GBs).
+            let t = depth_target(&data.depth_views[depth_views[rng.usize(..depth_views.len())]]);
             let full = gpu.dilation;
             gpu.dilation = t.dilation;
             let stepped = gpu.step(&t.camera, settings.background, Target::Depth { samples: &t.samples, weight: settings.depth_weight }, Some(lr));
@@ -234,19 +319,25 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             let robust = if progress >= settings.robust_from { settings.robust } else { 0.0 };
             gpu.step(camera, settings.background, Target::Color { rgba, scene_pixels: pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr))?
         };
-        if settings.fade_unseen_every > 0 && it % settings.fade_unseen_every == 0 && it >= 1000 && it + settings.relocate_every <= relocate_until {
+        if fade_due(it, settings, relocate_until) {
             let _cpu = crate::priority::CpuWork::start();
             let cams: Vec<Camera> = train_views.iter().map(|&i| data.views[i].camera).collect();
             let seen = gpu.visibility(&cams, settings.background)?;
-            let faded = logit(1e-4).to_bits();
-            let adjust: Vec<[u32; 4]> = seen.iter().enumerate().filter(|(_, w)| **w < settings.unseen_weight).map(|(i, _)| [i as u32, faded, 0f32.to_bits(), 0]).collect();
-            eprintln!("it {it}: fading {} of {} Gaussians no training pixel sees", adjust.len(), seen.len());
-            gpu.apply_relocation(&Relocation { adjust, copies: Vec::new(), len: seen.len() })?;
+            if seen.iter().all(|w| *w <= 0.0) {
+                // Nothing seen at all is a broken round (a mask of zeros, a lost readback), not a model nothing sees.
+                eprintln!("it {it}: no training pixel sees any Gaussian; nothing faded");
+            } else {
+                let faded = logit(1e-4).to_bits();
+                let adjust: Vec<[u32; 4]> = seen.iter().enumerate().filter(|(_, w)| **w < settings.unseen_weight).map(|(i, _)| [i as u32, faded, 0f32.to_bits(), 0]).collect();
+                eprintln!("it {it}: fading {} of {} Gaussians no training pixel sees", adjust.len(), seen.len());
+                gpu.apply_relocation(&Relocation { adjust, copies: Vec::new(), len: seen.len() })?;
+            }
         }
         if it % 50 == 0 || it == iterations {
-            let psnr = if it % 1000 == 0 || it == iterations {
+            // The last step's score is the result's, measured once it is final (crate::train::score_held_out).
+            let psnr = if it % 1000 == 0 && it != iterations {
                 let _cpu = crate::priority::CpuWork::start();
-                evaluate(gpu, data, &held_out, settings.background)?
+                evaluate(gpu, data, &probe, settings.background)?
             } else {
                 None
             };
@@ -256,7 +347,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             // The device classifies, the CPU samples the plan, the device moves the copies: a few MB cross the bus
             // instead of the whole set and its Adam moments both ways.
             let _cpu = crate::priority::CpuWork::start();
-            let weights = gpu.relocation_weights(max_radius, centre, far_field)?;
+            let weights = gpu.relocation_weights(settings.max_radius)?;
             let n = weights.len();
             if it % 500 == 0 {
                 let dead = weights.iter().filter(|w| **w == -1.0).count();
@@ -267,19 +358,18 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             regularise(gpu, plan.len);
         }
     }
-    let _cpu = crate::priority::CpuWork::start();
-    let (mut g, _, _, _) = gpu.download();
-    // Faded Gaussians that relocation never reused (it moves at most a twentieth per round, and stops at
-    // `relocate_until`) show nowhere: the result leaves them out.
-    let live: Vec<bool> = g.opacity_logits.iter().map(|&l| sigmoid(l) >= DEAD).collect();
-    g.retain(&live);
+    drop(feeding);
+    let mut g = gpu.download_params()?;
+    g.retain(&live(&g));
+    ensure!(!g.is_empty(), "training left no Gaussian that shows anywhere");
+    // From here on the device holds the result: what the PLY keeps is what scores.
+    gpu.upload(&g);
     if gpu.overflows > 0 {
         eprintln!("{} steps had more tile entries than the sort expected (dropped for that step)", gpu.overflows);
     }
-    let psnr_held_out = evaluate(gpu, data, &held_out, settings.background)?;
     let sample: Vec<usize> = train_views.iter().copied().step_by((train_views.len() / 8).max(1)).collect();
     let psnr_train = evaluate(gpu, data, &sample, settings.background)?.unwrap_or(0.0);
-    Ok(Outcome { gaussians: g, iterations, held_out, psnr_held_out, psnr_train, seconds: start.elapsed().as_secs_f32() })
+    Ok(Outcome { gaussians: g, iterations, held_out, psnr_train, seconds: start.elapsed().as_secs_f32() })
 }
 
 /// Keyframes at a coarser resolution: images box-filtered by 2 or 4 from the training resolution, their cameras, and
@@ -323,54 +413,54 @@ fn half_mask(mask: &[f32], w: u32, h: u32) -> Vec<f32> {
     out
 }
 
-/// The camera of an image box-filtered by `factor` (pixel centres at integers on both).
+/// The camera of an image box-filtered by `factor` (pixel centres at integers on both): [`Camera::scaled`].
 pub fn scaled(c: &Camera, factor: u32) -> Camera {
-    let f = factor as f32;
-    Camera { r: c.r, t: c.t, fx: c.fx / f, fy: c.fy / f, cx: (c.cx + 0.5) / f - 0.5, cy: (c.cy + 0.5) / f - 0.5, width: c.width / factor, height: c.height / factor }
+    c.scaled(factor)
 }
 
 fn levels(data: &Dataset) -> Vec<Level> {
     let mut out: Vec<Level> = Vec::new();
-    let (mut w, mut h) = (data.width, data.height);
-    let mut images: Vec<Vec<u32>> = data.views.iter().map(|v| v.image.clone()).collect();
-    let mut mask = data.mask.clone();
     for factor in [2u32, 4] {
-        images = images.iter().map(|img| half_image(img, w, h)).collect();
-        mask = half_mask(&mask, w, h);
-        w /= 2;
-        h /= 2;
-        let cameras = data.views.iter().map(|v| scaled(&v.camera, factor)).collect();
+        // Each level halves the one before it.
+        let (images, mask, w, h) = match out.last() {
+            None => (data.views.iter().map(|v| half_image(&v.image, data.width, data.height)).collect::<Vec<_>>(), half_mask(&data.mask, data.width, data.height), data.width / 2, data.height / 2),
+            Some(l) => (l.images.iter().map(|img| half_image(img, l.width, l.height)).collect(), half_mask(&l.mask, l.width, l.height), l.width / 2, l.height / 2),
+        };
+        let cameras = data.views.iter().map(|v| v.camera.scaled(factor)).collect();
         let scene_pixels = mask.iter().filter(|m| **m > 0.5).count() as f32;
-        out.push(Level { width: w, height: h, mask: mask.clone(), scene_pixels, images: images.clone(), cameras });
+        out.push(Level { width: w, height: h, mask, scene_pixels, images, cameras });
     }
     out
 }
 
 /// What a depth step renders: a camera, its samples (pixel x, pixel y, eye depth, 0) and its dilation.
-struct DepthTarget {
-    camera: Camera,
-    samples: Vec<[f32; 4]>,
-    dilation: [f32; 2],
+pub struct DepthTarget {
+    pub camera: Camera,
+    pub samples: Vec<[f32; 4]>,
+    pub dilation: [f32; 2],
 }
 
 /// A depth frame's step on a camera whose pixel centres are its sample rays: one pixel a sample, the footprint of the
 /// training resolution kept by scaling the dilation (the grid is regular up to a pixel's rounding). A frame without a
-/// regular grid renders at the training resolution.
-fn depth_target(d: &DepthView) -> DepthTarget {
+/// regular grid renders at the training resolution. Only trusted samples are targets.
+pub fn depth_target(d: &DepthView) -> DepthTarget {
     let dil = crate::cpu::DILATION as f32;
-    let (gw, gh) = (d.grid_width as usize, d.grid_height as usize);
-    if gw >= 2 && gh >= 2 {
-        let (x0, y0) = (d.pixels[0][0], d.pixels[0][1]);
-        let sx = (d.pixels[gw - 1][0] - x0) / (gw - 1) as f32;
-        let sy = (d.pixels[(gh - 1) * gw][1] - y0) / (gh - 1) as f32;
+    let (gw, gh) = (d.grid.width as usize, d.grid.height as usize);
+    let px = &d.grid.pixels;
+    let n = d.depth.len().min(px.len());
+    let trusted = |i: &usize| d.depth[*i] > 0.0 && !d.is_unknown(*i);
+    if gw >= 2 && gh >= 2 && n == gw * gh {
+        let (x0, y0) = (px[0][0], px[0][1]);
+        let sx = (px[gw - 1][0] - x0) / (gw - 1) as f32;
+        let sy = (px[(gh - 1) * gw][1] - y0) / (gh - 1) as f32;
         if sx > 0.0 && sy > 0.0 {
             let c = &d.camera;
             let camera = Camera { r: c.r, t: c.t, fx: c.fx / sx, fy: c.fy / sy, cx: (c.cx - x0) / sx, cy: (c.cy - y0) / sy, width: gw as u32, height: gh as u32 };
-            let samples = (0..gw * gh).filter(|&i| d.depth[i] > 0.0 && !d.is_dynamic(i)).map(|i| [(i % gw) as f32, (i / gw) as f32, d.depth[i], 0.0]).collect();
+            let samples = (0..n).filter(trusted).map(|i| [(i % gw) as f32, (i / gw) as f32, d.depth[i], 0.0]).collect();
             return DepthTarget { camera, samples, dilation: [dil / (sx * sx), dil / (sy * sy)] };
         }
     }
-    let samples = d.pixels.iter().zip(&d.depth).enumerate().filter(|(i, (_, z))| **z > 0.0 && !d.is_dynamic(*i)).map(|(_, (p, z))| [p[0], p[1], *z, 0.0]).collect();
+    let samples = (0..n).filter(trusted).map(|i| [px[i][0], px[i][1], d.depth[i], 0.0]).collect();
     DepthTarget { camera: d.camera, samples, dilation: [dil; 2] }
 }
 
@@ -393,16 +483,15 @@ fn relocation(o: f64, n: usize) -> (f64, f64) {
 }
 
 /// Each Gaussian's relocation weight, as relocate.wgsl's `classify` computes it on the device: −1 if dead (faded,
-/// broken, or `huge` on screen), −2 − its opacity if alive in the `far` field, else its opacity.
+/// broken, or `huge` on screen), −2 − its opacity if alive on the sky shell, else its opacity.
 #[cfg(test)]
-pub(crate) fn weights(g: &Gaussians, huge: &[bool], far: &[bool]) -> Vec<f32> {
+pub(crate) fn weights(g: &Gaussians, huge: &[bool]) -> Vec<f32> {
     (0..g.len())
         .map(|i| {
             let opacity = sigmoid(g.opacity_logits[i]);
-            let broken = g.means[i].iter().chain(&g.log_scales[i]).chain(std::iter::once(&g.opacity_logits[i])).any(|c| !c.is_finite());
-            if broken || opacity < DEAD || huge[i] {
+            if !g.is_finite(i) || opacity < DEAD || huge[i] {
                 -1.0
-            } else if far[i] {
+            } else if g.sky[i] {
                 -2.0 - opacity
             } else {
                 opacity
@@ -412,11 +501,12 @@ pub(crate) fn weights(g: &Gaussians, huge: &[bool], far: &[bool]) -> Vec<f32> {
 }
 
 /// Decides a relocation round from the Gaussians' [`weights`]: dead ones and new ones, up to `grow_to`, become copies
-/// of live ones sampled by opacity, never far ones (unless nothing else lives).
+/// of live ones sampled by opacity, never sky ones (unless nothing else lives). A weight that is no number counts as
+/// dead; weights that sum to nothing (a readback of zeros) move nothing.
 pub fn plan_relocation(weights: &[f32], grow_to: usize, rng: &mut fastrand::Rng) -> Relocation {
     let n = weights.len();
     let opacity = |i: usize| if weights[i] >= 0.0 { weights[i] } else { -2.0 - weights[i] };
-    let (mut dead, mut alive): (Vec<usize>, Vec<usize>) = (0..n).partition(|&i| weights[i] == -1.0);
+    let (mut dead, mut alive): (Vec<usize>, Vec<usize>) = (0..n).partition(|&i| weights[i] == -1.0 || !weights[i].is_finite());
     if alive.iter().any(|&i| weights[i] >= 0.0) {
         alive.retain(|&i| weights[i] >= 0.0);
     }
@@ -429,24 +519,46 @@ pub fn plan_relocation(weights: &[f32], grow_to: usize, rng: &mut fastrand::Rng)
         dead.truncate(cap);
     }
     let mut plan = Relocation { adjust: Vec::new(), copies: Vec::new(), len: n };
-    let moves = dead.len() + grow;
-    if moves == 0 || alive.is_empty() {
+    // No more moves than the live ones can take (MAX_RATIO − 1 copies each): after a mass fade a few sources remain.
+    let moves = (dead.len() + grow).min(alive.len() * (MAX_RATIO - 1));
+    if moves == 0 {
         return plan;
     }
-    let mut cdf = Vec::with_capacity(alive.len());
-    let mut acc = 0.0f64;
-    for &i in &alive {
-        acc += opacity(i) as f64;
-        cdf.push(acc);
+    let mut pool = alive.clone();
+    let mut cdf = Vec::with_capacity(pool.len());
+    let build = |pool: &[usize], cdf: &mut Vec<f64>| {
+        cdf.clear();
+        let mut acc = 0.0f64;
+        for &i in pool {
+            acc += opacity(i).max(0.0) as f64;
+            cdf.push(acc);
+        }
+        acc
+    };
+    let mut acc = build(&pool, &mut cdf);
+    if acc.is_nan() || acc <= 0.0 {
+        return plan;
     }
     let mut ratio = vec![1usize; n];
     let mut picks = Vec::with_capacity(moves);
+    let mut misses = 0;
     while picks.len() < moves {
         let r = rng.f64() * acc;
-        let j = alive[cdf.partition_point(|&c| c < r).min(alive.len() - 1)];
+        let j = pool[cdf.partition_point(|&c| c < r).min(pool.len() - 1)];
         if ratio[j] >= MAX_RATIO {
+            // Most of the weight sits on sources that took all they can: draw from the others from now on.
+            misses += 1;
+            if misses >= 16 {
+                pool.retain(|&i| ratio[i] < MAX_RATIO);
+                acc = build(&pool, &mut cdf);
+                misses = 0;
+                if pool.is_empty() || acc.is_nan() || acc <= 0.0 {
+                    break;
+                }
+            }
             continue;
         }
+        misses = 0;
         ratio[j] += 1;
         picks.push(j);
     }
@@ -498,15 +610,17 @@ pub(crate) fn apply_relocation(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Ve
         for (row, m) in r.iter().zip(mean.iter_mut()) {
             *m += row[0] * e[0] + row[1] * e[1] + row[2] * e[2];
         }
-        let (log_scale, rotation, opacity_logit, color) = (g.log_scales[j], g.rotations[j], g.opacity_logits[j], g.colors[j]);
+        let (log_scale, rotation, opacity_logit, color, sky) = (g.log_scales[j], g.rotations[j], g.opacity_logits[j], g.colors[j], g.sky[j]);
         if t < g.len() {
             g.means[t] = mean;
             g.log_scales[t] = log_scale;
             g.rotations[t] = rotation;
             g.opacity_logits[t] = opacity_logit;
             g.colors[t] = color;
+            g.sky[t] = sky;
         } else {
             g.push(mean, log_scale, rotation, opacity_logit, color);
+            *g.sky.last_mut().expect("pushed") = sky;
         }
         restart(m1, t);
         restart(m2, t);
@@ -514,11 +628,11 @@ pub(crate) fn apply_relocation(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Ve
 }
 
 /// Moves dead Gaussians (faded, broken, or `huge` on screen) and new ones, up to `grow_to`, onto live ones sampled
-/// by opacity, never `far` ones (unless nothing else lives), on the CPU (the tests' reference). Returns the number of
+/// by opacity, never sky ones (unless nothing else lives), on the CPU (the tests' reference). Returns the number of
 /// copies.
 #[cfg(test)]
-fn relocate(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Vec<f32>, huge: &[bool], far: &[bool], grow_to: usize, rng: &mut fastrand::Rng) -> usize {
-    let plan = plan_relocation(&weights(g, huge, far), grow_to, rng);
+fn relocate(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Vec<f32>, huge: &[bool], grow_to: usize, rng: &mut fastrand::Rng) -> usize {
+    let plan = plan_relocation(&weights(g, huge), grow_to, rng);
     apply_relocation(g, m1, m2, &plan);
     plan.copies.len()
 }
@@ -536,24 +650,27 @@ mod tests {
 
     #[test]
     fn the_depth_grid_camera_sees_every_sample_on_its_own_pixel() {
+        use crate::camera::Geometry;
+        use crate::dataset::DepthGrid;
         use orbiters_contracts::depth::DepthLayout;
         let (w, h) = (1920u32, 1080u32);
         let layout = DepthLayout::new(w, h).expect("layout");
         let pose = [0.96, 0.0, 0.28, 0.5, 0.0, 1.0, 0.0, 1.6, -0.28, 0.0, 0.96, -2.0];
         let camera = Camera::from_strip(&pose, &[1.2, 1.2 * w as f32 / h as f32, 0.0, 0.0], w, h, 1.0);
-        let (gw, gh) = (layout.tiles_x * orbiters_contracts::depth::SAMPLES_X, layout.tiles_y * orbiters_contracts::depth::SAMPLES_Y);
-        let mut pixels = Vec::new();
-        for gy in 0..gh {
-            for gx in 0..gw {
-                let (px, py) = layout.grid_pixel(gx, gy);
-                pixels.push([px as f32, py as f32]);
-            }
-        }
+        let grid = std::sync::Arc::new(DepthGrid::new(&layout, &Geometry::new(w, h, 1)));
+        let (gw, gh) = (grid.width, grid.height);
+        let pixels = grid.pixels.clone();
         let depth: Vec<f32> = (0..pixels.len()).map(|i| 1.0 + (i % 7) as f32).collect();
-        let view = DepthView { camera, grid_width: gw, grid_height: gh, pixels: pixels.clone(), depth: depth.clone(), game_time: 0.0, spacing: 8.0, dynamic: Vec::new() };
+        let mut view = DepthView { camera, grid, depth: depth.clone(), game_time: 0.0, unknown: Default::default(), decoder_unknown: 0, zero_may_be_unread: false };
         let t = depth_target(&view);
         assert_eq!((t.camera.width, t.camera.height), (gw, gh));
         assert_eq!(t.samples.len(), pixels.len());
+        // Unknown samples (and samples that hit nothing) are no targets.
+        view.unknown.insert(5);
+        view.depth[9] = 0.0;
+        let fewer = depth_target(&view);
+        assert_eq!(fewer.samples.len(), pixels.len() - 2);
+        assert!(fewer.samples.iter().all(|s| (s[1] as u32 * gw + s[0] as u32) as usize != 5));
         // Each sample's world point lands on its grid pixel: exactly across, within the rows' rounding down.
         let mut worst = [0f32; 2];
         for s in &t.samples {
@@ -605,7 +722,7 @@ mod tests {
         }
         let mut m1 = vec![1.0; 100 * PACKED];
         let mut m2 = vec![1.0; 100 * PACKED];
-        let moved = relocate(&mut g, &mut m1, &mut m2, &[false; 100], &[false; 100], 104, &mut fastrand::Rng::with_seed(1));
+        let moved = relocate(&mut g, &mut m1, &mut m2, &[false; 100], 104, &mut fastrand::Rng::with_seed(1));
         assert_eq!(moved, 7);
         assert_eq!(g.len(), 104);
         assert_eq!(m1.len(), 104 * PACKED);
@@ -620,24 +737,92 @@ mod tests {
             g.push([i as f32, 0.0, 0.0], [-2.0; 3], [1.0, 0.0, 0.0, 0.0], if i < 30 { logit(0.001) } else { logit(0.8) }, [0.5; 3]);
         }
         let (mut m1, mut m2) = (vec![0.0; 100 * PACKED], vec![0.0; 100 * PACKED]);
-        let moved = relocate(&mut g, &mut m1, &mut m2, &[false; 100], &[false; 100], 200, &mut fastrand::Rng::with_seed(2));
+        let moved = relocate(&mut g, &mut m1, &mut m2, &[false; 100], 200, &mut fastrand::Rng::with_seed(2));
         assert_eq!(moved, 5);
         assert_eq!(g.len(), 100);
         assert_eq!(g.opacity_logits.iter().filter(|&&l| sigmoid(l) < DEAD).count(), 25);
     }
 
     #[test]
-    fn the_far_field_never_spawns_copies() {
-        // Three faded, forty opaque far ones at x = 400, the rest near x = 0..2.
+    fn the_sky_shell_never_spawns_copies() {
+        // Three faded, forty opaque sky ones at x = 400, the rest near x = 0..2.
         let mut g = Gaussians::default();
         for i in 0..100 {
             let x = if (3..43).contains(&i) { 400.0 } else { (i % 3) as f32 };
             g.push([x, 0.0, 0.0], [-4.0; 3], [1.0, 0.0, 0.0, 0.0], if i < 3 { logit(0.001) } else { logit(0.9) }, [0.5; 3]);
+            g.sky[i] = (3..43).contains(&i);
         }
-        let far: Vec<bool> = g.means.iter().map(|m| m[0] > 100.0).collect();
         let (mut m1, mut m2) = (vec![0.0; 100 * PACKED], vec![0.0; 100 * PACKED]);
-        relocate(&mut g, &mut m1, &mut m2, &[false; 100], &far, 104, &mut fastrand::Rng::with_seed(4));
+        relocate(&mut g, &mut m1, &mut m2, &[false; 100], 104, &mut fastrand::Rng::with_seed(4));
         assert_eq!(g.len(), 104);
         assert_eq!(g.means.iter().filter(|m| m[0] > 100.0).count(), 40);
+        assert_eq!(g.sky.iter().filter(|s| **s).count(), 40);
+        // Far geometry that is not sky (a walk wider than the sky shell's 200 m) does spawn copies.
+        let mut far = Gaussians::default();
+        for i in 0..100 {
+            far.push([if i < 50 { -300.0 } else { 300.0 }, 0.0, 0.0], [-4.0; 3], [1.0, 0.0, 0.0, 0.0], if i < 3 { logit(0.001) } else { logit(0.9) }, [0.5; 3]);
+        }
+        assert_eq!(relocate(&mut far, &mut vec![0.0; 100 * PACKED], &mut vec![0.0; 100 * PACKED], &[false; 100], 104, &mut fastrand::Rng::with_seed(4)), 7);
+    }
+
+    /// Weights that all read zero (a failed readback), sources that cannot take all the moves (a mass fade), weights
+    /// that are no number: every plan ends.
+    #[test]
+    fn relocation_plans_end_whatever_the_weights() {
+        let mut rng = fastrand::Rng::with_seed(8);
+        let plan = plan_relocation(&[0.0; 1000], 1050, &mut rng);
+        assert!(plan.copies.is_empty() && plan.adjust.is_empty() && plan.len == 1000);
+        // Nine live sources and 9,991 faded ones: a twentieth (500) is more than nine can take (450).
+        let mut w = vec![-1.0f32; 10_000];
+        for i in 0..9 {
+            w[i * 1000] = 0.5;
+        }
+        let plan = plan_relocation(&w, 10_500, &mut rng);
+        assert_eq!(plan.copies.len(), 9 * (MAX_RATIO - 1));
+        assert_eq!(plan.adjust.len(), 9);
+        // One source holding nearly all the weight takes all it can (50 copies); the others take the other 50 moves.
+        let mut w = vec![0.001f32; 200];
+        w[0] = 1000.0;
+        w.extend(vec![-1.0; 1800]);
+        let plan = plan_relocation(&w, 2000, &mut rng);
+        assert_eq!(plan.copies.len(), 100);
+        assert_eq!(plan.copies.iter().filter(|c| c[1] == 0).count(), MAX_RATIO - 1);
+        // NaN and ∞ count as dead (at least one slot moves a round); the copy comes from the one live source.
+        let w = [f32::NAN, 0.5, -1.0, f32::INFINITY];
+        let plan = plan_relocation(&w, 4, &mut rng);
+        assert_eq!(plan.copies.len(), 1);
+        assert!(plan.copies.iter().all(|c| c[1] == 1 && c[0] != 1));
+    }
+
+    /// Fades run every thousand steps from step 1000, while a relocation round is left to reuse what they free.
+    #[test]
+    fn the_fade_schedule() {
+        let s = Settings::default();
+        let until = (9000.0 * s.relocate_until) as u32;
+        let due: Vec<u32> = (1..=9000).filter(|&it| fade_due(it, &s, until)).collect();
+        assert_eq!(due, vec![1000, 2000, 3000, 4000]);
+        assert!((1..=9000).all(|it| !fade_due(it, &Settings { fade_unseen_every: 0, ..s.clone() }, until)));
+    }
+
+    /// The result leaves out what shows nowhere: faded Gaussians and ones whose parameters are no numbers.
+    #[test]
+    fn the_result_keeps_only_what_shows() {
+        let mut g = Gaussians::default();
+        for o in [0.5, 0.004, 0.006, 0.9] {
+            g.push([0.0; 3], [-2.0; 3], [1.0, 0.0, 0.0, 0.0], logit(o), [0.5; 3]);
+        }
+        g.rotations[3][2] = f32::NAN;
+        assert_eq!(live(&g), vec![true, false, true, false]);
+    }
+
+    #[test]
+    fn held_out_keyframes_and_mid_run_probes() {
+        assert_eq!(held_out(20, 8), vec![4, 12]);
+        assert!(held_out(20, 1).is_empty() && held_out(20, 0).is_empty());
+        let many: Vec<usize> = (0..200).collect();
+        let probe = evenly(&many, 16);
+        assert_eq!(probe.len(), 16);
+        assert!(probe.windows(2).all(|p| p[1] - p[0] >= 12));
+        assert_eq!(evenly(&many[..5], 16), vec![0, 1, 2, 3, 4]);
     }
 }

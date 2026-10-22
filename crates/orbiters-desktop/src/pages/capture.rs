@@ -30,7 +30,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
         });
     });
     // Down to where the content starts (its top margin).
-    super::under_top(ui, cx, from, ui.max_rect().top() + cx.top + 8.0);
+    super::under_top(ui, cx, "capture", from, ui.max_rect().top() + cx.top + 8.0);
 }
 
 fn rec_state(s: CaptureState) -> RecState {
@@ -125,9 +125,7 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
             let seg_rect = Rect::from_min_size(pos2(r3.left() - 8.0 - seg_w, rect.bottom() - 36.0), vec2(seg_w, 36.0));
             let mut seg = ui.new_child(UiBuilder::new().max_rect(seg_rect).layout(Layout::right_to_left(Align::Center)));
             if widgets::segmented(&mut seg, "photo-3d-length", &mut length, &lengths, true) {
-                let mut settings = snap.settings.clone();
-                settings.photo_3d = length;
-                cx.ctl.save_settings(settings);
+                super::form::save(cx.ctl, &snap.settings, &Settings { photo_3d: length, ..snap.settings.clone() });
             }
             // The camera looks around, then circles at three heights, looking in and out: views a walk never gives.
             let bs = Button::new("Scan")
@@ -340,7 +338,7 @@ fn recorder(ui: &mut Ui, cx: &mut Cx, card: Rect) {
     let mode_changed = widgets::segmented(&mut seg, "capture-mode", &mut mode, &modes, false);
     let quality_changed = widgets::segmented(&mut seg, "storage-quality", &mut quality, &qualities, true);
     if mode_changed || quality_changed {
-        cx.ctl.save_settings(Settings { capture_mode: mode, storage_quality: quality, ..settings.clone() });
+        super::form::save(cx.ctl, settings, &Settings { capture_mode: mode, storage_quality: quality, ..settings.clone() });
     }
 
     if !consent {
@@ -407,7 +405,7 @@ fn consent_overlay(ui: &mut Ui, cx: &mut Cx, card: Rect) {
     }
     let button = Rect::from_min_size(pos2(dialog.left() + 24.0, dialog.bottom() - 24.0 - 40.0), vec2(dialog.width() - 48.0, 40.0));
     if Button::new("I understand").variant(Variant::Primary).width(button.width()).show_at(ui, button).clicked() {
-        cx.ctl.save_settings(Settings { consent_acknowledged: true, ..cx.snap.settings.clone() });
+        super::form::save(cx.ctl, &cx.snap.settings, &Settings { consent_acknowledged: true, ..cx.snap.settings.clone() });
     }
 }
 
@@ -439,8 +437,13 @@ fn tiles(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
             icons::SCAN,
             "Strip decoded",
             s.map(|_| if decoded > 99.95 { format!("{decoded:.0}%") } else { format!("{decoded:.1}%") }).unwrap_or_else(|| "–".into()),
-            s.map(|s| format!("{} unreadable", format::integer(s.strip_failed as f64))).unwrap_or_else(|| "pose strip in every frame".into()),
-            accent,
+            match s {
+                // Gone for a while: the camera may not see the avatar (the kit's "Near you" reach), and no keyframes come.
+                Some(s) if s.strip_missing_s >= 2.0 => format!("none for {:.0} s: is your avatar in view?", s.strip_missing_s),
+                Some(s) => format!("{} unreadable", format::integer(s.strip_failed as f64)),
+                None => "pose strip in every frame".into(),
+            },
+            if s.is_some_and(|s| s.strip_missing_s >= 2.0) { Some(theme::WARN) } else { accent },
         ),
         (
             icons::CUBE,
@@ -456,8 +459,13 @@ fn tiles(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
             icons::CPU,
             "Depth frames",
             format::integer(depth),
-            s.map(|s| format!("{} of frames", format::percent(s.depth_frames as f64, s.frames as f64))).unwrap_or_else(|| "exact depth samples".into()),
-            None,
+            match s {
+                // Decoding fell behind (a slow disk or a busy processor): the recording went on without those.
+                Some(s) if s.depth_dropped > 0 => format!("{} dropped", format::integer(s.depth_dropped as f64)),
+                Some(s) => format!("{} of frames", format::percent(s.depth_frames as f64, s.frames as f64)),
+                None => "exact depth samples".into(),
+            },
+            s.filter(|s| s.depth_dropped > 0).map(|_| theme::WARN),
         ),
         (
             icons::GAUGE,
@@ -552,7 +560,7 @@ fn performance(ui: &mut Ui, cx: &mut Cx) {
         }
     });
     if let Some(s) = changed {
-        cx.ctl.save_settings(s);
+        super::form::save(cx.ctl, &snap.settings, &s);
     }
 }
 
@@ -569,14 +577,11 @@ fn camera_path(ui: &mut Ui, cx: &mut Cx) {
             None => "Exact positions from the capture strip, top-down".into(),
         };
         widgets::text(p, pos2(rect.left() + 20.0, rect.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3));
-        if let Some(err) = &c.error {
-            widgets::text_truncated(
-                p,
-                pos2(rect.right() - 20.0, rect.top() + 36.0),
-                Align2::RIGHT_CENTER,
-                &Txt::new(err, 12.0).color(theme::DANGER),
-                rect.width() * 0.55,
-            );
+        // What went wrong: the capture's error, else what the recording goes on without (a microphone that could not
+        // be opened, files that could not be written), as the worker last said them.
+        let warnings = s.map(|s| s.warnings.join(" · ")).filter(|w| !w.is_empty());
+        if let Some((text, color)) = c.error.clone().map(|e| (e, theme::DANGER)).or_else(|| warnings.map(|w| (w, theme::WARN))) {
+            widgets::text_truncated(p, pos2(rect.right() - 20.0, rect.top() + 36.0), Align2::RIGHT_CENTER, &Txt::new(text, 12.0).color(color), rect.width() * 0.55);
         }
         let map = Rect::from_min_max(pos2(rect.left() + 16.0, rect.top() + 68.0), pos2(rect.right() - 16.0, rect.bottom() - 16.0));
         let coverage = c.coverage.as_ref().map(|m| trail::Coverage {

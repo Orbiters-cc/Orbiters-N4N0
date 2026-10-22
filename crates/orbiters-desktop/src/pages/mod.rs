@@ -1,6 +1,7 @@
 //! The pages, plus what they share: the page context, background jobs and staggered entrances.
 
 pub mod capture;
+pub mod form;
 pub mod mic;
 pub mod orb;
 pub mod sessions;
@@ -68,14 +69,16 @@ const UNDER_TOP_RAMP: f32 = 32.0;
 
 /// The shapes from `from` on that scrolled up under what the page keeps above its scrolling content (the title bar,
 /// and down to `bottom` its heading) stay in view there, blurred and dimmed, and no longer take clicks. Call after
-/// the content and before what sits on it.
-pub fn under_top(ui: &Ui, cx: &Cx, from: egui::layers::ShapeIdx, bottom: f32) {
+/// the content and before what sits on it. `name` tells the bands of one frame apart (the worlds' grid and a world's
+/// page both have one while a card flies open): each keeps its own GPU targets.
+pub fn under_top(ui: &Ui, cx: &Cx, name: &'static str, from: egui::layers::ShapeIdx, bottom: f32) {
     let page = ui.max_rect();
     let band = Rect::from_min_max(page.min, pos2(page.right(), bottom));
-    let _ = ui.interact(band, Id::unique("orbiters-page-top"), Sense::click());
+    let id = Id::unique(("orbiters-page-top", name));
+    let _ = ui.interact(band, id, Sense::click());
     if let Some(gpu) = cx.gpu {
         let look = blur::Look { solid: (band.height() - UNDER_TOP_RAMP).max(0.0), ..UNDER_TOP };
-        blur::under(ui, Id::unique("orbiters-page-top"), &gpu.textures, from, band, look);
+        blur::under(ui, id, &gpu.textures, from, band, look);
     }
 }
 

@@ -4,6 +4,7 @@ use orbiters_core::protocol::{WorkerCommand, WorkerEvent};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::time::{Duration, Instant};
 
 pub struct WorkerHandle {
     child: Child,
@@ -15,6 +16,42 @@ pub fn sibling_exe(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
     let dir = exe.parent().map(PathBuf::from).unwrap_or_default();
     dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// Puts a process the service started (the reconstruction, Orb's ears, the call worker, the window, the overlay) in
+/// the service's job: Windows ends it with the service, even when the service is killed or crashes. The reconstruction
+/// would otherwise keep the GPU for minutes and race the one a restarted service starts on the same session; the
+/// others leave once their link closes, unless they hang. What such a process starts in turn (a browser) is not in the
+/// job.
+pub fn keep_with_service(child: &Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use std::sync::OnceLock;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+        };
+        // Its handle stays open while the service runs and closes with it, which ends what is in the job. Not
+        // inheritable: no child keeps the job alive.
+        static JOB: OnceLock<Option<usize>> = OnceLock::new();
+        let job = JOB.get_or_init(|| unsafe {
+            let job = CreateJobObjectW(None, windows::core::PCWSTR::null()).ok()?;
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+            let size = std::mem::size_of_val(&info) as u32;
+            SetInformationJobObject(job, JobObjectExtendedLimitInformation, (&raw const info).cast(), size).ok()?;
+            Some(job.0 as usize)
+        });
+        if let Some(job) = *job {
+            if let Err(e) = unsafe { AssignProcessToJobObject(HANDLE(job as *mut _), HANDLE(child.as_raw_handle())) } {
+                eprintln!("process {} is not in the service's job: {e}", child.id());
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = child;
 }
 
 impl WorkerHandle {
@@ -33,6 +70,8 @@ impl WorkerHandle {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
+        // Not in the service's job: if the service goes, its end of stdin closes and the worker finishes the session
+        // it records (manifest, audio, tracking) before it leaves.
         let mut child = cmd.spawn()?;
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
@@ -40,9 +79,11 @@ impl WorkerHandle {
         std::thread::Builder::new().name("worker-stdout".into()).spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
-                match serde_json::from_str::<WorkerEvent>(&line) {
-                    Ok(e) => on_event(e),
-                    Err(_) => eprintln!("worker: unexpected output: {line}"),
+                // A number written as null (NaN) costs its field, not the event: a lost `Stopped` would leave the
+                // session "being saved" (`WorkerEvent::from_line`).
+                match WorkerEvent::from_line(&line) {
+                    Some(e) => on_event(e),
+                    None => eprintln!("worker: unexpected output: {line}"),
                 }
             }
             on_exit();
@@ -67,16 +108,34 @@ impl WorkerHandle {
     }
 }
 
-impl Drop for WorkerHandle {
-    fn drop(&mut self) {
+/// How long a quitting app waits for the worker to save the session it records.
+const QUIT_WAIT: Duration = Duration::from_secs(30);
+
+impl WorkerHandle {
+    /// The app quits: the worker saves the session it records (asked to stop before) and leaves, given the time that
+    /// takes, rather than the moment a worker being replaced gets.
+    pub fn quit(mut self) {
+        self.leave(QUIT_WAIT);
+    }
+
+    /// Asks the worker to leave (it finishes a session first) and waits up to `wait` for it, then ends it.
+    fn leave(&mut self, wait: Duration) {
         let _ = self.send(&WorkerCommand::Quit);
-        // Give the worker a moment to write its manifest, then make sure it is gone.
-        for _ in 0..30 {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
             if !self.alive() {
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(100));
         }
         let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for WorkerHandle {
+    fn drop(&mut self) {
+        // A moment to write its manifest, then it is gone (a stuck worker being replaced).
+        self.leave(Duration::from_secs(3));
     }
 }

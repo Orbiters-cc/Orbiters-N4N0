@@ -1,4 +1,6 @@
-//! Kernel timings on a trained result: steps with zero learning rates over a session's keyframes, every pass timed.
+//! Kernel timings on a trained result: steps over a session's keyframes (or depth frames) as the worker prepares it,
+//! every pass timed. The learning rates are tiny but not zero (Adam skips a slot whose rate is zero, which would hide
+//! its cost), so the parameters stay as they are.
 //!
 //! ```text
 //! cargo run --release --example kbench -- <session> [--ply <splats.ply>] [--steps N] [--width N] [--depth]
@@ -8,18 +10,18 @@
 
 use anyhow::Context as _;
 use orbiters_reconstruct::gpu::{DeviceOptions, Gpu, GradientSums, LearningRates, Target};
-use orbiters_reconstruct::{dataset, ply};
+use orbiters_reconstruct::{ply, prepare, train};
 use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {
     let mut it = std::env::args().skip(1);
-    let (mut session, mut ply_path, mut steps, mut width, mut depth, mut sums) = (None, None, 40usize, 1920u32, false, None);
+    let (mut session, mut ply_path, mut steps, mut width, mut depth_steps, mut sums) = (None, None, 40usize, 1920u32, false, None);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--ply" => ply_path = Some(PathBuf::from(it.next().context("--ply")?)),
             "--steps" => steps = it.next().context("--steps")?.parse()?,
             "--width" => width = it.next().context("--width")?.parse()?,
-            "--depth" => depth = true,
+            "--depth" => depth_steps = true,
             "--sums" => {
                 sums = Some(match it.next().context("--sums")?.as_str() {
                     "float" => GradientSums::Float,
@@ -32,18 +34,16 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let session = session.context("usage: kbench <session> [--ply p] [--steps n]")?;
-    let data = dataset::load(&session, width, |_| {})?;
+    let prepared = prepare::prepare(&session, &prepare::Options { width, ..Default::default() }, |_| {})?;
+    let data = &prepared.data;
     let g = ply::read(&ply_path.unwrap_or_else(|| session.join("reconstruction").join("splats.ply")))?;
-    let mut gpu = Gpu::with_options(DeviceOptions { sums, profile: true })?;
+    let mut gpu = Gpu::with_options(DeviceOptions { sums, profile: true, ..Default::default() })?;
     gpu.upload(&g);
-    gpu.set_mask(data.width, data.height, &data.mask);
+    gpu.set_mask(data.width, data.height, &data.mask)?;
     let px = data.mask.iter().filter(|m| **m > 0.5).count() as f32;
-    let zero = LearningRates { means: 0.0, log_scales: 0.0, rotations: 0.0, opacity: 0.0, colors: 0.0 };
-    let samples: Vec<Vec<[f32; 4]>> = data
-        .depth_views
-        .iter()
-        .map(|d| d.pixels.iter().zip(&d.depth).filter(|(_, z)| **z > 0.0).map(|(p, z)| [p[0], p[1], *z, 0.0]).collect())
-        .collect();
+    let zero = LearningRates { means: 1e-20, log_scales: 1e-20, rotations: 1e-20, opacity: 1e-20, colors: 1e-20 };
+    // Depth steps as training takes them: on the sample grid, trusted samples only.
+    let depth: Vec<train::DepthTarget> = data.depth_views.iter().map(train::depth_target).collect();
     // Warm-up (pipelines, buffer growth), then timed steps.
     for k in 0..3 {
         let v = &data.views[k % data.views.len()];
@@ -54,9 +54,13 @@ fn main() -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     let mut entries = 0u64;
     for k in 0..steps {
-        entries += if depth && !data.depth_views.is_empty() {
-            let d = k * 7 % data.depth_views.len();
-            gpu.step(&data.depth_views[d].camera, [0.0; 3], Target::Depth { samples: &samples[d], weight: 0.3 }, Some(zero))?
+        entries += if depth_steps && !depth.is_empty() {
+            let t = &depth[k * 7 % depth.len()];
+            let full = gpu.dilation;
+            gpu.dilation = t.dilation;
+            let stepped = gpu.step(&t.camera, [0.0; 3], Target::Depth { samples: &t.samples, weight: 0.3 }, Some(zero));
+            gpu.dilation = full;
+            stepped?
         } else {
             let v = &data.views[k * 7 % data.views.len()];
             gpu.step(&v.camera, [0.0; 3], Target::Color { rgba: &v.image, scene_pixels: px, weight: 1.0, ssim: 0.2, robust: 0.0 }, Some(zero))?
@@ -73,7 +77,7 @@ fn main() -> anyhow::Result<()> {
     // Gradient checksum of one fixed colour step.
     let v = &data.views[1];
     gpu.step(&v.camera, [0.0; 3], Target::Color { rgba: &v.image, scene_pixels: px, weight: 1.0, ssim: 0.2, robust: 0.0 }, Some(zero))?;
-    let grads = gpu.read_grads();
+    let grads = gpu.read_grads()?;
     let mut sums = [0f64; 5];
     for chunk in grads.chunks(16) {
         for (k, range) in [(0usize, 0..3usize), (1, 3..6), (2, 6..10), (3, 10..11), (4, 11..14)] {

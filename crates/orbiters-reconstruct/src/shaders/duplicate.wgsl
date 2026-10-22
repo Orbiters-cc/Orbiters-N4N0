@@ -20,12 +20,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     if (proj[o + 15u] == 0.0) {
         return;
     }
+    // At most 24 depth bits (gpu.rs depth_bits), which f32 holds exactly; the clamp keeps a key in its tile anyway (the
+    // farthest depth must never round up into the tile id's lowest bit).
     let depth_bits = frame.counts.z;
-    let max_q = f32((1u << depth_bits) - 1u);
+    let max_d = (1u << depth_bits) - 1u;
     let near = frame.limits.z;
     let far = frame.limits.w;
     let t = clamp(log2(proj[o + 5u] / near) / log2(far / near), 0.0, 1.0);
-    let dq = u32(t * max_q);
+    let dq = min(u32(t * f32(max_d)), max_d);
     let x0 = bitcast<u32>(proj[o + 11u]);
     let y0 = bitcast<u32>(proj[o + 12u]);
     let x1 = bitcast<u32>(proj[o + 13u]);

@@ -3,7 +3,9 @@
 //! renders the interface offscreen in several states and writes one PNG per state, for visual review without a
 //! window. The controller is not started: the snapshots are made up, the session library is real. `--only e2e`
 //! instead records a real test pattern through the worker, driven by synthetic clicks, with avatar parameters
-//! from a stand-in VRChat (OSC on the loopback interface, current values from its OSCQuery tree).
+//! from a stand-in VRChat (OSC on the loopback interface, current values from its OSCQuery tree). The end-to-end
+//! runs click controls found by their labels where the last frame drew them, and wait on what the app shows or the
+//! controller says (each wait with a time limit), never on fixed coordinates or delays.
 
 use crate::app::App;
 use crate::backend::{Ctl, Local};
@@ -16,9 +18,9 @@ use orbiters_core::protocol::{coverage, CaptureStats, CoverageMap, SpoutSourceIn
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::WorldState;
 use orbiters_ui::offscreen::{save_png, Offscreen};
-use orbiters_ui::toast;
-use std::path::PathBuf;
-use std::time::Duration;
+use orbiters_ui::{toast, widgets};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 struct Scenario {
     name: &'static str,
@@ -643,6 +645,23 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, height: f32, path: &st
             }
         }
         let capture = f + 1 == sc.frames;
+        if capture {
+            // What the page still reads (the list, pictures) lands before the shot: a slow disk makes the run
+            // longer, not the picture emptier. The frames meanwhile stand at the same time.
+            let limit = Instant::now() + Duration::from_secs(20);
+            while app.page_busy() && Instant::now() < limit {
+                std::thread::sleep(Duration::from_millis(10));
+                gpu.frame(
+                    &ctx,
+                    input.clone(),
+                    |ui| {
+                        app.logic_offline(ui.ctx());
+                        app.draw(ui);
+                    },
+                    false,
+                )?;
+            }
+        }
         let image = gpu.frame(
             &ctx,
             input,
@@ -661,54 +680,144 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, height: f32, path: &st
     Ok(())
 }
 
-/// `--only e2e`: a real test-pattern recording through the capture worker, driven by synthetic clicks in real time
-/// (Test pattern, then the record button to stop). Writes `e2e-recording.png` and `e2e-saved.png`; the session
-/// lands in the sessions folder.
-fn e2e(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {
-    let ctx = egui::Context::default();
-    orbiters_ui::install(&ctx);
-    let ctl = Controller::new(settings.clone());
-    let backend: Ctl = std::sync::Arc::new(Local::new(ctl.clone()));
-    backend.attach(&ctx);
-    let mut app = App::offline(backend);
-    app.skip_splash();
-    let vrchat = StandInVrchat::start(&ctl)?;
-    let before = controller::list_sessions(&settings.sessions_dir).len();
-    let start = std::time::Instant::now();
-    // Where the capture page puts its Test pattern button and the record button at 1280×820.
-    let mut clicks = vec![(1.0, pos2(1188.0, 102.0)), (6.0, pos2(511.0, 415.0))];
-    let mut shots = vec![(5.0, "e2e-recording"), (8.5, "e2e-saved")];
-    let mut release: Option<Pos2> = None;
-    while start.elapsed().as_secs_f64() < 9.0 {
-        let t = start.elapsed().as_secs_f64();
+/// An offscreen run in real time for the end-to-end flows: a frame about every 16 ms, presses on controls found by
+/// their labels, and waits on what the app or the controller shows, each with a time limit.
+struct Run<'a> {
+    gpu: &'a mut Offscreen,
+    ctx: egui::Context,
+    app: App,
+    scale: f32,
+    start: Instant,
+    /// A press of the last frame, let go of in this one.
+    release: Option<Pos2>,
+    /// Pause between frames (longer while a reconstruction trains).
+    pace: Duration,
+}
+
+impl<'a> Run<'a> {
+    fn new(gpu: &'a mut Offscreen, backend: Ctl, scale: f32) -> Self {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        widgets::watch_controls();
+        backend.attach(&ctx);
+        let mut app = App::offline(backend);
+        app.skip_splash();
+        Self { gpu, ctx, app, scale, start: Instant::now(), release: None, pace: Duration::from_millis(16) }
+    }
+
+    fn time(&self) -> f64 {
+        self.start.elapsed().as_secs_f64()
+    }
+
+    /// One frame with `events` (and the release of last frame's press); its picture when `capture`.
+    fn frame(&mut self, mut events: Vec<Event>, capture: bool) -> anyhow::Result<Option<egui::ColorImage>> {
+        let t = self.time();
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))), time: Some(t), ..Default::default() };
-        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(scale), focused: Some(true), ..Default::default() });
-        if let Some(p) = release.take() {
-            input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
-        } else if clicks.first().is_some_and(|(at, _)| t >= *at) {
-            let (_, p) = clicks.remove(0);
-            input.events.push(Event::PointerMoved(p));
-            input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
-            release = Some(p);
+        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.scale), focused: Some(true), ..Default::default() });
+        if let Some(p) = self.release.take() {
+            events.insert(0, Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
         }
-        vrchat.tick(t);
-        let shot = if shots.first().is_some_and(|(at, _)| t >= *at) { Some(shots.remove(0).1) } else { None };
-        let image = gpu.frame(
-            &ctx,
+        input.events = events;
+        let app = &mut self.app;
+        let image = self.gpu.frame(
+            &self.ctx,
             input,
             |ui| {
                 app.logic_offline(ui.ctx());
                 app.draw(ui);
             },
-            shot.is_some(),
+            capture,
         )?;
-        if let (Some(name), Some(image)) = (shot, image) {
-            let path = out.join(format!("{name}.png"));
-            save_png(&path, &image)?;
-            println!("{}", path.display());
-        }
-        std::thread::sleep(Duration::from_millis(16));
+        std::thread::sleep(self.pace);
+        Ok(image)
     }
+
+    /// Frames until `done` says so, checked after each; fails after `timeout` seconds, naming what was awaited.
+    fn until(&mut self, what: &str, timeout: f64, mut done: impl FnMut(&mut Self) -> bool) -> anyhow::Result<()> {
+        let limit = self.time() + timeout;
+        loop {
+            self.frame(Vec::new(), false)?;
+            if done(self) {
+                return Ok(());
+            }
+            anyhow::ensure!(self.time() < limit, "waited {timeout} s for {what}");
+        }
+    }
+
+    /// Frames for `seconds` (an animation settling before a shot).
+    fn wait(&mut self, seconds: f64) -> anyhow::Result<()> {
+        let end = self.time() + seconds;
+        self.until("a pause", seconds + 10.0, |run| run.time() >= end)
+    }
+
+    /// Waits for the control labelled `label` to be drawn, to take clicks and to stand still for a few frames (its
+    /// entrance or a morph over), then presses it at its centre and lets go on the next frame.
+    fn click(&mut self, label: &str, timeout: f64) -> anyhow::Result<()> {
+        let (mut last, mut still) = (None::<Rect>, 0);
+        self.until(&format!("the {label:?} control"), timeout, |run| match widgets::control(&run.ctx, label) {
+            Some((rect, true)) => {
+                still = if last == Some(rect) { still + 1 } else { 0 };
+                last = Some(rect);
+                still >= 5
+            }
+            _ => {
+                (last, still) = (None, 0);
+                false
+            }
+        })?;
+        let p = last.map(|r| r.center()).unwrap_or_default();
+        let press = Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() };
+        self.frame(vec![Event::PointerMoved(p), press], false)?;
+        self.release = Some(p);
+        self.frame(Vec::new(), false)?;
+        Ok(())
+    }
+
+    fn shoot(&mut self, out: &Path, name: &str) -> anyhow::Result<()> {
+        let image = self.frame(Vec::new(), true)?.context("the frame gave no picture")?;
+        let path = out.join(format!("{name}.png"));
+        save_png(&path, &image)?;
+        println!("{}", path.display());
+        Ok(())
+    }
+}
+
+/// `--only e2e`: a real test-pattern recording through the capture worker, driven by synthetic clicks in real time
+/// (Test pattern, then the record button to stop). Writes `e2e-recording.png` and `e2e-saved.png`; the session
+/// lands in the sessions folder.
+fn e2e(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {
+    let ctl = Controller::new(settings.clone());
+    let backend: Ctl = std::sync::Arc::new(Local::new(ctl.clone()));
+    let vrchat = StandInVrchat::start(&ctl)?;
+    let before = controller::list_sessions(&settings.sessions_dir).len();
+    let mut run = Run::new(gpu, backend, scale);
+    run.click("Test pattern", 20.0)?;
+    run.until("the test pattern to record", 30.0, |_| {
+        let v = ctl.view();
+        v.capture.state == CaptureState::Recording && v.capture.stats.as_ref().is_some_and(|s| s.frames > 0)
+    })?;
+    // A second into the recording the stand-in VRChat sends for three seconds.
+    vrchat.send_from(run.time() + 1.0);
+    run.until("the stand-in VRChat's parameters", 20.0, |run| {
+        let t = run.time();
+        vrchat.tick(t);
+        vrchat.finished(t)
+    })?;
+    run.wait(0.5)?;
+    run.shoot(out, "e2e-recording")?;
+    run.click(orbiters_ui::record::LABEL, 10.0)?;
+    let mut listed = 0.0;
+    run.until("the saved session", 60.0, |run| {
+        // The library is walked twice a second at most, once the capture is over.
+        if ctl.view().capture.state != CaptureState::Idle || run.time() - listed < 0.5 {
+            return false;
+        }
+        listed = run.time();
+        controller::list_sessions(&settings.sessions_dir).len() > before
+    })?;
+    // The "Session saved" toast comes in.
+    run.wait(0.8)?;
+    run.shoot(out, "e2e-saved")?;
     let after = controller::list_sessions(&settings.sessions_dir);
     println!("sessions: {before} before, {} after", after.len());
     if let Some(s) = after.first() {
@@ -730,152 +839,76 @@ fn e2e(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f
 
 /// The 3D view of the newest session's splats (`--only splats-3d`): as it opens, then after an orbit drag.
 fn splats_3d(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {
-    let ctx = egui::Context::default();
-    orbiters_ui::install(&ctx);
     let ctl = Controller::new(settings.clone());
     let sessions = controller::list_sessions(&settings.sessions_dir);
     ctl.set_snapshot(idle_snapshot(settings, &sessions));
     let backend: Ctl = std::sync::Arc::new(Local::new(ctl));
-    backend.attach(&ctx);
-    let mut app = App::offline(backend);
-    app.skip_splash();
     let handles = crate::gpu::Handles { device: gpu.device().clone(), queue: gpu.queue().clone(), textures: gpu.textures().clone() };
-    app.set_gpu(handles.clone());
-    let start = std::time::Instant::now();
-    let (mut opened, mut viewing, mut loaded_at) = (false, false, None::<f64>);
-    let mut shots = 0;
+    let mut run = Run::new(gpu, backend, scale);
+    run.app.set_gpu(handles.clone());
+    let t = run.time();
+    run.app.set_page(Page::Sessions, t);
+    run.until("the session list", 30.0, |run| run.app.sessions_mut().loaded())?;
+    let ctx = run.ctx.clone();
+    run.app.sessions_mut().open_first(&ctx, Rect::from_min_size(pos2(264.0, 160.0), vec2(300.0, 265.0)));
+    anyhow::ensure!(run.app.sessions_mut().open_dir().is_some(), "no session in {}", settings.sessions_dir.display());
+    // The detail opens, then the 3D view over it.
+    run.wait(1.0)?;
+    run.app.sessions_mut().open_viewer(&ctx, &handles);
+    run.until("the 3D view's splats", 120.0, |run| run.app.sessions_mut().viewer_loaded())?;
+    run.wait(0.6)?;
+    run.shoot(out, "splats-3d")?;
+    // Drag right and a little up across half a second, then shoot again.
     let centre = pos2(640.0, 450.0);
+    let press = Event::PointerButton { pos: centre, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() };
+    run.frame(vec![Event::PointerMoved(centre), press], false)?;
+    let from = run.time();
     loop {
-        let t = start.elapsed().as_secs_f64();
-        anyhow::ensure!(t < 120.0, "the 3D view did not load in two minutes");
-        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))), time: Some(t), ..Default::default() };
-        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(scale), focused: Some(true), ..Default::default() });
-        if t < 0.05 {
-            app.set_page(Page::Sessions, t);
+        let d = run.time() - from;
+        let p = centre + vec2(260.0, -80.0) * (d / 0.5).min(1.0) as f32;
+        run.frame(vec![Event::PointerMoved(p)], false)?;
+        if d > 0.55 {
+            run.frame(vec![Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }], false)?;
+            break;
         }
-        if !opened && t > 0.5 && app.sessions_mut().loaded() {
-            app.sessions_mut().open_first(&ctx, Rect::from_min_size(pos2(264.0, 160.0), vec2(300.0, 265.0)));
-            opened = true;
-        }
-        if opened && !viewing && t > 1.5 {
-            app.sessions_mut().open_viewer(&ctx, &handles);
-            viewing = true;
-        }
-        if loaded_at.is_none() && app.sessions_mut().viewer_loaded() {
-            loaded_at = Some(t);
-        }
-        // After the first shot: drag right and a little up across half a second, then shoot again.
-        let drag = loaded_at.map(|l| t - l - 1.0).filter(|d| shots == 1 && (0.0..=0.6).contains(d));
-        if let Some(d) = drag {
-            let p = centre + vec2(260.0, -80.0) * (d / 0.5).min(1.0) as f32;
-            input.events.push(Event::PointerMoved(p));
-            if d < 0.05 {
-                input.events.push(Event::PointerButton { pos: centre, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
-            }
-            if d > 0.55 {
-                input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
-            }
-        }
-        let shot = match loaded_at {
-            Some(l) if shots == 0 && t > l + 0.6 => Some("splats-3d"),
-            Some(l) if shots == 1 && t > l + 2.0 => Some("splats-3d-orbit"),
-            _ => None,
-        };
-        let image = gpu.frame(
-            &ctx,
-            input,
-            |ui| {
-                app.logic_offline(ui.ctx());
-                app.draw(ui);
-            },
-            shot.is_some(),
-        )?;
-        if let (Some(name), Some(image)) = (shot, image) {
-            let path = out.join(format!("{name}.png"));
-            save_png(&path, &image)?;
-            println!("{}", path.display());
-            shots += 1;
-            if shots == 2 {
-                return Ok(());
-            }
-        }
-        std::thread::sleep(Duration::from_millis(16));
     }
+    run.wait(1.4)?;
+    run.shoot(out, "splats-3d-orbit")
 }
 
 /// End to end on the newest session of `--sessions`: opens its detail, presses Reconstruct (the real worker
 /// replaces its `reconstruction/` folder) and shoots the progress and the result.
 fn e2e_reconstruct(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {
-    let ctx = egui::Context::default();
-    orbiters_ui::install(&ctx);
+    use orbiters_core::reconstruction::Stage;
     let ctl = Controller::new(settings.clone());
     let backend: Ctl = std::sync::Arc::new(Local::new(ctl.clone()));
-    backend.attach(&ctx);
-    let mut app = App::offline(backend);
-    app.skip_splash();
-    let start = std::time::Instant::now();
-    let (mut opened, mut clicked_at, mut ran, mut done_at) = (false, None::<f64>, false, None::<f64>);
-    let mut release: Option<Pos2> = None;
-    let (mut shot_progress, mut paged) = (false, false);
-    // Where the detail puts its Reconstruct button at 1280×820.
-    let button = pos2(1072.0, 591.0);
-    loop {
-        let t = start.elapsed().as_secs_f64();
-        anyhow::ensure!(t < 900.0, "the reconstruction did not finish in 15 minutes");
-        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))), time: Some(t), ..Default::default() };
-        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(scale), focused: Some(true), ..Default::default() });
-        if !paged {
-            app.set_page(Page::Sessions, t);
-            paged = true;
-        }
-        if !opened && t > 0.8 && app.sessions_mut().loaded() {
-            app.sessions_mut().open_first(&ctx, Rect::from_min_size(pos2(264.0, 160.0), vec2(300.0, 265.0)));
-            opened = true;
-        }
-        if let Some(p) = release.take() {
-            input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
-        } else if opened && clicked_at.is_none() && t > 4.0 {
-            input.events.push(Event::PointerMoved(button));
-            input.events.push(Event::PointerButton { pos: button, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
-            release = Some(button);
-            clicked_at = Some(t);
-        }
-        let job = ctl.view().reconstruction.clone();
-        ran |= job.is_some();
-        if ran && job.is_none() && done_at.is_none() {
-            done_at = Some(t);
-        }
-        let shot = if !shot_progress && job.as_ref().is_some_and(|j| j.iteration >= 1000) {
-            shot_progress = true;
-            Some("e2e-reconstructing")
-        } else if done_at.is_some_and(|d| t > d + 3.0) {
-            Some("e2e-reconstructed")
-        } else {
-            None
-        };
-        let image = gpu.frame(
-            &ctx,
-            input,
-            |ui| {
-                app.logic_offline(ui.ctx());
-                app.draw(ui);
-            },
-            shot.is_some(),
-        )?;
-        if let (Some(name), Some(image)) = (shot, image) {
-            let path = out.join(format!("{name}.png"));
-            save_png(&path, &image)?;
-            println!("{}", path.display());
-            if name == "e2e-reconstructed" {
-                break;
-            }
-        }
-        if clicked_at.is_some_and(|c| t > c + 5.0) && !ran {
-            anyhow::bail!("pressing Reconstruct started nothing: {:?}", ctl.take_notices());
-        }
-        // Light while the worker trains.
-        std::thread::sleep(Duration::from_millis(if ran { 100 } else { 16 }));
+    let mut run = Run::new(gpu, backend, scale);
+    let t = run.time();
+    run.app.set_page(Page::Sessions, t);
+    run.until("the session list", 30.0, |run| run.app.sessions_mut().loaded())?;
+    let ctx = run.ctx.clone();
+    run.app.sessions_mut().open_first(&ctx, Rect::from_min_size(pos2(264.0, 160.0), vec2(300.0, 265.0)));
+    let dir = run.app.sessions_mut().open_dir().with_context(|| format!("no session in {}", settings.sessions_dir.display()))?;
+    let before = run.app.sessions_mut().reconstruction_of(&dir);
+    // Its button, once the detail has opened and stands still.
+    let label = if before.is_some() { "Reconstruct again" } else { "Reconstruct" };
+    run.click(label, 20.0)?;
+    if run.until("the reconstruction to start", 15.0, |_| ctl.view().reconstruction.is_some()).is_err() {
+        anyhow::bail!("pressing {label} started nothing: {:?}", ctl.take_notices());
     }
+    // Light while the worker trains.
+    run.pace = Duration::from_millis(100);
+    run.until("training under way", 600.0, |_| ctl.view().reconstruction.as_ref().is_some_and(|j| j.stage == Stage::Training && j.progress >= 0.1))?;
+    run.shoot(out, "e2e-reconstructing")?;
+    run.until("the reconstruction to finish", 900.0, |_| ctl.view().reconstruction.is_none())?;
+    run.pace = Duration::from_millis(16);
+    // The library reloads with the new report, and the detail shows its preview.
+    run.until("the new splats in the session's detail", 60.0, |run| {
+        let now = run.app.sessions_mut().reconstruction_of(&dir);
+        now.is_some() && now != before
+    })?;
+    run.wait(1.0)?;
+    run.shoot(out, "e2e-reconstructed")?;
     for n in ctl.take_notices() {
         println!("notice: {n:?}");
     }
@@ -889,7 +922,12 @@ struct StandInVrchat {
     socket: std::net::UdpSocket,
     port: u16,
     sent: std::cell::Cell<u32>,
+    /// When it starts sending (once the recording runs).
+    from: std::cell::Cell<Option<f64>>,
 }
+
+/// How long the stand-in VRChat sends parameters.
+const SEND_FOR: f64 = 3.0;
 
 impl StandInVrchat {
     fn start(ctl: &controller::Shared) -> anyhow::Result<Self> {
@@ -915,13 +953,22 @@ impl StandInVrchat {
                 let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{tree}", tree.len()).as_bytes());
             }
         });
-        Ok(Self { socket: std::net::UdpSocket::bind("127.0.0.1:0")?, port, sent: std::cell::Cell::new(0) })
+        Ok(Self { socket: std::net::UdpSocket::bind("127.0.0.1:0")?, port, sent: std::cell::Cell::new(0), from: std::cell::Cell::new(None) })
     }
 
-    /// Between 2 and 5 s: a jaw opening and closing every frame, and a head pose every 4th.
+    /// Sends for [`SEND_FOR`] seconds from `t` on.
+    fn send_from(&self, t: f64) {
+        self.from.set(Some(t));
+    }
+
+    fn finished(&self, t: f64) -> bool {
+        self.from.get().is_some_and(|from| t >= from + SEND_FOR)
+    }
+
+    /// While it sends: a jaw opening and closing every frame, and a head pose every 4th.
     fn tick(&self, t: f64) {
         use rosc::{OscMessage, OscPacket, OscType};
-        if !(2.0..5.0).contains(&t) {
+        if !self.from.get().is_some_and(|from| (from..from + SEND_FOR).contains(&t)) {
             return;
         }
         let n = self.sent.get();
@@ -1133,7 +1180,7 @@ impl crate::backend::Backend for Still {
     fn pause_capture(&self, _paused: bool) {}
     fn start_test_capture(&self) {}
     fn import_raw_capture(&self, _dir: PathBuf) {}
-    fn save_settings(&self, _settings: Settings) {}
+    fn patch_settings(&self, _patch: serde_json::Value) {}
     fn trash_session(&self, _dir: PathBuf) {}
     fn reconstruct(&self, _dir: PathBuf) {}
     fn stop_reconstruction(&self) {}
@@ -1156,6 +1203,7 @@ impl crate::backend::Backend for Still {
     fn calibrated(&self, _calibration: orbiters_contracts::performance::calibration::Calibration) {}
     fn frames(&self, _chunk: crate::state::FrameChunk) {}
     fn walk_boost(&self, _strength: f32) {}
+    fn osc_reconnect(&self) {}
     fn quit(&self) {}
 }
 

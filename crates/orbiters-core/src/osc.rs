@@ -8,9 +8,10 @@
 
 use rosc::{OscMessage, OscPacket, OscType};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -40,10 +41,19 @@ impl OscValue {
             OscType::Int(i) => OscValue::Int(*i),
             OscType::Float(f) => OscValue::Float(*f),
             OscType::Double(d) => OscValue::Float(*d as f32),
-            OscType::Long(l) => OscValue::Int(*l as i32),
+            // A long beyond an int keeps its size, as a float, rather than wrapping around.
+            OscType::Long(l) => i32::try_from(*l).map_or(OscValue::Float(*l as f32), OscValue::Int),
             OscType::String(s) => OscValue::Text(s.clone()),
             _ => return None,
         })
+    }
+
+    /// [`OscValue::from_osc`] taking the argument: a text is moved rather than copied.
+    fn from_osc_owned(arg: OscType) -> Option<Self> {
+        match arg {
+            OscType::String(s) => Some(OscValue::Text(s)),
+            other => Self::from_osc(&other),
+        }
     }
 }
 
@@ -71,31 +81,56 @@ pub const AVATAR_CHANGE: &str = "/avatar/change";
 /// parameter of the settings.
 pub const DEPTH_FRAMES_PARAMETER: &str = "OrbitersDepthFrames";
 
-/// Turns one OSC packet (bundles included) into events, in the packet's order.
+/// What VRChat sends that the app reads: everything under these (the avatar, its changes and parameters; the headset
+/// and wrist poses; the camera). Anything else that reaches the port is dropped where it arrives.
+const ACCEPTED: [&str; 3] = ["/avatar/", "/tracking/vrsystem/", "/usercamera/"];
+/// The longest address, and the most arguments, of a message passed on: VRChat's addresses are a few dozen bytes and
+/// a pose has six floats, while one datagram could hold thousands of arguments, each a sample to record.
+const MAX_ADDRESS: usize = 512;
+const MAX_ARGUMENTS: usize = 16;
+
+/// Turns one OSC packet (bundles included) into events, in the packet's order. Only what the app reads passes
+/// ([`ACCEPTED`] addresses of at most [`MAX_ADDRESS`] bytes, with at most [`MAX_ARGUMENTS`] arguments).
 pub fn events_from_packet(packet: &OscPacket, out: &mut Vec<OscEvent>) {
+    take_events(packet.clone(), out);
+}
+
+/// [`events_from_packet`] taking the packet: addresses and texts are moved into the events, not copied.
+fn take_events(packet: OscPacket, out: &mut Vec<OscEvent>) {
     // A list instead of recursion: how deep bundles nest is up to the sender.
     let mut todo = vec![packet];
     while let Some(packet) = todo.pop() {
         match packet {
-            OscPacket::Message(m) => {
-                if let Some(name) = m.addr.strip_prefix(PARAMETERS_PREFIX) {
-                    if let Some(value) = m.args.first().and_then(OscValue::from_osc) {
-                        out.push(OscEvent::Parameter { name: name.to_string(), value });
-                    }
-                } else if m.addr == AVATAR_CHANGE {
-                    if let Some(OscValue::Text(id)) = m.args.first().and_then(OscValue::from_osc) {
-                        out.push(OscEvent::AvatarChanged { id });
-                    }
-                } else {
-                    let values: Vec<OscValue> = m.args.iter().filter_map(OscValue::from_osc).collect();
-                    if !values.is_empty() {
-                        out.push(OscEvent::Values { address: m.addr.clone(), values });
-                    }
-                }
-            }
-            OscPacket::Bundle(b) => todo.extend(b.content.iter().rev()),
+            OscPacket::Message(m) => out.extend(event_of(m.addr, m.args)),
+            OscPacket::Bundle(b) => todo.extend(b.content.into_iter().rev()),
         }
     }
+}
+
+/// The event of one message; `None` for one the app does not read.
+fn event_of(mut address: String, args: Vec<OscType>) -> Option<OscEvent> {
+    if address.len() > MAX_ADDRESS || args.len() > MAX_ARGUMENTS || !ACCEPTED.iter().any(|prefix| address.starts_with(prefix)) {
+        return None;
+    }
+    if address.starts_with(PARAMETERS_PREFIX) {
+        let value = args.into_iter().next().and_then(OscValue::from_osc_owned)?;
+        address.drain(..PARAMETERS_PREFIX.len());
+        return (!address.is_empty()).then_some(OscEvent::Parameter { name: address, value });
+    }
+    if address == AVATAR_CHANGE {
+        return match args.into_iter().next() {
+            Some(OscType::String(id)) if is_avatar_id(&id) => Some(OscEvent::AvatarChanged { id }),
+            _ => None,
+        };
+    }
+    let values: Vec<OscValue> = args.into_iter().filter_map(OscValue::from_osc_owned).collect();
+    (!values.is_empty()).then_some(OscEvent::Values { address, values })
+}
+
+/// An avatar id as VRChat sends it (`avtr_` and a UUID, or a local test build's): it names files (the avatar's
+/// manifest), so nothing that could lead out of a folder.
+fn is_avatar_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_alphanumeric() || b"_-:".contains(&c))
 }
 
 /// Deepest nesting of bundles, and of arrays in a message's arguments, that the receiver decodes. rosc decodes
@@ -184,12 +219,32 @@ pub fn host_info(name: &str, osc_port: u16) -> serde_json::Value {
     })
 }
 
+/// OSCQuery requests answered at once at most: each has a thread for up to a second and a half.
+const MAX_ANSWERING: usize = 8;
+
+/// Answers one OSCQuery request: HOST_INFO, the tree, or 404. The request may come in pieces, but whole within half a
+/// second; the answer is given up on after a second (a client that stops reading).
 fn serve_http(mut stream: TcpStream, tree: &str, host: &str) {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
     let mut buf = [0u8; 2048];
-    let n = stream.read(&mut buf).unwrap_or(0);
+    let mut n = 0;
+    while n < buf.len() && !buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+            break;
+        }
+        match stream.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(read) => n += read,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
     let request = String::from_utf8_lossy(&buf[..n]);
-    let path = request.lines().next().and_then(|l| l.split_whitespace().nth(1)).unwrap_or("/");
+    // No whole request line: no answer (half a line would read as the root).
+    let Some((line, _)) = request.split_once("\r\n") else { return };
+    let Some(path) = line.split_whitespace().nth(1) else { return };
     let (status, body) = if path.contains("HOST_INFO") {
         ("200 OK", host)
     } else if path == "/" || path.starts_with("/?") || path.starts_with("/avatar") || path.starts_with("/tracking") {
@@ -208,9 +263,30 @@ const MAX_ANSWER: usize = 8 << 20;
 /// `GET path` over HTTP/1.1 (identity or chunked body), for OSCQuery trees. `timeout` bounds the whole request,
 /// answer included, which may be at most [`MAX_ANSWER`] bytes.
 pub fn http_get(addr: SocketAddr, path: &str, timeout: Duration) -> anyhow::Result<String> {
+    let (status, body) = http_request(addr, path, timeout)?;
+    anyhow::ensure!(status == 200, "HTTP status {status}");
+    Ok(String::from_utf8(body)?)
+}
+
+/// `path` with the bytes a request line cannot hold written `%XX` (a parameter's name may hold a space).
+fn encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~?=&!$'()*+,;:@".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// [`http_get`] with the answer's status: (status, body).
+fn http_request(addr: SocketAddr, path: &str, timeout: Duration) -> anyhow::Result<(u16, Vec<u8>)> {
     let deadline = Instant::now() + timeout;
     let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
     stream.set_write_timeout(Some(timeout))?;
+    let path = encode_path(path);
     // One write: `write!` would send every piece in its own segment.
     stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nAccept: application/json\r\nConnection: close\r\n\r\n").as_bytes())?;
     let mut raw = Vec::new();
@@ -230,10 +306,11 @@ pub fn http_get(addr: SocketAddr, path: &str, timeout: Duration) -> anyhow::Resu
     }
     let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| anyhow::anyhow!("no HTTP header"))?;
     let head = String::from_utf8_lossy(&raw[..split]).to_ascii_lowercase();
-    anyhow::ensure!(head.starts_with("http/1.") && head.split_whitespace().nth(1) == Some("200"), "HTTP status {}", head.lines().next().unwrap_or(""));
+    let status = head.strip_prefix("http/1.").and_then(|h| h.split_whitespace().nth(1)).and_then(|s| s.parse::<u16>().ok());
+    let status = status.ok_or_else(|| anyhow::anyhow!("not an HTTP answer: {}", head.lines().next().unwrap_or("")))?;
     let body = &raw[split + 4..];
     let body = if head.contains("transfer-encoding: chunked") { dechunk(body)? } else { body.to_vec() };
-    Ok(String::from_utf8(body)?)
+    Ok((status, body))
 }
 
 fn dechunk(mut data: &[u8]) -> anyhow::Result<Vec<u8>> {
@@ -261,12 +338,38 @@ pub fn vrchat_values(addr: SocketAddr, timeout: Duration) -> anyhow::Result<Vec<
     Ok(out)
 }
 
+/// VRChat's camera as its OSCQuery tree at `addr` has it (`/usercamera/Mode`, `/usercamera/Streaming`…): empty when
+/// the tree has no such node (VRChat before 2025.3.3) or VRChat did not answer within `timeout`.
+pub fn vrchat_camera_values(addr: SocketAddr, timeout: Duration) -> Vec<(String, OscValue)> {
+    let mut out = Vec::new();
+    if let Some(tree) = http_get(addr, "/usercamera", timeout).ok().and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok()) {
+        tree_values(&tree, &mut out);
+    }
+    out
+}
+
+/// The current value of one node of VRChat's OSCQuery tree at `addr` (`/avatar/parameters/OrbitersRecord`): `None`
+/// when VRChat has no such node (the avatar worn has no such parameter); an error when VRChat could not tell (not
+/// reached, no answer within `timeout`, a node without a value).
+pub fn vrchat_value(addr: SocketAddr, path: &str, timeout: Duration) -> anyhow::Result<Option<OscValue>> {
+    let (status, body) = http_request(addr, path, timeout)?;
+    if status == 404 {
+        return Ok(None);
+    }
+    anyhow::ensure!(status == 200, "HTTP status {status}");
+    let node: serde_json::Value = serde_json::from_slice(&body)?;
+    let mut values = Vec::new();
+    tree_values(&node, &mut values);
+    let value = values.into_iter().find(|(p, _)| p == path).map(|(_, v)| v);
+    value.map(Some).ok_or_else(|| anyhow::anyhow!("VRChat's {path} has no value"))
+}
+
 /// Current values of an OSCQuery tree: every node with a `VALUE`, by full path (first value of each node).
 pub fn tree_values(tree: &serde_json::Value, out: &mut Vec<(String, OscValue)>) {
     if let (Some(path), Some(kind), Some(value)) = (tree["FULL_PATH"].as_str(), tree["TYPE"].as_str(), tree["VALUE"].get(0)) {
         let v = match kind.chars().next() {
             Some('f') | Some('d') => value.as_f64().map(|f| OscValue::Float(f as f32)),
-            Some('i') | Some('h') => value.as_i64().map(|i| OscValue::Int(i as i32)),
+            Some('i') | Some('h') => value.as_i64().map(|i| i32::try_from(i).map_or(OscValue::Float(i as f32), OscValue::Int)),
             Some('T') | Some('F') => value.as_bool().map(OscValue::Bool),
             Some('s') => value.as_str().map(|s| OscValue::Text(s.to_string())),
             _ => None,
@@ -290,9 +393,24 @@ pub struct OscService {
     vrchat: SocketAddr,
     stop: Arc<AtomicBool>,
     mdns: Option<mdns_sd::ServiceDaemon>,
+    /// The address the services are announced with (see [`OscService::advertise`]).
+    primary: Option<Ipv4Addr>,
     /// VRChat's own OSCQuery service, found over mDNS.
     vrchat_query: Arc<Mutex<Option<SocketAddr>>>,
+    /// When the last packet came in ([`crate::clock::now_ns`]; 0: none yet).
+    last_received: Arc<AtomicU64>,
     threads: Vec<JoinHandle<()>>,
+}
+
+/// The OSC socket, with a receive buffer of a few megabytes: face tracking sends thousands of values a second, which
+/// Windows' default buffer holds for only a moment of a busy receiving thread.
+fn udp_socket(bind: SocketAddr) -> std::io::Result<UdpSocket> {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    if let Err(e) = socket.set_recv_buffer_size(4 << 20) {
+        eprintln!("OSC receive buffer: {e}");
+    }
+    socket.bind(&bind.into())?;
+    Ok(socket.into())
 }
 
 impl OscService {
@@ -305,40 +423,58 @@ impl OscService {
         advertise: bool,
         on_event: impl Fn(OscEvent, u64) + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
+        Self::start_batched(name, parameters, vrchat_port, advertise, move |events: &mut Vec<OscEvent>, at| {
+            for e in events.drain(..) {
+                on_event(e, at);
+            }
+        })
+    }
+
+    /// [`OscService::start`] handing over a datagram's events at once (a bundle holds several), so that what they
+    /// change is changed in one go: `on_events` gets the list and takes them out of it.
+    pub fn start_batched(
+        name: &str,
+        parameters: &[String],
+        vrchat_port: u16,
+        advertise: bool,
+        mut on_events: impl FnMut(&mut Vec<OscEvent>, u64) + Send + 'static,
+    ) -> anyhow::Result<Self> {
         // VRChat finds the OSCQuery service at an address mDNS announces (this machine's own, see `advertise`):
         // advertised, it listens on every interface but takes packets and connections from this machine only. OSC
         // stays on every interface too until a live check shows VRChat sends it to HOST_INFO's 127.0.0.1 rather than
         // to the announced address (review DSK-13: UDP cannot tell a source spoofed from the LAN).
-        let bind = if advertise { "0.0.0.0:0" } else { "127.0.0.1:0" };
-        let udp = UdpSocket::bind(bind)?;
-        udp.set_read_timeout(Some(Duration::from_millis(200)))?;
+        let bind = SocketAddr::from((if advertise { Ipv4Addr::UNSPECIFIED } else { Ipv4Addr::LOCALHOST }, 0));
+        let udp = udp_socket(bind)?;
+        // Woken at once when the service stops (see `Drop`); the timeout only in case that wake-up is lost.
+        udp.set_read_timeout(Some(Duration::from_secs(1)))?;
         let osc_port = udp.local_addr()?.port();
         let http = TcpListener::bind(bind)?;
-        http.set_nonblocking(true)?;
         let query_port = http.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
-        let on_event = Arc::new(on_event);
         let vrchat_query = Arc::new(Mutex::new(None));
+        let last_received = Arc::new(AtomicU64::new(0));
         let mut threads = Vec::new();
 
         {
             let stop = stop.clone();
-            let on_event = on_event.clone();
             let udp = udp.try_clone()?;
+            let last_received = last_received.clone();
             threads.push(std::thread::Builder::new().name("osc-receive".into()).spawn(move || {
                 let mut buf = vec![0u8; 65536];
                 let mut events = Vec::new();
                 let mut local = LocalAddrs::default();
                 while !stop.load(Ordering::Relaxed) {
                     let Ok((n, from)) = udp.recv_from(&mut buf) else { continue };
-                    if !local.contains(from.ip()) || !nesting_within_limit(&buf[..n]) {
+                    if n == 0 || !local.contains(from.ip()) || !nesting_within_limit(&buf[..n]) {
                         continue;
                     }
                     let at = crate::clock::now_ns();
+                    last_received.store(at.max(1), Ordering::Relaxed);
                     if let Ok((_, packet)) = rosc::decoder::decode_udp(&buf[..n]) {
-                        events_from_packet(&packet, &mut events);
-                        for e in events.drain(..) {
-                            on_event(e, at);
+                        take_events(packet, &mut events);
+                        if !events.is_empty() {
+                            on_events(&mut events, at);
+                            events.clear();
                         }
                     }
                 }
@@ -346,45 +482,75 @@ impl OscService {
         }
         {
             let stop = stop.clone();
-            let tree = query_tree(parameters).to_string();
-            let host = host_info(name, osc_port).to_string();
+            let tree: Arc<str> = query_tree(parameters).to_string().into();
+            let host: Arc<str> = host_info(name, osc_port).to_string().into();
             threads.push(std::thread::Builder::new().name("oscquery-http".into()).spawn(move || {
                 let mut local = LocalAddrs::default();
-                while !stop.load(Ordering::Relaxed) {
-                    match http.accept() {
-                        Ok((stream, from)) if local.contains(from.ip()) => {
-                            let _ = stream.set_nonblocking(false);
-                            serve_http(stream, &tree, &host);
-                        }
-                        Ok(_) => {}
-                        Err(_) => std::thread::sleep(Duration::from_millis(50)),
+                let answering = Arc::new(AtomicUsize::new(0));
+                // Waits for connections without waking up in between (the service's end connects to wake it).
+                for stream in http.incoming() {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let Ok(stream) = stream else {
+                        std::thread::sleep(Duration::from_millis(50));
+                        continue;
+                    };
+                    if !stream.peer_addr().is_ok_and(|from| local.contains(from.ip())) {
+                        continue;
+                    }
+                    // Each answer on a thread of its own, a few at once: a client that sends its request slowly holds
+                    // up no other.
+                    if answering.fetch_add(1, Ordering::SeqCst) >= MAX_ANSWERING {
+                        answering.fetch_sub(1, Ordering::SeqCst);
+                        continue;
+                    }
+                    let (tree, host, done) = (tree.clone(), host.clone(), answering.clone());
+                    let spawned = std::thread::Builder::new().name("oscquery-answer".into()).spawn(move || {
+                        serve_http(stream, &tree, &host);
+                        done.fetch_sub(1, Ordering::SeqCst);
+                    });
+                    if spawned.is_err() {
+                        answering.fetch_sub(1, Ordering::SeqCst);
                     }
                 }
             })?);
         }
 
-        let mdns = if advertise {
+        let (mdns, primary) = if advertise {
             match Self::advertise(name, osc_port, query_port) {
-                Ok(d) => {
+                Ok((d, primary)) => {
                     match d.browse("_oscjson._tcp.local.") {
                         Ok(events) => {
                             let (stop, found) = (stop.clone(), vrchat_query.clone());
-                            threads.push(std::thread::Builder::new().name("oscquery-browse".into()).spawn(move || watch_vrchat(events, &stop, &found))?);
+                            threads
+                                .push(std::thread::Builder::new().name("oscquery-browse".into()).spawn(move || watch_vrchat(events, &stop, &found, primary))?);
                         }
                         Err(e) => eprintln!("OSCQuery browse failed: {e}"),
                     }
-                    Some(d)
+                    (Some(d), primary)
                 }
                 Err(e) => {
                     eprintln!("OSCQuery advertisement failed: {e}");
-                    None
+                    (None, None)
                 }
             }
         } else {
-            None
+            (None, None)
         };
 
-        Ok(Self { sender: udp, osc_port, query_port, vrchat: SocketAddr::from(([127, 0, 0, 1], vrchat_port)), stop, mdns, vrchat_query, threads })
+        Ok(Self {
+            sender: udp,
+            osc_port,
+            query_port,
+            vrchat: SocketAddr::from(([127, 0, 0, 1], vrchat_port)),
+            stop,
+            mdns,
+            primary,
+            vrchat_query,
+            last_received,
+            threads,
+        })
     }
 
     /// Announces the services with one of this machine's own addresses, the one of its default route (all of them
@@ -392,7 +558,7 @@ impl OscService {
     /// never announced (Windows lists no IPv4 loopback interface). VRChat makes one client per address it finds, and
     /// every client gets every message: one address keeps them single. Then asks for the services, so that a
     /// VRChat already running finds them too (see [`ask_for_services`]).
-    fn advertise(name: &str, osc_port: u16, query_port: u16) -> anyhow::Result<mdns_sd::ServiceDaemon> {
+    fn advertise(name: &str, osc_port: u16, query_port: u16) -> anyhow::Result<(mdns_sd::ServiceDaemon, Option<Ipv4Addr>)> {
         let daemon = mdns_sd::ServiceDaemon::new()?;
         let instance = format!("{}-{}", name.replace(' ', "-"), osc_port);
         let host = "orbiters-desktop.local.";
@@ -407,22 +573,29 @@ impl OscService {
         daemon.register(info("_oscjson._tcp.local.", query_port)?)?;
         daemon.register(info("_osc._udp.local.", osc_port)?)?;
         if let Some(ip) = primary {
-            std::thread::Builder::new().name("oscquery-ask".into()).spawn(move || {
-                // After mdns-sd's probes and its two announcements (about two seconds; see `ask_for_services`
-                // on why more than a second after the last), and once more in case.
-                for wait in [3500, 3500] {
-                    std::thread::sleep(Duration::from_millis(wait));
-                    if let Err(e) = ask_for_services(ip) {
-                        eprintln!("OSCQuery services query failed: {e}");
-                    }
-                }
-            })?;
+            // After mdns-sd's probes and its two announcements (about two seconds; see `ask_for_services` on why
+            // more than a second after the last), and once more in case.
+            ask_later(ip, &[3500, 3500]);
         }
-        Ok(daemon)
+        Ok((daemon, primary))
     }
 
     pub fn advertising(&self) -> bool {
         self.mdns.is_some()
+    }
+
+    /// Makes a running VRChat find the services again (VRChat sends avatar parameters only to the services it found,
+    /// and looks for them only when it starts): what [`OscService::start`] does once, and the browsing thread does
+    /// whenever a VRChat starts, done now. A VRChat that already knows them ignores the answer.
+    pub fn rediscover(&self) {
+        if let Some(ip) = self.primary.filter(|_| self.mdns.is_some()) {
+            ask_later(ip, &[1200, 3500]);
+        }
+    }
+
+    /// When VRChat (or anything else on this machine) last sent a packet ([`crate::clock::now_ns`]).
+    pub fn last_received_ns(&self) -> Option<u64> {
+        Some(self.last_received.load(Ordering::Relaxed)).filter(|&t| t != 0)
     }
 
     /// VRChat's OSCQuery service when it was found.
@@ -480,6 +653,19 @@ fn ask_for_services(ip: std::net::Ipv4Addr) -> std::io::Result<()> {
     Ok(())
 }
 
+/// [`ask_for_services`] on `ip`'s interface after each pause of `waits` (milliseconds, in turn), on a thread of its
+/// own. Pauses of more than a second keep each answer whole (see there).
+fn ask_later(ip: Ipv4Addr, waits: &'static [u64]) {
+    let _ = std::thread::Builder::new().name("oscquery-ask".into()).spawn(move || {
+        for &wait in waits {
+            std::thread::sleep(Duration::from_millis(wait));
+            if let Err(e) = ask_for_services(ip) {
+                eprintln!("OSCQuery services query failed: {e}");
+            }
+        }
+    });
+}
+
 /// This machine's addresses: loopback and every interface's, read again (at most once a second) when an unknown
 /// address knocks, since interfaces come and go.
 #[derive(Default)]
@@ -510,25 +696,120 @@ fn vrchat_address(addresses: &[Ipv4Addr], port: u16, local: &mut LocalAddrs) -> 
     Some(SocketAddr::from((ip, port)))
 }
 
-/// Keeps `found` pointing at this machine's VRChat OSCQuery service (`VRChat-Client-*`) while mDNS announces it.
-fn watch_vrchat(events: mdns_sd::Receiver<mdns_sd::ServiceEvent>, stop: &AtomicBool, found: &Mutex<Option<SocketAddr>>) {
-    let mut current: Option<String> = None;
+/// Whether VRChat's OSCQuery service answers at `addr`: its HOST_INFO, within a second, has an OSC port and VRChat's
+/// name (`VRChat-Client-…`, as it announces itself). An announcement pointing at another program's service on this
+/// machine (an OSC app's), or back at this one, is not VRChat.
+fn is_vrchat_client(addr: SocketAddr) -> bool {
+    http_get(addr, "/?HOST_INFO", Duration::from_secs(1)).ok().and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok()).is_some_and(|info| {
+        info["OSC_PORT"].as_u64().is_some_and(|p| (1..=65535).contains(&p)) && info["NAME"].as_str().is_some_and(|n| n.starts_with("VRChat"))
+    })
+}
+
+/// How often the VRChat service in use is asked whether it still answers, and how many times in a row it may not
+/// before it counts as gone (VRChat quit or crashed without saying so).
+const RECHECK: Duration = Duration::from_secs(15);
+const MISSES: u32 = 2;
+/// An announcement that did not answer as VRChat is not tried again for this long (a host repeating it).
+const REFUSED_FOR: Duration = Duration::from_secs(30);
+
+/// The VRChat OSCQuery services announced from this machine that answered as VRChat, the newest last: the one in use.
+/// A service comes in only by answering, and goes only once it stops answering, whatever the network says: an
+/// announcement or a goodbye from another host changes nothing.
+#[derive(Default)]
+struct VrchatServices {
+    verified: Vec<(String, SocketAddr)>,
+    refused: HashMap<String, Instant>,
+    misses: u32,
+}
+
+impl VrchatServices {
+    fn current(&self) -> Option<SocketAddr> {
+        self.verified.last().map(|(_, addr)| *addr)
+    }
+
+    /// `name` announced at `addr`: kept, as the one in use, when it answers as VRChat. Whether it was.
+    fn announced(&mut self, name: &str, addr: SocketAddr, answers: impl Fn(SocketAddr) -> bool) -> bool {
+        if self.verified.iter().any(|(n, a)| n == name && *a == addr) || self.refused.get(name).is_some_and(|t| t.elapsed() < REFUSED_FOR) {
+            return false;
+        }
+        if !answers(addr) {
+            if self.refused.len() >= 64 {
+                self.refused.clear();
+            }
+            self.refused.insert(name.to_string(), Instant::now());
+            return false;
+        }
+        self.refused.remove(name);
+        self.verified.retain(|(n, _)| n != name);
+        self.verified.push((name.to_string(), addr));
+        self.misses = 0;
+        true
+    }
+
+    /// The network says `name` is gone: it goes when it no longer answers.
+    fn removed(&mut self, name: &str, answers: impl Fn(SocketAddr) -> bool) {
+        let Some(i) = self.verified.iter().position(|(n, _)| n == name) else { return };
+        if answers(self.verified[i].1) {
+            return;
+        }
+        self.verified.remove(i);
+        self.drop_silent(&answers);
+    }
+
+    /// The service in use, asked again: gone after [`MISSES`] times in a row without an answer.
+    fn recheck(&mut self, answers: impl Fn(SocketAddr) -> bool) {
+        let Some(addr) = self.current() else { return };
+        if answers(addr) {
+            self.misses = 0;
+            return;
+        }
+        self.misses += 1;
+        if self.misses >= MISSES {
+            self.verified.pop();
+            self.misses = 0;
+            self.drop_silent(&answers);
+        }
+    }
+
+    /// Those that no longer answer go, newest first, so that the one in use answers.
+    fn drop_silent(&mut self, answers: &impl Fn(SocketAddr) -> bool) {
+        while self.current().is_some_and(|addr| !answers(addr)) {
+            self.verified.pop();
+        }
+    }
+}
+
+/// Keeps `found` pointing at this machine's VRChat OSCQuery service (`VRChat-Client-*`) while it runs
+/// ([`VrchatServices`]). A VRChat that starts while the services run looks for them only as it starts, before it could
+/// hear them: when its own service shows up, they are asked for again on `primary`'s interface so that it finds them.
+fn watch_vrchat(events: mdns_sd::Receiver<mdns_sd::ServiceEvent>, stop: &AtomicBool, found: &Mutex<Option<SocketAddr>>, primary: Option<Ipv4Addr>) {
+    let mut services = VrchatServices::default();
     let mut local = LocalAddrs::default();
+    let mut checked = Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        let before = services.current();
         match events.recv_timeout(Duration::from_millis(250)) {
             Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) if info.get_fullname().starts_with("VRChat-Client-") => {
                 let addresses: Vec<Ipv4Addr> = info.get_addresses_v4().into_iter().collect();
-                if let Some(addr) = vrchat_address(&addresses, info.get_port(), &mut local) {
-                    *found.lock().unwrap() = Some(addr);
-                    current = Some(info.get_fullname().to_string());
+                let Some(addr) = vrchat_address(&addresses, info.get_port(), &mut local) else { continue };
+                if services.announced(info.get_fullname(), addr, is_vrchat_client) {
+                    checked = Instant::now();
+                    // After VRChat's discovery is up (it announced itself), twice, and once more later.
+                    if let Some(ip) = primary {
+                        ask_later(ip, &[2000, 3500, 10000]);
+                    }
                 }
             }
-            Ok(mdns_sd::ServiceEvent::ServiceRemoved(_, name)) if current.as_deref() == Some(name.as_str()) => {
-                *found.lock().unwrap() = None;
-                current = None;
-            }
+            Ok(mdns_sd::ServiceEvent::ServiceRemoved(_, name)) => services.removed(&name, is_vrchat_client),
             Ok(_) | Err(mdns_sd::RecvTimeoutError::Timeout) => {}
             Err(_) => return,
+        }
+        if checked.elapsed() >= RECHECK {
+            checked = Instant::now();
+            services.recheck(is_vrchat_client);
+        }
+        if services.current() != before {
+            *found.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = services.current();
         }
     }
 }
@@ -539,8 +820,15 @@ impl Drop for OscService {
         if let Some(d) = self.mdns.take() {
             let _ = d.shutdown();
         }
+        // The receiving thread and the OSCQuery server wait for what comes next: an empty datagram and a connection
+        // wake them, to see they are done. One that cannot be woken ends on its own later rather than holding up the
+        // app's end.
+        let _ = self.sender.send_to(&[], (Ipv4Addr::LOCALHOST, self.osc_port));
+        let woken = TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, self.query_port)), Duration::from_millis(500)).is_ok();
         for t in self.threads.drain(..) {
-            let _ = t.join();
+            if woken || t.thread().name() != Some("oscquery-http") {
+                let _ = t.join();
+            }
         }
     }
 }
@@ -763,5 +1051,129 @@ mod tests {
         let _ = client.send_to(&msg, (ip, svc.osc_port));
         std::thread::sleep(Duration::from_millis(300));
         assert!(got.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_what_the_app_reads_passes() {
+        let message = |addr: &str, args: Vec<OscType>| OscPacket::Message(OscMessage { addr: addr.into(), args });
+        let mut events = Vec::new();
+        for packet in [
+            message("/chatbox/input", vec![OscType::String("hi".into()), OscType::Bool(true)]),
+            message("/input/Jump", vec![OscType::Int(1)]),
+            message(&format!("/avatar/parameters/{}", "x".repeat(600)), vec![OscType::Bool(true)]),
+            message("/tracking/vrsystem/head/pose", vec![OscType::Float(0.0); MAX_ARGUMENTS + 1]),
+            message("/avatar/change", vec![OscType::String(r"..\..\settings".into())]),
+            message("/avatar/parameters/", vec![OscType::Bool(true)]),
+        ] {
+            events_from_packet(&packet, &mut events);
+        }
+        assert!(events.is_empty(), "{events:?}");
+        events_from_packet(&message("/usercamera/Mode", vec![OscType::Int(2)]), &mut events);
+        events_from_packet(&message("/avatar/parameters/Big", vec![OscType::Long(1 << 40)]), &mut events);
+        events_from_packet(&message("/avatar/change", vec![OscType::String("avtr_4cf554b4-430c-4f8f-b53e-1f294eed230b".into())]), &mut events);
+        assert_eq!(
+            events,
+            vec![
+                OscEvent::Values { address: "/usercamera/Mode".into(), values: vec![OscValue::Int(2)] },
+                OscEvent::Parameter { name: "Big".into(), value: OscValue::Float((1u64 << 40) as f32) },
+                OscEvent::AvatarChanged { id: "avtr_4cf554b4-430c-4f8f-b53e-1f294eed230b".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_request_in_pieces_gets_its_answer_and_half_a_request_none() {
+        let svc = OscService::start("Orbiters desktop test", &[], 9, false, |_, _| {}).unwrap();
+        let mut s = TcpStream::connect(("127.0.0.1", svc.query_port)).unwrap();
+        s.set_nodelay(true).unwrap();
+        s.write_all(b"GET /?HOST").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        s.write_all(b"_INFO HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let mut answer = String::new();
+        s.read_to_string(&mut answer).unwrap();
+        assert!(answer.contains("\"OSC_PORT\""), "{answer}");
+        // A request line never finished: no tree comes back.
+        let mut half = TcpStream::connect(("127.0.0.1", svc.query_port)).unwrap();
+        half.write_all(b"GET /av").unwrap();
+        let mut answer = String::new();
+        let _ = half.read_to_string(&mut answer);
+        assert!(answer.is_empty(), "{answer}");
+        // Stopping wakes the server: it ends at once.
+        let started = Instant::now();
+        drop(svc);
+        assert!(started.elapsed() < Duration::from_millis(900), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn reads_one_value_of_vrchats_tree() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 1024];
+                let n = s.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let answer = if request.starts_with("GET /avatar/parameters/Orbiters%20Record HTTP/1.1") {
+                    let body = r#"{"FULL_PATH":"/avatar/parameters/Orbiters Record","TYPE":"T","ACCESS":3,"VALUE":[true]}"#;
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len())
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                };
+                s.write_all(answer.as_bytes()).unwrap();
+            }
+        });
+        assert_eq!(vrchat_value(addr, "/avatar/parameters/Orbiters Record", Duration::from_secs(2)).unwrap(), Some(OscValue::Bool(true)));
+        assert_eq!(vrchat_value(addr, "/avatar/parameters/Nope", Duration::from_secs(2)).unwrap(), None, "the avatar has no such parameter");
+        server.join().unwrap();
+        // Nothing listens: VRChat cannot tell, which is not a no.
+        let gone = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        assert!(vrchat_value(gone, "/avatar/parameters/Nope", Duration::from_millis(500)).is_err());
+    }
+
+    #[test]
+    fn only_vrchat_answers_as_vrchat() {
+        let host = |info: &'static str| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                if let Ok((mut s, _)) = listener.accept() {
+                    let _ = s.read(&mut [0u8; 1024]);
+                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{info}", info.len()).as_bytes());
+                }
+            });
+            addr
+        };
+        assert!(is_vrchat_client(host(r#"{"NAME":"VRChat-Client-A1B2C3","OSC_IP":"127.0.0.1","OSC_PORT":9000}"#)));
+        assert!(!is_vrchat_client(host(r#"{"NAME":"VRCFT","OSC_IP":"127.0.0.1","OSC_PORT":9010}"#)), "another OSC app");
+        assert!(!is_vrchat_client(host(r#"{"NAME":"Orbiters desktop","OSC_PORT":50000}"#)), "this one");
+        assert!(!is_vrchat_client(host(r#"{"NAME":"VRChat-Client-A1B2C3"}"#)), "no OSC port");
+    }
+
+    #[test]
+    fn vrchat_is_kept_until_it_stops_answering() {
+        let (real, other, fake) =
+            (SocketAddr::from(([127, 0, 0, 1], 50001)), SocketAddr::from(([127, 0, 0, 1], 50002)), SocketAddr::from(([127, 0, 0, 1], 50003)));
+        let answering = std::cell::RefCell::new(vec![real, other]);
+        let answers = |addr: SocketAddr| answering.borrow().contains(&addr);
+        let (a, b) = ("VRChat-Client-AAAAAA._oscjson._tcp.local.", "VRChat-Client-BBBBBB._oscjson._tcp.local.");
+        let mut s = VrchatServices::default();
+        assert!(s.announced(a, real, answers));
+        // An announcement that does not answer, then a goodbye for the real one from someone else: nothing changes.
+        assert!(!s.announced("VRChat-Client-EVIL._oscjson._tcp.local.", fake, answers));
+        s.removed(a, answers);
+        assert_eq!(s.current(), Some(real));
+        // A second VRChat; once it stops answering, the first is used again.
+        assert!(s.announced(b, other, answers));
+        assert_eq!(s.current(), Some(other));
+        answering.borrow_mut().retain(|addr| *addr != other);
+        s.recheck(answers);
+        assert_eq!(s.current(), Some(other), "one miss is not enough");
+        s.recheck(answers);
+        assert_eq!(s.current(), Some(real));
+        // VRChat quits: its goodbye is believed once it no longer answers.
+        answering.borrow_mut().clear();
+        s.removed(a, answers);
+        assert_eq!(s.current(), None);
     }
 }

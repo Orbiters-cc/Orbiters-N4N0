@@ -53,7 +53,7 @@ impl Controller {
     }
 
     fn start_upload(&self, world_id: &str, world_name: &str, kind: UploadKind, paths: Vec<PathBuf>) -> anyhow::Result<u64> {
-        anyhow::ensure!(world_id.starts_with("wrld_"), "Not a VRChat world.");
+        anyhow::ensure!(orbiters_core::vrchat_log::is_world_id(world_id), "Not a VRChat world.");
         let id = self.upload_serial.fetch_add(1, Ordering::Relaxed) + 1;
         self.update(|s| {
             let running = s.uploads.iter().any(|u| u.running() && u.world_id == world_id && u.kind == kind);
@@ -155,10 +155,10 @@ impl Controller {
             let mut parts = Vec::with_capacity(chunk.len());
             let mut taken = Vec::with_capacity(chunk.len());
             for p in chunk {
-                let bytes = std::fs::read(p)?;
                 taken.push(visited::read_shot(p).map(|i| iso(i.taken)).unwrap_or_default());
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "picture.png".into());
-                parts.push(Part { field: "pictures", name, content_type: "image/png", bytes });
+                // Read from the file while it is sent: twelve pictures never sit in memory at once.
+                parts.push(Part::file("pictures", name, "image/png", p)?);
             }
             let chunk_bytes: u64 = chunk_sizes.iter().sum();
             let mut report = self.progress(id);
@@ -206,7 +206,7 @@ impl Controller {
 /// A session's splats as a web `.splat`, and the upload's metadata: the start view (right-handed like the file:
 /// Unity's Z negated), the held-out quality and when the session was recorded.
 fn web_preview(session: &Path) -> anyhow::Result<(Vec<u8>, serde_json::Value)> {
-    let g = orbiters_reconstruct::ply::read(&reconstruction::dir(session).join(reconstruction::PLY_FILE))?;
+    let g = orbiters_reconstruct::ply::read(&reconstruction::result_dir(session).join(reconstruction::PLY_FILE))?;
     let (views, start) = crate::views::recorded(session)?;
     let v = views[start];
     let depth = crate::views::depth_ahead(&g, &v);

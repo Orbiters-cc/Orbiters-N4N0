@@ -1,6 +1,10 @@
 //! Follows VRChat's `output_log_*.txt` (the same source VRCX uses) for the current world and instance, who is in it,
 //! the avatar the local player wears and the videos the world plays. Reading a local log needs no VRChat account
 //! access.
+//!
+//! The log also holds text others write: what world scripts log (`Debug.Log`, over several lines too), and display
+//! and avatar names inside VRChat's own lines. A line counts only in VRChat's own shape (`2026.10.18 20:23:20 Debug
+//! -  ` then the message), with its marker at the very start of the message, and world and user ids that are ids.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -10,10 +14,12 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogEvent {
-    /// `[Behaviour] Joining wrld_…:instance`
-    Joining { world_id: String, instance: String },
-    /// `[Behaviour] Entering Room: <name>` (also "Joining or Creating Room")
+    /// `[Behaviour] Joining wrld_…:instance`, with the line's time (Unix seconds)
+    Joining { world_id: String, instance: String, at: Option<u64> },
+    /// `[Behaviour] Entering Room: <name>`, which comes right before the join
     EnteringRoom { name: String },
+    /// `[Behaviour] Joining or Creating Room: <name>`, which follows the join and completes it
+    JoinedRoom { name: String },
     /// `[Behaviour] OnLeftRoom`
     LeftRoom,
     /// `[Behaviour] Initialized PlayerAPI "<name>" is local`
@@ -67,7 +73,7 @@ pub struct WorldState {
 impl WorldState {
     pub fn apply(&mut self, e: &LogEvent) {
         match e {
-            LogEvent::Joining { world_id, instance } => {
+            LogEvent::Joining { world_id, instance, .. } => {
                 if self.world_id.as_deref() != Some(world_id.as_str()) {
                     self.world_name = None;
                 }
@@ -79,7 +85,7 @@ impl WorldState {
                 self.avatars.clear();
                 self.last_video = None;
             }
-            LogEvent::EnteringRoom { name } => {
+            LogEvent::EnteringRoom { name } | LogEvent::JoinedRoom { name } => {
                 self.world_name = Some(name.clone());
                 self.in_world = true;
             }
@@ -97,12 +103,27 @@ impl WorldState {
                 self.avatars.remove(name);
             }
             LogEvent::AvatarSwitched { player, avatar } => {
+                let (player, avatar) = self.who_switched(player, avatar);
                 if self.local_player.as_deref() == Some(player.as_str()) {
                     self.avatar_name = Some(avatar.clone());
                 }
-                self.avatars.insert(player.clone(), avatar.clone());
+                self.avatars.insert(player, avatar);
             }
             LogEvent::Video { url, at } => self.last_video = Some(VideoSeen { url: url.clone(), at: *at }),
+        }
+    }
+
+    /// Who switched to which avatar in `Switching <player> to avatar <avatar>`, which the parse cut at the first
+    /// " to avatar ": a name can hold those words too ("Me to avatar X", next to the local "Me"). The longest name of
+    /// someone here that the line starts with is who it is; with none, the parse's cut stands.
+    fn who_switched(&self, player: &str, avatar: &str) -> (String, String) {
+        const TO: &str = " to avatar ";
+        let line = format!("{player}{TO}{avatar}");
+        let known = self.players.values().chain(self.local_player.iter());
+        let named = known.filter(|name| line.len() > name.len() + TO.len() && line.starts_with(name.as_str()) && line[name.len()..].starts_with(TO));
+        match named.max_by_key(|name| name.len()) {
+            Some(name) => (name.clone(), line[name.len() + TO.len()..].to_string()),
+            None => (player.to_string(), avatar.to_string()),
         }
     }
 
@@ -133,131 +154,314 @@ fn player_key(name: &str, user_id: &str) -> String {
     }
 }
 
-/// `<name> (usr_…)` → name and id; a name alone has an empty id.
+/// `prefix` and a lowercase UUID, as VRChat writes its ids (`wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b`).
+pub fn is_vrchat_id(id: &str, prefix: &str) -> bool {
+    let Some(uuid) = id.strip_prefix(prefix) else { return false };
+    let b = uuid.as_bytes();
+    b.len() == 36 && b.iter().enumerate().all(|(i, c)| if matches!(i, 8 | 13 | 18 | 23) { *c == b'-' } else { c.is_ascii_digit() || (b'a'..=b'f').contains(c) })
+}
+
+/// A VRChat world id (`wrld_` and a UUID): what may go into a path of Orbiters' API or a session's manifest.
+pub fn is_world_id(id: &str) -> bool {
+    is_vrchat_id(id, "wrld_")
+}
+
+/// An instance as VRChat names it after the world (`77505~group(grp_…)~groupAccessType(public)~region(eu)`).
+fn is_instance(instance: &str) -> bool {
+    instance.len() <= 512 && instance.bytes().all(|c| c.is_ascii_alphanumeric() || b"~()_-.,:".contains(&c))
+}
+
+/// `<name> (usr_…)` → name and id; a name alone (or with something else in brackets) has an empty id.
 fn name_and_id(rest: &str) -> (String, String) {
     let rest = rest.trim();
     if let Some(i) = rest.rfind(" (usr_") {
-        if let Some(id) = rest[i + 2..].strip_suffix(')') {
+        if let Some(id) = rest[i + 2..].strip_suffix(')').filter(|id| is_vrchat_id(id, "usr_")) {
             return (rest[..i].to_string(), id.to_string());
         }
     }
     (rest.to_string(), String::new())
 }
 
-/// Parses one log line.
-pub fn parse_line(line: &str) -> Option<LogEvent> {
-    if let Some(i) = line.find("[Behaviour] Joining wrld_") {
-        let rest = &line[i + "[Behaviour] Joining ".len()..];
-        let token = rest.split_whitespace().next()?;
-        let (world, instance) = token.split_once(':').unwrap_or((token, ""));
-        return Some(LogEvent::Joining { world_id: world.to_string(), instance: instance.to_string() });
-    }
-    for marker in ["[Behaviour] Entering Room: ", "[Behaviour] Joining or Creating Room: "] {
-        if let Some(i) = line.find(marker) {
-            let name = line[i + marker.len()..].trim();
-            if !name.is_empty() {
-                return Some(LogEvent::EnteringRoom { name: name.to_string() });
-            }
-        }
-    }
-    if line.contains("[Behaviour] OnLeftRoom") {
-        return Some(LogEvent::LeftRoom);
-    }
-    if let Some(i) = line.find("[Behaviour] OnPlayerJoined ") {
-        let (name, user_id) = name_and_id(&line[i + "[Behaviour] OnPlayerJoined ".len()..]);
-        return (!name.is_empty()).then_some(LogEvent::PlayerJoined { name, user_id });
-    }
-    if let Some(i) = line.find("[Behaviour] OnPlayerLeft ") {
-        let (name, user_id) = name_and_id(&line[i + "[Behaviour] OnPlayerLeft ".len()..]);
-        return (!name.is_empty()).then_some(LogEvent::PlayerLeft { name, user_id });
-    }
-    if let Some(i) = line.find("[Behaviour] Initialized PlayerAPI \"") {
-        let rest = &line[i + "[Behaviour] Initialized PlayerAPI \"".len()..];
-        if let Some(name) = rest.trim_end().strip_suffix("\" is local") {
-            return Some(LogEvent::LocalPlayer { name: name.to_string() });
-        }
+/// Where the message starts in a line of VRChat's own shape, `2026.10.18 20:23:20 Debug      -  <message>` (the level
+/// padded with spaces); `None` for anything else, such as the further lines of a script's message.
+fn message_start(line: &[u8]) -> Option<usize> {
+    const DIGITS: [usize; 14] = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+    let shaped = line.len() > 24
+        && line[4] == b'.'
+        && line[7] == b'.'
+        && line[10] == b' '
+        && line[13] == b':'
+        && line[16] == b':'
+        && line[19] == b' '
+        && DIGITS.iter().all(|&i| line[i].is_ascii_digit());
+    if !shaped {
         return None;
     }
-    if let Some(i) = line.find("[Behaviour] Switching ") {
-        let rest = &line[i + "[Behaviour] Switching ".len()..];
-        let (player, avatar) = rest.split_once(" to avatar ")?;
-        return Some(LogEvent::AvatarSwitched { player: player.to_string(), avatar: avatar.trim_end().to_string() });
+    let level = 20 + line[20..].iter().take_while(|c| c.is_ascii_alphabetic()).count();
+    if level == 20 {
+        return None;
     }
-    if let Some(i) = line.find("[Video Playback] Attempting to resolve URL '") {
-        let rest = &line[i + "[Video Playback] Attempting to resolve URL '".len()..];
-        let url = rest.trim_end().strip_suffix('\'')?;
-        return (!url.is_empty()).then(|| LogEvent::Video { url: url.to_string(), at: crate::visited::log_time(line) });
+    let dash = level + line[level..].iter().take_while(|&&c| c == b' ').count();
+    (line.get(dash..dash + 3) == Some(b"-  ")).then_some(dash + 3)
+}
+
+const BEHAVIOUR: &[u8] = b"[Behaviour] ";
+const VIDEO: &[u8] = b"[Video Playback] Attempting to resolve URL '";
+
+/// The message of a line in VRChat's own shape ([`message_start`]).
+pub(crate) fn message(line: &[u8]) -> Option<&[u8]> {
+    message_start(line).map(|start| &line[start..])
+}
+
+/// Parses one log line.
+pub fn parse_line(line: &str) -> Option<LogEvent> {
+    parse_bytes(line.as_bytes())
+}
+
+/// Parses one log line read as bytes. Most lines are none of VRChat's markers: they are let go after a look at their
+/// first bytes, before any text is made of them.
+pub(crate) fn parse_bytes(line: &[u8]) -> Option<LogEvent> {
+    let start = message_start(line)?;
+    let message = &line[start..];
+    if !message.starts_with(BEHAVIOUR) && !message.starts_with(VIDEO) {
+        return None;
+    }
+    // The part before the message is ASCII: the offsets stay where they were.
+    let line = String::from_utf8_lossy(line);
+    parse_message(line[start..].trim_end(), &line[..19])
+}
+
+/// A message's event; `stamp` is its line's time (`2026.10.18 20:23:20`).
+fn parse_message(message: &str, stamp: &str) -> Option<LogEvent> {
+    if let Some(url) = message.strip_prefix("[Video Playback] Attempting to resolve URL '") {
+        let url = url.strip_suffix('\'')?;
+        return (!url.is_empty()).then(|| LogEvent::Video { url: url.to_string(), at: crate::visited::log_time(stamp) });
+    }
+    let rest = message.strip_prefix("[Behaviour] ")?;
+    if let Some(name) = rest.strip_prefix("Joining or Creating Room: ") {
+        let name = name.trim();
+        return (!name.is_empty()).then(|| LogEvent::JoinedRoom { name: name.to_string() });
+    }
+    if let Some(target) = rest.strip_prefix("Joining ") {
+        let token = target.split_whitespace().next()?;
+        let (world, instance) = token.split_once(':').unwrap_or((token, ""));
+        return (is_world_id(world) && is_instance(instance)).then(|| LogEvent::Joining {
+            world_id: world.to_string(),
+            instance: instance.to_string(),
+            at: crate::visited::log_time(stamp),
+        });
+    }
+    if let Some(name) = rest.strip_prefix("Entering Room: ") {
+        let name = name.trim();
+        return (!name.is_empty()).then(|| LogEvent::EnteringRoom { name: name.to_string() });
+    }
+    if rest == "OnLeftRoom" {
+        return Some(LogEvent::LeftRoom);
+    }
+    if let Some(who) = rest.strip_prefix("OnPlayerJoined ") {
+        let (name, user_id) = name_and_id(who);
+        return (!name.is_empty()).then_some(LogEvent::PlayerJoined { name, user_id });
+    }
+    if let Some(who) = rest.strip_prefix("OnPlayerLeft ") {
+        let (name, user_id) = name_and_id(who);
+        return (!name.is_empty()).then_some(LogEvent::PlayerLeft { name, user_id });
+    }
+    if let Some(who) = rest.strip_prefix("Initialized PlayerAPI \"") {
+        return who.strip_suffix("\" is local").map(|name| LogEvent::LocalPlayer { name: name.to_string() });
+    }
+    if let Some(switch) = rest.strip_prefix("Switching ") {
+        let (player, avatar) = switch.split_once(" to avatar ")?;
+        return Some(LogEvent::AvatarSwitched { player: player.to_string(), avatar: avatar.to_string() });
     }
     None
 }
 
-/// Newest `output_log_*.txt` in a folder.
+/// Logs are read in blocks of this size, each let go once its lines are read.
+const BLOCK: usize = 1 << 20;
+/// A line longer than this (a script dumping data) is passed over rather than kept whole.
+const MAX_LINE: usize = 1 << 20;
+
+/// Reads the complete lines of `file` from byte `from` up to byte `end`, about `budget` bytes of them at most, a block
+/// at a time: `f` gets each line without its end. Returns where the last complete line read ends (a line still being
+/// written is read again next time) and whether the reading got to `end` (or the end of the file).
+pub(crate) fn read_lines(file: &mut File, from: u64, end: u64, budget: u64, mut f: impl FnMut(&[u8])) -> (u64, bool) {
+    if from >= end || file.seek(SeekFrom::Start(from)).is_err() {
+        return (from, from >= end);
+    }
+    let mut block = vec![0u8; BLOCK.min((end - from) as usize)];
+    // The line begun in an earlier block, and whether it is one too long, passed over to its end.
+    let mut pending: Vec<u8> = Vec::new();
+    let mut skipping = false;
+    let (mut read, mut done) = (from, from);
+    while read < end && done - from < budget {
+        let want = ((end - read) as usize).min(block.len());
+        let n = match file.read(&mut block[..want]) {
+            Ok(0) => return (done, true),
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return (done, false),
+        };
+        let data = &block[..n];
+        let mut start = 0;
+        while let Some(i) = memchr::memchr(b'\n', &data[start..]) {
+            let line_end = start + i;
+            if skipping {
+                skipping = false;
+            } else if pending.is_empty() {
+                f(trim_cr(&data[start..line_end]));
+            } else {
+                pending.extend_from_slice(&data[start..line_end]);
+                f(trim_cr(&pending));
+                pending.clear();
+            }
+            start = line_end + 1;
+            done = read + start as u64;
+        }
+        if !skipping {
+            pending.extend_from_slice(&data[start..]);
+            if pending.len() > MAX_LINE {
+                pending = Vec::new();
+                skipping = true;
+            }
+        }
+        read += n as u64;
+    }
+    (done, read >= end)
+}
+
+fn trim_cr(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\r").unwrap_or(line)
+}
+
+/// Where the last line of `file` (`len` bytes) that joins a world starts, looked for from the end a block at a time:
+/// what the log says about the world being played follows it. `None` when no line does.
+fn last_join(file: &mut File, len: u64) -> Option<u64> {
+    const MARKER: &[u8] = b"[Behaviour] Joining wrld_";
+    // Each block reads on into the next by this much: a line cut between two is whole in one of them.
+    const OVERLAP: u64 = 4096;
+    let finder = memchr::memmem::FinderRev::new(MARKER);
+    let mut buf = vec![0u8; (BLOCK as u64 + OVERLAP).min(len) as usize];
+    let mut end = len;
+    while end > 0 {
+        let start = end.saturating_sub(BLOCK as u64);
+        let stop = (end + OVERLAP).min(len);
+        let n = (stop - start) as usize;
+        file.seek(SeekFrom::Start(start)).ok()?;
+        file.read_exact(&mut buf[..n]).ok()?;
+        let block = &buf[..n];
+        for at in finder.rfind_iter(block) {
+            // Its line must begin in this block (or the file); one that begins before is in the block before.
+            let line_start = match memchr::memrchr(b'\n', &block[..at]) {
+                Some(i) => i + 1,
+                None if start == 0 => 0,
+                None => continue,
+            };
+            let line_end = memchr::memchr(b'\n', &block[at..]).map_or(n, |i| at + i);
+            if matches!(parse_bytes(trim_cr(&block[line_start..line_end])), Some(LogEvent::Joining { .. })) {
+                return Some(start + line_start as u64);
+            }
+        }
+        end = start;
+    }
+    None
+}
+
+/// The log of the VRChat run that began last: `output_log_<date>_<time>.txt` names sort by when the run began. Not the
+/// log written to last: a second VRChat, or an old log something touched, would be followed then.
 pub fn newest_log(dir: &Path) -> Option<PathBuf> {
+    let dated = |name: &str| {
+        let b = name.as_bytes();
+        name.len() == "output_log_2026-10-20_00-00-00.txt".len()
+            && b[11..30].iter().enumerate().all(|(i, c)| if matches!(i, 4 | 7 | 10 | 13 | 16) { !c.is_ascii_digit() } else { c.is_ascii_digit() })
+    };
     std::fs::read_dir(dir)
         .ok()?
         .flatten()
-        .filter(|e| {
-            let n = e.file_name();
-            let n = n.to_string_lossy();
-            n.starts_with("output_log_") && n.ends_with(".txt")
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            (name.starts_with("output_log_") && name.ends_with(".txt")).then(|| ((dated(&name), name), e.path()))
         })
-        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
-        .map(|e| e.path())
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, path)| path)
 }
+
+/// What one poll reads at most: the rest waits for the next (the watcher thread has other things to do).
+const PER_POLL: u64 = 32 << 20;
 
 /// Incremental follower: call [`LogWatcher::poll`] periodically.
 pub struct LogWatcher {
     dir: Option<PathBuf>,
     file: Option<PathBuf>,
+    /// Where the next line to read starts.
     position: u64,
-    partial: Vec<u8>,
+    /// Everything in the log was read: the state is VRChat's as it is now.
+    caught_up: bool,
+    /// The last poll's events happened while it followed (not read back from before it began on this log).
+    live: bool,
+    /// What the last poll read: the log's file name and the bytes from, to.
+    last_read: Option<(String, u64, u64)>,
     pub state: WorldState,
 }
 
 impl LogWatcher {
     pub fn new(dir: Option<PathBuf>) -> Self {
-        Self { dir, file: None, position: 0, partial: Vec::new(), state: WorldState::default() }
+        Self { dir, file: None, position: 0, caught_up: false, live: false, last_read: None, state: WorldState::default() }
     }
 
-    /// Reads what was appended since the last call; returns the new events (state is updated too).
+    /// Whether everything the log holds was read: until then the state may be an hour old (a world left long ago).
+    pub fn caught_up(&self) -> bool {
+        self.caught_up
+    }
+
+    /// Whether the last poll's events happen now: a join read back from the time before following began (when Orbiters
+    /// started while VRChat ran) is not one.
+    pub fn live(&self) -> bool {
+        self.live
+    }
+
+    /// The log the last poll read (its file name) and the bytes it read, from and to.
+    pub fn last_read(&self) -> Option<(&str, u64, u64)> {
+        self.last_read.as_ref().map(|(name, from, to)| (name.as_str(), *from, *to))
+    }
+
+    /// Reads what was appended since the last call; returns the new events (state is updated too). A log first seen
+    /// is read from its last join on: what came before is a world left already.
     pub fn poll(&mut self) -> Vec<LogEvent> {
         let mut events = Vec::new();
+        let was_caught_up = self.caught_up;
+        self.last_read = None;
+        self.live = false;
         let Some(dir) = self.dir.clone().or_else(crate::paths::vrchat_log_dir) else { return events };
         let Some(newest) = newest_log(&dir) else { return events };
-        if self.file.as_ref() != Some(&newest) {
-            // A new VRChat run: start from the beginning of its log, forget the previous world.
-            self.file = Some(newest.clone());
-            self.position = 0;
-            self.partial.clear();
-            self.state = WorldState { log_file: Some(newest.clone()), ..Default::default() };
-        }
         let Ok(mut f) = File::open(&newest) else { return events };
         let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-        if len < self.position {
-            self.position = 0; // truncated
-            self.partial.clear();
+        let mut live = was_caught_up;
+        if self.file.as_ref() != Some(&newest) {
+            // A new VRChat run, the previous world forgotten. One that began while another log was followed happens
+            // now, read whole; one already under way when Orbiters started is read from its last join.
+            live = self.file.is_some();
+            self.position = if live { 0 } else { last_join(&mut f, len).unwrap_or(0) };
+            self.file = Some(newest.clone());
+            self.state = WorldState { log_file: Some(newest.clone()), ..Default::default() };
+            self.caught_up = false;
+        } else if len < self.position {
+            // Truncated: read again from its start.
+            self.position = 0;
+            self.state = WorldState { log_file: Some(newest.clone()), ..Default::default() };
         }
-        if len == self.position || f.seek(SeekFrom::Start(self.position)).is_err() {
-            return events;
-        }
-        let mut buf = Vec::with_capacity((len - self.position).min(64 << 20) as usize);
-        if f.take(64 << 20).read_to_end(&mut buf).is_err() {
-            return events;
-        }
-        self.position += buf.len() as u64;
-        self.partial.extend_from_slice(&buf);
-        let mut start = 0;
-        for i in 0..self.partial.len() {
-            if self.partial[i] == b'\n' {
-                let line = String::from_utf8_lossy(&self.partial[start..i]);
-                if let Some(e) = parse_line(&line) {
-                    self.state.apply(&e);
-                    events.push(e);
-                }
-                start = i + 1;
+        let from = self.position;
+        let state = &mut self.state;
+        let (to, all) = read_lines(&mut f, from, len, PER_POLL, |line| {
+            if let Some(e) = parse_bytes(line) {
+                state.apply(&e);
+                events.push(e);
             }
-        }
-        self.partial.drain(..start);
+        });
+        self.position = to;
+        self.caught_up = all;
+        self.live = live;
+        let name = newest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.last_read = Some((name, from, to));
         events
     }
 }
@@ -266,31 +470,71 @@ impl LogWatcher {
 mod tests {
     use super::*;
 
+    const WORLD_A: &str = "wrld_99123966-6b37-4b5b-9f3c-0a1b2c3d4e5f";
+    const WORLD_B: &str = "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b";
+    const ME: &str = "usr_8784f94a-27ed-4a3b-9c1d-112233445566";
+    const FRIEND: &str = "usr_1339e525-d75d-4832-9104-98dd89287681";
+
+    /// A line as VRChat writes it, at 20:23:20.
+    fn line(message: &str) -> String {
+        format!("2026.10.18 20:23:20 Debug      -  {message}")
+    }
+
+    fn event(message: &str) -> LogEvent {
+        parse_line(&line(message)).unwrap_or_else(|| panic!("no event in {message}"))
+    }
+
     #[test]
     fn parses_lines() {
-        assert_eq!(
-            parse_line("2026.10.18 20:23:20 Debug      -  [Behaviour] Joining wrld_99123966-6b37:77505~group(grp_9)~groupAccessType(public)~region(eu)"),
-            Some(LogEvent::Joining { world_id: "wrld_99123966-6b37".into(), instance: "77505~group(grp_9)~groupAccessType(public)~region(eu)".into() })
-        );
+        let joining = format!("2026.10.18 20:23:20 Debug      -  [Behaviour] Joining {WORLD_A}:77505~group(grp_9)~groupAccessType(public)~region(eu)");
+        match parse_line(&joining) {
+            Some(LogEvent::Joining { world_id, instance, at }) => {
+                assert_eq!((world_id.as_str(), instance.as_str()), (WORLD_A, "77505~group(grp_9)~groupAccessType(public)~region(eu)"));
+                assert!(at.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
         assert_eq!(
             parse_line("2026.10.18 20:23:20 Debug      -  [Behaviour] Entering Room: VRC Volleyball"),
             Some(LogEvent::EnteringRoom { name: "VRC Volleyball".into() })
         );
-        assert_eq!(parse_line("[Behaviour] OnLeftRoom"), Some(LogEvent::LeftRoom));
+        assert_eq!(event("[Behaviour] Joining or Creating Room: VRC Volleyball"), LogEvent::JoinedRoom { name: "VRC Volleyball".into() });
+        assert_eq!(parse_line("2026.10.18 20:59:59 Log        -  [Behaviour] OnLeftRoom\r"), Some(LogEvent::LeftRoom));
         assert_eq!(parse_line("2026.10.18 20:23:18 Warning    -  Path already exists, skipping: /usercamera/Pose"), None);
+    }
+
+    #[test]
+    fn only_vrchats_own_lines_count() {
+        let join = format!("[Behaviour] Joining {WORLD_B}:1");
+        // A world script's message holding the marker, a further line of a message, no time, a name holding it.
+        assert_eq!(parse_line(&line(&format!("[MyWorldScript] {join}"))), None);
+        assert_eq!(parse_line(&join), None);
+        assert_eq!(parse_line(&format!("  {join}")), None);
+        assert_eq!(parse_line(&format!("2026.10.18 20:23:20 -  {join}")), None, "no level");
+        assert!(matches!(parse_line(&line(&format!("[Behaviour] OnPlayerJoined x {join} (usr_x)"))), Some(LogEvent::PlayerJoined { .. })));
+        // Ids that are not VRChat's.
+        assert_eq!(parse_line(&line("[Behaviour] Joining wrld_99123966-6b37:1")), None);
+        assert_eq!(parse_line(&line("[Behaviour] Joining wrld_../../x:1")), None);
+        assert_eq!(parse_line(&line(&format!("[Behaviour] Joining {}:1", WORLD_A.to_uppercase().replace("WRLD", "wrld")))), None);
+        assert_eq!(parse_line(&line(&format!("[Behaviour] Joining {WORLD_A}:1\"/../x"))), None, "an instance with a quote");
+        assert_eq!(
+            event("[Behaviour] OnPlayerJoined Some One (usr_8784f94a-27ed)"),
+            LogEvent::PlayerJoined { name: "Some One (usr_8784f94a-27ed)".into(), user_id: String::new() },
+            "a short id is part of the name"
+        );
     }
 
     #[test]
     fn parses_people_avatars_and_videos() {
         assert_eq!(
-            parse_line("2026.10.18 20:23:34 Debug      -  [Behaviour] OnPlayerJoined Some One (2) (usr_8784f94a-27ed)"),
-            Some(LogEvent::PlayerJoined { name: "Some One (2)".into(), user_id: "usr_8784f94a-27ed".into() })
+            parse_line(&format!("2026.10.18 20:23:34 Debug      -  [Behaviour] OnPlayerJoined Some One (2) ({ME})")),
+            Some(LogEvent::PlayerJoined { name: "Some One (2)".into(), user_id: ME.into() })
         );
         assert_eq!(
             parse_line("2026.10.18 20:34:02 Debug      -  [Behaviour] OnPlayerLeft Old Name"),
             Some(LogEvent::PlayerLeft { name: "Old Name".into(), user_id: String::new() })
         );
-        assert_eq!(parse_line("[Behaviour] OnPlayerLeftRoom"), None);
+        assert_eq!(parse_line(&line("[Behaviour] OnPlayerLeftRoom")), None);
         assert_eq!(
             parse_line("2026.10.18 20:23:34 Debug      -  [Behaviour] Initialized PlayerAPI \"Me Myself\" is local"),
             Some(LogEvent::LocalPlayer { name: "Me Myself".into() })
@@ -313,45 +557,131 @@ mod tests {
     #[test]
     fn knows_who_is_there_and_what_i_wear() {
         let mut s = WorldState::default();
-        for line in [
-            "[Behaviour] Joining wrld_a:1",
-            "[Behaviour] Initialized PlayerAPI \"Me\" is local",
-            "[Behaviour] OnPlayerJoined Me (usr_me)",
-            "[Behaviour] OnPlayerJoined Friend (usr_f)",
-            "[Behaviour] Switching Friend to avatar Fox",
-            "[Behaviour] Switching Me to avatar Orbit",
-            "[Video Playback] Attempting to resolve URL 'https://youtu.be/x'",
+        for message in [
+            format!("[Behaviour] Joining {WORLD_A}:1"),
+            "[Behaviour] Initialized PlayerAPI \"Me\" is local".into(),
+            format!("[Behaviour] OnPlayerJoined Me ({ME})"),
+            format!("[Behaviour] OnPlayerJoined Friend ({FRIEND})"),
+            "[Behaviour] Switching Friend to avatar Fox".into(),
+            "[Behaviour] Switching Me to avatar Orbit".into(),
+            "[Video Playback] Attempting to resolve URL 'https://youtu.be/x'".into(),
         ] {
-            s.apply(&parse_line(line).unwrap());
+            s.apply(&event(&message));
         }
         assert_eq!(s.players.len(), 2);
         assert_eq!(s.others(), 1);
         assert_eq!(s.avatar_name.as_deref(), Some("Orbit"));
         assert_eq!(s.last_video.as_ref().map(|v| v.url.as_str()), Some("https://youtu.be/x"));
         assert_eq!(s.other_avatars(), [("Fox".to_string(), 1)].into(), "names of avatars only, mine left out");
-        s.apply(&parse_line("[Behaviour] OnPlayerLeft Friend (usr_f)").unwrap());
+        s.apply(&event(&format!("[Behaviour] OnPlayerLeft Friend ({FRIEND})")));
         assert_eq!(s.others(), 0);
         assert!(s.other_avatars().is_empty());
-        s.apply(&parse_line("[Behaviour] Joining wrld_b:2").unwrap());
+        s.apply(&event(&format!("[Behaviour] Joining {WORLD_B}:2")));
         assert!(s.players.is_empty() && s.last_video.is_none(), "a new instance starts empty");
         assert_eq!(s.avatar_name.as_deref(), Some("Orbit"), "the avatar stays");
     }
 
     #[test]
-    fn follows_a_growing_log() {
-        let dir = std::env::temp_dir().join(format!("orbiters-log-{}", std::process::id()));
+    fn a_name_that_holds_to_avatar_is_not_mine() {
+        let mut s = WorldState::default();
+        s.apply(&event("[Behaviour] Initialized PlayerAPI \"Me\" is local"));
+        s.apply(&event(&format!("[Behaviour] OnPlayerJoined Me ({ME})")));
+        s.apply(&event(&format!("[Behaviour] OnPlayerJoined Me to avatar X ({FRIEND})")));
+        s.apply(&event("[Behaviour] Switching Me to avatar Orbit"));
+        // The other person, whose name starts like the line about me would.
+        s.apply(&event("[Behaviour] Switching Me to avatar X to avatar Fox"));
+        assert_eq!(s.avatar_name.as_deref(), Some("Orbit"));
+        assert_eq!(s.avatars.get("Me to avatar X").map(String::as_str), Some("Fox"));
+        // An avatar whose name holds the words, worn by me.
+        s.apply(&event("[Behaviour] Switching Me to avatar Fly to avatar heaven"));
+        assert_eq!(s.avatar_name.as_deref(), Some("Fly to avatar heaven"));
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("orbiters-log-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn follows_a_growing_log() {
+        let dir = temp_dir("growing");
         let path = dir.join("output_log_2026-10-20_00-00-00.txt");
-        std::fs::write(&path, "x\n[Behaviour] Joining wrld_a:1\n[Behaviour] Entering Room: A\npartial").unwrap();
+        let joining = line(&format!("[Behaviour] Joining {WORLD_A}:1"));
+        std::fs::write(&path, format!("x\n{joining}\n\n{}\r\npartial", line("[Behaviour] Joining or Creating Room: A"))).unwrap();
         let mut w = LogWatcher::new(Some(dir.clone()));
         assert_eq!(w.poll().len(), 2);
         assert_eq!(w.state.world_name.as_deref(), Some("A"));
+        assert!(w.caught_up() && !w.live(), "read back from before following began");
+        assert_eq!(w.last_read().map(|(name, from, _)| (name.to_string(), from)), Some(("output_log_2026-10-20_00-00-00.txt".into(), 2)));
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(f, " line\n[Behaviour] OnLeftRoom").unwrap();
+        writeln!(f, " line\n{}", line("[Behaviour] OnLeftRoom")).unwrap();
         drop(f);
         assert_eq!(w.poll(), vec![LogEvent::LeftRoom]);
-        assert!(!w.state.in_world);
+        assert!(!w.state.in_world && w.live());
+        // A VRChat started while this one was followed: its log is read whole, as it happens.
+        std::fs::write(dir.join("output_log_2026-10-20_09-00-00.txt"), format!("{}\n", line(&format!("[Behaviour] Joining {WORLD_B}:7")))).unwrap();
+        let events = w.poll();
+        assert!(matches!(events.as_slice(), [LogEvent::Joining { world_id, .. }] if world_id == WORLD_B), "{events:?}");
+        assert!(w.live() && w.state.world_id.as_deref() == Some(WORLD_B));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_long_log_is_read_from_its_last_join() {
+        let dir = temp_dir("long");
+        let mut text = String::new();
+        text.push_str(&format!("{}\n{}\n", line(&format!("[Behaviour] Joining {WORLD_A}:1")), line("[Behaviour] Joining or Creating Room: Old")));
+        // Megabytes of a world's chatter, a fake join among it, then the last real join and what followed it.
+        let chatter = format!("{}\n", line(&format!("[Script] tick [Behaviour] Joining {WORLD_A}:9")));
+        while text.len() < 3 * BLOCK {
+            text.push_str(&chatter);
+        }
+        let last = text.len() as u64;
+        text.push_str(&format!("{}\n", line(&format!("[Behaviour] Joining {WORLD_B}:2"))));
+        text.push_str(&format!("{}\n", line("[Behaviour] Joining or Creating Room: New")));
+        text.push_str(&format!("{}\n", line(&format!("[Behaviour] OnPlayerJoined Friend ({FRIEND})"))));
+        let path = dir.join("output_log_2026-10-20_00-00-00.txt");
+        std::fs::write(&path, &text).unwrap();
+        assert_eq!(last_join(&mut File::open(&path).unwrap(), text.len() as u64), Some(last));
+        let mut w = LogWatcher::new(Some(dir.clone()));
+        let events = w.poll();
+        assert_eq!(events.len(), 3, "only what follows the last join: {events:?}");
+        assert_eq!((w.state.world_id.as_deref(), w.state.world_name.as_deref(), w.state.players.len()), (Some(WORLD_B), Some("New"), 1));
+        assert!(w.caught_up());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn lines_are_read_in_blocks_and_long_ones_passed_over() {
+        let dir = temp_dir("blocks");
+        let path = dir.join("log.txt");
+        let left = line("[Behaviour] OnLeftRoom");
+        // A line longer than any kept, holding what would be a line if it were cut at a block's end.
+        let huge = format!("{}{}", "z".repeat(MAX_LINE + BLOCK - 3), line("[Behaviour] OnLeftRoom"));
+        std::fs::write(&path, format!("{left}\r\n{huge}\n{left}\npartial")).unwrap();
+        let len = std::fs::metadata(&path).unwrap().len();
+        let mut lines = Vec::new();
+        let (to, all) = read_lines(&mut File::open(&path).unwrap(), 0, len, u64::MAX, |l| lines.push(parse_bytes(l)));
+        assert_eq!(lines.iter().filter(|e| **e == Some(LogEvent::LeftRoom)).count(), 2, "the first and the last, not the long one");
+        assert_eq!((to, all), (len - "partial".len() as u64, true));
+        // A budget stops at a line's end, and the next read goes on from there.
+        let (first, all) = read_lines(&mut File::open(&path).unwrap(), 0, len, 1, |_| {});
+        assert_eq!((first, all), (left.len() as u64 + 2, false));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_run_that_began_last_is_followed() {
+        let dir = temp_dir("newest");
+        std::fs::write(dir.join("output_log_2026-10-20_10-00-00.txt"), "").unwrap();
+        std::fs::write(dir.join("output_log_2026-10-19_23-00-00.txt"), "").unwrap();
+        // Written to last, but older.
+        std::fs::write(dir.join("output_log_2026-10-19_23-00-00.txt"), "touched").unwrap();
+        std::fs::write(dir.join("output_log_notes.txt"), "").unwrap();
+        assert_eq!(newest_log(&dir).unwrap().file_name().unwrap(), "output_log_2026-10-20_10-00-00.txt");
         std::fs::remove_dir_all(dir).ok();
     }
 }

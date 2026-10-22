@@ -25,9 +25,40 @@ pub fn file() -> PathBuf {
     orbiters_core::paths::config_dir().join("orb").join("videos.json")
 }
 
+/// How reading the saved videos went.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Loaded {
+    /// The whole list (an empty one when there was no file yet).
+    Whole,
+    /// Some entries could not be read (a hand edit, a newer version's): the others were kept, and the file was copied
+    /// aside first (`<name>.bad-<seconds>`), so the next save loses nothing.
+    Partial(Option<PathBuf>),
+    /// The file could not be read at all (another program holds it, no permission): saving over it would lose it.
+    Unreadable(String),
+}
+
 impl Videos {
+    /// The list in `path`, and how reading it went.
+    pub fn read(path: &Path) -> (Self, Loaded) {
+        let text = match orbiters_core::read_text(path) {
+            Ok(None) => return (Self::default(), Loaded::Whole),
+            Ok(Some(text)) => text,
+            Err(e) => return (Self::default(), Loaded::Unreadable(e.to_string())),
+        };
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        if let Ok(videos) = serde_json::from_str::<Videos>(text) {
+            return (videos, Loaded::Whole);
+        }
+        // Entry by entry: what can be read stays.
+        let entries =
+            serde_json::from_str::<serde_json::Value>(text).ok().and_then(|v| v.get("videos").and_then(|l| l.as_array()).cloned()).unwrap_or_default();
+        let videos = entries.into_iter().filter_map(|e| serde_json::from_value(e).ok()).collect();
+        (Self { videos }, Loaded::Partial(orbiters_core::keep_aside(path)))
+    }
+
+    /// The list in `path`, whatever could be read of it.
     pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        Self::read(path).0
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
@@ -145,5 +176,23 @@ mod tests {
         videos.save(&path).unwrap();
         assert_eq!(Videos::load(&path), videos);
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_list_read_in_part_is_kept_aside_before_it_is_replaced() {
+        let dir = std::env::temp_dir().join(format!("orb-videos-partial-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("videos.json");
+        assert_eq!(Videos::read(&path), (Videos::default(), Loaded::Whole), "no file yet");
+        // One entry from a newer version (no saved_utc), one as this version writes them.
+        let text =
+            "\u{feff}{ \"videos\": [ { \"url\": \"https://vimeo.com/2\", \"rating\": 5 }, { \"url\": \"https://vimeo.com/1\", \"saved_utc\": \"t\" } ] }";
+        std::fs::write(&path, text).unwrap();
+        let (videos, loaded) = Videos::read(&path);
+        assert_eq!(videos.videos.len(), 1);
+        assert_eq!(videos.videos[0].url, "https://vimeo.com/1");
+        let Loaded::Partial(Some(aside)) = loaded else { panic!("{loaded:?}") };
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), text, "the whole file, as it was");
+        std::fs::remove_dir_all(dir).ok();
     }
 }

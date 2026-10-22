@@ -46,7 +46,7 @@ pub struct Compositor<'a> {
 
 impl Client {
     pub fn compositor(&self) -> Result<Compositor<'_>, Error> {
-        Ok(Compositor { table: self.interface(COMPOSITOR_VERSION)?, _client: self })
+        Ok(Compositor { table: self.table(&self.compositor_table, COMPOSITOR_VERSION)?, _client: self })
     }
 }
 

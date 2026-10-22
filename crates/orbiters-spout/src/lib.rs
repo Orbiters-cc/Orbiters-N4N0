@@ -4,14 +4,14 @@
 //! (BSD-2-Clause, Lynn Jarvis / leadedge): `SpoutSenderNames`, `<name>`, `<name>_SpoutAccessMutex`,
 //! `<name>_Count_Semaphore`.
 //!
-//! [`Receiver`] reads any Spout sender (VRChat's Stream camera, OBS, …) into CPU memory;
-//! [`Sender`] publishes frames, used by tests and the test-pattern source.
+//! [`Receiver`] reads any Spout sender (VRChat's Stream camera, OBS, …) into CPU memory, only the rows asked for
+//! ([`FrameReader`]); [`Sender`] publishes frames, used by tests and the test-pattern source.
 
 #[cfg(windows)]
 mod win;
 
 #[cfg(windows)]
-pub use win::{active_sender, list_senders, sender_info, Receiver, Sender};
+pub use win::{active_sender, list_senders, sender_info, FrameReader, Receiver, Sender};
 
 /// Description of a Spout sender, from its shared info block.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +42,8 @@ pub struct Frame<'a> {
     pub order: ChannelOrder,
     /// Sender frame counter when available (increases by one per sent frame).
     pub frame_count: Option<i64>,
+    /// When the receiver saw the frame: just before it copied it from the sender's texture.
+    pub seen: std::time::Instant,
 }
 
 #[derive(Debug)]

@@ -296,7 +296,7 @@ mod tests {
             (map.cells[2 * i], map.cells[2 * i + 1])
         };
         let (sectors, bits) = at(0.25, 6.1);
-        assert!(sectors >= 1 && sectors <= 2 && bits & cell_bits::OBSTACLE != 0, "wall cell {sectors} {bits:#x}");
+        assert!((1..=2).contains(&sectors) && bits & cell_bits::OBSTACLE != 0, "wall cell {sectors} {bits:#x}");
         let (_, floor_bits) = at(0.25, 2.25);
         assert!(floor_bits & cell_bits::FLOOR != 0 && floor_bits & cell_bits::OBSTACLE == 0, "floor cell {floor_bits:#x}");
         assert!(map.hints.iter().any(|h| h.contains("ahead") && h.contains("one direction")), "{:?}", map.hints);

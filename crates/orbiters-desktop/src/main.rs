@@ -11,6 +11,7 @@ mod backend;
 mod controller;
 mod gpu;
 mod ipc;
+mod mailbox;
 mod mixer_inbox;
 mod overlay;
 mod pages;
@@ -27,6 +28,7 @@ mod window;
 mod worker;
 
 fn main() -> anyhow::Result<()> {
+    orbiters_core::panic_log::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--screenshot") => screenshot::run(&args[1..]),

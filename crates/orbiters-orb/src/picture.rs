@@ -78,9 +78,36 @@ pub fn fit(source: &Grey, width: usize, height: usize) -> Vec<f32> {
     out
 }
 
+/// Values (0 to 1) stretched so that the darkest and the brightest two percent reach black and white: a dull or dark
+/// thumbnail keeps its shapes once dithered to a few levels. A nearly flat picture is left as it is.
+pub fn stretch(values: &mut [f32]) {
+    if values.len() < 2 {
+        return;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let low = sorted[sorted.len() * 2 / 100];
+    let high = sorted[(sorted.len() * 98 / 100).min(sorted.len() - 1)];
+    if high - low < 0.05 {
+        return;
+    }
+    for v in values.iter_mut() {
+        *v = ((*v - low) / (high - low)).clamp(0.0, 1.0);
+    }
+}
+
+/// sRGB values (as a JPEG holds them, 0 to 1) as linear light: black and white pixels side by side show the mean of
+/// their light, so what dithering shares out must be light. Mid grey (0.5) is about a fifth of white's light.
+pub fn to_linear(values: &mut [f32]) {
+    for v in values.iter_mut() {
+        let c = v.clamp(0.0, 1.0);
+        *v = if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+    }
+}
+
 /// Each value (0 to 1) as one of `levels` grey levels (0 to `levels` − 1), the error spread to the neighbours
-/// (Floyd–Steinberg, rows walked back and forth so it leaves no diagonal streaks). The values are taken as they look:
-/// a level's share of white is its brightness.
+/// (Floyd–Steinberg, rows walked back and forth so it leaves no diagonal streaks). A level's share of white is the
+/// value: give it light ([`to_linear`]) for the dots to look as bright as the picture.
 pub fn dither(values: &[f32], width: usize, height: usize, levels: u8) -> Vec<u8> {
     let top = levels.max(2) as f32 - 1.0;
     let mut error = values.iter().map(|v| v.clamp(0.0, 1.0) * top).collect::<Vec<f32>>();
@@ -155,6 +182,19 @@ mod tests {
         let four = dither(&vec![0.5; w * h], w, h, 4);
         let mean = four.iter().map(|&v| v as f32 / 3.0).sum::<f32>() / (w * h) as f32;
         assert!((mean - 0.5).abs() < 0.02 && four.iter().all(|&v| v <= 3));
+    }
+
+    #[test]
+    fn stretches_levels_and_takes_light() {
+        let mut dull: Vec<f32> = (0..100).map(|i| 0.4 + 0.2 * i as f32 / 99.0).collect();
+        stretch(&mut dull);
+        assert!(dull[1] < 0.01 && dull[98] > 0.99, "{} {}", dull[1], dull[98]);
+        let mut flat = vec![0.5; 50];
+        stretch(&mut flat);
+        assert_eq!(flat, vec![0.5; 50], "a flat picture is left alone");
+        let mut grey = vec![0.0, 0.5, 1.0];
+        to_linear(&mut grey);
+        assert!(grey[0] == 0.0 && (grey[1] - 0.214).abs() < 0.01 && (grey[2] - 1.0).abs() < 1e-6, "{grey:?}");
     }
 
     #[test]

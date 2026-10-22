@@ -23,6 +23,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         renderer: eframe::Renderer::Wgpu,
         centered: true,
         wgpu_options: gpu::options(),
+        // `orbiters_ui::install` brings its own (the system's fonts for other scripts, opened as needed): eframe's
+        // stand-in would only log that it has none.
+        system_font_fallback: false,
         ..Default::default()
     };
     eframe::run_native("Orbiters desktop", options, Box::new(move |cc| Ok(Box::new(App::new(cc, backend, splash))))).map_err(|e| anyhow::anyhow!("{e}"))

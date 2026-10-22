@@ -66,7 +66,9 @@ pub fn read(path: &Path) -> anyhow::Result<Gaussians> {
         bail!("unexpected PLY properties: {props:?}");
     }
     let stride = PROPERTIES.len() * 4;
-    if data.len() < end + count * stride {
+    // A header may claim any count: one past what the file holds is an error, never an overflow.
+    let needed = count.checked_mul(stride).and_then(|b| b.checked_add(end)).context("PLY vertex count out of range")?;
+    if data.len() < needed {
         bail!("PLY truncated");
     }
     let mut g = Gaussians::default();
@@ -108,5 +110,25 @@ mod tests {
                 assert!((mirrored[i][j] - s[i] * r[i][j] * s[j]).abs() < 1e-5);
             }
         }
+    }
+
+    /// A header claiming more vertices than the file holds, or more than fit in memory, is an error, not a panic.
+    #[test]
+    fn a_crafted_vertex_count_is_refused() {
+        let mut g = Gaussians::default();
+        g.push([1.0, 2.0, 3.0], [-2.0; 3], [1.0, 0.0, 0.0, 0.0], 0.4, [0.2, 0.5, 0.8]);
+        let path = std::env::temp_dir().join(format!("orbiters-ply-crafted-{}.ply", std::process::id()));
+        write(&path, &g).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let line = b"element vertex 1\n";
+        let at = bytes.windows(line.len()).position(|w| w == line).expect("vertex line");
+        for count in ["2", "18446744073709551615", "1229782938247303441"] {
+            let mut crafted = bytes[..at].to_vec();
+            crafted.extend_from_slice(format!("element vertex {count}\n").as_bytes());
+            crafted.extend_from_slice(&bytes[at + line.len()..]);
+            std::fs::write(&path, &crafted).unwrap();
+            assert!(read(&path).is_err(), "{count}");
+        }
+        std::fs::remove_file(&path).ok();
     }
 }

@@ -56,19 +56,20 @@ impl TPoseDetector {
         TPoseCheck::of(head, left, right).all()
     }
 
-    /// `true` at the moment a held T-pose counts.
+    /// `true` at the moment a held T-pose counts. A time earlier than the last (a clock that went back) counts as no
+    /// time passed.
     pub fn update(&mut self, time_ns: u64, in_pose: bool) -> bool {
         if in_pose {
             self.left_since = None;
             let since = *self.held_since.get_or_insert(time_ns);
-            if !self.fired && time_ns - since >= 500_000_000 {
+            if !self.fired && time_ns.saturating_sub(since) >= 500_000_000 {
                 self.fired = true;
                 return true;
             }
         } else {
             self.held_since = None;
             let since = *self.left_since.get_or_insert(time_ns);
-            if time_ns - since >= 1_000_000_000 {
+            if time_ns.saturating_sub(since) >= 1_000_000_000 {
                 self.fired = false;
             }
         }
@@ -135,6 +136,9 @@ mod tests {
         let mut d = TPoseDetector::default();
         assert!(!d.update(0, true) && d.update(500_000_000, true) && !d.update(900_000_000, true), "fires once per hold");
         assert!(!d.update(1_000_000_000, false) && !d.update(2_100_000_000, false) && !d.update(2_200_000_000, true) && d.update(2_700_000_000, true));
+        // Time that goes back neither panics nor fires.
+        let mut back = TPoseDetector::default();
+        assert!(!back.update(5_000_000_000, true) && !back.update(1, true) && !back.update(2, false) && !back.update(1, false));
 
         let devices = vec![
             Device { serial: "H".into(), class: DeviceClass::Hmd, role: "head".into(), ..Default::default() },

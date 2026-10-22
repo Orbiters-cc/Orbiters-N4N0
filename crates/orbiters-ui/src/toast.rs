@@ -104,13 +104,13 @@ impl Toasts {
                     dismissed.push(t.id);
                 }
                 let mut p = ui.painter().clone();
-                p.set_opacity(alpha);
+                p.multiply_opacity(alpha);
                 widgets::panel(&p, rect, 16.0);
                 widgets::icon(&p, pos2(rect.left() + 16.0 + 8.5, rect.top() + 14.0 + 10.0), glyph, 17.0, color);
                 p.galley(pos2(rect.left() + 16.0 + 17.0 + 12.0, rect.top() + 14.0), galley, theme::FG);
-                // Countdown bar.
+                // Countdown bar: a 2-point line shrinking over seconds needs no more than 30 frames a second.
                 let life = t.kind.lifetime();
-                let k = 1.0 - (anim::since(ctx, t.born, life) / life).clamp(0.0, 1.0) as f32;
+                let k = 1.0 - (anim::since_every(ctx, t.born, life, 30.0) / life).clamp(0.0, 1.0) as f32;
                 if k > 0.0 {
                     // Inside the rounded corners, shrinking towards the left.
                     let track = Rect::from_min_max(pos2(rect.left() + 14.0, rect.bottom() - 3.0), pos2(rect.right() - 14.0, rect.bottom() - 1.0));

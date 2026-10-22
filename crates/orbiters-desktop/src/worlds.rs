@@ -1,7 +1,8 @@
-//! What the Visited worlds page reads, in the window process: the worlds visited (the tray service keeps them from
-//! VRChat's logs), the screenshots taken in each and the sessions recorded there; each world's public page on the Map
-//! explorer (cached for a few days); and pictures, decoded off the interface thread by a few loaders, with small
-//! thumbnails kept on disk so a library of 4K screenshots opens at once the second time.
+//! What the library pages read, in the window process: the sessions (with their sizes kept between listings, for the
+//! Sessions and Visited worlds pages alike); the worlds visited (the tray service keeps them from VRChat's logs), the
+//! screenshots taken in each and the sessions recorded there; each world's public page on the Map explorer (cached
+//! for a few days); and pictures, decoded off the interface thread by a few loaders, with small thumbnails kept on
+//! disk so a library of 4K screenshots opens at once the second time.
 
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use orbiters_contracts::qoi;
@@ -15,6 +16,20 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
+
+/// Sessions under `root`, newest first ([`bundle::list_sessions`]), each session's size kept from the last listing
+/// while it has not changed (`bundle::session_size`, which the tray service's storage count shares): entering a library
+/// page reads the manifests again and walks only the sessions written since, not every file of every session.
+pub fn sessions(root: &Path) -> Vec<SessionSummary> {
+    bundle::list_sessions(root)
+}
+
+/// The screenshot index is read, changed and saved by two jobs of this window (the worlds, a world's hashes): one at
+/// a time, so neither saves over what the other just added.
+fn shot_index_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// A world with what this computer has of it.
 #[derive(Clone, Debug)]
@@ -40,10 +55,14 @@ impl VisitedWorld {
 pub fn load(sessions_dir: &Path) -> Vec<VisitedWorld> {
     let history = visited::History::load(&visited::history_file());
     let index_file = visited::shot_index_file();
-    let mut index = visited::ShotIndex::load(&index_file);
-    if index.refresh(&visited::screenshot_dirs()) {
-        let _ = index.save(&index_file);
-    }
+    let index = {
+        let _one = shot_index_lock();
+        let mut index = visited::ShotIndex::load(&index_file);
+        if index.refresh(&visited::screenshot_dirs()) {
+            let _ = index.save(&index_file);
+        }
+        index
+    };
     let mut worlds: BTreeMap<String, VisitedWorld> = BTreeMap::new();
     fn entry<'a>(worlds: &'a mut BTreeMap<String, VisitedWorld>, id: &str) -> &'a mut VisitedWorld {
         worlds.entry(id.to_string()).or_insert_with(|| VisitedWorld {
@@ -72,7 +91,7 @@ pub fn load(sessions_dir: &Path) -> Vec<VisitedWorld> {
         }
         w.shots.push(shot);
     }
-    for s in bundle::list_sessions(sessions_dir) {
+    for s in sessions(sessions_dir) {
         let Some(world) = s.manifest.world.as_ref() else { continue };
         let Some(id) = world.id.clone().filter(|id| id.starts_with("wrld_")) else { continue };
         let w = entry(&mut worlds, &id);
@@ -84,7 +103,7 @@ pub fn load(sessions_dir: &Path) -> Vec<VisitedWorld> {
     }
     let mut out: Vec<VisitedWorld> = worlds.into_values().collect();
     for w in &mut out {
-        w.sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
+        w.sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
         if w.name.is_empty() {
             w.name = "Unnamed world".into();
         }
@@ -97,6 +116,7 @@ pub fn load(sessions_dir: &Path) -> Vec<VisitedWorld> {
 /// shared by it.
 pub fn hashes(paths: Vec<PathBuf>) -> HashMap<PathBuf, String> {
     let index_file = visited::shot_index_file();
+    let _one = shot_index_lock();
     let mut index = visited::ShotIndex::load(&index_file);
     if index.hash(&paths) {
         let _ = index.save(&index_file);
@@ -105,8 +125,24 @@ pub fn hashes(paths: Vec<PathBuf>) -> HashMap<PathBuf, String> {
     index.shots().into_iter().filter(|s| wanted.contains(&s.path)).filter_map(|s| Some((s.path, s.sha256?))).collect()
 }
 
+/// World pages, their pictures and thumbnails: made again when missing, so they live on this computer only
+/// ([`orbiters_core::paths::cache_dir`]), not in the roaming config folder where they were before. What was kept there
+/// is moved over once (a rename on the same disk; when it cannot be, it is made again).
 fn cache_dir() -> PathBuf {
-    orbiters_core::paths::config_dir().join("cache")
+    static MOVED: std::sync::Once = std::sync::Once::new();
+    let dir = orbiters_core::paths::cache_dir();
+    if !cfg!(test) {
+        MOVED.call_once(|| {
+            let old = orbiters_core::paths::config_dir().join("cache");
+            for part in ["worlds", "thumbs", "screenshots.json"] {
+                let (from, to) = (old.join(part), dir.join(part));
+                if from.exists() && !to.exists() && std::fs::create_dir_all(&dir).is_ok() {
+                    let _ = std::fs::rename(&from, &to);
+                }
+            }
+        });
+    }
+    dir
 }
 
 /// Orbiters for public reads. `ORBITERS_PUBLIC_API` points them at another server (screenshots against a disposable
@@ -167,9 +203,9 @@ impl Infos {
                             Ok(page) => {
                                 if keep {
                                     let _ = std::fs::create_dir_all(&dir);
-                                    let _ = std::fs::write(
+                                    let _ = orbiters_core::write_atomic(
                                         &file,
-                                        serde_json::to_vec(&CachedInfo { fetched: visited::now(), page: page.clone() }).unwrap_or_default(),
+                                        &serde_json::to_vec(&CachedInfo { fetched: visited::now(), page: page.clone() }).unwrap_or_default(),
                                     );
                                 }
                                 page.map_or(Info::Unlisted, |p| Info::Listed(Box::new(p)))
@@ -222,13 +258,28 @@ enum Slot {
     Missing,
 }
 
+/// A picture as the pages keep it, and when they last asked for it (egui's clock).
+struct Kept {
+    slot: Slot,
+    used: f64,
+}
+
 type Loaded = (Picture, Option<ColorImage>);
+
+/// Bytes of picture textures kept (about ninety thumbnails, three screens of a world's pictures): those asked for
+/// most recently. The others are decoded again (from the small copies kept on disk) when they come back into view.
+const KEEP_BYTES: usize = 48 << 20;
+
+/// A waiting picture nobody asked for since this long (scrolled past) is not decoded after all.
+const STALE_REQUEST: f64 = 2.0;
 
 /// Pictures decoded by three loader threads (newest requests first), uploaded as textures on the interface thread.
 pub struct Pictures {
-    slots: HashMap<Picture, Slot>,
+    slots: HashMap<Picture, Kept>,
     queue: Arc<(Mutex<Vec<Picture>>, std::sync::Condvar)>,
     done: Arc<Mutex<Vec<Loaded>>>,
+    /// When the pictures were last trimmed to [`KEEP_BYTES`] (egui's clock).
+    trimmed: f64,
 }
 
 impl Pictures {
@@ -258,38 +309,86 @@ impl Pictures {
                 })
                 .expect("picture loader");
         }
-        Self { slots: HashMap::new(), queue, done }
+        Self { slots: HashMap::new(), queue, done, trimmed: f64::NEG_INFINITY }
     }
 
     /// The picture as a texture once decoded; asks for it the first time (and again to bring it forward while it
     /// waits, so what is on screen loads first).
     pub fn get(&mut self, ctx: &egui::Context, picture: &Picture) -> Option<TextureHandle> {
+        let now = ctx.input(|i| i.time);
         for (p, image) in std::mem::take(&mut *self.done.lock().unwrap()) {
-            let slot = match image {
+            // One no longer wanted (scrolled past while it was decoded) is dropped.
+            let Some(kept) = self.slots.get_mut(&p) else { continue };
+            kept.slot = match image {
                 Some(image) => Slot::Ready(ctx.load_texture(format!("picture-{:x}", key(&p)), image, TextureOptions::LINEAR)),
                 None => Slot::Missing,
             };
-            self.slots.insert(p, slot);
         }
-        match self.slots.get(picture) {
-            Some(Slot::Ready(t)) => Some(t.clone()),
-            Some(Slot::Missing) => None,
-            Some(Slot::Loading) => {
-                let (lock, _) = &*self.queue;
-                let mut q = lock.lock().unwrap();
-                if let Some(i) = q.iter().position(|p| p == picture) {
-                    let p = q.remove(i);
-                    q.push(p);
+        if now - self.trimmed > 0.5 {
+            self.trimmed = now;
+            self.trim(now);
+        }
+        match self.slots.get_mut(picture) {
+            Some(kept) => {
+                kept.used = now;
+                match &kept.slot {
+                    Slot::Ready(t) => Some(t.clone()),
+                    Slot::Missing => None,
+                    Slot::Loading => {
+                        // (Not in the queue: a loader has it.)
+                        let (lock, _) = &*self.queue;
+                        let mut q = lock.lock().unwrap();
+                        if let Some(i) = q.iter().position(|p| p == picture) {
+                            let p = q.remove(i);
+                            q.push(p);
+                        }
+                        None
+                    }
                 }
-                None
             }
             None => {
-                self.slots.insert(picture.clone(), Slot::Loading);
+                self.slots.insert(picture.clone(), Kept { slot: Slot::Loading, used: now });
                 let (lock, ready) = &*self.queue;
                 lock.lock().unwrap().push(picture.clone());
                 ready.notify_one();
                 None
             }
+        }
+    }
+
+    /// Whether pictures asked for are still being decoded.
+    pub fn loading(&self) -> bool {
+        self.slots.values().any(|k| matches!(k.slot, Slot::Loading))
+    }
+
+    /// Requests nobody repeated for [`STALE_REQUEST`] leave the queue, and the textures asked for longest ago go
+    /// beyond [`KEEP_BYTES`] (a big library browsed end to end would otherwise keep hundreds).
+    fn trim(&mut self, now: f64) {
+        let stale = |k: &Kept| matches!(k.slot, Slot::Loading) && now - k.used > STALE_REQUEST;
+        {
+            let (lock, _) = &*self.queue;
+            let slots = &self.slots;
+            lock.lock().unwrap().retain(|p| slots.get(p).is_some_and(|k| !stale(k)));
+        }
+        self.slots.retain(|_, k| !stale(k));
+        let bytes = |k: &Kept| match &k.slot {
+            Slot::Ready(t) => t.byte_size(),
+            _ => 0,
+        };
+        let mut total: usize = self.slots.values().map(bytes).sum();
+        if total <= KEEP_BYTES {
+            return;
+        }
+        // What was on screen in the last second stays, whatever it weighs.
+        let mut old: Vec<(f64, Picture, usize)> =
+            self.slots.iter().filter(|(_, k)| matches!(k.slot, Slot::Ready(_)) && k.used < now - 1.0).map(|(p, k)| (k.used, p.clone(), bytes(k))).collect();
+        old.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, p, size) in old {
+            if total <= KEEP_BYTES {
+                break;
+            }
+            self.slots.remove(&p);
+            total -= size;
         }
     }
 
@@ -316,31 +415,35 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
         }
         Picture::Shot { path, width, .. } => {
             let cached = (*width <= THUMB_WIDTH).then(|| cache_dir().join("thumbs").join(format!("{:016x}.qoi", key(picture))));
-            if let Some((h, rgba)) = cached.as_ref().and_then(|c| std::fs::read(c).ok()).and_then(|d| qoi::decode_rgba(&d).ok()) {
+            // A thumbnail is at most THUMB_WIDTH wide (and, a picture standing up, four times as tall): a file saying it
+            // is bigger is not one, and is made again rather than given its memory.
+            let most = u64::from(THUMB_WIDTH) * u64::from(THUMB_WIDTH) * 4;
+            if let Some((h, rgba)) = cached.as_ref().and_then(|c| std::fs::read(c).ok()).and_then(|d| qoi::decode_rgba_max(&d, most).ok()) {
                 return Some(ColorImage::from_rgba_unmultiplied([h.width as usize, h.height as usize], &rgba));
             }
             let (w, h, rgba) = decode_png(&std::fs::read(path).ok()?)?;
             let (tw, th, rgb) = bundle::downscale(&rgba, w, h, *width);
             if let Some(c) = cached {
                 let _ = std::fs::create_dir_all(c.parent()?);
-                let _ = std::fs::write(&c, qoi::encode(&rgb, tw, th, 3));
+                let _ = orbiters_core::write_atomic(&c, &qoi::encode(&rgb, tw, th, 3));
             }
             Some(ColorImage::from_rgb([tw as usize, th as usize], &rgb))
         }
         Picture::Remote { world_id, url, large } => {
             let file = cache_dir().join("worlds").join(format!("{world_id}{}.png", if *large { "-large" } else { "" }));
-            let bytes = match std::fs::read(&file) {
-                Ok(b) if keep => b,
-                _ => {
+            // One kept that cannot be read (cut short) is fetched again.
+            let kept = keep.then(|| std::fs::read(&file).ok()).flatten().and_then(|b| decode_png(&b));
+            let (w, h, rgba) = match kept {
+                Some(picture) => picture,
+                None => {
                     let b = api.image(url).ok()?;
                     if keep {
                         let _ = std::fs::create_dir_all(file.parent()?);
-                        let _ = std::fs::write(&file, &b);
+                        let _ = orbiters_core::write_atomic(&file, &b);
                     }
-                    b
+                    decode_png(&b)?
                 }
             };
-            let (w, h, rgba) = decode_png(&bytes)?;
             Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
         }
     }
@@ -362,4 +465,30 @@ pub fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         png::ColorType::Indexed => return None,
     };
     Some((info.width, info.height, rgba))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_sizes_are_kept_until_the_session_changes() {
+        let root = std::env::temp_dir().join(format!("orbiters-window-library-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let m = orbiters_contracts::manifest::SessionManifest::new("id-1".into(), orbiters_core::now_utc_iso(), "0.1.0");
+        let (dir, _) = bundle::BundleWriter::create(&root, "World: test", m).unwrap().finish().unwrap();
+        let first = sessions(&root);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].size_bytes, bundle::folder_size(&dir));
+        assert_eq!(sessions(&root)[0].size_bytes, first[0].size_bytes);
+        // A file added to the session: its folder changed, its size is walked again (past the file system clock's
+        // tick, about 16 ms on Windows, so that the change has a time of its own).
+        std::thread::sleep(Duration::from_millis(40));
+        std::fs::write(dir.join("extra.bin"), vec![0u8; 1000]).unwrap();
+        assert_eq!(sessions(&root)[0].size_bytes, first[0].size_bytes + 1000);
+        // Gone from the folder, gone from the list.
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(sessions(&root).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

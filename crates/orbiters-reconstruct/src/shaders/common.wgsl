@@ -13,7 +13,7 @@ struct Frame {
     background: vec4<f32>,
     // Width, height, tiles across, tiles down.
     size: vec4<u32>,
-    // Gaussians, intersections, depth bits of a sort key, unused.
+    // Gaussians, unused, depth bits of a sort key, 1 to regularise the Gaussians a training step does not show too.
     counts: vec4<u32>,
     // Loss weights: colour L1, depth, unused, scene pixels or depth samples in this view.
     loss: vec4<f32>,

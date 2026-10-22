@@ -1,5 +1,6 @@
-//! Frame sources. Each lends frames as borrowed [`ImageView`]s so Spout frames are decoded straight from
-//! mapped GPU memory without an extra copy.
+//! Frame sources. Each lends its frames through [`FrameAccess`]: a Spout frame is read back from the GPU only as far
+//! as the decoders ask (the strip and the skeleton band of most frames, all of a keyframe or a depth frame), and
+//! decoded straight from mapped GPU memory without an extra copy.
 
 use orbiters_contracts::image::{ImageView, PixelOrder, RgbaImage};
 use orbiters_contracts::raw_capture::{self, RawCapture};
@@ -16,28 +17,118 @@ pub enum Next {
     End,
 }
 
+/// One frame lent by a source.
+pub trait FrameAccess {
+    fn width(&self) -> u32;
+    fn height(&self) -> u32;
+    /// When the frame was seen, on the shared clock ([`orbiters_core::clock::now_ns`]).
+    fn seen_ns(&self) -> u64;
+    /// The picture with at least these ranges of rows (top-down as stored, ends excluded) of this frame. Only those
+    /// rows are sure to be: read nothing else.
+    fn rows(&mut self, ranges: &[(u32, u32)]) -> anyhow::Result<ImageView<'_>>;
+    /// The whole picture.
+    fn full(&mut self) -> anyhow::Result<ImageView<'_>>;
+}
+
+/// A frame held whole in memory (files, test patterns).
+pub struct Whole<'a> {
+    pub view: ImageView<'a>,
+    pub seen_ns: u64,
+}
+
+impl<'a> Whole<'a> {
+    pub fn new(view: ImageView<'a>) -> Self {
+        Self { view, seen_ns: orbiters_core::clock::now_ns() }
+    }
+}
+
+impl FrameAccess for Whole<'_> {
+    fn width(&self) -> u32 {
+        self.view.width
+    }
+
+    fn height(&self) -> u32 {
+        self.view.height
+    }
+
+    fn seen_ns(&self) -> u64 {
+        self.seen_ns
+    }
+
+    fn rows(&mut self, _ranges: &[(u32, u32)]) -> anyhow::Result<ImageView<'_>> {
+        Ok(self.view)
+    }
+
+    fn full(&mut self) -> anyhow::Result<ImageView<'_>> {
+        Ok(self.view)
+    }
+}
+
 pub trait FrameSource: Send {
     /// Short human description ("Spout: VRChat", "Raw capture: Test 2026-10-20").
     fn describe(&self) -> String;
     /// Name for the session folder.
     fn folder_hint(&self) -> String;
-    fn next(&mut self, timeout: Duration, f: &mut dyn FnMut(ImageView<'_>)) -> anyhow::Result<Next>;
+    fn next(&mut self, timeout: Duration, f: &mut dyn FnMut(&mut dyn FrameAccess)) -> anyhow::Result<Next>;
+    /// What the person should know about the source since the last call (a sender that cannot be opened, frames
+    /// that could not be read): the source keeps going.
+    fn warning(&mut self) -> Option<String> {
+        None
+    }
+}
+
+/// Where frames differ from one another: the capture strip's time (its payload's word 2, first copy) in a band of
+/// block rows at the top of the picture, and the same band at the bottom for flipped render targets; and, for frames
+/// without a strip (a kit switched off), eight one-pixel rows across the whole picture. Spout compares these pixels to
+/// tell a new frame from the last one, under 2 % of the picture.
+pub fn strip_probe(width: u32, height: u32) -> Vec<[u32; 4]> {
+    let mut rects = Vec::new();
+    if let Some(l) = strip::StripLayout::new(width, height) {
+        let per_row = l.data_per_row().max(1);
+        let (first, last) = (64 / per_row, 95 / per_row);
+        let (y0, y1) = ((l.y0 + first * l.block).min(height), (l.y0 + (last + 1) * l.block).min(height));
+        let (x0, x1) = (l.x0, (l.x0 + l.cols * l.block).min(width));
+        rects.extend([[x0, y0, x1, y1], [x0, height - y1, x1, height - y0]]);
+    }
+    rects.extend((1..=8).map(|k| height * k / 9).filter(|&y| y < height).map(|y| [0, y, width, y + 1]));
+    rects
 }
 
 // ---------------------------------------------------------------- Spout
+
+/// Reconnection pauses: the first, and the longest while it keeps failing.
+#[cfg(windows)]
+const RETRY_FIRST: Duration = Duration::from_millis(500);
+#[cfg(windows)]
+const RETRY_MOST: Duration = Duration::from_secs(5);
 
 #[cfg(windows)]
 pub struct SpoutSource {
     receiver: orbiters_spout::Receiver,
     wanted: String,
-    connected: Option<String>,
-    last_attempt: Option<Instant>,
+    /// The sender read: the first one this session connected to, kept. A session never moves to another program's
+    /// output (OBS's, the test pattern) when VRChat's goes away: it waits for it.
+    pinned: Option<String>,
+    connected: bool,
+    /// When the next connection attempt may be made, and the pause after the next failure.
+    retry_at: Option<Instant>,
+    backoff: Duration,
+    /// What went wrong last, not yet told.
+    trouble: Option<String>,
 }
 
 #[cfg(windows)]
 impl SpoutSource {
     pub fn new(name: &str) -> anyhow::Result<Self> {
-        Ok(Self { receiver: orbiters_spout::Receiver::new()?, wanted: name.to_string(), connected: None, last_attempt: None })
+        Ok(Self {
+            receiver: orbiters_spout::Receiver::new()?,
+            wanted: name.to_string(),
+            pinned: None,
+            connected: false,
+            retry_at: None,
+            backoff: RETRY_FIRST,
+            trouble: None,
+        })
     }
 
     /// The sender to read: the configured name, else VRChat's, else the active one, else the first.
@@ -54,62 +145,150 @@ impl SpoutSource {
             .or_else(|| senders.first().cloned())
     }
 
-    fn try_connect(&mut self) -> anyhow::Result<bool> {
-        if self.last_attempt.map(|t| t.elapsed() < Duration::from_millis(500)).unwrap_or(false) {
-            return Ok(false);
+    fn try_connect(&mut self) -> bool {
+        if self.retry_at.is_some_and(|t| Instant::now() < t) {
+            return false;
         }
-        self.last_attempt = Some(Instant::now());
-        let Some(name) = Self::pick_sender(&self.wanted) else { return Ok(false) };
-        let info = self.receiver.connect(&name)?;
-        eprintln!("spout: connected to \"{}\" {}x{} (DXGI format {})", info.name, info.width, info.height, info.format);
-        self.connected = Some(name);
-        Ok(true)
+        let name = match &self.pinned {
+            Some(pinned) => Self::pick_sender(pinned),
+            None => Self::pick_sender(&self.wanted),
+        };
+        let Some(name) = name else {
+            // No sender yet: looked for again in a moment.
+            self.retry_at = Some(Instant::now() + RETRY_FIRST);
+            return false;
+        };
+        match self.receiver.connect(&name) {
+            Ok(info) => {
+                eprintln!("spout: connected to \"{}\" {}x{} (DXGI format {})", info.name, info.width, info.height, info.format);
+                self.pinned = Some(name);
+                self.connected = true;
+                self.retry_at = None;
+                self.backoff = RETRY_FIRST;
+                true
+            }
+            Err(e) => {
+                self.failed(format!("Spout: \"{name}\" could not be opened: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Something failed (a sender recreated at a size whose texture cannot be opened, a GPU reset, a format): the
+    /// next attempt opens the sender again, after a pause that grows while it keeps failing.
+    fn failed(&mut self, why: String) {
+        eprintln!("{why}");
+        self.connected = false;
+        self.retry_at = Some(Instant::now() + self.backoff);
+        self.backoff = (self.backoff * 2).min(RETRY_MOST);
+        self.trouble = Some(why);
+    }
+}
+
+/// A Spout frame being read back.
+#[cfg(windows)]
+struct SpoutFrame<'a, 'r> {
+    reader: &'a mut orbiters_spout::FrameReader<'r>,
+    seen_ns: u64,
+}
+
+#[cfg(windows)]
+fn view_of(frame: orbiters_spout::Frame<'_>) -> anyhow::Result<ImageView<'_>> {
+    let order = match frame.order {
+        orbiters_spout::ChannelOrder::Rgba => PixelOrder::Rgba,
+        orbiters_spout::ChannelOrder::Bgra => PixelOrder::Bgra,
+    };
+    Ok(ImageView::try_new(frame.width, frame.height, frame.stride, frame.data, order)?)
+}
+
+#[cfg(windows)]
+impl FrameAccess for SpoutFrame<'_, '_> {
+    fn width(&self) -> u32 {
+        self.reader.width()
+    }
+
+    fn height(&self) -> u32 {
+        self.reader.height()
+    }
+
+    fn seen_ns(&self) -> u64 {
+        self.seen_ns
+    }
+
+    fn rows(&mut self, ranges: &[(u32, u32)]) -> anyhow::Result<ImageView<'_>> {
+        view_of(self.reader.rows(ranges)?)
+    }
+
+    fn full(&mut self) -> anyhow::Result<ImageView<'_>> {
+        view_of(self.reader.full()?)
     }
 }
 
 #[cfg(windows)]
 impl FrameSource for SpoutSource {
     fn describe(&self) -> String {
-        format!("Spout: {}", self.connected.as_deref().unwrap_or(if self.wanted.is_empty() { "waiting for a sender" } else { &self.wanted }))
+        format!("Spout: {}", self.pinned.as_deref().unwrap_or(if self.wanted.is_empty() { "waiting for a sender" } else { &self.wanted }))
     }
 
     fn folder_hint(&self) -> String {
-        self.connected.clone().unwrap_or_else(|| "Spout".into())
+        self.pinned.clone().unwrap_or_else(|| "Spout".into())
     }
 
-    fn next(&mut self, timeout: Duration, f: &mut dyn FnMut(ImageView<'_>)) -> anyhow::Result<Next> {
-        if self.connected.is_none() && !self.try_connect()? {
+    fn next(&mut self, timeout: Duration, f: &mut dyn FnMut(&mut dyn FrameAccess)) -> anyhow::Result<Next> {
+        if !self.connected && !self.try_connect() {
             std::thread::sleep(timeout.min(Duration::from_millis(100)));
             return Ok(Next::Timeout);
         }
-        let result = self.receiver.receive(timeout, |frame| {
-            let order = match frame.order {
-                orbiters_spout::ChannelOrder::Rgba => PixelOrder::Rgba,
-                orbiters_spout::ChannelOrder::Bgra => PixelOrder::Bgra,
-            };
-            f(ImageView::new(frame.width, frame.height, frame.stride, frame.data, order));
+        // The probe for the sender's size (and again for a sender the receiver opened again at another size).
+        if let Some(info) = self.receiver.info() {
+            let probe = strip_probe(info.width, info.height);
+            self.receiver.set_probe(probe);
+        }
+        let result = self.receiver.receive_with(timeout, |reader| {
+            // The time the frame was seen, on the shared clock.
+            let seen_ns = orbiters_core::clock::now_ns().saturating_sub(reader.seen.elapsed().as_nanos() as u64);
+            f(&mut SpoutFrame { reader, seen_ns });
         });
         match result {
             Ok(Some(())) => Ok(Next::Frame),
             Ok(None) => Ok(Next::Timeout),
             Err(orbiters_spout::SpoutError::NotFound(name)) => {
                 eprintln!("spout: sender \"{name}\" went away");
-                self.connected = None;
+                self.connected = false;
                 Ok(Next::Timeout)
             }
-            Err(e) => Err(e.into()),
+            Err(e) => {
+                self.failed(format!("Spout: reading \"{}\" failed: {e}", self.pinned.as_deref().unwrap_or("the sender")));
+                Ok(Next::Timeout)
+            }
         }
+    }
+
+    fn warning(&mut self) -> Option<String> {
+        self.trouble.take()
     }
 }
 
 // ---------------------------------------------------------------- Raw capture folders
 
+/// After this many unreadable frames in a row an import ends: the capture stopped early (fewer files than
+/// `capture.json` says) or its disk went away.
+const MAX_BAD_IN_A_ROW: u32 = 30;
+
+/// A frame read and decoded ahead: its index and its pixels, or why it could not be read.
+type Loaded = (u32, Result<Vec<u8>, String>);
+
 pub struct RawSequenceSource {
     dir: PathBuf,
     meta: RawCapture,
-    index: u32,
     realtime: bool,
     started: Option<Instant>,
+    /// Frames read and decoded ahead on a helper thread, in order: reading the next file overlaps processing this one.
+    loaded: crossbeam_channel::Receiver<Loaded>,
+    /// Frames that could not be read: how many in all, and in a row.
+    skipped: u32,
+    bad_in_a_row: u32,
+    trouble: Option<String>,
 }
 
 impl RawSequenceSource {
@@ -117,11 +296,29 @@ impl RawSequenceSource {
         let text = std::fs::read_to_string(dir.join(raw_capture::RAW_FILE)).map_err(|e| anyhow::anyhow!("{}: no capture.json ({e})", dir.display()))?;
         let meta: RawCapture = serde_json::from_str(&text)?;
         anyhow::ensure!(meta.format == raw_capture::RAW_FORMAT, "{} is not a raw capture", dir.display());
-        Ok(Self { dir: dir.to_path_buf(), meta, index: 0, realtime, started: None })
-    }
-
-    pub fn frame_path(&self, index: u32) -> PathBuf {
-        self.dir.join(raw_capture::FRAMES_DIR).join(raw_capture::frame_file(index))
+        anyhow::ensure!(
+            meta.width > 0 && meta.height > 0 && meta.width as u64 * meta.height as u64 <= qoi::MAX_PIXELS,
+            "{}: capture.json gives a frame size of {}×{}",
+            dir.display(),
+            meta.width,
+            meta.height
+        );
+        let (tx, loaded) = crossbeam_channel::bounded::<Loaded>(2);
+        let (frames, count, (width, height)) = (dir.join(raw_capture::FRAMES_DIR), meta.frame_count, (meta.width, meta.height));
+        std::thread::Builder::new().name("raw-frames".into()).spawn(move || {
+            for index in 0..count {
+                let path = frames.join(raw_capture::frame_file(index));
+                // Each frame must be the size capture.json gives: a broken header cannot make the reader allocate more.
+                let frame = std::fs::read(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|data| qoi::decode_rgba_sized(&data, width, height).map(|(_, rgba)| rgba).map_err(|e| e.to_string()))
+                    .map_err(|e| format!("{}: {e}", path.display()));
+                if tx.send((index, frame)).is_err() {
+                    return;
+                }
+            }
+        })?;
+        Ok(Self { dir: dir.to_path_buf(), meta, realtime, started: None, loaded, skipped: 0, bad_in_a_row: 0, trouble: None })
     }
 }
 
@@ -138,23 +335,41 @@ impl FrameSource for RawSequenceSource {
             .unwrap_or_else(|| self.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Raw capture".into()))
     }
 
-    fn next(&mut self, _timeout: Duration, f: &mut dyn FnMut(ImageView<'_>)) -> anyhow::Result<Next> {
-        if self.index >= self.meta.frame_count {
-            return Ok(Next::End);
-        }
-        let path = self.frame_path(self.index);
-        let data = std::fs::read(&path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-        let (h, rgba) = qoi::decode_rgba(&data)?;
-        if self.realtime && self.meta.fps > 0.0 {
-            let start = *self.started.get_or_insert_with(Instant::now);
-            let due = start + Duration::from_secs_f64(self.index as f64 / self.meta.fps as f64);
-            if let Some(wait) = due.checked_duration_since(Instant::now()) {
-                std::thread::sleep(wait);
+    fn next(&mut self, _timeout: Duration, f: &mut dyn FnMut(&mut dyn FrameAccess)) -> anyhow::Result<Next> {
+        loop {
+            // The helper ends after the last frame.
+            let Ok((index, frame)) = self.loaded.recv() else { return Ok(Next::End) };
+            let rgba = match frame {
+                Ok(rgba) => rgba,
+                Err(why) => {
+                    // A missing or broken frame is skipped and counted; too many in a row end the import.
+                    self.skipped += 1;
+                    self.bad_in_a_row += 1;
+                    eprintln!("raw capture: frame {index} skipped: {why}");
+                    self.trouble = Some(format!("{} frame(s) of the raw capture could not be read ({why})", self.skipped));
+                    if self.bad_in_a_row >= MAX_BAD_IN_A_ROW {
+                        self.trouble = Some(format!("The raw capture ends at frame {index}: {} frames in a row could not be read ({why})", self.bad_in_a_row));
+                        return Ok(Next::End);
+                    }
+                    continue;
+                }
+            };
+            self.bad_in_a_row = 0;
+            if self.realtime && self.meta.fps > 0.0 {
+                let start = *self.started.get_or_insert_with(Instant::now);
+                let due = start + Duration::from_secs_f64(index as f64 / self.meta.fps as f64);
+                if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(wait);
+                }
             }
+            let (w, h) = (self.meta.width, self.meta.height);
+            f(&mut Whole::new(ImageView::new(w, h, w as usize * 4, &rgba, PixelOrder::Rgba)));
+            return Ok(Next::Frame);
         }
-        self.index += 1;
-        f(ImageView::new(h.width, h.height, h.width as usize * 4, &rgba, PixelOrder::Rgba));
-        Ok(Next::Frame)
+    }
+
+    fn warning(&mut self) -> Option<String> {
+        self.trouble.take()
     }
 }
 
@@ -273,7 +488,7 @@ impl FrameSource for TestPatternSource {
         "Test pattern".into()
     }
 
-    fn next(&mut self, _timeout: Duration, f: &mut dyn FnMut(ImageView<'_>)) -> anyhow::Result<Next> {
+    fn next(&mut self, _timeout: Duration, f: &mut dyn FnMut(&mut dyn FrameAccess)) -> anyhow::Result<Next> {
         if self.frames > 0 && self.index >= self.frames {
             return Ok(Next::End);
         }
@@ -286,7 +501,7 @@ impl FrameSource for TestPatternSource {
         }
         let img = self.render(self.index);
         self.index += 1;
-        f(img.view());
+        f(&mut Whole::new(img.view()));
         Ok(Next::Frame)
     }
 }
@@ -329,6 +544,100 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The probe Spout compares to tell frames apart covers the strip's time: two frames that differ by their time
+    /// alone differ there, either way up, and it is a sliver of the picture.
+    #[test]
+    fn the_strip_probe_covers_the_strip_time() {
+        let (w, h) = (1920u32, 1080u32);
+        let probe = strip_probe(w, h);
+        // The strip's two bands, and eight rows across the picture for frames without a strip.
+        assert_eq!(probe.len(), 10);
+        assert!(probe[2..].iter().all(|r| (r[0], r[2], r[3] - r[1]) == (0, w, 1)));
+        assert_eq!(strip_probe(96, 54).len(), 8, "a frame too small for a strip still has its rows");
+        let frame = |time: f32| {
+            let mut img = RgbaImage::new(w, h);
+            let payload = strip::StripPayload {
+                flags: strip::flags::compose(strip::flags::KIND_COLOUR, 0, 0, 0, strip::flags::SOURCE_TEST),
+                time,
+                camera_to_world: TestPatternSource::pose(0.0),
+                projection: [0.97, 1.73, 0.0, 0.0],
+                near: 0.05,
+                far: 1000.0,
+                screen_width: w,
+                screen_height: h,
+            };
+            strip::encode(&mut img, &payload).unwrap();
+            img
+        };
+        let inside = |img: &RgbaImage, r: [u32; 4]| -> Vec<u8> { (r[1]..r[3]).flat_map(|y| (r[0]..r[2]).flat_map(move |x| img.get(x, y))).collect() };
+        let (a, b) = (frame(100.0), frame(100.016_67));
+        assert_ne!(inside(&a, probe[0]), inside(&b, probe[0]), "upright");
+        assert_ne!(inside(&a.flipped_vertically(), probe[1]), inside(&b.flipped_vertically(), probe[1]), "flipped");
+        let area: u32 = probe.iter().map(|r| (r[2] - r[0]) * (r[3] - r[1])).sum();
+        assert!(area * 50 < w * h, "{area} pixels");
+        // Without a strip, a picture that moves below the strip's rows still differs in the probe.
+        let (mut c, mut d) = (RgbaImage::new(w, h), RgbaImage::new(w, h));
+        c.fill_rect(0, h / 2, w, h / 2, [40, 80, 120]);
+        d.fill_rect(0, h / 2 - 100, w, h / 2 + 100, [40, 80, 120]);
+        assert!(probe.iter().any(|&r| inside(&c, r) != inside(&d, r)));
+    }
+
+    fn raw_capture(name: &str, frame_count: u32, frames: &[(u32, Option<Vec<u8>>)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("orbiters-raw-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(raw_capture::FRAMES_DIR)).unwrap();
+        let meta = RawCapture {
+            format: raw_capture::RAW_FORMAT.into(),
+            version: raw_capture::RAW_VERSION,
+            width: 64,
+            height: 64,
+            fps: 30.0,
+            frame_count,
+            ..Default::default()
+        };
+        std::fs::write(dir.join(raw_capture::RAW_FILE), serde_json::to_vec(&meta).unwrap()).unwrap();
+        let picture = qoi::encode(&vec![128u8; 64 * 64 * 4], 64, 64, 4);
+        for (index, bytes) in frames {
+            std::fs::write(dir.join(raw_capture::FRAMES_DIR).join(raw_capture::frame_file(*index)), bytes.clone().unwrap_or_else(|| picture.clone())).unwrap();
+        }
+        dir
+    }
+
+    fn read_all(src: &mut RawSequenceSource) -> u32 {
+        let mut seen = 0;
+        while !matches!(
+            src.next(Duration::from_millis(10), &mut |f| {
+                assert_eq!((f.width(), f.height()), (64, 64));
+                seen += 1;
+            }),
+            Ok(Next::End)
+        ) {}
+        seen
+    }
+
+    /// A missing or broken frame (a file of another size than capture.json says, among them) is skipped and told; the
+    /// import goes on to the end instead of retrying it forever.
+    #[test]
+    fn raw_captures_skip_frames_they_cannot_read() {
+        let other_size = qoi::encode(&vec![0u8; 32 * 32 * 4], 32, 32, 4);
+        let dir = raw_capture("skip", 6, &[(0, None), (1, None), (3, Some(other_size)), (4, Some(b"qoif garbage".to_vec())), (5, None)]);
+        let mut src = RawSequenceSource::open(&dir, false).unwrap();
+        assert_eq!(read_all(&mut src), 3);
+        let told = src.warning().expect("told");
+        assert!(told.contains("3 frame(s)"), "{told}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A capture that stopped early (fewer files than capture.json says) ends after a run of missing frames.
+    #[test]
+    fn a_raw_capture_that_stopped_early_ends() {
+        let dir = raw_capture("short", 1000, &[(0, None), (1, None)]);
+        let mut src = RawSequenceSource::open(&dir, false).unwrap();
+        assert_eq!(read_all(&mut src), 2);
+        assert!(src.warning().is_some_and(|w| w.contains("ends at frame")));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

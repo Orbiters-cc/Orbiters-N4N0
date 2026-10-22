@@ -56,7 +56,7 @@ pub struct Input<'a> {
 
 impl Client {
     pub fn input(&self) -> Result<Input<'_>, Error> {
-        Ok(Input { table: self.interface(INPUT_VERSION)?, _client: self })
+        Ok(Input { table: self.table(&self.input_table, INPUT_VERSION)?, _client: self })
     }
 }
 
@@ -108,9 +108,20 @@ impl Input<'_> {
     /// Reads the actions of every set in `sets` for this frame (once a frame, all of them together).
     pub fn update_sets(&self, sets: &[ActionSetHandle]) -> Result<(), i32> {
         type F = unsafe extern "system" fn(*mut ActiveActionSet, u32, u32) -> i32;
-        let mut active: Vec<ActiveActionSet> = sets.iter().map(|&s| ActiveActionSet { action_set: s, ..Default::default() }).collect();
-        if active.is_empty() {
+        if sets.is_empty() {
             return Ok(());
+        }
+        // A few sets each frame: on the stack.
+        let mut few = [ActiveActionSet::default(); 8];
+        let mut many = Vec::new();
+        let active: &mut [ActiveActionSet] = if sets.len() <= few.len() {
+            &mut few[..sets.len()]
+        } else {
+            many.resize(sets.len(), ActiveActionSet::default());
+            &mut many
+        };
+        for (a, &s) in active.iter_mut().zip(sets) {
+            a.action_set = s;
         }
         // SAFETY: entry 4 is UpdateActionState; `active.len()` sets of the given size.
         result(unsafe { entry::<F>(self.table, 4)(active.as_mut_ptr(), std::mem::size_of::<ActiveActionSet>() as u32, active.len() as u32) })

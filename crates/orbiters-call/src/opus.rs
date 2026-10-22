@@ -2,7 +2,7 @@
 //! packet's inband FEC and by packet loss concealment.
 
 use audiopus::coder::{Decoder, Encoder};
-use audiopus::{Application, Bitrate, Channels, SampleRate};
+use audiopus::{Application, Bitrate, Channels, SampleRate, Signal};
 
 /// Samples a second (mono).
 pub const RATE: usize = 48_000;
@@ -16,6 +16,8 @@ const EXPECTED_LOSS: u8 = 10;
 const MAX_CONCEALED: u16 = 10;
 /// The largest packet a frame can make.
 const MAX_PACKET: usize = 1500;
+/// The encoder's effort (0 to 10): 6 sounds as good for a voice at this bitrate for about half of 10's CPU.
+const COMPLEXITY: u8 = 6;
 
 /// Cuts any sound into 20 ms frames and encodes them.
 pub struct FrameEncoder {
@@ -30,6 +32,9 @@ impl FrameEncoder {
     pub fn new() -> anyhow::Result<Self> {
         let mut encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
         encoder.set_bitrate(Bitrate::BitsPerSecond(BITRATE))?;
+        encoder.set_complexity(COMPLEXITY)?;
+        // Always a voice: Opus need not guess (and never switches to its music mode on a laugh).
+        encoder.set_signal(Signal::Voice)?;
         encoder.set_inband_fec(true)?;
         encoder.set_packet_loss_perc(EXPECTED_LOSS)?;
         Ok(Self { encoder, pending: Vec::with_capacity(FRAME * 2), packet: vec![0; MAX_PACKET], dtx: false })

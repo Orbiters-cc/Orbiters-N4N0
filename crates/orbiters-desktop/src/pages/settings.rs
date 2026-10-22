@@ -1,11 +1,11 @@
 //! Settings page: the Orbiters account, capture, storage, VRChat and OSC, performance, interface, about. Changes apply as they are made (shown at
-//! once, saved in the background); text fields apply with their Save button.
+//! once, saved in the background); text fields apply with their Save button (see [`super::form`]).
 
+use super::form::{self, Texts};
 use super::mic::{mic_test, MicTest};
 use super::{section, Cx, Job};
 use crate::state::AccountState;
 use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder};
-use orbiters_core::settings::Settings;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Variant};
@@ -20,9 +20,8 @@ enum Folder {
 
 #[derive(Default)]
 pub struct State {
-    /// Local copy the controls edit; refreshed whenever the saved settings change elsewhere.
-    draft: Option<Settings>,
-    synced: Option<Settings>,
+    /// The Spout sender and the record parameter as typed, until saved.
+    texts: Texts,
     log_open: bool,
     picker: Option<(Folder, Job<Option<PathBuf>>)>,
     mic: MicTest,
@@ -39,11 +38,10 @@ impl State {
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
-    if state.synced.as_ref() != Some(&cx.snap.settings) {
-        state.draft = Some(cx.snap.settings.clone());
-        state.synced = Some(cx.snap.settings.clone());
-    }
-    let mut draft = state.draft.clone().unwrap_or_else(|| cx.snap.settings.clone());
+    // The controls edit a copy of the settings as published; what they change is saved over the settings as they
+    // are by then (`form::save`).
+    let base = cx.snap.settings.clone();
+    let mut draft = base.clone();
     let mut apply = false;
 
     // A folder chosen in the picker.
@@ -88,11 +86,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::separator(ui);
                 let placeholder = snap.sources.first().map(|s| s.name.clone()).unwrap_or_else(|| "VRChat".into());
                 widgets::field(ui, "Spout sender", Some("Leave empty to pick VRChat's Stream camera automatically."), 290.0, |ui| {
-                    if Button::new("Save").size(Size::Sm).show(ui).clicked() {
+                    if let Some(text) = form::text_row(ui, &mut state.texts, "spout-sender", &base.spout_sender, &placeholder, 208.0, false) {
+                        draft.spout_sender = text;
                         apply = true;
                     }
-                    ui.add_space(8.0);
-                    widgets::text_field(ui, "spout-sender", &mut draft.spout_sender, &placeholder, 208.0, false);
                 });
                 if !snap.sources.is_empty() {
                     ui.horizontal_wrapped(|ui| {
@@ -100,6 +97,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         for s in &snap.sources {
                             if source_chip(ui, &format!("{} · {}×{}", s.name, s.width, s.height), draft.spout_sender == s.name).clicked() {
                                 draft.spout_sender = s.name.clone();
+                                state.texts.forget("spout-sender");
                                 apply = true;
                             }
                         }
@@ -174,11 +172,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 );
                 widgets::separator(ui);
                 widgets::field(ui, "Record parameter", Some("Bool avatar parameter that toggles recording."), 270.0, |ui| {
-                    if Button::new("Save").size(Size::Sm).show(ui).clicked() {
+                    if let Some(text) = form::text_row(ui, &mut state.texts, "record-parameter", &base.osc.record_parameter, "OrbitersRecord", 192.0, true) {
+                        draft.osc.record_parameter = text;
                         apply = true;
                     }
-                    ui.add_space(8.0);
-                    widgets::text_field(ui, "record-parameter", &mut draft.osc.record_parameter, "OrbitersRecord", 192.0, true);
                 });
                 widgets::separator(ui);
                 let log_desc = snap.vrchat.world.log_file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| {
@@ -372,12 +369,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         });
     });
     // Down to where the content starts (its top margin).
-    super::under_top(ui, cx, from, ui.max_rect().top() + cx.top + 8.0);
+    super::under_top(ui, cx, "settings", from, ui.max_rect().top() + cx.top + 8.0);
 
     if apply {
-        cx.ctl.save_settings(draft.clone());
+        form::save(cx.ctl, &base, &draft);
     }
-    state.draft = Some(draft);
 }
 
 fn pick(ctx: &egui::Context, current: &std::path::Path) -> Job<Option<PathBuf>> {

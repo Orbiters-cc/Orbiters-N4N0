@@ -6,6 +6,7 @@ pub mod context;
 pub mod controls;
 pub mod menu;
 pub mod picture;
+pub mod policy;
 pub mod text;
 pub mod tools;
 pub mod videos;

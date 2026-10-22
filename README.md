@@ -68,6 +68,9 @@ person asks. `orbiters-voice transcribe <file.wav>` checks them on 16 kHz record
 Building `orbiters-call` compiles the Opus codec from source and needs CMake on the PATH (3.x; the portable zip from
 Kitware's releases is enough).
 
+Ship `THIRD_PARTY_NOTICES.md` and `THIRD_PARTY_LICENSES.md` with the programs. After a dependency change, regenerate
+the licenses with `python scripts/third_party_licenses.py`.
+
 The app looks for `orbiters-capture`, `orbiters-reconstruct`, `orbiters-voice` and `orbiters-call` next to its own
 executable. What stays running is small: in the tray the
 service and the worker use about 25 MB together and no GPU. The window is a separate process that exists only
@@ -112,5 +115,6 @@ cargo clippy --workspace --all-targets
 
 ## License
 
-Free to use, proprietary source: see [LICENSE.md](LICENSE.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Free to use, proprietary source: see [LICENSE.md](LICENSE.md), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 Copyright (c) 2026 Enzo DUTRA / blackorbit.

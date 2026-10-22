@@ -30,6 +30,11 @@ pub enum WorkerCommand {
     Calibration {
         calibration: Box<Calibration>,
     },
+    /// VRChat runs as process `pid` now (it started after the session did, or restarted): the running session records
+    /// what it plays from now on. Sent while recording with VRChat's sound on.
+    GameAudio {
+        pid: u32,
+    },
     Quit,
 }
 
@@ -212,6 +217,17 @@ pub struct CaptureStats {
     pub calibrations: u64,
     /// Frames whose capture-kit skeleton band was read.
     pub skeleton_frames: u64,
+    /// Depth frames dropped because decoding them fell behind.
+    pub depth_dropped: u64,
+    /// Seconds since a frame's strip was last read, while frames keep coming and after it was read once (0 while it
+    /// is read): frames without it have no camera pose, so no keyframe. The capture kit's "Near you" reach draws it
+    /// only while the camera sees the avatar or is near it.
+    pub strip_missing_s: f32,
+    /// What went wrong that the recording goes on without (a microphone that could not be opened, files that could
+    /// not be written), the latest of each kind. The strip's state is in `last_error`. The worker also sends each as
+    /// an `Error` event, once.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -253,6 +269,26 @@ pub enum WorkerEvent {
 impl WorkerEvent {
     pub fn to_line(&self) -> String {
         serde_json::to_string(self).expect("event serialises")
+    }
+
+    /// Reads one line of the worker's output. A number the worker could not write (serde_json writes NaN as `null`,
+    /// which no float reads) costs that field, not the event: a `Stopped` lost to it would leave the app saving the
+    /// session until the worker is restarted. Other events must read whole.
+    pub fn from_line(line: &str) -> Option<WorkerEvent> {
+        if let Ok(event) = serde_json::from_str(line) {
+            return Some(event);
+        }
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        match value["event"].as_str()? {
+            "stats" => Some(WorkerEvent::Stats(crate::json_lenient::<CaptureStats>(line).0)),
+            "coverage" => Some(WorkerEvent::Coverage(crate::json_lenient::<CoverageMap>(line).0)),
+            "stopped" => Some(WorkerEvent::Stopped {
+                session_dir: serde_json::from_value(value["session_dir"].clone()).ok()?,
+                manifest: Box::new(crate::json_lenient::<SessionManifest>(&value["manifest"].to_string()).0),
+                reason: value["reason"].as_str().unwrap_or_default().to_string(),
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -297,5 +333,25 @@ mod tests {
             r#"{"cmd":"osc","samples":[{"at_ns":5,"address":"/avatar/parameters/Viseme","value":{"type":"int","value":3},"initial":true},{"at_ns":9,"address":"/tracking/vrsystem/head/pose","index":4,"value":{"type":"float","value":90.0}}]}"#
         );
         assert_eq!(serde_json::from_str::<WorkerCommand>(&line).unwrap(), osc);
+    }
+
+    #[test]
+    fn a_number_written_as_null_costs_the_field_not_the_event() {
+        let stats = WorkerEvent::Stats(CaptureStats { frames: 3, fps: f32::NAN, ..Default::default() }).to_line();
+        assert!(stats.contains("\"fps\":null"), "{stats}");
+        assert!(serde_json::from_str::<WorkerEvent>(&stats).is_err(), "strictly, the line is lost");
+        assert!(matches!(WorkerEvent::from_line(&stats), Some(WorkerEvent::Stats(s)) if s.frames == 3 && s.fps == 0.0));
+        let mut manifest = SessionManifest::new("id".into(), "2026-10-21T00:00:00Z".into(), "0.1.0");
+        manifest.stats.duration_s = f64::NAN;
+        manifest.stats.frames = 9;
+        let stopped = WorkerEvent::Stopped { session_dir: "C:/s/x".into(), manifest: Box::new(manifest), reason: "stopped".into() }.to_line();
+        match WorkerEvent::from_line(&stopped) {
+            Some(WorkerEvent::Stopped { session_dir, manifest, reason }) => {
+                assert_eq!((session_dir, manifest.stats.frames, reason.as_str()), (PathBuf::from("C:/s/x"), 9, "stopped"));
+                assert_eq!(manifest.id, "id");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(WorkerEvent::from_line("{\"event\":\"error\",\"message\":7}").is_none());
     }
 }

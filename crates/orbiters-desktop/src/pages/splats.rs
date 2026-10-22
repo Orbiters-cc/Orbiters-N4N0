@@ -36,7 +36,15 @@ struct Renderer {
     gpu: Gpu,
     target: Option<Presented>,
     last: Option<Camera>,
+    /// Why the last view could not be drawn (more splats than the GPU sorts, say): shown instead of an empty view.
+    error: Option<String>,
+    /// Frames left to ask whether the last one left splats out: it did not wait for the GPU's count, which comes back
+    /// a frame or two later ([`Gpu::needs_redraw`]), and such a frame is drawn again.
+    checks: u8,
 }
+
+/// How many frames after a render its count is waited for.
+const REDRAW_CHECKS: u8 = 4;
 
 struct Presented {
     size: (u32, u32),
@@ -58,7 +66,7 @@ impl Orbit {
     fn from_view(v: &View, depth: f32) -> Self {
         let f = normalize(v.forward);
         let pivot = [v.position[0] + f[0] * depth, v.position[1] + f[1] * depth, v.position[2] + f[2] * depth];
-        Self { pivot, yaw: f[0].atan2(f[2]), pitch: f[1].clamp(-1.0, 1.0).asin(), distance: depth, fov_y: v.fov_y }
+        Self { pivot, yaw: f[0].atan2(f[2]), pitch: f[1].clamp(-1.0, 1.0).asin(), distance: depth, fov_y: views::usable_fov(v.fov_y) }
     }
 
     fn forward(&self) -> [f32; 3] {
@@ -124,6 +132,13 @@ impl Viewer {
             }
             let camera = orbit.camera(w, h);
             p.add(egui_wgpu::Callback::new_paint_callback(rect, SplatCallback { renderer: l.renderer.clone(), camera }));
+            let (error, checking) = l.renderer.lock().map(|r| (r.error.clone(), r.checks > 0)).unwrap_or_default();
+            if let Some(e) = error {
+                widgets::text(&p, rect.center(), Align2::CENTER_CENTER, &Txt::new(format!("This view could not be drawn: {e}"), 13.0).color(theme::DANGER));
+            }
+            if checking {
+                ctx.request_repaint();
+            }
         } else {
             let (text, color) = match &self.error {
                 Some(e) => (format!("The splats could not be shown: {e}"), theme::DANGER),
@@ -203,7 +218,7 @@ fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_p
         orbit.pitch = (orbit.pitch - delta.y * 0.006).clamp(-1.54, 1.54);
     }
     // World units per point at the pivot, for panning and flying.
-    let per_point = orbit.distance * 2.0 * (0.5 * orbit.fov_y).tan() / rect.height().max(1.0);
+    let per_point = orbit.distance * 2.0 * (0.5 * views::usable_fov(orbit.fov_y)).tan() / rect.height().max(1.0);
     let cam = orbit.camera(16, height_px.max(16));
     let (right, up, forward) = (cam.r[0], cam.up(), cam.forward());
     let mut moved = [0f32; 3];
@@ -237,13 +252,13 @@ fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_p
 
 /// Reads the splats and the recorded views, and sets the renderer up on the window's device.
 fn load(dir: &Path, device: wgpu::Device, queue: wgpu::Queue) -> anyhow::Result<Loaded> {
-    let g = ply::read(&reconstruction::dir(dir).join(reconstruction::PLY_FILE))?;
+    let g = ply::read(&reconstruction::result_dir(dir).join(reconstruction::PLY_FILE))?;
     let (views, start) = views::recorded(dir)?;
     // Orbit around what that view looks at.
     let depth = views::depth_ahead(&g, &views[start]);
     let mut gpu = Gpu::renderer(device, queue);
     gpu.upload(&g);
-    Ok(Loaded { renderer: Arc::new(Mutex::new(Renderer { gpu, target: None, last: None })), splats: g.len(), views, start, depth })
+    Ok(Loaded { renderer: Arc::new(Mutex::new(Renderer { gpu, target: None, last: None, error: None, checks: 0 })), splats: g.len(), views, start, depth })
 }
 
 const BLIT: &str = r#"
@@ -384,10 +399,20 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
             r.target = Some(Presented { size, view, bind_group });
             r.last = None;
         }
-        if r.last != Some(self.camera) {
-            if r.gpu.step(&self.camera, BACKGROUND, Target::None, None).is_ok() {
-                let view = r.target.as_ref().expect("target").view.clone();
-                r.gpu.present(&view);
+        let moved = r.last != Some(self.camera);
+        let left_out = !moved && r.checks > 0 && {
+            r.checks -= 1;
+            r.gpu.needs_redraw()
+        };
+        if moved || left_out {
+            match r.gpu.step(&self.camera, BACKGROUND, Target::None, None) {
+                Ok(_) => {
+                    let view = r.target.as_ref().expect("target").view.clone();
+                    r.gpu.present(&view);
+                    r.error = None;
+                    r.checks = REDRAW_CHECKS;
+                }
+                Err(e) => r.error = Some(format!("{e:#}")),
             }
             r.last = Some(self.camera);
         }

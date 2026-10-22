@@ -80,30 +80,24 @@ pub fn show_with(ui: &Ui, rect: Rect, id: Id, trail: &Trail<'_>, coverage: Optio
     let scale = rect.width() / span.max(0.001);
     let to_screen = |x: f32, z: f32| pos2(rect.center().x + (x - cx) * scale, rect.center().y + (-z - cy) * scale);
 
-    // Grid.
+    // Grid: 1, 2 or 5 times a power of ten metres, at most about 20 lines across, however long the path.
     let w = span;
     let h = span / aspect;
-    let grid = if w > 60.0 {
-        10.0
-    } else if w > 20.0 {
-        5.0
-    } else {
-        1.0
-    };
+    let grid = grid_step(w.max(h));
     let stroke = Stroke::new(1.0, theme::white(0.045));
-    let x0 = cx - w * 0.5;
-    let y0 = cy - h * 0.5;
-    let mut gx = (x0 / grid).floor() * grid;
-    while gx < x0 + w {
-        let sx = rect.center().x + (gx - cx) * scale;
-        p.vline(sx, rect.y_range(), stroke);
-        gx += grid;
-    }
-    let mut gy = (y0 / grid).floor() * grid;
-    while gy < y0 + h {
-        let sy = rect.center().y + (gy - cy) * scale;
-        p.hline(rect.x_range(), sy, stroke);
-        gy += grid;
+    if grid.is_finite() && cx.is_finite() && cy.is_finite() {
+        // Counted in whole steps: adding a step to a coordinate stops changing it far from the origin.
+        let lines = |from: f32, length: f32| {
+            let first = (from / grid).floor() as i64;
+            let count = ((length / grid).ceil() as i64 + 1).clamp(0, 64);
+            (first..first + count).map(move |i| i as f32 * grid).filter(move |g| *g < from + length)
+        };
+        for gx in lines(cx - w * 0.5, w) {
+            p.vline(rect.center().x + (gx - cx) * scale, rect.y_range(), stroke);
+        }
+        for gy in lines(cy - h * 0.5, h) {
+            p.hline(rect.x_range(), rect.center().y + (gy - cy) * scale, stroke);
+        }
     }
 
     // What the depth frames saw, under the path.
@@ -151,8 +145,28 @@ pub fn show_with(ui: &Ui, rect: Rect, id: Id, trail: &Trail<'_>, coverage: Optio
     // Scale legend.
     let ly = rect.bottom() - 14.0;
     p.hline((rect.left() + 12.0)..=(rect.left() + 12.0 + 32.0), ly, Stroke::new(1.0, theme::FG_4));
-    let unit = if grid >= 1.0 { format!("{grid:.0} m") } else { format!("{grid} m") };
-    widgets::text(&p, pos2(rect.left() + 52.0, ly), Align2::LEFT_CENTER, &Txt::new(unit, 10.5).color(theme::FG_4));
+    widgets::text(&p, pos2(rect.left() + 52.0, ly), Align2::LEFT_CENTER, &Txt::new(grid_label(grid), 10.5).color(theme::FG_4));
+}
+
+/// The grid's step for a view `span` metres across: 1, 2 or 5 times a power of ten, about a twentieth of the view
+/// (a metre at least: the shortest paths keep their metre grid).
+fn grid_step(span: f32) -> f32 {
+    let rough = (span / 20.0).max(1.0);
+    if !rough.is_finite() {
+        return f32::INFINITY;
+    }
+    let decade = 10f32.powf(rough.log10().floor());
+    [1.0, 2.0, 5.0, 10.0].into_iter().map(|k| k * decade).find(|g| *g >= rough * 0.999).unwrap_or(10.0 * decade)
+}
+
+fn grid_label(grid: f32) -> String {
+    if !grid.is_finite() {
+        "–".into()
+    } else if grid >= 1000.0 {
+        format!("{} km", grid / 1000.0)
+    } else {
+        format!("{grid:.0} m")
+    }
 }
 
 /// A heading cone fading out from the camera: a fan of triangles with a radial alpha falloff.
@@ -175,4 +189,23 @@ fn cone(p: &egui::Painter, at: Pos2, heading: f32, length: f32) {
         mesh.add_triangle(a_mid, b_far, b_mid);
     }
     p.add(Shape::mesh(mesh));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grid_steps_stay_few_and_round() {
+        for (span, step) in [(6.0, 1.0), (20.0, 1.0), (30.0, 2.0), (60.0, 5.0), (200.0, 10.0), (5_000.0, 500.0), (100_000.0, 5_000.0)] {
+            assert_eq!(grid_step(span), step, "{span} m");
+        }
+        for span in [7.0f32, 63.0, 999.0, 4.3e4, 2.7e8, 3e12] {
+            let g = grid_step(span);
+            assert!(span / g <= 20.5 && span / g >= 4.0, "{span} m: step {g}");
+        }
+        assert_eq!(grid_step(f32::INFINITY), f32::INFINITY);
+        assert_eq!(grid_label(5_000.0), "5 km");
+        assert_eq!(grid_label(2.0), "2 m");
+    }
 }

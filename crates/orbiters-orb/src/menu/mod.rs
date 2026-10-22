@@ -11,6 +11,7 @@ pub mod screen;
 pub mod touch;
 
 use crate::youtube::{Results, Video};
+use std::time::{Duration, Instant};
 
 /// Results on a page of the list.
 pub const RESULTS_PER_PAGE: usize = 5;
@@ -128,18 +129,27 @@ pub enum Target {
     Take,
 }
 
-/// What the host does for the menu.
+/// What the host does for the menu. Requests are numbered, and their answers carry the number back: an answer to an
+/// older request (the same words searched again, a slower suggestion) never replaces a newer one's.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
-    /// Suggestions for this text (sent once per text; the host may drop answers to older texts).
-    Suggest(String),
-    Search(String),
-    /// The next page of results for `query`.
+    /// Suggestions for this text (asked once per text; see [`SuggestQueue`] for how the hosts send them).
+    Suggest {
+        id: u64,
+        text: String,
+    },
+    /// Results for `query`: search `id`, whose next pages carry the same number.
+    Search {
+        id: u64,
+        query: String,
+    },
+    /// The next page of search `id`.
     More {
+        id: u64,
         query: String,
         token: String,
     },
-    /// Thumbnails the page shows (video ids); the host fetches those it does not have.
+    /// Thumbnails the page shows, then the next page's (video ids); the host fetches those it does not have.
     Thumbnails(Vec<String>),
     /// Put a video's link in the clipboard.
     Copy {
@@ -178,16 +188,23 @@ pub struct Menu {
     /// Suggestions for `suggested_for`, the best first.
     pub suggestions: Vec<String>,
     suggested_for: String,
-    /// The text suggestions were last asked for (so each text is asked once).
+    /// The text suggestions were last asked for (so each text is asked once), the last request's number and the
+    /// number of the one shown.
     asked_for: String,
+    suggest_id: u64,
+    suggested_id: u64,
     /// Results of `results_for`, every page fetched so far.
     pub results: Vec<Video>,
     pub results_for: String,
     continuation: Option<String>,
+    /// The search's number (its answers carry it).
+    search_id: u64,
     /// The page of results shown (from 0).
     pub result_page: usize,
     pub searching: bool,
     loading_more: bool,
+    /// Next was pressed on the last page fetched: the page turns once its results arrive (and stays when none do).
+    turning: bool,
     /// Orb listens to the person.
     pub listening: bool,
     pub fast_walk: bool,
@@ -203,8 +220,11 @@ pub struct Menu {
     pub countdown: Option<u32>,
     /// A short line for the person: what was copied, what failed. Shown until the next change of page.
     pub notice: Option<String>,
-    /// What Orb heard last (shown on Home).
+    /// What Orb heard last, or what it says (shown on Home).
     pub heard: Option<String>,
+    /// `heard` holds the owner's own words: everyone else's screen does not show them (a sentence for Orb may have
+    /// been kept out of the world, VRChat's microphone muted while it was said).
+    pub heard_private: bool,
 }
 
 impl Menu {
@@ -270,13 +290,16 @@ impl Menu {
             }
             Target::Field => Vec::new(),
             Target::Search => self.search(),
-            Target::Suggestion(i) => match self.shown_suggestions().get(i as usize).cloned() {
-                Some(text) => {
-                    self.query = cut(&text, QUERY_MAX);
-                    self.search()
+            Target::Suggestion(i) => {
+                let picked = self.shown_suggestions().nth(i as usize).map(str::to_string);
+                match picked {
+                    Some(text) => {
+                        self.query = cut(&text, QUERY_MAX);
+                        self.search()
+                    }
+                    None => Vec::new(),
                 }
-                None => Vec::new(),
-            },
+            }
             Target::Key(c) => self.type_text(&c.to_string()),
             Target::Space => self.type_text(" "),
             Target::Backspace => self.backspace(),
@@ -373,32 +396,32 @@ impl Menu {
             return Vec::new();
         }
         self.asked_for = text.clone();
-        vec![Effect::Suggest(text)]
+        self.suggest_id += 1;
+        vec![Effect::Suggest { id: self.suggest_id, text }]
     }
 
     /// The suggestions to show: those for what is typed, or for an earlier text while the new ones are on their way
-    /// (only while they still start like it, so they never contradict the field).
-    pub fn shown_suggestions(&self) -> Vec<String> {
-        let typed = self.query.trim().to_lowercase();
-        if typed.is_empty() {
-            return Vec::new();
-        }
-        let fresh = self.suggested_for.trim().eq_ignore_ascii_case(self.query.trim());
+    /// (only while they still start like it, so they never contradict the field). Read in place: the screen's steps ask
+    /// for them many times a second.
+    pub fn shown_suggestions(&self) -> impl Iterator<Item = &str> + '_ {
+        let typed = self.query.trim();
+        let fresh = same_ignoring_case(self.suggested_for.trim(), typed);
         self.suggestions
             .iter()
-            .filter(|s| fresh || s.to_lowercase().starts_with(&typed))
-            .filter(|s| !s.trim().eq_ignore_ascii_case(self.query.trim()) || !fresh)
+            .map(String::as_str)
+            .filter(move |s| !typed.is_empty() && (fresh || starts_ignoring_case(s, typed)))
+            .filter(move |s| !fresh || !same_ignoring_case(s.trim(), typed))
             .take(SUGGESTIONS)
-            .cloned()
-            .collect()
     }
 
-    /// Suggestions arrived for `text`.
-    pub fn suggestions_arrived(&mut self, text: &str, suggestions: Vec<String>) {
-        // An answer to a text the field no longer starts with is stale.
-        if !self.query.trim_start().to_lowercase().starts_with(&text.trim().to_lowercase()) {
+    /// Suggestions arrived for request `id`, asked for `text`.
+    pub fn suggestions_arrived(&mut self, id: u64, text: &str, suggestions: Vec<String>) {
+        // An older request's answer never replaces a newer one's, and an answer to a text the field no longer starts
+        // with is stale.
+        if id <= self.suggested_id || !starts_ignoring_case(self.query.trim_start(), text.trim()) {
             return;
         }
+        self.suggested_id = id;
         self.suggested_for = text.to_string();
         self.suggestions = suggestions;
     }
@@ -410,12 +433,14 @@ impl Menu {
         }
         self.searching = true;
         self.loading_more = false;
+        self.turning = false;
         self.results.clear();
         self.continuation = None;
         self.results_for = query.clone();
         self.result_page = 0;
+        self.search_id += 1;
         self.go(Page::Results);
-        vec![Effect::Search(query)]
+        vec![Effect::Search { id: self.search_id, query }]
     }
 
     /// Search for `query` straight away (said aloud, or asked of Orb).
@@ -425,9 +450,10 @@ impl Menu {
         self.search()
     }
 
-    /// Results arrived for `query`: the first page, or the next one (`more`).
-    pub fn results_arrived(&mut self, query: &str, results: Results, more: bool) -> Vec<Effect> {
-        if query != self.results_for {
+    /// Results arrived for search `id`: its first page, or the next one (`more`).
+    pub fn results_arrived(&mut self, id: u64, results: Results, more: bool) -> Vec<Effect> {
+        // Another search's (an older one for the same words included) is dropped.
+        if id != self.search_id {
             return Vec::new();
         }
         self.searching = false;
@@ -442,19 +468,24 @@ impl Menu {
             }
         }
         self.continuation = results.continuation;
+        // The page asked for turns now that it has results; when none came, it stays where it was.
+        if std::mem::take(&mut self.turning) && (self.result_page + 1) * RESULTS_PER_PAGE < self.results.len() {
+            self.result_page += 1;
+        }
         if self.results.is_empty() {
             self.notice = Some(format!("Nothing found for \"{}\"", self.results_for));
         }
         self.thumbnails()
     }
 
-    /// The search or the next page failed.
-    pub fn results_failed(&mut self, query: &str, error: &str) {
-        if query != self.results_for {
+    /// Search `id` or its next page failed: the page stays where it was (Next tries again).
+    pub fn results_failed(&mut self, id: u64, error: &str) {
+        if id != self.search_id {
             return;
         }
         self.searching = false;
         self.loading_more = false;
+        self.turning = false;
         self.notice = Some(format!("YouTube did not answer: {}", cut(error, 60)));
     }
 
@@ -509,10 +540,11 @@ impl Menu {
                         }
                         return effects;
                     }
+                    // The next page is not fetched yet. A full page turns once its results arrive; one still filling
+                    // up waits for them, so no result is skipped.
                     let more = self.fetch_more();
-                    if !more.is_empty() {
-                        // The page turns when its results arrive.
-                        self.result_page += 1;
+                    if self.loading_more && self.page_results().len() == RESULTS_PER_PAGE {
+                        self.turning = true;
                     }
                     return more;
                 }
@@ -535,15 +567,16 @@ impl Menu {
         match self.continuation.clone() {
             Some(token) => {
                 self.loading_more = true;
-                vec![Effect::More { query: self.results_for.clone(), token }]
+                vec![Effect::More { id: self.search_id, query: self.results_for.clone(), token }]
             }
             None => Vec::new(),
         }
     }
 
-    /// Thumbnails of the results page shown.
+    /// Thumbnails of the results page shown, then of the next page (fetched ahead, so they show as it turns).
     pub fn thumbnails(&self) -> Vec<Effect> {
-        let ids: Vec<String> = self.page_results().iter().map(|v| v.id.clone()).collect();
+        let start = (self.result_page * RESULTS_PER_PAGE).min(self.results.len());
+        let ids: Vec<String> = self.results[start..].iter().take(2 * RESULTS_PER_PAGE).map(|v| v.id.clone()).collect();
         if ids.is_empty() {
             Vec::new()
         } else {
@@ -551,9 +584,9 @@ impl Menu {
         }
     }
 
-    /// Whether the next page of results is being fetched (shown as loading).
+    /// Whether a search, or the page asked for, is being fetched (shown as loading).
     pub fn loading(&self) -> bool {
-        self.searching || (self.loading_more && self.page_results().is_empty())
+        self.searching || self.turning || (self.loading_more && self.page_results().is_empty())
     }
 
     pub fn page_contacts(&self) -> &[Contact] {
@@ -590,6 +623,7 @@ impl Menu {
             return Some(self.search());
         }
         self.heard = Some(cut(text, 60));
+        self.heard_private = true;
         None
     }
 }
@@ -597,6 +631,98 @@ impl Menu {
 /// `text`'s first `max` characters.
 pub fn cut(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
+}
+
+fn lower(text: &str) -> impl Iterator<Item = char> + '_ {
+    text.chars().flat_map(char::to_lowercase)
+}
+
+/// `text` starts with `prefix`, whatever their case (no copy made).
+fn starts_ignoring_case(text: &str, prefix: &str) -> bool {
+    let mut text = lower(text);
+    lower(prefix).all(|c| text.next() == Some(c))
+}
+
+fn same_ignoring_case(a: &str, b: &str) -> bool {
+    lower(a).eq(lower(b))
+}
+
+/// `text` in lines of at most `cols` characters, cut between words (a longer word is cut): what Orb says, a line at a
+/// time on the screen's Home.
+pub fn pieces(text: &str, cols: usize) -> Vec<String> {
+    let cols = cols.max(1);
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let word = cut(word, cols);
+        let width = line.chars().count();
+        if width > 0 && width + 1 + word.chars().count() > cols {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(&word);
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+/// How long a line of `text` stays up: time to read its words.
+pub fn reading_time(text: &str) -> Duration {
+    Duration::from_millis((800 + 300 * text.split_whitespace().count() as u64).max(2500))
+}
+
+/// The pause after a keystroke before suggestions are asked for: typing a word asks once, not once a letter.
+pub const SUGGEST_PAUSE: Duration = Duration::from_millis(130);
+/// A request that has not answered by then is taken as lost (its own time limit is shorter).
+const SUGGEST_LOST: Duration = Duration::from_secs(5);
+
+/// How the hosts send the menu's [`Effect::Suggest`]s: the latest text only, once typing pauses for [`SUGGEST_PAUSE`],
+/// one request at a time (the next waits for the answer, then asks for what the field holds by then).
+#[derive(Debug, Default)]
+pub struct SuggestQueue {
+    wanted: Option<(u64, String, Instant)>,
+    in_flight: Option<(u64, Instant)>,
+}
+
+impl SuggestQueue {
+    /// The menu asked for suggestions for `text` (request `id`) at `now`: it replaces any not sent yet.
+    pub fn want(&mut self, id: u64, text: String, now: Instant) {
+        self.wanted = Some((id, text, now));
+    }
+
+    /// The request to send now, if one is due.
+    pub fn due(&mut self, now: Instant) -> Option<(u64, String)> {
+        if self.in_flight.is_some_and(|(_, since)| now.duration_since(since) < SUGGEST_LOST) {
+            return None;
+        }
+        if self.wanted.as_ref().is_none_or(|(_, _, at)| now.duration_since(*at) < SUGGEST_PAUSE) {
+            return None;
+        }
+        let (id, text, _) = self.wanted.take()?;
+        self.in_flight = Some((id, now));
+        Some((id, text))
+    }
+
+    /// Request `id` answered (or failed).
+    pub fn answered(&mut self, id: u64) {
+        if self.in_flight.is_some_and(|(i, _)| i == id) {
+            self.in_flight = None;
+        }
+    }
+
+    /// When a request may next be due (for a host that sleeps until then).
+    pub fn next_due(&self) -> Option<Instant> {
+        let (_, _, at) = self.wanted.as_ref()?;
+        let after_pause = *at + SUGGEST_PAUSE;
+        Some(match self.in_flight {
+            Some((_, since)) => after_pause.max(since + SUGGEST_LOST),
+            None => after_pause,
+        })
+    }
 }
 
 /// A duration as a call shows it: `0:42`, `12:05`, `1:02:03`.
@@ -621,6 +747,10 @@ mod tests {
         Results { videos: ids.map(|i| video(&i.to_string())).collect(), continuation: more.then(|| "token".to_string()) }
     }
 
+    fn suggest(id: u64, text: &str) -> Effect {
+        Effect::Suggest { id, text: text.into() }
+    }
+
     #[test]
     fn types_suggests_and_searches() {
         let mut menu = Menu::default();
@@ -629,19 +759,24 @@ mod tests {
         menu.press(Target::YouTube);
         assert_eq!(menu.page, Page::Search);
         assert!(menu.type_text(" ").is_empty(), "no leading space");
-        assert_eq!(menu.press(Target::Key('l')), vec![Effect::Suggest("l".into())]);
-        assert_eq!(menu.type_text("ofi"), vec![Effect::Suggest("lofi".into())]);
-        assert_eq!(menu.type_text(" "), vec![Effect::Suggest("lofi ".into())]);
+        assert_eq!(menu.press(Target::Key('l')), vec![suggest(1, "l")]);
+        assert_eq!(menu.type_text("ofi"), vec![suggest(2, "lofi")]);
+        assert_eq!(menu.type_text(" "), vec![suggest(3, "lofi ")]);
         assert!(menu.type_text(" ").is_empty(), "no double space");
-        menu.suggestions_arrived("lof", vec!["loft".into()]);
-        menu.suggestions_arrived("lofi", vec!["lofi hip hop".into(), "lofi girl".into(), "LOFI".into()]);
-        assert_eq!(menu.shown_suggestions(), vec!["lofi hip hop", "lofi girl"], "suggestions start like the field; the field itself is not repeated");
-        menu.suggestions_arrived("lol", vec!["lol".into()]);
+        menu.suggestions_arrived(2, "lofi", vec!["lofi hip hop".into(), "lofi girl".into(), "LOFI".into()]);
+        assert_eq!(
+            menu.shown_suggestions().collect::<Vec<_>>(),
+            vec!["lofi hip hop", "lofi girl"],
+            "suggestions start like the field; the field itself is not repeated"
+        );
+        menu.suggestions_arrived(1, "l", vec!["lol".into()]);
+        assert_eq!(menu.suggestions.len(), 3, "an older request's answer never replaces a newer one's");
+        menu.suggestions_arrived(4, "lol", vec!["lol".into()]);
         assert_eq!(menu.suggestions.len(), 3, "an answer for another text is dropped");
         menu.backspace();
         assert_eq!(menu.query, "lofi");
         let effects = menu.press(Target::Suggestion(1));
-        assert_eq!(effects, vec![Effect::Search("lofi girl".into())]);
+        assert_eq!(effects, vec![Effect::Search { id: 1, query: "lofi girl".into() }]);
         assert_eq!((menu.page, menu.searching, menu.query.as_str()), (Page::Results, true, "lofi girl"));
         for _ in 0..60 {
             menu.type_text("x");
@@ -650,15 +785,33 @@ mod tests {
     }
 
     #[test]
+    fn suggestions_wait_for_a_pause_one_request_at_a_time() {
+        let mut queue = SuggestQueue::default();
+        let t0 = Instant::now();
+        assert_eq!(queue.due(t0), None);
+        queue.want(1, "l".into(), t0);
+        queue.want(2, "lo".into(), t0 + Duration::from_millis(60));
+        assert_eq!(queue.due(t0 + Duration::from_millis(100)), None, "still typing");
+        assert_eq!(queue.next_due(), Some(t0 + Duration::from_millis(60) + SUGGEST_PAUSE));
+        let sent = t0 + Duration::from_millis(200);
+        assert_eq!(queue.due(sent), Some((2, "lo".into())), "the latest text only");
+        queue.want(3, "lof".into(), sent);
+        assert_eq!(queue.due(sent + Duration::from_millis(300)), None, "one request at a time");
+        queue.answered(2);
+        assert_eq!(queue.due(sent + Duration::from_millis(300)), Some((3, "lof".into())));
+        assert_eq!(queue.due(sent + Duration::from_secs(1)), None, "nothing more wanted");
+    }
+
+    #[test]
     fn pages_through_results_and_fetches_ahead() {
         let mut menu = Menu::default();
         menu.open();
         let effects = menu.search_for("cats");
-        assert_eq!(effects, vec![Effect::Search("cats".into())]);
-        assert!(menu.results_arrived("dogs", results(0..20, true), false).is_empty(), "results of another search are dropped");
-        let effects = menu.results_arrived("cats", results(0..12, true), false);
+        assert_eq!(effects, vec![Effect::Search { id: 1, query: "cats".into() }]);
+        assert!(menu.results_arrived(2, results(0..20, true), false).is_empty(), "results of another search are dropped");
+        let effects = menu.results_arrived(1, results(0..12, true), false);
         assert_eq!(menu.page_results().len(), 5);
-        assert!(matches!(&effects[..], [Effect::Thumbnails(ids)] if ids.len() == 5));
+        assert!(matches!(&effects[..], [Effect::Thumbnails(ids)] if ids.len() == 10), "this page's and the next's: {effects:?}");
         assert!(!menu.has_previous() && menu.has_next());
         menu.press(Target::Next);
         assert_eq!(menu.result_page, 1);
@@ -668,7 +821,8 @@ mod tests {
         assert_eq!(menu.page_results().len(), 2);
         let effects = menu.press(Target::Next);
         assert!(effects.is_empty(), "already fetching");
-        let effects = menu.results_arrived("cats", results(12..20, false), true);
+        assert_eq!(menu.result_page, 2, "a page still filling up waits for its results");
+        let effects = menu.results_arrived(1, results(12..20, false), true);
         assert!(!effects.is_empty());
         assert_eq!(menu.page_results().len(), 5);
         assert_eq!(menu.result_pages(), 4);
@@ -679,6 +833,46 @@ mod tests {
         assert_eq!(menu.page, Page::Search, "back from results is the search");
         assert_eq!(menu.press(Target::Close), vec![Effect::Close]);
         assert!(!menu.open);
+    }
+
+    #[test]
+    fn a_failed_or_empty_next_page_leaves_the_page_where_it_was() {
+        let mut menu = Menu::default();
+        menu.open();
+        menu.search_for("cats");
+        menu.results_arrived(1, results(0..10, true), false);
+        menu.press(Target::Next);
+        assert_eq!(menu.result_page, 1);
+        // The last full page: Next fetches, the page turns once results come.
+        let effects = menu.press(Target::Next);
+        assert!(effects.is_empty() || matches!(&effects[..], [Effect::More { id: 1, .. }]), "{effects:?}");
+        assert!(menu.loading());
+        menu.results_failed(1, "timed out");
+        assert_eq!((menu.result_page, menu.loading()), (1, false), "no page past the end");
+        assert_eq!(layout::text(&menu, layout::Content::PageLabel), "2/2+");
+        // Next again: this time results come, and the next page shows them from its first.
+        assert!(matches!(&menu.press(Target::Next)[..], [Effect::More { id: 1, .. }]));
+        menu.results_arrived(1, results(10..20, true), true);
+        assert_eq!(menu.result_page, 2);
+        assert_eq!(menu.page_results()[0].id, video("10").id, "nothing skipped");
+        // An empty next page: the page stays, and there is no "+" any more.
+        menu.press(Target::Next);
+        menu.press(Target::Next);
+        menu.results_arrived(1, Results::default(), true);
+        assert_eq!(menu.result_page, 3);
+        assert_eq!(layout::text(&menu, layout::Content::PageLabel), "4/4");
+        // An older search's next page, for the same words, lands nowhere.
+        menu.search_for("cats");
+        assert!(menu.results_arrived(1, results(40..45, true), true).is_empty());
+        assert!(menu.results.is_empty() && menu.searching);
+    }
+
+    #[test]
+    fn cuts_what_orb_says_into_lines() {
+        assert_eq!(pieces("Voilà ton sweat, va voir tes potes maintenant", 16), vec!["Voilà ton sweat,", "va voir tes", "potes maintenant"]);
+        assert_eq!(pieces("abcdefghijklmnopqrstuvwxyz", 10), vec!["abcdefghij"]);
+        assert!(pieces("  ", 10).is_empty());
+        assert!(reading_time("one two") >= Duration::from_millis(2500));
     }
 
     #[test]
@@ -716,8 +910,9 @@ mod tests {
         menu.open();
         assert_eq!(menu.heard("what time is it?"), None, "on Home it is for Orb");
         assert_eq!(menu.heard.as_deref(), Some("what time is it"));
+        assert!(menu.heard_private, "the owner's own words");
         menu.press(Target::YouTube);
-        assert_eq!(menu.heard("Lofi hip hop."), Some(vec![Effect::Search("Lofi hip hop".into())]));
+        assert_eq!(menu.heard("Lofi hip hop."), Some(vec![Effect::Search { id: 1, query: "Lofi hip hop".into() }]));
         assert_eq!(clock(42), "0:42");
         assert_eq!(clock(3723), "1:02:03");
     }

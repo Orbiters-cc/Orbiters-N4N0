@@ -27,6 +27,140 @@ fn parameter(name: &str) -> String {
     format!("{}{name}", orbiters_core::osc::PARAMETERS_PREFIX)
 }
 
+/// A letter with an accent written as two characters (the letter, then a combining accent: how some keyboards and
+/// speech engines write them) as the one the panel has a glyph for.
+fn compose(base: char, mark: char) -> Option<char> {
+    const MARKS: [(char, &str, &str); 7] = [
+        ('\u{0300}', "aeiouAEIOU", "àèìòùÀÈÌÒÙ"),
+        ('\u{0301}', "aeiouyAEIOUY", "áéíóúýÁÉÍÓÚÝ"),
+        ('\u{0302}', "aeiouAEIOU", "âêîôûÂÊÎÔÛ"),
+        ('\u{0303}', "anoANO", "ãñõÃÑÕ"),
+        ('\u{0308}', "aeiouyAEIOUY", "äëïöüÿÄËÏÖÜŸ"),
+        ('\u{030A}', "aA", "åÅ"),
+        ('\u{0327}', "cC", "çÇ"),
+    ];
+    let (_, from, to) = MARKS.iter().find(|(m, _, _)| *m == mark)?;
+    from.chars().position(|c| c == base).and_then(|i| to.chars().nth(i))
+}
+
+/// A Vietnamese letter (Latin Extended Additional, U+1EA0 to U+1EF9) as the nearest the panel shows: its circumflex
+/// kept when it has one (`ệ` → `ê`), its other marks dropped (`ặ` → `a`, `ở` → `o`).
+fn vietnamese(c: char) -> Option<char> {
+    let code = c as u32;
+    if !(0x1EA0..=0x1EF9).contains(&code) {
+        return match c {
+            'Ơ' => Some('O'),
+            'ơ' => Some('o'),
+            'Ư' => Some('U'),
+            'ư' => Some('u'),
+            _ => None,
+        };
+    }
+    let pair = (code - 0x1EA0) / 2;
+    let lower = (code - 0x1EA0) % 2 == 1;
+    let base = match pair {
+        0..=1 | 7..=11 => 'A',
+        2..=6 => 'Â',
+        12..=14 => 'E',
+        15..=19 => 'Ê',
+        20..=21 => 'I',
+        22..=23 | 29..=33 => 'O',
+        24..=28 => 'Ô',
+        34..=40 => 'U',
+        _ => 'Y',
+    };
+    Some(if lower { base.to_lowercase().next().unwrap_or(base) } else { base })
+}
+
+/// A Greek letter in Latin letters (ELOT 743, accents dropped).
+fn greek(c: char) -> Option<&'static str> {
+    Some(match c {
+        'α' | 'ά' => "a",
+        'β' => "v",
+        'γ' => "g",
+        'δ' => "d",
+        'ε' | 'έ' => "e",
+        'ζ' => "z",
+        'η' | 'ή' => "i",
+        'θ' => "th",
+        'ι' | 'ί' | 'ϊ' | 'ΐ' => "i",
+        'κ' => "k",
+        'λ' => "l",
+        'μ' => "m",
+        'ν' => "n",
+        'ξ' => "x",
+        'ο' | 'ό' => "o",
+        'π' => "p",
+        'ρ' => "r",
+        'σ' | 'ς' => "s",
+        'τ' => "t",
+        'υ' | 'ύ' | 'ϋ' | 'ΰ' => "y",
+        'φ' => "f",
+        'χ' => "ch",
+        'ψ' => "ps",
+        'ω' | 'ώ' => "o",
+        'Α' | 'Ά' => "A",
+        'Β' => "V",
+        'Γ' => "G",
+        'Δ' => "D",
+        'Ε' | 'Έ' => "E",
+        'Ζ' => "Z",
+        'Η' | 'Ή' => "I",
+        'Θ' => "Th",
+        'Ι' | 'Ί' | 'Ϊ' => "I",
+        'Κ' => "K",
+        'Λ' => "L",
+        'Μ' => "M",
+        'Ν' => "N",
+        'Ξ' => "X",
+        'Ο' | 'Ό' => "O",
+        'Π' => "P",
+        'Ρ' => "R",
+        'Σ' => "S",
+        'Τ' => "T",
+        'Υ' | 'Ύ' | 'Ϋ' => "Y",
+        'Φ' => "F",
+        'Χ' => "Ch",
+        'Ψ' => "Ps",
+        'Ω' | 'Ώ' => "O",
+        _ => return None,
+    })
+}
+
+/// `text` with what the contract's folding (`orb::fold`) cannot place made placeable first: accents written as a
+/// letter and a combining mark joined into one letter, Vietnamese letters as their nearest, Greek in Latin letters.
+/// The contract would show them as `?`, or drop the accent.
+pub fn fold_more(text: &str) -> std::borrow::Cow<'_, str> {
+    let placeable = |c: char| c.is_ascii() || !(('\u{0300}'..='\u{036F}').contains(&c) || vietnamese(c).is_some() || greek(c).is_some());
+    if text.chars().all(placeable) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut last: Option<char> = None;
+    for c in text.chars() {
+        if ('\u{0300}'..='\u{036F}').contains(&c) {
+            // A combining mark: onto the letter before it when they make one the panel has; dropped otherwise.
+            if let Some(joined) = last.and_then(|b| compose(b, c)) {
+                out.pop();
+                out.push(joined);
+                last = Some(joined);
+            }
+            continue;
+        }
+        if let Some(v) = vietnamese(c) {
+            out.push(v);
+            last = Some(v);
+        } else if let Some(latin) = greek(c) {
+            out.push_str(latin);
+            last = latin.chars().last();
+        } else {
+            out.push(c);
+            last = Some(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// How long a page stays up once it was fully sent: time to read its words, at least three seconds.
 pub fn reading_time(page: &Page) -> Duration {
     let text = orb::page_text(page);
@@ -58,6 +192,12 @@ pub struct TextSender {
     phase: Option<(Instant, Phase)>,
     /// `Orb/Text/Pointer` as this sender last set it; unknown after a reload or when something else used the channel.
     pointer: Option<i32>,
+    /// Blocks the page on display sends whatever `sent` says (bit `b`: block `b`), and whether it has not had its first
+    /// step yet: a page starting sends every block that shows text or that `sent` holds text in. `sent` is only what
+    /// the steps believe: VRChat may reload the avatar without saying so (its cells wiped), and messages may be lost
+    /// while OSC is down. Sending those blocks whole at every page puts such a panel right again at the next page.
+    force: u64,
+    fresh: bool,
 }
 
 impl TextSender {
@@ -79,6 +219,8 @@ impl TextSender {
             sticky: false,
             phase: None,
             pointer: None,
+            force: 0,
+            fresh: false,
         }
     }
 
@@ -108,11 +250,13 @@ impl TextSender {
     }
 
     fn load(&mut self, text: &str) {
-        let mut pages: VecDeque<Page> = orb::pages(text).into();
+        let mut pages: VecDeque<Page> = orb::pages(&fold_more(text)).into();
         self.complete_at = None;
         self.resync = 0;
         self.current = pages.pop_front();
         self.queue = pages;
+        self.fresh = self.current.is_some();
+        self.force = 0;
         if let Some(page) = &self.current {
             self.hold = reading_time(page);
         } else {
@@ -129,14 +273,46 @@ impl TextSender {
         self.phase = None;
     }
 
+    /// The text up and waiting (every page left, one line each), taken off the panel: it hides at the next step. Orb's
+    /// screen shows it instead while it is open.
+    pub fn take_text(&mut self) -> Option<String> {
+        let text: Vec<String> = self
+            .current
+            .iter()
+            .chain(&self.queue)
+            .map(|page| orb::page_text(page).split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|t| !t.is_empty())
+            .collect();
+        self.hide();
+        (!text.is_empty()).then(|| text.join(" "))
+    }
+
+    /// When the sender next has something to do (a block's next phase, a step), `None` when it has nothing: the
+    /// orb's thread sleeps until then.
+    pub fn next_due(&self) -> Option<Instant> {
+        if let Some((at, _)) = &self.phase {
+            return Some(*at);
+        }
+        (self.busy() || !self.known || self.clear).then(|| self.next_step.unwrap_or_else(Instant::now))
+    }
+
     /// The avatar was (re)loaded: its panel's cells are unknown until cleared; what was being shown starts again.
     pub fn reset(&mut self) {
+        self.forget();
+        self.next_step = None;
+    }
+
+    /// Messages to VRChat were lost (OSC stopped, a send failed): what the panel holds is no longer known. It is
+    /// cleared and what is up sent whole again, from the next step on (at the steps' pace: nothing is hurried while
+    /// OSC stays down).
+    pub fn forget(&mut self) {
         self.known = false;
         self.visible = false;
         self.complete_at = None;
-        self.next_step = None;
         self.phase = None;
         self.pointer = None;
+        self.fresh = self.current.is_some();
+        self.force = 0;
     }
 
     /// Whether a step is due at `now` and would send something (a page, a clear), or a block is between its phases.
@@ -216,10 +392,12 @@ impl TextSender {
             Phase::Pointer(block, cells) => {
                 let n = self.sync;
                 self.sent[block * n..(block + 1) * n].copy_from_slice(&cells);
+                self.force &= !(1u64 << block);
                 self.next_step = Some(now + self.step);
                 // Complete once its last block went: its reading time starts now.
                 if let Some(page) = self.current {
-                    if self.complete_at.is_none() && (0..orb::pointer_count(n)).all(|b| page[b * n..(b + 1) * n] == self.sent[b * n..(b + 1) * n]) {
+                    let whole = (0..orb::pointer_count(n)).all(|b| page[b * n..(b + 1) * n] == self.sent[b * n..(b + 1) * n]);
+                    if self.complete_at.is_none() && self.force == 0 && whole {
                         self.complete_at = Some(now);
                     }
                 }
@@ -249,8 +427,13 @@ impl TextSender {
         }
         let n = self.sync;
         let pointers = orb::pointer_count(n);
+        if std::mem::take(&mut self.fresh) {
+            // A new page: every block that shows text, or that the panel should hold text in, goes whatever `sent` says.
+            let blank = |cells: &[u8]| cells.iter().all(|&g| g == 0);
+            self.force = (0..pointers).filter(|&b| !blank(&page[b * n..(b + 1) * n]) || !blank(&self.sent[b * n..(b + 1) * n])).fold(0, |m, b| m | 1 << b);
+        }
         let differs = |sent: &Page, b: usize| page[b * n..(b + 1) * n] != sent[b * n..(b + 1) * n];
-        if let Some(block) = (0..pointers).find(|&b| differs(&self.sent, b)) {
+        if let Some(block) = (0..pointers).find(|&b| self.force & (1 << b) != 0 || differs(&self.sent, b)) {
             out.extend(self.block(block, now));
             return out;
         }
@@ -263,7 +446,8 @@ impl TextSender {
                 Some(next) => {
                     self.hold = reading_time(&next);
                     self.current = Some(next);
-                    // The next page's first changed block goes at once.
+                    self.fresh = true;
+                    // The next page's first block goes at once.
                     out.extend(self.step_messages(now));
                 }
                 None => {
@@ -514,6 +698,103 @@ mod tests {
         let (_, visible) = run(&mut sender, &mut panel, t, BLOCK);
         assert_eq!(visible, Some(false));
         assert!(!sender.sticky());
+    }
+
+    /// The blocks a sender sends from `start` until it sends one a second time (it then only resends in turn).
+    fn blocks_until_a_repeat(sender: &mut TextSender, start: Instant) -> Vec<i32> {
+        let mut blocks = Vec::new();
+        let mut t = start;
+        for _ in 0..2000 {
+            for (address, value) in sender.tick(t) {
+                if let (true, OscType::Int(p)) = (address.ends_with(params::TEXT_POINTER), value) {
+                    if p > 0 && p != POINTER_CLEAR {
+                        if blocks.contains(&p) {
+                            return blocks;
+                        }
+                        blocks.push(p);
+                    }
+                }
+            }
+            t += TICK;
+        }
+        blocks
+    }
+
+    #[test]
+    fn a_new_page_repairs_a_panel_that_lost_what_it_held() {
+        let mut sender = TextSender::new(8, STEP);
+        let mut panel = PanelModel::new([0; TEXT_LENGTH]);
+        sender.show("Hello there, how are you today?");
+        let (t, _) = run(&mut sender, &mut panel, Instant::now(), BLOCK * 5);
+        assert_eq!(first_row(&panel.cells), "Hello there, how are you today?");
+        // VRChat reloads the avatar without a word to Orbiters desktop: its panel is blank, while the sender believes it
+        // still holds the text. The next text shares three of its four blocks, and still arrives whole.
+        let mut wiped = PanelModel::new([0; TEXT_LENGTH]);
+        sender.show("Hello there, how are you now?");
+        run(&mut sender, &mut wiped, t, BLOCK * 6);
+        assert_eq!(first_row(&wiped.cells), "Hello there, how are you now?");
+        // A whole page that differs from the last in one block: every block with text goes before the page counts as
+        // shown (and before any block is resent in turn).
+        let lines = "aaaa bbbb cccc dddd eeee ffff gg\nhhhh iiii jjjj kkkk llll mmmm nn\noooo pppp qqqq rrrr ssss tttt uu\nvvvv wwww xxxx yyyy zzzz 1111 22";
+        let mut sender = TextSender::new(8, STEP);
+        sender.show_sticky(lines);
+        let shown = blocks_until_a_repeat(&mut sender, Instant::now());
+        assert_eq!(shown.len(), 16);
+        sender.show_sticky(&lines.replacen("aaaa", "AAAA", 1));
+        let resent = blocks_until_a_repeat(&mut sender, Instant::now() + Duration::from_secs(30));
+        assert_eq!(resent, (1..=16).collect::<Vec<i32>>(), "every block of the new page, in order");
+    }
+
+    #[test]
+    fn a_sender_that_lost_its_messages_sends_the_text_whole_again() {
+        let mut sender = TextSender::new(8, STEP);
+        let mut panel = PanelModel::new([0; TEXT_LENGTH]);
+        sender.show_sticky("Hi, I'm Orb. Yes, the one in the menu.");
+        let (mut t, _) = run(&mut sender, &mut panel, Instant::now(), BLOCK * 6);
+        while sender.mid_block() {
+            sender.tick(t);
+            t += TICK;
+        }
+        // OSC goes down as the next text starts: its first messages are lost, and the host says so.
+        sender.show_sticky("Hi, I'm Orb. Yes, the one in the menu!");
+        let t = sender.next_due().unwrap().max(t);
+        assert!(!sender.tick(t).is_empty());
+        sender.forget();
+        assert!(sender.tick(t + TICK).is_empty(), "the next step at its pace, not at once");
+        // Back: the panel (holding who knows what) is cleared, then the whole text goes.
+        let mut stale = PanelModel::new([9; TEXT_LENGTH]);
+        let out = sender.tick(t + STEP);
+        assert_eq!(out[0], (parameter(params::TEXT_POINTER), OscType::Int(POINTER_CLEAR)));
+        stale.apply(8, &out);
+        run(&mut sender, &mut stale, t + STEP + TICK, BLOCK * 6);
+        assert_eq!(first_row(&stale.cells), "Hi, I'm Orb. Yes, the one in the");
+    }
+
+    #[test]
+    fn letters_the_contract_cannot_place_are_placed_first() {
+        assert_eq!(fold_more("Tiếng Việt, xin chào"), "Tiêng Viêt, xin chào");
+        assert_eq!(fold_more("Đặng Ước"), "Đang Uoc", "Đ is the contract's to fold");
+        assert_eq!(fold_more("Καλημέρα"), "Kalimera");
+        // Accents written as a letter and a combining mark.
+        assert_eq!(fold_more("cafe\u{0301} nai\u{0308}ve Vie\u{0323}\u{0302}t"), "café naïve Viêt");
+        assert!(matches!(fold_more("Ça va ? Привет"), std::borrow::Cow::Borrowed(_)), "nothing to do: no copy");
+        let page = &orb::pages(&fold_more("Việt"))[0];
+        assert_eq!(orb::page_text(page).lines().next().unwrap().trim_end(), "Viêt", "every letter has a glyph");
+    }
+
+    #[test]
+    fn the_screen_takes_every_page_left() {
+        let mut sender = TextSender::new(8, STEP);
+        assert_eq!(sender.take_text(), None);
+        let text = (1..=6).map(|i| format!("ligne {i}")).collect::<Vec<_>>().join("\n");
+        sender.show(&text);
+        assert_eq!(sender.next_due().map(|t| t <= Instant::now()), Some(true), "a step is due");
+        assert_eq!(sender.take_text().as_deref(), Some("ligne 1 ligne 2 ligne 3 ligne 4 ligne 5 ligne 6"));
+        assert!(!sender.busy());
+        let mut panel = PanelModel::new([5; TEXT_LENGTH]);
+        let (_, visible) = run(&mut sender, &mut panel, Instant::now(), BLOCK);
+        assert_eq!(visible, Some(false), "taken off the panel");
+        assert_eq!(sender.next_due(), None, "then nothing to do");
     }
 
     #[test]

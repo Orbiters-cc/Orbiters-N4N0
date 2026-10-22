@@ -1,6 +1,7 @@
 // Projection backward: each Gaussian's 2D gradients (grad2d) to gradients of its parameters (grads, laid out like
-// params), and the densification statistics (stats: accumulated screen-space gradient norm, visible count,
-// largest radius, unused). The gradient buffer (binding 3) and `grad` come from one of the sums_read_*.wgsl variants.
+// params), the regularisers' gradients, and the largest screen radius it reached since the last relocation round
+// (stats.z, as a share of each view's width, so steps on the depth-sample grid and coarse levels compare alike). The
+// gradient buffer (binding 3), `grad` and `clear_grads` come from one of the sums_read_*.wgsl variants.
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<storage, read> params: array<f32>;
@@ -18,7 +19,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     for (var k = 0u; k < PARAM; k++) {
         grads[o + k] = 0.0;
     }
-    if (proj[i * PROJ + 15u] == 0.0) {
+    // The regularisers (frame.reg.x · mean opacity, frame.reg.y · mean scale per metre) pull on the Gaussians this view
+    // shows, and with frame.counts.w on every one, as 3DGS-MCMC's do (crate::train::Settings::regularise_unseen).
+    let op = sigmoid(params[o + 10u]);
+    let seen = proj[i * PROJ + 15u] != 0.0;
+    if (!seen) {
+        if (frame.counts.w != 0u) {
+            let s = exp(vec3<f32>(params[o + 3u], params[o + 4u], params[o + 5u]));
+            grads[o + 10u] = frame.reg.x * op * (1.0 - op);
+            grads[o + 3u] = frame.reg.y * s.x;
+            grads[o + 4u] = frame.reg.y * s.y;
+            grads[o + 5u] = frame.reg.y * s.z;
+        }
         return;
     }
     let mean = vec3<f32>(params[o], params[o + 1u], params[o + 2u]);
@@ -28,26 +40,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let g = i * GRAD2D;
     let d_mean2 = vec2<f32>(grad(g), grad(g + 1u));
     let d_conic = vec3<f32>(grad(g + 2u), grad(g + 3u), grad(g + 4u));
-    let op = proj[i * PROJ + 6u];
-    // The opacity regulariser (frame.reg.x · opacity) lets Gaussians nothing needs fade out, to be relocated.
-    grads[o + 10u] = (grad(g + 5u) + frame.reg.x) * op * (1.0 - op);
-    grads[o + 11u] = grad(g + 6u);
-    grads[o + 12u] = grad(g + 7u);
-    grads[o + 13u] = grad(g + 8u);
+    let d_op = grad(g + 5u);
+    let d_color = vec3<f32>(grad(g + 6u), grad(g + 7u), grad(g + 8u));
     let d_z = grad(g + 9u);
+    // The next step's sums start from zero (this was the only reader).
+    clear_grads(g);
+    grads[o + 10u] = (d_op + frame.reg.x) * op * (1.0 - op);
+    grads[o + 11u] = d_color.x;
+    grads[o + 12u] = d_color.y;
+    grads[o + 13u] = d_color.z;
 
-    // Conic → 2D covariance.
-    let a = m.cov.x;
-    let b = m.cov.y;
-    let c = m.cov.z;
-    let det = a * c - b * b;
-    let inv2 = 1.0 / (det * det);
-    let da = inv2 * (-c * c * d_conic.x + b * c * d_conic.y - b * b * d_conic.z);
-    let db = inv2 * (2.0 * b * c * d_conic.x - (det + 2.0 * b * b) * d_conic.y + 2.0 * a * b * d_conic.z);
-    let dc = inv2 * (-b * b * d_conic.x + a * b * d_conic.y - a * a * d_conic.z);
-    let g00 = da;
-    let g01 = 0.5 * db;
-    let g11 = dc;
+    // Conic → 2D covariance: dL/dΣ = −K·(dL/dK)·K with the conic K the projection stored (cpu::backward does the
+    // same), instead of 1/det², which overflows for near-plane splats metres wide and amplifies cancellation when det
+    // is tiny. K = (A, B; B, C); dL/dB counts B once, so (dL/dK)'s off-diagonal is half of it.
+    let ka = proj[i * PROJ + 2u];
+    let kb = proj[i * PROJ + 3u];
+    let kc = proj[i * PROJ + 4u];
+    let g00 = -(ka * ka * d_conic.x + ka * kb * d_conic.y + kb * kb * d_conic.z);
+    let g01 = -(ka * kb * d_conic.x + 0.5 * (kb * kb + ka * kc) * d_conic.y + kb * kc * d_conic.z);
+    let g11 = -(kb * kb * d_conic.x + kb * kc * d_conic.y + kc * kc * d_conic.z);
     let j0 = m.j0;
     let j1 = m.j1;
     // dL/dΣc = Jᵀ G J.
@@ -109,7 +120,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         dr[r] = dm * m.s;
         d_log_scale += m.rq[r] * dm * m.s;
     }
-    // The scale regulariser (frame.reg.y · Σ scales) keeps Gaussians from growing where nothing holds them back.
+    // With the scale regulariser (frame.reg.y · Σ scales), which keeps Gaussians from growing where nothing holds them.
     let d_scale = d_log_scale + frame.reg.y * m.s;
     grads[o + 3u] = d_scale.x;
     grads[o + 4u] = d_scale.y;
@@ -130,11 +141,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     grads[o + 8u] = d_rot.z;
     grads[o + 9u] = d_rot.w;
 
-    // Densification statistics: the screen-space gradient in normalised device units, as 3DGS measures it.
-    let ndc = d_mean2 * 0.5 * vec2<f32>(f32(frame.size.x), f32(frame.size.y));
-    var s = stats[i];
-    s.x += length(ndc);
-    s.y += 1.0;
-    s.z = max(s.z, proj[i * PROJ + 10u]);
-    stats[i] = s;
+    // The largest screen radius since the last relocation round, as a share of this view's width.
+    var st = stats[i];
+    st.z = max(st.z, proj[i * PROJ + 10u] / f32(frame.size.x));
+    stats[i] = st;
 }

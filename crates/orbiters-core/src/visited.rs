@@ -5,6 +5,7 @@
 //! `vrc:WorldDisplayName`, `xmp:CreateDate`); [`ShotIndex`] remembers what it read per file, so a library of
 //! thousands of pictures is scanned once. Nothing here needs a VRChat account.
 
+use crate::vrchat_log::LogEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -13,6 +14,12 @@ use std::path::{Path, PathBuf};
 
 /// Visits kept per world (the newest).
 const MAX_VISITS: usize = 200;
+/// Worlds kept (those visited longest ago go first): a log that names worlds without end cannot grow the file
+/// without end.
+const MAX_WORLDS: usize = 5000;
+/// Log bytes one [`History::read_logs_following`] reads at most: a first look at days of logs is spread over several
+/// calls rather than holding up the thread that makes them.
+const READ_BUDGET: u64 = 64 << 20;
 
 /// Unix time in seconds.
 pub fn now() -> u64 {
@@ -52,18 +59,33 @@ pub fn history_file() -> PathBuf {
 }
 
 impl History {
+    /// Reads the visits kept. What does not fit (a world entry from a newer version, a file cut short) is left out and
+    /// the rest kept ([`crate::json_lenient`]); such a file is first kept beside as `visited-worlds.json.bad-<time>`,
+    /// since the next save replaces it and VRChat has deleted the logs it came from.
     pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        let text = match crate::read_text(path) {
+            Ok(Some(text)) => text,
+            Ok(None) => return Self::default(),
+            Err(e) => {
+                eprintln!("visited worlds: {}: {e}", path.display());
+                crate::keep_aside(path);
+                return Self::default();
+            }
+        };
+        let (history, dropped) = crate::json_lenient::<Self>(&text);
+        if !dropped.is_empty() {
+            let aside = crate::keep_aside(path);
+            eprintln!("visited worlds: {} left out of {}, the file kept as {aside:?}", dropped.join(", "), path.display());
+        }
+        history
     }
 
-    /// Written whole to a temporary file, then moved over the old one (a reader never sees half a file).
+    /// Written whole ([`crate::write_atomic`]): a reader, a crash or a power cut finds the old file or the new one.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(self)?)?;
-        std::fs::rename(&tmp, path)?;
+        crate::write_atomic(path, &serde_json::to_vec(self)?)?;
         Ok(())
     }
 
@@ -79,6 +101,12 @@ impl History {
         if w.visits.len() > MAX_VISITS {
             w.visits.remove(0);
         }
+        if self.worlds.len() > MAX_WORLDS {
+            let oldest = self.worlds.iter().filter(|(id, _)| id.as_str() != world_id).min_by_key(|(_, w)| w.last()).map(|(id, _)| id.clone());
+            if let Some(id) = oldest {
+                self.worlds.remove(&id);
+            }
+        }
         true
     }
 
@@ -93,6 +121,13 @@ impl History {
 
     /// Reads what every `output_log_*.txt` in `dir` gained since the last call; returns whether anything changed.
     pub fn read_logs(&mut self, dir: &Path) -> bool {
+        self.read_logs_following(dir, None)
+    }
+
+    /// [`History::read_logs`] next to the log follower, which is at byte `at` of the log named `following.0`: that log
+    /// is read up to there only, after which the follower's reading is taken instead ([`History::follow`]) and the
+    /// newest log is read once, not twice. At most [`READ_BUDGET`] bytes a call: the rest is read by the next ones.
+    pub fn read_logs_following(&mut self, dir: &Path, following: Option<(&str, u64)>) -> bool {
         let Ok(entries) = std::fs::read_dir(dir) else { return false };
         let mut logs: Vec<(String, PathBuf)> = entries
             .flatten()
@@ -104,58 +139,75 @@ impl History {
         // Their names hold the start time: oldest first, so the last world joined is the newest.
         logs.sort();
         let mut changed = false;
-        for (name, path) in logs {
-            let from = self.logs.get(&name).copied().unwrap_or(0);
-            let Some((read, lines)) = read_new_lines(&path, from) else { continue };
-            for line in lines.lines() {
-                changed |= self.read_line(line);
+        let mut budget = READ_BUDGET;
+        for (name, path) in &logs {
+            let Ok(mut file) = File::open(path) else { continue };
+            let Ok(len) = file.metadata().map(|m| m.len()) else { continue };
+            // A log shorter than what was read of it was replaced: read again.
+            let from = self.logs.get(name).copied().filter(|&from| from <= len).unwrap_or(0);
+            let end = match following {
+                Some((followed, at)) if followed == name.as_str() => at.min(len),
+                _ => len,
+            };
+            if from >= end || budget == 0 {
+                continue;
             }
-            if read != from {
-                self.logs.insert(name, read);
+            let mut events = Vec::new();
+            // Only joins and room names count here: other lines are let go after a look at their first bytes.
+            let (read, _) = crate::vrchat_log::read_lines(&mut file, from, end, budget, |line| {
+                let joins =
+                    crate::vrchat_log::message(line).is_some_and(|m| m.starts_with(b"[Behaviour] Joining ") || m.starts_with(b"[Behaviour] Entering Room: "));
+                if let Some(e) = joins.then(|| crate::vrchat_log::parse_bytes(line)).flatten() {
+                    events.push(e);
+                }
+            });
+            budget = budget.saturating_sub(read - from);
+            for e in &events {
+                changed |= self.observe(e);
+            }
+            if self.logs.get(name) != Some(&read) {
+                self.logs.insert(name.clone(), read);
                 changed = true;
             }
         }
         // Forget the logs VRChat deleted.
         let before = self.logs.len();
-        self.logs.retain(|name, _| dir.join(name).is_file());
+        self.logs.retain(|name, _| logs.iter().any(|(n, _)| n == name));
         changed | (self.logs.len() != before)
     }
 
+    /// What the log follower read of the log named `name`, bytes `from` to `to`, with its events: taken in place of
+    /// reading them again once the visits are known up to `from` (until then [`History::read_logs_following`] reads
+    /// that log itself). Returns whether anything changed.
+    pub fn follow(&mut self, name: &str, from: u64, to: u64, events: &[LogEvent]) -> bool {
+        if to <= from || self.logs.get(name).copied().unwrap_or(0) != from {
+            return false;
+        }
+        for e in events {
+            self.observe(e);
+        }
+        self.logs.insert(name.to_string(), to);
+        true
+    }
+
     // A join reads "Entering Room: <name>", "Joining wrld_…:<instance>", then "Joining or Creating Room: <name>".
-    fn read_line(&mut self, line: &str) -> bool {
-        match crate::vrchat_log::parse_line(line) {
-            Some(crate::vrchat_log::LogEvent::Joining { world_id, .. }) => {
-                let Some(at) = log_time(line) else { return false };
-                let mut changed = self.record(&world_id, at);
+    fn observe(&mut self, event: &LogEvent) -> bool {
+        match event {
+            LogEvent::Joining { world_id, at: Some(at), .. } => {
+                let mut changed = self.record(world_id, *at);
                 if let Some(name) = self.entering.take() {
                     changed |= self.name_last(&name);
                 }
                 changed
             }
-            Some(crate::vrchat_log::LogEvent::EnteringRoom { name }) if line.contains("[Behaviour] Joining or Creating Room: ") => self.name_last(&name),
-            Some(crate::vrchat_log::LogEvent::EnteringRoom { name }) => {
-                self.entering = Some(name);
+            LogEvent::JoinedRoom { name } => self.name_last(name),
+            LogEvent::EnteringRoom { name } => {
+                self.entering = Some(name.clone());
                 false
             }
             _ => false,
         }
     }
-}
-
-/// The complete lines a file gained after byte `from`, and where they end.
-fn read_new_lines(path: &Path, from: u64) -> Option<(u64, String)> {
-    let mut f = File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    let from = if len < from { 0 } else { from };
-    if len == from {
-        return Some((from, String::new()));
-    }
-    f.seek(SeekFrom::Start(from)).ok()?;
-    let mut buf = Vec::with_capacity((len - from).min(256 << 20) as usize);
-    f.take(256 << 20).read_to_end(&mut buf).ok()?;
-    let end = buf.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-    buf.truncate(end);
-    Some((from + end as u64, String::from_utf8_lossy(&buf).into_owned()))
 }
 
 /// The time at the start of a log line (`2026.10.18 20:23:20 …`, this computer's local time) as Unix seconds.
@@ -168,10 +220,15 @@ pub fn log_time(line: &str) -> Option<u64> {
     local_unix(n(0..4)? as i32, n(5..7)? as u8, n(8..10)? as u8, n(11..13)? as u8, n(14..16)? as u8, n(17..19)? as u8)
 }
 
+/// A local date and time as Unix seconds, with the offset this computer's time zone had then: a log or a picture
+/// from before a change to or from summer time is not an hour off (and a log read again counts no visit twice).
 fn local_unix(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> Option<u64> {
     let date = time::Date::from_calendar_date(year, time::Month::try_from(month).ok()?, day).ok()?;
     let t = time::PrimitiveDateTime::new(date, time::Time::from_hms(hour, minute, second).ok()?);
-    let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    let now = || time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    let guess = time::UtcOffset::local_offset_at(t.assume_utc()).unwrap_or_else(|_| now());
+    // The guess was the offset at that time read as UTC: next to a change, the offset at the moment it gives wins.
+    let offset = time::UtcOffset::local_offset_at(t.assume_offset(guess)).unwrap_or(guess);
     u64::try_from(t.assume_offset(offset).unix_timestamp()).ok()
 }
 
@@ -336,21 +393,32 @@ pub struct ShotIndex {
 }
 
 pub fn shot_index_file() -> PathBuf {
+    crate::paths::cache_dir().join("screenshots.json")
+}
+
+/// Where the index was kept before caches moved out of the roaming config folder.
+fn legacy_shot_index_file() -> PathBuf {
     crate::paths::config_dir().join("cache").join("screenshots.json")
 }
 
 impl ShotIndex {
+    /// The index as saved; one that cannot be read is made again (it is a cache: the pictures are read again).
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        let legacy = (!path.exists() && path == shot_index_file()).then(legacy_shot_index_file);
+        let Ok(Some(text)) = crate::read_text(legacy.as_deref().unwrap_or(path)) else { return Self::default() };
+        serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text)).unwrap_or_else(|e| {
+            eprintln!("screenshots index: {}: {e}; reading the pictures again", path.display());
+            Self::default()
+        })
     }
 
+    /// Written whole, through a temporary file of its own ([`crate::write_atomic`]): two windows saving at once each
+    /// leave a whole index.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(self)?)?;
-        std::fs::rename(&tmp, path)?;
+        crate::write_atomic(path, &serde_json::to_vec(self)?)?;
         Ok(())
     }
 
@@ -481,7 +549,7 @@ mod tests {
         assert!(index.refresh(std::slice::from_ref(&dir)));
         assert!(!index.refresh(std::slice::from_ref(&dir)));
         assert_eq!(index.shots().len(), 1);
-        assert!(index.hash(&[path.clone()]));
+        assert!(index.hash(std::slice::from_ref(&path)));
         assert_eq!(index.shots()[0].sha256.as_deref(), Some(sha256_file(&path).unwrap().as_str()));
         std::fs::remove_file(&path).unwrap();
         assert!(index.refresh(std::slice::from_ref(&dir)));
@@ -507,32 +575,40 @@ mod tests {
         println!("{} screenshots with a world in {:?} ({:?})", shots.len(), t.elapsed(), screenshot_dirs());
     }
 
+    const A: &str = "wrld_99123966-6b37-4b5b-9f3c-0a1b2c3d4e5f";
+    const B: &str = "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b";
+
     #[test]
     fn keeps_visits_across_logs_read_in_pieces() {
         let dir = std::env::temp_dir().join(format!("orbiters-visits-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("output_log_2026-10-18_20-17-45.txt");
         std::fs::write(
             &log,
-            "2026.10.18 20:23:20 Debug      -  [Behaviour] Entering Room: A\n2026.10.18 20:23:20 Debug      -  [Behaviour] Joining wrld_a:1~region(eu)\n\
-             2026.10.18 20:23:20 Debug      -  [Behaviour] Joining or Creating Room: A\n2026.10.18 20:59:59 Debug      -  [Behaviour] OnLeftRoom\n\
-             2026.10.18 21:00:00 Debug      -  [Behaviour] Entering Room: B\n2026.10.18 21:00:00 Debug      -  [Behaviour] Joining wrld_b:2\n\
-             2026.10.18 21:00:01 Debug      -  [Behaviour] Joining or",
+            format!(
+                "2026.10.18 20:23:20 Debug      -  [Behaviour] Entering Room: A\n2026.10.18 20:23:20 Debug      -  [Behaviour] Joining {A}:1~region(eu)\n\
+                 2026.10.18 20:23:20 Debug      -  [Behaviour] Joining or Creating Room: A\n2026.10.18 20:59:59 Debug      -  [Behaviour] OnLeftRoom\n\
+                 2026.10.18 21:00:00 Debug      -  [Script] [Behaviour] Joining {B}:66\n\
+                 2026.10.18 21:00:00 Debug      -  [Behaviour] Entering Room: B\n2026.10.18 21:00:00 Debug      -  [Behaviour] Joining {B}:2\n\
+                 2026.10.18 21:00:01 Debug      -  [Behaviour] Joining or"
+            ),
         )
         .unwrap();
         let mut h = History::default();
         assert!(h.read_logs(&dir));
-        assert_eq!(h.worlds["wrld_a"].name.as_deref(), Some("A"));
-        assert_eq!(h.worlds["wrld_a"].visits.len(), 1);
-        assert_eq!(h.worlds["wrld_b"].name.as_deref(), Some("B"));
+        assert_eq!(h.worlds[A].name.as_deref(), Some("A"));
+        assert_eq!(h.worlds[A].visits.len(), 1);
+        assert_eq!(h.worlds[B].name.as_deref(), Some("B"));
+        assert_eq!(h.worlds[B].visits.len(), 1, "a script's line is no visit");
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
-        writeln!(f, " Creating Room: B (renamed)\n2026.10.18 22:00:00 Debug      -  [Behaviour] Entering Room: A\n2026.10.18 22:00:00 Debug      -  [Behaviour] Joining wrld_a:3").unwrap();
+        writeln!(f, " Creating Room: B (renamed)\n2026.10.18 22:00:00 Debug      -  [Behaviour] Entering Room: A\n2026.10.18 22:00:00 Debug      -  [Behaviour] Joining {A}:3").unwrap();
         drop(f);
         assert!(h.read_logs(&dir));
-        assert_eq!(h.worlds["wrld_b"].name.as_deref(), Some("B (renamed)"));
-        assert_eq!(h.worlds["wrld_a"].name.as_deref(), Some("A"));
-        assert_eq!(h.worlds["wrld_a"].visits.len(), 2);
+        assert_eq!(h.worlds[B].name.as_deref(), Some("B (renamed)"));
+        assert_eq!(h.worlds[A].name.as_deref(), Some("A"));
+        assert_eq!(h.worlds[A].visits.len(), 2);
         assert!(!h.read_logs(&dir));
         let saved = dir.join("visited-worlds.json");
         h.save(&saved).unwrap();
@@ -543,5 +619,56 @@ mod tests {
         assert!(again.read_logs(&dir));
         assert_eq!(again.worlds.len(), 2);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_newest_log_is_read_once_beside_the_follower() {
+        let dir = std::env::temp_dir().join(format!("orbiters-visits-follow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "output_log_2026-10-18_20-17-45.txt";
+        let first =
+            format!("2026.10.18 20:23:20 Debug      -  [Behaviour] Joining {A}:1\n2026.10.18 20:23:20 Debug      -  [Behaviour] Joining or Creating Room: A\n");
+        std::fs::write(dir.join(name), &first).unwrap();
+        let mut h = History::default();
+        // The follower is at the end of what is there: the visits are read up to it.
+        assert!(h.read_logs_following(&dir, Some((name, first.len() as u64))));
+        assert_eq!(h.worlds[A].name.as_deref(), Some("A"));
+        // What it reads next is taken from it; the history does not read those bytes itself.
+        let more = format!("2026.10.18 21:00:00 Debug      -  [Behaviour] Joining {B}:2\n");
+        std::fs::write(dir.join(name), format!("{first}{more}")).unwrap();
+        let to = (first.len() + more.len()) as u64;
+        let events = vec![crate::vrchat_log::parse_line(more.trim_end()).unwrap()];
+        assert!(!h.follow(name, 3, to, &events), "not where the history is");
+        assert!(h.follow(name, first.len() as u64, to, &events));
+        assert_eq!(h.worlds[B].visits.len(), 1);
+        assert!(!h.read_logs_following(&dir, Some((name, to))), "nothing left to read");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_history_that_does_not_fit_keeps_what_does_and_the_file() {
+        let dir = std::env::temp_dir().join(format!("orbiters-visits-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("visited-worlds.json");
+        std::fs::write(&path, format!("\u{feff}{{\"worlds\":{{\"{A}\":{{\"name\":\"A\",\"visits\":[5]}},\"{B}\":{{\"name\":7,\"visits\":[\"x\"]}}}}}}"))
+            .unwrap();
+        let h = History::load(&path);
+        assert_eq!(h.worlds[A].visits, vec![5]);
+        assert!(!h.worlds.contains_key(B));
+        let kept = std::fs::read_dir(&dir).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("visited-worlds.json.bad-"));
+        assert!(kept);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn worlds_kept_are_bounded() {
+        let mut h = History::default();
+        for i in 0..MAX_WORLDS + 10 {
+            assert!(h.record(&format!("wrld_{i:08x}-0000-4000-8000-000000000000"), 1000 + i as u64));
+        }
+        assert_eq!(h.worlds.len(), MAX_WORLDS);
+        assert!(!h.worlds.contains_key("wrld_00000000-0000-4000-8000-000000000000"), "the world visited longest ago went first");
     }
 }

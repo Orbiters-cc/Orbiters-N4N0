@@ -21,6 +21,19 @@ enum Thumb {
     Missing,
 }
 
+/// A session's picture as the grid keeps it.
+struct Kept {
+    thumb: Thumb,
+    /// The session's manifest time when it was read: a session written since gets its picture again.
+    modified: u64,
+    /// When a card last drew it (egui's clock), to let go of the oldest first.
+    used: f64,
+}
+
+/// Session pictures kept as textures (about half a megabyte each): those last on screen. Others load again from
+/// disk as they scroll back into view.
+const KEEP_THUMBS: usize = 64;
+
 struct Detail {
     dir: PathBuf,
     /// The card's rect when it was opened (the morph starts there).
@@ -71,7 +84,10 @@ pub struct State {
     list: Job<Vec<SessionSummary>>,
     sessions: Option<Vec<SessionSummary>>,
     query: String,
-    thumbs: HashMap<PathBuf, Thumb>,
+    /// The sessions the search shows (indices into `sessions`), for the search it was worked out for: again only
+    /// when the list or the search changes, not every frame.
+    shown: Option<(String, Vec<usize>)>,
+    thumbs: HashMap<PathBuf, Kept>,
     detail: Option<Detail>,
     /// The 3D view of a session's splats, over everything (the detail waits under it).
     viewer: Option<super::splats::Viewer>,
@@ -90,9 +106,21 @@ impl State {
 
     pub fn loaded(&mut self) -> bool {
         if let Some(list) = self.list.take() {
-            self.sessions = Some(list);
+            self.set_sessions(list);
         }
         self.sessions.is_some()
+    }
+
+    /// Whether something is still being read (the list, pictures): the screenshots wait for it.
+    pub fn busy(&self) -> bool {
+        self.list.running() || self.thumbs.values().any(|k| matches!(k.thumb, Thumb::Loading(_)))
+    }
+
+    /// A new list: the pictures of sessions that went away (trashed, moved) go with them.
+    fn set_sessions(&mut self, list: Vec<SessionSummary>) {
+        self.thumbs.retain(|dir, _| list.iter().any(|s| &s.dir == dir));
+        self.sessions = Some(list);
+        self.shown = None;
     }
 
     fn open(&mut self, ctx: &egui::Context, dir: PathBuf, origin: Rect) {
@@ -132,16 +160,22 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let page = ui.max_rect();
 
-    // Reload when the library changes, the folder changes, or the page is entered again.
+    // Reload when the library changes, the folder changes, or the page is entered again (sizes come from the
+    // window's library cache: only sessions written since are walked again).
     let key = (cx.ctl.library_version(), cx.snap.settings.sessions_dir.clone(), cx.visit);
     if state.loaded.as_ref() != Some(&key) {
+        if state.loaded.as_ref().is_some_and(|k| k.1 != key.1) {
+            // Another folder: none of these pictures belong to it.
+            state.thumbs.clear();
+        }
         state.loaded = Some(key);
         let dir = cx.snap.settings.sessions_dir.clone();
-        state.list = Job::spawn(&ctx, move || controller::list_sessions(&dir));
+        state.list = Job::spawn(&ctx, move || crate::worlds::sessions(&dir));
     }
     if let Some(list) = state.list.take() {
-        state.sessions = Some(list);
+        state.set_sessions(list);
     }
+    let now = anim::time(&ctx);
 
     // Heading and actions, fixed above the grid (drawn after it, over the cards scrolled up under them).
     let head = Rect::from_min_size(pos2(page.left() + super::PAD_X, page.top() + cx.top + 8.0), vec2(page.width() - super::PAD_X * 2.0, 72.0));
@@ -159,13 +193,19 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let grid_from = orbiters_ui::blur::next_shape(ui);
     let mut gu = ui.new_child(UiBuilder::new().max_rect(grid_rect).id_salt("sessions-grid"));
     let q = state.query.trim().to_lowercase();
-    let filtered: Vec<SessionSummary> = state
-        .sessions
-        .as_ref()
-        .map(|l| {
-            l.iter().filter(|s| q.is_empty() || title(s).to_lowercase().contains(&q) || s.dir.to_string_lossy().to_lowercase().contains(&q)).cloned().collect()
-        })
-        .unwrap_or_default();
+    if state.shown.as_ref().is_none_or(|(asked, _)| *asked != q) {
+        let shown = state
+            .sessions
+            .as_ref()
+            .map(|l| {
+                let matches = |s: &SessionSummary| q.is_empty() || title(s).to_lowercase().contains(&q) || s.dir.to_string_lossy().to_lowercase().contains(&q);
+                l.iter().enumerate().filter(|(_, s)| matches(s)).map(|(i, _)| i).collect()
+            })
+            .unwrap_or_default();
+        state.shown = Some((q.clone(), shown));
+    }
+    let filtered: &[usize] = state.shown.as_ref().map(|(_, v)| v.as_slice()).unwrap_or_default();
+    let sessions = state.sessions.as_deref().unwrap_or_default();
     let mut clicked: Option<(PathBuf, Rect)> = None;
     egui::ScrollArea::vertical().id_salt("sessions").auto_shrink([false, false]).scroll_bar_rect(below_head).show(&mut gu, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 32 }).show(ui, |ui| {
@@ -189,10 +229,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 if !ui.is_rect_visible(r) {
                     continue;
                 }
-                match filtered.get(i) {
+                match filtered.get(i).and_then(|&k| sessions.get(k)) {
                     Some(s) => {
                         let shown = state.detail.as_ref().filter(|d| d.dir == s.dir).map_or(1.0, |d| card_opacity(d.progress));
-                        let tex = thumbnail(&ctx, &mut state.thumbs, s);
+                        let tex = thumbnail(&ctx, &mut state.thumbs, s, now);
                         if session_card(ui, cx, i, s, r, tex.as_ref(), shown) {
                             clicked = Some((s.dir.clone(), r));
                         }
@@ -202,7 +242,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             }
         });
     });
-    super::under_top(&gu, cx, grid_from, grid_top);
+    super::under_top(&gu, cx, "sessions", grid_from, grid_top);
 
     let total: u64 = state.sessions.as_ref().map(|l| l.iter().map(|s| s.size_bytes).sum()).unwrap_or(0);
     let sub = match &state.sessions {
@@ -254,12 +294,23 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     } else if state.detail.is_some() {
         detail(&ctx, cx, state, page);
     }
+    trim_thumbs(&mut state.thumbs, now);
 }
 
 impl State {
     /// Whether the 3D view shows its splats (screenshots).
     pub fn viewer_loaded(&self) -> bool {
         self.viewer.as_ref().is_some_and(|v| v.loaded())
+    }
+
+    /// The session whose detail is open (screenshots).
+    pub fn open_dir(&self) -> Option<PathBuf> {
+        self.detail.as_ref().map(|d| d.dir.clone())
+    }
+
+    /// When the reconstruction the library shows for `dir` was made, if it has one (screenshots).
+    pub fn reconstruction_of(&self, dir: &std::path::Path) -> Option<String> {
+        self.sessions.as_ref()?.iter().find(|s| s.dir == dir)?.reconstruction.as_ref().map(|r| r.created_utc.clone())
     }
 
     /// Opens the 3D view of the open detail's session (screenshots).
@@ -269,27 +320,44 @@ impl State {
     }
 }
 
-fn thumbnail(ctx: &egui::Context, thumbs: &mut HashMap<PathBuf, Thumb>, s: &SessionSummary) -> Option<TextureHandle> {
+fn thumbnail(ctx: &egui::Context, thumbs: &mut HashMap<PathBuf, Kept>, s: &SessionSummary, now: f64) -> Option<TextureHandle> {
     if !s.has_thumbnail {
         return None;
     }
-    let entry = thumbs.entry(s.dir.clone()).or_insert_with(|| {
+    if thumbs.get(&s.dir).is_some_and(|k| k.modified != s.modified) {
+        thumbs.remove(&s.dir);
+    }
+    let kept = thumbs.entry(s.dir.clone()).or_insert_with(|| {
         let dir = s.dir.clone();
-        Thumb::Loading(Job::spawn(ctx, move || {
-            bundle::read_thumbnail(&dir).map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
-        }))
+        let job = Job::spawn(ctx, move || bundle::read_thumbnail(&dir).map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba)));
+        Kept { thumb: Thumb::Loading(job), modified: s.modified, used: now }
     });
-    if let Thumb::Loading(job) = entry {
+    kept.used = now;
+    if let Thumb::Loading(job) = &mut kept.thumb {
         if let Some(result) = job.take() {
-            *entry = match result {
+            kept.thumb = match result {
                 Some(image) => Thumb::Ready(ctx.load_texture(format!("session-thumb-{}", s.dir.display()), image, TextureOptions::LINEAR)),
                 None => Thumb::Missing,
             };
         }
     }
-    match entry {
+    match &kept.thumb {
         Thumb::Ready(t) => Some(t.clone()),
         _ => None,
+    }
+}
+
+/// Lets go of the pictures drawn longest ago beyond [`KEEP_THUMBS`] (their textures are freed with them).
+fn trim_thumbs(thumbs: &mut HashMap<PathBuf, Kept>, now: f64) {
+    let ready = |k: &Kept| matches!(k.thumb, Thumb::Ready(_));
+    let count = thumbs.values().filter(|k| ready(k)).count();
+    if count <= KEEP_THUMBS {
+        return;
+    }
+    let mut old: Vec<(f64, PathBuf)> = thumbs.iter().filter(|(_, k)| ready(k) && k.used < now).map(|(dir, k)| (k.used, dir.clone())).collect();
+    old.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (_, dir) in old.into_iter().take(count - KEEP_THUMBS) {
+        thumbs.remove(&dir);
     }
 }
 
@@ -302,21 +370,28 @@ fn preview(ctx: &egui::Context, d: &mut Detail, s: &SessionSummary) -> Option<Te
             let (w, h, rgba) = reconstruction::read_preview(&dir)?;
             let f = w.div_ceil(960).max(1) as usize;
             let (w, h) = (w as usize, h as usize);
-            let (sw, sh) = (w / f, h / f);
+            if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+                return None;
+            }
+            // Every pixel counts, the last row and column of blocks included when `f` does not divide the size.
+            let (sw, sh) = (w.div_ceil(f), h.div_ceil(f));
             let mut small = vec![0u8; sw * sh * 4];
             for y in 0..sh {
+                let (y0, y1) = (y * f, ((y + 1) * f).min(h));
                 for x in 0..sw {
+                    let (x0, x1) = (x * f, ((x + 1) * f).min(w));
                     let mut acc = [0u32; 4];
-                    for dy in 0..f {
-                        let row = ((y * f + dy) * w + x * f) * 4;
-                        for px in rgba[row..row + f * 4].as_chunks::<4>().0 {
+                    for yy in y0..y1 {
+                        let row = (yy * w + x0) * 4;
+                        for px in rgba[row..row + (x1 - x0) * 4].as_chunks::<4>().0 {
                             for c in 0..4 {
                                 acc[c] += px[c] as u32;
                             }
                         }
                     }
+                    let n = ((x1 - x0) * (y1 - y0)) as u32;
                     for c in 0..4 {
-                        small[(y * sw + x) * 4 + c] = (acc[c] / (f * f) as u32) as u8;
+                        small[(y * sw + x) * 4 + c] = (acc[c] / n) as u8;
                     }
                 }
             }
@@ -632,9 +707,16 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         state.detail = None;
         return;
     };
-    let tex = match state.thumbs.get(&d.dir) {
-        Some(Thumb::Ready(t)) => Some(t.clone()),
-        _ => None,
+    let tex = match state.thumbs.get_mut(&d.dir) {
+        Some(kept) => {
+            // In use as long as the detail shows it, wherever the grid is scrolled.
+            kept.used = anim::time(ctx);
+            match &kept.thumb {
+                Thumb::Ready(t) => Some(t.clone()),
+                _ => None,
+            }
+        }
+        None => None,
     };
     let id = Id::unique(("session-detail", d.serial));
     let t = anim::spring_from(ctx, id.with("morph"), [0.0], [if d.closing { 0.0 } else { 1.0 }], Spring::MORPH)[0];
@@ -870,6 +952,8 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         if let Some(l) = state.sessions.as_mut() {
             l.retain(|s| s.dir != session.dir);
         }
+        state.thumbs.remove(&session.dir);
+        state.shown = None;
         state.detail = None;
         return;
     }

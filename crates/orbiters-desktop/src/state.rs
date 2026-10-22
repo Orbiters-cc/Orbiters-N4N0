@@ -26,6 +26,20 @@ pub struct VrchatStatus {
     pub pid: Option<u32>,
     pub world: WorldState,
     pub log_found: bool,
+    /// How VRChat moves the avatar, once its parameters said so: the SteamVR tab's walk boost carries only while VRChat
+    /// walks the avatar itself.
+    #[serde(default)]
+    pub motion: Option<AvatarMotion>,
+}
+
+/// What VRChat's own avatar parameters (`InStation`, `Seated`, `VelocityMagnitude`) say of its moving. The speed is
+/// kept to a quarter metre a second, so that walking does not publish the state at the rate VRChat sends it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AvatarMotion {
+    pub in_station: bool,
+    pub seated: bool,
+    /// Metres a second.
+    pub speed: f32,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -40,6 +54,10 @@ pub struct OscStatus {
     pub vrchat_found: bool,
     /// Distinct OSC addresses VRChat sent values for (avatar parameters, poses).
     pub values: usize,
+    /// VRChat sent something within the last minute. It sends avatar parameters only to OSC services it found:
+    /// off while VRChat runs, the avatar's buttons (Talk, a hand on the orb) do not reach Orbiters.
+    #[serde(default)]
+    pub receiving: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -121,6 +139,9 @@ pub struct AccountStatus {
 pub struct SteamVrStatus {
     /// SteamVR's server runs.
     pub running: bool,
+    /// Its process id while it runs (`vrserver`): a SteamVR quit and started again is another one.
+    #[serde(default)]
+    pub pid: Option<u32>,
     /// The Orbiters overlay is connected (a tab in SteamVR's dashboard).
     pub overlay: bool,
     /// The latest T-pose calibration.
@@ -260,6 +281,17 @@ pub struct OrbConfirmation {
     pub approve_url: String,
 }
 
+/// The link of a confirmation the owner gives in Orbiters desktop itself (what Orb asks before it does a public,
+/// lasting or costly thing), rather than on the Orbiters website: the number of what waits follows it.
+pub const LOCAL_APPROVAL: &str = "orbiters-desktop:orb/approve/";
+
+impl OrbConfirmation {
+    /// Approved in Orbiters desktop (the Orb page's button, or a spoken yes), not on the Orbiters website.
+    pub fn is_local(&self) -> bool {
+        self.approve_url.starts_with(LOCAL_APPROVAL)
+    }
+}
+
 /// The speech models and the voice worker.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct VoiceStatus {
@@ -272,6 +304,9 @@ pub struct VoiceStatus {
     /// The microphone's level while Orb listens (0 to 1).
     pub level: f32,
     pub error: Option<String>,
+    /// The models stopped loading (the worker stopped twice while loading them): installing again repairs them.
+    #[serde(default)]
+    pub repair: bool,
 }
 
 /// A process's share of this computer.
@@ -454,7 +489,13 @@ impl Snapshot {
     pub fn new(settings: Settings) -> Self {
         Self {
             version: orbiters_core::APP_VERSION.into(),
-            vrchat: VrchatStatus { running: false, pid: None, world: WorldState::default(), log_found: orbiters_core::paths::vrchat_log_dir().is_some() },
+            vrchat: VrchatStatus {
+                running: false,
+                pid: None,
+                world: WorldState::default(),
+                log_found: orbiters_core::paths::vrchat_log_dir().is_some(),
+                motion: None,
+            },
             sources: Vec::new(),
             mics: Vec::new(),
             osc: OscStatus { enabled: settings.osc.enabled, ..Default::default() },
@@ -493,8 +534,11 @@ impl Snapshot {
         if far_enough.unwrap_or(true) {
             self.capture.trail.push(p);
             if self.capture.trail.len() > 6000 {
-                // Thin the older half instead of dropping the start of the path.
-                let keep: Vec<[f32; 3]> = self.capture.trail.iter().step_by(2).copied().collect();
+                // Thin the older half (every other point) instead of dropping the start of the path: the recent part
+                // keeps its detail, the oldest is thinned most.
+                let half = self.capture.trail.len() / 2;
+                let mut keep: Vec<[f32; 3]> = self.capture.trail[..half].iter().step_by(2).copied().collect();
+                keep.extend_from_slice(&self.capture.trail[half..]);
                 self.capture.trail = keep;
             }
         }

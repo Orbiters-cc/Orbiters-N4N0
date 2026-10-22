@@ -1,15 +1,18 @@
-//! One capture session: decodes every frame's strip (and depth symbols on depth frames), chooses keyframes,
-//! and writes the session bundle. Keyframe images are encoded on a small thread pool so capture never waits
-//! on disk or compression; when the pool falls behind, keyframes are dropped (and counted) instead.
+//! One capture session: decodes every frame's strip (and the skeleton band of colour frames), chooses keyframes,
+//! and writes the session bundle. Keyframes are encoded, and depth frames decoded, on threads of their own, so
+//! capture never waits on the disk, compression or the depth decoder: when they fall behind, keyframes and depth
+//! frames are dropped (and counted) instead. A frame's record reaches `frames.bin` once the files it names are
+//! written, in frame order: a session cut short (a full disk, a crash) never names a keyframe that is not there.
 
 use crate::audio::{AudioRecorder, AudioSource};
 use crate::coverage::Coverage;
 use crate::performance::{ParameterStream, SkeletonStream};
+use crate::sources::FrameAccess;
 use crate::tracking::{self, TrackingRecorder};
-use crossbeam_channel::{bounded, Receiver as ChanReceiver, Sender as ChanSender, TrySendError};
+use crossbeam_channel::{bounded, unbounded, Receiver as ChanReceiver, Sender as ChanSender};
 use orbiters_contracts::frame_record::{record_flags, FrameRecord};
 use orbiters_contracts::image::{ImageView, PixelOrder};
-use orbiters_contracts::manifest::{depth_file, SessionManifest, StorageQuality};
+use orbiters_contracts::manifest::{self as bundle_files, depth_file, SessionManifest, StorageQuality};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_contracts::performance::tracking::Device;
 use orbiters_contracts::performance::{self as perf, audio::TrackKind};
@@ -18,97 +21,442 @@ use orbiters_core::bundle::{self, BundleWriter};
 use orbiters_core::clock;
 use orbiters_core::keyframes::{self, KeyframeSelector};
 use orbiters_core::protocol::{CaptureStats, CoverageMap, OscSample, StartCapture};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-enum Job {
-    Keyframe { path: PathBuf, data: Vec<u8>, width: u32, height: u32, bgra: bool },
-    Depth { path: PathBuf, bytes: Vec<u8> },
+/// Something the person should know about a recording that goes on, by what it concerns: the worker tells each kind
+/// once, and again when its message changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Warning {
+    Microphone,
+    GameSound,
+    Tracking,
+    /// The avatar parameters' and the skeleton band's streams.
+    Streams,
+    /// Keyframes and depth frames that could not be written, or were dropped.
+    Pictures,
+    /// The session's files as a whole: its checkpoints, `frames.bin`, the free space left.
+    Disk,
+    /// The frame source (a Spout sender that cannot be opened, frames of a raw capture that cannot be read).
+    Source,
+    /// The capture strip, seen once and then for a while not (no camera pose, so no keyframes).
+    Strip,
 }
 
-struct Pool {
-    tx: Option<ChanSender<Job>>,
+/// A stretch without the strip shorter than this is a moment's trouble (a fast turn, a flash): not counted.
+const STRIP_GAP_NS: u64 = 1_000_000_000;
+/// A stretch without the strip this long is told while recording.
+const STRIP_GAP_TOLD_NS: u64 = 3_000_000_000;
+
+/// A picture for the encoders: a keyframe (its frame's record waits for it), or a depth frame kept as received.
+struct Picture {
+    /// The record waiting for it; `None` for `depth-raw/` frames, which no record names.
+    frame: Option<u64>,
+    path: PathBuf,
+    /// Upright and tightly packed, in the source's channel order.
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
+    bgra: bool,
+    /// The session's thumbnail, made from this picture below the strip (rows from `.1` down).
+    thumbnail: Option<(PathBuf, u32)>,
+}
+
+/// A depth frame for the decoder, upright and tightly packed.
+struct DepthJob {
+    frame: u64,
+    index: i32,
+    path: PathBuf,
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
+    order: PixelOrder,
+}
+
+/// A depth frame decoded and written.
+struct Decoded {
+    layout: depth::DepthLayout,
+    grid_width: u32,
+    codes: Vec<u16>,
+    tiles_rejected: u32,
+    bytes: u64,
+}
+
+/// What a thread finished, with the frame buffer it had (back for the next copy).
+enum Done {
+    Picture { frame: Option<u64>, written: Result<u64, String>, thumbnail_failed: bool, buffer: Vec<u8> },
+    Depth { frame: u64, index: i32, decoded: Result<Option<Decoded>, String>, buffer: Vec<u8>, width: u32, height: u32, bgra: bool },
+}
+
+/// Threads taking jobs from a bounded queue.
+struct Workers<J> {
+    tx: Option<ChanSender<J>>,
     threads: Vec<JoinHandle<()>>,
-    written: Arc<AtomicU64>,
-    errors: Arc<AtomicU64>,
 }
 
-impl Pool {
-    fn new(threads: usize) -> Self {
-        let (tx, rx): (ChanSender<Job>, ChanReceiver<Job>) = bounded(threads * 2);
-        let written = Arc::new(AtomicU64::new(0));
-        let errors = Arc::new(AtomicU64::new(0));
-        let handles = (0..threads)
+impl<J: Send + 'static> Workers<J> {
+    /// `threads` threads named `name-<i>`, each running the job function `make` gives it (its own state: the depth
+    /// decoder learns how each tile reads), with room for `queue` jobs waiting.
+    fn spawn(name: &str, threads: usize, queue: usize, make: impl Fn() -> Box<dyn FnMut(J) + Send>) -> Self {
+        let (tx, rx) = bounded::<J>(queue);
+        let threads = (0..threads)
             .map(|i| {
-                let rx = rx.clone();
-                let written = written.clone();
-                let errors = errors.clone();
+                let (rx, mut work) = (rx.clone(), make());
                 std::thread::Builder::new()
-                    .name(format!("encode-{i}"))
+                    .name(format!("{name}-{i}"))
                     .spawn(move || {
                         for job in rx {
-                            let (path, bytes) = match job {
-                                Job::Keyframe { path, data, width, height, bgra } => {
-                                    (path, qoi::encode_bgra_strided(&data, width, height, width as usize * 4, bgra, true))
-                                }
-                                Job::Depth { path, bytes } => (path, bytes),
-                            };
-                            match std::fs::write(&path, &bytes) {
-                                Ok(()) => {
-                                    written.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                                }
-                                Err(e) => {
-                                    eprintln!("write {}: {e}", path.display());
-                                    errors.fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
+                            work(job);
                         }
                     })
-                    .expect("spawn encoder")
+                    .expect("spawn a capture thread")
             })
             .collect();
-        Self { tx: Some(tx), threads: handles, written, errors }
+        Self { tx: Some(tx), threads }
     }
 
-    fn try_send(&self, job: Job) -> bool {
-        match self.tx.as_ref().expect("pool open").try_send(job) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
+    /// Whether a job would be taken now: looked at before a frame is copied for one.
+    fn has_room(&self) -> bool {
+        self.tx.as_ref().is_some_and(|tx| !tx.is_full())
+    }
+
+    /// Every thread ended while jobs could still come (a panic): nothing will be taken.
+    fn dead(&self) -> bool {
+        self.tx.is_some() && self.threads.iter().all(|t| t.is_finished())
+    }
+
+    /// Queues a job; it comes back when it could not be (no room after all, the threads gone).
+    fn send(&self, job: J) -> Result<(), J> {
+        match &self.tx {
+            Some(tx) => tx.try_send(job).map_err(|e| e.into_inner()),
+            None => Err(job),
         }
     }
 
-    /// Depth files are small and must not be lost: block until queued.
-    fn send(&self, job: Job) {
-        let _ = self.tx.as_ref().expect("pool open").send(job);
-    }
-
-    fn finish(mut self) -> (u64, u64) {
+    /// No more jobs: waits for the threads to finish theirs.
+    fn finish(&mut self) {
         self.tx = None;
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
-        (self.written.load(Ordering::Relaxed), self.errors.load(Ordering::Relaxed))
     }
 }
 
-/// Copies a borrowed frame into a tightly packed, upright buffer (4 bytes per pixel, source channel order).
-fn copy_upright(view: &ImageView, flipped: bool) -> Vec<u8> {
-    let row = view.width as usize * 4;
-    let mut out = vec![0u8; row * view.height as usize];
-    for y in 0..view.height as usize {
-        let src_row = if flipped { view.height as usize - 1 - y } else { y };
-        out[y * row..(y + 1) * row].copy_from_slice(&view.data[src_row * view.stride..src_row * view.stride + row]);
+/// Files written whole by a thread of their own (the checkpoints' `manifest.json`, `audio.json`, `calibration.json`),
+/// each through a temporary file flushed to the disk and a rename ([`orbiters_core::write_atomic`], which also waits
+/// out a moment's lock on the file): the capture thread hands them over and goes on. A file handed over again before
+/// it was written is written once, as it was last.
+struct Saver {
+    shared: Arc<(Mutex<SaverState>, Condvar)>,
+    thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct SaverState {
+    /// Files waiting, the latest of each.
+    waiting: Vec<(PathBuf, Vec<u8>)>,
+    /// One is being written.
+    busy: bool,
+    /// Files written, and why others could not be, since the session last looked.
+    written: u64,
+    errors: Vec<String>,
+    closed: bool,
+}
+
+impl Saver {
+    fn spawn() -> Self {
+        let shared = Arc::new((Mutex::new(SaverState::default()), Condvar::new()));
+        let thread = {
+            let shared = shared.clone();
+            std::thread::Builder::new().name("save".into()).spawn(move || Self::run(&shared)).expect("spawn the session's saver")
+        };
+        Self { shared, thread: Some(thread) }
     }
-    out
+
+    fn run(shared: &(Mutex<SaverState>, Condvar)) {
+        let (lock, wake) = shared;
+        let mut state = lock.lock().unwrap();
+        loop {
+            if !state.waiting.is_empty() {
+                let (path, bytes) = state.waiting.remove(0);
+                state.busy = true;
+                drop(state);
+                let result = orbiters_core::write_atomic(&path, &bytes);
+                state = lock.lock().unwrap();
+                state.busy = false;
+                match result {
+                    Ok(()) => state.written += 1,
+                    Err(e) => state.errors.push(format!("{}: {e}", path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default())),
+                }
+                wake.notify_all();
+                continue;
+            }
+            if state.closed {
+                return;
+            }
+            state = wake.wait(state).unwrap();
+        }
+    }
+
+    /// Hands a file over (a version of it still waiting is replaced).
+    fn save(&self, path: PathBuf, bytes: Vec<u8>) {
+        let (lock, wake) = &*self.shared;
+        let mut state = lock.lock().unwrap();
+        match state.waiting.iter_mut().find(|(p, _)| *p == path) {
+            Some(waiting) => waiting.1 = bytes,
+            None => state.waiting.push((path, bytes)),
+        }
+        wake.notify_all();
+    }
+
+    /// Files written since the last call, and why others could not be.
+    fn outcome(&self) -> (u64, Vec<String>) {
+        let mut state = self.shared.0.lock().unwrap();
+        (std::mem::take(&mut state.written), std::mem::take(&mut state.errors))
+    }
+
+    /// Writes what waits, and ends the thread.
+    fn finish(&mut self) {
+        self.shared.0.lock().unwrap().closed = true;
+        self.shared.1.notify_all();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+
+    /// Nothing waits, nothing is being written.
+    #[cfg(test)]
+    fn idle(&self) -> bool {
+        let state = self.shared.0.lock().unwrap();
+        state.waiting.is_empty() && !state.busy
+    }
+}
+
+impl Drop for Saver {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// Writes a file through a temporary one renamed into place: a reader, or a crash, finds all of it or nothing. The
+/// rename waits out a moment's lock (an antivirus or an indexer looking at the new file).
+fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let written = std::fs::write(&tmp, bytes).and_then(|()| orbiters_core::rename_retrying(&tmp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// Threads one picture is encoded on (the same file as on one): a keyframe's buffer and its record wait less.
+const ENCODE_THREADS: usize = 2;
+
+/// Encodes and writes a picture (and the session's thumbnail when it carries one).
+fn encode(job: Picture, done: &ChanSender<Done>) {
+    let bytes = qoi::encode_bgra_strided_parallel(&job.data, job.width, job.height, job.width as usize * 4, job.bgra, true, ENCODE_THREADS);
+    let written = write_whole(&job.path, &bytes).map(|()| bytes.len() as u64).map_err(|e| {
+        eprintln!("write {}: {e}", job.path.display());
+        e.to_string()
+    });
+    let thumbnail_failed = job.thumbnail.as_ref().is_some_and(|(path, top)| {
+        let row = job.width as usize * 4;
+        let mut rgba = job.data[(*top as usize * row).min(job.data.len())..].to_vec();
+        if job.bgra {
+            for px in rgba.as_chunks_mut::<4>().0 {
+                px.swap(0, 2);
+            }
+        }
+        let (tw, th, small) = bundle::downscale(&rgba, job.width, (rgba.len() / row.max(1)) as u32, 480);
+        write_whole(path, &qoi::encode(&small, tw, th, 3)).is_err()
+    });
+    let _ = done.send(Done::Picture { frame: job.frame, written, thumbnail_failed, buffer: job.data });
+}
+
+/// Decodes a depth frame and writes its codes. `None` when the frame is too small for depth symbols.
+fn decode_depth(decoder: &mut depth::Decoder, job: &DepthJob) -> Result<Option<Decoded>, String> {
+    let view = ImageView::try_new(job.width, job.height, job.width as usize * 4, &job.data, job.order).map_err(|e| e.to_string())?;
+    // The copy is upright: read as it is.
+    let Some(d) = decoder.decode(&view, false) else { return Ok(None) };
+    let bytes = depth_file::write(d.grid_width, d.grid_height, job.width, job.height, &d.codes);
+    write_whole(&job.path, &bytes).map_err(|e| {
+        eprintln!("write {}: {e}", job.path.display());
+        e.to_string()
+    })?;
+    Ok(Some(Decoded { layout: d.layout, grid_width: d.grid_width, codes: d.codes, tiles_rejected: d.tiles_rejected, bytes: bytes.len() as u64 }))
+}
+
+/// Frame-sized buffers the threads hand back, for the next copies (a fresh 8–33 MB buffer per keyframe costs its page
+/// faults on every frame copied), and the bytes out with the threads: frames copied for them stay under a budget
+/// whatever the picture's size (an 8K frame is 133 MB).
+#[derive(Default)]
+struct Buffers {
+    free: Vec<Vec<u8>>,
+    out: usize,
+}
+
+impl Buffers {
+    /// Bytes of frames the threads may hold at once.
+    const OUT_MOST: usize = 768 << 20;
+    /// Bytes of buffers kept for the next copies.
+    const KEEP_MOST: usize = 256 << 20;
+
+    /// Whether a frame of `bytes` may go to a thread now.
+    fn room(&self, bytes: usize) -> bool {
+        self.out + bytes <= Self::OUT_MOST
+    }
+
+    fn take(&mut self) -> Vec<u8> {
+        self.free.pop().unwrap_or_default()
+    }
+
+    /// A buffer of `bytes` went to a thread.
+    fn lent(&mut self, bytes: usize) {
+        self.out += bytes;
+    }
+
+    /// A lent buffer back from its thread.
+    fn give(&mut self, buffer: Vec<u8>) {
+        self.out = self.out.saturating_sub(buffer.len());
+        self.keep(buffer);
+    }
+
+    /// A buffer for the next copies, if there is room for it.
+    fn keep(&mut self, buffer: Vec<u8>) {
+        let kept: usize = self.free.iter().map(Vec::capacity).sum();
+        if kept + buffer.capacity() <= Self::KEEP_MOST {
+            self.free.push(buffer);
+        }
+    }
+}
+
+/// Copies a frame into `out`, tightly packed and upright (4 bytes per pixel, the source's channel order).
+fn copy_upright(view: &ImageView, flipped: bool, out: &mut Vec<u8>) {
+    let row = view.width as usize * 4;
+    out.clear();
+    out.reserve(row * view.height as usize);
+    for y in 0..view.height as usize {
+        let src = if flipped { view.height as usize - 1 - y } else { y };
+        out.extend_from_slice(&view.data[src * view.stride..src * view.stride + row]);
+    }
+}
+
+/// A frame's record waiting for its files (its keyframe, its depth frame) before it goes to `frames.bin`.
+struct Pending {
+    record: FrameRecord,
+    waiting: u8,
+    since: Instant,
+}
+
+/// How long a record waits for its files (a disk that hangs, a thread that died) before it goes without them.
+const RECORD_PATIENCE: Duration = Duration::from_secs(20);
+/// How long failures must keep coming, with nothing written meanwhile, before the recording stops; failures closer
+/// than `FAILURE_RUN` belong to one run (a checkpoint every few seconds keeps a full disk's run going).
+const WRITE_PATIENCE: Duration = Duration::from_secs(3);
+const FAILURE_RUN: Duration = Duration::from_secs(6);
+
+/// Writing failures in a row: since when, the last one, how many, and the last error.
+struct Failing {
+    since: Instant,
+    last: Instant,
+    count: u32,
+    error: String,
+}
+
+impl Failing {
+    /// Failures that keep coming, not one now and then: nothing gets written any more.
+    fn persistent(&self) -> bool {
+        self.count >= 3 && self.since.elapsed() >= WRITE_PATIENCE && self.last.elapsed() < Duration::from_secs(1)
+    }
+}
+/// Free space under which the recording stops, and under which it is told it soon will.
+const FREE_STOP: u64 = 512 << 20;
+const FREE_WARN: u64 = 2 << 30;
+/// How often the session so far reaches the disk ([`CaptureSession::checkpoint`]).
+const CHECKPOINT_EVERY: Duration = Duration::from_millis(4500);
+/// `audio.json` grows by a sync pair a second per track: written this often while recording.
+const AUDIO_INDEX_EVERY: Duration = Duration::from_secs(30);
+
+/// The record of frame `frame`, while it waits.
+fn pending_at(pending: &mut VecDeque<Pending>, frame: u64) -> Option<&mut Pending> {
+    let first = pending.front()?.record.frame_index;
+    pending.get_mut(frame.checked_sub(first)? as usize)
+}
+
+/// Where the decoders read, for frames of one size: the strip's rows and the skeleton band's (with the reach of the
+/// band decoder's shift search), for either orientation as stored.
+struct Areas {
+    width: u32,
+    height: u32,
+    strip: Option<strip::StripLayout>,
+    /// Upright, flipped: the strip's rows and the band's, read together.
+    rows: [Vec<(u32, u32)>; 2],
+    band: [Option<(u32, u32)>; 2],
+}
+
+impl Areas {
+    fn new(width: u32, height: u32) -> Self {
+        let strip = strip::StripLayout::new(width, height);
+        let flip = |(a, b): (u32, u32)| (height.saturating_sub(b), height.saturating_sub(a));
+        let strip_rows = strip.map(|l| (l.reserved.y0, l.reserved.y1.min(height)));
+        let band = skeleton::BandLayout::new(width, height).map(|b| (b.reserved().y0.saturating_sub(3 * b.cell + 2), height));
+        let up: Vec<(u32, u32)> = strip_rows.into_iter().chain(band).collect();
+        let down = up.iter().map(|&r| flip(r)).collect();
+        Self { width, height, strip, rows: [up, down], band: [band, band.map(flip)] }
+    }
+}
+
+/// Free bytes on the disk holding `dir`.
+#[cfg(windows)]
+fn free_space(dir: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(dir: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
+    }
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+    let mut available = 0u64;
+    // SAFETY: a NUL-terminated path and an out-parameter; the totals are not asked for.
+    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) };
+    (ok != 0).then_some(available)
+}
+
+#[cfg(not(windows))]
+fn free_space(_dir: &Path) -> Option<u64> {
+    None
+}
+
+/// What [`CaptureSession::process`] made of a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Processed {
+    Frame,
+    /// The frame is of another size than the session's (the Stream camera's resolution changed): it was left for a
+    /// new session, since a bundle holds frames of one size.
+    SizeChanged {
+        width: u32,
+        height: u32,
+    },
 }
 
 pub struct CaptureSession {
     writer: BundleWriter,
     selector: KeyframeSelector,
-    pool: Pool,
+    /// Keyframes (and `depth-raw/` frames) to encode and write; depth frames to decode and write; what they finished.
+    encoder: Workers<Picture>,
+    depth: Workers<DepthJob>,
+    done: ChanReceiver<Done>,
+    buffers: Buffers,
+    /// The checkpoints' files, written on a thread of their own.
+    saver: Saver,
+    /// Records waiting for their files, in frame order.
+    pending: VecDeque<Pending>,
+    band: skeleton::Decoder,
+    areas: Option<Areas>,
     pub stats: CaptureStats,
     /// Session start on the shared clock: every stream's `time_ns` counts from here.
     epoch_ns: u64,
@@ -122,6 +470,8 @@ pub struct CaptureSession {
     /// calibrations and devices `calibration.json` was written with.
     checkpointed: Instant,
     calibrations_written: (usize, usize),
+    /// When `audio.json` was last written while recording.
+    audio_indexed: Option<Instant>,
     frame_index: u64,
     prefer_flipped: bool,
     previous: Option<(u32, [f32; 12], f32)>,
@@ -132,6 +482,67 @@ pub struct CaptureSession {
     raw_depth_kept: u32,
     /// What the depth frames have seen, for the capture page's coverage map.
     coverage: Coverage,
+    /// Bytes of the pictures written, and the files that could not be.
+    written: u64,
+    write_errors: u64,
+    /// Writing that has been failing, with nothing written meanwhile.
+    failing: Option<Failing>,
+    /// When the free space was last looked at, and whether running low was told.
+    free_checked: Option<Instant>,
+    free_warned: bool,
+    /// Warnings not yet handed to the worker, and the latest of each kind (the stats show them).
+    warnings: Vec<(Warning, String)>,
+    latest: Vec<(Warning, String)>,
+    /// Why the recording must stop (the disk is full).
+    stop: Option<String>,
+    /// When a frame's strip was last read and since when it has not been (after it was once), on the session clock;
+    /// the time without it, in stretches of at least [`STRIP_GAP_NS`]; the latest frame's time. With the capture kit's
+    /// "Near you" reach, the kit is not drawn while the camera sees neither the avatar nor its surroundings.
+    strip_first_ns: Option<u64>,
+    strip_seen_ns: Option<u64>,
+    strip_lost_ns: Option<u64>,
+    strip_missing_ns: u64,
+    last_frame_ns: u64,
+    /// The worker paused the recording (a game track started meanwhile starts paused).
+    performance_paused: bool,
+    /// The source does not run on its own (a raw capture imported as fast as it reads, a test pattern): the threads
+    /// are waited for, rather than frames dropped.
+    offline: bool,
+}
+
+/// Numbers JSON can carry, in the stats sent four times a second: serde writes NaN and infinities as `null`, which
+/// costs the reader the field (and, strictly read, the whole event).
+fn finite_stats(s: &mut CaptureStats) {
+    let finite = |v: f32| if v.is_finite() { v } else { 0.0 };
+    (s.fps, s.decode_ms) = (finite(s.fps), finite(s.decode_ms));
+    if !s.elapsed_s.is_finite() {
+        s.elapsed_s = 0.0;
+    }
+    if s.position.is_some_and(|p| p.iter().any(|v| !v.is_finite())) {
+        s.position = None;
+    }
+    if s.heading_deg.is_some_and(|h| !h.is_finite()) {
+        s.heading_deg = None;
+    }
+    (s.mic_level, s.game_level) = (s.mic_level.map(finite), s.game_level.map(finite));
+}
+
+/// The same for a finished session's manifest (the `Stopped` event carries it).
+fn finite_manifest(m: &mut SessionManifest) {
+    let s = &mut m.stats;
+    if !s.duration_s.is_finite() {
+        s.duration_s = 0.0;
+    }
+    s.first_game_time = s.first_game_time.filter(|t| t.is_finite());
+    s.last_game_time = s.last_game_time.filter(|t| t.is_finite());
+}
+
+/// The warning kind and the words for an audio track.
+fn audio_warning(kind: TrackKind) -> (Warning, &'static str) {
+    match kind {
+        TrackKind::Mic => (Warning::Microphone, "microphone"),
+        TrackKind::Game => (Warning::GameSound, "VRChat sound"),
+    }
 }
 
 /// Depth frames a session keeps as received when some of their tiles could not be read.
@@ -160,10 +571,28 @@ impl CaptureSession {
             writer.use_game_time_duration();
         }
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 6) / 2 + 1;
+        let (done_tx, done) = unbounded::<Done>();
+        let encoder = {
+            let done = done_tx.clone();
+            Workers::spawn("encode", threads, threads * 2, move || {
+                let done = done.clone();
+                Box::new(move |job: Picture| encode(job, &done))
+            })
+        };
+        // One thread decodes depth frames in order, with a decoder that learns how each tile reads (it splits a frame
+        // over the cores itself).
+        let depth = Workers::spawn("depth", 1, 3, move || {
+            let (done, mut decoder) = (done_tx.clone(), depth::Decoder::new());
+            Box::new(move |job: DepthJob| {
+                let decoded = decode_depth(&mut decoder, &job);
+                let DepthJob { frame, index, data, width, height, order, .. } = job;
+                let _ = done.send(Done::Depth { frame, index, decoded, buffer: data, width, height, bgra: order == PixelOrder::Bgra });
+            })
+        });
         let parameters = ParameterStream::new(writer.dir());
         let skeleton = SkeletonStream::new(writer.dir());
         let epoch_ns = clock::now_ns();
-        let mut stats = CaptureStats::default();
+        let mut warnings = Vec::new();
         let mut audio = Vec::new();
         let p = &cmd.performance;
         let wanted = [
@@ -177,9 +606,9 @@ impl CaptureSession {
                     audio.push(r);
                 }
                 Err(e) => {
-                    let what = if kind == TrackKind::Mic { "microphone" } else { "VRChat sound" };
+                    let (warning, what) = audio_warning(kind);
                     eprintln!("{what}: {e:#}");
-                    stats.last_error = Some(format!("Could not record the {what}: {e:#}"));
+                    warnings.push((warning, format!("The {what} is not recorded: {e:#}")));
                 }
             }
         }
@@ -187,17 +616,24 @@ impl CaptureSession {
             Some(hz) => match TrackingRecorder::start(tracking::steamvr(), writer.dir(), epoch_ns, hz) {
                 Ok(r) => Some(r),
                 Err(e) => {
-                    stats.last_error = Some(format!("Could not record SteamVR tracking: {e:#}"));
+                    warnings.push((Warning::Tracking, format!("SteamVR tracking is not recorded: {e:#}")));
                     None
                 }
             },
             None => None,
         };
-        Ok(Self {
+        let mut session = Self {
             writer,
             selector: KeyframeSelector::new(cmd.keyframes.clone(), cmd.quality == StorageQuality::Lossless),
-            pool: Pool::new(threads),
-            stats,
+            encoder,
+            depth,
+            done,
+            buffers: Buffers::default(),
+            saver: Saver::spawn(),
+            pending: VecDeque::new(),
+            band: skeleton::Decoder::new(),
+            areas: None,
+            stats: CaptureStats::default(),
             epoch_ns,
             parameters,
             skeleton,
@@ -214,6 +650,7 @@ impl CaptureSession {
                 .collect(),
             checkpointed: Instant::now(),
             calibrations_written: (0, 0),
+            audio_indexed: None,
             frame_index: 0,
             prefer_flipped: false,
             previous: None,
@@ -222,7 +659,30 @@ impl CaptureSession {
             raw_depth_kept: 0,
             coverage: Coverage::new(),
             fps_window: (Instant::now(), 0),
-        })
+            written: 0,
+            write_errors: 0,
+            failing: None,
+            free_checked: None,
+            free_warned: false,
+            warnings: Vec::new(),
+            latest: Vec::new(),
+            stop: None,
+            strip_first_ns: None,
+            strip_seen_ns: None,
+            strip_lost_ns: None,
+            strip_missing_ns: 0,
+            last_frame_ns: 0,
+            performance_paused: false,
+            offline: matches!(
+                cmd.source,
+                orbiters_core::protocol::SourceSpec::RawSequence { realtime: false, .. } | orbiters_core::protocol::SourceSpec::TestPattern { .. }
+            ),
+        };
+        for (kind, message) in warnings {
+            session.warn(kind, message);
+        }
+        session.check_free_space();
+        Ok(session)
     }
 
     pub fn dir(&self) -> PathBuf {
@@ -233,17 +693,135 @@ impl CaptureSession {
         self.writer.manifest_mut().world = world;
     }
 
+    /// What the source turned out to be (a Spout source names its sender once it connected).
+    pub fn set_source_name(&mut self, name: String) {
+        self.writer.manifest_mut().capture.source_name = name;
+    }
+
     /// Nanoseconds since the session started.
     pub fn time_ns(&self) -> u64 {
         clock::now_ns().saturating_sub(self.epoch_ns)
+    }
+
+    /// Hands the warnings out (each once).
+    pub fn take_warnings(&mut self) -> Vec<(Warning, String)> {
+        std::mem::take(&mut self.warnings)
+    }
+
+    /// Why the recording must stop now (the disk is full, or nothing can be written any more).
+    pub fn must_stop(&self) -> Option<&str> {
+        self.stop.as_deref()
+    }
+
+    /// Notes something the person should know (the stats keep the latest of each kind).
+    pub fn warn(&mut self, kind: Warning, message: String) {
+        match self.latest.iter_mut().find(|(k, _)| *k == kind) {
+            Some(latest) => latest.1 = message.clone(),
+            None => self.latest.push((kind, message.clone())),
+        }
+        self.stats.warnings = self.latest.iter().map(|(_, m)| m.clone()).collect();
+        self.warnings.push((kind, message));
+    }
+
+    /// A frame without a readable strip at `now`: a stretch without it starts (once the strip was seen), and one long
+    /// enough is told, once a stretch.
+    fn strip_missed(&mut self, now: u64) {
+        if self.strip_seen_ns.is_none() {
+            return;
+        }
+        let lost = *self.strip_lost_ns.get_or_insert(now);
+        let gap = now.saturating_sub(lost);
+        let told = self.stats.strip_missing_s >= STRIP_GAP_TOLD_NS as f32 / 1e9;
+        self.stats.strip_missing_s = gap as f32 / 1e9;
+        if gap >= STRIP_GAP_TOLD_NS && !told {
+            self.warn(
+                Warning::Strip,
+                "No capture strip for a few seconds: no camera pose, so no keyframes. With the capture kit's \"Near you\" reach it is drawn only while the camera sees your avatar or is near it.".into(),
+            );
+        }
+    }
+
+    /// A frame whose strip was read at `now`: a stretch without it ends, counted when long enough.
+    fn strip_read(&mut self, now: u64) {
+        if let Some(lost) = self.strip_lost_ns.take() {
+            let gap = now.saturating_sub(lost);
+            if gap >= STRIP_GAP_NS {
+                self.strip_missing_ns += gap;
+            }
+        }
+        self.strip_first_ns.get_or_insert(now);
+        self.strip_seen_ns = Some(now);
+        self.stats.strip_missing_s = 0.0;
+    }
+
+    /// Time without the strip after it was first seen, the stretch still open at the end included; and the time since
+    /// it was first seen.
+    fn strip_missing(&self) -> (u64, u64) {
+        let open = self.strip_lost_ns.map_or(0, |lost| self.last_frame_ns.saturating_sub(lost));
+        let open = if open >= STRIP_GAP_NS { open } else { 0 };
+        let since_seen = self.strip_first_ns.map_or(0, |first| self.last_frame_ns.saturating_sub(first));
+        (self.strip_missing_ns + open, since_seen)
+    }
+
+    /// A file was written: writing works.
+    fn wrote(&mut self) {
+        self.failing = None;
+    }
+
+    /// A file could not be written. The recording goes on (an antivirus holding a file, a moment's trouble) unless
+    /// failures keep coming, with nothing written, for a while ([`Failing::persistent`]).
+    fn write_failed(&mut self, what: &str, error: String) {
+        self.write_errors += 1;
+        let now = Instant::now();
+        match &mut self.failing {
+            Some(f) if f.last.elapsed() <= FAILURE_RUN => (f.last, f.count, f.error) = (now, f.count + 1, error.clone()),
+            _ => self.failing = Some(Failing { since: now, last: now, count: 1, error: error.clone() }),
+        }
+        self.warn(Warning::Disk, format!("Files of the session could not be written ({what}: {error})"));
+    }
+
+    /// Stops the recording while a little space is left (files cut short by a full disk are worse than a session
+    /// that ends), and says so before.
+    fn check_free_space(&mut self) {
+        if self.free_checked.is_some_and(|t| t.elapsed() < CHECKPOINT_EVERY) {
+            return;
+        }
+        self.free_checked = Some(Instant::now());
+        let Some(free) = free_space(self.writer.dir()) else { return };
+        let mb = free >> 20;
+        if free < FREE_STOP && self.stop.is_none() {
+            self.stop = Some(format!("Recording stopped: only {mb} MB is free on the disk the sessions are saved to."));
+        } else if free < FREE_WARN && !self.free_warned {
+            self.free_warned = true;
+            self.warn(Warning::Disk, format!("Only {mb} MB is free on the disk the sessions are saved to: the recording stops below 512 MB."));
+        }
     }
 
     /// Records OSC values from VRChat (avatar parameters, face tracking, head and wrist poses).
     pub fn osc(&mut self, samples: &[OscSample], paused: bool) {
         for sample in samples {
             if let Err(e) = self.parameters.add(self.epoch_ns, sample, paused) {
-                self.stats.last_error = Some(format!("parameters: {e:#}"));
+                self.warn(Warning::Streams, format!("Avatar parameters are not recorded: {e:#}"));
+                break;
             }
+        }
+    }
+
+    /// VRChat runs as process `pid` now (it started after the session, or restarted): the session's VRChat sound
+    /// follows it, or starts with it.
+    pub fn game_audio(&mut self, pid: u32) {
+        let source = AudioSource::Process(pid);
+        if let Some(r) = self.audio.iter().find(|a| a.kind == TrackKind::Game) {
+            r.retarget(source);
+            return;
+        }
+        match AudioRecorder::start(TrackKind::Game, source, self.writer.dir(), self.epoch_ns) {
+            Ok(r) => {
+                eprintln!("recording {}", r.source_name);
+                r.set_paused(self.performance_paused);
+                self.audio.push(r);
+            }
+            Err(e) => self.warn(Warning::GameSound, format!("The VRChat sound is not recorded: {e:#}")),
         }
     }
 
@@ -254,7 +832,8 @@ impl CaptureSession {
     }
 
     /// While paused, the audio tracks record silence and no poses are written.
-    pub fn set_performance_paused(&self, paused: bool) {
+    pub fn set_performance_paused(&mut self, paused: bool) {
+        self.performance_paused = paused;
         for a in &self.audio {
             a.set_paused(paused);
         }
@@ -266,31 +845,65 @@ impl CaptureSession {
     /// Recording goes on after a pause: writes what changed meanwhile.
     pub fn resume(&mut self) {
         if let Err(e) = self.parameters.resume(self.time_ns()) {
-            self.stats.last_error = Some(format!("parameters: {e:#}"));
+            self.warn(Warning::Streams, format!("Avatar parameters are not recorded: {e:#}"));
         }
     }
 
-    /// Processes one frame (called with the source's borrowed view).
-    pub fn process(&mut self, view: ImageView<'_>) -> anyhow::Result<()> {
+    /// Processes one frame: its strip (and the skeleton band) first; the whole picture is read only for a depth frame
+    /// or a keyframe, and only when there is room to take it.
+    pub fn process(&mut self, frame: &mut dyn FrameAccess) -> anyhow::Result<Processed> {
         let t0 = Instant::now();
-        let mut record =
-            FrameRecord { frame_index: self.frame_index, capture_time_ns: self.time_ns(), width: view.width, height: view.height, ..Default::default() };
-        self.frame_index += 1;
-        self.stats.frames += 1;
-        self.stats.width = view.width;
-        self.stats.height = view.height;
+        self.collect();
+        let (width, height) = (frame.width(), frame.height());
         let capture = &mut self.writer.manifest_mut().capture;
         if capture.width == 0 {
-            capture.width = view.width;
-            capture.height = view.height;
+            capture.width = width;
+            capture.height = height;
+        } else if (capture.width, capture.height) != (width, height) {
+            return Ok(Processed::SizeChanged { width, height });
         }
+        if self.areas.as_ref().is_none_or(|a| (a.width, a.height) != (width, height)) {
+            self.areas = Some(Areas::new(width, height));
+        }
+        let mut record = FrameRecord {
+            frame_index: self.frame_index,
+            // When the frame was seen, not when it was read back: in step with the sound and the poses.
+            capture_time_ns: frame.seen_ns().saturating_sub(self.epoch_ns),
+            width,
+            height,
+            ..Default::default()
+        };
+        self.frame_index += 1;
+        self.stats.frames += 1;
+        self.stats.width = width;
+        self.stats.height = height;
+        let mut waiting = 0u8;
+        // The record goes out whatever reading the frame met (frame indices stay consecutive).
+        let read = self.read_frame(frame, &mut record, &mut waiting);
+        if record.has(record_flags::GATED) {
+            self.stats.gated += 1;
+        }
+        self.pending.push_back(Pending { record, waiting, since: Instant::now() });
+        self.flush_records();
+        self.decode_time_total += t0.elapsed().as_secs_f64();
+        read.map(|()| Processed::Frame)
+    }
 
-        match strip::decode_preferring(&view, self.prefer_flipped) {
+    /// Decodes a frame into its record, and queues its keyframe or depth frame (`waiting` counts them). An error is the
+    /// source's: a part of the frame could not be read.
+    fn read_frame(&mut self, frame: &mut dyn FrameAccess, record: &mut FrameRecord, waiting: &mut u8) -> anyhow::Result<()> {
+        let (width, height) = (record.width, record.height);
+        let bytes = width as usize * height as usize * 4;
+        let now = record.capture_time_ns;
+        self.last_frame_ns = now;
+        match self.decode_strip(frame)? {
             Err(e) => {
                 self.stats.strip_failed += 1;
                 self.stats.last_error = Some(e.to_string());
+                self.strip_missed(now);
             }
             Ok(d) => {
+                self.strip_read(now);
                 self.prefer_flipped = d.flipped;
                 self.stats.flipped = d.flipped;
                 self.stats.strip_ok += 1;
@@ -308,13 +921,11 @@ impl CaptureSession {
                 record.corrected_bits = d.corrected_bits;
                 record.patch = d.patch;
                 record.min_contrast = d.min_contrast;
-                // The capture kit's skeleton band rides on colour frames (depth frames use the whole picture).
-                if !p.is_depth_frame() {
-                    if let Some(Ok(pose)) = skeleton::decode(&view, d.flipped).map(|b| b.result) {
-                        if let Err(e) = self.skeleton.add(record.capture_time_ns, &pose) {
-                            self.stats.last_error = Some(format!("skeleton: {e:#}"));
-                        }
-                    }
+                // The capture kit's skeleton band rides on an avatar's colour frames (depth frames use the whole
+                // picture; the simulator draws none; the test pattern draws one like the kit).
+                let source = strip::flags::source(p.flags);
+                if !p.is_depth_frame() && (source == strip::flags::SOURCE_AVATAR || source == strip::flags::SOURCE_TEST) {
+                    self.read_band(frame, d.flipped, p.time, record.capture_time_ns)?;
                 }
                 let pos = p.position();
                 self.stats.position = Some(pos);
@@ -322,7 +933,7 @@ impl CaptureSession {
 
                 // Gating: a repeated frame (same game time) or an impossible jump (teleport, respawn).
                 let gated = match &self.previous {
-                    Some((bits, prev_pose, prev_time)) if *bits == p.time.to_bits() => true,
+                    Some((bits, _, _)) if *bits == p.time.to_bits() => true,
                     Some((_, prev_pose, prev_time)) => {
                         let dt = (p.time - prev_time).abs().max(1e-3);
                         let moved = keyframes::translation(&p.camera_to_world, prev_pose);
@@ -339,69 +950,236 @@ impl CaptureSession {
                 if gated {
                     record.flags |= record_flags::GATED;
                 } else if p.is_depth_frame() {
-                    if let Some(dd) = depth::decode(&view, d.flipped) {
+                    self.wait_for(|s| s.depth.has_room() && s.buffers.room(bytes));
+                    if self.depth.has_room() && self.buffers.room(bytes) {
+                        let mut data = self.buffers.take();
+                        let order = {
+                            let view = frame.full()?;
+                            copy_upright(&view, d.flipped, &mut data);
+                            view.order
+                        };
                         let (index, path) = self.writer.reserve_depth();
-                        let bytes = depth_file::write(dd.grid_width, dd.grid_height, view.width, view.height, &dd.codes);
-                        self.pool.send(Job::Depth { path, bytes });
-                        record.flags |= record_flags::DEPTH;
-                        record.depth_index = index;
-                        self.stats.depth_frames += 1;
-                        self.coverage.add_depth(&p.camera_to_world, &p.projection, &dd.layout, dd.grid_width, &dd.codes);
-                        // A few frames with tiles that could not be read, as received: what the world's
-                        // post-processing did to the symbols, for whoever improves the decoder next.
-                        if dd.tiles_rejected > 0 && self.raw_depth_kept < RAW_DEPTH_FRAMES {
-                            if let Ok(path) = self.writer.raw_depth_path(index) {
-                                let data = copy_upright(&view, d.flipped);
-                                let bgra = view.order == PixelOrder::Bgra;
-                                if self.pool.try_send(Job::Keyframe { path, data, width: view.width, height: view.height, bgra }) {
-                                    self.raw_depth_kept += 1;
-                                }
+                        match self.depth.send(DepthJob { frame: record.frame_index, index, path, data, width, height, order }) {
+                            Ok(()) => {
+                                self.buffers.lent(bytes);
+                                *waiting += 1;
+                            }
+                            Err(job) => {
+                                self.buffers.keep(job.data);
+                                self.stats.depth_dropped += 1;
                             }
                         }
-                    }
-                } else if self.selector.consider(&p.camera_to_world, p.time) {
-                    let data = copy_upright(&view, d.flipped);
-                    let bgra = view.order == PixelOrder::Bgra;
-                    if !self.thumbnail_done {
-                        let mut rgba = data.clone();
-                        if bgra {
-                            for px in rgba.as_chunks_mut::<4>().0 {
-                                px.swap(0, 2);
-                            }
-                        }
-                        // Leave the pose strip (and its reference patches) out of the picture.
-                        let top = strip::StripLayout::new(view.width, view.height).map(|l| l.reserved.y1.min(view.height - 1)).unwrap_or(0);
-                        let below = &rgba[top as usize * view.width as usize * 4..];
-                        if self.writer.write_thumbnail(below, view.width, view.height - top).is_ok() {
-                            self.thumbnail_done = true;
-                        }
-                    }
-                    let (index, path) = self.writer.reserve_keyframe();
-                    if self.pool.try_send(Job::Keyframe { path, data, width: view.width, height: view.height, bgra }) {
-                        record.flags |= record_flags::KEYFRAME;
-                        record.keyframe_index = index;
-                        self.stats.keyframes += 1;
                     } else {
+                        // The decoder is behind: this one is dropped rather than waited for.
+                        self.stats.depth_dropped += 1;
+                    }
+                } else if self.selector.clone().consider(&p.camera_to_world, p.time) {
+                    // A keyframe it is (asked on a copy of the selector, which keeps waiting for one until it is taken).
+                    self.wait_for(|s| s.encoder.has_room() && s.buffers.room(bytes));
+                    if !self.encoder.has_room() || !self.buffers.room(bytes) {
+                        // The encoders are behind: nothing is copied, and the keyframe is counted as dropped.
                         self.stats.dropped += 1;
+                    } else {
+                        let mut data = self.buffers.take();
+                        let bgra = {
+                            let view = frame.full()?;
+                            copy_upright(&view, d.flipped, &mut data);
+                            view.order == PixelOrder::Bgra
+                        };
+                        self.selector.consider(&p.camera_to_world, p.time);
+                        // The first keyframe makes the thumbnail, from below the strip and its patches.
+                        let thumbnail = (!self.thumbnail_done).then(|| {
+                            let top = self.areas.as_ref().and_then(|a| a.strip).map_or(0, |l| l.reserved.y1.min(height - 1));
+                            (self.writer.dir().join(bundle_files::THUMBNAIL_FILE), top)
+                        });
+                        let (index, path) = self.writer.reserve_keyframe();
+                        match self.encoder.send(Picture { frame: Some(record.frame_index), path, data, width, height, bgra, thumbnail }) {
+                            Ok(()) => {
+                                self.buffers.lent(bytes);
+                                record.flags |= record_flags::KEYFRAME;
+                                record.keyframe_index = index;
+                                self.stats.keyframes += 1;
+                                self.thumbnail_done = true;
+                                *waiting += 1;
+                            }
+                            Err(job) => {
+                                self.buffers.keep(job.data);
+                                self.stats.dropped += 1;
+                            }
+                        }
                     }
                 }
             }
         }
-        if record.has(record_flags::GATED) {
-            self.stats.gated += 1;
-        }
-        self.writer.append_record(&record)?;
-        self.decode_time_total += t0.elapsed().as_secs_f64();
         Ok(())
     }
 
-    /// The coverage map so far, with hints for where the camera is now.
-    pub fn coverage_map(&self) -> Option<CoverageMap> {
-        self.coverage.map(self.stats.position, self.stats.heading_deg, self.stats.elapsed_s)
+    /// For a source that waits (`offline`): until there is `room`, taking what the threads finish meanwhile, or
+    /// [`RECORD_PATIENCE`] at most (a thread that died).
+    fn wait_for(&mut self, room: impl Fn(&Self) -> bool) {
+        if !self.offline {
+            return;
+        }
+        let until = Instant::now() + RECORD_PATIENCE;
+        while !room(self) && Instant::now() < until && !self.encoder.dead() && !self.depth.dead() {
+            std::thread::sleep(Duration::from_millis(1));
+            self.collect();
+        }
     }
 
-    /// Refreshes rates and byte counts; call before sending stats.
+    /// Waits for every queued file to be written, its record to go out, and the saver to be done (tests read the
+    /// bundle meanwhile).
+    #[cfg(test)]
+    fn settle(&mut self) {
+        let until = Instant::now() + RECORD_PATIENCE;
+        while (self.pending.iter().any(|p| p.waiting > 0) || !self.saver.idle()) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+            self.collect();
+        }
+    }
+
+    /// Decodes the strip, in the last frame's orientation first; the band's rows of that orientation are read along
+    /// with it (a colour frame's band is decoded next).
+    fn decode_strip(&mut self, frame: &mut dyn FrameAccess) -> anyhow::Result<Result<strip::StripDecode, strip::StripError>> {
+        let Some(areas) = &self.areas else { return Ok(Err(strip::StripError::ImageTooSmall)) };
+        let Some(layout) = areas.strip else { return Ok(Err(strip::StripError::ImageTooSmall)) };
+        let first = self.prefer_flipped;
+        let tried = {
+            let view = frame.rows(&areas.rows[first as usize])?;
+            strip::decode_oriented(&view, &layout, first)
+        };
+        match tried {
+            Ok(d) => Ok(Ok(d)),
+            Err(error) => {
+                let view = frame.rows(&areas.rows[!first as usize])?;
+                // The first error tells more, unless it only says there was no strip that way up.
+                Ok(strip::decode_oriented(&view, &layout, !first).map_err(|second| match error {
+                    strip::StripError::NoStrip { .. } => second,
+                    _ => error,
+                }))
+            }
+        }
+    }
+
+    /// The capture kit's skeleton band of a colour frame, into `skeleton.bin`: only a band of this frame (the strip's
+    /// game time, bit for bit), not another kit wearer's in view.
+    fn read_band(&mut self, frame: &mut dyn FrameAccess, flipped: bool, time: f32, time_ns: u64) -> anyhow::Result<()> {
+        let Some(rows) = self.areas.as_ref().and_then(|a| a.band[flipped as usize]) else { return Ok(()) };
+        let pose = {
+            let view = frame.rows(&[rows])?;
+            match self.band.decode(&view, flipped).map(|b| b.result) {
+                Some(Ok(pose)) if pose.is_of_frame(time) => pose,
+                _ => return Ok(()),
+            }
+        };
+        if let Err(e) = self.skeleton.add(time_ns, &pose) {
+            self.warn(Warning::Streams, format!("The skeleton band is not recorded: {e:#}"));
+        }
+        Ok(())
+    }
+
+    /// Takes what the threads finished: records get their files, or lose the flags of those that could not be
+    /// written; the coverage map gets the depth frames; buffers come back. Then the records that are ready go out.
+    fn collect(&mut self) {
+        while let Ok(done) = self.done.try_recv() {
+            match done {
+                Done::Picture { frame, written, thumbnail_failed, buffer } => {
+                    self.buffers.give(buffer);
+                    if thumbnail_failed {
+                        self.thumbnail_done = false;
+                    }
+                    match written {
+                        Ok(bytes) => {
+                            self.written += bytes;
+                            self.wrote();
+                        }
+                        Err(error) => {
+                            self.write_failed(if frame.is_some() { "a keyframe" } else { "a depth frame as received" }, error);
+                            if let Some(p) = frame.and_then(|f| pending_at(&mut self.pending, f)) {
+                                p.record.flags &= !record_flags::KEYFRAME;
+                                p.record.keyframe_index = -1;
+                                self.stats.keyframes = self.stats.keyframes.saturating_sub(1);
+                            }
+                        }
+                    }
+                    if let Some(p) = frame.and_then(|f| pending_at(&mut self.pending, f)) {
+                        p.waiting = p.waiting.saturating_sub(1);
+                    }
+                }
+                Done::Depth { frame, index, decoded, buffer, width, height, bgra } => {
+                    let mut buffer = Some(buffer);
+                    match decoded {
+                        Ok(Some(d)) => {
+                            self.written += d.bytes;
+                            self.wrote();
+                            if let Some(p) = pending_at(&mut self.pending, frame) {
+                                p.record.flags |= record_flags::DEPTH;
+                                p.record.depth_index = index;
+                                self.stats.depth_frames += 1;
+                                self.coverage.add_depth(&p.record.camera_to_world, &p.record.projection, &d.layout, d.grid_width, &d.codes);
+                            }
+                            // A few frames with tiles that could not be read, as received: what the world's
+                            // post-processing did to the symbols, for whoever improves the decoder next.
+                            if d.tiles_rejected > 0 && self.raw_depth_kept < RAW_DEPTH_FRAMES && self.encoder.has_room() {
+                                if let Ok(path) = self.writer.raw_depth_path(index) {
+                                    // The buffer stays lent: from the decoder to an encoder.
+                                    let data = buffer.take().expect("buffer");
+                                    match self.encoder.send(Picture { frame: None, path, data, width, height, bgra, thumbnail: None }) {
+                                        Ok(()) => self.raw_depth_kept += 1,
+                                        Err(job) => buffer = Some(job.data),
+                                    }
+                                }
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => self.write_failed("a depth frame", error),
+                    }
+                    if let Some(buffer) = buffer {
+                        self.buffers.give(buffer);
+                    }
+                    if let Some(p) = pending_at(&mut self.pending, frame) {
+                        p.waiting = p.waiting.saturating_sub(1);
+                    }
+                }
+            }
+        }
+        self.flush_records();
+    }
+
+    /// Appends the records whose files are done, in frame order.
+    fn flush_records(&mut self) {
+        while let Some(front) = self.pending.front_mut() {
+            if front.waiting > 0 {
+                if front.since.elapsed() < RECORD_PATIENCE {
+                    break;
+                }
+                // Its files are taking too long (a disk that hangs, a thread that died): the record goes without them.
+                front.record.flags &= !(record_flags::KEYFRAME | record_flags::DEPTH);
+                front.record.keyframe_index = -1;
+                front.record.depth_index = -1;
+                front.waiting = 0;
+                self.warn(Warning::Pictures, "Keyframes or depth frames took too long to write and were left out.".into());
+                continue;
+            }
+            let p = self.pending.pop_front().expect("a record");
+            if let Err(e) = self.writer.append_record(&p.record) {
+                self.write_failed("frames.bin", format!("{e:#}"));
+            }
+        }
+    }
+
+    /// The coverage map so far, with hints for where the camera is now (none while one of its numbers is not one JSON
+    /// can carry).
+    pub fn coverage_map(&self) -> Option<CoverageMap> {
+        self.coverage
+            .map(self.stats.position, self.stats.heading_deg, self.stats.elapsed_s)
+            .filter(|m| [m.cell_m, m.x0, m.z0].iter().all(|v| v.is_finite()) && m.floor_y.is_none_or(f32::is_finite))
+    }
+
+    /// Refreshes rates and byte counts, takes what the threads finished and saves the session so far when due; call
+    /// before sending stats.
     pub fn refresh_stats(&mut self) -> &CaptureStats {
+        self.collect();
         let (since, frames_then) = self.fps_window;
         let dt = since.elapsed().as_secs_f32();
         if dt >= 1.0 {
@@ -409,15 +1187,22 @@ impl CaptureSession {
             self.fps_window = (Instant::now(), self.stats.frames);
         }
         self.stats.decode_ms = if self.stats.frames > 0 { (self.decode_time_total / self.stats.frames as f64 * 1000.0) as f32 } else { 0.0 };
-        self.stats.bytes = self.writer.manifest().stats.bytes + self.pool.written.load(Ordering::Relaxed) + self.parameters.changes * 16;
+        // Every file the session writes, the sound and the skeleton band's frames too (the storage limit counts them).
+        let sound: u64 = self.audio.iter().filter_map(AudioRecorder::track).map(|t| 58 + t.frames * t.channels as u64 * 4).sum();
+        let skeleton = self.skeleton.frames * perf::skeleton_frames::RECORD_SIZE as u64;
+        self.stats.bytes = self.writer.manifest().stats.bytes + self.written + self.parameters.changes * 16 + sound + skeleton;
         self.stats.elapsed_s = self.time_ns() as f64 / 1e9;
         self.stats.parameter_changes = self.parameters.changes;
         self.stats.skeleton_frames = self.skeleton.frames;
         if let Err(e) = self.skeleton.flush() {
-            self.stats.last_error = Some(format!("skeleton: {e:#}"));
+            self.warn(Warning::Streams, format!("The skeleton band is not recorded: {e:#}"));
         }
         self.stats.mic_level = self.audio.iter().find(|a| a.kind == TrackKind::Mic).map(AudioRecorder::take_level);
         self.stats.game_level = self.audio.iter().find(|a| a.kind == TrackKind::Game).map(AudioRecorder::take_level);
+        let troubles: Vec<(TrackKind, String)> = self.audio.iter().filter_map(|a| a.take_trouble().map(|t| (a.kind, t))).collect();
+        for (kind, trouble) in troubles {
+            self.warn(audio_warning(kind).0, trouble);
+        }
         if let Some(t) = &self.tracking {
             let c = t.counts();
             self.stats.tracking_connected = Some(c.connected);
@@ -425,35 +1210,55 @@ impl CaptureSession {
             self.stats.bytes += c.samples * 64;
         }
         if let Err(e) = self.parameters.flush() {
-            self.stats.last_error = Some(format!("parameters: {e:#}"));
+            self.warn(Warning::Streams, format!("Avatar parameters are not recorded: {e:#}"));
         }
-        if self.checkpointed.elapsed() >= bundle::CHECKPOINT_EVERY {
+        if self.checkpointed.elapsed() >= CHECKPOINT_EVERY {
             if let Err(e) = self.checkpoint() {
-                self.stats.last_error = Some(format!("saving the session so far: {e:#}"));
+                self.write_failed("the session so far", format!("{e:#}"));
             }
         }
+        // What the saver wrote since, or could not.
+        let (saved, errors) = self.saver.outcome();
+        if saved > 0 {
+            self.wrote();
+        }
+        for error in errors {
+            self.write_failed("the session so far", error);
+        }
+        if let Some(f) = self.failing.as_ref().filter(|f| f.persistent()) {
+            if self.stop.is_none() {
+                self.stop = Some(format!("Recording stopped: the session could not be written ({}).", f.error));
+            }
+        }
+        self.check_free_space();
+        finite_stats(&mut self.stats);
         &self.stats
     }
 
     /// Writes what the session holds so far, every few seconds: the streams' tables (`parameters.json`,
     /// `audio.json` as the WAVE headers stand, `calibration.json`; `tracking.json` is kept by its thread), the
     /// manifest with its performance block, and the frame records. A session that never finishes (the worker
-    /// killed or crashed, Windows shut down) stays readable up to here.
+    /// killed or crashed, Windows shut down) stays readable up to here. The files written whole (each flushed to the
+    /// disk before it replaces the last) go to the saver: the capture thread does not wait for the disk.
     fn checkpoint(&mut self) -> anyhow::Result<()> {
         self.checkpointed = Instant::now();
         self.parameters.flush()?;
         self.skeleton.flush()?;
         let tracks: Vec<_> = self.audio.iter().filter_map(AudioRecorder::track).collect();
-        if !tracks.is_empty() {
+        // `audio.json` grows by a sync pair a second per track: compact, and not at every checkpoint.
+        if !tracks.is_empty() && self.audio_indexed.is_none_or(|t| t.elapsed() >= AUDIO_INDEX_EVERY) {
+            self.audio_indexed = Some(Instant::now());
             let mut index = perf::audio::Audio::new();
             index.tracks = tracks.clone();
-            orbiters_core::write_atomic(&self.writer.dir().join(perf::AUDIO_FILE), &serde_json::to_vec_pretty(&index)?)?;
+            self.saver.save(self.writer.dir().join(perf::AUDIO_FILE), serde_json::to_vec(&index)?);
         }
         let (devices, detected) = self.tracking.as_ref().map(TrackingRecorder::found).unwrap_or_default();
         let calibrations = session_calibrations(&self.calibrations, detected, &devices);
         let written = (calibrations.len(), devices.len());
         if written != self.calibrations_written {
-            tracking::write_calibrations(self.writer.dir(), calibrations)?;
+            if let Some(json) = tracking::calibrations_json(calibrations)? {
+                self.saver.save(self.writer.dir().join(perf::CALIBRATION_FILE), json);
+            }
             self.calibrations_written = written;
         }
         let performance = &mut self.writer.manifest_mut().performance;
@@ -462,36 +1267,85 @@ impl CaptureSession {
         performance.tracking_samples = self.tracking.as_ref().map_or(0, |t| t.counts().samples);
         performance.calibrations = written.0 as u32;
         performance.audio = tracks.into_iter().map(|t| t.file).collect();
-        self.writer.checkpoint()
+        let (path, manifest) = self.writer.checkpoint_deferred()?;
+        self.saver.save(path, manifest);
+        Ok(())
     }
 
-    /// Waits for pending files and writes the final manifest.
-    pub fn finish(self) -> anyhow::Result<(PathBuf, SessionManifest)> {
-        let Self { mut writer, pool, parameters, skeleton, audio, tracking, calibrations, .. } = self;
-        let (written, errors) = pool.finish();
+    /// Waits for pending files and writes the final manifest. Every step runs even when one fails (a full disk, a
+    /// file another program holds): whatever can be written is, the manifest last, and what went wrong comes back
+    /// with it, so the service always learns that the session ended.
+    pub fn finish(mut self) -> Finished {
+        // Every queued file first: the depth decoder's (whose frames may still ask for a `depth-raw/` picture), then
+        // the encoders'. Their records follow them into frames.bin.
+        self.depth.finish();
+        self.collect();
+        self.encoder.finish();
+        self.collect();
+        // A record whose file never came (a thread that died) goes without it.
+        for p in &mut self.pending {
+            if p.waiting > 0 {
+                p.record.flags &= !(record_flags::KEYFRAME | record_flags::DEPTH);
+                (p.record.keyframe_index, p.record.depth_index, p.waiting) = (-1, -1, 0);
+            }
+        }
+        self.flush_records();
+        // The last checkpoint's files before the final ones (written here), which must come after them.
+        self.saver.finish();
+        for error in self.saver.outcome().1 {
+            eprintln!("finishing the session: the last checkpoint: {error}");
+        }
+        let (strip_missing_ns, strip_since_ns) = self.strip_missing();
+        let Self { mut writer, parameters, skeleton, audio, tracking, calibrations, calibrations_written, written, write_errors, .. } = self;
+        let mut warnings = Vec::new();
+        // Long stretches without the strip leave parts of the walk without keyframes: how much, and why it happens.
+        if strip_missing_ns >= 5_000_000_000 && strip_missing_ns * 10 >= strip_since_ns {
+            warnings.push(format!(
+                "no camera pose for {:.0} s of {:.0} s: the capture strip was not seen, so those parts have no keyframes. With the capture kit's \"Near you\" reach it is drawn only while the camera sees your avatar or is near it: install it with \"Everywhere\" in Mixer to film anywhere",
+                strip_missing_ns as f64 / 1e9,
+                strip_since_ns as f64 / 1e9
+            ));
+        }
         writer.add_bytes(written);
-        let (changes, bytes) = parameters.finish()?;
-        writer.manifest_mut().performance.parameter_changes = changes;
-        writer.add_bytes(bytes);
-        let (frames, bytes) = skeleton.finish()?;
-        writer.manifest_mut().performance.skeleton_frames = frames;
-        writer.add_bytes(bytes);
+        if write_errors > 0 {
+            warnings.push(format!("{write_errors} file(s) could not be written"));
+        }
+        match parameters.finish() {
+            Ok((changes, bytes)) => {
+                writer.manifest_mut().performance.parameter_changes = changes;
+                writer.add_bytes(bytes);
+            }
+            Err(e) => warnings.push(format!("avatar parameters: {e:#}")),
+        }
+        match skeleton.finish() {
+            Ok((frames, bytes)) => {
+                writer.manifest_mut().performance.skeleton_frames = frames;
+                writer.add_bytes(bytes);
+            }
+            Err(e) => warnings.push(format!("skeleton: {e:#}")),
+        }
         let mut tracks = perf::audio::Audio::new();
         for recorder in audio {
             match recorder.finish() {
                 Ok(track) => {
                     writer.add_bytes(58 + track.frames * track.channels as u64 * 4);
-                    writer.manifest_mut().performance.audio.push(track.file.clone());
                     tracks.tracks.push(track);
                 }
-                Err(e) => eprintln!("audio: {e:#}"),
+                Err(e) => warnings.push(format!("audio: {e:#}")),
             }
         }
+        // The list is the tracks', whatever the checkpoints wrote before (they listed the same files).
+        writer.manifest_mut().performance.audio = tracks.tracks.iter().map(|t| t.file.clone()).collect();
         if !tracks.tracks.is_empty() {
-            orbiters_core::write_atomic(&writer.dir().join(perf::AUDIO_FILE), &serde_json::to_vec_pretty(&tracks)?)?;
+            let index = serde_json::to_vec_pretty(&tracks).map_err(anyhow::Error::from);
+            if let Err(e) = index.and_then(|bytes| Ok(orbiters_core::write_atomic(&writer.dir().join(perf::AUDIO_FILE), &bytes)?)) {
+                warnings.push(format!("audio.json: {e:#}"));
+            }
         }
-        let (mut devices, mut detected) = (Vec::new(), Vec::new());
+        let (mut devices, mut detected, mut lost_devices) = (Vec::new(), Vec::new(), false);
         if let Some(t) = tracking {
+            // What the recorder knew at its last write: the devices to number calibrations by if it fails now.
+            let found = t.found();
             match t.finish() {
                 Ok(r) => {
                     eprintln!("tracking: {} devices, {} samples, {} T-poses", r.devices.len(), r.samples, r.calibrations.len());
@@ -500,18 +1354,41 @@ impl CaptureSession {
                     detected = r.calibrations;
                     devices = r.devices;
                 }
-                Err(e) => eprintln!("tracking: {e:#}"),
+                Err(e) => {
+                    warnings.push(format!("tracking: {e:#}"));
+                    (devices, detected) = found;
+                    lost_devices = devices.is_empty();
+                }
             }
         }
-        let calibrations = session_calibrations(&calibrations, detected, &devices);
-        writer.manifest_mut().performance.calibrations = calibrations.len() as u32;
-        let bytes = tracking::write_calibrations(writer.dir(), calibrations)?;
-        writer.add_bytes(bytes);
-        if errors > 0 {
-            eprintln!("{errors} file(s) could not be written");
+        // Calibrations are numbered by tracking's devices: when tracking failed knowing none, the last checkpoint's
+        // file stays as it was rather than being replaced by one with every device unknown. Otherwise (tracking off
+        // included) the file gets every calibration, those made since the last checkpoint too.
+        if !(lost_devices && calibrations_written.0 > 0) {
+            let calibrations = session_calibrations(&calibrations, detected, &devices);
+            writer.manifest_mut().performance.calibrations = calibrations.len() as u32;
+            match tracking::write_calibrations(writer.dir(), calibrations) {
+                Ok(bytes) => writer.add_bytes(bytes),
+                Err(e) => warnings.push(format!("calibration.json: {e:#}")),
+            }
         }
-        writer.finish()
+        let (dir, mut manifest, error) = writer.finish_keeping();
+        if let Some(e) = error {
+            warnings.push(format!("the session's manifest: {e:#}"));
+        }
+        finite_manifest(&mut manifest);
+        for w in &warnings {
+            eprintln!("finishing the session: {w}");
+        }
+        Finished { dir, manifest, warnings }
     }
+}
+
+/// A finished session: where it is, its manifest, and what could not be written (empty when all was).
+pub struct Finished {
+    pub dir: PathBuf,
+    pub manifest: SessionManifest,
+    pub warnings: Vec<String>,
 }
 
 /// A session's calibrations: those from the overlay (they name devices by serial: numbered like this session's
@@ -528,11 +1405,224 @@ fn session_calibrations(overlay: &[Calibration], detected: Vec<Calibration>, dev
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sources::{FrameSource, Next, TestPatternSource};
+    use crate::sources::{FrameSource, Next, TestPatternSource, Whole};
     use orbiters_contracts::manifest::{CaptureMode, ConsentInfo};
     use orbiters_contracts::performance::skeleton_frames;
     use orbiters_core::protocol::SourceSpec;
     use orbiters_core::settings::KeyframeSettings;
+
+    /// A test-pattern session of `frames` 720p frames under a fresh folder of the temporary directory.
+    fn pattern_session(name: &str, frames: u32) -> (PathBuf, CaptureSession, TestPatternSource) {
+        let root = std::env::temp_dir().join(format!("orbiters-capture-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cmd = StartCapture {
+            source: SourceSpec::TestPattern { width: 1280, height: 720, fps: 30.0, depth_every: 4, frames },
+            sessions_dir: root.clone(),
+            mode: CaptureMode::RecordOnly,
+            quality: StorageQuality::High,
+            keyframes: KeyframeSettings::default(),
+            world: None,
+            consent: ConsentInfo::default(),
+            folder_name: Some(name.into()),
+            performance: Default::default(),
+        };
+        let src = TestPatternSource::new(1280, 720, 30.0, 4, frames, false);
+        let session = CaptureSession::start(&cmd, src.describe(), &src.folder_hint()).unwrap();
+        (root, session, src)
+    }
+
+    /// Keyframes and depth frames that cannot be written are named by no record: the session stays readable whole.
+    #[test]
+    fn records_never_name_files_that_were_not_written() {
+        let (root, mut session, mut src) = pattern_session("unwritable", 24);
+        // The pictures' folders vanish (a drive unplugged, a cleaner): every picture fails to write.
+        std::fs::remove_dir_all(session.dir().join("keyframes")).unwrap();
+        std::fs::remove_dir_all(session.dir().join("depth")).unwrap();
+        while !matches!(src.next(std::time::Duration::from_millis(10), &mut |v| assert_eq!(session.process(v).unwrap(), Processed::Frame)), Ok(Next::End)) {}
+        let finished = session.finish();
+        assert!(finished.warnings.iter().any(|w| w.contains("could not be written")), "{:?}", finished.warnings);
+        let records = bundle::read_records(&finished.dir).unwrap();
+        assert_eq!(records.len(), 24);
+        assert!(records.iter().all(|r| !r.has(record_flags::KEYFRAME) && !r.has(record_flags::DEPTH)));
+        assert!(records.iter().all(|r| r.keyframe_index == -1 && r.depth_index == -1));
+        assert_eq!((finished.manifest.stats.frames, finished.manifest.stats.keyframes, finished.manifest.stats.depth_frames), (24, 0, 0));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The Stream camera set to another resolution: its frames are left for a new session (a bundle has one size).
+    #[test]
+    fn a_new_frame_size_is_left_for_a_new_session() {
+        let (root, mut session, _) = pattern_session("resized", 0);
+        let big = TestPatternSource::new(1280, 720, 30.0, 0, 1, false).render(0);
+        let small = TestPatternSource::new(640, 360, 30.0, 0, 1, false).render(0);
+        assert_eq!(session.process(&mut Whole::new(big.view())).unwrap(), Processed::Frame);
+        assert_eq!(session.process(&mut Whole::new(small.view())).unwrap(), Processed::SizeChanged { width: 640, height: 360 });
+        let finished = session.finish();
+        let m = &finished.manifest;
+        assert_eq!((m.capture.width, m.capture.height, m.stats.frames), (1280, 720, 1));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Odd sizes record like any other, and a frame too small for a strip is a frame without one (not a panic).
+    #[test]
+    fn odd_and_tiny_frame_sizes_are_recorded() {
+        for (name, w, h, strip) in [("odd", 1365, 767, true), ("tiny", 96, 54, false)] {
+            let (root, mut session, _) = pattern_session(name, 0);
+            let img = TestPatternSource::new(w, h, 30.0, 0, 1, false).render(0);
+            assert_eq!(session.process(&mut Whole::new(img.view())).unwrap(), Processed::Frame);
+            let finished = session.finish();
+            assert!(finished.warnings.is_empty(), "{:?}", finished.warnings);
+            let records = bundle::read_records(&finished.dir).unwrap();
+            assert_eq!((records.len(), records[0].has(record_flags::STRIP_OK), records[0].has(record_flags::KEYFRAME)), (1, strip, strip), "{name}");
+            if strip {
+                let kf = finished.dir.join("keyframes").join(bundle::keyframe_file(records[0].keyframe_index));
+                let (head, _) = qoi::decode_rgba(&std::fs::read(kf).unwrap()).unwrap();
+                assert_eq!((head.width, head.height), (w, h));
+            }
+            std::fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// A frame's time is when the source saw it, not when it was decoded (later, after its readback).
+    #[test]
+    fn frames_are_timed_when_they_were_seen() {
+        let (root, mut session, _) = pattern_session("timed", 0);
+        let img = TestPatternSource::new(1280, 720, 30.0, 0, 1, false).render(0);
+        let seen_ns = session.epoch_ns + 5_000_000;
+        session.process(&mut Whole { view: img.view(), seen_ns }).unwrap();
+        let finished = session.finish();
+        assert_eq!(bundle::read_records(&finished.dir).unwrap()[0].capture_time_ns, 5_000_000);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// What the worker sends reads back strictly: no NaN or infinity, which JSON would carry as null.
+    #[test]
+    fn events_carry_only_numbers_json_can_hold() {
+        let mut s = CaptureStats {
+            frames: 3,
+            fps: f32::NAN,
+            decode_ms: f32::INFINITY,
+            elapsed_s: f64::NAN,
+            position: Some([0.0, f32::NAN, 1.0]),
+            heading_deg: Some(f32::NEG_INFINITY),
+            mic_level: Some(f32::INFINITY),
+            ..Default::default()
+        };
+        finite_stats(&mut s);
+        let line = orbiters_core::protocol::WorkerEvent::Stats(s).to_line();
+        assert!(serde_json::from_str::<orbiters_core::protocol::WorkerEvent>(&line).is_ok(), "{line}");
+        let mut m = SessionManifest::default();
+        (m.stats.duration_s, m.stats.first_game_time, m.stats.last_game_time) = (f64::NAN, Some(f32::NAN), Some(2.0));
+        finite_manifest(&mut m);
+        assert_eq!((m.stats.duration_s, m.stats.first_game_time, m.stats.last_game_time), (0.0, None, Some(2.0)));
+    }
+
+    /// The checkpoints' files go to their own thread: the latest version of each is written, and what could not be is
+    /// told.
+    #[test]
+    fn the_saver_writes_the_latest_of_each_file() {
+        let dir = std::env::temp_dir().join(format!("orbiters-saver-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut saver = Saver::spawn();
+        let manifest = dir.join("manifest.json");
+        saver.save(manifest.clone(), b"1".to_vec());
+        saver.save(manifest.clone(), b"2".to_vec());
+        saver.save(dir.join("no such folder").join("audio.json"), b"x".to_vec());
+        saver.finish();
+        assert_eq!(std::fs::read(&manifest).unwrap(), b"2");
+        let (written, errors) = saver.outcome();
+        assert!((1..=2).contains(&written), "{written}");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("audio.json"), "{errors:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn frames_lent_to_the_threads_stay_under_a_budget() {
+        let mut b = Buffers::default();
+        // Six 8K frames fit, not seven.
+        let frame = 7680 * 4320 * 4;
+        assert_eq!((0..10).take_while(|_| b.room(frame).then(|| b.lent(frame)).is_some()).count(), 6);
+        b.out = Buffers::OUT_MOST - 16;
+        assert!(b.room(16) && !b.room(17));
+        b.give(vec![0u8; 16]);
+        assert_eq!(b.out, Buffers::OUT_MOST - 32);
+        assert_eq!(b.take().len(), 16, "kept for the next copy");
+    }
+
+    /// Writing that fails for a moment is told once and waited out; writing that keeps failing stops the recording.
+    #[test]
+    fn a_disk_that_keeps_failing_stops_the_recording() {
+        let (root, mut session, _) = pattern_session("full", 0);
+        // Whatever the temporary folder's disk has free: only the failing writes count here.
+        (session.stop, session.free_checked) = (None, Some(Instant::now()));
+        session.take_warnings();
+        let full = "There is not enough space on the disk. (os error 112)";
+        session.write_failed("frames.bin", full.into());
+        session.write_failed("frames.bin", full.into());
+        session.refresh_stats();
+        assert_eq!(session.must_stop(), None, "a moment's trouble");
+        let told: Vec<_> = session.take_warnings().into_iter().filter(|(k, _)| *k == Warning::Disk).collect();
+        assert!(!told.is_empty() && told.iter().all(|(_, w)| w.contains("not enough space")), "{told:?}");
+        assert_eq!(session.stats.warnings.len(), 1, "the stats keep the latest of each kind");
+        // Something written meanwhile: writing works.
+        session.wrote();
+        assert!(session.failing.is_none());
+        // One failure, however long ago and with nothing written since (paused, no keyframe due): no reason to stop.
+        session.write_failed("a keyframe", full.into());
+        let earlier = Instant::now().checked_sub(WRITE_PATIENCE).unwrap();
+        session.failing.as_mut().unwrap().since = earlier;
+        session.refresh_stats();
+        assert_eq!(session.must_stop(), None, "a single failure");
+        // A failure long after the last one starts a run of its own.
+        session.failing.as_mut().unwrap().last = Instant::now().checked_sub(FAILURE_RUN * 2).unwrap();
+        session.write_failed("a keyframe", full.into());
+        assert_eq!(session.failing.as_ref().map(|f| f.count), Some(1));
+        // Failures that keep coming for three seconds: the recording stops.
+        session.failing.as_mut().unwrap().since = earlier;
+        session.write_failed("a depth frame", full.into());
+        session.write_failed("frames.bin", full.into());
+        session.refresh_stats();
+        assert!(session.must_stop().is_some_and(|why| why.contains("not enough space")), "{:?}", session.must_stop());
+        drop(session);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The strip lost while recording (a camera that no longer sees an avatar whose kit has the "Near you" reach): the
+    /// stats say for how long, a long stretch is told once, and the end of the session says how much had no pose.
+    #[test]
+    fn stretches_without_the_strip_are_told_and_counted() {
+        let (root, mut session, _) = pattern_session("strip-gaps", 0);
+        session.take_warnings();
+        let s = |seconds: f64| (seconds * 1e9) as u64;
+        // Nothing seen yet (no kit, or not yet in view): nothing is missing.
+        session.strip_missed(s(0.5));
+        assert_eq!((session.stats.strip_missing_s, session.strip_missing()), (0.0, (0, 0)));
+        session.strip_read(s(1.0));
+        // A blink of half a second is no stretch.
+        session.strip_missed(s(2.0));
+        session.strip_read(s(2.5));
+        assert_eq!(session.strip_missing().0, 0);
+        // Eight seconds without it: told once, past three seconds.
+        for tenth in 30..110 {
+            session.last_frame_ns = s(tenth as f64 / 10.0);
+            session.strip_missed(session.last_frame_ns);
+        }
+        assert!((session.stats.strip_missing_s - 7.9).abs() < 0.01, "{}", session.stats.strip_missing_s);
+        let told: Vec<_> = session.take_warnings().into_iter().filter(|(k, _)| *k == Warning::Strip).collect();
+        assert_eq!(told.len(), 1, "{told:?}");
+        session.strip_read(s(11.0));
+        assert_eq!(session.stats.strip_missing_s, 0.0);
+        // A stretch still open at the end counts too: 8 s, then 4 of the last 4.
+        session.last_frame_ns = s(15.0);
+        session.strip_missed(s(11.0));
+        session.strip_missed(s(15.0));
+        assert_eq!(session.strip_missing(), (s(8.0) + s(4.0), s(14.0)));
+        let finished = session.finish();
+        assert!(finished.warnings.iter().any(|w| w.starts_with("no camera pose for 12 s of 14 s")), "{:?}", finished.warnings);
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn a_session_that_never_finishes_reads_up_to_its_last_checkpoint() {
@@ -562,11 +1652,17 @@ mod tests {
             initial: false,
         };
         session.osc(&[viseme], false);
-        while !matches!(src.next(std::time::Duration::from_millis(10), &mut |v| session.process(v).unwrap()), Ok(Next::End)) {}
-        // Five seconds on: the stats refresh writes a checkpoint. Then the worker is killed: no finish.
-        session.checkpointed = Instant::now().checked_sub(bundle::CHECKPOINT_EVERY).unwrap();
+        while !matches!(src.next(std::time::Duration::from_millis(10), &mut |v| assert_eq!(session.process(v).unwrap(), Processed::Frame)), Ok(Next::End)) {}
+        // The files written, a few seconds on: the stats refresh writes a checkpoint. Then the worker is killed: no
+        // finish.
+        session.settle();
+        session.checkpointed = Instant::now().checked_sub(CHECKPOINT_EVERY).unwrap();
+        session.refresh_stats();
+        // The saver writes the checkpoint's files a moment later, on its own thread.
+        session.settle();
         session.refresh_stats();
         assert_eq!(session.stats.last_error, None);
+        assert!(session.stats.warnings.is_empty(), "{:?}", session.stats.warnings);
         let dir = session.dir();
         let manifest = bundle::read_manifest(&dir).unwrap();
         assert_eq!(manifest.stats.frames, 20);
@@ -600,19 +1696,18 @@ mod tests {
         let mut src = TestPatternSource::new(1280, 720, 30.0, 4, 60, false);
         let mut session = CaptureSession::start(&cmd, src.describe(), &src.folder_hint()).unwrap();
         loop {
-            let mut err = None;
-            match src.next(std::time::Duration::from_millis(10), &mut |v| {
-                if let Err(e) = session.process(v) {
-                    err = Some(e);
-                }
-            }) {
-                Ok(Next::Frame) => assert!(err.is_none()),
+            let mut outcome = None;
+            match src.next(std::time::Duration::from_millis(10), &mut |v| outcome = Some(session.process(v))) {
+                Ok(Next::Frame) => assert_eq!(outcome.map(|o| o.unwrap()), Some(Processed::Frame)),
                 Ok(Next::End) => break,
                 Ok(Next::Timeout) => {}
                 Err(e) => panic!("{e}"),
             }
         }
-        let (dir, manifest) = session.finish().unwrap();
+        assert_eq!((session.stats.dropped, session.stats.depth_dropped), (0, 0), "a test pattern waits for the encoders");
+        let finished = session.finish();
+        assert!(finished.warnings.is_empty(), "{:?}", finished.warnings);
+        let (dir, manifest) = (finished.dir, finished.manifest);
         assert_eq!(manifest.stats.frames, 60);
         assert_eq!(manifest.stats.strip_ok, 60);
         assert_eq!(manifest.stats.depth_frames, 15);

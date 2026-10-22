@@ -45,12 +45,16 @@ mod win {
             MenuEvent::set_event_handler(Some(move |e: MenuEvent| match e.id.0.as_str() {
                 "show" => svc.show_window(false),
                 "toggle" => {
-                    let ctl = &svc.ctl;
-                    let r = if ctl.is_capturing() { ctl.stop_capture() } else { ctl.start_capture(false) };
-                    if let Err(err) = r {
-                        ctl.notify(NoticeKind::Error, err.to_string());
-                        svc.show_window(false);
-                    }
+                    // Starting reads VRChat's values over HTTP: not on the thread of the tray's message loop.
+                    let svc = svc.clone();
+                    std::thread::spawn(move || {
+                        let ctl = &svc.ctl;
+                        let r = if ctl.is_capturing() { ctl.stop_capture() } else { ctl.start_capture(false) };
+                        if let Err(err) = r {
+                            ctl.notify(NoticeKind::Error, err.to_string());
+                            svc.show_window(false);
+                        }
+                    });
                 }
                 "quit" => svc.quit(),
                 _ => {}

@@ -20,7 +20,7 @@ pub struct ChaperoneSetup<'a> {
 
 impl Client {
     pub fn chaperone_setup(&self) -> Result<ChaperoneSetup<'_>, Error> {
-        Ok(ChaperoneSetup { table: self.interface(CHAPERONE_SETUP_VERSION)?, _client: self })
+        Ok(ChaperoneSetup { table: self.table(&self.chaperone_setup_table, CHAPERONE_SETUP_VERSION)?, _client: self })
     }
 }
 

@@ -13,3 +13,6 @@ pollster = { workspace = true }
 png = { workspace = true }
 tiny-skia = { workspace = true }
 anyhow = { workspace = true }
+# System fonts mapped instead of read, and their character maps (skrifa is egui's own font reader).
+memmap2 = "0.9"
+skrifa = "0.44"

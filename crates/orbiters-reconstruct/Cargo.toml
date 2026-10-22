@@ -25,5 +25,5 @@ windows = { workspace = true }
 sysinfo = "0.37"
 
 [dev-dependencies]
-naga = { version = "30", features = ["wgsl-in", "hlsl-out"] }
+naga = { version = "30", features = ["wgsl-in", "hlsl-out", "spv-out"] }
 png = { workspace = true }

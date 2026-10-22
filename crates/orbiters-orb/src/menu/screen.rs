@@ -6,6 +6,10 @@
 //! VRChat takes them); everyone else's through the text panel's synced channel (`Orb/Text/Pointer` past the panel's
 //! blocks, `Orb/Text/Sync*`), a block every step: the header first, then the texts, then the thumbnails a pass at a time
 //! (every eighth row, then every fourth...), so others see the page early and the pictures sharpen.
+//!
+//! Only the bytes a page reads are ever sent for it, and resent in turn; a new page clears the memory first, so none of
+//! the last page's text shows in the new one's slots. Everyone else's frame ([`Frame::public`]) carries no hover nor
+//! press and names none of the owner's friends.
 
 use super::layout::{self, Layout, ScreenPage, MAX_ELEMENTS, PICTURES};
 use super::Menu;
@@ -75,15 +79,21 @@ pub struct Frame {
 /// A thumbnail as the screen shows it: rows top first, [`ROW_BYTES`] each.
 pub type Picture = [u8; PICTURE_BYTES];
 
-/// A JPEG thumbnail made into a screen picture: grey, fitted, dithered to black and white.
+/// A JPEG thumbnail made into a screen picture (see [`picture_from_grey`]).
 pub fn picture_of(jpeg: &[u8]) -> anyhow::Result<Picture> {
-    let grey = crate::picture::grey_jpeg(jpeg)?;
-    let values = crate::picture::fit(&grey, PICTURE_W, PICTURE_H);
+    Ok(picture_from_grey(&crate::picture::grey_jpeg(jpeg)?))
+}
+
+/// A grey picture made into a screen picture: fitted, its levels stretched, turned to light and dithered to black and
+/// white, so the dots look as bright as the picture and a dull one keeps its shapes.
+pub fn picture_from_grey(grey: &crate::picture::Grey) -> Picture {
+    let mut values = crate::picture::fit(grey, PICTURE_W, PICTURE_H);
+    crate::picture::stretch(&mut values);
+    crate::picture::to_linear(&mut values);
     let bits = crate::picture::dither(&values, PICTURE_W, PICTURE_H, 2);
-    let packed = crate::picture::pack(&bits, 1);
     let mut picture = [0u8; PICTURE_BYTES];
-    picture.copy_from_slice(&packed);
-    Ok(picture)
+    picture.copy_from_slice(&crate::picture::pack(&bits, 1));
+    picture
 }
 
 /// Glyph indices for `text` in `cols` cells (aligned as the slot says).
@@ -111,15 +121,25 @@ fn sendable(byte: u8) -> u8 {
 }
 
 impl Frame {
-    /// The screen's memory for `menu` on its page: `hover` and `pressed` are element indices of that page's layout,
-    /// `pictures` the thumbnails known by video id.
+    /// The owner's screen memory for `menu` on its page: `hover` and `pressed` are element indices of that page's
+    /// layout, `pictures` the thumbnails known by video id.
     pub fn new(menu: &Menu, hover: Option<usize>, pressed: Option<usize>, flags: Flags, pictures: &dyn Fn(&str) -> Option<Picture>) -> Self {
+        Self::build(menu, hover, pressed, flags, pictures, false)
+    }
+
+    /// Everyone else's screen memory for `menu`: no hover nor press (they changed with every move of the owner's finger
+    /// and held the rest back, one block a step), and the owner's friends never named ([`layout::text_for`]).
+    pub fn public(menu: &Menu, flags: Flags, pictures: &dyn Fn(&str) -> Option<Picture>) -> Self {
+        Self::build(menu, None, None, flags, pictures, true)
+    }
+
+    fn build(menu: &Menu, hover: Option<usize>, pressed: Option<usize>, flags: Flags, pictures: &dyn Fn(&str) -> Option<Picture>, public: bool) -> Self {
         let mut bank = [0u8; BANK];
         if !menu.open {
             return Self { bank };
         }
         let page = ScreenPage::of(menu);
-        let layout = layout::layout(page);
+        let layout = layout::cached(page);
         bank[PAGE] = page as u8;
         bank[FLAGS] = flags.listening as u8 | (flags.loading as u8) << 1 | (flags.thinking as u8) << 2;
         bank[HOVER] = hover.filter(|&h| h < layout.elements.len()).map_or(0, |h| h as u8 + 1);
@@ -134,7 +154,7 @@ impl Frame {
             }
         }
         for slot in &layout.slots {
-            let text = layout::slot_text(menu, slot);
+            let text = layout::slot_text_for(menu, slot, public);
             let at = TEXT + slot.offset as usize;
             bank[at..at + slot.cols as usize].copy_from_slice(&cells(&text, slot.cols as usize, slot.align));
         }
@@ -157,24 +177,58 @@ impl Frame {
     }
 
     /// The layout of the page this frame shows.
-    pub fn layout(menu: &Menu) -> Layout {
-        layout::layout(ScreenPage::of(menu))
+    pub fn layout(menu: &Menu) -> &'static Layout {
+        layout::cached(ScreenPage::of(menu))
     }
 }
 
-/// The byte ranges in the order an audience gets them: header, texts, then each pass of every thumbnail.
+/// The byte ranges in the order an audience gets them again: header, texts, then each pass of every thumbnail.
 fn priority() -> Vec<std::ops::Range<usize>> {
     let mut out = vec![0..PASS, PASS..HEADER, TEXT..PICTURES_AT];
     let mut start = 0;
     for &end in &PASS_ENDS {
-        for p in 0..PICTURES {
-            let at = PICTURES_AT + p * PICTURE_BYTES;
-            out.push(at + start * ROW_BYTES..at + end * ROW_BYTES);
-        }
+        out.extend(pass_rows(start, end));
         start = end;
     }
     out
 }
+
+/// The bytes of every thumbnail's kept rows `start` to `end` (a pass).
+fn pass_rows(start: usize, end: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
+    (0..PICTURES).map(move |p| {
+        let at = PICTURES_AT + p * PICTURE_BYTES;
+        at + start * ROW_BYTES..at + end * ROW_BYTES
+    })
+}
+
+/// The bytes page `page` reads (contracts `Docs/orb.md`, Memory): the header, the page's text slots and, on the
+/// results page, the thumbnails. The rest of the memory is never sent for that page (its bytes count as equal whatever
+/// they hold), nor resent. Page 0 (nothing shown) reads the header only.
+fn visible(page: u8) -> &'static [bool; BANK] {
+    static MASKS: std::sync::OnceLock<Vec<[bool; BANK]>> = std::sync::OnceLock::new();
+    let masks = MASKS.get_or_init(|| {
+        let mut header = [false; BANK];
+        header[..HEADER].fill(true);
+        let mut masks = vec![header; ScreenPage::ALL.len() + 1];
+        for page in ScreenPage::ALL {
+            let l = layout::cached(page);
+            let mask = &mut masks[page as usize];
+            for s in &l.slots {
+                let at = TEXT + s.offset as usize;
+                mask[at..at + s.cols as usize].fill(true);
+            }
+            if !l.pictures.is_empty() {
+                mask[PICTURES_AT..].fill(true);
+            }
+        }
+        masks
+    });
+    masks.get(page as usize).unwrap_or(&masks[0])
+}
+
+/// While nothing differs, the header goes again every this many blocks (for whoever just loaded the avatar: the
+/// page's picture shows at once, its texts follow).
+const HEADER_EVERY: usize = 6;
 
 /// What one step of a screen channel sends (contracts `Docs/orb.md`, Screen): the pointer or the values, never both.
 /// VRChat may apply values a frame or more before a pointer sent with them, which wrote a block with the next one's
@@ -187,6 +241,9 @@ pub enum Send {
     Values(usize, Vec<u8>),
     /// The pointer to a block (from 0).
     Pointer(usize),
+    /// The memory cleared (the owner's pointer 255; everyone else's 254, which also closes their screen until the next
+    /// block): a new page starts from nothing, so none of the last page's text shows in its slots.
+    Clear,
 }
 
 impl Send {
@@ -194,29 +251,52 @@ impl Send {
     pub fn moves_to_block(&self) -> bool {
         matches!(self, Send::Pointer(_))
     }
+
+    /// Whether the pointer stays as this step set it a whole step: on a block, or clearing.
+    pub fn holds(&self) -> bool {
+        matches!(self, Send::Pointer(_) | Send::Clear)
+    }
 }
 
 /// One audience's copy of the screen's memory, as the steps sent it: the owner (local values) or everyone else (the
-/// synced text channel). Each block sent is the most urgent one that differs from what it should hold.
+/// synced text channel). Each block sent is the most urgent one that differs from what it should hold, among the
+/// bytes its page reads; when none does, the page's blocks go again in turn.
 pub struct Audience {
     /// Bytes a step writes.
     block: usize,
     sent: [u8; BANK],
     /// Whether `sent` is known (cleared, then written); after a reload the screen's memory is not.
     known: bool,
-    /// The next block resent when nothing differs.
+    /// The next of the page's blocks resent when nothing differs, and how many went since the header did.
     resync: usize,
+    since_header: usize,
+    /// The blocks the page reads, in the order they are resent, and the page they are for.
+    page_blocks: (u8, Vec<usize>),
     order: Vec<std::ops::Range<usize>>,
     /// The block whose values go next (the pointer rests at 0), and the block the pointer moves to next.
     queued: Option<usize>,
     pending: Option<usize>,
     /// The pointer rests at 0.
     resting: bool,
+    /// The block in its steps (or the last one) is a resend: nothing differed when it was picked.
+    resending: bool,
 }
 
 impl Audience {
     pub fn new(block: usize) -> Self {
-        Self { block: block.max(2), sent: [0; BANK], known: false, resync: 0, order: priority(), queued: None, pending: None, resting: false }
+        Self {
+            block: block.max(2),
+            sent: [0; BANK],
+            known: false,
+            resync: 0,
+            since_header: 0,
+            page_blocks: (0, Vec::new()),
+            order: priority(),
+            queued: None,
+            pending: None,
+            resting: false,
+            resending: false,
+        }
     }
 
     pub fn blocks(&self) -> usize {
@@ -229,6 +309,19 @@ impl Audience {
         self.queued = None;
         self.pending = None;
         self.resting = false;
+        self.resending = false;
+    }
+
+    /// The screen's memory is clear without a step saying so (closing cleared everyone else's; a loaded avatar starts
+    /// clear). `pointer_writes_nothing`: the pointer was left where it writes nothing (closed), so a block's values
+    /// may go first.
+    pub fn cleared(&mut self, pointer_writes_nothing: bool) {
+        self.known = true;
+        self.sent = [0; BANK];
+        self.queued = None;
+        self.pending = None;
+        self.resting = pointer_writes_nothing;
+        self.resending = false;
     }
 
     /// Whether a block is between its steps: nothing else may use the channel until it is done.
@@ -236,9 +329,29 @@ impl Audience {
         self.queued.is_some() || self.pending.is_some()
     }
 
-    /// The next step for `want`: the next block (a changed one by urgency, else one in turn) goes in three steps, the
-    /// pointer to 0, its values, the pointer to it.
+    /// Whether the block in its steps, or the last one, was sent again only because nothing differed.
+    pub fn resending(&self) -> bool {
+        self.resending
+    }
+
+    /// Whether the memory holds all of `want` its page reads, no block being in its steps: what goes next would only
+    /// be sent again.
+    pub fn settled(&self, want: &[u8; BANK]) -> bool {
+        self.known && !self.mid_block() && self.differing(&self.presentable(want)).is_none()
+    }
+
+    /// The next step for `want`: a new page's clear, else the next block (a changed one by urgency, else one in turn)
+    /// in three steps, the pointer to 0, its values, the pointer to it.
     pub fn step(&mut self, want: &[u8; BANK]) -> Send {
+        // A new page: the memory is cleared first (a block between its steps with it), then the header goes.
+        if self.known && self.sent[PAGE] != 0 && want[PAGE] != self.sent[PAGE] {
+            self.known = false;
+        }
+        if !self.known {
+            // Clearing writes nothing: the next block's values may go at once.
+            self.cleared(true);
+            return Send::Clear;
+        }
         if let Some(block) = self.pending.take() {
             self.resting = false;
             return Send::Pointer(block);
@@ -246,7 +359,9 @@ impl Audience {
         let block = match self.queued.take() {
             Some(block) => block,
             None => {
-                let block = self.next(want).unwrap_or_else(|| self.resend());
+                let next = self.next(want);
+                self.resending = next.is_none();
+                let block = next.unwrap_or_else(|| self.resend(want[PAGE]));
                 if !self.resting {
                     self.resting = true;
                     self.queued = Some(block);
@@ -288,29 +403,87 @@ impl Audience {
         out
     }
 
-    /// The next block to write for `want`, by urgency, and marks it sent; `None` when the screen holds it all.
-    pub fn next(&mut self, want: &[u8; BANK]) -> Option<usize> {
-        let want = self.presentable(want);
-        let block = self.order.iter().find_map(|range| {
+    /// The most urgent block whose bytes the page reads differ from `want` (already [`Self::presentable`]): the header,
+    /// the texts, then the thumbnails a pass at a time, the passes' count once a pass of them all went (one block
+    /// saying so for the five, rather than one per thumbnail).
+    fn differing(&self, want: &[u8; BANK]) -> Option<usize> {
+        let mask = visible(want[PAGE]);
+        // The first block holding a byte of `range` (only those count) that differs.
+        let first = |range: std::ops::Range<usize>| {
             let mut b = range.start / self.block;
             while b * self.block < range.end {
-                let (from, to) = (b * self.block, ((b + 1) * self.block).min(BANK));
-                if self.sent[from..to] != want[from..to] {
+                let (from, to) = ((b * self.block).max(range.start), ((b + 1) * self.block).min(range.end));
+                if (from..to).any(|i| mask[i] && self.sent[i] != want[i]) {
                     return Some(b);
                 }
                 b += 1;
             }
             None
-        })?;
-        let (from, to) = (block * self.block, ((block + 1) * self.block).min(BANK));
-        self.sent[from..to].copy_from_slice(&want[from..to]);
+        };
+        let counted = |level: u8| (0..PICTURES).any(|p| mask[PASS + p] && self.sent[PASS + p] < want[PASS + p].min(level));
+        // A thumbnail that changed hides first (its passes' count down), so its old rows never show with the new.
+        if (0..PICTURES).any(|p| mask[PASS + p] && want[PASS + p] < self.sent[PASS + p]) {
+            return Some(PASS / self.block);
+        }
+        if let Some(b) = first(0..PASS).or_else(|| first(TEXT..PICTURES_AT)) {
+            return Some(b);
+        }
+        let mut start = 0;
+        for (level, &end) in PASS_ENDS.iter().enumerate() {
+            if let Some(b) = pass_rows(start, end).find_map(&first) {
+                return Some(b);
+            }
+            if counted(level as u8 + 1) {
+                return Some(PASS / self.block);
+            }
+            start = end;
+        }
+        first(PASS..HEADER)
+    }
+
+    /// The next block to write for `want`, by urgency, and marks it sent; `None` when the screen holds all its page
+    /// reads. The block's other bytes are sent as the memory holds them.
+    pub fn next(&mut self, want: &[u8; BANK]) -> Option<usize> {
+        let want = self.presentable(want);
+        let block = self.differing(&want)?;
+        let mask = visible(want[PAGE]);
+        for i in block * self.block..((block + 1) * self.block).min(BANK) {
+            if mask[i] {
+                self.sent[i] = want[i];
+            }
+        }
         Some(block)
     }
 
-    /// A block to write again while nothing differs, in turn (for whoever loaded the avatar since).
-    pub fn resend(&mut self) -> usize {
-        let block = self.resync % self.blocks();
-        self.resync = (block + 1) % self.blocks();
+    /// A block to write again while nothing differs (for whoever loaded the avatar since, and to repair a block
+    /// VRChat dropped): page `page`'s blocks in turn, its texts before its pictures, the header every [`HEADER_EVERY`].
+    pub fn resend(&mut self, page: u8) -> usize {
+        if self.page_blocks.0 != page || self.page_blocks.1.is_empty() {
+            let mask = visible(page);
+            let mut blocks: Vec<usize> = Vec::new();
+            for range in &self.order {
+                for b in range.start / self.block..range.end.div_ceil(self.block) {
+                    let read = (b * self.block..((b + 1) * self.block).min(BANK)).any(|i| mask[i]);
+                    if read && !blocks.contains(&b) {
+                        blocks.push(b);
+                    }
+                }
+            }
+            self.page_blocks = (page, blocks);
+            self.resync = 0;
+        }
+        self.since_header += 1;
+        let blocks = &self.page_blocks.1;
+        let block = if self.since_header >= HEADER_EVERY {
+            0
+        } else {
+            let block = blocks[self.resync % blocks.len()];
+            self.resync = (self.resync + 1) % blocks.len();
+            block
+        };
+        if block == 0 {
+            self.since_header = 0;
+        }
         block
     }
 
@@ -334,6 +507,10 @@ pub mod local {
     pub const VALUE_PREFIX: &str = params::SCREEN_VALUE_PREFIX;
     /// `Orb/Screen/Touch/L0` …: how near the left (`L`) or right (`R`) index finger is to each touch point (0 to 1).
     pub const TOUCH_PREFIX: &str = params::SCREEN_TOUCH_PREFIX;
+    /// `Orb/Screen/Eye0` … and `Orb/Screen/Gaze0` …: how near the eyes and the gaze point are to each touch point
+    /// (desktop mode's looking).
+    pub const EYE_PREFIX: &str = params::SCREEN_EYE_PREFIX;
+    pub const GAZE_PREFIX: &str = params::SCREEN_GAZE_PREFIX;
 
     pub fn value(i: usize) -> String {
         format!("{VALUE_PREFIX}{i}")
@@ -346,6 +523,7 @@ pub fn local_messages(send: &Send) -> Vec<Message> {
         Send::Rest => vec![(parameter(local::POINTER), OscType::Int(0))],
         Send::Values(_, bytes) => bytes.iter().enumerate().map(|(i, &b)| (parameter(&local::value(i)), OscType::Float(orb::sync_value(b)))).collect(),
         Send::Pointer(block) => vec![(parameter(local::POINTER), OscType::Int(*block as i32 + 1))],
+        Send::Clear => local_clear(),
     }
 }
 
@@ -377,6 +555,7 @@ pub fn synced_messages(sync: usize, send: &Send) -> Vec<Message> {
             bytes.iter().take(sync).enumerate().map(|(i, &b)| (parameter(&params::text_sync(i)), OscType::Float(orb::sync_value(b)))).collect()
         }
         Send::Pointer(block) => vec![(parameter(params::TEXT_POINTER), OscType::Int((first_pointer(sync) + block) as i32))],
+        Send::Clear => synced_close(),
     }
 }
 
@@ -402,7 +581,7 @@ mod tests {
             duration: Some("1:00".into()),
             live: false,
         });
-        menu.results_arrived("lofi", Results { videos: videos.collect(), continuation: None }, false);
+        menu.results_arrived(1, Results { videos: videos.collect(), continuation: None }, false);
         menu
     }
 
@@ -491,11 +670,66 @@ mod tests {
             steps += 1;
         }
         assert_eq!(owner.sent, want);
-        // Every block once, and the header again as each picture's passes complete.
-        assert!(steps <= BANK.div_ceil(LOCAL_VALUES) + PICTURES * PASSES as usize, "{steps} steps");
+        // Every block once, and the passes' count again once per pass of them all (not once per thumbnail).
+        assert!(steps <= BANK.div_ceil(LOCAL_VALUES) + PASSES as usize, "{steps} steps");
         // Nothing left: resend in turn.
         assert_eq!(owner.next(&want), None);
-        assert_eq!((owner.resend(), owner.resend()), (0, 1));
+        assert!(owner.settled(&want));
+        assert_eq!((owner.resend(want[PAGE]), owner.resend(want[PAGE])), (0, 1));
+    }
+
+    #[test]
+    fn a_page_s_unread_bytes_are_never_sent_and_the_header_comes_back_often() {
+        // The results page sent whole, then Home: its slots and header only.
+        let mut menu = results_menu();
+        let mut everyone = Audience::new(8);
+        everyone.cleared(false);
+        let results = Frame::public(&menu, Flags::default(), &|_| Some(picture(3))).bank;
+        while everyone.next(&results).is_some() {}
+        menu.press(Target::Back);
+        menu.press(Target::Back);
+        let home = Frame::public(&menu, Flags::default(), &|_| None).bank;
+        assert_eq!(home[PAGE], ScreenPage::Home as u8);
+        assert_eq!(everyone.step(&home), Send::Clear, "a new page clears first");
+        let mut blocks = 0;
+        while everyone.next(&home).is_some() {
+            blocks += 1;
+        }
+        let mask = visible(home[PAGE]);
+        let read_blocks = (0..BANK.div_ceil(8)).filter(|b| (b * 8..((b + 1) * 8).min(BANK)).any(|i| mask[i])).count();
+        assert!(blocks <= read_blocks && read_blocks < 30, "{blocks} blocks for Home's {read_blocks}");
+        assert!(everyone.sent[PICTURES_AT..].iter().all(|&b| b == 0), "no thumbnail byte for Home");
+        // Nothing differs: the page's blocks in turn, the header among them every few.
+        let resent: Vec<usize> = (0..60).map(|_| everyone.resend(home[PAGE])).collect();
+        assert!(resent.iter().all(|&b| (b * 8..((b + 1) * 8).min(BANK)).any(|i| mask[i])), "only blocks Home reads: {resent:?}");
+        assert!(resent.windows(HEADER_EVERY).all(|w| w.contains(&0)), "{resent:?}");
+    }
+
+    #[test]
+    fn everyone_else_never_gets_the_owner_s_finger_or_friends() {
+        let mut menu = Menu::default();
+        menu.open();
+        menu.set_contacts(vec![crate::menu::Contact { id: "u1".into(), name: "Lyra".into() }], true, "");
+        menu.press(Target::Call);
+        let owner = Frame::new(&menu, Some(3), Some(4), Flags::default(), &|_| None).bank;
+        let public = Frame::public(&menu, Flags::default(), &|_| None).bank;
+        assert_eq!((owner[HOVER], owner[PRESSED]), (4, 5));
+        assert_eq!((public[HOVER], public[PRESSED]), (0, 0), "no hover: block 0 stays put while the finger moves");
+        let lyra: Vec<u8> = "Lyra".chars().map(|c| orb::glyph_index(c).unwrap()).collect();
+        assert!(owner.windows(4).any(|w| w == lyra));
+        assert!(!public.windows(4).any(|w| w == lyra), "no friend's name for everyone else");
+    }
+
+    #[test]
+    fn a_changed_thumbnail_hides_before_its_rows_change() {
+        let menu = results_menu();
+        let first = Frame::new(&menu, None, None, Flags::default(), &|_| Some(picture(3))).bank;
+        let mut owner = Audience::new(LOCAL_VALUES);
+        owner.take_clear();
+        while owner.next(&first).is_some() {}
+        let second = Frame::new(&menu, None, None, Flags::default(), &|_| Some(picture(4))).bank;
+        assert_eq!(owner.next(&second), Some(PASS / LOCAL_VALUES), "the passes' count first");
+        assert!((0..PICTURES).all(|p| owner.sent[PASS + p] == 0));
     }
 
     #[test]
@@ -521,6 +755,10 @@ mod tests {
             Send::Rest => *pointer = None,
             Send::Pointer(b) => *pointer = Some(*b),
             Send::Values(_, bytes) => *values = bytes.clone(),
+            Send::Clear => {
+                *pointer = None;
+                *memory = [0; BANK];
+            }
         }
         if let Some(b) = *pointer {
             for (i, &v) in values.iter().enumerate() {

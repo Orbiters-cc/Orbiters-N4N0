@@ -1,5 +1,5 @@
-//! Painting helpers egui lacks: anti-aliased gradient fills of convex shapes, conic rings, gradient arcs, soft
-//! glows and shadows. Colours interpolate in gamma space like CSS, so the web design's gradients carry over.
+//! Painting helpers egui lacks: anti-aliased gradient fills of convex shapes, squircles, arcs, dashed circles and
+//! shadows. Colours interpolate in gamma space like CSS, so the web design's gradients carry over.
 
 use egui::{pos2, vec2, Color32, Mesh, Painter, Pos2, Rect, Shape, Vec2};
 use std::f32::consts::TAU;
@@ -38,18 +38,6 @@ impl Gradient {
 
     pub fn vertical(rect: Rect, stops: &[(f32, Color32)]) -> Self {
         Self::new(rect.center_top(), rect.center_bottom(), stops)
-    }
-
-    /// CSS `linear-gradient(<angle>deg, ...)` over `rect` (0° points up, 90° right, 135° to the bottom right).
-    pub fn css(rect: Rect, angle_deg: f32, stops: &[(f32, Color32)]) -> Self {
-        let a = angle_deg.to_radians();
-        let dir = vec2(a.sin(), -a.cos());
-        let half = (rect.width() * a.sin().abs() + rect.height() * a.cos().abs()) * 0.5;
-        Self::new(rect.center() - dir * half, rect.center() + dir * half, stops)
-    }
-
-    pub fn two(start: Pos2, end: Pos2, a: Color32, b: Color32) -> Self {
-        Self::new(start, end, &[(0.0, a), (1.0, b)])
     }
 
     fn t(&self, p: Pos2) -> f32 {
@@ -190,11 +178,6 @@ pub fn squircle_texture(painter: &Painter, rect: Rect, radii: [f32; 4], texture:
     painter.add(Shape::mesh(mesh));
 }
 
-pub fn circle_points(center: Pos2, radius: f32) -> Vec<Pos2> {
-    let n = ((radius * 1.2).ceil() as usize).clamp(16, 160);
-    (0..n).map(|i| center + Vec2::angled(TAU * i as f32 / n as f32) * radius).collect()
-}
-
 /// Fills a convex polygon, colouring each vertex with `color_at` and feathering the edge by one pixel.
 pub fn fill_convex(painter: &Painter, points: &[Pos2], color_at: impl Fn(Pos2) -> Color32) {
     if points.len() < 3 {
@@ -313,100 +296,6 @@ fn outline_feather(painter: &Painter, points: &[Pos2], color_at: impl Fn(Pos2) -
     painter.add(Shape::mesh(mesh));
 }
 
-/// Rounded rectangle with a gradient fill.
-pub fn gradient_rect(painter: &Painter, rect: Rect, radius: f32, g: &Gradient) {
-    fill_gradient(painter, &rounded_rect_points(rect, radius), g);
-}
-
-/// Circle with a radial gradient: `inner` at `focus` (relative to the centre, in radii), `outer` at the rim.
-pub fn radial_disc(painter: &Painter, center: Pos2, radius: f32, focus: Vec2, inner: Color32, outer: Color32, outer_stop: f32) {
-    let rings = 10;
-    let n = ((radius * 0.9).ceil() as usize).clamp(24, 128);
-    let f = feather(painter) * 0.5;
-    let focus_pt = center + focus * radius;
-    let mut mesh = Mesh::default();
-    mesh.colored_vertex(focus_pt, inner);
-    for r in 1..=rings {
-        let k = r as f32 / rings as f32;
-        let c = inner.lerp_to_gamma(outer, (k / outer_stop).min(1.0));
-        for i in 0..n {
-            let rim = center + Vec2::angled(TAU * i as f32 / n as f32) * (radius - if r == rings { f } else { 0.0 });
-            mesh.colored_vertex(focus_pt + (rim - focus_pt) * k, c);
-        }
-    }
-    for i in 0..n {
-        let rim = center + Vec2::angled(TAU * i as f32 / n as f32) * (radius + f);
-        mesh.colored_vertex(rim, Color32::TRANSPARENT);
-    }
-    let n32 = n as u32;
-    for i in 0..n32 {
-        let j = (i + 1) % n32;
-        mesh.add_triangle(0, 1 + i, 1 + j);
-    }
-    for r in 0..rings as u32 {
-        let a = 1 + r * n32;
-        let b = a + n32;
-        for i in 0..n32 {
-            let j = (i + 1) % n32;
-            mesh.add_triangle(a + i, b + i, b + j);
-            mesh.add_triangle(a + i, b + j, a + j);
-        }
-    }
-    painter.add(Shape::mesh(mesh));
-}
-
-/// A soft blob: `color` in the middle fading out like a Gaussian blur of an ellipse (`size` = ellipse radii,
-/// `blur` = the blur's standard deviation).
-pub fn glow(painter: &Painter, center: Pos2, size: Vec2, blur: f32, color: Color32) {
-    if color.a() == 0 {
-        return;
-    }
-    let reach = size + Vec2::splat(blur * 2.5);
-    let n = 48;
-    let rings = 14;
-    let mut mesh = Mesh::default();
-    let coverage = |d: f32| 0.5 * erfc(d / (blur.max(0.5) * std::f32::consts::SQRT_2));
-    // Distance from the ellipse edge along each ray, sampled from inside to the far reach.
-    let min_r = size.x.min(size.y);
-    mesh.colored_vertex(center, color.gamma_multiply(coverage(-min_r)));
-    for r in 1..=rings {
-        let k = r as f32 / rings as f32;
-        for i in 0..n {
-            let dir = Vec2::angled(TAU * i as f32 / n as f32);
-            let edge = vec2(dir.x * size.x, dir.y * size.y).length();
-            let far = vec2(dir.x * reach.x, dir.y * reach.y).length();
-            let dist = far * k;
-            mesh.colored_vertex(center + dir * dist, color.gamma_multiply(coverage(dist - edge)));
-        }
-    }
-    let n32 = n as u32;
-    for i in 0..n32 {
-        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n32);
-    }
-    for r in 0..(rings - 1) as u32 {
-        let a = 1 + r * n32;
-        let b = a + n32;
-        for i in 0..n32 {
-            let j = (i + 1) % n32;
-            mesh.add_triangle(a + i, b + i, b + j);
-            mesh.add_triangle(a + i, b + j, a + j);
-        }
-    }
-    painter.add(Shape::mesh(mesh));
-}
-
-/// Complementary error function (Abramowitz-Stegun 7.1.26), enough for blur edges.
-pub fn erfc(x: f32) -> f32 {
-    let z = x.abs();
-    let t = 1.0 / (1.0 + 0.327_591_1 * z);
-    let y = t * (0.254_829_6 + t * (-0.284_496_7 + t * (1.421_413_8 + t * (-1.453_152 + t * 1.061_405_4)))) * (-z * z).exp();
-    if x >= 0.0 {
-        y
-    } else {
-        2.0 - y
-    }
-}
-
 /// CSS-like box shadow of a rounded rectangle.
 pub fn shadow(painter: &Painter, rect: Rect, radius: f32, offset: Vec2, blur: f32, spread: f32, color: Color32) {
     let r = rect.translate(offset).expand(spread);
@@ -458,37 +347,17 @@ pub fn arc_colored(painter: &Painter, center: Pos2, radius: f32, start: f32, swe
     }
 }
 
-/// A ring filled with a conic gradient (stops around the circle from 12 o'clock clockwise), turned by `rotation`.
-pub fn conic_ring(painter: &Painter, center: Pos2, inner: f32, outer: f32, stops: &[(f32, Color32)], rotation: f32) {
-    let f = feather(painter);
-    let n = ((outer * 1.1).ceil() as usize).clamp(48, 220);
-    let mut mesh = Mesh::default();
-    for i in 0..=n {
-        let k = i as f32 / n as f32;
-        let a = -std::f32::consts::FRAC_PI_2 + rotation + TAU * k;
-        let dir = Vec2::angled(a);
-        let c = sample(stops, k);
-        mesh.colored_vertex(center + dir * (outer + f * 0.5), Color32::TRANSPARENT);
-        mesh.colored_vertex(center + dir * (outer - f * 0.5), c);
-        mesh.colored_vertex(center + dir * (inner + f * 0.5), c);
-        mesh.colored_vertex(center + dir * (inner - f * 0.5), Color32::TRANSPARENT);
-    }
-    for i in 0..n as u32 {
-        let a = 4 * i;
-        let b = a + 4;
-        for k in 0..3 {
-            mesh.add_triangle(a + k, b + k, b + k + 1);
-            mesh.add_triangle(a + k, b + k + 1, a + k + 1);
-        }
-    }
-    painter.add(Shape::mesh(mesh));
-}
-
 /// A dashed circle (`pattern` = dash and gap lengths in points), turned by `rotation` radians.
 pub fn dashed_circle(painter: &Painter, center: Pos2, radius: f32, pattern: [f32; 2], width: f32, color: Color32, rotation: f32) {
     let [dash, gap] = pattern;
     let circumference = TAU * radius;
-    let count = (circumference / (dash + gap)).floor().max(1.0) as usize;
+    // No pattern (or no circle) would ask for endless dashes: a plain ring then.
+    let period = dash + gap;
+    if period.is_nan() || period <= 0.0 || !circumference.is_finite() {
+        ring(painter, center, radius, width, color);
+        return;
+    }
+    let count = ((circumference / period).floor().max(1.0) as usize).min(4096);
     let step = TAU / count as f32;
     let dash_angle = step * dash / (dash + gap);
     for i in 0..count {

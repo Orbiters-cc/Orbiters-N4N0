@@ -13,7 +13,7 @@ use crate::state::{CallLink, CallPhase, Snapshot};
 use egui::{pos2, ColorImage, TextureHandle, TextureId, TextureOptions};
 use orbiters_openvr::{self as vr, overlay_flag, Matrix34, Pose, Universe, MAX_DEVICES};
 use orbiters_orb::menu::layout::{self, ScreenPage};
-use orbiters_orb::menu::{Call, Contact, Effect, Menu, Page};
+use orbiters_orb::menu::{Call, Contact, Effect, Menu, Page, SuggestQueue};
 use orbiters_orb::{picture, youtube};
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -28,17 +28,33 @@ const DISTANCE_M: f32 = 0.5;
 const BELOW_EYES_M: f32 = 0.16;
 /// The menu closes after this long without a press or a word.
 const IDLE_CLOSE: Duration = Duration::from_secs(120);
+/// A thumbnail that failed is tried again after this (times the tries), so many times.
+const THUMB_RETRY: Duration = Duration::from_secs(3);
+const THUMB_TRIES: u8 = 3;
 
 enum Done {
-    Suggestions(String, anyhow::Result<Vec<String>>),
-    Results { query: String, more: bool, result: anyhow::Result<youtube::Results> },
-    Thumbnail(String, Option<ColorImage>),
+    Suggestions { id: u64, text: String, result: anyhow::Result<Vec<String>> },
+    Results { id: u64, more: bool, result: anyhow::Result<youtube::Results> },
+    Thumbnail { id: String, tries: u8, image: Option<ColorImage> },
 }
 
 enum Thumb {
     Loading,
     Ready(TextureHandle),
-    Failed,
+    /// The last try failed at `at`.
+    Failed {
+        at: Instant,
+        tries: u8,
+    },
+}
+
+/// Sets `slot` to `value`, saying whether that changed it.
+fn set<T: PartialEq>(slot: &mut T, value: T) -> bool {
+    if *slot == value {
+        return false;
+    }
+    *slot = value;
+    true
 }
 
 pub struct MenuOverlay {
@@ -48,6 +64,7 @@ pub struct MenuOverlay {
     hover: Option<usize>,
     pressed: Option<usize>,
     thumbs: HashMap<String, Thumb>,
+    suggest: SuggestQueue,
     done_tx: mpsc::Sender<Done>,
     done_rx: mpsc::Receiver<Done>,
     shown: bool,
@@ -59,7 +76,13 @@ pub struct MenuOverlay {
     dictation_seen: Option<u32>,
     /// What the service was last told (open, dictation).
     reported: Option<(bool, bool)>,
+    /// When the menu last closed: a request to close it that comes just after (sent before the service heard) finds
+    /// it closed, and must not open it again.
+    closed_at: Option<Instant>,
 }
+
+/// A toggling request this soon after the menu closed is the close it meant, already done.
+const TOGGLE_AFTER_CLOSE: Duration = Duration::from_millis(500);
 
 /// The overlay's transform: `distance` in front of `head` (level, along where it looks), `below` lower, facing it.
 pub fn in_front(head: &Matrix34, distance: f32, below: f32) -> Matrix34 {
@@ -94,6 +117,7 @@ impl MenuOverlay {
             hover: None,
             pressed: None,
             thumbs: HashMap::new(),
+            suggest: SuggestQueue::default(),
             done_tx,
             done_rx,
             shown: false,
@@ -103,11 +127,8 @@ impl MenuOverlay {
             request_seen: None,
             dictation_seen: None,
             reported: None,
+            closed_at: None,
         })
-    }
-
-    pub fn shown(&self) -> bool {
-        self.shown
     }
 
     pub fn destroy(&self, overlay: &vr::Overlay) {
@@ -135,6 +156,8 @@ impl MenuOverlay {
     }
 
     fn close(&mut self, overlay: &vr::Overlay) {
+        // (The menu's own close, idle or its button, closed `menu` already: this hides the overlay.)
+        self.closed_at = Some(Instant::now());
         self.menu.close();
         if self.shown {
             let _ = overlay.hide(self.handle);
@@ -142,105 +165,106 @@ impl MenuOverlay {
         }
     }
 
-    /// Keeps the menu's picture of what the service knows (calls, fast walk, listening, the picture's countdown).
+    /// Keeps the menu's picture of what the service knows (calls, fast walk, listening, the picture's countdown),
+    /// field by field: the menu (its results and suggestions included) is not copied every frame to find a change.
     fn follow(&mut self, snap: &Snapshot) {
-        let before = self.menu.clone();
         let m = &mut self.menu;
-        m.listening = snap.orb.listening;
+        let mut changed = set(&mut m.listening, snap.orb.listening);
         // What Orb says shows on Home too.
         if let Some(panel) = &snap.orb.panel {
-            m.heard = Some(panel.split_whitespace().collect::<Vec<_>>().join(" "));
+            if m.heard_private || !m.heard.as_deref().is_some_and(|h| h.split_whitespace().eq(panel.split_whitespace())) {
+                m.heard = Some(panel.split_whitespace().collect::<Vec<_>>().join(" "));
+                m.heard_private = false;
+                changed = true;
+            }
         }
-        m.fast_walk = snap.settings.walk_boost.enabled;
-        m.countdown = snap.orb.photo_countdown;
-        m.photo_timer = snap.settings.photo_3d_timer;
-        m.photo_length = shared::photo_length(snap.settings.photo_3d);
+        changed |= set(&mut m.fast_walk, snap.settings.walk_boost.enabled);
+        changed |= set(&mut m.countdown, snap.orb.photo_countdown);
+        changed |= set(&mut m.photo_timer, snap.settings.photo_3d_timer);
+        changed |= set(&mut m.photo_length, shared::photo_length(snap.settings.photo_3d));
         let calls = &snap.orb.calls;
-        let contacts: Vec<Contact> = calls.contacts.iter().map(|c| Contact { id: c.id.clone(), name: c.name.clone() }).collect();
         let (ready, note) = match &calls.link {
-            CallLink::Linked { .. } => (true, String::new()),
-            CallLink::Off => (false, "Calls are off: Orbiters desktop › Orb › Calls".to_string()),
-            CallLink::SignedOut => (false, "Sign in to Orbiters to call friends".to_string()),
-            CallLink::NoAccount => (false, "VRChat's account here is unknown: open VRChat".to_string()),
-            CallLink::NotLinked { .. } => (false, "Link this VRChat account on Orbiters to call".to_string()),
+            CallLink::Linked { .. } => (true, ""),
+            CallLink::Off => (false, "Calls are off: Orbiters desktop › Orb › Calls"),
+            CallLink::SignedOut => (false, "Sign in to Orbiters to call friends"),
+            CallLink::NoAccount => (false, "VRChat's account here is unknown: open VRChat"),
+            CallLink::NotLinked { .. } => (false, "Link this VRChat account on Orbiters to call"),
         };
-        if m.contacts != contacts || m.calls_ready != ready || m.call_note != note {
-            m.set_contacts(contacts, ready, &note);
+        let same_contacts = m.contacts.len() == calls.contacts.len() && m.contacts.iter().zip(&calls.contacts).all(|(a, b)| a.id == b.id && a.name == b.name);
+        if !same_contacts || m.calls_ready != ready || m.call_note != note {
+            m.set_contacts(calls.contacts.iter().map(|c| Contact { id: c.id.clone(), name: c.name.clone() }).collect(), ready, note);
+            changed = true;
         }
-        let call = calls.call.as_ref().map(|c| match c.phase {
-            CallPhase::Ringing => Call::Ringing { name: c.name.clone() },
-            CallPhase::Calling | CallPhase::Connecting => Call::Calling { name: c.name.clone() },
-            CallPhase::Connected => Call::Connected {
-                name: c.name.clone(),
-                seconds: c.connected_at_ms.map_or(0, |at| crate::controller::unix_ms().saturating_sub(at) / 1000),
-                muted: c.muted,
-            },
-        });
-        if m.call != call {
-            m.set_call(call);
+        if calls.call.is_some() || m.call.is_some() {
+            let call = calls.call.as_ref().map(|c| match c.phase {
+                CallPhase::Ringing => Call::Ringing { name: c.name.clone() },
+                CallPhase::Calling | CallPhase::Connecting => Call::Calling { name: c.name.clone() },
+                CallPhase::Connected => Call::Connected {
+                    name: c.name.clone(),
+                    seconds: c.connected_at_ms.map_or(0, |at| crate::controller::unix_ms().saturating_sub(at) / 1000),
+                    muted: c.muted,
+                },
+            });
+            if m.call != call {
+                m.set_call(call);
+                changed = true;
+            }
         }
-        if *m != before {
+        if changed {
             self.dirty = true;
         }
     }
 
+    /// Fetches the thumbnails among `ids` not here yet (one that failed is tried again a little later, a few times).
+    fn thumbnails(&mut self, ids: Vec<String>) {
+        if self.thumbs.len() > 60 {
+            self.thumbs.retain(|id, _| ids.contains(id));
+        }
+        let now = Instant::now();
+        for id in ids {
+            let tries = match self.thumbs.get(&id) {
+                None => 0,
+                Some(Thumb::Failed { at, tries }) if *tries < THUMB_TRIES && now >= *at + THUMB_RETRY * *tries as u32 => *tries,
+                Some(_) => continue,
+            };
+            self.thumbs.insert(id.clone(), Thumb::Loading);
+            let tx = self.done_tx.clone();
+            std::thread::spawn(move || {
+                let image = youtube::thumbnail(&id).ok().and_then(|jpeg| picture::rgb_jpeg(&jpeg).ok()).map(|rgb| {
+                    let rgba: Vec<u8> = rgb.pixels.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
+                    ColorImage::from_rgba_unmultiplied([rgb.width, rgb.height], &rgba)
+                });
+                let _ = tx.send(Done::Thumbnail { id, tries, image });
+            });
+        }
+    }
+
     fn effects(&mut self, effects: Vec<Effect>, overlay: &vr::Overlay, snap: &Snapshot, backend: &Ctl) {
-        let language = || {
-            let locale = std::env::var("LANG").unwrap_or_default();
-            let code = locale.split(['-', '_', '.']).next().unwrap_or("").to_lowercase();
-            if code.len() == 2 {
-                code
-            } else {
-                sys_language()
-            }
-        };
+        let language = language_now;
         for effect in effects {
             match effect {
-                Effect::Suggest(text) => {
-                    let (tx, lang) = (self.done_tx.clone(), language());
-                    std::thread::spawn(move || {
-                        let result = youtube::suggestions(&text, &lang);
-                        let _ = tx.send(Done::Suggestions(text, result));
-                    });
-                }
-                Effect::Search(query) => {
+                // Asked for once typing pauses, one request at a time ([`MenuOverlay::update`] sends it).
+                Effect::Suggest { id, text } => self.suggest.want(id, text, Instant::now()),
+                Effect::Search { id, query } => {
                     let (tx, lang) = (self.done_tx.clone(), language());
                     std::thread::spawn(move || {
                         let result = youtube::search(&query, &lang);
-                        let _ = tx.send(Done::Results { query, more: false, result });
+                        let _ = tx.send(Done::Results { id, more: false, result });
                     });
                 }
-                Effect::More { query, token } => {
+                Effect::More { id, token, .. } => {
                     let (tx, lang) = (self.done_tx.clone(), language());
                     std::thread::spawn(move || {
                         let result = youtube::more(&token, &lang);
-                        let _ = tx.send(Done::Results { query, more: true, result });
+                        let _ = tx.send(Done::Results { id, more: true, result });
                     });
                 }
-                Effect::Thumbnails(ids) => {
-                    if self.thumbs.len() > 60 {
-                        self.thumbs.retain(|id, _| ids.contains(id));
-                    }
-                    for id in ids {
-                        if self.thumbs.contains_key(&id) {
-                            continue;
-                        }
-                        self.thumbs.insert(id.clone(), Thumb::Loading);
-                        let tx = self.done_tx.clone();
-                        std::thread::spawn(move || {
-                            let image = youtube::thumbnail(&id).ok().and_then(|jpeg| picture::rgb_jpeg(&jpeg).ok()).map(|rgb| {
-                                let rgba: Vec<u8> = rgb.pixels.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect();
-                                ColorImage::from_rgba_unmultiplied([rgb.width, rgb.height], &rgba)
-                            });
-                            let _ = tx.send(Done::Thumbnail(id, image));
-                        });
-                    }
-                }
+                Effect::Thumbnails(ids) => self.thumbnails(ids),
                 Effect::Copy { link, .. } => backend.orb(OrbCommand::CopyText { text: link }),
                 Effect::FastWalk(on) => {
                     let mut settings = snap.settings.clone();
                     settings.walk_boost.enabled = on;
-                    backend.save_settings(settings);
+                    backend.save_changes(&snap.settings, &settings);
                 }
                 Effect::CallContact { id } => backend.orb(OrbCommand::Call { contact: id }),
                 Effect::Answer => backend.orb(OrbCommand::AnswerCall),
@@ -250,7 +274,7 @@ impl MenuOverlay {
                     let mut settings = snap.settings.clone();
                     settings.photo_3d_timer = timer;
                     settings.photo_3d = shared::photo_setting(length);
-                    backend.save_settings(settings);
+                    backend.save_changes(&snap.settings, &settings);
                     if take {
                         backend.orb(OrbCommand::Photo3DIn { seconds: timer });
                     }
@@ -278,9 +302,10 @@ impl MenuOverlay {
                 self.open(overlay, steamvr, snap);
             }
         } else if asked && !snap.orb.screen {
+            let just_closed = self.closed_at.is_some_and(|t| t.elapsed() < TOGGLE_AFTER_CLOSE);
             if self.menu.open && snap.orb.menu_toggle {
                 self.close(overlay);
-            } else if !self.menu.open {
+            } else if !self.menu.open && !(snap.orb.menu_toggle && just_closed) {
                 self.open(overlay, steamvr, snap);
             }
         }
@@ -314,12 +339,12 @@ impl MenuOverlay {
             self.dictation_seen = Some(0);
         }
         // The laser: SteamVR's mouse, from the bottom left.
-        let page = layout::layout(ScreenPage::of(&self.menu));
+        let page = layout::cached(ScreenPage::of(&self.menu));
         while let Some(e) = overlay.poll_event(self.handle) {
             match e.event_type {
                 vr::event::MOUSE_MOVE => {
                     let (x, y, _) = e.mouse();
-                    let hover = layout::hit(&page, x, HEIGHT as f32 - y).map(|(i, _)| i).filter(|&i| !layout::state(&self.menu, &page.elements[i]).hidden);
+                    let hover = layout::hit(page, x, HEIGHT as f32 - y).map(|(i, _)| i).filter(|&i| !layout::state(&self.menu, &page.elements[i]).hidden);
                     if hover != self.hover {
                         self.hover = hover;
                         self.dirty = true;
@@ -327,7 +352,7 @@ impl MenuOverlay {
                 }
                 vr::event::MOUSE_BUTTON_DOWN => {
                     let (x, y, _) = e.mouse();
-                    if let Some((i, target)) = layout::hit(&page, x, HEIGHT as f32 - y) {
+                    if let Some((i, target)) = layout::hit(page, x, HEIGHT as f32 - y) {
                         if !layout::state(&self.menu, &page.elements[i]).hidden {
                             // The press shows at once; what it does follows.
                             self.pressed = Some(i);
@@ -352,19 +377,48 @@ impl MenuOverlay {
         }
         while let Ok(done) = self.done_rx.try_recv() {
             match done {
-                Done::Suggestions(text, Ok(list)) => self.menu.suggestions_arrived(&text, list),
-                Done::Suggestions(_, Err(_)) => {}
-                Done::Results { query, more, result: Ok(results) } => effects.extend(self.menu.results_arrived(&query, results, more)),
-                Done::Results { query, result: Err(e), .. } => self.menu.results_failed(&query, &e.to_string()),
-                Done::Thumbnail(id, image) => {
+                Done::Suggestions { id, text, result } => {
+                    self.suggest.answered(id);
+                    match result {
+                        Ok(list) => self.menu.suggestions_arrived(id, &text, list),
+                        Err(e) => eprintln!("orb menu: YouTube suggestions: {e:#}"),
+                    }
+                }
+                Done::Results { id, more, result: Ok(results) } => effects.extend(self.menu.results_arrived(id, results, more)),
+                Done::Results { id, result: Err(e), .. } => self.menu.results_failed(id, &e.to_string()),
+                Done::Thumbnail { id, tries, image } => {
                     let thumb = match image {
                         Some(image) => Thumb::Ready(self.canvas.ctx().load_texture(format!("yt-{id}"), image, TextureOptions::LINEAR)),
-                        None => Thumb::Failed,
+                        None => Thumb::Failed { at: Instant::now(), tries: tries + 1 },
                     };
                     self.thumbs.insert(id, thumb);
                 }
             }
             self.dirty = true;
+        }
+        // Suggestions once typing paused, one request at a time.
+        if let Some((id, text)) = self.suggest.due(Instant::now()) {
+            let (tx, lang) = (self.done_tx.clone(), language_now());
+            std::thread::spawn(move || {
+                let result = youtube::suggestions(&text, &lang);
+                let _ = tx.send(Done::Suggestions { id, text, result });
+            });
+        }
+        // Thumbnails of the results shown that failed, tried again once their wait is over.
+        if self.menu.page == Page::Results {
+            let now = Instant::now();
+            let retry: Vec<String> = self
+                .menu
+                .page_results()
+                .iter()
+                .filter(
+                    |v| matches!(self.thumbs.get(&v.id), Some(Thumb::Failed { at, tries }) if *tries < THUMB_TRIES && now >= *at + THUMB_RETRY * *tries as u32),
+                )
+                .map(|v| v.id.clone())
+                .collect();
+            if !retry.is_empty() {
+                self.thumbnails(retry);
+            }
         }
         if self.menu.listening {
             self.last_activity = Instant::now();
@@ -383,6 +437,10 @@ impl MenuOverlay {
             self.dirty = false;
             self.last_paint = Some(Instant::now());
             let time = self.last_activity.elapsed().as_secs_f64();
+            if !self.shown {
+                // Shown again: SteamVR gets a whole picture first.
+                self.canvas.invalidate();
+            }
             let (menu, hover, pressed, thumbs) = (&self.menu, self.hover, self.pressed, &self.thumbs);
             let picture = |id: &str| -> Option<TextureId> {
                 match thumbs.get(id) {
@@ -390,14 +448,28 @@ impl MenuOverlay {
                     _ => None,
                 }
             };
-            let rgba = self.canvas.paint(time, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu, hover, pressed, picture: &picture, time })).to_vec();
-            presenter.show(overlay, self.handle, &rgba, WIDTH, HEIGHT);
+            self.canvas.paint(time, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu, hover, pressed, picture: &picture, time }));
+            // Only what changed goes to SteamVR, straight from the canvas.
+            if let Some(changed) = self.canvas.damage() {
+                presenter.show_part(overlay, self.handle, self.canvas.pixels(), WIDTH, HEIGHT, changed);
+            }
             if !self.shown {
                 let _ = overlay.show(self.handle);
                 self.shown = true;
             }
         }
         clicked
+    }
+}
+
+/// The language YouTube is asked in (`fr`): `LANG` when set, else Windows' locale.
+fn language_now() -> String {
+    let locale = std::env::var("LANG").unwrap_or_default();
+    let code = locale.split(['-', '_', '.']).next().unwrap_or("").to_lowercase();
+    if code.len() == 2 {
+        code
+    } else {
+        sys_language()
     }
 }
 

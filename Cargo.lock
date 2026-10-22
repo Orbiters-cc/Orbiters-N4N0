@@ -3554,6 +3554,8 @@ dependencies = [
  "async-trait",
  "audiopus",
  "bytes",
+ "log",
+ "orbiters-core",
  "orbiters-sound",
  "rtc",
  "serde",
@@ -3568,7 +3570,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
- "flate2",
  "orbiters-audio",
  "orbiters-contracts",
  "orbiters-core",
@@ -3583,6 +3584,7 @@ dependencies = [
 name = "orbiters-contracts"
 version = "0.1.0"
 dependencies = [
+ "miniz_oxide 0.9.1",
  "serde",
  "serde_json",
  "windows 0.62.2",
@@ -3597,6 +3599,7 @@ dependencies = [
  "flate2",
  "if-addrs",
  "mdns-sd",
+ "memchr",
  "orbiters-contracts",
  "rosc",
  "rusqlite",
@@ -3710,8 +3713,10 @@ dependencies = [
  "bytemuck",
  "egui",
  "egui-wgpu",
+ "memmap2",
  "png",
  "pollster 1.0.1",
+ "skrifa",
  "tiny-skia",
 ]
 
@@ -3723,8 +3728,10 @@ dependencies = [
  "bzip2 0.4.4",
  "orbiters-audio",
  "orbiters-core",
+ "orbiters-orb",
  "serde",
  "serde_json",
+ "sha2",
  "sherpa-onnx",
  "tar",
  "ureq 3.4.2",

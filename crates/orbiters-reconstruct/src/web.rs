@@ -74,6 +74,7 @@ mod tests {
             rotations: vec![[1.0, 0.0, 0.0, 0.0]; n],
             opacity_logits: (0..n).map(|i| if i == 0 { -20.0 } else { 2.0 }).collect(),
             colors: vec![[0.5, 0.25, 1.0]; n],
+            sky: vec![false; n],
         }
     }
 

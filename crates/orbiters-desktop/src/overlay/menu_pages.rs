@@ -30,7 +30,8 @@ pub const TABLE_ELEMENTS: usize = 40;
 pub const TABLE_VERSION: u8 = 1;
 const _: () = assert!(TABLE_PICTURES + PICTURES <= TABLE_ELEMENTS && TABLE_ELEMENTS + 2 * MAX_ELEMENTS <= TABLE_WIDTH);
 
-/// The layout table, RGBA8, one row per page id (row 0 empty). Positions and sizes are in 4-pixel units.
+/// The layout table, RGBA8, one row per page id (row 0 empty). Positions and sizes are in 4-pixel units, a byte each,
+/// so 1020 pixels at most: nothing on a page is as wide as the page itself (1024), which the layout's test checks.
 ///
 /// - Texel 0: version, slots, pictures, elements.
 /// - Texels 1 to 32, two per text slot: (x, y, columns, cell height / 2), (text offset low byte, high byte,
@@ -43,7 +44,8 @@ pub fn layout_table() -> Vec<u8> {
         let l = layout::layout(page);
         let row = page as usize * TABLE_WIDTH * 4;
         let mut put = |texel: usize, v: [u8; 4]| table[row + texel * 4..row + texel * 4 + 4].copy_from_slice(&v);
-        let g = |v: u16| (v / layout::GRID) as u8;
+        // A value past 1020 pixels would wrap to a small one: refused rather than written wrong.
+        let g = |v: u16| u8::try_from(v / layout::GRID).expect("the layout table holds positions and sizes up to 1020 pixels");
         put(0, [TABLE_VERSION, l.slots.len() as u8, l.pictures.len() as u8, l.elements.len() as u8]);
         for (i, s) in l.slots.iter().enumerate() {
             put(TABLE_SLOTS + 2 * i, [g(s.x), g(s.y), s.cols, s.size / 2]);
@@ -62,7 +64,9 @@ pub fn layout_table() -> Vec<u8> {
 
 /// Premultiplied RGBA to straight alpha (what PNG files hold).
 fn unpremultiply(rgba: &[u8]) -> Vec<u8> {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| {
             let a = p[3] as u32;
             if a == 0 {
@@ -130,19 +134,15 @@ fn sample_thumbnail(ctx: &egui::Context, seed: usize) -> TextureHandle {
     ctx.load_texture(format!("thumb{seed}"), ColorImage::from_rgba_unmultiplied([w, h], &rgba), TextureOptions::LINEAR)
 }
 
-/// The stand-in thumbnail as the avatar's screen gets it: grey, fitted, dithered, packed.
+/// The stand-in thumbnail as the avatar's screen gets it (as a real one: fitted, stretched, dithered, packed).
 fn sample_picture(seed: usize) -> screen::Picture {
     let (w, h, rgba) = sample_rgba(seed);
     let grey = picture::Grey {
         width: w,
         height: h,
-        pixels: rgba.chunks_exact(4).map(|p| (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) as u8).collect(),
+        pixels: rgba.as_chunks::<4>().0.iter().map(|p| (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) as u8).collect(),
     };
-    let values = picture::fit(&grey, screen::PICTURE_W, screen::PICTURE_H);
-    let bits = picture::dither(&values, screen::PICTURE_W, screen::PICTURE_H, 2);
-    let mut out = [0u8; screen::PICTURE_BYTES];
-    out.copy_from_slice(&picture::pack(&bits, 1));
-    out
+    screen::picture_from_grey(&grey)
 }
 
 /// Menus with sample content, one per page, with the element hovered and pressed.
@@ -168,6 +168,7 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     search.press(Target::YouTube);
     search.type_text("lofi hi");
     search.suggestions_arrived(
+        1,
         "lofi hi",
         vec!["lofi hip hop".into(), "lofi hip hop radio".into(), "lofi hip hop beats to study".into(), "lofi hits".into(), "lofi hindi".into()],
     );
@@ -198,7 +199,7 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
             live: *live,
         })
         .collect();
-    results.results_arrived("lofi hip hop", Results { videos, continuation: Some("next".into()) }, false);
+    results.results_arrived(1, Results { videos, continuation: Some("next".into()) }, false);
     out.push((ScreenPage::Results, results, Some(9), None));
     let mut calls = base();
     calls.page = Page::Call;

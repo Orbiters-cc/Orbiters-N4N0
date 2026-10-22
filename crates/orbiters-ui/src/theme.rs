@@ -183,19 +183,6 @@ impl Txt {
     }
 }
 
-/// Gradient text (the web's `text-gradient`): one colour per character, sampled along the word.
-pub fn gradient_job(text: &str, base: &Txt, stops: &[(f32, Color32)]) -> LayoutJob {
-    let chars: Vec<char> = text.chars().collect();
-    let mut job = LayoutJob::default();
-    let n = chars.len().max(2) - 1;
-    for (i, ch) in chars.iter().enumerate() {
-        let mut format = base.format();
-        format.color = crate::paint::sample(stops, i as f32 / n as f32);
-        job.append(&ch.to_string(), 0.0, format);
-    }
-    job
-}
-
 /// Dark style for egui's own widgets (text edits, scroll bars, tooltips) in the Orbiters palette.
 pub fn apply(ctx: &egui::Context) {
     ctx.set_theme(egui::ThemePreference::Dark);

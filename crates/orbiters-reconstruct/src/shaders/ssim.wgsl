@@ -92,10 +92,13 @@ fn ssim_partials(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocatio
         let b = 2.0 * (exy - mx * my) + C2;
         let c = mx * mx + my * my + C1;
         let d = (st.z - mx * mx) + (st.w - my * my) + C2;
-        let s = a * b / (c * d);
-        pa[ch] = s * (2.0 * my / a - 2.0 * my / b - 2.0 * mx / c + 2.0 * mx / d);
+        let cd = c * d;
+        let s = a * b / cd;
+        // Divided only by c ≥ C1 and d ≳ C2 (fused-ssim's algebra, cpu::ssim_partials): a and b cross zero in
+        // anti-correlated windows and with negative rendered colour, where S/a and S/b were 0/0.
+        pa[ch] = 2.0 * my * (b - a) / cd - 2.0 * mx * s * (1.0 / c - 1.0 / d);
         pb[ch] = -s / d;
-        pc[ch] = 2.0 * s / b;
+        pc[ch] = 2.0 * a / cd;
     }
     let q = scene(px, py);
     if (px < i32(frame.size.x) && py < i32(frame.size.y)) {

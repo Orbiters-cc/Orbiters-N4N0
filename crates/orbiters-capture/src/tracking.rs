@@ -22,6 +22,10 @@ pub trait PoseSource: Send {
     fn sample(&mut self, out: &mut [Pose; MAX_DEVICES]) -> bool;
     /// What a device is; `None` while it is not known yet.
     fn describe(&mut self, index: u32) -> Option<Device>;
+    /// Whether devices changed roles (or properties) since the last call: they are described again.
+    fn take_roles_changed(&mut self) -> bool {
+        false
+    }
 }
 
 /// SteamVR as a background application: it never starts SteamVR.
@@ -56,6 +60,10 @@ impl PoseSource for SteamVr {
     fn describe(&mut self, index: u32) -> Option<Device> {
         self.client.describe(index)
     }
+
+    fn take_roles_changed(&mut self) -> bool {
+        std::mem::take(&mut self.roles_changed)
+    }
 }
 
 /// What a finished recording leaves for the manifest.
@@ -68,13 +76,20 @@ pub struct TrackingResult {
 /// Connects to the pose source; `None` while it is not available (SteamVR not running).
 pub type Connect = Box<dyn FnMut() -> Option<Box<dyn PoseSource>> + Send>;
 
-/// SteamVR, retried until it runs.
+/// SteamVR, retried until it runs. Why it cannot be reached is logged when that changes, not at every attempt
+/// ("not installed" every 3 s filled the worker's log in twenty minutes).
 pub fn steamvr() -> Connect {
-    Box::new(|| match SteamVr::connect() {
-        Ok(s) => Some(Box::new(s) as Box<dyn PoseSource>),
+    let mut logged: Option<String> = None;
+    Box::new(move || match SteamVr::connect() {
+        Ok(s) => {
+            logged = None;
+            Some(Box::new(s) as Box<dyn PoseSource>)
+        }
         Err(e) => {
-            if !e.not_running() {
-                eprintln!("SteamVR: {e}");
+            let why = e.to_string();
+            if !e.not_running() && logged.as_deref() != Some(why.as_str()) {
+                eprintln!("SteamVR: {why}");
+                logged = Some(why);
             }
             None
         }
@@ -228,6 +243,11 @@ impl Recording {
                 eprintln!("SteamVR quit; waiting for it to come back");
                 return Ok(());
             }
+            // A controller that gets its role late, hands swapped in SteamVR: every device is described again (the
+            // numbers stay, by serial).
+            if source.take_roles_changed() {
+                self.known.clear();
+            }
             let t = orbiters_core::clock::now_ns().saturating_sub(self.epoch_ns);
             let mut current: Vec<Sample> = Vec::new();
             for (i, p) in poses.iter().enumerate() {
@@ -276,7 +296,7 @@ impl Recording {
     }
 
     /// The device's number in `tracking.json`, describing it the first time (a device seen before a SteamVR
-    /// restart keeps its number: same serial).
+    /// restart keeps its number: same serial), and again after a role change (its role follows).
     fn number_of(&mut self, source: &mut dyn PoseSource, index: u32, t: u64) -> Option<u8> {
         if let Some(n) = self.known.get(&index) {
             return *n;
@@ -288,15 +308,22 @@ impl Recording {
             return None;
         }
         let existing = self.devices.devices.iter().position(|e| !d.serial.is_empty() && e.serial == d.serial);
-        self.devices_changed = true;
         let number = match existing {
             Some(n) => {
-                self.devices.devices[n].index = index as u8;
+                let e = &mut self.devices.devices[n];
+                // A role it lost for a moment (switched off) is kept.
+                let role = if d.role.is_empty() { e.role.clone() } else { d.role };
+                if e.index != index as u8 || e.role != role {
+                    e.index = index as u8;
+                    e.role = role;
+                    self.devices_changed = true;
+                }
                 n
             }
             None => {
                 d.first_seen_ns = t;
                 self.devices.devices.push(d);
+                self.devices_changed = true;
                 self.devices.devices.len() - 1
             }
         };
@@ -350,14 +377,19 @@ impl Recording {
 
 /// `calibration.json` of a session: calibrations made before it (negative times) and those it caught.
 pub fn write_calibrations(dir: &Path, calibrations: Vec<Calibration>) -> anyhow::Result<u64> {
+    let Some(json) = calibrations_json(calibrations)? else { return Ok(0) };
+    orbiters_core::write_atomic(&dir.join(orbiters_contracts::performance::CALIBRATION_FILE), &json)?;
+    Ok(json.len() as u64)
+}
+
+/// The bytes of `calibration.json`, `None` without calibrations (a session without any has no file).
+pub fn calibrations_json(calibrations: Vec<Calibration>) -> anyhow::Result<Option<Vec<u8>>> {
     if calibrations.is_empty() {
-        return Ok(0);
+        return Ok(None);
     }
     let mut all = orbiters_contracts::performance::calibration::Calibrations::new();
     all.calibrations = calibrations;
-    let json = serde_json::to_vec_pretty(&all)?;
-    orbiters_core::write_atomic(&dir.join(orbiters_contracts::performance::CALIBRATION_FILE), &json)?;
-    Ok(json.len() as u64)
+    Ok(Some(serde_json::to_vec_pretty(&all)?))
 }
 
 #[cfg(test)]
@@ -438,6 +470,51 @@ mod tests {
         assert_eq!((c.source.as_str(), c.devices.len()), ("detected", 3));
         assert!((c.head_height_m - 1.62).abs() < 1e-5 && (c.arm_span_m - 1.4).abs() < 1e-5);
         assert!(write_calibrations(&dir, result.calibrations).unwrap() > 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Controllers that get their roles late (SteamVR names the hands once both are on): first described without
+    /// one, then told of the change.
+    struct LateRoles {
+        inner: StandIn,
+        samples: u32,
+        changed: bool,
+    }
+
+    impl PoseSource for LateRoles {
+        fn sample(&mut self, out: &mut [Pose; MAX_DEVICES]) -> bool {
+            self.samples += 1;
+            if self.samples == 10 {
+                self.changed = true;
+            }
+            self.inner.sample(out)
+        }
+
+        fn describe(&mut self, index: u32) -> Option<Device> {
+            let mut d = self.inner.describe(index)?;
+            if self.samples < 10 && d.class == DeviceClass::Controller {
+                d.role.clear();
+            }
+            Some(d)
+        }
+
+        fn take_roles_changed(&mut self) -> bool {
+            std::mem::take(&mut self.changed)
+        }
+    }
+
+    #[test]
+    fn roles_given_late_are_followed() {
+        let dir = std::env::temp_dir().join(format!("orbiters-tracking-roles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut once = Some(Box::new(LateRoles { inner: StandIn { t: 0.0, step: 0.03 }, samples: 0, changed: false }) as Box<dyn PoseSource>);
+        let rec = TrackingRecorder::start(Box::new(move || once.take()), &dir, orbiters_core::clock::now_ns(), 100.0).unwrap();
+        std::thread::sleep(Duration::from_millis(1300));
+        let result = rec.finish().unwrap();
+        assert_eq!(result.devices.iter().map(|d| d.role.as_str()).collect::<Vec<_>>(), ["head", "left_hand", "right_hand"]);
+        // The T-pose came after the hands were named: caught.
+        assert_eq!(result.calibrations.len(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 

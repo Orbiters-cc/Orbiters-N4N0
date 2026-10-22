@@ -1,8 +1,9 @@
 //! Springs and clocks. Every animated value is a damped spring kept in egui's memory under an id; it asks for a
 //! repaint only while it moves, so a still interface costs nothing. While the window is not live (unfocused,
-//! hidden, or reduce motion) springs jump to their targets and looping clocks stop where they are.
+//! hidden, or reduce motion) springs jump to their targets and looping clocks stop where they are. Looping
+//! decorations share one modest frame rate and rest after half a minute without input.
 
-use egui::{Color32, Context, Id, Pos2, Rect, Vec2};
+use egui::{Color32, Context, Id};
 use std::time::Duration;
 
 /// Spring constants (the web interface's motion presets).
@@ -41,9 +42,25 @@ fn live_id() -> Id {
     Id::unique("orbiters-anim-live")
 }
 
-/// Whether looping animations may run and springs animate (the window is focused and motion is allowed).
+/// Whether looping animations may run and springs animate (the window is focused and motion is allowed). Call it
+/// every frame: it also notes input, which keeps looping decorations going (see [`clock`]).
 pub fn set_live(ctx: &Context, live: bool) {
-    ctx.data_mut(|d| d.insert_temp(live_id(), live));
+    let (t, input) = ctx.input(|i| (i.time, had_input(i)));
+    ctx.data_mut(|d| {
+        d.insert_temp(live_id(), live);
+        if input {
+            d.insert_temp(input_id(), t);
+        }
+    });
+}
+
+fn input_id() -> Id {
+    Id::unique("orbiters-anim-input")
+}
+
+/// Something the person did this frame: a key, a click, a scroll, the pointer moving.
+fn had_input(i: &egui::InputState) -> bool {
+    !i.events.is_empty() || i.pointer.is_moving() || i.pointer.any_down()
 }
 
 pub fn is_live(ctx: &Context) -> bool {
@@ -64,12 +81,38 @@ pub fn spring_from<const N: usize>(ctx: &Context, id: Id, initial: [f32; N], tar
     spring_eps(ctx, id, initial, target, s, 0.001)
 }
 
-/// Like [`spring_from`], settling once within `eps` of the target.
+/// Like [`spring_from`], settling once within `eps` of the target. One lock of egui's memory, the spring changed
+/// where it lies (no copy put back each frame).
 pub fn spring_eps<const N: usize>(ctx: &Context, id: Id, initial: [f32; N], target: [f32; N], s: Spring, eps: f32) -> [f32; N] {
     let t = now(ctx);
-    let live = is_live(ctx);
-    let mut st =
-        ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(id, || State { value: initial, velocity: [0.0; N], target, time: t, settled: initial == target }));
+    let (value, moving) = ctx.data_mut(|d| {
+        let live = d.get_temp::<bool>(live_id()).unwrap_or(true);
+        let st = d.get_temp_mut_or_insert_with(id, || {
+            // A first value that is not a number starts at the target (or at rest at zero).
+            let start: [f32; N] = std::array::from_fn(|k| if initial[k].is_finite() { initial[k] } else { finite_or(target[k], 0.0) });
+            let goal = std::array::from_fn(|k| finite_or(target[k], start[k]));
+            State { value: start, velocity: [0.0; N], target: goal, time: t, settled: start == goal }
+        });
+        step(st, target, t, live, s, eps)
+    });
+    if moving {
+        ctx.request_repaint();
+    }
+    value
+}
+
+fn finite_or(v: f32, fallback: f32) -> f32 {
+    if v.is_finite() {
+        v
+    } else {
+        fallback
+    }
+}
+
+/// Advances a spring to time `t`; returns its value and whether it still moves. A target that is not a number
+/// holds the spring where it is: it would never settle and the window would repaint forever.
+fn step<const N: usize>(st: &mut State<N>, target: [f32; N], t: f64, live: bool, s: Spring, eps: f32) -> ([f32; N], bool) {
+    let target: [f32; N] = std::array::from_fn(|k| finite_or(target[k], finite_or(st.value[k], 0.0)));
     if st.target != target {
         if st.settled {
             // Restart the clock: the first step is one frame long, whatever time passed while it rested.
@@ -83,53 +126,28 @@ pub fn spring_eps<const N: usize>(ctx: &Context, id: Id, initial: [f32; N], targ
         st.velocity = [0.0; N];
         st.settled = true;
     }
-    if !st.settled {
-        let mut dt = (t - st.time).clamp(0.0, 0.05) as f32;
+    if st.settled {
         st.time = t;
-        while dt > 0.0 {
-            let h = dt.min(1.0 / 240.0);
-            dt -= h;
-            for ((x, v), goal) in st.value.iter_mut().zip(st.velocity.iter_mut()).zip(target) {
-                let a = (-s.stiffness * (*x - goal) - s.damping * *v) / s.mass;
-                *v += a * h;
-                *x += *v * h;
-            }
-        }
-        let still = (0..N).all(|k| (st.value[k] - target[k]).abs() < eps && st.velocity[k].abs() < eps * 10.0);
-        if still {
-            st.value = target;
-            st.velocity = [0.0; N];
-            st.settled = true;
-        } else {
-            ctx.request_repaint();
-        }
-    } else {
-        st.time = t;
+        return (st.value, false);
     }
-    ctx.data_mut(|d| d.insert_temp(id, st));
-    st.value
-}
-
-/// Gives a spring a push (e.g. a little bump on a button).
-pub fn kick<const N: usize>(ctx: &Context, id: Id, velocity: [f32; N]) {
-    if !is_live(ctx) {
-        return;
-    }
-    ctx.data_mut(|d| {
-        if let Some(mut st) = d.get_temp::<State<N>>(id) {
-            for (v, dv) in st.velocity.iter_mut().zip(velocity) {
-                *v += dv;
-            }
-            st.settled = false;
-            d.insert_temp(id, st);
+    let mut dt = (t - st.time).clamp(0.0, 0.05) as f32;
+    st.time = t;
+    while dt > 0.0 {
+        let h = dt.min(1.0 / 240.0);
+        dt -= h;
+        for ((x, v), goal) in st.value.iter_mut().zip(st.velocity.iter_mut()).zip(target) {
+            let a = (-s.stiffness * (*x - goal) - s.damping * *v) / s.mass;
+            *v += a * h;
+            *x += *v * h;
         }
-    });
-    ctx.request_repaint();
-}
-
-/// Forgets a spring so it starts fresh next time (entrance animations that should replay).
-pub fn reset<const N: usize>(ctx: &Context, id: Id) {
-    ctx.data_mut(|d| d.remove::<State<N>>(id));
+    }
+    let still = (0..N).all(|k| (st.value[k] - target[k]).abs() < eps && st.velocity[k].abs() < eps * 10.0);
+    if still || st.value.iter().any(|v| !v.is_finite()) {
+        st.value = target;
+        st.velocity = [0.0; N];
+        st.settled = true;
+    }
+    (st.value, !st.settled)
 }
 
 pub fn value(ctx: &Context, id: Id, target: f32, s: Spring) -> f32 {
@@ -139,20 +157,6 @@ pub fn value(ctx: &Context, id: Id, target: f32, s: Spring) -> f32 {
 /// 0 → 1 (or back) as `on` changes.
 pub fn toggle(ctx: &Context, id: Id, on: bool, s: Spring) -> f32 {
     value(ctx, id, if on { 1.0 } else { 0.0 }, s)
-}
-
-pub fn vec2(ctx: &Context, id: Id, target: Vec2, s: Spring) -> Vec2 {
-    let [x, y] = spring(ctx, id, [target.x, target.y], s);
-    Vec2::new(x, y)
-}
-
-pub fn pos2(ctx: &Context, id: Id, target: Pos2, s: Spring) -> Pos2 {
-    vec2(ctx, id, target.to_vec2(), s).to_pos2()
-}
-
-pub fn rect(ctx: &Context, id: Id, target: Rect, s: Spring) -> Rect {
-    let [a, b, c, d] = spring(ctx, id, [target.min.x, target.min.y, target.max.x, target.max.y], s);
-    Rect::from_min_max(Pos2::new(a, b), Pos2::new(c, d))
 }
 
 /// A colour easing towards `target` (channels in gamma space, premultiplied).
@@ -169,30 +173,57 @@ struct Clock {
     last: f64,
 }
 
-/// Seconds that advance only while the window is live: looping animations read it so they pause where they
-/// are instead of jumping. Asks for the next frame at `fps` (decorative loops need no more than 30-60).
+/// Frames per second of every looping decoration (the glow's drift, status dots, the record button's orbits, the
+/// trail's pulse): one shared rate, so that they all move on the same frames instead of each asking for its own.
+pub const DECOR_FPS: f32 = 15.0;
+
+/// Looping decorations rest this long after the last input: a window left focused while its owner is in VR then
+/// draws nothing until something changes.
+pub const REST_AFTER: f64 = 30.0;
+
+/// Seconds that advance only while the window is live and was used in the last [`REST_AFTER`] seconds: looping
+/// animations read it, so they pause where they are instead of jumping. Asks for the next frame at the shared
+/// [`DECOR_FPS`] (or `fps` when that is lower).
 pub fn clock(ctx: &Context, fps: f32) -> f64 {
     let id = Id::unique("orbiters-anim-clock");
-    let t = now(ctx);
-    let live = is_live(ctx);
-    let mut c = ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(id, || Clock { elapsed: 0.0, last: t }));
-    if live {
-        c.elapsed += (t - c.last).clamp(0.0, 0.1);
-        ctx.request_repaint_after(Duration::from_secs_f32(1.0 / fps.max(1.0)));
+    let (t, input) = ctx.input(|i| (i.time, had_input(i)));
+    let (elapsed, running) = ctx.data_mut(|d| {
+        if input {
+            d.insert_temp(input_id(), t);
+        }
+        let live = d.get_temp::<bool>(live_id()).unwrap_or(true);
+        let last_input = *d.get_temp_mut_or_insert_with(input_id(), || t);
+        let running = live && t - last_input < REST_AFTER;
+        let c = d.get_temp_mut_or_insert_with(id, || Clock { elapsed: 0.0, last: t });
+        if running {
+            c.elapsed += (t - c.last).clamp(0.0, 0.1);
+        }
+        c.last = t;
+        (c.elapsed, running)
+    });
+    if running {
+        let fps = if fps.is_finite() { fps.clamp(1.0, DECOR_FPS) } else { DECOR_FPS };
+        ctx.request_repaint_after(Duration::from_secs_f32(1.0 / fps));
     }
-    c.last = t;
-    ctx.data_mut(|d| d.insert_temp(id, c));
-    c.elapsed
+    elapsed
 }
 
 /// Time since `start` (seconds of real time), asking for frames until `duration` has passed.
 pub fn since(ctx: &Context, start: f64, duration: f64) -> f64 {
+    since_every(ctx, start, duration, f32::INFINITY)
+}
+
+/// [`since`] for long, slow changes (a toast's countdown bar): frames come at most `fps` times a second, not at
+/// the monitor's 144 or 240 Hz.
+pub fn since_every(ctx: &Context, start: f64, duration: f64, fps: f32) -> f64 {
     let elapsed = now(ctx) - start;
     if elapsed < duration {
-        if is_live(ctx) {
-            ctx.request_repaint();
-        } else {
+        if !is_live(ctx) {
             ctx.request_repaint_after(Duration::from_secs_f64(duration - elapsed));
+        } else if fps.is_finite() {
+            ctx.request_repaint_after(Duration::from_secs_f64((1.0 / fps.max(1.0) as f64).min(duration - elapsed)));
+        } else {
+            ctx.request_repaint();
         }
     }
     elapsed.max(0.0)
@@ -267,5 +298,69 @@ pub mod ease {
         } else {
             1.0 - local
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs one frame at `t` (with `events`) and returns how soon it asked for the next.
+    fn frame(ctx: &Context, t: f64, events: Vec<egui::Event>, mut f: impl FnMut(&Context)) -> Duration {
+        let input = egui::RawInput { time: Some(t), events, ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| f(ui.ctx()));
+        // No renderer takes the font atlas here.
+        out.textures_delta.clear();
+        out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay).unwrap_or(Duration::MAX)
+    }
+
+    #[test]
+    fn springs_settle_and_a_target_that_is_not_a_number_holds_them() {
+        let ctx = Context::default();
+        let id = Id::unique("spring");
+        let mut v = [0f32; 2];
+        for k in 0..240 {
+            frame(&ctx, k as f64 / 60.0, vec![], |ctx| v = spring_from(ctx, id, [0.0, 0.0], [1.0, -2.0], Spring::BOUNCY));
+        }
+        assert_eq!(v, [1.0, -2.0]);
+        // NaN (a degenerate layout) keeps the last value and asks for no frames.
+        let delay = frame(&ctx, 5.0, vec![], |ctx| v = spring(ctx, id, [f32::NAN, -2.0], Spring::BOUNCY));
+        assert_eq!(v, [1.0, -2.0]);
+        let delay2 = frame(&ctx, 5.1, vec![], |ctx| v = spring(ctx, id, [f32::NAN, f32::INFINITY], Spring::BOUNCY));
+        assert_eq!(v, [1.0, -2.0]);
+        assert!(delay > Duration::from_secs(1) && delay2 > Duration::from_secs(1), "{delay:?} {delay2:?}");
+        // A first value that is not a number starts at the target.
+        frame(&ctx, 5.2, vec![], |ctx| v = spring_from(ctx, Id::unique("fresh"), [f32::NAN, 3.0], [0.5, 3.0], Spring::SOFT));
+        assert_eq!(v, [0.5, 3.0]);
+    }
+
+    #[test]
+    fn looping_decorations_share_a_rate_and_rest_without_input() {
+        let ctx = Context::default();
+        // egui's own first frames ask for more frames: let them pass.
+        for k in 0..5 {
+            frame(&ctx, k as f64 * 0.01, vec![], |ctx| set_live(ctx, true));
+        }
+        let mut t = 0.0;
+        let first = frame(&ctx, 0.05, vec![], |ctx| {
+            set_live(ctx, true);
+            t = clock(ctx, 60.0);
+        });
+        assert!(first <= Duration::from_secs_f32(1.0 / DECOR_FPS) + Duration::from_millis(1), "{first:?}");
+        // Half a minute later, nothing touched: the loops stand still and ask for nothing.
+        let resting = frame(&ctx, 0.05 + REST_AFTER + 1.0, vec![], |ctx| {
+            set_live(ctx, true);
+            t = clock(ctx, 60.0);
+        });
+        assert_eq!(t, 0.0);
+        assert!(resting > Duration::from_secs(1), "{resting:?}");
+        // The pointer moves: they go on from where they stood.
+        let moved = vec![egui::Event::PointerMoved(egui::pos2(10.0, 10.0))];
+        let woken = frame(&ctx, 0.05 + REST_AFTER + 2.0, moved, |ctx| {
+            set_live(ctx, true);
+            t = clock(ctx, 60.0);
+        });
+        assert!(t > 0.0 && t <= 0.1 + 1e-9, "{t}");
+        assert!(woken <= Duration::from_secs_f32(1.0 / DECOR_FPS) + Duration::from_millis(1), "{woken:?}");
     }
 }

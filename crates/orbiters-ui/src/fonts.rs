@@ -1,11 +1,16 @@
 //! Fonts. Windows 11 has Segoe UI Variable: every weight through its `wght` axis and optical sizes through
 //! `opsz`, so headings get the Display cut and labels the Text cut. Elsewhere the first common sans family found
 //! (static weights when there is no variable file). Cascadia Mono or Consolas for IDs, and the Phosphor icons.
+//! Letters none of them has (Japanese, Chinese, Korean, Thai, Arabic… in world and friend names) come from the
+//! system's own font for their script, opened the first time such a letter shows up. Every file is opened once per
+//! process, mapped rather than read, and shared by all its egui contexts (the VR overlay runs five).
 
-use egui::epaint::text::{FontTweak, VariationCoords};
-use egui::{FontData, FontDefinitions, FontFamily};
+use egui::epaint::text::{Blob, FontTweak, VariationCoords};
+use egui::{FallbackRequest, FontData, FontDefinitions, FontFamily, FontInsert, FontPriority, InsertFontFamily};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Phosphor Icons (MIT), regular and fill.
 pub const PHOSPHOR: &[u8] = include_bytes!("../assets/Phosphor.ttf");
@@ -16,22 +21,27 @@ const WEIGHTS: [u16; 4] = [400, 500, 600, 700];
 /// Set when the text font is variable: exact weights and optical sizes then come from [`coords`].
 static VARIABLE: AtomicBool = AtomicBool::new(false);
 
+/// The text families, one per weight of [`WEIGHTS`]. Made once: every run of text names one, and a family is an
+/// `Arc<str>` that was formatted and allocated each time.
+fn families() -> &'static [FontFamily; 4] {
+    static FAMILIES: OnceLock<[FontFamily; 4]> = OnceLock::new();
+    FAMILIES.get_or_init(|| [FontFamily::Proportional, FontFamily::Name("w500".into()), FontFamily::Name("w600".into()), FontFamily::Name("w700".into())])
+}
+
 /// Family for a weight (400, 500, 600 or 700, whichever is nearest).
 pub fn family(weight: f32) -> FontFamily {
-    let w = WEIGHTS.iter().min_by_key(|w| (**w as f32 - weight).abs() as u32).copied().unwrap_or(400);
-    if w == 400 {
-        FontFamily::Proportional
-    } else {
-        FontFamily::Name(format!("w{w}").into())
-    }
+    let i = (0..WEIGHTS.len()).min_by_key(|&i| (WEIGHTS[i] as f32 - weight).abs() as u32).unwrap_or(0);
+    families()[i].clone()
 }
 
 pub fn icons() -> FontFamily {
-    FontFamily::Name("icons".into())
+    static ICONS: OnceLock<FontFamily> = OnceLock::new();
+    ICONS.get_or_init(|| FontFamily::Name("icons".into())).clone()
 }
 
 pub fn icons_fill() -> FontFamily {
-    FontFamily::Name("icons-fill".into())
+    static ICONS_FILL: OnceLock<FontFamily> = OnceLock::new();
+    ICONS_FILL.get_or_init(|| FontFamily::Name("icons-fill".into())).clone()
 }
 
 /// Variation coordinates for a text run: the exact weight and an optical size matching the text size.
@@ -44,12 +54,24 @@ pub fn coords(size: f32, weight: f32) -> VariationCoords {
 }
 
 enum Sans {
-    Variable(&'static [u8]),
+    Variable(Blob),
     /// Files for 400, 500, 600, 700 (missing weights borrow the nearest heavier one, then lighter).
-    Static([Option<&'static [u8]>; 4]),
+    Static([Option<Blob>; 4]),
 }
 
-/// Loads the fonts into `ctx` (egui's own fonts stay as fallbacks for symbols the system font lacks).
+/// The interface's fonts as this computer has them, looked for once per process.
+struct Found {
+    sans: Option<Sans>,
+    mono: Option<Blob>,
+}
+
+fn found() -> &'static Found {
+    static FOUND: OnceLock<Found> = OnceLock::new();
+    FOUND.get_or_init(|| Found { sans: find_sans(), mono: find_mono() })
+}
+
+/// Loads the fonts into `ctx` (egui's own fonts stay as fallbacks for symbols the system font lacks), and the
+/// system's fonts for other scripts as their letters appear.
 pub fn install(ctx: &egui::Context) {
     let mut defs = FontDefinitions::default();
     let fallback_text = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
@@ -60,17 +82,17 @@ pub fn install(ctx: &egui::Context) {
     defs.families.insert(icons(), vec!["phosphor".into()]);
     defs.families.insert(icons_fill(), vec!["phosphor-fill".into()]);
 
-    let sans = find_sans();
-    VARIABLE.store(matches!(sans, Some(Sans::Variable(_))), Ordering::Relaxed);
+    let found = found();
+    VARIABLE.store(matches!(found.sans, Some(Sans::Variable(_))), Ordering::Relaxed);
     for (i, w) in WEIGHTS.iter().enumerate() {
         let name = format!("ui-{w}");
-        let data = match &sans {
+        let data = match &found.sans {
             Some(Sans::Variable(bytes)) => {
-                Some(FontData::from_static(bytes).tweak(FontTweak { coords: VariationCoords::new([(b"wght", *w as f32)]), ..Default::default() }))
+                Some(FontData::from_blob(bytes.clone(), 0).tweak(FontTweak { coords: VariationCoords::new([(b"wght", *w as f32)]), ..Default::default() }))
             }
             Some(Sans::Static(files)) => {
                 let pick = files[i..].iter().chain(files[..i].iter().rev()).flatten().next();
-                pick.map(|bytes| FontData::from_static(bytes))
+                pick.map(|bytes| FontData::from_blob(bytes.clone(), 0))
             }
             None => None,
         };
@@ -81,21 +103,40 @@ pub fn install(ctx: &egui::Context) {
         }
         list.push("phosphor".into());
         list.extend(fallback_text.iter().cloned());
-        defs.families.insert(family(*w as f32), list);
+        defs.families.insert(families()[i].clone(), list);
     }
 
-    if let Some(bytes) = find_mono() {
-        defs.font_data.insert("mono".into(), FontData::from_static(bytes).into());
+    if let Some(bytes) = &found.mono {
+        defs.font_data.insert("mono".into(), FontData::from_blob(bytes.clone(), 0).into());
         let mut list = vec!["mono".to_string()];
         list.extend(fallback_mono);
         defs.families.insert(FontFamily::Monospace, list);
     }
     ctx.set_fonts(defs);
+
+    // Once per context, whatever calls this again.
+    let added = ctx.data_mut(|d| std::mem::replace(d.get_temp_mut_or_default::<bool>(egui::Id::unique("orbiters-fonts-provider")), true));
+    if !added {
+        ctx.add_font_provider(Arc::new(SystemFallback { cjk: cjk() }));
+    }
 }
 
-/// Reads a font file once for the life of the app.
-fn load(path: &Path) -> Option<&'static [u8]> {
-    std::fs::read(path).ok().map(|bytes| &*Box::leak(bytes.into_boxed_slice()))
+/// A font file, opened once for the life of the process and shared by every context: mapped rather than read (a CJK
+/// font is 12 to 20 MB, of which a few names touch a few pages), read when it cannot be mapped.
+fn open(path: &Path) -> Option<Blob> {
+    static OPEN: OnceLock<Mutex<HashMap<PathBuf, Option<Blob>>>> = OnceLock::new();
+    let mut open = OPEN.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    open.entry(path.to_path_buf())
+        .or_insert_with(|| {
+            let file = std::fs::File::open(path).ok()?;
+            // SAFETY: a font file is not changed while it is in use (Windows does not replace an open font file), and
+            // egui only ever reads the bytes.
+            match unsafe { memmap2::Mmap::map(&file) } {
+                Ok(map) => Some(Arc::new(map) as Blob),
+                Err(_) => std::fs::read(path).ok().map(|bytes| Arc::new(bytes) as Blob),
+            }
+        })
+        .clone()
 }
 
 #[cfg(windows)]
@@ -106,18 +147,24 @@ fn windows_fonts() -> PathBuf {
 #[cfg(windows)]
 fn find_sans() -> Option<Sans> {
     let dir = windows_fonts();
-    if let Some(bytes) = load(&dir.join("SegUIVar.ttf")) {
+    if let Some(bytes) = open(&dir.join("SegUIVar.ttf")) {
         return Some(Sans::Variable(bytes));
     }
     // Windows 10: static Segoe UI, which has no medium cut.
-    let regular = load(&dir.join("segoeui.ttf"))?;
-    Some(Sans::Static([Some(regular), None, load(&dir.join("seguisb.ttf")), load(&dir.join("segoeuib.ttf"))]))
+    let regular = open(&dir.join("segoeui.ttf"))?;
+    Some(Sans::Static([Some(regular), None, open(&dir.join("seguisb.ttf")), open(&dir.join("segoeuib.ttf"))]))
 }
 
 #[cfg(windows)]
-fn find_mono() -> Option<&'static [u8]> {
+fn find_mono() -> Option<Blob> {
     let dir = windows_fonts();
-    load(&dir.join("CascadiaMono.ttf")).or_else(|| load(&dir.join("consola.ttf")))
+    open(&dir.join("CascadiaMono.ttf")).or_else(|| open(&dir.join("consola.ttf")))
+}
+
+/// A system font file by its name in the fonts folder.
+#[cfg(windows)]
+fn system_file(name: &str) -> Option<Blob> {
+    open(&windows_fonts().join(name))
 }
 
 #[cfg(not(windows))]
@@ -130,7 +177,7 @@ fn font_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// First file (in `names` order) found under the font folders.
+/// First file (in `names` order) found under the font folders (walked once per process).
 #[cfg(not(windows))]
 fn find_file(names: &[&str]) -> Option<PathBuf> {
     fn walk(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
@@ -146,10 +193,14 @@ fn find_file(names: &[&str]) -> Option<PathBuf> {
             }
         }
     }
-    let mut files = Vec::new();
-    for d in font_dirs() {
-        walk(&d, 0, &mut files);
-    }
+    static FILES: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    let files = FILES.get_or_init(|| {
+        let mut files = Vec::new();
+        for d in font_dirs() {
+            walk(&d, 0, &mut files);
+        }
+        files
+    });
     names.iter().find_map(|n| files.iter().find(|p| p.file_name().is_some_and(|f| f.eq_ignore_ascii_case(n))).cloned())
 }
 
@@ -157,7 +208,7 @@ fn find_file(names: &[&str]) -> Option<PathBuf> {
 fn find_sans() -> Option<Sans> {
     let variable =
         ["InterVariable.ttf", "Inter[opsz,wght].ttf", "Inter-VariableFont_opsz,wght.ttf", "NotoSans[wdth,wght].ttf", "NotoSans-VariableFont_wdth,wght.ttf"];
-    if let Some(bytes) = find_file(&variable).and_then(|p| load(&p)) {
+    if let Some(bytes) = find_file(&variable).and_then(|p| open(&p)) {
         return Some(Sans::Variable(bytes));
     }
     let families: [[&str; 4]; 3] = [
@@ -166,8 +217,8 @@ fn find_sans() -> Option<Sans> {
         ["DejaVuSans.ttf", "", "", "DejaVuSans-Bold.ttf"],
     ];
     for names in families {
-        if let Some(regular) = find_file(&[names[0]]).and_then(|p| load(&p)) {
-            let other = |n: &str| if n.is_empty() { None } else { find_file(&[n]).and_then(|p| load(&p)) };
+        if let Some(regular) = find_file(&[names[0]]).and_then(|p| open(&p)) {
+            let other = |n: &str| if n.is_empty() { None } else { find_file(&[n]).and_then(|p| open(&p)) };
             return Some(Sans::Static([Some(regular), other(names[1]), other(names[2]), other(names[3])]));
         }
     }
@@ -175,7 +226,356 @@ fn find_sans() -> Option<Sans> {
 }
 
 #[cfg(not(windows))]
-fn find_mono() -> Option<&'static [u8]> {
+fn find_mono() -> Option<Blob> {
     find_file(&["CascadiaMono.ttf", "JetBrainsMono-Regular.ttf", "DejaVuSansMono.ttf", "NotoSansMono-Regular.ttf", "LiberationMono-Regular.ttf"])
-        .and_then(|p| load(&p))
+        .and_then(|p| open(&p))
+}
+
+/// A system font file by its file name, wherever it is under the font folders.
+#[cfg(not(windows))]
+fn system_file(name: &str) -> Option<Blob> {
+    find_file(&[name]).and_then(|p| open(&p))
+}
+
+/// Which CJK font comes first for kana and Chinese characters: the one of this computer's language. Elsewhere the
+/// Simplified Chinese font, which also has kana: a Japanese or Chinese name then reads in one font, not two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cjk {
+    Japanese,
+    Simplified,
+    Traditional,
+    Korean,
+}
+
+fn cjk_for_locale(locale: &str) -> Cjk {
+    let l = locale.to_ascii_lowercase().replace('_', "-");
+    if l.starts_with("ja") {
+        Cjk::Japanese
+    } else if l.starts_with("ko") {
+        Cjk::Korean
+    } else if l.starts_with("zh") && ["hant", "-tw", "-hk", "-mo"].iter().any(|t| l.contains(t)) {
+        Cjk::Traditional
+    } else {
+        Cjk::Simplified
+    }
+}
+
+fn cjk() -> Cjk {
+    static CJK: OnceLock<Cjk> = OnceLock::new();
+    *CJK.get_or_init(|| cjk_for_locale(&user_locale()))
+}
+
+/// The user's locale name ("ja-JP").
+#[cfg(windows)]
+fn user_locale() -> String {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetUserDefaultLocaleName(name: *mut u16, length: i32) -> i32;
+    }
+    let mut name = [0u16; 85];
+    // SAFETY: the buffer holds LOCALE_NAME_MAX_LENGTH (85) UTF-16 units, the length the call is given.
+    let n = unsafe { GetUserDefaultLocaleName(name.as_mut_ptr(), name.len() as i32) };
+    if n <= 1 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&name[..(n - 1) as usize])
+}
+
+#[cfg(not(windows))]
+fn user_locale() -> String {
+    ["LC_ALL", "LC_CTYPE", "LANG"].iter().find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty())).unwrap_or_default()
+}
+
+/// The scripts the system fallback knows a font for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Script {
+    Hangul,
+    Kana,
+    /// Chinese characters, CJK punctuation and full-width forms.
+    Han,
+    Thai,
+    Lao,
+    Khmer,
+    Arabic,
+    Hebrew,
+    Armenian,
+    Georgian,
+    /// Devanagari to Sinhala.
+    Indic,
+    Ethiopic,
+    Myanmar,
+    Tibetan,
+    Mongolian,
+    Cherokee,
+    Yi,
+    /// Anything else the interface's fonts lack (rare Latin, Greek or Cyrillic letters, symbols).
+    Other,
+}
+
+fn script(c: char) -> Script {
+    match c as u32 {
+        0x1100..=0x11FF | 0x3130..=0x318F | 0xA960..=0xA97F | 0xAC00..=0xD7FF | 0xFFA0..=0xFFDC => Script::Hangul,
+        0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF65..=0xFF9F | 0x1B000..=0x1B16F => Script::Kana,
+        0x2E80..=0x2FDF
+        | 0x3000..=0x303F
+        | 0x3100..=0x312F
+        | 0x31A0..=0x31EF
+        | 0x3200..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F
+        | 0xFF00..=0xFF64
+        | 0xFFE0..=0xFFEF
+        | 0x20000..=0x3FFFF => Script::Han,
+        0x0E00..=0x0E7F => Script::Thai,
+        0x0E80..=0x0EFF => Script::Lao,
+        0x1780..=0x17FF | 0x19E0..=0x19FF => Script::Khmer,
+        0x0600..=0x06FF | 0x0750..=0x077F | 0x0870..=0x08FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => Script::Arabic,
+        0x0590..=0x05FF | 0xFB1D..=0xFB4F => Script::Hebrew,
+        0x0530..=0x058F => Script::Armenian,
+        0x10A0..=0x10FF | 0x1C90..=0x1CBF | 0x2D00..=0x2D2F => Script::Georgian,
+        0x0900..=0x0DFF | 0xA8E0..=0xA8FF => Script::Indic,
+        0x1200..=0x139F | 0x2D80..=0x2DDF | 0xAB00..=0xAB2F => Script::Ethiopic,
+        0x1000..=0x109F | 0xA9E0..=0xA9FF | 0xAA60..=0xAA7F => Script::Myanmar,
+        0x0F00..=0x0FFF => Script::Tibetan,
+        0x1800..=0x18AF => Script::Mongolian,
+        0x13A0..=0x13FF | 0xAB70..=0xABBF => Script::Cherokee,
+        0xA000..=0xA4CF => Script::Yi,
+        _ => Script::Other,
+    }
+}
+
+/// A face of a system font file: its file name and its index in a collection.
+type Face = (&'static str, u32);
+
+/// A font family as its weights: regular (and medium), semibold, bold (the regular again when it has no other).
+type Weights = [Face; 3];
+
+#[cfg(windows)]
+mod table {
+    use super::Weights;
+    // The UI cuts of the collections (Yu Gothic UI, Microsoft YaHei UI, Microsoft JhengHei UI), then older fonts.
+    pub const JAPANESE: &[Weights] = &[[("YuGothM.ttc", 1), ("YuGothB.ttc", 2), ("YuGothB.ttc", 1)], [("msgothic.ttc", 1); 3]];
+    pub const SIMPLIFIED: &[Weights] = &[[("msyh.ttc", 1), ("msyhbd.ttc", 1), ("msyhbd.ttc", 1)], [("simsun.ttc", 0); 3]];
+    pub const TRADITIONAL: &[Weights] = &[[("msjh.ttc", 1), ("msjhbd.ttc", 1), ("msjhbd.ttc", 1)], [("mingliu.ttc", 0); 3]];
+    pub const KOREAN: &[Weights] = &[[("malgun.ttf", 0), ("malgunbd.ttf", 0), ("malgunbd.ttf", 0)], [("gulim.ttc", 0); 3]];
+    pub const THAI: &[Weights] = &[
+        [("LeelawUI.ttf", 0), ("LeelaUIb.ttf", 0), ("LeelaUIb.ttf", 0)],
+        [("leelawad.ttf", 0), ("leelawdb.ttf", 0), ("leelawdb.ttf", 0)],
+        [("tahoma.ttf", 0), ("tahomabd.ttf", 0), ("tahomabd.ttf", 0)],
+    ];
+    pub const LAO: &[Weights] = &[[("LeelawUI.ttf", 0), ("LeelaUIb.ttf", 0), ("LeelaUIb.ttf", 0)], [("LaoUI.ttf", 0), ("LaoUIb.ttf", 0), ("LaoUIb.ttf", 0)]];
+    pub const KHMER: &[Weights] =
+        &[[("LeelawUI.ttf", 0), ("LeelaUIb.ttf", 0), ("LeelaUIb.ttf", 0)], [("KhmerUI.ttf", 0), ("KhmerUIb.ttf", 0), ("KhmerUIb.ttf", 0)]];
+    /// Static Segoe UI: Arabic, Hebrew, Armenian, Georgian, and every Latin, Greek and Cyrillic letter (Segoe UI
+    /// Variable has fewer).
+    pub const SEGOE: &[Weights] = &[
+        [("segoeui.ttf", 0), ("seguisb.ttf", 0), ("segoeuib.ttf", 0)],
+        [("tahoma.ttf", 0), ("tahomabd.ttf", 0), ("tahomabd.ttf", 0)],
+        [("arial.ttf", 0), ("arialbd.ttf", 0), ("arialbd.ttf", 0)],
+    ];
+    pub const INDIC: &[Weights] = &[[("Nirmala.ttf", 0), ("NirmalaB.ttf", 0), ("NirmalaB.ttf", 0)], [("Nirmala.ttc", 0); 3]];
+    pub const ETHIOPIC: &[Weights] = &[[("ebrima.ttf", 0), ("ebrimabd.ttf", 0), ("ebrimabd.ttf", 0)]];
+    pub const MYANMAR: &[Weights] = &[[("mmrtext.ttf", 0), ("mmrtextb.ttf", 0), ("mmrtextb.ttf", 0)]];
+    pub const TIBETAN: &[Weights] = &[[("himalaya.ttf", 0); 3]];
+    pub const MONGOLIAN: &[Weights] = &[[("monbaiti.ttf", 0); 3]];
+    pub const CHEROKEE: &[Weights] = &[[("gadugi.ttf", 0), ("gadugib.ttf", 0), ("gadugib.ttf", 0)]];
+    pub const YI: &[Weights] = &[[("msyi.ttf", 0); 3]];
+    pub const SYMBOLS: &[Weights] = &[[("seguisym.ttf", 0); 3]];
+}
+
+#[cfg(not(windows))]
+mod table {
+    use super::Weights;
+    // Noto's CJK collection holds Japanese, Korean, Simplified and Traditional Chinese in that order.
+    pub const JAPANESE: &[Weights] = &[[("NotoSansCJK-Regular.ttc", 0), ("NotoSansCJK-Bold.ttc", 0), ("NotoSansCJK-Bold.ttc", 0)]];
+    pub const KOREAN: &[Weights] = &[[("NotoSansCJK-Regular.ttc", 1), ("NotoSansCJK-Bold.ttc", 1), ("NotoSansCJK-Bold.ttc", 1)]];
+    pub const SIMPLIFIED: &[Weights] =
+        &[[("NotoSansCJK-Regular.ttc", 2), ("NotoSansCJK-Bold.ttc", 2), ("NotoSansCJK-Bold.ttc", 2)], [("DroidSansFallbackFull.ttf", 0); 3]];
+    pub const TRADITIONAL: &[Weights] = &[[("NotoSansCJK-Regular.ttc", 3), ("NotoSansCJK-Bold.ttc", 3), ("NotoSansCJK-Bold.ttc", 3)]];
+    pub const THAI: &[Weights] = &[[("NotoSansThai-Regular.ttf", 0), ("NotoSansThai-Bold.ttf", 0), ("NotoSansThai-Bold.ttf", 0)]];
+    pub const LAO: &[Weights] = &[[("NotoSansLao-Regular.ttf", 0); 3]];
+    pub const KHMER: &[Weights] = &[[("NotoSansKhmer-Regular.ttf", 0); 3]];
+    pub const SEGOE: &[Weights] = &[
+        [("NotoSansArabic-Regular.ttf", 0); 3],
+        [("NotoSansHebrew-Regular.ttf", 0); 3],
+        [("NotoSansArmenian-Regular.ttf", 0); 3],
+        [("NotoSansGeorgian-Regular.ttf", 0); 3],
+        [("DejaVuSans.ttf", 0), ("DejaVuSans-Bold.ttf", 0), ("DejaVuSans-Bold.ttf", 0)],
+    ];
+    pub const INDIC: &[Weights] = &[[("NotoSansDevanagari-Regular.ttf", 0); 3], [("NotoSansBengali-Regular.ttf", 0); 3], [("NotoSansTamil-Regular.ttf", 0); 3]];
+    pub const ETHIOPIC: &[Weights] = &[[("NotoSansEthiopic-Regular.ttf", 0); 3]];
+    pub const MYANMAR: &[Weights] = &[[("NotoSansMyanmar-Regular.ttf", 0); 3]];
+    pub const TIBETAN: &[Weights] = &[[("NotoSerifTibetan-Regular.ttf", 0); 3]];
+    pub const MONGOLIAN: &[Weights] = &[[("NotoSansMongolian-Regular.ttf", 0); 3]];
+    pub const CHEROKEE: &[Weights] = &[[("NotoSansCherokee-Regular.ttf", 0); 3]];
+    pub const YI: &[Weights] = &[[("NotoSansYi-Regular.ttf", 0); 3]];
+    pub const SYMBOLS: &[Weights] = &[[("NotoSansSymbols2-Regular.ttf", 0); 3], [("DejaVuSans.ttf", 0); 3]];
+}
+
+/// The fonts to try for a script, in order.
+fn candidates(script: Script, cjk: Cjk) -> Vec<&'static [Weights]> {
+    use table::*;
+    match script {
+        Script::Hangul => vec![KOREAN],
+        Script::Kana => match cjk {
+            Cjk::Japanese => vec![JAPANESE, SIMPLIFIED, KOREAN],
+            Cjk::Korean => vec![KOREAN, JAPANESE, SIMPLIFIED],
+            Cjk::Simplified | Cjk::Traditional => vec![SIMPLIFIED, JAPANESE, TRADITIONAL, KOREAN],
+        },
+        Script::Han => match cjk {
+            Cjk::Japanese => vec![JAPANESE, SIMPLIFIED, TRADITIONAL, KOREAN],
+            Cjk::Traditional => vec![TRADITIONAL, SIMPLIFIED, JAPANESE, KOREAN],
+            Cjk::Korean => vec![KOREAN, SIMPLIFIED, TRADITIONAL, JAPANESE],
+            Cjk::Simplified => vec![SIMPLIFIED, TRADITIONAL, JAPANESE, KOREAN],
+        },
+        Script::Thai => vec![THAI],
+        Script::Lao => vec![LAO],
+        Script::Khmer => vec![KHMER],
+        Script::Arabic | Script::Hebrew | Script::Armenian | Script::Georgian => vec![SEGOE],
+        Script::Indic => vec![INDIC],
+        Script::Ethiopic => vec![ETHIOPIC],
+        Script::Myanmar => vec![MYANMAR],
+        Script::Tibetan => vec![TIBETAN],
+        Script::Mongolian => vec![MONGOLIAN],
+        Script::Cherokee => vec![CHEROKEE],
+        Script::Yi => vec![YI],
+        Script::Other => vec![SEGOE, SYMBOLS],
+    }
+}
+
+/// Whether a face draws `c` (its character map has it).
+fn covers(data: &FontData, c: char) -> bool {
+    use skrifa::MetadataProvider as _;
+    skrifa::FontRef::from_index(data.bytes(), data.index).is_ok_and(|font| font.charmap().map(c).is_some())
+}
+
+/// Letters the interface's fonts lack, from the system's font for their script at the nearest weight. A file is
+/// opened the first time one of its letters shows up; egui then keeps the face in the family's fallbacks, and asks
+/// again only for a letter that face lacks too.
+struct SystemFallback {
+    cjk: Cjk,
+}
+
+impl SystemFallback {
+    /// The face for `c` in text of `weight`, and the name egui knows it by.
+    fn face(&self, c: char, weight: u16) -> Option<(String, FontData)> {
+        let column = match weight {
+            600 => 1,
+            700 => 2,
+            _ => 0,
+        };
+        for family in candidates(script(c), self.cjk) {
+            for weights in family {
+                // A missing bold file falls back to the regular one.
+                let mut tries = vec![weights[column]];
+                if weights[0] != weights[column] {
+                    tries.push(weights[0]);
+                }
+                for (file, index) in tries {
+                    let Some(blob) = system_file(file) else { continue };
+                    let data = FontData::from_blob(blob, index);
+                    if covers(&data, c) {
+                        return Some((format!("system:{file}#{index}"), data));
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+impl egui::FontProvider for SystemFallback {
+    fn font_for(&self, request: &FallbackRequest<'_>) -> Option<FontInsert> {
+        let c = request.cluster.chars().next()?;
+        // The icon fonts have nothing to fall back to.
+        let weight = match families().iter().position(|f| f == request.family) {
+            Some(i) => WEIGHTS[i],
+            None if *request.family == icons() || *request.family == icons_fill() => return None,
+            None => 400,
+        };
+        let (name, data) = self.face(c, weight)?;
+        Some(FontInsert::new(&name, data, vec![InsertFontFamily { family: request.family.clone(), priority: FontPriority::Lowest }]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn letters_find_their_script() {
+        for (c, s) in [
+            ('あ', Script::Kana),
+            ('カ', Script::Kana),
+            ('ｶ', Script::Kana),
+            ('漢', Script::Han),
+            ('。', Script::Han),
+            ('Ａ', Script::Han),
+            ('한', Script::Hangul),
+            ('ㅎ', Script::Hangul),
+            ('ไ', Script::Thai),
+            ('ع', Script::Arabic),
+            ('א', Script::Hebrew),
+            ('ह', Script::Indic),
+            ('ሰ', Script::Ethiopic),
+            ('A', Script::Other),
+            ('★', Script::Other),
+        ] {
+            assert_eq!(script(c), s, "{c}");
+        }
+    }
+
+    #[test]
+    fn the_locale_picks_the_cjk_font() {
+        for (locale, cjk) in [
+            ("ja-JP", Cjk::Japanese),
+            ("ja_JP.UTF-8", Cjk::Japanese),
+            ("ko-KR", Cjk::Korean),
+            ("zh-CN", Cjk::Simplified),
+            ("zh-TW", Cjk::Traditional),
+            ("zh-Hant-HK", Cjk::Traditional),
+            ("fr-FR", Cjk::Simplified),
+            ("", Cjk::Simplified),
+        ] {
+            assert_eq!(cjk_for_locale(locale), cjk, "{locale}");
+        }
+    }
+
+    #[test]
+    fn families_are_the_same_values_every_time() {
+        assert_eq!(family(400.0), FontFamily::Proportional);
+        assert_eq!(family(650.0), FontFamily::Name("w600".into()));
+        assert_eq!(family(f32::NAN), FontFamily::Proportional);
+        assert_eq!(icons(), FontFamily::Name("icons".into()));
+    }
+
+    /// With Windows' fonts at hand: Japanese, Korean and Thai letters get a face that draws them, bold in bold text,
+    /// and the icon families are left alone.
+    #[cfg(windows)]
+    #[test]
+    fn system_fonts_draw_other_scripts() {
+        if !windows_fonts().join("msyh.ttc").is_file() {
+            return;
+        }
+        let fallback = SystemFallback { cjk: Cjk::Japanese };
+        let (name, data) = fallback.face('猫', 400).expect("a face for kanji");
+        assert!(name.starts_with("system:YuGoth") || name.starts_with("system:msyh"), "{name}");
+        assert!(covers(&data, '猫'));
+        if windows_fonts().join("YuGothB.ttc").is_file() {
+            let (bold, _) = fallback.face('ね', 700).expect("a bold face for kana");
+            assert_eq!(bold, "system:YuGothB.ttc#1");
+        }
+        if windows_fonts().join("malgun.ttf").is_file() {
+            assert!(fallback.face('한', 400).is_some_and(|(n, _)| n.starts_with("system:malgun")));
+        }
+        if windows_fonts().join("LeelawUI.ttf").is_file() {
+            assert!(fallback.face('ไ', 400).is_some_and(|(n, _)| n == "system:LeelawUI.ttf#0"));
+        }
+        let request = FallbackRequest { cluster: "猫", family: &icons() };
+        assert!(egui::FontProvider::font_for(&fallback, &request).is_none());
+        let request = FallbackRequest { cluster: "猫", family: &families()[3] };
+        assert!(egui::FontProvider::font_for(&fallback, &request).is_some_and(|f| f.families[0].family == families()[3]));
+    }
 }

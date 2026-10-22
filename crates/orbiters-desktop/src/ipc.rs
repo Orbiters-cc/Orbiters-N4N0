@@ -70,6 +70,13 @@ pub enum ToService {
     SaveSettings {
         settings: Box<Settings>,
     },
+    /// Changes only these settings: a JSON object of the changed fields, a section as an object of its own changed
+    /// fields (`{"orb": {"wake_word": true}}`), merged into the service's settings as they are ([`Settings::patched`]).
+    /// A window's copy of the settings may lag the service's (the avatar's radial moved meanwhile): saved whole, it
+    /// would put back what changed in between.
+    PatchSettings {
+        patch: serde_json::Value,
+    },
     ImportRaw {
         dir: PathBuf,
     },
@@ -118,6 +125,8 @@ pub enum ToService {
     Orb {
         command: OrbCommand,
     },
+    /// Make VRChat find the OSC service again (it sends avatar parameters only to services it found).
+    OscReconnect,
     /// VRChat's frames the overlay saw, for world performance statistics.
     Frames {
         chunk: crate::state::FrameChunk,
@@ -165,6 +174,8 @@ pub enum OrbCommand {
     },
     /// Downloads the speech models.
     InstallVoice,
+    /// Stops the speech models' download (the worker removes what it unpacked).
+    CancelVoiceInstall,
     /// A 3D picture with VRChat's camera where it stands (recorded, then reconstructed).
     Photo3D,
     /// Calls a friend (a contact id from the calls status).
@@ -242,11 +253,78 @@ pub fn read_hello(stream: &TcpStream, timeout: Duration) -> Option<(String, Role
     }
 }
 
+/// Whether a client's token is the service's, in a time that does not depend on where they differ.
+pub fn same_token(given: &str, expected: &str) -> bool {
+    let (a, b) = (given.as_bytes(), expected.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 pub fn write_line<T: Serialize>(w: &mut impl Write, msg: &T) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(msg).map_err(std::io::Error::other)?;
     line.push(b'\n');
     w.write_all(&line)?;
     w.flush()
+}
+
+/// [`ToClient::Snapshot`] written from a shared snapshot, without copying it, and made into JSON once however many
+/// links write it: the window and the overlay are handed the same published snapshot.
+pub fn write_snapshot(w: &mut impl Write, snapshot: &Arc<Snapshot>) -> std::io::Result<()> {
+    #[derive(Serialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum Out<'a> {
+        Snapshot { snapshot: &'a Snapshot },
+    }
+    // The last snapshot written and its line. While it is alive the address names it: a snapshot published later is
+    // another allocation.
+    type Written = Option<(std::sync::Weak<Snapshot>, Arc<[u8]>)>;
+    static LAST: Mutex<Written> = Mutex::new(None);
+    let line = {
+        let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match last.as_ref().filter(|(written, _)| written.strong_count() > 0 && std::sync::Weak::as_ptr(written) == Arc::as_ptr(snapshot)) {
+            Some((_, line)) => line.clone(),
+            None => {
+                let mut line = serde_json::to_vec(&Out::Snapshot { snapshot }).map_err(std::io::Error::other)?;
+                line.push(b'\n');
+                let line: Arc<[u8]> = line.into();
+                *last = Some((Arc::downgrade(snapshot), line.clone()));
+                line
+            }
+        }
+    };
+    w.write_all(&line)?;
+    w.flush()
+}
+
+/// Reads one line of at most `max` bytes (without its end). `Ok(None)` at the end of the stream; a longer line is an
+/// error, so that a peer can never make this side keep an endless line in memory.
+pub fn read_line_capped(reader: &mut impl BufRead, max: usize) -> std::io::Result<Option<String>> {
+    let mut line = Vec::new();
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if available.is_empty() {
+            return Ok((!line.is_empty()).then(|| String::from_utf8_lossy(&line).into_owned()));
+        }
+        let (taken, done) = match available.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (available.len(), false),
+        };
+        line.extend_from_slice(&available[..taken]);
+        reader.consume(taken);
+        if line.len() > max + 1 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "line too long"));
+        }
+        if done {
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+        }
+    }
 }
 
 /// Where a client finds the service, as passed on its command line (`--service <port> <token>`).
@@ -422,6 +500,26 @@ mod tests {
         }
         assert_eq!(client.library_version(), 7);
         assert!(matches!(client.take_notices().as_slice(), [Notice::Toast { kind: NoticeKind::Warning, .. }]));
+    }
+
+    #[test]
+    fn a_snapshot_written_to_several_links_is_the_same_line() {
+        let first = Arc::new(Snapshot::new(Settings::default()));
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        write_snapshot(&mut a, &first).unwrap();
+        write_snapshot(&mut b, &first).unwrap();
+        assert_eq!(a, b);
+        assert!(matches!(serde_json::from_slice::<ToClient>(&a).unwrap(), ToClient::Snapshot { .. }));
+        // A later snapshot is written as it is, not as the one before.
+        let mut changed = Snapshot::new(Settings::default());
+        changed.capture.trail = vec![[1.0, 2.0, 3.0]];
+        let later = Arc::new(changed);
+        let mut c = Vec::new();
+        write_snapshot(&mut c, &later).unwrap();
+        match serde_json::from_slice::<ToClient>(&c).unwrap() {
+            ToClient::Snapshot { snapshot } => assert_eq!(snapshot.capture.trail, vec![[1.0, 2.0, 3.0]]),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

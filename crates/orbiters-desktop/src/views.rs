@@ -26,12 +26,23 @@ pub fn recorded(dir: &Path) -> anyhow::Result<(Vec<View>, usize)> {
         .iter()
         .map(|r| {
             let cam = Camera::from_strip(&r.camera_to_world, &r.projection, r.width.max(1), r.height.max(1), 1.0);
-            View { position: cam.position(), forward: cam.forward(), fov_y: cam.fov_y() }
+            View { position: cam.position(), forward: cam.forward(), fov_y: usable_fov(cam.fov_y()) }
         })
         .collect();
     anyhow::ensure!(!views.is_empty(), "this session has no keyframe to look from");
     let start = report.as_ref().and_then(|r| r.held_out_keyframes.first()).and_then(|k| keyframes.iter().position(|r| r.keyframe_index == *k)).unwrap_or(0);
     Ok((views, start))
+}
+
+/// A recorded vertical field of view as a view can use it: 10° to 150° (a degenerate projection in a record gave
+/// none, or one past 180°, and the 3D view's pan and fly speeds came out huge or backwards), 60° when it is not a
+/// number.
+pub fn usable_fov(fov_y: f32) -> f32 {
+    if fov_y.is_finite() {
+        fov_y.clamp(10f32.to_radians(), 150f32.to_radians())
+    } else {
+        60f32.to_radians()
+    }
 }
 
 /// How far ahead of `v` its subject is: the median distance of the splats in front of it (3 m when none are).

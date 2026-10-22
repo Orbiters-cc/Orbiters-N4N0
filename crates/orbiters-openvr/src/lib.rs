@@ -6,12 +6,18 @@
 //!
 //! A [`Client`] of type [`AppType::Background`] never starts SteamVR: it fails when SteamVR is not running.
 
+// The runtime loaded is `vrclient_x64.dll`, and `IVRClientCore`'s methods are called as `extern "system"`: right on
+// x64, where C++ methods use the platform convention, wrong on 32-bit Windows (thiscall).
+#[cfg(all(windows, not(target_arch = "x86_64")))]
+compile_error!("orbiters-openvr supports 64-bit Windows (x86_64) only: it loads vrclient_x64.dll and calls IVRClientCore with the x64 convention");
+
 use orbiters_contracts::performance::tracking::{self, Device, Sample};
 pub mod chaperone;
 pub mod compositor;
 #[cfg(windows)]
 pub mod gpu;
 pub mod input;
+use std::cell::OnceCell;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 
@@ -86,6 +92,18 @@ impl ControllerRole {
             other => Self::Other(other),
         }
     }
+
+    fn raw(self) -> i32 {
+        match self {
+            Self::Invalid => 0,
+            Self::LeftHand => 1,
+            Self::RightHand => 2,
+            Self::OptOut => 3,
+            Self::Treadmill => 4,
+            Self::Stylus => 5,
+            Self::Other(v) => v,
+        }
+    }
 }
 
 /// `ETrackedDeviceProperty` values used here.
@@ -118,6 +136,15 @@ pub mod event {
     pub const DASHBOARD_DEACTIVATED: u32 = 503;
     pub const QUIT: u32 = 700;
     pub const PROCESS_QUIT: u32 = 701;
+    /// The play space changed under the applications: another chaperone universe, a seated or standing zero pose
+    /// reset (a recenter), a cache to read again, room setup starting or saved (`CommitWorkingCopy`, by any
+    /// application). 800 and 802 no longer come with SteamVR's current chaperone.
+    pub const CHAPERONE_UNIVERSE_CHANGED: u32 = 801;
+    pub const SEATED_ZERO_POSE_RESET: u32 = 804;
+    pub const CHAPERONE_FLUSH_CACHE: u32 = 805;
+    pub const ROOM_SETUP_STARTING: u32 = 806;
+    pub const ROOM_SETUP_COMMITTED: u32 = 807;
+    pub const STANDING_ZERO_POSE_RESET: u32 = 808;
 }
 
 /// `HmdMatrix34_t`: row-major 3×4, right-handed, metres.
@@ -187,7 +214,7 @@ impl Event {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     NotInstalled,
-    /// `EVRInitError` from the runtime (121: SteamVR is not running, for background apps).
+    /// `EVRInitError` from the runtime (121: SteamVR is not running, for background apps; 119: it is shutting down).
     Init(i32),
     /// The runtime lacks an interface version.
     Interface(&'static str, i32),
@@ -195,8 +222,9 @@ pub enum Error {
 }
 
 impl Error {
+    /// SteamVR is not running, or is shutting down (what a background application is told instead of starting it).
     pub fn not_running(&self) -> bool {
-        matches!(self, Error::Init(121))
+        matches!(self, Error::Init(121) | Error::Init(119))
     }
 }
 
@@ -205,6 +233,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::NotInstalled => write!(f, "SteamVR is not installed"),
             Error::Init(121) => write!(f, "SteamVR is not running"),
+            Error::Init(119) => write!(f, "SteamVR is shutting down"),
             Error::Init(code) => write!(f, "SteamVR refused the connection (error {code})"),
             Error::Interface(name, code) => write!(f, "SteamVR has no {name} (error {code})"),
             Error::Load(e) => write!(f, "could not load SteamVR's client: {e}"),
@@ -304,17 +333,25 @@ unsafe fn entry<F: Copy>(table: *const usize, index: usize) -> F {
     unsafe { std::mem::transmute_copy(&*table.add(index)) }
 }
 
+/// A function table asked for on first use, then kept (or why the runtime has none).
+type Table = OnceCell<Result<*const usize, Error>>;
+
 /// A connection to SteamVR. Dropping it disconnects (`IVRClientCore::Cleanup`) and unloads the client.
 pub struct Client {
     core: *mut c_void,
     system: *const usize,
     overlay: Option<*const usize>,
+    /// The other interfaces, looked up once each: a frame of the overlay reads several of them, and each lookup
+    /// builds a name and asks the runtime.
+    input_table: Table,
+    compositor_table: Table,
+    chaperone_setup_table: Table,
     _library: platform::Library,
 }
 
-// SteamVR's client interfaces are thread-safe; the pointers stay valid until `Cleanup`.
+// SteamVR's client interfaces may be called from any thread; the pointers stay valid until `Cleanup`. A client is
+// used by one thread at a time (not `Sync`: its tables fill on first use).
 unsafe impl Send for Client {}
-unsafe impl Sync for Client {}
 
 pub const SYSTEM_VERSION: &str = "IVRSystem_026";
 pub const OVERLAY_VERSION: &str = "IVROverlay_028";
@@ -342,7 +379,15 @@ impl Client {
         if err != 0 {
             return Err(Error::Init(err));
         }
-        let mut client = Client { core, system: std::ptr::null(), overlay: None, _library: library };
+        let mut client = Client {
+            core,
+            system: std::ptr::null(),
+            overlay: None,
+            input_table: OnceCell::new(),
+            compositor_table: OnceCell::new(),
+            chaperone_setup_table: OnceCell::new(),
+            _library: library,
+        };
         client.system = client.interface(SYSTEM_VERSION)?;
         if app == AppType::Overlay {
             client.overlay = Some(client.interface(OVERLAY_VERSION)?);
@@ -366,6 +411,11 @@ impl Client {
         Ok(table as *const usize)
     }
 
+    /// `version`'s function table from `cell`, looked up the first time only.
+    fn table(&self, cell: &Table, version: &'static str) -> Result<*const usize, Error> {
+        cell.get_or_init(|| self.interface(version)).clone()
+    }
+
     // ------------------------------------------------------------------------------------------------ IVRSystem
 
     /// Poses of all devices now (no prediction), in `universe`.
@@ -385,6 +435,15 @@ impl Client {
         type F = unsafe extern "system" fn(u32) -> i32;
         // SAFETY: entry 19 is GetControllerRoleForTrackedDeviceIndex.
         ControllerRole::from_raw(unsafe { entry::<F>(self.system, 19)(device) })
+    }
+
+    /// The device that has `role` now (the left or the right hand), if one has it: one question instead of one per
+    /// device.
+    pub fn controller_index(&self, role: ControllerRole) -> Option<u32> {
+        type F = unsafe extern "system" fn(i32) -> u32;
+        // SAFETY: entry 18 is GetTrackedDeviceIndexForControllerRole (k_unTrackedDeviceIndexInvalid when none).
+        let index = unsafe { entry::<F>(self.system, 18)(role.raw()) };
+        (index < MAX_DEVICES as u32).then_some(index)
     }
 
     pub fn is_connected(&self, device: u32) -> bool {
@@ -443,7 +502,8 @@ impl Client {
 
     /// What a device is (class, role, serial, ...), for `tracking.json`; `None` for an empty slot.
     pub fn describe(&self, index: u32) -> Option<Device> {
-        let class = match self.device_class(index) {
+        let raw_class = self.device_class(index);
+        let class = match raw_class {
             DeviceClass::Hmd => tracking::DeviceClass::Hmd,
             DeviceClass::Controller => tracking::DeviceClass::Controller,
             DeviceClass::GenericTracker => tracking::DeviceClass::Tracker,
@@ -451,7 +511,6 @@ impl Client {
             DeviceClass::Invalid => return None,
             _ => tracking::DeviceClass::Other,
         };
-        let raw_class = self.device_class(index);
         let controller_type = self.string_property(index, prop::CONTROLLER_TYPE);
         let s = |p| self.string_property(index, p).unwrap_or_default();
         Some(Device {
@@ -588,6 +647,14 @@ impl Overlay<'_> {
         unsafe { entry::<F>(self.table, 45)(handle) }
     }
 
+    /// Waits until the compositor starts its next frame, `timeout_ms` at most (a frame's length is the advice: a
+    /// signal can be missed while the scene application is slow). A loop that waits here runs once per frame shown.
+    pub fn wait_frame_sync(&self, timeout_ms: u32) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u32) -> i32;
+        // SAFETY: entry 47 is WaitFrameSync.
+        overlay_result(unsafe { entry::<F>(self.table, 47)(timeout_ms) })
+    }
+
     pub fn poll_event(&self, handle: OverlayHandle) -> Option<Event> {
         type F = unsafe extern "system" fn(u64, *mut Event, u32) -> bool;
         let mut e = Event::default();
@@ -713,6 +780,16 @@ mod tests {
     }
 
     #[test]
+    fn roles_and_errors() {
+        for role in [ControllerRole::Invalid, ControllerRole::LeftHand, ControllerRole::RightHand, ControllerRole::Stylus, ControllerRole::Other(9)] {
+            assert_eq!(ControllerRole::from_raw(role.raw()), role);
+        }
+        // Shutting down counts as not running: a background client is refused instead of starting SteamVR.
+        assert!(Error::Init(121).not_running() && Error::Init(119).not_running() && !Error::Init(108).not_running());
+        assert_eq!(Error::Init(119).to_string(), "SteamVR is shutting down");
+    }
+
+    #[test]
     fn runtime_path_and_roles() {
         let dir = std::env::temp_dir();
         let text = format!(r#"{{ "runtime": ["Z:\\nowhere", {:?}], "jsonid": "vrpathreg" }}"#, dir.to_string_lossy());
@@ -725,6 +802,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "connects to SteamVR when it runs"]
     fn background_client_never_starts_steamvr() {
         // With SteamVR closed this fails with "not running" (121) instead of launching it; with SteamVR open it
         // connects and lists the headset.

@@ -2,7 +2,7 @@
 //! way, 660 Hz the other) in place of a microphone, and what each side hears is measured: length, level, pitch and how
 //! much of it is the tone.
 
-use crate::call::{Call, CallEvent};
+use crate::call::{Call, PeerEvent};
 use crate::opus::{FRAME, RATE};
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -98,16 +98,14 @@ fn play_tone(call: &Call, hz: f32) -> JoinHandle<()> {
             ticker.tick().await;
             let frame: Vec<f32> = (n..n + FRAME).map(|i| AMPLITUDE * (std::f32::consts::TAU * hz * i as f32 / RATE as f32).sin()).collect();
             n += FRAME;
-            if mic.send(frame).is_err() {
-                return;
-            }
+            mic.push(&frame);
         }
     })
 }
 
 pub async fn run(listen: Duration) -> anyhow::Result<Report> {
     let (events, mut event_rx) = unbounded_channel();
-    let mut calls = [Call::new(1, vec![], "127.0.0.1:0", events.clone()).await?, Call::new(2, vec![], "127.0.0.1:0", events).await?];
+    let mut calls = [Call::new(1, vec![], false, "127.0.0.1:0", events.clone()).await?, Call::new(2, vec![], false, "127.0.0.1:0", events).await?];
     let started = Instant::now();
     let offer = calls[0].offer().await?;
     let answer = calls[1].answer(offer).await?;
@@ -129,8 +127,9 @@ pub async fn run(listen: Duration) -> anyhow::Result<Report> {
             Some((id, event)) = event_rx.recv() => {
                 let (me, other) = if id == 1 { (0, 1) } else { (1, 0) };
                 match event {
-                    CallEvent::Candidate(candidate) => calls[other].add_candidates(vec![candidate]).await,
-                    CallEvent::Connected => {
+                    PeerEvent::Candidate(candidate) => calls[other].add_candidates(vec![candidate]).await,
+                    PeerEvent::Gathered => {}
+                    PeerEvent::Connected => {
                         if let Err(e) = calls[me].start_sending().await {
                             break Err(e);
                         }
@@ -141,7 +140,7 @@ pub async fn run(listen: Duration) -> anyhow::Result<Report> {
                             listening = Some(Instant::now());
                         }
                     }
-                    CallEvent::Ended(reason) => break Err(anyhow::anyhow!("call {id} ended: {reason:?}")),
+                    PeerEvent::Ended(reason) => break Err(anyhow::anyhow!("call {id} ended: {reason:?}")),
                 }
             }
             _ = ticker.tick() => {

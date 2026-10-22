@@ -1,7 +1,8 @@
 //! Progressive blur where scrolled content passes under a bar (the title bar, a sticky header), like the website's
 //! navigation bar with its stacked backdrop filters. egui cannot read back what it drew, so the shapes reaching
 //! into the band are drawn a second time offscreen, with the window's own textures, then blurred more the nearer
-//! they are to the band's top edge, and painted in place of the sharp ones.
+//! they are to the band's top edge, and painted in place of the sharp ones. A band whose content, size and look
+//! are what they were last frame is not blurred again: its last result is painted.
 
 use egui::epaint::emath::TSTransform;
 use egui::epaint::textures::{TextureFilter, TextureOptions, TextureWrapMode};
@@ -10,6 +11,7 @@ use egui::layers::ShapeIdx;
 use egui::{pos2, Id, Rect, Shape, Ui};
 use egui_wgpu::wgpu;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 /// How a band looks.
@@ -38,7 +40,8 @@ pub fn next_shape(ui: &Ui) -> ShapeIdx {
 
 /// Takes the shapes `from..` of `ui`'s layer out of `band` (their clip ends at its bottom edge) and paints a
 /// progressively blurred copy of what they drew there instead. Call it after the content and before what sits on
-/// the band (the bar's text and buttons). `id` names the band's GPU objects; keep it stable.
+/// the band (the bar's text and buttons). `id` names the band's GPU objects: keep it stable, and give each band
+/// drawn in a frame its own (two sharing one would blur with each other's targets).
 pub fn under(ui: &Ui, id: Id, textures: &Textures, from: ShapeIdx, band: Rect, look: Look) {
     let ctx = ui.ctx();
     let ppp = ctx.pixels_per_point();
@@ -46,6 +49,11 @@ pub fn under(ui: &Ui, id: Id, textures: &Textures, from: ShapeIdx, band: Rect, l
     let snap = |p: egui::Pos2| pos2((p.x * ppp).round() / ppp, (p.y * ppp).round() / ppp);
     let band = Rect::from_min_max(snap(band.min), snap(band.max));
     if band.width() < 1.0 || band.height() < 1.0 {
+        return;
+    }
+    if atlas_changing(ctx, textures) {
+        // Text laid out this frame points into a font atlas the renderer gets only after this frame: blurred with
+        // the one it has, it would come out garbled. The content stays sharp for this one frame.
         return;
     }
     let reach = Rect::from_min_max(band.min, pos2(band.max.x, band.max.y + MARGIN));
@@ -88,9 +96,81 @@ pub fn under(ui: &Ui, id: Id, textures: &Textures, from: ShapeIdx, band: Rect, l
         }
     }
     let size = [(band.width() * ppp).round() as u32, (reach.height() * ppp).round() as u32];
-    let callback = BlurCallback { id, primitives, textures: used, size, band_px: (band.height() * ppp).round(), ppp, look };
+    let band_px = (band.height() * ppp).round();
+    let fingerprint = {
+        let mut h = Fingerprint::default();
+        (size, band_px.to_bits(), ppp.to_bits(), [look.blur, look.solid, look.darken, look.fade].map(f32::to_bits)).hash(&mut h);
+        for p in &primitives {
+            let r = p.clip_rect;
+            [r.min.x, r.min.y, r.max.x, r.max.y].map(f32::to_bits).hash(&mut h);
+            if let Primitive::Mesh(m) = &p.primitive {
+                m.texture_id.hash(&mut h);
+                h.write(bytemuck::cast_slice(&m.indices));
+                h.write(bytemuck::cast_slice(&m.vertices));
+            }
+        }
+        h.finish()
+    };
+    let pass = ctx.cumulative_pass_nr();
+    let callback = BlurCallback { id, primitives, textures: used, size, band_px, ppp, look, fingerprint, pass };
     debug_assert!(look.solid < band.height(), "the plateau must end inside the band");
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(band, callback));
+}
+
+/// Whether the font atlas is being replaced this frame (it grew, or egui cleared it once full): the renderer's copy
+/// is then not the one this frame's text was laid out in.
+fn atlas_changing(ctx: &egui::Context, textures: &Textures) -> bool {
+    #[derive(Clone, Copy)]
+    struct Seen {
+        pass: u64,
+        fill: f32,
+        cleared: bool,
+    }
+    let (size, fill) = ctx.fonts(|f| (f.font_image_size(), f.font_atlas_fill_ratio()));
+    let uploaded = textures.read().texture(&TextureId::default()).and_then(|t| t.texture.as_ref().map(|t| [t.width() as usize, t.height() as usize]));
+    let pass = ctx.cumulative_pass_nr();
+    // Once per frame, for every band of it: a clear shows as the atlas filling less than it did.
+    let cleared = ctx.data_mut(|d| {
+        let seen = d.get_temp_mut_or_insert_with(Id::unique("orbiters-blur-atlas"), || Seen { pass, fill, cleared: false });
+        if seen.pass != pass {
+            *seen = Seen { pass, fill, cleared: fill < seen.fill };
+        }
+        seen.cleared
+    });
+    uploaded != Some(size) || cleared
+}
+
+/// What a band shows, summed up (a fast multiplicative hash of the copies' meshes and the band's size and look):
+/// the same as last frame, last frame's blur is painted again.
+#[derive(Default)]
+struct Fingerprint(u64);
+
+impl Fingerprint {
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+impl Hasher for Fingerprint {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let (words, rest) = bytes.as_chunks::<8>();
+        for w in words {
+            self.add(u64::from_le_bytes(*w));
+        }
+        if !rest.is_empty() {
+            let mut last = [0u8; 8];
+            last[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(last) ^ ((rest.len() as u64) << 56));
+        }
+    }
+
+    fn write_u64(&mut self, v: u64) {
+        self.add(v);
+    }
 }
 
 const SHADER: &str = r#"
@@ -130,7 +210,8 @@ fn vs_main(@builtin(vertex_index) i: u32) -> V {
 // One direction of a gaussian.
 @fragment
 fn fs_blur(in: V) -> @location(0) vec4<f32> {
-    let sigma = u.pass_.y;
+    // (No blur at all would divide nothing by nothing below.)
+    let sigma = max(u.pass_.y, 1e-3);
     let dir = select(vec2<f32>(1.0 / u.size.x, 0.0), vec2<f32>(0.0, 1.0 / u.size.y), u.pass_.x > 0.5);
     let reach = 3.0 * sigma;
     // Bilinear taps at most a pixel and a half apart.
@@ -214,9 +295,13 @@ pub struct BlurResources {
     sampler: wgpu::Sampler,
     linear_target: bool,
     bands: HashMap<Id, Band>,
-    /// Made with the pipelines (its renderer compiles one), for the first band, so its first frame does not hitch.
+    /// Made with the pipelines (its renderer compiles one), for the first band, so its first frame does not hitch;
+    /// later the renderer of a band no page draws any more, kept for the next one.
     spare: Option<Band>,
 }
+
+/// A band not drawn for this many passes gives its textures back (a page left).
+const FORGET_AFTER: u64 = 120;
 
 /// One band's renderer (its own buffers: two bands drawn in one frame must not share them) and textures.
 struct Band {
@@ -227,6 +312,10 @@ struct Band {
     uniforms: Vec<wgpu::Buffer>,
     size: [u32; 2],
     targets: Option<Targets>,
+    /// What the targets hold now ([`Fingerprint`]).
+    shows: Option<u64>,
+    /// The pass it was last drawn in.
+    pass: u64,
 }
 
 struct Targets {
@@ -319,13 +408,15 @@ impl Band {
                 })
             })
             .collect();
-        Self { renderer, mirrored: HashMap::new(), uniforms, size: [0, 0], targets: None }
+        Self { renderer, mirrored: HashMap::new(), uniforms, size: [0, 0], targets: None, shows: None, pass: 0 }
     }
 
-    /// Knows exactly this frame's textures (a texture the window renderer replaced is registered again).
-    fn mirror(&mut self, device: &wgpu::Device, textures: &[(TextureId, wgpu::Texture, TextureOptions)]) {
+    /// Knows exactly this frame's textures (a texture the window renderer replaced is registered again); true when
+    /// that changed anything.
+    fn mirror(&mut self, device: &wgpu::Device, textures: &[(TextureId, wgpu::Texture, TextureOptions)]) -> bool {
         let stale: Vec<TextureId> =
             self.mirrored.iter().filter(|(id, (t, _))| !textures.iter().any(|(i, u, _)| i == *id && u == t)).map(|(id, _)| *id).collect();
+        let mut changed = !stale.is_empty();
         for id in stale {
             if let Some((_, mine)) = self.mirrored.remove(&id) {
                 self.renderer.free_texture(&mine);
@@ -338,7 +429,19 @@ impl Band {
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             let mine = self.renderer.register_native_texture_with_sampler_options(device, &view, sampler(*options));
             self.mirrored.insert(*id, (texture.clone(), mine));
+            changed = true;
         }
+        changed
+    }
+
+    /// Gives its textures back, keeping the renderer (and its compiled pipeline) for another band.
+    fn release(&mut self) {
+        for (_, (_, mine)) in self.mirrored.drain() {
+            self.renderer.free_texture(&mine);
+        }
+        self.targets = None;
+        self.shows = None;
+        self.size = [0, 0];
     }
 
     fn resize(&mut self, device: &wgpu::Device, res: &BlurResources, size: [u32; 2]) {
@@ -346,6 +449,7 @@ impl Band {
             return;
         }
         self.size = size;
+        self.shows = None;
         let view = || {
             device
                 .create_texture(&wgpu::TextureDescriptor {
@@ -414,6 +518,23 @@ struct BlurCallback {
     band_px: f32,
     ppp: f32,
     look: Look,
+    /// What the copies and the look sum up to ([`Fingerprint`]).
+    fingerprint: u64,
+    /// The pass it was made in.
+    pass: u64,
+}
+
+/// Lets go of the textures of bands no longer drawn; one renderer is kept for the next band.
+fn forget_old(res: &mut BlurResources, pass: u64) {
+    let old: Vec<Id> = res.bands.iter().filter(|(_, b)| b.pass + FORGET_AFTER < pass).map(|(id, _)| *id).collect();
+    for id in old {
+        if let Some(mut band) = res.bands.remove(&id) {
+            band.release();
+            if res.spare.is_none() {
+                res.spare = Some(band);
+            }
+        }
+    }
 }
 
 fn begin(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) -> wgpu::RenderPass<'static> {
@@ -444,9 +565,22 @@ impl egui_wgpu::CallbackTrait for BlurCallback {
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let Some(res) = resources.get_mut::<BlurResources>() else { return Vec::new() };
+        forget_old(res, self.pass);
         let mut band = res.bands.remove(&self.id).or_else(|| res.spare.take()).unwrap_or_else(|| Band::new(device));
-        band.mirror(device, &self.textures);
-        band.resize(device, res, self.size);
+        band.pass = self.pass;
+        // A band wider or taller than a texture can be (a window across several monitors) is blurred at a lower
+        // density instead of failing validation.
+        let limit = device.limits().max_texture_dimension_2d.max(1) as f32;
+        let k = (limit / self.size[0].max(1) as f32).min(limit / self.size[1].max(1) as f32).min(1.0);
+        let size = self.size.map(|v| ((v as f32 * k).floor() as u32).max(1));
+        let (ppp, band_px) = (self.ppp * k, (self.band_px * k).round());
+        let textures_changed = band.mirror(device, &self.textures);
+        band.resize(device, res, size);
+        if !textures_changed && band.shows == Some(self.fingerprint) && band.targets.is_some() {
+            // Nothing under the band changed: last frame's blur is still right.
+            res.bands.insert(self.id, band);
+            return Vec::new();
+        }
         // The copies with this renderer's names for the textures; a mesh whose texture it lacks is left out.
         let primitives: Vec<ClippedPrimitive> = self
             .primitives
@@ -460,12 +594,12 @@ impl egui_wgpu::CallbackTrait for BlurCallback {
                 Primitive::Callback(_) => None,
             })
             .collect();
-        let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: self.size, pixels_per_point: self.ppp };
+        let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: size, pixels_per_point: ppp };
         let commands = band.renderer.update_buffers(device, queue, encoder, &primitives, &screen);
-        let strongest = self.look.blur * self.ppp;
-        let [w, h] = self.size.map(|v| v as f32);
+        let strongest = self.look.blur * ppp;
+        let [w, h] = size.map(|v| v as f32);
         let uniforms = |pass: [f32; 4]| Uniforms {
-            size: [w, h, self.band_px, (self.look.solid * self.ppp).round()],
+            size: [w, h, band_px, (self.look.solid * ppp).round()],
             look: [strongest, self.look.darken, self.look.fade, if res.linear_target { 1.0 } else { 0.0 }],
             pass,
         };
@@ -486,6 +620,7 @@ impl egui_wgpu::CallbackTrait for BlurCallback {
                     p.draw(0..3, 0..1);
                 }
             }
+            band.shows = Some(self.fingerprint);
         }
         res.bands.insert(self.id, band);
         commands

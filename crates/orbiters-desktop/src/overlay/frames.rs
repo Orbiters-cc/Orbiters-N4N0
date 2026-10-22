@@ -8,11 +8,14 @@ use orbiters_openvr::{self as vr};
 use std::time::{Duration, Instant};
 
 const CHUNK: Duration = Duration::from_secs(10);
+/// The compositor keeps the last frames: reading 64 of them five times a second misses none below 320 Hz.
+const POLL: Duration = Duration::from_millis(200);
 
 pub struct FrameSampler {
     last_frame: Option<u32>,
     intervals: Vec<f32>,
     since: Instant,
+    polled: Option<Instant>,
     refresh_hz: Option<f32>,
     headset: Option<String>,
     gpu: Option<String>,
@@ -24,15 +27,20 @@ impl FrameSampler {
             last_frame: None,
             intervals: Vec::new(),
             since: Instant::now(),
+            polled: None,
             refresh_hz: steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0),
             headset: steamvr.string_property(0, vr::prop::MODEL_NUMBER),
             gpu: adapter_name(steamvr),
         }
     }
 
-    /// Reads the frames VRChat showed since the last call (`vrchat_scene`: VRChat has the scene and is not loading);
-    /// a chunk once ten seconds were gathered.
+    /// Reads the frames VRChat showed since the last read (`vrchat_scene`: VRChat has the scene and is not loading),
+    /// five times a second whatever the overlay loop's pace; a chunk once ten seconds were gathered.
     pub fn update(&mut self, steamvr: &vr::Client, vrchat_scene: bool) -> Option<FrameChunk> {
+        if self.polled.is_some_and(|t| t.elapsed() < POLL) {
+            return None;
+        }
+        self.polled = Some(Instant::now());
         let Ok(compositor) = steamvr.compositor() else { return None };
         let mut timings = [FrameTiming::default(); 64];
         let n = compositor.frame_timings(&mut timings);

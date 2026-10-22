@@ -53,6 +53,11 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
+# Line tables keep panics and backtraces readable (file and line) at a fraction of the size of full debug information,
+# which made `target/debug` tens of gigabytes.
+[profile.dev]
+debug = "line-tables-only"
+
 # Decoders and image codecs are far too slow unoptimised; keep dependencies fast in debug builds too.
 [profile.dev.package."*"]
 opt-level = 2

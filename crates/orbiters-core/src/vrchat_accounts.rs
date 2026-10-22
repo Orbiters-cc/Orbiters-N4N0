@@ -27,9 +27,7 @@ impl Source {
 
 /// `usr_` followed by a lowercase UUID.
 pub fn is_user_id(id: &str) -> bool {
-    let Some(rest) = id.strip_prefix("usr_") else { return false };
-    let parts: Vec<&str> = rest.split('-').collect();
-    parts.len() == 5 && [8, 4, 4, 4, 12].iter().zip(&parts).all(|(n, p)| p.len() == *n && p.chars().all(|c| c.is_ascii_hexdigit()))
+    crate::vrchat_log::is_vrchat_id(id, "usr_")
 }
 
 /// A friend's id as Orbiters matches it: lowercase hex `SHA-256("orbiters-calls:" + id)`.
@@ -96,15 +94,7 @@ pub fn read(log_account: Option<&str>) -> LocalVrchat {
     let vrcx_account = vrcx.as_ref().and_then(vrcx_account);
     let next_dir = vrcnext_dir();
     let next_accounts = next_dir.as_deref().map(vrcnext_accounts).unwrap_or_default();
-    let log_account = log_account.filter(|id| is_user_id(id)).map(str::to_string);
-    let account = match (&log_account, &vrcx_account) {
-        (Some(log), _) if vrcx_account.as_deref() == Some(log) => Some((log.clone(), Source::Vrcx)),
-        (Some(log), _) if next_accounts.contains(log) => Some((log.clone(), Source::Vrcnext)),
-        (Some(log), _) => Some((log.clone(), Source::VrchatLog)),
-        (None, Some(id)) => Some((id.clone(), Source::Vrcx)),
-        (None, None) if next_accounts.len() == 1 => Some((next_accounts[0].clone(), Source::Vrcnext)),
-        _ => None,
-    };
+    let account = choose(log_account, vrcx_account.as_deref(), &next_accounts);
     let mut friends = BTreeSet::new();
     if let Some((id, _)) = &account {
         if let (Some(db), Some(vrcx_id)) = (&vrcx, &vrcx_account) {
@@ -122,13 +112,45 @@ pub fn read(log_account: Option<&str>) -> LocalVrchat {
     LocalVrchat { account, friends }
 }
 
+/// Which account is this computer's. VRCX and VRCNext signed in to VRChat with theirs, so an account one of them
+/// knows wins; the log's id (the local player's, as VRChat's log names it) picks between them, and stands alone only
+/// when neither knows an account, or when VRCNext knows several and none is the log's.
+fn choose(log_account: Option<&str>, vrcx: Option<&str>, next: &[String]) -> Option<(String, Source)> {
+    let log = log_account.filter(|id| is_user_id(id));
+    match (log, vrcx) {
+        (Some(log), Some(vrcx)) if log == vrcx => Some((log.to_string(), Source::Vrcx)),
+        (Some(log), _) if next.iter().any(|n| n == log) => Some((log.to_string(), Source::Vrcnext)),
+        (_, Some(vrcx)) => Some((vrcx.to_string(), Source::Vrcx)),
+        (_, None) if next.len() == 1 => Some((next[0].clone(), Source::Vrcnext)),
+        (Some(log), None) => Some((log.to_string(), Source::VrchatLog)),
+        (None, None) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn the_account_the_apps_know_wins() {
+        let (me, other, third) =
+            ("usr_11111111-1111-1111-1111-111111111111", "usr_22222222-2222-2222-2222-222222222222", "usr_33333333-3333-3333-3333-333333333333");
+        let next = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(choose(Some(me), Some(me), &[]), Some((me.into(), Source::Vrcx)));
+        // The log says another account (a name posing in it, or an old line): VRCX's stands.
+        assert_eq!(choose(Some(other), Some(me), &[]), Some((me.into(), Source::Vrcx)));
+        // The log picks between VRCX and VRCNext.
+        assert_eq!(choose(Some(other), Some(me), &next(&[other])), Some((other.into(), Source::Vrcnext)));
+        assert_eq!(choose(None, None, &next(&[other])), Some((other.into(), Source::Vrcnext)));
+        assert_eq!(choose(Some(third), None, &next(&[me, other])), Some((third.into(), Source::VrchatLog)), "VRCNext cannot tell which");
+        assert_eq!(choose(Some(me), None, &[]), Some((me.into(), Source::VrchatLog)));
+        assert_eq!(choose(Some("usr_bad"), None, &[]), None);
+    }
+
+    #[test]
     fn ids_and_hashes() {
         assert!(is_user_id("usr_1339e525-d75d-4832-9104-98dd89287681"));
+        assert!(!is_user_id("usr_1339E525-D75D-4832-9104-98DD89287681"), "VRChat writes them lowercase");
         assert!(!is_user_id("usr_1339e525"));
         assert!(!is_user_id("grp_1339e525-d75d-4832-9104-98dd89287681"));
         assert_eq!(vrcx_table_prefix("usr_1339e525-d75d-4832-9104-98dd89287681"), "usr1339e525d75d4832910498dd89287681");

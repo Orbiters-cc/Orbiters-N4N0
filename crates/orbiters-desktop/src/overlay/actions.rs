@@ -18,7 +18,10 @@ const ACTIONS: &str = r#"{
     { "controller_type": "vive_controller", "binding_url": "bindings_vive_controller.json" },
     { "controller_type": "holographic_controller", "binding_url": "bindings_holographic_controller.json" },
     { "controller_type": "hpmotioncontroller", "binding_url": "bindings_hpmotioncontroller.json" },
-    { "controller_type": "vive_cosmos_controller", "binding_url": "bindings_vive_cosmos_controller.json" }
+    { "controller_type": "vive_cosmos_controller", "binding_url": "bindings_vive_cosmos_controller.json" },
+    { "controller_type": "vive_focus3_controller", "binding_url": "bindings_vive_focus3_controller.json" },
+    { "controller_type": "pico_controller", "binding_url": "bindings_pico_controller.json" },
+    { "controller_type": "frame_controller", "binding_url": "bindings_frame_controller.json" }
   ],
   "actions": [
     { "name": "/actions/walk/in/move_left", "type": "vector2" },
@@ -48,16 +51,23 @@ fn bindings(controller: &str, input: &str, mode: &str) -> String {
     )
 }
 
+/// The controllers with default bindings, the stick's input path and its mode. VIVE Focus 3 and Pico controllers as
+/// Steam Link and Pico's streaming drivers describe them, the Steam Frame's as its driver does.
+const CONTROLLERS: [(&str, &str, &str); 9] = [
+    ("knuckles", "thumbstick", "joystick"),
+    ("oculus_touch", "joystick", "joystick"),
+    ("vive_controller", "trackpad", "trackpad"),
+    ("holographic_controller", "joystick", "joystick"),
+    ("hpmotioncontroller", "joystick", "joystick"),
+    ("vive_cosmos_controller", "joystick", "joystick"),
+    ("vive_focus3_controller", "joystick", "joystick"),
+    ("pico_controller", "joystick", "joystick"),
+    ("frame_controller", "thumbstick", "joystick"),
+];
+
 pub(super) fn write_manifest(dir: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let files = [
-        ("knuckles", "thumbstick", "joystick"),
-        ("oculus_touch", "joystick", "joystick"),
-        ("vive_controller", "trackpad", "trackpad"),
-        ("holographic_controller", "joystick", "joystick"),
-        ("hpmotioncontroller", "joystick", "joystick"),
-        ("vive_cosmos_controller", "joystick", "joystick"),
-    ];
+    let files = CONTROLLERS;
     for (controller, input, mode) in files {
         std::fs::write(dir.join(format!("bindings_{controller}.json")), bindings(controller, input, mode))?;
     }
@@ -115,12 +125,14 @@ impl Actions {
         steamvr.input().is_ok_and(|input| input.update_sets(&self.sets).is_ok())
     }
 
-    /// The menu button was pressed since the last frame (its rising edge).
+    /// The menu button was pressed since the last read (its rising edge; `changed` also catches a press that went
+    /// up and down again between two reads).
     pub fn menu_pressed(&mut self, steamvr: &vr::Client) -> bool {
         let Some((_, action)) = self.menu else { return false };
         let Ok(input) = steamvr.input() else { return false };
-        let down = input.digital(action).is_ok_and(|d| d.active && d.state);
-        let pressed = down && !self.menu_down;
+        let Ok(data) = input.digital(action) else { return false };
+        let down = data.active && data.state;
+        let pressed = down && (!self.menu_down || data.changed);
         self.menu_down = down;
         pressed
     }
@@ -143,6 +155,12 @@ mod tests {
         }
         let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(manifest["actions"].as_array().unwrap().len(), 3);
+        // Every controller listed has its file, and every file is listed.
+        let listed: Vec<&str> = manifest["default_bindings"].as_array().unwrap().iter().map(|b| b["controller_type"].as_str().unwrap()).collect();
+        assert_eq!(listed, CONTROLLERS.map(|(c, _, _)| c));
+        for b in manifest["default_bindings"].as_array().unwrap() {
+            assert!(dir.join(b["binding_url"].as_str().unwrap()).is_file());
+        }
         std::fs::remove_dir_all(dir).ok();
     }
 }

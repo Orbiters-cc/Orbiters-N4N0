@@ -5,6 +5,7 @@
 //! layout table holds it in a byte.
 
 use super::{Call, KeyboardLayout, Keys, Menu, Page, Target, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, TIMERS};
+use std::sync::OnceLock;
 
 pub const WIDTH: u16 = 1024;
 pub const HEIGHT: u16 = 576;
@@ -285,6 +286,13 @@ pub const PICTURES: usize = RESULTS_PER_PAGE;
 /// The screen's text: bytes for every page's slots.
 pub const TEXT_BYTES: u16 = 360;
 
+/// The page's layout, built once: the screen's steps and the overlay's frames read it many times a second.
+pub fn cached(page: ScreenPage) -> &'static Layout {
+    static LAYOUTS: OnceLock<Vec<Layout>> = OnceLock::new();
+    let all = LAYOUTS.get_or_init(|| ScreenPage::ALL.iter().map(|&p| layout(p)).collect());
+    &all[ScreenPage::ALL.iter().position(|&p| p == page).unwrap_or(0)]
+}
+
 /// Where something pressable is.
 pub fn hit(layout: &Layout, x: f32, y: f32) -> Option<(usize, Target)> {
     // The last drawn wins (buttons sit on rows).
@@ -510,6 +518,30 @@ fn tile_note(menu: &Menu, tile: u8) -> String {
 
 /// What a slot shows (not yet cut to its cells).
 pub fn text(menu: &Menu, content: Content) -> String {
+    text_for(menu, content, false)
+}
+
+/// What a slot shows, to the owner or, `public`, to everyone else around (the avatar's screen through the synced
+/// channel): there the owner's friends are never named (the call list, who calls or is called), nor the owner's own
+/// words to Orb.
+pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
+    if public {
+        match content {
+            Content::ContactName(_) => return String::new(),
+            Content::CallName if menu.call.is_some() => return "A friend".into(),
+            Content::CallsTitle if menu.calls_ready => return "Call a friend".into(),
+            Content::TileNote(2) => {
+                return match &menu.call {
+                    Some(Call::Ringing { .. }) => "Incoming call".into(),
+                    Some(Call::Calling { .. }) => "Calling…".into(),
+                    Some(Call::Connected { seconds, .. }) => super::clock(*seconds),
+                    None => String::new(),
+                }
+            }
+            Content::Heard if menu.heard_private => return String::new(),
+            _ => {}
+        }
+    }
     match content {
         Content::Status => {
             if menu.listening {
@@ -521,7 +553,7 @@ pub fn text(menu: &Menu, content: Content) -> String {
         Content::TileNote(i) => tile_note(menu, i),
         Content::Heard => menu.heard.as_ref().map(|h| format!("\"{h}\"")).unwrap_or_default(),
         Content::Query => menu.query.clone(),
-        Content::Suggestion(i) => menu.shown_suggestions().get(i as usize).cloned().unwrap_or_default(),
+        Content::Suggestion(i) => menu.shown_suggestions().nth(i as usize).map(str::to_string).unwrap_or_default(),
         Content::ResultsTitle => {
             if let Some(notice) = &menu.notice {
                 notice.clone()
@@ -601,7 +633,12 @@ pub fn ellipsis(text: &str, cols: usize) -> String {
 /// What a slot shows, cut to its cells: the screen shows exactly this, and the overlay too (characters the screen's
 /// font has no glyph for are folded or dropped, as on Orb's panel).
 pub fn slot_text(menu: &Menu, slot: &Slot) -> String {
-    let text = orbiters_contracts::orb::panel_text(&text(menu, slot.content)).replace('\n', " ");
+    slot_text_for(menu, slot, false)
+}
+
+/// What a slot shows, cut to its cells, to the owner or to everyone else (`public`, see [`text_for`]).
+pub fn slot_text_for(menu: &Menu, slot: &Slot, public: bool) -> String {
+    let text = orbiters_contracts::orb::panel_text(&crate::text::fold_more(&text_for(menu, slot.content, public))).replace('\n', " ");
     match slot.content {
         // The field keeps the end in view, with the caret.
         Content::Query => {
@@ -632,7 +669,7 @@ pub fn state(menu: &Menu, element: &Element) -> State {
         _ => false,
     };
     let hidden = match element.target {
-        Target::Suggestion(i) => i as usize >= menu.shown_suggestions().len(),
+        Target::Suggestion(i) => menu.shown_suggestions().nth(i as usize).is_none(),
         Target::Copy(i) => i as usize >= menu.page_results().len(),
         Target::Contact(i) => i as usize >= menu.page_contacts().len() || menu.call.is_some(),
         Target::Previous => !menu.has_previous(),
@@ -659,6 +696,7 @@ mod tests {
                 assert!(r.right() <= WIDTH && r.bottom() <= HEIGHT, "{page:?}: {r:?} leaves the page");
                 for v in [r.x, r.y, r.w, r.h] {
                     assert_eq!(v % GRID, 0, "{page:?}: {r:?} is off the grid");
+                    assert!(v / GRID <= 255, "{page:?}: {r:?} does not fit the screen's layout table (a byte in 4-pixel units)");
                 }
             }
             for s in &l.slots {
@@ -720,7 +758,7 @@ mod tests {
         assert_eq!(ellipsis("Lofi", 8), "Lofi");
         menu.search_for("cats");
         menu.results_arrived(
-            "cats",
+            1,
             crate::youtube::Results {
                 videos: vec![crate::youtube::Video {
                     id: "n61ULEU7CO0".into(),
@@ -739,5 +777,30 @@ mod tests {
         let copy = l.elements.iter().rev().find(|e| e.target == Target::Copy(1)).unwrap();
         assert!(state(&menu, copy).hidden, "one result: the second row is hidden");
         assert!(state(&menu, &l.elements[2]).hidden, "no next page");
+        assert_eq!(cached(ScreenPage::Results), &l, "built once, the same");
+    }
+
+    #[test]
+    fn everyone_else_never_reads_the_owner_s_friends() {
+        let mut menu = Menu::default();
+        menu.open();
+        menu.set_contacts(vec![super::super::Contact { id: "u1".into(), name: "Lyra Nightfall".into() }], true, "");
+        menu.press(Target::Call);
+        let list = cached(ScreenPage::of(&menu));
+        let texts = |public: bool| list.slots.iter().map(|s| slot_text_for(&menu, s, public)).collect::<Vec<_>>().join("|");
+        assert!(texts(false).contains("Lyra Nightfall") && texts(false).contains("1 online"));
+        assert!(!texts(true).contains("Lyra") && !texts(true).contains("online"), "{}", texts(true));
+        menu.set_call(Some(Call::Ringing { name: "Lyra Nightfall".into() }));
+        let ringing = cached(ScreenPage::of(&menu));
+        let shown: Vec<String> = ringing.slots.iter().map(|s| slot_text_for(&menu, s, true)).collect();
+        assert_eq!(shown, vec!["A friend", "is calling you"]);
+        assert_eq!(text_for(&menu, Content::TileNote(2), true), "Incoming call");
+        assert_eq!(text_for(&menu, Content::TileNote(2), false), "Lyra Nightfall calls");
+        // The owner's words to Orb stay theirs; what Orb says is for everyone.
+        menu.heard("put my hoodie on");
+        assert_eq!(text_for(&menu, Content::Heard, true), "");
+        menu.heard = Some("Voilà ton sweat".into());
+        menu.heard_private = false;
+        assert_eq!(text_for(&menu, Content::Heard, true), "\"Voilà ton sweat\"");
     }
 }

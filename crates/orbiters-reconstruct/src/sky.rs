@@ -32,8 +32,8 @@ pub fn complete(g: &mut Gaussians, centre: [f32; 3], far_field: f32, distance: f
         }
         let (a, e) = cell([d[0] / r, d[1] / r, d[2] / r]);
         let w = sigmoid(g.opacity_logits[i]);
-        for c in 0..3 {
-            sum[e * AZIMUTHS + a][c] += w * g.colors[i][c];
+        for (total, colour) in sum[e * AZIMUTHS + a].iter_mut().zip(g.colors[i]) {
+            *total += w * colour;
         }
         weight[e * AZIMUTHS + a] += w;
     }
@@ -57,7 +57,7 @@ pub fn complete(g: &mut Gaussians, centre: [f32; 3], far_field: f32, distance: f
     }
     let lowest = (((LOWEST_DEG / 180.0 + 0.5) * ELEVATIONS as f32) as usize).min(ELEVATIONS - 1);
     let mut added = 0;
-    for e in lowest..ELEVATIONS {
+    for (e, band_colour) in band.iter().enumerate().skip(lowest) {
         let el = ((e as f32 + 0.5) / ELEVATIONS as f32 - 0.5) * std::f32::consts::PI;
         for a in 0..AZIMUTHS {
             if seen(a, e) {
@@ -66,7 +66,7 @@ pub fn complete(g: &mut Gaussians, centre: [f32; 3], far_field: f32, distance: f
             // The nearest seen cell of the band, fading into the band's colour over a quarter turn.
             let nearest = (1..=AZIMUTHS / 2)
                 .find_map(|k| [(a + k) % AZIMUTHS, (a + AZIMUTHS - k) % AZIMUTHS].into_iter().find(|&j| seen(j, e)).map(|j| (k, colour(j, e))));
-            let base = band[e].expect("every band has a colour");
+            let base = band_colour.expect("every band has a colour");
             let c = match nearest {
                 Some((k, near)) => {
                     let t = (k as f32 / (AZIMUTHS as f32 / 4.0)).min(1.0);

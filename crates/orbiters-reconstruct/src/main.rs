@@ -105,8 +105,9 @@ fn run(args: Args) -> anyhow::Result<Report> {
     stage(Stage::Seeding, 0.0);
     let budget = settings.budget * 2 / 3;
     let mut seeded = orbiters_reconstruct::priority::on_loading_threads(|| init::from_depth(data, budget, &held_out, |p| stage(Stage::Seeding, p)));
-    // Depth frames that say too little (heavy bloom, extreme post-processing, no depth frames at all): seeds along the
-    // keyframes' rays make up a tenth of the seeding budget, and the set may grow while many are dead.
+    // Depth frames that say too little (bloom beyond what decoders take out, extreme post-processing, no depth frames
+    // at all): seeds along the keyframes' rays make up a tenth of the seeding budget, and the set may grow while many
+    // are dead.
     let few = budget / 10;
     if seeded.len() < few {
         if seeded.is_empty() {

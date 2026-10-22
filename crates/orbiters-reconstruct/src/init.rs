@@ -60,8 +60,9 @@ pub fn from_depth(data: &Dataset, budget: usize, held_out: &[usize], mut progres
 pub const RAY_NEAREST: f32 = 0.5;
 pub const RAY_FARTHEST: f32 = 50.0;
 
-/// Seeds for a capture whose depth frames say too little: on the plaza walk under heavy bloom 99.97 % of the samples
-/// could not be read, depth seeded about a thousand Gaussians, and training stayed there (8–10 dB off-path). Adds
+/// Seeds for a capture whose depth frames say too little: on the plaza walk under heavy bloom, before decoders took the
+/// glow out (contracts, 2026-10-22), 99.97 % of the samples could not be read, depth seeded about a thousand Gaussians,
+/// and training stayed there (8–10 dB off-path). Adds
 /// `count` along the rays of training keyframes' scene pixels (not `held_out`), 3DGS's random initialisation: depths
 /// spread evenly in inverse depth between [`RAY_NEAREST`] and [`RAY_FARTHEST`], the pixel's colour, a round footprint
 /// as wide as the seeds' spacing, opacity 0.1. Training keeps those the views agree on.

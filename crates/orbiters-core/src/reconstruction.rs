@@ -14,8 +14,8 @@ pub const OLD_DIR: &str = "reconstruction.old";
 pub const PLY_FILE: &str = "splats.ply";
 /// The sky behind the splats, where training learnt it as a map (orbiters_reconstruct::sky::SkyMap): an
 /// equirectangular 8-bit sRGB PNG twice as wide as high, longitude `atan2(x, z)` from −180° at the left edge, elevation
-/// from +90° at the top row, in the PLY's (Unity's) axes. Viewers draw it wherever the splats leave the view open
-/// (contracts Docs/session-bundle.md).
+/// from +90° at the top row, by directions in the Unity world (the PLY's right-handed world with Z negated). Viewers
+/// draw it wherever the splats leave the view open (contracts Docs/session-bundle.md).
 pub const SKY_FILE: &str = "sky.png";
 pub const REPORT_FILE: &str = "report.json";
 /// A render of the first held-out keyframe (QOI, RGB).

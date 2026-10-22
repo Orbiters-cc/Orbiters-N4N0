@@ -197,19 +197,24 @@ impl Api {
         Self::json(response)
     }
 
-    /// Adds a 3D preview (`.splat`), replacing this member's earlier one of the world. `metadata` holds the start
-    /// view (`{"view":{"position":[…],"target":[…]}}`), quality and capture date.
+    /// Adds a 3D preview (`.splat`) with its sky map (a reconstruction's sky.png, when there is one), replacing this
+    /// member's earlier one of the world. `metadata` holds the start view (`{"view":{"position":[…],"target":[…]}}`),
+    /// quality and capture date.
     pub fn add_preview(
         &self,
         token: &str,
         world_id: &str,
         splat: Vec<u8>,
+        sky: Option<&Path>,
         metadata: &serde_json::Value,
         progress: impl FnMut(u64, u64) + Send + 'static,
     ) -> anyhow::Result<()> {
         let world_id = world_path(world_id)?;
-        let part = Part::bytes("splat", format!("{world_id}.splat"), "application/octet-stream", splat);
-        let response = self.multipart(token, &format!("maps/worlds/{world_id}/previews"), &metadata.to_string(), vec![part], progress)?;
+        let mut parts = vec![Part::bytes("splat", format!("{world_id}.splat"), "application/octet-stream", splat)];
+        if let Some(sky) = sky {
+            parts.push(Part::file("sky", "sky.png", "image/png", sky)?);
+        }
+        let response = self.multipart(token, &format!("maps/worlds/{world_id}/previews"), &metadata.to_string(), parts, progress)?;
         Self::json::<serde_json::Value>(response).map(|_| ())
     }
 

@@ -1,5 +1,6 @@
 //! The 3D view of a session's reconstruction: its splats drawn by the same GPU rasteriser that trained them
-//! (`orbiters_reconstruct::gpu::Gpu` in render-only mode, on the window's own device), through a paint callback.
+//! (`orbiters_reconstruct::gpu::Gpu` in render-only mode, on the window's own device), through a paint callback, with
+//! the sky map trained with them behind (`sky.png`, where training learnt the sky as a map).
 //! It opens on the camera of the keyframe the preview shows; drag to orbit, right-drag to pan, scroll to zoom,
 //! WASD/QE to fly, and step through the recorded keyframe views. What the keyframes saw poorly (weakly, rarely, from
 //! one side, or from much farther than the view now is) can be faded, blurred or turned to haze, and what lies beyond
@@ -14,6 +15,7 @@ use orbiters_core::reconstruction;
 use orbiters_reconstruct::camera::{normalize, Camera};
 use orbiters_reconstruct::gpu::{Confidence, ConfidenceMode, FarField, FarMode, Gpu, Target};
 use orbiters_reconstruct::ply;
+use orbiters_reconstruct::sky::SkyMap;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, IconButton, SegOption, Variant};
 use orbiters_ui::{format, icons};
@@ -35,8 +37,8 @@ struct Loaded {
     /// lies beyond the depth frames' reach (what the far field control needs).
     seen: bool,
     far: bool,
-    /// The sky's colour at the horizon (orbiters_reconstruct::sky::horizon), else the background's: what fog and haze
-    /// turn to.
+    /// The sky's colour at the horizon (the sky map's band around it, else the sky shell's: orbiters_reconstruct::sky),
+    /// else the background's: what fog and haze turn to.
     horizon: [f32; 3],
 }
 
@@ -356,17 +358,23 @@ fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_p
     }
 }
 
-/// Reads the splats and the recorded views, and sets the renderer up on the window's device.
+/// Reads the splats, their sky map and the recorded views, and sets the renderer up on the window's device.
 fn load(dir: &Path, device: wgpu::Device, queue: wgpu::Queue) -> anyhow::Result<Loaded> {
-    let g = ply::read(&reconstruction::result_dir(dir).join(reconstruction::PLY_FILE))?;
+    let result = reconstruction::result_dir(dir);
+    let g = ply::read(&result.join(reconstruction::PLY_FILE))?;
+    let sky_file = result.join(reconstruction::SKY_FILE);
+    let sky = if sky_file.is_file() { Some(SkyMap::read(&sky_file)?) } else { None };
     let (views, start) = views::recorded(dir)?;
     // Orbit around what that view looks at.
     let depth = views::depth_ahead(&g, &views[start]);
     let mut gpu = Gpu::renderer(device, queue);
     gpu.upload(&g);
+    if let Some(map) = &sky {
+        gpu.set_sky(Some((map.width, &map.rgb)))?;
+    }
     let seen = g.seen.iter().any(|s| s.weight >= 0.0);
     let far = g.seen.iter().any(|s| s.beyond > 0.0);
-    let horizon = orbiters_reconstruct::sky::horizon(&g).unwrap_or(BACKGROUND);
+    let horizon = sky.as_ref().map(SkyMap::horizon).or_else(|| orbiters_reconstruct::sky::horizon(&g)).unwrap_or(BACKGROUND);
     Ok(Loaded { renderer: Arc::new(Mutex::new(Renderer { gpu, target: None, last: None, error: None, checks: 0 })), splats: g.len(), views, start, depth, seen, far, horizon })
 }
 

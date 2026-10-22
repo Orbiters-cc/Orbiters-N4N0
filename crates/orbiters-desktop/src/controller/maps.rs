@@ -182,8 +182,8 @@ impl Controller {
         let id = self.start_upload(&world_id, &world_name, UploadKind::Preview, vec![session.clone()])?;
         let c = self.clone();
         std::thread::spawn(move || {
-            let state = match web_preview(&session).and_then(|(bytes, metadata)| {
-                let total = bytes.len() as u64;
+            let state = match web_preview(&session).and_then(|(bytes, sky, metadata)| {
+                let total = bytes.len() as u64 + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
                 c.update_if(|s| match s.uploads.iter_mut().find(|u| u.id == id) {
                     Some(u) => {
                         u.state = UploadState::Sending;
@@ -192,7 +192,7 @@ impl Controller {
                     }
                     None => false,
                 });
-                api.add_preview(&token, &world_id, bytes, &metadata, c.progress(id))
+                api.add_preview(&token, &world_id, bytes, sky.as_deref(), &metadata, c.progress(id))
             }) {
                 Ok(()) => UploadState::Done { added: 1, skipped: 0 },
                 Err(e) => UploadState::Failed { message: e.to_string() },
@@ -203,10 +203,12 @@ impl Controller {
     }
 }
 
-/// A session's splats as a web `.splat`, and the upload's metadata: the start view (right-handed like the file:
-/// Unity's Z negated), the held-out quality and when the session was recorded.
-fn web_preview(session: &Path) -> anyhow::Result<(Vec<u8>, serde_json::Value)> {
-    let g = orbiters_reconstruct::ply::read(&reconstruction::result_dir(session).join(reconstruction::PLY_FILE))?;
+/// A session's splats as a web `.splat`, its sky map (sky.png as trained, when training learnt one) and the upload's
+/// metadata: the start view (right-handed like the file: Unity's Z negated), the held-out quality and when the session
+/// was recorded.
+fn web_preview(session: &Path) -> anyhow::Result<(Vec<u8>, Option<PathBuf>, serde_json::Value)> {
+    let result = reconstruction::result_dir(session);
+    let g = orbiters_reconstruct::ply::read(&result.join(reconstruction::PLY_FILE))?;
     let (views, start) = crate::views::recorded(session)?;
     let v = views[start];
     let depth = crate::views::depth_ahead(&g, &v);
@@ -221,7 +223,8 @@ fn web_preview(session: &Path) -> anyhow::Result<(Vec<u8>, serde_json::Value)> {
         "quality": report.and_then(|r| r.psnr_held_out),
         "capturedAt": recorded,
     });
-    Ok((web.bytes, metadata))
+    let sky = Some(result.join(reconstruction::SKY_FILE)).filter(|p| p.is_file());
+    Ok((web.bytes, sky, metadata))
 }
 
 #[cfg(test)]
@@ -238,7 +241,7 @@ mod tests {
         let api = orbiters_core::account::Api::at(&env("ORBITERS_TEST_API"));
         let world = env("ORBITERS_TEST_WORLD");
         let t = Instant::now();
-        let (bytes, metadata) = web_preview(Path::new(&env("ORBITERS_TEST_SESSION"))).unwrap();
+        let (bytes, sky, metadata) = web_preview(Path::new(&env("ORBITERS_TEST_SESSION"))).unwrap();
         println!("{:.1} MB web preview in {:?}: {metadata}", bytes.len() as f64 / 1e6, t.elapsed());
         assert_eq!(bytes.len() % orbiters_reconstruct::web::SPLAT_BYTES, 0);
         let view = &metadata["view"];
@@ -247,7 +250,7 @@ mod tests {
         let sent = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let s = sent.clone();
         let total = bytes.len() as u64;
-        api.add_preview(&env("ORBITERS_TEST_TOKEN"), &world, bytes, &metadata, move |n, _| s.store(n, Ordering::Relaxed)).unwrap();
+        api.add_preview(&env("ORBITERS_TEST_TOKEN"), &world, bytes, sky.as_deref(), &metadata, move |n, _| s.store(n, Ordering::Relaxed)).unwrap();
         assert!(sent.load(Ordering::Relaxed) >= total);
         let page = api.world(&world).unwrap().unwrap();
         println!("previews {before} → {}", page.previews);

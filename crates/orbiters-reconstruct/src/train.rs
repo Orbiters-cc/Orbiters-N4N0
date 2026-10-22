@@ -85,6 +85,10 @@ pub struct Settings {
     /// them; the shell's discs stay only where the parallax test cannot confirm sky (crate::sky::give_way). 0, or a
     /// capture none of whose pixels saw the sky: the shell of discs and its completion ([`Settings::sky_fill`]).
     pub sky_map: u32,
+    /// Depth seeded too few Gaussians, and seeds along the keyframes' rays made up for it (crate::init::add_from_rays;
+    /// the worker sets it): relocation then grows the set while it is under a quarter of the budget, even while many
+    /// Gaussians are dead. Otherwise the set grows only while few are, and a set that starts at a thousand never does.
+    pub starved: bool,
 }
 
 impl Default for Settings {
@@ -115,6 +119,7 @@ impl Default for Settings {
             filter_3d: 0.0,
             cleanup: false,
             sky_map: 2048,
+            starved: false,
         }
     }
 }
@@ -399,7 +404,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                 let dead = weights.iter().filter(|w| **w == -1.0).count();
                 eprintln!("it {it}: {n} Gaussians, {dead} dead or huge, {intersections} entries");
             }
-            let plan = plan_relocation(&weights, (n + n / 20).min(settings.budget), &mut rng);
+            let plan = plan_relocation(&weights, (n + n / 20).min(settings.budget), settings.starved && n < settings.budget / 4, &mut rng);
             gpu.apply_relocation(&plan)?;
             regularise(gpu, plan.len);
             gpu.update_filter_3d(&filter_cams, settings.filter_3d)?;
@@ -582,8 +587,9 @@ pub(crate) fn weights(g: &Gaussians, huge: &[bool]) -> Vec<f32> {
 
 /// Decides a relocation round from the Gaussians' [`weights`]: dead ones and new ones, up to `grow_to`, become copies
 /// of live ones sampled by opacity, never sky ones (unless nothing else lives). A weight that is no number counts as
-/// dead; weights that sum to nothing (a readback of zeros) move nothing.
-pub fn plan_relocation(weights: &[f32], grow_to: usize, rng: &mut fastrand::Rng) -> Relocation {
+/// dead; weights that sum to nothing (a readback of zeros) move nothing. `starved` ([`Settings::starved`]): the set
+/// grows whatever number are dead.
+pub fn plan_relocation(weights: &[f32], grow_to: usize, starved: bool, rng: &mut fastrand::Rng) -> Relocation {
     let n = weights.len();
     let opacity = |i: usize| if weights[i] >= 0.0 { weights[i] } else { -2.0 - weights[i] };
     let (mut dead, mut alive): (Vec<usize>, Vec<usize>) = (0..n).partition(|&i| weights[i] == -1.0 || !weights[i].is_finite());
@@ -593,7 +599,7 @@ pub fn plan_relocation(weights: &[f32], grow_to: usize, rng: &mut fastrand::Rng)
     // At most a twentieth of the set moves at once, and the set grows only while it uses what it has: a scene that
     // needs fewer Gaussians than the budget would otherwise churn copies that fade again.
     let cap = (n / 20).max(1);
-    let grow = if dead.len() <= cap { grow_to.saturating_sub(n) } else { 0 };
+    let grow = if dead.len() <= cap || starved { grow_to.saturating_sub(n) } else { 0 };
     if dead.len() > cap {
         rng.shuffle(&mut dead);
         dead.truncate(cap);
@@ -712,7 +718,7 @@ pub(crate) fn apply_relocation(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Ve
 /// copies.
 #[cfg(test)]
 fn relocate(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Vec<f32>, huge: &[bool], grow_to: usize, rng: &mut fastrand::Rng) -> usize {
-    let plan = plan_relocation(&weights(g, huge), grow_to, rng);
+    let plan = plan_relocation(&weights(g, huge), grow_to, false, rng);
     apply_relocation(g, m1, m2, &plan);
     plan.copies.len()
 }
@@ -845,31 +851,44 @@ mod tests {
         assert_eq!(relocate(&mut far, &mut vec![0.0; 100 * PACKED], &mut vec![0.0; 100 * PACKED], &[false; 100], 104, &mut fastrand::Rng::with_seed(4)), 7);
     }
 
+    /// A starved set (seeded from rays, crate::init::add_from_rays) grows though many of it are dead; another does not.
+    #[test]
+    fn a_starved_set_grows_whatever_number_are_dead() {
+        let mut rng = fastrand::Rng::with_seed(5);
+        // 1,000 Gaussians, 400 dead.
+        let w: Vec<f32> = (0..1000).map(|i| if i % 5 < 2 { -1.0 } else { 0.5 }).collect();
+        let fed = plan_relocation(&w, 1050, false, &mut rng);
+        assert_eq!(fed.len, 1000, "a set that does not use what it has does not grow");
+        let starved = plan_relocation(&w, 1050, true, &mut rng);
+        assert_eq!(starved.len, 1050);
+        assert!(starved.copies.len() >= 50 + 50, "a twentieth of the dead moved, and fifty new: {}", starved.copies.len());
+    }
+
     /// Weights that all read zero (a failed readback), sources that cannot take all the moves (a mass fade), weights
     /// that are no number: every plan ends.
     #[test]
     fn relocation_plans_end_whatever_the_weights() {
         let mut rng = fastrand::Rng::with_seed(8);
-        let plan = plan_relocation(&[0.0; 1000], 1050, &mut rng);
+        let plan = plan_relocation(&[0.0; 1000], 1050, false, &mut rng);
         assert!(plan.copies.is_empty() && plan.adjust.is_empty() && plan.len == 1000);
         // Nine live sources and 9,991 faded ones: a twentieth (500) is more than nine can take (450).
         let mut w = vec![-1.0f32; 10_000];
         for i in 0..9 {
             w[i * 1000] = 0.5;
         }
-        let plan = plan_relocation(&w, 10_500, &mut rng);
+        let plan = plan_relocation(&w, 10_500, false, &mut rng);
         assert_eq!(plan.copies.len(), 9 * (MAX_RATIO - 1));
         assert_eq!(plan.adjust.len(), 9);
         // One source holding nearly all the weight takes all it can (50 copies); the others take the other 50 moves.
         let mut w = vec![0.001f32; 200];
         w[0] = 1000.0;
         w.extend(vec![-1.0; 1800]);
-        let plan = plan_relocation(&w, 2000, &mut rng);
+        let plan = plan_relocation(&w, 2000, false, &mut rng);
         assert_eq!(plan.copies.len(), 100);
         assert_eq!(plan.copies.iter().filter(|c| c[1] == 0).count(), MAX_RATIO - 1);
         // NaN and ∞ count as dead (at least one slot moves a round); the copy comes from the one live source.
         let w = [f32::NAN, 0.5, -1.0, f32::INFINITY];
-        let plan = plan_relocation(&w, 4, &mut rng);
+        let plan = plan_relocation(&w, 4, false, &mut rng);
         assert_eq!(plan.copies.len(), 1);
         assert!(plan.copies.iter().all(|c| c[1] == 1 && c[0] != 1));
     }

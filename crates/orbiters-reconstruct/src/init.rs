@@ -56,6 +56,37 @@ pub fn from_depth(data: &Dataset, budget: usize, held_out: &[usize], mut progres
     g
 }
 
+/// Depths of [`add_from_rays`]' seeds: spread evenly in inverse depth between these, metres.
+pub const RAY_NEAREST: f32 = 0.5;
+pub const RAY_FARTHEST: f32 = 50.0;
+
+/// Seeds for a capture whose depth frames say too little: on the plaza walk under heavy bloom 99.97 % of the samples
+/// could not be read, depth seeded about a thousand Gaussians, and training stayed there (8–10 dB off-path). Adds
+/// `count` along the rays of training keyframes' scene pixels (not `held_out`), 3DGS's random initialisation: depths
+/// spread evenly in inverse depth between [`RAY_NEAREST`] and [`RAY_FARTHEST`], the pixel's colour, a round footprint
+/// as wide as the seeds' spacing, opacity 0.1. Training keeps those the views agree on.
+pub fn add_from_rays(g: &mut Gaussians, data: &Dataset, count: usize, held_out: &[usize], seed: u64) {
+    let views: Vec<usize> = (0..data.views.len()).filter(|i| !held_out.contains(i)).collect();
+    let scene: Vec<u32> = (0..data.mask.len()).filter(|&p| data.mask[p] > 0.5).map(|p| p as u32).collect();
+    if views.is_empty() || scene.is_empty() || count == 0 {
+        return;
+    }
+    let mut rng = fastrand::Rng::with_seed(seed);
+    // The seeds' spacing in a view, pixels: the views share them out over their scene pixels.
+    let spacing = (scene.len() as f32 * views.len() as f32 / count as f32).sqrt();
+    let opacity = logit(0.1);
+    let (near, far) = (1.0 / RAY_NEAREST, 1.0 / RAY_FARTHEST);
+    for _ in 0..count {
+        let v = &data.views[views[rng.usize(..views.len())]];
+        let p = scene[rng.usize(..scene.len())];
+        let (x, y) = ((p % data.width) as f32, (p / data.width) as f32);
+        let z = 1.0 / (far + rng.f32() * (near - far));
+        let Some(color) = sample_rgb(&v.image, data.width, data.height, x, y) else { continue };
+        let s = (z * spacing / v.camera.fx).max(1e-4).ln();
+        g.push(v.camera.unproject(x, y, z), [s; 3], [1.0, 0.0, 0.0, 0.0], opacity, color);
+    }
+}
+
 /// A sample's point and the footprint of its disc (the spacing of its tile's samples): on the sky shell when it hit
 /// nothing.
 fn point(dv: &DepthView, i: usize) -> ([f32; 3], f32, bool) {
@@ -267,6 +298,29 @@ mod tests {
         let (g, mut rng) = (grid(), fastrand::Rng::with_seed(4));
         let depth_views = (0..frames).map(|k| depth_frame(step * k as f32, k as f32, &g, &mut rng)).collect();
         dataset(vec![keyframe(0.0, 0.0, 0, [200, 10, 10]), keyframe(0.0, 100.0, 1, [10, 200, 10])], depth_views)
+    }
+
+    /// A capture without depth: seeds along the training keyframes' rays, inside their view at depths between the
+    /// bounds, coloured from them (never from the held-out one), through scene pixels only.
+    #[test]
+    fn a_capture_without_depth_seeds_along_the_rays() {
+        let data = dataset(vec![keyframe(0.0, 0.0, 0, [200, 10, 10]), keyframe(1.0, 1.0, 1, [10, 200, 10]), keyframe(2.0, 2.0, 2, [10, 10, 200])], Vec::new());
+        assert!(from_depth(&data, usize::MAX, &[], |_| {}).is_empty());
+        let mut g = Gaussians::default();
+        add_from_rays(&mut g, &data, 500, &[1], 9);
+        assert_eq!(g.len(), 500);
+        for i in 0..g.len() {
+            let c = g.colors[i];
+            let from = if c[0] > 0.5 { 0.0 } else { 2.0 };
+            assert!(c[1] < 0.5, "never the held-out keyframe's green: {c:?}");
+            let (u, v, z) = camera(from).project(g.means[i]).expect("in front of its keyframe");
+            assert!((RAY_NEAREST * 0.999..=RAY_FARTHEST * 1.001).contains(&z), "depth {z}");
+            assert!((-0.01..W as f32).contains(&u) && (-0.01..80.0).contains(&v), "a scene pixel ({u}, {v}), not the band");
+            assert!(g.opacity_logits[i] < 0.0 && !g.sky[i]);
+        }
+        // Depths spread in inverse depth: as many seeds nearer than 1 m as between 1 and 50 m.
+        let near = (0..g.len()).filter(|&i| camera(if g.colors[i][0] > 0.5 { 0.0 } else { 2.0 }).project(g.means[i]).unwrap().2 < 1.0).count();
+        assert!((200..300).contains(&near), "{near}");
     }
 
     /// The merge in parallel keeps exactly the discs the one-sample-at-a-time merge kept, in the same order.

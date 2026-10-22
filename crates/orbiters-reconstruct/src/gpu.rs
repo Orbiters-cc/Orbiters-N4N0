@@ -2531,7 +2531,7 @@ mod tests {
         for (i, (a, b)) in weights.iter().zip(&expected_weights).enumerate() {
             assert!((a - b).abs() < 1e-5, "Gaussian {i}: weight {a} on the device, {b} on the CPU");
         }
-        let plan = crate::train::plan_relocation(&weights, 2 * n, &mut fastrand::Rng::with_seed(3));
+        let plan = crate::train::plan_relocation(&weights, 2 * n, false, &mut fastrand::Rng::with_seed(3));
         assert!(!plan.adjust.is_empty() && plan.len == 2 * n, "{} adjusted, {} Gaussians", plan.adjust.len(), plan.len);
         let mut expected = g.clone();
         let (mut m1, mut m2) = (ones.clone(), ones.clone());

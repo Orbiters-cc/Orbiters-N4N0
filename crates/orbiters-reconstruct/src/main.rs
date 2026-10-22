@@ -112,8 +112,8 @@ fn run(args: Args) -> anyhow::Result<Report> {
         settings.sky_fill = false;
         let (map, found) = orbiters_reconstruct::sky::seed_map(data, settings.sky_map, &held_out);
         eprintln!(
-            "sky map: {} across from {} sky pixels, {} texels seen; {} of the {} seen from both halves of the walk differ between them",
-            map.width, found.pixels, found.texels_seen, found.texels_parallax, found.texels_tested
+            "sky map: {} across from {} sky pixels, {} texels seen; {} of the {} 5.6° cells seen from both halves of the walk differ between them",
+            map.width, found.pixels, found.texels_seen, found.cells_parallax, found.cells_tested
         );
         gpu.set_sky(Some((map.width, &map.rgb)))?;
     }

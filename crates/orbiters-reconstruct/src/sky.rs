@@ -153,20 +153,23 @@ pub struct SkyMap {
 }
 
 /// What seeding a [`SkyMap`] found: keyframe pixels whose rays hit nothing in the depth frame nearest in time, the
-/// texels they reached, and of the texels seen from both halves of the walk (split at its median position along its
-/// longest extent) those whose colour differs between the halves: finite content without depth shows parallax.
+/// texels they reached, and of the 5.6° cells (a map [`PARALLAX_CELLS`] across) seen from both halves of the walk
+/// (split at its median position along its longest extent) those whose colour differs between the halves: finite
+/// content without depth shows parallax.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SkySeeding {
     pub pixels: usize,
     pub texels_seen: usize,
-    pub texels_tested: usize,
-    pub texels_parallax: usize,
+    pub cells_tested: usize,
+    pub cells_parallax: usize,
 }
 
-/// A texel whose colour differs by more than this (0–1, any channel) between the walk's halves shows parallax.
+/// A cell whose colour differs by more than this (0–1, any channel) between the walk's halves shows parallax.
 const PARALLAX: f64 = 0.05;
-/// Pixels a texel needs from each half of the walk to be tested.
-const TESTED: f64 = 4.0;
+/// Pixels a cell needs from each half of the walk to be tested.
+const TESTED: f64 = 16.0;
+/// Cells across of the parallax test (texels are too fine: few are seen from both halves).
+pub const PARALLAX_CELLS: usize = 64;
 
 /// The texel holding direction `d` on a map `width` texels across (the one whose square holds it).
 pub fn texel(d: [f32; 3], width: usize) -> usize {
@@ -216,7 +219,8 @@ pub fn seed_map(data: &Dataset, width: u32, held_out: &[usize]) -> (SkyMap, SkyS
     let mut along: Vec<f32> = positions.iter().map(|p| p[axis]).collect();
     along.sort_by(f32::total_cmp);
     let split = along.get(along.len() / 2).copied().unwrap_or(0.0);
-    let mut sum = vec![[[0f64; 4]; 2]; w * h];
+    let mut sum = vec![[0f64; 4]; w * h];
+    let mut cells = vec![[[0f64; 4]; 2]; PARALLAX_CELLS * PARALLAX_CELLS / 2];
     let mut found = SkySeeding::default();
     let (iw, ih) = (data.width, data.height);
     for (i, v) in data.views.iter().enumerate() {
@@ -247,27 +251,29 @@ pub fn seed_map(data: &Dataset, width: u32, held_out: &[usize]) -> (SkyMap, SkyS
                     continue;
                 }
                 let Some(c) = sample_rgb(&v.image, iw, ih, x as f32, y as f32) else { continue };
-                let t = &mut sum[texel([far[0] - origin[0], far[1] - origin[1], far[2] - origin[2]], w)][half];
-                for k in 0..3 {
-                    t[k] += c[k] as f64;
+                let dir = [far[0] - origin[0], far[1] - origin[1], far[2] - origin[2]];
+                for t in [&mut sum[texel(dir, w)], &mut cells[texel(dir, PARALLAX_CELLS)][half]] {
+                    for k in 0..3 {
+                        t[k] += c[k] as f64;
+                    }
+                    t[3] += 1.0;
                 }
-                t[3] += 1.0;
                 found.pixels += 1;
             }
         }
     }
     let mut seen: Vec<Option<[f32; 3]>> = vec![None; w * h];
     for (t, s) in sum.iter().enumerate() {
-        let n = s[0][3] + s[1][3];
-        if n == 0.0 {
-            continue;
+        if s[3] > 0.0 {
+            seen[t] = Some([0, 1, 2].map(|k| (s[k] / s[3]) as f32));
+            found.texels_seen += 1;
         }
-        seen[t] = Some([0, 1, 2].map(|k| ((s[0][k] + s[1][k]) / n) as f32));
-        found.texels_seen += 1;
+    }
+    for s in &cells {
         if s[0][3] >= TESTED && s[1][3] >= TESTED {
-            found.texels_tested += 1;
+            found.cells_tested += 1;
             if (0..3).any(|k| (s[0][k] / s[0][3] - s[1][k] / s[1][3]).abs() > PARALLAX) {
-                found.texels_parallax += 1;
+                found.cells_parallax += 1;
             }
         }
     }

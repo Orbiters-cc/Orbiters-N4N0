@@ -131,6 +131,10 @@ pub enum ToService {
     Frames {
         chunk: crate::state::FrameChunk,
     },
+    /// Someone put the headset on or took it off (SteamVR's activity level, read by the overlay).
+    Headset {
+        in_use: bool,
+    },
     /// The overlay changed the walk boost's strength (also sent to the avatar's `Orb/WalkBoost`).
     WalkBoost {
         strength: f32,

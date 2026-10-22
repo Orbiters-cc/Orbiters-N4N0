@@ -210,6 +210,7 @@ impl Service {
             ToService::Maps => ctl.refresh_maps(),
             ToService::Calibrated { calibration } => ctl.calibrated(*calibration),
             ToService::Frames { chunk } => ctl.frames(chunk),
+            ToService::Headset { in_use } => ctl.set_headset(Some(in_use)),
             ToService::WalkBoost { strength } => ctl.set_walk_boost(strength, false),
             // Which Talk button is held matters: the service lets it go when that window or overlay goes away.
             ToService::Orb { command: OrbCommand::Talk { down } } => ctl.orb_app_talk(down, role == Role::Overlay),

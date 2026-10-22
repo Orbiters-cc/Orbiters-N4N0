@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]
-//!     [--regularise-unseen]
+//!     [--regularise-unseen] [--adam-restart] [--filter-3d S] [--cleanup]
 //! ```
 //!
 //! Prints one [`Event`] per line on stdout for the app and writes the session's `reconstruction/` folder: the splats
@@ -55,6 +55,10 @@ fn args() -> anyhow::Result<Args> {
             "--regularise-unseen" => settings.regularise_unseen = true,
             // Adam's bias correction per Gaussian from its restart, rather than from the run's first step.
             "--adam-restart" => settings.adam_restart = true,
+            // Mip-Splatting's 3D filter's scale (0, the default: none; its own is orbiters_reconstruct::cpu::FILTER_3D).
+            "--filter-3d" => settings.filter_3d = it.next().context("--filter-3d needs a value")?.parse().context("--filter-3d takes a number")?,
+            // What the exact depth says is not there leaves the result (orbiters_reconstruct::cleanup).
+            "--cleanup" => settings.cleanup = true,
             "--gpu" => {
                 device.low_power = match it.next().as_deref() {
                     Some("integrated") => true,
@@ -88,15 +92,22 @@ fn run(args: Args) -> anyhow::Result<Report> {
     }
     let data = &prepared.data;
     let held_out = train::held_out(data.views.len(), args.settings.hold_out_every);
+    // Training gives way to VRChat on its graphics card: the queue asks for low priority (nothing else waits on it when
+    // the GPU is free), the budget fits the graphics memory VRChat leaves, and with SteamVR the frame-timing governor
+    // paces the steps (orbiters_reconstruct::governor, joined by train::train while VRChat runs).
+    let mut gpu = gpu::Gpu::with_options(gpu::DeviceOptions { low_priority: true, ..args.device })?;
+    let mut settings = args.settings.clone();
+    if orbiters_reconstruct::priority::vrchat() && !gpu.integrated {
+        fit_memory(&gpu, &mut settings);
+    }
     stage(Stage::Seeding, 0.0);
-    let budget = args.settings.budget * 2 / 3;
+    let budget = settings.budget * 2 / 3;
     let seeded = orbiters_reconstruct::priority::on_loading_threads(|| init::from_depth(data, budget, &held_out, |p| stage(Stage::Seeding, p)));
     if seeded.is_empty() {
         bail!("{}", prepared.nothing_to_seed());
     }
-    let mut gpu = gpu::Gpu::with_options(args.device)?;
     stage(Stage::Training, 0.0);
-    let outcome = train::train(data, &mut gpu, seeded, &args.settings, |p| {
+    let outcome = train::train(data, &mut gpu, seeded, &settings, |p| {
         emit(&Event::Progress { iteration: p.iteration, iterations: p.iterations, gaussians: p.gaussians, intersections: p.intersections, psnr: p.psnr, seconds: p.seconds });
     })?;
 
@@ -117,11 +128,11 @@ fn run(args: Args) -> anyhow::Result<Report> {
         Ok(())
     };
     let mut first = true;
-    let psnr_held_out = train::score_held_out(&mut gpu, data, prepared.undo.as_ref(), &outcome.held_out, args.settings.background, |i, img| {
+    let psnr_held_out = train::score_held_out(&mut gpu, data, prepared.undo.as_ref(), &outcome.held_out, settings.background, |i, img| {
         write(i, img, std::mem::take(&mut first))
     })?;
     if outcome.held_out.is_empty() {
-        write(0, &train::render(&mut gpu, &data.views[0].camera, args.settings.background)?, true)?;
+        write(0, &train::render(&mut gpu, &data.views[0].camera, settings.background)?, true)?;
     }
     let report = Report {
         gaussians: outcome.gaussians.len(),
@@ -145,6 +156,23 @@ fn run(args: Args) -> anyhow::Result<Report> {
     std::fs::write(partial.join(rec::REPORT_FILE), serde_json::to_string_pretty(&report)?)?;
     replace(dir, &partial)?;
     Ok(report)
+}
+
+/// Lowers `settings.budget` until a run fits the graphics memory the GPU has free (beside VRChat), leaving 1 GB for
+/// VRChat's own growth (avatars loading in), but never under 200,000 Gaussians.
+fn fit_memory(gpu: &gpu::Gpu, settings: &mut train::Settings) {
+    const LEFT: u64 = 1 << 30;
+    const FEWEST: usize = 200_000;
+    let Some(free) = gpu.free_memory() else { return };
+    let need = gpu.training_memory(settings.budget);
+    if free >= need + LEFT {
+        return;
+    }
+    let fixed = gpu.training_memory(0);
+    let fits = (settings.budget as f64 * free.saturating_sub(LEFT + fixed) as f64 / need.saturating_sub(fixed).max(1) as f64) as usize;
+    let budget = fits.clamp(FEWEST.min(settings.budget), settings.budget);
+    eprintln!("graphics memory: {} MB free beside VRChat ({} MB needed): {budget} Gaussians instead of {}", free >> 20, need >> 20, settings.budget);
+    settings.budget = budget;
 }
 
 /// Retries a file operation that another program (an indexer, an antivirus scan, a viewer just closing) holds for a

@@ -67,8 +67,20 @@ pub struct Settings {
     pub unseen_weight: f32,
     /// Covers the sky shell where no view looked (crate::sky) once training ends. On the capture simulator's off-path
     /// views (Bench Plaza: other heights, sideways, looking up) it gained 8 dB looking up and 1.3–1.8 dB over all
-    /// views of three captures, for about a thousand Gaussians.
+    /// views of three captures, for about a thousand Gaussians. Backing every cell the shell does not cover whole, from
+    /// behind it, rather than only the empty ones, took the dark streaks off the edge of what was seen and scored 0.1 dB
+    /// higher looking up and 0.15–0.18 dB on held-out keyframes on the same trained sets; completing it half way through
+    /// training instead made no difference beyond the runs' noise (21.30 against 21.20 dB off-path, three and five runs).
     pub sky_fill: bool,
+    /// Mip-Splatting's 3D filter's scale (crate::cpu::FILTER_3D; 0: none): no Gaussian is finer than a fifth of a
+    /// pixel² at the keyframe that sees it most closely. Recomputed every 100 steps and after each relocation round,
+    /// and fused into the result (crate::gaussians::Gaussians::fuse_filter). Off: on the off-path benchmark (plaza walk,
+    /// three runs each) it cost 0.25–0.36 dB at the views' scale and below, and gained nothing at a 4× zoom-in, where
+    /// the compensated 2D filter alone (crate::cpu::FILTER_2D) scored 5 dB above 3DGS's dilation.
+    pub filter_3d: f32,
+    /// Leaves out what the exact depth says is not there once training ends: floaters in front of measured surfaces and
+    /// islands no depth saw that do not join the ground under the walked path (crate::cleanup).
+    pub cleanup: bool,
 }
 
 impl Default for Settings {
@@ -96,6 +108,8 @@ impl Default for Settings {
             fade_unseen_every: 1000,
             unseen_weight: 0.02,
             sky_fill: true,
+            filter_3d: 0.0,
+            cleanup: false,
         }
     }
 }
@@ -279,6 +293,9 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     // The set grows to the budget: buffers of that size from the start never grow (and copy) on the way.
     gpu.reserve(settings.budget.max(init.len()));
     gpu.upload(&init);
+    // The 3D filter follows the keyframes trained on, at their full resolution (the finest sampling).
+    let filter_cams: Vec<Camera> = train_views.iter().map(|&i| data.views[i].camera).collect();
+    gpu.update_filter_3d(&filter_cams, settings.filter_3d)?;
     let coarse = if settings.half_until > 0.0 { levels(data) } else { Vec::new() };
     for l in &coarse {
         gpu.set_mask(l.width, l.height, &l.mask)?;
@@ -295,6 +312,19 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let relocate_until = (iterations as f32 * settings.relocate_until) as u32;
     for it in 1..=iterations {
         feeding.follow();
+        if it % 500 == 1 {
+            // While VRChat runs on this GPU, SteamVR's frame timing paces the steps (crate::governor).
+            let beside = crate::priority::vrchat() && !gpu.integrated;
+            if beside && gpu.governor.is_none() {
+                gpu.governor = crate::governor::Governor::connect();
+                if gpu.governor.is_some() {
+                    eprintln!("it {it}: training between VRChat's frames (SteamVR's frame timing)");
+                }
+            } else if !beside && gpu.governor.is_some() {
+                gpu.governor = None;
+                eprintln!("it {it}: VRChat closed: training at full speed");
+            }
+        }
         let progress = (it - 1) as f32 / iterations as f32;
         // Coarse to fine: this step's level (0 full, 1 half, 2 quarter resolution); positions decay from full on.
         let level = if coarse.is_empty() || progress >= settings.half_until {
@@ -316,10 +346,10 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
         let intersections = if depth_step {
             // Built for the step (all of a long session's targets at once would take GBs).
             let t = depth_target(&data.depth_views[depth_views[rng.usize(..depth_views.len())]]);
-            let full = gpu.dilation;
-            gpu.dilation = t.dilation;
+            let full = gpu.filter_2d;
+            gpu.filter_2d = t.filter_2d;
             let stepped = gpu.step(&t.camera, settings.background, Target::Depth { samples: &t.samples, weight: settings.depth_weight }, Some(lr));
-            gpu.dilation = full;
+            gpu.filter_2d = full;
             stepped?
         } else {
             let v = train_views[rng.usize(..train_views.len())];
@@ -367,10 +397,19 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             let plan = plan_relocation(&weights, (n + n / 20).min(settings.budget), &mut rng);
             gpu.apply_relocation(&plan)?;
             regularise(gpu, plan.len);
+            gpu.update_filter_3d(&filter_cams, settings.filter_3d)?;
+        } else if it % 100 == 0 && it + 100 <= iterations {
+            // As Mip-Splatting does: every 100 steps but the last 100's.
+            gpu.update_filter_3d(&filter_cams, settings.filter_3d)?;
         }
     }
     drop(feeding);
+    if let Some(g) = &gpu.governor {
+        eprintln!("governor: {:.1} s waiting for VRChat's frames, {} back-offs", g.waited.as_secs_f32(), g.backoffs);
+    }
+    // The result keeps the filter in its scales and opacities: the PLY renders what training rendered.
     let mut g = gpu.download_params()?;
+    g.fuse_filter();
     g.retain(&live(&g));
     ensure!(!g.is_empty(), "training left no Gaussian that shows anywhere");
     if settings.sky_fill {
@@ -380,6 +419,22 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     }
     // From here on the device holds the result: what the PLY keeps is what scores.
     gpu.upload(&g);
+    // And what the keyframes saw of each, which the PLY keeps for viewers (crate::gaussians::Seen).
+    g.seen = gpu.seen(&filter_cams, settings.background)?;
+    let beyond = crate::cleanup::beyond(&g, &data.depth_views);
+    for (s, b) in g.seen.iter_mut().zip(beyond) {
+        s.beyond = b;
+    }
+    if settings.cleanup {
+        let _cpu = crate::priority::CpuWork::start();
+        let focal = filter_cams[0].fx.max(filter_cams[0].fy);
+        let (keep, cleaned) = crate::cleanup::clean(&g, &data.depth_views, &filter_cams, focal);
+        eprintln!("cleanup: {} floaters and {} islands left out of {}", cleaned.floaters, cleaned.islands, g.len());
+        if cleaned.floaters + cleaned.islands > 0 {
+            g.retain(&keep);
+            gpu.upload(&g);
+        }
+    }
     if gpu.overflows > 0 {
         eprintln!("{} steps had more tile entries than the sort expected (dropped for that step)", gpu.overflows);
     }
@@ -449,18 +504,18 @@ fn levels(data: &Dataset) -> Vec<Level> {
     out
 }
 
-/// What a depth step renders: a camera, its samples (pixel x, pixel y, eye depth, weight) and its dilation.
+/// What a depth step renders: a camera, its samples (pixel x, pixel y, eye depth, weight) and its 2D filter.
 pub struct DepthTarget {
     pub camera: Camera,
     pub samples: Vec<[f32; 4]>,
-    pub dilation: [f32; 2],
+    pub filter_2d: [f32; 2],
 }
 
 /// A depth frame's step on a camera whose pixel centres are its sample rays: one pixel a sample, the footprint of the
-/// training resolution kept by scaling the dilation (the grid is regular up to a pixel's rounding). A frame without a
+/// training resolution kept by scaling the 2D filter (the grid is regular up to a pixel's rounding). A frame without a
 /// regular grid renders at the training resolution. Only trusted samples are targets.
 pub fn depth_target(d: &DepthView) -> DepthTarget {
-    let dil = crate::cpu::DILATION as f32;
+    let filter = crate::cpu::FILTER_2D as f32;
     let (gw, gh) = (d.grid.width as usize, d.grid.height as usize);
     let px = &d.grid.pixels;
     let n = d.depth.len().min(px.len());
@@ -477,11 +532,11 @@ pub fn depth_target(d: &DepthView) -> DepthTarget {
             let c = &d.camera;
             let camera = Camera { r: c.r, t: c.t, fx: c.fx / sx, fy: c.fy / sy, cx: (c.cx - x0) / sx, cy: (c.cy - y0) / sy, width: gw as u32, height: gh as u32 };
             let samples = (0..n).filter(trusted).map(|i| [(i % gw) as f32, (i / gw) as f32, d.depth[i], weight(i)]).collect();
-            return DepthTarget { camera, samples, dilation: [dil / (sx * sx), dil / (sy * sy)] };
+            return DepthTarget { camera, samples, filter_2d: [filter / (sx * sx), filter / (sy * sy)] };
         }
     }
     let samples = (0..n).filter(trusted).map(|i| [px[i][0], px[i][1], d.depth[i], 0.0]).collect();
-    DepthTarget { camera: d.camera, samples, dilation: [dil; 2] }
+    DepthTarget { camera: d.camera, samples, filter_2d: [filter; 2] }
 }
 
 /// New opacity and scale factor of a Gaussian of opacity `o` split into `n` copies, so their sum renders like the

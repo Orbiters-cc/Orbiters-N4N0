@@ -10,6 +10,7 @@
 
 use super::orb::{OrbRuntime, Source};
 use super::{NoticeKind, Shared};
+use orbiters_contracts::orb::thumbnail;
 use orbiters_core::osc::OscValue;
 use orbiters_orb::menu::layout::{Content, ScreenPage};
 use orbiters_orb::menu::screen::{self, Audience, Flags, Frame, Picture, LOCAL_VALUES};
@@ -140,9 +141,11 @@ impl Followups {
 }
 
 pub struct ScreenRuntime {
-    /// The avatar's Orb prop has the projected screen, with this many text values.
+    /// The avatar's Orb prop has the projected screen, with this many text values and thumbnails of this many bytes
+    /// (`Orb/Screen/ThumbnailBytes`).
     pub available: bool,
     sync: Option<usize>,
+    pub(super) thumbnail: usize,
     pub menu: Menu,
     owner: Audience,
     everyone: Option<Audience>,
@@ -226,7 +229,8 @@ impl Default for ScreenRuntime {
             available: false,
             sync: None,
             menu: Menu::default(),
-            owner: Audience::new(LOCAL_VALUES),
+            owner: Audience::new(LOCAL_VALUES, thumbnail::SIZES[0]),
+            thumbnail: thumbnail::SIZES[0],
             everyone: None,
             open_sent: None,
             close_everyone: false,
@@ -277,21 +281,23 @@ impl Default for ScreenRuntime {
 }
 
 impl ScreenRuntime {
-    /// The avatar changed: whether it has the screen, with `sync` text values (its memory is unknown again). The same
-    /// avatar looked at again changes nothing.
-    pub fn avatar(&mut self, available: bool, sync: Option<usize>) {
-        let available = available && sync.is_some_and(screen::fits);
-        if available && self.available && sync == self.sync {
+    /// The avatar changed: whether it has the screen, with `sync` text values and thumbnails of `thumbnail` bytes (its
+    /// memory is unknown again). The same avatar looked at again changes nothing.
+    pub fn avatar(&mut self, available: bool, sync: Option<usize>, thumbnail: usize) {
+        let available = available && sync.is_some_and(|n| screen::fits(n, thumbnail));
+        if available && self.available && sync == self.sync && thumbnail == self.thumbnail {
             return;
         }
         self.available = available;
         self.sync = sync.filter(|_| available);
+        self.thumbnail = thumbnail;
         // A loaded avatar's copies start clear; where the text channel's pointer stands is not known.
         self.everyone = self.sync.map(|n| {
-            let mut everyone = Audience::new(n);
+            let mut everyone = Audience::new(n, thumbnail);
             everyone.cleared(false);
             everyone
         });
+        self.owner = Audience::new(LOCAL_VALUES, thumbnail);
         self.owner.forget();
         self.open_sent = None;
         if !self.available {
@@ -1018,7 +1024,7 @@ impl super::Controller {
             let frame = {
                 let pictures = &s.pictures;
                 let flags = Flags { listening, loading: s.menu.loading(), thinking };
-                Frame::new(&s.menu, s.hover, s.pressed.map(|(i, _)| i), flags, &|id: &str| thumbnail(pictures, id))
+                Frame::new(&s.menu, s.hover, s.pressed.map(|(i, _)| i), flags, s.thumbnail, &|id: &str| thumbnail(pictures, id))
             };
             // Once it holds the whole page, blocks go again only now and then (they repair a block VRChat dropped).
             let settled = s.owner.settled(&frame.bank);
@@ -1065,7 +1071,8 @@ impl super::Controller {
         } else {
             // Everyone else's frame: no hover nor press, no friend named. A new page clears their memory first.
             let pictures = &s.pictures;
-            let frame = Frame::public(&s.menu, Flags { loading: s.menu.loading(), ..Default::default() }, &|id: &str| thumbnail(pictures, id));
+            let flags = Flags { loading: s.menu.loading(), ..Default::default() };
+            let frame = Frame::public(&s.menu, flags, s.thumbnail, &|id: &str| thumbnail(pictures, id));
             let send = everyone.step(&frame.bank);
             if !send.holds() {
                 wait = orbiters_orb::text::PHASE_GAP;
@@ -1115,7 +1122,7 @@ impl super::Controller {
 /// Thumbnail `id`, when the screen has it.
 fn thumbnail(pictures: &HashMap<String, Thumb>, id: &str) -> Option<Picture> {
     match pictures.get(id) {
-        Some(Thumb::Ready(picture)) => Some(*picture),
+        Some(Thumb::Ready(picture)) => Some(picture.clone()),
         _ => None,
     }
 }
@@ -1140,7 +1147,7 @@ mod tests {
     #[test]
     fn what_waits_never_wakes_the_orb_thread_at_once() {
         let mut s = ScreenRuntime::default();
-        s.avatar(true, Some(8));
+        s.avatar(true, Some(8), 72);
         s.menu.open();
         let now = Instant::now();
         let past = now - Duration::from_secs(1);
@@ -1170,7 +1177,7 @@ mod tests {
     /// Home on the screen in desktop mode, the stand-in mouse up, VRChat in front in mouse-look.
     fn looking(mouse: &FakeMouse) -> ScreenRuntime {
         let mut s = ScreenRuntime::default();
-        s.avatar(true, Some(8));
+        s.avatar(true, Some(8), 72);
         s.set_gaze(true);
         s.menu.open();
         s.mouse = Box::new(mouse.clone());

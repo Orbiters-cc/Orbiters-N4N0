@@ -5,8 +5,9 @@
 //! - `Orb screen layout.png`: where each page's changing parts go, a row per page, for the screen's shader (see
 //!   [`layout_table`]).
 //! - `menu-<page>.png`: each page as the SteamVR overlay shows it with sample content, for reviewing the design;
-//!   `bank-<page>.bin`: what the avatar's screen is sent for the same page (its 744 bytes), to draw it with the screen's
-//!   shader and compare.
+//!   `bank-<page>.bin`: what the avatar's screen is sent for the same page (its 744 bytes, 72-byte thumbnails), to draw
+//!   it with the screen's shader and compare; `bank-results-128.bin`, the results page with 128-byte thumbnails (1024
+//!   bytes).
 
 use super::menu_ui::{self, View};
 use super::Canvas;
@@ -112,7 +113,7 @@ pub fn page_pictures() -> Vec<u8> {
     out
 }
 
-/// A stand-in thumbnail: bands of colour (160 × 90, RGBA), with a disc so the screen's black and white shows a shape.
+/// A stand-in thumbnail: bands of colour (160 × 90, RGBA), with a disc.
 fn sample_rgba(seed: usize) -> (usize, usize, Vec<u8>) {
     let (w, h) = (160usize, 90usize);
     let palette = [[226, 120, 82], [92, 140, 220], [120, 200, 140], [200, 110, 200], [230, 200, 90]];
@@ -134,15 +135,11 @@ fn sample_thumbnail(ctx: &egui::Context, seed: usize) -> TextureHandle {
     ctx.load_texture(format!("thumb{seed}"), ColorImage::from_rgba_unmultiplied([w, h], &rgba), TextureOptions::LINEAR)
 }
 
-/// The stand-in thumbnail as the avatar's screen gets it (as a real one: fitted, stretched, dithered, packed).
+/// The stand-in thumbnail as the avatar's screen gets it (as a real one: fitted and encoded).
 fn sample_picture(seed: usize) -> screen::Picture {
     let (w, h, rgba) = sample_rgba(seed);
-    let grey = picture::Grey {
-        width: w,
-        height: h,
-        pixels: rgba.as_chunks::<4>().0.iter().map(|p| (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) as u8).collect(),
-    };
-    screen::picture_from_grey(&grey)
+    let rgb = picture::Rgb { width: w, height: h, pixels: rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect() };
+    screen::picture_from_rgb(&rgb)
 }
 
 /// Menus with sample content, one per page, with the element hovered and pressed.
@@ -240,8 +237,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         println!("{}", path.display());
         let pictures = |id: &str| -> Option<screen::Picture> { id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).map(sample_picture) };
         let flags = screen::Flags { listening: menu.listening, loading: menu.loading(), thinking: false };
-        let bank = screen::Frame::new(&menu, hover, pressed, flags, &pictures).bank;
-        std::fs::write(out.join(format!("bank-{}.bin", page.name())), bank)?;
+        let bank = screen::Frame::new(&menu, hover, pressed, flags, 72, &pictures).bank;
+        std::fs::write(out.join(format!("bank-{}.bin", page.name())), &bank[..screen::bank_bytes(72)])?;
+        if page == ScreenPage::Results {
+            let bank = screen::Frame::new(&menu, hover, pressed, flags, 128, &pictures).bank;
+            std::fs::write(out.join(format!("bank-{}-128.bin", page.name())), &bank[..screen::bank_bytes(128)])?;
+        }
     }
     Ok(())
 }

@@ -1,11 +1,13 @@
 //! The avatar's projected screen (contracts `Docs/orb.md`, Screen): the menu as bytes in the screen's memory, and the
 //! sender that writes them. The screen shows a picture of the page (rendered from [`super::layout`], part of the prop)
-//! and draws over it what changes, read from its memory: [`BANK`] bytes, two to an animator value.
+//! and draws over it what changes, read from its memory: [`bank_bytes`] bytes (744, or 1024 with 128-byte thumbnails),
+//! two to an animator value.
 //!
 //! The owner's screen is written through local parameters (`Orb/Screen/Pointer` and 16 values a step, as fast as
 //! VRChat takes them); everyone else's through the text panel's synced channel (`Orb/Text/Pointer` past the panel's
-//! blocks, `Orb/Text/Sync*`), a block every step: the header first, then the texts, then the thumbnails a pass at a time
-//! (every eighth row, then every fourth...), so others see the page early and the pictures sharpen.
+//! blocks, `Orb/Text/Sync*`), a block every step: the header first, then the texts, then the thumbnails a layer at a time
+//! (contracts `orb::thumbnail`: a blur first, sharper with each layer), so others see the page early and the pictures
+//! sharpen.
 //!
 //! Only the bytes a page reads are ever sent for it, and resent in turn; a new page clears the memory first, so none of
 //! the last page's text shows in the new one's slots. Everyone else's frame ([`Frame::public`]) carries no hover nor
@@ -14,12 +16,13 @@
 use super::layout::{self, Layout, ScreenPage, MAX_ELEMENTS, PICTURES};
 use super::Menu;
 use crate::text::Message;
-use orbiters_contracts::orb::{self, params};
+use orbiters_contracts::orb::{self, params, thumbnail};
 use rosc::OscType;
 
-/// Bytes of the screen's memory.
-pub const BANK: usize = 744;
-/// The header: page, flags, hovered and pressed elements, the "on" and "hidden" masks, the thumbnails' passes.
+/// The largest screen memory (128-byte thumbnails): every memory here is this long, its bytes past the avatar's
+/// [`bank_bytes`] never read nor sent.
+pub const BANK: usize = bank_bytes(thumbnail::MAX_BYTES);
+/// The header: page, flags, hovered and pressed elements, the "on" and "hidden" masks, the thumbnails' layer counts.
 pub const HEADER: usize = 24;
 pub const PAGE: usize = 0;
 pub const FLAGS: usize = 1;
@@ -33,22 +36,17 @@ pub const ON_BYTES: usize = 4;
 /// Elements not shown, 7 to a byte, elements 0 to 55.
 pub const HIDDEN: usize = 8;
 pub const HIDDEN_BYTES: usize = 8;
-/// How many passes of each thumbnail the screen holds (0 to [`PASSES`]).
-pub const PASS: usize = 16;
+/// How many layers of each thumbnail the screen holds (0 to 3, or 4 with 128-byte thumbnails).
+pub const LAYER_COUNTS: usize = 16;
 /// Where the texts start (slot offsets count from here).
 pub const TEXT: usize = HEADER;
-/// Where the thumbnails start: [`PICTURES`] of [`PICTURE_BYTES`].
+/// Where the thumbnails start: [`PICTURES`] of the avatar's thumbnail size (contracts `orb::thumbnail::SIZES`).
 pub const PICTURES_AT: usize = TEXT + layout::TEXT_BYTES as usize;
-/// A thumbnail's size in pixels, one bit each (white 1), packed 8 to a byte, the leftmost in the highest bit.
-pub const PICTURE_W: usize = 32;
-pub const PICTURE_H: usize = 18;
-pub const ROW_BYTES: usize = PICTURE_W / 8;
-pub const PICTURE_BYTES: usize = ROW_BYTES * PICTURE_H;
-/// The order rows are kept in, so each pass is a run of bytes: every eighth row, every fourth, every second, the rest.
-pub const ROW_ORDER: [usize; PICTURE_H] = [0, 8, 16, 4, 12, 2, 6, 10, 14, 1, 3, 5, 7, 9, 11, 13, 15, 17];
-/// How many kept rows each pass ends after.
-pub const PASS_ENDS: [usize; 4] = [3, 5, 9, 18];
-pub const PASSES: u8 = 4;
+
+/// The screen's memory with thumbnails of `size` bytes: 744 with 72, 1024 with 128.
+pub const fn bank_bytes(size: usize) -> usize {
+    PICTURES_AT + PICTURES * size
+}
 
 /// `Orb/Screen/Pointer`: write nothing.
 pub const LOCAL_NONE: i32 = 0;
@@ -59,9 +57,9 @@ pub const LOCAL_VALUES: usize = 16;
 /// `Orb/Text/Pointer`: the screen closed (everyone else's screen hides and clears).
 pub const POINTER_SCREEN_CLOSE: i32 = 254;
 
-const _: () = assert!(PICTURES_AT + PICTURES * PICTURE_BYTES == BANK);
+const _: () = assert!(bank_bytes(72) == 744 && BANK == 1024);
 const _: () = assert!(HIDDEN_BYTES * 7 >= MAX_ELEMENTS);
-const _: () = assert!(PASS + PICTURES <= HEADER);
+const _: () = assert!(LAYER_COUNTS + PICTURES <= HEADER);
 
 /// The screen's flags (header byte [`FLAGS`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -71,29 +69,41 @@ pub struct Flags {
     pub thinking: bool,
 }
 
-/// What the screen should hold for `menu`.
+/// What the screen should hold for `menu`: [`bank_bytes`] of its thumbnails' size (the rest stays 0).
 pub struct Frame {
     pub bank: [u8; BANK],
 }
 
-/// A thumbnail as the screen shows it: rows top first, [`ROW_BYTES`] each.
-pub type Picture = [u8; PICTURE_BYTES];
-
-/// A JPEG thumbnail made into a screen picture (see [`picture_from_grey`]).
-pub fn picture_of(jpeg: &[u8]) -> anyhow::Result<Picture> {
-    Ok(picture_from_grey(&crate::picture::grey_jpeg(jpeg)?))
+/// A thumbnail as the screen shows it (contracts `orb::thumbnail`), in both sizes a prop may keep.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Picture {
+    small: Vec<u8>,
+    large: Vec<u8>,
 }
 
-/// A grey picture made into a screen picture: fitted, its levels stretched, turned to light and dithered to black and
-/// white, so the dots look as bright as the picture and a dull one keeps its shapes.
-pub fn picture_from_grey(grey: &crate::picture::Grey) -> Picture {
-    let mut values = crate::picture::fit(grey, PICTURE_W, PICTURE_H);
-    crate::picture::stretch(&mut values);
-    crate::picture::to_linear(&mut values);
-    let bits = crate::picture::dither(&values, PICTURE_W, PICTURE_H, 2);
-    let mut picture = [0u8; PICTURE_BYTES];
-    picture.copy_from_slice(&crate::picture::pack(&bits, 1));
-    picture
+impl Picture {
+    /// From a 64 × 36 picture (sRGB values 0 to 1, rows top first).
+    pub fn new(picture: &[[f32; 3]]) -> Self {
+        Self { small: thumbnail::encode(picture, 72), large: thumbnail::encode(picture, 128) }
+    }
+
+    /// The memory of a thumbnail of `size` bytes (72 or 128).
+    pub fn bytes(&self, size: usize) -> &[u8] {
+        if size >= thumbnail::MAX_BYTES {
+            &self.large
+        } else {
+            &self.small
+        }
+    }
+}
+
+/// A JPEG thumbnail made into a screen picture: fitted to 64 × 36 (a cover, cropped at its middle) and encoded.
+pub fn picture_of(jpeg: &[u8]) -> anyhow::Result<Picture> {
+    Ok(picture_from_rgb(&crate::picture::rgb_jpeg(jpeg)?))
+}
+
+pub fn picture_from_rgb(rgb: &crate::picture::Rgb) -> Picture {
+    Picture::new(&crate::picture::fit(rgb, thumbnail::WIDTH, thumbnail::HEIGHT))
 }
 
 /// Glyph indices for `text` in `cols` cells (aligned as the slot says).
@@ -110,30 +120,29 @@ fn cells(text: &str, cols: usize, align: layout::Align) -> Vec<u8> {
     glyphs
 }
 
-/// The bytes a glyph index or a picture byte travels as: 128 has no float, so a picture byte of 128 becomes 129 (its
-/// last pixel turns white).
-fn sendable(byte: u8) -> u8 {
-    if byte == orb::UNSENDABLE {
-        orb::UNSENDABLE + 1
-    } else {
-        byte
-    }
-}
-
 impl Frame {
     /// The owner's screen memory for `menu` on its page: `hover` and `pressed` are element indices of that page's
-    /// layout, `pictures` the thumbnails known by video id.
-    pub fn new(menu: &Menu, hover: Option<usize>, pressed: Option<usize>, flags: Flags, pictures: &dyn Fn(&str) -> Option<Picture>) -> Self {
-        Self::build(menu, hover, pressed, flags, pictures, false)
+    /// layout, `size` the bytes of each thumbnail the prop keeps, `pictures` the thumbnails known by video id.
+    pub fn new(menu: &Menu, hover: Option<usize>, pressed: Option<usize>, flags: Flags, size: usize, pictures: &dyn Fn(&str) -> Option<Picture>) -> Self {
+        Self::build(menu, hover, pressed, flags, size, pictures, false)
     }
 
     /// Everyone else's screen memory for `menu`: no hover nor press (they changed with every move of the owner's finger
     /// and held the rest back, one block a step), and the owner's friends never named ([`layout::text_for`]).
-    pub fn public(menu: &Menu, flags: Flags, pictures: &dyn Fn(&str) -> Option<Picture>) -> Self {
-        Self::build(menu, None, None, flags, pictures, true)
+    pub fn public(menu: &Menu, flags: Flags, size: usize, pictures: &dyn Fn(&str) -> Option<Picture>) -> Self {
+        Self::build(menu, None, None, flags, size, pictures, true)
     }
 
-    fn build(menu: &Menu, hover: Option<usize>, pressed: Option<usize>, flags: Flags, pictures: &dyn Fn(&str) -> Option<Picture>, public: bool) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        menu: &Menu,
+        hover: Option<usize>,
+        pressed: Option<usize>,
+        flags: Flags,
+        size: usize,
+        pictures: &dyn Fn(&str) -> Option<Picture>,
+        public: bool,
+    ) -> Self {
         let mut bank = [0u8; BANK];
         if !menu.open {
             return Self { bank };
@@ -161,16 +170,10 @@ impl Frame {
         if page == ScreenPage::Results {
             for picture in &layout.pictures {
                 let Some(video) = menu.page_results().get(picture.result as usize) else { continue };
-                let Some(pixels) = pictures(&video.id) else { continue };
-                let at = PICTURES_AT + picture.result as usize * PICTURE_BYTES;
-                for (kept, &row) in ROW_ORDER.iter().enumerate() {
-                    let from = row * ROW_BYTES;
-                    let to = at + kept * ROW_BYTES;
-                    for b in 0..ROW_BYTES {
-                        bank[to + b] = sendable(pixels[from + b]);
-                    }
-                }
-                bank[PASS + picture.result as usize] = PASSES;
+                let Some(thumb) = pictures(&video.id) else { continue };
+                let at = PICTURES_AT + picture.result as usize * size;
+                bank[at..at + size].copy_from_slice(thumb.bytes(size));
+                bank[LAYER_COUNTS + picture.result as usize] = thumbnail::layers_in(size) as u8;
             }
         }
         Self { bank }
@@ -182,47 +185,55 @@ impl Frame {
     }
 }
 
-/// The byte ranges in the order an audience gets them again: header, texts, then each pass of every thumbnail.
-fn priority() -> Vec<std::ops::Range<usize>> {
-    let mut out = vec![0..PASS, PASS..HEADER, TEXT..PICTURES_AT];
-    let mut start = 0;
-    for &end in &PASS_ENDS {
-        out.extend(pass_rows(start, end));
-        start = end;
+/// The byte ranges in the order an audience gets them again: header, texts, then each layer of every thumbnail.
+fn priority(size: usize) -> Vec<std::ops::Range<usize>> {
+    let mut out = vec![0..LAYER_COUNTS, LAYER_COUNTS..HEADER, TEXT..PICTURES_AT];
+    for layer in 1..=thumbnail::layers_in(size) {
+        out.extend(layer_bytes(size, layer));
     }
     out
 }
 
-/// The bytes of every thumbnail's kept rows `start` to `end` (a pass).
-fn pass_rows(start: usize, end: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
+/// Where layer `layer` (from 1) of each thumbnail of `size` bytes ends, in bytes from its first.
+fn layer_end(layer: usize) -> usize {
+    thumbnail::LAYERS[layer - 1]
+}
+
+/// The bytes of layer `layer` (from 1) of every thumbnail of `size` bytes.
+fn layer_bytes(size: usize, layer: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
+    let start = if layer > 1 { layer_end(layer - 1) } else { 0 };
     (0..PICTURES).map(move |p| {
-        let at = PICTURES_AT + p * PICTURE_BYTES;
-        at + start * ROW_BYTES..at + end * ROW_BYTES
+        let at = PICTURES_AT + p * size;
+        at + start..at + layer_end(layer)
     })
 }
 
-/// The bytes page `page` reads (contracts `Docs/orb.md`, Memory): the header, the page's text slots and, on the
-/// results page, the thumbnails. The rest of the memory is never sent for that page (its bytes count as equal whatever
-/// they hold), nor resent. Page 0 (nothing shown) reads the header only.
-fn visible(page: u8) -> &'static [bool; BANK] {
-    static MASKS: std::sync::OnceLock<Vec<[bool; BANK]>> = std::sync::OnceLock::new();
+/// The bytes page `page` reads (contracts `Docs/orb.md`, Memory) with thumbnails of `size` bytes: the header, the
+/// page's text slots and, on the results page, the thumbnails. The rest of the memory is never sent for that page (its
+/// bytes count as equal whatever they hold), nor resent. Page 0 (nothing shown) reads the header only.
+fn visible(page: u8, size: usize) -> &'static [bool; BANK] {
+    type Masks = Vec<[bool; BANK]>;
+    static MASKS: std::sync::OnceLock<[Masks; 2]> = std::sync::OnceLock::new();
     let masks = MASKS.get_or_init(|| {
-        let mut header = [false; BANK];
-        header[..HEADER].fill(true);
-        let mut masks = vec![header; ScreenPage::ALL.len() + 1];
-        for page in ScreenPage::ALL {
-            let l = layout::cached(page);
-            let mask = &mut masks[page as usize];
-            for s in &l.slots {
-                let at = TEXT + s.offset as usize;
-                mask[at..at + s.cols as usize].fill(true);
+        thumbnail::SIZES.map(|size| {
+            let mut header = [false; BANK];
+            header[..HEADER].fill(true);
+            let mut masks = vec![header; ScreenPage::ALL.len() + 1];
+            for page in ScreenPage::ALL {
+                let l = layout::cached(page);
+                let mask = &mut masks[page as usize];
+                for s in &l.slots {
+                    let at = TEXT + s.offset as usize;
+                    mask[at..at + s.cols as usize].fill(true);
+                }
+                if !l.pictures.is_empty() {
+                    mask[PICTURES_AT..bank_bytes(size)].fill(true);
+                }
             }
-            if !l.pictures.is_empty() {
-                mask[PICTURES_AT..].fill(true);
-            }
-        }
-        masks
+            masks
+        })
     });
+    let masks = &masks[usize::from(size >= thumbnail::MAX_BYTES)];
     masks.get(page as usize).unwrap_or(&masks[0])
 }
 
@@ -264,6 +275,8 @@ impl Send {
 pub struct Audience {
     /// Bytes a step writes.
     block: usize,
+    /// The bytes of each thumbnail the prop keeps (72 or 128): its memory is [`bank_bytes`] of it.
+    size: usize,
     sent: [u8; BANK],
     /// Whether `sent` is known (cleared, then written); after a reload the screen's memory is not.
     known: bool,
@@ -283,15 +296,16 @@ pub struct Audience {
 }
 
 impl Audience {
-    pub fn new(block: usize) -> Self {
+    pub fn new(block: usize, size: usize) -> Self {
         Self {
             block: block.max(2),
+            size,
             sent: [0; BANK],
             known: false,
             resync: 0,
             since_header: 0,
             page_blocks: (0, Vec::new()),
-            order: priority(),
+            order: priority(size),
             queued: None,
             pending: None,
             resting: false,
@@ -300,7 +314,7 @@ impl Audience {
     }
 
     pub fn blocks(&self) -> usize {
-        BANK.div_ceil(self.block)
+        bank_bytes(self.size).div_ceil(self.block)
     }
 
     /// The screen's memory is unknown again (an avatar load, the screen reopened): it is cleared first.
@@ -384,30 +398,31 @@ impl Audience {
         true
     }
 
-    /// What `want` holds once the thumbnails' passes say only what this audience has whole: a pass is counted once
-    /// every byte of it was sent.
+    /// What `want` holds once the thumbnails' layer counts say only what this audience has whole: a layer is counted
+    /// once every byte of it was sent.
     fn presentable(&self, want: &[u8; BANK]) -> [u8; BANK] {
         let mut out = *want;
         for p in 0..PICTURES {
-            let at = PICTURES_AT + p * PICTURE_BYTES;
-            let mut passes = 0;
-            for (i, &end) in PASS_ENDS.iter().enumerate() {
-                if want[PASS + p] as usize > i && self.sent[at..at + end * ROW_BYTES] == want[at..at + end * ROW_BYTES] {
-                    passes = i as u8 + 1;
+            let at = PICTURES_AT + p * self.size;
+            let mut layers = 0;
+            for layer in 1..=thumbnail::layers_in(self.size) {
+                let end = at + layer_end(layer);
+                if want[LAYER_COUNTS + p] as usize >= layer && self.sent[at..end] == want[at..end] {
+                    layers = layer as u8;
                 } else {
                     break;
                 }
             }
-            out[PASS + p] = passes;
+            out[LAYER_COUNTS + p] = layers;
         }
         out
     }
 
     /// The most urgent block whose bytes the page reads differ from `want` (already [`Self::presentable`]): the header,
-    /// the texts, then the thumbnails a pass at a time, the passes' count once a pass of them all went (one block
+    /// the texts, then the thumbnails a layer at a time, the layers' count once a layer of them all went (one block
     /// saying so for the five, rather than one per thumbnail).
     fn differing(&self, want: &[u8; BANK]) -> Option<usize> {
-        let mask = visible(want[PAGE]);
+        let mask = visible(want[PAGE], self.size);
         // The first block holding a byte of `range` (only those count) that differs.
         let first = |range: std::ops::Range<usize>| {
             let mut b = range.start / self.block;
@@ -420,25 +435,23 @@ impl Audience {
             }
             None
         };
-        let counted = |level: u8| (0..PICTURES).any(|p| mask[PASS + p] && self.sent[PASS + p] < want[PASS + p].min(level));
-        // A thumbnail that changed hides first (its passes' count down), so its old rows never show with the new.
-        if (0..PICTURES).any(|p| mask[PASS + p] && want[PASS + p] < self.sent[PASS + p]) {
-            return Some(PASS / self.block);
+        let counted = |level: u8| (0..PICTURES).any(|p| mask[LAYER_COUNTS + p] && self.sent[LAYER_COUNTS + p] < want[LAYER_COUNTS + p].min(level));
+        // A thumbnail that changed hides first (its layers' count down), so its old layers never show with the new.
+        if (0..PICTURES).any(|p| mask[LAYER_COUNTS + p] && want[LAYER_COUNTS + p] < self.sent[LAYER_COUNTS + p]) {
+            return Some(LAYER_COUNTS / self.block);
         }
-        if let Some(b) = first(0..PASS).or_else(|| first(TEXT..PICTURES_AT)) {
+        if let Some(b) = first(0..LAYER_COUNTS).or_else(|| first(TEXT..PICTURES_AT)) {
             return Some(b);
         }
-        let mut start = 0;
-        for (level, &end) in PASS_ENDS.iter().enumerate() {
-            if let Some(b) = pass_rows(start, end).find_map(&first) {
+        for layer in 1..=thumbnail::layers_in(self.size) {
+            if let Some(b) = layer_bytes(self.size, layer).find_map(&first) {
                 return Some(b);
             }
-            if counted(level as u8 + 1) {
-                return Some(PASS / self.block);
+            if counted(layer as u8) {
+                return Some(LAYER_COUNTS / self.block);
             }
-            start = end;
         }
-        first(PASS..HEADER)
+        first(LAYER_COUNTS..HEADER)
     }
 
     /// The next block to write for `want`, by urgency, and marks it sent; `None` when the screen holds all its page
@@ -446,7 +459,7 @@ impl Audience {
     pub fn next(&mut self, want: &[u8; BANK]) -> Option<usize> {
         let want = self.presentable(want);
         let block = self.differing(&want)?;
-        let mask = visible(want[PAGE]);
+        let mask = visible(want[PAGE], self.size);
         for i in block * self.block..((block + 1) * self.block).min(BANK) {
             if mask[i] {
                 self.sent[i] = want[i];
@@ -459,7 +472,7 @@ impl Audience {
     /// VRChat dropped): page `page`'s blocks in turn, its texts before its pictures, the header every [`HEADER_EVERY`].
     pub fn resend(&mut self, page: u8) -> usize {
         if self.page_blocks.0 != page || self.page_blocks.1.is_empty() {
-            let mask = visible(page);
+            let mask = visible(page, self.size);
             let mut blocks: Vec<usize> = Vec::new();
             for range in &self.order {
                 for b in range.start / self.block..range.end.div_ceil(self.block) {
@@ -541,9 +554,10 @@ pub fn first_pointer(sync: usize) -> usize {
     orb::pointer_count(sync) + 1
 }
 
-/// Whether a prop with `sync` values can address the whole screen through `Orb/Text/Pointer` (pointers up to 253).
-pub fn fits(sync: usize) -> bool {
-    first_pointer(sync) + BANK.div_ceil(sync) - 1 < POINTER_SCREEN_CLOSE as usize
+/// Whether a prop with `sync` values and thumbnails of `size` bytes can address the whole screen through
+/// `Orb/Text/Pointer` (pointers up to 253): 128-byte thumbnails need 8 values or more.
+pub fn fits(sync: usize, size: usize) -> bool {
+    thumbnail::SIZES.contains(&size) && first_pointer(sync) + bank_bytes(size).div_ceil(sync) - 1 < POINTER_SCREEN_CLOSE as usize
 }
 
 /// Everyone else's step through the text panel's synced pointer (block `b` is pointer `first_pointer(sync) + b`) or
@@ -586,31 +600,20 @@ mod tests {
     }
 
     fn picture(seed: u8) -> Picture {
-        let mut p = [0u8; PICTURE_BYTES];
-        for (i, b) in p.iter_mut().enumerate() {
-            *b = (i as u8).wrapping_mul(37).wrapping_add(seed);
-        }
-        p
-    }
-
-    /// What the screen's shader reads back from a bank: a cell's glyph, a picture's pixel in a display row.
-    fn pixel(bank: &[u8; BANK], picture: usize, x: usize, y: usize) -> bool {
-        let passes = bank[PASS + picture] as usize;
-        if passes == 0 {
-            return false;
-        }
-        // The display row a pass shows for `y`: rounded down to the pass's step.
-        let step = [8, 4, 2, 1][passes - 1];
-        let shown = y / step * step;
-        let kept = ROW_ORDER.iter().position(|&r| r == shown).unwrap();
-        let byte = bank[PICTURES_AT + picture * PICTURE_BYTES + kept * ROW_BYTES + x / 8];
-        byte >> (7 - x % 8) & 1 == 1
+        let pixels: Vec<[f32; 3]> = (0..thumbnail::WIDTH * thumbnail::HEIGHT)
+            .map(|i| {
+                let (x, y) = ((i % thumbnail::WIDTH) as f32 / 64.0, (i / thumbnail::WIDTH) as f32 / 36.0);
+                [(x + seed as f32 * 0.1).fract(), y, ((x * 3.0 + y) * 0.5 + seed as f32 * 0.07).fract()]
+            })
+            .collect();
+        Picture::new(&pixels)
     }
 
     #[test]
     fn a_results_page_holds_its_texts_states_and_pictures() {
         let menu = results_menu();
-        let frame = Frame::new(&menu, Some(1), None, Flags { listening: true, ..Default::default() }, &|id| (id == "video000001").then(|| picture(9)));
+        let thumb = picture(9);
+        let frame = Frame::new(&menu, Some(1), None, Flags { listening: true, ..Default::default() }, 72, &|id| (id == "video000001").then(|| thumb.clone()));
         let bank = frame.bank;
         assert_eq!(bank[PAGE], ScreenPage::Results as u8);
         assert_eq!(bank[FLAGS], 1);
@@ -623,30 +626,25 @@ mod tests {
         // Five results on page one: nothing hidden among rows; "previous" hidden.
         let previous = layout.elements.iter().position(|e| e.target == Target::Previous).unwrap();
         assert_eq!(bank[HIDDEN + previous / 7] >> (previous % 7) & 1, 1);
-        assert_eq!(bank[PASS + 1], PASSES);
-        assert_eq!(bank[PASS], 0, "no thumbnail for the first result yet");
-        let source = picture(9);
-        for y in 0..PICTURE_H {
-            for x in 0..PICTURE_W {
-                let expected = source[y * ROW_BYTES + x / 8] >> (7 - x % 8) & 1 == 1;
-                // 128 travels as 129: the byte's last pixel may turn white.
-                let byte = source[y * ROW_BYTES + x / 8];
-                if byte == 128 && x % 8 == 7 {
-                    continue;
-                }
-                assert_eq!(pixel(&bank, 1, x, y), expected, "({x}, {y})");
-            }
-        }
+        assert_eq!(bank[LAYER_COUNTS + 1], 3, "72 bytes: three layers");
+        assert_eq!(bank[LAYER_COUNTS], 0, "no thumbnail for the first result yet");
+        assert_eq!(&bank[PICTURES_AT + 72..PICTURES_AT + 144], thumb.bytes(72), "result 1's thumbnail, as encoded");
+        assert!(bank[bank_bytes(72)..].iter().all(|&b| b == 0), "nothing past 744 bytes");
         assert!(bank.iter().all(|&b| b != orb::UNSENDABLE), "every byte can be sent");
-        assert_eq!(Frame::new(&Menu::default(), None, None, Flags::default(), &|_| None).bank, [0; BANK], "closed: empty");
+        // 128-byte thumbnails: four layers, result 1 from byte 384 + 128.
+        let large = Frame::new(&menu, None, None, Flags::default(), 128, &|id| (id == "video000001").then(|| thumb.clone())).bank;
+        assert_eq!(large[LAYER_COUNTS + 1], 4);
+        assert_eq!(&large[PICTURES_AT + 128..PICTURES_AT + 256], thumb.bytes(128));
+        assert_eq!(Frame::new(&Menu::default(), None, None, Flags::default(), 72, &|_| None).bank, [0; BANK], "closed: empty");
         assert_eq!(RESULTS_PER_PAGE, PICTURES);
     }
 
     #[test]
-    fn everyone_gets_header_texts_then_pictures_by_pass() {
+    fn everyone_gets_header_texts_then_pictures_by_layer() {
         let menu = results_menu();
-        let want = Frame::new(&menu, None, None, Flags::default(), &|_| Some(picture(3))).bank;
-        let mut everyone = Audience::new(8);
+        let thumb = picture(3);
+        let want = Frame::new(&menu, None, None, Flags::default(), 72, &|_| Some(thumb.clone())).bank;
+        let mut everyone = Audience::new(8, 72);
         assert!(everyone.take_clear());
         assert!(!everyone.take_clear(), "once");
         let mut order = Vec::new();
@@ -659,19 +657,22 @@ mod tests {
         let text_blocks = (TEXT / 8)..PICTURES_AT.div_ceil(8);
         let first_picture = order.iter().position(|&b| b * 8 >= PICTURES_AT).unwrap();
         assert!(order[..first_picture].iter().filter(|&&b| text_blocks.contains(&b)).count() > 20, "texts before pictures");
-        // After the first pass of every picture, the header says one pass each before any second-pass row goes.
-        let pass_header = order.iter().position(|&b| b == PASS / 8).unwrap();
-        assert!(pass_header > first_picture);
+        // After the first layer of every picture, the header says one layer each before any second-layer byte goes.
+        let layer_header = order.iter().position(|&b| b == LAYER_COUNTS / 8).unwrap();
+        assert!(layer_header > first_picture);
+        let first_layer: Vec<usize> = layer_bytes(72, 1).map(|r| r.start / 8).collect();
+        assert!(first_layer.iter().all(|b| order[..layer_header].contains(b)), "every first layer before the count");
         // Owner: 16 bytes a step, the same content.
-        let mut owner = Audience::new(LOCAL_VALUES);
+        let mut owner = Audience::new(LOCAL_VALUES, 72);
         owner.take_clear();
         let mut steps = 0;
         while owner.next(&want).is_some() {
             steps += 1;
         }
         assert_eq!(owner.sent, want);
-        // Every block once, and the passes' count again once per pass of them all (not once per thumbnail).
-        assert!(steps <= BANK.div_ceil(LOCAL_VALUES) + PASSES as usize, "{steps} steps");
+        // Every block once (some twice: a 16-byte block may hold two thumbnails' layers), and the layers' count again once
+        // per layer of them all (not once per thumbnail).
+        assert!(steps <= bank_bytes(72).div_ceil(LOCAL_VALUES) + 2 * PICTURES + 3, "{steps} steps");
         // Nothing left: resend in turn.
         assert_eq!(owner.next(&want), None);
         assert!(owner.settled(&want));
@@ -682,20 +683,21 @@ mod tests {
     fn a_page_s_unread_bytes_are_never_sent_and_the_header_comes_back_often() {
         // The results page sent whole, then Home: its slots and header only.
         let mut menu = results_menu();
-        let mut everyone = Audience::new(8);
+        let mut everyone = Audience::new(8, 72);
         everyone.cleared(false);
-        let results = Frame::public(&menu, Flags::default(), &|_| Some(picture(3))).bank;
+        let thumb = picture(3);
+        let results = Frame::public(&menu, Flags::default(), 72, &|_| Some(thumb.clone())).bank;
         while everyone.next(&results).is_some() {}
         menu.press(Target::Back);
         menu.press(Target::Back);
-        let home = Frame::public(&menu, Flags::default(), &|_| None).bank;
+        let home = Frame::public(&menu, Flags::default(), 72, &|_| None).bank;
         assert_eq!(home[PAGE], ScreenPage::Home as u8);
         assert_eq!(everyone.step(&home), Send::Clear, "a new page clears first");
         let mut blocks = 0;
         while everyone.next(&home).is_some() {
             blocks += 1;
         }
-        let mask = visible(home[PAGE]);
+        let mask = visible(home[PAGE], 72);
         let read_blocks = (0..BANK.div_ceil(8)).filter(|b| (b * 8..((b + 1) * 8).min(BANK)).any(|i| mask[i])).count();
         assert!(blocks <= read_blocks && read_blocks < 30, "{blocks} blocks for Home's {read_blocks}");
         assert!(everyone.sent[PICTURES_AT..].iter().all(|&b| b == 0), "no thumbnail byte for Home");
@@ -711,8 +713,8 @@ mod tests {
         menu.open();
         menu.set_contacts(vec![crate::menu::Contact { id: "u1".into(), name: "Lyra".into() }], true, "");
         menu.press(Target::Call);
-        let owner = Frame::new(&menu, Some(3), Some(4), Flags::default(), &|_| None).bank;
-        let public = Frame::public(&menu, Flags::default(), &|_| None).bank;
+        let owner = Frame::new(&menu, Some(3), Some(4), Flags::default(), 72, &|_| None).bank;
+        let public = Frame::public(&menu, Flags::default(), 72, &|_| None).bank;
         assert_eq!((owner[HOVER], owner[PRESSED]), (4, 5));
         assert_eq!((public[HOVER], public[PRESSED]), (0, 0), "no hover: block 0 stays put while the finger moves");
         let lyra: Vec<u8> = "Lyra".chars().map(|c| orb::glyph_index(c).unwrap()).collect();
@@ -721,20 +723,25 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_thumbnail_hides_before_its_rows_change() {
+    fn a_changed_thumbnail_hides_before_its_layers_change() {
         let menu = results_menu();
-        let first = Frame::new(&menu, None, None, Flags::default(), &|_| Some(picture(3))).bank;
-        let mut owner = Audience::new(LOCAL_VALUES);
+        let (a, b) = (picture(3), picture(4));
+        let first = Frame::new(&menu, None, None, Flags::default(), 128, &|_| Some(a.clone())).bank;
+        let mut owner = Audience::new(LOCAL_VALUES, 128);
         owner.take_clear();
         while owner.next(&first).is_some() {}
-        let second = Frame::new(&menu, None, None, Flags::default(), &|_| Some(picture(4))).bank;
-        assert_eq!(owner.next(&second), Some(PASS / LOCAL_VALUES), "the passes' count first");
-        assert!((0..PICTURES).all(|p| owner.sent[PASS + p] == 0));
+        let second = Frame::new(&menu, None, None, Flags::default(), 128, &|_| Some(b.clone())).bank;
+        assert_eq!(owner.next(&second), Some(LAYER_COUNTS / LOCAL_VALUES), "the layers' count first");
+        assert!((0..PICTURES).all(|p| owner.sent[LAYER_COUNTS + p] == 0));
+        while owner.next(&second).is_some() {}
+        assert_eq!(owner.sent, second, "then the new pictures, layer by layer");
     }
 
     #[test]
     fn messages_and_pointers() {
-        assert!(fits(4) && fits(8) && fits(16));
+        assert!(fits(4, 72) && fits(8, 72) && fits(16, 72));
+        assert!(!fits(4, 128) && fits(8, 128) && fits(16, 128), "1024 bytes in blocks of 4 would pass pointer 253");
+        assert!(!fits(8, 100));
         assert_eq!(first_pointer(8), 17);
         let pointer = format!("{}Orb/Text/Pointer", orbiters_core::osc::PARAMETERS_PREFIX);
         assert_eq!(synced_messages(8, &Send::Pointer(2)), vec![(pointer.clone(), OscType::Int(19))]);
@@ -772,9 +779,10 @@ mod tests {
     #[test]
     fn blocks_go_in_three_steps_that_never_mix_pointer_and_values() {
         let menu = results_menu();
-        let want = Frame::new(&menu, None, None, Flags::default(), &|_| Some(picture(3))).bank;
-        for size in [8, LOCAL_VALUES] {
-            let mut audience = Audience::new(size);
+        let thumb = picture(3);
+        for (size, thumbnails) in [(8, 72), (LOCAL_VALUES, 72), (8, 128), (LOCAL_VALUES, 128)] {
+            let want = Frame::new(&menu, None, None, Flags::default(), thumbnails, &|_| Some(thumb.clone())).bank;
+            let mut audience = Audience::new(size, thumbnails);
             audience.take_clear();
             let (mut memory, mut pointer, mut values) = ([0u8; BANK], None, Vec::new());
             let mut kinds = Vec::new();
@@ -783,7 +791,7 @@ mod tests {
                 kinds.push(std::mem::discriminant(&send));
                 write(&mut memory, &mut pointer, &mut values, size, &send);
             }
-            assert_eq!(memory, want, "{size} bytes a block");
+            assert_eq!(memory, want, "{size} bytes a block, {thumbnails}-byte thumbnails");
             assert!(!audience.mid_block() || kinds.len() % 3 != 0);
             // Rest, values, pointer, in turn.
             assert_eq!(kinds[0], std::mem::discriminant(&Send::Rest));

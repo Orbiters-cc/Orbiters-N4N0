@@ -159,11 +159,13 @@ pub struct OrbRuntime {
     vrchat_running: bool,
     /// Where Orb's menu goes (contracts `Docs/orb.md`, Menu): the avatar's Orb prop has the projected screen, with
     /// these text values; VRChat runs in VR (`VRMode`, `None` until it says); the screen shows the menu in VR too
-    /// (`Orb/Screen/Replace`, as VRChat or the manifest says).
+    /// (`Orb/Screen/Replace`, as VRChat or the manifest says); the bytes of each of its thumbnails
+    /// (`Orb/Screen/ThumbnailBytes`, likewise; 72 when neither says).
     screen_present: bool,
     screen_sync: Option<usize>,
     vr_mode: Option<bool>,
     screen_replace: Option<bool>,
+    screen_thumbnail: Option<usize>,
     voice_hint_shown: bool,
     enabled: bool,
     /// Wakes the orb thread before its next deadline (`woken`: a wake came while it was busy).
@@ -222,7 +224,8 @@ impl OrbRuntime {
         self.screen_present = false;
         self.screen_sync = None;
         self.screen_replace = None;
-        self.screen.avatar(false, None);
+        self.screen_thumbnail = None;
+        self.screen.avatar(false, None, contract::thumbnail::SIZES[0]);
         self.screen.set_gaze(false);
     }
 
@@ -234,9 +237,10 @@ impl OrbRuntime {
     fn screen_place(&mut self, steamvr: bool) {
         let desktop = self.vr_mode.map_or(!steamvr, |vr| !vr);
         let shows = self.screen_present && (desktop || self.screen_replace.unwrap_or(true));
-        let used = shows && self.screen_sync.is_some_and(orbiters_orb::menu::screen::fits);
-        if used != self.screen.available {
-            self.screen.avatar(used, self.screen_sync);
+        let thumbnail = self.screen_thumbnail.unwrap_or(contract::thumbnail::SIZES[0]);
+        let used = shows && self.screen_sync.is_some_and(|n| orbiters_orb::menu::screen::fits(n, thumbnail));
+        if used != self.screen.available || (used && thumbnail != self.screen.thumbnail) {
+            self.screen.avatar(used, self.screen_sync, thumbnail);
         }
         // In desktop mode its owner points by looking and clicks; in VR the fingers do.
         self.screen.set_gaze(used && desktop);
@@ -732,15 +736,18 @@ impl Controller {
                 && !name.starts_with(local::TOUCH_PREFIX)
                 && !name.starts_with(local::EYE_PREFIX)
                 && !name.starts_with(local::GAZE_PREFIX)
-                && name != params::SCREEN_REPLACE)
+                && name != params::SCREEN_REPLACE
+                && name != params::SCREEN_THUMBNAIL_BYTES)
     }
 
-    /// VRChat's mode or the avatar's `Orb/Screen/Replace` (on the OSC receiving thread): where Orb's menu goes is
-    /// looked at again at the orb thread's next step.
+    /// VRChat's mode, the avatar's `Orb/Screen/Replace` or `Orb/Screen/ThumbnailBytes` (on the OSC receiving thread):
+    /// where Orb's menu goes, and what the screen keeps, is looked at again at the orb thread's next step.
     fn orb_screen_choice(&self, name: &str, value: &OscValue) {
         let mut rt = self.orb.lock().unwrap();
         if name == params::VR_MODE {
             rt.vr_mode = Some(value.truthy());
+        } else if name == params::SCREEN_THUMBNAIL_BYTES {
+            rt.screen_thumbnail = thumbnail_bytes(int_value(value), None);
         } else {
             rt.screen_replace = Some(value.truthy());
         }
@@ -768,7 +775,7 @@ impl Controller {
     /// (listening, Orb's menu, the walk boost) is done on the OSC action thread, in order, and what goes to Orbiters
     /// on threads of its own.
     pub(super) fn orb_on_parameter(self: &Shared, name: &str, value: &OscValue) {
-        if name == params::VR_MODE || name == params::SCREEN_REPLACE {
+        if name == params::VR_MODE || name == params::SCREEN_REPLACE || name == params::SCREEN_THUMBNAIL_BYTES {
             self.orb_screen_choice(name, value);
             return;
         }
@@ -938,6 +945,10 @@ impl Controller {
         // Where Orb's menu goes: VRChat's mode (an int, 1 in VR), and Orb/Screen/Replace.
         let vr_mode = flag(params::VR_MODE);
         let replace = screen_replace(flag(params::SCREEN_REPLACE), manifest.as_ref());
+        let thumbnail = thumbnail_bytes(
+            parameters.iter().find(|(a, _)| a[PARAMETERS_PREFIX.len()..] == *params::SCREEN_THUMBNAIL_BYTES).and_then(|(_, v)| int_value(v)),
+            manifest.as_ref(),
+        );
         let steamvr = self.snapshot.lock().unwrap().steamvr.running;
         let synced = names.iter().filter(|n| n.starts_with(params::TEXT_SYNC_PREFIX)).count();
         let sync = if contract::SYNC_COUNTS.contains(&synced) {
@@ -993,6 +1004,7 @@ impl Controller {
                 rt.screen_present = rt.params.contains(orbiters_orb::menu::screen::local::POINTER) || manifest_screen;
                 rt.screen_sync = sync;
                 rt.screen_replace = replace;
+                rt.screen_thumbnail = thumbnail;
                 if vr_mode.is_some() {
                     rt.vr_mode = vr_mode;
                 }
@@ -1830,6 +1842,22 @@ fn screen_replace(tree: Option<bool>, manifest: Option<&AvatarManifest>) -> Opti
     tree.or_else(|| manifest.and_then(|m| m.parameter(params::SCREEN_REPLACE)).map(|p| p.default > 0.5))
 }
 
+/// `Orb/Screen/ThumbnailBytes` as VRChat holds it (`tree`), else its default in the avatar's manifest, when it is one
+/// of the sizes a screen keeps (contracts `orb::thumbnail::SIZES`).
+fn thumbnail_bytes(tree: Option<i32>, manifest: Option<&AvatarManifest>) -> Option<usize> {
+    let value = tree.or_else(|| manifest.and_then(|m| m.parameter(params::SCREEN_THUMBNAIL_BYTES)).map(|p| p.default.round() as i32))?;
+    usize::try_from(value).ok().filter(|n| contract::thumbnail::SIZES.contains(n))
+}
+
+/// An int parameter's value (VRChat sends ints as ints; a float that holds a whole number counts too).
+fn int_value(value: &OscValue) -> Option<i32> {
+    match value {
+        OscValue::Int(n) => Some(*n),
+        OscValue::Float(f) if f.fract() == 0.0 => Some(*f as i32),
+        _ => None,
+    }
+}
+
 fn read_manifest(avatar_id: &str) -> Option<AvatarManifest> {
     let path = orbiters_core::paths::avatars_dir().join(avatar::file_name(avatar_id));
     let text = std::fs::read_to_string(path).ok()?;
@@ -1896,13 +1924,20 @@ mod tests {
     }
 
     fn received(socket: &UdpSocket, wait: Duration) -> Vec<Message> {
+        // Orb's steps go as bundles: their messages in order.
+        fn unpack(packet: rosc::OscPacket, out: &mut Vec<Message>) {
+            match packet {
+                rosc::OscPacket::Message(m) => out.push((m.addr, m.args[0].clone())),
+                rosc::OscPacket::Bundle(b) => b.content.into_iter().for_each(|p| unpack(p, out)),
+            }
+        }
         let mut out = Vec::new();
         let until = Instant::now() + wait;
-        let mut buf = [0u8; 2048];
+        let mut buf = [0u8; 8192];
         while Instant::now() < until {
             if let Ok(n) = socket.recv(&mut buf) {
-                if let Ok((_, rosc::OscPacket::Message(m))) = rosc::decoder::decode_udp(&buf[..n]) {
-                    out.push((m.addr, m.args[0].clone()));
+                if let Ok((_, packet)) = rosc::decoder::decode_udp(&buf[..n]) {
+                    unpack(packet, &mut out);
                 }
             }
         }
@@ -2505,6 +2540,31 @@ data: {}
             ctl.orb_stop();
             ctl.shutdown();
         }
+    }
+
+    #[test]
+    fn the_screen_keeps_the_thumbnail_size_vrchat_says() {
+        // 128 bytes as the avatar's tree says: the owner's blocks reach past the 744 bytes of 72-byte thumbnails.
+        let mut tree = mode_tree("avtr_thumbnails_128", Some(0), false);
+        tree["CONTENTS"]["parameters"]["CONTENTS"]["Orb_Screen_ThumbnailBytes"] =
+            json!({ "FULL_PATH": parameter(params::SCREEN_THUMBNAIL_BYTES), "TYPE": "i", "VALUE": [128] });
+        let (ctl, vrchat) = orb_on(tree);
+        assert!(until(|| ctl.orb.lock().unwrap().screen.thumbnail == 128));
+        opens_on_the_screen(&ctl, &vrchat);
+        // A size no screen keeps: 72, the default.
+        ctl.orb_on_parameter(params::SCREEN_THUMBNAIL_BYTES, &OscValue::Int(100));
+        assert!(until(|| ctl.orb.lock().unwrap().screen.thumbnail == 72));
+        ctl.orb_stop();
+        ctl.shutdown();
+        // Neither VRChat nor a manifest says: 72.
+        let (ctl, _vrchat) = orb_on(mode_tree("avtr_thumbnails_default", Some(0), false));
+        assert!(until(|| ctl.view().orb.screen));
+        assert_eq!(ctl.orb.lock().unwrap().screen.thumbnail, 72);
+        ctl.orb_stop();
+        ctl.shutdown();
+        assert_eq!(thumbnail_bytes(Some(128), None), Some(128));
+        assert_eq!(thumbnail_bytes(Some(4), None), None);
+        assert_eq!(int_value(&OscValue::Float(72.0)), Some(72));
     }
 
     #[test]

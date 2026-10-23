@@ -45,7 +45,23 @@ mod imp {
         }
     }
 
+    /// Lab (S4_QOS=high|eco): the process's quality of service, which Windows otherwise takes from the window it
+    /// descends from (the desktop's: low while it is minimized or covered, its threads then on efficiency cores).
+    fn set_qos() {
+        use windows::Win32::System::Threading::{ProcessPowerThrottling, SetProcessInformation, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE};
+        let Ok(qos) = std::env::var("S4_QOS") else { return };
+        let state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: if qos == "eco" { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
+        };
+        // SAFETY: the pointer and size describe `state`, alive for the call.
+        let done = unsafe { SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state as *const _ as *const core::ffi::c_void, std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32) };
+        eprintln!("lab: process QoS {qos}: {done:?}");
+    }
+
     pub fn govern() {
+        set_qos();
         VRCHAT.get_or_init(|| {
             // Normal first: looking for VRChat below normal can itself take seconds on a busy machine.
             set_class(NORMAL_PRIORITY_CLASS);

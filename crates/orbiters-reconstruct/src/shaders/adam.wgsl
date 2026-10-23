@@ -14,6 +14,9 @@ struct AdamInfo {
 @group(0) @binding(2) var<storage, read> grads: array<f32>;
 @group(0) @binding(3) var<storage, read_write> moment1: array<f32>;
 @group(0) @binding(4) var<storage, read_write> moment2: array<f32>;
+// The projection's values (16 floats a Gaussian like the parameters; slot 15 is 1 where the step shows it): with
+// info.n.z (lab: sparse Adam) the Gaussians a step does not show keep their moments and parameters.
+@group(0) @binding(5) var<storage, read> proj: array<f32>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
@@ -22,6 +25,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         return;
     }
     let slot = k % 16u;
+    if (info.n.z != 0u && proj[k - slot + 15u] == 0.0) {
+        return;
+    }
+    // Lazily dense Adam (info.n.w; lazy_adam.wgsl): a Gaussian's first moment's slot 14 keeps its last step.
+    if (info.n.w != 0u && slot == 14u) {
+        moment1[k] = bitcast<f32>(info.n.y);
+        return;
+    }
     let lr = info.lr[slot / 4u][slot % 4u];
     if (lr == 0.0) {
         return;

@@ -17,6 +17,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         return;
     }
     let o = i * PARAM;
+    // Lab (sparse Adam, frame.confidence.w): Adam skips a Gaussian this step does not show, so its gradients go unwritten.
+    if (frame.confidence.w != 0.0 && frame.counts.w == 0u && proj[i * PROJ + 15u] == 0.0) {
+        return;
+    }
     for (var k = 0u; k < PARAM; k++) {
         grads[o + k] = 0.0;
     }

@@ -52,6 +52,11 @@ fn restart(i: u32) {
         m2[i * PARAM + k] = 0.0;
     }
     params[i * PARAM + RESTART] = info.step;
+    // Lab (info.max_radius, unused by adjust and copy, as a flag): moments zero until a step shows it
+    // (project_backward_adam_dense.wgsl skips it meanwhile).
+    if (info.max_radius != 0.0) {
+        m2[i * PARAM + RESTART] = 1.0;
+    }
 }
 
 @compute @workgroup_size(256)

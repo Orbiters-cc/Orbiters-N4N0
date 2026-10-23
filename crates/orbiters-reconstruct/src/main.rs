@@ -12,7 +12,7 @@
 use anyhow::{bail, Context as _};
 use orbiters_contracts::qoi;
 use orbiters_core::reconstruction::{self as rec, Event, Report, Stage};
-use orbiters_reconstruct::{gpu, init, ply, prepare, sky, train};
+use orbiters_reconstruct::{gpu, init, ply, prepare, sky, timing, train};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -80,15 +80,19 @@ fn rgb8(img: &[[f32; 4]]) -> Vec<u8> {
 }
 
 fn run(args: Args) -> anyhow::Result<Report> {
+    let run_start = std::time::Instant::now();
     let dir = &args.session;
     // Above normal while VRChat is closed, out of its way while it runs (orbiters_reconstruct::priority).
     orbiters_reconstruct::priority::govern();
     // A swap an earlier run stopped in the middle of: its previous result is back in place first.
     recover(dir);
     stage(Stage::Loading, 0.0);
+    // Lab (S4_OVERLAP): the device and its kernels come up while the session loads.
+    let device_options = gpu::DeviceOptions { low_priority: true, ..args.device };
+    let early_device = std::env::var_os("S4_OVERLAP").is_some().then(|| std::thread::spawn(move || timing::section("2 device", None, || gpu::Gpu::with_options(device_options))));
     // Within the memory budget; depth that says nothing becomes unknown, the world's chromatic aberration leaves the
     // keyframes.
-    let prepared = prepare::prepare(dir, &prepare::Options { width: args.width, ..Default::default() }, |p| stage(Stage::Loading, p))?;
+    let prepared = timing::section("1 prepare", None, || prepare::prepare(dir, &prepare::Options { width: args.width, ..Default::default() }, |p| stage(Stage::Loading, p)))?;
     for line in prepared.describe() {
         eprintln!("{line}");
     }
@@ -97,14 +101,18 @@ fn run(args: Args) -> anyhow::Result<Report> {
     // Training gives way to VRChat on its graphics card: the queue asks for low priority (nothing else waits on it when
     // the GPU is free), the budget fits the graphics memory VRChat leaves, and with SteamVR the frame-timing governor
     // paces the steps (orbiters_reconstruct::governor, joined by train::train while VRChat runs).
-    let mut gpu = gpu::Gpu::with_options(gpu::DeviceOptions { low_priority: true, ..args.device })?;
+    let mut gpu = match early_device {
+        Some(thread) => timing::section("2 device (waited)", None, || thread.join()).map_err(|_| anyhow::anyhow!("the GPU device's thread panicked"))??,
+        None => timing::section("2 device", None, || gpu::Gpu::with_options(device_options))?,
+    };
+    let dev = gpu.device.clone();
     let mut settings = args.settings.clone();
     if orbiters_reconstruct::priority::vrchat() && !gpu.integrated {
         fit_memory(&gpu, &mut settings);
     }
     stage(Stage::Seeding, 0.0);
     let budget = settings.budget * 2 / 3;
-    let mut seeded = orbiters_reconstruct::priority::on_loading_threads(|| init::from_depth(data, budget, &held_out, |p| stage(Stage::Seeding, p)));
+    let mut seeded = timing::section("3 seeding", None, || orbiters_reconstruct::priority::on_loading_threads(|| init::from_depth(data, budget, &held_out, |p| stage(Stage::Seeding, p))));
     // Depth frames that say too little (bloom beyond what decoders take out, extreme post-processing, no depth frames
     // at all): seeds along the keyframes' rays make up a tenth of the seeding budget, and the set may grow while many
     // are dead.
@@ -123,7 +131,7 @@ fn run(args: Args) -> anyhow::Result<Report> {
     if settings.sky_map > 0 {
         // The sky as a map, which completes the sky itself: the shell's discs give way to it where the parallax test
         // found true sky (orbiters_reconstruct::sky). A capture none of whose pixels saw the sky keeps the shell.
-        let (map, found) = sky::seed_map(data, settings.sky_map, &held_out);
+        let (map, found) = timing::section("3 sky seed", None, || sky::seed_map(data, settings.sky_map, &held_out));
         if found.pixels > 0 {
             settings.sky_fill = false;
             let left = sky::give_way(&mut seeded, &found, train::camera_centre(data));
@@ -141,8 +149,10 @@ fn run(args: Args) -> anyhow::Result<Report> {
         bail!("{}", prepared.nothing_to_seed());
     }
     stage(Stage::Training, 0.0);
-    let outcome = train::train(data, &mut gpu, seeded, &settings, |p| {
-        emit(&Event::Progress { iteration: p.iteration, iterations: p.iterations, gaussians: p.gaussians, intersections: p.intersections, psnr: p.psnr, seconds: p.seconds });
+    let outcome = timing::section("4 train", Some(&dev), || {
+        train::train(data, &mut gpu, seeded, &settings, |p| {
+            emit(&Event::Progress { iteration: p.iteration, iterations: p.iterations, gaussians: p.gaussians, intersections: p.intersections, psnr: p.psnr, seconds: p.seconds });
+        })
     })?;
 
     stage(Stage::Saving, 0.0);
@@ -151,7 +161,8 @@ fn run(args: Args) -> anyhow::Result<Report> {
         std::fs::remove_dir_all(&partial).with_context(|| format!("clearing {}", partial.display()))?;
     }
     std::fs::create_dir_all(partial.join(rec::HELD_OUT_DIR))?;
-    ply::write(&partial.join(rec::PLY_FILE), &outcome.gaussians)?;
+    timing::section("5 ply", None, || ply::write(&partial.join(rec::PLY_FILE), &outcome.gaussians))?;
+    let sky_start = std::time::Instant::now();
     if let Some((width, rgb)) = gpu.sky()? {
         // What neither seeding nor training saw takes the sky's colour at its elevation, carried smoothly on from what
         // they saw (sky::SkyMap::fill): the map as viewers draw it, and as the held-out keyframes are scored.
@@ -162,6 +173,7 @@ fn run(args: Args) -> anyhow::Result<Report> {
         gpu.set_sky(Some((map.width, &map.rgb)))?;
         map.write(&partial.join(rec::SKY_FILE))?;
     }
+    timing::add("5 sky fill", sky_start.elapsed());
     // One render of each held-out keyframe: its preview and its score (the device holds the result).
     let write = |i: usize, img: &[[f32; 4]], preview: bool| -> anyhow::Result<()> {
         let encoded = qoi::encode(&rgb8(img), data.width, data.height, 3);
@@ -172,8 +184,14 @@ fn run(args: Args) -> anyhow::Result<Report> {
         Ok(())
     };
     let mut first = true;
-    let psnr_held_out = train::score_held_out(&mut gpu, data, prepared.undo.as_ref(), &outcome.held_out, settings.background, |i, img| {
-        write(i, img, std::mem::take(&mut first))
+    let psnr_held_out = timing::section("6 score held out", Some(&dev), || {
+        if std::env::var_os("S4_PAR_SCORE").is_some() {
+            // Lab: the CPU's share in parallel; the first held-out keyframe's render is the preview, as below.
+            let preview = outcome.held_out.first().copied();
+            train::score_held_out_parallel(&mut gpu, data, prepared.undo.as_ref(), &outcome.held_out, settings.background, |i, img| write(i, img, Some(i) == preview))
+        } else {
+            train::score_held_out(&mut gpu, data, prepared.undo.as_ref(), &outcome.held_out, settings.background, |i, img| write(i, img, std::mem::take(&mut first)))
+        }
     })?;
     if outcome.held_out.is_empty() {
         write(0, &train::render(&mut gpu, &data.views[0].camera, settings.background)?, true)?;
@@ -198,7 +216,9 @@ fn run(args: Args) -> anyhow::Result<Report> {
         depth_unknown: prepared.depth.as_ref().map(|f| f.unknown_samples),
     };
     std::fs::write(partial.join(rec::REPORT_FILE), serde_json::to_string_pretty(&report)?)?;
-    replace(dir, &partial)?;
+    timing::section("7 replace", None, || replace(dir, &partial))?;
+    timing::add("0 run", run_start.elapsed());
+    timing::print();
     Ok(report)
 }
 

@@ -9,7 +9,8 @@
 @group(0) @binding(3) var<storage, read> ranges: array<u32>;
 @group(0) @binding(5) var<storage, read_write> out_state: array<vec2<u32>>;
 
-// Per batch entry: (mean.x, mean.y, conic.a, conic.b), (conic.c, opacity, depth, id bits), (r, g, b, 0).
+// Per batch entry: (mean.x, mean.y, conic.a, conic.b), (conic.c, opacity, depth, id bits), (r, g, b, radius): the
+// radius (project.wgsl's, out to α = 1/255) lets a pass skip an entry no pixel of its own reaches.
 var<workgroup> s_a: array<vec4<f32>, 256>;
 var<workgroup> s_b: array<vec4<f32>, 256>;
 var<workgroup> s_c: array<vec4<f32>, 256>;
@@ -23,5 +24,5 @@ fn load(slot: u32, entry: u32) {
     let c = proj[o + 2u];
     s_a[slot] = a;
     s_b[slot] = vec4<f32>(b.x, b.z, b.y, bitcast<f32>(id));
-    s_c[slot] = vec4<f32>(b.w, c.x, c.y, 0.0);
+    s_c[slot] = vec4<f32>(b.w, c.x, c.y, c.z);
 }

@@ -36,6 +36,8 @@ fn main() -> anyhow::Result<()> {
         Some("--window") => window::run(&args[1..]),
         Some("--overlay") => overlay::run(&args[1..]),
         Some("--orb-menu") => overlay::menu_pages::run(&args[1..]),
+        #[cfg(windows)]
+        Some("--eye-picture") => overlay::eye_picture::run(&args[1..]),
         Some("--quit") => {
             single::signal(single::Request::Quit);
             Ok(())

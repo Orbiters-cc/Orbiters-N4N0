@@ -11,6 +11,8 @@
 
 mod actions;
 pub mod calibration;
+#[cfg(windows)]
+pub mod eye_picture;
 mod frames;
 mod menu;
 pub mod menu_pages;

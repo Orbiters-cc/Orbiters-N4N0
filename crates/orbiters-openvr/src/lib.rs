@@ -17,6 +17,8 @@ pub mod compositor;
 #[cfg(windows)]
 pub mod gpu;
 pub mod input;
+#[cfg(windows)]
+pub mod mirror;
 use std::cell::OnceCell;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};

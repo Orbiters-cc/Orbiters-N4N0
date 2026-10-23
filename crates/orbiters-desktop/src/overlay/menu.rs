@@ -81,10 +81,28 @@ pub struct MenuOverlay {
     closed_at: Option<Instant>,
     /// The media reading the menu shows (its version: [`crate::media::Watcher::reading`]).
     media_seen: u64,
+    /// Where the menu was opened (it stays there), and whether the head is behind it: it then shows its back.
+    placed: Option<Matrix34>,
+    behind: bool,
 }
 
 /// A toggling request this soon after the menu closed is the close it meant, already done.
 const TOGGLE_AFTER_CLOSE: Duration = Duration::from_millis(500);
+
+/// How far past the overlay's plane (metres) the head goes before it shows the other side: standing in the plane
+/// doesn't flicker it.
+const SIDE_MARGIN_M: f32 = 0.02;
+
+/// Whether `head` is behind the overlay at `placed` (its +Z faces the front), `was` the last answer.
+pub fn behind(placed: &Matrix34, head: &Matrix34, was: bool) -> bool {
+    let (o, h) = (&placed.m, &head.m);
+    let d: f32 = (0..3).map(|i| (h[i][3] - o[i][3]) * o[i][2]).sum();
+    if was {
+        d < SIDE_MARGIN_M
+    } else {
+        d < -SIDE_MARGIN_M
+    }
+}
 
 /// The overlay's transform: `distance` in front of `head` (level, along where it looks), `below` lower, facing it.
 pub fn in_front(head: &Matrix34, distance: f32, below: f32) -> Matrix34 {
@@ -131,6 +149,8 @@ impl MenuOverlay {
             reported: None,
             closed_at: None,
             media_seen: 0,
+            placed: None,
+            behind: false,
         })
     }
 
@@ -146,7 +166,13 @@ impl MenuOverlay {
         } else {
             Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.6], [0.0, 0.0, 1.0, 0.0]] }
         };
-        let _ = overlay.set_transform_absolute(self.handle, &in_front(&head, DISTANCE_M, BELOW_EYES_M));
+        let placed = in_front(&head, DISTANCE_M, BELOW_EYES_M);
+        let _ = overlay.set_transform_absolute(self.handle, &placed);
+        self.placed = Some(placed);
+        if self.behind {
+            self.behind = false;
+            let _ = overlay.set_texture_bounds(self.handle, 0.0, 0.0, 1.0, 1.0);
+        }
         let settings = &snap.settings;
         self.menu.layout = shared::keyboard(settings.orb.menu.keyboard);
         self.menu.photo_timer = settings.photo_3d_timer;
@@ -184,6 +210,7 @@ impl MenuOverlay {
             }
         }
         changed |= set(&mut m.fast_walk, snap.settings.walk_boost.enabled);
+        changed |= set(&mut m.desktop_mode, snap.orb.desktop_mode);
         changed |= set(&mut m.light, snap.orb.light.map(|l| orbiters_orb::menu::Light { on: l.on, color: l.color, level: l.level }));
         changed |= set(&mut m.countdown, snap.orb.photo_countdown);
         changed |= set(&mut m.photo_timer, snap.settings.photo_3d_timer);
@@ -370,13 +397,32 @@ impl MenuOverlay {
         } else {
             self.dictation_seen = Some(0);
         }
+        // Seen from behind it shows its back (mirrored by SteamVR, so drawn flipped) and the laser does nothing there.
+        if let Some(placed) = &self.placed {
+            let mut poses = [Pose::default(); MAX_DEVICES];
+            steamvr.poses(Universe::Standing, &mut poses);
+            if poses[0].pose_is_valid {
+                let now = behind(placed, &poses[0].device_to_absolute, self.behind);
+                if now != self.behind {
+                    self.behind = now;
+                    let (u_min, u_max) = if now { (1.0, 0.0) } else { (0.0, 1.0) };
+                    let _ = overlay.set_texture_bounds(self.handle, u_min, 0.0, u_max, 1.0);
+                    self.hover = None;
+                    self.pressed = None;
+                    self.dirty = true;
+                }
+            }
+        }
         // The laser: SteamVR's mouse, from the bottom left.
         let page = layout::cached(ScreenPage::of(&self.menu));
         while let Some(e) = overlay.poll_event(self.handle) {
+            if self.behind {
+                continue;
+            }
             match e.event_type {
                 vr::event::MOUSE_MOVE => {
                     let (x, y, _) = e.mouse();
-                    let hover = layout::hit(page, x, HEIGHT as f32 - y).map(|(i, _)| i).filter(|&i| !layout::state(&self.menu, &page.elements[i]).hidden);
+                    let hover = layout::hit(page, x, HEIGHT as f32 - y).map(|(i, _)| i).filter(|&i| layout::state(&self.menu, &page.elements[i]).pointable());
                     if hover != self.hover {
                         self.hover = hover;
                         self.dirty = true;
@@ -385,7 +431,7 @@ impl MenuOverlay {
                 vr::event::MOUSE_BUTTON_DOWN => {
                     let (x, y, _) = e.mouse();
                     if let Some((i, target)) = layout::hit(page, x, HEIGHT as f32 - y) {
-                        if !layout::state(&self.menu, &page.elements[i]).hidden {
+                        if layout::state(&self.menu, &page.elements[i]).pointable() {
                             // The press shows at once; what it does follows.
                             self.pressed = Some(i);
                             effects.extend(self.menu.press(target));
@@ -480,7 +526,11 @@ impl MenuOverlay {
                     _ => None,
                 }
             };
-            self.canvas.paint(time, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu, hover, pressed, picture: &picture, time }));
+            if self.behind {
+                self.canvas.paint(time, |p| menu_ui::draw_back(p, pos2(0.0, 0.0)));
+            } else {
+                self.canvas.paint(time, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu, hover, pressed, picture: &picture, time }));
+            }
             // Only what changed goes to SteamVR, straight from the canvas.
             if let Some(changed) = self.canvas.damage() {
                 presenter.show_part(overlay, self.handle, self.canvas.pixels(), WIDTH, HEIGHT, changed);
@@ -539,5 +589,17 @@ mod tests {
         let turned = Matrix34 { m: [[0.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.7], [-1.0, 0.0, 0.0, 0.0]] };
         let t = in_front(&turned, 0.5, 0.0);
         assert!((t.m[0][3] + 0.5).abs() < 1e-5 && t.m[2][3].abs() < 1e-5, "{:?}", t.m);
+    }
+
+    #[test]
+    fn the_back_shows_once_the_head_is_past_the_plane() {
+        let head = Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.7], [0.0, 0.0, 1.0, 0.0]] };
+        let placed = in_front(&head, 0.5, 0.16);
+        let at = |z: f32| Matrix34 { m: [[1.0, 0.0, 0.0, 0.3], [0.0, 1.0, 0.0, 1.6], [0.0, 0.0, 1.0, z]] };
+        assert!(!behind(&placed, &head, false), "where it opened: the front");
+        assert!(!behind(&placed, &at(-0.51), false), "in the plane: still the front");
+        assert!(behind(&placed, &at(-0.6), false), "walked past it");
+        assert!(behind(&placed, &at(-0.49), true), "back to the plane: still the back");
+        assert!(!behind(&placed, &at(-0.4), true), "in front again");
     }
 }

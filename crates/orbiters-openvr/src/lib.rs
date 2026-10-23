@@ -730,6 +730,13 @@ impl Overlay<'_> {
         overlay_result(unsafe { entry::<F>(self.table, 60)(handle, &t) })
     }
 
+    /// The part of the texture the overlay shows, u and v from its top left: a minimum above its maximum flips it.
+    pub fn set_texture_bounds(&self, handle: OverlayHandle, u_min: f32, v_min: f32, u_max: f32, v_max: f32) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64, *const [f32; 4]) -> i32;
+        // SAFETY: entry 30 is SetOverlayTextureBounds (VRTextureBounds_t: uMin, vMin, uMax, vMax).
+        overlay_result(unsafe { entry::<F>(self.table, 30)(handle, &[u_min, v_min, u_max, v_max]) })
+    }
+
     /// Places the overlay in the standing play space (the overlay's +Z faces the viewer).
     pub fn set_transform_absolute(&self, handle: OverlayHandle, transform: &Matrix34) -> Result<(), i32> {
         type F = unsafe extern "system" fn(u64, i32, *const Matrix34) -> i32;

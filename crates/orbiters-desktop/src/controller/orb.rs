@@ -249,8 +249,9 @@ impl OrbRuntime {
         if used != self.screen.available || (used && thumbnail != self.screen.thumbnail) {
             self.screen.avatar(used, self.screen_sync, thumbnail);
         }
-        // In desktop mode its owner points by looking and clicks; in VR the fingers do.
+        // In desktop mode its owner points by looking and clicks; in VR the fingers do. Fast walk is VR's only.
         self.screen.set_gaze(used && desktop);
+        self.screen.menu.desktop_mode = desktop;
     }
 
     /// `Orb/Menu` to send, when the avatar's Menu toggle no longer says whether Orb's menu shows (another trigger opened
@@ -337,6 +338,7 @@ impl OrbRuntime {
             calls: Default::default(),
             screen: self.screen.available,
             screen_open: self.screen.menu.open,
+            desktop_mode: self.screen.menu.desktop_mode,
             menu_request: self.screen.menu_request,
             menu_toggle: self.screen.menu_toggle,
             dictation: self.screen.dictation.clone(),

@@ -11,6 +11,8 @@ use orbiters_ui::{icons, widgets};
 
 /// The page's background.
 pub const CARD: Color32 = theme::INK_900;
+/// How much of the card covers an element greyed out (the avatar's screen uses the same).
+const UNAVAILABLE_VEIL: f32 = 0.6;
 
 /// What changes on a page, for the overlay.
 pub struct View<'a> {
@@ -253,6 +255,24 @@ fn picture(p: &Painter, r: Rect, texture: Option<TextureId>) {
     }
 }
 
+/// The overlay seen from behind: Orb (a green dot with its eyes) over "Orb menu" and "look at the other side", as the
+/// avatar's screen shows its back. The menu is on the side its owner faces.
+pub fn draw_back(p: &Painter, origin: Pos2) {
+    let card = Rect::from_min_size(origin, vec2(layout::WIDTH as f32, layout::HEIGHT as f32));
+    p.rect_filled(card, theme::radius(layout::CARD_RADIUS as f32), CARD);
+    let centre = card.center().x;
+    let orb = pos2(centre, card.center().y - 86.0);
+    p.circle_filled(orb, 40.0, theme::alpha(theme::ACCENT, 0.16));
+    p.circle_filled(orb, 26.0, theme::ACCENT);
+    for side in [-1.0, 1.0] {
+        p.rect_filled(Rect::from_center_size(orb + vec2(side * 9.0, -2.0), vec2(7.0, 13.0)), theme::radius(3.5), CARD);
+    }
+    let title = Txt::new("Orb menu", 52.0).weight(weight::SEMIBOLD).color(theme::FG);
+    widgets::text(p, pos2(centre, card.center().y + 6.0), Align2::CENTER_CENTER, &title);
+    let hint = Txt::new("look at the other side", 28.0).weight(weight::REGULAR).color(theme::FG_3);
+    widgets::text(p, pos2(centre, card.center().y + 62.0), Align2::CENTER_CENTER, &hint);
+}
+
 /// The whole page as the overlay shows it.
 pub fn draw(p: &Painter, origin: Pos2, view: &View) {
     let menu = view.menu;
@@ -267,7 +287,10 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
         element(p, e, origin);
         let r = rect(e.rect, origin);
         let radius = theme::radius(e.radius() as f32);
-        if view.pressed == Some(i) {
+        if state.unavailable {
+            // Greyed out: the card shows through, as on the avatar's screen.
+            p.rect_filled(r, radius, theme::alpha(CARD, UNAVAILABLE_VEIL));
+        } else if view.pressed == Some(i) {
             p.rect_filled(r, radius, if matches!(e.look, Look::Accent | Look::Danger) { theme::black(0.16) } else { theme::white(0.12) });
         } else if view.hover == Some(i) {
             p.rect_filled(r, radius, if matches!(e.look, Look::Accent | Look::Danger) { theme::white(0.14) } else { theme::white(0.06) });

@@ -381,6 +381,9 @@ pub struct OrbStatus {
     /// Orb's menu is open on the avatar's screen.
     #[serde(default)]
     pub screen_open: bool,
+    /// VRChat runs in desktop mode (as it says; until it does, while SteamVR doesn't run): no fast walk.
+    #[serde(default)]
+    pub desktop_mode: bool,
     /// Bumped when something asks the overlay to open Orb's menu (the wake word alone, a hand on the orb).
     #[serde(default)]
     pub menu_request: u32,

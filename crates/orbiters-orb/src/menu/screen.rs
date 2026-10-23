@@ -22,7 +22,8 @@ use rosc::OscType;
 /// The largest screen memory (128-byte thumbnails): every memory here is this long, its bytes past the avatar's
 /// [`bank_bytes`] never read nor sent.
 pub const BANK: usize = bank_bytes(thumbnail::MAX_BYTES);
-/// The header: page, flags, hovered and pressed elements, the "on" and "hidden" masks, the thumbnails' layer counts.
+/// The header: page, flags, hovered and pressed elements, the "on", "hidden" and "unavailable" masks, the thumbnails'
+/// layer counts.
 pub const HEADER: usize = 24;
 pub const PAGE: usize = 0;
 pub const FLAGS: usize = 1;
@@ -38,6 +39,9 @@ pub const HIDDEN: usize = 8;
 pub const HIDDEN_BYTES: usize = 8;
 /// How many layers of each thumbnail the screen holds (0 to 3, or 4 with 128-byte thumbnails).
 pub const LAYER_COUNTS: usize = 16;
+/// Elements greyed out (not available now: fast walk in desktop mode), 7 to a byte, elements 0 to 20.
+pub const UNAVAILABLE: usize = 21;
+pub const UNAVAILABLE_BYTES: usize = 3;
 /// Where the texts start (slot offsets count from here).
 pub const TEXT: usize = HEADER;
 /// Where the thumbnails start: [`PICTURES`] of the avatar's thumbnail size (contracts `orb::thumbnail::SIZES`).
@@ -161,6 +165,9 @@ impl Frame {
             }
             if state.hidden {
                 bank[HIDDEN + i / 7] |= 1 << (i % 7);
+            }
+            if state.unavailable && i < UNAVAILABLE_BYTES * 7 {
+                bank[UNAVAILABLE + i / 7] |= 1 << (i % 7);
             }
         }
         for slot in &layout.slots {

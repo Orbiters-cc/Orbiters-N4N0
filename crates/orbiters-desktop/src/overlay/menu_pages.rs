@@ -104,6 +104,9 @@ pub fn page_pictures() -> Vec<u8> {
     let mut canvas = Canvas::new(WIDTH, HEIGHT);
     let slice = (WIDTH * HEIGHT * 4) as usize;
     let mut out = vec![0u8; slice * SLICES];
+    // Slice 0: the back, what the screen shows from behind.
+    let rgba = paint(&mut canvas, |p| menu_ui::draw_back(p, pos2(0.0, 0.0)));
+    out[..slice].copy_from_slice(&unpremultiply(&rgba));
     for page in ScreenPage::ALL {
         let l = layout::layout(page);
         let rgba = paint(&mut canvas, |p| menu_ui::draw_chrome(p, pos2(0.0, 0.0), &l));
@@ -251,6 +254,8 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     };
     let mut home = more();
     home.fast_walk = true;
+    // As in VRChat's desktop mode: fast walk greyed out.
+    home.desktop_mode = true;
     home.heard = Some("play some music".into());
     out.push((ScreenPage::HomeSix, home, Some(4), None));
     let mut music = more();
@@ -280,6 +285,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let rgba: Vec<u8> = art.pixels.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
         canvas.ctx().load_texture(SAMPLE_ART, ColorImage::from_rgba_unmultiplied([art.width, art.height], &rgba), TextureOptions::LINEAR)
     };
+    let rgba = paint(&mut canvas, |p| menu_ui::draw_back(p, pos2(0.0, 0.0)));
+    let path = out.join("menu-back.png");
+    write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
+    println!("{}", path.display());
     for (page, menu, hover, pressed) in samples() {
         assert_eq!(ScreenPage::of(&menu), page, "the sample shows its page");
         let picture = |id: &str| -> Option<TextureId> {

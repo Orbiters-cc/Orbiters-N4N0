@@ -503,7 +503,7 @@ impl ScreenRuntime {
             self.looked_at = touch::look(self.eye, self.gaze_point);
         }
         let menu = &self.menu;
-        let looked = self.looked_at.and_then(|(x, y)| layout::hit(layout, x, y)).filter(|(i, _)| !layout::state(menu, &layout.elements[*i]).hidden);
+        let looked = self.looked_at.and_then(|(x, y)| layout::hit(layout, x, y)).filter(|(i, _)| layout::state(menu, &layout.elements[*i]).pointable());
         self.hover = looked.map(|(i, _)| i);
         // How long the gaze rests on what it looks at.
         let page = ScreenPage::of(&self.menu);
@@ -1001,14 +1001,14 @@ impl super::Controller {
                     s.last_activity = now;
                     s.holding[hand] = true;
                     if let Some((index, target)) = layout::hit(layout, x, y) {
-                        if !layout::state(&s.menu, &layout.elements[index]).hidden {
+                        if layout::state(&s.menu, &layout.elements[index]).pointable() {
                             s.pressed = Some((index, now));
                             followups.effects.extend(s.menu.press(target));
                         }
                     }
                 }
                 Some(Gesture::Hover { x, y } | Gesture::Hold { x, y }) => {
-                    s.hover = layout::hit(layout, x, y).map(|(i, _)| i).filter(|&i| !layout::state(&s.menu, &layout.elements[i]).hidden);
+                    s.hover = layout::hit(layout, x, y).map(|(i, _)| i).filter(|&i| layout::state(&s.menu, &layout.elements[i]).pointable());
                 }
                 Some(Gesture::Away) => {
                     s.holding[hand] = false;

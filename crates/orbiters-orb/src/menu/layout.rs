@@ -599,6 +599,7 @@ pub fn picture_key<'a>(menu: &'a Menu, picture: &Picture) -> Option<&'a str> {
 /// A tile's note on Home.
 fn tile_note(menu: &Menu, tile: u8) -> String {
     match tile {
+        0 if menu.desktop_mode => "Only in VR".into(),
         0 => (if menu.fast_walk { "On" } else { "Off" }).into(),
         1 => match menu.results.len() {
             0 => "Search videos".into(),
@@ -817,6 +818,15 @@ pub struct State {
     pub on: bool,
     /// Not there now (no such result, no page before): not drawn.
     pub hidden: bool,
+    /// Shown greyed out, not available now (fast walk in desktop mode): nothing happens on it.
+    pub unavailable: bool,
+}
+
+impl State {
+    /// Whether a pointer hovers and presses it.
+    pub fn pointable(self) -> bool {
+        !self.hidden && !self.unavailable
+    }
 }
 
 pub fn state(menu: &Menu, element: &Element) -> State {
@@ -844,7 +854,8 @@ pub fn state(menu: &Menu, element: &Element) -> State {
         Target::LightSwitch | Target::LightColor(_) | Target::LightLevel(_) => menu.light.is_none(),
         _ => false,
     };
-    State { on, hidden }
+    let unavailable = element.target == Target::FastWalk && menu.desktop_mode;
+    State { on: on && !unavailable, hidden, unavailable }
 }
 
 #[cfg(test)]
@@ -1009,6 +1020,23 @@ mod tests {
         assert_eq!(on, vec![Target::LightSwitch, Target::LightColor(1), Target::LightLevel(1)]);
         assert_eq!(text(&menu, Content::LightState), "On · Warm · Medium");
         assert_eq!(text(&menu, Content::TileNote(5)), "On · Warm");
+    }
+
+    #[test]
+    fn fast_walk_is_greyed_out_in_desktop_mode() {
+        let mut menu = Menu::default();
+        menu.fast_walk = true;
+        menu.desktop_mode = true;
+        for page in [ScreenPage::Home, ScreenPage::HomeSix] {
+            let l = layout(page);
+            let walk = l.elements.iter().find(|e| e.target == Target::FastWalk).unwrap();
+            let s = state(&menu, walk);
+            assert!(s.unavailable && !s.on && !s.pointable(), "{page:?}");
+            let note = l.slots.iter().find(|s| s.content == Content::TileNote(0)).unwrap();
+            assert_eq!(slot_text(&menu, note), "Only in VR", "{page:?}: it fits its slot");
+        }
+        menu.desktop_mode = false;
+        assert!(state(&menu, layout(ScreenPage::Home).elements.iter().find(|e| e.target == Target::FastWalk).unwrap()).pointable());
     }
 
     #[test]

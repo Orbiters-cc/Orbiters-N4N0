@@ -289,6 +289,8 @@ pub struct Menu {
     /// Orb listens to the person.
     pub listening: bool,
     pub fast_walk: bool,
+    /// VRChat runs in desktop mode: fast walk (a move of SteamVR's play space) is greyed out, "Only in VR".
+    pub desktop_mode: bool,
     pub contacts: Vec<Contact>,
     pub contact_page: usize,
     pub call: Option<Call>,
@@ -361,6 +363,7 @@ impl Menu {
                 self.go(to);
                 Vec::new()
             }
+            Target::FastWalk if self.desktop_mode => Vec::new(),
             Target::FastWalk => {
                 self.fast_walk = !self.fast_walk;
                 vec![Effect::FastWalk(self.fast_walk)]
@@ -1062,6 +1065,9 @@ mod tests {
         menu.open();
         assert_eq!(menu.press(Target::FastWalk), vec![Effect::FastWalk(true)]);
         assert_eq!(menu.press(Target::FastWalk), vec![Effect::FastWalk(false)]);
+        menu.desktop_mode = true;
+        assert!(menu.press(Target::FastWalk).is_empty(), "no fast walk in desktop mode");
+        menu.desktop_mode = false;
         menu.set_contacts((0..7).map(|i| Contact { id: format!("u{i}"), name: format!("Friend {i}") }).collect(), true, "");
         menu.press(Target::Call);
         menu.press(Target::Next);

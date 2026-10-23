@@ -3,8 +3,9 @@
 
 use crate::backend::Ctl;
 use crate::controller::{Notice, NoticeKind};
+use crate::ipc::UpdateAction;
 use crate::pages::{self, Page};
-use crate::state::{AccountState, CaptureState, Snapshot};
+use crate::state::{AccountState, CaptureState, Snapshot, UpdateState};
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, ResizeDirection, Sense, Ui, Vec2, ViewportCommand};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::glow::{self, Mood};
@@ -350,8 +351,31 @@ impl App {
 
         // Status at the bottom.
         let bottom = inner.bottom() - 16.0;
-        let version = Txt::new(format!("v{}", snap.version), 11.0).color(theme::FG_4);
-        widgets::text(ui.painter(), pos2(inner.left() + 8.0, bottom - 6.0), Align2::LEFT_CENTER, &version);
+        if let UpdateState::Ready { version, .. } = &snap.update.state {
+            // A downloaded update: the version gives way to the restart that installs it.
+            let waiting = snap.update.restart_when_idle;
+            let label = if waiting { "Restarts once done" } else { "Update ready · Restart" };
+            let tip = if waiting {
+                format!("Version {version} installs once {} ends (Settings, About)", snap.busy_with().unwrap_or("the running work"))
+            } else {
+                format!("Version {version}: restart Orbiters desktop to install it")
+            };
+            let txt = Txt::new(label, 11.5).weight(weight::MEDIUM).color(theme::ACCENT);
+            let pill = Rect::from_min_size(pos2(inner.left() + 2.0, bottom - 18.0), vec2(widgets::text_size(ui, &txt).x + 38.0, 24.0));
+            let resp = ui.interact(pill, id.with("update"), Sense::click()).on_hover_text(tip);
+            let resp = if waiting { resp } else { resp.on_hover_cursor(CursorIcon::PointingHand) };
+            let hover = anim::toggle(&ctx, id.with("update-hover"), !waiting && resp.hovered(), Spring::SNAPPY);
+            let p = ui.painter();
+            p.rect_filled(pill, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12 + 0.08 * hover));
+            widgets::icon(p, pos2(pill.left() + 15.0, pill.center().y), icons::ARROW_COUNTER_CLOCKWISE, 13.0, theme::ACCENT);
+            widgets::text(p, pos2(pill.left() + 27.0, pill.center().y), Align2::LEFT_CENTER, &txt);
+            if !waiting && widgets::pressed(&resp) {
+                self.ctl.updates(UpdateAction::Restart { now: false });
+            }
+        } else {
+            let version = Txt::new(format!("v{}", snap.version), 11.0).color(theme::FG_4);
+            widgets::text(ui.painter(), pos2(inner.left() + 8.0, bottom - 6.0), Align2::LEFT_CENTER, &version);
+        }
         let osc = &snap.osc;
         let osc_tone = if osc.listening {
             if osc.advertising {

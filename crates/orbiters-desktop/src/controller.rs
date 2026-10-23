@@ -149,6 +149,8 @@ pub struct Controller {
     scan: Mutex<scan::ScanRuntime>,
     /// Calls with VRChat friends (controller/calls.rs).
     calls: Mutex<calls::CallsRuntime>,
+    /// Updates of an installed app (controller/update.rs).
+    updates: Mutex<update::UpdateRuntime>,
     /// The thread that writes the settings, the newest only ([`Controller::queue_save`]).
     settings_writer: Mutex<Option<(mpsc::Sender<Settings>, std::thread::JoinHandle<()>)>>,
     /// A capture asked for while the last one was still being saved: it starts once that one is (source, importing,
@@ -276,6 +278,7 @@ mod orb;
 mod performance;
 mod scan;
 pub(crate) mod screen;
+pub mod update;
 mod voice;
 pub use account::open_url;
 
@@ -313,6 +316,7 @@ impl Controller {
             burst: Mutex::new(burst::BurstRuntime::default()),
             scan: Mutex::new(scan::ScanRuntime::default()),
             calls: Mutex::new(calls::CallsRuntime::default()),
+            updates: Mutex::new(update::UpdateRuntime::default()),
             settings_writer: Mutex::new(None),
             pending_start: Mutex::new(None),
             stopping_since: Mutex::new(None),
@@ -336,6 +340,7 @@ impl Controller {
         self.start_account();
         self.start_orb();
         self.start_calls();
+        self.start_updates();
     }
 
     /// The interface's context, repainted on every change.

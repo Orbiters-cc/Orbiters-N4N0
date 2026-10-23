@@ -1,0 +1,35 @@
+[package]
+name = "orbiters-setup"
+description = "Orbiters desktop's setup: installs, updates and uninstalls it for the person (no administrator rights), in the Orbiters look."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "orbiters-setup"
+path = "src/main.rs"
+
+[dependencies]
+orbiters-update = { workspace = true, features = ["payload"] }
+orbiters-ui = { workspace = true }
+egui = { workspace = true }
+eframe = { workspace = true }
+anyhow = { workspace = true }
+png = { workspace = true }
+time = { workspace = true }
+dirs = { workspace = true }
+rfd = "0.17"
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Graphics_Dwm",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+raw-window-handle = "0.6"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/orbiters-core", "crates/orbiters-spout", "crates/orbiters-capture", "crates/orbiters-ui", "crates/orbiters-desktop", "crates/orbiters-openvr", "crates/orbiters-reconstruct", "crates/orbiters-sound", "crates/orbiters-orb", "crates/orbiters-audio", "crates/orbiters-voice", "crates/orbiters-call"]
+members = ["crates/orbiters-core", "crates/orbiters-spout", "crates/orbiters-capture", "crates/orbiters-ui", "crates/orbiters-desktop", "crates/orbiters-openvr", "crates/orbiters-reconstruct", "crates/orbiters-sound", "crates/orbiters-orb", "crates/orbiters-audio", "crates/orbiters-voice", "crates/orbiters-call", "crates/orbiters-update", "crates/orbiters-setup", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +17,7 @@ orbiters-ui = { path = "crates/orbiters-ui" }
 orbiters-sound = { path = "crates/orbiters-sound" }
 orbiters-orb = { path = "crates/orbiters-orb" }
 orbiters-audio = { path = "crates/orbiters-audio" }
+orbiters-update = { path = "crates/orbiters-update" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

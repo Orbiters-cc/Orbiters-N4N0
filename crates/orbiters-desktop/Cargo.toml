@@ -15,6 +15,7 @@ orbiters-contracts = { workspace = true }
 orbiters-ui = { workspace = true }
 orbiters-sound = { workspace = true }
 orbiters-orb = { workspace = true }
+orbiters-update = { workspace = true, features = ["net"] }
 orbiters-reconstruct = { path = "../orbiters-reconstruct" }
 bytemuck = { workspace = true }
 orbiters-openvr = { workspace = true }

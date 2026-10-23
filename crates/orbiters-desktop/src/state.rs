@@ -472,6 +472,41 @@ impl OrbFace {
         [OrbFace::Idle, OrbFace::Listening, OrbFace::Thinking, OrbFace::Talking, OrbFace::Sleeping, OrbFace::Happy, OrbFace::Annoyed, OrbFace::Surprised];
 }
 
+/// Updates of an installed app (controller/update.rs).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct UpdateStatus {
+    /// The setup installed this copy: it updates itself (a development build does not).
+    pub enabled: bool,
+    /// The release channel it follows.
+    pub channel: String,
+    pub state: UpdateState,
+    /// The last look that reached Orbiters (Unix seconds).
+    pub checked: Option<u64>,
+    /// The person asked to restart once the running work ends ([`Snapshot::busy_with`]).
+    pub restart_when_idle: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UpdateState {
+    /// Up to date, or not looked yet.
+    #[default]
+    Idle,
+    Checking,
+    Downloading {
+        version: String,
+        fraction: f32,
+    },
+    /// Downloaded and checked: a restart installs it.
+    Ready {
+        version: String,
+        notes: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WorkerStatus {
     pub ready: bool,
@@ -499,6 +534,8 @@ pub struct Snapshot {
     pub uploads: Vec<UploadStatus>,
     #[serde(default)]
     pub orb: OrbStatus,
+    #[serde(default)]
+    pub update: UpdateStatus,
 }
 
 impl Snapshot {
@@ -534,11 +571,30 @@ impl Snapshot {
             account: AccountStatus::default(),
             uploads: Vec::new(),
             orb: OrbStatus::default(),
+            update: UpdateStatus::default(),
         }
     }
 
     pub fn is_capturing(&self) -> bool {
         matches!(self.capture.state, CaptureState::Starting | CaptureState::Recording | CaptureState::Paused | CaptureState::Importing)
+    }
+
+    /// What a restart (to update) would cut short now, as the interface names it: a recording being made or saved, a
+    /// reconstruction running or waiting, a call, an upload to the Map explorer, the speech models downloading.
+    pub fn busy_with(&self) -> Option<&'static str> {
+        if self.is_capturing() || self.capture.state == CaptureState::Stopping {
+            Some("the recording")
+        } else if self.reconstruction.is_some() || !self.reconstruct_queue.is_empty() {
+            Some("the reconstruction")
+        } else if self.orb.calls.call.is_some() {
+            Some("the call")
+        } else if self.uploads.iter().any(UploadStatus::running) {
+            Some("the upload")
+        } else if self.orb.voice.downloading.is_some() {
+            Some("the speech models' download")
+        } else {
+            None
+        }
     }
 
     /// Adds a camera position to the trail when it moved enough (keeps the trail light).

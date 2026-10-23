@@ -3630,6 +3630,7 @@ dependencies = [
  "orbiters-sound",
  "orbiters-spout",
  "orbiters-ui",
+ "orbiters-update",
  "png",
  "raw-window-handle",
  "rfd",
@@ -3693,6 +3694,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbiters-setup"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 6.0.0",
+ "eframe",
+ "egui",
+ "orbiters-ui",
+ "orbiters-update",
+ "png",
+ "raw-window-handle",
+ "rfd",
+ "time",
+ "windows 0.62.2",
+ "winresource",
+]
+
+[[package]]
 name = "orbiters-sound"
 version = "0.1.0"
 dependencies = [
@@ -3721,6 +3740,23 @@ dependencies = [
  "pollster 1.0.1",
  "skrifa",
  "tiny-skia",
+]
+
+[[package]]
+name = "orbiters-update"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "dirs 6.0.0",
+ "ring",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "ureq 3.4.2",
+ "zstd",
 ]
 
 [[package]]
@@ -6921,6 +6957,19 @@ name = "xml-rs"
 version = "0.8.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "dirs 6.0.0",
+ "orbiters-update",
+ "serde",
+ "serde_json",
+ "time",
+]
 
 [[package]]
 name = "xz2"

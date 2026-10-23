@@ -1218,6 +1218,7 @@ impl crate::backend::Backend for Still {
     fn headset(&self, _in_use: bool) {}
     fn walk_boost(&self, _strength: f32) {}
     fn osc_reconnect(&self) {}
+    fn updates(&self, _action: crate::ipc::UpdateAction) {}
     fn quit(&self) {}
 }
 

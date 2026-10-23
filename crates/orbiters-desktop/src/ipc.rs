@@ -139,7 +139,23 @@ pub enum ToService {
     WalkBoost {
         strength: f32,
     },
+    /// Updates of an installed app (controller/update.rs).
+    Updates {
+        action: UpdateAction,
+    },
     Quit,
+}
+
+/// What the window asks of updates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UpdateAction {
+    /// Look for a newer release now.
+    Check,
+    /// Restart into the downloaded update: once the running work ends, or `now`.
+    Restart { now: bool },
+    /// No restart once the running work ends after all.
+    CancelRestart,
 }
 
 /// What the window and the overlay ask of Orb.

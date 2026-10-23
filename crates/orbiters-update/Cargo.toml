@@ -1,0 +1,28 @@
+[package]
+name = "orbiters-update"
+description = "Orbiters desktop's releases: the signed release manifest, what an install records, the installer's payload, and fetching an update."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+# Signed releases: checking them (the app) and signing them (`cargo xtask`).
+signing = ["dep:ring", "dep:base64"]
+# Fetching a release and its installer over HTTPS (the app).
+net = ["signing", "dep:ureq"]
+# The programs inside the installer: read by the setup, written by `cargo xtask`.
+payload = ["dep:zstd", "dep:tar"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+dirs = { workspace = true }
+semver = "1"
+sha2 = "0.10"
+base64 = { version = "0.22", optional = true }
+# Ed25519 signatures (already built for the call worker's WebRTC).
+ring = { version = "0.17", optional = true }
+ureq = { version = "3", default-features = false, features = ["native-tls"], optional = true }
+zstd = { version = "0.13", optional = true }
+tar = { version = "0.4", optional = true }

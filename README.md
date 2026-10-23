@@ -48,6 +48,9 @@ well.
 | `crates/orbiters-audio` | Microphones and a process's sound through WASAPI, for the capture worker and the voice worker |
 | `crates/orbiters-core` | Shared logic: settings, session bundles, keyframes, VRChat log, OSC/OSCQuery, worker protocols |
 | `crates/orbiters-spout` | Spout2 receiver and test sender (Direct3D 11), protocol-compatible with the Spout2 SDK |
+| `crates/orbiters-setup` | The setup (`OrbitersSetup-<version>.exe`): installs the app for the person in `%LOCALAPPDATA%\Programs` (no administrator rights), updates it and uninstalls it, in the app's look |
+| `crates/orbiters-update` | Releases: the signed release file apps read, the setup's payload, the install record, downloading an update |
+| `xtask/` | Release tooling, `cargo xtask keygen / bump / dist / publish / release` (see [Releasing](docs/releasing.md)) |
 | `contracts/` | Submodule [OrbitersContracts](https://github.com/Orbiters-cc/OrbitersContracts): formats shared with Mixer |
 
 ## Building
@@ -89,6 +92,13 @@ pattern, then the record button), and writes the session into the sessions folde
 the newest session and presses Reconstruct (the real worker replaces its `reconstruction/` folder). `--only splats-3d`
 opens the newest session's 3D view (the splats drawn by the reconstruction's own rasteriser on the window's GPU),
 then orbits it.
+
+## Releasing
+
+Bump the version, commit, push, then `cargo xtask release`: it builds and signs the programs on this computer, packs
+them into the setup, publishes it on orbiters.cc and tags the commit. Installed apps find the new version within
+hours, download it in the background and install it on their next restart. Everything about it, first-time set-up
+included, is in [docs/releasing.md](docs/releasing.md).
 
 ## Command-line tools
 

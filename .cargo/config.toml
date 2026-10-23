@@ -1,0 +1,3 @@
+# `cargo xtask <command>`: Orbiters desktop's release tooling (xtask/, docs/releasing.md).
+[alias]
+xtask = "run --package xtask --"

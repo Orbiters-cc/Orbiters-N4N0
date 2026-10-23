@@ -1,0 +1,3 @@
+# The public half of Orbiters desktop's release key (Ed25519, Base64), written by `cargo xtask keygen`. Releases are
+# signed with the private half, which stays off this repository and off the server.
+d3BVir4NfVL2lYsZcxzMoHr55p98WtCeGycc9UI40zo=

@@ -3,7 +3,7 @@
 //! and failures come back as notices.
 
 use crate::controller::{self, Notice, NoticeKind};
-use crate::ipc::{Client, OrbCommand, ToService};
+use crate::ipc::{Client, OrbCommand, ToService, UpdateAction};
 use crate::state::{MapsMine, Snapshot};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::settings::Settings;
@@ -69,6 +69,8 @@ pub trait Backend: Send + Sync {
     fn walk_boost(&self, strength: f32);
     /// Makes VRChat find the OSC service again (it sends avatar parameters only to services it found).
     fn osc_reconnect(&self);
+    /// Updates: look now, restart into the downloaded one, or not after all.
+    fn updates(&self, action: UpdateAction);
     /// Quits the whole app (the tray service and every window).
     fn quit(&self);
     /// The service asked this window to come to the front.
@@ -214,6 +216,10 @@ impl Backend for Remote {
 
     fn orb(&self, command: OrbCommand) {
         self.0.send(&ToService::Orb { command });
+    }
+
+    fn updates(&self, action: UpdateAction) {
+        self.0.send(&ToService::Updates { action });
     }
 
     fn quit(&self) {
@@ -384,6 +390,10 @@ impl Backend for Local {
 
     fn orb(&self, command: OrbCommand) {
         self.ctl.orb_command(command);
+    }
+
+    fn updates(&self, action: UpdateAction) {
+        self.ctl.update_action(action);
     }
 
     fn quit(&self) {

@@ -157,6 +157,16 @@ impl Service {
         }
     }
 
+    /// Restarts into an update's setup (controller/update.rs): starts it, then quits; the setup replaces the files
+    /// once the app has gone and starts it again, with its window if one is open now, in the tray otherwise.
+    fn restart_into(&self, setup: &std::path::Path, dir: &std::path::Path) {
+        let window_open = self.links.lock().unwrap().iter().any(|l| l.role == Role::Window);
+        match controller::update::start_setup(setup, dir, !window_open) {
+            Ok(()) => self.quit(),
+            Err(e) => self.ctl.notify(NoticeKind::Error, format!("The update could not start: {e}")),
+        }
+    }
+
     fn handle(&self, link: u64, role: Role, msg: ToService) {
         let ctl = &self.ctl;
         let report = |r: anyhow::Result<()>| {
@@ -216,6 +226,7 @@ impl Service {
             ToService::Orb { command: OrbCommand::Talk { down } } => ctl.orb_app_talk(down, role == Role::Overlay),
             ToService::Orb { command } => ctl.orb_command(command),
             ToService::OscReconnect => ctl.osc_rediscover(),
+            ToService::Updates { action } => ctl.update_action(action),
             ToService::Quit => self.quit(),
         }
     }
@@ -327,6 +338,15 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         single::Instance::Other => return Ok(()),
     };
 
+    // An update that was ready when the app last quit installs now, before anything runs; its setup starts the app
+    // again once done.
+    if let Some((setup, dir)) = controller::update::pending_setup() {
+        match controller::update::start_setup(&setup, &dir, hidden) {
+            Ok(()) => return Ok(()),
+            Err(e) => eprintln!("the update could not start: {e}"),
+        }
+    }
+
     let settings = Settings::load();
     let _ = std::fs::create_dir_all(&settings.sessions_dir);
     let _ = std::fs::create_dir_all(&settings.raw_captures_dir);
@@ -353,6 +373,12 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         quit_tx: Mutex::new(Some(quit_tx)),
     });
     *slot.lock().unwrap() = Some(service.clone());
+    let weak = Arc::downgrade(&service);
+    service.ctl.set_restarter(Box::new(move |setup, dir| {
+        if let Some(svc) = weak.upgrade() {
+            svc.restart_into(setup, dir);
+        }
+    }));
 
     let svc = service.clone();
     std::thread::Builder::new().name("ipc".into()).spawn(move || {
@@ -461,6 +487,16 @@ mod tests {
         assert!(!overlay_due(Some(Some(1)), soon, Some(7), Some(7)));
         assert!(overlay_due(Some(Some(1)), later, Some(7), Some(7)));
         assert!(overlay_due(Some(None), later, Some(7), Some(7)), "ended without a code");
+    }
+
+    #[test]
+    fn update_actions_reach_the_service() {
+        let line = serde_json::to_string(&ToService::Updates { action: ipc::UpdateAction::Restart { now: false } }).unwrap();
+        assert_eq!(line, r#"{"type":"updates","action":{"kind":"restart","now":false}}"#);
+        match serde_json::from_str::<ToService>(r#"{"type":"updates","action":{"kind":"check"}}"#).unwrap() {
+            ToService::Updates { action } => assert_eq!(action, ipc::UpdateAction::Check),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

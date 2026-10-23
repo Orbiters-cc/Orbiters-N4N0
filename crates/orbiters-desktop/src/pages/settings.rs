@@ -4,7 +4,9 @@
 use super::form::{self, Texts};
 use super::mic::{mic_test, MicTest};
 use super::{section, Cx, Job};
-use crate::state::AccountState;
+use crate::backend::Ctl;
+use crate::ipc::UpdateAction;
+use crate::state::{AccountState, Snapshot, UpdateState};
 use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder};
 use orbiters_core::settings::WhilePlaying;
 use orbiters_ui::anim::{self, Spring};
@@ -358,6 +360,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 if Button::new("Worker log").icon(icons::SCROLL).size(Size::Sm).show(&mut bu).clicked() {
                     want_log = true;
                 }
+                widgets::separator(ui);
+                updates(ui, cx.ctl, snap);
                 if state.log_open {
                     let lines = cx.ctl.worker_log().unwrap_or_default();
                     let k = anim::spring_from(ui.ctx(), Id::unique("worker-log-open"), [0.0], [1.0], Spring::SOFT)[0].clamp(0.0, 1.0);
@@ -391,6 +395,75 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
     if apply {
         form::save(cx.ctl, &base, &draft);
+    }
+}
+
+/// Updates of an installed app: where they stand, and the button that moves them on (controller/update.rs).
+fn updates(ui: &mut Ui, ctl: &Ctl, snap: &Snapshot) {
+    let u = &snap.update;
+    if !u.enabled {
+        widgets::field(ui, "Updates", Some("This copy was not installed by Orbiters desktop's setup: it does not update itself."), 0.0, |_| {});
+        return;
+    }
+    let busy = snap.busy_with();
+    let text = match &u.state {
+        UpdateState::Idle => match u.checked {
+            Some(at) => format!("Up to date (looked {}).", super::local_time_unix(at)),
+            None => "Orbiters desktop looks for a newer version shortly after it starts, then every few hours.".into(),
+        },
+        UpdateState::Checking => "Looking for a newer version…".into(),
+        UpdateState::Downloading { version, fraction } => format!("Downloading version {version}: {:.0} %", fraction * 100.0),
+        UpdateState::Ready { version, .. } if u.restart_when_idle => {
+            format!("Version {version} is ready. Orbiters desktop restarts to install it once {} ends.", busy.unwrap_or("the running work"))
+        }
+        UpdateState::Ready { version, .. } => match busy {
+            Some(work) => format!("Version {version} is ready. Restarting now would stop {work}: it can wait for it to end."),
+            None => format!("Version {version} is ready: a restart installs it, and Orbiters desktop opens again."),
+        },
+        UpdateState::Failed { message } => message.clone(),
+    };
+    let hint = busy.map(|work| format!("Restarts once {work} ends")).unwrap_or_default();
+    widgets::field(ui, "Updates", Some(&text), 300.0, |ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+        match &u.state {
+            UpdateState::Ready { .. } if u.restart_when_idle => {
+                if Button::new("Restart now").variant(Variant::Danger).size(Size::Sm).show(ui).clicked() {
+                    ctl.updates(UpdateAction::Restart { now: true });
+                }
+                if Button::new("Not after all").variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
+                    ctl.updates(UpdateAction::CancelRestart);
+                }
+            }
+            UpdateState::Ready { .. } => {
+                let label = if busy.is_some() { "Restart when done" } else { "Restart to update" };
+                let mut button = Button::new(label).icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Primary).size(Size::Sm);
+                if busy.is_some() {
+                    button = button.hint(&hint);
+                }
+                if button.show(ui).clicked() {
+                    ctl.updates(UpdateAction::Restart { now: false });
+                }
+            }
+            UpdateState::Checking | UpdateState::Downloading { .. } => {
+                Button::new("Look now").size(Size::Sm).enabled(false).show(ui);
+            }
+            UpdateState::Idle | UpdateState::Failed { .. } => {
+                if Button::new("Look now").size(Size::Sm).show(ui).clicked() {
+                    ctl.updates(UpdateAction::Check);
+                }
+            }
+        }
+    });
+    if let UpdateState::Ready { notes, .. } = &u.state {
+        let notes = notes.trim();
+        if !notes.is_empty() {
+            let w = ui.available_width();
+            let mut job = Txt::new(notes, 12.0).color(theme::FG_3).line_height(18.0).job(w);
+            job.wrap.max_rows = 8;
+            let g = ui.painter().layout_job(job);
+            let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y + 16.0), Sense::hover());
+            ui.painter().galley(r.min, g, theme::FG_3);
+        }
     }
 }
 

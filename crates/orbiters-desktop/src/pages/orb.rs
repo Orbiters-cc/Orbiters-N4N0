@@ -266,6 +266,17 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     let options = [widgets::SegOption::new(K::Auto, "Automatic"), widgets::SegOption::new(K::Qwerty, "QWERTY"), widgets::SegOption::new(K::Azerty, "AZERTY")];
                     apply |= widgets::segmented(ui, "orb-menu-keyboard", &mut draft.orb.menu.keyboard, &options, true);
                 });
+                widgets::field(
+                    ui,
+                    "Look",
+                    Some("Retro: a green phosphor terminal, as on an old computer. The orb's screen has its own Look, in My Avatar."),
+                    200.0,
+                    |ui| {
+                        use orbiters_core::settings::MenuLook as L;
+                        let options = [widgets::SegOption::new(L::Modern, "Modern"), widgets::SegOption::new(L::Retro, "Retro")];
+                        apply |= widgets::segmented(ui, "orb-menu-look", &mut draft.orb.menu.look, &options, true);
+                    },
+                );
             });
 
             let calls = &orb.calls;

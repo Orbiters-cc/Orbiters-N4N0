@@ -11,8 +11,10 @@ use crate::controller::screen as shared;
 use crate::ipc::OrbCommand;
 use crate::state::{CallLink, CallPhase, Snapshot};
 use egui::{pos2, ColorImage, TextureHandle, TextureId, TextureOptions};
+use orbiters_core::settings::MenuLook;
 use orbiters_openvr::{self as vr, overlay_flag, Matrix34, Pose, Universe, MAX_DEVICES};
 use orbiters_orb::menu::layout::{self, ScreenPage};
+use orbiters_orb::menu::retro;
 use orbiters_orb::menu::{Call, Contact, Effect, Menu, Page, SuggestQueue};
 use orbiters_orb::{picture, youtube};
 use std::collections::HashMap;
@@ -84,6 +86,9 @@ pub struct MenuOverlay {
     /// Where the menu was opened (it stays there), and whether the head is behind it: it then shows its back.
     placed: Option<Matrix34>,
     behind: bool,
+    /// The retro look is shown: the canvas's pixels go to SteamVR through `retro_pixels`, turned green.
+    retro: bool,
+    retro_pixels: Vec<u8>,
 }
 
 /// A toggling request this soon after the menu closed is the close it meant, already done.
@@ -151,6 +156,8 @@ impl MenuOverlay {
             media_seen: 0,
             placed: None,
             behind: false,
+            retro: false,
+            retro_pixels: Vec::new(),
         })
     }
 
@@ -508,6 +515,13 @@ impl MenuOverlay {
         if !self.menu.open {
             return clicked;
         }
+        // A look switched in Orbiters desktop: the whole picture again.
+        let retro_now = snap.settings.orb.menu.look == MenuLook::Retro;
+        if retro_now != self.retro {
+            self.retro = retro_now;
+            self.canvas.invalidate();
+            self.dirty = true;
+        }
         // The microphone breathes while Orb listens: about 20 pictures a second then, else only on changes.
         let animating = self.menu.listening;
         let due = self.last_paint.is_none_or(|t| t.elapsed() >= Duration::from_millis(if animating { 50 } else { 22 }));
@@ -533,7 +547,13 @@ impl MenuOverlay {
             }
             // Only what changed goes to SteamVR, straight from the canvas.
             if let Some(changed) = self.canvas.damage() {
-                presenter.show_part(overlay, self.handle, self.canvas.pixels(), WIDTH, HEIGHT, changed);
+                if self.retro {
+                    self.retro_pixels.resize(self.canvas.pixels().len(), 0);
+                    retro::apply(self.canvas.pixels(), &mut self.retro_pixels, WIDTH, HEIGHT, changed);
+                    presenter.show_part(overlay, self.handle, &self.retro_pixels, WIDTH, HEIGHT, changed);
+                } else {
+                    presenter.show_part(overlay, self.handle, self.canvas.pixels(), WIDTH, HEIGHT, changed);
+                }
             }
             if !self.shown {
                 let _ = overlay.show(self.handle);

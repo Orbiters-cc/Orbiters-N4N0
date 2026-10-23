@@ -301,6 +301,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let path = out.join(format!("menu-{}.png", page.name()));
         write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
         println!("{}", path.display());
+        let mut green = vec![0u8; rgba.len()];
+        orbiters_orb::menu::retro::apply(&rgba, &mut green, WIDTH, HEIGHT, [0, 0, WIDTH, HEIGHT]);
+        let path = out.join(format!("menu-{}-retro.png", page.name()));
+        write_png(&path, WIDTH, HEIGHT, &unpremultiply(&green))?;
+        println!("{}", path.display());
         let pictures = |id: &str| -> Option<screen::Picture> {
             if id == SAMPLE_ART {
                 return Some(screen::picture_from_rgb(&art));

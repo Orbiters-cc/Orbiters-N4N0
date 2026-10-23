@@ -157,12 +157,23 @@ pub struct MenuSettings {
     pub touch: bool,
     /// The search keyboard's letters.
     pub keyboard: KeyboardLayout,
+    /// How the overlay's menu looks (the orb's screen has its own Look in My Avatar).
+    pub look: MenuLook,
 }
 
 impl Default for MenuSettings {
     fn default() -> Self {
-        Self { button: true, wake_word: true, touch: true, keyboard: KeyboardLayout::Auto }
+        Self { button: true, wake_word: true, touch: true, keyboard: KeyboardLayout::Auto, look: MenuLook::Modern }
     }
+}
+
+/// How Orb's menu looks: Orbiters' own, or a green phosphor terminal (`orbiters_orb::menu::retro`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuLook {
+    #[default]
+    Modern,
+    Retro,
 }
 
 /// The order of the letters on Orb's keyboard.

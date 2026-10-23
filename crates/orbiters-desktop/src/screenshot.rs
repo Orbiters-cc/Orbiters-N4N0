@@ -228,13 +228,26 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         Scenario {
             name: "orb-scrolled",
             page: Page::Orb,
-            snapshot: orb_busy,
+            snapshot: orb_busy.clone(),
             frames: 120,
             splash: false,
             open_detail: false,
             toasts: vec![],
             pointer: None,
             scroll: 760.0,
+            world: None,
+        },
+        // Orb's menu settings: its keyboard and look.
+        Scenario {
+            name: "orb-menu-settings",
+            page: Page::Orb,
+            snapshot: orb_busy,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 1180.0,
             world: None,
         },
         Scenario {

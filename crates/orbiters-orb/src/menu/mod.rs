@@ -8,6 +8,7 @@
 //! answers back. [`screen`] turns a menu into what the avatar's screen is sent; [`touch`] finds where a finger touches it.
 
 pub mod layout;
+pub mod retro;
 pub mod screen;
 pub mod touch;
 

@@ -4,6 +4,7 @@
 //! avatar's screen ([`super::menu_ui`]) and runs the same menu (`orbiters_orb::menu`): YouTube is fetched here, the
 //! rest (calls, the clipboard, a 3D picture, fast walk) goes to the tray service.
 
+use super::menu_retro;
 use super::menu_ui::{self, View};
 use super::{Canvas, Presenter};
 use crate::backend::Ctl;
@@ -14,7 +15,6 @@ use egui::{pos2, ColorImage, TextureHandle, TextureId, TextureOptions};
 use orbiters_core::settings::MenuLook;
 use orbiters_openvr::{self as vr, overlay_flag, Matrix34, Pose, Universe, MAX_DEVICES};
 use orbiters_orb::menu::layout::{self, ScreenPage};
-use orbiters_orb::menu::retro;
 use orbiters_orb::menu::{Call, Contact, Effect, Menu, Page, SuggestQueue};
 use orbiters_orb::{picture, youtube};
 use std::collections::HashMap;
@@ -42,7 +42,8 @@ enum Done {
 
 enum Thumb {
     Loading,
-    Ready(TextureHandle),
+    /// The picture, and the same as the retro look's green dots.
+    Ready(TextureHandle, TextureHandle),
     /// The last try failed at `at`.
     Failed {
         at: Instant,
@@ -86,9 +87,8 @@ pub struct MenuOverlay {
     /// Where the menu was opened (it stays there), and whether the head is behind it: it then shows its back.
     placed: Option<Matrix34>,
     behind: bool,
-    /// The retro look is shown: the canvas's pixels go to SteamVR through `retro_pixels`, turned green.
+    /// The menu is drawn in the retro look (Orbiters desktop's Orb › Orb's menu › Look).
     retro: bool,
-    retro_pixels: Vec<u8>,
 }
 
 /// A toggling request this soon after the menu closed is the close it meant, already done.
@@ -157,7 +157,6 @@ impl MenuOverlay {
             placed: None,
             behind: false,
             retro: false,
-            retro_pixels: Vec::new(),
         })
     }
 
@@ -268,11 +267,11 @@ impl MenuOverlay {
         self.menu.media = reading.media;
         self.menu.volume = reading.volume;
         if let Some(art) = reading.art {
-            if !matches!(self.thumbs.get(&art.key), Some(Thumb::Ready(_))) {
+            if !matches!(self.thumbs.get(&art.key), Some(Thumb::Ready(..))) {
                 let rgba: Vec<u8> = art.rgb.pixels.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
                 let image = ColorImage::from_rgba_unmultiplied([art.rgb.width, art.rgb.height], &rgba);
-                let texture = self.canvas.ctx().load_texture(art.key.clone(), image, TextureOptions::LINEAR);
-                self.thumbs.insert(art.key.clone(), Thumb::Ready(texture));
+                let ready = self.ready(art.key.clone(), image);
+                self.thumbs.insert(art.key.clone(), ready);
             }
         }
         self.dirty = true;
@@ -473,7 +472,7 @@ impl MenuOverlay {
                 Done::Results { id, result: Err(e), .. } => self.menu.results_failed(id, &e.to_string()),
                 Done::Thumbnail { id, tries, image } => {
                     let thumb = match image {
-                        Some(image) => Thumb::Ready(self.canvas.ctx().load_texture(format!("yt-{id}"), image, TextureOptions::LINEAR)),
+                        Some(image) => self.ready(format!("yt-{id}"), image),
                         None => Thumb::Failed { at: Instant::now(), tries: tries + 1 },
                     };
                     self.thumbs.insert(id, thumb);
@@ -533,27 +532,23 @@ impl MenuOverlay {
                 // Shown again: SteamVR gets a whole picture first.
                 self.canvas.invalidate();
             }
-            let (menu, hover, pressed, thumbs) = (&self.menu, self.hover, self.pressed, &self.thumbs);
+            let (menu, hover, pressed, thumbs, retro) = (&self.menu, self.hover, self.pressed, &self.thumbs, self.retro);
             let picture = |id: &str| -> Option<TextureId> {
                 match thumbs.get(id) {
-                    Some(Thumb::Ready(t)) => Some(t.id()),
+                    Some(Thumb::Ready(photo, dots)) => Some(if retro { dots.id() } else { photo.id() }),
                     _ => None,
                 }
             };
-            if self.behind {
-                self.canvas.paint(time, |p| menu_ui::draw_back(p, pos2(0.0, 0.0)));
-            } else {
-                self.canvas.paint(time, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu, hover, pressed, picture: &picture, time }));
-            }
+            let view = View { menu, hover, pressed, picture: &picture, time };
+            self.canvas.paint(time, |p| match (self.behind, retro) {
+                (true, false) => menu_ui::draw_back(p, pos2(0.0, 0.0)),
+                (true, true) => menu_retro::draw_back(p, pos2(0.0, 0.0)),
+                (false, false) => menu_ui::draw(p, pos2(0.0, 0.0), &view),
+                (false, true) => menu_retro::draw(p, pos2(0.0, 0.0), &view),
+            });
             // Only what changed goes to SteamVR, straight from the canvas.
             if let Some(changed) = self.canvas.damage() {
-                if self.retro {
-                    self.retro_pixels.resize(self.canvas.pixels().len(), 0);
-                    retro::apply(self.canvas.pixels(), &mut self.retro_pixels, WIDTH, HEIGHT, changed);
-                    presenter.show_part(overlay, self.handle, &self.retro_pixels, WIDTH, HEIGHT, changed);
-                } else {
-                    presenter.show_part(overlay, self.handle, self.canvas.pixels(), WIDTH, HEIGHT, changed);
-                }
+                presenter.show_part(overlay, self.handle, self.canvas.pixels(), WIDTH, HEIGHT, changed);
             }
             if !self.shown {
                 let _ = overlay.show(self.handle);
@@ -561,6 +556,15 @@ impl MenuOverlay {
             }
         }
         clicked
+    }
+}
+
+impl MenuOverlay {
+    /// A picture ready to show: its texture, and its green dots for the retro look (crisp, so drawn with nearest pixels).
+    fn ready(&self, name: String, image: ColorImage) -> Thumb {
+        let dots = menu_retro::dots(&image, 1);
+        let ctx = self.canvas.ctx();
+        Thumb::Ready(ctx.load_texture(name.clone(), image, TextureOptions::LINEAR), ctx.load_texture(name + "-dots", dots, TextureOptions::NEAREST))
     }
 }
 

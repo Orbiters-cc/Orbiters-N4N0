@@ -232,6 +232,7 @@ impl OrbRuntime {
         self.screen_thumbnail = None;
         self.screen_version = None;
         self.screen.menu.six_tiles = false;
+        self.screen.pointing = false;
         self.screen.avatar(false, None, contract::thumbnail::SIZES[0]);
         self.screen.set_gaze(false);
     }
@@ -762,6 +763,7 @@ impl Controller {
         } else if name == params::SCREEN_VERSION {
             rt.screen_version = int_value(value);
             rt.screen.menu.six_tiles = six_tiles(rt.screen_version);
+            rt.screen.pointing = pointing(rt.screen_version);
         } else {
             rt.screen_replace = Some(value.truthy());
         }
@@ -1083,6 +1085,7 @@ impl Controller {
                 rt.screen_thumbnail = thumbnail;
                 rt.screen_version = screen_version;
                 rt.screen.menu.six_tiles = six_tiles(screen_version);
+                rt.screen.pointing = pointing(screen_version);
                 rt.light = light;
                 if vr_mode.is_some() {
                     rt.vr_mode = vr_mode;
@@ -2001,6 +2004,11 @@ fn media_word(command: orbiters_orb::menu::MediaCommand) -> String {
 /// Whether a screen of `version` (`Orb/Screen/Version`; older screens lack it) has the six-tile Home, Music and Light.
 fn six_tiles(version: Option<i32>) -> bool {
     version.is_some_and(|v| v >= contract::SCREEN_MUSIC_LIGHT)
+}
+
+/// Whether a screen of `version` points with rays from the fingertips (contracts `Docs/orb.md`, Pointing).
+fn pointing(version: Option<i32>) -> bool {
+    version.is_some_and(|v| v >= contract::SCREEN_POINTING)
 }
 
 /// `Orb/Light/Level` before the avatar says it (the prop's default).

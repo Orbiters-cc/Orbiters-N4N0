@@ -8,6 +8,7 @@
 //! changes nothing, as receivers and fingers scale together): x to the right, y up, z away from the person (the screen's
 //! face looks at −z).
 
+use orbiters_contracts::orb;
 use std::time::{Duration, Instant};
 
 /// How long a finger may go unfound (a fit rejected on a mix of new and old readings, a hand moving fast) before it
@@ -80,6 +81,36 @@ fn looked_at(eyes: Option<[f64; 3]>, gaze: [f64; 3]) -> Option<(f32, f32)> {
     }
     let t = -c[2] / along;
     Some(on_page(c[0] + (gaze[0] - c[0]) * t, c[1] + (gaze[1] - c[1]) * t))
+}
+
+/// Where a hand's pointer dot is on the page (screen version 4, contracts `Docs/orb.md`, Pointing), in pixels, from its
+/// proximities to the first three touch points (0 to 1), or `None` when one is out of reach or they do not agree. The
+/// dot lies on the screen's face, so this is exact: the first receiver's sphere taken from the two others leaves two
+/// straight lines meeting at the dot, and the first distance must then agree within 2 cm (else they are not one dot's).
+pub fn pointed(proximity: [f32; 3]) -> Option<(f32, f32)> {
+    if proximity.iter().any(|&p| !(p > 0.0 && p <= 1.0)) {
+        return None;
+    }
+    // Centre to centre: the receiver's reach less the proximity, and the dot's own radius.
+    let d = proximity.map(|p| RADIUS * (1.0 - p as f64) + orb::POINT_RADIUS);
+    let c = &RECEIVERS;
+    let line = |i: usize| {
+        let a = 2.0 * (c[0][0] - c[i][0]);
+        let b = 2.0 * (c[0][1] - c[i][1]);
+        let r = d[i] * d[i] - d[0] * d[0] - (c[i][0] * c[i][0] + c[i][1] * c[i][1]) + (c[0][0] * c[0][0] + c[0][1] * c[0][1]);
+        (a, b, r)
+    };
+    let ((a1, b1, r1), (a2, b2, r2)) = (line(1), line(2));
+    let det = a1 * b2 - b1 * a2;
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let x = (r1 * b2 - b1 * r2) / det;
+    let y = (a1 * r2 - r1 * a2) / det;
+    if !x.is_finite() || !y.is_finite() || ((x - c[0][0]).hypot(y - c[0][1]) - d[0]).abs() > 0.02 {
+        return None;
+    }
+    Some(on_page(x, y))
 }
 
 /// A contact's centre in the screen's space from the four proximities (0 to 1), fitted from `start`, or `None` when
@@ -166,6 +197,76 @@ pub struct Touch {
     blocked: bool,
     /// Since when the finger is not found.
     lost_since: Option<Instant>,
+}
+
+/// A hand's pointing ray (screen version 4): hovering where its dot is, pressing when the fingertip comes within
+/// [`orb::RAY_PRESS`] of the screen along the ray. A press needs the fingertip seen farther away first (a hand that
+/// enters already close presses nothing until it backs off), and ends once it is back to [`orb::RAY_RELEASE`], or once
+/// the ray has missed for [`LOST_GRACE`] (a finger pushed through the face).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Pointer {
+    pressing: bool,
+    /// Where the dot is on the page.
+    pub at: Option<(f32, f32)>,
+    /// The fingertip was seen at least [`orb::RAY_RELEASE`] away over the screen: what may press next.
+    armed: bool,
+    /// Since when the dot is not found.
+    lost_since: Option<Instant>,
+}
+
+impl Pointer {
+    /// The hand's new reading at `now`: its ray meets the screen (`hit`) at `ratio` of its length, and the dot's
+    /// proximities to the first three touch points.
+    pub fn update(&mut self, hit: bool, ratio: f32, proximity: [f32; 3], now: Instant) -> Gesture {
+        let Some((x, y)) = hit.then(|| pointed(proximity)).flatten() else { return self.unfound(now) };
+        self.lost_since = None;
+        self.at = Some((x, y));
+        let inside = x >= 0.0 && y >= 0.0 && x < super::layout::WIDTH as f32 && y < super::layout::HEIGHT as f32;
+        if self.pressing {
+            if ratio < orb::RAY_RELEASE {
+                return Gesture::Hold { x, y };
+            }
+            self.pressing = false;
+        }
+        if ratio <= orb::RAY_PRESS {
+            if inside && self.armed {
+                self.pressing = true;
+                self.armed = false;
+                return Gesture::Press { x, y };
+            }
+            return if inside { Gesture::Hover { x, y } } else { Gesture::Away };
+        }
+        if ratio >= orb::RAY_RELEASE {
+            self.armed = inside;
+        }
+        if inside {
+            Gesture::Hover { x, y }
+        } else {
+            Gesture::Away
+        }
+    }
+
+    /// No new reading came: a dot unfound for [`LOST_GRACE`] is gone (`Some(Away)`), the pointer starting afresh.
+    pub fn tick(&mut self, now: Instant) -> Option<Gesture> {
+        let gone = self.lost_since.is_some_and(|since| now.duration_since(since) >= LOST_GRACE);
+        (gone && (self.at.is_some() || self.pressing || self.armed)).then(|| {
+            *self = Pointer::default();
+            Gesture::Away
+        })
+    }
+
+    fn unfound(&mut self, now: Instant) -> Gesture {
+        let since = *self.lost_since.get_or_insert(now);
+        if now.duration_since(since) >= LOST_GRACE {
+            *self = Pointer { lost_since: Some(since), ..Pointer::default() };
+            return Gesture::Away;
+        }
+        match self.at {
+            Some((x, y)) if self.pressing => Gesture::Hold { x, y },
+            Some((x, y)) => Gesture::Hover { x, y },
+            None => Gesture::Away,
+        }
+    }
 }
 
 /// What a hand did this update.
@@ -393,5 +494,47 @@ mod tests {
         // No gaze point: nowhere; looking away from the screen: nowhere.
         assert_eq!(look(read(GAZE_EYES, 0.01), [0.0; 4]), None);
         assert_eq!(looked_at(Some(GAZE_EYES), [0.0, 0.2, -0.5]), None);
+    }
+
+    /// What a hand's three touch points read for its dot at page pixel (`px`, `py`), on the screen's face.
+    fn dot(px: f32, py: f32) -> [f32; 3] {
+        let x = px as f64 / super::super::layout::WIDTH as f64 * WIDTH - WIDTH / 2.0;
+        let y = HEIGHT / 2.0 - py as f64 / super::super::layout::HEIGHT as f64 * HEIGHT;
+        let mut out = [0f32; 3];
+        for (o, c) in out.iter_mut().zip(&RECEIVERS[..3]) {
+            let d = (x - c[0]).hypot(y - c[1]) - orb::POINT_RADIUS;
+            *o = (1.0 - d / RADIUS) as f32;
+        }
+        out
+    }
+
+    #[test]
+    fn a_dot_is_found_exactly_on_the_face() {
+        for (x, y) in [(10.0, 10.0), (512.0, 288.0), (1000.0, 560.0), (700.0, 120.0)] {
+            let (fx, fy) = pointed(dot(x, y)).expect("found");
+            assert!((fx - x).abs() < 0.2 && (fy - y).abs() < 0.2, "({x}, {y}) found at ({fx}, {fy})");
+        }
+        // Readings no single dot gives (8 cm from three corners 0.58 m apart) do not agree.
+        assert_eq!(pointed([0.9, 0.9, 0.9]), None);
+        assert_eq!(pointed([0.0, 0.5, 0.5]), None, "out of reach");
+    }
+
+    #[test]
+    fn the_fingertip_presses_near_the_dot_after_coming_from_farther() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut p = Pointer::default();
+        assert_eq!(p.update(true, 0.02, dot(300.0, 200.0), ms(0)), Gesture::Hover { x: p.at.unwrap().0, y: p.at.unwrap().1 }, "close at once: no press");
+        assert!(matches!(p.update(true, 0.3, dot(300.0, 200.0), ms(10)), Gesture::Hover { .. }));
+        assert!(matches!(p.update(true, 0.05, dot(300.0, 200.0), ms(20)), Gesture::Hover { .. }), "between: hover");
+        assert!(matches!(p.update(true, 0.03, dot(300.0, 200.0), ms(30)), Gesture::Press { .. }));
+        assert!(matches!(p.update(true, 0.05, dot(302.0, 200.0), ms(40)), Gesture::Hold { .. }), "not back far enough");
+        // Pushed through the face: the ray misses, the press holds a moment, then lets go.
+        assert!(matches!(p.update(false, 0.0, [0.0; 3], ms(50)), Gesture::Hold { .. }));
+        assert_eq!(p.tick(ms(200)), Some(Gesture::Away));
+        assert!(matches!(p.update(true, 0.02, dot(300.0, 200.0), ms(210)), Gesture::Hover { .. }), "back out close: no new press");
+        assert!(matches!(p.update(true, 0.07, dot(300.0, 200.0), ms(220)), Gesture::Hover { .. }));
+        assert!(matches!(p.update(true, 0.07, dot(300.0, 200.0), ms(230)), Gesture::Hover { .. }));
+        assert!(matches!(p.update(true, 0.035, dot(300.0, 200.0), ms(240)), Gesture::Press { .. }), "a second press");
     }
 }

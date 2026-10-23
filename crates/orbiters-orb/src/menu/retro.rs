@@ -1,42 +1,44 @@
-//! Orb's menu in its retro look (contracts `Docs/orb.md`, Retro look): a green phosphor terminal. The page as drawn is
-//! turned into one hue by its light, every third row is darker (scanlines) and the corners fade. The avatar's screen
-//! does the same in its shader, so both read alike; text arriving a block at a time then reads as typed out.
+//! Orb's menu in its retro look (contracts `Docs/orb.md`, Retro look): pictures as green dots. The overlay draws a
+//! thumbnail this way from its pixels, the avatar's retro screen from the thumbnail's bytes (the light the codec carries
+//! at each dot's centre), with the same steps and dither, so both read alike.
 
-/// The phosphor's three steps: the card, the labels, the brightest marks (sRGB).
-const DARK: [f32; 3] = [6.0, 16.0, 9.0];
-const MID: [f32; 3] = [40.0, 230.0, 110.0];
-const HOT: [f32; 3] = [200.0, 255.0, 215.0];
+/// The dots across and down a picture.
+pub const DOTS_X: usize = 96;
+pub const DOTS_Y: usize = 54;
+/// The four steps a dot takes (ground, dim, line, hot), as levels of its light.
+pub const STEPS: usize = 4;
+/// Light below `LOW` is the ground, above `LOW + SPAN` the hottest step: a fixed stretch, the same on both sides.
+pub const LOW: f32 = 0.08;
+pub const SPAN: f32 = 0.84;
+/// The ordered dither's threshold map (4 × 4 Bayer), of 16 levels.
+const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
-/// One pixel of the page (sRGB, not premultiplied) at (x, y) of a `width` × `height` page, in the retro look.
-pub fn pixel(rgb: [u8; 3], x: u32, y: u32, width: u32, height: u32) -> [u8; 3] {
-    let light = (0.2126 * rgb[0] as f32 + 0.7152 * rgb[1] as f32 + 0.0722 * rgb[2] as f32) / 255.0;
-    let t = ((light - 0.05) / 0.85).clamp(0.0, 1.0).powf(0.85);
-    let (from, to, k) = if t < 0.75 { (DARK, MID, t / 0.75) } else { (MID, HOT, (t - 0.75) / 0.25) };
-    let scanline = if y % 3 == 2 { 0.72 } else { 1.0 };
-    let dx = (x as f32 + 0.5) / width as f32 * 2.0 - 1.0;
-    let dy = (y as f32 + 0.5) / height as f32 * 2.0 - 1.0;
-    let vignette = 1.0 - 0.22 * (0.6 * dx * dx + dy * dy);
-    std::array::from_fn(|i| ((from[i] + (to[i] - from[i]) * k) * scanline * vignette).round().clamp(0.0, 255.0) as u8)
-}
-
-/// Writes the `rect` (x0, y0, x1, y1) of `rgba` (premultiplied, top row first, `width` × `height`) into the same place
-/// of `out` in the retro look, premultiplied again with the same alpha.
-pub fn apply(rgba: &[u8], out: &mut [u8], width: u32, height: u32, rect: [u32; 4]) {
-    let [x0, y0, x1, y1] = rect;
-    for y in y0..y1.min(height) {
-        for x in x0..x1.min(width) {
-            let i = ((y * width + x) * 4) as usize;
-            let a = rgba[i + 3];
-            if a == 0 {
-                out[i..i + 4].copy_from_slice(&[0, 0, 0, 0]);
-                continue;
+/// The light (JPEG's Y of the sRGB values, 0 to 1) of each dot of a `width` × `height` picture read through `pixel`,
+/// averaged over the pixels the dot covers, row by row from the top.
+pub fn lights(width: usize, height: usize, pixel: impl Fn(usize, usize) -> [u8; 3]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(DOTS_X * DOTS_Y);
+    for dy in 0..DOTS_Y {
+        let (y0, y1) = (dy * height / DOTS_Y, ((dy + 1) * height / DOTS_Y).max(dy * height / DOTS_Y + 1).min(height));
+        for dx in 0..DOTS_X {
+            let (x0, x1) = (dx * width / DOTS_X, ((dx + 1) * width / DOTS_X).max(dx * width / DOTS_X + 1).min(width));
+            let mut sum = 0.0;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let [r, g, b] = pixel(x, y);
+                    sum += 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+                }
             }
-            let straight = |c: u8| ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8;
-            let c = pixel([straight(rgba[i]), straight(rgba[i + 1]), straight(rgba[i + 2])], x, y, width, height);
-            let pre = |c: u8| ((c as u32 * a as u32 + 127) / 255) as u8;
-            out[i..i + 4].copy_from_slice(&[pre(c[0]), pre(c[1]), pre(c[2]), a]);
+            out.push(sum / ((y1 - y0) * (x1 - x0)).max(1) as f32 / 255.0);
         }
     }
+    out
+}
+
+/// The step (0 to 3) of a dot at (`x`, `y`) with `light`: stretched, then dithered between the two nearest steps.
+pub fn step(light: f32, x: usize, y: usize) -> usize {
+    let level = ((light - LOW) / SPAN).clamp(0.0, 1.0) * (STEPS - 1) as f32;
+    let threshold = (BAYER[y % 4][x % 4] as f32 + 0.5) / 16.0;
+    ((level + threshold).floor() as usize).min(STEPS - 1)
 }
 
 #[cfg(test)]
@@ -44,31 +46,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn light_becomes_phosphor() {
-        // The centre of a 1024 × 576 page, off a scanline: black is the dark step, white the hot one.
-        assert_eq!(pixel([0, 0, 0], 512, 288, 1024, 576), [6, 16, 9]);
-        assert_eq!(pixel([255, 255, 255], 512, 288, 1024, 576), [200, 255, 215]);
-        // A label is near the hot step, secondary text between the card and the labels.
-        let label = pixel([236, 237, 238], 512, 288, 1024, 576);
-        assert!(label[1] >= 250, "{label:?}");
-        let note = pixel([139, 139, 148], 512, 288, 1024, 576);
-        assert!(note[1] > 150 && note[1] < 230, "{note:?}");
-        // Every third row is darker, the corners too.
-        assert!(pixel([128, 128, 128], 512, 290, 1024, 576)[1] < pixel([128, 128, 128], 512, 288, 1024, 576)[1]);
-        assert!(pixel([128, 128, 128], 0, 0, 1024, 576)[1] < pixel([128, 128, 128], 512, 288, 1024, 576)[1]);
+    fn steps_follow_the_light_and_dither_between() {
+        assert_eq!(step(0.0, 0, 0), 0);
+        assert_eq!(step(1.0, 3, 3), 3);
+        // Halfway between two steps: half the dots of a 4 × 4 block take the upper one.
+        let mid = LOW + SPAN * (0.5 / 3.0);
+        let upper = (0..4).flat_map(|y| (0..4).map(move |x| (x, y))).filter(|&(x, y)| step(mid, x, y) == 1).count();
+        assert_eq!(upper, 8);
     }
 
     #[test]
-    fn keeps_alpha_and_the_rest_of_the_picture() {
-        let (w, h) = (4u32, 3u32);
-        let mut rgba = vec![0u8; (w * h * 4) as usize];
-        // A half-covered white pixel at (1, 1): premultiplied 128.
-        let i = ((w + 1) * 4) as usize;
-        rgba[i..i + 4].copy_from_slice(&[128, 128, 128, 128]);
-        let mut out = vec![9u8; rgba.len()];
-        apply(&rgba, &mut out, w, h, [1, 1, 2, 2]);
-        assert_eq!(out[i + 3], 128);
-        assert!(out[i + 1] > out[i] && out[i + 1] <= 128, "premultiplied green: {:?}", &out[i..i + 4]);
-        assert!(out[..i].iter().all(|&b| b == 9), "outside the rect: untouched");
+    fn lights_average_what_each_dot_covers() {
+        // A picture twice the dots' size, white on its left half.
+        let (w, h) = (DOTS_X * 2, DOTS_Y * 2);
+        let light = lights(w, h, |x, _| if x < w / 2 { [255; 3] } else { [0; 3] });
+        assert_eq!(light.len(), DOTS_X * DOTS_Y);
+        assert!((light[0] - 1.0).abs() < 1e-5 && light[DOTS_X - 1].abs() < 1e-5);
     }
 }

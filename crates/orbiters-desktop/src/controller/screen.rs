@@ -14,7 +14,7 @@ use orbiters_contracts::orb::thumbnail;
 use orbiters_core::osc::OscValue;
 use orbiters_orb::menu::layout::{Content, ScreenPage};
 use orbiters_orb::menu::screen::{self, Audience, Flags, Frame, Picture, LOCAL_VALUES};
-use orbiters_orb::menu::touch::{self, Gesture, Touch, LOST_GRACE};
+use orbiters_orb::menu::touch::{self, Gesture, Pointer, Touch, LOST_GRACE};
 use orbiters_orb::menu::{self, layout, Call, Contact, Effect, KeyboardLayout, Menu, Page, PhotoLength, SuggestQueue};
 use orbiters_orb::text::{Message, TextSender};
 use orbiters_orb::youtube;
@@ -166,6 +166,10 @@ pub struct ScreenRuntime {
     proximity: [[f32; 4]; 2],
     touched: [bool; 2],
     touch: [Touch; 2],
+    /// The screen points with rays (version 4): each hand's ray (hit, ratio along it) and pointer, instead of fingers.
+    pub(super) pointing: bool,
+    ray: [(bool, f32); 2],
+    pointers: [Pointer; 2],
     pub(super) hover: Option<usize>,
     pub(super) pressed: Option<(usize, Instant)>,
     holding: [bool; 2],
@@ -245,6 +249,9 @@ impl Default for ScreenRuntime {
             proximity: [[0.0; 4]; 2],
             touched: [false; 2],
             touch: [Touch::default(); 2],
+            pointing: false,
+            ray: [(false, 1.0); 2],
+            pointers: [Pointer::default(); 2],
             hover: None,
             pressed: None,
             holding: [false; 2],
@@ -426,8 +433,8 @@ impl ScreenRuntime {
             if let Some(t) = self.suggest.next_due() {
                 at(t);
             }
-            // A finger no longer heard of is let go of a moment later.
-            if self.touch.iter().any(|t| t.finger.is_some()) {
+            // A finger or a dot no longer heard of is let go of a moment later.
+            if self.touch.iter().any(|t| t.finger.is_some()) || self.pointers.iter().any(|p| p.at.is_some()) {
                 at(now + LOST_GRACE);
             }
         }
@@ -526,6 +533,24 @@ impl ScreenRuntime {
             self.clicking = false;
         }
         self.mouse_down = Some(mouse.down);
+    }
+
+    /// A hand's pointing ray (`Orb/Screen/Ray/L_Hit`, `…_Ratio`, the right hand's): whether it meets the screen, where
+    /// along it.
+    pub fn ray_value(&mut self, name: &str, value: &OscValue) -> bool {
+        let Some(rest) = name.strip_prefix(screen::local::RAY_PREFIX) else { return false };
+        let hand = match rest.chars().next() {
+            Some('L') => 0,
+            Some('R') => 1,
+            _ => return true,
+        };
+        match (&rest[1..], value) {
+            ("_Hit", v) => self.ray[hand].0 = v.truthy(),
+            ("_Ratio", OscValue::Float(v)) => self.ray[hand].1 = *v,
+            _ => return true,
+        }
+        self.touched[hand] = true;
+        true
     }
 
     /// The owner's index finger near the screen: one of the eight touch points (`Orb/Screen/Touch/L0` …).
@@ -993,7 +1018,15 @@ impl super::Controller {
             if !s.menu.open {
                 continue;
             }
-            let gesture = if touched { Some(s.touch[hand].update(s.proximity[hand], now)) } else { s.touch[hand].tick(now) };
+            let gesture = match (s.pointing, touched) {
+                (true, true) => {
+                    let [a, b, c, _] = s.proximity[hand];
+                    Some(s.pointers[hand].update(s.ray[hand].0, s.ray[hand].1, [a, b, c], now))
+                }
+                (true, false) => s.pointers[hand].tick(now),
+                (false, true) => Some(s.touch[hand].update(s.proximity[hand], now)),
+                (false, false) => s.touch[hand].tick(now),
+            };
             let layout = Frame::layout(&s.menu);
             match gesture {
                 None => {}
@@ -1126,6 +1159,12 @@ impl super::Controller {
             if rt.screen.menu.open {
                 rt.wake();
             }
+        } else if name.starts_with(screen::local::RAY_PREFIX) {
+            let mut rt = self.orb.lock().unwrap();
+            rt.screen.ray_value(name, value);
+            if rt.screen.menu.open {
+                rt.wake();
+            }
         } else if let (true, OscValue::Float(v)) = (name.starts_with(screen::local::EYE_PREFIX) || name.starts_with(screen::local::GAZE_PREFIX), value) {
             // Read at the orb thread's next step, a few milliseconds away while looking points: no wake for each.
             self.orb.lock().unwrap().screen.gaze_value(name, *v);
@@ -1170,6 +1209,17 @@ mod tests {
         assert_eq!(s.touched, [true, true]);
         assert!(s.touch_point("Orb/Screen/Touch/X0", 1.0), "ours, ignored");
         assert_eq!(language().len(), 2);
+    }
+
+    #[test]
+    fn reads_pointing_rays() {
+        let mut s = ScreenRuntime::default();
+        assert!(s.ray_value("Orb/Screen/Ray/R_Hit", &OscValue::Bool(true)));
+        assert!(s.ray_value("Orb/Screen/Ray/R_Ratio", &OscValue::Float(0.2)));
+        assert!(s.ray_value("Orb/Screen/Ray/L_Distance", &OscValue::Float(0.3)), "ours, not read");
+        assert!(!s.ray_value("Orb/Screen/Touch/R0", &OscValue::Float(0.3)));
+        assert_eq!(s.ray, [(false, 1.0), (true, 0.2)]);
+        assert_eq!(s.touched, [false, true]);
     }
 
     #[test]

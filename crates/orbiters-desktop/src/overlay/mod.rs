@@ -16,6 +16,7 @@ pub mod eye_picture;
 mod frames;
 mod menu;
 pub mod menu_pages;
+pub mod menu_retro;
 pub mod menu_ui;
 pub mod ui;
 pub mod walk;

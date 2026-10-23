@@ -9,6 +9,7 @@
 //!   it with the screen's shader and compare; `bank-results-128.bin`, the results page with 128-byte thumbnails (1024
 //!   bytes).
 
+use super::menu_retro;
 use super::menu_ui::{self, View};
 use super::Canvas;
 use egui::{pos2, ColorImage, TextureHandle, TextureId, TextureOptions};
@@ -90,6 +91,31 @@ pub(super) fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> an
     Ok(())
 }
 
+/// A straight RGBA picture at half size, each pixel the mean of four (colours weighted by their alpha).
+fn half(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let (w, h) = (width / 2, height / 2);
+    let mut out = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = [0u32; 4];
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let i = ((2 * y + dy) * width + 2 * x + dx) * 4;
+                let a = rgba[i + 3] as u32;
+                for c in 0..3 {
+                    sum[c] += rgba[i + c] as u32 * a;
+                }
+                sum[3] += a;
+            }
+            let o = (y * w + x) * 4;
+            for c in 0..3 {
+                out[o + c] = sum[c].checked_div(sum[3]).unwrap_or(0) as u8;
+            }
+            out[o + 3] = (sum[3] / 4) as u8;
+        }
+    }
+    out
+}
+
 /// Paints one frame twice (fonts and textures load on the first).
 fn paint(canvas: &mut Canvas, draw: impl Fn(&egui::Painter)) -> Vec<u8> {
     let mut rgba = Vec::new();
@@ -99,17 +125,18 @@ fn paint(canvas: &mut Canvas, draw: impl Fn(&egui::Painter)) -> Vec<u8> {
     rgba
 }
 
-/// The page texture: every page's unchanging part, slice by slice, straight alpha.
-pub fn page_pictures() -> Vec<u8> {
+/// The page texture: every page's unchanging part, slice by slice, straight alpha, in Orbiters' own look or the retro
+/// one (`retro`: the avatar's retro screen has these).
+pub fn page_pictures(retro: bool) -> Vec<u8> {
     let mut canvas = Canvas::new(WIDTH, HEIGHT);
     let slice = (WIDTH * HEIGHT * 4) as usize;
     let mut out = vec![0u8; slice * SLICES];
     // Slice 0: the back, what the screen shows from behind.
-    let rgba = paint(&mut canvas, |p| menu_ui::draw_back(p, pos2(0.0, 0.0)));
+    let rgba = paint(&mut canvas, |p| if retro { menu_retro::draw_back(p, pos2(0.0, 0.0)) } else { menu_ui::draw_back(p, pos2(0.0, 0.0)) });
     out[..slice].copy_from_slice(&unpremultiply(&rgba));
     for page in ScreenPage::ALL {
         let l = layout::layout(page);
-        let rgba = paint(&mut canvas, |p| menu_ui::draw_chrome(p, pos2(0.0, 0.0), &l));
+        let rgba = paint(&mut canvas, |p| if retro { menu_retro::draw_chrome(p, pos2(0.0, 0.0), &l) } else { menu_ui::draw_chrome(p, pos2(0.0, 0.0), &l) });
         let at = page as usize * slice;
         out[at..at + slice].copy_from_slice(&unpremultiply(&rgba));
     }
@@ -270,25 +297,38 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let out = Path::new(args.first().map(String::as_str).unwrap_or("orb-menu"));
     std::fs::create_dir_all(out)?;
-    let pages = page_pictures();
-    let path = out.join("Orb screen pages.png");
-    write_png(&path, WIDTH, HEIGHT * SLICES as u32, &pages)?;
-    println!("{}", path.display());
+    for (retro, name) in [(false, "Orb screen pages.png"), (true, "Orb screen pages retro.png")] {
+        let path = out.join(name);
+        write_png(&path, WIDTH, HEIGHT * SLICES as u32, &page_pictures(retro))?;
+        println!("{}", path.display());
+    }
     let path = out.join("Orb screen layout.png");
     write_png(&path, TABLE_WIDTH as u32, SLICES as u32, &layout_table())?;
     println!("{}", path.display());
 
     let mut canvas = Canvas::new(WIDTH, HEIGHT);
     let thumbs: Vec<TextureHandle> = (0..PICTURES).map(|i| sample_thumbnail(canvas.ctx(), i)).collect();
+    // The same pictures as the retro look's green dots.
+    let dots: Vec<TextureHandle> = (0..PICTURES)
+        .map(|i| {
+            let (w, h, rgba) = sample_rgba(i);
+            let image = menu_retro::dots(&ColorImage::from_rgba_unmultiplied([w, h], &rgba), 1);
+            canvas.ctx().load_texture(format!("dots{i}"), image, TextureOptions::NEAREST)
+        })
+        .collect();
     let art = sample_art();
-    let art_texture = {
+    let art_image = {
         let rgba: Vec<u8> = art.pixels.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
-        canvas.ctx().load_texture(SAMPLE_ART, ColorImage::from_rgba_unmultiplied([art.width, art.height], &rgba), TextureOptions::LINEAR)
+        ColorImage::from_rgba_unmultiplied([art.width, art.height], &rgba)
     };
-    let rgba = paint(&mut canvas, |p| menu_ui::draw_back(p, pos2(0.0, 0.0)));
-    let path = out.join("menu-back.png");
-    write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
-    println!("{}", path.display());
+    let art_dots = canvas.ctx().load_texture("art-dots", menu_retro::dots(&art_image, 1), TextureOptions::NEAREST);
+    let art_texture = canvas.ctx().load_texture(SAMPLE_ART, art_image, TextureOptions::LINEAR);
+    for (retro, name) in [(false, "menu-back.png"), (true, "menu-back-retro.png")] {
+        let rgba = paint(&mut canvas, |p| if retro { menu_retro::draw_back(p, pos2(0.0, 0.0)) } else { menu_ui::draw_back(p, pos2(0.0, 0.0)) });
+        let path = out.join(name);
+        write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
+        println!("{}", path.display());
+    }
     for (page, menu, hover, pressed) in samples() {
         assert_eq!(ScreenPage::of(&menu), page, "the sample shows its page");
         let picture = |id: &str| -> Option<TextureId> {
@@ -297,15 +337,29 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
             id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).and_then(|i| thumbs.get(i)).map(|t| t.id())
         };
-        let rgba = paint(&mut canvas, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &picture, time: 0.4 }));
+        let modern = paint(&mut canvas, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &picture, time: 0.4 }));
         let path = out.join(format!("menu-{}.png", page.name()));
+        write_png(&path, WIDTH, HEIGHT, &unpremultiply(&modern))?;
+        println!("{}", path.display());
+        let dotted = |id: &str| -> Option<TextureId> {
+            if id == SAMPLE_ART {
+                return Some(art_dots.id());
+            }
+            id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).and_then(|i| dots.get(i)).map(|t| t.id())
+        };
+        let rgba = paint(&mut canvas, |p| menu_retro::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &dotted, time: 0.4 }));
+        let path = out.join(format!("menu-{}-retro.png", page.name()));
         write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
         println!("{}", path.display());
-        let mut green = vec![0u8; rgba.len()];
-        orbiters_orb::menu::retro::apply(&rgba, &mut green, WIDTH, HEIGHT, [0, 0, WIDTH, HEIGHT]);
-        let path = out.join(format!("menu-{}-retro.png", page.name()));
-        write_png(&path, WIDTH, HEIGHT, &unpremultiply(&green))?;
-        println!("{}", path.display());
+        // Orbiters Toolkit's pictures of the two looks, for the Look option on the orb's card in My Avatar: this Home,
+        // half size.
+        if page == ScreenPage::HomeSix {
+            for (picture, name) in [(&modern, "Orb preview.png"), (&rgba, "Orb preview retro.png")] {
+                let path = out.join(name);
+                write_png(&path, WIDTH / 2, HEIGHT / 2, &half(&unpremultiply(picture), WIDTH as usize, HEIGHT as usize))?;
+                println!("{}", path.display());
+            }
+        }
         let pictures = |id: &str| -> Option<screen::Picture> {
             if id == SAMPLE_ART {
                 return Some(screen::picture_from_rgb(&art));

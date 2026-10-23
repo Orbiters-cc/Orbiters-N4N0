@@ -530,6 +530,8 @@ pub mod local {
     /// (desktop mode's looking).
     pub const EYE_PREFIX: &str = params::SCREEN_EYE_PREFIX;
     pub const GAZE_PREFIX: &str = params::SCREEN_GAZE_PREFIX;
+    /// `Orb/Screen/Ray/L_Hit`, `…_Ratio` and the right hand's: the pointing rays (screen version 4).
+    pub const RAY_PREFIX: &str = params::SCREEN_RAY_PREFIX;
 
     pub fn value(i: usize) -> String {
         format!("{VALUE_PREFIX}{i}")

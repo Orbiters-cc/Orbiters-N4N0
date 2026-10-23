@@ -5,7 +5,7 @@
 
 var<workgroup> done_count: atomic<u32>;
 
-@compute @workgroup_size(16, 16)
+@compute @workgroup_size(TILE, TILE)
 fn forward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let tile = wid.x + wid.y * frame.size.z;
     let px = wid.x * TILE + lid.x;
@@ -26,14 +26,14 @@ fn forward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) 
     var depth = 0.0;
     var last = first;
     let pix = vec2<f32>(f32(px), f32(py));
-    // One loop over the tile's entries, a new batch every 256 (shaders compilers may unroll a loop with a known small
+    // One loop over the tile's entries, a new batch every TILE_PIXELS (shaders compilers may unroll a loop with a known small
     // bound: D3D's FXC took 40 s over the nested form). No early exits but the uniform one at a batch start.
     for (var e = first; e < end; e++) {
-        let slot = (e - first) & 255u;
+        let slot = (e - first) & (TILE_PIXELS - 1u);
         if (slot == 0u) {
             // Every pixel done: stop. Else load the next batch (the uniform load is also the barrier that lets every
             // pixel finish the previous one).
-            if (workgroupUniformLoad(&done_count) == 256u) {
+            if (workgroupUniformLoad(&done_count) == TILE_PIXELS) {
                 break;
             }
             if (e + li < end) {

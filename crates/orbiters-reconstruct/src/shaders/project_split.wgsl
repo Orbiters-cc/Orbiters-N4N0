@@ -1,4 +1,4 @@
-// A training device's projection with large Gaussians split off (lab, S4_SPLIT_BIG; after common.wgsl): project.wgsl's
+// A training device's projection with large Gaussians split off (after common.wgsl): project.wgsl's
 // projection without a viewer's guards, confidence or far field, except that a Gaussian whose tile box holds more than
 // BIG_TILES tiles goes on the `big` list (proj slot 15 = 2: listed) instead of having one thread test them all:
 // `project_big` then gives each listed Gaussian a workgroup to count its tiles. One thread walking an 8,160-tile box

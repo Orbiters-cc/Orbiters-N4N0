@@ -233,92 +233,55 @@ pub fn seed_map(data: &Dataset, width: u32, held_out: &[usize]) -> (SkyMap, SkyS
     let mut cells = vec![[[0f64; 4]; 2]; PARALLAX_CELLS * PARALLAX_CELLS / 2];
     let mut found = SkySeeding::default();
     let (iw, ih) = (data.width, data.height);
-    let parallel = std::env::var_os("S4_PAR_SKY").is_some();
+    // Each view's rows searched in parallel, their sky pixels then added up row by row, pixel by pixel: the sums of a
+    // serial loop (0.82 → 0.17 s on VRChat Home).
+    use rayon::prelude::*;
     for (i, v) in data.views.iter().enumerate() {
         if held_out.contains(&i) {
-            continue;
-        }
-        if parallel {
-            // Lab: each row's sky pixels found in parallel, then added up row by row, pixel by pixel, as below.
-            let Some(d) = data.depth_views.iter().min_by(|a, b| (a.game_time - v.game_time).abs().total_cmp(&(b.game_time - v.game_time).abs())) else { continue };
-            let Some(g) = Regular::of(&d.grid) else { continue };
-            let origin = v.camera.position();
-            let half = usize::from(positions[i][axis] > split);
-            use rayon::prelude::*;
-            let rows: Vec<Vec<(usize, usize, [f32; 3])>> = (0..ih)
-                .into_par_iter()
-                .step_by(2)
-                .map(|y| {
-                    let mut hits = Vec::new();
-                    for x in (0..iw).step_by(2) {
-                        if data.mask[(y * iw + x) as usize] < 0.5 {
-                            continue;
-                        }
-                        let far = v.camera.unproject(x as f32, y as f32, 1e4);
-                        let Some((u, vv, _)) = d.camera.project(far) else { continue };
-                        let (fx, fy) = ((u - g.x0) / g.sx, (vv - g.y0) / g.sy);
-                        if !(fx >= 0.0 && fy >= 0.0 && fx <= (g.w - 1) as f32 && fy <= (g.h - 1) as f32) {
-                            continue;
-                        }
-                        let (i0, j0) = ((fx as usize).min(g.w - 2), (fy as usize).min(g.h - 2));
-                        let sky = [(0, 0), (1, 0), (0, 1), (1, 1)].iter().all(|&(di, dj)| {
-                            let k = (j0 + dj) * g.w + i0 + di;
-                            d.depth[k] <= 0.0 && !d.is_unknown(k)
-                        });
-                        if !sky {
-                            continue;
-                        }
-                        let Some(c) = sample_rgb(&v.image, iw, ih, x as f32, y as f32) else { continue };
-                        let dir = [far[0] - origin[0], far[1] - origin[1], far[2] - origin[2]];
-                        hits.push((texel(dir, w), texel(dir, PARALLAX_CELLS), c));
-                    }
-                    hits
-                })
-                .collect();
-            for (t0, t1, c) in rows.into_iter().flatten() {
-                for t in [&mut sum[t0], &mut cells[t1][half]] {
-                    for k in 0..3 {
-                        t[k] += c[k] as f64;
-                    }
-                    t[3] += 1.0;
-                }
-                found.pixels += 1;
-            }
             continue;
         }
         let Some(d) = data.depth_views.iter().min_by(|a, b| (a.game_time - v.game_time).abs().total_cmp(&(b.game_time - v.game_time).abs())) else { continue };
         let Some(g) = Regular::of(&d.grid) else { continue };
         let origin = v.camera.position();
         let half = usize::from(positions[i][axis] > split);
-        for y in (0..ih).step_by(2) {
-            for x in (0..iw).step_by(2) {
-                if data.mask[(y * iw + x) as usize] < 0.5 {
-                    continue;
-                }
-                let far = v.camera.unproject(x as f32, y as f32, 1e4);
-                let Some((u, vv, _)) = d.camera.project(far) else { continue };
-                let (fx, fy) = ((u - g.x0) / g.sx, (vv - g.y0) / g.sy);
-                if !(fx >= 0.0 && fy >= 0.0 && fx <= (g.w - 1) as f32 && fy <= (g.h - 1) as f32) {
-                    continue;
-                }
-                let (i0, j0) = ((fx as usize).min(g.w - 2), (fy as usize).min(g.h - 2));
-                let sky = [(0, 0), (1, 0), (0, 1), (1, 1)].iter().all(|&(di, dj)| {
-                    let k = (j0 + dj) * g.w + i0 + di;
-                    d.depth[k] <= 0.0 && !d.is_unknown(k)
-                });
-                if !sky {
-                    continue;
-                }
-                let Some(c) = sample_rgb(&v.image, iw, ih, x as f32, y as f32) else { continue };
-                let dir = [far[0] - origin[0], far[1] - origin[1], far[2] - origin[2]];
-                for t in [&mut sum[texel(dir, w)], &mut cells[texel(dir, PARALLAX_CELLS)][half]] {
-                    for k in 0..3 {
-                        t[k] += c[k] as f64;
+        let rows: Vec<Vec<(usize, usize, [f32; 3])>> = (0..ih)
+            .into_par_iter()
+            .step_by(2)
+            .map(|y| {
+                let mut hits = Vec::new();
+                for x in (0..iw).step_by(2) {
+                    if data.mask[(y * iw + x) as usize] < 0.5 {
+                        continue;
                     }
-                    t[3] += 1.0;
+                    let far = v.camera.unproject(x as f32, y as f32, 1e4);
+                    let Some((u, vv, _)) = d.camera.project(far) else { continue };
+                    let (fx, fy) = ((u - g.x0) / g.sx, (vv - g.y0) / g.sy);
+                    if !(fx >= 0.0 && fy >= 0.0 && fx <= (g.w - 1) as f32 && fy <= (g.h - 1) as f32) {
+                        continue;
+                    }
+                    let (i0, j0) = ((fx as usize).min(g.w - 2), (fy as usize).min(g.h - 2));
+                    let sky = [(0, 0), (1, 0), (0, 1), (1, 1)].iter().all(|&(di, dj)| {
+                        let k = (j0 + dj) * g.w + i0 + di;
+                        d.depth[k] <= 0.0 && !d.is_unknown(k)
+                    });
+                    if !sky {
+                        continue;
+                    }
+                    let Some(c) = sample_rgb(&v.image, iw, ih, x as f32, y as f32) else { continue };
+                    let dir = [far[0] - origin[0], far[1] - origin[1], far[2] - origin[2]];
+                    hits.push((texel(dir, w), texel(dir, PARALLAX_CELLS), c));
                 }
-                found.pixels += 1;
+                hits
+            })
+            .collect();
+        for (t0, t1, c) in rows.into_iter().flatten() {
+            for t in [&mut sum[t0], &mut cells[t1][half]] {
+                for k in 0..3 {
+                    t[k] += c[k] as f64;
+                }
+                t[3] += 1.0;
             }
+            found.pixels += 1;
         }
     }
     let mut seen: Vec<Option<[f32; 3]>> = vec![None; w * h];

@@ -1,4 +1,4 @@
-// The tile entries with large Gaussians split off (lab, S4_SPLIT_BIG; after common.wgsl; project_split.wgsl listed
+// The tile entries with large Gaussians split off (after common.wgsl; project_split.wgsl listed
 // them): duplicate.wgsl for the rest, and `duplicate_big` writes a listed Gaussian's entries with a workgroup, in any
 // order inside its slice (its entries' keys all differ in the tile, so the sort orders them alike).
 

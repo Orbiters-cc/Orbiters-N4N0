@@ -74,7 +74,7 @@ fn sum10(v0: vec4<f32>, v1: vec2<f32>, v2: vec4<f32>, lane: u32) -> Sum10 {
 // One-dimensional workgroup (subgroup builtins need one), still one 16×16 tile. The subgroup operations run under
 // `subgroupAny(hit)`, which is the same in every lane of a subgroup, and every lane reaches them for every entry.
 @diagnostic(off, subgroup_uniformity)
-@compute @workgroup_size(256)
+@compute @workgroup_size(TILE_PIXELS)
 fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(subgroup_invocation_id) lane: u32, @builtin(subgroup_size) lanes: u32) {
     let tile = wid.x + wid.y * frame.size.z;
     let px = wid.x * TILE + li % TILE;
@@ -104,11 +104,11 @@ fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
     var acc_c = background_at(f32(px), f32(py));
     var acc_d = 0.0;
     let pix = vec2<f32>(f32(px), f32(py));
-    let batches = (used_end - first + 255u) / 256u;
+    let batches = (used_end - first + TILE_PIXELS - 1u) / TILE_PIXELS;
     for (var b = 0u; b < batches; b++) {
-        // Batch b holds entries [stop − 256, stop), loaded far to near.
-        let stop = used_end - b * 256u;
-        let start = max(first, select(0u, stop - 256u, stop >= 256u));
+        // Batch b holds entries [stop − TILE_PIXELS, stop), loaded far to near.
+        let stop = used_end - b * TILE_PIXELS;
+        let start = max(first, select(0u, stop - TILE_PIXELS, stop >= TILE_PIXELS));
         let count = stop - start;
         workgroupBarrier();
         if (li < count) {

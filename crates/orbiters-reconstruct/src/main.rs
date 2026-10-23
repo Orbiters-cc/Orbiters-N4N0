@@ -87,9 +87,12 @@ fn run(args: Args) -> anyhow::Result<Report> {
     // A swap an earlier run stopped in the middle of: its previous result is back in place first.
     recover(dir);
     stage(Stage::Loading, 0.0);
-    // Lab (S4_OVERLAP): the device and its kernels come up while the session loads.
+    // Training gives way to VRChat on its graphics card: the queue asks for low priority (nothing else waits on it when
+    // the GPU is free), the budget fits the graphics memory VRChat leaves, and with SteamVR the frame-timing governor
+    // paces the steps (orbiters_reconstruct::governor, joined by train::train while VRChat runs). The device and its
+    // kernels come up while the session loads (about half a second each).
     let device_options = gpu::DeviceOptions { low_priority: true, ..args.device };
-    let early_device = std::env::var_os("S4_OVERLAP").is_some().then(|| std::thread::spawn(move || timing::section("2 device", None, || gpu::Gpu::with_options(device_options))));
+    let device = std::thread::spawn(move || timing::section("2 device", None, || gpu::Gpu::with_options(device_options)));
     // Within the memory budget; depth that says nothing becomes unknown, the world's chromatic aberration leaves the
     // keyframes.
     let prepared = timing::section("1 prepare", None, || prepare::prepare(dir, &prepare::Options { width: args.width, ..Default::default() }, |p| stage(Stage::Loading, p)))?;
@@ -98,13 +101,7 @@ fn run(args: Args) -> anyhow::Result<Report> {
     }
     let data = &prepared.data;
     let held_out = train::held_out(data.views.len(), args.settings.hold_out_every);
-    // Training gives way to VRChat on its graphics card: the queue asks for low priority (nothing else waits on it when
-    // the GPU is free), the budget fits the graphics memory VRChat leaves, and with SteamVR the frame-timing governor
-    // paces the steps (orbiters_reconstruct::governor, joined by train::train while VRChat runs).
-    let mut gpu = match early_device {
-        Some(thread) => timing::section("2 device (waited)", None, || thread.join()).map_err(|_| anyhow::anyhow!("the GPU device's thread panicked"))??,
-        None => timing::section("2 device", None, || gpu::Gpu::with_options(device_options))?,
-    };
+    let mut gpu = device.join().map_err(|_| anyhow::anyhow!("the GPU device's thread panicked"))??;
     let dev = gpu.device.clone();
     let mut settings = args.settings.clone();
     if orbiters_reconstruct::priority::vrchat() && !gpu.integrated {
@@ -183,15 +180,10 @@ fn run(args: Args) -> anyhow::Result<Report> {
         std::fs::write(partial.join(rec::HELD_OUT_DIR).join(format!("{:06}.qoi", data.views[i].keyframe)), &encoded)?;
         Ok(())
     };
-    let mut first = true;
+    // The first held-out keyframe's render is the preview.
+    let preview = outcome.held_out.first().copied();
     let psnr_held_out = timing::section("6 score held out", Some(&dev), || {
-        if std::env::var_os("S4_PAR_SCORE").is_some() {
-            // Lab: the CPU's share in parallel; the first held-out keyframe's render is the preview, as below.
-            let preview = outcome.held_out.first().copied();
-            train::score_held_out_parallel(&mut gpu, data, prepared.undo.as_ref(), &outcome.held_out, settings.background, |i, img| write(i, img, Some(i) == preview))
-        } else {
-            train::score_held_out(&mut gpu, data, prepared.undo.as_ref(), &outcome.held_out, settings.background, |i, img| write(i, img, std::mem::take(&mut first)))
-        }
+        train::score_held_out(&mut gpu, data, prepared.undo.as_ref(), &outcome.held_out, settings.background, |i, img| write(i, img, Some(i) == preview))
     })?;
     if outcome.held_out.is_empty() {
         write(0, &train::render(&mut gpu, &data.views[0].camera, settings.background)?, true)?;

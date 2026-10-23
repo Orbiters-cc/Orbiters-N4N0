@@ -227,9 +227,6 @@ struct Kernels {
     sort_scatter: wgpu::ComputePipeline,
     ranges: wgpu::ComputePipeline,
     forward: wgpu::ComputePipeline,
-    /// The forward with two pixels a thread (shaders/raster_forward2.wgsl), and on 8×4 blocks (raster_forward_b.wgsl).
-    forward2: wgpu::ComputePipeline,
-    forward_b: wgpu::ComputePipeline,
     present: wgpu::ComputePipeline,
     /// The sky map in place of the constant background (crate::sky::SkyMap).
     sky_composite: wgpu::ComputePipeline,
@@ -237,59 +234,44 @@ struct Kernels {
     training: Option<Training>,
 }
 
+/// A training device's kernels. Its steps take their own paths: large Gaussians split off the projection and the tile
+/// entries (shaders/project_split.wgsl, duplicate_split.wgsl), the sort's scatter by subgroup ballots
+/// (sort_subgroups.wgsl), the backward with two pixels a thread on 16×16 tiles (raster_backward_blocks.wgsl), depth
+/// steps on 8×8 tiles, and the projection backward fused with Adam (project_backward_adam.wgsl).
 struct Training {
     sums: GradientSums,
+    /// One pixel a thread (the reference; [`Gpu::backward_from`] on 16×16 tiles too) and two on 16×16 tiles.
     backward: wgpu::ComputePipeline,
-    /// The backward with two pixels a thread (shaders/raster_backward2.wgsl), and four (raster_backward4.wgsl).
-    backward2: wgpu::ComputePipeline,
-    backward4: wgpu::ComputePipeline,
-    backward2s: wgpu::ComputePipeline,
-    backward2b: wgpu::ComputePipeline,
+    backward_blocks: wgpu::ComputePipeline,
     loss_color: wgpu::ComputePipeline,
     ssim_partials: wgpu::ComputePipeline,
     ssim_gradient: wgpu::ComputePipeline,
     robust_residual: wgpu::ComputePipeline,
     robust_inliers: wgpu::ComputePipeline,
     depth_loss: wgpu::ComputePipeline,
+    /// The parameter gradients alone (tests: [`Gpu::read_grads`]), and with the Adam step (training).
     project_backward: wgpu::ComputePipeline,
-    adam: wgpu::ComputePipeline,
+    project_backward_adam: wgpu::ComputePipeline,
     relocate_classify: wgpu::ComputePipeline,
     relocate_adjust: wgpu::ComputePipeline,
     relocate_copy: wgpu::ComputePipeline,
     squared_error: wgpu::ComputePipeline,
+    /// The largest weights (the PLY's seen statistics), and whether they reach a threshold (fading).
     visibility: wgpu::ComputePipeline,
+    visibility_over: wgpu::ComputePipeline,
     filter_3d: wgpu::ComputePipeline,
     seen: wgpu::ComputePipeline,
     sky_gradient: wgpu::ComputePipeline,
     sky_adam: wgpu::ComputePipeline,
-    /// The sort's scatter with subgroup ballots (shaders/sort_subgroups.wgsl).
-    sort_scatter_subgroups: wgpu::ComputePipeline,
-    /// Lazily dense Adam (shaders/lazy_adam.wgsl, project_lazy.wgsl).
-    project_lazy: wgpu::ComputePipeline,
-    catch_up_all: wgpu::ComputePipeline,
-    /// The projection backward fused with Adam (shaders/project_backward_adam.wgsl).
-    project_backward_adam: wgpu::ComputePipeline,
-    /// Visibility by threshold stores (shaders/raster_visibility.wgsl `visibility_over`), and with subgroup maxima
-    /// (`visibility_sub`).
-    visibility_over: wgpu::ComputePipeline,
-    visibility_sub: wgpu::ComputePipeline,
-    /// D-SSIM reading its inputs once for the three channels (shaders/ssim2.wgsl).
-    ssim_partials2: wgpu::ComputePipeline,
-    ssim_gradient2: wgpu::ComputePipeline,
-    /// The radix sort with 8-bit digits (shaders/sort8.wgsl).
-    sort8_count: wgpu::ComputePipeline,
-    sort8_scatter: wgpu::ComputePipeline,
-    /// The projection backward fused with dense Adam (shaders/project_backward_adam_dense.wgsl).
-    project_backward_adam_dense: wgpu::ComputePipeline,
-    /// Large Gaussians split off the projection and duplicate passes (shaders/project_split.wgsl, duplicate_split.wgsl).
-    project_split: wgpu::ComputePipeline,
+    sort_scatter: wgpu::ComputePipeline,
+    project: wgpu::ComputePipeline,
     project_big: wgpu::ComputePipeline,
-    duplicate_split: wgpu::ComputePipeline,
+    duplicate: wgpu::ComputePipeline,
     duplicate_big: wgpu::ComputePipeline,
-    /// The same on 8×8 tiles (depth steps), with the forward and backward.
-    project_split8: wgpu::ComputePipeline,
+    /// Depth steps on 8×8 tiles.
+    project8: wgpu::ComputePipeline,
     project_big8: wgpu::ComputePipeline,
-    duplicate_split8: wgpu::ComputePipeline,
+    duplicate8: wgpu::ComputePipeline,
     duplicate_big8: wgpu::ComputePipeline,
     forward8: wgpu::ComputePipeline,
     backward8: wgpu::ComputePipeline,
@@ -413,49 +395,6 @@ pub struct Gpu {
     pub regularise_unseen: bool,
     /// Whether relocated Gaussians count Adam's bias correction from their restart (crate::train::Settings).
     pub adam_restart: bool,
-    /// Lab: Adam and the projection backward skip the Gaussians a step does not show (S4_SPARSE_ADAM).
-    pub sparse_adam: bool,
-    /// Lab: a training device's sort scatters with subgroup ballots (S4_SORT_SUBGROUPS).
-    pub sort_subgroups: bool,
-    /// Lab: the backward takes two pixels a thread (S4_BACKWARD2), or four (S4_BACKWARD4).
-    pub backward2: bool,
-    pub backward4: bool,
-    /// Lab: which two-pixel backward (S4_BACKWARD2_VARIANT): b'c' blocks with skips, b's' strips, b'b' blocks.
-    pub backward2_variant: u8,
-    /// Lab: lazily dense Adam (S4_LAZY_ADAM; shaders/lazy_adam.wgsl), with the positions' learning rate's log decay a
-    /// step; whether Gaussians wait to catch up, and the last step's rates.
-    pub lazy_adam: bool,
-    /// Lab: with lazy Adam, the projection backward and Adam in one kernel (S4_FUSED_ADAM).
-    pub fused_adam: bool,
-    /// Lab: the forward takes two pixels a thread (S4_FORWARD2), or runs on 8×4 blocks (S4_FORWARD_B).
-    pub forward2: bool,
-    pub forward_b: bool,
-    /// Lab: visibility rounds record only whether a weight reaches this (0: the largest weight; S4_FAST_VISIBILITY).
-    pub visibility_threshold: f32,
-    /// Lab (S4_RESIDENT): the keyframes on the device ([`Gpu::set_keyframes`]), and the one the next colour step trains
-    /// on (instead of uploading its pixels).
-    keyframes: Vec<wgpu::Buffer>,
-    pub resident_target: Option<usize>,
-    /// Lab: D-SSIM reads its inputs once for the three channels (S4_SSIM2).
-    pub ssim2: bool,
-    /// Lab: visibility rounds take subgroup maxima before their atomics (S4_VIS_SUBGROUP).
-    pub vis_subgroup: bool,
-    /// Lab: a training device sorts with 8-bit digits, four passes (S4_SORT8).
-    pub sort8: bool,
-    /// Lab: without lazy Adam, the projection backward fused with dense Adam (S4_FUSED_DENSE).
-    pub fused_dense: bool,
-    /// Lab: large Gaussians' tiles counted and written by whole workgroups (S4_SPLIT_BIG), and their list.
-    pub split_big: bool,
-    /// Lab: restarted Gaussians stay dormant for the fused dense Adam until a step shows them (S4_DORMANT).
-    pub dormant: bool,
-    /// Lab: 8×8 tiles for depth steps (1, S4_DEPTH_TILE8) or for every step (2, tests); 0: 16×16 everywhere. And
-    /// whether the step being recorded is on them.
-    pub tile8: u8,
-    tile8_step: bool,
-    big: Option<wgpu::Buffer>,
-    pub means_decay: f32,
-    lazy_pending: std::cell::Cell<bool>,
-    last_rates: std::cell::Cell<[f32; 16]>,
     /// A viewer's guards (project.wgsl; [`Gpu::renderer`] sets them): splats fade in over the first 20 cm from the eye,
     /// those holding the eye are left out, none reaches further than 1024 px on screen, and they sort by distance from
     /// the eye. Training never uses them: what they hide there would never be corrected.
@@ -488,6 +427,21 @@ pub struct Gpu {
     /// The first GPU error a training device reported out of band (or its loss): every later step and readback fails
     /// with it.
     errors: Arc<std::sync::Mutex<Option<String>>>,
+    /// Visibility rounds: whether a weight reaches this (fading; 0: the largest weight), and whether they may go without
+    /// waiting for each view's count ([`Gpu::visibility`]).
+    visibility_over: f32,
+    visibility_pipelined: bool,
+    /// The keyframes on the device ([`Gpu::set_keyframes`]), and the one the next colour step trains on instead of
+    /// uploading its pixels.
+    keyframes: Vec<wgpu::Buffer>,
+    pub resident_target: Option<usize>,
+    /// The list of large Gaussians a training step's projection splits off (shaders/project_split.wgsl).
+    big: Option<wgpu::Buffer>,
+    /// Whether the step being recorded is on 8×8 tiles (depth steps); tests' switches for every step on 8×8 tiles, and
+    /// for the one-pixel-a-thread backward on 16×16 tiles (the reference the two-pixel one is checked against).
+    tile8_step: bool,
+    pub(crate) tile8_all: bool,
+    pub(crate) reference_backward: bool,
     /// Loss masks per image size ([`Gpu::set_mask`]).
     masks: Vec<((u32, u32), wgpu::Buffer)>,
     /// Gaussians the splat buffers make room for at least ([`Gpu::reserve`]).
@@ -501,7 +455,7 @@ pub struct Gpu {
 /// A bind group's pipeline and its (binding, buffer) entries.
 type BindKey = (wgpu::ComputePipeline, Vec<(u32, wgpu::Buffer)>);
 
-/// Lab: relocation weights on their way back from the device ([`Gpu::request_relocation_weights`]).
+/// Relocation weights on their way back from the device ([`Gpu::request_relocation_weights`]).
 pub struct PendingWeights {
     staging: wgpu::Buffer,
     state: Arc<AtomicU32>,
@@ -713,19 +667,10 @@ struct KernelSource {
 /// Every kernel module: the renderer's, and with `sums` a training device's (its backward built for `sum_lanes`,
 /// see [`DeviceOptions::sum_lanes`]).
 fn kernel_sources(sums: Option<GradientSums>, sum_lanes: u32) -> Vec<KernelSource> {
-    kernel_sources_for(sums, sum_lanes, 4)
-}
-
-/// [`kernel_sources`] for an adapter whose subgroups have at least `min_lanes` lanes (sizes sort8.wgsl's counts).
-fn kernel_sources_for(sums: Option<GradientSums>, sum_lanes: u32, min_lanes: u32) -> Vec<KernelSource> {
-    let sub8 = format!("const SUB8: u32 = {}u;\n", 256 * (256 / min_lanes.clamp(4, 128)));
-    // Lab: the raster kernels on 8×8 tiles (depth steps), from their 16×16 sources' tile-size literals.
-    let common8 = include_str!("shaders/common.wgsl").replace("const TILE: u32 = 16u;", "const TILE: u32 = 8u;");
-    let raster8 = include_str!("shaders/raster.wgsl").replace("array<vec4<f32>, 256>", "array<vec4<f32>, 64>");
-    let forward8 = include_str!("shaders/raster_forward.wgsl").replace("@workgroup_size(16, 16)", "@workgroup_size(8, 8)").replace("& 255u", "& 63u").replace("== 256u", "== 64u");
-    let backward8 = include_str!("shaders/raster_backward.wgsl").replace("@workgroup_size(256)", "@workgroup_size(64)").replace("255u", "63u").replace("256u", "64u");
     let common = include_str!("shaders/common.wgsl");
     let raster = include_str!("shaders/raster.wgsl");
+    // Depth steps' kernels on 8×8 tiles (shaders/common.wgsl's TILE).
+    let common8 = common.replace("const TILE: u32 = 16u;", "const TILE: u32 = 8u;");
     let source = |name: &'static str, parts: &[&str], entries: &'static [&'static str]| KernelSource { name, code: parts.join("\n"), entries };
     let mut out = vec![
         source("project", &[common, include_str!("shaders/project.wgsl")], &["main"][..]),
@@ -733,7 +678,7 @@ fn kernel_sources_for(sums: Option<GradientSums>, sum_lanes: u32, min_lanes: u32
         source("duplicate", &[common, include_str!("shaders/duplicate.wgsl")], &["main"]),
         source("sort", &[include_str!("shaders/sort.wgsl")], &["count", "scatter"]),
         source("ranges", &[common, include_str!("shaders/ranges.wgsl")], &["main"]),
-        source("raster forward", &[common, raster, include_str!("shaders/raster_forward.wgsl"), include_str!("shaders/raster_forward2.wgsl"), include_str!("shaders/raster_forward_b.wgsl")], &["forward", "forward2", "forward_b"]),
+        source("raster forward", &[common, raster, include_str!("shaders/raster_forward.wgsl")], &["forward"]),
         source("present", &[common, include_str!("shaders/present.wgsl")], &["main"]),
         source("sky composite", &[common, include_str!("shaders/sky_lookup.wgsl"), include_str!("shaders/sky_composite.wgsl")], &["composite"]),
     ];
@@ -741,35 +686,29 @@ fn kernel_sources_for(sums: Option<GradientSums>, sum_lanes: u32, min_lanes: u32
         let (add, read) = sums.sources();
         // The 32-lane transposed sums, and how many lanes add the ten sums otherwise (0: the subgroup's).
         let lanes = format!("const SUM10: bool = {};\nconst ADD_LANES: u32 = {sum_lanes}u;\n", sum_lanes == 0);
+        let sky_lookup = include_str!("shaders/sky_lookup.wgsl");
+        let backward = include_str!("shaders/raster_backward.wgsl");
         out.extend([
-            source(
-                "raster backward",
-                &[common, raster, add, lanes.as_str(), include_str!("shaders/sky_lookup.wgsl"), include_str!("shaders/raster_backward.wgsl"), include_str!("shaders/raster_backward2.wgsl"), include_str!("shaders/raster_backward4.wgsl"), include_str!("shaders/raster_backward2s.wgsl"), include_str!("shaders/raster_backward2b.wgsl")],
-                &["backward", "backward2", "backward4", "backward2s", "backward2b"],
-            ),
-            source("sky gradient", &[common, add, include_str!("shaders/sky_lookup.wgsl"), include_str!("shaders/sky_gradient.wgsl")], &["gradient"]),
+            source("raster backward", &[common, raster, add, lanes.as_str(), sky_lookup, backward, include_str!("shaders/raster_backward_blocks.wgsl")], &["backward", "backward_blocks"]),
+            source("sky gradient", &[common, add, sky_lookup, include_str!("shaders/sky_gradient.wgsl")], &["gradient"]),
             source("sky adam", &[read, "const GRAD2D: u32 = 4u;\n", include_str!("shaders/sky_adam.wgsl")], &["adam"]),
             source("loss", &[common, include_str!("shaders/loss.wgsl")], &["color", "squared_error"]),
-            source("ssim", &[common, include_str!("shaders/ssim.wgsl"), include_str!("shaders/ssim2.wgsl")], &["ssim_partials", "ssim_gradient", "ssim_partials2", "ssim_gradient2"]),
+            source("ssim", &[common, include_str!("shaders/ssim.wgsl")], &["ssim_partials", "ssim_gradient"]),
             source("robust", &[common, include_str!("shaders/robust.wgsl")], &["residual", "inliers"]),
             source("depth_loss", &[common, include_str!("shaders/depth_loss.wgsl")], &["main"]),
-            source("project_backward", &[common, read, include_str!("shaders/project_backward.wgsl")], &["main"]),
-            source("adam", &[include_str!("shaders/adam.wgsl")], &["main"]),
+            source("project_backward", &[common, read, include_str!("shaders/param_grads.wgsl"), include_str!("shaders/project_backward.wgsl")], &["main"]),
+            source("project_backward adam", &[common, read, include_str!("shaders/param_grads.wgsl"), include_str!("shaders/project_backward_adam.wgsl")], &["main"]),
             source("relocate", &[include_str!("shaders/relocate.wgsl")], &["classify", "adjust", "copy"]),
-            source("raster visibility", &[common, raster, include_str!("shaders/raster_visibility.wgsl")], &["visibility", "visibility_over", "visibility_sub"]),
+            source("raster visibility", &[common, raster, include_str!("shaders/raster_visibility.wgsl")], &["visibility", "visibility_over"]),
             source("filter3d", &[include_str!("shaders/filter3d.wgsl")], &["main"]),
             source("seen", &[include_str!("shaders/seen.wgsl")], &["main"]),
             source("sort subgroups", &[include_str!("shaders/sort.wgsl"), include_str!("shaders/sort_subgroups.wgsl")], &["scatter_subgroups"]),
-            source("project lazy", &[common, include_str!("shaders/lazy_adam.wgsl"), include_str!("shaders/project_lazy.wgsl")], &["project_lazy", "catch_up_all"]),
-            source("project backward adam", &[common, read, include_str!("shaders/lazy_adam.wgsl"), include_str!("shaders/project_backward_adam.wgsl")], &["main"]),
-            source("sort8", &[sub8.as_str(), include_str!("shaders/sort8.wgsl")], &["count8", "scatter8"]),
-            source("project backward adam dense", &[common, read, include_str!("shaders/lazy_adam.wgsl"), include_str!("shaders/project_backward_adam_dense.wgsl")], &["main_dense"]),
             source("project split", &[common, include_str!("shaders/project_split.wgsl")], &["project_split", "project_big"]),
+            source("duplicate split", &[common, include_str!("shaders/duplicate_split.wgsl")], &["duplicate_split", "duplicate_big"]),
             source("project split 8", &[common8.as_str(), include_str!("shaders/project_split.wgsl")], &["project_split", "project_big"]),
             source("duplicate split 8", &[common8.as_str(), include_str!("shaders/duplicate_split.wgsl")], &["duplicate_split", "duplicate_big"]),
-            source("raster forward 8", &[common8.as_str(), raster8.as_str(), forward8.as_str()], &["forward"]),
-            source("raster backward 8", &[common8.as_str(), raster8.as_str(), add, lanes.as_str(), include_str!("shaders/sky_lookup.wgsl"), backward8.as_str()], &["backward"]),
-            source("duplicate split", &[common, include_str!("shaders/duplicate_split.wgsl")], &["duplicate_split", "duplicate_big"]),
+            source("raster forward 8", &[common8.as_str(), raster, include_str!("shaders/raster_forward.wgsl")], &["forward"]),
+            source("raster backward 8", &[common8.as_str(), raster, add, lanes.as_str(), sky_lookup, backward], &["backward"]),
         ]);
     }
     out
@@ -781,10 +720,7 @@ impl Gpu {
     }
 
     pub fn with_options(options: DeviceOptions) -> anyhow::Result<Self> {
-        // Lab: S4_NO_INDIRECT_VALIDATION drops wgpu's check of indirect dispatch arguments (Vulkan only: on D3D12 the
-        // kernels' num_workgroups would read 0 without it).
-        let flags = if std::env::var_os("S4_NO_INDIRECT_VALIDATION").is_some() { wgpu::InstanceFlags::empty() } else { wgpu::InstanceFlags::default() };
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, flags, ..wgpu::InstanceDescriptor::new_without_display_handle() });
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, ..wgpu::InstanceDescriptor::new_without_display_handle() });
         let adapter = if options.low_power {
             block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY))
                 .into_iter()
@@ -844,7 +780,7 @@ impl Gpu {
             });
         }
         let name = format!("{} ({:?}, {}{})", info.name, info.backend, sums.name(), if low_priority { ", low priority" } else { "" });
-        let mut gpu = Self::build_for(device, queue, name, Some(sums), options.sum_lanes, info.subgroup_min_size);
+        let mut gpu = Self::build(device, queue, name, Some(sums), options.sum_lanes);
         gpu.errors = errors;
         gpu.integrated = info.device_type == wgpu::DeviceType::IntegratedGpu;
         gpu.wgpu_adapter = Some(adapter);
@@ -911,10 +847,6 @@ impl Gpu {
     }
 
     fn build(device: wgpu::Device, queue: wgpu::Queue, adapter: String, sums: Option<GradientSums>, sum_lanes: u32) -> Self {
-        Self::build_for(device, queue, adapter, sums, sum_lanes, 4)
-    }
-
-    fn build_for(device: wgpu::Device, queue: wgpu::Queue, adapter: String, sums: Option<GradientSums>, sum_lanes: u32, min_lanes: u32) -> Self {
         // Every kernel writes its workgroup memory before reading it: without wgpu's zero-fill (one thread clearing
         // whole arrays), D3D's FXC compiles the raster kernel in moments instead of 40 s.
         let options = wgpu::PipelineCompilationOptions { zero_initialize_workgroup_memory: false, ..Default::default() };
@@ -941,24 +873,18 @@ impl Gpu {
                 })
                 .collect()
         };
-        if std::env::var_os("S4_PAR_COMPILE").is_some() {
-            // Lab: the modules compile on every core (the driver turns each pipeline into machine code on its own).
+        // The modules compile on every core (the driver turns each pipeline into machine code on its own): a training
+        // device's 39 pipelines took 0.8 s on one.
+        {
             use rayon::prelude::*;
-            let built: Vec<_> = kernel_sources_for(sums, sum_lanes, min_lanes).into_par_iter().map(compile).collect();
+            let built: Vec<_> = kernel_sources(sums, sum_lanes).into_par_iter().map(compile).collect();
             pipes.extend(built.into_iter().flatten());
-        } else {
-            for k in kernel_sources_for(sums, sum_lanes, min_lanes) {
-                pipes.extend(compile(k));
-            }
         }
         let mut pipe = |module: &'static str, entry: &'static str| pipes.remove(&(module, entry)).expect("a kernel of kernel_sources");
         let training = sums.map(|sums| Training {
             sums,
             backward: pipe("raster backward", "backward"),
-            backward2: pipe("raster backward", "backward2"),
-            backward4: pipe("raster backward", "backward4"),
-            backward2s: pipe("raster backward", "backward2s"),
-            backward2b: pipe("raster backward", "backward2b"),
+            backward_blocks: pipe("raster backward", "backward_blocks"),
             loss_color: pipe("loss", "color"),
             ssim_partials: pipe("ssim", "ssim_partials"),
             ssim_gradient: pipe("ssim", "ssim_gradient"),
@@ -966,34 +892,25 @@ impl Gpu {
             robust_inliers: pipe("robust", "inliers"),
             depth_loss: pipe("depth_loss", "main"),
             project_backward: pipe("project_backward", "main"),
-            adam: pipe("adam", "main"),
+            project_backward_adam: pipe("project_backward adam", "main"),
             relocate_classify: pipe("relocate", "classify"),
             relocate_adjust: pipe("relocate", "adjust"),
             relocate_copy: pipe("relocate", "copy"),
             squared_error: pipe("loss", "squared_error"),
             visibility: pipe("raster visibility", "visibility"),
+            visibility_over: pipe("raster visibility", "visibility_over"),
             filter_3d: pipe("filter3d", "main"),
             seen: pipe("seen", "main"),
             sky_gradient: pipe("sky gradient", "gradient"),
             sky_adam: pipe("sky adam", "adam"),
-            sort_scatter_subgroups: pipe("sort subgroups", "scatter_subgroups"),
-            project_lazy: pipe("project lazy", "project_lazy"),
-            catch_up_all: pipe("project lazy", "catch_up_all"),
-            project_backward_adam: pipe("project backward adam", "main"),
-            visibility_over: pipe("raster visibility", "visibility_over"),
-            visibility_sub: pipe("raster visibility", "visibility_sub"),
-            ssim_partials2: pipe("ssim", "ssim_partials2"),
-            ssim_gradient2: pipe("ssim", "ssim_gradient2"),
-            sort8_count: pipe("sort8", "count8"),
-            sort8_scatter: pipe("sort8", "scatter8"),
-            project_backward_adam_dense: pipe("project backward adam dense", "main_dense"),
-            project_split: pipe("project split", "project_split"),
+            sort_scatter: pipe("sort subgroups", "scatter_subgroups"),
+            project: pipe("project split", "project_split"),
             project_big: pipe("project split", "project_big"),
-            duplicate_split: pipe("duplicate split", "duplicate_split"),
+            duplicate: pipe("duplicate split", "duplicate_split"),
             duplicate_big: pipe("duplicate split", "duplicate_big"),
-            project_split8: pipe("project split 8", "project_split"),
+            project8: pipe("project split 8", "project_split"),
             project_big8: pipe("project split 8", "project_big"),
-            duplicate_split8: pipe("duplicate split 8", "duplicate_split"),
+            duplicate8: pipe("duplicate split 8", "duplicate_split"),
             duplicate_big8: pipe("duplicate split 8", "duplicate_big"),
             forward8: pipe("raster forward 8", "forward"),
             backward8: pipe("raster backward 8", "backward"),
@@ -1008,8 +925,6 @@ impl Gpu {
             sort_scatter: pipe("sort", "scatter"),
             ranges: pipe("ranges", "main"),
             forward: pipe("raster forward", "forward"),
-            forward2: pipe("raster forward", "forward2"),
-            forward_b: pipe("raster forward", "forward_b"),
             present: pipe("present", "main"),
             sky_composite: pipe("sky composite", "composite"),
             training,
@@ -1065,30 +980,6 @@ impl Gpu {
             scale_reg: 0.0,
             regularise_unseen: false,
             adam_restart: false,
-            sparse_adam: false,
-            sort_subgroups: false,
-            backward2: false,
-            backward4: false,
-            backward2_variant: b'c',
-            lazy_adam: false,
-            fused_adam: false,
-            forward2: false,
-            forward_b: false,
-            visibility_threshold: 0.0,
-            keyframes: Vec::new(),
-            resident_target: None,
-            ssim2: false,
-            vis_subgroup: false,
-            sort8: false,
-            fused_dense: false,
-            split_big: false,
-            dormant: false,
-            tile8: 0,
-            tile8_step: false,
-            big: None,
-            means_decay: 0.0,
-            lazy_pending: Default::default(),
-            last_rates: std::cell::Cell::new([0.0; 16]),
             guards: false,
             confidence: Confidence::default(),
             far: FarField::default(),
@@ -1104,6 +995,14 @@ impl Gpu {
             wgpu_adapter: None,
             integrated: false,
             errors: Default::default(),
+            visibility_over: 0.0,
+            visibility_pipelined: false,
+            keyframes: Vec::new(),
+            resident_target: None,
+            big: None,
+            tile8_step: false,
+            tile8_all: false,
+            reference_backward: false,
             masks: Vec::new(),
             reserved: 0,
             uniforms: Default::default(),
@@ -1239,7 +1138,6 @@ impl Gpu {
     }
 
     fn upload_inner(&mut self, g: &Gaussians, moments: Option<(&[f32], &[f32])>) {
-        self.lazy_pending.set(false);
         let n = g.len();
         let training = self.k.training.is_some();
         let fresh = self.splats.as_ref().is_none_or(|s| s.cap < n);
@@ -1309,7 +1207,6 @@ impl Gpu {
 
     /// The Gaussians, their Adam moments and densification statistics (packed).
     pub fn download(&self) -> anyhow::Result<Download> {
-        self.settle();
         let s = self.splats.as_ref().context("nothing uploaded")?;
         let n = self.count;
         let m1: Vec<f32> = self.read(&s.m1, n * PACKED)?;
@@ -1321,7 +1218,6 @@ impl Gpu {
     /// The Gaussians alone, with their 3D filters (a finished run's result: its Adam moments and statistics stay on the
     /// device).
     pub fn download_params(&self) -> anyhow::Result<Gaussians> {
-        self.settle();
         let s = self.splats.as_ref().context("nothing uploaded")?;
         let mut g = Gaussians::unpack(&self.read::<f32>(&s.params, self.count * PACKED)?);
         g.filter_3d = self.read(&s.filter, self.count)?;
@@ -1331,9 +1227,6 @@ impl Gpu {
     /// Sets every Gaussian's 3D filter (cpu::filter_3d) from the cameras that train it: `scale` / ν̂², with ν̂ the
     /// highest focal / depth among those that see its centre; 0 for one none sees, and for every one with `scale` 0.
     pub fn update_filter_3d(&mut self, cams: &[Camera], scale: f32) -> anyhow::Result<()> {
-        if scale > 0.0 {
-            self.settle();
-        }
         self.check()?;
         let t = self.training()?;
         let s = self.splats.as_ref().context("no Gaussians")?;
@@ -1403,7 +1296,6 @@ impl Gpu {
     /// Gaussian −1 if dead (faded, broken, or wider on screen than `max_radius` of its image's width since the last
     /// round), −2 − its opacity if alive on the sky shell, else its opacity.
     pub fn relocation_weights(&self, max_radius: f32) -> anyhow::Result<Vec<f32>> {
-        self.settle();
         let t = self.training()?;
         let s = self.splats.as_ref().context("no Gaussians")?;
         let n = self.count;
@@ -1416,10 +1308,10 @@ impl Gpu {
         self.read(&weights, n)
     }
 
-    /// Lab: [`Gpu::relocation_weights`] without waiting: the classification is queued behind the steps, and its
-    /// result comes back through [`PendingWeights::take`] once the GPU gets there.
+    /// [`Gpu::relocation_weights`] without waiting: the classification is queued behind the steps, and its result comes
+    /// back through [`PendingWeights::take`] once the GPU gets there (training plans the round meanwhile, on another
+    /// thread, from weights a few steps old).
     pub fn request_relocation_weights(&self, max_radius: f32) -> anyhow::Result<PendingWeights> {
-        self.settle();
         let t = self.training()?;
         let s = self.splats.as_ref().context("no Gaussians")?;
         let n = self.count;
@@ -1443,7 +1335,6 @@ impl Gpu {
     /// restart at zero like the sources', counting their bias correction from this step with `adam_restart`, else from
     /// the run's first), clears the screen-size statistics and grows the set to `plan.len`.
     pub fn apply_relocation(&mut self, plan: &Relocation) -> anyhow::Result<()> {
-        self.settle();
         self.check()?;
         let n = self.count;
         if self.splats.as_ref().is_some_and(|s| s.cap < plan.len) {
@@ -1471,9 +1362,7 @@ impl Gpu {
             let entries = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("relocation plan"), contents, usage: wgpu::BufferUsages::STORAGE });
             // The step a relocated Gaussian's bias correction counts from (adam.wgsl); 0 is the run's first.
             let restart = if self.adam_restart { self.step as f32 } else { 0.0 };
-            // Lab: the third field marks restarted Gaussians dormant (relocate.wgsl), for the fused dense Adam.
-            let dormant = if self.dormant && self.fused_dense { 1f32.to_bits() } else { 0 };
-            let info = self.uniform(&[n as u32, count as u32, dormant, restart.to_bits()]);
+            let info = self.uniform(&[n as u32, count as u32, 0, restart.to_bits()]);
             let bind = self.bind(pipeline, &[(0, &info), (1, &s.params), (4, &entries), (5, &s.m1), (6, &s.m2)]);
             self.dispatch(&mut enc, pipeline, &bind, groups(count));
         }
@@ -1481,18 +1370,6 @@ impl Gpu {
         self.queue.submit([enc.finish()]);
         self.count = plan.len;
         Ok(())
-    }
-
-    /// Lab: each Gaussian's tile box (tiles in its rectangle) and the tiles it hits, from the last projection.
-    pub fn read_tile_boxes(&self) -> anyhow::Result<Vec<(u32, u32)>> {
-        let s = self.splats.as_ref().context("nothing uploaded")?;
-        let proj: Vec<f32> = self.read(&s.proj, self.count * 16)?;
-        let counts: Vec<u32> = self.read(&s.counts, self.count)?;
-        Ok(proj
-            .chunks(16)
-            .zip(counts)
-            .map(|(p, c)| if p[15] == 0.0 { (0, 0) } else { ((p[13].to_bits() - p[11].to_bits()) * (p[14].to_bits() - p[12].to_bits()), c) })
-            .collect())
     }
 
     /// The last step's parameter gradients (packed), for tests.
@@ -1524,7 +1401,7 @@ impl Gpu {
         }
         let d = &self.device;
         let px = (w * h) as u64;
-        // Room for 8×8 tiles (depth steps on them, lab).
+        // Room for 8×8 tiles: depth steps render their sample grid on them.
         let tiles = (w.div_ceil(8) * h.div_ceil(8)) as u64;
         let t = if train { px } else { 0 };
         self.image = Some(ImageBuffers {
@@ -1605,11 +1482,8 @@ impl Gpu {
         }
     }
 
-    fn frame_for(&self, cam: &Camera, background: [f32; 3], loss: [f32; 4], train: bool) -> Frame {
-        self.frame_for_tile(cam, background, loss, train, cpu::TILE)
-    }
-
-    fn frame_for_tile(&self, cam: &Camera, background: [f32; 3], loss: [f32; 4], train: bool, tile: u32) -> Frame {
+    /// The frame's uniform for a step from `cam` on tiles of `tile` pixels a side.
+    fn frame_for(&self, cam: &Camera, background: [f32; 3], loss: [f32; 4], train: bool, tile: u32) -> Frame {
         let tiles_x = cam.width.div_ceil(tile);
         let tiles_y = cam.height.div_ceil(tile);
         let (opacity_reg, scale_reg) = if train { (self.opacity_reg, self.scale_reg) } else { (0.0, 0.0) };
@@ -1637,7 +1511,7 @@ impl Gpu {
                     ConfidenceMode::Haze => 2.0,
                 },
                 0.0,
-                if train && (self.sparse_adam || self.lazy_adam) { 1.0 } else { 0.0 },
+                0.0,
             ],
             far: [
                 match self.far.mode {
@@ -1646,7 +1520,7 @@ impl Gpu {
                     FarMode::Crop => 2.0,
                 },
                 self.far.distance,
-                if train { 0.0 } else { self.visibility_threshold },
+                if train { 0.0 } else { self.visibility_over },
                 0.0,
             ],
             horizon: [self.far.horizon[0], self.far.horizon[1], self.far.horizon[2], self.sky.as_ref().map_or(0.0, |s| s.width as f32)],
@@ -1757,15 +1631,12 @@ impl Gpu {
         let train = !matches!(target, Target::None);
         // Each sort copy (sized half again over the entries) must fit one storage binding.
         let max_entries = (self.device.limits().max_storage_buffer_binding_size / 4 * 2 / 3).min(u32::MAX as u64) as u32;
-        // Lab: depth steps (or, for tests, every step) on 8×8 tiles.
-        let tile8 = self.split_big && self.k.training.is_some() && match self.tile8 {
-            1 => matches!(target, Target::Depth { .. }),
-            2 => true,
-            _ => false,
-        };
+        // A training device renders depth steps' sample grids on 8×8 tiles (shaders/common.wgsl's TILE): the grid's
+        // 66 tiles of 16×16 left the GPU half idle and every pixel thousands of entries to walk.
+        let tile8 = self.k.training.is_some() && (matches!(target, Target::Depth { .. }) || self.tile8_all);
         let tile = if tile8 { 8 } else { cpu::TILE };
         self.tile8_step = tile8;
-        let frame = self.frame_for_tile(cam, background, loss, train, tile);
+        let frame = self.frame_for(cam, background, loss, train, tile);
         self.queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));
         let (params, proj, counts, offsets, filter, seen_buf) = {
             let s = self.splats.as_ref().context("no Gaussians")?;
@@ -1776,7 +1647,8 @@ impl Gpu {
         // grow for the next steps. A viewer goes without waiting only while its sort holds half again the count it last
         // saw at this size (its camera moves a little a frame; waiting, it sizes the sort to twice the count); a frame
         // that overflowed anyway makes the next one wait, and [`Gpu::needs_redraw`] says to draw it. The first step at
-        // a size, and a visibility round, wait.
+        // a size waits, and so do visibility rounds unless [`Gpu::visibility`] lets them go (it checks for dropped
+        // entries after the round, and waits the round again if any were).
         let training = self.k.training.is_some();
         let _ = self.device.poll(wgpu::PollType::Poll);
         for slot in 0..RING {
@@ -1785,6 +1657,7 @@ impl Gpu {
         let roomy = |gpu: &Self, est: u32| !gpu.redraw && gpu.sort.as_ref().is_some_and(|s| s.cap as u64 >= est as u64 + est as u64 / 2);
         let pipelined = match (seen, self.estimate(size)) {
             (None, Some(est)) if training || roomy(self, est) => Some(est),
+            (Some(_), Some(est)) if training && self.visibility_pipelined => Some(est),
             _ => None,
         };
         let cap = match pipelined {
@@ -1796,35 +1669,27 @@ impl Gpu {
             Some(_) => self.sort.as_ref().expect("sort").cap.min(max_entries as usize) as u32,
             None => 0,
         };
-        let lazy = self.lazy_adam && lr.is_some() && self.k.training.is_some();
-        if !lazy {
-            self.settle();
-        }
         self.pace_wait(0);
         let mut enc = self.device.create_command_encoder(&Default::default());
         self.section("project");
-        match (lazy, lr) {
-            (true, Some(lr)) => {
-                let s = self.splats.as_ref().context("no Gaussians")?;
-                let info = self.uniform_at(("adam lazy", 0), &AdamInfo { lr: rates_of(lr), beta: [0.9, 0.999, 1e-15, self.means_decay], n: [(n * PACKED) as u32, self.step + 1, 1, 1] });
-                let t = self.k.training.as_ref().expect("a training GPU");
-                let bind = self.bind_cached(&t.project_lazy, &[(0, &self.frame), (1, &params), (2, &proj), (3, &counts), (4, &filter), (6, &s.m1), (7, &s.m2), (8, &info)]);
-                self.dispatch(&mut enc, &t.project_lazy, &bind, groups(n));
-            }
-            _ if self.split_big && self.k.training.is_some() => {
+        // A training device's own projection has no viewer's guards, confidence or far field: with them (a viewer on
+        // a training device) it renders as viewers do.
+        let split = !self.guards && self.k.training.is_some();
+        match self.k.training.as_ref().filter(|_| split) {
+            Some(t) => {
+                // Large Gaussians' tiles are counted by whole workgroups (shaders/project_split.wgsl).
+                let (split, big_pass) = if tile8 { (t.project8.clone(), t.project_big8.clone()) } else { (t.project.clone(), t.project_big.clone()) };
                 if self.big.is_none() {
                     self.big = Some(storage(&self.device, "large Gaussians", 65536 * 4));
                 }
                 let big = self.big.clone().expect("made above");
                 enc.clear_buffer(&big, 0, Some(4));
-                let t = self.k.training.as_ref().expect("a training GPU");
-                let (split, big_pass) = if tile8 { (t.project_split8.clone(), t.project_big8.clone()) } else { (t.project_split.clone(), t.project_big.clone()) };
                 let bind = self.bind_cached(&split, &[(0, &self.frame), (1, &params), (2, &proj), (3, &counts), (4, &filter), (6, &big)]);
                 self.dispatch(&mut enc, &split, &bind, groups(n));
                 let bind = self.bind_cached(&big_pass, &[(2, &proj), (3, &counts), (6, &big)]);
                 self.dispatch(&mut enc, &big_pass, &bind, (512, 1));
             }
-            _ => {
+            None => {
                 let bind = self.bind_cached(&self.k.project, &[(0, &self.frame), (1, &params), (2, &proj), (3, &counts), (4, &filter), (5, &seen_buf)]);
                 self.dispatch(&mut enc, &self.k.project, &bind, groups(n));
             }
@@ -1879,9 +1744,9 @@ impl Gpu {
         enc.clear_buffer(&ranges, 0, None);
         if total > 0 {
             self.section("duplicate");
-            match (self.split_big && !lazy, self.k.training.as_ref(), self.big.clone()) {
-                (true, Some(t), Some(big)) => {
-                    let (split, big_pass) = if tile8 { (t.duplicate_split8.clone(), t.duplicate_big8.clone()) } else { (t.duplicate_split.clone(), t.duplicate_big.clone()) };
+            match (self.k.training.as_ref().filter(|_| split), self.big.clone()) {
+                (Some(t), Some(big)) => {
+                    let (split, big_pass) = if tile8 { (t.duplicate8.clone(), t.duplicate_big8.clone()) } else { (t.duplicate.clone(), t.duplicate_big.clone()) };
                     let bind = self.bind_cached(&split, &[(0, &self.frame), (1, &proj), (2, &offsets), (3, &keys[0]), (4, &values[0]), (5, &counts)]);
                     self.dispatch(&mut enc, &split, &bind, groups(n));
                     let bind = self.bind_cached(&big_pass, &[(0, &self.frame), (1, &proj), (2, &offsets), (3, &keys[0]), (4, &values[0]), (5, &counts), (6, &big)]);
@@ -1895,32 +1760,14 @@ impl Gpu {
             // Pipelined, the histograms' stride is the capacity's blocks and only the counted blocks scatter.
             let blocks = (total as usize).div_ceil(256);
             self.section("sort");
-            let sort8 = self.sort8 && self.k.training.is_some();
-            if sort8 {
-                // Blocks of 1024 over the capacity (pipelined) or the count; the kernels read the true count.
-                let blocks8 = (total as usize).div_ceil(1024);
-                let t = self.k.training.as_ref().expect("a training GPU");
-                let (count8, scatter8) = (t.sort8_count.clone(), t.sort8_scatter.clone());
-                for pass in 0..4u32 {
-                    let (a, b) = ((pass % 2) as usize, ((pass + 1) % 2) as usize);
-                    let info = self.uniform_at(("sort8", pass as usize), &SortInfo { n: total, blocks: blocks8 as u32, shift: pass * 8, pad: 0 });
-                    let bind = self.bind_cached(&count8, &[(0, &info), (1, &keys[a]), (3, &hist), (6, &total_out)]);
-                    self.dispatch(&mut enc, &count8, &bind, groups_of(blocks8));
-                    self.scan(&mut enc, &hist, &hist_offsets, blocks8 * 256, 0, "scan digits8");
-                    let bind = self.bind_cached(&scatter8, &[(0, &info), (1, &keys[a]), (2, &values[a]), (3, &hist_offsets), (4, &keys[b]), (5, &values[b]), (6, &total_out)]);
-                    self.dispatch(&mut enc, &scatter8, &bind, groups_of(blocks8));
-                }
-            }
-            for pass in (0..8u32).filter(|_| !sort8) {
+            for pass in 0..8u32 {
                 let (a, b) = ((pass % 2) as usize, ((pass + 1) % 2) as usize);
                 let info = self.uniform_at(("sort", pass as usize), &SortInfo { n: total, blocks: blocks as u32, shift: pass * 4, pad: 0 });
                 let bind = self.bind_cached(&self.k.sort_count, &[(0, &info), (1, &keys[a]), (3, &hist), (6, &total_out)]);
                 self.dispatch(&mut enc, &self.k.sort_count, &bind, groups_of(blocks));
                 self.scan(&mut enc, &hist, &hist_offsets, blocks * 16, 0, "scan digits");
-                let scatter = match self.k.training.as_ref() {
-                    Some(t) if self.sort_subgroups => &t.sort_scatter_subgroups,
-                    _ => &self.k.sort_scatter,
-                };
+                // A training device ranks by subgroup ballots (shaders/sort_subgroups.wgsl): 0.42 ms against 1.11.
+                let scatter = self.k.training.as_ref().map_or(&self.k.sort_scatter, |t| &t.sort_scatter);
                 let bind = self.bind_cached(scatter, &[(0, &info), (1, &keys[a]), (2, &values[a]), (3, &hist_offsets), (4, &keys[b]), (5, &values[b]), (6, &total_out)]);
                 if pipelined.is_some() {
                     self.dispatch_counted(&mut enc, scatter, &bind);
@@ -1944,13 +1791,12 @@ impl Gpu {
             // A visibility round walks the entries as the forward pass would, recording what each Gaussian shows.
             let t = self.training()?;
             let mask = mask.as_ref().expect("checked above");
-            if self.visibility_threshold > 0.0 {
+            if self.visibility_over > 0.0 {
                 let bind = self.bind(&t.visibility_over, &[(0, &self.frame), (1, &proj), (2, &values[0]), (3, &ranges), (8, mask), (10, seen)]);
                 self.dispatch(&mut enc, &t.visibility_over, &bind, tiles);
             } else {
-                let kernel = if self.vis_subgroup { &t.visibility_sub } else { &t.visibility };
-                let bind = self.bind(kernel, &[(0, &self.frame), (1, &proj), (2, &values[0]), (3, &ranges), (8, mask), (9, seen)]);
-                self.dispatch(&mut enc, kernel, &bind, tiles);
+                let bind = self.bind(&t.visibility, &[(0, &self.frame), (1, &proj), (2, &values[0]), (3, &ranges), (8, mask), (9, seen)]);
+                self.dispatch(&mut enc, &t.visibility, &bind, tiles);
             }
             // Governed, the round went to the GPU already (and this encoder is empty).
             let enc = self.pace(enc, 1)?;
@@ -1960,8 +1806,6 @@ impl Gpu {
         self.section("forward");
         let forward = match self.k.training.as_ref() {
             Some(t) if tile8 => &t.forward8,
-            _ if self.forward2 => &self.k.forward2,
-            _ if self.forward_b => &self.k.forward_b,
             _ => &self.k.forward,
         };
         let bind = self.bind_cached(forward, &[(0, &self.frame), (1, &proj), (2, &values[0]), (3, &ranges), (4, &out_color), (5, &out_state)]);
@@ -1994,11 +1838,10 @@ impl Gpu {
                     used = kept.clone();
                 }
                 if ssim > 0.0 {
-                    let (partials_pass, gradient_pass) = if self.ssim2 { (&t.ssim_partials2, &t.ssim_gradient2) } else { (&t.ssim_partials, &t.ssim_gradient) };
-                    let bind = self.bind_cached(partials_pass, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &used), (4, &partials)]);
-                    self.dispatch(&mut enc, partials_pass, &bind, loss_tiles);
-                    let bind = self.bind_cached(gradient_pass, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &used), (4, &partials), (5, &d_pixel)]);
-                    self.dispatch(&mut enc, gradient_pass, &bind, loss_tiles);
+                    let bind = self.bind_cached(&t.ssim_partials, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &used), (4, &partials)]);
+                    self.dispatch(&mut enc, &t.ssim_partials, &bind, loss_tiles);
+                    let bind = self.bind_cached(&t.ssim_gradient, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &used), (4, &partials), (5, &d_pixel)]);
+                    self.dispatch(&mut enc, &t.ssim_gradient, &bind, loss_tiles);
                 } else {
                     let bind = self.bind_cached(&t.loss_color, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &used), (4, &d_pixel)]);
                     self.dispatch(&mut enc, &t.loss_color, &bind, groups((cam.width * cam.height) as usize));
@@ -2029,28 +1872,7 @@ impl Gpu {
         }
         if train {
             enc = self.pace(enc, 1)?;
-            match lr {
-                Some(lr) if lazy && self.fused_adam => {
-                    self.raster_backward_into(&mut enc, &proj, &values[0], &ranges, &out_state, &d_pixel, tiles);
-                    self.project_backward_adam(&mut enc, &proj, lr);
-                }
-                Some(lr) if !lazy && self.fused_dense => {
-                    self.raster_backward_into(&mut enc, &proj, &values[0], &ranges, &out_state, &d_pixel, tiles);
-                    self.step += 1;
-                    let info = self.uniform_at(("adam fused dense", 0), &AdamInfo { lr: rates_of(lr), beta: [0.9, 0.999, 1e-15, 0.0], n: [(self.count * PACKED) as u32, self.step, 0, 0] });
-                    let s = self.splats.as_ref().expect("splats");
-                    let t = self.k.training.as_ref().expect("a training GPU");
-                    self.section("project_backward + adam");
-                    let bind = self.bind_cached(&t.project_backward_adam_dense, &[(0, &self.frame), (1, &s.params), (2, &proj), (3, &s.grad2d), (4, &s.filter), (5, &s.stats), (6, &s.m1), (7, &s.m2), (8, &info)]);
-                    self.dispatch(&mut enc, &t.project_backward_adam_dense, &bind, groups(self.count));
-                }
-                _ => {
-                    self.backward_into(&mut enc, &proj, &values[0], &ranges, &out_state, &d_pixel, tiles);
-                    if let Some(lr) = lr {
-                        self.adam(&mut enc, lr);
-                    }
-                }
-            }
+            self.backward_into(&mut enc, &proj, &values[0], &ranges, &out_state, &d_pixel, tiles, lr);
             if lr.is_some() && colour_step {
                 self.sky_step(&mut enc, &out_state, &d_pixel, (cam.width * cam.height) as usize);
             }
@@ -2114,56 +1936,12 @@ impl Gpu {
         Ok(())
     }
 
-    /// The backward pass alone (the rasteriser's; no projection backward).
-    #[allow(clippy::too_many_arguments)]
-    fn raster_backward_into(
-        &self,
-        enc: &mut wgpu::CommandEncoder,
-        proj: &wgpu::Buffer,
-        values: &wgpu::Buffer,
-        ranges: &wgpu::Buffer,
-        out_state: &wgpu::Buffer,
-        d_pixel: &wgpu::Buffer,
-        tiles: (u32, u32),
-    ) {
-        let s = self.splats.as_ref().expect("splats");
-        let t = self.k.training.as_ref().expect("a training GPU");
-        self.section("backward");
-        let sky = self.sky.as_ref().map_or(&self.no_sky, |s| &s.texels);
-        let backward = if self.tile8_step {
-            &t.backward8
-        } else if self.backward4 {
-            &t.backward4
-        } else if self.backward2 {
-            match self.backward2_variant {
-                b's' => &t.backward2s,
-                b'b' => &t.backward2b,
-                _ => &t.backward2,
-            }
-        } else {
-            &t.backward
-        };
-        let bind = self.bind_cached(backward, &[(0, &self.frame), (1, proj), (2, values), (3, ranges), (5, out_state), (6, d_pixel), (7, &s.grad2d), (8, sky)]);
-        self.dispatch(enc, backward, &bind, tiles);
-    }
-
-    /// Lazy Adam's projection backward and Adam step in one pass (shaders/project_backward_adam.wgsl).
-    fn project_backward_adam(&mut self, enc: &mut wgpu::CommandEncoder, proj: &wgpu::Buffer, lr: LearningRates) {
-        self.step += 1;
-        let rates = rates_of(lr);
-        self.lazy_pending.set(true);
-        self.last_rates.set(rates);
-        let info = self.uniform_at(("adam fused", 0), &AdamInfo { lr: rates, beta: [0.9, 0.999, 1e-15, self.means_decay], n: [(self.count * PACKED) as u32, self.step, 1, 1] });
-        let s = self.splats.as_ref().expect("splats");
-        let t = self.k.training.as_ref().expect("a training GPU");
-        self.section("project_backward + adam");
-        let bind = self.bind_cached(&t.project_backward_adam, &[(0, &self.frame), (1, &s.params), (2, proj), (3, &s.grad2d), (4, &s.filter), (5, &s.stats), (6, &s.m1), (7, &s.m2), (8, &info)]);
-        self.dispatch(enc, &t.project_backward_adam, &bind, groups(self.count));
-    }
-
+    /// The backward pass: the rasteriser's (two pixels a thread on 16×16 tiles, one on 8×8: depth steps), then the
+    /// projection backward, with this step's Adam step (`lr`) in the same pass, or writing the parameter gradients alone
+    /// (tests: [`Gpu::read_grads`]).
     #[allow(clippy::too_many_arguments)]
     fn backward_into(
-        &self,
+        &mut self,
         enc: &mut wgpu::CommandEncoder,
         proj: &wgpu::Buffer,
         values: &wgpu::Buffer,
@@ -2171,50 +1949,43 @@ impl Gpu {
         out_state: &wgpu::Buffer,
         d_pixel: &wgpu::Buffer,
         tiles: (u32, u32),
+        lr: Option<LearningRates>,
     ) {
+        if lr.is_some() {
+            self.step += 1;
+        }
+        let info = lr.map(|lr| self.uniform_at(("adam", 0), &AdamInfo { lr: rates_of(lr), beta: [0.9, 0.999, 1e-15, 0.0], n: [(self.count * PACKED) as u32, self.step, 0, 0] }));
         let s = self.splats.as_ref().expect("splats");
-        // No clear of grad2d: it is zero here, as project_backward zeroes the sums it reads (new buffers start zeroed).
+        // No clear of grad2d: it is zero here, as the projection backward zeroes the sums it reads (new buffers start
+        // zeroed).
         let t = self.k.training.as_ref().expect("a training GPU");
         self.section("backward");
         let sky = self.sky.as_ref().map_or(&self.no_sky, |s| &s.texels);
-        let backward = if self.tile8_step {
-            &t.backward8
-        } else if self.backward4 {
-            &t.backward4
-        } else if self.backward2 {
-            match self.backward2_variant {
-                b's' => &t.backward2s,
-                b'b' => &t.backward2b,
-                _ => &t.backward2,
-            }
-        } else {
-            &t.backward
+        // The one-pixel kernel on 16×16 tiles only as tests' reference.
+        let backward = match (self.tile8_step, self.reference_backward) {
+            (true, _) => &t.backward8,
+            (false, true) => &t.backward,
+            (false, false) => &t.backward_blocks,
         };
         let bind = self.bind_cached(backward, &[(0, &self.frame), (1, proj), (2, values), (3, ranges), (5, out_state), (6, d_pixel), (7, &s.grad2d), (8, sky)]);
         self.dispatch(enc, backward, &bind, tiles);
-        self.section("project_backward");
-        let bind = self.bind_cached(&t.project_backward, &[(0, &self.frame), (1, &s.params), (2, proj), (3, &s.grad2d), (4, &s.grads), (5, &s.stats), (6, &s.filter)]);
-        self.dispatch(enc, &t.project_backward, &bind, groups(self.count));
-    }
-
-    fn adam(&mut self, enc: &mut wgpu::CommandEncoder, lr: LearningRates) {
-        self.step += 1;
-        let rates = rates_of(lr);
-        let n = self.count * PACKED;
-        let info = self.uniform_at(("adam", 0), &AdamInfo { lr: rates, beta: [0.9, 0.999, 1e-15, 0.0], n: [n as u32, self.step, u32::from(self.sparse_adam || self.lazy_adam), u32::from(self.lazy_adam)] });
-        if self.lazy_adam {
-            self.lazy_pending.set(true);
-            self.last_rates.set(rates);
+        match info {
+            Some(info) => {
+                self.section("project_backward + adam");
+                let bind = self.bind_cached(&t.project_backward_adam, &[(0, &self.frame), (1, &s.params), (2, proj), (3, &s.grad2d), (4, &s.filter), (5, &s.stats), (6, &s.m1), (7, &s.m2), (8, &info)]);
+                self.dispatch(enc, &t.project_backward_adam, &bind, groups(self.count));
+            }
+            None => {
+                self.section("project_backward");
+                let bind = self.bind_cached(&t.project_backward, &[(0, &self.frame), (1, &s.params), (2, proj), (3, &s.grad2d), (4, &s.grads), (5, &s.stats), (6, &s.filter)]);
+                self.dispatch(enc, &t.project_backward, &bind, groups(self.count));
+            }
         }
-        let s = self.splats.as_ref().expect("splats");
-        let t = self.k.training.as_ref().expect("a training GPU");
-        self.section("adam");
-        let bind = self.bind_cached(&t.adam, &[(0, &info), (1, &s.params), (2, &s.grads), (3, &s.m1), (4, &s.m2), (5, &s.proj)]);
-        self.dispatch(enc, &t.adam, &bind, groups(n));
     }
 
-    /// Lab: uploads every keyframe once (packed RGBA as the colour steps take them); a step names its keyframe in
-    /// [`Gpu::resident_target`].
+    /// Uploads every keyframe once (packed RGBA, as the colour steps take them) for steps to name in
+    /// [`Gpu::resident_target`] instead of uploading their pixels: 8.3 MB a step through `write_buffer`, about a
+    /// millisecond of the CPU's time a step, which bounds small scenes' steps.
     pub fn set_keyframes(&mut self, images: &[&[u32]]) {
         use rayon::prelude::*;
         // The copies into the upload buffers on every core.
@@ -2223,21 +1994,6 @@ impl Gpu {
             .par_iter()
             .map(|img| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("keyframe"), contents: bytemuck::cast_slice(img), usage: wgpu::BufferUsages::STORAGE }))
             .collect();
-    }
-
-    /// Lazily dense Adam: brings every Gaussian up to the last step run (shaders/project_lazy.wgsl `catch_up_all`)
-    /// before anything reads the whole set.
-    fn settle(&self) {
-        if !self.lazy_pending.replace(false) {
-            return;
-        }
-        let (Some(t), Some(s)) = (self.k.training.as_ref(), self.splats.as_ref()) else { return };
-        let n = self.count;
-        let info = self.uniform(&AdamInfo { lr: self.last_rates.get(), beta: [0.9, 0.999, 1e-15, self.means_decay], n: [(n * PACKED) as u32, self.step, 1, 1] });
-        let bind = self.bind(&t.catch_up_all, &[(1, &s.params), (6, &s.m1), (7, &s.m2), (8, &info)]);
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        self.dispatch(&mut enc, &t.catch_up_all, &bind, groups(n));
-        self.queue.submit([enc.finish()]);
     }
 
     /// The sky map's gradient from this colour step's pixel gradients, then its Adam step (at the splats' step) on the
@@ -2310,7 +2066,8 @@ impl Gpu {
         // On the tiles the last render used.
         let tile = if self.tile8_step { 8 } else { cpu::TILE };
         let tiles = (cam.width.div_ceil(tile), cam.height.div_ceil(tile));
-        self.backward_into(&mut enc, &splats.proj, &s.values[0], &i.ranges, &i.out_state, &i.d_pixel, tiles);
+        let (proj, values, ranges, out_state, d_pixel) = (splats.proj.clone(), s.values[0].clone(), i.ranges.clone(), i.out_state.clone(), i.d_pixel.clone());
+        self.backward_into(&mut enc, &proj, &values, &ranges, &out_state, &d_pixel, tiles, None);
         self.queue.submit([enc.finish()]);
     }
 
@@ -2382,14 +2139,34 @@ impl Gpu {
         Ok(raw.into_iter().map(|[w, views, sectors, rate]| Seen { weight: f32::from_bits(w), views, sectors: sectors as u16, rate: f32::from_bits(rate), beyond: 0.0 }).collect())
     }
 
-    pub fn visibility(&mut self, cams: &[Camera], background: [f32; 3]) -> anyhow::Result<Vec<f32>> {
+    /// Each Gaussian's largest blending weight in a scene pixel of any of `cams` (`at_least` 0), or with `at_least` a
+    /// weight of at least that where one reaches it and 0 elsewhere (fading: threshold stores instead of an atomic
+    /// maximum at every blend). The views go without waiting for their counts where an estimate sizes their sort (waiting
+    /// cost fading's 720 views on VRChat Home about a second); a round that dropped entries, which would leave their
+    /// Gaussians unseen and fade them, is done again, waiting.
+    pub fn visibility(&mut self, cams: &[Camera], background: [f32; 3], at_least: f32) -> anyhow::Result<Vec<f32>> {
         let n = self.count;
-        let seen = storage(&self.device, "seen", (n * 4) as u64);
-        for cam in cams {
-            self.caught(|gpu| gpu.run(cam, background, Target::None, None, Some(&seen)))?;
+        self.visibility_over = at_least;
+        let mut out = None;
+        for pipelined in [true, false] {
+            let seen = storage(&self.device, "seen", (n * 4) as u64);
+            self.visibility_pipelined = pipelined;
+            let overflows = self.overflows;
+            let round = cams.iter().try_for_each(|cam| self.caught(|gpu| gpu.run(cam, background, Target::None, None, Some(&seen)).map(|_| ())));
+            self.wait_readbacks();
+            if let Err(e) = round {
+                out = Some(Err(e));
+                break;
+            }
+            if self.overflows == overflows {
+                out = Some(self.read::<u32>(&seen, n).map(|bits| bits.into_iter().map(f32::from_bits).collect()));
+                break;
+            }
+            eprintln!("a visibility round dropped tile entries: done again, waiting for each view's count");
         }
-        let bits: Vec<u32> = self.read(&seen, n)?;
-        Ok(bits.into_iter().map(f32::from_bits).collect())
+        self.visibility_pipelined = false;
+        self.visibility_over = 0.0;
+        out.unwrap_or_else(|| Err(anyhow!("a visibility round dropped tile entries even when waiting")))
     }
 
     /// PSNR of a render from `cam` against a keyframe over the scene pixels (the mask set for its size), computed on
@@ -2529,81 +2306,70 @@ mod tests {
     #[test]
     fn forward_and_backward_match_the_cpu_reference() {
         forward_and_backward_match(devices());
-    }
-
-    #[test]
-    fn four_pixels_a_thread_match_the_cpu_reference() {
-        let devices: Vec<Gpu> = devices()
+        let reference: Vec<Gpu> = devices()
             .into_iter()
             .map(|mut g| {
-                g.backward4 = true;
+                g.reference_backward = true;
                 g
             })
             .collect();
-        forward_and_backward_match(devices);
-        for lanes in [4, 8, 16] {
-            let narrow: Vec<Gpu> = devices_with(lanes)
-                .into_iter()
-                .filter(|g| g.sums() != Some(GradientSums::CompareAndSwap))
-                .map(|mut g| {
-                    g.backward4 = true;
-                    g
-                })
-                .collect();
-            forward_and_backward_match(narrow);
+        forward_and_backward_match(reference);
+    }
+
+    /// A training step's fused projection backward and Adam step moves every Gaussian as the projection backward's
+    /// gradients and a CPU Adam step do (those it shows and, with no gradient, those it does not).
+    #[test]
+    fn fused_adam_steps_as_a_cpu_adam_step() {
+        let Some(mut gpu) = devices().into_iter().next() else { return };
+        let (g, cam) = scene(3000, 160, 90, 61);
+        let mut zoomed = cam;
+        zoomed.fx *= 2.5;
+        zoomed.fy *= 2.5;
+        let mut rng = fastrand::Rng::with_seed(62);
+        let target: Vec<u32> = (0..cam.width * cam.height).map(|_| rng.u32(..) | 0xff00_0000).collect();
+        gpu.set_mask(cam.width, cam.height, &vec![1.0; (cam.width * cam.height) as usize]).expect("mask");
+        let lr = LearningRates { means: 1e-3, log_scales: 0.005, rotations: 0.001, opacity: 0.05, colors: 0.0025 };
+        let px = (cam.width * cam.height) as f32;
+        // Moments from a first step on the whole view, then a step on a zoomed view that leaves some Gaussians unshown.
+        gpu.upload(&g);
+        gpu.step(&cam, [0.0; 3], Target::Color { rgba: &target, scene_pixels: px, weight: 1.0, ssim: 0.2, robust: 0.0 }, Some(lr)).expect("step");
+        let (before, m1, m2, _) = gpu.download().expect("download");
+        gpu.step(&zoomed, [0.0; 3], Target::Color { rgba: &target, scene_pixels: px, weight: 1.0, ssim: 0.2, robust: 0.0 }, None).expect("gradients");
+        let grads = gpu.read_grads().expect("gradients");
+        gpu.upload_with_moments(&before, Some((&m1, &m2)));
+        gpu.step = 1;
+        gpu.step(&zoomed, [0.0; 3], Target::Color { rgba: &target, scene_pixels: px, weight: 1.0, ssim: 0.2, robust: 0.0 }, Some(lr)).expect("step");
+        let (after, _, _, _) = gpu.download().expect("download");
+        let rates = rates_of(lr);
+        let (b1, b2, eps, t) = (0.9f64, 0.999f64, 1e-15f64, 2.0f64);
+        let (p0, p1) = (before.pack(), after.pack());
+        let (mut compared, mut off, mut unshown_moved) = (0usize, 0usize, 0usize);
+        for k in 0..p0.len() {
+            let slot = k % PACKED;
+            if rates[slot] == 0.0 {
+                continue;
+            }
+            let (g, m, v) = (grads[k] as f64, m1[k] as f64, m2[k] as f64);
+            let m = b1 * m + (1.0 - b1) * g;
+            let v = b2 * v + (1.0 - b2) * g * g;
+            let expected = p0[k] as f64 - rates[slot] as f64 * (m / (1.0 - b1.powf(t))) / ((v / (1.0 - b2.powf(t))).sqrt() + eps);
+            let moved = (p0[k] as f64 - expected).abs();
+            if g == 0.0 && moved > 0.0 {
+                unshown_moved += 1;
+            }
+            // Float atomics sum each gradient in any order: compare where the step moved the parameter.
+            if moved > 1e-6 {
+                compared += 1;
+                if (p1[k] as f64 - expected).abs() > 0.01 * moved + 1e-7 {
+                    off += 1;
+                }
+            }
         }
+        eprintln!("fused Adam against a CPU Adam step: {off} of {compared} moved parameters off by over 1 %; {unshown_moved} moved by momentum alone");
+        assert!(unshown_moved > 100, "the zoomed view showed every Gaussian");
+        assert!(compared > 10_000 && off * 1000 < compared, "{off} of {compared}");
     }
 
-    #[test]
-    fn forward_on_blocks_matches_the_cpu_reference() {
-        let devices: Vec<Gpu> = devices()
-            .into_iter()
-            .map(|mut g| {
-                g.forward_b = true;
-                g
-            })
-            .collect();
-        forward_and_backward_match(devices);
-    }
-
-    #[test]
-    fn forward_with_two_pixels_a_thread_matches_the_cpu_reference() {
-        let devices: Vec<Gpu> = devices()
-            .into_iter()
-            .map(|mut g| {
-                g.forward2 = true;
-                g.backward2 = true;
-                g
-            })
-            .collect();
-        forward_and_backward_match(devices);
-    }
-
-    #[test]
-    fn two_pixels_a_thread_match_the_cpu_reference() {
-        let devices: Vec<Gpu> = devices()
-            .into_iter()
-            .map(|mut g| {
-                g.backward2 = true;
-                g
-            })
-            .collect();
-        forward_and_backward_match(devices);
-        for lanes in [4, 8, 16] {
-            let narrow: Vec<Gpu> = devices_with(lanes)
-                .into_iter()
-                .filter(|g| g.sums() != Some(GradientSums::CompareAndSwap))
-                .map(|mut g| {
-                    g.backward2 = true;
-                    g
-                })
-                .collect();
-            forward_and_backward_match(narrow);
-        }
-    }
-
-    /// A device whose queue asks for low priority (where the driver offers it) trains alike; the free graphics memory
-    /// it reports is under the adapter's own.
     #[test]
     fn a_low_priority_device_trains_alike() {
         let Ok(gpu) = Gpu::with_options(DeviceOptions { low_priority: true, ..Default::default() }) else { return };
@@ -3010,124 +2776,33 @@ mod tests {
         }
     }
 
+    /// A training device (the scatter by subgroup ballots, large Gaussians split off the projection and the tile entries)
+    /// sorts the same entries as a viewer (neither), bit for bit.
     #[test]
-    fn ssim_reading_inputs_once_gives_the_same_gradients() {
-        for mut gpu in devices() {
-            let (w, h) = (157u32, 93u32);
-            let (g, cam) = scene(2000, w, h, 17);
-            let mut rng = fastrand::Rng::with_seed(18);
-            let target: Vec<u32> = (0..w * h).map(|_| rng.u32(..) | 0xff00_0000).collect();
-            let mask: Vec<f32> = (0..w * h).map(|p| if (20..29).contains(&(p / w)) { 0.0 } else { 1.0 }).collect();
-            gpu.upload(&g);
-            gpu.set_mask(w, h, &mask).expect("mask");
-            let scene_pixels = mask.iter().filter(|m| **m > 0.5).count() as f32;
-            let mut grads = Vec::new();
-            for ssim2 in [false, true] {
-                gpu.ssim2 = ssim2;
-                gpu.step(&cam, [0.1, 0.2, 0.3], Target::Color { rgba: &target, scene_pixels, weight: 1.0, ssim: 0.2, robust: 0.0 }, None).expect("step");
-                grads.push(gpu.read_d_pixel().expect("gradient"));
-            }
-            assert!(grads[0].iter().any(|p| p[0] != 0.0));
-            assert!(grads[0] == grads[1], "ssim2 changed the pixel gradients");
-        }
-    }
-
-    #[test]
-    fn lazy_adam_trains_like_dense_adam() {
-        // Dense twice (float atomics sum in any order: two dense runs differ too), then lazy.
-        let mut results = Vec::new();
-        for (lazy, fused) in [(false, false), (false, false), (true, false), (true, true), (false, true)] {
-            let Ok(mut gpu) = Gpu::new() else { return };
-            let (g, cam) = scene(3000, 160, 90, 21);
-            gpu.upload(&g);
-            gpu.lazy_adam = lazy;
-            gpu.fused_adam = fused;
-            gpu.fused_dense = fused && !lazy;
-            gpu.means_decay = (0.01f32).ln() / 40.0;
-            gpu.set_mask(cam.width, cam.height, &vec![1.0; (cam.width * cam.height) as usize]).expect("mask");
-            // Views that show different parts of the set: the full view and zoomed ones off centre.
-            let views: Vec<Camera> = (0..4)
-                .map(|k| {
-                    let mut c = cam;
-                    if k > 0 {
-                        c.fx *= 2.5;
-                        c.fy *= 2.5;
-                        c.cx += [0.0, 120.0, -120.0, 0.0][k];
-                        c.cy += [0.0, 60.0, -60.0, 60.0][k];
-                    }
-                    c
-                })
-                .collect();
-            let mut rng = fastrand::Rng::with_seed(4);
-            let target: Vec<u32> = (0..cam.width * cam.height).map(|_| rng.u32(..) | 0xff00_0000).collect();
-            for it in 0..40u32 {
-                let lr = LearningRates { means: 1e-3 * (0.01f32).powf(it as f32 / 40.0), log_scales: 0.005, rotations: 0.001, opacity: 0.05, colors: 0.0025 };
-                gpu.step(&views[(it as usize * 3 + it as usize / 5) % 4], [0.0; 3], Target::Color { rgba: &target, scene_pixels: (cam.width * cam.height) as f32, weight: 1.0, ssim: 0.2, robust: 0.0 }, Some(lr)).expect("step");
-            }
-            results.push(gpu.download().expect("download").0.pack());
-        }
-        let initial = g_initial_packed(21);
-        // Mean absolute difference per parameter group, against the mean move from the start.
-        let groups = [("means", 0..3), ("scales", 3..6), ("rotations", 6..10), ("opacity", 10..11), ("colours", 11..14)];
-        for (name, range) in groups {
-            let diff = |a: &[f32], b: &[f32]| {
-                let (mut sum, mut n) = (0f64, 0f64);
-                for (x, y) in a.chunks(PACKED).zip(b.chunks(PACKED)) {
-                    for k in range.clone() {
-                        sum += (x[k] as f64 - y[k] as f64).abs();
-                        n += 1.0;
-                    }
-                }
-                sum / n
-            };
-            let moved = diff(&results[0], &initial);
-            let noise = diff(&results[0], &results[1]);
-            let lazy = diff(&results[0], &results[2]);
-            let fused = diff(&results[0], &results[3]);
-            let dense_fused = diff(&results[0], &results[4]);
-            eprintln!("  {name}: moved {moved:.3e}, dense against dense {noise:.3e}, lazy against dense {lazy:.3e}, fused {fused:.3e}, dense fused {dense_fused:.3e}");
-            assert!(dense_fused <= 3.0 * noise + 1e-4 * moved, "{name}: dense fused {dense_fused:.3e} against dense noise {noise:.3e}");
-            assert!(moved > 0.0, "{name} never moved");
-            assert!(lazy <= 2.0 * noise + 0.02 * moved, "{name}: lazy {lazy:.3e} against dense noise {noise:.3e} (moved {moved:.3e})");
-            assert!(fused <= 2.0 * noise + 0.02 * moved, "{name}: fused {fused:.3e} against dense noise {noise:.3e} (moved {moved:.3e})");
-        }
-    }
-
-    fn g_initial_packed(seed: u64) -> Vec<f32> {
-        scene(3000, 160, 90, seed).0.pack()
-    }
-
-    #[test]
-    fn both_scatters_sort_alike() {
-        let gpu = Gpu::new();
-        let Ok(mut gpu) = gpu else {
-            eprintln!("skipped: {}", gpu.err().expect("error"));
-            return;
-        };
+    fn training_and_viewers_sort_alike() {
+        let Ok(mut gpu) = Gpu::new() else { return };
+        let mut viewer = Gpu::renderer(gpu.device.clone(), gpu.queue.clone());
+        // Without its guards (they sort by distance from the eye, not depth along the view).
+        viewer.guards = false;
         let (mut g, cam) = scene(400_000, 1280, 720, 9);
-        // And some that fill much of the frame (large tile boxes: the split passes' list).
+        // And some that fill much of the frame (large tile boxes: the training projection's list).
         let mut rng = fastrand::Rng::with_seed(10);
         for _ in 0..50 {
             let p = cam.unproject(rng.f32() * 1280.0, rng.f32() * 720.0, 1.0 + rng.f32() * 2.0);
             g.push(p, [-0.8 + rng.f32(), -0.8 + rng.f32(), -3.0], [1.0, rng.f32() - 0.5, rng.f32() - 0.5, 0.0], 1.0, [0.5; 3]);
         }
-        gpu.upload(&g);
         let mut sorted = Vec::new();
-        for (subgroups, sort8, split) in [(false, false, false), (true, false, false), (false, true, false), (false, false, true)] {
-            gpu.sort_subgroups = subgroups;
-            gpu.sort8 = sort8;
-            gpu.split_big = split;
-            gpu.step(&cam, [0.0; 3], Target::None, None).expect("step");
-            let total = gpu.read::<u32>(&gpu.total_out, 2).expect("total")[1] as usize;
-            let s = gpu.sort.as_ref().expect("sort");
-            let keys: Vec<u32> = gpu.read(&s.keys[0], total).expect("keys");
-            let values: Vec<u32> = gpu.read(&s.values[0], total).expect("values");
+        for device in [&mut gpu, &mut viewer] {
+            device.upload(&g);
+            device.step(&cam, [0.0; 3], Target::None, None).expect("step");
+            let total = device.read::<u32>(&device.total_out, 2).expect("total")[1] as usize;
+            let s = device.sort.as_ref().expect("sort");
+            let keys: Vec<u32> = device.read(&s.keys[0], total).expect("keys");
+            let values: Vec<u32> = device.read(&s.values[0], total).expect("values");
             sorted.push((keys, values));
         }
         assert!(sorted[0].0.len() > 1_000_000);
-        assert!(sorted[0] == sorted[1], "the subgroup scatter sorted differently");
-        assert!(sorted[0] == sorted[2], "the 8-bit sort sorted differently");
-        assert!(sorted[0] == sorted[3], "splitting large Gaussians off sorted differently");
+        assert!(sorted[0] == sorted[1], "training and viewers sorted differently");
     }
 
     #[test]
@@ -3338,12 +3013,11 @@ mod tests {
     #[test]
     fn eight_pixel_tiles_render_the_same_image_and_gradients() {
         let Some(mut gpu) = devices().into_iter().next() else { return };
-        gpu.split_big = true;
         let (g, cam) = scene(20_000, 168, 95, 51);
         gpu.upload(&g);
         let mut renders = Vec::new();
-        for tile8 in [0u8, 2] {
-            gpu.tile8 = tile8;
+        for tile8 in [false, true] {
+            gpu.tile8_all = tile8;
             // Twice: a size's pipelined sort is sized from the counts seen at that size, which 8×8 tiles raise.
             for _ in 0..2 {
                 gpu.step(&cam, [0.1, 0.2, 0.3], Target::None, None).expect("step");
@@ -3358,23 +3032,8 @@ mod tests {
         assert!(renders[0].iter().any(|p| p[3] > 0.0));
         assert!(renders[0] == renders[1], "8×8 tiles rendered differently");
         // And the backward on them against the CPU reference.
-        gpu.tile8 = 2;
+        gpu.tile8_all = true;
         forward_and_backward_match(vec![gpu]);
-    }
-
-    #[test]
-    fn subgroup_visibility_finds_the_same_largest_weights() {
-        let Some(mut gpu) = devices().into_iter().next() else { return };
-        let (g, cam) = scene(20_000, 320, 180, 47);
-        gpu.upload(&g);
-        let mask: Vec<f32> = (0..cam.width * cam.height).map(|p| if p / cam.width < 20 { 0.0 } else { 1.0 }).collect();
-        gpu.set_mask(cam.width, cam.height, &mask).expect("mask");
-        let largest = gpu.visibility(&[cam], [0.0; 3]).expect("visibility");
-        gpu.vis_subgroup = true;
-        let sub = gpu.visibility(&[cam], [0.0; 3]).expect("visibility");
-        gpu.vis_subgroup = false;
-        assert!(largest.iter().filter(|w| **w > 0.0).count() > 1000);
-        assert!(largest == sub, "subgroup maxima differ");
     }
 
     #[test]
@@ -3388,10 +3047,8 @@ mod tests {
         zoomed.fx *= 2.0;
         zoomed.fy *= 2.0;
         let cams = [cam, zoomed];
-        let largest = gpu.visibility(&cams, [0.0; 3]).expect("visibility");
-        gpu.visibility_threshold = 0.02;
-        let over = gpu.visibility(&cams, [0.0; 3]).expect("visibility");
-        gpu.visibility_threshold = 0.0;
+        let largest = gpu.visibility(&cams, [0.0; 3], 0.0).expect("visibility");
+        let over = gpu.visibility(&cams, [0.0; 3], 0.02).expect("visibility");
         let faded = largest.iter().filter(|w| **w < 0.02).count();
         assert!(faded > 100 && faded < g.len() - 100, "{faded} of {} faded", g.len());
         for (i, (a, b)) in largest.iter().zip(&over).enumerate() {
@@ -3422,7 +3079,7 @@ mod tests {
         gpu.upload(&g);
         let mask: Vec<f32> = (0..w * h).map(|p| if p / w < 8 { 0.0 } else { 1.0 }).collect();
         gpu.set_mask(w, h, &mask).expect("mask");
-        let seen = gpu.visibility(&[cam], [0.0; 3]).expect("visibility");
+        let seen = gpu.visibility(&[cam], [0.0; 3], 0.0).expect("visibility");
         assert!(seen[0] > 0.9, "front Gaussian: {}", seen[0]);
         // Behind an α = 0.99 splat: at most 1 % of the light reaches it.
         assert!(seen[1] < 0.011, "hidden Gaussian: {}", seen[1]);

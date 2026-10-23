@@ -1,9 +1,10 @@
-// Backward with two pixels a thread (after raster_backward.wgsl, whose bindings and sums it shares): a thread walks two
-// rows of one column, so each entry is read from workgroup memory once for both, and a lane adds its two pixels'
-// gradients in registers before the subgroup sums them: half the sums and atomics of one pixel a thread. Each 32
-// threads hold an 8×8 block of the tile, and a subgroup skips, all lanes together, an entry whose radius misses its
-// live pixels' box or that lies past every one of its pixels' last blended entry: those entries would hit none of its
-// pixels. Same entries, same order, the same gradients up to the order of float additions.
+// Backward on 16×16 tiles with two pixels a thread (after raster_backward.wgsl, whose bindings and sums it shares;
+// training colour steps): each 32 threads hold an 8×8 block of the tile, a thread two rows of one column, so each entry
+// is read from workgroup memory once for both pixels, and a lane adds its two pixels' gradients in registers before the
+// subgroup sums them: half the sums and atomics of one pixel a thread, and compact blocks that an entry's footprint
+// meets in fewer subgroups than two-row strips. 1.6 ms against 2.3 for one pixel a thread on VRChat Home's 823k
+// splats; skipping, a subgroup at a time, the entries out of its block's reach cost more than it saved. The same
+// entries in the same order as `backward`: the same gradients up to the order of float additions.
 
 struct Pixel {
     t: f32,
@@ -47,11 +48,11 @@ fn pixel_grad(px: ptr<function, Pixel>, pix: vec2<f32>, dp: vec4<f32>, live: boo
     return out;
 }
 
-var<workgroup> tile_last2: atomic<u32>;
+var<workgroup> tile_last_blocks: atomic<u32>;
 
 @diagnostic(off, subgroup_uniformity)
 @compute @workgroup_size(128)
-fn backward2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(subgroup_invocation_id) lane: u32, @builtin(subgroup_size) lanes: u32) {
+fn backward_blocks(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(subgroup_invocation_id) lane: u32, @builtin(subgroup_size) lanes: u32) {
     let tile = wid.x + wid.y * frame.size.z;
     // Threads 32b..32b+31 hold the tile's 8×8 block b (two by two), two rows each.
     let block = li / 32u;
@@ -87,22 +88,17 @@ fn backward2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_in
     let live0 = in0 && any(dp0 != vec4<f32>(0.0));
     let live1 = in1 && any(dp1 != vec4<f32>(0.0));
     if (li == 0u) {
-        atomicStore(&tile_last2, first);
+        atomicStore(&tile_last_blocks, first);
     }
     workgroupBarrier();
-    atomicMax(&tile_last2, max(select(first, last0, live0), select(first, last1, live1)));
-    let used_end = workgroupUniformLoad(&tile_last2);
+    atomicMax(&tile_last_blocks, max(select(first, last0, live0), select(first, last1, live1)));
+    let used_end = workgroupUniformLoad(&tile_last_blocks);
     p0.acc_c = background_at(f32(px), f32(py0));
     p1.acc_c = background_at(f32(px), f32(py1));
     p0.acc_d = 0.0;
     p1.acc_d = 0.0;
     let pix0 = vec2<f32>(f32(px), f32(py0));
     let pix1 = vec2<f32>(f32(px), f32(py1));
-    // This subgroup's live pixels: their box, and one past the last entry any of them blended.
-    let live = live0 || live1;
-    let lo = subgroupMin(select(vec2<f32>(3.4e38), vec2<f32>(f32(px), f32(select(py1, py0, live0))), live));
-    let hi = subgroupMax(select(vec2<f32>(-3.4e38), vec2<f32>(f32(px), f32(select(py0, py1, live1))), live));
-    let sub_last = subgroupMax(max(select(first, last0, live0), select(first, last1, live1)));
     let batches = (used_end - first + 255u) / 256u;
     for (var b = 0u; b < batches; b++) {
         // Batch b holds entries [stop − 256, stop), loaded far to near, two a thread.
@@ -121,13 +117,8 @@ fn backward2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_in
             // No early exits: every lane of a subgroup reaches the reduction below for every entry.
             let entry = stop - 1u - j;
             let a = s_a[j];
-            let cr = s_c[j];
-            // Subgroup-uniform: no pixel of this subgroup's box is within the entry's reach, or none blended it.
-            if (entry >= sub_last || a.x + cr.w < lo.x || a.x - cr.w > hi.x || a.y + cr.w < lo.y || a.y - cr.w > hi.y) {
-                continue;
-            }
             let bb = s_b[j];
-            let col = cr.xyz;
+            let col = s_c[j].xyz;
             let r0 = pixel_grad(&p0, pix0, dp0, live0 && entry < last0, a, bb, col);
             let r1 = pixel_grad(&p1, pix1, dp1, live1 && entry < last1, a, bb, col);
             let g0 = r0.g0 + r1.g0;

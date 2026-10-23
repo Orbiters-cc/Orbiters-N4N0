@@ -1,7 +1,9 @@
 //! Training in replay mode: Adam on the keyframes' colour ((1 − λ)·L1 + λ·D-SSIM over the scene pixels) and the
 //! exact depth samples (relative L1), with MCMC-style relocation (Kheradmand et al. 2024): every so often, Gaussians
 //! that faded out move onto live ones picked by opacity, the copies sharing the original's opacity and footprint, while
-//! the set grows to its budget. Depth steps render only the depth samples' rays; colour steps can run coarse to fine. Every `hold_out_every`-th keyframe is never trained on and scores the result.
+//! the set grows to its budget. Depth steps render only the depth samples' rays; colour steps train on every other
+//! pixel each way for the first half of the run (and can run coarse to fine). Every `hold_out_every`-th keyframe is never
+//! trained on and scores the result.
 
 use crate::aberration::Undo;
 use crate::camera::Camera;
@@ -54,6 +56,16 @@ pub struct Settings {
     /// Canine capture, but cost about 1.2 dB on the best 90 % of VRChat Home's pixels in two repeats.
     pub quarter_until: f32,
     pub half_until: f32,
+    /// Colour steps before this fraction of the run train on every `stride`-th pixel each way, from a phase drawn each
+    /// step: a camera whose pixel centres are those pixels' rays, the target and mask sampled there, and the 2D filter
+    /// scaled to keep the training resolution's footprint, so each step trains the full-resolution model on an unbiased
+    /// subset of its pixels (D-SSIM on the sub-grid). Half the run at stride 2 trained VRChat Home 16 % faster (70.8 →
+    /// 59.8 s), Exoplanet Journey 13 %, the synthetic plaza 9 % and Canine 5 %, at equal held-out PSNR on each (three to
+    /// five interleaved runs; the plaza's off-path scores equal too); with 1.2 times the steps, in the same time as
+    /// none, Home and Exoplanet scored 0.3 dB higher. Unlike coarse to fine (box-filtered keyframes and the filter
+    /// unscaled: −1.2 dB on Home), nothing here learns a blurred model. 0 or a stride of 1: every pixel.
+    pub stride_until: f32,
+    pub stride: u32,
     /// Relocation stops after this fraction of the steps; the rest only refines. Half instead of 0.8 gained 0.7–1.0 dB
     /// on the Canine orbit (two seeds) and was neutral on VRChat Home: while rounds continue, the moved copies never
     /// settle.
@@ -112,6 +124,8 @@ impl Default for Settings {
             robust_from: 0.25,
             quarter_until: 0.0,
             half_until: 0.0,
+            stride_until: 0.5,
+            stride: 2,
             relocate_until: 0.5,
             fade_unseen_every: 1000,
             unseen_weight: 0.02,
@@ -241,37 +255,9 @@ pub fn evaluate(gpu: &mut Gpu, data: &Dataset, views: &[usize], background: [f32
 /// mean PSNR over the scene pixels. With the world's chromatic aberration undone in the keyframes (`undo`), a render
 /// passes through that aberration and is scored against the keyframe as captured (read again from the session), as
 /// the lab scored it: a plain render against the realigned keyframe reads about 0.1 dB high, against the captured one
-/// low.
-pub fn score_held_out(gpu: &mut Gpu, data: &Dataset, undo: Option<&Undo>, views: &[usize], background: [f32; 3], mut each: impl FnMut(usize, &[[f32; 4]]) -> anyhow::Result<()>) -> anyhow::Result<Option<f32>> {
-    let mut sum = 0.0;
-    for &i in views {
-        let img = render(gpu, &data.views[i].camera, background)?;
-        // A keyframe that can no longer be read as captured (its drive gone, the file deleted since loading) is scored
-        // as loaded rather than losing the finished run.
-        let captured = undo.and_then(|u| match crate::dataset::keyframe_image(&data.dir, data.views[i].keyframe, &data.geometry) {
-            Ok(captured) => Some((u, captured)),
-            Err(e) => {
-                eprintln!("keyframe {} scored as loaded: {e:#}", data.views[i].keyframe);
-                None
-            }
-        });
-        let psnr = match captured {
-            Some((u, captured)) => {
-                let seen = crate::priority::on_loading_threads(|| crate::aberration::aberrate(&img, data.width as usize, data.height as usize, u.intensity, u.factor));
-                psnr(&seen, &captured, &u.mask)
-            }
-            None => psnr(&img, &data.views[i].image, &data.mask),
-        };
-        ensure!(psnr.is_finite(), "keyframe {} has no scene pixel to score", data.views[i].keyframe);
-        each(i, &img)?;
-        sum += psnr;
-    }
-    Ok((!views.is_empty()).then(|| sum / views.len() as f32))
-}
-
-/// [`score_held_out`] with the CPU's share (aberration, PSNR, `each`) in parallel: the device renders eight views, the
-/// loading threads score and hand them on together, then the next eight. The same scores, summed in view order.
-pub fn score_held_out_parallel(
+/// low. The device renders eight views, the loading threads score and hand them on together, then the next eight (the
+/// same scores, summed in view order).
+pub fn score_held_out(
     gpu: &mut Gpu,
     data: &Dataset,
     undo: Option<&Undo>,
@@ -360,88 +346,31 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     gpu.set_mask(data.width, data.height, &data.mask)?;
     gpu.regularise_unseen = settings.regularise_unseen;
     gpu.adam_restart = settings.adam_restart;
-    gpu.sparse_adam = std::env::var_os("S4_SPARSE_ADAM").is_some();
-    gpu.sort_subgroups = std::env::var_os("S4_SORT_SUBGROUPS").is_some();
-    gpu.backward2 = std::env::var_os("S4_BACKWARD2").is_some();
-    if let Some(v) = std::env::var("S4_BACKWARD2_VARIANT").ok().and_then(|v| v.bytes().next()) {
-        gpu.backward2_variant = v;
-    }
-    gpu.backward4 = std::env::var_os("S4_BACKWARD4").is_some();
-    gpu.vis_subgroup = std::env::var_os("S4_VIS_SUBGROUP").is_some();
-    gpu.sort8 = std::env::var_os("S4_SORT8").is_some();
-    gpu.fused_dense = std::env::var_os("S4_FUSED_DENSE").is_some();
-    gpu.split_big = std::env::var_os("S4_SPLIT_BIG").is_some();
-    gpu.dormant = std::env::var_os("S4_DORMANT").is_some();
-    if std::env::var_os("S4_DEPTH_TILE8").is_some() {
-        gpu.tile8 = 1;
-        eprintln!("lab: depth steps on 8×8 tiles");
-    }
-    if gpu.split_big {
-        eprintln!("lab: large Gaussians split off the projection");
-    }
-    if gpu.fused_dense {
-        eprintln!("lab: projection backward fused with dense Adam");
-    }
-    if gpu.sort8 {
-        eprintln!("lab: 8-bit radix sort");
-    }
-    gpu.ssim2 = std::env::var_os("S4_SSIM2").is_some();
-    if gpu.ssim2 {
-        eprintln!("lab: D-SSIM reads its inputs once");
-    }
-    gpu.forward2 = std::env::var_os("S4_FORWARD2").is_some();
-    gpu.forward_b = std::env::var_os("S4_FORWARD_B").is_some();
-    if gpu.forward2 {
-        eprintln!("lab: two pixels a thread in the forward");
-    }
-    gpu.lazy_adam = std::env::var_os("S4_LAZY_ADAM").is_some();
-    gpu.fused_adam = gpu.lazy_adam && std::env::var_os("S4_FUSED_ADAM").is_some();
-    if gpu.fused_adam {
-        eprintln!("lab: projection backward fused with Adam");
-    }
-    gpu.means_decay = (0.01f32).ln() / iterations as f32;
-    if gpu.lazy_adam {
-        eprintln!("lab: lazily dense Adam");
-    }
-    if gpu.backward4 {
-        eprintln!("lab: four pixels a thread in the backward");
-    }
-    if gpu.backward2 {
-        eprintln!("lab: two pixels a thread in the backward");
-    }
-    if gpu.sort_subgroups {
-        eprintln!("lab: subgroup sort scatter");
-    }
-    // Lab (round 4): strided colour steps until `until` of the run (S4_STRIDE=until,stride[,l1]).
-    let stride_lab: Option<(f32, u32, bool)> = std::env::var("S4_STRIDE").ok().and_then(|v| {
-        let p: Vec<&str> = v.split(',').collect();
-        Some((p.first()?.parse().ok()?, p.get(1)?.parse::<u32>().ok()?.max(1), p.get(2) == Some(&"l1")))
-    });
-    let phase_masks: Vec<(u32, u32, Vec<f32>, f32)> = match stride_lab {
-        Some((_, s, _)) => (0..s * s)
+    // Each phase of the colour steps' sub-grid (Settings::stride): its size, mask and scene pixels.
+    let stride = settings.stride.max(1);
+    let phases: Vec<(u32, u32, Vec<f32>, f32)> = if settings.stride_until > 0.0 && stride > 1 {
+        (0..stride * stride)
             .map(|ph| {
-                let (ox, oy) = (ph % s, ph / s);
-                let (w, h) = ((data.width - ox).div_ceil(s), (data.height - oy).div_ceil(s));
-                let mask: Vec<f32> = (0..h).flat_map(|j| (0..w).map(move |i| data.mask[((s * j + oy) * data.width + s * i + ox) as usize])).collect();
-                let sp = mask.iter().filter(|m| **m > 0.5).count() as f32;
-                (w, h, mask, sp)
+                let (ox, oy) = (ph % stride, ph / stride);
+                let (w, h) = ((data.width - ox).div_ceil(stride), (data.height - oy).div_ceil(stride));
+                let mask: Vec<f32> = (0..h).flat_map(|j| (0..w).map(move |i| data.mask[((stride * j + oy) * data.width + stride * i + ox) as usize])).collect();
+                let scene = mask.iter().filter(|m| **m > 0.5).count() as f32;
+                (w, h, mask, scene)
             })
-            .collect(),
-        None => Vec::new(),
+            .collect()
+    } else {
+        Vec::new()
     };
-    let mut strided_rgba: Vec<u32> = Vec::new();
-    let resident = std::env::var_os("S4_RESIDENT").is_some();
+    let mut sub_grid: Vec<u32> = Vec::new();
+    let mut mask_phase = None;
+    // The keyframes on the device when its memory has room for them beside the set (with a GB to spare): steps then
+    // upload no pixels.
+    const LEFT: u64 = 1 << 30;
+    let keyframe_bytes: u64 = data.views.iter().map(|v| v.image.len() as u64 * 4).sum();
+    let resident = gpu.free_memory().is_some_and(|free| free >= gpu.training_memory(settings.budget) + keyframe_bytes + LEFT);
     if resident {
         let images: Vec<&[u32]> = data.views.iter().map(|v| v.image.as_slice()).collect();
         gpu.set_keyframes(&images);
-        eprintln!("lab: {} keyframes on the GPU", images.len());
-    }
-    let mut last_phase = u32::MAX;
-    if let Some((until, s, l1)) = stride_lab {
-        eprintln!("lab: strided colour steps (every {s}th pixel{}) until {until} of the run", if l1 { ", L1 only" } else { "" });
-    }
-    if gpu.sparse_adam {
-        eprintln!("lab: sparse Adam");
     }
     let regularise = |gpu: &mut Gpu, n: usize| {
         gpu.opacity_reg = settings.opacity_reg / n.max(1) as f32;
@@ -451,8 +380,9 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     gpu.step = 0;
     crate::timing::add("4a train setup", setup_start.elapsed());
     let relocate_until = (iterations as f32 * settings.relocate_until) as u32;
-    // Lab (S4_ASYNC_RELOCATE): a round's weights in flight, then its plan on a helper thread (own random stream).
-    let async_relocate = std::env::var_os("S4_ASYNC_RELOCATE").is_some();
+    // Relocation rounds off the steps' path: a round's weights come back while training goes on, a helper thread plans
+    // it (its own random stream), and the plan lands a few steps later (VRChat Home: −4 %, quality equal): the plan took
+    // 20–30 ms of the CPU a round, with the GPU waiting.
     let mut pending_weights: Option<(u32, crate::gpu::PendingWeights)> = None;
     let mut pending_plan: Option<std::thread::JoinHandle<Relocation>> = None;
     for it in 1..=iterations {
@@ -503,36 +433,33 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                 l => (&coarse[l - 1].cameras[v], &coarse[l - 1].images[v], coarse[l - 1].scene_pixels),
             };
             let robust = if progress >= settings.robust_from { settings.robust } else { 0.0 };
-            match stride_lab.filter(|(until, _, _)| progress < *until) {
-                Some((_, s, l1)) => {
-                    let ph = rng.u32(..s * s);
-                    let (ox, oy) = (ph % s, ph / s);
-                    let (w, h, mask, sp) = &phase_masks[ph as usize];
-                    if ph != last_phase {
-                        gpu.set_mask(*w, *h, mask)?;
-                        last_phase = ph;
-                    }
-                    let c = &data.views[v].camera;
-                    let f = s as f32;
-                    let cam = Camera { r: c.r, t: c.t, fx: c.fx / f, fy: c.fy / f, cx: (c.cx - ox as f32) / f, cy: (c.cy - oy as f32) / f, width: *w, height: *h };
-                    let img = &data.views[v].image;
-                    strided_rgba.clear();
-                    for j in 0..*h {
-                        let row = ((s * j + oy) * data.width) as usize;
-                        strided_rgba.extend((0..*w).map(|i| img[row + (s * i + ox) as usize]));
-                    }
-                    let full = gpu.filter_2d;
-                    gpu.filter_2d = [full[0] / (f * f), full[1] / (f * f)];
-                    let stepped = gpu.step(&cam, settings.background, Target::Color { rgba: &strided_rgba, scene_pixels: *sp, weight: 1.0, ssim: if l1 { 0.0 } else { settings.ssim }, robust }, Some(lr));
-                    gpu.filter_2d = full;
-                    stepped?
+            if level == 0 && progress < settings.stride_until && !phases.is_empty() {
+                let ph = rng.u32(..stride * stride);
+                let (ox, oy) = (ph % stride, ph / stride);
+                let (w, h, mask, scene) = &phases[ph as usize];
+                if mask_phase != Some(ph) {
+                    gpu.set_mask(*w, *h, mask)?;
+                    mask_phase = Some(ph);
                 }
-                None => {
-                    if resident && level == 0 {
-                        gpu.resident_target = Some(v);
-                    }
-                    gpu.step(camera, settings.background, Target::Color { rgba, scene_pixels: pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr))?
+                let c = &data.views[v].camera;
+                let f = stride as f32;
+                let cam = Camera { r: c.r, t: c.t, fx: c.fx / f, fy: c.fy / f, cx: (c.cx - ox as f32) / f, cy: (c.cy - oy as f32) / f, width: *w, height: *h };
+                let img = &data.views[v].image;
+                sub_grid.clear();
+                for j in 0..*h {
+                    let row = ((stride * j + oy) * data.width) as usize;
+                    sub_grid.extend((0..*w).map(|i| img[row + (stride * i + ox) as usize]));
                 }
+                let full = gpu.filter_2d;
+                gpu.filter_2d = [full[0] / (f * f), full[1] / (f * f)];
+                let stepped = gpu.step(&cam, settings.background, Target::Color { rgba: &sub_grid, scene_pixels: *scene, weight: 1.0, ssim: settings.ssim, robust }, Some(lr));
+                gpu.filter_2d = full;
+                stepped?
+            } else {
+                if resident && level == 0 {
+                    gpu.resident_target = Some(v);
+                }
+                gpu.step(camera, settings.background, Target::Color { rgba, scene_pixels: pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr))?
             }
         };
         if fade_due(it, settings, relocate_until) {
@@ -540,12 +467,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             let fade_start = Instant::now();
             let _cpu = crate::priority::CpuWork::start();
             let cams: Vec<Camera> = train_views.iter().map(|&i| data.views[i].camera).collect();
-            if std::env::var_os("S4_FAST_VISIBILITY").is_some() {
-                gpu.visibility_threshold = settings.unseen_weight;
-            }
-            let seen = gpu.visibility(&cams, settings.background);
-            gpu.visibility_threshold = 0.0;
-            let seen = seen?;
+            let seen = gpu.visibility(&cams, settings.background, settings.unseen_weight)?;
             if seen.iter().all(|w| *w <= 0.0) {
                 // Nothing seen at all is a broken round (a mask of zeros, a lost readback), not a model nothing sees.
                 eprintln!("it {it}: no training pixel sees any Gaussian; nothing faded");
@@ -568,7 +490,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             };
             report(&Progress { iteration: it, iterations, gaussians: gpu.count, intersections, psnr, seconds: start.elapsed().as_secs_f32() });
         }
-        if async_relocate {
+        {
             // A plan that is ready lands now; weights that arrived go to a planner.
             if pending_plan.as_ref().is_some_and(|h| h.is_finished()) {
                 let plan = pending_plan.take().expect("checked").join().map_err(|_| anyhow::anyhow!("the relocation planner panicked"))?;
@@ -594,7 +516,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                 }
             }
         }
-        if async_relocate && it % settings.relocate_every == 0 && it >= 500 && it <= relocate_until {
+        if it % settings.relocate_every == 0 && it >= 500 && it <= relocate_until {
             // The last round's plan must land before the next round reads the set (rare: rounds are 100 steps apart).
             if let Some(h) = pending_plan.take() {
                 let plan = h.join().map_err(|_| anyhow::anyhow!("the relocation planner panicked"))?;
@@ -602,32 +524,19 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                 regularise(gpu, plan.len);
             }
             if pending_weights.is_none() {
-                pending_weights = Some((it, crate::timing::section("4d1 relocation weights", None, || gpu.request_relocation_weights(settings.max_radius))?));
+                pending_weights = Some((it, gpu.request_relocation_weights(settings.max_radius)?));
             }
-        } else if it % settings.relocate_every == 0 && it >= 500 && it <= relocate_until {
-            // The device classifies, the CPU samples the plan, the device moves the copies: a few MB cross the bus
-            // instead of the whole set and its Adam moments both ways.
-            let _cpu = crate::priority::CpuWork::start();
-            let _sync = crate::timing::on().then(|| dev.poll(wgpu::PollType::wait_indefinitely()));
-            let relocate_start = Instant::now();
-            let weights = crate::timing::section("4d1 relocation weights", None, || gpu.relocation_weights(settings.max_radius))?;
-            let n = weights.len();
-            if it % 500 == 0 {
-                let dead = weights.iter().filter(|w| **w == -1.0).count();
-                eprintln!("it {it}: {n} Gaussians, {dead} dead or huge, {intersections} entries");
-            }
-            let plan = crate::timing::section("4d2 relocation plan", None, || plan_relocation(&weights, (n + n / 20).min(settings.budget), settings.starved && n < settings.budget / 4, &mut rng));
-            crate::timing::section("4d3 relocation apply", None, || gpu.apply_relocation(&plan))?;
-            regularise(gpu, plan.len);
-            gpu.update_filter_3d(&filter_cams, settings.filter_3d)?;
-            let _sync = crate::timing::on().then(|| dev.poll(wgpu::PollType::wait_indefinitely()));
-            crate::timing::add("4d relocate + 3D filter", relocate_start.elapsed());
         } else if it % 100 == 0 && it + 100 <= iterations {
             // As Mip-Splatting does: every 100 steps but the last 100's.
             crate::timing::section("4e 3D filter", Some(&dev), || gpu.update_filter_3d(&filter_cams, settings.filter_3d))?;
         }
     }
     drop(feeding);
+    // A round still on its way (none should be: rounds end at `relocate_until`) moves nothing now.
+    if let Some(h) = pending_plan.take() {
+        let _ = h.join();
+    }
+    drop(pending_weights);
     let _sync = crate::timing::on().then(|| dev.poll(wgpu::PollType::wait_indefinitely()));
     let end_start = Instant::now();
     if let Some(g) = &gpu.governor {
@@ -807,9 +716,6 @@ pub(crate) fn weights(g: &Gaussians, huge: &[bool]) -> Vec<f32> {
 /// dead; weights that sum to nothing (a readback of zeros) move nothing. `starved` ([`Settings::starved`]): the set
 /// grows whatever number are dead.
 pub fn plan_relocation(weights: &[f32], grow_to: usize, starved: bool, rng: &mut fastrand::Rng) -> Relocation {
-    if std::env::var_os("S4_FAST_PLAN").is_some() {
-        return plan_relocation_fast(weights, grow_to, starved, rng);
-    }
     let n = weights.len();
     let opacity = |i: usize| if weights[i] >= 0.0 { weights[i] } else { -2.0 - weights[i] };
     let (mut dead, mut alive): (Vec<usize>, Vec<usize>) = (0..n).partition(|&i| weights[i] == -1.0 || !weights[i].is_finite());
@@ -888,117 +794,6 @@ pub fn plan_relocation(weights: &[f32], grow_to: usize, starved: bool, rng: &mut
     plan
 }
 
-/// [`plan_relocation`] with its long loops in parallel (lab, S4_FAST_PLAN): the same plan. What depends on order stays
-/// in order: the random draws (taken in one go in the same sequence, the RNG left where the plain plan leaves it), the
-/// CDF's sums, the picks' bookkeeping, the copies' targets.
-fn plan_relocation_fast(weights: &[f32], grow_to: usize, starved: bool, rng: &mut fastrand::Rng) -> Relocation {
-    use rayon::prelude::*;
-    let n = weights.len();
-    let opacity = |i: usize| if weights[i] >= 0.0 { weights[i] } else { -2.0 - weights[i] };
-    let is_dead = |i: usize| weights[i] == -1.0 || !weights[i].is_finite();
-    let mut dead: Vec<usize> = (0..n).into_par_iter().filter(|&i| is_dead(i)).collect();
-    let mut alive: Vec<usize> = (0..n).into_par_iter().filter(|&i| !is_dead(i)).collect();
-    if alive.par_iter().any(|&i| weights[i] >= 0.0) {
-        alive = alive.into_par_iter().filter(|&i| weights[i] >= 0.0).collect();
-    }
-    let cap = (n / 20).max(1);
-    let grow = if dead.len() <= cap || starved { grow_to.saturating_sub(n) } else { 0 };
-    if dead.len() > cap {
-        rng.shuffle(&mut dead);
-        dead.truncate(cap);
-    }
-    let mut plan = Relocation { adjust: Vec::new(), copies: Vec::new(), len: n };
-    let moves = (dead.len() + grow).min(alive.len() * (MAX_RATIO - 1));
-    if moves == 0 {
-        return plan;
-    }
-    let mut pool = alive.clone();
-    let mut cdf = Vec::with_capacity(pool.len());
-    let build = |pool: &[usize], cdf: &mut Vec<f64>| {
-        cdf.clear();
-        let mut acc = 0.0f64;
-        for &i in pool {
-            acc += opacity(i).max(0.0) as f64;
-            cdf.push(acc);
-        }
-        acc
-    };
-    let mut acc = build(&pool, &mut cdf);
-    if acc.is_nan() || acc <= 0.0 {
-        return plan;
-    }
-    let mut ratio = vec![1usize; n];
-    let mut picks = Vec::with_capacity(moves);
-    let mut misses = 0;
-    // The draws one attempt each would take, searched in parallel; an attempt after the pool changed, or past them (a
-    // miss took one), searches on its own.
-    let before = rng.clone();
-    let u: Vec<f64> = (0..moves).map(|_| rng.f64()).collect();
-    let found: Vec<usize> = u.par_iter().map(|&u| cdf.partition_point(|&c| c < u * acc).min(pool.len() - 1)).collect();
-    let (mut used, mut pool_changed) = (0usize, false);
-    while picks.len() < moves {
-        let k = if used < moves {
-            let k = if pool_changed { cdf.partition_point(|&c| c < u[used] * acc).min(pool.len() - 1) } else { found[used] };
-            used += 1;
-            k
-        } else {
-            let r = rng.f64() * acc;
-            cdf.partition_point(|&c| c < r).min(pool.len() - 1)
-        };
-        let j = pool[k];
-        if ratio[j] >= MAX_RATIO {
-            misses += 1;
-            if misses >= 16 {
-                pool.retain(|&i| ratio[i] < MAX_RATIO);
-                pool_changed = true;
-                acc = build(&pool, &mut cdf);
-                misses = 0;
-                if pool.is_empty() || acc.is_nan() || acc <= 0.0 {
-                    break;
-                }
-            }
-            continue;
-        }
-        misses = 0;
-        ratio[j] += 1;
-        picks.push(j);
-    }
-    if used < moves {
-        // Stopped before using every draw: the RNG goes on from where the plain plan's would.
-        *rng = before;
-        for _ in 0..used {
-            rng.f64();
-        }
-    }
-    plan.adjust = alive
-        .par_iter()
-        .filter(|&&j| ratio[j] > 1)
-        .map(|&j| {
-            let (new_o, factor) = relocation(opacity(j) as f64, ratio[j]);
-            let new_logit = logit((new_o as f32).clamp(DEAD, 1.0 - 1e-4));
-            [j as u32, new_logit.to_bits(), (factor as f32).max(1e-6).ln().to_bits(), 0]
-        })
-        .collect();
-    // normal() draws u then v, three times a copy.
-    let raw: Vec<f32> = (0..6 * picks.len()).map(|_| rng.f32()).collect();
-    let offsets: Vec<[f32; 3]> = raw
-        .par_chunks(6)
-        .map(|d| {
-            let one = |u: f32, v: f32| (-2.0 * u.max(1e-7).ln()).sqrt() * (std::f32::consts::TAU * v).cos();
-            [one(d[0], d[1]), one(d[2], d[3]), one(d[4], d[5])]
-        })
-        .collect();
-    let mut free = dead.into_iter();
-    for (&j, e) in picks.iter().zip(&offsets) {
-        let target = free.next().unwrap_or_else(|| {
-            plan.len += 1;
-            plan.len - 1
-        });
-        plan.copies.push([target as u32, j as u32, e[0].to_bits(), e[1].to_bits(), e[2].to_bits(), 0, 0, 0]);
-    }
-    plan
-}
-
 /// Applies a relocation plan on the CPU (what relocate.wgsl does on the device): sources first, then copies of the
 /// adjusted sources. Adam moments of every Gaussian touched restart at zero.
 #[cfg(test)]
@@ -1059,42 +854,6 @@ fn normal(rng: &mut fastrand::Rng) -> f32 {
     let u = rng.f32().max(1e-7);
     let v = rng.f32();
     (-2.0 * u.ln()).sqrt() * (std::f32::consts::TAU * v).cos()
-}
-
-#[cfg(test)]
-mod lab_bench {
-    /// Lab: how long the CPU takes to plan a relocation round of a Home-sized set.
-    /// The parallel searches plan exactly what the sequential ones do.
-    #[test]
-    fn fast_relocation_plans_alike() {
-        let mut rng = fastrand::Rng::with_seed(5);
-        // With a few heavy sources that fill up (misses, pool rebuilds) and many dead.
-        let weights: Vec<f32> = (0..200_000).map(|i| if i % 7 == 0 { -1.0 } else if i % 50_000 == 1 { 1e6 } else { rng.f32() }).collect();
-        let plain = super::plan_relocation(&weights, 230_000, false, &mut fastrand::Rng::with_seed(9));
-        std::env::set_var("S4_FAST_PLAN", "1");
-        let fast = super::plan_relocation(&weights, 230_000, false, &mut fastrand::Rng::with_seed(9));
-        std::env::remove_var("S4_FAST_PLAN");
-        assert!(!plain.copies.is_empty());
-        assert_eq!(plain, fast);
-    }
-
-    #[test]
-    #[ignore]
-    fn relocation_plan_time() {
-        let mut rng = fastrand::Rng::with_seed(3);
-        let weights: Vec<f32> = (0..823_000).map(|i| if i % 19 == 0 { -1.0 } else { rng.f32().powi(2) }).collect();
-        for fast in [false, true, false, true] {
-            if fast {
-                std::env::set_var("S4_FAST_PLAN", "1");
-            } else {
-                std::env::remove_var("S4_FAST_PLAN");
-            }
-            let start = std::time::Instant::now();
-            let plan = super::plan_relocation(&weights, 864_150, false, &mut rng);
-            eprintln!("plan (fast {fast}): {:?}, {} adjusted, {} copies", start.elapsed(), plan.adjust.len(), plan.copies.len());
-        }
-        std::env::remove_var("S4_FAST_PLAN");
-    }
 }
 
 #[cfg(test)]

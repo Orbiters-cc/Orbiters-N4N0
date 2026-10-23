@@ -30,7 +30,10 @@ struct Frame {
     horizon: vec4<f32>,
 }
 
+// Tiles of TILE × TILE pixels: 16 for colour steps and viewers; depth steps render their sample grid on 8×8 tiles
+// (crate::gpu: those modules replace this line), four times the workgroups and a quarter of the walk per pixel.
 const TILE: u32 = 16u;
+const TILE_PIXELS: u32 = TILE * TILE;
 const MAX_ALPHA: f32 = 0.99;
 const MIN_ALPHA: f32 = 0.003921569;
 const MIN_T: f32 = 0.0001;

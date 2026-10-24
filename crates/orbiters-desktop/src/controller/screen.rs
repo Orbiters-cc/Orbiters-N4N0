@@ -315,6 +315,13 @@ impl ScreenRuntime {
         }
     }
 
+    /// The app quits: the menu closes, and the owner's screen counts as told so (the quit's last message tells it), so
+    /// a step still under way sends nothing more.
+    pub(super) fn quit(&mut self) {
+        let _ = self.menu.close();
+        self.open_sent = Some(false);
+    }
+
     /// Messages to VRChat were lost: neither screen's memory is known any more (each is cleared at its next step), nor
     /// whether it is open.
     pub(super) fn lost(&mut self) {

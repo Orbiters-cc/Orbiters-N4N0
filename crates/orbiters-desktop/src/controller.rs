@@ -1451,6 +1451,7 @@ impl Controller {
         self.quitting.store(true, Ordering::Relaxed);
         self.voice_stop();
         self.orb_stop();
+        self.orb_close_on_quit();
         self.calls_stop();
         self.put_vrchat_back();
         // Stopped outside the lock: stopping waits for the receiving thread.

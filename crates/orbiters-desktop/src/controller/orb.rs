@@ -1621,6 +1621,17 @@ impl Controller {
         self.account_api()
     }
 
+    /// The app quits: N4N0's projected screen and its Menu toggle are turned off over OSC (best effort, one datagram),
+    /// so the avatar's screen does not stay open with nothing left to drive it once Orbiters - N4N0 is gone. Sent
+    /// whatever the avatar is known to have: VRChat leaves out parameters an avatar lacks.
+    pub(super) fn orb_close_on_quit(&self) {
+        self.orb.lock().unwrap().screen.quit();
+        let off = vec![(parameter(params::SCREEN_OPEN), vec![OscType::Bool(false)]), (parameter(params::MENU), vec![OscType::Bool(false)])];
+        if let Some(Err(e)) = self.with_osc(|o| o.send_bundle(off)) {
+            eprintln!("closing N4N0's screen: {e:#}");
+        }
+    }
+
     /// Ends the orb thread, and a turn under way (the app quits).
     pub(super) fn orb_stop(&self) {
         let mut rt = self.orb.lock().unwrap();
@@ -2586,6 +2597,35 @@ data: {}
         ctl.orb_on_parameter(params::MENU, &OscValue::Bool(false));
         assert!(until(|| !open(&ctl)));
         assert_eq!(menu_values(&received(&vrchat, Duration::from_millis(300))), Vec::<bool>::new(), "the toggle said so itself");
+        ctl.orb_stop();
+        ctl.shutdown();
+    }
+
+    #[test]
+    fn quitting_closes_n4n0_s_screen_and_its_menu_toggle() {
+        let (ctl, vrchat) = orb_on(menu_tree("avtr_quit", true));
+        ctl.menu_open(true);
+        assert!(until(|| ctl.orb.lock().unwrap().screen.menu.open));
+        let opened = received(&vrchat, Duration::from_millis(300));
+        assert!(opened.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(true))), "{opened:?}");
+        // The app quits with the menu on the avatar's screen: both go off, so nothing stays open without the app.
+        ctl.shutdown();
+        let sent = received(&vrchat, Duration::from_millis(300));
+        assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(false))), "{sent:?}");
+        // The menu's own toggle may say so too as it closes: every word is off.
+        let menu = menu_values(&sent);
+        assert!(!menu.is_empty() && menu.iter().all(|on| !on), "{sent:?}");
+        let last_open = sent.iter().rposition(|m| m.0 == parameter(params::SCREEN_OPEN)).unwrap();
+        assert_eq!(sent[last_open].1, OscType::Bool(false), "nothing opens it again after: {sent:?}");
+    }
+
+    #[test]
+    fn a_screen_left_open_is_closed_at_start() {
+        // The app ended without closing it (it stopped answering, or was killed): VRChat still holds the screen open.
+        let mut tree = menu_tree("avtr_stale_screen", true);
+        tree["CONTENTS"]["parameters"]["CONTENTS"][params::SCREEN_OPEN.replace('/', "_")]["VALUE"] = json!([true]);
+        let (ctl, _vrchat, sent) = orb_started(tree);
+        assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(false))), "the first state closes it: {sent:?}");
         ctl.orb_stop();
         ctl.shutdown();
     }

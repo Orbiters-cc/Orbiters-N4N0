@@ -24,6 +24,15 @@ pub struct View<'a> {
     pub picture: &'a dyn Fn(&str) -> Option<TextureId>,
     /// Seconds, for what moves (N4N0 listening).
     pub time: f64,
+    /// Without the close button (the window's Home, where the menu stays).
+    pub stays: bool,
+}
+
+impl View<'_> {
+    /// Whether element `e` shows on this page: as the menu says, the close button not where it stays.
+    pub fn shows(&self, e: &Element) -> bool {
+        !layout::state(self.menu, e).hidden && !(self.stays && e.target == orbiters_orb::menu::Target::Close)
+    }
 }
 
 fn rect(r: layout::Rect, origin: Pos2) -> Rect {
@@ -281,7 +290,7 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
     backdrop(p, origin, layout, menu.listening.then_some(view.time));
     for (i, e) in layout.elements.iter().enumerate() {
         let state = layout::state(menu, e);
-        if state.hidden {
+        if !view.shows(e) {
             continue;
         }
         element(p, e, origin);

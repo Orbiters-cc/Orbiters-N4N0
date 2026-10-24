@@ -44,6 +44,8 @@ pub struct Service {
     window: Mutex<Option<(Child, Instant)>>,
     /// The overlay process we started, when, and for which SteamVR (its `vrserver` process id).
     overlay: Mutex<Option<(Child, Instant, Option<u32>)>>,
+    /// The SteamVR (its `vrserver` process id, 0 unknown) whose start of the app was looked at ([`Service::keep_steamvr_start`]).
+    steamvr_start_seen: Mutex<Option<u32>>,
     quitting: AtomicBool,
     #[cfg(windows)]
     main_thread: u32,
@@ -85,6 +87,25 @@ impl Service {
                 *window = Some((child, Instant::now()));
             }
             Err(e) => eprintln!("could not start the window: {e}"),
+        }
+    }
+
+    /// Once per SteamVR session: SteamVR is told a start with it chosen while it was not running, or else what it says
+    /// is kept in the settings (its own settings may have changed it): [`crate::startup`]. It is asked only while it runs.
+    fn keep_steamvr_start(&self) {
+        if self.quitting.load(Ordering::Relaxed) {
+            return;
+        }
+        let snap = self.ctl.view();
+        let session = snap.steamvr.pid.unwrap_or(0);
+        if !snap.steamvr.running || *self.steamvr_start_seen.lock().unwrap() == Some(session) {
+            return;
+        }
+        // Not yet answering (it is starting, or going): asked again next turn.
+        let Ok(client) = orbiters_openvr::Client::connect(orbiters_openvr::AppType::Background) else { return };
+        *self.steamvr_start_seen.lock().unwrap() = Some(session);
+        if let Some(startup) = crate::startup::reconcile(&client, &snap.settings.startup) {
+            self.ctl.update_settings(|s| s.startup = startup);
         }
     }
 
@@ -366,6 +387,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         unauthenticated: AtomicUsize::new(0),
         window: Mutex::new(None),
         overlay: Mutex::new(None),
+        steamvr_start_seen: Mutex::new(None),
         quitting: AtomicBool::new(false),
         #[cfg(windows)]
         main_thread: unsafe { windows::Win32::System::Threading::GetCurrentThreadId() },
@@ -404,6 +426,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     let svc = service.clone();
     std::thread::Builder::new().name("overlay-keeper".into()).spawn(move || loop {
         svc.keep_overlay();
+        svc.keep_steamvr_start();
         std::thread::sleep(Duration::from_secs(2));
     })?;
 

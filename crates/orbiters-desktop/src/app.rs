@@ -31,6 +31,7 @@ pub struct App {
     show_splash: bool,
     sidebar_since: Option<f64>,
     toasts: toast::Toasts,
+    home: pages::home::State,
     capture: pages::capture::State,
     sessions: pages::sessions::State,
     worlds: pages::worlds::State,
@@ -65,13 +66,14 @@ impl App {
             ctl,
             windowed: false,
             gpu: None,
-            page: Page::Capture,
+            page: Page::Home,
             page_since: 0.0,
             visit: 0,
             started: None,
             show_splash: true,
             sidebar_since: None,
             toasts: toast::Toasts::default(),
+            home: Default::default(),
             capture: Default::default(),
             sessions: Default::default(),
             worlds: Default::default(),
@@ -293,8 +295,9 @@ impl App {
         // Navigation with a pill that slides to the active page.
         let nav_top = logo_rect.bottom() + 28.0;
         let items = [
-            (Page::Capture, "Capture", icons::APERTURE),
+            (Page::Home, "Home", icons::HOUSE),
             (Page::Orb, "N4N0", icons::SMILEY),
+            (Page::Capture, "Capture", icons::APERTURE),
             (Page::Sessions, "Sessions", icons::FOLDER_OPEN),
             (Page::Worlds, "Visited worlds", icons::GLOBE),
             (Page::Settings, "Settings", icons::SLIDERS_HORIZONTAL),
@@ -432,6 +435,7 @@ impl App {
             top: TITLE_H,
         };
         match self.page {
+            Page::Home => pages::home::show(&mut child, &mut cx, &mut self.home),
             Page::Capture => pages::capture::show(&mut child, &mut cx, &mut self.capture),
             Page::Orb => pages::orb::show(&mut child, &mut cx, &mut self.orb),
             Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions),

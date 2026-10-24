@@ -26,3 +26,7 @@ ring = { version = "0.17", optional = true }
 ureq = { version = "3", default-features = false, features = ["native-tls"], optional = true }
 zstd = { version = "0.13", optional = true }
 tar = { version = "0.4", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# The start with Windows (the person's registry): `windows_start`.
+windows = { workspace = true }

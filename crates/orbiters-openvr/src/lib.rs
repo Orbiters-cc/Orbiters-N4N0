@@ -12,6 +12,7 @@
 compile_error!("orbiters-openvr supports 64-bit Windows (x86_64) only: it loads vrclient_x64.dll and calls IVRClientCore with the x64 convention");
 
 use orbiters_contracts::performance::tracking::{self, Device, Sample};
+pub mod applications;
 pub mod chaperone;
 pub mod compositor;
 #[cfg(windows)]
@@ -380,6 +381,7 @@ pub struct Client {
     input_table: Table,
     compositor_table: Table,
     chaperone_setup_table: Table,
+    applications_table: Table,
     _library: platform::Library,
 }
 
@@ -420,6 +422,7 @@ impl Client {
             input_table: OnceCell::new(),
             compositor_table: OnceCell::new(),
             chaperone_setup_table: OnceCell::new(),
+            applications_table: OnceCell::new(),
             _library: library,
         };
         client.system = client.interface(SYSTEM_VERSION)?;

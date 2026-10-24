@@ -1,15 +1,15 @@
 //! What the setup asks of Windows: the processes running from the install folder and the app's quit request, the
 //! installed-apps entry and the start with Windows (the person's own part of the registry), the shortcuts, free
-//! space, and starting a program on its own.
+//! space, and starting a program on its own; and of SteamVR, its start of the app.
 
-use orbiters_update::{APP_EXE, DISPLAY_NAME, PUBLISHER, RUN_KEY, RUN_VALUE, SETUP_EXE, UNINSTALL_KEY};
+use orbiters_update::{windows_start, APP_EXE, DISPLAY_NAME, PUBLISHER, SETUP_EXE, UNINSTALL_KEY};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use windows::core::{w, Interface, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteKeyW, RegDeleteTreeW, RegGetValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
-    REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
+    RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegDeleteTreeW, RegGetValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD,
+    REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::Threading::{
     OpenEventW, OpenProcess, QueryFullProcessImageNameW, SetEvent, TerminateProcess, WaitForSingleObject, EVENT_MODIFY_STATE, PROCESS_NAME_WIN32,
@@ -258,26 +258,61 @@ pub fn unregister() {
 
 /// Starts the app (in the tray, without its window) when the person signs in to Windows, or stops doing so.
 pub fn set_start_with_windows(dir: &Path, on: bool) -> anyhow::Result<()> {
-    if on {
-        Key::create(RUN_KEY)?.set_text(RUN_VALUE, &format!("\"{}\" --hidden", dir.join(APP_EXE).display()))
-    } else {
-        unsafe {
-            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(RUN_KEY), &HSTRING::from(RUN_VALUE));
-        }
-        Ok(())
-    }
+    windows_start::set(&dir.join(APP_EXE), on)
 }
 
 /// Whether the start with Windows points into `dir` (left alone otherwise: another install's).
 pub fn starts_with_windows_from(dir: &Path) -> bool {
-    let Some(line) = read_text(RUN_KEY, RUN_VALUE) else { return false };
-    let line = line.trim();
-    // `"<program>" --hidden`, or a program without quotes.
-    let program = match line.strip_prefix('"') {
-        Some(rest) => rest.split('"').next().unwrap_or_default(),
-        None => line.split(' ').next().unwrap_or_default(),
+    windows_start::program().is_some_and(|program| key(&program).starts_with(&format!("{}\\", key(dir))))
+}
+
+/// Has SteamVR start the app in `dir` with itself, or not, when SteamVR runs (it is never started for this): `Ok(false)`
+/// when it does not run. The install record keeps the choice, which the app then tells SteamVR the next time it runs.
+pub fn set_start_with_steamvr(dir: &Path, on: bool) -> anyhow::Result<bool> {
+    use orbiters_update::{STEAMVR_APP_KEY, STEAMVR_ARGUMENTS, STEAMVR_DESCRIPTION};
+    let Some(path) = orbiters_update::steamvr_manifest_path() else { return Ok(false) };
+    let exe = dir.join(APP_EXE);
+    let manifest = orbiters_openvr::applications::Manifest {
+        key: STEAMVR_APP_KEY,
+        binary: &exe,
+        arguments: STEAMVR_ARGUMENTS,
+        name: DISPLAY_NAME,
+        description: STEAMVR_DESCRIPTION,
     };
-    key(Path::new(program)).starts_with(&format!("{}\\", key(dir)))
+    orbiters_openvr::applications::set_start_with_steamvr(&manifest, &path, on).map_err(anyhow::Error::msg)
+}
+
+/// The setup's "Start with SteamVR" in the app's settings (their `startup` section only): `told` when SteamVR was told
+/// already, else the app tells it the next time SteamVR runs. A settings file that cannot be read is left alone.
+pub fn remember_start_with_steamvr(on: bool, told: bool) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let path = orbiters_update::app_settings_file().context("no settings folder")?;
+    let mut settings: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).with_context(|| format!("{} cannot be read", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(e.into()),
+    };
+    let fields = settings.as_object_mut().with_context(|| format!("{} is not a settings file", path.display()))?;
+    let startup = fields.entry("startup").or_insert_with(|| serde_json::json!({}));
+    anyhow::ensure!(startup.is_object(), "{} has another startup section", path.display());
+    startup["steamvr"] = serde_json::json!(on);
+    startup["steamvr_pending"] = serde_json::json!(!told);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Written beside, then moved over it: a cut write leaves the settings as they were.
+    let tmp = path.with_extension("json.setup");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&settings)?)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// SteamVR forgets the app (uninstalling): its start and its manifest go (only the manifest's file when SteamVR is not
+/// running: SteamVR drops a manifest whose file is gone).
+pub fn forget_steamvr() {
+    if let Some(path) = orbiters_update::steamvr_manifest_path() {
+        orbiters_openvr::applications::forget_application(orbiters_update::STEAMVR_APP_KEY, &path);
+    }
 }
 
 /// The person's Start menu programs folder, or desktop.
@@ -314,7 +349,7 @@ pub fn write_shortcut(at: &Path, dir: &Path) -> anyhow::Result<()> {
         link.SetPath(&HSTRING::from(target.as_os_str()))?;
         link.SetWorkingDirectory(&HSTRING::from(dir.as_os_str()))?;
         link.SetIconLocation(&HSTRING::from(target.as_os_str()), 0)?;
-        link.SetDescription(&HSTRING::from("Capture VRChat worlds, talk with N4N0 and call friends"))?;
+        link.SetDescription(&HSTRING::from("N4N0's menu for VRChat: fast walk, YouTube, calls, 3D pictures, music and the light"))?;
         if let Some(parent) = at.parent() {
             std::fs::create_dir_all(parent)?;
         }

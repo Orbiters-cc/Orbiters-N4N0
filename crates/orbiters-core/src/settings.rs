@@ -38,6 +38,19 @@ pub struct Settings {
     pub photo_3d_timer: u32,
     /// Where reconstructions train while VRChat runs.
     pub reconstruct_while_playing: WhilePlaying,
+    /// Starting with SteamVR (starting with Windows is the person's registry, read where it is shown).
+    pub startup: StartupSettings,
+}
+
+/// SteamVR starting Orbiters - N4N0 with itself, among its startup overlay apps. SteamVR keeps the truth; this is
+/// what was last chosen here or seen there, and a choice still to tell it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StartupSettings {
+    /// SteamVR starts Orbiters - N4N0 with itself.
+    pub steamvr: bool,
+    /// `steamvr` was chosen while SteamVR was not running (here, or in the setup): SteamVR is told the next time it runs.
+    pub steamvr_pending: bool,
 }
 
 /// Where a reconstruction trains while VRChat runs. On the graphics card, unpaced, training took the GPU from the game:
@@ -315,6 +328,7 @@ impl Default for Settings {
             photo_3d: Photo3dLength::default(),
             photo_3d_timer: 0,
             reconstruct_while_playing: WhilePlaying::default(),
+            startup: StartupSettings::default(),
         }
     }
 }

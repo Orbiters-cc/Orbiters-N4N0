@@ -184,8 +184,13 @@ fn run_task(args: &Args, payload: Option<&'static [u8]>, progress: &install::Pro
     let result = match args.mode {
         Mode::Install => {
             let bytes = payload.context("This setup holds no programs to install.")?;
-            let options =
-                install::Options { dir: target_dir(args), desktop_shortcut: true, start_with_windows: false, channel: orbiters_update::STABLE.into() };
+            let options = install::Options {
+                dir: target_dir(args),
+                desktop_shortcut: true,
+                start_with_windows: false,
+                start_with_steamvr: false,
+                channel: orbiters_update::STABLE.into(),
+            };
             let fresh = orbiters_update::InstallRecord::read(&options.dir).is_none();
             install::install(bytes, &options, progress, silent, fresh).map(|_| options.dir)
         }

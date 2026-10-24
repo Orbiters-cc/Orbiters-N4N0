@@ -22,6 +22,8 @@ use std::path::{Component, Path, PathBuf};
 pub mod net;
 #[cfg(feature = "payload")]
 pub mod payload;
+#[cfg(windows)]
+pub mod windows_start;
 
 /// What a release and an install record are of.
 pub const PRODUCT: &str = "orbiters-desktop";
@@ -43,6 +45,23 @@ pub const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Unin
 /// The value that starts the app with Windows, under `HKEY_CURRENT_USER\<RUN_KEY>`.
 pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 pub const RUN_VALUE: &str = "Orbiters - N4N0";
+/// The app's key in SteamVR: its application manifest, and SteamVR's start of it among its startup overlay apps.
+pub const STEAMVR_APP_KEY: &str = "cc.orbiters.n4n0";
+/// What SteamVR starts with itself: the app in the tray, as Windows does.
+pub const STEAMVR_ARGUMENTS: &str = "--hidden";
+pub const STEAMVR_DESCRIPTION: &str = "N4N0's menu for VRChat: fast walk, YouTube, calls, 3D pictures, music and the light";
+
+/// The app's SteamVR manifest, in its settings folder (`%APPDATA%\Orbiters\Desktop`), where SteamVR reads it from:
+/// the app and the setup write it there (the install folder's files are only the setup's payload).
+pub fn steamvr_manifest_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("Orbiters").join("Desktop").join("orbiters-n4n0.vrmanifest"))
+}
+
+/// The app's settings file (`orbiters_core::paths::settings_file` in the app), where the setup leaves its "Start with
+/// SteamVR" for the app when SteamVR could not be told at once.
+pub fn app_settings_file() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("Orbiters").join("Desktop").join("settings.json"))
+}
 
 /// The public half of the release key (`update-key.pub`, written by `cargo xtask keygen`).
 #[cfg(feature = "signing")]
@@ -192,6 +211,10 @@ pub struct InstallRecord {
     pub files: Vec<String>,
     pub desktop_shortcut: bool,
     pub start_with_windows: bool,
+    /// The setup's "Start with SteamVR" (SteamVR is told at once when it runs, else the app tells it the next time it
+    /// runs). Records of setups without the choice say no.
+    #[serde(default)]
+    pub start_with_steamvr: bool,
     /// When this version was installed (UTC, RFC 3339).
     pub installed: String,
 }
@@ -364,6 +387,7 @@ mod tests {
             files: vec![APP_EXE.into(), SETUP_EXE.into()],
             desktop_shortcut: true,
             start_with_windows: false,
+            start_with_steamvr: true,
             installed: "2026-10-23T12:00:00Z".into(),
         };
         record.write(&dir).unwrap();

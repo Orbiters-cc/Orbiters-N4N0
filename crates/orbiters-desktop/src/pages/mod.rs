@@ -2,6 +2,7 @@
 
 pub mod capture;
 pub mod form;
+pub mod home;
 pub mod mic;
 pub mod orb;
 pub mod sessions;
@@ -19,6 +20,8 @@ use std::sync::mpsc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
+    /// N4N0's menu: what the app does, side by side.
+    Home,
     Capture,
     Orb,
     Sessions,

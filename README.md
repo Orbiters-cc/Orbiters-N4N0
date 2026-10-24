@@ -1,6 +1,8 @@
 # Orbiters - N4N0
 
-Capture VRChat worlds while you play and bring them into Unity with [Mixer](https://github.com/Orbiters-cc/Mixer).
+The companion app of **N4N0** for VRChat, and of its menu: fast walk, YouTube, calls, 3D pictures, music and the light,
+side by side as equals on the window's Home, in the SteamVR overlay and on N4N0's screen on your avatar. It also
+captures VRChat worlds while you play and brings them into Unity with [Mixer](https://github.com/Orbiters-cc/Mixer).
 
 A shader on your capture avatar draws a small *capture strip* into VRChat's Stream camera: the exact camera pose,
 projection and frame flags, bit-coded in grey blocks, plus *depth frames* that carry exact depth from the game.
@@ -20,7 +22,8 @@ Calling N4N0 also opens **N4N0's menu**: the SteamVR binding "Open N4N0's menu" 
 you change it in SteamVR's controller settings), the wake word on its own, or a hand on N4N0. It has fast walk (walk
 boost on or off), YouTube (a keyboard with YouTube's suggestions as you type, five results a page with their thumbnail,
 channel and duration, and "Copy link" to paste in a world's video player; a sentence you say on the search page is what
-it searches), calls, and a 3D picture with a timer. It opens in the SteamVR overlay in front of you, and SteamVR's laser
+it searches), calls, a 3D picture with a timer, the music that plays and N4N0's light. The window's Home is the same
+menu, with the keyboard for searching. It opens in the SteamVR overlay in front of you, and SteamVR's laser
 works on it; when your orb has the projected screen ("Replace Orbiters overlay" on N4N0's card in My Avatar), it
 opens on that screen in VRChat instead, where you touch it with your index finger and people around see it too
 (contracts `Docs/orb.md`, Menu and Screen). YouTube is read without an account or a key, as YouTube's own website does.

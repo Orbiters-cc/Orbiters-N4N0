@@ -1,5 +1,5 @@
 //! `orbiters-desktop --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]
-//! [--height <points>]`
+//! [--height <points>] [--width <points>]`
 //! renders the interface offscreen in several states and writes one PNG per state, for visual review without a
 //! window. The controller is not started: the snapshots are made up, the session library is real. `--only e2e`
 //! instead records a real test pattern through the worker, driven by synthetic clicks, with avatar parameters
@@ -13,7 +13,7 @@ use crate::controller::{self, Controller};
 use crate::pages::Page;
 use crate::state::{CaptureState, Snapshot};
 use anyhow::Context as _;
-use egui::{pos2, vec2, Event, Pos2, RawInput, Rect, ViewportId, ViewportInfo};
+use egui::{pos2, vec2, Event, Pos2, RawInput, Rect, Vec2, ViewportId, ViewportInfo};
 use orbiters_core::protocol::{coverage, CaptureStats, CoverageMap, SpoutSourceInfo};
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::WorldState;
@@ -54,6 +54,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut settings = Settings::default();
     let mut scale = 1.0f32;
     let mut height = 820.0f32;
+    let mut width = 1280.0f32;
     let mut only: Option<String> = None;
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
@@ -63,6 +64,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "--scale" => scale = it.next().context("--scale <factor>")?.parse()?,
             "--only" => only = Some(it.next().context("--only <name>")?.clone()),
             "--height" => height = it.next().context("--height <points>")?.parse()?,
+            "--width" => width = it.next().context("--width <points>")?.parse()?,
             other => anyhow::bail!("unknown option {other}"),
         }
     }
@@ -183,7 +185,45 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         s
     };
 
+    // Home: N4N0's menu with what the service knows (friends to call, the light on, fast walk on).
+    let home = {
+        let mut s = with_calls(&orb_busy, false);
+        s.orb.light = Some(crate::state::OrbLight { on: true, color: 1, level: 0.6 });
+        s.settings.walk_boost.enabled = true;
+        s
+    };
+    let home_listening = {
+        let mut s = home.clone();
+        s.orb.listening = true;
+        s.orb.panel = Some("Fast walk is on. Say what you want, or tap a tile.".into());
+        s
+    };
+
     let scenarios = vec![
+        Scenario {
+            name: "home",
+            page: Page::Home,
+            snapshot: home,
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+        },
+        Scenario {
+            name: "home-listening",
+            page: Page::Home,
+            snapshot: home_listening,
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: Some(pos2(560.0, 300.0)),
+            scroll: 0.0,
+            world: None,
+        },
         Scenario {
             name: "orb-calls",
             page: Page::Orb,
@@ -464,6 +504,24 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 250.0,
             world: None,
         },
+        // The end of Settings: starting with Windows and SteamVR (SteamVR to be told at its next start), interface, about.
+        Scenario {
+            name: "settings-start",
+            page: Page::Settings,
+            snapshot: {
+                let mut s = idle.clone();
+                s.settings.startup.steamvr = true;
+                s.settings.startup.steamvr_pending = true;
+                s
+            },
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 100_000.0,
+            world: None,
+        },
         Scenario {
             name: "worlds",
             page: Page::Worlds,
@@ -581,13 +639,13 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             continue;
         }
         let path = out.join(format!("{}.png", sc.name));
-        render(&mut gpu, &sc, scale, height, &path)?;
+        render(&mut gpu, &sc, scale, vec2(width, height), &path)?;
         println!("{}", path.display());
     }
     Ok(())
 }
 
-fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, height: f32, path: &std::path::Path) -> anyhow::Result<()> {
+fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std::path::Path) -> anyhow::Result<()> {
     let ctx = egui::Context::default();
     orbiters_ui::install(&ctx);
     let ctl = Controller::new(sc.snapshot.settings.clone());
@@ -600,7 +658,6 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, height: f32, path: &st
     if !sc.splash {
         app.skip_splash();
     }
-    let size = vec2(1280.0, height);
     for f in 0..sc.frames {
         let t = f as f64 / 60.0;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(t), ..Default::default() };
@@ -805,6 +862,9 @@ fn e2e(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f
     let vrchat = StandInVrchat::start(&ctl)?;
     let before = controller::list_sessions(&settings.sessions_dir).len();
     let mut run = Run::new(gpu, backend, scale);
+    // The window opens on Home: recording is on Capture.
+    let t = run.time();
+    run.app.set_page(Page::Capture, t);
     run.click("Test pattern", 20.0)?;
     run.until("the test pattern to record", 30.0, |_| {
         let v = ctl.view();

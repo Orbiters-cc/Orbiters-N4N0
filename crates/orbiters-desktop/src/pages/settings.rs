@@ -1,4 +1,4 @@
-//! Settings page: the Orbiters account, capture, storage, VRChat and OSC, performance, interface, about. Changes apply as they are made (shown at
+//! Settings page: the Orbiters account, capture, storage, VRChat and OSC, performance, starting, interface, about. Changes apply as they are made (shown at
 //! once, saved in the background); text fields apply with their Save button (see [`super::form`]).
 
 use super::form::{self, Texts};
@@ -12,7 +12,7 @@ use orbiters_core::settings::WhilePlaying;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, SegOption, Size, Variant};
-use orbiters_ui::{format, icons, logo};
+use orbiters_ui::{format, icons, logo, toast};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -30,6 +30,14 @@ pub struct State {
     mic: MicTest,
     /// "Sign out" was pressed once: it asks before signing every tool out.
     confirm_sign_out: bool,
+    /// Whether Windows starts the app: read when the page opens (on the visit it was read), set at once by its switch
+    /// while the registry is written.
+    windows_start: Option<bool>,
+    windows_read: u64,
+    windows_job: Option<Job<Result<(), String>>>,
+    /// The start with SteamVR as switched, until the settings say so, and SteamVR being told meanwhile.
+    steamvr_shown: Option<bool>,
+    steamvr_job: Option<(bool, Job<Result<bool, String>>)>,
 }
 
 impl State {
@@ -59,6 +67,37 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             }
             state.picker = None;
         }
+    }
+
+    // Starting with Windows: read on each visit; a write that failed shows what is.
+    if state.windows_read != cx.visit {
+        state.windows_read = cx.visit;
+        state.windows_start = Some(crate::startup::starts_with_windows());
+    }
+    if let Some(result) = state.windows_job.as_mut().and_then(Job::take) {
+        state.windows_job = None;
+        if let Err(e) = result {
+            cx.toasts.push(&ctx, toast::Kind::Error, format!("The start with Windows did not change: {e}"));
+            state.windows_start = Some(crate::startup::starts_with_windows());
+        }
+    }
+    // Starting with SteamVR: told to SteamVR when it runs, kept for its next start otherwise.
+    if let Some((on, result)) = state.steamvr_job.as_mut().and_then(|(on, job)| job.take().map(|r| (*on, r))) {
+        state.steamvr_job = None;
+        match result {
+            Ok(told) => {
+                draft.startup.steamvr = on;
+                draft.startup.steamvr_pending = !told;
+                apply = true;
+            }
+            Err(e) => {
+                state.steamvr_shown = None;
+                cx.toasts.push(&ctx, toast::Kind::Error, format!("SteamVR did not take the change: {e}"));
+            }
+        }
+    }
+    if state.steamvr_job.is_none() && state.steamvr_shown == Some(base.startup.steamvr) {
+        state.steamvr_shown = None;
     }
 
     let from = orbiters_ui::blur::next_shape(ui);
@@ -308,7 +347,31 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
             });
 
-            section(ui, cx, 6, icons::SPARKLE, "Interface", None, |ui| {
+            section(ui, cx, 6, icons::POWER, "Start", Some("Orbiters - N4N0 opening on its own, in the tray"), |ui| {
+                let mut windows = state.windows_start.unwrap_or(false);
+                widgets::field(ui, "Start with Windows", Some("Waits in the tray, ready when VRChat starts."), 48.0, |ui| {
+                    if widgets::toggle(ui, "start-windows", &mut windows) && state.windows_job.is_none() {
+                        state.windows_start = Some(windows);
+                        state.windows_job = Some(Job::spawn(&ctx, move || crate::startup::set_start_with_windows(windows).map_err(|e| e.to_string())));
+                    }
+                });
+                widgets::separator(ui);
+                let startup = &snap.settings.startup;
+                let mut steamvr = state.steamvr_shown.unwrap_or(startup.steamvr);
+                let note = match (startup.steamvr_pending && state.steamvr_job.is_none(), startup.steamvr) {
+                    (true, true) => "SteamVR is not running: it is told at its next start, while Orbiters - N4N0 runs.",
+                    (true, false) => "SteamVR is not running: it stops at its next start, while Orbiters - N4N0 runs.",
+                    _ => "Opens when SteamVR starts, in its dashboard (SteamVR lists it with its startup overlay apps).",
+                };
+                widgets::field(ui, "Start with SteamVR", Some(note), 48.0, |ui| {
+                    if widgets::toggle(ui, "start-steamvr", &mut steamvr) && state.steamvr_job.is_none() {
+                        state.steamvr_shown = Some(steamvr);
+                        state.steamvr_job = Some((steamvr, Job::spawn(&ctx, move || crate::startup::set_start_with_steamvr(steamvr))));
+                    }
+                });
+            });
+
+            section(ui, cx, 7, icons::SPARKLE, "Interface", None, |ui| {
                 widgets::field(ui, "Reduce motion", Some("Calmer transitions and a still background."), 48.0, |ui| {
                     apply |= widgets::toggle(ui, "reduce-motion", &mut draft.reduce_motion);
                 });
@@ -323,7 +386,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
             let mut want_log = false;
             let mut quit = false;
-            section(ui, cx, 7, icons::INFO, "About", None, |ui| {
+            section(ui, cx, 8, icons::INFO, "About", None, |ui| {
                 ui.add_space(8.0);
                 let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::hover());
                 let lr = Rect::from_min_size(pos2(row.left(), row.center().y - 21.0), logo::size_for_width(48.0));

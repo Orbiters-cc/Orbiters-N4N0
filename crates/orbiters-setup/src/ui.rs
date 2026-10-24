@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
-const SIZE: [f32; 2] = [760.0, 500.0];
+const SIZE: [f32; 2] = [760.0, 560.0];
 const TITLE_H: f32 = 40.0;
 const BRAND_W: f32 = 300.0;
 const LICENCE: &str = include_str!("../../../LICENSE.md");
@@ -85,6 +85,7 @@ struct Setup {
     existing: Option<InstallRecord>,
     desktop_shortcut: bool,
     start_with_windows: bool,
+    start_with_steamvr: bool,
     launch: bool,
     remove_data: bool,
     picker: Option<mpsc::Receiver<Option<PathBuf>>>,
@@ -129,6 +130,7 @@ impl Setup {
             logo_hovered: false,
             desktop_shortcut: existing.as_ref().is_none_or(|r| r.desktop_shortcut),
             start_with_windows: existing.as_ref().is_some_and(|r| r.start_with_windows),
+            start_with_steamvr: existing.as_ref().is_some_and(|r| r.start_with_steamvr),
             dir,
             existing,
             launch: true,
@@ -364,13 +366,13 @@ impl Setup {
     fn welcome(&mut self, ui: &mut Ui, r: Rect, now: f64) {
         let (title, verb, note, warn) = self.action();
         let (visit, since) = (self.visit, self.page_since);
-        let sub = note.unwrap_or_else(|| "Capture VRChat worlds into sessions for Mixer, talk with N4N0, and call your friends.".into());
+        let sub = note.unwrap_or_else(|| "N4N0 and its menu for VRChat: fast walk, YouTube, calls, 3D pictures, music and the light.".into());
         block(ui, visit, since, 0, r, |ui| heading(ui, title, Some(&sub), if warn { theme::WARN } else { theme::FG_3 }));
 
         let locked = self.existing.is_some();
         let dir_text = short_path(&self.dir.display().to_string(), 64);
         let mut change = false;
-        let (desktop, autostart) = (&mut self.desktop_shortcut, &mut self.start_with_windows);
+        let (desktop, autostart, steamvr) = (&mut self.desktop_shortcut, &mut self.start_with_windows, &mut self.start_with_steamvr);
         let card_area = Rect::from_min_max(pos2(r.left(), r.top() + 92.0), r.max);
         block(ui, visit, since, 1, card_area, |ui| {
             card(ui, |ui| {
@@ -386,6 +388,10 @@ impl Setup {
                 widgets::separator(ui);
                 widgets::field(ui, "Start with Windows", Some("Waits in the tray, ready when VRChat starts."), 48.0, |ui| {
                     widgets::toggle(ui, "start-with-windows", autostart);
+                });
+                widgets::separator(ui);
+                widgets::field(ui, "Start with SteamVR", Some("Opens when SteamVR starts, in its dashboard."), 48.0, |ui| {
+                    widgets::toggle(ui, "start-with-steamvr", steamvr);
                 });
             });
         });
@@ -421,6 +427,7 @@ impl Setup {
                 dir: self.dir.clone(),
                 desktop_shortcut: self.desktop_shortcut,
                 start_with_windows: self.start_with_windows,
+                start_with_steamvr: self.start_with_steamvr,
                 channel: self.existing.as_ref().map(|r| r.channel.clone()).unwrap_or_else(|| orbiters_update::STABLE.into()),
             };
             self.start(Job::Install(options, true));
@@ -911,6 +918,7 @@ pub fn screenshots(dir: &std::path::Path, payload: Option<&'static [u8]>) -> any
         files: Vec::new(),
         desktop_shortcut: true,
         start_with_windows: false,
+        start_with_steamvr: false,
         installed: String::new(),
     };
     fn working(label: &str, fraction: f32, stuck: bool) -> Arc<Progress> {
@@ -927,7 +935,10 @@ pub fn screenshots(dir: &std::path::Path, payload: Option<&'static [u8]>) -> any
             "installing",
             Box::new(move |s| {
                 s.page = Page::Working;
-                s.job = Some(Job::Install(Options { dir: s.dir.clone(), desktop_shortcut: true, start_with_windows: false, channel: "stable".into() }, true));
+                s.job = Some(Job::Install(
+                    Options { dir: s.dir.clone(), desktop_shortcut: true, start_with_windows: false, start_with_steamvr: false, channel: "stable".into() },
+                    true,
+                ));
                 s.task = Some(working("Unpacking orbiters-desktop.exe", 0.42, false));
             }),
         ),
@@ -935,7 +946,10 @@ pub fn screenshots(dir: &std::path::Path, payload: Option<&'static [u8]>) -> any
             "closing",
             Box::new(move |s| {
                 s.page = Page::Working;
-                s.job = Some(Job::Install(Options { dir: s.dir.clone(), desktop_shortcut: true, start_with_windows: false, channel: "stable".into() }, true));
+                s.job = Some(Job::Install(
+                    Options { dir: s.dir.clone(), desktop_shortcut: true, start_with_windows: false, start_with_steamvr: false, channel: "stable".into() },
+                    true,
+                ));
                 s.task = Some(working("Closing Orbiters - N4N0…", 0.8, true));
             }),
         ),
@@ -962,6 +976,7 @@ pub fn screenshots(dir: &std::path::Path, payload: Option<&'static [u8]>) -> any
                         files: Vec::new(),
                         desktop_shortcut: true,
                         start_with_windows: false,
+                        start_with_steamvr: false,
                         installed: String::new(),
                     })
                 });
@@ -981,6 +996,7 @@ pub fn screenshots(dir: &std::path::Path, payload: Option<&'static [u8]>) -> any
                     files: Vec::new(),
                     desktop_shortcut: true,
                     start_with_windows: false,
+                    start_with_steamvr: false,
                     installed: String::new(),
                 });
             }),

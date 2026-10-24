@@ -657,7 +657,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             settings: &snap.settings.walk_boost,
             walking_allowed: vrchat_scene && !dashboard,
             place: place.as_deref(),
-            held: t.menu.menu.open || t.state.busy() || t.state.calibrator.in_world(now),
+            held: t.menu.host.menu.open || t.state.busy() || t.state.calibrator.in_world(now),
             away: snap.orb.afk,
             // VRChat's InStation, Seated and VelocityMagnitude tell whether it walks the avatar; without them (VRChat
             // not talking to Orbiters, or not lately) the stick alone says it.

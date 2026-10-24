@@ -31,6 +31,7 @@ pub struct Options {
     pub dir: PathBuf,
     pub desktop_shortcut: bool,
     pub start_with_windows: bool,
+    pub start_with_steamvr: bool,
     /// The release channel the app follows.
     pub channel: String,
 }
@@ -171,6 +172,7 @@ pub fn install(bytes: &[u8], options: &Options, progress: &Progress, silent: boo
         files: index.files.iter().map(|f| f.path.clone()).collect(),
         desktop_shortcut: options.desktop_shortcut,
         start_with_windows: options.start_with_windows,
+        start_with_steamvr: options.start_with_steamvr,
         installed: now(),
     };
     record.write(dir).with_context(|| format!("{} cannot be written", dir.join(RECORD_FILE).display()))?;
@@ -225,7 +227,8 @@ fn swap(dir: &Path, staging: &Path, backup: &Path, index: &payload::Index, previ
     Ok(())
 }
 
-/// Windows' side: the installed-apps entry, the Start menu (and desktop) shortcut, the start with Windows.
+/// Windows' side: the installed-apps entry, the Start menu (and desktop) shortcut, the start with Windows; and SteamVR's
+/// start of the app, when SteamVR runs (else the app tells it, from the record, the next time it runs).
 fn integrate(dir: &Path, record: &InstallRecord, previous: Option<&InstallRecord>, size: u64, fresh: bool) -> anyhow::Result<()> {
     system::register(dir, &record.version, size).context("The installed-apps entry cannot be written")?;
     if let Some(link) = system::start_menu_shortcut() {
@@ -244,6 +247,17 @@ fn integrate(dir: &Path, record: &InstallRecord, previous: Option<&InstallRecord
         } else if system::starts_with_windows_from(dir) {
             system::set_start_with_windows(dir, false)?;
         }
+        // Never a reason for the install to fail: what SteamVR could not be told now, the app tells it the next time
+        // SteamVR runs (its settings keep the choice).
+        if record.start_with_steamvr || previous.is_some_and(|p| p.start_with_steamvr) {
+            let told = system::set_start_with_steamvr(dir, record.start_with_steamvr).unwrap_or_else(|e| {
+                eprintln!("SteamVR's start of the app: {e:#}");
+                false
+            });
+            if let Err(e) = system::remember_start_with_steamvr(record.start_with_steamvr, told) {
+                eprintln!("the app's settings: {e:#}");
+            }
+        }
     }
     system::refresh_shell();
     Ok(())
@@ -252,8 +266,13 @@ fn integrate(dir: &Path, record: &InstallRecord, previous: Option<&InstallRecord
 /// Updates the install in `dir` to the payload, keeping its options and channel.
 pub fn update(bytes: &[u8], dir: &Path, progress: &Progress, silent: bool) -> anyhow::Result<InstallRecord> {
     let record = InstallRecord::read(dir).with_context(|| format!("Orbiters - N4N0 is not installed in {}.", dir.display()))?;
-    let options =
-        Options { dir: dir.to_path_buf(), desktop_shortcut: record.desktop_shortcut, start_with_windows: record.start_with_windows, channel: record.channel };
+    let options = Options {
+        dir: dir.to_path_buf(),
+        desktop_shortcut: record.desktop_shortcut,
+        start_with_windows: record.start_with_windows,
+        start_with_steamvr: record.start_with_steamvr,
+        channel: record.channel,
+    };
     install(bytes, &options, progress, silent, false)?;
     InstallRecord::read(dir).context("The install record is missing after the update.")
 }
@@ -273,6 +292,7 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
     if system::starts_with_windows_from(dir) {
         let _ = system::set_start_with_windows(dir, false);
     }
+    system::forget_steamvr();
     if let Some(link) = system::start_menu_shortcut() {
         let _ = std::fs::remove_file(link);
     }
@@ -419,6 +439,7 @@ mod tests {
             files: files.iter().map(|f| f.to_string()).collect(),
             desktop_shortcut: false,
             start_with_windows: false,
+            start_with_steamvr: false,
             installed: String::new(),
         }
     }

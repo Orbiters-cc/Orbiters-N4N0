@@ -95,6 +95,10 @@ impl App {
         if self.page == Page::Orb && page != Page::Orb {
             self.orb.leave(&self.ctl);
         }
+        // Home again while a feature's page shows: back to Home itself.
+        if page == Page::Home && self.page == Page::Home {
+            self.home.back_home();
+        }
         if page != self.page || self.visit == 0 {
             self.page = page;
             self.page_since = now;
@@ -105,6 +109,10 @@ impl App {
     /// The GPU of an offscreen renderer (screenshots).
     pub fn set_gpu(&mut self, gpu: crate::gpu::Handles) {
         self.gpu = Some(gpu);
+    }
+
+    pub fn home_mut(&mut self) -> &mut pages::home::State {
+        &mut self.home
     }
 
     pub fn sessions_mut(&mut self) -> &mut pages::sessions::State {

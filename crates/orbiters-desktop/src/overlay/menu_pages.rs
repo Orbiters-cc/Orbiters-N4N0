@@ -144,7 +144,7 @@ pub fn page_pictures(retro: bool) -> Vec<u8> {
 }
 
 /// A stand-in thumbnail: bands of colour (160 × 90, RGBA), with a disc.
-fn sample_rgba(seed: usize) -> (usize, usize, Vec<u8>) {
+pub(crate) fn sample_rgba(seed: usize) -> (usize, usize, Vec<u8>) {
     let (w, h) = (160usize, 90usize);
     let palette = [[226, 120, 82], [92, 140, 220], [120, 200, 140], [200, 110, 200], [230, 200, 90]];
     let base = palette[seed % palette.len()];
@@ -173,7 +173,7 @@ fn sample_picture(seed: usize) -> screen::Picture {
 }
 
 /// A stand-in for music art: a square, as most art is, whole on the menu's 16:9 card (as the media reading gives it).
-fn sample_art() -> picture::Rgb {
+pub(crate) fn sample_art() -> picture::Rgb {
     let size = 160usize;
     let mut pixels = Vec::with_capacity(size * size * 3);
     for y in 0..size {
@@ -187,7 +187,51 @@ fn sample_art() -> picture::Rgb {
 }
 
 /// The sample music art's key.
-const SAMPLE_ART: &str = "art:sample";
+pub(crate) const SAMPLE_ART: &str = "art:sample";
+
+/// Suggestions for "lofi hi".
+pub(crate) fn sample_suggestions() -> Vec<String> {
+    ["lofi hip hop", "lofi hip hop radio", "lofi hip hop beats to study", "lofi hits", "lofi hindi"].map(String::from).to_vec()
+}
+
+/// Results for "lofi hip hop", their thumbnails [`sample_rgba`] by their order (`sample00000`…).
+pub(crate) fn sample_videos() -> Vec<Video> {
+    let titles = [
+        ("lofi hip hop radio 📚 beats to relax/study to", "Lofi Girl", None, true),
+        ("Best of lofi hip hop 2021 ✨ [beats to relax/study to]", "Lofi Girl", Some("6:10:58"), false),
+        ("Chillhop Radio - jazzy & lofi hip hop beats 🐾", "Chillhop Music", None, true),
+        ("1 A.M Study Session 📚 [lofi hip hop]", "Lofi Girl", Some("1:01:14"), false),
+        ("Why the rush? - lo-fi beats for work/study / cat jazz", "chill chill journal", Some("3:31:19"), false),
+    ];
+    titles
+        .iter()
+        .enumerate()
+        .map(|(i, (t, c, d, live))| Video {
+            id: format!("sample{i:05}"),
+            title: t.to_string(),
+            channel: c.to_string(),
+            duration: d.map(str::to_string),
+            live: *live,
+        })
+        .collect()
+}
+
+/// A song playing, with [`sample_art`].
+pub(crate) fn sample_media() -> Media {
+    Media {
+        title: "Midnight City".into(),
+        artist: "M83".into(),
+        album: "Hurry Up, We're Dreaming".into(),
+        app: "Spotify".into(),
+        playing: true,
+        can_play_pause: true,
+        can_previous: true,
+        can_next: true,
+        position: Some(83),
+        duration: Some(243),
+        art: Some(SAMPLE_ART.into()),
+    }
+}
 
 /// Menus with sample content, one per page, with the element hovered and pressed.
 fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
@@ -211,11 +255,7 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     let mut search = base();
     search.press(Target::YouTube);
     search.type_text("lofi hi");
-    search.suggestions_arrived(
-        1,
-        "lofi hi",
-        vec!["lofi hip hop".into(), "lofi hip hop radio".into(), "lofi hip hop beats to study".into(), "lofi hits".into(), "lofi hindi".into()],
-    );
+    search.suggestions_arrived(1, "lofi hi", sample_suggestions());
     out.push((ScreenPage::SearchQwerty, search.clone(), Some(14), None));
     let mut azerty = search.clone();
     azerty.layout = KeyboardLayout::Azerty;
@@ -225,25 +265,7 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     out.push((ScreenPage::SearchSymbols, symbols, None, None));
     let mut results = base();
     results.search_for("lofi hip hop");
-    let titles = [
-        ("lofi hip hop radio 📚 beats to relax/study to", "Lofi Girl", None, true),
-        ("Best of lofi hip hop 2021 ✨ [beats to relax/study to]", "Lofi Girl", Some("6:10:58"), false),
-        ("Chillhop Radio - jazzy & lofi hip hop beats 🐾", "Chillhop Music", None, true),
-        ("1 A.M Study Session 📚 [lofi hip hop]", "Lofi Girl", Some("1:01:14"), false),
-        ("Why the rush? - lo-fi beats for work/study / cat jazz", "chill chill journal", Some("3:31:19"), false),
-    ];
-    let videos = titles
-        .iter()
-        .enumerate()
-        .map(|(i, (t, c, d, live))| Video {
-            id: format!("sample{i:05}"),
-            title: t.to_string(),
-            channel: c.to_string(),
-            duration: d.map(str::to_string),
-            live: *live,
-        })
-        .collect();
-    results.results_arrived(1, Results { videos, continuation: Some("next".into()) }, false);
+    results.results_arrived(1, Results { videos: sample_videos(), continuation: Some("next".into()) }, false);
     out.push((ScreenPage::Results, results, Some(9), None));
     let mut calls = base();
     calls.page = Page::Call;
@@ -262,19 +284,7 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     let more = || {
         let mut m = base();
         m.six_tiles = true;
-        m.media = Some(Media {
-            title: "Midnight City".into(),
-            artist: "M83".into(),
-            album: "Hurry Up, We're Dreaming".into(),
-            app: "Spotify".into(),
-            playing: true,
-            can_play_pause: true,
-            can_previous: true,
-            can_next: true,
-            position: Some(83),
-            duration: Some(243),
-            art: Some(SAMPLE_ART.into()),
-        });
+        m.media = Some(sample_media());
         m.volume = Some(Volume { percent: 40, muted: false });
         m.light = Some(Light { on: true, color: 1, level: 0.6 });
         m
@@ -337,8 +347,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
             id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).and_then(|i| thumbs.get(i)).map(|t| t.id())
         };
-        let modern =
-            paint(&mut canvas, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &picture, time: 0.4, stays: false }));
+        let modern = paint(&mut canvas, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &picture, time: 0.4 }));
         let path = out.join(format!("menu-{}.png", page.name()));
         write_png(&path, WIDTH, HEIGHT, &unpremultiply(&modern))?;
         println!("{}", path.display());
@@ -348,8 +357,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
             id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).and_then(|i| dots.get(i)).map(|t| t.id())
         };
-        let rgba =
-            paint(&mut canvas, |p| menu_retro::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &dotted, time: 0.4, stays: false }));
+        let rgba = paint(&mut canvas, |p| menu_retro::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &dotted, time: 0.4 }));
         let path = out.join(format!("menu-{}-retro.png", page.name()));
         write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
         println!("{}", path.display());

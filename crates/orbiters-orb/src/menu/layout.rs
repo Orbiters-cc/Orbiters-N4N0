@@ -171,6 +171,22 @@ pub enum Icon {
     SpeakerOff,
 }
 
+/// Home's six features in their order (the first four as on the four-tile Home), each with its icon, title and colour:
+/// the six-tile Home here, and the window's Home in Orbiters - N4N0.
+pub const HOME_TILES: [(Target, Icon, &str, Tint); 6] = [
+    (Target::FastWalk, Icon::Walk, "Fast walk", Tint::Green),
+    (Target::YouTube, Icon::YouTube, "YouTube", Tint::Red),
+    (Target::Call, Icon::Phone, "Call", Tint::Blue),
+    (Target::Photo, Icon::Cube, "3D picture", Tint::Violet),
+    (Target::Music, Icon::Music, "Music", Tint::Cyan),
+    (Target::Light, Icon::Lightbulb, "Light", Tint::Amber),
+];
+
+/// The 3D picture's timers as its page writes them ([`super::TIMERS`] in order), here and on the window's Home.
+pub const TIMER_LABELS: [&str; 4] = ["Off", "3 s", "5 s", "10 s"];
+/// Its camera flights ([`super::PhotoLength::ALL`] in order).
+pub const LENGTH_LABELS: [&str; 3] = ["1 s", "4 s", "8 s"];
+
 /// A tinted icon tile's colour (home tiles).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tint {
@@ -507,10 +523,10 @@ pub fn layout(page: ScreenPage) -> Layout {
         }
         ScreenPage::Photo => {
             elements.push(round(Target::Back, 32, Icon::Back));
-            for (i, label) in ["Off", "3 s", "5 s", "10 s"].into_iter().enumerate() {
+            for (i, label) in TIMER_LABELS.into_iter().enumerate() {
                 elements.push(with(element(Target::Timer(i as u8), Rect::new(100 + i as u16 * 136, 156, 124, 56), Look::Chip), None, Some(label)));
             }
-            for (i, label) in ["1 s", "4 s", "8 s"].into_iter().enumerate() {
+            for (i, label) in LENGTH_LABELS.into_iter().enumerate() {
                 elements.push(with(element(Target::Length(i as u8), Rect::new(100 + i as u16 * 136, 292, 124, 56), Look::Chip), None, Some(label)));
             }
             elements.push(with(element(Target::Take, Rect::new(100, 400, 444, 76), Look::Accent), Some(Icon::Cube), Some("Take 3D picture")));
@@ -523,15 +539,7 @@ pub fn layout(page: ScreenPage) -> Layout {
         }
         ScreenPage::HomeSix => {
             // Two rows of three: the first four as on the four-tile Home, then music and light.
-            let tiles = [
-                (Target::FastWalk, Icon::Walk, "Fast walk", Tint::Green),
-                (Target::YouTube, Icon::YouTube, "YouTube", Tint::Red),
-                (Target::Call, Icon::Phone, "Call", Tint::Blue),
-                (Target::Photo, Icon::Cube, "3D picture", Tint::Violet),
-                (Target::Music, Icon::Music, "Music", Tint::Cyan),
-                (Target::Light, Icon::Lightbulb, "Light", Tint::Amber),
-            ];
-            for (i, (target, icon, title, tint)) in tiles.into_iter().enumerate() {
+            for (i, (target, icon, title, tint)) in HOME_TILES.into_iter().enumerate() {
                 let (x, y) = (32 + (i as u16 % 3) * 324, 104 + (i as u16 / 3) * 176);
                 let mut tile = with(element(target, Rect::new(x, y, 312, 160), Look::Tile), Some(icon), Some(title));
                 tile.tint = Some(tint);
@@ -830,7 +838,13 @@ impl State {
 }
 
 pub fn state(menu: &Menu, element: &Element) -> State {
-    let on = match element.target {
+    target_state(menu, element.target)
+}
+
+/// What pressing `target` would find, wherever it is drawn (the window's Home draws its own controls for the same
+/// targets).
+pub fn target_state(menu: &Menu, target: Target) -> State {
+    let on = match target {
         Target::FastWalk => menu.fast_walk,
         Target::Timer(i) => TIMERS.get(i as usize) == Some(&menu.photo_timer),
         Target::Length(i) => super::PhotoLength::ALL.get(i as usize) == Some(&menu.photo_length),
@@ -840,7 +854,7 @@ pub fn state(menu: &Menu, element: &Element) -> State {
         Target::Mute => menu.volume.is_some_and(|v| v.muted),
         _ => false,
     };
-    let hidden = match element.target {
+    let hidden = match target {
         Target::Suggestion(i) => menu.shown_suggestions().nth(i as usize).is_none(),
         Target::Copy(i) => i as usize >= menu.page_results().len(),
         Target::Contact(i) => i as usize >= menu.page_contacts().len() || menu.call.is_some(),
@@ -854,7 +868,7 @@ pub fn state(menu: &Menu, element: &Element) -> State {
         Target::LightSwitch | Target::LightColor(_) | Target::LightLevel(_) => menu.light.is_none(),
         _ => false,
     };
-    let unavailable = element.target == Target::FastWalk && menu.desktop_mode;
+    let unavailable = target == Target::FastWalk && menu.desktop_mode;
     State { on: on && !unavailable, hidden, unavailable }
 }
 

@@ -17,6 +17,7 @@ use egui::{pos2, vec2, Event, Pos2, RawInput, Rect, Vec2, ViewportId, ViewportIn
 use orbiters_core::protocol::{coverage, CaptureStats, CoverageMap, SpoutSourceInfo};
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::WorldState;
+use orbiters_orb::menu::Page as MenuPage;
 use orbiters_ui::offscreen::{save_png, Offscreen};
 use orbiters_ui::{toast, widgets};
 use std::path::{Path, PathBuf};
@@ -36,6 +37,15 @@ struct Scenario {
     scroll: f32,
     /// The Visited worlds page: a world opened, and what happens in it.
     world: Option<WorldShot>,
+    /// Home with one of its features' pages open ([`stage_home`]).
+    home: Option<HomeShot>,
+}
+
+/// One of Home's pages open: with the overlay's sample content (a search typed, its results), or as it opens.
+#[derive(Clone, Copy)]
+struct HomeShot {
+    page: MenuPage,
+    samples: bool,
 }
 
 /// In a world's page (the one with the most captures, or with `pictures` the most pictures): pictures picked or shown
@@ -192,6 +202,13 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         s.settings.walk_boost.enabled = true;
         s
     };
+    // Home as many first see it: VRChat in desktop mode (no fast walk), calls off, no light on this N4N0.
+    let home_plain = {
+        let mut s = idle.clone();
+        s.orb.desktop_mode = true;
+        s.settings.orb.wake_word = true;
+        s
+    };
     let home_listening = {
         let mut s = home.clone();
         s.orb.listening = true;
@@ -203,7 +220,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         Scenario {
             name: "home",
             page: Page::Home,
-            snapshot: home,
+            snapshot: home.clone(),
             frames: 90,
             splash: false,
             open_detail: false,
@@ -211,6 +228,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "home-listening",
@@ -223,6 +241,163 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: Some(pos2(560.0, 300.0)),
             scroll: 0.0,
             world: None,
+            home: None,
+        },
+        Scenario {
+            name: "home-youtube",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Search, samples: true }),
+        },
+        Scenario {
+            name: "home-results",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Results, samples: true }),
+        },
+        Scenario {
+            name: "home-results-scrolled",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 560.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Results, samples: true }),
+        },
+        Scenario {
+            name: "home-call",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Call, samples: true }),
+        },
+        Scenario {
+            name: "home-ringing",
+            page: Page::Home,
+            snapshot: with_calls(&home, true),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+        },
+        Scenario {
+            name: "home-photo",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Photo, samples: true }),
+        },
+        Scenario {
+            name: "home-music",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Music, samples: true }),
+        },
+        Scenario {
+            name: "home-light",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Light, samples: true }),
+        },
+        Scenario {
+            name: "home-plain",
+            page: Page::Home,
+            snapshot: home_plain.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+        },
+        Scenario {
+            name: "home-plain-youtube",
+            page: Page::Home,
+            snapshot: home_plain.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Search, samples: false }),
+        },
+        Scenario {
+            name: "home-plain-call",
+            page: Page::Home,
+            snapshot: home_plain.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Call, samples: false }),
+        },
+        Scenario {
+            name: "home-plain-light",
+            page: Page::Home,
+            snapshot: home_plain.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Light, samples: false }),
         },
         Scenario {
             name: "orb-calls",
@@ -235,6 +410,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 1060.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "orb",
@@ -247,6 +423,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "orb-testing",
@@ -264,6 +441,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 100_000.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "orb-scrolled",
@@ -276,6 +454,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 760.0,
             world: None,
+            home: None,
         },
         // N4N0's menu settings: its keyboard and look.
         Scenario {
@@ -289,6 +468,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 1180.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "orb-new",
@@ -301,6 +481,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "splash",
@@ -313,6 +494,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "capture-idle",
@@ -325,6 +507,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "capture-recording",
@@ -337,6 +520,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "capture-consent",
@@ -349,6 +533,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "toasts",
@@ -364,6 +549,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "sessions",
@@ -376,6 +562,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: Some(pos2(400.0, 300.0)),
             scroll: 0.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "session-detail",
@@ -388,6 +575,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "sessions-waiting",
@@ -400,6 +588,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "session-waiting",
@@ -412,6 +601,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "session-reconstructing",
@@ -424,6 +614,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "settings",
@@ -436,6 +627,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         // The Orbiters account: signed out, then finishing in the browser.
         Scenario {
@@ -449,6 +641,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "settings-signing-in",
@@ -461,6 +654,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: None,
+            home: None,
         },
         // Content under the title bar (and the sessions under their heading): blurred, not cut.
         Scenario {
@@ -474,6 +668,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 112.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "settings-walk",
@@ -491,6 +686,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 1750.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "settings-scrolled",
@@ -503,6 +699,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 250.0,
             world: None,
+            home: None,
         },
         // The end of Settings: starting with Windows and SteamVR (SteamVR to be told at its next start), interface, about.
         Scenario {
@@ -521,6 +718,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 100_000.0,
             world: None,
+            home: None,
         },
         Scenario {
             name: "worlds",
@@ -533,6 +731,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: Some(pos2(420.0, 260.0)),
             scroll: 0.0,
             world: Some(WorldShot { maps: Some(maps.clone()), ..Default::default() }),
+            home: None,
         },
         // The card flying into the world's page, a sixth of a second in.
         Scenario {
@@ -546,6 +745,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: Some(WorldShot { maps: Some(maps.clone()), ..Default::default() }),
+            home: None,
         },
         Scenario {
             name: "world-detail",
@@ -558,6 +758,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: Some(WorldShot { maps: Some(maps.clone()), ..Default::default() }),
+            home: None,
         },
         Scenario {
             name: "world-waiting",
@@ -570,6 +771,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: Some(WorldShot { maps: Some(maps.clone()), ..Default::default() }),
+            home: None,
         },
         Scenario {
             name: "world-pictures",
@@ -582,6 +784,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 560.0,
             world: Some(WorldShot { pictures: true, select: 3, maps: Some(maps.clone()), ..Default::default() }),
+            home: None,
         },
         Scenario {
             name: "world-sharing",
@@ -594,6 +797,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 560.0,
             world: Some(WorldShot { pictures: true, maps: Some(maps.clone()), ..Default::default() }),
+            home: None,
         },
         Scenario {
             name: "world-signed-out",
@@ -606,6 +810,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 560.0,
             world: Some(WorldShot { pictures: true, select: 2, ..Default::default() }),
+            home: None,
         },
         Scenario {
             name: "world-viewer",
@@ -618,6 +823,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 0.0,
             world: Some(WorldShot { pictures: true, view: Some(1), maps: Some(maps), ..Default::default() }),
+            home: None,
         },
         Scenario {
             name: "sessions-scrolled",
@@ -630,8 +836,16 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer: None,
             scroll: 140.0,
             world: None,
+            home: None,
         },
     ];
+
+    // Home's music is the overlay's sample song, never what this computer plays.
+    crate::media::watcher().stand_in(crate::media::Reading {
+        media: Some(crate::overlay::menu_pages::sample_media()),
+        volume: Some(orbiters_orb::menu::Volume { percent: 40, muted: false }),
+        art: Some(std::sync::Arc::new(crate::media::Art { key: crate::overlay::menu_pages::SAMPLE_ART.into(), rgb: crate::overlay::menu_pages::sample_art() })),
+    });
 
     let mut gpu = Offscreen::new()?;
     for sc in scenarios {
@@ -677,6 +891,12 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         }
         if f == 0 {
             app.set_page(sc.page, t);
+        }
+        // Home made its menu on the first frame.
+        if let (Some(shot), 2) = (sc.home, f) {
+            if let Some(host) = app.home_mut().menu_host() {
+                stage_home(host, shot);
+            }
         }
         if f == 1 {
             for (kind, message) in &sc.toasts {
@@ -749,6 +969,44 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         std::thread::sleep(Duration::from_millis(3));
     }
     Ok(())
+}
+
+/// Home with one of its features' pages open: YouTube with the overlay's sample suggestions or results (their
+/// thumbnails too, nothing fetched) or as it opens; calls, the music and the light as the snapshot and the stand-in
+/// music say.
+fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }: HomeShot) {
+    use crate::overlay::menu_pages::{sample_rgba, sample_suggestions, sample_videos};
+    use orbiters_orb::menu::{Effect, Target};
+    let open = match page {
+        MenuPage::Home => return,
+        MenuPage::Search | MenuPage::Results => Target::YouTube,
+        MenuPage::Call => Target::Call,
+        MenuPage::Photo => Target::Photo,
+        MenuPage::Music => Target::Music,
+        MenuPage::Light => Target::Light,
+    };
+    host.press(open);
+    if !samples {
+        return;
+    }
+    match page {
+        MenuPage::Search => {
+            if let Some(Effect::Suggest { id, text }) = host.menu.set_query("lofi hi").into_iter().next() {
+                host.menu.suggestions_arrived(id, &text, sample_suggestions());
+            }
+        }
+        MenuPage::Results => {
+            if let Some(Effect::Search { id, .. }) = host.menu.search_for("lofi hip hop").into_iter().next() {
+                let videos = sample_videos();
+                for (i, video) in videos.iter().enumerate() {
+                    let (w, h, rgba) = sample_rgba(i);
+                    host.put_picture(&video.id, egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba));
+                }
+                host.menu.results_arrived(id, orbiters_orb::youtube::Results { videos, continuation: Some("next".into()) }, false);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// An offscreen run in real time for the end-to-end flows: a frame about every 16 ms, presses on controls found by

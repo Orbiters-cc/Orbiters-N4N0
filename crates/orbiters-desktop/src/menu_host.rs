@@ -9,12 +9,14 @@ use crate::ipc::OrbCommand;
 use crate::overlay::menu_retro;
 use crate::state::{CallLink, CallPhase, Snapshot};
 use egui::{ColorImage, TextureHandle, TextureId, TextureOptions};
-use orbiters_orb::menu::{Call, Contact, Effect, Menu, Page, SuggestQueue, Target};
+use orbiters_orb::menu::{Call, Contact, Effect, Light, Menu, Page, SuggestQueue, Target};
 use orbiters_orb::{picture, youtube};
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+/// A light the menu set shows until the service says the same, or this long.
+const LIGHT_ECHO: Duration = Duration::from_secs(2);
 /// A thumbnail that failed is tried again after this (times the tries), so many times.
 const THUMB_RETRY: Duration = Duration::from_secs(3);
 const THUMB_TRIES: u8 = 3;
@@ -55,6 +57,9 @@ pub struct MenuHost {
     done_rx: mpsc::Receiver<Done>,
     /// The media reading the menu shows (its version: [`crate::media::Watcher::reading`]).
     media_seen: u64,
+    /// The light as last set here, and when: what the service says replaces it once it says the same (or after
+    /// [`LIGHT_ECHO`]), so a switch does not jump back while the service is told.
+    light_set: Option<(Light, Instant)>,
     /// Something the menu shows changed since it was last drawn.
     pub dirty: bool,
 }
@@ -62,7 +67,17 @@ pub struct MenuHost {
 impl MenuHost {
     pub fn new(ctx: egui::Context) -> Self {
         let (done_tx, done_rx) = mpsc::channel();
-        Self { menu: Menu::default(), ctx, thumbs: HashMap::new(), suggest: SuggestQueue::default(), done_tx, done_rx, media_seen: 0, dirty: true }
+        Self {
+            menu: Menu::default(),
+            ctx,
+            thumbs: HashMap::new(),
+            suggest: SuggestQueue::default(),
+            done_tx,
+            done_rx,
+            media_seen: 0,
+            light_set: None,
+            dirty: true,
+        }
     }
 
     /// Opens the menu on Home with the settings it starts from (keyboard, the 3D picture's timer and length). It has
@@ -98,7 +113,15 @@ impl MenuHost {
         }
         changed |= set(&mut m.fast_walk, snap.settings.walk_boost.enabled);
         changed |= set(&mut m.desktop_mode, snap.orb.desktop_mode);
-        changed |= set(&mut m.light, snap.orb.light.map(|l| orbiters_orb::menu::Light { on: l.on, color: l.color, level: l.level }));
+        let said = snap.orb.light.map(|l| Light { on: l.on, color: l.color, level: l.level });
+        let light = match self.light_set {
+            Some((set, at)) if said != Some(set) && at.elapsed() < LIGHT_ECHO => Some(set),
+            _ => {
+                self.light_set = None;
+                said
+            }
+        };
+        changed |= set(&mut m.light, light);
         changed |= set(&mut m.countdown, snap.orb.photo_countdown);
         changed |= set(&mut m.photo_timer, snap.settings.photo_3d_timer);
         changed |= set(&mut m.photo_length, shared::photo_length(snap.settings.photo_3d));
@@ -278,7 +301,10 @@ impl MenuHost {
                     }
                 }
                 Effect::Media(command) => crate::media::watcher().command(command),
-                Effect::Light(light) => backend.orb(OrbCommand::Light { on: light.on, color: light.color, level: light.level }),
+                Effect::Light(light) => {
+                    self.light_set = Some((light, Instant::now()));
+                    backend.orb(OrbCommand::Light { on: light.on, color: light.color, level: light.level });
+                }
                 Effect::Close => close = true,
             }
         }
@@ -291,6 +317,12 @@ impl MenuHost {
             Some(Thumb::Ready(photo, dots)) => Some(if retro { dots.id() } else { photo.id() }),
             _ => None,
         }
+    }
+
+    /// Keeps a picture fetched elsewhere (the screenshot review's stand-ins) under `key`, as a fetched one.
+    pub fn put_picture(&mut self, key: &str, image: ColorImage) {
+        let ready = self.ready(key.to_string(), image);
+        self.thumbs.insert(key.to_string(), ready);
     }
 
     /// A picture ready to show: its texture, and its green dots for the retro look (crisp, so drawn with nearest pixels).

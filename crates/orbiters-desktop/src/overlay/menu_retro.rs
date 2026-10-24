@@ -382,7 +382,7 @@ pub fn draw(p: &Painter, origin: Pos2, view: &super::menu_ui::View) {
     furniture(p, origin, layout);
     for (i, e) in layout.elements.iter().enumerate() {
         let state = layout::state(menu, e);
-        if !view.shows(e) {
+        if state.hidden {
             continue;
         }
         let r = rect(e.rect, origin);

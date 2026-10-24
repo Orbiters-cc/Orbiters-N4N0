@@ -95,6 +95,15 @@ impl Watcher {
         state.reading.clone()
     }
 
+    /// A made-up reading in place of Windows' (the screenshot review), before anything wanted one: this process
+    /// never reads Windows' then.
+    pub fn stand_in(&self, reading: Reading) {
+        let mut state = self.state.0.lock().unwrap();
+        state.started = true;
+        state.reading = reading;
+        state.version += 1;
+    }
+
     /// The latest reading and its version (it changes with the reading).
     pub fn reading(&self) -> (u64, Reading) {
         let state = self.state.0.lock().unwrap();

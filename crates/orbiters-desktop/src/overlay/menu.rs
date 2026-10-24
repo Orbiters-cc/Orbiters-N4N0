@@ -298,7 +298,7 @@ impl MenuOverlay {
             let (host, hover, pressed, retro) = (&self.host, self.hover, self.pressed, self.retro);
             let menu = &host.menu;
             let picture = |id: &str| -> Option<TextureId> { host.picture(id, retro) };
-            let view = View { menu, hover, pressed, picture: &picture, time, stays: false };
+            let view = View { menu, hover, pressed, picture: &picture, time };
             self.canvas.paint(time, |p| match (self.behind, retro) {
                 (true, false) => menu_ui::draw_back(p, pos2(0.0, 0.0)),
                 (true, true) => menu_retro::draw_back(p, pos2(0.0, 0.0)),

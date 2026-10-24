@@ -534,6 +534,17 @@ impl Menu {
         self.suggest()
     }
 
+    /// What a text field shows becomes the search field's text (a display with a keyboard of its own: the window's
+    /// Home), with the same limit and the same suggestions as typing.
+    pub fn set_query(&mut self, text: &str) -> Vec<Effect> {
+        let text = cut(text.trim_start(), QUERY_MAX);
+        if text == self.query {
+            return Vec::new();
+        }
+        self.query = text;
+        self.suggest()
+    }
+
     pub fn backspace(&mut self) -> Vec<Effect> {
         if self.page != Page::Search {
             return Vec::new();
@@ -745,6 +756,15 @@ impl Menu {
     /// Whether a search, or the page asked for, is being fetched (shown as loading).
     pub fn loading(&self) -> bool {
         self.searching || self.turning || (self.loading_more && self.page_results().is_empty())
+    }
+
+    /// Calls the friend at `index` of the whole list (a display that shows them all): as pressing them on their page.
+    pub fn call_contact(&mut self, index: usize) -> Vec<Effect> {
+        if index >= self.contacts.len() {
+            return Vec::new();
+        }
+        self.contact_page = index / CONTACTS_PER_PAGE;
+        self.press(Target::Contact((index % CONTACTS_PER_PAGE) as u8))
     }
 
     pub fn page_contacts(&self) -> &[Contact] {
@@ -1103,5 +1123,24 @@ mod tests {
         assert_eq!(menu.heard("Lofi hip hop."), Some(vec![Effect::Search { id: 1, query: "Lofi hip hop".into() }]));
         assert_eq!(clock(42), "0:42");
         assert_eq!(clock(3723), "1:02:03");
+    }
+
+    #[test]
+    fn a_display_with_its_own_field_and_list_drives_the_same_menu() {
+        let mut menu = Menu::default();
+        menu.open();
+        menu.press(Target::YouTube);
+        // A text field: what it shows becomes the query, its start trimmed and cut as typing would.
+        assert_eq!(menu.set_query("  lofi"), vec![suggest(1, "lofi")]);
+        assert!(menu.set_query("lofi").is_empty(), "the same text asks nothing");
+        menu.set_query(&"x".repeat(60));
+        assert_eq!(menu.query.chars().count(), QUERY_MAX);
+        assert!(menu.set_query("").is_empty());
+        assert!(menu.query.is_empty() && menu.suggestions.is_empty());
+        // The whole friend list: the seventh friend is called as on its page.
+        menu.set_contacts((0..7).map(|i| Contact { id: format!("u{i}"), name: format!("Friend {i}") }).collect(), true, "");
+        assert_eq!(menu.call_contact(6), vec![Effect::CallContact { id: "u6".into() }]);
+        assert_eq!(menu.contact_page, 1);
+        assert!(menu.call_contact(7).is_empty(), "no such friend");
     }
 }

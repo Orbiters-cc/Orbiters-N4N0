@@ -5,6 +5,7 @@ use crate::state::CaptureState;
 use egui::{pos2, vec2, Align, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder, Vec2};
 use orbiters_contracts::manifest::{CaptureMode, StorageQuality};
 use orbiters_core::settings::{Photo3dLength, Settings};
+use orbiters_orb::menu::layout::LENGTH_LABELS;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::format;
 use orbiters_ui::record::{self, RecState, RecordButton};
@@ -16,6 +17,13 @@ use orbiters_ui::{icons, trail};
 pub struct State;
 
 const GRID_H: f32 = 500.0;
+
+/// What each of a 3D picture's camera flights does (1 s, 4 s, 8 s), here and on Home's 3D picture page.
+pub(super) const FLIGHT_HINTS: [&str; 3] = [
+    "A gentle sweep around what the camera aims at",
+    "Around you, then straight up and down and 10 m out every way",
+    "As 4 s, plus circles around four points 8 m away",
+];
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
     let from = orbiters_ui::blur::next_shape(ui);
@@ -116,11 +124,11 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
             picture = b3.show_at(ui, r3).clicked();
             // How long the camera flies: 1 s gentle, 4 s around you and out every way, 8 s with far circles too.
             let mut length = snap.settings.photo_3d;
-            let lengths = [
-                SegOption::new(Photo3dLength::Quick, "1 s").hint("A gentle sweep around what the camera aims at"),
-                SegOption::new(Photo3dLength::Standard, "4 s").hint("Around you, then straight up and down and 10 m out every way"),
-                SegOption::new(Photo3dLength::Full, "8 s").hint("As 4 s, plus circles around four points 8 m away"),
-            ];
+            let lengths = [Photo3dLength::Quick, Photo3dLength::Standard, Photo3dLength::Full]
+                .into_iter()
+                .zip(LENGTH_LABELS.into_iter().zip(FLIGHT_HINTS))
+                .map(|(length, (label, hint))| SegOption::new(length, label).hint(hint))
+                .collect::<Vec<_>>();
             let seg_w = 150.0;
             let seg_rect = Rect::from_min_size(pos2(r3.left() - 8.0 - seg_w, rect.bottom() - 36.0), vec2(seg_w, 36.0));
             let mut seg = ui.new_child(UiBuilder::new().max_rect(seg_rect).layout(Layout::right_to_left(Align::Center)));

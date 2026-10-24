@@ -1,5 +1,6 @@
 //! One instance at a time. A second launch asks the running one to show its window (or, with `--quit`, to shut
-//! down cleanly, e.g. before an update replaces the files), then exits.
+//! down cleanly, e.g. before an update replaces the files), then exits. A hidden one (Windows or SteamVR starting the
+//! app) leaves it as it is.
 
 /// What another launch asks the running instance to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,7 +13,7 @@ pub enum Request {
 pub enum Instance {
     /// First instance; keep the guard alive. Requests from other launches arrive on a background thread.
     First(Guard),
-    /// Another instance runs and was asked to show itself.
+    /// Another instance runs (and was asked to show itself, unless this launch was hidden).
     Other,
 }
 
@@ -40,11 +41,14 @@ mod win {
         unsafe { OpenEventW(EVENT_MODIFY_STATE, false, name).map(|event| SetEvent(event).is_ok()).unwrap_or(false) }
     }
 
-    pub fn acquire(on_request: impl Fn(Request) + Send + 'static) -> anyhow::Result<Instance> {
+    /// This process runs, or another does (asked to show its window when `show`).
+    pub fn acquire(show: bool, on_request: impl Fn(Request) + Send + 'static) -> anyhow::Result<Instance> {
         unsafe {
             let mutex = CreateMutexW(None, false, w!("Local\\OrbitersDesktop.Instance"))?;
             if GetLastError() == ERROR_ALREADY_EXISTS {
-                signal(Request::Show);
+                if show {
+                    signal(Request::Show);
+                }
                 return Ok(Instance::Other);
             }
             let show = CreateEventW(None, false, false, SHOW)?;
@@ -97,8 +101,10 @@ mod unix {
         stream.write_all(if request == Request::Show { b"show\n" } else { b"quit\n" }).is_ok()
     }
 
-    pub fn acquire(on_request: impl Fn(Request) + Send + 'static) -> anyhow::Result<Instance> {
-        if signal(Request::Show) {
+    /// This process runs, or another does (asked to show its window when `show`).
+    pub fn acquire(show: bool, on_request: impl Fn(Request) + Send + 'static) -> anyhow::Result<Instance> {
+        let other = if show { signal(Request::Show) } else { UnixStream::connect(socket_path()).is_ok() };
+        if other {
             return Ok(Instance::Other);
         }
         // Nobody answered: a stale socket from a crash.
@@ -109,7 +115,12 @@ mod unix {
             for stream in listener.incoming().flatten() {
                 let mut line = String::new();
                 if BufReader::new(stream).read_line(&mut line).is_ok() {
-                    on_request(if line.trim() == "quit" { Request::Quit } else { Request::Show });
+                    // A hidden launch only looks: it sends nothing.
+                    match line.trim() {
+                        "quit" => on_request(Request::Quit),
+                        "show" => on_request(Request::Show),
+                        _ => {}
+                    }
                 }
             }
         })?;

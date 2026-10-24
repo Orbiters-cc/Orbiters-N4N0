@@ -345,10 +345,11 @@ fn allow_foreground(pid: u32) {
 
 /// Runs the service until Quit. `hidden` starts in the tray without opening the window.
 pub fn run(hidden: bool) -> anyhow::Result<()> {
-    // A second launch shows the window instead (or quits the app with `--quit`).
+    // A second launch shows the window instead (or quits the app with `--quit`); a hidden one (Windows or SteamVR
+    // starting the app while it runs) changes nothing.
     let slot: Arc<Mutex<Option<Arc<Service>>>> = Arc::default();
     let requests = slot.clone();
-    let _instance = match single::acquire(move |request| {
+    let _instance = match single::acquire(!hidden, move |request| {
         let Some(svc) = requests.lock().unwrap().clone() else { return };
         match request {
             single::Request::Show => svc.show_window(false),

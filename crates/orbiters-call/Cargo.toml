@@ -1,6 +1,6 @@
 [package]
 name = "orbiters-call"
-description = "Orb's calls, a worker process: WebRTC audio (Opus) between two Orbiters desktops, through Cloudflare Realtime TURN (only, unless a call is direct)."
+description = "N4N0's calls, a worker process: WebRTC audio (Opus) between two Orbiters - N4N0 apps, through Cloudflare Realtime TURN (only, unless a call is direct)."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

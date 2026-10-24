@@ -1,5 +1,5 @@
 //! The headset's view as SteamVR's compositor has it (`GetMirrorTextureD3D11`, as cnlohr's openvr-screengrab and Haï's
-//! h-view read it): one eye's picture of the scene application, read back to the CPU. For Orb's phone camera: a picture
+//! h-view read it): one eye's picture of the scene application, read back to the CPU. For N4N0's phone camera: a picture
 //! of the world as its owner sees it, without VRChat's camera.
 
 use crate::compositor::{Compositor, Eye};

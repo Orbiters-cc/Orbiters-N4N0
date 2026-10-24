@@ -1,4 +1,4 @@
-//! Orb's menu in its retro look (contracts `Docs/orb.md`, Retro look): a cassette-futurism terminal, the same pages and
+//! N4N0's menu in its retro look (contracts `Docs/orb.md`, Retro look): a cassette-futurism terminal, the same pages and
 //! layout as Orbiters' own look (so pointing, hovering and the screen's memory stay as they are) drawn as phosphor-green
 //! line work on black. Panels have cut corners instead of round ones, labels are monospace capitals, icons sit in corner
 //! brackets, a dot grid runs behind everything and the page has a double frame with tick marks. Pictures are green dots.
@@ -138,7 +138,7 @@ fn frame(p: &Painter, origin: Pos2, layout: Option<&Layout>) {
     // A plate on the top line: the system's name, and hatched tape beside it.
     let plate = Rect::from_center_size(pos2(card.center().x, card.min.y + 5.0), vec2(176.0, 12.0));
     p.rect_filled(plate.expand2(vec2(6.0, 2.0)), 0.0, BG);
-    widgets::text(p, plate.center(), Align2::CENTER_CENTER, &mono("// ORB·OS 4 //", 11.0, TEXT2));
+    widgets::text(p, plate.center(), Align2::CENTER_CENTER, &mono("// N4N0·OS 4 //", 11.0, TEXT2));
     for side in [-1.0f32, 1.0] {
         let tape = Rect::from_center_size(pos2(card.center().x + side * 128.0, card.min.y + 5.0), vec2(64.0, 7.0));
         p.rect_filled(tape.expand(1.0), 0.0, BG);
@@ -284,7 +284,7 @@ fn element(p: &Painter, e: &Element, origin: Pos2, ink: Ink) {
     }
 }
 
-/// The page's own icons (Orb's microphone, the 3D picture's cube) and labels.
+/// The page's own icons (N4N0's microphone, the 3D picture's cube) and labels.
 fn furniture(p: &Painter, origin: Pos2, layout: &Layout) {
     for (r, icon, t) in &layout.icons {
         let r = rect(*r, origin);
@@ -412,12 +412,12 @@ pub fn draw(p: &Painter, origin: Pos2, view: &super::menu_ui::View) {
     scanlines(p, origin);
 }
 
-/// The back, in the retro look: "Orb menu, look at the other side".
+/// The back, in the retro look: "N4N0 menu, look at the other side".
 pub fn draw_back(p: &Painter, origin: Pos2) {
     frame(p, origin, None);
     let card = Rect::from_min_size(origin, vec2(layout::WIDTH as f32, layout::HEIGHT as f32));
     let c = card.center();
-    // Orb as a schematic: a ring with its eyes, in brackets.
+    // N4N0 as a schematic: a ring with its eyes, in brackets.
     let orb = c - vec2(0.0, 92.0);
     p.circle_stroke(orb, 30.0, Stroke::new(2.0, LINE));
     p.circle_filled(orb, 22.0, PANEL);
@@ -425,7 +425,7 @@ pub fn draw_back(p: &Painter, origin: Pos2) {
         p.rect_filled(Rect::from_center_size(orb + vec2(side * 9.0, -2.0), vec2(6.0, 12.0)), 0.0, LINE);
     }
     brackets(p, Rect::from_center_size(orb, vec2(84.0, 84.0)), 12.0, Stroke::new(1.5, DIM));
-    widgets::text(p, pos2(c.x, c.y + 2.0), Align2::CENTER_CENTER, &mono("// ORB MENU //", 44.0, TEXT));
+    widgets::text(p, pos2(c.x, c.y + 2.0), Align2::CENTER_CENTER, &mono("// N4N0 MENU //", 44.0, TEXT));
     widgets::text(p, pos2(c.x, c.y + 54.0), Align2::CENTER_CENTER, &mono("> look at the other side_", 22.0, TEXT2));
     hatch(p, Rect::from_center_size(pos2(c.x, c.y + 100.0), vec2(360.0, 10.0)), 8.0, Stroke::new(1.5, DIM));
 }

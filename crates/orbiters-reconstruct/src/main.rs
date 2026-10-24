@@ -1,4 +1,4 @@
-//! Reconstruction worker of Orbiters desktop:
+//! Reconstruction worker of Orbiters - N4N0:
 //!
 //! ```text
 //! orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]

@@ -14,7 +14,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let backend: Ctl = Arc::new(Remote(Client::connect(&endpoint, Role::Window)?));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Orbiters desktop")
+            .with_title("Orbiters - N4N0")
             .with_app_id("orbiters-desktop")
             .with_decorations(false)
             .with_inner_size([1280.0, 820.0])
@@ -29,5 +29,5 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         system_font_fallback: false,
         ..Default::default()
     };
-    eframe::run_native("Orbiters desktop", options, Box::new(move |cc| Ok(Box::new(App::new(cc, backend, splash))))).map_err(|e| anyhow::anyhow!("{e}"))
+    eframe::run_native("Orbiters - N4N0", options, Box::new(move |cc| Ok(Box::new(App::new(cc, backend, splash))))).map_err(|e| anyhow::anyhow!("{e}"))
 }

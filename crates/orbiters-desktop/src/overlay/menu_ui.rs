@@ -1,4 +1,4 @@
-//! Draws Orb's menu pages from their layout (`orbiters_orb::menu::layout`). The SteamVR overlay draws everything; the
+//! Draws N4N0's menu pages from their layout (`orbiters_orb::menu::layout`). The SteamVR overlay draws everything; the
 //! avatar's projected screen shows a picture of each page's unchanging part (cards, buttons, icons, labels: drawn here
 //! too, see [`draw_chrome`]) and draws the rest over it, at the same places, from what the desktop sends.
 
@@ -22,7 +22,7 @@ pub struct View<'a> {
     pub pressed: Option<usize>,
     /// A thumbnail by its key (a result's video id, the music's art key: `layout::picture_key`), once loaded.
     pub picture: &'a dyn Fn(&str) -> Option<TextureId>,
-    /// Seconds, for what moves (Orb listening).
+    /// Seconds, for what moves (N4N0 listening).
     pub time: f64,
 }
 
@@ -196,7 +196,7 @@ fn backdrop(p: &Painter, origin: Pos2, layout: &Layout, listening: Option<f64>) 
         let color = t.map(tint);
         p.circle_filled(r.center(), r.width() / 2.0, color.map_or(theme::INK_750, |c| theme::alpha(c, 0.16)));
         widgets::icon(p, r.center(), glyph(*icon), r.width() * 0.5, color.unwrap_or(theme::FG_3));
-        // Orb listening: the microphone breathes.
+        // N4N0 listening: the microphone breathes.
         if let (Icon::Microphone, Some(time)) = (icon, listening) {
             let pulse = (0.5 + 0.5 * (time * 4.0).sin()) as f32;
             p.circle_stroke(r.center(), r.width() / 2.0 + 3.0 + 4.0 * pulse, Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.7 - 0.5 * pulse)));
@@ -255,7 +255,7 @@ fn picture(p: &Painter, r: Rect, texture: Option<TextureId>) {
     }
 }
 
-/// The overlay seen from behind: Orb (a green dot with its eyes) over "Orb menu" and "look at the other side", as the
+/// The overlay seen from behind: N4N0 (a green dot with its eyes) over "N4N0 menu" and "look at the other side", as the
 /// avatar's screen shows its back. The menu is on the side its owner faces.
 pub fn draw_back(p: &Painter, origin: Pos2) {
     let card = Rect::from_min_size(origin, vec2(layout::WIDTH as f32, layout::HEIGHT as f32));
@@ -267,7 +267,7 @@ pub fn draw_back(p: &Painter, origin: Pos2) {
     for side in [-1.0, 1.0] {
         p.rect_filled(Rect::from_center_size(orb + vec2(side * 9.0, -2.0), vec2(7.0, 13.0)), theme::radius(3.5), CARD);
     }
-    let title = Txt::new("Orb menu", 52.0).weight(weight::SEMIBOLD).color(theme::FG);
+    let title = Txt::new("N4N0 menu", 52.0).weight(weight::SEMIBOLD).color(theme::FG);
     widgets::text(p, pos2(centre, card.center().y + 6.0), Align2::CENTER_CENTER, &title);
     let hint = Txt::new("look at the other side", 28.0).weight(weight::REGULAR).color(theme::FG_3);
     widgets::text(p, pos2(centre, card.center().y + 62.0), Align2::CENTER_CENTER, &hint);

@@ -84,7 +84,7 @@ fn osc_samples<'a>(address: &'a str, values: &'a [OscValue], at_ns: u64, initial
 }
 
 /// Face tracking's parameters (VRCFaceTracking's `v2/…`, and `FT/…`): hundreds a second that only the recording
-/// reads, never a button of Orb's.
+/// reads, never a button of N4N0's.
 fn face_tracking(name: &str) -> bool {
     name.starts_with("v2/") || name.starts_with("FT/")
 }
@@ -138,7 +138,7 @@ pub struct Controller {
     /// What this member added to the Map explorer, and the uploads' numbering (controller/maps.rs).
     maps_mine: Mutex<Option<MapsMine>>,
     upload_serial: AtomicU64,
-    /// Orb, the companion on the avatar (controller/orb.rs), and its ears (controller/voice.rs).
+    /// N4N0, the companion on the avatar (controller/orb.rs), and its ears (controller/voice.rs).
     orb: Mutex<orb::OrbRuntime>,
     voice: Mutex<voice::VoiceRuntime>,
     /// VRChat's frame rate per world, gathered for Orbiters (controller/performance.rs).
@@ -169,7 +169,7 @@ pub struct Controller {
     quitting: AtomicBool,
 }
 
-/// Work an OSC message asks for (Talk, a hand on the orb, the record toggle).
+/// Work an OSC message asks for (Talk, a hand on N4N0, the record toggle).
 type OscAction = Box<dyn FnOnce(&Shared) + Send>;
 
 /// OSC actions waiting at most: past this (a flood of messages), new ones are dropped rather than kept without end.
@@ -462,7 +462,7 @@ impl Controller {
 
     fn ensure_worker(self: &Shared) -> anyhow::Result<()> {
         // A late OSC echo or a queued start while the app quits starts no worker.
-        anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "Orbiters desktop is quitting.");
+        anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "Orbiters - N4N0 is quitting.");
         let mut guard = self.worker.lock().unwrap();
         if let Some(w) = guard.as_mut() {
             if w.alive() {
@@ -707,7 +707,7 @@ impl Controller {
     }
 
     fn start_with(self: &Shared, source: SourceSpec, importing: bool, from_osc: bool) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "Orbiters desktop is quitting.");
+        anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "Orbiters - N4N0 is quitting.");
         let settings = self.settings();
         let spout = matches!(source, SourceSpec::Spout { .. });
         if !importing && !settings.consent_acknowledged {
@@ -1063,7 +1063,7 @@ impl Controller {
     /// Does what an OSC message asked for on the OSC action thread (started on first use), after what earlier
     /// messages asked for: a record toggle pressed twice stops what it started. Not on the receiving thread, which
     /// must keep reading (face tracking sends hundreds of values a second into a small socket buffer) while starting
-    /// a capture or Orb's ears takes a while.
+    /// a capture or N4N0's ears takes a while.
     pub(super) fn osc_action(self: &Shared, action: impl FnOnce(&Shared) + Send + 'static) {
         self.try_osc_action(action);
     }
@@ -1109,7 +1109,7 @@ impl Controller {
         for event in events.drain(..) {
             match event {
                 OscEvent::Parameter { name, value } => {
-                    // Face tracking's flood skips Orb's buttons (none is one of its parameters).
+                    // Face tracking's flood skips N4N0's buttons (none is one of its parameters).
                     if !face_tracking(&name) {
                         self.orb_on_parameter(&name, &value);
                     }
@@ -1120,7 +1120,7 @@ impl Controller {
                 }
                 OscEvent::AvatarChanged { id } => {
                     self.on_avatar_changed();
-                    // Orb reads the parameters the last avatar held before they go (`on_osc`).
+                    // N4N0 reads the parameters the last avatar held before they go (`on_osc`).
                     self.orb_on_avatar(id.clone());
                     messages.push((AVATAR_CHANGE.to_string(), vec![OscValue::Text(id)]));
                 }
@@ -1401,7 +1401,7 @@ impl Controller {
     }
 
     /// Makes VRChat find the OSC service again (the Reconnect button, or VRChat quiet for a while): without it VRChat
-    /// sends no avatar parameter, so nothing on the avatar reaches Orb (Talk, a hand on the orb, Orb's screen).
+    /// sends no avatar parameter, so nothing on the avatar reaches N4N0 (Talk, a hand on N4N0, N4N0's screen).
     pub fn osc_rediscover(&self) {
         self.with_osc(|o| o.rediscover());
     }
@@ -1420,7 +1420,7 @@ impl Controller {
         let wanted = vec![parameter.clone()];
         // Starting a recording reads VRChat's current values over HTTP: the record toggle is acted on on the action
         // thread, in order (`record_toggled`).
-        let result = OscService::start_batched("Orbiters desktop", &wanted, vrchat_port, advertise, move |events, at_ns| {
+        let result = OscService::start_batched("Orbiters - N4N0", &wanted, vrchat_port, advertise, move |events, at_ns| {
             ctl.on_osc_events(events, at_ns, &parameter);
         });
         match result {

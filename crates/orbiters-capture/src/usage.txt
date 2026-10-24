@@ -1,4 +1,4 @@
-orbiters-capture: the capture worker of Orbiters desktop
+orbiters-capture: the capture worker of Orbiters - N4N0
 
   worker                        JSON-lines protocol on stdin/stdout (used by the app)
   record --source <src> [--out <sessions folder>] [--quality lossless|high|compact]

@@ -1,6 +1,6 @@
 [package]
 name = "orbiters-capture"
-description = "Capture worker of Orbiters desktop: frame sources (Spout, raw captures, test pattern), strip and depth decoding, session bundles."
+description = "Capture worker of Orbiters - N4N0: frame sources (Spout, raw captures, test pattern), strip and depth decoding, session bundles."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

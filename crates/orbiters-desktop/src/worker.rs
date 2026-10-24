@@ -18,7 +18,7 @@ pub fn sibling_exe(name: &str) -> PathBuf {
     dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
 }
 
-/// Puts a process the service started (the reconstruction, Orb's ears, the call worker, the window, the overlay) in
+/// Puts a process the service started (the reconstruction, N4N0's ears, the call worker, the window, the overlay) in
 /// the service's job: Windows ends it with the service, even when the service is killed or crashes. The reconstruction
 /// would otherwise keep the GPU for minutes and race the one a restarted service starts on the same session; the
 /// others leave once their link closes, unless they hang. What such a process starts in turn (a browser) is not in the

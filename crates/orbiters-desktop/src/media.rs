@@ -1,4 +1,4 @@
-//! The computer's music and volume, for Orb's menu and Orb's assistant (contracts `Docs/orb.md`, Menu): what Windows'
+//! The computer's music and volume, for N4N0's menu and N4N0's assistant (contracts `Docs/orb.md`, Menu): what Windows'
 //! media controls say plays (the app that played last: Spotify, a browser, any app that tells Windows), its art, and the
 //! default speakers' volume. A process reads them on a thread of its own, about once a second, only while something
 //! shows them ([`Watcher::want`]); the SteamVR overlay and the tray service each have theirs.

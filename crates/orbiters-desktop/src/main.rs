@@ -1,4 +1,4 @@
-//! Orbiters desktop: captures VRChat worlds (Spout frames with the avatar's pose strip) and what the avatar does
+//! Orbiters - N4N0: captures VRChat worlds (Spout frames with the avatar's pose strip) and what the avatar does
 //! (avatar parameters, voice, sound, SteamVR tracking) into session bundles for Mixer. A small tray service
 //! (controller, worker, OSC), a native egui window on wgpu in its own process while it is open, and a SteamVR
 //! dashboard tab in another while SteamVR runs.

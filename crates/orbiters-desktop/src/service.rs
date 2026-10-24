@@ -1,4 +1,4 @@
-//! The tray service: what runs while Orbiters desktop waits in the tray. It owns the controller (capture worker,
+//! The tray service: what runs while Orbiters - N4N0 waits in the tray. It owns the controller (capture worker,
 //! OSC, VRChat and SteamVR watchers), the tray icon and single-instance handling, and serves the window and the VR
 //! overlay over the IPC link. It never creates a GPU device: the window process does, and exits when closed; the
 //! overlay process runs while SteamVR does.
@@ -248,7 +248,7 @@ impl Service {
         let mailbox = Mailbox::new(true);
         let out = mailbox.clone();
         let mut writer = stream;
-        // The window gets the state about 30 times a second at most (an open Orb menu republishes 70 times): the newest
+        // The window gets the state about 30 times a second at most (an open N4N0 menu republishes 70 times): the newest
         // waits in the mailbox meanwhile. The overlay, in the headset, gets every one it can read.
         let pace = (role == Role::Window).then_some(WINDOW_PACE);
         std::thread::spawn(move || {

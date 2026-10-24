@@ -1,4 +1,4 @@
-//! Orbiters desktop's setup: one program that installs it for the person (in `%LOCALAPPDATA%\Programs`, no
+//! Orbiters - N4N0's setup: one program that installs it for the person (in `%LOCALAPPDATA%\Programs`, no
 //! administrator rights), updates it, and uninstalls it, in the Orbiters look.
 //!
 //! - `OrbitersSetup-<version>.exe`: the programs inside ([`payload`]); installs them, or updates an install.
@@ -111,7 +111,7 @@ fn main() {
 #[cfg(not(windows))]
 fn main() {
     let _ = (Args::parse(std::env::args().skip(1)), payload());
-    eprintln!("Orbiters desktop's setup is for Windows.");
+    eprintln!("Orbiters - N4N0's setup is for Windows.");
     std::process::exit(1);
 }
 
@@ -142,7 +142,7 @@ pub fn target_dir(args: &Args) -> PathBuf {
 fn relocate(args: &Args) -> i32 {
     let Some(dir) = install_dir(args) else {
         if !args.silent {
-            system::message("Orbiters desktop is not installed for this Windows account.", false, false);
+            system::message("Orbiters - N4N0 is not installed for this Windows account.", false, false);
         }
         return 1;
     };
@@ -191,11 +191,11 @@ fn run_task(args: &Args, payload: Option<&'static [u8]>, progress: &install::Pro
         }
         Mode::Update => {
             let bytes = payload.context("This setup holds no programs to install.")?;
-            let dir = install_dir(args).context("Orbiters desktop is not installed for this Windows account.")?;
+            let dir = install_dir(args).context("Orbiters - N4N0 is not installed for this Windows account.")?;
             install::update(bytes, &dir, progress, silent).map(|_| dir)
         }
         Mode::Uninstall => {
-            let dir = install_dir(args).context("Orbiters desktop is not installed for this Windows account.")?;
+            let dir = install_dir(args).context("Orbiters - N4N0 is not installed for this Windows account.")?;
             let r = install::uninstall(&dir, remove_data, progress, silent).map(|_| dir);
             done_relocated(args);
             return r.map(drop);
@@ -213,7 +213,7 @@ fn run_task(args: &Args, payload: Option<&'static [u8]>, progress: &install::Pro
 pub fn relaunch(dir: &std::path::Path, hidden: bool) {
     let args: &[&str] = if hidden { &["--hidden"] } else { &[] };
     if let Err(e) = system::launch(&dir.join(orbiters_update::APP_EXE), args) {
-        eprintln!("Orbiters desktop could not be started again: {e}");
+        eprintln!("Orbiters - N4N0 could not be started again: {e}");
     }
 }
 
@@ -232,8 +232,8 @@ pub fn done_relocated(args: &Args) {
 fn fallback(args: &Args, payload: Option<&'static [u8]>) -> i32 {
     let version = payload.and_then(|p| orbiters_update::payload::read_index(p).ok()).map(|i| i.version).unwrap_or_default();
     let ask = match args.mode {
-        Mode::Install => Some(format!("Install Orbiters desktop {version} in {}?\n\nIf it is running, it closes first.", target_dir(args).display())),
-        Mode::Uninstall => Some("Uninstall Orbiters desktop?\n\nYour sessions and settings are kept.".to_string()),
+        Mode::Install => Some(format!("Install Orbiters - N4N0 {version} in {}?\n\nIf it is running, it closes first.", target_dir(args).display())),
+        Mode::Uninstall => Some("Uninstall Orbiters - N4N0?\n\nYour sessions and settings are kept.".to_string()),
         Mode::Update => None,
     };
     if let Some(question) = ask {
@@ -247,11 +247,11 @@ fn fallback(args: &Args, payload: Option<&'static [u8]>) -> i32 {
         Ok(()) => {
             match args.mode {
                 Mode::Install => {
-                    system::message(&format!("Orbiters desktop {version} is installed. Find it in the Start menu."), false, false);
+                    system::message(&format!("Orbiters - N4N0 {version} is installed. Find it in the Start menu."), false, false);
                     relaunch(&target_dir(args), false);
                 }
                 Mode::Uninstall => {
-                    system::message("Orbiters desktop is uninstalled.", false, false);
+                    system::message("Orbiters - N4N0 is uninstalled.", false, false);
                 }
                 Mode::Update => {}
             }

@@ -110,7 +110,7 @@ fn close_app(dir: &Path, progress: &Progress, silent: bool) -> anyhow::Result<()
     if system::processes_in(dir).is_empty() {
         return Ok(());
     }
-    progress.label("Closing Orbiters desktop…");
+    progress.label("Closing Orbiters - N4N0…");
     if system::app_runs_from(dir) {
         system::ask_app_to_quit();
     }
@@ -121,10 +121,10 @@ fn close_app(dir: &Path, progress: &Progress, silent: bool) -> anyhow::Result<()
             while !system::wait_for_folder(dir, Duration::from_secs(1), stop) && !stop() {}
             progress.stuck(false);
         }
-        anyhow::ensure!(!progress.cancelled(), "Cancelled: Orbiters desktop was still running.");
+        anyhow::ensure!(!progress.cancelled(), "Cancelled: Orbiters - N4N0 was still running.");
         system::terminate_folder(dir);
     }
-    anyhow::ensure!(system::processes_in(dir).is_empty(), "Orbiters desktop is still running from {}.", dir.display());
+    anyhow::ensure!(system::processes_in(dir).is_empty(), "Orbiters - N4N0 is still running from {}.", dir.display());
     Ok(())
 }
 
@@ -251,7 +251,7 @@ fn integrate(dir: &Path, record: &InstallRecord, previous: Option<&InstallRecord
 
 /// Updates the install in `dir` to the payload, keeping its options and channel.
 pub fn update(bytes: &[u8], dir: &Path, progress: &Progress, silent: bool) -> anyhow::Result<InstallRecord> {
-    let record = InstallRecord::read(dir).with_context(|| format!("Orbiters desktop is not installed in {}.", dir.display()))?;
+    let record = InstallRecord::read(dir).with_context(|| format!("Orbiters - N4N0 is not installed in {}.", dir.display()))?;
     let options =
         Options { dir: dir.to_path_buf(), desktop_shortcut: record.desktop_shortcut, start_with_windows: record.start_with_windows, channel: record.channel };
     install(bytes, &options, progress, silent, false)?;
@@ -262,8 +262,8 @@ pub fn update(bytes: &[u8], dir: &Path, progress: &Progress, silent: bool) -> an
 /// folder once empty. `remove_data` also removes its settings, caches and speech models; the person's sessions are
 /// never touched.
 pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: bool) -> anyhow::Result<()> {
-    let record = InstallRecord::read(dir).with_context(|| format!("Orbiters desktop is not installed in {}.", dir.display()))?;
-    progress.set(0.05, "Closing Orbiters desktop…");
+    let record = InstallRecord::read(dir).with_context(|| format!("Orbiters - N4N0 is not installed in {}.", dir.display()))?;
+    progress.set(0.05, "Closing Orbiters - N4N0…");
     close_app(dir, progress, silent)?;
 
     progress.set(0.2, "Removing it from Windows…");
@@ -326,7 +326,7 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
     Ok(())
 }
 
-/// What Orbiters desktop keeps outside its install folder, its own only (`orbiters_core::paths`): settings
+/// What Orbiters - N4N0 keeps outside its install folder, its own only (`orbiters_core::paths`): settings
 /// (`%APPDATA%\Orbiters\Desktop`), caches and downloaded updates (`%LOCALAPPDATA%\Orbiters\Desktop`), speech models
 /// (`%LOCALAPPDATA%\Orbiters\Models`). What the Orbiters Unity tools share there (the account, Mixer's inbox, avatar
 /// manifests, logs) stays, and so do the sessions.
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn folders_compare_as_windows_does() {
-        assert!(same_dir(Path::new("C:/Users/A/Programs/Orbiters desktop/"), Path::new(r"c:\users\a\programs\orbiters desktop")));
-        assert!(!same_dir(Path::new("C:/Users/A/Programs/Orbiters"), Path::new("C:/Users/A/Programs/Orbiters desktop")));
+        assert!(same_dir(Path::new("C:/Users/A/Programs/Orbiters - N4N0/"), Path::new(r"c:\users\a\programs\orbiters - n4n0")));
+        assert!(!same_dir(Path::new("C:/Users/A/Programs/Orbiters"), Path::new("C:/Users/A/Programs/Orbiters - N4N0")));
     }
 }

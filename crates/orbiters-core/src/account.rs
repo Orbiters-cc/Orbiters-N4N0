@@ -4,7 +4,7 @@
 //! the current user (with Toolkit's entropy), elsewhere it is plain JSON readable by the user only. Signing in here
 //! writes the same file, so every tool shares it; signing out removes it for every tool.
 //!
-//! A sign-in is the same browser pairing the tools use (`/editor-links`): Orbiters desktop asks for a link, opens it,
+//! A sign-in is the same browser pairing the tools use (`/editor-links`): Orbiters - N4N0 asks for a link, opens it,
 //! the person signs in on the website and types the code shown here, and polling with the link's secret returns an
 //! editor credential (`orbit-…`, sent as a bearer token). It has no expiry of its own: the server drops it after 90
 //! idle days or when the account signs out everywhere, and `unity-wizard/token` tells whether it still works.
@@ -25,7 +25,7 @@ pub enum Server {
 const DEV_SWITCH: &str = "MCB_DevEnvironment";
 /// Toolkit's DPAPI entropy for the account file.
 const ENTROPY: &[u8] = b"Orbiters.Toolkit account";
-/// The client name Orbiters desktop signs in as (the server's editor-link clients).
+/// The client name Orbiters - N4N0 signs in as (the server's editor-link clients).
 pub const CLIENT: &str = "desktop";
 
 impl Server {
@@ -389,7 +389,7 @@ impl Api {
 
     /// Starts a browser sign-in with `provider` (`discord` or `telegram`).
     pub fn begin_link(&self, provider: &str) -> anyhow::Result<Link> {
-        let device = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "Orbiters desktop".into());
+        let device = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "Orbiters - N4N0".into());
         let response = self.agent.post(&self.url("editor-links")).send_json(serde_json::json!({ "provider": provider, "client": CLIENT, "device": device }))?;
         let link: Link = Self::json(response)?;
         if link.link_url.is_empty() || link.poll_token.is_empty() {
@@ -503,7 +503,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The browser pairing as Orbiters desktop runs it, against a disposable server: ORBITERS_TEST_API (its address) and
+    /// The browser pairing as Orbiters - N4N0 runs it, against a disposable server: ORBITERS_TEST_API (its address) and
     /// ORBITERS_TEST_JWT (a website token of a member there, who "confirms" in place of the browser). Run by hand:
     /// cargo test -p orbiters-core account::tests::signs_in_through_the_browser_pairing -- --ignored --nocapture
     #[test]
@@ -516,7 +516,7 @@ mod tests {
         assert!(link.link_url.contains("app=desktop"), "{}", link.link_url);
         assert!(matches!(api.poll_link(&link.poll_token).unwrap(), Poll::Pending));
         let token = link.link_url.split("token=").nth(1).unwrap().split('&').next().unwrap().to_string();
-        // A wrong code is refused in Orbiters desktop's words, the right one confirms.
+        // A wrong code is refused in Orbiters - N4N0's words, the right one confirms.
         let confirm = |code: &str| {
             api.agent()
                 .post(&api.url(&format!("editor-links/{token}/confirm")))
@@ -526,7 +526,7 @@ mod tests {
         };
         let wrong = confirm(if link.code == "AAAA" { "BBBB" } else { "AAAA" });
         assert_eq!(wrong.status().as_u16(), 400);
-        assert!(wrong.into_body().read_to_string().unwrap().contains("Orbiters desktop shows"));
+        assert!(wrong.into_body().read_to_string().unwrap().contains("Orbiters - N4N0 shows"));
         assert_eq!(confirm(&link.code).status().as_u16(), 200);
         let Poll::Done(account) = api.poll_link(&link.poll_token).unwrap() else { panic!("not signed in") };
         assert!(account.token.starts_with("orbit-"));

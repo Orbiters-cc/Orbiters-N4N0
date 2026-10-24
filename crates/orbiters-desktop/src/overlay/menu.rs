@@ -1,6 +1,6 @@
-//! Orb's menu in the play space (when the avatar has no Orb screen): a SteamVR overlay that opens half a metre in
-//! front of the headset, upright and facing it, when the person calls Orb (the controller binding, the wake word on
-//! its own, a hand on the orb). SteamVR's laser points at it whenever it shows. It draws the same pages as the
+//! N4N0's menu in the play space (when the avatar has no N4N0 screen): a SteamVR overlay that opens half a metre in
+//! front of the headset, upright and facing it, when the person calls N4N0 (the controller binding, the wake word on
+//! its own, a hand on N4N0). SteamVR's laser points at it whenever it shows. It draws the same pages as the
 //! avatar's screen ([`super::menu_ui`]) and runs the same menu (`orbiters_orb::menu`): YouTube is fetched here, the
 //! rest (calls, the clipboard, a 3D picture, fast walk) goes to the tray service.
 
@@ -87,7 +87,7 @@ pub struct MenuOverlay {
     /// Where the menu was opened (it stays there), and whether the head is behind it: it then shows its back.
     placed: Option<Matrix34>,
     behind: bool,
-    /// The menu is drawn in the retro look (Orbiters desktop's Orb › Orb's menu › Look).
+    /// The menu is drawn in the retro look (Orbiters - N4N0 › N4N0 › N4N0's menu › Look).
     retro: bool,
 }
 
@@ -126,7 +126,7 @@ pub fn in_front(head: &Matrix34, distance: f32, below: f32) -> Matrix34 {
 impl MenuOverlay {
     pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
         let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}");
-        let handle = overlay.create(&format!("{key}.menu"), "Orb's menu").map_err(|c| fail("menu", c))?;
+        let handle = overlay.create(&format!("{key}.menu"), "N4N0's menu").map_err(|c| fail("menu", c))?;
         let _ = overlay.set_width_in_meters(handle, WIDTH_M);
         overlay.set_mouse_input(handle).map_err(|c| fail("menu input", c))?;
         overlay.set_mouse_scale(handle, WIDTH as f32, HEIGHT as f32).map_err(|c| fail("menu mouse scale", c))?;
@@ -207,7 +207,7 @@ impl MenuOverlay {
     fn follow(&mut self, snap: &Snapshot) {
         let m = &mut self.menu;
         let mut changed = set(&mut m.listening, snap.orb.listening);
-        // What Orb says shows on Home too.
+        // What N4N0 says shows on Home too.
         if let Some(panel) = &snap.orb.panel {
             if m.heard_private || !m.heard.as_deref().is_some_and(|h| h.split_whitespace().eq(panel.split_whitespace())) {
                 m.heard = Some(panel.split_whitespace().collect::<Vec<_>>().join(" "));
@@ -224,7 +224,7 @@ impl MenuOverlay {
         let calls = &snap.orb.calls;
         let (ready, note) = match &calls.link {
             CallLink::Linked { .. } => (true, ""),
-            CallLink::Off => (false, "Calls are off: Orbiters desktop › Orb › Calls"),
+            CallLink::Off => (false, "Calls are off: Orbiters - N4N0 › N4N0 › Calls"),
             CallLink::SignedOut => (false, "Sign in to Orbiters to call friends"),
             CallLink::NoAccount => (false, "VRChat's account here is unknown: open VRChat"),
             CallLink::NotLinked { .. } => (false, "Link this VRChat account on Orbiters to call"),
@@ -353,7 +353,7 @@ impl MenuOverlay {
     /// happened (for the click sound).
     pub fn update(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter, snap: &Snapshot, backend: &Ctl, button: bool) -> bool {
         let mut clicked = false;
-        // The service asks for the menu (the wake word alone, a hand on the orb) or, with Orb's screen, keeps it.
+        // The service asks for the menu (the wake word alone, a hand on N4N0) or, with N4N0's screen, keeps it.
         let request = snap.orb.menu_request;
         let asked = self.request_seen.is_some_and(|seen| seen != request);
         self.request_seen = Some(request);
@@ -374,7 +374,7 @@ impl MenuOverlay {
             }
         }
         if snap.orb.screen && self.menu.open {
-            // The avatar now has Orb's screen: the menu lives there.
+            // The avatar now has N4N0's screen: the menu lives there.
             self.close(overlay);
         }
         // What the service reads: open, and whether a sentence is for the search field.
@@ -514,14 +514,14 @@ impl MenuOverlay {
         if !self.menu.open {
             return clicked;
         }
-        // A look switched in Orbiters desktop: the whole picture again.
+        // A look switched in Orbiters - N4N0: the whole picture again.
         let retro_now = snap.settings.orb.menu.look == MenuLook::Retro;
         if retro_now != self.retro {
             self.retro = retro_now;
             self.canvas.invalidate();
             self.dirty = true;
         }
-        // The microphone breathes while Orb listens: about 20 pictures a second then, else only on changes.
+        // The microphone breathes while N4N0 listens: about 20 pictures a second then, else only on changes.
         let animating = self.menu.listening;
         let due = self.last_paint.is_none_or(|t| t.elapsed() >= Duration::from_millis(if animating { 50 } else { 22 }));
         if (self.dirty || animating) && due {

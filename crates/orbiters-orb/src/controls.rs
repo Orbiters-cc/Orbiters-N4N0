@@ -1,4 +1,4 @@
-//! An avatar's controls as Orb sees them: from its manifest (menu labels and final parameter names, contracts
+//! An avatar's controls as N4N0 sees them: from its manifest (menu labels and final parameter names, contracts
 //! `Docs/avatar-manifest.md`) or, without one, from the parameters VRChat lists. Finds the control a person or the
 //! assistant names ("Hoodie", "Clothes / Hoodie") and turns a setting into the OSC messages that apply it.
 
@@ -119,7 +119,7 @@ pub fn is_system_parameter(name: &str) -> bool {
         "EyeTrackingActive",
         "LipTrackingActive",
     ];
-    const PREFIXES: &[&str] = &["Orb/", "KAT_", "OSC", "VRCOSC/", "FT/", "OSCm/", "BFI/", "Orbiters"];
+    const PREFIXES: &[&str] = &["N4N0/", "KAT_", "OSC", "VRCOSC/", "FT/", "OSCm/", "BFI/", "Orbiters"];
     const SUFFIXES: &[&str] = &["_IsGrabbed", "_IsPosed", "_Angle", "_Stretch", "_Squish"];
     BUILT_IN.contains(&name) || name.contains("v2/") || PREFIXES.iter().any(|p| name.starts_with(p)) || SUFFIXES.iter().any(|s| name.ends_with(s))
 }
@@ -158,16 +158,16 @@ pub struct Controls {
     pub from_manifest: bool,
 }
 
-/// Whether a control may be offered to the assistant: not Orb's own (its menu: Talk, calls, a 3D picture), not the
-/// system's (the capture kit's record toggle), and writing nothing VRChat, Orb or an OSC app drives. VRChat echoes a
-/// write to such a parameter, and Orbiters desktop would take the echo for the owner's press (a call, a recording).
+/// Whether a control may be offered to the assistant: not N4N0's own (its menu: Talk, calls, a 3D picture), not the
+/// system's (the capture kit's record toggle), and writing nothing VRChat, N4N0 or an OSC app drives. VRChat echoes a
+/// write to such a parameter, and Orbiters - N4N0 would take the echo for the owner's press (a call, a recording).
 fn offered(tags: &[Tag], parameter: Option<&String>, sub_parameters: &[String]) -> bool {
     !tags.iter().any(|t| matches!(t, Tag::Orb | Tag::System)) && parameter.into_iter().chain(sub_parameters).all(|p| !is_system_parameter(p))
 }
 
 impl Controls {
     /// The controls of a manifest: every control that sets a parameter (folders only when they do), but those never
-    /// offered (Orb's own, the system's).
+    /// offered (N4N0's own, the system's).
     pub fn from_manifest(manifest: &AvatarManifest) -> Self {
         let types = manifest.parameters.iter().map(|p| (p.name.clone(), p.kind)).collect();
         let controls = manifest
@@ -238,7 +238,7 @@ impl Controls {
         }
     }
 
-    /// Leaves out the controls that write one of `parameters`: Orbiters desktop's own (the capture kit's record and
+    /// Leaves out the controls that write one of `parameters`: Orbiters - N4N0's own (the capture kit's record and
     /// depth toggles, whatever the settings name them).
     pub fn withhold(&mut self, parameters: &[&str]) {
         self.controls.retain(|c| c.parameter.iter().chain(&c.sub_parameters).all(|p| !parameters.contains(&p.as_str())));
@@ -330,7 +330,7 @@ impl Controls {
         let address = format!("{PARAMETERS_PREFIX}{name}");
         let message = |v: f32| (address.clone(), self.typed(name, v));
         Ok(match (control.kind, setting) {
-            (Kind::TwoAxis | Kind::FourAxis, _) => return Err(format!("\"{}\" is a puppet: Orb cannot hold it.", control.path_text())),
+            (Kind::TwoAxis | Kind::FourAxis, _) => return Err(format!("\"{}\" is a puppet: N4N0 cannot hold it.", control.path_text())),
             (Kind::Button, Setting::Off) => Plan { now: vec![message(0.0)], later: Vec::new() },
             (Kind::Button, _) => Plan { now: vec![message(control.value)], later: vec![message(0.0)] },
             (Kind::Radial, Setting::Value(v)) => Plan { now: vec![message(v.clamp(0.0, 1.0))], later: Vec::new() },
@@ -351,7 +351,7 @@ impl Controls {
     }
 
     /// One line per control, for the assistant (`"Clothes / Hoodie" (toggle, on) [clothing]`: the avatar maker's labels
-    /// as a JSON string, cut short), at most `max_chars` (the rest counted). Orb's own controls and system ones are
+    /// as a JSON string, cut short), at most `max_chars` (the rest counted). N4N0's own controls and system ones are
     /// never there.
     pub fn summary(&self, latest: &HashMap<String, OscValue>, max_chars: usize) -> String {
         let mut out = String::new();
@@ -444,7 +444,7 @@ mod tests {
               "parameters": [
                 { "name": "VF1_Clothes/Hoodie", "type": "bool" }, { "name": "VF2_Hat", "type": "bool" },
                 { "name": "Outfit", "type": "int" }, { "name": "Size", "type": "float" }, { "name": "VRCEmote", "type": "int" },
-                { "name": "Orb/Visible", "type": "bool" } ],
+                { "name": "N4N0/Visible", "type": "bool" } ],
               "controls": [
                 { "path": ["Clothes"], "type": "submenu", "tags": ["clothing"] },
                 { "path": ["Clothes", "<b>Hoodie</b>"], "type": "toggle", "parameter": "VF1_Clothes/Hoodie", "value": 1, "tags": ["clothing"] },
@@ -454,7 +454,7 @@ mod tests {
                 { "path": ["Outfits", "Winter"], "type": "toggle", "parameter": "Outfit", "value": 3 },
                 { "path": ["Size"], "type": "radial", "parameter": "Size", "sub_parameters": ["Size"] },
                 { "path": ["GoGo Loco", "Poses", "Sit"], "type": "button", "parameter": "VRCEmote", "value": 129, "tags": ["pose"] },
-                { "path": ["Orb", "Orb"], "type": "toggle", "parameter": "Orb/Visible", "value": 1, "tags": ["orb"] }
+                { "path": ["N4N0", "N4N0"], "type": "toggle", "parameter": "N4N0/Visible", "value": 1, "tags": ["orb"] }
               ] }"#,
         )
         .unwrap()
@@ -469,7 +469,7 @@ mod tests {
     #[test]
     fn finds_controls_by_path_label_or_words() {
         let c = Controls::from_manifest(&manifest());
-        assert_eq!(c.controls.len(), 7, "the folder sets nothing; Orb's own control is not offered");
+        assert_eq!(c.controls.len(), 7, "the folder sets nothing; N4N0's own control is not offered");
         assert_eq!(c.find("Clothes / Hoodie").unwrap().parameter.as_deref(), Some("VF1_Clothes/Hoodie"));
         assert_eq!(c.find("hoodie").unwrap().label(), "<b>Hoodie</b>");
         assert_eq!(c.find("chapeau a plumes").unwrap().parameter.as_deref(), Some("VF2_Hat"));
@@ -506,7 +506,7 @@ mod tests {
         assert!(text.contains("\"Outfits / Winter\" (toggle, on)"));
         assert!(text.contains("\"Outfits / Summer\" (toggle, off)"));
         assert!(text.contains("\"Outfits / Default\" (toggle, off)"));
-        assert!(!text.contains("Orb / Orb"));
+        assert!(!text.contains("N4N0 / N4N0"));
         let first: HashMap<String, OscValue> = [(format!("{PARAMETERS_PREFIX}Outfit"), OscValue::Int(0))].into();
         let text = c.summary(&first, 10_000);
         assert!(text.contains("\"Outfits / Default\" (toggle, on)"), "an int's first choice is on at 0: {text}");
@@ -522,11 +522,11 @@ mod tests {
             &AvatarManifest::parse(
                 r#"{ "format": "orbiters.avatar", "version": 1, "avatar_id": "avtr_x",
                   "parameters": [ { "name": "Hat", "type": "bool" }, { "name": "OrbitersRecord", "type": "bool" },
-                    { "name": "MyRecord", "type": "bool" }, { "name": "Orb/Call/Go", "type": "bool" }, { "name": "Glow", "type": "float" } ],
+                    { "name": "MyRecord", "type": "bool" }, { "name": "N4N0/Call/Go", "type": "bool" }, { "name": "Glow", "type": "float" } ],
                   "controls": [
                     { "path": ["Hat"], "type": "toggle", "parameter": "Hat", "value": 1 },
-                    { "path": ["Orb", "Call", "Go"], "type": "button", "parameter": "Orb/Call/Go", "value": 1 },
-                    { "path": ["Orb", "3D picture"], "type": "button", "parameter": "Orb/Photo3D", "value": 1, "tags": ["orb"] },
+                    { "path": ["N4N0", "Call", "Go"], "type": "button", "parameter": "N4N0/Call/Go", "value": 1 },
+                    { "path": ["N4N0", "3D picture"], "type": "button", "parameter": "N4N0/Photo3D", "value": 1, "tags": ["orb"] },
                     { "path": ["Kit", "Record"], "type": "toggle", "parameter": "OrbitersRecord", "value": 1 },
                     { "path": ["Kit", "Record here"], "type": "toggle", "parameter": "MyRecord", "value": 1, "tags": ["system"] },
                     { "path": ["Kit", "My record"], "type": "toggle", "parameter": "MyRecord", "value": 1 },
@@ -539,7 +539,7 @@ mod tests {
         let paths: Vec<String> = c.search("", 25).iter().map(|c| c.path_text()).collect();
         assert_eq!(paths, vec!["Hat", "Glow"]);
         assert!(c.find("record").is_err() && c.find("go").is_err() && c.find("3d picture").is_err());
-        assert!(!c.summary(&HashMap::new(), 10_000).contains("Orb"));
+        assert!(!c.summary(&HashMap::new(), 10_000).contains("N4N0"));
         // A radial asked for with neither on nor a value is not pushed to its end.
         let glow = c.find("glow").unwrap();
         assert!(c.plan(glow, Setting::Press).unwrap_err().contains("radial"));
@@ -562,7 +562,7 @@ mod tests {
             ("/avatar/parameters/Hoodie".to_string(), OscValue::Bool(false)),
             ("/avatar/parameters/VelocityX".to_string(), OscValue::Float(0.0)),
             ("/avatar/parameters/v2/JawOpen".to_string(), OscValue::Float(0.0)),
-            ("/avatar/parameters/Orb/State".to_string(), OscValue::Int(0)),
+            ("/avatar/parameters/N4N0/State".to_string(), OscValue::Int(0)),
             ("/avatar/parameters/Tail_IsGrabbed".to_string(), OscValue::Bool(false)),
             ("/avatar/change".to_string(), OscValue::Text("avtr_x".into())),
         ];

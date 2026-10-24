@@ -1,9 +1,9 @@
-//! The tools Orbiters desktop lends Orb's assistant (contracts `Docs/orb-assistant.md`, client tools): what the
+//! The tools Orbiters - N4N0 lends N4N0's assistant (contracts `Docs/orb-assistant.md`, client tools): what the
 //! assistant may ask the desktop to do, as JSON Schemas for the server, and the actions its calls become.
 
 use serde_json::{json, Value};
 
-/// An orb mood the assistant may show while its answer is up (`Orb/State`).
+/// A mood N4N0 may show while the assistant's answer is up (`N4N0/State`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mood {
     Neutral,
@@ -54,7 +54,7 @@ pub enum Action {
         command: Option<crate::menu::MediaCommand>,
         volume_change: Option<i8>,
     },
-    /// The orb's light: what is given changes, the rest stays.
+    /// N4N0's light: what is given changes, the rest stays.
     Light {
         on: Option<bool>,
         color: Option<u8>,
@@ -77,7 +77,7 @@ pub fn specs(bare_parameters: bool) -> Vec<Value> {
         }),
         json!({
             "name": "find_avatar_controls",
-            "description": "Search the owner's avatar menu for controls whose path holds these words (empty: list them all). Returns paths, kinds and current states. Orb's own controls and the capture kit's are never listed: they are not yours to press.",
+            "description": "Search the owner's avatar menu for controls whose path holds these words (empty: list them all). Returns paths, kinds and current states. N4N0's own controls and the capture kit's are never listed: they are not yours to press.",
             "input_schema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }
         }),
         json!({
@@ -97,7 +97,7 @@ pub fn specs(bare_parameters: bool) -> Vec<Value> {
         }),
         json!({
             "name": "save_video",
-            "description": "Save the video the world's video player is playing now (or played last) to the owner's saved videos in Orbiters desktop.",
+            "description": "Save the video the world's video player is playing now (or played last) to the owner's saved videos in Orbiters - N4N0.",
             "input_schema": { "type": "object", "properties": {} }
         }),
         json!({
@@ -107,12 +107,12 @@ pub fn specs(bare_parameters: bool) -> Vec<Value> {
         }),
         json!({
             "name": "copy_to_clipboard",
-            "description": "Put text (such as a video link) in the clipboard of the owner's computer, so they can paste it into a world's video player or VRChat's keyboard. Orbiters desktop shows the owner the text and copies it once they say yes.",
+            "description": "Put text (such as a video link) in the clipboard of the owner's computer, so they can paste it into a world's video player or VRChat's keyboard. Orbiters - N4N0 shows the owner the text and copies it once they say yes.",
             "input_schema": { "type": "object", "properties": { "text": { "type": "string", "maxLength": 2000 } }, "required": ["text"] }
         }),
         json!({
             "name": "set_afk_message",
-            "description": "Set the message the orb's panel shows to people while the owner is away (AFK), and/or turn it on or off. A new text waits for the owner's yes.",
+            "description": "Set the message N4N0's panel shows to people while the owner is away (AFK), and/or turn it on or off. A new text waits for the owner's yes.",
             "input_schema": { "type": "object", "properties": {
                 "text": { "type": "string", "maxLength": 120 },
                 "enabled": { "type": "boolean" }
@@ -128,7 +128,7 @@ pub fn specs(bare_parameters: bool) -> Vec<Value> {
         }),
         json!({
             "name": "orb_light",
-            "description": "Make the orb a light (for a dark world, or a photo): on or off, its colour and brightness. Everyone around sees it. Only for an orb with the Light option (the avatar lists Orb/Light); the result says when it has none.",
+            "description": "Make N4N0 a light (for a dark world, or a photo): on or off, its colour and brightness. Everyone around sees it. Only for N4N0 with the Light option (the avatar lists N4N0/Light); the result says when it has none.",
             "input_schema": { "type": "object", "properties": {
                 "on": { "type": "boolean" },
                 "color": { "enum": ["white", "warm", "sunset", "pink", "violet", "blue", "cyan", "green"] },
@@ -137,7 +137,7 @@ pub fn specs(bare_parameters: bool) -> Vec<Value> {
         }),
         json!({
             "name": "orb_mood",
-            "description": "How the orb looks while your answer is up.",
+            "description": "How N4N0 looks while your answer is up.",
             "input_schema": { "type": "object", "properties": { "mood": { "enum": ["neutral", "happy", "annoyed", "surprised", "sleepy"] } }, "required": ["mood"] }
         }),
     ];
@@ -211,13 +211,13 @@ pub fn parse(name: &str, input: &Value) -> Result<Action, String> {
                     orbiters_contracts::orb::LIGHT_COLORS
                         .iter()
                         .position(|(n, _)| n.eq_ignore_ascii_case(&name))
-                        .ok_or_else(|| format!("The orb's light has no colour \"{name}\"."))? as u8,
+                        .ok_or_else(|| format!("N4N0's light has no colour \"{name}\"."))? as u8,
                 ),
                 None => None,
             };
             Action::Light { on: flag(input, "on"), color, level: number(input, "brightness").map(|v| v.clamp(0.0, 1.0)) }
         }
-        other => return Err(format!("Orbiters desktop has no tool \"{other}\".")),
+        other => return Err(format!("Orbiters - N4N0 has no tool \"{other}\".")),
     })
 }
 

@@ -1,22 +1,24 @@
-//! The wake word: a sentence for Orb starts with its name ("Orb, put my hoodie on", "Hey Orb what time is it"). The
-//! microphone's sentences are transcribed on this computer; only those that start with a wake word go further.
+//! The wake word: a sentence for N4N0 starts with its name, said "Nano" ("Nano, put my hoodie on", "Hey Nano what time
+//! is it"). The microphone's sentences are transcribed on this computer; only those that start with a wake word go
+//! further.
 
 use crate::controls::normalize;
 
-/// Greetings that may come before the wake word.
-const LEADS: &[&str] = &["hey", "hi", "hello", "ok", "okay", "yo", "dis", "eh", "he", "salut", "bonjour", "alors", "oh"];
+/// Greetings that may come before the wake word ("et" is how speech recognition writes a French "Hé").
+const LEADS: &[&str] = &["hey", "hi", "hello", "ok", "okay", "yo", "dis", "eh", "he", "et", "salut", "bonjour", "alors", "oh"];
 
-/// How speech recognition writes "Orb" (and "Dis Orb") when it mishears it, seen with French and English voices. Only
-/// as the whole sentence: "Herb is…", "Orbs are…" or "Or b…" also start ordinary sentences, which must not go further.
-const ORB_HEARD_AS: &[&str] = &["orbe", "orbs", "o herb", "oh herb", "herb", "drb", "dorb", "d'orb", "or b"];
+/// How speech recognition writes "Nano" (and "Dis Nano", "Oh Nano") when it mishears it, seen with French and English
+/// voices. Only as the whole sentence: "Nana is…" also starts ordinary sentences, which must not go further.
+const NANO_HEARD_AS: &[&str] = &["nana", "dano", "onano"];
 
-/// The token sequences that stand for a wake word: its own (`true`), and how "orb" gets misheard (`false`: only when
-/// nothing follows).
+/// The token sequences that stand for a wake word: its own (`true`), and how "Nano" gets misheard (`false`: only when
+/// nothing follows). N4N0 written as such is said "Nano".
 fn forms(word: &str) -> Vec<(Vec<String>, bool)> {
     let split = |w: &str| -> Vec<String> { normalize(w).split([' ', '/']).filter(|t| !t.is_empty()).map(str::to_string).collect() };
     let mut forms = vec![(split(word), true)];
-    if normalize(word) == "orb" {
-        forms.extend(ORB_HEARD_AS.iter().map(|w| (split(w), false)));
+    if matches!(normalize(word).as_str(), "nano" | "n4n0") {
+        forms.push((split("nano"), true));
+        forms.extend(NANO_HEARD_AS.iter().map(|w| (split(w), false)));
     }
     forms.retain(|(f, _)| !f.is_empty());
     forms
@@ -65,41 +67,48 @@ mod tests {
     use super::*;
 
     fn words() -> Vec<String> {
-        vec!["orb".into(), "orbe".into()]
+        vec!["nano".into()]
     }
 
+    // The sentences below are how NVIDIA Parakeet wrote Windows' voices (David, Zira, Hazel, Hortense) saying them.
     #[test]
     fn finds_the_command_after_the_wake_word() {
-        assert_eq!(command("Orb, mets mon sweat à capuche.", &words()).as_deref(), Some("mets mon sweat à capuche."));
-        assert_eq!(command("Hey Orb what's up?", &words()).as_deref(), Some("what's up?"));
-        assert_eq!(command("ok, Orbe : prends une photo", &words()).as_deref(), Some("prends une photo"));
-        assert_eq!(command("Orb!", &words()).as_deref(), Some(""));
-        assert_eq!(command("Dis Orb.", &words()).as_deref(), Some(""));
+        assert_eq!(command("Nano, mets mon souhait à capuche.", &words()).as_deref(), Some("mets mon souhait à capuche."));
+        assert_eq!(command("Hey Nano, what time is it?", &words()).as_deref(), Some("what time is it?"));
+        assert_eq!(command("Ok Nano, allume la lumière.", &words()).as_deref(), Some("allume la lumière."));
+        assert_eq!(command("Et Nano, mets de la musique.", &words()).as_deref(), Some("mets de la musique."));
+        assert_eq!(command("Nano", &words()).as_deref(), Some(""));
+        assert_eq!(command("Dis Nano.", &words()).as_deref(), Some(""));
+        assert_eq!(command("Salut Nano!", &words()).as_deref(), Some(""));
     }
 
     #[test]
     fn ignores_other_sentences() {
-        assert_eq!(command("I saw an orb yesterday", &words()), None);
-        assert_eq!(command("Orbiters is cool", &words()), None);
+        assert_eq!(command("I saw a nano drone yesterday", &words()), None);
+        assert_eq!(command("Nanotech is cool", &words()), None);
         assert_eq!(command("", &words()), None);
-        assert_eq!(command("hey there orb", &words()), None);
+        assert_eq!(command("hey there nano", &words()), None);
     }
 
     #[test]
-    fn hears_orb_through_recognition_mistakes_said_alone() {
-        // Misheard, the name alone still calls Orb (it then listens to the next sentence)...
-        assert_eq!(command("O Herb.", &words()).as_deref(), Some(""));
-        assert_eq!(command("DRB !", &words()).as_deref(), Some(""));
-        assert_eq!(command("Hey, or b?", &words()).as_deref(), Some(""));
+    fn hears_nano_through_recognition_mistakes_said_alone() {
+        // Misheard, the name alone still calls N4N0 (it then listens to the next sentence)...
+        assert_eq!(command("Nana", &words()).as_deref(), Some(""));
+        assert_eq!(command("Hi Nana", &words()).as_deref(), Some(""));
+        assert_eq!(command("Dano.", &words()).as_deref(), Some(""));
+        assert_eq!(command("Onano !", &words()).as_deref(), Some(""));
         // ...but a sentence that only starts like it is ordinary speech: it goes nowhere.
-        assert_eq!(command("O Herb, mets mon souhait à capuche s'il te plaît.", &words()), None);
-        assert_eq!(command("DRB, organise une soirée cinéma samedi soir.", &words()), None);
-        assert_eq!(command("Herb is coming tonight", &words()), None);
-        assert_eq!(command("Orbs are cool", &words()), None);
-        assert_eq!(command("Herbs are nice", &words()), None);
-        // The wake words themselves, however the sentence goes on.
-        assert_eq!(command("Orb. Save me this video please.", &words()).as_deref(), Some("Save me this video please."));
-        assert_eq!(command("Orbe, prends une photo", &words()).as_deref(), Some("prends une photo"));
+        assert_eq!(command("Dano, prend une photo.", &words()), None);
+        assert_eq!(command("Onano, prend une photo.", &words()), None);
+        assert_eq!(command("Nana is coming tonight", &words()), None);
+        // The wake word itself, however the sentence goes on.
+        assert_eq!(command("Nano. Put my hoodie on.", &words()).as_deref(), Some("Put my hoodie on."));
+    }
+
+    #[test]
+    fn n4n0_written_is_said_nano() {
+        assert_eq!(command("Nano, save this video please.", &["N4N0".into()]).as_deref(), Some("save this video please."));
+        assert_eq!(command("Nana", &["N4N0".into()]).as_deref(), Some(""));
     }
 
     #[test]

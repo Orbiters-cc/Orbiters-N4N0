@@ -55,7 +55,7 @@ pub struct OscStatus {
     /// Distinct OSC addresses VRChat sent values for (avatar parameters, poses).
     pub values: usize,
     /// VRChat sent something within the last minute. It sends avatar parameters only to OSC services it found:
-    /// off while VRChat runs, the avatar's buttons (Talk, a hand on the orb) do not reach Orbiters.
+    /// off while VRChat runs, the avatar's buttons (Talk, a hand on N4N0) do not reach Orbiters.
     #[serde(default)]
     pub receiving: bool,
 }
@@ -243,7 +243,7 @@ pub struct MapsMine {
     pub error: Option<String>,
 }
 
-/// What the orb shows (`Orb/State`, contracts `Docs/orb.md`).
+/// What N4N0 shows (`N4N0/State`, contracts `Docs/orb.md`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrbFace {
@@ -258,13 +258,13 @@ pub enum OrbFace {
     Surprised,
 }
 
-/// Who said a line of Orb's conversation.
+/// Who said a line of N4N0's conversation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrbWho {
     You,
     Orb,
-    /// Something Orb did or noticed (a tool ran, a video was saved).
+    /// Something N4N0 did or noticed (a tool ran, a video was saved).
     Note,
     Error,
 }
@@ -277,7 +277,7 @@ pub struct OrbLine {
     pub at_ms: u64,
 }
 
-/// An action of Orb's (publishing an event…) waiting for the member's approval on Orbiters.
+/// An action of N4N0's (publishing an event…) waiting for the member's approval on Orbiters.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrbConfirmation {
     pub id: String,
@@ -286,12 +286,12 @@ pub struct OrbConfirmation {
     pub approve_url: String,
 }
 
-/// The link of a confirmation the owner gives in Orbiters desktop itself (what Orb asks before it does a public,
+/// The link of a confirmation the owner gives in Orbiters - N4N0 itself (what N4N0 asks before it does a public,
 /// lasting or costly thing), rather than on the Orbiters website: the number of what waits follows it.
 pub const LOCAL_APPROVAL: &str = "orbiters-desktop:orb/approve/";
 
 impl OrbConfirmation {
-    /// Approved in Orbiters desktop (the Orb page's button, or a spoken yes), not on the Orbiters website.
+    /// Approved in Orbiters - N4N0 (the N4N0 page's button, or a spoken yes), not on the Orbiters website.
     pub fn is_local(&self) -> bool {
         self.approve_url.starts_with(LOCAL_APPROVAL)
     }
@@ -306,7 +306,7 @@ pub struct VoiceStatus {
     pub running: bool,
     /// The models are downloading: the fraction done.
     pub downloading: Option<f32>,
-    /// The microphone's level while Orb listens (0 to 1).
+    /// The microphone's level while N4N0 listens (0 to 1).
     pub level: f32,
     pub error: Option<String>,
     /// The models stopped loading (the worker stopped twice while loading them): installing again repairs them.
@@ -335,16 +335,16 @@ pub struct FrameChunk {
     pub gpu: Option<String>,
 }
 
-/// Orb, the companion on the avatar (controller/orb.rs).
+/// N4N0, the companion on the avatar (controller/orb.rs).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct OrbStatus {
     /// The avatar VRChat loaded.
     pub avatar_id: Option<String>,
-    /// The avatar carries the Orb prop, with this many text sync values.
+    /// The avatar carries the N4N0 prop, with this many text sync values.
     pub prop_sync: Option<u8>,
     /// The avatar's manifest was found: its menu is known by label.
     pub manifest: bool,
-    /// Controls Orb can reach on the avatar.
+    /// Controls N4N0 can reach on the avatar.
     pub controls: usize,
     pub face: OrbFace,
     /// What the panel shows now.
@@ -355,36 +355,36 @@ pub struct OrbStatus {
     /// The conversation as shown, the newest last.
     pub lines: Vec<OrbLine>,
     pub confirmations: Vec<OrbConfirmation>,
-    /// The free quota of Orb's assistant, as the last answer told it.
+    /// The free quota of N4N0's assistant, as the last answer told it.
     pub quota: Option<orbiters_orb::assistant::Quota>,
     pub voice: VoiceStatus,
     /// Saved videos, the newest first.
     pub videos: Vec<orbiters_orb::videos::SavedVideo>,
     /// Orbiters' processes and VRChat's.
     pub resources: Vec<ProcessUsage>,
-    /// Testing: the state the orb is held in, every state shown in turn, the owner acted as away.
+    /// Testing: the state N4N0 is held in, every state shown in turn, the owner acted as away.
     #[serde(default)]
     pub test_face: Option<OrbFace>,
     #[serde(default)]
     pub test_cycle: bool,
     #[serde(default)]
     pub test_afk: bool,
-    /// Testing: the whole orb is hidden (`Orb/Visible` sent false).
+    /// Testing: the whole orb is hidden (`N4N0/Visible` sent false).
     #[serde(default)]
     pub test_hidden: bool,
     /// Calls with VRChat friends (controller/calls.rs).
     #[serde(default)]
     pub calls: CallsStatus,
-    /// The avatar's Orb prop has the projected screen: Orb's menu opens there instead of in the overlay.
+    /// The avatar's N4N0 prop has the projected screen: N4N0's menu opens there instead of in the overlay.
     #[serde(default)]
     pub screen: bool,
-    /// Orb's menu is open on the avatar's screen.
+    /// N4N0's menu is open on the avatar's screen.
     #[serde(default)]
     pub screen_open: bool,
     /// VRChat runs in desktop mode (as it says; until it does, while SteamVR doesn't run): no fast walk.
     #[serde(default)]
     pub desktop_mode: bool,
-    /// Bumped when something asks the overlay to open Orb's menu (the wake word alone, a hand on the orb).
+    /// Bumped when something asks the overlay to open N4N0's menu (the wake word alone, a hand on N4N0).
     #[serde(default)]
     pub menu_request: u32,
     /// The last request may close the overlay's menu when it is open (asked again).
@@ -396,12 +396,12 @@ pub struct OrbStatus {
     /// Seconds before the 3D picture a menu's timer started.
     #[serde(default)]
     pub photo_countdown: Option<u32>,
-    /// The orb's light, when the avatar's orb has one (the Light option).
+    /// N4N0's light, when the avatar's N4N0 has one (the Light option).
     #[serde(default)]
     pub light: Option<OrbLight>,
 }
 
-/// The orb's light as the avatar holds it (`Orb/Light`, `Orb/Light/Color`, `Orb/Light/Level`).
+/// N4N0's light as the avatar holds it (`N4N0/Light`, `N4N0/Light/Color`, `N4N0/Light/Level`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct OrbLight {
     pub on: bool,
@@ -409,14 +409,14 @@ pub struct OrbLight {
     pub level: f32,
 }
 
-/// Orb calls as the interface shows them.
+/// N4N0 calls as the interface shows them.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CallsStatus {
     pub link: CallLink,
     /// Friends who can be called now.
     pub contacts: Vec<CallContact>,
     pub call: Option<CallView>,
-    /// The Orb's panel lists the contacts, and which one is chosen.
+    /// N4N0's panel lists the contacts, and which one is chosen.
     pub menu_open: bool,
     pub picked: usize,
 }
@@ -470,7 +470,7 @@ pub struct CallView {
 }
 
 impl OrbFace {
-    /// Every state, in `Orb/State`'s order.
+    /// Every state, in `N4N0/State`'s order.
     pub const ALL: [OrbFace; 8] =
         [OrbFace::Idle, OrbFace::Listening, OrbFace::Thinking, OrbFace::Talking, OrbFace::Sleeping, OrbFace::Happy, OrbFace::Annoyed, OrbFace::Surprised];
 }

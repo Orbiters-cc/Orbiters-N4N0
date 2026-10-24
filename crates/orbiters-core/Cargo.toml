@@ -1,6 +1,6 @@
 [package]
 name = "orbiters-core"
-description = "Shared logic of Orbiters desktop: settings, session bundles, keyframes, VRChat log, OSC, worker protocol."
+description = "Shared logic of Orbiters - N4N0: settings, session bundles, keyframes, VRChat log, OSC, worker protocol."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

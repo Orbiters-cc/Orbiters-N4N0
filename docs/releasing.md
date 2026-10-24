@@ -1,10 +1,10 @@
-# Releasing Orbiters desktop
+# Releasing Orbiters - N4N0
 
 A release is a version bump, built on this computer (not on GitHub's runners) and published on orbiters.cc:
 
 ```sh
 cargo xtask bump 0.2.0          # the workspace's version, in Cargo.toml and Cargo.lock
-git commit -am "Orbiters desktop 0.2.0" && git push
+git commit -am "Orbiters - N4N0 0.2.0" && git push
 cargo xtask release
 ```
 
@@ -126,7 +126,7 @@ request bodies at 100 MB.
 ## The setup
 
 `OrbitersSetup-<version>.exe` holds the whole app (about 30 MB) and works offline. It installs for the person who
-runs it, in `%LOCALAPPDATA%\Programs\Orbiters desktop` (or a folder they choose), without administrator rights. It
+runs it, in `%LOCALAPPDATA%\Programs\Orbiters - N4N0` (or a folder they choose), without administrator rights. It
 adds the app to Windows' installed apps (Settings, Apps) with its icon, version and size, a Start menu shortcut,
 optionally a desktop shortcut, and optionally a start with Windows in the tray (`--hidden`).
 

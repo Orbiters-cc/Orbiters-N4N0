@@ -34,12 +34,12 @@ mod win {
     impl Tray {
         /// Creates the icon; its events arrive on this thread's message loop.
         pub fn new(service: Arc<Service>) -> anyhow::Result<Self> {
-            let show = MenuItem::with_id("show", "Show Orbiters desktop", true, None);
+            let show = MenuItem::with_id("show", "Show Orbiters - N4N0", true, None);
             let toggle = MenuItem::with_id("toggle", "Start recording", true, None);
-            let quit = MenuItem::with_id("quit", "Quit Orbiters desktop", true, None);
+            let quit = MenuItem::with_id("quit", "Quit Orbiters - N4N0", true, None);
             let menu = Menu::with_items(&[&show, &toggle, &PredefinedMenuItem::separator(), &quit])?;
             let tray =
-                TrayIconBuilder::new().with_tooltip("Orbiters desktop").with_menu(Box::new(menu)).with_menu_on_left_click(false).with_icon(icon()?).build()?;
+                TrayIconBuilder::new().with_tooltip("Orbiters - N4N0").with_menu(Box::new(menu)).with_menu_on_left_click(false).with_icon(icon()?).build()?;
 
             let svc = service.clone();
             MenuEvent::set_event_handler(Some(move |e: MenuEvent| match e.id.0.as_str() {

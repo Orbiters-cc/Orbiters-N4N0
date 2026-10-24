@@ -1,4 +1,4 @@
-//! The client of Orb's assistant on the Orbiters server (contracts `Docs/orb-assistant.md`): one request of a turn,
+//! The client of N4N0's assistant on the Orbiters server (contracts `Docs/orb-assistant.md`): one request of a turn,
 //! read as server-sent events. The conversation lives here, on the desktop; the server keeps nothing.
 
 use anyhow::Context as _;
@@ -146,9 +146,9 @@ fn error_from(status: u16, body: &str) -> AssistantError {
         .to_string()
     });
     let message = text("message").or_else(|| text("error")).unwrap_or_else(|| match code.as_str() {
-        "unauthorized" => "Sign in to Orbiters again to talk to Orb.".to_string(),
-        "rate_limited" | "quota_exhausted" => "Orb needs a break: try again in a moment.".to_string(),
-        _ => format!("Orb's assistant is not available right now ({status})."),
+        "unauthorized" => "Sign in to Orbiters again to talk to N4N0.".to_string(),
+        "rate_limited" | "quota_exhausted" => "N4N0 needs a break: try again in a moment.".to_string(),
+        _ => format!("N4N0's assistant is not available right now ({status})."),
     });
     AssistantError { code, message }
 }

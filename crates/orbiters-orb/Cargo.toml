@@ -1,6 +1,6 @@
 [package]
 name = "orbiters-orb"
-description = "Orb, the Orbiters companion: its text panel, avatar controls, assistant client and helpers, without IO threads."
+description = "N4N0, the Orbiters companion: its text panel, avatar controls, assistant client and helpers, without IO threads."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

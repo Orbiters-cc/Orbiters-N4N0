@@ -2,7 +2,7 @@
 //! [`capture`] hands every packet to its caller with the QueryPerformanceCounter time of its first frame on the
 //! shared clock ([`orbiters_core::clock`]), as interleaved float samples; [`capture_packets`] also tells what the
 //! device said about each packet, and why the capture ended. The capture worker writes them to session tracks; the
-//! voice worker listens to them for Orb.
+//! voice worker listens to them for N4N0.
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;

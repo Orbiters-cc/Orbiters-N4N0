@@ -1,5 +1,5 @@
-//! Orb's ears: the voice worker (`orbiters-voice`) and its protocol, JSON lines with commands on its stdin and events on
-//! its stdout. The worker opens the microphone only while Orb listens (or while the wake word is on), finds sentences
+//! N4N0's ears: the voice worker (`orbiters-voice`) and its protocol, JSON lines with commands on its stdin and events on
+//! its stdout. The worker opens the microphone only while N4N0 listens (or while the wake word is on), finds sentences
 //! with Silero VAD and transcribes them on this computer with NVIDIA Parakeet (through sherpa-onnx, loaded when a
 //! sentence needs it and let go after ten idle minutes); nothing it hears is kept or sent anywhere by the worker itself.
 
@@ -64,7 +64,7 @@ pub fn damaged(models: &Path) -> Vec<String> {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VoiceCommand {
     /// Gets ready with the models of `models` (Silero VAD loads now, the recogniser when a sentence needs it); `mic`
-    /// is a capture endpoint id (`None`: the Windows default). `wake_words` are the words that wake Orb: a long
+    /// is a capture endpoint id (`None`: the Windows default). `wake_words` are the words that wake N4N0: a long
     /// sentence heard for the wake word is transcribed whole only when its start holds one.
     Start {
         models: PathBuf,
@@ -77,7 +77,7 @@ pub enum VoiceCommand {
     Mic {
         mic: Option<String>,
     },
-    /// Listens for a sentence for Orb: until [`VoiceCommand::Finish`] when `hold`, else until the sentence ends. The
+    /// Listens for a sentence for N4N0: until [`VoiceCommand::Finish`] when `hold`, else until the sentence ends. The
     /// worker answers every listen with one [`VoiceEvent::Heard`] carrying its `id`, unless it is cancelled.
     Listen {
         hold: bool,
@@ -128,12 +128,12 @@ pub enum VoiceEvent {
     Speech {
         active: bool,
     },
-    /// The microphone's level while Orb listens (0 to 1), about ten times a second.
+    /// The microphone's level while N4N0 listens (0 to 1), about ten times a second.
     Level {
         level: f32,
     },
-    /// A transcribed sentence: the one Orb listened for (`for_orb`, answering listen `listen`), or one heard while the
-    /// wake word is on (`listen` 0). An empty text for Orb means nothing was said.
+    /// A transcribed sentence: the one N4N0 listened for (`for_orb`, answering listen `listen`), or one heard while the
+    /// wake word is on (`listen` 0). An empty text for N4N0 means nothing was said.
     Heard {
         text: String,
         for_orb: bool,
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let c = VoiceCommand::Start { models: PathBuf::from("m"), mic: None, wake_word: true, wake_words: vec!["orb".into()] };
+        let c = VoiceCommand::Start { models: PathBuf::from("m"), mic: None, wake_word: true, wake_words: vec!["nano".into()] };
         assert_eq!(serde_json::from_str::<VoiceCommand>(&c.to_line()).unwrap(), c);
         // Lines from before the wake words, the microphone switch and repairs still read.
         assert_eq!(
@@ -178,7 +178,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<VoiceCommand>(r#"{"type":"wake_word","on":true}"#).unwrap(), VoiceCommand::WakeWord { on: true, words: vec![] });
         let m = VoiceCommand::Mic { mic: Some("{0.0.1.00000000}.{abc}".into()) };
         assert_eq!(serde_json::from_str::<VoiceCommand>(&m.to_line()).unwrap(), m);
-        let e = VoiceEvent::Heard { text: "Orb, mets mon sweat".into(), for_orb: false, seconds: 1.5, decode_ms: 120, listen: 0 };
+        let e = VoiceEvent::Heard { text: "Nano, mets mon sweat".into(), for_orb: false, seconds: 1.5, decode_ms: 120, listen: 0 };
         assert_eq!(serde_json::from_str::<VoiceEvent>(&e.to_line()).unwrap(), e);
         let l = VoiceCommand::Listen { hold: true, id: 7 };
         assert_eq!(serde_json::from_str::<VoiceCommand>(&l.to_line()).unwrap(), l);

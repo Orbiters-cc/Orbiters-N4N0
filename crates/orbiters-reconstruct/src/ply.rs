@@ -20,7 +20,7 @@ pub const EXTRAS: [&str; 6] = ["sky", "seen_weight", "seen_views", "seen_sectors
 
 pub fn write(path: &Path, g: &Gaussians) -> anyhow::Result<()> {
     let mut out = Vec::with_capacity(400 + g.len() * (PROPERTIES.len() + EXTRAS.len()) * 4);
-    write!(out, "ply\nformat binary_little_endian 1.0\ncomment Orbiters desktop reconstruction (right-handed: Unity world with Z negated)\nelement vertex {}\n", g.len())?;
+    write!(out, "ply\nformat binary_little_endian 1.0\ncomment Orbiters - N4N0 reconstruction (right-handed: Unity world with Z negated)\nelement vertex {}\n", g.len())?;
     for p in PROPERTIES.iter().chain(&EXTRAS) {
         writeln!(out, "property float {p}")?;
     }

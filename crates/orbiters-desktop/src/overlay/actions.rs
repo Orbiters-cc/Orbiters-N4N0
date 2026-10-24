@@ -1,5 +1,5 @@
 //! The overlay's SteamVR actions (`IVRInput`): one action manifest, as SteamVR takes one per process, with the walk
-//! boost's sticks and the button that opens Orb's menu, and their default bindings for each kind of controller (people
+//! boost's sticks and the button that opens N4N0's menu, and their default bindings for each kind of controller (people
 //! change them in SteamVR's controller settings, under Orbiters). Every set is read once a frame, together.
 
 use orbiters_openvr::input::{ActionHandle, ActionSetHandle};
@@ -31,11 +31,11 @@ const ACTIONS: &str = r#"{
   "action_sets": [ { "name": "/actions/walk", "usage": "leftright" }, { "name": "/actions/menu", "usage": "leftright" } ],
   "localization": [ { "language_tag": "en_US", "/actions/walk": "Walk boost",
     "/actions/walk/in/move_left": "Walking stick (left hand)", "/actions/walk/in/move_right": "Walking stick (right hand)",
-    "/actions/menu": "Orb's menu", "/actions/menu/in/open": "Open Orb's menu" } ]
+    "/actions/menu": "N4N0's menu", "/actions/menu/in/open": "Open N4N0's menu" } ]
 }"#;
 
 /// Default bindings: each hand's stick (a Vive wand's trackpad) to its move action, and a double press of the left
-/// stick (rarely used by VRChat) to Orb's menu.
+/// stick (rarely used by VRChat) to N4N0's menu.
 fn bindings(controller: &str, input: &str, mode: &str) -> String {
     let source = |hand: &str| {
         format!(
@@ -44,7 +44,7 @@ fn bindings(controller: &str, input: &str, mode: &str) -> String {
     };
     let menu = format!(r#"{{ "path": "/user/hand/left/input/{input}", "mode": "button", "inputs": {{ "double": {{ "output": "/actions/menu/in/open" }} }} }}"#);
     format!(
-        r#"{{ "controller_type": "{controller}", "name": "Orbiters", "description": "Walk boost's sticks; a double press of the left stick opens Orb's menu",
+        r#"{{ "controller_type": "{controller}", "name": "Orbiters", "description": "Walk boost's sticks; a double press of the left stick opens N4N0's menu",
   "bindings": {{ "/actions/walk": {{ "sources": [ {}, {} ] }}, "/actions/menu": {{ "sources": [ {menu} ] }} }} }}"#,
         source("left"),
         source("right")

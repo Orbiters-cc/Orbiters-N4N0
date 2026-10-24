@@ -1,4 +1,4 @@
-//! Shared logic of Orbiters desktop, used by the app and its workers.
+//! Shared logic of Orbiters - N4N0, used by the app and its workers.
 
 pub mod account;
 pub mod bundle;

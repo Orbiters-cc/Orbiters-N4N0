@@ -1,6 +1,6 @@
 [package]
 name = "orbiters-desktop"
-description = "Orbiters desktop: capture VRChat worlds and bring them into Unity with Mixer."
+description = "Orbiters - N4N0: capture VRChat worlds and bring them into Unity with Mixer."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

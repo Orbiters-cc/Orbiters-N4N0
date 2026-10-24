@@ -1,5 +1,5 @@
 //! `orbiters-desktop --eye-picture <out.png> [--right]`: what the headset shows now, one eye, as SteamVR's compositor has
-//! it (`orbiters_openvr::mirror`): the picture Orb's phone camera will take its photos from, without VRChat's camera.
+//! it (`orbiters_openvr::mirror`): the picture N4N0's phone camera will take its photos from, without VRChat's camera.
 //! Needs SteamVR running; nothing else starts.
 
 use anyhow::Context;

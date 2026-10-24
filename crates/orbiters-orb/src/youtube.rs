@@ -1,4 +1,4 @@
-//! YouTube for Orb's menu, without an account or an API key: suggestions while the person types (Google's suggest
+//! YouTube for N4N0's menu, without an account or an API key: suggestions while the person types (Google's suggest
 //! endpoint, the one YouTube's own search box uses), search results from YouTube's web client API (InnerTube
 //! `/search`, as the website itself calls it) and each result's thumbnail. Read only: the menu copies a result's link
 //! so it can be pasted into a world's video player.

@@ -1,6 +1,6 @@
-//! Orb's menu (contracts `Docs/orb.md`, Menu): what opens when the person calls Orb (a controller button, the wake word
-//! on its own, touching the orb): fast walk, YouTube, calls, a 3D picture, the computer's music and the orb's light.
-//! Orbiters desktop's SteamVR overlay shows it, or the avatar's projected screen when the Orb prop has one; both draw
+//! N4N0's menu (contracts `Docs/orb.md`, Menu): what opens when the person calls N4N0 (a controller button, the wake word
+//! on its own, touching N4N0): fast walk, YouTube, calls, a 3D picture, the computer's music and N4N0's light.
+//! Orbiters - N4N0's SteamVR overlay shows it, or the avatar's projected screen when the N4N0 prop has one; both draw
 //! the same pages from [`layout`].
 //!
 //! This module holds what the menu shows and what each press does, without IO: presses and typing return [`Effect`]s
@@ -40,7 +40,7 @@ pub enum Page {
     Photo,
     /// What the computer plays (Windows' media controls) and its volume.
     Music,
-    /// The orb as a light: on or off, its colour and brightness.
+    /// N4N0 as a light: on or off, its colour and brightness.
     Light,
 }
 
@@ -60,7 +60,7 @@ pub enum Keys {
     Symbols,
 }
 
-/// A 3D picture's camera flight (Orbiters desktop's `Photo3dLength`).
+/// A 3D picture's camera flight (Orbiters - N4N0's `Photo3dLength`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PhotoLength {
     /// 1 s.
@@ -110,7 +110,7 @@ pub struct Volume {
     pub muted: bool,
 }
 
-/// What the music page (or Orb's assistant) asks of the computer.
+/// What the music page (or N4N0's assistant) asks of the computer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaCommand {
     PlayPause,
@@ -123,7 +123,7 @@ pub enum MediaCommand {
     Mute(bool),
 }
 
-/// The orb's light as the avatar holds it (`Orb/Light`, `Orb/Light/Color`, `Orb/Light/Level`).
+/// N4N0's light as the avatar holds it (`N4N0/Light`, `N4N0/Light/Color`, `N4N0/Light/Level`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Light {
     pub on: bool,
@@ -252,7 +252,7 @@ pub enum Effect {
     },
     /// Tell the computer's media controls or its volume.
     Media(MediaCommand),
-    /// Set the orb's light so (its three parameters).
+    /// Set N4N0's light so (its three parameters).
     Light(Light),
     /// The menu closed.
     Close,
@@ -287,7 +287,7 @@ pub struct Menu {
     loading_more: bool,
     /// Next was pressed on the last page fetched: the page turns once its results arrive (and stays when none do).
     turning: bool,
-    /// Orb listens to the person.
+    /// N4N0 listens to the person.
     pub listening: bool,
     pub fast_walk: bool,
     /// VRChat runs in desktop mode: fast walk (a move of SteamVR's play space) is greyed out, "Only in VR".
@@ -304,18 +304,18 @@ pub struct Menu {
     pub countdown: Option<u32>,
     /// A short line for the person: what was copied, what failed. Shown until the next change of page.
     pub notice: Option<String>,
-    /// What Orb heard last, or what it says (shown on Home).
+    /// What N4N0 heard last, or what it says (shown on Home).
     pub heard: Option<String>,
-    /// `heard` holds the owner's own words: everyone else's screen does not show them (a sentence for Orb may have
+    /// `heard` holds the owner's own words: everyone else's screen does not show them (a sentence for N4N0 may have
     /// been kept out of the world, VRChat's microphone muted while it was said).
     pub heard_private: bool,
     /// Home has six tiles (music and light): the overlay always, the avatar's screen from version 3
-    /// (`Orb/Screen/Version`); older screens have the first four.
+    /// (`N4N0/Screen/Version`); older screens have the first four.
     pub six_tiles: bool,
     /// What the computer plays (`None`: nothing, or not known yet) and its volume.
     pub media: Option<Media>,
     pub volume: Option<Volume>,
-    /// The orb's light, when the avatar has it (the Light option on the orb's card).
+    /// N4N0's light, when the avatar has it (the Light option on N4N0's card).
     pub light: Option<Light>,
 }
 
@@ -601,7 +601,7 @@ impl Menu {
         vec![Effect::Search { id: self.search_id, query }]
     }
 
-    /// Search for `query` straight away (said aloud, or asked of Orb).
+    /// Search for `query` straight away (said aloud, or asked of N4N0).
     pub fn search_for(&mut self, query: &str) -> Vec<Effect> {
         self.open = true;
         self.query = cut(query.trim(), QUERY_MAX);
@@ -769,8 +769,8 @@ impl Menu {
         self.call = call;
     }
 
-    /// The sentence Orb heard while the menu is open: on the search page it is what to search for, and the menu takes
-    /// it (`Some`); elsewhere it is for Orb's assistant (`None`).
+    /// The sentence N4N0 heard while the menu is open: on the search page it is what to search for, and the menu takes
+    /// it (`Some`); elsewhere it is for N4N0's assistant (`None`).
     pub fn heard(&mut self, text: &str) -> Option<Vec<Effect>> {
         let text = text.trim().trim_end_matches(['.', '!', '?']).trim();
         if !self.open || text.is_empty() {
@@ -805,7 +805,7 @@ fn same_ignoring_case(a: &str, b: &str) -> bool {
     lower(a).eq(lower(b))
 }
 
-/// `text` in lines of at most `cols` characters, cut between words (a longer word is cut): what Orb says, a line at a
+/// `text` in lines of at most `cols` characters, cut between words (a longer word is cut): what N4N0 says, a line at a
 /// time on the screen's Home.
 pub fn pieces(text: &str, cols: usize) -> Vec<String> {
     let cols = cols.max(1);
@@ -1096,7 +1096,7 @@ mod tests {
         let mut menu = Menu::default();
         assert_eq!(menu.heard("cats"), None, "closed");
         menu.open();
-        assert_eq!(menu.heard("what time is it?"), None, "on Home it is for Orb");
+        assert_eq!(menu.heard("what time is it?"), None, "on Home it is for N4N0");
         assert_eq!(menu.heard.as_deref(), Some("what time is it"));
         assert!(menu.heard_private, "the owner's own words");
         menu.press(Target::YouTube);

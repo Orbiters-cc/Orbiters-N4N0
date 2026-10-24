@@ -1,4 +1,4 @@
-//! OSC with VRChat. Orbiters desktop receives avatar parameters through OSCQuery: it advertises a small OSC
+//! OSC with VRChat. Orbiters - N4N0 receives avatar parameters through OSCQuery: it advertises a small OSC
 //! server over mDNS (`_osc._udp`, `_oscjson._tcp`), VRChat discovers it and sends what its tree asks for:
 //! `/avatar` brings `/avatar/change` and every avatar parameter (face tracking included, whichever app writes
 //! it), `/tracking/vrsystem` the headset and wrist poses once the person allows it in VRChat's Tracking & IK
@@ -188,7 +188,7 @@ pub fn query_tree(parameters: &[String]) -> serde_json::Value {
     for p in parameters {
         params.insert(
             p.clone(),
-            serde_json::json!({ "FULL_PATH": format!("{PARAMETERS_PREFIX}{p}"), "TYPE": "T", "ACCESS": 2, "DESCRIPTION": "Orbiters desktop" }),
+            serde_json::json!({ "FULL_PATH": format!("{PARAMETERS_PREFIX}{p}"), "TYPE": "T", "ACCESS": 2, "DESCRIPTION": "Orbiters - N4N0" }),
         );
     }
     let pose = |part: &str| {
@@ -892,7 +892,7 @@ mod tests {
     fn receives_parameters_and_serves_tree() {
         let got = Arc::new(Mutex::new(Vec::new()));
         let sink = got.clone();
-        let svc = OscService::start("Orbiters desktop test", &["OrbitersRecord".into()], 9, false, move |e, at| sink.lock().unwrap().push((e, at))).unwrap();
+        let svc = OscService::start("Orbiters - N4N0 test", &["OrbitersRecord".into()], 9, false, move |e, at| sink.lock().unwrap().push((e, at))).unwrap();
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         let send = |addr: &str, args: Vec<OscType>| {
             let msg = OscPacket::Message(OscMessage { addr: addr.into(), args });
@@ -1066,7 +1066,7 @@ mod tests {
         // service keeps receiving.
         let got = Arc::new(Mutex::new(Vec::new()));
         let sink = got.clone();
-        let svc = OscService::start("Orbiters desktop test", &[], 9, false, move |e, at| sink.lock().unwrap().push((e, at))).unwrap();
+        let svc = OscService::start("Orbiters - N4N0 test", &[], 9, false, move |e, at| sink.lock().unwrap().push((e, at))).unwrap();
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         let deep = nested_bundles(3000, &message);
         assert!(deep.len() < 65_000);
@@ -1129,7 +1129,7 @@ mod tests {
     fn a_service_not_advertised_listens_on_the_loopback_interface_only() {
         let got = Arc::new(Mutex::new(Vec::new()));
         let sink = got.clone();
-        let svc = OscService::start("Orbiters desktop test", &[], 9, false, move |e, at| sink.lock().unwrap().push((e, at))).unwrap();
+        let svc = OscService::start("Orbiters - N4N0 test", &[], 9, false, move |e, at| sink.lock().unwrap().push((e, at))).unwrap();
         assert!(svc.sender.local_addr().unwrap().ip().is_loopback());
         let Some(ip) = primary_ipv4() else { return };
         // Sent to this machine's LAN address: nothing listens there.
@@ -1171,7 +1171,7 @@ mod tests {
 
     #[test]
     fn a_request_in_pieces_gets_its_answer_and_half_a_request_none() {
-        let svc = OscService::start("Orbiters desktop test", &[], 9, false, |_, _| {}).unwrap();
+        let svc = OscService::start("Orbiters - N4N0 test", &[], 9, false, |_, _| {}).unwrap();
         let mut s = TcpStream::connect(("127.0.0.1", svc.query_port)).unwrap();
         s.set_nodelay(true).unwrap();
         s.write_all(b"GET /?HOST").unwrap();

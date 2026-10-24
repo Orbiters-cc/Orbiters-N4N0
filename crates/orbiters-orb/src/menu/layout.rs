@@ -15,7 +15,7 @@ pub const GRID: u16 = 4;
 /// The page's corner radius.
 pub const CARD_RADIUS: u16 = 28;
 
-/// The pages as the screen numbers them (`Orb/Screen` page byte; 0 shows nothing).
+/// The pages as the screen numbers them (`N4N0/Screen` page byte; 0 shows nothing).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ScreenPage {
@@ -141,7 +141,7 @@ pub enum Look {
     Danger = 9,
 }
 
-/// The icons the pages use (Phosphor icons in Orbiters desktop's font).
+/// The icons the pages use (Phosphor icons in Orbiters - N4N0's font).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
     Close,
@@ -234,7 +234,7 @@ pub enum Content {
     Status,
     /// Home: under a tile's title.
     TileNote(u8),
-    /// Home: what Orb heard last.
+    /// Home: what N4N0 heard last.
     Heard,
     Query,
     Suggestion(u8),
@@ -433,8 +433,8 @@ pub fn layout(page: ScreenPage) -> Layout {
             }
             elements.push(round(Target::Close, 936, Icon::Close));
             icons.push((Rect::new(32, 24, 56, 56), Icon::Microphone, Some(Tint::Green)));
-            labels.push(Label { x: 104, y: 34, size: 32, text: "Orb", style: Style::Primary, bold: true });
-            slots.add(188, 40, 48, 24, Style::Accent, Content::Status);
+            labels.push(Label { x: 104, y: 34, size: 32, text: "N4N0", style: Style::Primary, bold: true });
+            slots.add(208, 40, 48, 24, Style::Accent, Content::Status);
             for i in 0..4u8 {
                 slots.add(56 + i as u16 * 244, 376, 14, 24, Style::Secondary, Content::TileNote(i));
             }
@@ -539,8 +539,8 @@ pub fn layout(page: ScreenPage) -> Layout {
             }
             elements.push(round(Target::Close, 936, Icon::Close));
             icons.push((Rect::new(32, 24, 56, 56), Icon::Microphone, Some(Tint::Green)));
-            labels.push(Label { x: 104, y: 34, size: 32, text: "Orb", style: Style::Primary, bold: true });
-            slots.add(188, 40, 48, 24, Style::Accent, Content::Status);
+            labels.push(Label { x: 104, y: 34, size: 32, text: "N4N0", style: Style::Primary, bold: true });
+            slots.add(208, 40, 48, 24, Style::Accent, Content::Status);
             for i in 0..6u16 {
                 slots.add(32 + (i % 3) * 324 + 116, 104 + (i / 3) * 176 + 92, 15, 24, Style::Secondary, Content::TileNote(i as u8));
             }
@@ -628,7 +628,7 @@ fn tile_note(menu: &Menu, tile: u8) -> String {
         _ => match menu.light {
             Some(light) if light.on => format!("On · {}", LIGHT_COLORS.get(light.color as usize).map_or("", |c| c.0)),
             Some(_) => "Off".into(),
-            None => "Not on this orb".into(),
+            None => "Not on this N4N0".into(),
         },
     }
 }
@@ -649,7 +649,7 @@ pub fn text(menu: &Menu, content: Content) -> String {
 
 /// What a slot shows, to the owner or, `public`, to everyone else around (the avatar's screen through the synced
 /// channel): there the owner's friends are never named (the call list, who calls or is called), nor the owner's own
-/// words to Orb.
+/// words to N4N0.
 pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
     if public {
         match content {
@@ -673,7 +673,7 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             if menu.listening {
                 "Listening… say what you want".into()
             } else {
-                "Tap a tile, or call Orb again to talk".into()
+                "Tap a tile, or call N4N0 again to talk".into()
             }
         }
         Content::TileNote(i) => tile_note(menu, i),
@@ -769,7 +769,7 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
         },
         Content::LightNote => match menu.light {
             Some(_) => "Everyone around sees your orb's light".into(),
-            None => "Turn Light on for the orb in My Avatar (its card's options)".into(),
+            None => "Turn Light on for N4N0 in My Avatar (its card's options)".into(),
         },
     }
 }
@@ -790,7 +790,7 @@ pub fn ellipsis(text: &str, cols: usize) -> String {
 }
 
 /// What a slot shows, cut to its cells: the screen shows exactly this, and the overlay too (characters the screen's
-/// font has no glyph for are folded or dropped, as on Orb's panel).
+/// font has no glyph for are folded or dropped, as on N4N0's panel).
 pub fn slot_text(menu: &Menu, slot: &Slot) -> String {
     slot_text_for(menu, slot, false)
 }
@@ -1055,7 +1055,7 @@ mod tests {
         assert_eq!(shown, vec!["A friend", "is calling you"]);
         assert_eq!(text_for(&menu, Content::TileNote(2), true), "Incoming call");
         assert_eq!(text_for(&menu, Content::TileNote(2), false), "Lyra Nightfall calls");
-        // The owner's words to Orb stay theirs; what Orb says is for everyone.
+        // The owner's words to N4N0 stay theirs; what N4N0 says is for everyone.
         menu.heard("put my hoodie on");
         assert_eq!(text_for(&menu, Content::Heard, true), "");
         menu.heard = Some("Voilà ton sweat".into());

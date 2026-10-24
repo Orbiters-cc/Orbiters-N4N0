@@ -1,6 +1,6 @@
 [package]
 name = "orbiters-sound"
-description = "Interface sounds of Orbiters desktop, synthesized at start-up (a port of React Bits' Sound Lab renderer), the default-output player and the mic monitor."
+description = "Interface sounds of Orbiters - N4N0, synthesized at start-up (a port of React Bits' Sound Lab renderer), the default-output player and the mic monitor."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

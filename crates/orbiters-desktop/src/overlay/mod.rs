@@ -3,7 +3,7 @@
 //! ([`orbiters_ui::software`], only what changed) and handed to SteamVR as D3D11 textures of a small device on the
 //! headset's GPU (raw pixels without one), only while the dashboard shows the tab and only the part that changed. It
 //! reads the device poses itself for T-pose calibrations, which also put a mirror and two hand targets in the play
-//! space, and runs walk boost and Orb's menu in the play space.
+//! space, and runs walk boost and N4N0's menu in the play space.
 //!
 //! It never starts SteamVR: it connects as an overlay application (the kind SteamVR starts for) only after a
 //! background connection, which SteamVR refuses when it is not running, found it running; and it ends when SteamVR
@@ -48,7 +48,7 @@ const STEAMVR_GONE_AFTER: Duration = Duration::from_secs(5);
 /// The tab's pictures: at most 45 a second, whatever asks for them (the laser moving, the service's news).
 const MIN_FRAME: Duration = Duration::from_millis(22);
 /// A turn of the loop while nothing moves the play space: every turn reads the controllers, as the binding that opens
-/// Orb's menu (a double press by default) is true for a moment only and SteamVR keeps no press between two reads.
+/// N4N0's menu (a double press by default) is true for a moment only and SteamVR keeps no press between two reads.
 const TURN: Duration = Duration::from_millis(11);
 /// A turn waiting on the compositor is at least this long, should the wait come back at once.
 const SHORTEST_TURN: Duration = Duration::from_millis(3);
@@ -465,7 +465,7 @@ impl Drop for Server {
 }
 
 /// What the overlay changed in SteamVR and told the service, put back however the session ends (a quit, a close,
-/// SteamVR gone, an error, a panic unwinding): a held Talk let go, Orb's menu said closed, the play space back where
+/// SteamVR gone, an error, a panic unwinding): a held Talk let go, N4N0's menu said closed, the play space back where
 /// it was, the overlays taken down. (A process killed outside leaves no moved play space: SteamVR goes back to the
 /// saved chaperone once the process previewing one is gone.)
 struct Teardown<'a> {
@@ -643,7 +643,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 backend.headset(activity.in_use());
             }
         }
-        // VRChat's frame times also pace Orb's projected screen (the owner's steps follow the frame rate).
+        // VRChat's frame times also pace N4N0's projected screen (the owner's steps follow the frame rate).
         if snap.settings.world_performance || snap.settings.orb.enabled {
             if let Some(chunk) = frames.update(&steamvr, vrchat_scene) {
                 backend.frames(chunk);

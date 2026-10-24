@@ -1,33 +1,33 @@
-# Orbiters desktop
+# Orbiters - N4N0
 
 Capture VRChat worlds while you play and bring them into Unity with [Mixer](https://github.com/Orbiters-cc/Mixer).
 
 A shader on your capture avatar draws a small *capture strip* into VRChat's Stream camera: the exact camera pose,
 projection and frame flags, bit-coded in grey blocks, plus *depth frames* that carry exact depth from the game.
-Orbiters desktop receives the Stream camera over Spout, decodes every frame, keeps lossless keyframes, poses and
+Orbiters - N4N0 receives the Stream camera over Spout, decodes every frame, keeps lossless keyframes, poses and
 depth, and writes a session bundle that the reconstruction (next milestone) turns into Gaussian splats and meshes.
 It never asks for your VRChat login: it only reads VRChat's local log, OSC and Spout.
 
-Orbiters desktop also runs **Orb**, the companion that floats on your avatar (the Orb prop from My Avatar's gallery):
+Orbiters - N4N0 also runs **N4N0**, the companion that floats on your avatar (the N4N0 prop from My Avatar's gallery):
 it answers on a text panel everyone around you can read, puts your hoodie on when you ask, keeps your GoGoLoco pose
 when you change avatar, holds parameters that worlds reset, shows an AFK message while you are away, saves the videos
 a world plays and takes pictures. Its assistant runs on Orbiters (`/orb` on the website, free quota or your own key);
-the window's Orb page turns it off for a tool without AI. You talk to it by holding Talk in its menu, touching it, the
-Talk button in the window or the SteamVR tab, or by starting a sentence with "Orb"; speech is transcribed on this
-computer and only the sentences meant for Orb go to the assistant.
+the window's N4N0 page turns it off for a tool without AI. You talk to it by holding Talk in its menu, touching it, the
+Talk button in the window or the SteamVR tab, or by starting a sentence with "Nano" (N4N0 said aloud); speech is transcribed on this
+computer and only the sentences meant for N4N0 go to the assistant.
 
-Calling Orb also opens **Orb's menu**: the SteamVR binding "Open Orb's menu" (a double press of the left stick unless
-you change it in SteamVR's controller settings), the wake word on its own, or a hand on the orb. It has fast walk (walk
+Calling N4N0 also opens **N4N0's menu**: the SteamVR binding "Open N4N0's menu" (a double press of the left stick unless
+you change it in SteamVR's controller settings), the wake word on its own, or a hand on N4N0. It has fast walk (walk
 boost on or off), YouTube (a keyboard with YouTube's suggestions as you type, five results a page with their thumbnail,
 channel and duration, and "Copy link" to paste in a world's video player; a sentence you say on the search page is what
 it searches), calls, and a 3D picture with a timer. It opens in the SteamVR overlay in front of you, and SteamVR's laser
-works on it; when your orb has the projected screen ("Replace Orbiters overlay" on the orb's card in My Avatar), it
+works on it; when your orb has the projected screen ("Replace Orbiters overlay" on N4N0's card in My Avatar), it
 opens on that screen in VRChat instead, where you touch it with your index finger and people around see it too
 (contracts `Docs/orb.md`, Menu and Screen). YouTube is read without an account or a key, as YouTube's own website does.
 
 In VR it also offers **walk boost**: while you push the stick you walk with, your play space moves along with you, so
 you cover more ground in VRChat. The chaperone stays on your room's walls, and the play space goes back when you
-change world. Its strength is a slider in the SteamVR tab, in Settings, and in Orb's Walk boost radial on your avatar.
+change world. Its strength is a slider in the SteamVR tab, in Settings, and in N4N0's Walk boost radial on your avatar.
 And, when you turn it on in Settings, it shares **your frame rate per world** with Orbiters: a summary a minute with
 the world, your avatar, how many people were there and the names of their avatars (never who they are), plus your
 graphics card, processor and headset (contracts `Docs/world-performance.md`). The Map explorer shows which worlds run
@@ -42,9 +42,9 @@ well.
 | `crates/orbiters-capture` | Capture worker process (`orbiters-capture`): frame sources, strip and depth decoding, session bundles |
 | `crates/orbiters-reconstruct` | Reconstruction worker process (`orbiters-reconstruct`): trains Gaussian splats from a session's keyframes, poses and depth on the GPU (WGSL kernels on wgpu, checked against an f64 reference) |
 | `crates/orbiters-sound` | Interface sounds computed at start-up (a port of React Bits' Sound Lab renderer, see its NOTICE.md), the default-output player and the settings' mic monitor |
-| `crates/orbiters-orb` | Orb, the companion on the avatar (contracts `Docs/orb.md`): its text panel's sender, avatar controls found by label, the tools and client of its assistant, the wake word, saved videos |
-| `crates/orbiters-voice` | Orb's ears, a worker process (`orbiters-voice`): the microphone while Orb listens, Silero VAD and NVIDIA Parakeet through sherpa-onnx, on the CPU; it also installs the speech models |
-| `crates/orbiters-call` | Orb's calls, a worker process (`orbiters-call`): WebRTC voice (webrtc-rs, Opus) between two Orbiters desktops, through Cloudflare Realtime TURN when needed (contracts `Docs/orb-calls.md`) |
+| `crates/orbiters-orb` | N4N0, the companion on the avatar (contracts `Docs/orb.md`): its text panel's sender, avatar controls found by label, the tools and client of its assistant, the wake word, saved videos |
+| `crates/orbiters-voice` | N4N0's ears, a worker process (`orbiters-voice`): the microphone while N4N0 listens, Silero VAD and NVIDIA Parakeet through sherpa-onnx, on the CPU; it also installs the speech models |
+| `crates/orbiters-call` | N4N0's calls, a worker process (`orbiters-call`): WebRTC voice (webrtc-rs, Opus) between two Orbiters - N4N0 apps, through Cloudflare Realtime TURN when needed (contracts `Docs/orb-calls.md`) |
 | `crates/orbiters-audio` | Microphones and a process's sound through WASAPI, for the capture worker and the voice worker |
 | `crates/orbiters-core` | Shared logic: settings, session bundles, keyframes, VRChat log, OSC/OSCQuery, worker protocols |
 | `crates/orbiters-spout` | Spout2 receiver and test sender (Direct3D 11), protocol-compatible with the Spout2 SDK |
@@ -65,7 +65,7 @@ target/release/orbiters-desktop
 
 Building `orbiters-voice` downloads sherpa-onnx's prebuilt shared libraries (about 8 MB, from k2-fsa's GitHub
 releases) and places `sherpa-onnx-c-api.dll` and `onnxruntime.dll` next to it; ship them with it. The speech models
-(about 490 MB) are not part of the app: the Orb page installs them into `%LOCALAPPDATA%/Orbiters/Models` when the
+(about 490 MB) are not part of the app: the N4N0 page installs them into `%LOCALAPPDATA%/Orbiters/Models` when the
 person asks. `orbiters-voice transcribe <file.wav>` checks them on 16 kHz recordings.
 
 Building `orbiters-call` compiles the Opus codec from source and needs CMake on the PATH (3.x; the portable zip from
@@ -109,10 +109,10 @@ cargo run -p orbiters-capture -- record --source "spout:Orbiters Test Pattern" -
 cargo run -p orbiters-capture -- record --source "raw:<raw capture folder>"          # replay a Mixer simulator capture
 cargo run -p orbiters-capture -- verify "<raw capture folder>"                        # compare with its ground truth
 cargo run --release -p orbiters-reconstruct -- "<session folder>" [--iterations N] [--budget N] [--width N]
-cargo run -p orbiters-desktop -- --orb-menu <folder>    # Orb's screen pages and layout table (for Toolkit), sample pages
+cargo run -p orbiters-desktop -- --orb-menu <folder>    # N4N0's screen pages and layout table (for Toolkit), sample pages
 ```
 
-`--orb-menu` writes `Orb screen pages.png` and `Orb screen layout.png`, which Orbiters Toolkit carries as
+`--orb-menu` writes `N4N0 screen pages.png` and `N4N0 screen layout.png`, which Orbiters Toolkit carries as
 `Editor/VRChat/OrbScreenPages.png.bytes` and `OrbScreenLayout.png.bytes`: run it and copy them over whenever the
 menu's layout or look changes, so the avatar's screen matches the overlay.
 

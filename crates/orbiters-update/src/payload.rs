@@ -88,7 +88,7 @@ pub fn read_index(payload: &[u8]) -> anyhow::Result<Index> {
 fn index_of(entry: tar::Entry<'_, impl Read>) -> anyhow::Result<Index> {
     anyhow::ensure!(entry.path()?.as_ref() == Path::new(INDEX), "the installer's payload does not start with its index");
     let index: Index = serde_json::from_reader(entry.take(4 << 20)).context("the installer's payload index cannot be read")?;
-    anyhow::ensure!(index.product == PRODUCT, "the installer holds {}, not Orbiters desktop", index.product);
+    anyhow::ensure!(index.product == PRODUCT, "the installer holds {}, not Orbiters - N4N0", index.product);
     Ok(index)
 }
 

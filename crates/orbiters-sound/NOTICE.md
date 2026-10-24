@@ -2,7 +2,7 @@
 
 `src/synth.rs` ports part of the sound renderer of React Bits' Sound Lab
 (<https://reactbits.dev/tools/sound-lab>, `src/sounds/ts/react-bits-sound.ts`), and `src/sounds.rs` carries its
-"Reveal" and "Rocker" recipes. Orbiters desktop uses them as its own interface sounds, as part of the application;
+"Reveal" and "Rocker" recipes. Orbiters - N4N0 uses them as its own interface sounds, as part of the application;
 they are not offered as a sound library on their own.
 
 React Bits is licensed as follows:

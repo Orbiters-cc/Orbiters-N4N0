@@ -1,4 +1,4 @@
-//! Orbiters desktop capture worker.
+//! Orbiters - N4N0 capture worker.
 //!
 //! * `orbiters-capture worker` — driven by the app: JSON-lines commands on stdin, events on stdout.
 //! * `orbiters-capture record --source <spout[:name] | raw:<folder> | test> [--out <folder>] [--quality …] [--frames N]`

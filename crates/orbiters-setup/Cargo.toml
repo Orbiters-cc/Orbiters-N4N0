@@ -1,6 +1,6 @@
 [package]
 name = "orbiters-setup"
-description = "Orbiters desktop's setup: installs, updates and uninstalls it for the person (no administrator rights), in the Orbiters look."
+description = "Orbiters - N4N0's setup: installs, updates and uninstalls it for the person (no administrator rights), in the Orbiters look."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

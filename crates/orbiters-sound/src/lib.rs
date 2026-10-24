@@ -1,4 +1,4 @@
-//! Sound for Orbiters desktop: the interface sounds (computed, not shipped as files), a player on the default output
+//! Sound for Orbiters - N4N0: the interface sounds (computed, not shipped as files), a player on the default output
 //! device and the microphone monitor of the settings' mic test.
 
 mod device;

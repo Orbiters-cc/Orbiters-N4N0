@@ -1,4 +1,4 @@
-//! Orbiters desktop's releases, shared by the app (which looks for updates), the setup (which installs one) and
+//! Orbiters - N4N0's releases, shared by the app (which looks for updates), the setup (which installs one) and
 //! `cargo xtask` (which makes and publishes them).
 //!
 //! - [`Release`]: one release of a channel, published as a [`SignedRelease`] at `<feed>/<channel>.json`. Its signature
@@ -36,13 +36,13 @@ pub const SETUP_EXE: &str = "orbiters-setup.exe";
 /// The install record's file, in the install folder.
 pub const RECORD_FILE: &str = "install.json";
 /// The name in Windows' installed apps, the Start menu and the shortcuts.
-pub const DISPLAY_NAME: &str = "Orbiters desktop";
+pub const DISPLAY_NAME: &str = "Orbiters - N4N0";
 pub const PUBLISHER: &str = "Orbiters";
 /// The app's entry in Windows' installed apps, under `HKEY_CURRENT_USER`.
 pub const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\OrbitersDesktop";
 /// The value that starts the app with Windows, under `HKEY_CURRENT_USER\<RUN_KEY>`.
 pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-pub const RUN_VALUE: &str = "Orbiters desktop";
+pub const RUN_VALUE: &str = "Orbiters - N4N0";
 
 /// The public half of the release key (`update-key.pub`, written by `cargo xtask keygen`).
 #[cfg(feature = "signing")]
@@ -144,7 +144,7 @@ impl SignedRelease {
             .verify(signed.release.as_bytes(), &signature)
             .map_err(|_| anyhow::anyhow!("the release is not signed with Orbiters' release key"))?;
         let release: Release = serde_json::from_str(&signed.release).context("the signed release cannot be read")?;
-        anyhow::ensure!(release.product == PRODUCT, "the release is of {}, not Orbiters desktop", release.product);
+        anyhow::ensure!(release.product == PRODUCT, "the release is of {}, not Orbiters - N4N0", release.product);
         anyhow::ensure!(release.channel == channel, "the release is of the {} channel, not {channel}", release.channel);
         anyhow::ensure!(semver::Version::parse(&release.version).is_ok(), "the release's version ({}) is not a version", release.version);
         anyhow::ensure!(
@@ -223,7 +223,7 @@ impl InstallRecord {
     }
 }
 
-/// Where the setup installs by default: `%LOCALAPPDATA%\Programs\Orbiters desktop`, the person's own programs
+/// Where the setup installs by default: `%LOCALAPPDATA%\Programs\Orbiters - N4N0`, the person's own programs
 /// folder (no administrator rights, to install or to update).
 pub fn default_install_dir() -> PathBuf {
     dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("Programs").join(DISPLAY_NAME)

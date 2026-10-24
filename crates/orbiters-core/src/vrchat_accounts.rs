@@ -1,5 +1,5 @@
 //! The VRChat account signed in on this computer and its friends, as VRCX and VRCNext keep them (read only; their
-//! databases are opened read-only while they run). Orb's calls use them (contracts `Docs/orb-calls.md`): the account is
+//! databases are opened read-only while they run). N4N0's calls use them (contracts `Docs/orb-calls.md`): the account is
 //! offered for the verified link, the friends are matched on Orbiters as hashes. Nothing here signs in to VRChat.
 
 use rusqlite::{Connection, OpenFlags};

@@ -1,4 +1,4 @@
-//! "Test microphone": hear a microphone on this PC's output and see its level (settings, and Orb's "hear yourself").
+//! "Test microphone": hear a microphone on this PC's output and see its level (settings, and N4N0's "hear yourself").
 
 use super::Job;
 use egui::{pos2, vec2, Align2, Rect, Sense, Ui};

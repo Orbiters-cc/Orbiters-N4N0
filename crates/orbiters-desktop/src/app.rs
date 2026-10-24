@@ -216,7 +216,7 @@ impl App {
             }
         }
         let p = ui.painter();
-        let name = Txt::new("Orbiters desktop", 12.0).weight(weight::SEMIBOLD).tracking(0.025).color(theme::FG_2);
+        let name = Txt::new("Orbiters - N4N0", 12.0).weight(weight::SEMIBOLD).tracking(0.025).color(theme::FG_2);
         let r = widgets::text(p, pos2(rect.left() + 16.0, rect.center().y), Align2::LEFT_CENTER, &name);
         let subtitle = match snap.capture.state {
             CaptureState::Recording => Some("Recording".to_string()),
@@ -288,13 +288,13 @@ impl App {
             Align2::LEFT_CENTER,
             &Txt::new("Orbiters", 17.0).weight(weight::SEMIBOLD).tracking(-0.01),
         );
-        widgets::text(p, pos2(logo_rect.right() + 12.0, logo_rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new("desktop", 11.5).color(theme::FG_3));
+        widgets::text(p, pos2(logo_rect.right() + 12.0, logo_rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new("N4N0", 11.5).color(theme::FG_3));
 
         // Navigation with a pill that slides to the active page.
         let nav_top = logo_rect.bottom() + 28.0;
         let items = [
             (Page::Capture, "Capture", icons::APERTURE),
-            (Page::Orb, "Orb", icons::SMILEY),
+            (Page::Orb, "N4N0", icons::SMILEY),
             (Page::Sessions, "Sessions", icons::FOLDER_OPEN),
             (Page::Worlds, "Visited worlds", icons::GLOBE),
             (Page::Settings, "Settings", icons::SLIDERS_HORIZONTAL),
@@ -358,7 +358,7 @@ impl App {
             let tip = if waiting {
                 format!("Version {version} installs once {} ends (Settings, About)", snap.busy_with().unwrap_or("the running work"))
             } else {
-                format!("Version {version}: restart Orbiters desktop to install it")
+                format!("Version {version}: restart Orbiters - N4N0 to install it")
             };
             let txt = Txt::new(label, 11.5).weight(weight::MEDIUM).color(theme::ACCENT);
             let pill = Rect::from_min_size(pos2(inner.left() + 2.0, bottom - 18.0), vec2(widgets::text_size(ui, &txt).x + 38.0, 24.0));
@@ -487,7 +487,7 @@ fn splash(ctx: &egui::Context, full: Rect, t: f64) {
         tp.multiply_opacity(k);
         let y = logo_rect.bottom() + 24.0 + 14.0 * (1.0 - k);
         widgets::text(&tp, pos2(full.center().x, y + 16.0), Align2::CENTER_CENTER, &Txt::new("Orbiters", 28.0).weight(weight::SEMIBOLD).tracking(-0.01));
-        let galley = tp.layout_job(Txt::new("DESKTOP", 13.0).weight(weight::MEDIUM).tracking(0.32).color(theme::FG_3).job(f32::INFINITY));
+        let galley = tp.layout_job(Txt::new("N4N0", 13.0).weight(weight::MEDIUM).tracking(0.32).color(theme::FG_3).job(f32::INFINITY));
         let at = pos2(full.center().x - galley.size().x * 0.5 + 0.16 * 13.0, y + 44.0 - galley.size().y * 0.5);
         tp.galley(at, galley, theme::FG);
     });
@@ -572,7 +572,7 @@ impl eframe::App for App {
         self.draw(ui);
     }
 
-    /// The window closes with Talk held: let go of it, or VRChat would stay muted and Orb go on listening.
+    /// The window closes with Talk held: let go of it, or VRChat would stay muted and N4N0 go on listening.
     fn on_exit(&mut self) {
         self.orb.leave(&self.ctl);
     }

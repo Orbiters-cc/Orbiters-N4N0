@@ -26,7 +26,7 @@ pub struct Settings {
     pub reduce_motion: bool,
     /// Show Orbiters in SteamVR's dashboard while SteamVR runs.
     pub steamvr_overlay: bool,
-    /// Orb, the Orbiters companion on the avatar.
+    /// N4N0, the Orbiters companion on the avatar.
     pub orb: OrbSettings,
     /// Share VRChat's frame rate in each world with Orbiters, a summary a minute (contracts `Docs/world-performance.md`).
     pub world_performance: bool,
@@ -34,7 +34,7 @@ pub struct Settings {
     pub walk_boost: WalkBoostSettings,
     /// How long a 3D picture's camera flight lasts (more seconds, more of the place seen).
     pub photo_3d: Photo3dLength,
-    /// Seconds before a 3D picture taken from Orb's menu starts (0: at once).
+    /// Seconds before a 3D picture taken from N4N0's menu starts (0: at once).
     pub photo_3d_timer: u32,
     /// Where reconstructions train while VRChat runs.
     pub reconstruct_while_playing: WhilePlaying,
@@ -107,22 +107,22 @@ pub enum Follow {
     Hand,
 }
 
-/// Orb, the Orbiters companion (contracts `Docs/orb.md`): its helpers, and its assistant.
+/// N4N0, the Orbiters companion (contracts `Docs/orb.md`): its helpers, and its assistant.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OrbSettings {
-    /// Orb's helpers run: the text panel, the AFK message, held and carried parameters, saved videos.
+    /// N4N0's helpers run: the text panel, the AFK message, held and carried parameters, saved videos.
     pub enabled: bool,
-    /// Orb's assistant: listening and answers. Off, Orb is a tool without AI: nothing is transcribed or sent.
+    /// N4N0's assistant: listening and answers. Off, N4N0 is a tool without AI: nothing is transcribed or sent.
     pub assistant: bool,
     /// Listen for the wake word in everything the microphone hears. Sentences are transcribed on this computer; only
     /// those that start with a wake word go further.
     pub wake_word: bool,
-    /// The words that wake Orb at the start of a sentence ("hey", "ok" or "dis" before them are fine).
+    /// The words that wake N4N0 at the start of a sentence ("hey", "ok" or "dis" before them are fine).
     pub wake_words: Vec<String>,
-    /// Mute VRChat's microphone while the menu's Talk button is held, so the sentence for Orb stays out of the world.
+    /// Mute VRChat's microphone while the menu's Talk button is held, so the sentence for N4N0 stays out of the world.
     pub mute_while_talking: bool,
-    /// Microphone Orb listens to (endpoint id; empty for the Windows default).
+    /// Microphone N4N0 listens to (endpoint id; empty for the Windows default).
     pub mic_device: String,
     /// Milliseconds between two steps of the text panel (VRChat loses faster ones for other players).
     pub text_step_ms: u64,
@@ -133,31 +133,31 @@ pub struct OrbSettings {
     pub carry_parameters: Vec<String>,
     /// Parameters held at a value: put back whenever something else changes them.
     pub pins: Vec<Pin>,
-    /// Calls with VRChat friends who have Orbiters and Orb too (contracts `Docs/orb-calls.md`): presence and the
+    /// Calls with VRChat friends who have Orbiters and N4N0 too (contracts `Docs/orb-calls.md`): presence and the
     /// friends this computer's VRCX and VRCNext know go to Orbiters (as hashes) while on.
     pub calls: bool,
     /// Calls may go straight between the two computers (a little faster on one network), each side then seeing the
     /// other's addresses. Off, they go through the relay, which shows the friend only its own.
     pub direct_calls: bool,
-    /// Orb's menu (fast walk, YouTube, calls, a 3D picture): what opens it, the keyboard's letters.
+    /// N4N0's menu (fast walk, YouTube, calls, a 3D picture): what opens it, the keyboard's letters.
     pub menu: MenuSettings,
 }
 
-/// What opens Orb's menu: in the SteamVR overlay, or on the avatar's projected screen when the Orb prop has one (the
-/// "Replace Orbiters overlay" option of the orb in My Avatar). Opening it also starts Orb listening.
+/// What opens N4N0's menu: in the SteamVR overlay, or on the avatar's projected screen when the N4N0 prop has one (the
+/// "Replace Orbiters overlay" option of N4N0 in My Avatar). Opening it also starts N4N0 listening.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MenuSettings {
-    /// The SteamVR controller binding "Open Orb's menu" (by default a double press of the left stick, changed in
+    /// The SteamVR controller binding "Open N4N0's menu" (by default a double press of the left stick, changed in
     /// SteamVR's controller settings for Orbiters).
     pub button: bool,
-    /// Saying the wake word on its own ("Orb!") while the wake word is on.
+    /// Saying the wake word on its own ("Nano!", N4N0 said aloud) while the wake word is on.
     pub wake_word: bool,
-    /// Touching the orb with a hand.
+    /// Touching N4N0 with a hand.
     pub touch: bool,
     /// The search keyboard's letters.
     pub keyboard: KeyboardLayout,
-    /// How the overlay's menu looks (the orb's screen has its own Look in My Avatar).
+    /// How the overlay's menu looks (N4N0's screen has its own Look in My Avatar).
     pub look: MenuLook,
 }
 
@@ -167,7 +167,7 @@ impl Default for MenuSettings {
     }
 }
 
-/// How Orb's menu looks: Orbiters' own, or a green phosphor terminal (`orbiters_orb::menu::retro`).
+/// How N4N0's menu looks: Orbiters' own, or a green phosphor terminal (`orbiters_orb::menu::retro`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MenuLook {
@@ -176,7 +176,7 @@ pub enum MenuLook {
     Retro,
 }
 
-/// The order of the letters on Orb's keyboard.
+/// The order of the letters on N4N0's keyboard.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyboardLayout {
@@ -218,7 +218,7 @@ impl Default for OrbSettings {
             enabled: true,
             assistant: true,
             wake_word: false,
-            wake_words: vec!["orb".into(), "orbe".into()],
+            wake_words: vec!["nano".into()],
             mute_while_talking: true,
             mic_device: String::new(),
             text_step_ms: 300,
@@ -447,7 +447,7 @@ mod tests {
         let partial = Settings::load_from(&path);
         assert_eq!(partial.storage_limit_gb, 3.0);
         assert_eq!(partial.osc.record_parameter, "OrbitersRecord");
-        assert_eq!(partial.orb, OrbSettings::default(), "settings from before Orb get its defaults");
+        assert_eq!(partial.orb, OrbSettings::default(), "settings from before N4N0 get its defaults");
         std::fs::remove_dir_all(dir).ok();
     }
 

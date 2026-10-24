@@ -1,4 +1,4 @@
-//! The policy between Orb's assistant and what it asks Orbiters desktop to do (contracts `Docs/orb-assistant.md`,
+//! The policy between N4N0's assistant and what it asks Orbiters - N4N0 to do (contracts `Docs/orb-assistant.md`,
 //! client tools). The assistant reads text other people chose (a world's name, a video's title, an avatar's labels), so
 //! a tool call is a request, not an order: the desktop runs one only once this policy lets it.
 //!
@@ -8,7 +8,7 @@
 //!   settings and put back at every avatar load), a new AFK message, the clipboard (its text shown), a control the
 //!   avatar's menu tags nsfw. The desktop asks in its own words ([`question`]) and only the owner's next sentence, said
 //!   or typed, answers it ([`reply`]): nothing the assistant writes can.
-//! - Orb's own controls, the system's and Orbiters desktop's parameters are never offered at all
+//! - N4N0's own controls, the system's and Orbiters - N4N0's parameters are never offered at all
 //!   ([`crate::controls::Controls`]).
 
 use crate::context::{quoted, NAME_CHARS};
@@ -178,9 +178,9 @@ pub fn what(action: &Action, control: Option<&Control>) -> String {
         Action::TakePhoto { .. } => "take a picture".into(),
         Action::SaveVideo => "save the video".into(),
         Action::ListSavedVideos => "read your saved videos".into(),
-        Action::Mood { .. } => "change the orb's look".into(),
+        Action::Mood { .. } => "change N4N0's look".into(),
         Action::Media { .. } => "control the music".into(),
-        Action::Light { .. } => "change the orb's light".into(),
+        Action::Light { .. } => "change N4N0's light".into(),
     }
 }
 
@@ -194,8 +194,8 @@ pub fn changes(action: &Action) -> bool {
 pub fn question(whats: &[String]) -> String {
     match whats {
         [] => String::new(),
-        [one] => format!("Orb asks to {one}. Say yes to do it."),
-        [first @ .., last] => format!("Orb asks to {}, and to {last}. Say yes to do them.", first.join(", to ")),
+        [one] => format!("N4N0 asks to {one}. Say yes to do it."),
+        [first @ .., last] => format!("N4N0 asks to {}, and to {last}. Say yes to do them.", first.join(", to ")),
     }
 }
 
@@ -205,7 +205,7 @@ const YES: &str = "yes yeah yep yup ya yea sure ok okay okey kay confirm confirm
 /// Words that say no.
 const NO: &str = "no nope nah non cancel stop don dont not never annule annuler laisse pas nein nee нет nao nie";
 /// Words that may come with a yes or a no without changing it.
-const WITH: &str = "please pls plz it ahead for of thanks thank you then now orb orbe merci stp svp s il te plait y le la l d sur tomber \
+const WITH: &str = "please pls plz it ahead for of thanks thank you then now nano n4n0 merci stp svp s il te plait y le la l d sur tomber \
                     peine mind t por favor bitte пожалуйста thx alright right";
 
 /// Whether `word` is one of `words` (separated by spaces).
@@ -271,8 +271,8 @@ mod tests {
             Verdict::Refuse { why: "No more AFK message changes in this request (at most 1).".into() }
         );
         assert_eq!(policy.review(&Action::Mood { mood: Mood::Happy }, None), Verdict::Run);
-        assert_eq!(question(&["copy x".into()]), "Orb asks to copy x. Say yes to do it.");
-        assert_eq!(question(&["a".into(), "b".into(), "c".into()]), "Orb asks to a, to b, and to c. Say yes to do them.");
+        assert_eq!(question(&["copy x".into()]), "N4N0 asks to copy x. Say yes to do it.");
+        assert_eq!(question(&["a".into(), "b".into(), "c".into()]), "N4N0 asks to a, to b, and to c. Say yes to do them.");
     }
 
     #[test]
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn hears_yes_and_no_in_a_few_words() {
-        for yes in ["Yes.", "yes please", "OK, fais-le stp", "oui vas-y", "D'accord !", "bien sûr", "Yeah, do it", "go ahead", "да", "Orb, yes"] {
+        for yes in ["Yes.", "yes please", "OK, fais-le stp", "oui vas-y", "D'accord !", "bien sûr", "Yeah, do it", "go ahead", "да", "Nano, yes"] {
             assert_eq!(reply(yes), Some(true), "{yes}");
         }
         for no in ["No.", "no thanks", "non merci", "laisse tomber", "don't", "нет", "cancel it"] {

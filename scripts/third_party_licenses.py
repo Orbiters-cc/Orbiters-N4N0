@@ -246,7 +246,7 @@ def main():
             groups.setdefault((license, normalized(text)), (text, []))[1].append(name)
 
     out = ["# Third-party licenses", "",
-           "The license texts of the components built into Orbiters desktop's programs (`orbiters-desktop`, "
+           "The license texts of the components built into Orbiters - N4N0's programs (`orbiters-desktop`, "
            "`orbiters-capture`, `orbiters-reconstruct`, `orbiters-voice`, `orbiters-call`) and of the native libraries "
            "next to them. Ship this file with the programs. See `THIRD_PARTY_NOTICES.md` for an overview, the fonts and "
            "the models.", "",

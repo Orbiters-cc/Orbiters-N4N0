@@ -1,4 +1,4 @@
-//! Reconstruction for Orbiters desktop (implementation plan, phase 3: replay mode). A session's lossless keyframes,
+//! Reconstruction for Orbiters - N4N0 (implementation plan, phase 3: replay mode). A session's lossless keyframes,
 //! exact poses and exact depth samples train a set of 3D Gaussians on the GPU; the result is a splat PLY.
 
 pub mod aberration;

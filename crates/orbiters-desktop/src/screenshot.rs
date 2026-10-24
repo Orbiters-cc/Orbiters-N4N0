@@ -237,7 +237,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 760.0,
             world: None,
         },
-        // Orb's menu settings: its keyboard and look.
+        // N4N0's menu settings: its keyboard and look.
         Scenario {
             name: "orb-menu-settings",
             page: Page::Orb,
@@ -1038,7 +1038,7 @@ impl StandInVrchat {
     }
 }
 
-/// Orb on an avatar with its prop and menu, a conversation under way, saved videos and the speech models installed.
+/// N4N0 on an avatar with its prop and menu, a conversation under way, saved videos and the speech models installed.
 fn orb_snapshot(base: &Snapshot) -> Snapshot {
     use crate::state::{OrbConfirmation, OrbFace, OrbLine, OrbWho, ProcessUsage};
     let mut s = base.clone();
@@ -1056,11 +1056,11 @@ fn orb_snapshot(base: &Snapshot) -> Snapshot {
     o.face = OrbFace::Talking;
     o.panel = Some("Done, hoodie on. Now go find\nyour friends instead of\ntalking to a floating ball.".into());
     o.lines = vec![
-        line(OrbWho::You, "Orb, mets mon sweat à capuche"),
-        line(OrbWho::Note, "Orb set Clothes / Hoodie"),
+        line(OrbWho::You, "Nano, mets mon sweat à capuche"),
+        line(OrbWho::Note, "N4N0 set Clothes / Hoodie"),
         line(OrbWho::Orb, "Done, hoodie on. Now go find your friends instead of talking to a floating ball."),
         line(OrbWho::You, "Plan a movie night for my community on Saturday at 9 pm"),
-        line(OrbWho::Note, "Orb: create event draft…"),
+        line(OrbWho::Note, "N4N0: create event draft…"),
         line(OrbWho::Orb, "Drafted “Movie night” for Saturday 21:00 in Cozy Cinema. Approve it on Orbiters and I'll announce it."),
     ];
     o.confirmations = vec![OrbConfirmation {
@@ -1086,8 +1086,8 @@ fn orb_snapshot(base: &Snapshot) -> Snapshot {
         },
     ];
     o.resources = vec![
-        ProcessUsage { name: "Orbiters desktop".into(), cpu_percent: 1.2, memory_mb: 148.0 },
-        ProcessUsage { name: "Orb's ears".into(), cpu_percent: 0.4, memory_mb: 912.0 },
+        ProcessUsage { name: "Orbiters - N4N0".into(), cpu_percent: 1.2, memory_mb: 148.0 },
+        ProcessUsage { name: "N4N0's ears".into(), cpu_percent: 0.4, memory_mb: 912.0 },
         ProcessUsage { name: "VRChat".into(), cpu_percent: 187.0, memory_mb: 6840.0 },
     ];
     s

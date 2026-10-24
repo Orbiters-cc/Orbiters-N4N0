@@ -1,6 +1,6 @@
 [package]
 name = "orbiters-update"
-description = "Orbiters desktop's releases: the signed release manifest, what an install records, the installer's payload, and fetching an update."
+description = "Orbiters - N4N0's releases: the signed release manifest, what an install records, the installer's payload, and fetching an update."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

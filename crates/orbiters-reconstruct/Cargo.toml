@@ -1,6 +1,6 @@
 [package]
 name = "orbiters-reconstruct"
-description = "Reconstruction worker of Orbiters desktop: trains Gaussian splats from a session's lossless keyframes, exact poses and exact depth (replay mode), on the GPU through wgpu."
+description = "Reconstruction worker of Orbiters - N4N0: trains Gaussian splats from a session's lossless keyframes, exact poses and exact depth (replay mode), on the GPU through wgpu."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

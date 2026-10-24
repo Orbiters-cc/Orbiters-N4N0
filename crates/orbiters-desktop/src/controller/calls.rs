@@ -1,7 +1,7 @@
-//! Orb calls in the tray service (contracts `Docs/orb-calls.md`): presence and the friends this computer's VRCX and
+//! N4N0 calls in the tray service (contracts `Docs/orb-calls.md`): presence and the friends this computer's VRCX and
 //! VRCNext know (as hashes) go to Orbiters every minute while calls are on; the server's event stream brings incoming
 //! calls and the other side's answer and candidates; the `orbiters-call` worker carries the audio peer to peer
-//! (protocol `orbiters_core::call`). The Orb's panel lists the contacts while its Call menu is open and says who is
+//! (protocol `orbiters_core::call`). N4N0's panel lists the contacts while its Call menu is open and says who is
 //! calling.
 //!
 //! Each call has a number of this side's own, which the worker's commands and events carry, and the server's events
@@ -257,10 +257,10 @@ pub struct CallsRuntime {
     signals: Option<mpsc::Sender<Signal>>,
     /// One client for Orbiters while the server stays the same: its connections are kept between requests.
     client: Option<Api>,
-    /// Direct calls are allowed (the Orb setting, read before each offer and answer). Off, calls go through the relay
+    /// Direct calls are allowed (the N4N0 setting, read before each offer and answer). Off, calls go through the relay
     /// only: the other side sees the relay's address, never this computer's.
     direct: bool,
-    /// The panel lists the contacts (the Orb's Call menu is open), and which one is chosen.
+    /// The panel lists the contacts (N4N0's Call menu is open), and which one is chosen.
     pub(super) menu_open: bool,
     pub(super) picked: usize,
     /// The event stream open (or opening): its number and the credential it was opened with. A stream whose number
@@ -413,7 +413,7 @@ impl CallsRuntime {
         self.call = Some(c);
         Acts {
             say: Some(format!("{name} is calling. Touch me or press Call to answer.")),
-            notice: Some((NoticeKind::Info, format!("{name} is calling: answer on the Orb page, in the SteamVR tab or by touching the orb."))),
+            notice: Some((NoticeKind::Info, format!("{name} is calling: answer on the N4N0 page, in the SteamVR tab or by touching N4N0."))),
             publish: true,
             ..Default::default()
         }
@@ -557,7 +557,7 @@ fn not_linked(e: &anyhow::Error) -> bool {
 /// The panel's text for the call menu: four contacts around the chosen one, `>` before it.
 pub fn menu_text(contacts: &[CallContact], picked: usize) -> String {
     if contacts.is_empty() {
-        return "No friend to call right now. They need Orbiters and Orb on.".into();
+        return "No friend to call right now. They need Orbiters and N4N0 on.".into();
     }
     let picked = picked.min(contacts.len() - 1);
     let first = (picked / PAGE) * PAGE;
@@ -1176,7 +1176,7 @@ impl super::Controller {
         }
     }
 
-    /// Calls a contact (the window, the overlay or the Orb's menu).
+    /// Calls a contact (the window, the overlay or N4N0's menu).
     pub fn call_contact(self: &Shared, contact: String) {
         let (number, name) = {
             let mut rt = self.calls.lock().unwrap();
@@ -1258,9 +1258,9 @@ impl super::Controller {
         self.calls_act(rt, acts);
     }
 
-    // ---- The Orb's Call menu (avatar parameters, contracts Orb/Call/*) ----
+    // ---- N4N0's Call menu (avatar parameters, contracts N4N0/Call/*) ----
 
-    /// `Orb/Call/Menu` pressed: the contacts on the panel, or off it.
+    /// `N4N0/Call/Menu` pressed: the contacts on the panel, or off it.
     pub(super) fn calls_menu(self: &Shared) {
         let (open, text) = {
             let mut rt = self.calls.lock().unwrap();
@@ -1275,7 +1275,7 @@ impl super::Controller {
         self.calls_publish(|_| {});
     }
 
-    /// `Orb/Call/Pick` moved.
+    /// `N4N0/Call/Pick` moved.
     pub(super) fn calls_pick(self: &Shared, value: f32) {
         let text = {
             let mut rt = self.calls.lock().unwrap();
@@ -1294,7 +1294,7 @@ impl super::Controller {
         self.calls_publish(|_| {});
     }
 
-    /// `Orb/Call/Go` (or a touch while it rings): answers a ringing call, or calls the chosen contact.
+    /// `N4N0/Call/Go` (or a touch while it rings): answers a ringing call, or calls the chosen contact.
     pub(super) fn calls_go(self: &Shared) -> bool {
         let (ringing, chosen) = {
             let rt = self.calls.lock().unwrap();
@@ -1313,7 +1313,7 @@ impl super::Controller {
         false
     }
 
-    /// Whether a call rings for this member (touching the orb answers it).
+    /// Whether a call rings for this member (touching N4N0 answers it).
     pub(super) fn call_ringing_in(&self) -> bool {
         self.calls.lock().unwrap().call.as_ref().is_some_and(Call::ringing_in)
     }

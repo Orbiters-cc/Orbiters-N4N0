@@ -1,4 +1,4 @@
-//! Small pictures for Orb's screen: a JPEG (a video's thumbnail) or a PNG (music art) decoded and fitted to a few dozen
+//! Small pictures for N4N0's screen: a JPEG (a video's thumbnail) or a PNG (music art) decoded and fitted to a few dozen
 //! pixels, which the screen's thumbnail codec (contracts `orb::thumbnail`) then encodes.
 
 use zune_core::bytestream::ZCursor;

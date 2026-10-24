@@ -221,7 +221,7 @@ fn read_text(path: &str, name: &str) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..len]))
 }
 
-/// Where Windows' installed apps say Orbiters desktop is.
+/// Where Windows' installed apps say Orbiters - N4N0 is.
 pub fn registered_dir() -> Option<PathBuf> {
     read_text(UNINSTALL_KEY, "InstallLocation").filter(|d| !d.is_empty()).map(PathBuf::from)
 }
@@ -314,7 +314,7 @@ pub fn write_shortcut(at: &Path, dir: &Path) -> anyhow::Result<()> {
         link.SetPath(&HSTRING::from(target.as_os_str()))?;
         link.SetWorkingDirectory(&HSTRING::from(dir.as_os_str()))?;
         link.SetIconLocation(&HSTRING::from(target.as_os_str()), 0)?;
-        link.SetDescription(&HSTRING::from("Capture VRChat worlds, talk with Orb and call friends"))?;
+        link.SetDescription(&HSTRING::from("Capture VRChat worlds, talk with N4N0 and call friends"))?;
         if let Some(parent) = at.parent() {
             std::fs::create_dir_all(parent)?;
         }

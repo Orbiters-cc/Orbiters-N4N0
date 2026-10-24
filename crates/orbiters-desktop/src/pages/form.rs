@@ -1,6 +1,6 @@
-//! What the Settings and Orb pages share to edit the settings. Switches, sliders and choices apply as they change;
+//! What the Settings and N4N0 pages share to edit the settings. Switches, sliders and choices apply as they change;
 //! text fields wait for their Save button (or Enter) and keep what is typed while the settings change elsewhere (the
-//! avatar's Walk boost radial, the SteamVR tab, Orb). A change is saved over the settings as they are when it is
+//! avatar's Walk boost radial, the SteamVR tab, N4N0). A change is saved over the settings as they are when it is
 //! saved, so it carries only itself: never a text typed and not saved, nor an old copy of what changed meanwhile.
 
 use crate::backend::Ctl;

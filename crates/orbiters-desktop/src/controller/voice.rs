@@ -1,6 +1,6 @@
-//! Orb's ears in the tray service: the voice worker (`orbiters-voice`, protocol `orbiters_core::voice`) runs while
-//! VRChat does and Orb's assistant is on with its models installed, so a sentence is transcribed without waiting for
-//! models to load. It opens the microphone only while Orb listens, or all along when the wake word is on, and keeps
+//! N4N0's ears in the tray service: the voice worker (`orbiters-voice`, protocol `orbiters_core::voice`) runs while
+//! VRChat does and N4N0's assistant is on with its models installed, so a sentence is transcribed without waiting for
+//! models to load. It opens the microphone only while N4N0 listens, or all along when the wake word is on, and keeps
 //! only its small VAD loaded between sentences. It runs below normal priority: VRChat comes first.
 
 use super::orb::Source;
@@ -50,7 +50,7 @@ struct VoiceHandle {
 impl VoiceHandle {
     fn spawn(ctl: Shared) -> anyhow::Result<Self> {
         let path = crate::worker::sibling_exe("orbiters-voice");
-        anyhow::ensure!(path.is_file(), "Orb's voice worker was not found at {}", path.display());
+        anyhow::ensure!(path.is_file(), "N4N0's voice worker was not found at {}", path.display());
         let mut cmd = Command::new(&path);
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)]
@@ -171,15 +171,15 @@ impl VoiceRuntime {
         let damaged = self.load_crashes >= 2;
         self.repair |= damaged;
         let message = if code.map(|c| c as u32) == Some(DLL_NOT_FOUND) {
-            "Orb's ears could not start: a library they need is missing next to Orbiters desktop (onnxruntime.dll or sherpa-onnx-c-api.dll). Reinstall Orbiters desktop.".to_string()
+            "N4N0's ears could not start: a library they need is missing next to Orbiters - N4N0 (onnxruntime.dll or sherpa-onnx-c-api.dll). Reinstall Orbiters - N4N0.".to_string()
         } else if damaged {
-            "Orb's ears stopped twice while loading the speech models: they may be damaged. Install them again on the Orb page.".to_string()
+            "N4N0's ears stopped twice while loading the speech models: they may be damaged. Install them again on the N4N0 page.".to_string()
         } else {
             let code = code.map(|c| format!(" (exit code {:#x})", c as u32)).unwrap_or_default();
             let after = if self.crashes >= CRASHES_MOST { " They stay off until you press Talk." } else { "" };
             match last {
-                Some(line) => format!("Orb's ears stopped{code}: {line}.{after}"),
-                None => format!("Orb's ears stopped{code}.{after}"),
+                Some(line) => format!("N4N0's ears stopped{code}: {line}.{after}"),
+                None => format!("N4N0's ears stopped{code}.{after}"),
             }
         };
         (message, damaged)
@@ -187,7 +187,7 @@ impl VoiceRuntime {
 }
 
 impl Controller {
-    /// Starts the voice worker when Orb should be able to hear (VRChat runs, or a sentence was asked for meanwhile;
+    /// Starts the voice worker when N4N0 should be able to hear (VRChat runs, or a sentence was asked for meanwhile;
     /// the assistant is on, the models are here), stops it otherwise, and passes on a changed microphone or wake
     /// word (without loading anything again). Called once a second.
     pub(super) fn voice_follow(self: &Shared) {
@@ -254,7 +254,7 @@ impl Controller {
         }
     }
 
-    /// Orb listens for a sentence from `source` (the worker starts if it was not running, as for the window's Talk
+    /// N4N0 listens for a sentence from `source` (the worker starts if it was not running, as for the window's Talk
     /// button with VRChat closed, and stays a while after).
     pub(super) fn voice_listen(self: &Shared, source: Source) {
         let settings = self.settings().orb;
@@ -295,7 +295,7 @@ impl Controller {
         }
     }
 
-    /// Downloads the speech models in a worker of their own, its progress on the Orb page: what is missing or cut
+    /// Downloads the speech models in a worker of their own, its progress on the N4N0 page: what is missing or cut
     /// short, or all of it when they stopped loading (a repair).
     pub(super) fn voice_install(self: &Shared) {
         let mut rt = self.voice.lock().unwrap();
@@ -320,7 +320,7 @@ impl Controller {
         }
     }
 
-    /// Stops the speech models' download (the Orb page's Cancel): the installing worker removes what it unpacked and
+    /// Stops the speech models' download (the N4N0 page's Cancel): the installing worker removes what it unpacked and
     /// leaves; its end puts the Install button back.
     pub(super) fn voice_cancel_install(&self) {
         if let Some(installer) = self.voice.lock().unwrap().installer.as_mut() {
@@ -373,7 +373,7 @@ impl Controller {
                 if for_orb {
                     eprintln!("voice: {seconds:.1} s transcribed in {decode_ms} ms");
                 }
-                // A sentence for a cancelled listen goes nowhere; one for the latest listen ends Orb's listening.
+                // A sentence for a cancelled listen goes nowhere; one for the latest listen ends N4N0's listening.
                 let (dropped, current) = {
                     let mut rt = self.voice.lock().unwrap();
                     let dropped = for_orb && listen != 0 && rt.cancelled_take(listen);
@@ -405,7 +405,7 @@ impl Controller {
                     v.error = None;
                     v.repair = false;
                 });
-                self.notify(NoticeKind::Success, "Orb can hear now.");
+                self.notify(NoticeKind::Success, "N4N0 can hear now.");
             }
             VoiceEvent::Error { message } => {
                 self.orb.lock().unwrap().line(OrbWho::Error, message.clone());
@@ -475,7 +475,7 @@ mod tests {
         let soon = Duration::from_secs(5);
         let (message, damaged) = rt.ended(soon, Some(3), Some("something went wrong"));
         assert!(!damaged);
-        assert_eq!(message, "Orb's ears stopped (exit code 0x3): something went wrong.");
+        assert_eq!(message, "N4N0's ears stopped (exit code 0x3): something went wrong.");
         assert_eq!(rt.restart_delay(), RESTART_AFTER);
         rt.ended(soon, Some(3), None);
         assert_eq!(rt.restart_delay(), RESTART_AFTER * 2);

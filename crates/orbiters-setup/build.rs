@@ -48,8 +48,8 @@ fn main() {
     {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("../orbiters-desktop/assets/icon.ico");
-        res.set("ProductName", "Orbiters desktop");
-        res.set("FileDescription", "Orbiters desktop setup");
+        res.set("ProductName", "Orbiters - N4N0");
+        res.set("FileDescription", "Orbiters - N4N0 setup");
         res.set("CompanyName", "Orbiters");
         res.set("LegalCopyright", "Copyright (c) 2026 Enzo DUTRA / blackorbit");
         res.set_manifest(MANIFEST);

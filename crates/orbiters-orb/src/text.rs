@@ -1,4 +1,4 @@
-//! The sender of Orb's text panel (contracts `Docs/orb.md`, Text): turns text into pages and, step by step, into
+//! The sender of N4N0's text panel (contracts `Docs/orb.md`, Text): turns text into pages and, step by step, into
 //! the pointer and sync values VRChat syncs to everyone, resending blocks while a page is up so that people who
 //! arrive late see it whole.
 
@@ -182,7 +182,7 @@ pub struct TextSender {
     hold: Duration,
     /// The next block resent while a page is up.
     resync: usize,
-    /// What `Orb/Text/Visible` was last set to.
+    /// What `N4N0/Text/Visible` was last set to.
     visible: bool,
     next_step: Option<Instant>,
     clear: bool,
@@ -190,7 +190,7 @@ pub struct TextSender {
     sticky: bool,
     /// The block being sent and when its next phase is due.
     phase: Option<(Instant, Phase)>,
-    /// `Orb/Text/Pointer` as this sender last set it; unknown after a reload or when something else used the channel.
+    /// `N4N0/Text/Pointer` as this sender last set it; unknown after a reload or when something else used the channel.
     pointer: Option<i32>,
     /// Blocks the page on display sends whatever `sent` says (bit `b`: block `b`), and whether it has not had its first
     /// step yet: a page starting sends every block that shows text or that `sent` holds text in. `sent` is only what
@@ -273,7 +273,7 @@ impl TextSender {
         self.phase = None;
     }
 
-    /// The text up and waiting (every page left, one line each), taken off the panel: it hides at the next step. Orb's
+    /// The text up and waiting (every page left, one line each), taken off the panel: it hides at the next step. N4N0's
     /// screen shows it instead while it is open.
     pub fn take_text(&mut self) -> Option<String> {
         let text: Vec<String> = self
@@ -325,7 +325,7 @@ impl TextSender {
         self.phase.is_some()
     }
 
-    /// Something else uses the text channel until `at` (Orb's screen takes its turns): no step before then, and the
+    /// Something else uses the text channel until `at` (N4N0's screen takes its turns): no step before then, and the
     /// pointer is no longer known (the next block moves it to 0 first). A block between its phases starts again later.
     pub fn hold_until(&mut self, at: Instant) {
         self.next_step = Some(self.next_step.map_or(at, |t| t.max(at)));
@@ -727,7 +727,7 @@ mod tests {
         sender.show("Hello there, how are you today?");
         let (t, _) = run(&mut sender, &mut panel, Instant::now(), BLOCK * 5);
         assert_eq!(first_row(&panel.cells), "Hello there, how are you today?");
-        // VRChat reloads the avatar without a word to Orbiters desktop: its panel is blank, while the sender believes it
+        // VRChat reloads the avatar without a word to Orbiters - N4N0: its panel is blank, while the sender believes it
         // still holds the text. The next text shares three of its four blocks, and still arrives whole.
         let mut wiped = PanelModel::new([0; TEXT_LENGTH]);
         sender.show("Hello there, how are you now?");
@@ -749,14 +749,14 @@ mod tests {
     fn a_sender_that_lost_its_messages_sends_the_text_whole_again() {
         let mut sender = TextSender::new(8, STEP);
         let mut panel = PanelModel::new([0; TEXT_LENGTH]);
-        sender.show_sticky("Hi, I'm Orb. Yes, the one in the menu.");
+        sender.show_sticky("Hi, I'm N4N0. Yes, the one in the menu.");
         let (mut t, _) = run(&mut sender, &mut panel, Instant::now(), BLOCK * 6);
         while sender.mid_block() {
             sender.tick(t);
             t += TICK;
         }
         // OSC goes down as the next text starts: its first messages are lost, and the host says so.
-        sender.show_sticky("Hi, I'm Orb. Yes, the one in the menu!");
+        sender.show_sticky("Hi, I'm N4N0. Yes, the one in the menu!");
         let t = sender.next_due().unwrap().max(t);
         assert!(!sender.tick(t).is_empty());
         sender.forget();
@@ -767,7 +767,7 @@ mod tests {
         assert_eq!(out[0], (parameter(params::TEXT_POINTER), OscType::Int(POINTER_CLEAR)));
         stale.apply(8, &out);
         run(&mut sender, &mut stale, t + STEP + TICK, BLOCK * 6);
-        assert_eq!(first_row(&stale.cells), "Hi, I'm Orb. Yes, the one in the");
+        assert_eq!(first_row(&stale.cells), "Hi, I'm N4N0. Yes, the one in");
     }
 
     #[test]

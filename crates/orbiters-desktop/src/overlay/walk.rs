@@ -3,7 +3,7 @@
 //! covers more ground than VRChat's own walking. The chaperone's walls move the other way, so they stay on the room's
 //! walls.
 //!
-//! The boost waits while the stick is not walking: Orb's menu or the calibration stands in the play space, a setting
+//! The boost waits while the stick is not walking: N4N0's menu or the calibration stands in the play space, a setting
 //! of the boost was just changed (the Walk boost radial of VRChat's Action Menu turns with the same stick), VRChat says
 //! the owner is away, and, when VRChat says how it moves the avatar, while it sits in a station or does not walk it. A
 //! recenter, a seated reset, a room setup or another application's saved change becomes the new base of the carry
@@ -229,7 +229,7 @@ pub struct Moment<'a> {
     pub walking_allowed: bool,
     /// The world and instance: another one puts the play space back.
     pub place: Option<&'a str>,
-    /// Something stands in the play space where it was put (Orb's menu, the calibration's mirror): moving the play
+    /// Something stands in the play space where it was put (N4N0's menu, the calibration's mirror): moving the play
     /// space would carry the person away from it.
     pub held: bool,
     /// VRChat says the owner is away.
@@ -666,7 +666,7 @@ mod tests {
         assert!(!walk.moving() && room.preview.is_none());
         walk.step(&mut room, &moment(&s, None), || FORWARD, || Some(yaw(0.0)), at(1600));
         assert!(walk.moving());
-        // Orb's menu in the play space, or the owner away: it waits too.
+        // N4N0's menu in the play space, or the owner away: it waits too.
         let held = Moment { held: true, ..moment(&s, None) };
         walk.step(&mut room, &held, || FORWARD, || Some(yaw(0.0)), at(1610));
         assert!(!walk.moving());

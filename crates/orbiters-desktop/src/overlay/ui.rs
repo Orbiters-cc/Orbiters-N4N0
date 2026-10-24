@@ -1,5 +1,5 @@
 //! What the SteamVR dashboard tab shows: the recorder, what each stream records right now, and the T-pose
-//! calibration; or Orb: hold to talk, what Orb said, hear yourself. Laid out for a fixed 1024 × 640 point canvas, read
+//! calibration; or N4N0: hold to talk, what N4N0 said, hear yourself. Laid out for a fixed 1024 × 640 point canvas, read
 //! from a metre or two away.
 
 use super::calibration::{Calibrator, Phase};
@@ -22,7 +22,7 @@ pub trait Poses {
     fn read(&mut self) -> (Vec<Device>, Vec<Sample>);
 }
 
-/// The tab's pages: the recorder, Orb, walk boost.
+/// The tab's pages: the recorder, N4N0, walk boost.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
     #[default]
@@ -80,17 +80,17 @@ impl OverlayUi {
     pub fn show(&mut self, ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, poses: &mut dyn Poses) {
         let rect = Rect::from_min_size(pos2(0.0, 0.0), SIZE);
         header(ui, snap, rect);
-        // Capture or Orb, in the middle of the header.
+        // Capture or N4N0, in the middle of the header.
         let mut page = self.page;
         // The control's width: its labels with their padding, and the track's.
         let label = |t: &str| widgets::text_size(ui, &Txt::new(t, 13.0).weight(weight::MEDIUM)).x + 28.0;
-        let track = label("Capture") + label("Orb") + label("Walk boost") + 8.0;
+        let track = label("Capture") + label("N4N0") + label("Walk boost") + 8.0;
         let mut tabs = ui.new_child(UiBuilder::new().max_rect(Rect::from_center_size(pos2(rect.center().x, 46.0), vec2(track, 36.0))).id_salt("overlay-pages"));
         widgets::segmented(
             &mut tabs,
             "overlay-page",
             &mut page,
-            &[SegOption::new(Page::Capture, "Capture"), SegOption::new(Page::Orb, "Orb"), SegOption::new(Page::Walk, "Walk boost")],
+            &[SegOption::new(Page::Capture, "Capture"), SegOption::new(Page::Orb, "N4N0"), SegOption::new(Page::Walk, "Walk boost")],
             false,
         );
         if page != self.page {
@@ -178,7 +178,7 @@ impl OverlayUi {
 }
 
 impl OverlayUi {
-    /// Orb's page: hold to talk on the left, what Orb said and its panel at the top right, quick actions under it.
+    /// N4N0's page: hold to talk on the left, what N4N0 said and its panel at the top right, quick actions under it.
     /// Walk boost: on or off and how strong (left), which stick and which way is forward (right).
     fn walk(&mut self, ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, left: Rect, right: Rect) {
         use orbiters_core::settings::{Follow, Hand, WalkBoostSettings};
@@ -226,7 +226,7 @@ impl OverlayUi {
             &p,
             pos2(left.left() + 22.0, left.bottom() - 28.0),
             Align2::LEFT_CENTER,
-            &Txt::new("Orb's Walk boost radial on your avatar sets it too.", 12.5).color(theme::FG_4),
+            &Txt::new("N4N0's Walk boost radial on your avatar sets it too.", 12.5).color(theme::FG_4),
             left.width() - 44.0,
         );
 
@@ -291,7 +291,7 @@ impl OverlayUi {
 
         // Hold to talk: a round button that grows a ring with the voice.
         widgets::card(ui.painter(), left, theme::CARD_RADIUS);
-        widgets::text(ui.painter(), pos2(left.left() + 22.0, left.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps("Talk to Orb"));
+        widgets::text(ui.painter(), pos2(left.left() + 22.0, left.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps("Talk to N4N0"));
         let center = pos2(left.center().x, left.top() + 56.0 + 100.0);
         let disc = Rect::from_center_size(center, Vec2::splat(200.0));
         let resp = ui.interact(disc, Id::unique("overlay-orb-talk"), egui::Sense::click_and_drag());
@@ -315,17 +315,17 @@ impl OverlayUi {
         p.circle_filled(center, if held { 84.0 } else { 88.0 }, fill);
         widgets::icon(&p, center, icons::MICROPHONE, 64.0, if can_talk { theme::ON_ACCENT } else { theme::FG_3 });
         let (title, sub) = if !settings.enabled || !settings.assistant {
-            ("Orb's assistant is off", "Turn it on in Orbiters desktop › Orb".to_string())
+            ("N4N0's assistant is off", "Turn it on in Orbiters - N4N0 › N4N0".to_string())
         } else if !signed_in {
-            ("Sign in to talk to Orb", "In Orbiters desktop › Settings".to_string())
+            ("Sign in to talk to N4N0", "In Orbiters - N4N0 › Settings".to_string())
         } else if !orb.voice.installed {
-            ("Orb cannot hear yet", "Install its ears in Orbiters desktop › Orb".to_string())
+            ("N4N0 cannot hear yet", "Install its ears in Orbiters - N4N0 › N4N0".to_string())
         } else if orb.listening {
             ("Listening…", "Let go when you are done".to_string())
         } else if orb.thinking {
-            ("Thinking…", "Orb answers on its panel".to_string())
+            ("Thinking…", "N4N0 answers on its panel".to_string())
         } else {
-            ("Hold and speak", "Or hold Talk in Orb's menu, or touch the orb".to_string())
+            ("Hold and speak", "Or hold Talk in N4N0's menu, or touch N4N0".to_string())
         };
         let y = disc.bottom() + 28.0;
         widgets::text_truncated(&p, pos2(left.center().x, y), Align2::CENTER_CENTER, &Txt::new(title, 20.0).weight(weight::SEMIBOLD), left.width() - 40.0);
@@ -335,21 +335,21 @@ impl OverlayUi {
             let line = format!("{} of {} free answers left today", q.limit.saturating_sub(q.used), q.limit);
             widgets::text(&p, pos2(left.center().x, left.bottom() - 28.0), Align2::CENTER_CENTER, &Txt::new(line, 12.5).color(theme::FG_4));
         }
-        // VRChat sends avatar parameters only to OSC services it found: without them, a hand on the orb and the menu's
+        // VRChat sends avatar parameters only to OSC services it found: without them, a hand on N4N0 and the menu's
         // Talk button never arrive.
         let quiet = snap.vrchat.running && snap.osc.enabled && !snap.osc.receiving;
         if quiet {
             let g = p.layout_job(
-                Txt::new("VRChat sends Orbiters nothing: touching the orb and Talk in its menu cannot reach Orb. Is OSC on in VRChat's Action Menu?", 12.5)
+                Txt::new("VRChat sends Orbiters nothing: touching N4N0 and Talk in its menu cannot reach N4N0. Is OSC on in VRChat's Action Menu?", 12.5)
                     .color(theme::WARN)
                     .line_height(17.0)
                     .job(left.width() - 44.0),
             );
             p.galley(pos2(left.left() + 22.0, y + 52.0), g, theme::WARN);
         }
-        // Orb's menu from here too (it opens in front of you), and asking VRChat again when it is quiet.
+        // N4N0's menu from here too (it opens in front of you), and asking VRChat again when it is quiet.
         let by = left.bottom() - if quota.is_some() { 96.0 } else { 64.0 };
-        let menu_button = Button::new("Orb's menu").icon(icons::STACK).variant(Variant::Secondary).enabled(settings.enabled);
+        let menu_button = Button::new("N4N0's menu").icon(icons::STACK).variant(Variant::Secondary).enabled(settings.enabled);
         let w = menu_button.desired_width(ui).max(150.0);
         let reconnect_w = 150.0;
         let x0 = left.center().x - (w + if quiet { 12.0 + reconnect_w } else { 0.0 }) / 2.0;
@@ -366,16 +366,16 @@ impl OverlayUi {
             ui.ctx().request_repaint();
         }
 
-        // What Orb said, and its panel.
+        // What N4N0 said, and its panel.
         let said = Rect::from_min_size(right.min, vec2(right.width(), 318.0));
         widgets::card(ui.painter(), said, theme::CARD_RADIUS);
-        widgets::text(ui.painter(), pos2(said.left() + 22.0, said.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps("Orb said"));
+        widgets::text(ui.painter(), pos2(said.left() + 22.0, said.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps("N4N0 said"));
         let body = Rect::from_min_max(pos2(said.left() + 22.0, said.top() + 48.0), pos2(said.right() - 22.0, said.bottom() - 18.0));
         let mut yy = body.top();
         let last: Vec<_> = orb.lines.iter().filter(|l| matches!(l.who, OrbWho::You | OrbWho::Orb | OrbWho::Error)).rev().take(3).collect();
         if last.is_empty() {
             let g = p.layout_job(
-                Txt::new("Nothing yet. Ask Orb to put your hoodie on, take a picture, or plan a movie night.", 15.0)
+                Txt::new("Nothing yet. Ask N4N0 to put your hoodie on, take a picture, or plan a movie night.", 15.0)
                     .color(theme::FG_3)
                     .line_height(21.0)
                     .job(body.width()),
@@ -385,8 +385,8 @@ impl OverlayUi {
         for line in last.into_iter().rev() {
             let (who, color) = match line.who {
                 OrbWho::You => ("You", theme::FG_3),
-                OrbWho::Error => ("Orb", theme::DANGER),
-                _ => ("Orb", theme::ACCENT),
+                OrbWho::Error => ("N4N0", theme::DANGER),
+                _ => ("N4N0", theme::ACCENT),
             };
             widgets::text(&p, pos2(body.left(), yy + 9.0), Align2::LEFT_CENTER, &Txt::caps(who).color(color));
             let g = p.layout_job(

@@ -1,10 +1,10 @@
-//! What Orb's assistant is told about the moment (`context.summary` of a turn): where the owner is, what avatar they
+//! What N4N0's assistant is told about the moment (`context.summary` of a turn): where the owner is, what avatar they
 //! wear and what it can do. Other people are counted, never named: their names stay on this computer.
 //!
 //! Much of it is text other people chose: the world's name (its creator), the avatar's name and its menu's labels (the
 //! avatar's maker), the last video's link and title (whoever used the world's video player). The assistant gets it as
 //! data, never as instructions: such text goes in a JSON block or JSON strings, each value cut short and rid of
-//! control, direction and zero-width characters, and Orbiters desktop's own lines say what it is. The controls come
+//! control, direction and zero-width characters, and Orbiters - N4N0's own lines say what it is. The controls come
 //! last with a budget of their own, so a long title never pushes them out.
 
 use serde_json::Value;
@@ -96,7 +96,7 @@ pub struct Moment {
     /// People in the instance besides the owner.
     pub others: usize,
     pub avatar_name: Option<String>,
-    /// The avatar carries the Orb prop (answers show on its panel).
+    /// The avatar carries the N4N0 prop (answers show on its panel).
     pub orb_prop: bool,
     pub afk: bool,
     /// The video the world played last, with its title when known.
@@ -105,14 +105,14 @@ pub struct Moment {
     pub controls: String,
     pub controls_from_manifest: bool,
     pub saved_videos: usize,
-    /// What Orbiters desktop did or heard since the assistant's last answer (the owner's yes to an action, a turn that
+    /// What Orbiters - N4N0 did or heard since the assistant's last answer (the owner's yes to an action, a turn that
     /// failed after its tools ran), in its own words: lines that quote other text quote it with [`quoted`].
     pub notes: Vec<String>,
 }
 
 impl Moment {
     pub fn summary(&self) -> String {
-        // Orbiters desktop's own words first.
+        // Orbiters - N4N0's own words first.
         let mut out = String::new();
         if !self.vrchat_running {
             out.push_str("VRChat is not running.\n");
@@ -126,9 +126,9 @@ impl Moment {
             }
         }
         if self.orb_prop {
-            out.push_str("The owner's avatar carries the Orb prop: your answers show on its panel.\n");
+            out.push_str("The owner's avatar carries the N4N0 prop: your answers show on its panel.\n");
         } else if self.avatar_name.is_some() || self.vrchat_running {
-            out.push_str("The owner's avatar has no Orb prop: answers show in Orbiters desktop only.\n");
+            out.push_str("The owner's avatar has no N4N0 prop: answers show in Orbiters - N4N0 only.\n");
         }
         if self.saved_videos > 0 {
             out.push_str(&format!("The owner has {} saved videos.\n", self.saved_videos));
@@ -191,7 +191,7 @@ mod tests {
         };
         let s = m.summary();
         assert!(s.contains("with 11 other people"), "{s}");
-        assert!(s.contains("carries the Orb prop"));
+        assert!(s.contains("carries the N4N0 prop"));
         assert!(s.contains(r#"{"avatar":"Rexouium","last_video_played":{"title":"Song","url":"https://youtu.be/x"},"world":"The Black Cat"}"#), "{s}");
         assert!(s.ends_with("\"Clothes / Hoodie\" (toggle, off)\n"));
         assert!(Moment::default().summary().starts_with("VRChat is not running"));

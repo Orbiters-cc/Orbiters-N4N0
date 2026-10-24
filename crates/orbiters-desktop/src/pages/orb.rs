@@ -1,7 +1,7 @@
-//! Orb page: talking to Orb (typed, or held to speak), what Orb knows of the avatar (the Orb prop and its panel, the
-//! AFK message, carried and held parameters), saved videos, Orb's ears (speech models, microphone, wake word), its
+//! N4N0 page: talking to N4N0 (typed, or held to speak), what N4N0 knows of the avatar (the N4N0 prop and its panel, the
+//! AFK message, carried and held parameters), saved videos, N4N0's ears (speech models, microphone, wake word), its
 //! assistant (on, or off for a tool without AI), what Orbiters costs this computer, and testing what everyone sees of
-//! the orb (its states, sample texts, away, hidden, touched). Changes apply as they are made; the AFK message with
+//! N4N0 (its states, sample texts, away, hidden, touched). Changes apply as they are made; the AFK message with
 //! its Save button (see [`super::form`]).
 
 use super::form::{self, Texts};
@@ -42,13 +42,13 @@ impl State {
 /// How the assistant stands, for the conversation's subtitle.
 fn assistant_line(orb: &OrbStatus, settings: &Settings, account: &AccountState) -> String {
     if !settings.orb.enabled {
-        return "Orb is off".into();
+        return "N4N0 is off".into();
     }
     if !settings.orb.assistant {
-        return "Assistant off: Orb is a tool without AI".into();
+        return "Assistant off: N4N0 is a tool without AI".into();
     }
     if !matches!(account, AccountState::SignedIn { .. } | AccountState::Offline { .. } | AccountState::Checking { .. }) {
-        return "Sign in to Orbiters (Settings) to talk to Orb".into();
+        return "Sign in to Orbiters (Settings) to talk to N4N0".into();
     }
     match &orb.quota {
         Some(q) if q.own_key => "Answers on your own key".into(),
@@ -59,7 +59,7 @@ fn assistant_line(orb: &OrbStatus, settings: &Settings, account: &AccountState) 
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     // The controls edit a copy of the settings as published; what they change is saved over the settings as they
-    // are by then (`form::save`), so a pin Orb just added stays.
+    // are by then (`form::save`), so a pin N4N0 just added stays.
     let base = cx.snap.settings.clone();
     let mut draft = base.clone();
     let mut apply = false;
@@ -71,10 +71,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 40 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             let sub = heading_line(snap);
-            super::block(ui, cx, 0, 72.0, |ui, rect| super::heading(ui, rect, "Companion", "Orb", Some(&sub)));
+            super::block(ui, cx, 0, 72.0, |ui, rect| super::heading(ui, rect, "Companion", "N4N0", Some(&sub)));
 
             let talk_sub = assistant_line(orb, &snap.settings, &snap.account.state);
-            section(ui, cx, 1, icons::SMILEY, "Talk to Orb", Some(&talk_sub), |ui| {
+            section(ui, cx, 1, icons::SMILEY, "Talk to N4N0", Some(&talk_sub), |ui| {
                 conversation(ui, orb);
                 ui.add_space(12.0);
                 let signed_in = matches!(snap.account.state, AccountState::SignedIn { .. } | AccountState::Offline { .. } | AccountState::Checking { .. });
@@ -84,7 +84,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 let ask_w = 92.0;
                 let field = Rect::from_min_max(row.min, pos2(row.right() - talk_w - ask_w - 16.0, row.max.y));
                 let mut fu = ui.new_child(UiBuilder::new().max_rect(field).layout(Layout::left_to_right(egui::Align::Center)));
-                let resp = widgets::text_field(&mut fu, "orb-ask", &mut state.ask, "Ask Orb something…", field.width(), false);
+                let resp = widgets::text_field(&mut fu, "orb-ask", &mut state.ask, "Ask N4N0 something…", field.width(), false);
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let ask_rect = Rect::from_min_size(pos2(field.right() + 8.0, row.top()), vec2(ask_w, 40.0));
                 let ask = Button::new("Ask").icon(icons::SPARKLE).variant(Variant::Primary).enabled(can_ask && !orb.thinking && !state.ask.trim().is_empty()).width(ask_w).show_at(ui, ask_rect);
@@ -108,13 +108,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
                 if !orb.voice.installed && can_ask {
                     ui.add_space(6.0);
-                    note(ui, "Install Orb's ears below to talk instead of typing.", theme::FG_3);
+                    note(ui, "Install N4N0's ears below to talk instead of typing.", theme::FG_3);
                 }
                 for c in &orb.confirmations {
                     ui.add_space(12.0);
-                    // What Orb asks before it does it is answered here (or by saying yes); the rest on Orbiters.
+                    // What N4N0 asks before it does it is answered here (or by saying yes); the rest on Orbiters.
                     let (fallback, label, icon) = if c.is_local() {
-                        ("Orb asks before it does this. Say or type no to leave it.", "Yes, do it", icons::CHECK)
+                        ("N4N0 asks before it does this. Say or type no to leave it.", "Yes, do it", icons::CHECK)
                     } else {
                         ("Waiting for your approval on Orbiters.", "Approve on Orbiters", icons::ARROW_SQUARE_OUT)
                     };
@@ -143,7 +143,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 let mut bu = ui.new_child(UiBuilder::new().max_rect(r).layout(Layout::left_to_right(egui::Align::Center)));
                 bu.spacing_mut().item_spacing = vec2(8.0, 0.0);
                 if Button::new("Show a test message").icon(icons::PLAY).size(Size::Sm).enabled(orb.prop_sync.is_some()).show(&mut bu).clicked() {
-                    cx.ctl.orb(OrbCommand::Say { text: "Hi, I'm Orb. Yes, the one in the menu. No, I'm not your friend.".into() });
+                    cx.ctl.orb(OrbCommand::Say { text: "Hi, I'm N4N0. Yes, the one in the menu. No, I'm not your friend.".into() });
                 }
                 if Button::new("Clear").icon(icons::X).variant(Variant::Ghost).size(Size::Sm).enabled(orb.panel.is_some()).show(&mut bu).clicked() {
                     cx.ctl.orb(OrbCommand::HidePanel);
@@ -155,11 +155,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 ui.add_space(12.0);
                 widgets::separator(ui);
                 let menu = if orb.avatar_id.is_none() {
-                    "Orb looks at your avatar once VRChat loads it.".to_string()
+                    "N4N0 looks at your avatar once VRChat loads it.".to_string()
                 } else if orb.manifest {
-                    format!("Orbiters Toolkit described this avatar's menu: Orb knows its {} controls by name.", orb.controls)
+                    format!("Orbiters Toolkit described this avatar's menu: N4N0 knows its {} controls by name.", orb.controls)
                 } else {
-                    "Orb sees only parameter names. Upload the avatar from Unity with Orbiters Toolkit installed to give Orb its menu.".to_string()
+                    "N4N0 sees only parameter names. Upload the avatar from Unity with Orbiters Toolkit installed to give N4N0 its menu.".to_string()
                 };
                 widgets::field(ui, "Menu", Some(&menu), 140.0, |ui| {
                     let (t, c) = if orb.manifest { ("Known by label", theme::OK) } else if orb.avatar_id.is_some() { ("Names only", theme::WARN) } else { ("–", theme::FG_4) };
@@ -168,7 +168,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 });
                 if orb.screen && orb.prop_sync == Some(8) {
                     ui.add_space(6.0);
-                    note(ui, "Orb's screen fills twice as fast with 16 sync values: choose 16 in Orbiters Toolkit's Orb settings and upload the avatar again.", theme::FG_3);
+                    note(ui, "N4N0's screen fills twice as fast with 16 sync values: choose 16 in Orbiters Toolkit's N4N0 settings and upload the avatar again.", theme::FG_3);
                 }
                 widgets::separator(ui);
                 widgets::field(ui, "AFK message", Some("While VRChat says you are away, the panel tells people around you."), 48.0, |ui| {
@@ -201,7 +201,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                             orbiters_core::osc::OscValue::Float(v) => format!("{v:.2}"),
                             orbiters_core::osc::OscValue::Text(t) => t.clone(),
                         };
-                        let desc = format!("Held at {value}: Orb puts it back whenever VRChat or a world resets it.");
+                        let desc = format!("Held at {value}: N4N0 puts it back whenever VRChat or a world resets it.");
                         widgets::field(ui, &pin.parameter, Some(&desc), 100.0, |ui| {
                             if Button::new("Let go").variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
                                 remove = Some(i);
@@ -215,17 +215,17 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
             });
 
-            // Orb's menu: fast walk, YouTube, calls, a 3D picture. (Sections enter in the order they stand on the page.)
+            // N4N0's menu: fast walk, YouTube, calls, a 3D picture. (Sections enter in the order they stand on the page.)
             let menu_sub = if orb.screen {
                 "Opens on the screen your orb projects (\"Replace Orbiters overlay\" in My Avatar)"
             } else {
                 "Opens in the SteamVR overlay, in front of you"
             };
-            section(ui, cx, 3, icons::STACK, "Orb's menu", Some(menu_sub), |ui| {
+            section(ui, cx, 3, icons::STACK, "N4N0's menu", Some(menu_sub), |ui| {
                 widgets::field(
                     ui,
                     "Controller button",
-                    Some("SteamVR's \"Open Orb's menu\" binding for Orbiters: a double press of the left stick, unless you change it in SteamVR's controller settings."),
+                    Some("SteamVR's \"Open N4N0's menu\" binding for Orbiters: a double press of the left stick, unless you change it in SteamVR's controller settings."),
                     48.0,
                     |ui| {
                         apply |= widgets::toggle(ui, "orb-menu-button", &mut draft.orb.menu.button);
@@ -234,26 +234,26 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 let say = if draft.orb.wake_word {
                     "The wake word on its own opens the menu."
                 } else {
-                    "The wake word on its own opens the menu, once Orb listens for its name: turn on Wake word under Orb's ears."
+                    "The wake word on its own opens the menu, once N4N0 listens for its name: turn on Wake word under N4N0's ears."
                 };
-                widgets::field(ui, "Say \"Orb\"", Some(say), 48.0, |ui| {
+                widgets::field(ui, "Say \"Nano\"", Some(say), 48.0, |ui| {
                     apply |= widgets::toggle(ui, "orb-menu-wake", &mut draft.orb.menu.wake_word);
                 });
-                widgets::field(ui, "Touch the orb", Some("A hand on the orb opens the menu; touching it again closes it."), 48.0, |ui| {
+                widgets::field(ui, "Touch N4N0", Some("A hand on N4N0 opens the menu; touching it again closes it."), 48.0, |ui| {
                     apply |= widgets::toggle(ui, "orb-menu-touch", &mut draft.orb.menu.touch);
                 });
-                widgets::field(ui, "Try it", Some("Opens the menu (or closes it) as the button and the orb do."), 140.0, |ui| {
+                widgets::field(ui, "Try it", Some("Opens the menu (or closes it) as the button and N4N0 do."), 140.0, |ui| {
                     if Button::new("Open the menu").icon(icons::STACK).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
                         cx.ctl.orb(OrbCommand::ToggleScreen);
                     }
                 });
                 if snap.vrchat.running && snap.osc.enabled && !snap.osc.receiving {
-                    // VRChat sends avatar parameters only to OSC services it found: without them, the orb's touch and
+                    // VRChat sends avatar parameters only to OSC services it found: without them, N4N0's touch and
                     // the menu's Talk button never reach Orbiters.
                     ui.add_space(4.0);
                     note(
                         ui,
-                        "VRChat has sent Orbiters nothing for a minute: touching the orb and Talk in its menu cannot reach Orb. Orbiters asks VRChat to find it again by itself; Reconnect asks now. Check that OSC is on in VRChat's Action Menu (Options › OSC).",
+                        "VRChat has sent Orbiters nothing for a minute: touching N4N0 and Talk in its menu cannot reach N4N0. Orbiters asks VRChat to find it again by itself; Reconnect asks now. Check that OSC is on in VRChat's Action Menu (Options › OSC).",
                         theme::WARN,
                     );
                     if Button::new("Reconnect").icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
@@ -269,7 +269,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(
                     ui,
                     "Look",
-                    Some("Retro: a green phosphor terminal, as on an old computer. The orb's screen has its own Look, in My Avatar."),
+                    Some("Retro: a green phosphor terminal, as on an old computer. N4N0's screen has its own Look, in My Avatar."),
                     200.0,
                     |ui| {
                         use orbiters_core::settings::MenuLook as L;
@@ -282,9 +282,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let calls = &orb.calls;
             let calls_sub = match (&calls.call, &calls.link) {
                 (Some(c), _) => call_line(c),
-                (None, CallLink::Linked { .. }) if calls.contacts.is_empty() => "No friend with Orbiters and Orb on right now".to_string(),
+                (None, CallLink::Linked { .. }) if calls.contacts.is_empty() => "No friend with Orbiters and N4N0 on right now".to_string(),
                 (None, CallLink::Linked { .. }) => format!("{} friends can be called", calls.contacts.len()),
-                (None, CallLink::Off) => "Call VRChat friends who have Orbiters and Orb too".to_string(),
+                (None, CallLink::Off) => "Call VRChat friends who have Orbiters and N4N0 too".to_string(),
                 (None, CallLink::SignedOut) => "Sign in to Orbiters to use calls".to_string(),
                 (None, CallLink::NoAccount) => "Open VRChat, VRCX or VRCNext once so Orbiters knows your VRChat account".to_string(),
                 (None, CallLink::NotLinked { .. }) => "Link your VRChat account on Orbiters to be called".to_string(),
@@ -347,7 +347,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 if matches!(calls.link, CallLink::Linked { .. }) {
                     for contact in &calls.contacts {
                         widgets::separator(ui);
-                        widgets::field(ui, &contact.name, Some("Has Orbiters and Orb on now"), 100.0, |ui| {
+                        widgets::field(ui, &contact.name, Some("Has Orbiters and N4N0 on now"), 100.0, |ui| {
                             if Button::new("Call").icon(icons::BROADCAST).size(Size::Sm).enabled(calls.call.is_none()).show(ui).clicked() {
                                 cx.ctl.orb(OrbCommand::Call { contact: contact.id.clone() });
                             }
@@ -356,7 +356,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
             });
 
-            let videos_sub = if orb.videos.is_empty() { "Ask Orb to “save this video” while a world plays one".to_string() } else { format!("{} saved", orb.videos.len()) };
+            let videos_sub = if orb.videos.is_empty() { "Ask N4N0 to “save this video” while a world plays one".to_string() } else { format!("{} saved", orb.videos.len()) };
             section(ui, cx, 5, icons::FILM_STRIP, "Saved videos", Some(&videos_sub), |ui| {
                 if let Some(video) = &snap.vrchat.world.last_video {
                     widgets::field(ui, "Playing in this world", Some(&video.url), 150.0, |ui| {
@@ -411,9 +411,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             } else {
                 "Installed: they start with VRChat".to_string()
             };
-            section(ui, cx, 6, icons::MICROPHONE, "Orb's ears", Some(&ears_sub), |ui| {
+            section(ui, cx, 6, icons::MICROPHONE, "N4N0's ears", Some(&ears_sub), |ui| {
                 if !voice.installed {
-                    let desc = "Speech to text on this computer, in 25 languages (NVIDIA Parakeet, Silero VAD): about 490 MB to download. Nothing you say leaves it until it is a sentence for Orb.";
+                    let desc = "Speech to text on this computer, in 25 languages (NVIDIA Parakeet, Silero VAD): about 490 MB to download. Nothing you say leaves it until it is a sentence for N4N0.";
                     widgets::field(ui, "Speech models", Some(desc), 280.0, |ui| {
                         let busy = voice.downloading.is_some();
                         let label = match (busy, unpacking, voice.repair) {
@@ -444,7 +444,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     ui.add_space(8.0);
                     widgets::separator(ui);
                 }
-                widgets::field(ui, "Microphone", Some("The one Orb listens to."), 0.0, |_| {});
+                widgets::field(ui, "Microphone", Some("The one N4N0 listens to."), 0.0, |_| {});
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
                     if source_chip(ui, "Windows default", draft.orb.mic_device.is_empty()).clicked() {
@@ -465,37 +465,37 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(
                     ui,
                     "Wake word",
-                    Some("Start a sentence with “Orb” and Orb hears it, any time. Every sentence is transcribed on this computer to find it; none is kept."),
+                    Some("Start a sentence with “Nano” (N4N0 said aloud) and N4N0 hears it, any time. Every sentence is transcribed on this computer to find it; none is kept."),
                     48.0,
                     |ui| {
                         apply |= widgets::toggle(ui, "orb-wake", &mut draft.orb.wake_word);
                     },
                 );
                 widgets::separator(ui);
-                widgets::field(ui, "Mute VRChat while I hold Talk", Some("The sentence for Orb stays out of the world."), 48.0, |ui| {
+                widgets::field(ui, "Mute VRChat while I hold Talk", Some("The sentence for N4N0 stays out of the world."), 48.0, |ui| {
                     apply |= widgets::toggle(ui, "orb-mute", &mut draft.orb.mute_while_talking);
                 });
                 ui.add_space(4.0);
-                note(ui, "In VRChat: hold Talk in Orb's menu, touch the orb with a hand, or start with “Orb” when the wake word is on.", theme::FG_3);
+                note(ui, "In VRChat: hold Talk in N4N0's menu, touch N4N0 with a hand, or start with “Nano” when the wake word is on.", theme::FG_3);
                 ui.add_space(8.0);
             });
 
-            section(ui, cx, 7, icons::SPARKLE, "Assistant", Some("Orb's brain runs on Orbiters"), |ui| {
-                widgets::field(ui, "Orb", Some("The panel, the AFK message, carried and held parameters, saved videos."), 48.0, |ui| {
+            section(ui, cx, 7, icons::SPARKLE, "Assistant", Some("N4N0's brain runs on Orbiters"), |ui| {
+                widgets::field(ui, "N4N0", Some("The panel, the AFK message, carried and held parameters, saved videos."), 48.0, |ui| {
                     apply |= widgets::toggle(ui, "orb-enabled", &mut draft.orb.enabled);
                 });
                 widgets::separator(ui);
                 widgets::field(
                     ui,
                     "AI assistant",
-                    Some("Off, Orb is a tool without AI: nothing is transcribed, and nothing goes to Orbiters."),
+                    Some("Off, N4N0 is a tool without AI: nothing is transcribed, and nothing goes to Orbiters."),
                     48.0,
                     |ui| {
                         apply |= widgets::toggle(ui, "orb-ai", &mut draft.orb.assistant);
                     },
                 );
                 widgets::separator(ui);
-                widgets::field(ui, "Personality and own key", Some("Orb's roast level, its language and your own AI key are on the Orbiters website."), 150.0, |ui| {
+                widgets::field(ui, "Personality and own key", Some("N4N0's roast level, its language and your own AI key are on the Orbiters website."), 150.0, |ui| {
                     if Button::new("Open").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
                         let site = if snap.account.development { orbiters_core::account::Server::Development } else { orbiters_core::account::Server::Production };
                         let _ = crate::controller::open_url(&format!("{}orb?tab=settings&section=orb", site.website()));
@@ -523,13 +523,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let prop = orb.prop_sync.is_some();
             let testing_sub = match orb.prop_sync {
                 Some(n) => format!("What everyone sees of your orb · {n} text slots"),
-                None => "Wear an avatar with the Orb prop in VRChat to test it".to_string(),
+                None => "Wear an avatar with the N4N0 prop in VRChat to test it".to_string(),
             };
             section(ui, cx, 9, icons::FLASK, "Testing", Some(&testing_sub), |ui| {
                 widgets::field(
                     ui,
                     "States",
-                    Some("Hold the orb in one state, as everyone sees it, or play them all, two seconds each. Automatic follows what Orb is doing."),
+                    Some("Hold N4N0 in one state, as everyone sees it, or play them all, two seconds each. Automatic follows what N4N0 is doing."),
                     150.0,
                     |ui| {
                         if Button::new("Play every state").icon(icons::PLAY).size(Size::Sm).enabled(prop && !orb.test_cycle).show(ui).clicked() {
@@ -578,13 +578,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 });
                 widgets::separator(ui);
                 let mut shown = !orb.test_hidden;
-                widgets::field(ui, "Show the orb", Some("Off hides the whole orb and its panel (Orb/Visible), like Show Orb in its menu."), 48.0, |ui| {
+                widgets::field(ui, "Show N4N0", Some("Off hides the whole orb and its panel (N4N0/Visible), like Show N4N0 in its menu."), 48.0, |ui| {
                     if widgets::toggle(ui, "orb-test-visible", &mut shown) {
                         cx.ctl.orb(OrbCommand::TestVisible { on: shown });
                     }
                 });
                 widgets::separator(ui);
-                widgets::field(ui, "Touch the orb", Some("As if your hand touched it: the menu opens (or Orb listens for one sentence, with that off)."), 110.0, |ui| {
+                widgets::field(ui, "Touch N4N0", Some("As if your hand touched it: the menu opens (or N4N0 listens for one sentence, with that off)."), 110.0, |ui| {
                     let ears = orb.voice.installed && snap.settings.orb.assistant;
                     if Button::new("Touch").icon(icons::CROSSHAIR).variant(Variant::Secondary).size(Size::Sm).enabled(prop && ears).show(ui).clicked() {
                         cx.ctl.orb(OrbCommand::TestTouch);
@@ -603,25 +603,25 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 fn heading_line(snap: &crate::state::Snapshot) -> String {
     let orb = &snap.orb;
     if !snap.settings.orb.enabled {
-        return "Orb is off".into();
+        return "N4N0 is off".into();
     }
     if !snap.vrchat.running {
         return "Waiting for VRChat".into();
     }
     match (&snap.vrchat.world.avatar_name, orb.prop_sync) {
         (Some(a), Some(_)) => format!("On “{a}”"),
-        (Some(a), None) => format!("“{a}” has no Orb: add it from My Avatar's gallery"),
+        (Some(a), None) => format!("“{a}” has no N4N0: add it from My Avatar's gallery"),
         (None, Some(_)) => "On your avatar".into(),
-        (None, None) => "Your avatar has no Orb: add it from My Avatar's gallery".into(),
+        (None, None) => "Your avatar has no N4N0: add it from My Avatar's gallery".into(),
     }
 }
 
 fn avatar_line(snap: &crate::state::Snapshot) -> String {
     let orb = &snap.orb;
     match (orb.prop_sync, orb.face) {
-        (Some(_), face) if snap.vrchat.running => format!("Orb is {}", face_word(face)),
-        (Some(n), _) => format!("Orb prop with {n} text values"),
-        (None, _) if orb.avatar_id.is_some() => "No Orb prop on this avatar".into(),
+        (Some(_), face) if snap.vrchat.running => format!("N4N0 is {}", face_word(face)),
+        (Some(n), _) => format!("N4N0 prop with {n} text values"),
+        (None, _) if orb.avatar_id.is_some() => "No N4N0 prop on this avatar".into(),
         _ => "No avatar yet".into(),
     }
 }
@@ -692,7 +692,7 @@ fn note(ui: &mut Ui, text: &str, color: egui::Color32) {
     ui.painter().galley(r.min, g, color);
 }
 
-/// The last lines of the conversation: the person's to the right, Orb's in green to the left, what Orb did in small.
+/// The last lines of the conversation: the person's to the right, N4N0's in green to the left, what N4N0 did in small.
 fn conversation(ui: &mut Ui, orb: &OrbStatus) {
     let width = ui.available_width();
     let lines: Vec<&OrbLine> = orb.lines.iter().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
@@ -703,7 +703,7 @@ fn conversation(ui: &mut Ui, orb: &OrbStatus) {
             ui.painter(),
             r.center(),
             Align2::CENTER_CENTER,
-            &Txt::new("“Orb, put my hoodie on.” “Orb, plan a movie night Saturday.” “Orb, save this video.”", 12.5).color(theme::FG_3),
+            &Txt::new("“Nano, put my hoodie on.” “Nano, plan a movie night Saturday.” “Nano, save this video.”", 12.5).color(theme::FG_3),
         );
         return;
     }
@@ -743,7 +743,7 @@ fn conversation(ui: &mut Ui, orb: &OrbStatus) {
         orb_dot(ui, pos2(row.left() + 13.0, bubble.center().y), 11.0);
         let t = anim::time(ui.ctx());
         if orb.listening {
-            // The microphone's level, as Orb hears it.
+            // The microphone's level, as N4N0 hears it.
             let level = orb.voice.level.clamp(0.0, 1.0);
             let bar = Rect::from_min_size(pos2(bubble.left() + 14.0, bubble.center().y - 3.0), vec2(bubble.width() - 28.0, 6.0));
             ui.painter().rect_filled(bar, theme::radius(3.0), theme::white(0.08));
@@ -760,7 +760,7 @@ fn conversation(ui: &mut Ui, orb: &OrbStatus) {
     }
 }
 
-/// Orb's little face: a green disc with two eyes.
+/// N4N0's little face: a green disc with two eyes.
 fn orb_dot(ui: &Ui, center: egui::Pos2, radius: f32) {
     let p = ui.painter();
     p.circle_filled(center, radius, theme::ACCENT);
@@ -769,7 +769,7 @@ fn orb_dot(ui: &Ui, center: egui::Pos2, radius: f32) {
     }
 }
 
-/// The panel as people see it: four rows of 32 characters, white on a dark glass, empty when Orb is quiet.
+/// The panel as people see it: four rows of 32 characters, white on a dark glass, empty when N4N0 is quiet.
 fn panel_preview(ui: &mut Ui, orb: &OrbStatus) {
     let width = ui.available_width().min(520.0);
     let (r, _) = ui.allocate_exact_size(vec2(width, 112.0), Sense::hover());
@@ -782,10 +782,10 @@ fn panel_preview(ui: &mut Ui, orb: &OrbStatus) {
             }
         }
         (None, Some(_)) => {
-            widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new("The panel is hidden until Orb speaks", 12.5).color(theme::FG_4));
+            widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new("The panel is hidden until N4N0 speaks", 12.5).color(theme::FG_4));
         }
         (None, None) => {
-            widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new("No Orb on this avatar: add it from My Avatar's gallery", 12.5).color(theme::FG_4));
+            widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new("No N4N0 on this avatar: add it from My Avatar's gallery", 12.5).color(theme::FG_4));
         }
     }
     widgets::text(p, pos2(r.right() - 14.0, r.bottom() - 12.0), Align2::RIGHT_CENTER, &Txt::caps("Panel").color(theme::FG_4));

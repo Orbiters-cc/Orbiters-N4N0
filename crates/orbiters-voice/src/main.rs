@@ -1,5 +1,5 @@
-//! Orb's ears: the voice worker of Orbiters desktop (protocol: `orbiters_core::voice`). The microphone is open only
-//! while Orb listens or the wake word is on. A held sentence (the Talk button) is transcribed when it is let go; any
+//! N4N0's ears: the voice worker of Orbiters - N4N0 (protocol: `orbiters_core::voice`). The microphone is open only
+//! while N4N0 listens or the wake word is on. A held sentence (the Talk button) is transcribed when it is let go; any
 //! other sentence ends where Silero VAD hears it end. Transcription runs here, on the CPU, with NVIDIA Parakeet
 //! through sherpa-onnx. Audio is kept in memory only until its sentence is transcribed.
 //!
@@ -24,11 +24,11 @@ use std::time::{Duration, Instant};
 const RATE: usize = voice::SAMPLE_RATE as usize;
 /// Silero VAD's window at 16 kHz.
 const WINDOW: usize = 512;
-/// A sentence for Orb that never starts is given up after this.
+/// A sentence for N4N0 that never starts is given up after this.
 const NO_SPEECH: Duration = Duration::from_secs(8);
 /// The longest sentence (held or not).
 const LONGEST: Duration = Duration::from_secs(30);
-/// Sound kept from before Orb starts listening, while the microphone is already open (the wake word).
+/// Sound kept from before N4N0 starts listening, while the microphone is already open (the wake word).
 const PREROLL: usize = RATE * 3 / 10;
 /// Threads of the recogniser: VRChat needs the rest.
 const THREADS: i32 = 2;
@@ -70,7 +70,7 @@ fn path_string(p: PathBuf) -> Option<String> {
 }
 
 fn load_vad(models: &Path) -> anyhow::Result<VoiceActivityDetector> {
-    anyhow::ensure!(models.join(voice::VAD_FILE).is_file(), "Orb's speech models are not installed in {}", models.display());
+    anyhow::ensure!(models.join(voice::VAD_FILE).is_file(), "N4N0's speech models are not installed in {}", models.display());
     VoiceActivityDetector::create(
         &VadModelConfig {
             silero_vad: SileroVadModelConfig {
@@ -93,7 +93,7 @@ fn load_vad(models: &Path) -> anyhow::Result<VoiceActivityDetector> {
 }
 
 fn load_recognizer(models: &Path) -> anyhow::Result<OfflineRecognizer> {
-    anyhow::ensure!(voice::installed(models), "Orb's speech models are not installed in {} (or are damaged)", models.display());
+    anyhow::ensure!(voice::installed(models), "N4N0's speech models are not installed in {} (or are damaged)", models.display());
     let asr = models.join(voice::ASR_DIR);
     let mut config = OfflineRecognizerConfig::default();
     config.model_config.transducer = OfflineTransducerModelConfig {
@@ -126,7 +126,7 @@ enum Recognizer {
     Ready(OfflineRecognizer),
 }
 
-/// A sentence to transcribe: for Orb (answering listen `listen`), or heard for the wake word.
+/// A sentence to transcribe: for N4N0 (answering listen `listen`), or heard for the wake word.
 struct Sentence {
     samples: Vec<f32>,
     for_orb: bool,
@@ -411,7 +411,7 @@ impl Worker {
             Err(e) => {
                 // Tried again at the next sentence.
                 self.recognizer = Recognizer::Unloaded;
-                emit(&VoiceEvent::Error { message: format!("Orb's speech recogniser did not load: {e}") });
+                emit(&VoiceEvent::Error { message: format!("N4N0's speech recogniser did not load: {e}") });
                 while let Some(s) = self.waiting.pop_front() {
                     if s.for_orb {
                         emit(&VoiceEvent::Heard { text: String::new(), for_orb: true, seconds: 0.0, decode_ms: 0, listen: s.listen });
@@ -495,7 +495,7 @@ impl Worker {
             return;
         }
         if self.waiting.len() >= WAITING_MOST {
-            // The oldest sentence heard for the wake word goes (one for Orb is always answered).
+            // The oldest sentence heard for the wake word goes (one for N4N0 is always answered).
             match self.waiting.iter().position(|s| !s.for_orb) {
                 Some(i) => drop(self.waiting.remove(i)),
                 None if !for_orb => return,
@@ -522,13 +522,13 @@ impl Worker {
         emit(&VoiceEvent::Heard { text, for_orb: s.for_orb, seconds, decode_ms, listen: s.listen });
     }
 
-    /// A sentence for Orb that never started, or went on too long; a microphone due to open again; a recogniser
+    /// A sentence for N4N0 that never started, or went on too long; a microphone due to open again; a recogniser
     /// idle long enough to go. False when the install stalled (the worker then quits).
     fn tick(&mut self) -> bool {
         if let Some(progress) = &self.installing {
             if progress.idle_for() > STALL {
                 emit(&VoiceEvent::Error {
-                    message: "The download of Orb's speech models stalled (nothing came for a minute). Try again: it goes on from where it stopped.".into(),
+                    message: "The download of N4N0's speech models stalled (nothing came for a minute). Try again: it goes on from where it stopped.".into(),
                 });
                 return false;
             }
@@ -850,7 +850,7 @@ fn main() {
             Ok(Input::Installed(result)) => {
                 match result {
                     Ok(()) => emit(&VoiceEvent::Installed),
-                    Err(e) => emit(&VoiceEvent::Error { message: format!("Could not install Orb's speech models: {e}") }),
+                    Err(e) => emit(&VoiceEvent::Error { message: format!("Could not install N4N0's speech models: {e}") }),
                 }
                 break;
             }

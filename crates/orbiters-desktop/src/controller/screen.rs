@@ -1,5 +1,5 @@
-//! Orb's menu in the tray service (contracts `Docs/orb.md`, Menu and Screen): on the avatar's projected screen when
-//! the Orb prop has one, and the requests that open it in the SteamVR overlay otherwise.
+//! N4N0's menu in the tray service (contracts `Docs/orb.md`, Menu and Screen): on the avatar's projected screen when
+//! the N4N0 prop has one, and the requests that open it in the SteamVR overlay otherwise.
 //!
 //! The screen's menu lives here, beside the OSC link: the orb thread writes its memory (the owner's through local
 //! values, a block every step; everyone else's through the text channel, in turn with the panel), the screen's touch
@@ -37,9 +37,9 @@ const IDLE_CLOSE: Duration = Duration::from_secs(120);
 /// A thumbnail that failed is tried again after this (times the tries), so many times.
 const THUMB_RETRY: Duration = Duration::from_secs(3);
 const THUMB_TRIES: u8 = 3;
-/// VRChat sends back the `Orb/Menu` the desktop set within this: the same value then is its echo, not the owner's.
+/// VRChat sends back the `N4N0/Menu` the desktop set within this: the same value then is its echo, not the owner's.
 const MENU_ECHO: Duration = Duration::from_secs(1);
-/// After an avatar change, what VRChat sends of `Orb/Menu` for this long is the loaded avatar's default.
+/// After an avatar change, what VRChat sends of `N4N0/Menu` for this long is the loaded avatar's default.
 const MENU_SETTLE: Duration = Duration::from_secs(2);
 /// The overlay says its menu opened within this of being asked (else it is not there).
 const OVERLAY_ANSWER: Duration = Duration::from_secs(2);
@@ -141,15 +141,15 @@ impl Followups {
 }
 
 pub struct ScreenRuntime {
-    /// The avatar's Orb prop has the projected screen, with this many text values and thumbnails of this many bytes
-    /// (`Orb/Screen/ThumbnailBytes`).
+    /// The avatar's N4N0 prop has the projected screen, with this many text values and thumbnails of this many bytes
+    /// (`N4N0/Screen/ThumbnailBytes`).
     pub available: bool,
     sync: Option<usize>,
     pub(super) thumbnail: usize,
     pub menu: Menu,
     owner: Audience,
     everyone: Option<Audience>,
-    /// What `Orb/Screen/Open` was last set to.
+    /// What `N4N0/Screen/Open` was last set to.
     open_sent: Option<bool>,
     /// Everyone else's screen must be told it closed.
     close_everyone: bool,
@@ -175,7 +175,7 @@ pub struct ScreenRuntime {
     holding: [bool; 2],
     /// The page hover and presses are for.
     page_shown: Option<ScreenPage>,
-    /// Desktop mode with Orb's menu on the screen: its owner points by looking and presses with a left click.
+    /// Desktop mode with N4N0's menu on the screen: its owner points by looking and presses with a left click.
     gaze: bool,
     /// How near the eyes and the gaze point are to the touch points, new since the last step; where they look.
     eye: [f32; 4],
@@ -193,13 +193,13 @@ pub struct ScreenRuntime {
     rested: Option<(ScreenPage, usize, Instant)>,
     pictures: HashMap<String, Thumb>,
     suggest: SuggestQueue,
-    /// What Orb says while the menu is open: on Home, a line at a time, the next once the last was read.
+    /// What N4N0 says while the menu is open: on Home, a line at a time, the next once the last was read.
     answer: VecDeque<String>,
     answer_next: Option<Instant>,
     done_tx: mpsc::Sender<Done>,
     done_rx: mpsc::Receiver<Done>,
     last_activity: Instant,
-    /// The overlay's menu: open, and whether a sentence Orb hears is what to search for.
+    /// The overlay's menu: open, and whether a sentence N4N0 hears is what to search for.
     pub overlay_open: bool,
     pub overlay_dictation: bool,
     /// Bumped to ask the overlay to open its menu.
@@ -217,7 +217,7 @@ pub struct ScreenRuntime {
     /// When the overlay was last asked to close its menu, until it says it did (it counts as closed meanwhile: the Menu
     /// toggle the owner just turned off is not turned on again).
     overlay_closing: Option<Instant>,
-    /// The Menu toggle of Orb's expressions menu (`Orb/Menu`) as the avatar holds it, as far as the desktop knows
+    /// The Menu toggle of N4N0's expressions menu (`N4N0/Menu`) as the avatar holds it, as far as the desktop knows
     /// (`None`: not known, after an avatar change); the values the desktop set it to lately (VRChat sends them back,
     /// and an echo asks nothing); until when what VRChat sends of it is a loaded avatar's default, not the owner's.
     menu_param: Option<bool>,
@@ -325,7 +325,7 @@ impl ScreenRuntime {
         self.open_sent = None;
     }
 
-    /// Whether Orb's menu shows: on the avatar's screen when it has one, else in the overlay (asked to open or close
+    /// Whether N4N0's menu shows: on the avatar's screen when it has one, else in the overlay (asked to open or close
     /// it, it counts as open or closed until it says, or does not answer in time).
     fn menu_shown(&self, now: Instant) -> bool {
         if self.available {
@@ -356,7 +356,7 @@ impl ScreenRuntime {
         self.menu_settle_until = Some(now + MENU_SETTLE);
     }
 
-    /// The value to set `Orb/Menu` to, when the avatar's toggle no longer says whether the menu shows (another trigger
+    /// The value to set `N4N0/Menu` to, when the avatar's toggle no longer says whether the menu shows (another trigger
     /// opened it, it closed on its own), taken as sent.
     pub(super) fn menu_sync(&mut self, now: Instant) -> Option<bool> {
         if self.menu_settle_until.is_some_and(|t| now < t) {
@@ -376,7 +376,7 @@ impl ScreenRuntime {
         Some(shown)
     }
 
-    /// `Orb/Menu` as VRChat sent it: what the owner asks (`Some(open)`), or nothing: the echo of a value the desktop
+    /// `N4N0/Menu` as VRChat sent it: what the owner asks (`Some(open)`), or nothing: the echo of a value the desktop
     /// set, a loaded avatar's default, the menu already so.
     pub(super) fn menu_toggled(&mut self, on: bool, now: Instant) -> Option<bool> {
         self.menu_sent.retain(|(_, at)| now.duration_since(*at) < MENU_ECHO);
@@ -426,7 +426,7 @@ impl ScreenRuntime {
                 at(now + GAZE_POLL);
             }
             at(self.last_activity + IDLE_CLOSE);
-            // What Orb said moves on only while Home shows.
+            // What N4N0 said moves on only while Home shows.
             if let Some(t) = self.answer_next.filter(|_| self.menu.page == Page::Home) {
                 at(t);
             }
@@ -457,7 +457,7 @@ impl ScreenRuntime {
         self.photo_at.map(|at| at.saturating_duration_since(now).as_secs_f32().ceil() as u32)
     }
 
-    /// Looking points (desktop mode with Orb's menu on the screen) or no longer does: what was read of it goes.
+    /// Looking points (desktop mode with N4N0's menu on the screen) or no longer does: what was read of it goes.
     pub(super) fn set_gaze(&mut self, on: bool) {
         if self.gaze == on {
             return;
@@ -474,7 +474,7 @@ impl ScreenRuntime {
         self.hover = None;
     }
 
-    /// The eyes or the gaze point near the screen (`Orb/Screen/Eye0` …, `Orb/Screen/Gaze0` …): kept only while looking
+    /// The eyes or the gaze point near the screen (`N4N0/Screen/Eye0` …, `N4N0/Screen/Gaze0` …): kept only while looking
     /// points (in VR the fingers do). Whether `name` is one.
     pub fn gaze_value(&mut self, name: &str, value: f32) -> bool {
         let (values, rest) = if let Some(rest) = name.strip_prefix(screen::local::EYE_PREFIX) {
@@ -535,7 +535,7 @@ impl ScreenRuntime {
         self.mouse_down = Some(mouse.down);
     }
 
-    /// A hand's pointing ray (`Orb/Screen/Ray/L_Hit`, `…_Ratio`, the right hand's): whether it meets the screen, where
+    /// A hand's pointing ray (`N4N0/Screen/Ray/L_Hit`, `…_Ratio`, the right hand's): whether it meets the screen, where
     /// along it.
     pub fn ray_value(&mut self, name: &str, value: &OscValue) -> bool {
         let Some(rest) = name.strip_prefix(screen::local::RAY_PREFIX) else { return false };
@@ -553,7 +553,7 @@ impl ScreenRuntime {
         true
     }
 
-    /// The owner's index finger near the screen: one of the eight touch points (`Orb/Screen/Touch/L0` …).
+    /// The owner's index finger near the screen: one of the eight touch points (`N4N0/Screen/Touch/L0` …).
     pub fn touch_point(&mut self, name: &str, value: f32) -> bool {
         let Some(rest) = name.strip_prefix(screen::local::TOUCH_PREFIX) else { return false };
         let mut chars = rest.chars();
@@ -622,8 +622,8 @@ pub fn photo_setting(length: PhotoLength) -> orbiters_core::settings::Photo3dLen
 }
 
 impl super::Controller {
-    /// Something asked for Orb's menu (the wake word alone, a hand on the orb, a controller button): it opens on the
-    /// avatar's screen when there is one, else in the overlay; Orb listens either way. Opening it again closes it.
+    /// Something asked for N4N0's menu (the wake word alone, a hand on N4N0, a controller button): it opens on the
+    /// avatar's screen when there is one, else in the overlay; N4N0 listens either way. Opening it again closes it.
     pub(super) fn menu_open(self: &Shared, toggle: bool) {
         let settings = self.settings();
         let mut rt = self.orb.lock().unwrap();
@@ -668,7 +668,7 @@ impl super::Controller {
         self.orb_publish();
     }
 
-    /// Closes Orb's menu: the screen's, or the overlay's (asked to when it is open, or as soon as it says it opened).
+    /// Closes N4N0's menu: the screen's, or the overlay's (asked to when it is open, or as soon as it says it opened).
     pub(super) fn menu_close(self: &Shared) {
         let effects = {
             let mut rt = self.orb.lock().unwrap();
@@ -684,7 +684,7 @@ impl super::Controller {
         self.orb_publish();
     }
 
-    /// The Menu toggle of Orb's expressions menu (`Orb/Menu`, on the OSC action thread): on opens Orb's menu as the
+    /// The Menu toggle of N4N0's expressions menu (`N4N0/Menu`, on the OSC action thread): on opens N4N0's menu as the
     /// binding does, off closes it. VRChat sending back what the desktop set asks nothing.
     pub(super) fn menu_toggled(self: &Shared, on: bool) {
         let asked = self.orb.lock().unwrap().screen.menu_toggled(on, Instant::now());
@@ -695,7 +695,7 @@ impl super::Controller {
         }
     }
 
-    /// Orb listens to one sentence (as a hand on the orb does), unless it already listens.
+    /// N4N0 listens to one sentence (as a hand on N4N0 does), unless it already listens.
     fn menu_listen(self: &Shared) {
         let settings = self.settings().orb;
         if !settings.enabled || !settings.assistant {
@@ -726,7 +726,7 @@ impl super::Controller {
             }
             if open && std::mem::take(&mut s.overlay_close_after) {
                 // Closed before it opened (the Menu toggle turned off meanwhile): the overlay's menu, even when the
-                // avatar's screen shows Orb's menu by now.
+                // avatar's screen shows N4N0's menu by now.
                 s.overlay_close();
                 false
             } else {
@@ -739,7 +739,7 @@ impl super::Controller {
         self.orb_publish();
     }
 
-    /// A sentence Orb heard while a menu is open: the screen's search page takes it, or the overlay's (`true`: taken).
+    /// A sentence N4N0 heard while a menu is open: the screen's search page takes it, or the overlay's (`true`: taken).
     pub(super) fn menu_heard(self: &Shared, text: &str) -> bool {
         let mut rt = self.orb.lock().unwrap();
         if rt.screen.menu.open {
@@ -901,7 +901,7 @@ impl super::Controller {
         followups: &mut Followups,
     ) -> Vec<Message> {
         let mut out = Vec::new();
-        // The screen stands where the panel would show: what Orb says goes on the screen's Home instead, whole, a line
+        // The screen stands where the panel would show: what N4N0 says goes on the screen's Home instead, whole, a line
         // at a time.
         if rt.screen.available && rt.screen.menu.open {
             if let Some(text) = rt.sender.as_mut().filter(|s| s.busy() && !s.sticky()).and_then(TextSender::take_text) {
@@ -911,7 +911,7 @@ impl super::Controller {
                 rt.screen.answer_next = Some(now);
             }
         } else if !rt.screen.answer.is_empty() {
-            // The menu closed before Orb's answer was read: the rest goes on the panel.
+            // The menu closed before N4N0's answer was read: the rest goes on the panel.
             let rest = std::mem::take(&mut rt.screen.answer).into_iter().collect::<Vec<_>>().join(" ");
             rt.screen.answer_next = None;
             rt.show(&rest);
@@ -973,7 +973,7 @@ impl super::Controller {
                 }
             }
         }
-        // What Orb said, on Home a line at a time (the next once the last was read; it waits while another page shows).
+        // What N4N0 said, on Home a line at a time (the next once the last was read; it waits while another page shows).
         if s.menu.open && s.menu.page == Page::Home && s.answer_next.is_some_and(|t| now >= t) {
             match s.answer.pop_front() {
                 Some(line) => {
@@ -991,7 +991,7 @@ impl super::Controller {
         let contacts: Vec<Contact> = snapshot_calls.contacts.iter().map(|c| Contact { id: c.id.clone(), name: c.name.clone() }).collect();
         let (ready, note) = match &snapshot_calls.link {
             crate::state::CallLink::Linked { .. } => (true, String::new()),
-            crate::state::CallLink::Off => (false, "Calls are off: Orbiters desktop › Orb › Calls".to_string()),
+            crate::state::CallLink::Off => (false, "Calls are off: Orbiters - N4N0 › N4N0 › Calls".to_string()),
             crate::state::CallLink::SignedOut => (false, "Sign in to Orbiters to call friends".to_string()),
             crate::state::CallLink::NoAccount => (false, "VRChat's account here is unknown: open VRChat".to_string()),
             crate::state::CallLink::NotLinked { .. } => (false, "Link this VRChat account on Orbiters to call".to_string()),
@@ -1148,9 +1148,9 @@ impl super::Controller {
     }
 
     /// What the screen's touch points send (on the OSC receiving thread: record only, and wake the orb thread while the
-    /// menu is open). The other `Orb/Screen/` parameters are the app's own writes coming back.
+    /// menu is open). The other `N4N0/Screen/` parameters are the app's own writes coming back.
     pub(super) fn screen_parameter(&self, name: &str, value: &OscValue) -> bool {
-        if !name.starts_with("Orb/Screen/") {
+        if !name.starts_with("N4N0/Screen/") {
             return false;
         }
         if let (true, OscValue::Float(v)) = (name.starts_with(screen::local::TOUCH_PREFIX), value) {
@@ -1201,23 +1201,23 @@ mod tests {
     #[test]
     fn reads_touch_points() {
         let mut s = ScreenRuntime::default();
-        assert!(s.touch_point("Orb/Screen/Touch/L2", 0.5));
-        assert!(s.touch_point("Orb/Screen/Touch/R3", 0.25));
-        assert!(!s.touch_point("Orb/Text/Sync0", 0.25));
+        assert!(s.touch_point("N4N0/Screen/Touch/L2", 0.5));
+        assert!(s.touch_point("N4N0/Screen/Touch/R3", 0.25));
+        assert!(!s.touch_point("N4N0/Text/Sync0", 0.25));
         assert_eq!(s.proximity[0][2], 0.5);
         assert_eq!(s.proximity[1][3], 0.25);
         assert_eq!(s.touched, [true, true]);
-        assert!(s.touch_point("Orb/Screen/Touch/X0", 1.0), "ours, ignored");
+        assert!(s.touch_point("N4N0/Screen/Touch/X0", 1.0), "ours, ignored");
         assert_eq!(language().len(), 2);
     }
 
     #[test]
     fn reads_pointing_rays() {
         let mut s = ScreenRuntime::default();
-        assert!(s.ray_value("Orb/Screen/Ray/R_Hit", &OscValue::Bool(true)));
-        assert!(s.ray_value("Orb/Screen/Ray/R_Ratio", &OscValue::Float(0.2)));
-        assert!(s.ray_value("Orb/Screen/Ray/L_Distance", &OscValue::Float(0.3)), "ours, not read");
-        assert!(!s.ray_value("Orb/Screen/Touch/R0", &OscValue::Float(0.3)));
+        assert!(s.ray_value("N4N0/Screen/Ray/R_Hit", &OscValue::Bool(true)));
+        assert!(s.ray_value("N4N0/Screen/Ray/R_Ratio", &OscValue::Float(0.2)));
+        assert!(s.ray_value("N4N0/Screen/Ray/L_Distance", &OscValue::Float(0.3)), "ours, not read");
+        assert!(!s.ray_value("N4N0/Screen/Touch/R0", &OscValue::Float(0.3)));
         assert_eq!(s.ray, [(false, 1.0), (true, 0.2)]);
         assert_eq!(s.touched, [false, true]);
     }
@@ -1229,7 +1229,7 @@ mod tests {
         s.menu.open();
         let now = Instant::now();
         let past = now - Duration::from_secs(1);
-        // Orb's answer waits while another page shows, a press is held, the screen's turn waits for the panel's block.
+        // N4N0's answer waits while another page shows, a press is held, the screen's turn waits for the panel's block.
         s.menu.page = Page::Search;
         s.answer.push_back("later".into());
         s.answer_next = Some(past);

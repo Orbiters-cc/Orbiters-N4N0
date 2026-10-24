@@ -1,6 +1,6 @@
 [package]
 name = "orbiters-voice"
-description = "Orb's ears: the voice worker of Orbiters desktop. Listens to the microphone, finds sentences (Silero VAD) and transcribes them on this computer (NVIDIA Parakeet through sherpa-onnx)."
+description = "N4N0's ears: the voice worker of Orbiters - N4N0. Listens to the microphone, finds sentences (Silero VAD) and transcribes them on this computer (NVIDIA Parakeet through sherpa-onnx)."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

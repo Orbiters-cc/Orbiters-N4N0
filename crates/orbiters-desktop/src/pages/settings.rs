@@ -293,7 +293,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(
                     ui,
                     "Walk boost",
-                    Some("In VR, your play space moves along with your walking stick, so you walk faster in VRChat. Also in the SteamVR tab and Orb's menu."),
+                    Some("In VR, your play space moves along with your walking stick, so you walk faster in VRChat. Also in the SteamVR tab and N4N0's menu."),
                     48.0,
                     |ui| {
                         apply |= widgets::toggle(ui, "walk-boost", &mut draft.walk_boost.enabled);
@@ -334,7 +334,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     p,
                     pos2(x, row.center().y - 10.0),
                     Align2::LEFT_CENTER,
-                    &Txt::new(format!("Orbiters desktop {}", snap.version), 15.0).weight(weight::SEMIBOLD),
+                    &Txt::new(format!("Orbiters - N4N0 {}", snap.version), 15.0).weight(weight::SEMIBOLD),
                 );
                 widgets::text_truncated(
                     p,
@@ -402,23 +402,23 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 fn updates(ui: &mut Ui, ctl: &Ctl, snap: &Snapshot) {
     let u = &snap.update;
     if !u.enabled {
-        widgets::field(ui, "Updates", Some("This copy was not installed by Orbiters desktop's setup: it does not update itself."), 0.0, |_| {});
+        widgets::field(ui, "Updates", Some("This copy was not installed by Orbiters - N4N0's setup: it does not update itself."), 0.0, |_| {});
         return;
     }
     let busy = snap.busy_with();
     let text = match &u.state {
         UpdateState::Idle => match u.checked {
             Some(at) => format!("Up to date (looked {}).", super::local_time_unix(at)),
-            None => "Orbiters desktop looks for a newer version shortly after it starts, then every few hours.".into(),
+            None => "Orbiters - N4N0 looks for a newer version shortly after it starts, then every few hours.".into(),
         },
         UpdateState::Checking => "Looking for a newer version…".into(),
         UpdateState::Downloading { version, fraction } => format!("Downloading version {version}: {:.0} %", fraction * 100.0),
         UpdateState::Ready { version, .. } if u.restart_when_idle => {
-            format!("Version {version} is ready. Orbiters desktop restarts to install it once {} ends.", busy.unwrap_or("the running work"))
+            format!("Version {version} is ready. Orbiters - N4N0 restarts to install it once {} ends.", busy.unwrap_or("the running work"))
         }
         UpdateState::Ready { version, .. } => match busy {
             Some(work) => format!("Version {version} is ready. Restarting now would stop {work}: it can wait for it to end."),
-            None => format!("Version {version} is ready: a restart installs it, and Orbiters desktop opens again."),
+            None => format!("Version {version} is ready: a restart installs it, and Orbiters - N4N0 opens again."),
         },
         UpdateState::Failed { message } => message.clone(),
     };
@@ -510,7 +510,7 @@ fn account(ui: &mut Ui, cx: &Cx, confirm_sign_out: &mut bool) {
                 });
             }
             AccountState::SignedOut | AccountState::Expired { .. } | AccountState::Unknown => {
-                let desc = "One sign-in for Orbiters desktop and your Unity tools: MCB, My Avatar, ReFit and the Logger. Uploads to the Map explorer use it.";
+                let desc = "One sign-in for Orbiters - N4N0 and your Unity tools: MCB, My Avatar, ReFit and the Logger. Uploads to the Map explorer use it.";
                 widgets::field(ui, "Sign in", Some(desc), 260.0, |ui| {
                     if Button::new("Telegram").icon(icons::TELEGRAM_LOGO).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
                         cx.ctl.sign_in("telegram");

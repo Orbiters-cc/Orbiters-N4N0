@@ -39,7 +39,7 @@ fn vrchat_sends_parameters_and_poses() {
 }
 
 /// Run by hand with VRChat open, wearing an avatar with the capture kit (its `OrbitersDepthFrames` does nothing while
-/// `OrbitersRecord` is off) and Orb's screen (`Orb/Screen/Value15`):
+/// `OrbitersRecord` is off) and N4N0's screen (`N4N0/Screen/Value15`):
 /// cargo test -p orbiters-core --test vrchat_live vrchat_sends_to_loopback_and_takes_bundles -- --ignored --nocapture
 /// The service's OSC socket listens on 127.0.0.1 alone, so VRChat's echo of a change reaching it shows that VRChat
 /// sends to HOST_INFO's 127.0.0.1 (review DSK-13); changes sent as one bundle, read back from VRChat's OSCQuery, show
@@ -67,7 +67,7 @@ fn vrchat_sends_to_loopback_and_takes_bundles() {
     };
     std::thread::sleep(Duration::from_secs(9).saturating_sub(start.elapsed()));
     let depth = "/avatar/parameters/OrbitersDepthFrames";
-    let value15 = "/avatar/parameters/Orb/Screen/Value15";
+    let value15 = "/avatar/parameters/N4N0/Screen/Value15";
     let read = |path: &str| vrchat_value(query, path, Duration::from_secs(2)).expect("VRChat's OSCQuery").unwrap_or_else(|| panic!("the avatar has no {path}"));
     let echoed = |name: &str, want: &OscValue| {
         let end = Instant::now() + Duration::from_secs(3);
@@ -92,7 +92,7 @@ fn vrchat_sends_to_loopback_and_takes_bundles() {
     let single_value = read(depth);
     // 2. Two messages in one bundle: both applied, both echoed.
     service.send_bundle(vec![(depth.into(), vec![OscType::Bool(false)]), (value15.into(), vec![OscType::Float(0.25)])]).expect("bundle");
-    let bundle_echo = echoed("OrbitersDepthFrames", &OscValue::Bool(false)) && echoed("Orb/Screen/Value15", &OscValue::Float(0.25));
+    let bundle_echo = echoed("OrbitersDepthFrames", &OscValue::Bool(false)) && echoed("N4N0/Screen/Value15", &OscValue::Float(0.25));
     let bundle_values = (read(depth), read(value15));
     // Back as they were.
     service.send_bundle(vec![(depth.into(), vec![as_osc(&depth_before)]), (value15.into(), vec![as_osc(&value15_before)])]).expect("restore");

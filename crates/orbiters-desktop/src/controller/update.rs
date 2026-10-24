@@ -265,7 +265,7 @@ impl Controller {
         }
         tidy(Some(&version));
         self.update(|s| s.update.state = UpdateState::Ready { version: version.clone(), notes: release.notes.clone() });
-        self.notify(NoticeKind::Info, format!("Orbiters desktop {version} is ready: restart it to update (Settings, About)."));
+        self.notify(NoticeKind::Info, format!("Orbiters - N4N0 {version} is ready: restart it to update (Settings, About)."));
     }
 
     /// Restarts into the downloaded update: at once when nothing would be cut short (or `now`), otherwise once the
@@ -279,7 +279,7 @@ impl Controller {
             if let Some(work) = self.busy_with() {
                 let first = self.update_if(|s| !std::mem::replace(&mut s.update.restart_when_idle, true));
                 if first {
-                    self.notify(NoticeKind::Info, format!("Orbiters desktop restarts to update once {work} ends."));
+                    self.notify(NoticeKind::Info, format!("Orbiters - N4N0 restarts to update once {work} ends."));
                 }
                 return;
             }
@@ -297,7 +297,7 @@ impl Controller {
         let u = self.updates.lock().unwrap();
         match (&u.restarter, &u.install) {
             (Some(restart), Some(dir)) => restart(&setup, dir),
-            _ => self.notify(NoticeKind::Error, "This window cannot restart Orbiters desktop to update."),
+            _ => self.notify(NoticeKind::Error, "This window cannot restart Orbiters - N4N0 to update."),
         }
     }
 }

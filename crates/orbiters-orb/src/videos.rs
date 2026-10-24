@@ -1,5 +1,5 @@
 //! Saved videos: what a world's video player played (VRChat's log names every URL it resolves), kept on this computer
-//! when the person asks Orb to ("save me this video").
+//! when the person asks N4N0 to ("save me this video").
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

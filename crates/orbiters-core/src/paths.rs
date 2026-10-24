@@ -61,7 +61,7 @@ pub fn local_data_root() -> PathBuf {
     dirs::data_local_dir().unwrap_or_else(fallback_dir).join("Orbiters")
 }
 
-/// What Orbiters desktop can make again (what screenshots say, world pages, thumbnails): on this computer only, not
+/// What Orbiters - N4N0 can make again (what screenshots say, world pages, thumbnails): on this computer only, not
 /// in the roaming config folder.
 pub fn cache_dir() -> PathBuf {
     local_data_root().join("Desktop").join("cache")
@@ -72,7 +72,7 @@ pub fn avatars_dir() -> PathBuf {
     local_data_root().join("Avatars")
 }
 
-/// Speech models Orb downloads when the person asks for them.
+/// Speech models N4N0 downloads when the person asks for them.
 pub fn models_dir() -> PathBuf {
     local_data_root().join("Models")
 }

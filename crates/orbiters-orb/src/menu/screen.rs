@@ -3,9 +3,9 @@
 //! and draws over it what changes, read from its memory: [`bank_bytes`] bytes (744, or 1024 with 128-byte thumbnails),
 //! two to an animator value.
 //!
-//! The owner's screen is written through local parameters (`Orb/Screen/Pointer` and 16 values a step, as fast as
-//! VRChat takes them); everyone else's through the text panel's synced channel (`Orb/Text/Pointer` past the panel's
-//! blocks, `Orb/Text/Sync*`), a block every step: the header first, then the texts, then the thumbnails a layer at a time
+//! The owner's screen is written through local parameters (`N4N0/Screen/Pointer` and 16 values a step, as fast as
+//! VRChat takes them); everyone else's through the text panel's synced channel (`N4N0/Text/Pointer` past the panel's
+//! blocks, `N4N0/Text/Sync*`), a block every step: the header first, then the texts, then the thumbnails a layer at a time
 //! (contracts `orb::thumbnail`: a blur first, sharper with each layer), so others see the page early and the pictures
 //! sharpen.
 //!
@@ -52,13 +52,13 @@ pub const fn bank_bytes(size: usize) -> usize {
     PICTURES_AT + PICTURES * size
 }
 
-/// `Orb/Screen/Pointer`: write nothing.
+/// `N4N0/Screen/Pointer`: write nothing.
 pub const LOCAL_NONE: i32 = 0;
-/// `Orb/Screen/Pointer`: clear the owner's screen memory.
+/// `N4N0/Screen/Pointer`: clear the owner's screen memory.
 pub const LOCAL_CLEAR: i32 = 255;
-/// Values per local step (`Orb/Screen/Value0` …).
+/// Values per local step (`N4N0/Screen/Value0` …).
 pub const LOCAL_VALUES: usize = 16;
-/// `Orb/Text/Pointer`: the screen closed (everyone else's screen hides and clears).
+/// `N4N0/Text/Pointer`: the screen closed (everyone else's screen hides and clears).
 pub const POINTER_SCREEN_CLOSE: i32 = 254;
 
 const _: () = assert!(bank_bytes(72) == 744 && BANK == 1024);
@@ -524,13 +524,13 @@ pub mod local {
     pub const OPEN: &str = params::SCREEN_OPEN;
     pub const POINTER: &str = params::SCREEN_POINTER;
     pub const VALUE_PREFIX: &str = params::SCREEN_VALUE_PREFIX;
-    /// `Orb/Screen/Touch/L0` …: how near the left (`L`) or right (`R`) index finger is to each touch point (0 to 1).
+    /// `N4N0/Screen/Touch/L0` …: how near the left (`L`) or right (`R`) index finger is to each touch point (0 to 1).
     pub const TOUCH_PREFIX: &str = params::SCREEN_TOUCH_PREFIX;
-    /// `Orb/Screen/Eye0` … and `Orb/Screen/Gaze0` …: how near the eyes and the gaze point are to each touch point
+    /// `N4N0/Screen/Eye0` … and `N4N0/Screen/Gaze0` …: how near the eyes and the gaze point are to each touch point
     /// (desktop mode's looking).
     pub const EYE_PREFIX: &str = params::SCREEN_EYE_PREFIX;
     pub const GAZE_PREFIX: &str = params::SCREEN_GAZE_PREFIX;
-    /// `Orb/Screen/Ray/L_Hit`, `…_Ratio` and the right hand's: the pointing rays (screen version 4).
+    /// `N4N0/Screen/Ray/L_Hit`, `…_Ratio` and the right hand's: the pointing rays (screen version 4).
     pub const RAY_PREFIX: &str = params::SCREEN_RAY_PREFIX;
 
     pub fn value(i: usize) -> String {
@@ -557,13 +557,13 @@ pub fn local_open(open: bool) -> Message {
     (parameter(local::OPEN), OscType::Bool(open))
 }
 
-/// The first `Orb/Text/Pointer` of the screen for a prop with `sync` values: right after the panel's blocks.
+/// The first `N4N0/Text/Pointer` of the screen for a prop with `sync` values: right after the panel's blocks.
 pub fn first_pointer(sync: usize) -> usize {
     orb::pointer_count(sync) + 1
 }
 
 /// Whether a prop with `sync` values and thumbnails of `size` bytes can address the whole screen through
-/// `Orb/Text/Pointer` (pointers up to 253): 128-byte thumbnails need 8 values or more.
+/// `N4N0/Text/Pointer` (pointers up to 253): 128-byte thumbnails need 8 values or more.
 pub fn fits(sync: usize, size: usize) -> bool {
     thumbnail::SIZES.contains(&size) && first_pointer(sync) + bank_bytes(size).div_ceil(sync) - 1 < POINTER_SCREEN_CLOSE as usize
 }
@@ -751,7 +751,7 @@ mod tests {
         assert!(!fits(4, 128) && fits(8, 128) && fits(16, 128), "1024 bytes in blocks of 4 would pass pointer 253");
         assert!(!fits(8, 100));
         assert_eq!(first_pointer(8), 17);
-        let pointer = format!("{}Orb/Text/Pointer", orbiters_core::osc::PARAMETERS_PREFIX);
+        let pointer = format!("{}N4N0/Text/Pointer", orbiters_core::osc::PARAMETERS_PREFIX);
         assert_eq!(synced_messages(8, &Send::Pointer(2)), vec![(pointer.clone(), OscType::Int(19))]);
         assert_eq!(synced_messages(8, &Send::Rest), vec![(pointer, OscType::Int(0))]);
         let m = synced_messages(8, &Send::Values(2, vec![0, 1, 255, 129, 4, 5, 6, 7]));
@@ -759,7 +759,7 @@ mod tests {
         assert_eq!(m[2].1, OscType::Float(orb::sync_value(255)));
         let l = local_messages(&Send::Values(0, vec![1; LOCAL_VALUES]));
         assert_eq!(l.len(), 16);
-        assert!(l[15].0.ends_with("Orb/Screen/Value15"));
+        assert!(l[15].0.ends_with("N4N0/Screen/Value15"));
         assert_eq!(local_messages(&Send::Pointer(0))[0].1, OscType::Int(1));
     }
 

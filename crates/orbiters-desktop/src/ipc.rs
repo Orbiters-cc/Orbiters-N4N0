@@ -121,7 +121,7 @@ pub enum ToService {
     Calibrated {
         calibration: Box<Calibration>,
     },
-    /// Orb: a question, the Talk button, the panel, saved videos.
+    /// N4N0: a question, the Talk button, the panel, saved videos.
     Orb {
         command: OrbCommand,
     },
@@ -135,7 +135,7 @@ pub enum ToService {
     Headset {
         in_use: bool,
     },
-    /// The overlay changed the walk boost's strength (also sent to the avatar's `Orb/WalkBoost`).
+    /// The overlay changed the walk boost's strength (also sent to the avatar's `N4N0/WalkBoost`).
     WalkBoost {
         strength: f32,
     },
@@ -158,7 +158,7 @@ pub enum UpdateAction {
     CancelRestart,
 }
 
-/// What the window and the overlay ask of Orb.
+/// What the window and the overlay ask of N4N0.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OrbCommand {
@@ -175,7 +175,7 @@ pub enum OrbCommand {
         text: String,
     },
     HidePanel,
-    /// Starts a new conversation (Orb forgets the current one).
+    /// Starts a new conversation (N4N0 forgets the current one).
     NewConversation,
     SaveVideo,
     RemoveVideo {
@@ -209,7 +209,7 @@ pub enum OrbCommand {
     MuteCall {
         on: bool,
     },
-    /// Testing: holds the orb in a state (`None`: back to what Orb is doing).
+    /// Testing: holds N4N0 in a state (`None`: back to what N4N0 is doing).
     TestFace {
         face: Option<crate::state::OrbFace>,
     },
@@ -219,26 +219,26 @@ pub enum OrbCommand {
     TestAfk {
         on: bool,
     },
-    /// Testing: acts as if the owner touched the orb.
+    /// Testing: acts as if the owner touched N4N0.
     TestTouch,
-    /// Testing: shows or hides the whole orb (`Orb/Visible`).
+    /// Testing: shows or hides the whole orb (`N4N0/Visible`).
     TestVisible {
         on: bool,
     },
-    /// The overlay's Orb menu opened or closed, and whether a sentence Orb hears is what to search for (its search
-    /// page is up). Opening it makes Orb listen.
+    /// The overlay's N4N0 menu opened or closed, and whether a sentence N4N0 hears is what to search for (its search
+    /// page is up). Opening it makes N4N0 listen.
     MenuState {
         open: bool,
         dictation: bool,
     },
-    /// The SteamVR button for Orb's menu while the avatar has Orb's screen: opens the screen, or closes it.
+    /// The SteamVR button for N4N0's menu while the avatar has N4N0's screen: opens the screen, or closes it.
     ToggleScreen,
-    /// A 3D picture after `seconds` (Orb's menu's timer).
+    /// A 3D picture after `seconds` (N4N0's menu's timer).
     #[serde(rename = "photo_3d_in")]
     Photo3DIn {
         seconds: u32,
     },
-    /// The orb's light as Orb's menu set it (its Light page): `Orb/Light`, its colour and level.
+    /// N4N0's light as N4N0's menu set it (its Light page): `N4N0/Light`, its colour and level.
     Light {
         on: bool,
         color: u8,

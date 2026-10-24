@@ -382,7 +382,7 @@ fn consent_overlay(ui: &mut Ui, cx: &mut Cx, card: Rect) {
     let bullets = [
         "Capture your own worlds, or worlds whose creators agreed, and keep the results private.",
         "Other players are left out: hide them in the Stream camera (Remote Players off).",
-        "Orbiters desktop never asks for your VRChat login and only reads VRChat's local log, OSC and Spout.",
+        "Orbiters - N4N0 never asks for your VRChat login and only reads VRChat's local log, OSC and Spout.",
     ];
     let galleys: Vec<_> = bullets.iter().map(|b| p.layout_job(Txt::new(*b, 13.0).color(theme::FG_2).line_height(20.0).job(w - 48.0 - 16.0))).collect();
     let text_h: f32 = galleys.iter().map(|g| g.size().y + 8.0).sum();

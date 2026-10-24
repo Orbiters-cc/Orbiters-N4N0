@@ -1,4 +1,4 @@
-//! Orb's calls: the call worker (`orbiters-call`) and its protocol, JSON lines with commands on its stdin
+//! N4N0's calls: the call worker (`orbiters-call`) and its protocol, JSON lines with commands on its stdin
 //! (`{"cmd": …}`) and events on its stdout (`{"event": …}`); the call itself is in contracts `Docs/orb-calls.md`.
 //!
 //! The service numbers its calls: every command for a call and every event of one carries that number, so a late

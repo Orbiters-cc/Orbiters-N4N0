@@ -1,8 +1,8 @@
-//! `orbiters-desktop --orb-menu <out>`: Orb's menu pages as files.
+//! `orbiters-desktop --orb-menu <out>`: N4N0's menu pages as files.
 //!
-//! - `Orb screen pages.png`: the picture of every page's unchanging part, one 1024 × 576 slice per page (slice 0 is
+//! - `N4N0 screen pages.png`: the picture of every page's unchanging part, one 1024 × 576 slice per page (slice 0 is
 //!   empty; slice `n` is page `n`), top first: Toolkit imports it as the projected screen's page texture array.
-//! - `Orb screen layout.png`: where each page's changing parts go, a row per page, for the screen's shader (see
+//! - `N4N0 screen layout.png`: where each page's changing parts go, a row per page, for the screen's shader (see
 //!   [`layout_table`]).
 //! - `menu-<page>.png`: each page as the SteamVR overlay shows it with sample content, for reviewing the design;
 //!   `bank-<page>.bin`: what the avatar's screen is sent for the same page (its 744 bytes, 72-byte thumbnails), to draw
@@ -258,7 +258,7 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     photo.page = Page::Photo;
     photo.countdown = Some(3);
     out.push((ScreenPage::Photo, photo, Some(2), None));
-    // The overlay's Home and screens from version 3: six tiles, music playing, the orb's light on.
+    // The overlay's Home and screens from version 3: six tiles, music playing, N4N0's light on.
     let more = || {
         let mut m = base();
         m.six_tiles = true;
@@ -297,12 +297,12 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let out = Path::new(args.first().map(String::as_str).unwrap_or("orb-menu"));
     std::fs::create_dir_all(out)?;
-    for (retro, name) in [(false, "Orb screen pages.png"), (true, "Orb screen pages retro.png")] {
+    for (retro, name) in [(false, "N4N0 screen pages.png"), (true, "N4N0 screen pages retro.png")] {
         let path = out.join(name);
         write_png(&path, WIDTH, HEIGHT * SLICES as u32, &page_pictures(retro))?;
         println!("{}", path.display());
     }
-    let path = out.join("Orb screen layout.png");
+    let path = out.join("N4N0 screen layout.png");
     write_png(&path, TABLE_WIDTH as u32, SLICES as u32, &layout_table())?;
     println!("{}", path.display());
 
@@ -351,10 +351,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let path = out.join(format!("menu-{}-retro.png", page.name()));
         write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
         println!("{}", path.display());
-        // Orbiters Toolkit's pictures of the two looks, for the Look option on the orb's card in My Avatar: this Home,
+        // Orbiters Toolkit's pictures of the two looks, for the Look option on N4N0's card in My Avatar: this Home,
         // half size.
         if page == ScreenPage::HomeSix {
-            for (picture, name) in [(&modern, "Orb preview.png"), (&rgba, "Orb preview retro.png")] {
+            for (picture, name) in [(&modern, "N4N0 preview.png"), (&rgba, "N4N0 preview retro.png")] {
                 let path = out.join(name);
                 write_png(&path, WIDTH / 2, HEIGHT / 2, &half(&unpremultiply(picture), WIDTH as usize, HEIGHT as usize))?;
                 println!("{}", path.display());

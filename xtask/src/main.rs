@@ -1,4 +1,4 @@
-//! Orbiters desktop's release tooling, run as `cargo xtask <command>` (an alias in `.cargo/config.toml`). Releases are
+//! Orbiters - N4N0's release tooling, run as `cargo xtask <command>` (an alias in `.cargo/config.toml`). Releases are
 //! built on this computer, not on GitHub's runners, and published on orbiters.cc, where installed apps find them
 //! within hours (at once when the person looks in Settings):
 //!
@@ -301,10 +301,10 @@ fn release(config: &Config, channel: &str, notes: String, allow_dirty: bool) -> 
     let dist = dist::dist(config, &dist::Options { unsigned: false, channel: channel.into(), notes, programs: None })?;
     publish::publish(config, &version, channel, false)?;
 
-    let tagged = git(&["tag", "--annotate", &tag, "--message", &format!("Orbiters desktop {version}")]).and_then(|_| git(&["push", "origin", &tag]));
+    let tagged = git(&["tag", "--annotate", &tag, "--message", &format!("Orbiters - N4N0 {version}")]).and_then(|_| git(&["push", "origin", &tag]));
     match tagged {
         Ok(_) => println!("Tagged {tag}."),
-        Err(e) => println!("The release is out, but tagging it failed ({e:#}): git tag -a {tag} -m \"Orbiters desktop {version}\" && git push origin {tag}"),
+        Err(e) => println!("The release is out, but tagging it failed ({e:#}): git tag -a {tag} -m \"Orbiters - N4N0 {version}\" && git push origin {tag}"),
     }
     println!("\nOrbiters desktop {version} is released on {channel} ({}).", dist.display());
     Ok(())

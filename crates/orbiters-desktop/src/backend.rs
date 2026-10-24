@@ -28,7 +28,7 @@ pub trait Backend: Send + Sync {
     /// it arrives.
     fn patch_settings(&self, patch: serde_json::Value);
     /// Saves what `settings` changed against `base`, the copy it was changed from (a snapshot's): only those fields,
-    /// so that whatever changed meanwhile (the avatar's radial, Orb, the other window) stays.
+    /// so that whatever changed meanwhile (the avatar's radial, N4N0, the other window) stays.
     fn save_changes(&self, base: &Settings, settings: &Settings) {
         if base != settings {
             self.patch_settings(base.diff(settings));
@@ -59,13 +59,13 @@ pub trait Backend: Send + Sync {
     fn maps(&self) -> Option<MapsMine>;
     /// A T-pose calibration taken in the overlay.
     fn calibrated(&self, calibration: Calibration);
-    /// Orb: a question, the Talk button, the panel, saved videos.
+    /// N4N0: a question, the Talk button, the panel, saved videos.
     fn orb(&self, command: OrbCommand);
     /// VRChat's frames the overlay saw, for world performance statistics.
     fn frames(&self, chunk: crate::state::FrameChunk);
     /// Whether someone wears the headset (the overlay reads SteamVR's activity level).
     fn headset(&self, in_use: bool);
-    /// Sets the walk boost's strength (0 to 1), saved and sent to the avatar's `Orb/WalkBoost`.
+    /// Sets the walk boost's strength (0 to 1), saved and sent to the avatar's `N4N0/WalkBoost`.
     fn walk_boost(&self, strength: f32);
     /// Makes VRChat find the OSC service again (it sends avatar parameters only to services it found).
     fn osc_reconnect(&self);

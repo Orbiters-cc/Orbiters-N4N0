@@ -347,7 +347,7 @@ impl Api {
             .tls_config(tls)
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(90)))
-            .user_agent(concat!("OrbitersDesktop/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("Orbiters-N4N0/", env!("CARGO_PKG_VERSION")))
             .build()
             .new_agent();
         agents.push((base.clone(), agent.clone()));

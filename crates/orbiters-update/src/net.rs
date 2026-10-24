@@ -22,7 +22,7 @@ fn agent() -> ureq::Agent {
         .timeout_recv_response(Some(Duration::from_secs(60)))
         // Long enough for a slow connection, never forever: a download cut short goes on from there next time.
         .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
-        .user_agent(concat!("OrbitersDesktop/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Orbiters-N4N0/", env!("CARGO_PKG_VERSION")))
         .build()
         .new_agent()
 }

@@ -1,15 +1,19 @@
 # Releasing Orbiters - N4N0
 
-A release is a version bump, built on this computer (not on GitHub's runners) and published on orbiters.cc:
+A release is a version bump, built on this computer (not on GitHub's runners), published on orbiters.cc and as a
+release of [Orbiters-cc/Orbiters-N4N0](https://github.com/Orbiters-cc/Orbiters-N4N0/releases) with the setup attached:
 
 ```sh
 cargo xtask bump 0.2.0          # the workspace's version, in Cargo.toml and Cargo.lock
 git commit -am "Orbiters - N4N0 0.2.0" && git push
-cargo xtask release
+cargo xtask release             # --unsigned until code signing is set up (GitHub only)
 ```
 
 `release` refuses a commit that is not clean, not pushed, not on `main`, or whose version is already released. It
-then builds and signs everything (`dist`), uploads it (`publish`), and tags the commit `desktop-v0.2.0`.
+then builds and signs everything (`dist`), uploads it (`publish`), tags the commit `desktop-v0.2.0`, and makes that
+tag's GitHub release with `OrbitersSetup-0.2.0.exe` (`github`, through the signed-in `gh`). Every version bump gets
+its GitHub release. With `--unsigned`, before Azure Artifact Signing is set up (below), the setup carries no
+signature and goes on GitHub only: SmartScreen warns about it, and installed apps update only to signed releases.
 
 Installed apps look for a new version 45 seconds after they start and every 4 hours after that, or when the person
 clicks **Look now** in Settings, About. They download the setup in the background and check its size and SHA-256
@@ -26,7 +30,8 @@ replaces the files in place, then starts the app again: no old versions are kept
 | `cargo xtask bump <version>` | Sets `[workspace.package] version` and updates Cargo.lock. Every program and the release carry this version. |
 | `cargo xtask dist` | Writes `target/dist/<version>/` (details below). `--unsigned` makes a test build, and `--programs <folder>` packs programs already built there instead of building them. Neither gets a release file, so `publish` cannot put them out. |
 | `cargo xtask publish` | Uploads `target/dist/<version>/` to the server and makes it the channel's release (`--force` publishes a version that is not newer than the current one). Use it again after an upload that was cut. |
-| `cargo xtask release` | Runs the checks, `dist`, `publish`, then the tag. `--notes <file>` adds release notes (plain text, shown in the app's Settings). |
+| `cargo xtask release` | Runs the checks, `dist`, `publish`, the tag, then `github`. `--notes <file>` adds release notes (plain text, shown in the app's Settings and on GitHub). `--unsigned`: no Authenticode signatures, no `publish`. |
+| `cargo xtask github` | Makes the GitHub release of `desktop-v<version>` (the tag pushed already) with `target/dist/<version>/`'s setup, or replaces the setup of one that exists. |
 
 All of them take `--channel <name>`, `stable` by default. An app follows the channel its install record names.
 
@@ -128,7 +133,10 @@ request bodies at 100 MB.
 `OrbitersSetup-<version>.exe` holds the whole app (about 30 MB) and works offline. It installs for the person who
 runs it, in `%LOCALAPPDATA%\Programs\Orbiters - N4N0` (or a folder they choose), without administrator rights. It
 adds the app to Windows' installed apps (Settings, Apps) with its icon, version and size, a Start menu shortcut,
-optionally a desktop shortcut, and optionally a start with Windows in the tray (`--hidden`).
+optionally a desktop shortcut, a start with Windows in the tray (`--hidden`), and a start with SteamVR: the app's
+SteamVR manifest (`orbiters-n4n0.vrmanifest` in its settings folder, key `cc.orbiters.n4n0`) registered among SteamVR's
+startup overlay apps while SteamVR runs; when it does not, the app's settings keep the choice and the app tells
+SteamVR the next time it runs. Both can be changed later in the app's Settings, Start.
 
 - **Over an existing install:** it updates the install where it is, keeping its options.
 - **While the app runs:** it asks the app to quit, as the app's own Quit does. The app finishes saving a recording
@@ -136,7 +144,8 @@ optionally a desktop shortcut, and optionally a start with Windows in the tray (
 - **How files are replaced:** the payload is unpacked and checked inside the install folder first, then each file is
   moved into place. If a move fails, the files already moved are put back and the error is shown.
 - **Uninstalling:** Windows runs `orbiters-setup.exe --uninstall` from the install folder. It copies itself to the
-  temporary folder, then removes the app's Windows entries and only the files its install record lists. Settings,
+  temporary folder, then removes the app's Windows entries, its SteamVR manifest (and SteamVR's start of it, when
+  SteamVR runs) and only the files its install record lists. Settings,
   caches and speech models go too if the person asks. Their sessions are never touched.
 
 | Arguments | What they do |

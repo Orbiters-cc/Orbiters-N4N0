@@ -69,6 +69,36 @@ pub fn publish(config: &Config, version: &str, channel: &str, force: bool) -> an
     Ok(())
 }
 
+/// Where releases also go: this repository on GitHub, a release per `desktop-v<version>` tag with its setup attached.
+pub const GITHUB_REPO: &str = "Orbiters-cc/Orbiters-N4N0";
+
+/// The GitHub release of `version`: its tag (pushed already) with `target/dist/<version>/`'s setup attached, through
+/// GitHub's CLI (`gh`, signed in). For a version released there already, its setup is replaced.
+pub fn github(version: &str, notes: &str, unsigned: bool) -> anyhow::Result<()> {
+    let tag = format!("desktop-v{version}");
+    let setup = crate::target_dir().join("dist").join(version).join(format!("OrbitersSetup-{version}.exe"));
+    anyhow::ensure!(setup.is_file(), "no {} (cargo xtask dist)", setup.display());
+    let mut body = if notes.trim().is_empty() { format!("Orbiters - N4N0 {version}.") } else { notes.trim().to_string() };
+    body.push_str(&format!("\n\nInstall: download `OrbitersSetup-{version}.exe` below and run it (for you only, no administrator rights)."));
+    if unsigned {
+        body.push_str(" It is not code-signed yet: Windows SmartScreen warns about it (More info, then Run anyway).");
+    }
+    let notes_file = setup.with_file_name("github-notes.md");
+    std::fs::write(&notes_file, &body)?;
+    let exists = Command::new("gh").args(["release", "view", &tag, "--repo", GITHUB_REPO]).output().is_ok_and(|o| o.status.success());
+    if exists {
+        run(Command::new("gh").args(["release", "upload", &tag, "--repo", GITHUB_REPO, "--clobber"]).arg(&setup))?;
+    } else {
+        run(Command::new("gh")
+            .args(["release", "create", &tag, "--repo", GITHUB_REPO, "--verify-tag", "--title", &format!("Orbiters - N4N0 {version}"), "--notes-file"])
+            .arg(&notes_file)
+            .arg(&setup))?;
+    }
+    let _ = std::fs::remove_file(&notes_file);
+    println!("\nhttps://github.com/{GITHUB_REPO}/releases/tag/{tag}");
+    Ok(())
+}
+
 /// Copies `local` to `remote` through `<remote>.part`, checked against `sha256` there when given, then renamed.
 fn upload(host: &str, local: &Path, remote: &str, sha256: Option<&str>) -> anyhow::Result<()> {
     let part = format!("{remote}.part");

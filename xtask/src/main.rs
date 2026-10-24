@@ -5,14 +5,16 @@
 //! ```text
 //! cargo xtask keygen          once: the release key (its public half goes in the repository)
 //! cargo xtask bump 0.2.0      the workspace's version; commit and push it
-//! cargo xtask release         build, sign, pack, publish, tag
+//! cargo xtask release         build, sign, pack, publish, tag, and the GitHub release
 //! ```
 //!
 //! `release` checks the commit (clean, pushed, on main, its version not released yet), runs `dist` (the programs
 //! built in release and signed with Azure Artifact Signing, the setup with them inside, signed too, and the signed
 //! release file: `target/dist/<version>/`), then `publish` (uploaded to orbiters.cc over SSH, the release file last:
-//! installed apps see the new version only once its setup is there), then tags the commit `desktop-v<version>`.
-//! `dist` and `publish` also run on their own (`publish` again after a cut upload). See docs/releasing.md.
+//! installed apps see the new version only once its setup is there), then tags the commit `desktop-v<version>` and
+//! makes that tag's release on GitHub with the setup attached (`github`). `--unsigned` releases before Authenticode
+//! signing is set up: on GitHub only, since installed apps update only to signed releases. `dist`, `publish` and
+//! `github` also run on their own (`publish` or `github` again after a cut upload). See docs/releasing.md.
 
 mod dist;
 mod pe;
@@ -35,8 +37,11 @@ cargo xtask <command>
                                (--programs: packs the programs already built there instead, a test build)
   publish [--channel <name>] [--force]
                                uploads target/dist/<version>/ to orbiters.cc and makes it the channel's release
-  release [--notes <file>] [--channel <name>] [--allow-dirty]
-                               checks the commit, then dist, publish, and the desktop-v<version> tag
+  release [--notes <file>] [--channel <name>] [--allow-dirty] [--unsigned]
+                               checks the commit, then dist, publish, the desktop-v<version> tag and its GitHub
+                               release with the setup (--unsigned: no Authenticode signature, GitHub only)
+  github [--notes <file>] [--unsigned]
+                               the GitHub release of target/dist/<version>/'s setup (its tag pushed already)
 
 Settings: ~/.orbiters-release/config.json, or the environment (docs/releasing.md).";
 
@@ -219,7 +224,8 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
             dist::dist(&Config::load()?, &options).map(drop)
         }
         Some("publish") => publish::publish(&Config::load()?, &workspace_version()?, &channel, flag(rest, "--force")),
-        Some("release") => release(&Config::load()?, &channel, notes()?, flag(rest, "--allow-dirty")),
+        Some("release") => release(&Config::load()?, &channel, notes()?, flag(rest, "--allow-dirty"), flag(rest, "--unsigned")),
+        Some("github") => publish::github(&workspace_version()?, &notes()?, flag(rest, "--unsigned")),
         _ => {
             println!("{HELP}");
             Ok(())
@@ -280,8 +286,9 @@ fn bump(version: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Everything a version bump needs: the checks, `dist`, `publish`, the tag.
-fn release(config: &Config, channel: &str, notes: String, allow_dirty: bool) -> anyhow::Result<()> {
+/// Everything a version bump needs: the checks, `dist`, `publish`, the tag, the GitHub release. `unsigned`: before
+/// Authenticode signing is set up, a setup without signatures, on GitHub only.
+fn release(config: &Config, channel: &str, notes: String, allow_dirty: bool, unsigned: bool) -> anyhow::Result<()> {
     let version = workspace_version()?;
     let tag = format!("desktop-v{version}");
 
@@ -296,17 +303,28 @@ fn release(config: &Config, channel: &str, notes: String, allow_dirty: bool) -> 
     let _ = git(&["fetch", "--quiet", "origin"]);
     let pushed = git(&["branch", "--remotes", "--contains", "HEAD"])?;
     anyhow::ensure!(!pushed.is_empty(), "this commit is not pushed: push it first, the release names it");
-    publish::ensure_newer(&version, channel)?;
+    if !unsigned {
+        publish::ensure_newer(&version, channel)?;
+    }
 
-    let dist = dist::dist(config, &dist::Options { unsigned: false, channel: channel.into(), notes, programs: None })?;
-    publish::publish(config, &version, channel, false)?;
+    let dist = dist::dist(config, &dist::Options { unsigned, channel: channel.into(), notes: notes.clone(), programs: None })?;
+    if unsigned {
+        println!("\nUnsigned: not published on orbiters.cc (installed apps update only to signed releases).");
+    } else {
+        publish::publish(config, &version, channel, false)?;
+    }
 
     let tagged = git(&["tag", "--annotate", &tag, "--message", &format!("Orbiters - N4N0 {version}")]).and_then(|_| git(&["push", "origin", &tag]));
     match tagged {
         Ok(_) => println!("Tagged {tag}."),
-        Err(e) => println!("The release is out, but tagging it failed ({e:#}): git tag -a {tag} -m \"Orbiters - N4N0 {version}\" && git push origin {tag}"),
+        Err(e) => {
+            println!("The release is out, but tagging it failed ({e:#}): git tag -a {tag} -m \"Orbiters - N4N0 {version}\" && git push origin {tag}, then cargo xtask github");
+            return Ok(());
+        }
     }
-    println!("\nOrbiters desktop {version} is released on {channel} ({}).", dist.display());
+    publish::github(&version, &notes, unsigned)?;
+    let places = if unsigned { "GitHub".to_string() } else { format!("{channel} and GitHub") };
+    println!("\nOrbiters - N4N0 {version} is released on {places} ({}).", dist.display());
     Ok(())
 }
 

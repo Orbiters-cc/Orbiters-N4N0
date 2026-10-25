@@ -412,7 +412,7 @@ impl App {
             AccountState::SignedIn { username } => (username.clone(), widgets::Tone::Ok),
             AccountState::Checking { username } | AccountState::Offline { username } => (username.clone().unwrap_or_default(), widgets::Tone::Warn),
             AccountState::Expired { .. } => ("Sign-in expired".into(), widgets::Tone::Warn),
-            AccountState::SigningIn { .. } => ("Finishing in your browser".into(), widgets::Tone::Warn),
+            AccountState::SigningIn => ("Finishing in your browser".into(), widgets::Tone::Warn),
             AccountState::SignedOut | AccountState::Unknown => ("Not signed in".into(), widgets::Tone::Off),
         };
         side_status(ui, pos2(inner.left(), bottom - 34.0 - 132.0), "Orbiters", &account_text, account_tone, inner.width());

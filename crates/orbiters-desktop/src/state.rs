@@ -108,11 +108,8 @@ pub enum AccountState {
     Offline {
         username: Option<String>,
     },
-    /// Finishing in the browser, where `code` is typed.
-    SigningIn {
-        code: String,
-        provider: String,
-    },
+    /// Finishing in the browser: Connect on the page that opened there.
+    SigningIn,
 }
 
 impl AccountState {

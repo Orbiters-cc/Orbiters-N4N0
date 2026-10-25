@@ -427,6 +427,8 @@ fn empty_state(ui: &mut Ui, cx: &Cx, searching: bool, height: f32) {
 struct Sharing<'a> {
     /// Signed in to Orbiters (or an account saved but not checked yet).
     account: bool,
+    /// Signing in: finishing in the browser.
+    signing_in: bool,
     /// Why nothing can be shared, when nothing can.
     blocked: Option<&'static str>,
     mine: Option<&'a MineWorld>,
@@ -476,6 +478,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     };
     let sharing = Sharing {
         account: cx.snap.account.state.username().is_some(),
+        signing_in: cx.snap.account.state == crate::state::AccountState::SigningIn,
         blocked,
         mine: mine_of(&mine, &world.id),
         hashes: hashes.as_ref(),
@@ -729,8 +732,12 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         cx.ctl.upload_pictures(world.id.clone(), world.name.clone(), paths);
         o.handed = Some((anim::time(&ctx), std::mem::take(&mut o.selected)));
     }
-    if let Some(BarAction::SignIn(provider)) = bar {
-        cx.ctl.sign_in(provider);
+    if let Some(BarAction::SignIn) = bar {
+        if cx.snap.account.state == crate::state::AccountState::SigningIn {
+            cx.ctl.reopen_sign_in();
+        } else {
+            cx.ctl.sign_in();
+        }
     }
     if let Some(BarAction::Clear) = bar {
         o.selected.clear();
@@ -1063,7 +1070,7 @@ fn picture_tile(ui: &mut Ui, rect: Rect, shot: &Shot, tex: Option<&TextureHandle
 enum BarAction {
     Share,
     Clear,
-    SignIn(&'static str),
+    SignIn,
 }
 
 /// The selection's bar at the bottom of the page: how many, and share them (or sign in first); a pictures upload of
@@ -1136,17 +1143,21 @@ fn action_bar(ctx: &egui::Context, o: &Open, world: &VisitedWorld, sharing: &Sha
             }
             right = sr.left() - 8.0;
         } else {
-            for (provider, glyph, label) in
-                [("telegram", icons::TELEGRAM_LOGO, "Sign in with Telegram"), ("discord", icons::DISCORD_LOGO, "Sign in with Discord")]
-            {
-                let ib = Rect::from_min_size(pos2(right - 40.0, rect.center().y - 20.0), vec2(40.0, 40.0));
-                if IconButton::new(glyph, label).size(40.0, 18.0).show_at(ui, ib).clicked() {
-                    action = Some(BarAction::SignIn(provider));
-                }
-                right = ib.left() - 6.0;
+            // One sign-in, finished in the browser (Connect there); while it waits, the page opens again.
+            let sign_in = if sharing.signing_in {
+                Button::new("Finish in your browser")
+                    .icon(icons::ARROW_SQUARE_OUT)
+                    .variant(Variant::Secondary)
+                    .hint("Connect on the Orbiters page in your browser")
+            } else {
+                Button::new("Sign in to share").icon(icons::SIGN_IN).variant(Variant::Primary)
+            };
+            let sw = sign_in.desired_width(ui);
+            let sr = Rect::from_min_size(pos2(right - sw, rect.center().y - 20.0), vec2(sw, 40.0));
+            if sign_in.id_salt("world-bar-sign-in").show_at(ui, sr).clicked() {
+                action = Some(BarAction::SignIn);
             }
-            widgets::text(&p, pos2(right - 4.0, rect.center().y), Align2::RIGHT_CENTER, &Txt::new("Sign in to share", 12.5).color(theme::FG_2));
-            right -= 110.0;
+            right = sr.left() - 8.0;
         }
         let clear = Rect::from_min_size(pos2(right - 36.0, rect.center().y - 18.0), vec2(36.0, 36.0));
         if IconButton::new(icons::X, "Clear the selection").show_at(ui, clear).clicked() {

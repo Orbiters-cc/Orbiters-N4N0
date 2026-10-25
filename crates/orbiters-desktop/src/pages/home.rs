@@ -834,7 +834,7 @@ mod tests {
         fn stop_reconstruction(&self) {}
         fn unqueue_reconstruction(&self, _dir: PathBuf) {}
         fn send_to_mixer(&self, _dir: PathBuf, _title: String) {}
-        fn sign_in(&self, _provider: &str) {}
+        fn sign_in(&self) {}
         fn reopen_sign_in(&self) {}
         fn cancel_sign_in(&self) {}
         fn sign_out(&self) {}

@@ -96,10 +96,8 @@ pub enum ToService {
         title: String,
     },
     WorkerLog,
-    /// Signs in to Orbiters through the browser with `provider` (`discord` or `telegram`).
-    SignIn {
-        provider: String,
-    },
+    /// Signs in to Orbiters through the browser (Connect on the page it opens).
+    SignIn,
     ReopenSignIn,
     CancelSignIn,
     SignOut,

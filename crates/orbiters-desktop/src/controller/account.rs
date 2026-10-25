@@ -1,16 +1,18 @@
 //! The Orbiters account in the tray service. It is the one the Unity tools keep (`orbiters_core::account`): read at
 //! start, checked with Orbiters, and followed while the app runs, so signing in or out in MCB or My Avatar does the same
-//! here within seconds. Signing in runs the tools' browser pairing; the credential stays in this process (the window
-//! only sees the account's name and state).
+//! here within seconds. Signing in runs the tools' browser pairing: a listener on this computer's loopback waits for the
+//! browser to bring the code of the website's Connect, and trades it for the credential. The credential stays in this
+//! process (the window only sees the account's name and state).
 
 use super::{Controller, NoticeKind, Shared};
 use crate::state::AccountState;
-use orbiters_core::account::{self, Account, Api, Check, Poll, Server};
+use orbiters_core::account::{self, Account, Api, Callback, Check, Exchange, Served, Server};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 /// How long a browser sign-in waits for the website (the server's own link lifetime).
 const LINK_LIFETIME: Duration = Duration::from_secs(600);
-const POLL_EVERY: Duration = Duration::from_secs(2);
 /// An account that could not be checked (offline) is checked again this often.
 const RECHECK_OFFLINE: Duration = Duration::from_secs(60);
 
@@ -27,13 +29,28 @@ pub struct AccountRuntime {
     offline_since: Option<Instant>,
 }
 
+/// A sign-in waiting for the browser: the page it opened, and the switch that closes its listener.
 struct SignIn {
     server: Server,
-    poll_token: String,
     link_url: String,
-    until: Instant,
     generation: u64,
-    polled: Option<Instant>,
+    stop: Arc<AtomicBool>,
+    /// What the account showed before (put back when the sign-in ends without one).
+    before: AccountState,
+}
+
+impl AccountRuntime {
+    /// What the account shows when no sign-in waits: signed in with the account saved, or signed out.
+    fn resting(&self) -> AccountState {
+        self.account.as_ref().map_or(AccountState::SignedOut, |a| AccountState::SignedIn { username: a.username.clone().unwrap_or_default() })
+    }
+}
+
+impl Drop for SignIn {
+    /// Cancelled, replaced, signed out, ended: its listener goes.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Opens a web page (http or https only) in the default browser.
@@ -82,7 +99,6 @@ impl Controller {
     }
 
     fn account_tick(self: &Shared) {
-        self.poll_sign_in();
         let server = Server::current();
         let modified = account::modified(server);
         let (changed, offline_due) = {
@@ -108,7 +124,7 @@ impl Controller {
         let Some(saved) = saved else {
             self.update(|s| {
                 s.account.development = development;
-                if !matches!(s.account.state, AccountState::SigningIn { .. }) {
+                if s.account.state != AccountState::SigningIn {
                     s.account.state = AccountState::SignedOut;
                 }
             });
@@ -144,32 +160,129 @@ impl Controller {
         });
     }
 
-    /// Starts a browser sign-in with `provider` (`discord` or `telegram`): opens the website and shows its code.
-    pub fn sign_in(self: &Shared, provider: &str) -> anyhow::Result<()> {
+    /// Starts a browser sign-in: listens on this computer's loopback, asks Orbiters for a link that names where, and
+    /// opens it. The person signs in on the website if needed and clicks Connect; the browser then brings the code here,
+    /// which the link's secret trades for the credential ([`Controller::serve_sign_in`]). "Finish in your browser" shows
+    /// at once, before Orbiters answers.
+    pub fn sign_in(self: &Shared) -> anyhow::Result<()> {
         let server = Server::current();
-        let link = Api::new(server).begin_link(provider)?;
-        // The link comes from the API: open it only when it is the website's own page.
-        anyhow::ensure!(server.is_website_page(&link.link_url), "Orbiters answered with a sign-in link that is not on its website.");
-        let generation = {
+        self.sign_in_with(server, Api::new(server))
+    }
+
+    /// [`Controller::sign_in`] through `api`, `server`'s (tests: a stand-in for Orbiters).
+    fn sign_in_with(self: &Shared, server: Server, api: Api) -> anyhow::Result<()> {
+        let shown = self.snapshot.lock().unwrap().account.state.clone();
+        let (generation, before) = {
             let mut rt = self.account_runtime.lock().unwrap();
             rt.generation += 1;
-            rt.signing_in = Some(SignIn {
-                server,
-                poll_token: link.poll_token.clone(),
-                link_url: link.link_url.clone(),
-                until: Instant::now() + LINK_LIFETIME,
-                generation: rt.generation,
-                polled: None,
-            });
-            rt.generation
+            // The one waiting before goes (its listener with it); what the account showed before it comes back at the
+            // end. (Another still asking Orbiters for its link shows "finishing": the account at rest then.)
+            let earlier = rt.signing_in.take().map(|e| e.before.clone());
+            let before = earlier.unwrap_or(if shown == AccountState::SigningIn { rt.resting() } else { shown });
+            (rt.generation, before)
         };
-        let _ = generation;
         self.update(|s| {
             s.account.development = server == Server::Development;
-            s.account.state = AccountState::SigningIn { code: link.code.clone(), provider: provider.to_string() };
+            s.account.state = AccountState::SigningIn;
             s.account.error = None;
         });
-        open_url(&link.link_url)
+        let started = (|| {
+            let callback = Callback::bind()?;
+            let link = api.begin_link(callback.port(), callback.path())?;
+            // The links come from the API: the browser is sent only to the website's own pages.
+            anyhow::ensure!(
+                server.is_website_page(&link.link_url) && server.is_website_page(&link.connected_url),
+                "Orbiters answered with a sign-in link that is not on its website."
+            );
+            Ok((callback, link))
+        })();
+        let (callback, link) = match started {
+            Ok(started) => started,
+            Err(e) => {
+                // Unless a newer sign-in or a sign-out came meanwhile, the account shows what it did before.
+                if self.account_runtime.lock().unwrap().generation == generation {
+                    self.update(|s| s.account.state = before);
+                }
+                return Err(e);
+            }
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        {
+            let mut rt = self.account_runtime.lock().unwrap();
+            if rt.generation != generation {
+                // Cancelled while Orbiters answered.
+                return Ok(());
+            }
+            rt.signing_in = Some(SignIn { server, link_url: link.link_url.clone(), generation, stop: stop.clone(), before });
+        }
+        let ctl = self.clone();
+        let url = link.link_url.clone();
+        std::thread::Builder::new().name("sign-in".into()).spawn(move || ctl.serve_sign_in(&api, server, callback, link, generation, &stop))?;
+        // Tests open no browser.
+        if cfg!(test) {
+            return Ok(());
+        }
+        open_url(&url)
+    }
+
+    /// The listener of a sign-in, until the browser brings a code that ends it, the sign-in is cancelled or replaced,
+    /// or its link's time runs out. Each code is traded, the account saved for every tool, and only then the browser
+    /// is sent on to the website's connected page (or told it failed).
+    fn serve_sign_in(self: &Shared, api: &Api, server: Server, callback: Callback, link: account::Link, generation: u64, stop: &AtomicBool) {
+        let served = callback.serve(stop, Instant::now() + LINK_LIFETIME, |code| {
+            let exchange = api.exchange_link(&link.exchange_token, code);
+            let mut rt = self.account_runtime.lock().unwrap();
+            if rt.generation != generation {
+                // Cancelled while Orbiters answered: nothing is kept.
+                return account::Answer { location: link.failed_url(), done: true };
+            }
+            let answer = link.answer(&exchange);
+            match exchange {
+                Exchange::Done(account) => {
+                    rt.signing_in = None;
+                    // Tests never touch the Unity tools' account.
+                    let saved = if cfg!(test) { Ok(()) } else { account::save(server, &account) };
+                    let name = account.username.clone().unwrap_or_default();
+                    rt.account = Some(account);
+                    rt.read = Some((server, account::modified(server)));
+                    rt.offline_since = None;
+                    drop(rt);
+                    if let Err(e) = saved {
+                        self.notify(NoticeKind::Warning, format!("Signed in, but the Unity tools will not share it: {e}"));
+                    }
+                    self.update(|s| {
+                        s.account.state = AccountState::SignedIn { username: name.clone() };
+                        s.account.error = None;
+                    });
+                    self.notify(NoticeKind::Success, format!("Signed in to Orbiters as {name}."));
+                }
+                // The browser can bring another (Connect clicked again): the error shows meanwhile.
+                Exchange::Retry(message) => {
+                    drop(rt);
+                    self.update(|s| s.account.error = Some(message));
+                }
+                Exchange::Ended(message) => {
+                    let before = rt.signing_in.take().map(|s| s.before.clone());
+                    drop(rt);
+                    self.update(|s| {
+                        s.account.state = before.unwrap_or(AccountState::SignedOut);
+                        s.account.error = Some(message);
+                    });
+                }
+            }
+            answer
+        });
+        if served == Served::TimedOut {
+            let mut rt = self.account_runtime.lock().unwrap();
+            if rt.signing_in.as_ref().is_some_and(|s| s.generation == generation) {
+                let before = rt.signing_in.take().map(|s| s.before.clone());
+                drop(rt);
+                self.update(|s| {
+                    s.account.state = before.unwrap_or(AccountState::SignedOut);
+                    s.account.error = Some("The sign-in expired. Sign in again.".into());
+                });
+            }
+        }
     }
 
     /// Opens the sign-in page again (closed by mistake).
@@ -181,19 +294,18 @@ impl Controller {
         }
     }
 
+    /// Stops waiting for the browser: the listener closes, and the account shows what it did before.
     pub fn cancel_sign_in(&self) {
-        let account = {
+        let before = {
             let mut rt = self.account_runtime.lock().unwrap();
             rt.generation += 1;
-            rt.signing_in = None;
-            rt.account.clone()
+            rt.signing_in.take().map(|s| s.before.clone()).unwrap_or_else(|| rt.resting())
         };
         self.update(|s| {
             s.account.error = None;
-            s.account.state = match account {
-                Some(a) => AccountState::SignedIn { username: a.username.unwrap_or_default() },
-                None => AccountState::SignedOut,
-            };
+            if s.account.state == AccountState::SigningIn {
+                s.account.state = before;
+            }
         });
     }
 
@@ -221,79 +333,144 @@ impl Controller {
         let (server, _) = rt.read?;
         rt.account.as_ref().map(|a| (Api::new(server), a.token.clone()))
     }
-
-    /// One poll of the browser sign-in in progress, every two seconds.
-    fn poll_sign_in(self: &Shared) {
-        let (server, poll_token, generation) = {
-            let mut rt = self.account_runtime.lock().unwrap();
-            let Some(attempt) = rt.signing_in.as_mut() else { return };
-            if Instant::now() > attempt.until {
-                rt.signing_in = None;
-                let had = rt.account.clone();
-                drop(rt);
-                self.update(|s| {
-                    s.account.state = match had {
-                        Some(a) => AccountState::SignedIn { username: a.username.unwrap_or_default() },
-                        None => AccountState::SignedOut,
-                    };
-                    s.account.error = Some("The sign-in expired. Sign in again.".into());
-                });
-                return;
-            }
-            if attempt.polled.is_some_and(|t| t.elapsed() < POLL_EVERY) {
-                return;
-            }
-            attempt.polled = Some(Instant::now());
-            (attempt.server, attempt.poll_token.clone(), attempt.generation)
-        };
-        let answer = Api::new(server).poll_link(&poll_token);
-        let mut rt = self.account_runtime.lock().unwrap();
-        if rt.signing_in.as_ref().map(|s| s.generation) != Some(generation) {
-            return;
-        }
-        match answer {
-            Ok(Poll::Pending) => {}
-            Ok(Poll::Done(account)) => {
-                rt.signing_in = None;
-                let saved = account::save(server, &account);
-                let name = account.username.clone().unwrap_or_default();
-                rt.account = Some(account);
-                rt.read = Some((server, account::modified(server)));
-                rt.offline_since = None;
-                drop(rt);
-                if let Err(e) = saved {
-                    self.notify(NoticeKind::Warning, format!("Signed in, but the Unity tools will not share it: {e}"));
-                }
-                self.update(|s| {
-                    s.account.state = AccountState::SignedIn { username: name.clone() };
-                    s.account.error = None;
-                });
-                self.notify(NoticeKind::Success, format!("Signed in to Orbiters as {name}."));
-            }
-            Err(e) => {
-                rt.signing_in = None;
-                let had = rt.account.clone();
-                drop(rt);
-                self.update(|s| {
-                    s.account.state = match had {
-                        Some(a) => AccountState::SignedIn { username: a.username.unwrap_or_default() },
-                        None => AccountState::SignedOut,
-                    };
-                    s.account.error = Some(e.to_string());
-                });
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::controller::Controller;
+    use orbiters_core::settings::Settings;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Mutex;
+
+    /// The port and path of the app's listener, as the stand-in was told them.
+    type Told = Arc<Mutex<Option<(u16, String)>>>;
+
+    /// A stand-in for Orbiters as the development server (its website on this computer): the link it hands out, the
+    /// port and path of the app's listener it was told, and trades of the codes "good" (an account), "gone" (the link
+    /// ended) and anything else (no match).
+    fn orbiters() -> (Api, Told) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let site = format!("http://{}", listener.local_addr().unwrap());
+        let told: Told = Arc::default();
+        let (t, s) = (told.clone(), site.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                answer(stream, &s, &t);
+            }
+        });
+        (Api::at(&site), told)
+    }
+
+    fn answer(mut stream: TcpStream, site: &str, told: &Mutex<Option<(u16, String)>>) {
+        let mut data = Vec::new();
+        let mut buf = [0u8; 4096];
+        let (request, body) = loop {
+            let Ok(n) = stream.read(&mut buf) else { return };
+            if n == 0 {
+                return;
+            }
+            data.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&data).to_string();
+            let Some((head, body)) = text.split_once("\r\n\r\n") else { continue };
+            let length = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok()));
+            if body.len() >= length.unwrap_or(0) {
+                break (head.lines().next().unwrap_or_default().to_string(), body.to_string());
+            }
+        };
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+        let (status, reply) = if request.starts_with("POST /editor-links/exchange ") {
+            match json["code"].as_str() {
+                Some("good") => (200, serde_json::json!({ "token": "orbit-test", "user": "7", "username": "Tester", "avatarUrl": null })),
+                Some("gone") => (410, serde_json::json!({ "error": "This sign-in ended. Click Sign in again." })),
+                _ => (400, serde_json::json!({ "error": "This sign-in code does not match." })),
+            }
+        } else {
+            *told.lock().unwrap() = Some((json["port"].as_u64().unwrap_or(0) as u16, json["path"].as_str().unwrap_or_default().to_string()));
+            let link = serde_json::json!({ "linkUrl": format!("{site}/link-editor?token=t&app=desktop"),
+                "connectedUrl": format!("{site}/link-editor/connected?client=desktop"), "exchangeToken": "x", "expiresAt": "2026-10-25T12:00:00Z" });
+            (200, link)
+        };
+        let body = reply.to_string();
+        let _ = write!(stream, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    }
+
+    /// The browser bringing `code` to the app's listener: the status, and where it is sent.
+    fn bring(at: &(u16, String), code: &str) -> (u16, Option<String>) {
+        let mut s = TcpStream::connect(("127.0.0.1", at.0)).unwrap();
+        write!(s, "GET /{}?code={code} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", at.1, at.0).unwrap();
+        let mut reply = String::new();
+        s.read_to_string(&mut reply).unwrap();
+        (reply.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0), reply.lines().find_map(|l| l.strip_prefix("Location: ")).map(str::to_string))
+    }
+
+    fn until(what: &str, done: impl Fn() -> bool) {
+        let limit = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < limit, "waited for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn signs_in_with_the_websites_connect_and_nothing_typed() {
+        let (api, told) = orbiters();
+        let ctl = Controller::new(Settings::default());
+        ctl.update(|s| s.account.state = AccountState::SignedOut);
+        ctl.sign_in_with(Server::Development, api).unwrap();
+        assert_eq!(ctl.view().account.state, AccountState::SigningIn);
+        let at = told.lock().unwrap().clone().expect("the listener was named");
+        // A code that does not match: the browser hears it failed, the sign-in still waits (the error shows).
+        let (status, location) = bring(&at, "wrong");
+        assert!(status == 302 && location.as_deref().is_some_and(|l| l.ends_with("client=desktop&failed=1")), "{location:?}");
+        until("the error", || ctl.view().account.error.is_some());
+        assert_eq!(ctl.view().account.state, AccountState::SigningIn);
+        // Connect's code: signed in, then the browser goes to the connected page; the listener is gone.
+        let (status, location) = bring(&at, "good");
+        assert!(status == 302 && location.as_deref().is_some_and(|l| l.ends_with("connected?client=desktop")), "{location:?}");
+        assert_eq!(ctl.view().account.state, AccountState::SignedIn { username: "Tester".into() });
+        assert_eq!(ctl.view().account.error, None);
+        assert!(ctl.account_api().is_some_and(|(_, token)| token == "orbit-test"));
+        assert!(ctl.take_notices().iter().any(|n| format!("{n:?}").contains("Signed in to Orbiters as Tester")));
+        until("the listener to close", || TcpStream::connect(("127.0.0.1", at.0)).is_err());
+    }
+
+    #[test]
+    fn a_cancelled_or_ended_sign_in_puts_the_account_back() {
+        let (api, told) = orbiters();
+        let ctl = Controller::new(Settings::default());
+        let expired = AccountState::Expired { username: Some("Old".into()) };
+        ctl.update(|s| s.account.state = expired.clone());
+        // Cancelled: the listener closes, the account shows what it did before.
+        ctl.sign_in_with(Server::Development, api.clone()).unwrap();
+        let first = told.lock().unwrap().clone().unwrap();
+        ctl.cancel_sign_in();
+        assert_eq!(ctl.view().account.state, expired);
+        until("the listener to close", || TcpStream::connect(("127.0.0.1", first.0)).is_err());
+        // A second sign-in replaces a first still waiting (the first's listener goes).
+        ctl.sign_in_with(Server::Development, api.clone()).unwrap();
+        let second = told.lock().unwrap().clone().unwrap();
+        ctl.sign_in_with(Server::Development, api).unwrap();
+        let third = told.lock().unwrap().clone().unwrap();
+        until("the replaced listener to close", || TcpStream::connect(("127.0.0.1", second.0)).is_err());
+        // Ended by Orbiters: the browser hears it failed, the account shows what it did before, with why.
+        let (status, location) = bring(&third, "gone");
+        assert!(status == 302 && location.as_deref().is_some_and(|l| l.ends_with("&failed=1")), "{location:?}");
+        assert_eq!(ctl.view().account.state, expired);
+        assert!(ctl.view().account.error.as_deref().is_some_and(|e| e.contains("ended")));
+        until("the listener to close", || TcpStream::connect(("127.0.0.1", third.0)).is_err());
+        // Orbiters out of reach: the sign-in does not start, and the account is as it was.
+        assert!(ctl.sign_in_with(Server::Development, Api::at("http://127.0.0.1:9/")).is_err());
+        assert_eq!(ctl.view().account.state, expired);
+    }
+
     #[test]
     fn only_web_pages_are_opened() {
         for other in
             ["file:///C:/Windows/System32/calc.exe", "C:/Windows/System32/calc.exe", "//host/share/x.exe", "ms-msdt:/id PCWDiagnostic", "search-ms:query=x", ""]
         {
-            assert!(super::open_url(other).is_err(), "{other}");
+            assert!(open_url(other).is_err(), "{other}");
         }
     }
 }

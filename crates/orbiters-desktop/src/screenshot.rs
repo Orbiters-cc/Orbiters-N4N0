@@ -646,7 +646,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         Scenario {
             name: "settings-signing-in",
             page: Page::Settings,
-            snapshot: with_account(&idle, crate::state::AccountState::SigningIn { code: "K7QX".into(), provider: "discord".into() }, None),
+            snapshot: with_account(&idle, crate::state::AccountState::SigningIn, None),
             frames: 90,
             splash: false,
             open_detail: false,
@@ -1530,7 +1530,7 @@ impl crate::backend::Backend for Still {
     fn stop_reconstruction(&self) {}
     fn unqueue_reconstruction(&self, _dir: PathBuf) {}
     fn send_to_mixer(&self, _dir: PathBuf, _title: String) {}
-    fn sign_in(&self, _provider: &str) {}
+    fn sign_in(&self) {}
     fn reopen_sign_in(&self) {}
     fn cancel_sign_in(&self) {}
     fn sign_out(&self) {}

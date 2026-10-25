@@ -214,11 +214,11 @@ impl Service {
             }
             ToService::Reconstruct { dir } => report(ctl.reconstruct(dir)),
             ToService::SendToMixer { dir, title } => report(ctl.send_to_mixer(dir, title)),
-            ToService::SignIn { provider } => {
+            ToService::SignIn => {
                 // Asking Orbiters for the link is a network call: not on the link's reading thread.
                 let c = ctl.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = c.sign_in(&provider) {
+                    if let Err(e) = c.sign_in() {
                         c.notify(NoticeKind::Error, format!("Could not start the sign-in: {e}"));
                     }
                 });

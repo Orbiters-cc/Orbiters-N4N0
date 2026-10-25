@@ -62,6 +62,7 @@ pub const RECORD: &str = "\u{E3EE}";
 pub const SCAN: &str = "\u{EBB6}";
 pub const SCROLL: &str = "\u{EB7A}";
 pub const SHIELD_CHECK: &str = "\u{E40C}";
+pub const SIGN_IN: &str = "\u{E428}";
 pub const SIGN_OUT: &str = "\u{E42A}";
 pub const SKIP_BACK: &str = "\u{E5A4}";
 pub const SKIP_FORWARD: &str = "\u{E5A6}";

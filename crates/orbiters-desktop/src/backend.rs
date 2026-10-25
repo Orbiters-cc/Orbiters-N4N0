@@ -4,7 +4,7 @@
 
 use crate::controller::{self, Notice, NoticeKind};
 use crate::ipc::{Client, OrbCommand, ToService, UpdateAction};
-use crate::state::{MapsMine, Snapshot};
+use crate::state::{AccountState, MapsMine, Snapshot};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::settings::Settings;
 use std::path::PathBuf;
@@ -42,8 +42,8 @@ pub trait Backend: Send + Sync {
     fn unqueue_reconstruction(&self, dir: PathBuf);
     /// Sends a session's splats to the Unity editor running Mixer.
     fn send_to_mixer(&self, dir: PathBuf, title: String);
-    /// Signs in to Orbiters (the account the Unity tools share) through the browser.
-    fn sign_in(&self, provider: &str);
+    /// Signs in to Orbiters (the account the Unity tools share) through the browser: Connect on the page it opens.
+    fn sign_in(&self);
     fn reopen_sign_in(&self);
     fn cancel_sign_in(&self);
     fn sign_out(&self);
@@ -154,8 +154,13 @@ impl Backend for Remote {
         self.0.send(&ToService::SendToMixer { dir, title });
     }
 
-    fn sign_in(&self, provider: &str) {
-        self.0.send(&ToService::SignIn { provider: provider.to_string() });
+    fn sign_in(&self) {
+        // Finishing in the browser at once: the service asks Orbiters for the link, then opens it.
+        self.0.update_local(|s| {
+            s.account.state = AccountState::SigningIn;
+            s.account.error = None;
+        });
+        self.0.send(&ToService::SignIn);
     }
 
     fn reopen_sign_in(&self) {
@@ -322,11 +327,10 @@ impl Backend for Local {
         self.report(self.ctl.send_to_mixer(dir, title));
     }
 
-    fn sign_in(&self, provider: &str) {
+    fn sign_in(&self) {
         let ctl = self.ctl.clone();
-        let provider = provider.to_string();
         std::thread::spawn(move || {
-            if let Err(e) = ctl.sign_in(&provider) {
+            if let Err(e) = ctl.sign_in() {
                 ctl.notify(crate::controller::NoticeKind::Error, format!("Could not start the sign-in: {e}"));
             }
         });

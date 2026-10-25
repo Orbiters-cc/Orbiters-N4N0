@@ -1,7 +1,8 @@
 //! N4N0's menu (contracts `Docs/orb.md`, Menu): what opens when the person calls N4N0 (a controller button, the wake word
-//! on its own, touching N4N0): fast walk, YouTube, calls, a 3D picture, the computer's music and N4N0's light.
-//! Orbiters - N4N0's SteamVR overlay shows it, or the avatar's projected screen when the N4N0 prop has one; both draw
-//! the same pages from [`layout`].
+//! on its own, touching N4N0): fast walk, YouTube, calls, a 3D picture, the computer's music, N4N0's light and the
+//! avatar's saved states. Orbiters - N4N0's SteamVR overlay shows it, or the avatar's projected screen when the N4N0 prop
+//! has one; both draw the same pages from [`layout`]. A link copied from the results can be dropped in the world as a card
+//! (contracts `Docs/orb.md`, Link card), which the avatar's screen shows.
 //!
 //! This module holds what the menu shows and what each press does, without IO: presses and typing return [`Effect`]s
 //! that the host carries out (fetching suggestions and results, copying a link, starting a call), and the host hands the
@@ -27,6 +28,13 @@ pub const QUERY_MAX: usize = 40;
 pub const TIMERS: [u32; 4] = [0, 3, 5, 10];
 /// How much a volume button turns the computer's volume, in percent.
 pub const VOLUME_STEP: u8 = 5;
+/// Saved states on a page of the States list.
+pub const STATES_PER_PAGE: usize = 5;
+/// The segments of a dropped card's countdown bar: one a second (contracts `orb::CARD_SECONDS`).
+pub const CARD_SEGMENTS: usize = orbiters_contracts::orb::CARD_SECONDS as usize;
+/// Everyone else's copy of a card's countdown moves in steps of this many seconds: each step is a block on the slow
+/// synced channel, which the card's texts and picture need more.
+pub const CARD_PUBLIC_STEP: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Page {
@@ -42,6 +50,70 @@ pub enum Page {
     Music,
     /// N4N0 as a light: on or off, its colour and brightness.
     Light,
+    /// The avatar's saved states: apply one, save how it is now.
+    States,
+    /// A link card dropped in the world (only the avatar's screen shows it, while the menu itself is closed).
+    Card,
+}
+
+/// The pages a display has (contracts `Docs/orb.md`, Menu): the avatar's screen by its version (`N4N0/Screen/Version`),
+/// the overlay and the window all of them ([`Pages::ALL`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Pages {
+    /// Screens before version 3: the four-tile Home, no Music nor Light.
+    #[default]
+    Four,
+    /// Versions 3 and 4: the six-tile Home, Music and Light.
+    Six,
+    /// From version 5: the seven-tile Home (States), the States page, Drop on the results and the link card.
+    Seven,
+}
+
+impl Pages {
+    /// Every page: the overlay's and the window's.
+    pub const ALL: Pages = Pages::Seven;
+
+    /// The pages of a screen of `version` (`None`: a screen from before `N4N0/Screen/Version`).
+    pub fn of_screen(version: Option<i32>) -> Pages {
+        use orbiters_contracts::orb::{SCREEN_MUSIC_LIGHT, SCREEN_STATES_CARDS};
+        match version {
+            Some(v) if v >= SCREEN_STATES_CARDS => Pages::Seven,
+            Some(v) if v >= SCREEN_MUSIC_LIGHT => Pages::Six,
+            _ => Pages::Four,
+        }
+    }
+
+    /// Home has the music and light tiles (and their pages).
+    pub fn music_light(self) -> bool {
+        self >= Pages::Six
+    }
+
+    /// Home has the States tile (and its page), the results Drop, and links drop as cards.
+    pub fn states_cards(self) -> bool {
+        self >= Pages::Seven
+    }
+}
+
+/// A saved state of the avatar worn, as the menu lists it (Orbiters - N4N0 keeps them: contracts `Docs/orb.md`, States).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StateRow {
+    pub id: String,
+    pub name: String,
+    /// Applied after each world join and each switch to this avatar.
+    pub default: bool,
+    /// Applying it puts the GoGoLoco pose back too, and the avatar's size.
+    pub pose: bool,
+    pub size: bool,
+}
+
+/// A link card dropped in the world (contracts `Docs/orb.md`, Link card): its picture (a video id: the hosts keep
+/// pictures by key), title and link, and the whole seconds it has left.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Card {
+    pub link: String,
+    pub title: String,
+    pub video: Option<String>,
+    pub left: u32,
 }
 
 /// The letters' order on the keyboard.
@@ -205,6 +277,18 @@ pub enum Target {
     LightSwitch,
     LightColor(u8),
     LightLevel(u8),
+    // Home's seventh tile, and its page.
+    States,
+    /// A saved state's row, or its Apply button.
+    StateApply(u8),
+    /// The mark on the default state's row (it applies the state, as the row does).
+    StateMark(u8),
+    /// Saves how the avatar is now, named "State n".
+    StateSave,
+    // Results: a copied link dropped in the world.
+    Drop(u8),
+    /// A segment of a dropped card's countdown bar (nothing to press).
+    CardTime(u8),
 }
 
 /// What the host does for the menu. Requests are numbered, and their answers carry the number back: an answer to an
@@ -254,6 +338,22 @@ pub enum Effect {
     Media(MediaCommand),
     /// Set N4N0's light so (its three parameters).
     Light(Light),
+    /// Save how the avatar is now as a state named `name`.
+    SaveState {
+        name: String,
+    },
+    /// Put the avatar back as state `id` (named `name`) holds it.
+    ApplyState {
+        id: String,
+        name: String,
+    },
+    /// Drop a link card in the world: the avatar's screen shows it (contracts `Docs/orb.md`, Link card).
+    Drop {
+        link: String,
+        title: String,
+        /// The thumbnail's key (the video id).
+        video: Option<String>,
+    },
     /// The menu closed.
     Close,
 }
@@ -309,23 +409,45 @@ pub struct Menu {
     /// `heard` holds the owner's own words: everyone else's screen does not show them (a sentence for N4N0 may have
     /// been kept out of the world, VRChat's microphone muted while it was said).
     pub heard_private: bool,
-    /// Home has six tiles (music and light): the overlay always, the avatar's screen from version 3
-    /// (`N4N0/Screen/Version`); older screens have the first four.
-    pub six_tiles: bool,
+    /// The pages this display has: the overlay and the window all of them, the avatar's screen those of its version
+    /// (`N4N0/Screen/Version`): six tiles from version 3, seven (States, Drop, the link card) from version 5.
+    pub pages: Pages,
     /// What the computer plays (`None`: nothing, or not known yet) and its volume.
     pub media: Option<Media>,
     pub volume: Option<Volume>,
     /// N4N0's light, when the avatar has it (the Light option on N4N0's card).
     pub light: Option<Light>,
+    /// The avatar worn's saved states, newest last; `states_ready` once the avatar is known (else `states_note` says
+    /// why there are none), and the page of them shown (from 0).
+    pub states: Vec<StateRow>,
+    pub states_ready: bool,
+    pub states_note: String,
+    pub state_page: usize,
+    /// A save pressed here, shown in the list until the host's list has it (or [`SAVE_SHOWN`] passed).
+    pending_save: Option<(String, Instant)>,
+    /// The result whose link was copied last (its video id): its row offers Drop.
+    pub copied: Option<String>,
+    /// A copied link can be dropped as a card: the avatar's screen is of version 5 or later.
+    pub can_drop: bool,
+    /// The link card the avatar's screen shows (the menu's page is then [`Page::Card`]).
+    pub card: Option<Card>,
 }
+
+/// How long a state saved here shows before the host's list has it.
+const SAVE_SHOWN: Duration = Duration::from_secs(5);
 
 impl Menu {
     pub fn new(layout: KeyboardLayout, photo_timer: u32, photo_length: PhotoLength) -> Self {
         Self { layout, photo_timer, photo_length, ..Default::default() }
     }
 
-    /// Opens on Home (or where it was, when it is open already).
+    /// Opens on Home (or where it was, when it is open already). A link card the screen showed goes: opening the menu
+    /// again takes the card back.
     pub fn open(&mut self) {
+        if self.page == Page::Card {
+            self.card = None;
+            self.open = false;
+        }
         if !self.open {
             self.open = true;
             self.go(Page::Home);
@@ -338,7 +460,35 @@ impl Menu {
         }
         self.open = false;
         self.notice = None;
+        if self.page == Page::Card {
+            self.card = None;
+            self.page = Page::Home;
+        }
         vec![Effect::Close]
+    }
+
+    /// The avatar's screen shows `card`, dropped in the world: its own page, while the menu itself is closed (nothing
+    /// on it can be pressed).
+    pub fn show_card(&mut self, card: Card) {
+        self.card = Some(card);
+        self.open = true;
+        self.page = Page::Card;
+        self.notice = None;
+    }
+
+    /// Whether the screen shows a dropped card.
+    pub fn card_shown(&self) -> bool {
+        self.open && self.page == Page::Card && self.card.is_some()
+    }
+
+    /// The dropped card goes (its time is up): the screen shows nothing.
+    pub fn end_card(&mut self) -> Option<Card> {
+        let card = self.card.take()?;
+        if self.page == Page::Card {
+            self.open = false;
+            self.page = Page::Home;
+        }
+        Some(card)
     }
 
     fn go(&mut self, page: Page) {
@@ -351,7 +501,8 @@ impl Menu {
 
     /// The person pressed `target`.
     pub fn press(&mut self, target: Target) -> Vec<Effect> {
-        if !self.open {
+        // A dropped card is not the menu: nothing on it is pressed.
+        if !self.open || self.page == Page::Card {
             return Vec::new();
         }
         match target {
@@ -415,11 +566,46 @@ impl Menu {
             Target::Copy(i) => match self.page_results().get(i as usize) {
                 Some(video) => {
                     let effect = Effect::Copy { link: video.link(), title: video.title.clone() };
-                    self.notice = Some("Link copied: paste it in the video player".into());
+                    self.copied = Some(video.id.clone());
+                    // The row now offers Drop, where the display can drop it.
+                    let notice = if self.can_drop { "Link copied: paste it, or Drop it" } else { "Link copied: paste it in the video player" };
+                    self.notice = Some(notice.into());
                     vec![effect]
                 }
                 None => Vec::new(),
             },
+            Target::Drop(i) => match self.page_results().get(i as usize) {
+                Some(video) if self.can_drop && self.copied.as_deref() == Some(video.id.as_str()) => {
+                    let effect = Effect::Drop { link: video.link(), title: video.title.clone(), video: Some(video.id.clone()) };
+                    self.notice = Some("Dropped: grab the card to copy its link".into());
+                    vec![effect]
+                }
+                _ => Vec::new(),
+            },
+            Target::CardTime(_) => Vec::new(),
+            Target::States => {
+                self.go(Page::States);
+                Vec::new()
+            }
+            Target::StateApply(i) | Target::StateMark(i) => match self.page_states().get(i as usize) {
+                // A state saved here but not yet listed by the host has no id: nothing to apply yet.
+                Some(state) if !state.id.is_empty() => {
+                    let effect = Effect::ApplyState { id: state.id.clone(), name: state.name.clone() };
+                    self.notice = Some(format!("Applied \"{}\"", state.name));
+                    vec![effect]
+                }
+                _ => Vec::new(),
+            },
+            Target::StateSave if self.states_ready => {
+                let name = next_state_name(&self.states);
+                self.pending_save = Some((name.clone(), Instant::now()));
+                self.states.push(StateRow { name: name.clone(), ..Default::default() });
+                // The page with the new one shows.
+                self.state_page = (self.states.len() - 1) / STATES_PER_PAGE;
+                self.notice = Some(format!("Saved as \"{name}\""));
+                vec![Effect::SaveState { name }]
+            }
+            Target::StateSave => Vec::new(),
             Target::Previous => self.turn(-1),
             Target::Next => self.turn(1),
             Target::Contact(i) => match self.page_contacts().get(i as usize) {
@@ -604,6 +790,7 @@ impl Menu {
         self.loading_more = false;
         self.turning = false;
         self.results.clear();
+        self.copied = None;
         self.continuation = None;
         self.results_for = query.clone();
         self.result_page = 0;
@@ -678,6 +865,7 @@ impl Menu {
         match self.page {
             Page::Results => self.result_page > 0,
             Page::Call => self.contact_page > 0,
+            Page::States => self.state_page > 0,
             _ => false,
         }
     }
@@ -686,6 +874,7 @@ impl Menu {
         match self.page {
             Page::Results => (self.result_page + 1) * RESULTS_PER_PAGE < self.results.len() || self.continuation.is_some(),
             Page::Call => (self.contact_page + 1) * CONTACTS_PER_PAGE < self.contacts.len(),
+            Page::States => (self.state_page + 1) * STATES_PER_PAGE < self.states.len(),
             _ => false,
         }
     }
@@ -723,6 +912,12 @@ impl Menu {
                 let pages = self.contacts.len().div_ceil(CONTACTS_PER_PAGE).max(1);
                 let next = (self.contact_page as i32 + by).clamp(0, pages as i32 - 1) as usize;
                 self.contact_page = next;
+                Vec::new()
+            }
+            Page::States => {
+                let pages = self.states.len().div_ceil(STATES_PER_PAGE).max(1);
+                self.state_page = (self.state_page as i32 + by).clamp(0, pages as i32 - 1) as usize;
+                self.notice = None;
                 Vec::new()
             }
             _ => Vec::new(),
@@ -781,6 +976,34 @@ impl Menu {
         self.contact_page = self.contact_page.min(pages - 1);
     }
 
+    /// The saved states of the page shown.
+    pub fn page_states(&self) -> &[StateRow] {
+        let start = (self.state_page * STATES_PER_PAGE).min(self.states.len());
+        &self.states[start..(start + STATES_PER_PAGE).min(self.states.len())]
+    }
+
+    /// The avatar worn's saved states changed, as the host keeps them (`ready`: the avatar is known; else `note` says
+    /// why there are none). A state saved here stays in the list until the host's has it, or a few seconds.
+    pub fn set_states(&mut self, mut states: Vec<StateRow>, ready: bool, note: &str) {
+        if let Some((name, at)) = &self.pending_save {
+            if !ready || states.iter().any(|s| s.name == *name) || at.elapsed() >= SAVE_SHOWN {
+                self.pending_save = None;
+            } else {
+                states.push(StateRow { name: name.clone(), ..Default::default() });
+            }
+        }
+        self.states = states;
+        self.states_ready = ready;
+        self.states_note = note.to_string();
+        let pages = self.states.len().div_ceil(STATES_PER_PAGE).max(1);
+        self.state_page = self.state_page.min(pages - 1);
+    }
+
+    /// Whether a state saved here waits for the host's list.
+    pub fn saving(&self) -> bool {
+        self.pending_save.is_some()
+    }
+
     /// A call started, changed or ended. A ringing call opens the call page.
     pub fn set_call(&mut self, call: Option<Call>) {
         if matches!(call, Some(Call::Ringing { .. })) && self.open && !matches!(self.call, Some(Call::Ringing { .. })) {
@@ -809,6 +1032,18 @@ impl Menu {
 /// `text`'s first `max` characters.
 pub fn cut(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
+}
+
+/// The name a state saved without one gets: "State n", `n` one past how many there are (and past any taken name).
+pub fn next_state_name(states: &[StateRow]) -> String {
+    let mut n = states.len() + 1;
+    loop {
+        let name = format!("State {n}");
+        if !states.iter().any(|s| s.name.trim().eq_ignore_ascii_case(&name)) {
+            return name;
+        }
+        n += 1;
+    }
 }
 
 fn lower(text: &str) -> impl Iterator<Item = char> + '_ {
@@ -919,7 +1154,7 @@ mod tests {
 
     #[test]
     fn music_and_light_presses_show_at_once_and_ask_the_hosts() {
-        let mut menu = Menu { six_tiles: true, ..Default::default() };
+        let mut menu = Menu { pages: Pages::Six, ..Default::default() };
         menu.open();
         menu.press(Target::Music);
         assert!(menu.press(Target::MediaPlayPause).is_empty(), "nothing to play or pause");
@@ -1142,5 +1377,79 @@ mod tests {
         assert_eq!(menu.call_contact(6), vec![Effect::CallContact { id: "u6".into() }]);
         assert_eq!(menu.contact_page, 1);
         assert!(menu.call_contact(7).is_empty(), "no such friend");
+    }
+
+    #[test]
+    fn a_copied_link_offers_drop_where_cards_can_be_dropped() {
+        let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
+        menu.open();
+        menu.search_for("cats");
+        menu.results_arrived(1, results(0..5, false), false);
+        assert!(menu.press(Target::Drop(1)).is_empty(), "nothing copied yet");
+        menu.press(Target::Copy(1));
+        assert_eq!(menu.copied.as_deref(), Some(video("1").id.as_str()));
+        assert!(layout::target_state(&menu, Target::Drop(1)).hidden, "an older screen, or none: no Drop");
+        assert!(menu.press(Target::Drop(1)).is_empty());
+        menu.can_drop = true;
+        assert!(!layout::target_state(&menu, Target::Drop(1)).hidden, "the copied row offers it");
+        assert!(layout::target_state(&menu, Target::Drop(0)).hidden, "only that row");
+        assert_eq!(
+            menu.press(Target::Drop(1)),
+            vec![Effect::Drop { link: "https://www.youtube.com/watch?v=00000000001".into(), title: "Title 1".into(), video: Some(video("1").id) }]
+        );
+        assert_eq!(menu.page, Page::Results, "the hosts decide where the card goes (the screen shows it, the overlay closes)");
+        // A new search forgets what was copied.
+        menu.search_for("dogs");
+        assert!(menu.copied.is_none());
+    }
+
+    #[test]
+    fn a_dropped_card_is_not_the_menu_and_opening_the_menu_takes_it_back() {
+        let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
+        menu.show_card(Card { link: "https://example.com".into(), title: "Example".into(), video: None, left: 15 });
+        assert!(menu.card_shown() && menu.open && menu.page == Page::Card);
+        assert!(menu.press(Target::States).is_empty(), "nothing on a card is pressed");
+        assert!(menu.heard("search cats").is_none());
+        // Its time is up: nothing shows.
+        assert!(menu.end_card().is_some());
+        assert!(!menu.open && !menu.card_shown() && menu.page == Page::Home);
+        assert!(menu.end_card().is_none());
+        // Dropped again, then the menu opens: Home, the card gone. Closing a card's screen ends it too.
+        menu.show_card(Card { link: "https://example.com".into(), title: "Example".into(), video: None, left: 9 });
+        menu.open();
+        assert_eq!((menu.open, menu.page, menu.card.is_none()), (true, Page::Home, true));
+        menu.show_card(Card { link: "https://example.com".into(), title: "Example".into(), video: None, left: 9 });
+        assert_eq!(menu.close(), vec![Effect::Close]);
+        assert!(menu.card.is_none() && menu.page == Page::Home);
+    }
+
+    #[test]
+    fn a_state_saved_here_shows_until_the_host_lists_it() {
+        let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
+        menu.open();
+        menu.press(Target::States);
+        assert!(menu.press(Target::StateSave).is_empty(), "no avatar known: nothing to save");
+        let row = |id: &str, name: &str| StateRow { id: id.into(), name: name.into(), ..Default::default() };
+        menu.set_states(vec![row("s1", "State 1"), row("s2", "Hoodie on")], true, "");
+        assert_eq!(menu.press(Target::StateSave), vec![Effect::SaveState { name: "State 3".into() }]);
+        assert!(menu.saving());
+        assert_eq!(layout::text(&menu, layout::Content::StatesTitle), "Saved as \"State 3\"");
+        assert_eq!(menu.states.last().map(|s| (s.id.as_str(), s.name.as_str())), Some(("", "State 3")), "at once, before the host answers");
+        assert!(menu.press(Target::StateApply(2)).is_empty(), "not listed by the host yet: nothing to apply");
+        // The host's list, without it yet: it stays. With it: the host's.
+        menu.set_states(vec![row("s1", "State 1"), row("s2", "Hoodie on")], true, "");
+        assert_eq!(menu.states.len(), 3);
+        menu.set_states(vec![row("s1", "State 1"), row("s2", "Hoodie on"), row("s3", "State 3")], true, "");
+        assert_eq!(menu.states.len(), 3);
+        assert!(!menu.saving());
+        assert_eq!(menu.press(Target::StateApply(2)), vec![Effect::ApplyState { id: "s3".into(), name: "State 3".into() }]);
+        assert_eq!(next_state_name(&[row("a", "State 2"), row("b", "state 3")]), "State 4", "past a name taken, whatever its case");
+        // Twelve states: three pages of five.
+        menu.set_states((1..=12).map(|i| row(&format!("s{i}"), &format!("State {i}"))).collect(), true, "");
+        menu.press(Target::Next);
+        menu.press(Target::Next);
+        assert_eq!((menu.state_page, menu.page_states().len(), menu.has_next()), (2, 2, false));
+        menu.set_states(vec![row("s1", "State 1")], true, "");
+        assert_eq!(menu.state_page, 0, "fewer states: back to a page that exists");
     }
 }

@@ -8,6 +8,7 @@ pub mod orb;
 pub mod sessions;
 pub mod settings;
 pub mod splats;
+pub mod states;
 pub mod storage;
 pub mod worlds;
 

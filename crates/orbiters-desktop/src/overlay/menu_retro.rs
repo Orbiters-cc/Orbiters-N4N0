@@ -108,6 +108,7 @@ fn free(layout: &Layout, r: Rect, origin: Pos2) -> bool {
         .chain(layout.slots.iter().map(|s| rect(s.rect(), origin)))
         .chain(layout.pictures.iter().map(|pic| rect(pic.rect, origin)))
         .chain(layout.icons.iter().map(|(r, _, _)| rect(*r, origin)))
+        .chain(layout.boxes.iter().map(|b| rect(*b, origin)))
         .any(|b| b.expand(4.0).intersects(r));
     !busy
 }
@@ -138,7 +139,8 @@ fn frame(p: &Painter, origin: Pos2, layout: Option<&Layout>) {
     // A plate on the top line: the system's name, and hatched tape beside it.
     let plate = Rect::from_center_size(pos2(card.center().x, card.min.y + 5.0), vec2(176.0, 12.0));
     p.rect_filled(plate.expand2(vec2(6.0, 2.0)), 0.0, BG);
-    widgets::text(p, plate.center(), Align2::CENTER_CENTER, &mono("// N4N0·OS 4 //", 11.0, TEXT2));
+    let system = format!("// N4N0·OS {} //", orbiters_contracts::orb::SCREEN_LATEST);
+    widgets::text(p, plate.center(), Align2::CENTER_CENTER, &mono(&system, 11.0, TEXT2));
     for side in [-1.0f32, 1.0] {
         let tape = Rect::from_center_size(pos2(card.center().x + side * 128.0, card.min.y + 5.0), vec2(64.0, 7.0));
         p.rect_filled(tape.expand(1.0), 0.0, BG);
@@ -197,7 +199,7 @@ fn icon_and_label(p: &Painter, r: Rect, icon: Option<Icon>, label: Option<&str>,
 /// The resting colours of an element of `look`.
 fn ink(look: Look) -> Ink {
     match look {
-        Look::Accent => Ink { fill: LINE, stroke: LINE, text: BG, icon: BG },
+        Look::Accent | Look::Bar => Ink { fill: LINE, stroke: LINE, text: BG, icon: BG },
         Look::Danger => Ink { fill: ALERT, stroke: ALERT, text: BG, icon: BG },
         Look::KeyDark => Ink { fill: BG, stroke: DIM, text: TEXT2, icon: TEXT2 },
         Look::Row => Ink { fill: Color32::TRANSPARENT, stroke: DIM, text: TEXT2, icon: LINE },
@@ -237,14 +239,14 @@ fn element(p: &Painter, e: &Element, origin: Pos2, ink: Ink) {
     match e.look {
         Look::Tile => {
             // As Orbiters' own tile: the icon at its top (a tall tile) or left (a wide one), the title below or beside it.
-            let wide = r.width() > r.height();
+            let wide = super::menu_ui::tile_is_wide(e.rect);
             let box_ = Rect::from_min_size(r.min + if wide { vec2(24.0, (r.height() - 72.0) / 2.0) } else { vec2(24.0, 24.0) }, vec2(72.0, 72.0));
             if let Some(icon) = e.icon {
                 let ink = if e.tint == Some(Tint::Red) && ink.icon == LINE { Ink { icon: ALERT, ..ink } } else { ink };
                 bracketed_icon(p, box_, icon, 40.0, ink);
             }
             if let Some(title) = e.label {
-                let at = r.min + if wide { vec2(116.0, 38.0) } else { vec2(24.0, 228.0) };
+                let at = r.min + if wide { vec2(116.0, 38.0) } else { vec2(24.0, r.height() - 96.0) };
                 widgets::text(p, at, Align2::LEFT_TOP, &mono(title, 27.0, ink.text));
             }
             // A level bar in the top right corner: the tile's own instrument.
@@ -278,14 +280,26 @@ fn element(p: &Painter, e: &Element, origin: Pos2, ink: Ink) {
             _ => icon_and_label(p, r, e.icon, e.label, 18.0, ink),
         },
         Look::Accent | Look::Danger => icon_and_label(p, r, e.icon, e.label, if e.rect.h >= 64 { 22.0 } else { 18.0 }, ink),
+        // A countdown's segment: lit, nothing on it.
+        Look::Bar => {}
     }
     if let (Look::Key, orbiters_orb::menu::Target::Key(c), None) = (e.look, e.target, e.label) {
         widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new(c.to_string(), 28.0).mono().color(ink.text));
     }
 }
 
-/// The page's own icons (N4N0's microphone, the 3D picture's cube) and labels.
+/// The page's own icons (N4N0's microphone, the 3D picture's cube), its panels and labels.
 fn furniture(p: &Painter, origin: Pos2, layout: &Layout) {
+    // What N4N0 says: a panel as a tile's, N4N0 as a ring with its eyes at its top left.
+    for b in &layout.boxes {
+        let r = rect(*b, origin);
+        panel(p, r, 14.0, PANEL, Stroke::new(1.5, DIM));
+        let orb = r.min + vec2(38.0, 36.0);
+        p.circle_stroke(orb, 13.0, Stroke::new(1.5, LINE));
+        for side in [-1.0, 1.0] {
+            p.rect_filled(Rect::from_center_size(orb + vec2(side * 4.5, -1.0), vec2(3.0, 6.0)), 0.0, LINE);
+        }
+    }
     for (r, icon, t) in &layout.icons {
         let r = rect(*r, origin);
         let color = if *t == Some(Tint::Red) { ALERT } else { LINE };

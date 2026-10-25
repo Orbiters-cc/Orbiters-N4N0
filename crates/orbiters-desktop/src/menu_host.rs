@@ -1,15 +1,16 @@
 //! N4N0's menu (`orbiters_orb::menu`) run where it is drawn: the SteamVR overlay's menu in the play space, and Home,
 //! the window's main page. Both keep it in step with the tray service (listening, fast walk, calls, the light, the 3D
-//! picture's countdown), fetch YouTube's suggestions, results and thumbnails here, read the music of this process's
-//! media watcher, and send the rest (calls, the clipboard, a 3D picture, fast walk, the light) to the service.
+//! picture's countdown, the avatar's saved states, whether a link can be dropped as a card), fetch YouTube's
+//! suggestions, results and thumbnails here, read the music of this process's media watcher, and send the rest (calls,
+//! the clipboard, a 3D picture, fast walk, the light, saving and applying states, dropping a card) to the service.
 
 use crate::backend::Ctl;
 use crate::controller::screen as shared;
 use crate::ipc::OrbCommand;
 use crate::overlay::menu_retro;
-use crate::state::{CallLink, CallPhase, Snapshot};
+use crate::state::{CallLink, CallPhase, Snapshot, StateAction};
 use egui::{ColorImage, TextureHandle, TextureId, TextureOptions};
-use orbiters_orb::menu::{Call, Contact, Effect, Light, Menu, Page, SuggestQueue, Target};
+use orbiters_orb::menu::{Call, Contact, Effect, Light, Menu, Page, Pages, StateRow, SuggestQueue, Target};
 use orbiters_orb::{picture, youtube};
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -62,6 +63,12 @@ pub struct MenuHost {
     light_set: Option<(Light, Instant)>,
     /// Something the menu shows changed since it was last drawn.
     pub dirty: bool,
+    /// The saved states as the service last listed them (and whether the avatar is known), and the number of the last
+    /// note of theirs seen.
+    states_seen: Option<(Vec<StateRow>, bool)>,
+    note_seen: Option<u64>,
+    /// A link was dropped as a card since the host last looked (the overlay then closes: the card is in the world).
+    pub dropped: bool,
 }
 
 impl MenuHost {
@@ -77,6 +84,9 @@ impl MenuHost {
             media_seen: 0,
             light_set: None,
             dirty: true,
+            states_seen: None,
+            note_seen: None,
+            dropped: false,
         }
     }
 
@@ -87,7 +97,7 @@ impl MenuHost {
         self.menu.layout = shared::keyboard(settings.orb.menu.keyboard);
         self.menu.photo_timer = settings.photo_3d_timer;
         self.menu.photo_length = shared::photo_length(settings.photo_3d);
-        self.menu.six_tiles = true;
+        self.menu.pages = Pages::ALL;
         self.menu.open();
         self.dirty = true;
     }
@@ -123,6 +133,28 @@ impl MenuHost {
         };
         changed |= set(&mut m.light, light);
         changed |= set(&mut m.countdown, snap.orb.photo_countdown);
+        changed |= set(&mut m.can_drop, snap.orb.can_drop);
+        // The avatar's saved states (a state saved here shows until the service lists it), and what the service said
+        // of the last save or apply, on the States page.
+        let view = &snap.orb.states;
+        let rows: Vec<StateRow> =
+            view.states.iter().map(|s| StateRow { id: s.id.clone(), name: s.name.clone(), default: s.default, pose: s.pose, size: s.size }).collect();
+        let listed = (rows, view.avatar_id.is_some());
+        if self.states_seen.as_ref() != Some(&listed) || m.saving() {
+            m.set_states(listed.0.clone(), listed.1, "VRChat's avatar is not known yet");
+            self.states_seen = Some(listed);
+            changed = true;
+        }
+        if let Some(note) = &view.note {
+            // What went wrong replaces the line the press showed at once ("Saved as…", "Applied…").
+            if self.note_seen.is_some_and(|seen| seen != note.id) && note.error && m.page == Page::States {
+                m.notice = Some(note.text.clone());
+                changed = true;
+            }
+            self.note_seen = Some(note.id);
+        } else {
+            self.note_seen.get_or_insert(0);
+        }
         changed |= set(&mut m.photo_timer, snap.settings.photo_3d_timer);
         changed |= set(&mut m.photo_length, shared::photo_length(snap.settings.photo_3d));
         let calls = &snap.orb.calls;
@@ -304,6 +336,12 @@ impl MenuHost {
                 Effect::Light(light) => {
                     self.light_set = Some((light, Instant::now()));
                     backend.orb(OrbCommand::Light { on: light.on, color: light.color, level: light.level });
+                }
+                Effect::SaveState { name } => backend.orb(OrbCommand::States { action: StateAction::Save { name: Some(name) } }),
+                Effect::ApplyState { id, .. } => backend.orb(OrbCommand::States { action: StateAction::Apply { id } }),
+                Effect::Drop { link, title, video } => {
+                    backend.orb(OrbCommand::Drop { link, title, video });
+                    self.dropped = true;
                 }
                 Effect::Close => close = true,
             }

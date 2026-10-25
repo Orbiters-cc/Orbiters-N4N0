@@ -4,9 +4,11 @@
 pub mod assistant;
 pub mod context;
 pub mod controls;
+pub mod drops;
 pub mod menu;
 pub mod picture;
 pub mod policy;
+pub mod states;
 pub mod text;
 pub mod tools;
 pub mod videos;

@@ -450,6 +450,93 @@ pub struct OrbStatus {
     /// N4N0's light, when the avatar's N4N0 has one (the Light option).
     #[serde(default)]
     pub light: Option<OrbLight>,
+    /// The avatar worn's saved states (controller/states.rs).
+    #[serde(default)]
+    pub states: StatesView,
+    /// A copied link can be dropped in the world as a card: the avatar's N4N0 screen is of version 5 or later.
+    #[serde(default)]
+    pub can_drop: bool,
+    /// The link card the avatar's screen shows now, dropped in the world.
+    #[serde(default)]
+    pub card: Option<CardView>,
+}
+
+/// The saved states of the avatar worn, as the window and the menus show them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct StatesView {
+    /// The avatar they are for (`None`: VRChat's avatar is not known yet).
+    pub avatar_id: Option<String>,
+    /// What VRChat's log calls the avatar.
+    pub avatar_name: Option<String>,
+    pub states: Vec<StateView>,
+    /// What the last save, apply or change said (an error too).
+    pub note: Option<StatesNote>,
+    /// A save is under way.
+    pub saving: bool,
+}
+
+/// A line about the states, numbered (each new one shows again, even when it says the same).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct StatesNote {
+    pub id: u64,
+    pub text: String,
+    pub error: bool,
+}
+
+/// One saved state.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct StateView {
+    pub id: String,
+    pub name: String,
+    pub saved_utc: String,
+    /// Applied after each world join and each switch to this avatar.
+    pub default: bool,
+    /// Applying it puts the GoGoLoco pose back too, and the avatar's size.
+    pub pose: bool,
+    pub size: bool,
+    /// The parameters it keeps, how many of them are GoGoLoco's pose, and the eye height it keeps (metres).
+    pub parameters: usize,
+    pub pose_parameters: usize,
+    pub eye_height: Option<f32>,
+}
+
+/// What the window and the menus ask of the saved states.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "do", rename_all = "snake_case")]
+pub enum StateAction {
+    /// Save how the avatar is now (`None`: named "State n").
+    Save {
+        name: Option<String>,
+    },
+    Apply {
+        id: String,
+    },
+    /// Make `id` the default state (`None`: no default).
+    Default {
+        id: Option<String>,
+    },
+    Rename {
+        id: String,
+        name: String,
+    },
+    Delete {
+        id: String,
+    },
+    /// Whether applying `id` puts the GoGoLoco pose and the avatar's size back too.
+    Options {
+        id: String,
+        pose: bool,
+        size: bool,
+    },
+}
+
+/// A link card dropped in the world, as the window shows it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CardView {
+    pub title: String,
+    pub link: String,
+    /// Whole seconds left.
+    pub left: u32,
 }
 
 /// N4N0's light as the avatar holds it (`N4N0/Light`, `N4N0/Light/Color`, `N4N0/Light/Level`).

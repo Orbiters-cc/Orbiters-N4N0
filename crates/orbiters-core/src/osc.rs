@@ -366,6 +366,34 @@ pub fn vrchat_value(addr: SocketAddr, path: &str, timeout: Duration) -> anyhow::
 
 /// Current values of an OSCQuery tree: every node with a `VALUE`, by full path (first value of each node).
 pub fn tree_values(tree: &serde_json::Value, out: &mut Vec<(String, OscValue)>) {
+    walk_tree(tree, &mut |node| out.push((node.path, node.value)));
+}
+
+/// A node of an OSCQuery tree that has a value: its full path, its first value, and whether OSC may write it (its
+/// `ACCESS` is 2 or 3; VRChat's own avatar parameters, `VRMode`, `GestureLeft` or `Viseme`, are 1, read only). A node that
+/// says nothing of its access counts as writable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TreeNode {
+    pub path: String,
+    pub value: OscValue,
+    pub writable: bool,
+}
+
+/// Every node of an OSCQuery tree that has a value ([`TreeNode`]).
+pub fn tree_nodes(tree: &serde_json::Value, out: &mut Vec<TreeNode>) {
+    walk_tree(tree, &mut |node| out.push(node));
+}
+
+/// The avatar's nodes in VRChat's OSCQuery tree at `addr` (`/avatar`: its change, its parameters, its eye height),
+/// with whether OSC may write each. `timeout` bounds the whole request.
+pub fn vrchat_nodes(addr: SocketAddr, timeout: Duration) -> anyhow::Result<Vec<TreeNode>> {
+    let tree: serde_json::Value = serde_json::from_str(&http_get(addr, "/avatar", timeout)?)?;
+    let mut out = Vec::new();
+    tree_nodes(&tree, &mut out);
+    Ok(out)
+}
+
+fn walk_tree(tree: &serde_json::Value, f: &mut dyn FnMut(TreeNode)) {
     if let (Some(path), Some(kind), Some(value)) = (tree["FULL_PATH"].as_str(), tree["TYPE"].as_str(), tree["VALUE"].get(0)) {
         let v = match kind.chars().next() {
             Some('f') | Some('d') => value.as_f64().map(|f| OscValue::Float(f as f32)),
@@ -374,13 +402,14 @@ pub fn tree_values(tree: &serde_json::Value, out: &mut Vec<(String, OscValue)>) 
             Some('s') => value.as_str().map(|s| OscValue::Text(s.to_string())),
             _ => None,
         };
-        if let Some(v) = v {
-            out.push((path.to_string(), v));
+        if let Some(value) = v {
+            let writable = tree["ACCESS"].as_u64().is_none_or(|access| access & 2 != 0);
+            f(TreeNode { path: path.to_string(), value, writable });
         }
     }
     if let Some(children) = tree["CONTENTS"].as_object() {
         for child in children.values() {
-            tree_values(child, out);
+            walk_tree(child, f);
         }
     }
 }
@@ -943,6 +972,7 @@ mod tests {
             } }
         } })
         .to_string();
+        let tree_copy = tree.clone();
         let server = std::thread::spawn(move || {
             let (mut s, _) = listener.accept().unwrap();
             let mut buf = [0u8; 1024];
@@ -955,6 +985,23 @@ mod tests {
         let mut values = vrchat_values(addr, Duration::from_secs(2)).unwrap();
         server.join().unwrap();
         values.sort_by(|a, b| a.0.cmp(&b.0));
+        // With what OSC may write: VRChat's own are read only.
+        let mut nodes = Vec::new();
+        tree_nodes(&serde_json::from_str(&tree_copy).unwrap(), &mut nodes);
+        nodes.sort_by(|a, b| a.path.cmp(&b.path));
+        let writable: Vec<(&str, bool)> = nodes.iter().map(|n| (n.path.as_str(), n.writable)).collect();
+        assert_eq!(
+            writable,
+            vec![
+                ("/avatar/change", true),
+                ("/avatar/parameters/MuteSelf", false),
+                ("/avatar/parameters/Viseme", false),
+                ("/avatar/parameters/v2/JawOpen", true)
+            ]
+        );
+        let mut silent = Vec::new();
+        tree_nodes(&serde_json::json!({ "FULL_PATH": "/avatar/parameters/Old", "TYPE": "T", "VALUE": [true] }), &mut silent);
+        assert!(silent[0].writable, "a tree that says nothing of access: writable");
         assert_eq!(
             values,
             vec![

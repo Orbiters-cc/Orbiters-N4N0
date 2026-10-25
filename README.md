@@ -1,7 +1,8 @@
 # Orbiters - N4N0
 
-The companion app of **N4N0** for VRChat, and of its menu: fast walk, YouTube, calls, 3D pictures, music and the light,
-side by side as equals on the window's Home, in the SteamVR overlay and on N4N0's screen on your avatar. It also
+The companion app of **N4N0** for VRChat, and of its menu: fast walk, YouTube, calls, 3D pictures, music, the light and
+your avatar's saved states, side by side as equals on the window's Home, in the SteamVR overlay and on N4N0's screen on
+your avatar. It also
 captures VRChat worlds while you play and brings them into Unity with [Mixer](https://github.com/Orbiters-cc/Mixer).
 
 A shader on your capture avatar draws a small *capture strip* into VRChat's Stream camera: the exact camera pose,
@@ -22,7 +23,9 @@ Calling N4N0 also opens **N4N0's menu**: the SteamVR binding "Open N4N0's menu" 
 you change it in SteamVR's controller settings), the wake word on its own, or a hand on N4N0. It has fast walk (walk
 boost on or off), YouTube (a keyboard with YouTube's suggestions as you type, five results a page with their thumbnail,
 channel and duration, and "Copy link" to paste in a world's video player; a sentence you say on the search page is what
-it searches), calls, a 3D picture with a timer, the music that plays and N4N0's light. The window's Home is the same
+it searches), calls, a 3D picture with a timer, the music that plays, N4N0's light and the avatar's states. A copied link
+can be dropped in the world as a card on N4N0's screen (Drop): for 15 seconds whoever grabs it copies the link, through
+Orbiters for everyone else (contracts `Docs/orb.md`, Link card). The window's Home is the same
 menu, with the keyboard for searching. It opens in the SteamVR overlay in front of you, and SteamVR's laser
 works on it; when your orb has the projected screen ("Replace Orbiters overlay" on N4N0's card in My Avatar), it
 opens on that screen in VRChat instead, where you touch it with your index finger and people around see it too
@@ -31,6 +34,11 @@ opens on that screen in VRChat instead, where you touch it with your index finge
 In VR it also offers **walk boost**: while you push the stick you walk with, your play space moves along with you, so
 you cover more ground in VRChat. The chaperone stays on your room's walls, and the play space goes back when you
 change world. Its strength is a slider in the SteamVR tab, in Settings, and in N4N0's Walk boost radial on your avatar.
+**States** keep how an avatar is: every parameter OSC can set (GoGoLoco's pose and the avatar's size only when the state
+says so, N4N0's own never), saved under a name from Home's States page or N4N0's menu, and put back over OSC in one
+press. One state per avatar can be its default, put back after each world join and each switch to that avatar. They
+live in `avatar-states.json` beside the settings (contracts `Docs/orb.md`, Saved states).
+
 And, when you turn it on in Settings, it shares **your frame rate per world** with Orbiters: a summary a minute with
 the world, your avatar, how many people were there and the names of their avatars (never who they are), plus your
 graphics card, processor and headset (contracts `Docs/world-performance.md`). The Map explorer shows which worlds run

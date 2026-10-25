@@ -59,7 +59,9 @@ pub const LOCAL_CLEAR: i32 = 255;
 /// Values per local step (`N4N0/Screen/Value0` …).
 pub const LOCAL_VALUES: usize = 16;
 /// `N4N0/Text/Pointer`: the screen closed (everyone else's screen hides and clears).
-pub const POINTER_SCREEN_CLOSE: i32 = 254;
+pub const POINTER_SCREEN_CLOSE: i32 = orb::POINTER_SCREEN_CLOSE;
+/// `N4N0/Text/Pointer`: everyone else's screen is a dropped link card, frozen where it is until the screen closes.
+pub const POINTER_SCREEN_DROP: i32 = orb::POINTER_SCREEN_DROP;
 
 const _: () = assert!(bank_bytes(72) == 744 && BANK == 1024);
 const _: () = assert!(HIDDEN_BYTES * 7 >= MAX_ELEMENTS);
@@ -159,7 +161,7 @@ impl Frame {
         bank[HOVER] = hover.filter(|&h| h < layout.elements.len()).map_or(0, |h| h as u8 + 1);
         bank[PRESSED] = pressed.filter(|&p| p < layout.elements.len()).map_or(0, |p| p as u8 + 1);
         for (i, element) in layout.elements.iter().enumerate() {
-            let state = layout::state(menu, element);
+            let state = layout::state_for(menu, element, public);
             if state.on && i < ON_BYTES * 7 {
                 bank[ON + i / 7] |= 1 << (i % 7);
             }
@@ -232,8 +234,10 @@ fn visible(page: u8, size: usize) -> &'static [bool; BANK] {
                     let at = TEXT + s.offset as usize;
                     mask[at..at + s.cols as usize].fill(true);
                 }
-                if !l.pictures.is_empty() {
-                    mask[PICTURES_AT..bank_bytes(size)].fill(true);
+                // The thumbnails the page has: the results' five, the music's art, a card's picture.
+                for p in &l.pictures {
+                    let at = PICTURES_AT + p.result as usize * size;
+                    mask[at..at + size].fill(true);
                 }
             }
             masks
@@ -342,6 +346,14 @@ impl Audience {
         self.pending = None;
         self.resting = pointer_writes_nothing;
         self.resending = false;
+    }
+
+    /// The pointer was moved where it writes nothing (a dropped card's freeze, 253), a block's steps not under way: the
+    /// next block's values may go first.
+    pub fn park(&mut self) {
+        if !self.mid_block() {
+            self.resting = true;
+        }
     }
 
     /// Whether a block is between its steps: nothing else may use the channel until it is done.
@@ -522,6 +534,8 @@ pub mod local {
     use orbiters_contracts::orb::params;
 
     pub const OPEN: &str = params::SCREEN_OPEN;
+    /// The owner's screen is a dropped link card (from version 5): it shows, frozen, whatever else says.
+    pub const DROP: &str = params::SCREEN_DROP;
     pub const POINTER: &str = params::SCREEN_POINTER;
     pub const VALUE_PREFIX: &str = params::SCREEN_VALUE_PREFIX;
     /// `N4N0/Screen/Touch/L0` …: how near the left (`L`) or right (`R`) index finger is to each touch point (0 to 1).
@@ -557,15 +571,21 @@ pub fn local_open(open: bool) -> Message {
     (parameter(local::OPEN), OscType::Bool(open))
 }
 
+/// The owner's screen is a dropped link card (`N4N0/Screen/Drop`), or no longer.
+pub fn local_drop(dropped: bool) -> Message {
+    (parameter(local::DROP), OscType::Bool(dropped))
+}
+
 /// The first `N4N0/Text/Pointer` of the screen for a prop with `sync` values: right after the panel's blocks.
 pub fn first_pointer(sync: usize) -> usize {
     orb::pointer_count(sync) + 1
 }
 
 /// Whether a prop with `sync` values and thumbnails of `size` bytes can address the whole screen through
-/// `N4N0/Text/Pointer` (pointers up to 253): 128-byte thumbnails need 8 values or more.
+/// `N4N0/Text/Pointer` (pointers up to 252: 253 freezes a dropped card, 254 closes the screen): 128-byte thumbnails need
+/// 8 values or more.
 pub fn fits(sync: usize, size: usize) -> bool {
-    thumbnail::SIZES.contains(&size) && first_pointer(sync) + bank_bytes(size).div_ceil(sync) - 1 < POINTER_SCREEN_CLOSE as usize
+    thumbnail::SIZES.contains(&size) && first_pointer(sync) + bank_bytes(size).div_ceil(sync) - 1 < POINTER_SCREEN_DROP as usize
 }
 
 /// Everyone else's step through the text panel's synced pointer (block `b` is pointer `first_pointer(sync) + b`) or
@@ -584,6 +604,11 @@ pub fn synced_messages(sync: usize, send: &Send) -> Vec<Message> {
 /// Everyone else's screen closes (and clears).
 pub fn synced_close() -> Vec<Message> {
     vec![(parameter(params::TEXT_POINTER), OscType::Int(POINTER_SCREEN_CLOSE))]
+}
+
+/// Everyone else's screen is a dropped link card: it freezes where it is (until it closes) and can be grabbed.
+pub fn synced_drop() -> Vec<Message> {
+    vec![(parameter(params::TEXT_POINTER), OscType::Int(POINTER_SCREEN_DROP))]
 }
 
 #[cfg(test)]
@@ -806,5 +831,50 @@ mod tests {
             assert_eq!(kinds[1], std::mem::discriminant(&Send::Values(0, Vec::new())));
             assert_eq!(kinds[2], std::mem::discriminant(&Send::Pointer(0)));
         }
+    }
+
+    #[test]
+    fn a_dropped_card_s_countdown_moves_in_steps_for_everyone_else() {
+        use crate::menu::{Card, Pages, CARD_SEGMENTS};
+        let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
+        menu.show_card(Card { link: "https://www.youtube.com/watch?v=video000001".into(), title: "Song".into(), video: Some("video000001".into()), left: 13 });
+        let thumb = picture(5);
+        let owner = Frame::new(&menu, None, None, Flags::default(), 72, &|_| Some(thumb.clone())).bank;
+        let public = Frame::public(&menu, Flags::default(), 72, &|_| Some(thumb.clone())).bank;
+        assert_eq!(owner[PAGE], ScreenPage::Card as u8);
+        let hidden = |bank: &[u8; BANK]| (0..CARD_SEGMENTS).filter(|&i| bank[HIDDEN + i / 7] >> (i % 7) & 1 == 1).count();
+        assert_eq!((hidden(&owner), hidden(&public)), (2, 0), "13 s left: the owner's bar shows 13, everyone else's 15");
+        assert_eq!(owner[LAYER_COUNTS], 3);
+        assert_eq!(&owner[PICTURES_AT..PICTURES_AT + 72], thumb.bytes(72));
+        // Only the page's own picture is read: the other thumbnails' places are never sent for it, nor resent.
+        let mask = visible(owner[PAGE], 72);
+        assert!(mask[PICTURES_AT] && !mask[PICTURES_AT + 72] && !mask[bank_bytes(72) - 1]);
+        let music = visible(ScreenPage::Music as u8, 72);
+        assert!(music[PICTURES_AT] && !music[PICTURES_AT + 72]);
+        let results = visible(ScreenPage::Results as u8, 128);
+        assert!(results[PICTURES_AT] && results[bank_bytes(128) - 1], "the results read all five");
+        let prefix = orbiters_core::osc::PARAMETERS_PREFIX;
+        assert_eq!(synced_drop(), vec![(format!("{prefix}N4N0/Text/Pointer"), OscType::Int(253))]);
+        assert_eq!(local_drop(true), (format!("{prefix}N4N0/Screen/Drop"), OscType::Bool(true)));
+    }
+
+    #[test]
+    fn a_parked_pointer_lets_the_next_block_s_values_go_first() {
+        let menu = results_menu();
+        let want = Frame::public(&menu, Flags::default(), 72, &|_| None).bank;
+        let mut everyone = Audience::new(8, 72);
+        everyone.cleared(true);
+        assert!(matches!(everyone.step(&want), Send::Values(0, _)), "cleared with the pointer where it writes nothing");
+        assert!(matches!(everyone.step(&want), Send::Pointer(0)));
+        // The pointer on a block: the next block rests first...
+        assert_eq!(everyone.step(&want), Send::Rest);
+        assert!(matches!(everyone.step(&want), Send::Values(_, _)));
+        assert!(matches!(everyone.step(&want), Send::Pointer(_)));
+        // ...unless something moved it where it writes nothing (253) meanwhile.
+        everyone.park();
+        assert!(matches!(everyone.step(&want), Send::Values(_, _)), "no rest needed");
+        // Parking mid-block changes nothing: the block's pointer still goes.
+        everyone.park();
+        assert!(matches!(everyone.step(&want), Send::Pointer(_)));
     }
 }

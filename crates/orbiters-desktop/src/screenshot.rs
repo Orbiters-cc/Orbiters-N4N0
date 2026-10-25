@@ -224,11 +224,19 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         s
     };
 
-    // Home: N4N0's menu with what the service knows (friends to call, the light on, fast walk on).
+    // Home: N4N0's menu with what the service knows (friends to call, the light on, fast walk on, the avatar's saved
+    // states).
     let home = {
         let mut s = with_calls(&orb_busy, false);
         s.orb.light = Some(crate::state::OrbLight { on: true, color: 1, level: 0.6 });
         s.settings.walk_boost.enabled = true;
+        s.orb.states = sample_states(s.orb.avatar_id.clone());
+        s
+    };
+    // The same, its N4N0's screen of version 5: a copied link can be dropped as a card.
+    let home_drop = {
+        let mut s = home.clone();
+        s.orb.can_drop = true;
         s
     };
     // Home as many first see it: VRChat in desktop mode (no fast walk), calls off, no light on this N4N0.
@@ -385,6 +393,45 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             world: None,
             home: Some(HomeShot { page: MenuPage::Light, samples: true }),
             library: None,
+        },
+        Scenario {
+            name: "home-results-drop",
+            page: Page::Home,
+            snapshot: home_drop.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Results, samples: true }),
+        },
+        Scenario {
+            name: "home-states",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::States, samples: true }),
+        },
+        Scenario {
+            name: "home-plain-states",
+            page: Page::Home,
+            snapshot: home_plain.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::States, samples: false }),
         },
         Scenario {
             name: "home-plain",
@@ -1161,6 +1208,8 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
         MenuPage::Photo => Target::Photo,
         MenuPage::Music => Target::Music,
         MenuPage::Light => Target::Light,
+        MenuPage::States => Target::States,
+        MenuPage::Card => return,
     };
     host.press(open);
     if !samples {
@@ -1180,6 +1229,10 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
                     host.put_picture(&video.id, egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba));
                 }
                 host.menu.results_arrived(id, orbiters_orb::youtube::Results { videos, continuation: Some("next".into()) }, false);
+                // Where a card can be dropped: the second result's link copied, its row offering Drop.
+                if host.menu.can_drop {
+                    host.press(Target::Copy(1));
+                }
             }
         }
         _ => {}
@@ -1646,6 +1699,34 @@ fn orb_snapshot(base: &Snapshot) -> Snapshot {
         ProcessUsage { name: "VRChat".into(), cpu_percent: 187.0, memory_mb: 6840.0 },
     ];
     s
+}
+
+/// The sample avatar's saved states (`avatar`: the avatar worn): the second the default, the third with the pose and the
+/// size.
+fn sample_states(avatar: Option<String>) -> crate::state::StatesView {
+    use crate::state::{StateView, StatesView};
+    let state = |id: &str, name: &str, saved: &str, default: bool, pose: bool, size: bool, parameters: usize, pose_parameters: usize| StateView {
+        id: id.into(),
+        name: name.into(),
+        saved_utc: saved.into(),
+        default,
+        pose,
+        size,
+        parameters,
+        pose_parameters,
+        eye_height: Some(1.62),
+    };
+    StatesView {
+        avatar_id: avatar,
+        avatar_name: Some("Rexouium".into()),
+        states: vec![
+            StateView { eye_height: None, ..state("s1", "Hoodie on", "2026-10-21T19:40:00Z", false, false, false, 46, 12) },
+            state("s2", "Cosy evening", "2026-10-23T21:05:00Z", true, true, false, 46, 12),
+            state("s3", "Tall and sitting", "2026-10-24T18:12:00Z", false, true, true, 46, 12),
+        ],
+        note: None,
+        saving: false,
+    }
 }
 
 fn with_account(base: &Snapshot, state: crate::state::AccountState, error: Option<&str>) -> Snapshot {

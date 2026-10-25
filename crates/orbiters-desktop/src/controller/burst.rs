@@ -23,6 +23,8 @@ const STRAIGHT: f32 = 88.0;
 const RATE_HZ: u32 = 90;
 /// After the recording started, before the camera moves: Spout and the kit's first frames.
 const SETTLE: Duration = Duration::from_millis(700);
+/// A camera switched to Stream mode says so within this (VRChat's OSCQuery tree).
+const CAMERA_OPENS: Duration = Duration::from_millis(1200);
 
 /// Eases in and out.
 fn smooth(t: f32) -> f32 {
@@ -204,10 +206,21 @@ impl super::Controller {
             (pose, focus, smooth)
         };
         let length = self.settings().photo_3d;
+        // VRChat's camera must be open: OSC switches its mode (to Stream, for Spout) but does not open it.
+        let mode = |values: &[(String, OscValue)]| values.iter().find(|(p, _)| p == super::CAMERA_MODE).map(|(_, v)| v.clone());
+        if let Some(OscValue::Int(0)) = mode(&self.vrchat_values()) {
+            let _ = self.with_osc(|o| o.send(super::CAMERA_MODE, vec![rosc::OscType::Int(super::STREAM_MODE)]));
+            std::thread::sleep(CAMERA_OPENS);
+            if let Some(OscValue::Int(0)) = mode(&self.vrchat_values()) {
+                anyhow::bail!("VRChat's camera is off: open it (Quick Menu, Camera), then take the 3D picture again.");
+            }
+        }
         let Some(pose) = pose else {
             anyhow::bail!("Move VRChat's camera once so Orbiters knows where it is, then try again.");
         };
         let pose: [f32; 6] = pose.try_into().expect("six values");
+        // N4N0's menu stands in front of its owner: it closes, out of the picture.
+        self.n4n0.hide_menu();
         self.burst.lock().unwrap().recording = true;
         if let Err(e) = self.start_capture(false) {
             self.burst.lock().unwrap().recording = false;

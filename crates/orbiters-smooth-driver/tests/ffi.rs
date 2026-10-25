@@ -1,0 +1,163 @@
+//! End to end over the real FFI: build fake SteamVR objects (an `IVRDriverContext` and an `IVRServerDriverHost`,
+//! each a C++ object with its own function table), hand them to the provider that `HmdDriverFactory` returns, and
+//! check that a pose sent through the host's now-patched table reaches the fake host's original smoothed — then
+//! that `Cleanup` puts the table back.
+//!
+//! Runs on Windows only; the driver is Windows-only (it patches a vtable with `VirtualProtect`).
+#![cfg(target_os = "windows")]
+
+use driver_orbiters_smooth::openvr::{DriverPose, GetGenericInterfaceFn, Object, PoseUpdatedFn, Quaternion, HOST_POSE_UPDATED_SLOT};
+use driver_orbiters_smooth::HmdDriverFactory;
+use orbiters_smooth::{Control, MAX_DEVICES};
+use std::ffi::{c_char, c_void, CStr};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
+
+// ---- A fake IVRServerDriverHost: only TrackedDeviceAdded (slot 0) and TrackedDevicePoseUpdated (slot 1) matter ----
+
+/// What the fake host's original `TrackedDevicePoseUpdated` received last.
+static LAST_POSE: Mutex<Option<(u32, DriverPose)>> = Mutex::new(None);
+
+#[repr(C)]
+struct HostVtable {
+    tracked_device_added: extern "system" fn(*mut c_void, *const c_char, i32, *mut c_void) -> bool,
+    pose_updated: PoseUpdatedFn,
+    // The real interface has more methods; the driver only reaches slot 1, so stubs beyond it are unneeded.
+}
+
+extern "system" fn host_tracked_device_added(_this: *mut c_void, _serial: *const c_char, _class: i32, _driver: *mut c_void) -> bool {
+    true
+}
+
+extern "system" fn host_pose_updated(_this: *mut c_void, device: u32, pose: *const DriverPose, _size: u32) {
+    // SAFETY: the driver passes a readable `DriverPose` of the right size.
+    let pose = unsafe { *pose };
+    *LAST_POSE.lock().unwrap() = Some((device, pose));
+}
+
+static HOST_VTABLE: HostVtable = HostVtable { tracked_device_added: host_tracked_device_added, pose_updated: host_pose_updated };
+
+// ---- A fake IVRDriverContext: GetGenericInterface (slot 0), GetDriverHandle (slot 1) ----
+
+#[repr(C)]
+struct ContextVtable {
+    get_generic_interface: GetGenericInterfaceFn,
+    get_driver_handle: extern "system" fn(*mut c_void) -> u64,
+}
+
+/// What interface version the fake context was last asked for (count, to prove the detour calls through).
+static ASKED: AtomicU32 = AtomicU32::new(0);
+
+extern "system" fn context_get_generic_interface(_this: *mut c_void, version: *const c_char, _error: *mut i32) -> *mut c_void {
+    ASKED.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: a NUL-terminated version string.
+    let version = unsafe { CStr::from_ptr(version) };
+    let host = &HOST_OBJECT as *const _ as *mut c_void;
+    match version.to_str() {
+        Ok("IVRServerDriverHost_006") => host,
+        // Pretend _005 and the log are absent, as a modern SteamVR would.
+        _ => std::ptr::null_mut(),
+    }
+}
+
+extern "system" fn context_get_driver_handle(_this: *mut c_void) -> u64 {
+    1
+}
+
+static CONTEXT_VTABLE: ContextVtable = ContextVtable { get_generic_interface: context_get_generic_interface, get_driver_handle: context_get_driver_handle };
+
+// The fake objects live for the whole test (static, as SteamVR's do).
+static HOST_OBJECT: Object<HostVtable> = Object { vtable: &HOST_VTABLE };
+static CONTEXT_OBJECT: Object<ContextVtable> = Object { vtable: &CONTEXT_VTABLE };
+
+/// The provider's function table, as laid out in `openvr::ProviderVtable`.
+#[repr(C)]
+struct ProviderVtable {
+    init: unsafe extern "system" fn(*mut c_void, *mut c_void) -> i32,
+    cleanup: unsafe extern "system" fn(*mut c_void),
+    get_interface_versions: unsafe extern "system" fn(*mut c_void) -> *const *const c_char,
+    run_frame: unsafe extern "system" fn(*mut c_void),
+    should_block_standby_mode: unsafe extern "system" fn(*mut c_void) -> bool,
+    enter_standby: unsafe extern "system" fn(*mut c_void),
+    leave_standby: unsafe extern "system" fn(*mut c_void),
+}
+
+/// The host's current `TrackedDevicePoseUpdated` entry (to tell hooked from restored).
+fn host_pose_entry() -> usize {
+    // SAFETY: the host object's first word is its table; slot 1 is the pose update.
+    unsafe {
+        let vtable = *(&HOST_OBJECT as *const _ as *const *const usize);
+        *vtable.add(HOST_POSE_UPDATED_SLOT)
+    }
+}
+
+#[test]
+fn factory_init_hook_filter_and_cleanup() {
+    // The app side: a control block asking for strong smoothing on device 2.
+    let control = Control::open_or_create().expect("open control block");
+    control.set_all(&[0.0; MAX_DEVICES]);
+    control.set_strength(2, 1.0);
+    control.set_enabled(true);
+
+    // SteamVR asks the factory for the provider.
+    let provider = unsafe { HmdDriverFactory(c"IServerTrackedDeviceProvider_004".as_ptr(), std::ptr::null_mut()) };
+    assert!(!provider.is_null(), "the factory returns the provider");
+    assert!(
+        unsafe { HmdDriverFactory(c"IVRWatchdogProvider_001".as_ptr(), std::ptr::null_mut()) }.is_null(),
+        "and nothing for interfaces it does not implement"
+    );
+    // SAFETY: `provider` points at an object whose first word is its ProviderVtable.
+    let vtable = unsafe { &**(provider as *const *const ProviderVtable) };
+
+    let unhooked = host_pose_entry();
+
+    // Init hooks the context's GetGenericInterface and the host it returns.
+    let init = unsafe { (vtable.init)(provider, &CONTEXT_OBJECT as *const _ as *mut c_void) };
+    assert_eq!(init, 0, "Init returns VRInitError_None");
+    assert!(ASKED.load(Ordering::Relaxed) > 0, "Init asked the context for the host");
+    assert_ne!(host_pose_entry(), unhooked, "the host's pose-update slot now points at the driver");
+
+    // RunFrame reads the control block and makes smoothing active.
+    unsafe { (vtable.run_frame)(provider) };
+
+    // A device the app did not mark (strength 0) passes through bit for bit.
+    send_pose(0, DriverPose::at([3.0, 0.0, 0.0], Quaternion::IDENTITY));
+    let (device, pose) = LAST_POSE.lock().unwrap().unwrap();
+    assert_eq!(device, 0);
+    assert_eq!(pose.vec_position, [3.0, 0.0, 0.0]);
+
+    // Device 2 (strength 1): a sudden jump is eased, and the velocity SteamVR would predict with is damped to 0.
+    let settle = DriverPose::at([0.0, 0.0, 0.0], Quaternion::IDENTITY);
+    for _ in 0..3 {
+        send_pose(2, settle);
+    }
+    let mut jump = DriverPose::at([1.0, 0.0, 0.0], Quaternion::IDENTITY);
+    jump.vec_velocity = [5.0, 0.0, 0.0];
+    send_pose(2, jump);
+    let (device, pose) = LAST_POSE.lock().unwrap().unwrap();
+    assert_eq!(device, 2);
+    assert!(pose.vec_position[0] < 1.0, "the jump is eased, not passed as 1.0: {}", pose.vec_position[0]);
+    assert_eq!(pose.vec_velocity, [0.0, 0.0, 0.0], "prediction velocity damped at full strength");
+
+    // Cleanup restores the host's table.
+    unsafe { (vtable.cleanup)(provider) };
+    assert_eq!(host_pose_entry(), unhooked, "Cleanup put the host's original back");
+
+    // After Cleanup the slot is the real original: a pose arrives untouched again.
+    send_pose(2, DriverPose::at([9.0, 0.0, 0.0], Quaternion::IDENTITY));
+    assert_eq!(LAST_POSE.lock().unwrap().unwrap().1.vec_position, [9.0, 0.0, 0.0]);
+
+    control.set_enabled(false);
+}
+
+/// Calls the host's current `TrackedDevicePoseUpdated` through its table, as any SteamVR driver would — so while
+/// hooked it goes through the driver's detour first.
+fn send_pose(device: u32, pose: DriverPose) {
+    // SAFETY: slot 1 of the live host table, called with the host as `this` and a real pose.
+    unsafe {
+        let vtable = *(&HOST_OBJECT as *const _ as *const *const usize);
+        let entry = *vtable.add(HOST_POSE_UPDATED_SLOT);
+        let call: PoseUpdatedFn = std::mem::transmute::<usize, PoseUpdatedFn>(entry);
+        call(&HOST_OBJECT as *const _ as *mut c_void, device, &pose, std::mem::size_of::<DriverPose>() as u32);
+    }
+}

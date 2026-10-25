@@ -168,6 +168,10 @@ impl App {
     pub fn draw(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         let snap = self.ctl.view();
+        // This process reads Orbiters too (the Map explorer's public pages): from the environment the service uses.
+        if snap.settings.development != orbiters_update::development() {
+            crate::controller::use_environment(snap.settings.development);
+        }
         let now = anim::time(&ctx);
         let started = *self.started.get_or_insert(now);
         if self.visit == 0 {
@@ -298,6 +302,7 @@ impl App {
             &Txt::new("Orbiters", 17.0).weight(weight::SEMIBOLD).tracking(-0.01),
         );
         widgets::text(p, pos2(logo_rect.right() + 12.0, logo_rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new("N4N0", 11.5).color(theme::FG_3));
+        self.update_button(ui, snap, pos2(inner.right(), logo_rect.center().y), id.with("update"));
 
         // Navigation with a pill that slides to the active page.
         let nav_top = logo_rect.bottom() + 28.0;
@@ -359,33 +364,11 @@ impl App {
             }
         }
 
-        // Status at the bottom.
+        // Status at the bottom: the version, and the development environment when it is the one in use.
         let bottom = inner.bottom() - 16.0;
-        if let UpdateState::Ready { version, .. } = &snap.update.state {
-            // A downloaded update: the version gives way to the restart that installs it.
-            let waiting = snap.update.restart_when_idle;
-            let label = if waiting { "Restarts once done" } else { "Update ready · Restart" };
-            let tip = if waiting {
-                format!("Version {version} installs once {} ends (Settings, About)", snap.busy_with().unwrap_or("the running work"))
-            } else {
-                format!("Version {version}: restart Orbiters - N4N0 to install it")
-            };
-            let txt = Txt::new(label, 11.5).weight(weight::MEDIUM).color(theme::ACCENT);
-            let pill = Rect::from_min_size(pos2(inner.left() + 2.0, bottom - 18.0), vec2(widgets::text_size(ui, &txt).x + 38.0, 24.0));
-            let resp = ui.interact(pill, id.with("update"), Sense::click()).on_hover_text(tip);
-            let resp = if waiting { resp } else { resp.on_hover_cursor(CursorIcon::PointingHand) };
-            let hover = anim::toggle(&ctx, id.with("update-hover"), !waiting && resp.hovered(), Spring::SNAPPY);
-            let p = ui.painter();
-            p.rect_filled(pill, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12 + 0.08 * hover));
-            widgets::icon(p, pos2(pill.left() + 15.0, pill.center().y), icons::ARROW_COUNTER_CLOCKWISE, 13.0, theme::ACCENT);
-            widgets::text(p, pos2(pill.left() + 27.0, pill.center().y), Align2::LEFT_CENTER, &txt);
-            if !waiting && widgets::pressed(&resp) {
-                self.ctl.updates(UpdateAction::Restart { now: false });
-            }
-        } else {
-            let version = Txt::new(format!("v{}", snap.version), 11.0).color(theme::FG_4);
-            widgets::text(ui.painter(), pos2(inner.left() + 8.0, bottom - 6.0), Align2::LEFT_CENTER, &version);
-        }
+        let version = if snap.settings.development { format!("v{} · development", snap.version) } else { format!("v{}", snap.version) };
+        let version = Txt::new(version, 11.0).color(if snap.settings.development { theme::WARN } else { theme::FG_4 });
+        widgets::text(ui.painter(), pos2(inner.left() + 8.0, bottom - 6.0), Align2::LEFT_CENTER, &version);
         let osc = &snap.osc;
         let osc_tone = if osc.listening {
             if osc.advertising {
@@ -415,6 +398,55 @@ impl App {
             AccountState::SignedOut | AccountState::Unknown => ("Not signed in".into(), widgets::Tone::Off),
         };
         side_status(ui, pos2(inner.left(), bottom - 34.0 - 132.0), "Orbiters", &account_text, account_tone, inner.width());
+    }
+
+    /// The Update button beside the name (its right edge at `right_center`), as soon as a newer version is found: a
+    /// progress ring while it downloads, then the green button that restarts into it (or, while a recording or another
+    /// job would be cut short, what it waits for). Nothing while the app is up to date.
+    fn update_button(&mut self, ui: &mut Ui, snap: &Snapshot, right_center: egui::Pos2, id: Id) {
+        let ctx = ui.ctx().clone();
+        let u = &snap.update;
+        let (label, tip, fraction, live) = match &u.state {
+            UpdateState::Downloading { version, fraction } => {
+                ("Update", format!("Downloading version {version}: {:.0} %", fraction * 100.0), Some(*fraction), false)
+            }
+            UpdateState::Ready { version, .. } if u.restart_when_idle => {
+                ("Waiting", format!("Version {version} installs once {} ends (Settings, About)", snap.busy_with().unwrap_or("the running work")), None, false)
+            }
+            UpdateState::Ready { version, notes } => {
+                let first = notes.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| format!("\n{l}")).unwrap_or_default();
+                let tip = match snap.busy_with() {
+                    Some(work) => format!("Version {version} is ready: it installs once {work} ends{first}"),
+                    None => format!("Version {version} is ready: Orbiters - N4N0 restarts to install it{first}"),
+                };
+                ("Update", tip, None, true)
+            }
+            _ => return,
+        };
+        let txt = Txt::new(label, 11.5).weight(weight::SEMIBOLD).color(if live { theme::ON_ACCENT } else { theme::ACCENT });
+        let w = widgets::text_size(ui, &txt).x + 34.0;
+        let pill = Rect::from_min_size(pos2(right_center.x - w, right_center.y - 13.0), vec2(w, 26.0));
+        let resp = ui.interact(pill, id, Sense::click()).on_hover_text(tip);
+        let resp = if live { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
+        let hover = anim::toggle(&ctx, id.with("hover"), live && resp.hovered(), Spring::SNAPPY);
+        let press = anim::toggle(&ctx, id.with("press"), live && resp.is_pointer_button_down_on(), Spring::SNAPPY);
+        let shown = Rect::from_center_size(pill.center(), pill.size() * (1.0 - 0.06 * press));
+        let p = ui.painter();
+        let fill = if live { theme::mix(theme::ACCENT, theme::ACCENT_HOVER, hover) } else { theme::alpha(theme::ACCENT, 0.14) };
+        p.rect_filled(shown, theme::radius(13.0), fill);
+        let at = pos2(shown.left() + 13.0, shown.center().y);
+        match fraction {
+            Some(f) => {
+                orbiters_ui::paint::ring(p, at, 5.0, 2.0, theme::alpha(theme::ACCENT, 0.3));
+                orbiters_ui::paint::arc(p, at, 5.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::TAU * f.clamp(0.0, 1.0), 2.0, theme::ACCENT);
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
+            None => widgets::icon(p, at, icons::DOWNLOAD_SIMPLE, 12.5, if live { theme::ON_ACCENT } else { theme::ACCENT }),
+        }
+        widgets::text(p, pos2(shown.left() + 23.0, shown.center().y), Align2::LEFT_CENTER, &txt);
+        if live && widgets::pressed(&resp) {
+            self.ctl.updates(UpdateAction::Restart { now: false });
+        }
     }
 
     /// The intro glitch of the sidebar logo, once, right after the splash.

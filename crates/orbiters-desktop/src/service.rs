@@ -46,6 +46,8 @@ pub struct Service {
     overlay: Mutex<Option<(Child, Instant, Option<u32>)>>,
     /// The SteamVR (its `vrserver` process id, 0 unknown) whose start of the app was looked at ([`Service::keep_steamvr_start`]).
     steamvr_start_seen: Mutex<Option<u32>>,
+    /// Tracking smoothing's driver, kept in step with the settings ([`Service::keep_tracking`]).
+    smoothing: Mutex<crate::tracking::Smoothing>,
     quitting: AtomicBool,
     #[cfg(windows)]
     main_thread: u32,
@@ -107,6 +109,17 @@ impl Service {
         if let Some(startup) = crate::startup::reconcile(&client, &snap.settings.startup) {
             self.ctl.update_settings(|s| s.startup = startup);
         }
+    }
+
+    /// Tracking smoothing as the settings say: the driver installed, on or off, each device's strength; what it does now
+    /// goes to N4N0's Tracking page.
+    fn keep_tracking(&self) {
+        if self.quitting.load(Ordering::Relaxed) {
+            return;
+        }
+        let snap = self.ctl.view();
+        let note = self.smoothing.lock().unwrap().keep(&snap.settings.tracking, snap.steamvr.running);
+        self.ctl.set_tracking_note(note);
     }
 
     /// Starts the SteamVR overlay process while SteamVR runs (and the setting allows it); closes it otherwise.
@@ -391,6 +404,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         window: Mutex::new(None),
         overlay: Mutex::new(None),
         steamvr_start_seen: Mutex::new(None),
+        smoothing: Mutex::new(Default::default()),
         quitting: AtomicBool::new(false),
         #[cfg(windows)]
         main_thread: unsafe { windows::Win32::System::Threading::GetCurrentThreadId() },
@@ -430,6 +444,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     std::thread::Builder::new().name("overlay-keeper".into()).spawn(move || loop {
         svc.keep_overlay();
         svc.keep_steamvr_start();
+        svc.keep_tracking();
         std::thread::sleep(Duration::from_secs(2));
     })?;
 

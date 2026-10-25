@@ -994,7 +994,7 @@ fn without_the_screen_the_toggle_asks_the_overlay_and_a_close_waits_for_its_answ
     std::thread::sleep(Duration::from_millis(150));
     assert_eq!(request(&t).0, before.wrapping_add(1));
     // ...the close goes once it says it did.
-    n.command(Command::MenuState { open: true, dictation: false });
+    n.command(Command::MenuState { open: true, dictation: false, keyboard: false });
     assert_eq!(request(&t), (before.wrapping_add(2), true));
     t.shutdown(&n);
 }
@@ -1036,13 +1036,13 @@ fn in_vr_without_replace_the_overlay_shows_the_menu_and_the_screen_is_never_writ
     let asked = t.view().menu_request;
     n.on_parameter(params::MENU, &OscValue::Bool(true));
     assert!(until(|| t.view().menu_request == asked.wrapping_add(1)), "the overlay is asked to open its menu");
-    n.command(Command::MenuState { open: true, dictation: false });
+    n.command(Command::MenuState { open: true, dictation: false, keyboard: false });
     n.on_parameter(params::MENU, &OscValue::Bool(false));
     assert!(until(|| t.view().menu_request == asked.wrapping_add(2)));
     assert!(t.view().menu_toggle, "a close");
     // Until the overlay says it closed, the toggle the owner turned off is left so (not turned on, then off).
     let mut sent = received(&vrchat, Duration::from_millis(200));
-    n.command(Command::MenuState { open: false, dictation: false });
+    n.command(Command::MenuState { open: false, dictation: false, keyboard: false });
     sent.extend(received(&vrchat, Duration::from_millis(300)));
     assert_eq!(menu_values(&sent), Vec::<bool>::new());
     assert!(!writes_the_screen(&startup) && !writes_the_screen(&sent), "{startup:?} {sent:?}");
@@ -1362,7 +1362,7 @@ fn a_state_keeps_what_osc_may_write_and_puts_back_only_what_it_should() {
     n.refresh_avatar(None, HashMap::new(), 0);
     received(&input, Duration::from_millis(300));
     // Saved: what OSC may write (GoGoLoco's too), never VRChat's own, N4N0's nor the capture kit's toggle.
-    n.command(Command::States { action: StateAction::Save { name: Some("Cosy".into()) } });
+    n.command(Command::States { action: StateAction::Save { name: Some("Cosy".into()), size: false, pose: false, default: false } });
     assert!(until(|| t.view().states.states.len() == 1 && !t.view().states.saving));
     let state = t.view().states.states[0].clone();
     assert_eq!((state.name.as_str(), state.parameters, state.pose_parameters), ("Cosy", 5, 2), "{state:?}");
@@ -1568,7 +1568,7 @@ fn in_vr_without_replace_a_card_shows_on_the_screen_only_while_it_lasts() {
     assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(true))));
     assert!(text_pointers(&sent).contains(&253));
     // The overlay's menu opening takes it back: the screen closes again, and stays unwritten.
-    n.command(Command::MenuState { open: true, dictation: false });
+    n.command(Command::MenuState { open: true, dictation: false, keyboard: false });
     let sent = received(&vrchat, Duration::from_millis(800));
     assert!(sent.contains(&(parameter(params::SCREEN_DROP), OscType::Bool(false))), "{sent:?}");
     assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(false))));

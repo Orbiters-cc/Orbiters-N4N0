@@ -171,6 +171,33 @@ pub struct OrbStatus {
     /// The link card the avatar's screen shows now, dropped in the world.
     #[serde(default)]
     pub card: Option<CardView>,
+    /// Tracking smoothing as the menus show it; `None` where the app has none (`tracking_note` says why).
+    #[serde(default)]
+    pub tracking: Option<TrackingView>,
+    #[serde(default)]
+    pub tracking_note: String,
+    /// The last suggestion a menu sent, numbered, and why it did not reach Orbiters (`None`: it did).
+    #[serde(default)]
+    pub suggestion: Option<(u32, Option<String>)>,
+    /// The avatar's N4N0 version and the app's, as the bottom of Home shows them ("N4N0 1.0.9 · App 0.4.0").
+    #[serde(default)]
+    pub versions: String,
+    /// The computer's keys typed for the overlay menu's keyboard, numbered, the last few.
+    #[serde(default)]
+    pub keys: Vec<(u32, orbiters_orb::menu::KeyInput)>,
+    /// The video the world's player plays (VRChat's log), its title once known, and when it started (Unix seconds).
+    #[serde(default)]
+    pub world_video: Option<(String, Option<String>, Option<u64>)>,
+}
+
+/// Tracking smoothing (the app's SteamVR driver), as the Tracking page shows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackingView {
+    pub on: bool,
+    /// Each kind's strength, an index of `orbiters_orb::menu::SMOOTHING_LABELS`: headset, controllers, trackers.
+    pub levels: [u8; 3],
+    /// What the driver does now.
+    pub note: String,
 }
 
 /// The saved states of the avatar worn, as the window and the menus show them.
@@ -216,9 +243,16 @@ pub struct StateView {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "do", rename_all = "snake_case")]
 pub enum StateAction {
-    /// Save how the avatar is now (`None`: named "State n").
+    /// Save how the avatar is now (`None`: named "State n"); applying it also puts back the avatar's size (`size`) and
+    /// GoGoLoco's pose (`pose`), and it is the avatar's default (`default`).
     Save {
         name: Option<String>,
+        #[serde(default)]
+        size: bool,
+        #[serde(default)]
+        pose: bool,
+        #[serde(default)]
+        default: bool,
     },
     Apply {
         id: String,
@@ -251,7 +285,7 @@ pub struct CardView {
     pub left: u32,
 }
 
-/// N4N0's light as the avatar holds it (`N4N0/Light`, `N4N0/Light/Color`, `N4N0/Light/Level`).
+/// N4N0's light as the avatar holds it (`N4N0/Light/On`, `N4N0/Light/Color`, `N4N0/Light/Level`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct OrbLight {
     pub on: bool,

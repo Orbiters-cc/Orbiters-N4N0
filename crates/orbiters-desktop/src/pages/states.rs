@@ -49,7 +49,7 @@ impl StatesPage {
         let mut states = view.states.clone();
         for (action, _) in &self.pending {
             match action {
-                StateAction::Save { name } => {
+                StateAction::Save { name, .. } => {
                     let rows: Vec<StateRow> = states.iter().map(|s| StateRow { name: s.name.clone(), ..Default::default() }).collect();
                     let name = name.clone().unwrap_or_else(|| next_state_name(&rows));
                     states.push(StateView { name, ..Default::default() });
@@ -89,7 +89,7 @@ impl StatesPage {
 fn done(action: &StateAction, states: &[StateView]) -> bool {
     let find = |id: &str| states.iter().find(|s| s.id == id);
     match action {
-        StateAction::Save { name } => name.as_ref().is_some_and(|n| states.iter().any(|s| s.name == *n)),
+        StateAction::Save { name, .. } => name.as_ref().is_some_and(|n| states.iter().any(|s| s.name == *n)),
         StateAction::Default { id: Some(id) } => find(id).is_some_and(|s| s.default),
         StateAction::Default { id: None } => states.iter().all(|s| !s.default),
         StateAction::Rename { id, name } => find(id).is_none_or(|s| s.name == *name),
@@ -178,7 +178,7 @@ fn save_card(ui: &mut Ui, cx: &Cx, page: &mut StatesPage, states: &[StateView], 
             let name = page.name.trim().to_string();
             let name = if name.is_empty() { placeholder.clone() } else { name };
             page.name.clear();
-            page.ask(StateAction::Save { name: Some(name) }, now, out);
+            page.ask(StateAction::Save { name: Some(name), size: true, pose: false, default: false }, now, out);
         }
         ui.add_space(8.0);
     });
@@ -349,7 +349,7 @@ mod tests {
         let before = view(&[("s1", "Hoodie on", false), ("s2", "Cosy", true)]);
         page.ask(StateAction::Default { id: Some("s1".into()) }, 0.0, &mut out);
         page.ask(StateAction::Rename { id: "s2".into(), name: "Cosy evening".into() }, 0.0, &mut out);
-        page.ask(StateAction::Save { name: Some("State 3".into()) }, 0.0, &mut out);
+        page.ask(StateAction::Save { name: Some("State 3".into()), size: true, pose: false, default: false }, 0.0, &mut out);
         page.ask(StateAction::Apply { id: "s1".into() }, 0.0, &mut out);
         assert_eq!(out.len(), 4, "all of it sent");
         let shown = page.shown(&before, 0.5);

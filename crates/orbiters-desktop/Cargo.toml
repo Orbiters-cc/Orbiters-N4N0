@@ -20,6 +20,7 @@ orbiters-update = { workspace = true, features = ["net"] }
 orbiters-reconstruct = { path = "../orbiters-reconstruct" }
 bytemuck = { workspace = true }
 orbiters-openvr = { workspace = true }
+orbiters-smooth = { path = "../orbiters-smooth" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

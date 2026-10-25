@@ -32,14 +32,19 @@ cargo xtask <command>
   keygen [--force]             a new release key: the private half in ~/.orbiters-release, the public half in
                                crates/orbiters-update/update-key.pub (commit it)
   bump <version>               sets the workspace's version (Cargo.toml, Cargo.lock)
+  bump --dev                   the next development build's version (0.3.2-dev.1 after 0.3.1, then dev.2 ...)
   dist [--unsigned] [--notes <file>] [--channel <name>] [--programs <folder>]
                                builds, signs and packs target/dist/<version>/: the setup and the signed release
                                (--programs: packs the programs already built there instead, a test build)
-  publish [--channel <name>] [--force]
+  publish [--channel <name>] [--force] [--dev]
                                uploads target/dist/<version>/ to orbiters.cc and makes it the channel's release
+                               (--dev: copies it to the development environment's feed on this computer)
   release [--notes <file>] [--channel <name>] [--allow-dirty] [--unsigned]
                                checks the commit, then dist, publish, the desktop-v<version> tag and its GitHub
-                               release with the setup (--unsigned: no Authenticode signature, GitHub only)
+                               release with the setup (--unsigned: no Authenticode signature yet)
+  release --dev [--notes <file>] [--allow-dirty]
+                               a development build (bump --dev first): dist, then publish --dev; no push, tag or
+                               GitHub release. Installed apps switched to the development environment update to it
   github [--notes <file>] [--unsigned]
                                the GitHub release of target/dist/<version>/'s setup (its tag pushed already)
 
@@ -72,6 +77,10 @@ pub struct Config {
     pub remote_dir: Option<String>,
     /// Where the setup is built with the C runtime inside (`ORBITERS_SETUP_TARGET_DIR`; the target folder).
     pub setup_target_dir: Option<PathBuf>,
+    /// The development environment's feed folder (`ORBITERS_DEV_DOWNLOADS`; the server repository's
+    /// `docker-data/downloads/desktop` beside this one), served by the development server at
+    /// `orbiters_update::DEVELOPMENT_FEED`.
+    pub dev_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -94,7 +103,15 @@ impl Config {
         config.host = text("ORBITERS_RELEASE_HOST").or(config.host);
         config.remote_dir = text("ORBITERS_RELEASE_DIR").or(config.remote_dir);
         config.setup_target_dir = path("ORBITERS_SETUP_TARGET_DIR").or(config.setup_target_dir);
+        config.dev_dir = path("ORBITERS_DEV_DOWNLOADS").or(config.dev_dir);
         Ok(config)
+    }
+
+    pub fn dev_dir(&self) -> PathBuf {
+        self.dev_dir.clone().unwrap_or_else(|| {
+            let root = root();
+            root.parent().unwrap_or(&root).join("server").join("docker-data").join("downloads").join("desktop")
+        })
     }
 
     pub fn key_path(&self) -> PathBuf {
@@ -217,13 +234,16 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
     };
     match args.first().map(String::as_str) {
         Some("keygen") => keygen(&Config::load()?, flag(rest, "--force")),
+        Some("bump") if flag(rest, "--dev") => bump(&next_dev_version(&workspace_version()?)?),
         Some("bump") => bump(rest.first().context("cargo xtask bump <version>")?),
         Some("dist") => {
             let programs = value(rest, "--programs").map(PathBuf::from);
             let options = dist::Options { unsigned: flag(rest, "--unsigned"), channel, notes: notes()?, programs };
             dist::dist(&Config::load()?, &options).map(drop)
         }
+        Some("publish") if flag(rest, "--dev") => publish::publish_dev(&Config::load()?, &workspace_version()?, &channel, flag(rest, "--force")),
         Some("publish") => publish::publish(&Config::load()?, &workspace_version()?, &channel, flag(rest, "--force")),
+        Some("release") if flag(rest, "--dev") => release_dev(&Config::load()?, &channel, notes()?, flag(rest, "--allow-dirty")),
         Some("release") => release(&Config::load()?, &channel, notes()?, flag(rest, "--allow-dirty"), flag(rest, "--unsigned")),
         Some("github") => publish::github(&workspace_version()?, &notes()?, flag(rest, "--unsigned")),
         _ => {
@@ -303,16 +323,10 @@ fn release(config: &Config, channel: &str, notes: String, allow_dirty: bool, uns
     let _ = git(&["fetch", "--quiet", "origin"]);
     let pushed = git(&["branch", "--remotes", "--contains", "HEAD"])?;
     anyhow::ensure!(!pushed.is_empty(), "this commit is not pushed: push it first, the release names it");
-    if !unsigned {
-        publish::ensure_newer(&version, channel)?;
-    }
+    publish::ensure_newer(&version, channel)?;
 
     let dist = dist::dist(config, &dist::Options { unsigned, channel: channel.into(), notes: notes.clone(), programs: None })?;
-    if unsigned {
-        println!("\nUnsigned: not published on orbiters.cc (installed apps update only to signed releases).");
-    } else {
-        publish::publish(config, &version, channel, false)?;
-    }
+    publish::publish(config, &version, channel, false)?;
 
     let tagged = git(&["tag", "--annotate", &tag, "--message", &format!("Orbiters - N4N0 {version}")]).and_then(|_| git(&["push", "origin", &tag]));
     match tagged {
@@ -323,8 +337,42 @@ fn release(config: &Config, channel: &str, notes: String, allow_dirty: bool, uns
         }
     }
     publish::github(&version, &notes, unsigned)?;
-    let places = if unsigned { "GitHub".to_string() } else { format!("{channel} and GitHub") };
-    println!("\nOrbiters - N4N0 {version} is released on {places} ({}).", dist.display());
+    println!("\nOrbiters - N4N0 {version} is released on {channel} and GitHub ({}).", dist.display());
+    Ok(())
+}
+
+/// The next development build's version after `current`: `0.3.2-dev.1` after `0.3.1`, `0.3.2-dev.5` after
+/// `0.3.2-dev.4`.
+fn next_dev_version(current: &str) -> anyhow::Result<String> {
+    let mut v = semver::Version::parse(current).with_context(|| format!("{current} is not a version"))?;
+    let n = v.pre.as_str().strip_prefix("dev.").and_then(|n| n.parse::<u64>().ok());
+    match n {
+        Some(n) => v.pre = semver::Prerelease::new(&format!("dev.{}", n + 1))?,
+        None => {
+            anyhow::ensure!(v.pre.is_empty(), "{current} is a pre-release that is not a development build");
+            v.patch += 1;
+            v.pre = semver::Prerelease::new("dev.1")?;
+        }
+    }
+    Ok(v.to_string())
+}
+
+/// A development build (`cargo xtask bump --dev` first, committed): built and signed as a release, then put in the
+/// development environment's feed on this computer, where installed apps switched to the development environment
+/// find it within two minutes. No push, no tag, no GitHub release: development builds stay on this computer.
+fn release_dev(config: &Config, channel: &str, notes: String, allow_dirty: bool) -> anyhow::Result<()> {
+    let version = workspace_version()?;
+    anyhow::ensure!(version.contains("-dev."), "{version} is not a development version: cargo xtask bump --dev, commit, then release --dev");
+    if !allow_dirty {
+        let changes = git(&["status", "--porcelain", "--untracked-files=no"])?;
+        anyhow::ensure!(changes.is_empty(), "changes are not committed (--allow-dirty to build them anyway):\n{changes}");
+    }
+    orbiters_update::set_development(true);
+    publish::ensure_newer(&version, channel)?;
+    let notes = if notes.is_empty() { format!("Development build {version} ({})", git(&["rev-parse", "--short", "HEAD"]).unwrap_or_default()) } else { notes };
+    let dist = dist::dist(config, &dist::Options { unsigned: true, channel: channel.into(), notes, programs: None })?;
+    publish::publish_dev(config, &version, channel, false)?;
+    println!("\nOrbiters - N4N0 {version} is in the development environment ({}).", dist.display());
     Ok(())
 }
 
@@ -337,6 +385,15 @@ mod tests {
         let toml = "[workspace]\nmembers = []\n\n[workspace.package]\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[package]\nversion = \"9.9.9\"\n";
         assert_eq!(version_line(toml), Some((4, "0.1.0".into())));
         assert_eq!(version_line("[package]\nversion = \"1.0.0\"\n"), None);
+    }
+
+    #[test]
+    fn development_builds_count_up_after_a_release() {
+        assert_eq!(next_dev_version("0.3.1").unwrap(), "0.3.2-dev.1");
+        assert_eq!(next_dev_version("0.3.2-dev.1").unwrap(), "0.3.2-dev.2");
+        assert_eq!(next_dev_version("0.3.2-dev.9").unwrap(), "0.3.2-dev.10");
+        assert!(next_dev_version("0.4.0-beta.1").is_err(), "another pre-release is not a development build");
+        assert!(orbiters_update::is_newer("0.3.2-dev.2", "0.3.2-dev.1") && orbiters_update::is_newer("0.3.2", "0.3.2-dev.9"));
     }
 
     #[test]

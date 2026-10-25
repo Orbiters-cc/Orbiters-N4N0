@@ -14,7 +14,9 @@ use super::menu_ui::{self, View};
 use super::Canvas;
 use egui::{pos2, ColorImage, TextureHandle, TextureId, TextureOptions};
 use orbiters_orb::menu::layout::{self, ScreenPage, MAX_ELEMENTS, MAX_SLOTS, PICTURES};
-use orbiters_orb::menu::{screen, Call, Card, Contact, KeyboardLayout, Keys, Light, Media, Menu, Page, Pages, PhotoLength, StateRow, Target, Volume};
+use orbiters_orb::menu::{
+    screen, Call, Card, Contact, KeyboardLayout, Keys, Light, Media, Menu, Page, Pages, PhotoLength, StateRow, Target, Tracking, Volume, WorldVideo,
+};
 use orbiters_orb::picture;
 use orbiters_orb::youtube::{Results, Video};
 use std::path::Path;
@@ -324,6 +326,44 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     let video = &sample_videos()[3];
     card.show_card(Card { link: video.link(), title: video.title.clone(), video: Some(video.id.clone()), left: 11 });
     out.push((ScreenPage::Card, card, None, None));
+    // The overlay's Home and screens from version 6: ten places (Tracking, Suggest features), the versions, New state,
+    // the keyboard for names and ideas, Tracking and Suggest features.
+    let ten = || {
+        let mut m = seven();
+        m.pages = Pages::Ten;
+        m.tracking = Some(Tracking { on: true, levels: [0, 1, 2], note: "Smoothing your devices now".into() });
+        m.versions = "N4N0 1.0.9 · App 0.4.0".into();
+        m.world_video = Some(WorldVideo { url: sample_videos()[0].link(), title: Some(sample_videos()[0].title.clone()), at: None });
+        m
+    };
+    let mut home = ten();
+    home.fast_walk = true;
+    home.heard = Some("Done, hoodie on. Now go find your friends instead of talking to a floating ball.".into());
+    out.push((ScreenPage::HomeTen, home, Some(8), None));
+    let mut type_qwerty = ten();
+    type_qwerty.press(Target::Suggest);
+    type_qwerty.press(Target::SuggestType);
+    type_qwerty.type_text("A dance mode where N4N0 bounces to the music the world plays");
+    out.push((ScreenPage::TypeQwerty, type_qwerty.clone(), Some(14), None));
+    let mut type_azerty = type_qwerty.clone();
+    type_azerty.layout = KeyboardLayout::Azerty;
+    out.push((ScreenPage::TypeAzerty, type_azerty, None, Some(5)));
+    let mut type_symbols = type_qwerty;
+    type_symbols.keys = Keys::Symbols;
+    out.push((ScreenPage::TypeSymbols, type_symbols, None, None));
+    let mut new_state = ten();
+    new_state.press(Target::States);
+    new_state.press(Target::StateSave);
+    new_state.draft.name = "Party outfit".into();
+    new_state.draft.default = true;
+    out.push((ScreenPage::NewState, new_state, Some(5), None));
+    let mut tracking = ten();
+    tracking.press(Target::Tracking);
+    out.push((ScreenPage::Tracking, tracking, Some(7), None));
+    let mut suggest = ten();
+    suggest.press(Target::Suggest);
+    suggest.suggestion = "A dance mode where N4N0 bounces to the music the world plays, with a switch on its card".into();
+    out.push((ScreenPage::Suggest, suggest, Some(4), None));
     out
 }
 
@@ -399,7 +439,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         println!("{}", path.display());
         // Orbiters Toolkit's pictures of the two looks, for the Look option on N4N0's card in My Avatar: the newest
         // Home, half size.
-        if page == ScreenPage::HomeSeven {
+        if page == ScreenPage::HomeTen {
             for (picture, name) in [(&modern, "N4N0 preview.png"), (&rgba, "N4N0 preview retro.png")] {
                 let path = out.join(name);
                 write_png(&path, WIDTH / 2, HEIGHT / 2, &half(&unpremultiply(picture), WIDTH as usize, HEIGHT as usize))?;

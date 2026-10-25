@@ -128,7 +128,7 @@ pub fn specs(bare_parameters: bool) -> Vec<Value> {
         }),
         json!({
             "name": "orb_light",
-            "description": "Make N4N0 a light (for a dark world, or a photo): on or off, its colour and brightness. Everyone around sees it. Only for N4N0 with the Light option (the avatar lists N4N0/Light); the result says when it has none.",
+            "description": "Make N4N0 a light (for a dark world, or a photo): on or off, its colour and brightness. Everyone around sees it. Only for N4N0 with the Light option (the avatar lists N4N0/Light/On); the result says when it has none.",
             "input_schema": { "type": "object", "properties": {
                 "on": { "type": "boolean" },
                 "color": { "enum": ["white", "warm", "sunset", "pink", "violet", "blue", "cyan", "green"] },

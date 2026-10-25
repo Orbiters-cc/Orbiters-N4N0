@@ -164,6 +164,8 @@ pub(crate) struct ScreenRuntime {
     /// The overlay's menu: open, and whether a sentence N4N0 hears is what to search for.
     pub overlay_open: bool,
     pub overlay_dictation: bool,
+    /// The overlay's menu shows its keyboard.
+    pub overlay_keyboard: bool,
     /// Bumped to ask the overlay to open its menu.
     pub menu_request: u32,
     /// The last request may close the overlay's menu when it is open.
@@ -250,6 +252,7 @@ impl Default for ScreenRuntime {
             last_activity: now,
             overlay_open: false,
             overlay_dictation: false,
+            overlay_keyboard: false,
             menu_request: 0,
             menu_toggle: false,
             dictation: None,
@@ -657,6 +660,9 @@ fn close_menu(rt: &mut OrbRuntime) -> Vec<Effect> {
 /// What N4N0 says, cut as the Home of a display with `pages` shows it, a piece at a time: a line on the four- and
 /// six-tile Home, what its place holds on the seven-tile one.
 fn answer_pieces(text: &str, pages: Pages) -> Vec<String> {
+    if pages.ten() {
+        return layout::wide_heard_pages(text);
+    }
     if pages.states_cards() {
         return layout::heard_pages(text);
     }
@@ -788,8 +794,48 @@ impl N4n0 {
         }
     }
 
+    /// A key of the computer's keyboard while N4N0's menu shows its keyboard: typed there on the avatar's screen, or handed
+    /// to the overlay's menu (Ctrl+V's clipboard read here).
+    pub fn key(self: &Shared, input: orbiters_orb::menu::KeyInput) {
+        use orbiters_orb::menu::KeyInput;
+        let input = match input {
+            KeyInput::Paste => match self.device.clipboard.paste() {
+                Some(text) => KeyInput::Text(text.replace(['\r', '\n'], " ")),
+                None => return,
+            },
+            other => other,
+        };
+        let effects = {
+            let mut rt = self.orb.lock().unwrap();
+            if rt.screen.available && rt.screen.menu.shows_keyboard() {
+                rt.screen.last_activity = Instant::now();
+                let effects = rt.screen.menu.key(input, || None);
+                rt.wake();
+                effects
+            } else if rt.screen.overlay_open && rt.screen.overlay_keyboard {
+                let n = rt.keys.back().map_or(1, |(k, _)| k.wrapping_add(1));
+                rt.keys.push_back((n, input));
+                while rt.keys.len() > 32 {
+                    rt.keys.pop_front();
+                }
+                Vec::new()
+            } else {
+                return;
+            }
+        };
+        self.screen_effects(effects);
+        self.publish();
+    }
+
+    /// Closes N4N0's menu wherever it shows: a 3D picture starts, and the menu would be in it.
+    pub fn hide_menu(self: &Shared) {
+        let effects = close_menu(&mut self.orb.lock().unwrap());
+        self.screen_effects(effects);
+        self.publish();
+    }
+
     /// N4N0 listens to one sentence (as a hand on N4N0 does), unless it already listens.
-    fn menu_listen(self: &Shared) {
+    pub(crate) fn menu_listen(self: &Shared) {
         let settings = self.with_settings(|s| s.orb.clone());
         if !settings.enabled || !settings.assistant {
             return;
@@ -857,15 +903,59 @@ impl N4n0 {
         false
     }
 
+    /// Sends a feature suggestion to Orbiters as the signed-in account, on a thread of its own: from the avatar's
+    /// screen (`screen`: its menu hears how it went), or from the overlay's or the window's (numbered in the status).
+    pub(crate) fn suggestion_send(self: &Shared, text: String, voice: bool, screen: bool) {
+        let n = self.clone();
+        let _ = std::thread::Builder::new().name("orb-suggestion".into()).spawn(move || {
+            let about = orbiters_orb::suggestions::About {
+                source: "menu",
+                app_version: n.host.app_version(),
+                n4n0_version: n.orb.lock().unwrap().n4n0_version.clone(),
+                voice,
+            };
+            let result = match n.host.account() {
+                Some((api, token)) => orbiters_orb::suggestions::send(&api, &token, &text, &about).map_err(|e| format!("{e:#}")),
+                None => Err("Sign in to Orbiters in Orbiters - N4N0 first (Settings)".to_string()),
+            };
+            {
+                let mut rt = n.orb.lock().unwrap();
+                if screen {
+                    rt.screen.menu.suggestion_sent(result.clone());
+                    rt.screen.last_activity = Instant::now();
+                } else {
+                    let number = rt.suggestion.as_ref().map_or(1, |(k, _)| k.wrapping_add(1));
+                    rt.suggestion = Some((number, result.clone().err()));
+                }
+            }
+            match result {
+                Ok(()) => n.notify(NoticeKind::Info, "Your suggestion reached Orbiters: thank you!".to_string()),
+                Err(e) => n.notify(NoticeKind::Warning, format!("The suggestion was not sent: {e}")),
+            }
+            n.publish();
+        });
+    }
+
+    /// A 3D picture now. What stops it (VRChat's camera off) is told, and shown on the menu's 3D picture page.
+    pub(crate) fn photo_3d_now(self: &Shared) {
+        if let Err(e) = self.host.photo_3d() {
+            let text = e.to_string();
+            {
+                let mut rt = self.orb.lock().unwrap();
+                if rt.screen.menu.open && rt.screen.menu.page == orbiters_orb::menu::Page::Photo {
+                    rt.screen.menu.notice = Some(text.clone());
+                }
+            }
+            self.notify(NoticeKind::Warning, text);
+            self.publish();
+        }
+    }
+
     /// A 3D picture in `seconds` (now when 0); the menus count down.
     pub(crate) fn photo_3d_in(self: &Shared, seconds: u32) {
         if seconds == 0 {
             let n = self.clone();
-            std::thread::spawn(move || {
-                if let Err(e) = n.host.photo_3d() {
-                    n.notify(NoticeKind::Warning, e.to_string());
-                }
-            });
+            std::thread::spawn(move || n.photo_3d_now());
             return;
         }
         self.orb.lock().unwrap().screen.photo_at = Some(Instant::now() + Duration::from_secs(seconds as u64));
@@ -1062,9 +1152,21 @@ impl N4n0 {
                         self.notify(NoticeKind::Warning, e);
                     }
                 }
-                Effect::SaveState { name } => self.states_save(Some(name)),
+                Effect::SaveState { name, size, pose, default } => self.states_save(Some(name), crate::states::SaveOptions { size, pose, default }),
                 Effect::ApplyState { id, .. } => self.states_apply(id, false),
                 Effect::Drop { link, title, video } => self.card_drop(link, title, video),
+                Effect::Tracking { on, levels } => self.update_settings(|s| {
+                    s.tracking.enabled = on;
+                    s.tracking.levels = levels;
+                }),
+                Effect::Dictate => self.menu_listen(),
+                Effect::SendSuggestion { text, voice } => self.suggestion_send(text, voice, true),
+                Effect::WatchVideo { link } => {
+                    if let Err(e) = self.host.watch(&link) {
+                        self.notify(NoticeKind::Warning, e);
+                    }
+                }
+                Effect::SaveVideo => self.command(crate::Command::SaveVideo),
                 Effect::Close => {
                     let mut rt = self.orb.lock().unwrap();
                     rt.screen.hover = None;
@@ -1143,6 +1245,8 @@ pub(crate) fn tick(
     let listening = rt.listening.is_some();
     let thinking = rt.thinking();
     let light = rt.light;
+    let tracking = rt.tracking.as_ref().map(|t| orbiters_orb::menu::Tracking { on: t.on, levels: t.levels, note: t.note.clone() });
+    let (tracking_note, versions) = (rt.tracking_note.clone(), rt.versions.clone());
     // The avatar's saved states, as the States page lists them (again while one saved there waits for the list).
     let states_key = (rt.states.version, rt.avatar_id.clone());
     let rows = (rt.screen.states_seen.as_ref() != Some(&states_key) || rt.screen.menu.saving()).then(|| rt.states.rows(rt.avatar_id.as_deref()));
@@ -1155,6 +1259,9 @@ pub(crate) fn tick(
     // (read on the media thread).
     s.menu.light = light;
     s.menu.can_drop = s.card_ready();
+    s.menu.tracking = tracking;
+    s.menu.tracking_note = tracking_note;
+    s.menu.versions = versions;
     if s.menu.open && s.menu.pages.music_light() {
         media.want();
         let (version, reading) = media.reading();
@@ -1218,6 +1325,9 @@ pub(crate) fn tick(
     }
     // What the menu shows from elsewhere.
     s.menu.listening = listening;
+    if !listening {
+        s.menu.dictation_ended();
+    }
     s.menu.fast_walk = walk;
     s.menu.countdown = s.photo_at.map(|at| at.saturating_duration_since(now).as_secs_f32().ceil() as u32);
     let contacts = calls.menu_contacts();

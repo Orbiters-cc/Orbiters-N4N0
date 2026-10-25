@@ -16,7 +16,7 @@ use egui::{pos2, TextureId};
 use orbiters_core::settings::MenuLook;
 use orbiters_openvr::{self as vr, overlay_flag, Matrix34, Pose, Universe, MAX_DEVICES};
 use orbiters_orb::menu::layout::{self, ScreenPage};
-use orbiters_orb::menu::Page;
+
 use std::time::{Duration, Instant};
 
 const WIDTH: u32 = layout::WIDTH as u32;
@@ -42,7 +42,7 @@ pub struct MenuOverlay {
     request_seen: Option<u32>,
     dictation_seen: Option<u32>,
     /// What the service was last told (open, dictation).
-    reported: Option<(bool, bool)>,
+    reported: Option<(bool, bool, bool)>,
     /// When the menu last closed: a request to close it that comes just after (sent before the service heard) finds
     /// it closed, and must not open it again.
     closed_at: Option<Instant>,
@@ -182,10 +182,10 @@ impl MenuOverlay {
             self.close(overlay);
         }
         // What the service reads: open, and whether a sentence is for the search field.
-        let state = (self.host.menu.open, self.host.menu.open && self.host.menu.page == Page::Search);
+        let state = (self.host.menu.open, self.host.menu.takes_speech(), self.host.menu.shows_keyboard());
         if self.reported != Some(state) {
             self.reported = Some(state);
-            backend.orb(OrbCommand::MenuState { open: state.0, dictation: state.1 });
+            backend.orb(OrbCommand::MenuState { open: state.0, dictation: state.1, keyboard: state.2 });
         }
         if !self.host.menu.open {
             // Drain the laser's events of a hidden overlay.
@@ -194,7 +194,11 @@ impl MenuOverlay {
         }
         self.host.follow(snap);
         self.host.follow_media();
-        let mut effects = Vec::new();
+        // The computer's keyboard typing on the menu's keyboard (the service took the keys from VRChat).
+        let mut effects = self.host.take_keys(&snap.orb);
+        if !effects.is_empty() {
+            self.last_activity = Instant::now();
+        }
         if let Some((n, text)) = &snap.orb.dictation {
             if self.dictation_seen.is_some_and(|seen| seen != *n) {
                 self.last_activity = Instant::now();

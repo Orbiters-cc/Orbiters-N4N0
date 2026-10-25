@@ -5,7 +5,8 @@
 //! layout table holds it in a byte.
 
 use super::{
-    Call, KeyboardLayout, Keys, Menu, Page, Pages, Target, CARD_PUBLIC_STEP, CARD_SEGMENTS, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, STATES_PER_PAGE, TIMERS,
+    Call, KeyboardLayout, Keys, Menu, Page, Pages, Target, Typing, CARD_PUBLIC_STEP, CARD_SEGMENTS, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, SMOOTHING_LABELS,
+    STATES_PER_PAGE, TIMERS, TRACKING_KINDS,
 };
 use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
 use std::sync::OnceLock;
@@ -40,10 +41,23 @@ pub enum ScreenPage {
     States = 14,
     /// A link card dropped in the world (from version 5).
     Card = 15,
+    /// Home with ten places (Tracking, Suggest features, what N4N0 says across three) and the versions: screens from
+    /// version 6, and the overlay.
+    HomeTen = 16,
+    /// The keyboard for a state's name or a suggestion, in each of its keys (from version 6).
+    TypeQwerty = 17,
+    TypeAzerty = 18,
+    TypeSymbols = 19,
+    /// A state being made (from version 6).
+    NewState = 20,
+    /// SteamVR's tracking smoothed (from version 6).
+    Tracking = 21,
+    /// A feature to suggest (from version 6).
+    Suggest = 22,
 }
 
 impl ScreenPage {
-    pub const ALL: [ScreenPage; 15] = [
+    pub const ALL: [ScreenPage; 22] = [
         ScreenPage::Home,
         ScreenPage::SearchQwerty,
         ScreenPage::SearchAzerty,
@@ -59,6 +73,13 @@ impl ScreenPage {
         ScreenPage::HomeSeven,
         ScreenPage::States,
         ScreenPage::Card,
+        ScreenPage::HomeTen,
+        ScreenPage::TypeQwerty,
+        ScreenPage::TypeAzerty,
+        ScreenPage::TypeSymbols,
+        ScreenPage::NewState,
+        ScreenPage::Tracking,
+        ScreenPage::Suggest,
     ];
 
     /// The page picture's file stem and the overlay screenshot's name.
@@ -79,6 +100,13 @@ impl ScreenPage {
             ScreenPage::HomeSeven => "home-seven",
             ScreenPage::States => "states",
             ScreenPage::Card => "card",
+            ScreenPage::HomeTen => "home-ten",
+            ScreenPage::TypeQwerty => "type-qwerty",
+            ScreenPage::TypeAzerty => "type-azerty",
+            ScreenPage::TypeSymbols => "type-symbols",
+            ScreenPage::NewState => "new-state",
+            ScreenPage::Tracking => "tracking",
+            ScreenPage::Suggest => "suggest",
         }
     }
 
@@ -88,6 +116,7 @@ impl ScreenPage {
             Pages::Four => ScreenPage::Home,
             Pages::Six => ScreenPage::HomeSix,
             Pages::Seven => ScreenPage::HomeSeven,
+            Pages::Ten => ScreenPage::HomeTen,
         }
     }
 
@@ -96,6 +125,15 @@ impl ScreenPage {
         match menu.page {
             Page::Music | Page::Light if !menu.pages.music_light() => ScreenPage::home(menu.pages),
             Page::States | Page::Card if !menu.pages.states_cards() => ScreenPage::home(menu.pages),
+            Page::NewState | Page::Type | Page::Tracking | Page::Suggest if !menu.pages.ten() => ScreenPage::home(menu.pages),
+            Page::NewState => ScreenPage::NewState,
+            Page::Tracking => ScreenPage::Tracking,
+            Page::Suggest => ScreenPage::Suggest,
+            Page::Type => match (menu.keys, menu.layout) {
+                (Keys::Symbols, _) => ScreenPage::TypeSymbols,
+                (Keys::Letters, KeyboardLayout::Qwerty) => ScreenPage::TypeQwerty,
+                (Keys::Letters, KeyboardLayout::Azerty) => ScreenPage::TypeAzerty,
+            },
             Page::Home => ScreenPage::home(menu.pages),
             Page::Music => ScreenPage::Music,
             Page::Light => ScreenPage::Light,
@@ -167,6 +205,8 @@ pub enum Look {
     Danger = 9,
     /// A segment of a countdown bar: lit while its second is still to come, hidden once it went.
     Bar = 10,
+    /// A text area: a dark panel the text sits on (a suggestion, a name being typed).
+    Area = 11,
 }
 
 /// The icons the pages use (Phosphor icons in Orbiters - N4N0's font).
@@ -210,11 +250,28 @@ pub enum Icon {
     /// Grab a dropped card.
     Grab,
     Link,
+    /// The Tracking tile.
+    Tracking,
+    /// The Suggest features tile.
+    Suggest,
+    /// Type a text.
+    Keyboard,
+    /// Make a new one (New state).
+    Plus,
+    /// Send a suggestion.
+    Send,
+    /// Done typing.
+    Check,
+    /// The state's size, its pose.
+    Size,
+    Pose,
+    /// Watch a video on the computer.
+    Watch,
 }
 
 /// Home's features in their order (the first four as on the four-tile Home, the first six as on the six-tile one), each
 /// with its icon, title and colour: the seven-tile Home here, and the window's Home in Orbiters - N4N0.
-pub const HOME_TILES: [(Target, Icon, &str, Tint); 7] = [
+pub const HOME_TILES: [(Target, Icon, &str, Tint); 9] = [
     (Target::FastWalk, Icon::Walk, "Fast walk", Tint::Green),
     (Target::YouTube, Icon::YouTube, "YouTube", Tint::Red),
     (Target::Call, Icon::Phone, "Call", Tint::Blue),
@@ -222,6 +279,8 @@ pub const HOME_TILES: [(Target, Icon, &str, Tint); 7] = [
     (Target::Music, Icon::Music, "Music", Tint::Cyan),
     (Target::Light, Icon::Lightbulb, "Light", Tint::Amber),
     (Target::States, Icon::States, "States", Tint::Pink),
+    (Target::Tracking, Icon::Tracking, "Tracking", Tint::Indigo),
+    (Target::Suggest, Icon::Suggest, "Suggest", Tint::Purple),
 ];
 
 /// The tiles of a Home with `pages`.
@@ -229,7 +288,8 @@ pub fn home_tiles(pages: Pages) -> &'static [(Target, Icon, &'static str, Tint)]
     match pages {
         Pages::Four => &HOME_TILES[..4],
         Pages::Six => &HOME_TILES[..6],
-        Pages::Seven => &HOME_TILES,
+        Pages::Seven => &HOME_TILES[..7],
+        Pages::Ten => &HOME_TILES,
     }
 }
 
@@ -248,6 +308,8 @@ pub enum Tint {
     Cyan,
     Amber,
     Pink,
+    Indigo,
+    Purple,
     /// One of the light's colours (contracts `orb::LIGHT_COLORS`): a chip shows it as a swatch.
     Light(u8),
 }
@@ -268,7 +330,7 @@ impl Element {
     /// The corner radius both displays round it with.
     pub fn radius(&self) -> u16 {
         match self.look {
-            Look::Tile => 24,
+            Look::Tile | Look::Area => 24,
             Look::Round | Look::Field | Look::Bar => self.rect.h / 2,
             Look::Accent | Look::Danger | Look::Chip => self.rect.h.min(56) / 2,
             Look::Row => 16,
@@ -339,6 +401,23 @@ pub enum Content {
     /// A dropped card: its title on two lines, its link.
     CardTitle(u8),
     CardLink,
+    /// The ten-tile Home: its lines of what N4N0 says (wider than the seven-tile Home's), and the versions.
+    HeardWide(u8),
+    Versions,
+    /// The keyboard page: what it types for, and the text's lines (the last ones, the caret at its end).
+    TypeTitle,
+    TypeLine(u8),
+    /// New state: its name, and what applying it puts back.
+    DraftName,
+    DraftNote,
+    /// Tracking: whether it smooths now, and what to do (restart SteamVR, a kind's strength).
+    TrackingState,
+    TrackingNote,
+    /// Suggest features: the suggestion's lines, and how it goes.
+    SuggestLine(u8),
+    SuggestNote,
+    /// Music: the world's video (from screen version 6).
+    WorldVideo,
 }
 
 /// A line of changing text: `cols` cells of `size` pixels high and half as wide, from (`x`, `y`). On the screen, cell
@@ -476,8 +555,10 @@ const KEY_H: u16 = 52;
 const KEY_GAP: u16 = 8;
 const KEY_ROWS_Y: [u16; 4] = [320, 380, 440, 500];
 
-fn keyboard(elements: &mut Vec<Element>, page: ScreenPage, layout: KeyboardLayout) {
-    let rows = if page == ScreenPage::SearchSymbols { SYMBOL_ROWS } else { letter_rows(layout) };
+/// The keyboard's keys; its green key at the bottom right is `accent` (Search, or the keyboard page's Done).
+fn keyboard(elements: &mut Vec<Element>, page: ScreenPage, layout: KeyboardLayout, accent: (Target, Icon, &'static str)) {
+    let symbols = page == ScreenPage::SearchSymbols || page == ScreenPage::TypeSymbols;
+    let rows = if symbols { SYMBOL_ROWS } else { letter_rows(layout) };
     for (r, (keys, x0)) in rows.iter().enumerate() {
         let y = KEY_ROWS_Y[r];
         for (i, c) in keys.chars().enumerate() {
@@ -491,10 +572,25 @@ fn keyboard(elements: &mut Vec<Element>, page: ScreenPage, layout: KeyboardLayou
         }
     }
     let y = KEY_ROWS_Y[3];
-    let switch = if page == ScreenPage::SearchSymbols { (Target::Letters, "ABC") } else { (Target::Symbols, "?123") };
+    let switch = if symbols { (Target::Letters, "ABC") } else { (Target::Symbols, "?123") };
     elements.push(with(element(switch.0, Rect::new(36, y, 184, KEY_H), Look::KeyDark), None, Some(switch.1)));
     elements.push(with(element(Target::Space, Rect::new(228, y, 568, KEY_H), Look::Key), None, Some("space")));
-    elements.push(with(element(Target::Search, Rect::new(804, y, 184, KEY_H), Look::Accent), Some(Icon::Search), Some("Search")));
+    elements.push(with(element(accent.0, Rect::new(804, y, 184, KEY_H), Look::Accent), Some(accent.1), Some(accent.2)));
+}
+
+/// The keyboard page's text: lines of this many characters, the last ones shown.
+pub const TYPE_COLUMNS: usize = 74;
+pub const TYPE_LINES: usize = 4;
+/// The suggestion on Suggest features, the same way.
+pub const SUGGEST_COLUMNS: usize = 72;
+pub const SUGGEST_LINES: usize = 4;
+/// What N4N0 says on the ten-tile Home: lines of so many characters, so many at a time.
+pub const HEARD_WIDE_COLUMNS: usize = 44;
+pub const HEARD_WIDE_LINES: usize = 3;
+
+/// The ten-tile Home's place `i` (0 to 11): three rows of four, 228 × 140 each, 16 apart across and 12 down.
+fn ten_cell(i: usize) -> (u16, u16) {
+    (32 + (i as u16 % 4) * 244, 96 + (i as u16 / 4) * 152)
 }
 
 /// The page's layout.
@@ -537,7 +633,7 @@ pub fn layout(page: ScreenPage) -> Layout {
                 elements.push(with(element(Target::Suggestion(i), row, Look::Row), Some(Icon::Fill), None));
             }
             let layout = if page == ScreenPage::SearchAzerty { KeyboardLayout::Azerty } else { KeyboardLayout::Qwerty };
-            keyboard(&mut elements, page, layout);
+            keyboard(&mut elements, page, layout, (Target::Search, Icon::Search, "Search"));
             slots.add(164, 40, super::QUERY_MAX as u8, 24, Style::Primary, Content::Query);
             for i in 0..super::SUGGESTIONS as u8 {
                 slots.add(60, 104 + i as u16 * 44, 64, 24, Style::Primary, Content::Suggestion(i));
@@ -648,6 +744,10 @@ pub fn layout(page: ScreenPage) -> Layout {
             slots.add(512, 196, 40, 24, Style::Secondary, Content::MediaAlbum);
             slots.add(512, 244, 40, 24, Style::Accent, Content::MediaState);
             slots.add(800, 484, 16, 24, Style::Secondary, Content::VolumeLabel).centered();
+            // The world's video (screens from version 6): last, so the elements before keep their indices on older ones.
+            elements.push(with(element(Target::WatchVideo, Rect::new(512, 316, 196, 48), Look::KeyDark), Some(Icon::Watch), Some("Watch")));
+            elements.push(with(element(Target::SaveVideo, Rect::new(720, 316, 156, 48), Look::KeyDark), Some(Icon::Save), Some("Save")));
+            slots.add(512, 280, 40, 24, Style::Secondary, Content::WorldVideo);
         }
         ScreenPage::Light => {
             elements.push(round(Target::Back, 32, Icon::Back));
@@ -683,11 +783,11 @@ pub fn layout(page: ScreenPage) -> Layout {
             icons.push((Rect::new(32, 24, 56, 56), Icon::Microphone, Some(Tint::Green)));
             labels.push(Label { x: 104, y: 34, size: 32, text: "N4N0", style: Style::Primary, bold: true });
             slots.add(208, 40, 48, 24, Style::Accent, Content::Status);
-            for i in 0..HOME_TILES.len() {
+            for i in 0..home_tiles(Pages::Seven).len() {
                 let (x, y) = seven_cell(i);
                 slots.add(x + 24, y + 168, 15, 24, Style::Secondary, Content::TileNote(i as u8));
             }
-            let (x, y) = seven_cell(HOME_TILES.len());
+            let (x, y) = seven_cell(home_tiles(Pages::Seven).len());
             boxes.push(Rect::new(x, y, 228, 216));
             slots.add(x + 60, y + 24, 12, 24, Style::Secondary, Content::HeardCaption);
             for line in 0..HEARD_LINES as u16 {
@@ -696,7 +796,7 @@ pub fn layout(page: ScreenPage) -> Layout {
         }
         ScreenPage::States => {
             elements.push(round(Target::Back, 32, Icon::Back));
-            elements.push(with(element(Target::StateSave, Rect::new(616, 24, 176, 56), Look::Accent), Some(Icon::Save), Some("Save")));
+            elements.push(with(element(Target::StateSave, Rect::new(616, 24, 176, 56), Look::Accent), Some(Icon::Plus), Some("New state")));
             elements.push(round(Target::Previous, 808, Icon::Previous));
             elements.push(round(Target::Next, 936, Icon::Next));
             for i in 0..STATES_PER_PAGE as u8 {
@@ -734,6 +834,91 @@ pub fn layout(page: ScreenPage) -> Layout {
             icons.push((Rect::new(240, 400, 96, 96), Icon::Grab, Some(Tint::Green)));
             labels.push(Label { x: 364, y: 408, size: 48, text: "Grab to copy link", style: Style::Primary, bold: true });
             labels.push(Label { x: 364, y: 472, size: 24, text: "Anyone around with N4N0 can take it", style: Style::Secondary, bold: false });
+        }
+        ScreenPage::HomeTen => {
+            // Three rows of four: the nine features, then what N4N0 says across the last row's three other places; the
+            // versions at the bottom right, under them.
+            for (i, &(target, icon, title, tint)) in home_tiles(Pages::Ten).iter().enumerate() {
+                let (x, y) = ten_cell(i);
+                let mut tile = with(element(target, Rect::new(x, y, 228, 140), Look::Tile), Some(icon), Some(title));
+                tile.tint = Some(tint);
+                elements.push(tile);
+            }
+            elements.push(round(Target::Close, 936, Icon::Close));
+            icons.push((Rect::new(32, 24, 56, 56), Icon::Microphone, Some(Tint::Green)));
+            labels.push(Label { x: 104, y: 34, size: 32, text: "N4N0", style: Style::Primary, bold: true });
+            slots.add(208, 40, 48, 24, Style::Accent, Content::Status);
+            for i in 0..HOME_TILES.len() {
+                let (x, y) = ten_cell(i);
+                slots.add(x + 20, y + 96, 14, 24, Style::Secondary, Content::TileNote(i as u8));
+            }
+            let (x, y) = ten_cell(HOME_TILES.len());
+            boxes.push(Rect::new(x, y, 3 * 228 + 2 * 16, 140));
+            slots.add(x + 84, y + 20, 12, 24, Style::Secondary, Content::HeardCaption);
+            for line in 0..HEARD_WIDE_LINES as u16 {
+                slots.add(x + 84, y + 52 + line * 28, HEARD_WIDE_COLUMNS as u8, 24, Style::Primary, Content::HeardWide(line as u8));
+            }
+            slots.add(672, 548, 40, 16, Style::Secondary, Content::Versions);
+        }
+        ScreenPage::TypeQwerty | ScreenPage::TypeAzerty | ScreenPage::TypeSymbols => {
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(with(element(Target::Done, Rect::new(824, 24, 168, 56), Look::Accent), Some(Icon::Check), Some("Done")));
+            elements.push(element(Target::Field, Rect::new(32, 96, 960, 208), Look::Area));
+            let layout = if page == ScreenPage::TypeAzerty { KeyboardLayout::Azerty } else { KeyboardLayout::Qwerty };
+            keyboard(&mut elements, page, layout, (Target::Done, Icon::Check, "Done"));
+            slots.add(104, 40, 52, 24, Style::Primary, Content::TypeTitle);
+            for line in 0..TYPE_LINES as u16 {
+                slots.add(56, 116 + line * 44, TYPE_COLUMNS as u8, 24, Style::Primary, Content::TypeLine(line as u8));
+            }
+        }
+        ScreenPage::NewState => {
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(with(element(Target::DraftName, Rect::new(100, 136, 824, 64), Look::Field), Some(Icon::Keyboard), None));
+            elements.push(with(element(Target::DraftSize, Rect::new(100, 276, 236, 64), Look::Chip), Some(Icon::Size), Some("Size")));
+            elements.push(with(element(Target::DraftPose, Rect::new(352, 276, 236, 64), Look::Chip), Some(Icon::Pose), Some("Pose")));
+            elements.push(with(element(Target::DraftDefault, Rect::new(604, 276, 236, 64), Look::Chip), Some(Icon::Star), Some("Default")));
+            elements.push(with(element(Target::DraftSave, Rect::new(100, 444, 300, 76), Look::Accent), Some(Icon::Save), Some("Save state")));
+            labels.push(Label { x: 104, y: 34, size: 32, text: "New state", style: Style::Primary, bold: true });
+            labels.push(Label { x: 100, y: 100, size: 24, text: "Name", style: Style::Secondary, bold: false });
+            labels.push(Label { x: 100, y: 240, size: 24, text: "Options", style: Style::Secondary, bold: false });
+            slots.add(164, 156, super::STATE_NAME_MAX as u8 + 1, 24, Style::Primary, Content::DraftName);
+            slots.add(100, 372, 70, 24, Style::Secondary, Content::DraftNote);
+        }
+        ScreenPage::Tracking => {
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(with(element(Target::TrackingSwitch, Rect::new(100, 104, 300, 64), Look::Chip), Some(Icon::Tracking), Some("Smoothing")));
+            for (k, _) in TRACKING_KINDS.iter().enumerate() {
+                for (i, label) in SMOOTHING_LABELS.iter().enumerate() {
+                    let rect = Rect::new(340 + i as u16 * 136, 200 + k as u16 * 92, 124, 56);
+                    elements.push(with(element(Target::Smoothing((k * 4 + i) as u8), rect, Look::Chip), None, Some(label)));
+                }
+            }
+            labels.push(Label { x: 104, y: 34, size: 32, text: "Tracking", style: Style::Primary, bold: true });
+            for (k, kind) in TRACKING_KINDS.iter().enumerate() {
+                labels.push(Label { x: 100, y: 214 + k as u16 * 92, size: 28, text: *kind, style: Style::Primary, bold: false });
+            }
+            slots.add(424, 124, 46, 24, Style::Accent, Content::TrackingState);
+            slots.add(100, 492, 72, 24, Style::Secondary, Content::TrackingNote);
+        }
+        ScreenPage::Suggest => {
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(element(Target::SuggestType, Rect::new(32, 96, 960, 196), Look::Area));
+            elements.push(with(element(Target::SuggestType, Rect::new(32, 316, 220, 72), Look::KeyDark), Some(Icon::Keyboard), Some("Type")));
+            elements.push(with(element(Target::SuggestTalk, Rect::new(268, 316, 220, 72), Look::KeyDark), Some(Icon::Microphone), Some("Talk")));
+            elements.push(with(element(Target::SuggestSend, Rect::new(772, 316, 220, 72), Look::Accent), Some(Icon::Send), Some("Send")));
+            labels.push(Label { x: 104, y: 34, size: 32, text: "Suggest a feature", style: Style::Primary, bold: true });
+            labels.push(Label {
+                x: 32,
+                y: 488,
+                size: 24,
+                text: "What should N4N0 do next? The Orbiters team reads every idea.",
+                style: Style::Secondary,
+                bold: false,
+            });
+            for line in 0..SUGGEST_LINES as u16 {
+                slots.add(56, 116 + line * 40, SUGGEST_COLUMNS as u8, 24, Style::Primary, Content::SuggestLine(line as u8));
+            }
+            slots.add(32, 420, 60, 24, Style::Accent, Content::SuggestNote);
         }
     }
     Layout { page, elements, slots: slots.slots, pictures, labels, icons, boxes }
@@ -795,12 +980,19 @@ fn tile_note(menu: &Menu, tile: u8) -> String {
             Some(_) => "Off".into(),
             None => "Not on this N4N0".into(),
         },
-        _ if !menu.states_ready => "Avatar not known".into(),
-        _ => match menu.states.len() {
+        6 if !menu.states_ready => "Avatar not known".into(),
+        6 => match menu.states.len() {
             0 => "Save how it is".into(),
             1 => "1 saved".into(),
             n => format!("{n} saved"),
         },
+        7 => match &menu.tracking {
+            Some(t) if t.on => "Smoothing on".into(),
+            Some(_) => "Smoothing off".into(),
+            None => "Not here".into(),
+        },
+        _ if menu.sending => "Sending…".into(),
+        _ => "Tell the team".into(),
     }
 }
 
@@ -884,7 +1076,10 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
                     None => String::new(),
                 }
             }
-            Content::Heard | Content::HeardLine(_) | Content::HeardCaption if menu.heard_private => return String::new(),
+            Content::Heard | Content::HeardLine(_) | Content::HeardWide(_) | Content::HeardCaption if menu.heard_private => return String::new(),
+            // What the owner writes to Orbiters is theirs: everyone else's screen shows the page without it.
+            Content::SuggestLine(_) => return String::new(),
+            Content::TypeLine(_) if menu.typing == Typing::Suggestion => return String::new(),
             _ => {}
         }
     }
@@ -1026,7 +1221,98 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             Some(_) => "Everyone around sees your orb's light".into(),
             None => "Turn Light on for N4N0 in My Avatar (its card's options)".into(),
         },
+        Content::HeardWide(i) => {
+            menu.heard.as_deref().map(|h| wide_heard_lines(&shown(h))).and_then(|lines| lines.into_iter().nth(i as usize)).unwrap_or_default()
+        }
+        Content::Versions => menu.versions.clone(),
+        Content::TypeTitle => match menu.typing {
+            Typing::StateName => "Name the new state".into(),
+            Typing::Suggestion => "Your idea for N4N0".into(),
+        },
+        Content::TypeLine(i) => typed_lines(&menu.typed).into_iter().nth(i as usize).unwrap_or_default(),
+        Content::DraftName => menu.draft.name.clone(),
+        Content::DraftNote => {
+            let mut what = vec!["parameters"];
+            if menu.draft.size {
+                what.push("size");
+            }
+            if menu.draft.pose {
+                what.push("pose");
+            }
+            let last = what.pop().unwrap_or_default();
+            let list = if what.is_empty() { last.to_string() } else { format!("{} and {last}", what.join(", ")) };
+            let when = if menu.draft.default { " · also after each world join" } else { "" };
+            format!("Puts back its {list}{when}")
+        }
+        Content::TrackingState => match &menu.tracking {
+            Some(t) if t.on => "On".into(),
+            Some(_) => "Off".into(),
+            None => String::new(),
+        },
+        Content::TrackingNote => match &menu.tracking {
+            Some(t) => t.note.clone(),
+            None => menu.tracking_note.clone(),
+        },
+        Content::SuggestLine(i) if menu.suggestion.trim().is_empty() => {
+            if i == 0 {
+                "Type or say what N4N0 should do next".into()
+            } else {
+                String::new()
+            }
+        }
+        Content::SuggestLine(i) => suggestion_lines(&menu.suggestion).into_iter().nth(i as usize).unwrap_or_default(),
+        Content::WorldVideo => match &menu.world_video {
+            Some(video) if menu.pages.ten() => format!("In the world: {}", video.title.as_deref().unwrap_or(&video.url)),
+            _ => String::new(),
+        },
+        Content::SuggestNote => {
+            if let Some(notice) = &menu.notice {
+                notice.clone()
+            } else if menu.dictating {
+                "Listening: say your idea".into()
+            } else {
+                String::new()
+            }
+        }
     }
+}
+
+/// What N4N0 says on the ten-tile Home, in its lines (cut between words; the last ends in "…" when there is more).
+pub fn wide_heard_lines(text: &str) -> Vec<String> {
+    let mut lines = super::pieces(text, HEARD_WIDE_COLUMNS);
+    if lines.len() > HEARD_WIDE_LINES {
+        lines.truncate(HEARD_WIDE_LINES);
+        let last = &mut lines[HEARD_WIDE_LINES - 1];
+        let kept: String = last.chars().take(HEARD_WIDE_COLUMNS - 1).collect();
+        *last = format!("{}…", kept.trim_end());
+    }
+    lines
+}
+
+/// What N4N0 says, in the pieces the ten-tile Home's place shows one after the other.
+pub fn wide_heard_pages(text: &str) -> Vec<String> {
+    super::pieces(&shown(text), HEARD_WIDE_COLUMNS).chunks(HEARD_WIDE_LINES).map(|lines| lines.join(" ")).collect()
+}
+
+/// The keyboard page's text in its lines, the caret at its end: cut every [`TYPE_COLUMNS`] characters (the caret stays
+/// where the typing is), the last [`TYPE_LINES`] lines.
+pub fn typed_lines(typed: &str) -> Vec<String> {
+    let text: Vec<char> = shown_keep_spaces(typed).chars().chain(std::iter::once('|')).collect();
+    let lines: Vec<String> = text.chunks(TYPE_COLUMNS).map(|c| c.iter().collect()).collect();
+    let skip = lines.len().saturating_sub(TYPE_LINES);
+    lines.into_iter().skip(skip).collect()
+}
+
+/// A suggestion in its lines on Suggest features (cut between words), the last [`SUGGEST_LINES`] when it is longer.
+pub fn suggestion_lines(text: &str) -> Vec<String> {
+    let lines = super::pieces(&shown(text), SUGGEST_COLUMNS);
+    let skip = lines.len().saturating_sub(SUGGEST_LINES);
+    lines.into_iter().skip(skip).collect()
+}
+
+/// `text` as the screen's font writes it, its spaces kept (a text being typed ends in the space just typed).
+fn shown_keep_spaces(text: &str) -> String {
+    orbiters_contracts::orb::panel_text(&crate::text::fold_more(text)).replace('\n', " ")
 }
 
 /// `text` as the screen's font writes it (folded, one space between words): what text is wrapped from, so that the lines
@@ -1067,6 +1353,10 @@ pub fn slot_text_for(menu: &Menu, slot: &Slot, public: bool) -> String {
             let start = shown.len().saturating_sub(room);
             shown[start..].iter().collect::<String>() + "|"
         }
+        // The text being typed keeps its spaces (its lines are cut where the caret falls).
+        Content::TypeLine(_) => ellipsis(&text, slot.cols as usize),
+        // The versions end at the slot's right edge.
+        Content::Versions => format!("{:>1$}", ellipsis(text.trim(), slot.cols as usize), slot.cols as usize),
         // One space where a dropped character (an emoji) left two.
         _ => ellipsis(&text.split_whitespace().collect::<Vec<_>>().join(" "), slot.cols as usize),
     }
@@ -1116,6 +1406,12 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::Mute => menu.volume.is_some_and(|v| v.muted),
         // The default state's mark: chosen, ringed in green.
         Target::StateMark(i) => menu.page_states().get(i as usize).is_some_and(|s| s.default),
+        Target::DraftSize => menu.draft.size,
+        Target::DraftPose => menu.draft.pose,
+        Target::DraftDefault => menu.draft.default,
+        Target::TrackingSwitch => menu.tracking.as_ref().is_some_and(|t| t.on),
+        Target::Smoothing(i) => menu.tracking.as_ref().is_some_and(|t| t.on && t.levels.get((i / 4) as usize) == Some(&(i % 4))),
+        Target::SuggestTalk => menu.dictating,
         _ => false,
     };
     let hidden = match target {
@@ -1136,9 +1432,16 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::StateMark(i) => !menu.page_states().get(i as usize).is_some_and(|s| s.default),
         Target::StateSave => !menu.states_ready,
         Target::CardTime(i) => i as usize >= card_segments(menu, false),
+        Target::WatchVideo | Target::SaveVideo => menu.world_video.is_none() || !menu.pages.ten(),
         _ => false,
     };
-    let unavailable = target == Target::FastWalk && menu.desktop_mode;
+    let unavailable = match target {
+        Target::FastWalk => menu.desktop_mode,
+        Target::DraftSave => !menu.states_ready,
+        Target::TrackingSwitch | Target::Smoothing(_) => menu.tracking.is_none(),
+        Target::SuggestSend => menu.sending || menu.suggestion.trim().is_empty(),
+        _ => false,
+    };
     State { on: on && !unavailable, hidden, unavailable }
 }
 
@@ -1277,7 +1580,8 @@ mod tests {
         assert_eq!(Pages::of_screen(Some(3)), Pages::Six);
         assert_eq!(Pages::of_screen(Some(4)), Pages::Six, "version 4 points with rays, its pages are version 3's");
         assert_eq!(Pages::of_screen(Some(5)), Pages::Seven);
-        assert_eq!(Pages::of_screen(Some(9)), Pages::Seven);
+        assert_eq!(Pages::of_screen(Some(6)), Pages::Ten);
+        assert_eq!(Pages::of_screen(Some(9)), Pages::Ten);
         let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
         menu.open();
         assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSeven);

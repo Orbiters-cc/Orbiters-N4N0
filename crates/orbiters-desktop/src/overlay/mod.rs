@@ -483,7 +483,7 @@ impl Drop for Teardown<'_> {
     fn drop(&mut self) {
         self.state.release(self.backend);
         // Always: the menu may have closed on this turn's effects after its state was reported, unheard yet.
-        self.backend.orb(OrbCommand::MenuState { open: false, dictation: false });
+        self.backend.orb(OrbCommand::MenuState { open: false, dictation: false, keyboard: false });
         self.walk.reset(self.steamvr);
         self.world.destroy(self.overlay);
         self.menu.destroy(self.overlay);

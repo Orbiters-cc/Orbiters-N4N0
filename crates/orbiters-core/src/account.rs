@@ -36,9 +36,29 @@ const ENTROPY: &[u8] = b"Orbiters.Toolkit account";
 /// The client name Orbiters - N4N0 signs in as (the server's editor-link clients).
 pub const CLIENT: &str = "desktop";
 
+/// The server an app chose for itself ([`choose_server`]): 0 none, 1 production, 2 development.
+static CHOSEN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Talks to `server` from now on, whatever the Unity tools are set to (Orbiters - N4N0's own Development environment
+/// switch); `None` follows the Unity tools again.
+pub fn choose_server(server: Option<Server>) {
+    let value = match server {
+        None => 0,
+        Some(Server::Production) => 1,
+        Some(Server::Development) => 2,
+    };
+    CHOSEN.store(value, Ordering::Relaxed);
+}
+
 impl Server {
-    /// The server the Unity tools are set to (production when Unity never set it, or on other systems).
+    /// The server the app chose ([`choose_server`]), else the one the Unity tools are set to (production when Unity
+    /// never set it, or on other systems).
     pub fn current() -> Self {
+        match CHOSEN.load(Ordering::Relaxed) {
+            1 => return Server::Production,
+            2 => return Server::Development,
+            _ => {}
+        }
         if dev_switch().unwrap_or(false) {
             Server::Development
         } else {

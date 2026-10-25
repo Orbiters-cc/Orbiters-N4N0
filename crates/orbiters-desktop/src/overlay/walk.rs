@@ -37,7 +37,14 @@ const MOTION_LAG: Duration = Duration::from_millis(500);
 /// VRChat's own walking this long below [`VRCHAT_STILL`] stops the carry (a change of push shows late, briefly).
 const STILL_FOR: Duration = Duration::from_millis(300);
 /// Setups this close (metres, and rotation terms) are the same one: SteamVR may hand its numbers back a little off.
+#[cfg(test)]
 const SAME_SETUP: f32 = 1e-3;
+/// Standing zeros this close (a centimetre, and rotation terms) are the same play space: what tells a recenter from
+/// the boost's own preview read back.
+const SAME_STANDING: f32 = 1e-2;
+/// SteamVR raises a play-space event for each preview the boost shows: events this soon after one are its own, never a
+/// recenter (one made while walking is taken once the walk stops).
+const OWN_EVENTS: Duration = Duration::from_millis(1000);
 
 /// How far the stick is pushed (0 to 1, the dead zone removed; 0 for a reading that is not a number).
 pub fn push(stick: [f32; 2]) -> f32 {
@@ -83,7 +90,14 @@ pub struct Setup {
 }
 
 impl Setup {
-    /// The same play space, to a millimetre.
+    /// The same standing zero, to a centimetre: the walls and the seated zero aside, which SteamVR may hand back in
+    /// another form than they were written.
+    pub fn standing_close_to(&self, other: &Setup) -> bool {
+        self.standing.m.as_flattened().iter().zip(other.standing.m.as_flattened()).all(|(a, b)| (a - b).abs() <= SAME_STANDING)
+    }
+
+    /// The same play space, to a millimetre (the tests' measure).
+    #[cfg(test)]
     pub fn close_to(&self, other: &Setup) -> bool {
         let near = |a: &[f32], b: &[f32]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() <= SAME_SETUP);
         let matrix = |a: &Matrix34, b: &Matrix34| near(a.m.as_flattened(), b.m.as_flattened());
@@ -257,6 +271,8 @@ pub struct WalkBoost {
     changed: Option<Instant>,
     /// Room setup started then, and was not saved yet.
     room_setup: Option<Instant>,
+    /// When the boost last showed its preview (SteamVR's events that soon after are its own).
+    shown_at: Option<Instant>,
 }
 
 impl WalkBoost {
@@ -274,6 +290,7 @@ impl WalkBoost {
             seen: None,
             changed: None,
             room_setup: None,
+            shown_at: None,
         }
     }
 
@@ -376,6 +393,7 @@ impl WalkBoost {
         }
         play.write(&carried.shifted());
         play.show();
+        self.shown_at = Some(now);
         self.boost = speed * dir[0].hypot(dir[2]);
         self.moving = true;
     }
@@ -403,32 +421,38 @@ impl WalkBoost {
     /// application's change saved): the carry goes on from a new setup instead of writing the old one back.
     pub fn play_space_changed(&mut self, steamvr: &vr::Client) {
         if let Ok(mut setup) = steamvr.chaperone_setup() {
-            self.rebase(&mut setup);
+            self.rebase(&mut setup, Instant::now());
         }
     }
 
-    /// The same with `play`. What every application sees is read first: the boost's own preview there means nothing
-    /// changed it (the boost's showing raises some of these events), and nothing is touched, so no event loops. Else
-    /// the setup saved beneath, read with the preview hidden for a moment (while one shows, the working copy reverts
-    /// to it, not to the saved one), becomes the base if it is neither the old base nor what the boost showed, and
-    /// the boost shows its carry again at once.
-    pub fn rebase(&mut self, play: &mut dyn PlaySpace) {
+    /// The same with `play` at `now`. Events just after the boost showed its preview are its own: nothing is read or
+    /// touched (each look and showing again raised another event, and a read-back that differed from what was written,
+    /// in walls or the seated zero, hid and showed the preview again every frame: the play space jumped between two
+    /// places, the person thrown about). Else what every application sees is read: the boost's own carry there, or the
+    /// base, by their standing zero, means nothing changed it. Else the setup saved beneath, read with the preview
+    /// hidden for a moment (while one shows, the working copy reverts to it, not to the saved one), becomes the base if
+    /// it is neither the old base nor what the boost showed, and the boost shows its carry again at once.
+    pub fn rebase(&mut self, play: &mut dyn PlaySpace, now: Instant) {
+        if self.shown_at.is_some_and(|t| now.saturating_duration_since(t) < OWN_EVENTS) {
+            return;
+        }
         let Some(carried) = self.carried.as_mut() else { return };
         play.revert();
         let Some(live) = play.read() else { return };
         let shown = carried.shifted();
-        if live.close_to(&shown) || live.close_to(&carried.base) {
+        if live.standing_close_to(&shown) || live.standing_close_to(&carried.base) {
             return;
         }
         play.hide();
         play.revert();
         if let Some(saved) = play.read() {
-            if !saved.close_to(&carried.base) && !saved.close_to(&shown) {
+            if !saved.standing_close_to(&carried.base) && !saved.standing_close_to(&shown) {
                 carried.base = saved;
             }
         }
         play.write(&carried.shifted());
         play.show();
+        self.shown_at = Some(now);
     }
 
     /// Room setup starts: the play space goes back and stays put until the setup is saved.
@@ -622,12 +646,34 @@ mod tests {
         walk.step(&mut room, &m, || FORWARD, || Some(yaw(0.0)), t0 + Duration::from_millis(20));
         let (carried, shows) = (carried_by(&room), room.shows);
         // An event its own showing raised (SteamVR's working copy reverts to the preview, not to the saved setup):
-        // the play space stays as it is, nothing hidden or shown again, so no event follows.
-        for _ in 0..3 {
-            walk.rebase(&mut room);
+        // the play space stays as it is, nothing hidden or shown again, so no event follows. Just after the showing,
+        // and later too.
+        for ms in [21, 40, 3000] {
+            walk.rebase(&mut room, t0 + Duration::from_millis(ms));
         }
         assert!(close(carried_by(&room), carried), "{:?} then {:?}", carried, carried_by(&room));
         assert_eq!((room.shows, room.hides), (shows, 0));
+    }
+
+    #[test]
+    fn walls_read_back_otherwise_never_flip_the_play_space() {
+        let wall = Quad { corners: [[1.0, 0.0, 1.0], [1.0, 2.0, 1.0], [1.0, 2.0, -1.0], [1.0, 0.0, -1.0]] };
+        let other = Quad { corners: [[-1.0, 0.0, 1.0], [-1.0, 2.0, 1.0], [-1.0, 2.0, -1.0], [-1.0, 0.0, -1.0]] };
+        let (s, mut walk) = (settings(), boost());
+        let mut room = Room::new(Matrix34::IDENTITY);
+        room.saved.bounds = vec![wall, other];
+        let t0 = Instant::now();
+        let m = moment(&s, None);
+        walk.step(&mut room, &m, || FORWARD, || Some(yaw(0.0)), t0);
+        walk.step(&mut room, &m, || FORWARD, || Some(yaw(0.0)), t0 + Duration::from_millis(20));
+        // SteamVR hands the walls back in another order: the standing zero is the boost's, nothing moves.
+        room.preview.as_mut().unwrap().bounds.reverse();
+        let carried = carried_by(&room);
+        for ms in [25, 2000, 5000] {
+            walk.rebase(&mut room, t0 + Duration::from_millis(ms));
+        }
+        assert_eq!(room.hides, 0, "never hidden and shown again");
+        assert!(close(carried_by(&room), carried));
     }
 
     #[test]
@@ -642,13 +688,15 @@ mod tests {
         // as far as before (20 ms at 4 m/s).
         room.saved.standing = yaw(90.0);
         room.preview = None;
-        walk.rebase(&mut room);
+        walk.rebase(&mut room, t0 + Duration::from_millis(30));
+        assert!(room.preview.is_none(), "while walking, an event is the boost's own: untouched");
+        walk.rebase(&mut room, t0 + Duration::from_millis(2000));
         let expected = Carried { base: room.saved.clone(), offset: [0.0, 0.0, -0.08] }.shifted();
         assert!(room.live().close_to(&expected), "{:?}", room.live());
         // Another application's change saved under the preview while it shows: read with the preview hidden.
         room.saved.standing.m[1][3] = 1.65;
         room.preview.as_mut().unwrap().standing.m[0][3] += 0.3;
-        walk.rebase(&mut room);
+        walk.rebase(&mut room, t0 + Duration::from_millis(4000));
         assert!((room.live().standing.m[1][3] - 1.65).abs() < 1e-5, "the new saved setup is the base");
         assert!(room.preview.is_some(), "and the carry shows again");
     }

@@ -206,6 +206,7 @@ fn ink(look: Look) -> Ink {
         Look::Chip => Ink { fill: PANEL, stroke: DIM, text: TEXT2, icon: TEXT2 },
         Look::Key => Ink { fill: PANEL, stroke: DIM, text: TEXT, icon: TEXT },
         Look::Tile | Look::Field | Look::Round => Ink { fill: PANEL, stroke: LINE, text: TEXT, icon: LINE },
+        Look::Area => Ink { fill: PANEL, stroke: DIM, text: TEXT, icon: LINE },
     }
 }
 
@@ -237,6 +238,17 @@ fn element(p: &Painter, e: &Element, origin: Pos2, ink: Ink) {
         _ => panel(p, r, cut, ink.fill, Stroke::new(if e.look == Look::Tile { 2.0 } else { 1.5 }, ink.stroke)),
     }
     match e.look {
+        Look::Tile if super::menu_ui::tile_is_compact(e.rect) => {
+            // A small tile: the icon at its top left, the title beside it.
+            let box_ = Rect::from_min_size(r.min + vec2(20.0, 20.0), vec2(56.0, 56.0));
+            if let Some(icon) = e.icon {
+                let ink = if e.tint == Some(Tint::Red) && ink.icon == LINE { Ink { icon: ALERT, ..ink } } else { ink };
+                bracketed_icon(p, box_, icon, 30.0, ink);
+            }
+            if let Some(title) = e.label {
+                widgets::text(p, r.min + vec2(90.0, 34.0), Align2::LEFT_TOP, &mono(title, 21.0, ink.text));
+            }
+        }
         Look::Tile => {
             // As Orbiters' own tile: the icon at its top (a tall tile) or left (a wide one), the title below or beside it.
             let wide = super::menu_ui::tile_is_wide(e.rect);
@@ -280,8 +292,8 @@ fn element(p: &Painter, e: &Element, origin: Pos2, ink: Ink) {
             _ => icon_and_label(p, r, e.icon, e.label, 18.0, ink),
         },
         Look::Accent | Look::Danger => icon_and_label(p, r, e.icon, e.label, if e.rect.h >= 64 { 22.0 } else { 18.0 }, ink),
-        // A countdown's segment: lit, nothing on it.
-        Look::Bar => {}
+        // A countdown's segment: lit, nothing on it; a text area is its panel.
+        Look::Bar | Look::Area => {}
     }
     if let (Look::Key, orbiters_orb::menu::Target::Key(c), None) = (e.look, e.target, e.label) {
         widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new(c.to_string(), 28.0).mono().color(ink.text));

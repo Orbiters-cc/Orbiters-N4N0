@@ -37,6 +37,14 @@ const SCALING_ALLOWED: &str = states::EYE_HEIGHT_SCALING_ALLOWED;
 /// One write of the file at a time, the newest content last.
 static WRITING: Mutex<()> = Mutex::new(());
 
+/// What a state saved now puts back besides the avatar's parameters, and whether it becomes the avatar's default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SaveOptions {
+    pub size: bool,
+    pub pose: bool,
+    pub default: bool,
+}
+
 /// A default state to put back: for which avatar, from when, until when its parameters may be waited for.
 struct Due {
     avatar: String,
@@ -249,7 +257,7 @@ impl N4n0 {
     /// What the interfaces and the menus ask of the saved states of the avatar worn.
     pub(crate) fn states_action(self: &Shared, action: StateAction) {
         match action {
-            StateAction::Save { name } => self.states_save(name),
+            StateAction::Save { name, size, pose, default } => self.states_save(name, SaveOptions { size, pose, default }),
             StateAction::Apply { id } => self.states_apply(id, false),
             StateAction::Default { id } => self.states_change(|store, avatar| store.set_default(avatar, id.as_deref())),
             StateAction::Rename { id, name } => self.states_change(|store, avatar| store.rename(avatar, &id, &name)),
@@ -293,12 +301,12 @@ impl N4n0 {
 
     /// Saves how the avatar worn is now as a state named `name` ("State n" without one), on a thread of its own: VRChat's
     /// tree takes a moment to read.
-    pub(crate) fn states_save(self: &Shared, name: Option<String>) {
+    pub(crate) fn states_save(self: &Shared, name: Option<String>, options: SaveOptions) {
         self.orb.lock().unwrap().states.saving = true;
         self.publish();
         let n = self.clone();
         let _ = std::thread::Builder::new().name("orb-state-save".into()).spawn(move || {
-            let said = n.states_save_now(name);
+            let said = n.states_save_now(name, options);
             {
                 let mut rt = n.orb.lock().unwrap();
                 rt.states.saving = false;
@@ -318,7 +326,7 @@ impl N4n0 {
         });
     }
 
-    fn states_save_now(self: &Shared, name: Option<String>) -> Result<String, String> {
+    fn states_save_now(self: &Shared, name: Option<String>, options: SaveOptions) -> Result<String, String> {
         let avatar = self.orb.lock().unwrap().avatar_id.clone().ok_or("VRChat's avatar is not known yet: change avatar (or rejoin), then save.")?;
         let nodes = self.vrchat_nodes().map_err(|e| format!("VRChat did not say the avatar's parameters ({e:#}): is OSC on in VRChat?"))?;
         let (current, eye, _) = split(nodes);
@@ -341,9 +349,17 @@ impl N4n0 {
                 return Err(format!("The saved states could not be read ({e}): nothing was saved, so they stay whole."));
             }
             let saved = s.store().add(&avatar, avatar_name.as_deref(), name.as_deref(), parameters, eye, orbiters_core::now_utc_iso());
-            let saved = saved.map(|s| s.name.clone()).map_err(|e| e.to_string());
+            let saved = saved.map(|s| (s.id.clone(), s.name.clone())).map_err(|e| e.to_string());
+            let (id, saved) = saved?;
+            // What applying it puts back besides the parameters, and whether it is the avatar's default.
+            if options.size || options.pose {
+                s.store().set_options(&avatar, &id, options.pose, options.size).map_err(|e| e.to_string())?;
+            }
+            if options.default {
+                s.store().set_default(&avatar, Some(&id)).map_err(|e| e.to_string())?;
+            }
             s.version += 1;
-            saved?
+            saved
         };
         self.states_write()?;
         Ok(format!("Saved \"{saved}\": {count} parameter{}", if count == 1 { "" } else { "s" }))

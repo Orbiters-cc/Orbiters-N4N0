@@ -90,6 +90,22 @@ pub trait Host: Send + Sync + 'static {
     }
     /// The avatar's Walk boost radial moved (`N4N0/WalkBoost`): the strength, 0 to 1.
     fn walk_boost(&self, _strength: f32) {}
+    /// SteamVR's tracking smoothing here: what its driver does now ("Smoothing", "Restart SteamVR to start it"), or
+    /// `None` where the app cannot smooth SteamVR's tracking (the settings' `tracking` say what is chosen).
+    fn smoothing(&self) -> Option<String> {
+        None
+    }
+    /// The app's version, which N4N0's menu shows and suggestions carry.
+    fn app_version(&self) -> String {
+        orbiters_core::APP_VERSION.into()
+    }
+    /// Opens a video's link (http or https) on the device, to watch it there.
+    fn watch(&self, _link: &str) -> Result<(), String> {
+        Err("Videos open on the computer running Orbiters - N4N0.".into())
+    }
+    /// N4N0's menu shows its keyboard (`on`) or no longer does: the computer's keyboard may type there meanwhile
+    /// ([`crate::N4n0::key`]), VRChat's process `vrchat` in front.
+    fn keyboard(&self, _on: bool, _vrchat: Option<u32>) {}
     /// VRChat's `InStation`, `Seated` or `VelocityMagnitude` (on the OSC receiving thread); `None`: a new avatar, which
     /// has not said how it moves yet.
     fn motion(&self, _said: Option<(&str, &OscValue)>) {}
@@ -114,6 +130,10 @@ pub trait Osc: Send + Sync + 'static {
 /// The device's clipboard. Tests keep what they copy instead.
 pub trait Clipboard: Send + Sync {
     fn copy(&self, text: &str) -> Result<(), String>;
+    /// The text the clipboard holds (Ctrl+V on the menu's keyboard), when it holds some.
+    fn paste(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Opens a web page in the person's browser (only pages of the Orbiters website reach it).

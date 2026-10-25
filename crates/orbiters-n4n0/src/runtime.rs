@@ -16,7 +16,7 @@ use crate::media::Watcher;
 use crate::platform::{Browser, CallRequest, Clipboard, Ears, Files, Host, Locale, Osc, Platform, Sounds};
 use crate::screen::ScreenRuntime;
 use crate::states::StatesRuntime;
-use crate::status::{NoticeKind, OrbConfirmation, OrbFace, OrbLight, OrbLine, OrbStatus, OrbWho, ProcessUsage, VoiceStatus, LOCAL_APPROVAL};
+use crate::status::{NoticeKind, OrbConfirmation, OrbFace, OrbLight, OrbLine, OrbStatus, OrbWho, ProcessUsage, TrackingView, VoiceStatus, LOCAL_APPROVAL};
 use crate::voice::VoiceRuntime;
 use crate::Command;
 use orbiters_contracts::avatar::{self, AvatarManifest, Tag};
@@ -191,6 +191,20 @@ pub(crate) struct OrbRuntime {
     pub(crate) screen: ScreenRuntime,
     /// The avatar's saved states (states.rs).
     pub(crate) states: StatesRuntime,
+    /// The avatar's N4N0 version (its manifest's), and the versions the bottom of Home shows.
+    pub(crate) n4n0_version: Option<String>,
+    pub(crate) versions: String,
+    /// Tracking smoothing as the menus show it (`None`: the app has none, `tracking_note` says why).
+    pub(crate) tracking: Option<TrackingView>,
+    pub(crate) tracking_note: String,
+    /// The last suggestion a menu other than the screen's sent, numbered, and why it failed.
+    pub(crate) suggestion: Option<(u32, Option<String>)>,
+    /// The computer's keys for the overlay menu's keyboard (the last few, numbered), and whether the keyboard is taken.
+    pub(crate) keys: std::collections::VecDeque<(u32, orbiters_orb::menu::KeyInput)>,
+    pub(crate) keyboard_taken: bool,
+    /// The world's video, and the titles of those seen (`None` while asked).
+    pub(crate) world_video: Option<orbiters_orb::menu::WorldVideo>,
+    pub(crate) video_titles: HashMap<String, Option<String>>,
 }
 
 impl OrbRuntime {
@@ -360,6 +374,12 @@ impl OrbRuntime {
             states: self.states.view(self.avatar_id.as_deref()),
             can_drop: self.screen.card_ready(),
             card: self.screen.card_view(),
+            tracking: self.tracking.clone(),
+            tracking_note: self.tracking_note.clone(),
+            suggestion: self.suggestion.clone(),
+            versions: self.versions.clone(),
+            keys: self.keys.iter().cloned().collect(),
+            world_video: self.world_video.as_ref().map(|v| (v.url.clone(), v.title.clone(), v.at)),
         }
     }
 
@@ -604,14 +624,20 @@ impl N4n0 {
             let rt = self.orb.lock().unwrap();
             (rt.pins_due.is_some_and(|t| t <= now), rt.screen.available)
         };
-        let (settings, walk) = self.with_settings(|s| (TickSettings::of(&s.orb, pins_due), s.walk_boost.enabled));
+        let (settings, walk, tracking) = self.with_settings(|s| (TickSettings::of(&s.orb, pins_due), s.walk_boost.enabled, s.tracking.clone()));
         let scene = self.host.scene();
+        // What the Tracking page shows, and the versions at the bottom of Home.
+        let smoothing = self.host.smoothing();
+        let app_version = self.host.app_version();
+        // The world's video, as VRChat's log says.
+        let seen_video = self.host.world().last_video;
         // The friends who can be called only for the screen's menu.
         let calls = if screen { self.host.calls() } else { Default::default() };
         let (vrchat, steamvr) = (scene.vrchat, scene.steamvr);
         let mut followups = crate::screen::Followups::default();
         let mut out: Vec<Message> = Vec::new();
         let mut check_avatar = None;
+        let mut title_wanted: Option<String> = None;
         let mut gave_up = false;
         let mut expired = Vec::new();
         let before;
@@ -633,6 +659,21 @@ impl N4n0 {
                 rt.forget_avatar();
             }
             rt.vrchat_running = vrchat;
+            rt.tracking = smoothing.map(|note| TrackingView { on: tracking.enabled, levels: tracking.levels, note });
+            if rt.tracking.is_none() {
+                rt.tracking_note = "Smoothing SteamVR's tracking needs Orbiters - N4N0 on the computer running SteamVR".into();
+            }
+            rt.versions = format!("N4N0 {} · App {app_version}", rt.n4n0_version.as_deref().unwrap_or("?"));
+            if let Some(seen) = &seen_video {
+                if !rt.video_titles.contains_key(&seen.url) {
+                    rt.video_titles.insert(seen.url.clone(), None);
+                    title_wanted = Some(seen.url.clone());
+                }
+            }
+            let video =
+                seen_video.map(|seen| orbiters_orb::menu::WorldVideo { title: rt.video_titles.get(&seen.url).cloned().flatten(), url: seen.url, at: seen.at });
+            rt.screen.menu.world_video = video.clone();
+            rt.world_video = video;
             // The menu where it shows now (VRChat's mode or N4N0/Screen/Replace may have changed).
             rt.screen_place(steamvr);
             if rt.pending_at.is_some_and(|t| now.duration_since(t) > CONFIRM_FOR) {
@@ -713,6 +754,26 @@ impl N4n0 {
             due = rt.next_due(now, vrchat);
         }
         self.send(&out);
+        if let Some(url) = title_wanted {
+            let n = self.clone();
+            let _ = std::thread::Builder::new().name("orb-video-title".into()).spawn(move || {
+                let title = orbiters_orb::videos::youtube_title(&url);
+                n.orb.lock().unwrap().video_titles.insert(url, title);
+                n.publish();
+            });
+        }
+        let keyboard = {
+            let mut rt = self.orb.lock().unwrap();
+            let s = &rt.screen;
+            let wanted = (s.available && s.menu.shows_keyboard()) || (s.overlay_open && s.overlay_keyboard);
+            (wanted != rt.keyboard_taken).then(|| {
+                rt.keyboard_taken = wanted;
+                wanted
+            })
+        };
+        if let Some(on) = keyboard {
+            self.host.keyboard(on, scene.vrchat_pid);
+        }
         if let Some((_, id)) = default_state {
             self.states_apply(id, true);
         }
@@ -991,11 +1052,7 @@ impl N4n0 {
             params::PHOTO_3D => {
                 if value.truthy() {
                     // Starting reads VRChat's current values, as the record toggle's does: on the action queue.
-                    self.queue(|n| {
-                        if let Err(e) = n.host.photo_3d() {
-                            n.notify(NoticeKind::Warning, e.to_string());
-                        }
-                    });
+                    self.queue(|n| n.photo_3d_now());
                 }
             }
             params::WALK_BOOST => {
@@ -1084,7 +1141,7 @@ impl N4n0 {
         let flag = |name: &str| parameters.iter().find(|(a, _)| a[PARAMETERS_PREFIX.len()..] == *name).map(|(_, v)| v.truthy());
         let (afk, mute_self) = (flag("AFK"), flag("MuteSelf"));
         let manifest = read_manifest(&self.files.avatars, &id);
-        let manifest_screen = manifest.as_ref().and_then(|m| m.orb).is_some_and(|o| o.screen > 0);
+        let manifest_screen = manifest.as_ref().and_then(|m| m.orb.as_ref()).is_some_and(|o| o.screen > 0);
         // Where N4N0's menu goes: VRChat's mode (an int, 1 in VR), and N4N0/Screen/Replace.
         let vr_mode = flag(params::VR_MODE);
         let replace = screen_replace(flag(params::SCREEN_REPLACE), manifest.as_ref());
@@ -1110,7 +1167,7 @@ impl N4n0 {
         let sync = if contract::SYNC_COUNTS.contains(&synced) {
             Some(synced)
         } else if names.contains(params::TEXT_POINTER) || (!known && manifest.as_ref().is_some_and(|m| m.orb.is_some())) {
-            Some(manifest.as_ref().and_then(|m| m.orb).map(|o| o.text_sync as usize).filter(|n| contract::SYNC_COUNTS.contains(n)).unwrap_or(8))
+            Some(manifest.as_ref().and_then(|m| m.orb.as_ref()).map(|o| o.text_sync as usize).filter(|n| contract::SYNC_COUNTS.contains(n)).unwrap_or(8))
         } else {
             None
         };
@@ -1138,6 +1195,7 @@ impl N4n0 {
             rt.avatar_id = Some(id.clone());
             rt.params = names;
             rt.manifest = manifest.is_some();
+            rt.n4n0_version = manifest.as_ref().and_then(|m| m.orb.as_ref()).and_then(|o| o.version.clone());
             rt.controls = controls;
             rt.tree_unknown = !known;
             match sync {
@@ -1495,11 +1553,7 @@ impl N4n0 {
             Command::AnswerCall => self.host.call(CallRequest::Answer),
             Command::EndCall => self.host.call(CallRequest::End),
             Command::MuteCall { on } => self.host.call(CallRequest::Mute(on)),
-            Command::Photo3D => {
-                if let Err(e) = self.host.photo_3d() {
-                    self.notify(NoticeKind::Warning, e.to_string());
-                }
-            }
+            Command::Photo3D => self.photo_3d_now(),
             Command::TestCycle => {
                 let mut rt = self.orb.lock().unwrap();
                 rt.test_cycle = Some(Instant::now());
@@ -1507,7 +1561,21 @@ impl N4n0 {
             }
             Command::TestAfk { on } => self.orb.lock().unwrap().test_afk = on,
             Command::TestTouch => self.touch(),
-            Command::MenuState { open, dictation } => self.menu_overlay_state(open, dictation),
+            Command::MenuState { open, dictation, keyboard } => {
+                self.orb.lock().unwrap().screen.overlay_keyboard = open && keyboard;
+                self.menu_overlay_state(open, dictation)
+            }
+            Command::Tracking { on, levels } => self.update_settings(|s| {
+                s.tracking.enabled = on;
+                s.tracking.levels = levels;
+            }),
+            Command::Suggest { text, voice } => self.suggestion_send(text, voice, false),
+            Command::Dictate => self.menu_listen(),
+            Command::Watch { link } => {
+                if let Err(e) = self.host.watch(&link) {
+                    self.notify(NoticeKind::Warning, e);
+                }
+            }
             Command::ToggleScreen => self.menu_open(true),
             Command::Photo3DIn { seconds } => self.photo_3d_in(seconds),
             Command::Light { on, color, level } => {

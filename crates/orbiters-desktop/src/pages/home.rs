@@ -15,7 +15,7 @@ use egui::{pos2, vec2, Align, Align2, Color32, CursorIcon, Id, Key, Layout, Pain
 use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
 use orbiters_core::settings::Settings;
 use orbiters_orb::menu::layout::{self, Content, Tint, HOME_TILES, LENGTH_LABELS, TIMER_LABELS};
-use orbiters_orb::menu::{Call, Effect, MediaCommand, Menu, Page, PhotoLength, Target, Volume, TIMERS};
+use orbiters_orb::menu::{Call, Effect, MediaCommand, Menu, Page, PhotoLength, Target, Volume, SMOOTHING_LABELS, TIMERS, TRACKING_KINDS};
 use orbiters_orb::youtube::Video;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
@@ -45,6 +45,8 @@ enum Act {
     Volume(u8),
     /// What the States page asks of the service.
     States(StateAction),
+    /// The suggestion's new text.
+    Suggestion(String),
     /// Back to Home itself.
     Home,
 }
@@ -154,7 +156,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 Page::Photo => photo(ui, cx, menu, take_blocked, &mut acts),
                 Page::Music => music(ui, cx, menu, &picture, &mut acts),
                 Page::Light => light(ui, cx, menu, &mut acts),
-                Page::States => {
+                Page::Tracking => tracking(ui, cx, menu, &mut acts),
+                Page::Suggest | Page::Type => suggest(ui, cx, menu, &mut acts),
+                Page::States | Page::NewState => {
                     let mut out = Vec::new();
                     super::states::show(ui, cx, states, &mut out);
                     acts.extend(out.into_iter().map(|o| match o {
@@ -193,6 +197,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 effects.push(Effect::Media(MediaCommand::Volume(percent)));
             }
             Act::States(action) => cx.ctl.orb(OrbCommand::States { action }),
+            Act::Suggestion(text) => host.menu.suggestion = text,
             Act::Home => go_home(host),
         }
     }
@@ -780,6 +785,28 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
             });
         }
     });
+    // What the world's video player plays (VRChat's log): watched here from where the world is, or saved.
+    if let Some(video) = &menu.world_video {
+        let title = video.title.clone().unwrap_or_else(|| video.url.clone());
+        section(ui, cx, 2, icons::MONITOR_PLAY, "In the world", Some("What the world's video player plays now"), |ui| {
+            widgets::field(ui, &title, Some(&video.url), 260.0, |ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                if Button::new("Save").icon(icons::FLOPPY_DISK).size(Size::Sm).show(ui).clicked() {
+                    acts.push(Act::Press(Target::SaveVideo));
+                }
+                if Button::new("Watch")
+                    .icon(icons::MONITOR_PLAY)
+                    .variant(Variant::Primary)
+                    .size(Size::Sm)
+                    .hint("Opens it in your browser, where the world's player is")
+                    .show(ui)
+                    .clicked()
+                {
+                    acts.push(Act::Press(Target::WatchVideo));
+                }
+            });
+        });
+    }
 }
 
 fn light(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
@@ -810,6 +837,70 @@ fn light(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
                 acts.push(Act::Press(Target::LightLevel(level as u8)));
             }
         });
+    });
+}
+
+/// Tracking smoothing: the switch, each kind of device's strength, and what the driver does now.
+fn tracking(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
+    let Some(tracking) = menu.tracking.clone() else {
+        top(ui, cx, "Tracking", "Smoother trackers, controllers and headset", acts);
+        return note_card(ui, cx, 1, icons::VIRTUAL_REALITY, "Not on this computer", &layout::text(menu, Content::TrackingNote));
+    };
+    top(ui, cx, "Tracking", &tracking.note, acts);
+    let sub = "Less jitter, a little more lag: SteamVR's prediction is damped and each device's motion eased";
+    section(ui, cx, 1, icons::VIRTUAL_REALITY, "Smooth tracking", Some(sub), |ui| {
+        widgets::field(ui, "Smoothing", Some("Orbiters - N4N0's SteamVR driver: SteamVR loads it when it starts"), 48.0, |ui| {
+            let mut on = tracking.on;
+            if widgets::toggle(ui, "orbiters-home-tracking", &mut on) {
+                acts.push(Act::Press(Target::TrackingSwitch));
+            }
+        });
+        let hints = ["Keep it low: a smoothed headset lags behind your head", "For your hands", "Full-body trackers jitter most"];
+        for (k, kind) in TRACKING_KINDS.iter().enumerate() {
+            widgets::separator(ui);
+            let mut level = tracking.levels[k] as usize;
+            let levels: Vec<SegOption<usize>> = SMOOTHING_LABELS.iter().enumerate().map(|(i, name)| SegOption::new(i, name)).collect();
+            widgets::field(ui, kind, Some(hints[k]), 320.0, |ui| {
+                if widgets::segmented(ui, &format!("orbiters-home-smoothing-{k}"), &mut level, &levels, tracking.on) {
+                    acts.push(Act::Press(Target::Smoothing((k * 4 + level) as u8)));
+                }
+            });
+        }
+    });
+}
+
+/// Suggest features: the idea written here, sent to the Orbiters team.
+fn suggest(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
+    top(ui, cx, "Suggest a feature", "What should N4N0 do next? The Orbiters team reads every idea", acts);
+    let note = layout::text(menu, Content::SuggestNote);
+    section(ui, cx, 1, icons::CHAT_TEARDROP_TEXT, "Your idea", (!note.is_empty()).then_some(note.as_str()), |ui| {
+        ui.add_space(4.0);
+        let mut text = menu.suggestion.clone();
+        let w = ui.available_width();
+        let frame = egui::Frame::NONE.fill(theme::control()).corner_radius(theme::radius(12.0)).inner_margin(egui::Margin::same(12));
+        frame.show(ui, |ui| {
+            let edit = egui::TextEdit::multiline(&mut text)
+                .id_salt("orbiters-home-suggestion")
+                .hint_text("A feature, a fix, anything N4N0 or Orbiters - N4N0 could do better")
+                .frame(egui::Frame::NONE)
+                .desired_rows(5)
+                .desired_width(w - 24.0)
+                .char_limit(orbiters_orb::menu::SUGGESTION_MAX)
+                .font(egui::FontId::proportional(14.0));
+            ui.add(edit);
+        });
+        if text != menu.suggestion {
+            acts.push(Act::Suggestion(text.clone()));
+        }
+        ui.add_space(12.0);
+        let ready = !text.trim().is_empty() && !menu.sending;
+        let label = if menu.sending { "Sending…" } else { "Send" };
+        let button = Button::new(label).icon(icons::PAPER_PLANE_TILT).variant(Variant::Primary).enabled(ready);
+        let bw = button.desired_width(ui);
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
+        if button.show_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.top()), vec2(bw, 36.0))).clicked() {
+            acts.push(Act::Press(Target::SuggestSend));
+        }
     });
 }
 
@@ -1079,7 +1170,7 @@ mod tests {
         h.release(save.center());
         assert!(matches!(
             h.recorder.orb.lock().unwrap().last(),
-            Some(OrbCommand::States { action: StateAction::Save { name: Some(name) } }) if name == "State 2"
+            Some(OrbCommand::States { action: StateAction::Save { name: Some(name), .. } }) if name == "State 2"
         ));
     }
 }

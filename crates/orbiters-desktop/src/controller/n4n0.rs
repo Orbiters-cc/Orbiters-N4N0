@@ -119,6 +119,24 @@ impl Host for Link {
         self.with(|c| c.take_3d_picture()).unwrap_or(Ok(()))
     }
 
+    /// A video's link opened in the default browser (http or https only).
+    fn watch(&self, link: &str) -> Result<(), String> {
+        super::open_url(link).map_err(|e| e.to_string())
+    }
+
+    /// N4N0's menu shows its keyboard: the computer's keyboard types there while VRChat is in front.
+    fn keyboard(&self, on: bool, vrchat: Option<u32>) {
+        crate::keys::capture(on, vrchat);
+    }
+
+    /// Tracking smoothing: what the driver does now (Windows only).
+    fn smoothing(&self) -> Option<String> {
+        if !cfg!(windows) {
+            return None;
+        }
+        self.0.upgrade().map(|c| c.tracking_note())
+    }
+
     /// The avatar's Walk boost radial: kept, and not sent back to the radial.
     fn walk_boost(&self, strength: f32) {
         self.with(|c| c.set_walk_boost(strength, true));

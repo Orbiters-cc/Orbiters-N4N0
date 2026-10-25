@@ -50,11 +50,108 @@ pub enum Page {
     Music,
     /// N4N0 as a light: on or off, its colour and brightness.
     Light,
-    /// The avatar's saved states: apply one, save how it is now.
+    /// The avatar's saved states: apply one, make a new one.
     States,
     /// A link card dropped in the world (only the avatar's screen shows it, while the menu itself is closed).
     Card,
+    /// A state being made: its name, what it puts back, Save.
+    NewState,
+    /// The keyboard for a text that is not a search: a state's name, a suggestion ([`Menu::typing`]).
+    Type,
+    /// SteamVR's tracking smoothed (headset, controllers, trackers).
+    Tracking,
+    /// A feature to suggest to Orbiters, typed or said.
+    Suggest,
 }
+
+/// What the keyboard page ([`Page::Type`]) types.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Typing {
+    /// The name of the state being made.
+    #[default]
+    StateName,
+    /// A feature suggestion.
+    Suggestion,
+}
+
+impl Typing {
+    /// The most characters it holds.
+    pub fn max(self) -> usize {
+        match self {
+            Typing::StateName => STATE_NAME_MAX,
+            Typing::Suggestion => SUGGESTION_MAX,
+        }
+    }
+}
+
+/// A state's name, in characters.
+pub const STATE_NAME_MAX: usize = 32;
+/// A suggestion, in characters (the server takes up to 2000; the screen shows the end of a longer one).
+pub const SUGGESTION_MAX: usize = 400;
+
+/// The video the world's player plays now (VRChat's log), as the Music page shows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorldVideo {
+    pub url: String,
+    /// Its title, once known (YouTube's).
+    pub title: Option<String>,
+    /// When it started (Unix seconds), for watching it from where the world is.
+    pub at: Option<u64>,
+}
+
+/// The link to watch `video` at, `now` (Unix seconds): a YouTube video from where the world's player is (it started
+/// `now - at` ago, for up to six hours), anything else as it is.
+pub fn watch_link(video: &WorldVideo, now: u64) -> String {
+    let Some(id) = crate::videos::youtube_id(&video.url) else { return video.url.clone() };
+    match video.at.map(|at| now.saturating_sub(at)) {
+        Some(seconds) if (5..6 * 3600).contains(&seconds) => format!("https://www.youtube.com/watch?v={id}&t={seconds}s"),
+        _ => format!("https://www.youtube.com/watch?v={id}"),
+    }
+}
+
+/// A key of the computer's keyboard, for the menu's keyboard ([`Menu::key`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "key", content = "text", rename_all = "snake_case")]
+pub enum KeyInput {
+    /// What a key writes, in the keyboard's layout.
+    Text(String),
+    Backspace,
+    /// Search, or the keyboard page's Done.
+    Enter,
+    /// Back.
+    Escape,
+    /// Ctrl+V: the clipboard's text.
+    Paste,
+}
+
+/// The state the New state page makes: its name and what applying it puts back besides the parameters.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Draft {
+    pub name: String,
+    /// The avatar's size (its eye height): on unless the person turns it off.
+    pub size: bool,
+    /// GoGoLoco's pose.
+    pub pose: bool,
+    /// Applied after each world join and each switch to this avatar.
+    pub default: bool,
+}
+
+/// SteamVR's tracking smoothed per kind of device (Orbiters - N4N0's smoothing driver), as the Tracking page shows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tracking {
+    /// Smoothing is on.
+    pub on: bool,
+    /// Each kind's strength, an index of [`SMOOTHING_LABELS`]: the headset, the controllers, the trackers.
+    pub levels: [u8; 3],
+    /// What the driver does now ("Smoothing your trackers", "Restart SteamVR to start it"), or why it cannot.
+    pub note: String,
+}
+
+/// The kinds of devices the Tracking page smooths, in its rows' order.
+pub const TRACKING_KINDS: [&str; 3] = ["Headset", "Controllers", "Trackers"];
+/// The strengths it offers, and what each is (0 leaves the device as SteamVR tracks it, 1 the strongest).
+pub const SMOOTHING_LABELS: [&str; 4] = ["Off", "Low", "Medium", "High"];
+pub const SMOOTHING_STRENGTHS: [f32; 4] = [0.0, 0.35, 0.65, 0.9];
 
 /// The pages a display has (contracts `Docs/orb.md`, Menu): the avatar's screen by its version (`N4N0/Screen/Version`),
 /// the overlay and the window all of them ([`Pages::ALL`]).
@@ -67,16 +164,20 @@ pub enum Pages {
     Six,
     /// From version 5: the seven-tile Home (States), the States page, Drop on the results and the link card.
     Seven,
+    /// From version 6: the ten-tile Home (Tracking, Suggest features, the versions), New state, the keyboard for
+    /// names and suggestions, Tracking and Suggest features.
+    Ten,
 }
 
 impl Pages {
     /// Every page: the overlay's and the window's.
-    pub const ALL: Pages = Pages::Seven;
+    pub const ALL: Pages = Pages::Ten;
 
     /// The pages of a screen of `version` (`None`: a screen from before `N4N0/Screen/Version`).
     pub fn of_screen(version: Option<i32>) -> Pages {
-        use orbiters_contracts::orb::{SCREEN_MUSIC_LIGHT, SCREEN_STATES_CARDS};
+        use orbiters_contracts::orb::{SCREEN_MUSIC_LIGHT, SCREEN_STATES_CARDS, SCREEN_TEN_TILES};
         match version {
+            Some(v) if v >= SCREEN_TEN_TILES => Pages::Ten,
             Some(v) if v >= SCREEN_STATES_CARDS => Pages::Seven,
             Some(v) if v >= SCREEN_MUSIC_LIGHT => Pages::Six,
             _ => Pages::Four,
@@ -91,6 +192,11 @@ impl Pages {
     /// Home has the States tile (and its page), the results Drop, and links drop as cards.
     pub fn states_cards(self) -> bool {
         self >= Pages::Seven
+    }
+
+    /// Home has the Tracking and Suggest features tiles and the versions; States makes a new state on its own page.
+    pub fn ten(self) -> bool {
+        self >= Pages::Ten
     }
 }
 
@@ -195,7 +301,7 @@ pub enum MediaCommand {
     Mute(bool),
 }
 
-/// N4N0's light as the avatar holds it (`N4N0/Light`, `N4N0/Light/Color`, `N4N0/Light/Level`).
+/// N4N0's light as the avatar holds it (`N4N0/Light/On`, `N4N0/Light/Color`, `N4N0/Light/Level`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Light {
     pub on: bool,
@@ -283,12 +389,34 @@ pub enum Target {
     StateApply(u8),
     /// The mark on the default state's row (it applies the state, as the row does).
     StateMark(u8),
-    /// Saves how the avatar is now, named "State n".
+    /// The States page's New state (on screens before version 6: saves how the avatar is now, named "State n").
     StateSave,
     // Results: a copied link dropped in the world.
     Drop(u8),
     /// A segment of a dropped card's countdown bar (nothing to press).
     CardTime(u8),
+    // New state: its name (opens the keyboard), what it puts back, Save.
+    DraftName,
+    DraftSize,
+    DraftPose,
+    DraftDefault,
+    DraftSave,
+    /// The keyboard page's Done: the text goes where it was typed for.
+    Done,
+    // Home's eighth and ninth tiles.
+    Tracking,
+    Suggest,
+    /// Tracking: smoothing on or off, and a kind's strength (kind × 4 + strength: [`TRACKING_KINDS`] ×
+    /// [`SMOOTHING_LABELS`]).
+    TrackingSwitch,
+    Smoothing(u8),
+    /// Suggest features: type it, say it, send it.
+    SuggestType,
+    SuggestTalk,
+    SuggestSend,
+    /// Music: the world's video, watched on the computer from where the world is, or saved in N4N0's videos.
+    WatchVideo,
+    SaveVideo,
 }
 
 /// What the host does for the menu. Requests are numbered, and their answers carry the number back: an answer to an
@@ -338,10 +466,32 @@ pub enum Effect {
     Media(MediaCommand),
     /// Set N4N0's light so (its three parameters).
     Light(Light),
-    /// Save how the avatar is now as a state named `name`.
+    /// Save how the avatar is now as a state named `name`, which puts back its size and GoGoLoco's pose too when they
+    /// are on, and is the avatar's default when `default` is.
     SaveState {
         name: String,
+        size: bool,
+        pose: bool,
+        default: bool,
     },
+    /// Smooth SteamVR's tracking so (the Tracking page).
+    Tracking {
+        on: bool,
+        levels: [u8; 3],
+    },
+    /// Listen to the person for the suggestion they dictate (Suggest features' Talk).
+    Dictate,
+    /// Send this suggestion to Orbiters (`voice`: some of it was said, not typed).
+    SendSuggestion {
+        text: String,
+        voice: bool,
+    },
+    /// Open this video on the computer (the world's, from where its player is).
+    WatchVideo {
+        link: String,
+    },
+    /// Save the world's video in N4N0's videos.
+    SaveVideo,
     /// Put the avatar back as state `id` (named `name`) holds it.
     ApplyState {
         id: String,
@@ -431,6 +581,24 @@ pub struct Menu {
     pub can_drop: bool,
     /// The link card the avatar's screen shows (the menu's page is then [`Page::Card`]).
     pub card: Option<Card>,
+    /// The state the New state page makes.
+    pub draft: Draft,
+    /// What the keyboard page types for, and what it holds.
+    pub typing: Typing,
+    pub typed: String,
+    /// Tracking smoothing, when the host offers it (`None`: Tracking says why not, from `tracking_note`).
+    pub tracking: Option<Tracking>,
+    pub tracking_note: String,
+    /// The suggestion being written, whether some of it was said, and whether it is on its way to Orbiters.
+    pub suggestion: String,
+    pub suggestion_voice: bool,
+    pub sending: bool,
+    /// N4N0 listens for the suggestion (Talk on Suggest features).
+    pub dictating: bool,
+    /// The versions at the bottom of Home: N4N0's on the avatar and the app's ("N4N0 1.0.9 · App 0.4.0").
+    pub versions: String,
+    /// The video the world's player plays (VRChat's log).
+    pub world_video: Option<WorldVideo>,
 }
 
 /// How long a state saved here shows before the host's list has it.
@@ -494,8 +662,82 @@ impl Menu {
     fn go(&mut self, page: Page) {
         self.page = page;
         self.notice = None;
-        if page == Page::Search {
+        if page == Page::Search || page == Page::Type {
             self.keys = Keys::Letters;
+        }
+    }
+
+    /// Opens the keyboard page for `typing`, holding `text`.
+    fn type_for(&mut self, typing: Typing, text: String) {
+        self.typing = typing;
+        self.typed = cut(&text, typing.max());
+        self.go(Page::Type);
+    }
+
+    /// The page the keyboard page came from, and goes back to.
+    fn typed_from(&self) -> Page {
+        match self.typing {
+            Typing::StateName => Page::NewState,
+            Typing::Suggestion => Page::Suggest,
+        }
+    }
+
+    /// Saves the state as `draft` says: listed at once (until the host's list has it), the States page showing it.
+    fn save_draft(&mut self, draft: Draft) -> Vec<Effect> {
+        let name = if draft.name.trim().is_empty() { next_state_name(&self.states) } else { cut(draft.name.trim(), STATE_NAME_MAX) };
+        self.pending_save = Some((name.clone(), Instant::now()));
+        self.states.push(StateRow { name: name.clone(), size: draft.size, pose: draft.pose, default: draft.default, ..Default::default() });
+        self.go(Page::States);
+        // The page with the new one shows.
+        self.state_page = (self.states.len() - 1) / STATES_PER_PAGE;
+        self.notice = Some(format!("Saved as \"{name}\""));
+        vec![Effect::SaveState { name, size: draft.size, pose: draft.pose, default: draft.default }]
+    }
+
+    /// The suggestion reached Orbiters (`Ok`), or did not (why): sent, it is cleared and thanked for; else it stays.
+    pub fn suggestion_sent(&mut self, result: Result<(), String>) {
+        self.sending = false;
+        match result {
+            Ok(()) => {
+                self.suggestion.clear();
+                self.suggestion_voice = false;
+                self.notice = Some("Thank you! Your suggestion reached Orbiters".into());
+            }
+            Err(e) => self.notice = Some(format!("Not sent: {}", cut(&e, 60))),
+        }
+    }
+
+    /// Listening for the suggestion ended (heard or not).
+    pub fn dictation_ended(&mut self) {
+        self.dictating = false;
+    }
+
+    /// Whether a sentence N4N0 hears now is for the menu's page (what to search for, a suggestion, a state's name)
+    /// rather than for N4N0's assistant.
+    pub fn takes_speech(&self) -> bool {
+        self.open && matches!(self.page, Page::Search | Page::Suggest | Page::NewState | Page::Type)
+    }
+
+    /// Whether the menu shows its keyboard (YouTube's search, a name or a suggestion being typed): the computer's
+    /// keyboard types there then.
+    pub fn shows_keyboard(&self) -> bool {
+        self.open && matches!(self.page, Page::Search | Page::Type)
+    }
+
+    /// A key of the computer's keyboard while the menu's keyboard shows (`paste`: the clipboard's text, for Ctrl+V).
+    pub fn key(&mut self, input: KeyInput, paste: impl FnOnce() -> Option<String>) -> Vec<Effect> {
+        if !self.shows_keyboard() {
+            return Vec::new();
+        }
+        match input {
+            KeyInput::Text(text) => self.type_text(&text),
+            KeyInput::Backspace => self.backspace(),
+            KeyInput::Enter => self.press(if self.page == Page::Type { Target::Done } else { Target::Search }),
+            KeyInput::Escape => self.press(Target::Back),
+            KeyInput::Paste => match paste() {
+                Some(text) => self.type_text(&text.replace(['\r', '\n'], " ")),
+                None => Vec::new(),
+            },
         }
     }
 
@@ -510,6 +752,8 @@ impl Menu {
             Target::Back => {
                 let to = match self.page {
                     Page::Results => Page::Search,
+                    Page::Type => self.typed_from(),
+                    Page::NewState => Page::States,
                     _ => Page::Home,
                 };
                 self.go(to);
@@ -596,16 +840,97 @@ impl Menu {
                 }
                 _ => Vec::new(),
             },
-            Target::StateSave if self.states_ready => {
-                let name = next_state_name(&self.states);
-                self.pending_save = Some((name.clone(), Instant::now()));
-                self.states.push(StateRow { name: name.clone(), ..Default::default() });
-                // The page with the new one shows.
-                self.state_page = (self.states.len() - 1) / STATES_PER_PAGE;
-                self.notice = Some(format!("Saved as \"{name}\""));
-                vec![Effect::SaveState { name }]
+            // New state: its own page from screen version 6; older screens save at once, size included.
+            Target::StateSave if self.states_ready && self.pages.ten() => {
+                self.draft = Draft { name: next_state_name(&self.states), size: true, pose: false, default: false };
+                self.go(Page::NewState);
+                Vec::new()
             }
+            Target::StateSave if self.states_ready => self.save_draft(Draft { name: String::new(), size: true, pose: false, default: false }),
             Target::StateSave => Vec::new(),
+            Target::DraftName => {
+                self.type_for(Typing::StateName, self.draft.name.clone());
+                Vec::new()
+            }
+            Target::DraftSize => {
+                self.draft.size = !self.draft.size;
+                Vec::new()
+            }
+            Target::DraftPose => {
+                self.draft.pose = !self.draft.pose;
+                Vec::new()
+            }
+            Target::DraftDefault => {
+                self.draft.default = !self.draft.default;
+                Vec::new()
+            }
+            Target::DraftSave if self.states_ready && self.page == Page::NewState => self.save_draft(self.draft.clone()),
+            Target::DraftSave => Vec::new(),
+            Target::Done => {
+                let text = self.typed.trim().to_string();
+                match self.typing {
+                    Typing::StateName if !text.is_empty() => self.draft.name = text,
+                    Typing::StateName => {}
+                    Typing::Suggestion => self.suggestion = cut(&text, SUGGESTION_MAX),
+                }
+                self.go(self.typed_from());
+                Vec::new()
+            }
+            Target::Tracking => {
+                self.go(Page::Tracking);
+                Vec::new()
+            }
+            Target::TrackingSwitch | Target::Smoothing(_) => match self.tracking.as_mut() {
+                Some(tracking) => {
+                    match target {
+                        Target::Smoothing(i) if ((i / 4) as usize) < TRACKING_KINDS.len() => {
+                            tracking.levels[(i / 4) as usize] = i % 4;
+                            // Choosing a strength turns smoothing on (Off for every kind leaves it on, doing nothing).
+                            tracking.on = true;
+                        }
+                        Target::TrackingSwitch => tracking.on = !tracking.on,
+                        _ => return Vec::new(),
+                    }
+                    vec![Effect::Tracking { on: tracking.on, levels: tracking.levels }]
+                }
+                None => Vec::new(),
+            },
+            Target::Suggest => {
+                self.go(Page::Suggest);
+                Vec::new()
+            }
+            Target::SuggestType => {
+                self.type_for(Typing::Suggestion, self.suggestion.clone());
+                Vec::new()
+            }
+            Target::SuggestTalk if self.dictating => {
+                self.dictating = false;
+                Vec::new()
+            }
+            Target::SuggestTalk => {
+                self.dictating = true;
+                self.notice = Some("Listening: say your idea".into());
+                vec![Effect::Dictate]
+            }
+            Target::SuggestSend if !self.sending && !self.suggestion.trim().is_empty() => {
+                self.sending = true;
+                self.notice = Some("Sending…".into());
+                vec![Effect::SendSuggestion { text: self.suggestion.trim().to_string(), voice: self.suggestion_voice }]
+            }
+            Target::SuggestSend => Vec::new(),
+            Target::WatchVideo => match &self.world_video {
+                Some(video) => {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                    self.notice = Some("Opened on the computer".into());
+                    vec![Effect::WatchVideo { link: watch_link(video, now) }]
+                }
+                None => Vec::new(),
+            },
+            Target::SaveVideo if self.world_video.is_some() => {
+                self.notice = Some("Saved in N4N0's videos".into());
+                vec![Effect::SaveVideo]
+            }
+            Target::SaveVideo => Vec::new(),
             Target::Previous => self.turn(-1),
             Target::Next => self.turn(1),
             Target::Contact(i) => match self.page_contacts().get(i as usize) {
@@ -700,8 +1025,23 @@ impl Menu {
         }
     }
 
-    /// Text typed into the search field (a key, or several characters at once).
+    /// Text typed into the search field, or the keyboard page's text (a key, or several characters at once).
     pub fn type_text(&mut self, text: &str) -> Vec<Effect> {
+        if self.page == Page::Type {
+            let max = self.typing.max();
+            for c in text.chars() {
+                if self.typed.chars().count() >= max {
+                    break;
+                }
+                if c == ' ' && (self.typed.is_empty() || self.typed.ends_with(' ')) {
+                    continue;
+                }
+                if !c.is_control() {
+                    self.typed.push(c);
+                }
+            }
+            return Vec::new();
+        }
         if self.page != Page::Search {
             return Vec::new();
         }
@@ -732,6 +1072,10 @@ impl Menu {
     }
 
     pub fn backspace(&mut self) -> Vec<Effect> {
+        if self.page == Page::Type {
+            self.typed.pop();
+            return Vec::new();
+        }
         if self.page != Page::Search {
             return Vec::new();
         }
@@ -1022,6 +1366,26 @@ impl Menu {
         if self.page == Page::Search {
             self.query = cut(text, QUERY_MAX);
             return Some(self.search());
+        }
+        // Said on Suggest features (Talk, or just spoken there), or on the keyboard page: the words go in the text.
+        if self.page == Page::Suggest || (self.page == Page::Type && self.typing == Typing::Suggestion) {
+            let spoken = text.trim();
+            let target = if self.page == Page::Type { &mut self.typed } else { &mut self.suggestion };
+            let joined = if target.trim().is_empty() { spoken.to_string() } else { format!("{} {spoken}", target.trim_end()) };
+            *target = cut(&joined, SUGGESTION_MAX);
+            self.suggestion_voice = true;
+            self.dictating = false;
+            self.notice = None;
+            return Some(Vec::new());
+        }
+        if self.page == Page::NewState || (self.page == Page::Type && self.typing == Typing::StateName) {
+            let name = cut(text, STATE_NAME_MAX);
+            if self.page == Page::Type {
+                self.typed = name;
+            } else {
+                self.draft.name = name;
+            }
+            return Some(Vec::new());
         }
         self.heard = Some(cut(text, 60));
         self.heard_private = true;
@@ -1431,7 +1795,7 @@ mod tests {
         assert!(menu.press(Target::StateSave).is_empty(), "no avatar known: nothing to save");
         let row = |id: &str, name: &str| StateRow { id: id.into(), name: name.into(), ..Default::default() };
         menu.set_states(vec![row("s1", "State 1"), row("s2", "Hoodie on")], true, "");
-        assert_eq!(menu.press(Target::StateSave), vec![Effect::SaveState { name: "State 3".into() }]);
+        assert_eq!(menu.press(Target::StateSave), vec![Effect::SaveState { name: "State 3".into(), size: true, pose: false, default: false }]);
         assert!(menu.saving());
         assert_eq!(layout::text(&menu, layout::Content::StatesTitle), "Saved as \"State 3\"");
         assert_eq!(menu.states.last().map(|s| (s.id.as_str(), s.name.as_str())), Some(("", "State 3")), "at once, before the host answers");
@@ -1451,5 +1815,114 @@ mod tests {
         assert_eq!((menu.state_page, menu.page_states().len(), menu.has_next()), (2, 2, false));
         menu.set_states(vec![row("s1", "State 1")], true, "");
         assert_eq!(menu.state_page, 0, "fewer states: back to a page that exists");
+    }
+
+    #[test]
+    fn a_new_state_is_named_and_chosen_on_its_page() {
+        let mut menu = Menu { pages: Pages::Ten, ..Default::default() };
+        menu.open();
+        menu.set_states(vec![StateRow { id: "s1".into(), name: "State 1".into(), ..Default::default() }], true, "");
+        menu.press(Target::States);
+        assert!(menu.press(Target::StateSave).is_empty(), "New state opens its page, saving nothing yet");
+        assert_eq!(menu.page, Page::NewState);
+        assert_eq!(menu.draft, Draft { name: "State 2".into(), size: true, pose: false, default: false }, "the size on by default");
+        // The name typed on the keyboard page: Done brings it back, Back would not.
+        menu.press(Target::DraftName);
+        assert_eq!((menu.page, menu.typing, menu.typed.as_str()), (Page::Type, Typing::StateName, "State 2"));
+        for _ in 0..7 {
+            menu.backspace();
+        }
+        menu.type_text("  Party  outfit");
+        assert_eq!(menu.typed, "Party outfit", "no leading or double space");
+        assert_eq!(layout::text(&menu, layout::Content::TypeLine(0)), "Party outfit|");
+        menu.press(Target::Back);
+        assert_eq!((menu.page, menu.draft.name.as_str()), (Page::NewState, "State 2"));
+        menu.press(Target::DraftName);
+        menu.set_states(menu.states.clone(), true, "");
+        menu.typed = "Party outfit".into();
+        menu.press(Target::Done);
+        assert_eq!((menu.page, menu.draft.name.as_str()), (Page::NewState, "Party outfit"));
+        menu.press(Target::DraftPose);
+        menu.press(Target::DraftDefault);
+        menu.press(Target::DraftSize);
+        assert_eq!(layout::text(&menu, layout::Content::DraftNote), "Puts back its parameters and pose · also after each world join");
+        assert_eq!(menu.press(Target::DraftSave), vec![Effect::SaveState { name: "Party outfit".into(), size: false, pose: true, default: true }]);
+        assert_eq!(menu.page, Page::States);
+        assert_eq!(menu.states.last().map(|s| (s.name.as_str(), s.pose, s.size, s.default)), Some(("Party outfit", true, false, true)));
+        // A screen before version 6 has no New state page: its button saves at once, the size included.
+        let mut old = Menu { pages: Pages::Seven, ..Default::default() };
+        old.open();
+        old.set_states(Vec::new(), true, "");
+        old.press(Target::States);
+        assert_eq!(old.press(Target::StateSave), vec![Effect::SaveState { name: "State 1".into(), size: true, pose: false, default: false }]);
+        assert_eq!(
+            layout::ScreenPage::of(&Menu { pages: Pages::Seven, page: Page::NewState, open: true, ..Default::default() }),
+            layout::ScreenPage::HomeSeven
+        );
+    }
+
+    #[test]
+    fn the_world_video_is_watched_from_where_the_world_is() {
+        let video = |url: &str, at: Option<u64>| WorldVideo { url: url.into(), title: None, at };
+        assert_eq!(watch_link(&video("https://youtu.be/36YnV9STBqc", Some(1000)), 1090), "https://www.youtube.com/watch?v=36YnV9STBqc&t=90s");
+        assert_eq!(watch_link(&video("https://www.youtube.com/watch?v=36YnV9STBqc", Some(1000)), 1002), "https://www.youtube.com/watch?v=36YnV9STBqc", "just started");
+        assert_eq!(watch_link(&video("https://example.com/stream.m3u8", Some(1000)), 1090), "https://example.com/stream.m3u8");
+        let mut menu = Menu { pages: Pages::Ten, ..Default::default() };
+        menu.open();
+        menu.press(Target::Music);
+        assert!(menu.press(Target::WatchVideo).is_empty() && layout::target_state(&menu, Target::SaveVideo).hidden, "no video in the world");
+        menu.world_video = Some(video("https://youtu.be/36YnV9STBqc", None));
+        assert_eq!(menu.press(Target::SaveVideo), vec![Effect::SaveVideo]);
+        assert!(matches!(&menu.press(Target::WatchVideo)[..], [Effect::WatchVideo { .. }]));
+        menu.pages = Pages::Seven;
+        assert!(layout::target_state(&menu, Target::WatchVideo).hidden, "older screens have no such buttons");
+    }
+
+    #[test]
+    fn tracking_strengths_turn_smoothing_on() {
+        let mut menu = Menu { pages: Pages::Ten, ..Default::default() };
+        menu.open();
+        menu.press(Target::Tracking);
+        assert_eq!(menu.page, Page::Tracking);
+        assert!(menu.press(Target::Smoothing(5)).is_empty(), "nothing to set without the host's smoothing");
+        assert!(layout::target_state(&menu, Target::Smoothing(5)).unavailable);
+        menu.tracking = Some(Tracking { on: false, levels: [0, 1, 2], note: String::new() });
+        // Controllers (kind 1) to High (3).
+        assert_eq!(menu.press(Target::Smoothing(7)), vec![Effect::Tracking { on: true, levels: [0, 3, 2] }]);
+        assert!(layout::target_state(&menu, Target::Smoothing(7)).on && !layout::target_state(&menu, Target::Smoothing(5)).on);
+        assert_eq!(menu.press(Target::TrackingSwitch), vec![Effect::Tracking { on: false, levels: [0, 3, 2] }]);
+        assert!(!layout::target_state(&menu, Target::Smoothing(7)).on, "off: no strength ringed");
+        assert!(menu.press(Target::Smoothing(12)).is_empty(), "no fourth kind");
+    }
+
+    #[test]
+    fn a_suggestion_is_typed_or_said_then_sent() {
+        let mut menu = Menu { pages: Pages::Ten, ..Default::default() };
+        menu.open();
+        menu.press(Target::Suggest);
+        assert!(menu.press(Target::SuggestSend).is_empty(), "nothing to send yet");
+        assert!(layout::target_state(&menu, Target::SuggestSend).unavailable);
+        assert_eq!(menu.press(Target::SuggestTalk), vec![Effect::Dictate]);
+        assert!(menu.dictating && layout::target_state(&menu, Target::SuggestTalk).on);
+        assert_eq!(menu.heard("A dance mode for N4N0."), Some(Vec::new()), "said on the page: it is the suggestion's");
+        assert_eq!(menu.suggestion, "A dance mode for N4N0");
+        assert!(!menu.dictating && menu.suggestion_voice);
+        menu.press(Target::SuggestType);
+        menu.type_text(" with music");
+        menu.press(Target::Done);
+        assert_eq!((menu.page, menu.suggestion.as_str()), (Page::Suggest, "A dance mode for N4N0 with music"));
+        assert_eq!(
+            menu.press(Target::SuggestSend),
+            vec![Effect::SendSuggestion { text: "A dance mode for N4N0 with music".into(), voice: true }]
+        );
+        assert!(menu.press(Target::SuggestSend).is_empty(), "once while it is on its way");
+        menu.suggestion_sent(Err("offline".into()));
+        assert_eq!(menu.suggestion, "A dance mode for N4N0 with music", "kept when it failed");
+        menu.press(Target::SuggestSend);
+        menu.suggestion_sent(Ok(()));
+        assert!(menu.suggestion.is_empty() && layout::text(&menu, layout::Content::SuggestNote).starts_with("Thank you"));
+        // Everyone else's screen never shows what the owner writes.
+        menu.suggestion = "private idea".into();
+        assert_eq!(layout::text_for(&menu, layout::Content::SuggestLine(0), true), "");
     }
 }

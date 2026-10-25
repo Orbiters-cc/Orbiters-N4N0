@@ -63,6 +63,15 @@ pub fn glyph(icon: Icon) -> &'static str {
         Icon::Drop => icons::HAND_DEPOSIT,
         Icon::Grab => icons::HAND_GRABBING,
         Icon::Link => icons::LINK_SIMPLE,
+        Icon::Tracking => icons::VIRTUAL_REALITY,
+        Icon::Suggest => icons::CHAT_TEARDROP_TEXT,
+        Icon::Keyboard => icons::KEYBOARD,
+        Icon::Plus => icons::PLUS,
+        Icon::Send => icons::PAPER_PLANE_TILT,
+        Icon::Check => icons::CHECK,
+        Icon::Size => icons::ARROWS_OUT,
+        Icon::Pose => icons::PERSON_SIMPLE_WALK,
+        Icon::Watch => icons::MONITOR_PLAY,
     }
 }
 
@@ -78,6 +87,8 @@ pub fn tint(t: Tint) -> Color32 {
         Tint::Cyan => theme::CYAN,
         Tint::Amber => theme::WARN,
         Tint::Pink => PINK,
+        Tint::Indigo => theme::INDIGO,
+        Tint::Purple => theme::PURPLE,
         Tint::Light(i) => {
             let [r, g, b] = orbiters_contracts::orb::LIGHT_COLORS.get(i as usize).map_or([255; 3], |c| c.1);
             Color32::from_rgb(r, g, b)
@@ -96,7 +107,7 @@ fn style_color(style: Style) -> Color32 {
 /// An element's fill.
 fn fill(look: Look) -> Color32 {
     match look {
-        Look::Tile | Look::Field | Look::Chip => theme::INK_800,
+        Look::Tile | Look::Field | Look::Chip | Look::Area => theme::INK_800,
         Look::Round | Look::Key => theme::INK_750,
         Look::KeyDark => theme::INK_700,
         Look::Row => Color32::TRANSPARENT,
@@ -145,6 +156,18 @@ fn element(p: &Painter, e: &Element, origin: Pos2) {
         p.rect_filled(r, radius, color);
     }
     match e.look {
+        Look::Tile if tile_is_compact(e.rect) => {
+            // A small tile (ten tiles): a smaller icon at its top left, the title beside it, its note under both.
+            let tint = e.tint.map(tint).unwrap_or(theme::ACCENT);
+            let tile = Rect::from_min_size(r.min + vec2(20.0, 20.0), vec2(56.0, 56.0));
+            p.rect_filled(tile, theme::radius(16.0), theme::alpha(tint, 0.16));
+            if let Some(icon) = e.icon {
+                widgets::icon(p, tile.center(), glyph(icon), 30.0, tint);
+            }
+            if let Some(title) = e.label {
+                widgets::text(p, r.min + vec2(90.0, 34.0), Align2::LEFT_TOP, &Txt::new(title, 25.0).weight(weight::SEMIBOLD).color(theme::FG));
+            }
+        }
         Look::Tile => {
             let tint = e.tint.map(tint).unwrap_or(theme::ACCENT);
             // A wide tile (six tiles): the icon at its left, the title beside it (its note under the title); one as wide
@@ -160,8 +183,8 @@ fn element(p: &Painter, e: &Element, origin: Pos2) {
                 widgets::text(p, at, Align2::LEFT_TOP, &Txt::new(title, 30.0).weight(weight::SEMIBOLD).color(theme::FG));
             }
         }
-        // A countdown's segment: its colour is all of it.
-        Look::Bar => {}
+        // A countdown's segment: its colour is all of it; a text area is its panel, its text slots over it.
+        Look::Bar | Look::Area => {}
         Look::Field => {
             if let Some(icon) = e.icon {
                 widgets::icon(p, pos2(r.min.x + 34.0, r.center().y), glyph(icon), 26.0, theme::FG_3);
@@ -204,6 +227,11 @@ fn element(p: &Painter, e: &Element, origin: Pos2) {
 /// above it.
 pub fn tile_is_wide(r: layout::Rect) -> bool {
     2 * r.w as u32 > 3 * r.h as u32
+}
+
+/// Whether a home tile is one of the ten-tile Home's small ones: its icon smaller, its title beside it.
+pub fn tile_is_compact(r: layout::Rect) -> bool {
+    r.h <= 160 && r.w < 300
 }
 
 /// N4N0 itself, `radius` large: its green dot with its eyes, as the menu's back shows it.

@@ -161,6 +161,8 @@ pub struct Controller {
     /// A switch of the kit back on after an avatar change waits (one at a time, for the newest avatar).
     kit_rearm: AtomicBool,
     /// The app quits: no capture worker starts again, nor a capture.
+    /// What tracking smoothing's driver does now (the service's keeper says), for N4N0's Tracking page.
+    tracking_note: Mutex<String>,
     quitting: AtomicBool,
 }
 
@@ -225,6 +227,17 @@ fn calibration_file() -> PathBuf {
     orbiters_core::paths::config_dir().join("calibration.json")
 }
 
+/// Talks to Orbiters' development environment (the server on this computer, its account and update feed) or to
+/// orbiters.cc, as the settings' Development environment switch says, whatever the Unity tools are set to.
+pub fn use_environment(development: bool) {
+    orbiters_core::account::choose_server(Some(if development {
+        orbiters_core::account::Server::Development
+    } else {
+        orbiters_core::account::Server::Production
+    }));
+    orbiters_update::set_development(development);
+}
+
 /// The calibration kept; one that cannot be read is kept beside (`calibration.json.bad-<time>`) before the next
 /// calibration replaces it. Tests read none (the person's config folder stays out of them).
 fn read_calibration() -> Option<StoredCalibration> {
@@ -272,6 +285,7 @@ pub use account::open_url;
 
 impl Controller {
     pub fn new(settings: Settings) -> Shared {
+        use_environment(settings.development);
         let mut snapshot = Snapshot::new(settings);
         let calibration = read_calibration();
         snapshot.steamvr.calibration = calibration.as_ref().map(calibration_info);
@@ -315,13 +329,33 @@ impl Controller {
             osc_actions: orbiters_n4n0::Actions::default(),
             record_toggle: AtomicU8::new(TOGGLE_NONE),
             kit_rearm: AtomicBool::new(false),
+            tracking_note: Mutex::new(String::new()),
             quitting: AtomicBool::new(false),
         })
+    }
+
+    /// What tracking smoothing's driver does now, as the service's keeper found it.
+    pub fn set_tracking_note(&self, note: String) {
+        *self.tracking_note.lock().unwrap() = note;
+    }
+
+    pub fn tracking_note(&self) -> String {
+        self.tracking_note.lock().unwrap().clone()
     }
 
     /// Starts OSC, the worker and the watchers.
     pub fn start(self: &Shared) {
         self.start_osc();
+        // The computer's keyboard for N4N0's menu keyboard: its keys go to N4N0, off the hook's thread.
+        let (tx, rx) = mpsc::channel();
+        crate::keys::start(tx);
+        let ctl = Arc::downgrade(self);
+        let _ = std::thread::Builder::new().name("keys".into()).spawn(move || {
+            while let Ok(key) = rx.recv() {
+                let Some(ctl) = ctl.upgrade() else { return };
+                ctl.n4n0.key(key);
+            }
+        });
         let c = self.clone();
         std::thread::spawn(move || {
             if let Err(e) = c.ensure_worker() {
@@ -742,7 +776,8 @@ impl Controller {
         let record_parameters = !importing && settings.osc.enabled && settings.osc.record_parameters;
         // VRChat only sends values when they change: its OSCQuery tree has the current ones.
         let fetch_started = clock::now_ns();
-        let drive_camera = !importing && settings.osc.enabled && settings.osc.drive_camera && spout;
+        // A 3D picture always needs VRChat's camera streaming over Spout; a recording, as the setting says.
+        let drive_camera = !importing && settings.osc.enabled && spout && (settings.osc.drive_camera || self.burst.lock().unwrap().recording);
         // Started from the app: the capture kit draws only while its record toggle is on (the Action Menu sets it).
         let drive_avatar = !importing && settings.osc.enabled && spout && (!from_osc || self.avatar_before.lock().unwrap().is_some());
         let vrchat = if record_parameters || drive_camera || drive_avatar { self.vrchat_values() } else { Vec::new() };
@@ -1263,6 +1298,12 @@ impl Controller {
         if previous.reconstruct_while_playing != settings.reconstruct_while_playing {
             // Reconstructions held while VRChat runs may start now.
             self.next_reconstruction();
+        }
+        if previous.development != settings.development {
+            // The account thread reads the other server's account within half a second; the updates look there now.
+            use_environment(settings.development);
+            self.update(|s| s.update.state = crate::state::UpdateState::Idle);
+            self.update_action(crate::ipc::UpdateAction::Check);
         }
         let (osc_changed, sessions_changed) = (previous.osc != settings.osc, previous.sessions_dir != settings.sessions_dir);
         self.queue_save(settings);

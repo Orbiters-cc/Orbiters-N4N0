@@ -231,6 +231,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         s.orb.light = Some(crate::state::OrbLight { on: true, color: 1, level: 0.6 });
         s.settings.walk_boost.enabled = true;
         s.orb.states = sample_states(s.orb.avatar_id.clone());
+        s.orb.tracking = Some(orbiters_n4n0::status::TrackingView { on: true, levels: [0, 1, 2], note: "Smoothing your devices now".into() });
+        s.orb.versions = "N4N0 1.0.9 · App 0.4.0".into();
+        s.orb.world_video = Some(("https://www.youtube.com/watch?v=36YnV9STBqc".into(), Some("Lo-fi beats to relax to".into()), None));
         s
     };
     // The same, its N4N0's screen of version 5: a copied link can be dropped as a card.
@@ -392,6 +395,54 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::Light, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "update-ready",
+            page: Page::Home,
+            snapshot: {
+                let mut s = home.clone();
+                s.settings.development = true;
+                s.update.enabled = true;
+                s.update.state = crate::state::UpdateState::Ready { version: "0.3.2-dev.2".into(), notes: "Development build 0.3.2-dev.2".into() };
+                s
+            },
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "home-tracking",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Tracking, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-suggest",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Suggest, samples: true }),
             library: None,
         },
         Scenario {
@@ -1211,7 +1262,9 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
         MenuPage::Photo => Target::Photo,
         MenuPage::Music => Target::Music,
         MenuPage::Light => Target::Light,
-        MenuPage::States => Target::States,
+        MenuPage::States | MenuPage::NewState => Target::States,
+        MenuPage::Tracking => Target::Tracking,
+        MenuPage::Suggest | MenuPage::Type => Target::Suggest,
         MenuPage::Card => return,
     };
     host.press(open);

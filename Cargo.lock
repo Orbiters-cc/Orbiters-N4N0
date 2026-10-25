@@ -3628,6 +3628,7 @@ dependencies = [
  "orbiters-openvr",
  "orbiters-orb",
  "orbiters-reconstruct",
+ "orbiters-smooth",
  "orbiters-sound",
  "orbiters-spout",
  "orbiters-ui",
@@ -3726,6 +3727,21 @@ dependencies = [
  "time",
  "windows 0.62.2",
  "winresource",
+]
+
+[[package]]
+name = "orbiters-smooth"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "serde_json",
+]
+
+[[package]]
+name = "orbiters-smooth-driver"
+version = "0.3.1"
+dependencies = [
+ "orbiters-smooth",
 ]
 
 [[package]]
@@ -6986,6 +7002,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs 6.0.0",
  "orbiters-update",
+ "semver",
  "serde",
  "serde_json",
  "time",

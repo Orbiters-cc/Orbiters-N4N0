@@ -473,6 +473,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
                 widgets::separator(ui);
                 updates(ui, cx.ctl, snap);
+                widgets::separator(ui);
+                let note = if draft.development {
+                    "On: the Orbiters server running on this computer, its account and its builds of Orbiters - N4N0 as updates."
+                } else {
+                    "For testing development builds: the Orbiters server running on this computer instead of orbiters.cc, with its own account and updates."
+                };
+                widgets::field(ui, "Development environment", Some(note), 48.0, |ui| {
+                    apply |= widgets::toggle(ui, "development", &mut draft.development);
+                });
                 if state.log_open {
                     let lines = cx.ctl.worker_log().unwrap_or_default();
                     let k = anim::spring_from(ui.ctx(), Id::unique("worker-log-open"), [0.0], [1.0], Spring::SOFT)[0].clamp(0.0, 1.0);

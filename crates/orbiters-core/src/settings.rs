@@ -44,6 +44,28 @@ pub struct Settings {
     pub view_gpu: ViewGpu,
     /// Starting with SteamVR (starting with Windows is the person's registry, read where it is shown).
     pub startup: StartupSettings,
+    /// Orbiters' development environment instead of orbiters.cc: the server a developer runs on this computer, its
+    /// account and its update feed (development builds of Orbiters - N4N0).
+    pub development: bool,
+    /// SteamVR's tracking smoothed by Orbiters - N4N0's driver (its Tracking page).
+    pub tracking: TrackingSettings,
+}
+
+/// Tracking smoothing (Orbiters - N4N0's SteamVR driver): on or off, and each kind of device's strength as an index of
+/// the menu's choices (`orbiters_orb::menu::SMOOTHING_STRENGTHS`: off, low, medium, high), headset, controllers,
+/// trackers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrackingSettings {
+    pub enabled: bool,
+    pub levels: [u8; 3],
+}
+
+impl Default for TrackingSettings {
+    /// The headset untouched (smoothing it can make people sick), the controllers a little, the trackers more.
+    fn default() -> Self {
+        Self { enabled: false, levels: [0, 1, 2] }
+    }
 }
 
 /// SteamVR starting Orbiters - N4N0 with itself, among its startup overlay apps. SteamVR keeps the truth; this is
@@ -363,6 +385,8 @@ impl Default for Settings {
             window_gpu: WindowGpu::default(),
             view_gpu: ViewGpu::default(),
             startup: StartupSettings::default(),
+            development: false,
+            tracking: TrackingSettings::default(),
         }
     }
 }

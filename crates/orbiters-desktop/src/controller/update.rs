@@ -1,5 +1,6 @@
 //! Updates of an installed app (`orbiters_update`). The tray service looks for a newer release of the install's channel
-//! shortly after it starts and every few hours; a newer one's setup is downloaded in the background and checked
+//! a few seconds after it starts and every half hour (every two minutes in the development environment, whose feed is
+//! the development server on this computer); a newer one's setup is downloaded in the background and checked
 //! against the size and SHA-256 its signed release gives, then waits for the person. "Restart to update" (the window:
 //! Settings' About, the sidebar) has the service start that setup and quit: the setup replaces the files once nothing
 //! runs from the install folder any more, then starts the app again. While a recording, a reconstruction, a call or an
@@ -18,10 +19,12 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-/// The first look, once the app has settled.
-const FIRST_LOOK: Duration = Duration::from_secs(45);
-/// Then every so often.
-const EVERY: Duration = Duration::from_secs(4 * 3600);
+/// The first look, a moment after the app starts: a newer version shows beside its name at once.
+const FIRST_LOOK: Duration = Duration::from_secs(5);
+/// Then every so often (a request of a few hundred bytes), and more often in the development environment, whose
+/// builds come one after another while they are being tried.
+const EVERY: Duration = Duration::from_secs(30 * 60);
+const EVERY_DEVELOPMENT: Duration = Duration::from_secs(2 * 60);
 /// A restart waiting for the work to end looks this often.
 const IDLE_POLL: Duration = Duration::from_secs(5);
 /// Beside a downloaded setup ([`Ready`]).
@@ -151,7 +154,7 @@ impl Controller {
                 }
                 if asked || Instant::now() >= next {
                     c.look_for_update();
-                    next = Instant::now() + EVERY;
+                    next = Instant::now() + if orbiters_update::development() { EVERY_DEVELOPMENT } else { EVERY };
                 }
                 if c.view().update.restart_when_idle && c.busy_with().is_none() {
                     c.restart_to_update(true);
@@ -202,7 +205,8 @@ impl Controller {
             Err(e) => {
                 eprintln!("updates: {e:#}");
                 if !ready {
-                    self.update(|s| s.update.state = UpdateState::Failed { message: format!("Orbiters could not be asked for updates: {e}") });
+                    let place = if orbiters_update::development() { "The development server" } else { "Orbiters" };
+                    self.update(|s| s.update.state = UpdateState::Failed { message: format!("{place} could not be asked for updates ({e:#}).") });
                 }
                 return;
             }

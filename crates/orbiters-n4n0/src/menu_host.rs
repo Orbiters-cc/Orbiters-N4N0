@@ -87,6 +87,10 @@ pub struct MenuHost<P: Pictures> {
     note_seen: Option<u64>,
     /// A link was dropped as a card since the host last looked (the overlay then closes: the card is in the world).
     pub dropped: bool,
+    /// The number of the last suggestion result N4N0 published that this menu saw (the first status sets it).
+    suggestion_seen: Option<u32>,
+    /// The number of the last key of the computer's keyboard taken (the first status sets it).
+    keys_seen: Option<u32>,
 }
 
 impl<P: Pictures> MenuHost<P> {
@@ -109,6 +113,8 @@ impl<P: Pictures> MenuHost<P> {
             states_seen: None,
             note_seen: None,
             dropped: false,
+            suggestion_seen: None,
+            keys_seen: None,
         }
     }
 
@@ -179,6 +185,29 @@ impl<P: Pictures> MenuHost<P> {
         }
         changed |= set(&mut m.photo_timer, settings.photo_3d_timer);
         changed |= set(&mut m.photo_length, photo_length(settings.photo_3d));
+        // Tracking smoothing, the versions, and how the last suggestion sent from here went.
+        let tracking = orb.tracking.as_ref().map(|t| orbiters_orb::menu::Tracking { on: t.on, levels: t.levels, note: t.note.clone() });
+        changed |= set(&mut m.tracking, tracking);
+        changed |= set(&mut m.tracking_note, orb.tracking_note.clone());
+        changed |= set(&mut m.versions, orb.versions.clone());
+        let video = orb.world_video.as_ref().map(|(url, title, at)| orbiters_orb::menu::WorldVideo { url: url.clone(), title: title.clone(), at: *at });
+        changed |= set(&mut m.world_video, video);
+        if !orb.listening && m.dictating {
+            m.dictation_ended();
+            changed = true;
+        }
+        match (&orb.suggestion, self.suggestion_seen) {
+            (Some((n, error)), Some(seen)) if *n != seen => {
+                if m.sending {
+                    m.suggestion_sent(error.clone().map_or(Ok(()), Err));
+                    changed = true;
+                }
+                self.suggestion_seen = Some(*n);
+            }
+            (Some((n, _)), None) => self.suggestion_seen = Some(*n),
+            (None, None) => self.suggestion_seen = Some(0),
+            _ => {}
+        }
         let calls = &orb.calls;
         let (ready, note) = calls.menu_ready();
         let same_contacts = m.contacts.len() == calls.contacts.len() && m.contacts.iter().zip(&calls.contacts).all(|(a, b)| a.id == b.id && a.name == b.name);
@@ -196,6 +225,22 @@ impl<P: Pictures> MenuHost<P> {
         if changed {
             self.dirty = true;
         }
+    }
+
+    /// The computer's keys N4N0 handed this menu since it last looked (none the first time: those were for an
+    /// earlier menu); what they ask of the host follows from the effects returned.
+    pub fn take_keys(&mut self, orb: &OrbStatus) -> Vec<Effect> {
+        let newest = orb.keys.last().map_or(0, |(n, _)| *n);
+        let Some(seen) = self.keys_seen.replace(newest) else { return Vec::new() };
+        let mut effects = Vec::new();
+        for (n, key) in &orb.keys {
+            // Numbers wrap: the ones after `seen`.
+            if n.wrapping_sub(seen) as i32 > 0 {
+                effects.extend(self.menu.key(key.clone(), || None));
+                self.dirty = true;
+            }
+        }
+        effects
     }
 
     /// The music the menu shows, from this process's media reading (read only while a menu wants it), and its art as a
@@ -341,12 +386,19 @@ impl<P: Pictures> MenuHost<P> {
                     self.light_set = Some((light, Instant::now()));
                     service.command(Command::Light { on: light.on, color: light.color, level: light.level });
                 }
-                Effect::SaveState { name } => service.command(Command::States { action: StateAction::Save { name: Some(name) } }),
+                Effect::SaveState { name, size, pose, default } => {
+                    service.command(Command::States { action: StateAction::Save { name: Some(name), size, pose, default } })
+                }
                 Effect::ApplyState { id, .. } => service.command(Command::States { action: StateAction::Apply { id } }),
                 Effect::Drop { link, title, video } => {
                     service.command(Command::Drop { link, title, video });
                     self.dropped = true;
                 }
+                Effect::Tracking { on, levels } => service.command(Command::Tracking { on, levels }),
+                Effect::Dictate => service.command(Command::Dictate),
+                Effect::SendSuggestion { text, voice } => service.command(Command::Suggest { text, voice }),
+                Effect::WatchVideo { link } => service.command(Command::Watch { link }),
+                Effect::SaveVideo => service.command(Command::SaveVideo),
                 Effect::Close => close = true,
             }
         }
@@ -489,7 +541,7 @@ mod tests {
                 Effect::Copy { link: "https://x.y/".into(), title: "t".into() },
                 Effect::FastWalk(true),
                 Effect::Photo3d { timer: 5, length: orbiters_orb::menu::PhotoLength::Full },
-                Effect::SaveState { name: "State 2".into() },
+                Effect::SaveState { name: "State 2".into(), size: true, pose: false, default: false },
                 Effect::Drop { link: "https://x.y/".into(), title: "t".into(), video: None },
                 Effect::Close,
             ],
@@ -501,7 +553,7 @@ mod tests {
         assert!(matches!(&commands[..], [
             Command::CopyText { .. },
             Command::Photo3DIn { seconds: 5 },
-            Command::States { action: StateAction::Save { name: Some(n) } },
+            Command::States { action: StateAction::Save { name: Some(n), .. } },
             Command::Drop { .. },
         ] if n == "State 2"), "{commands:?}");
         let saved = service.saved.lock().unwrap();

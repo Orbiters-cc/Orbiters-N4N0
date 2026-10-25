@@ -75,6 +75,9 @@ pub enum Command {
     MenuState {
         open: bool,
         dictation: bool,
+        /// Its keyboard shows: the computer's keyboard types there.
+        #[serde(default)]
+        keyboard: bool,
     },
     /// The SteamVR button for N4N0's menu while the avatar has N4N0's screen: opens the screen, or closes it.
     ToggleScreen,
@@ -83,7 +86,7 @@ pub enum Command {
     Photo3DIn {
         seconds: u32,
     },
-    /// N4N0's light as N4N0's menu set it (its Light page): `N4N0/Light`, its colour and level.
+    /// N4N0's light as N4N0's menu set it (its Light page): `N4N0/Light/On`, its colour and level.
     Light {
         on: bool,
         color: u8,
@@ -92,6 +95,23 @@ pub enum Command {
     /// The avatar's saved states: save, apply, the default, rename, delete, what one puts back.
     States {
         action: StateAction,
+    },
+    /// Tracking smoothing as N4N0's menu set it (its Tracking page): on or off, each kind's strength (an index of
+    /// `orbiters_orb::menu::SMOOTHING_LABELS`: headset, controllers, trackers).
+    Tracking {
+        on: bool,
+        levels: [u8; 3],
+    },
+    /// A feature suggestion for Orbiters from N4N0's menu (`voice`: some of it was said to N4N0).
+    Suggest {
+        text: String,
+        voice: bool,
+    },
+    /// N4N0 listens to the next sentence for the menu (Suggest features' Talk).
+    Dictate,
+    /// Opens a video on the computer (the world's, from the Music page).
+    Watch {
+        link: String,
     },
     /// A copied link dropped in the world as a card, which the avatar's screen shows (contracts `Docs/orb.md`, Link card).
     Drop {
@@ -115,8 +135,8 @@ mod tests {
         assert_eq!(json(&Command::Photo3D), r#"{"kind":"photo3_d"}"#);
         assert_eq!(json(&Command::TestFace { face: Some(OrbFace::Happy) }), r#"{"kind":"test_face","face":"happy"}"#);
         assert_eq!(
-            json(&Command::States { action: StateAction::Save { name: None } }),
-            r#"{"kind":"states","action":{"do":"save","name":null}}"#
+            json(&Command::States { action: StateAction::Save { name: None, size: true, pose: false, default: false } }),
+            r#"{"kind":"states","action":{"do":"save","name":null,"size":true,"pose":false,"default":false}}"#
         );
         let back: Command = serde_json::from_str(r#"{"kind":"drop","link":"https://x.y/","title":"t","video":null}"#).unwrap();
         assert_eq!(back, Command::Drop { link: "https://x.y/".into(), title: "t".into(), video: None });

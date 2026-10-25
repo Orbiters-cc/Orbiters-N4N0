@@ -1,8 +1,10 @@
 //! What N4N0 asks of the app and of the device it runs on, as small traits: the desktop implements them with Windows'
 //! own (its controller, WASAPI, the clipboard, the voice worker's process), a phone with Android's.
 //!
-//! None of these is called while N4N0 holds a lock of its own, and nothing here may wait for N4N0: the app calls N4N0
-//! from its own threads (the OSC receiving one among them) while N4N0 calls it from N4N0's.
+//! The app calls N4N0 from its own threads (the OSC receiving one among them) while N4N0 calls it from N4N0's: nothing
+//! here may wait for N4N0. [`Host`] and [`Osc`] are never called while N4N0 holds a lock of its own; the device's
+//! keyboard and mouse are read, and the voice workers started and told, under N4N0's locks, so they answer at once
+//! and never call N4N0 back from within.
 
 use crate::status::{CallsStatus, NoticeKind, OrbStatus};
 use orbiters_core::account::Api;

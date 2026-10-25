@@ -54,10 +54,11 @@ well.
 | `crates/orbiters-reconstruct` | Reconstruction worker process (`orbiters-reconstruct`): trains Gaussian splats from a session's keyframes, poses and depth on the GPU (WGSL kernels on wgpu, checked against an f64 reference) |
 | `crates/orbiters-sound` | Interface sounds computed at start-up (a port of React Bits' Sound Lab renderer, see its NOTICE.md), the default-output player and the settings' mic monitor |
 | `crates/orbiters-orb` | N4N0, the companion on the avatar (contracts `Docs/orb.md`): its text panel's sender, avatar controls found by label, the tools and client of its assistant, the wake word, saved videos |
+| `crates/orbiters-n4n0` | N4N0's runtime, shared with the Android app: the panel, faces and helpers, the assistant's turns, N4N0's menu on the avatar's screen and the menu host the interfaces run, saved states, link cards, its ears, the music watcher; what each platform does its own way behind small traits (the app, OSC, clipboard, browser, sounds, language, ears, mouse, music, files) |
 | `crates/orbiters-voice` | N4N0's ears, a worker process (`orbiters-voice`): the microphone while N4N0 listens, Silero VAD and NVIDIA Parakeet through sherpa-onnx, on the CPU; it also installs the speech models |
 | `crates/orbiters-call` | N4N0's calls, a worker process (`orbiters-call`): WebRTC voice (webrtc-rs, Opus) between two Orbiters - N4N0 apps, through Cloudflare Realtime TURN when needed (contracts `Docs/orb-calls.md`) |
 | `crates/orbiters-audio` | Microphones and a process's sound through WASAPI, for the capture worker and the voice worker |
-| `crates/orbiters-core` | Shared logic: settings, session bundles, keyframes, VRChat log, OSC/OSCQuery, worker protocols |
+| `crates/orbiters-core` | Shared logic: settings, session bundles, keyframes, VRChat log, OSC/OSCQuery (this computer's VRChat, or a Quest's over the Wi-Fi), worker protocols; TLS, folders and the account's store per platform |
 | `crates/orbiters-spout` | Spout2 receiver and test sender (Direct3D 11), protocol-compatible with the Spout2 SDK |
 | `crates/orbiters-setup` | The setup (`OrbitersSetup-<version>.exe`): installs the app for the person in `%LOCALAPPDATA%\Programs` (no administrator rights), updates it and uninstalls it, in the app's look |
 | `crates/orbiters-update` | Releases: the signed release file apps read, the setup's payload, the install record, downloading an update |

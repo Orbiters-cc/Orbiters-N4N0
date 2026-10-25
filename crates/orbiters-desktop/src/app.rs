@@ -573,6 +573,8 @@ impl eframe::App for App {
         if self.ctl.take_show() {
             bring_to_front(ctx);
         }
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        self.ctl.set_background(!focused && self.ctl.view().vrchat.running);
         if self.ctl.should_close() {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }

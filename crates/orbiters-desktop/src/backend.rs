@@ -77,6 +77,9 @@ pub trait Backend: Send + Sync {
     fn take_show(&self) -> bool {
         false
     }
+    /// The window is behind VRChat (VRChat runs and the window does not have the focus): the service's news is drawn
+    /// at most a few times a second.
+    fn set_background(&self, _background: bool) {}
     /// This window should close (the app quits, or the service went away).
     fn should_close(&self) -> bool {
         false
@@ -228,6 +231,10 @@ impl Backend for Remote {
 
     fn take_show(&self) -> bool {
         self.0.take_show()
+    }
+
+    fn set_background(&self, background: bool) {
+        self.0.set_background(background);
     }
 
     fn should_close(&self) -> bool {

@@ -382,8 +382,14 @@ pub struct Client {
     show: AtomicBool,
     close: AtomicBool,
     connected: AtomicBool,
+    /// The window is behind VRChat ([`Client::set_background`]).
+    background: AtomicBool,
     repaint: Mutex<Option<egui::Context>>,
 }
+
+/// While the window is behind VRChat it draws the service's news at most five times a second (the service sends up to
+/// 30 a second, while recording or with N4N0's menu open): docs/igpu-experiment.md.
+pub const BACKGROUND_PACE: Duration = Duration::from_millis(200);
 
 impl Client {
     /// Connects, says hello, and waits for the first snapshot (so the first frame has real data).
@@ -409,6 +415,7 @@ impl Client {
             show: AtomicBool::new(false),
             close: AtomicBool::new(false),
             connected: AtomicBool::new(true),
+            background: AtomicBool::new(false),
             repaint: Mutex::new(None),
         });
         let c = client.clone();
@@ -416,6 +423,7 @@ impl Client {
             for line in reader.lines() {
                 let Ok(line) = line else { break };
                 let Ok(msg) = serde_json::from_str::<ToClient>(&line) else { continue };
+                let news = matches!(msg, ToClient::Snapshot { .. });
                 match msg {
                     ToClient::Snapshot { snapshot } => *c.snapshot.lock().unwrap() = Arc::new(*snapshot),
                     ToClient::Notice { notice } => c.notices.lock().unwrap().push(notice),
@@ -425,20 +433,32 @@ impl Client {
                     ToClient::Show => c.show.store(true, Ordering::Relaxed),
                     ToClient::Close => c.close.store(true, Ordering::Relaxed),
                 }
-                c.repaint();
+                c.repaint(news);
             }
             // The service is gone: close too.
             c.connected.store(false, Ordering::Relaxed);
             c.close.store(true, Ordering::Relaxed);
-            c.repaint();
+            c.repaint(false);
         })?;
         Ok(client)
     }
 
-    fn repaint(&self) {
+    /// A frame for what came; for the service's news, while the window is behind VRChat, at most [`BACKGROUND_PACE`]
+    /// after the last.
+    fn repaint(&self, news: bool) {
         if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
-            ctx.request_repaint();
+            if news && self.background.load(Ordering::Relaxed) {
+                ctx.request_repaint_after(BACKGROUND_PACE);
+            } else {
+                orbiters_ui::anim::request_frame(ctx);
+            }
         }
+    }
+
+    /// Whether the window is behind VRChat (VRChat runs and the window does not have the focus): each frame it draws
+    /// is GPU time VRChat could use, on the graphics card or, drawn on the integrated GPU, as the copy that shows it.
+    pub fn set_background(&self, background: bool) {
+        self.background.store(background, Ordering::Relaxed);
     }
 
     pub fn attach(&self, ctx: &egui::Context) {

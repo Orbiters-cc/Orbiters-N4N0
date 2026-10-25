@@ -1,8 +1,10 @@
 //! Orbiters - N4N0 capture worker.
 //!
 //! * `orbiters-capture worker` — driven by the app: JSON-lines commands on stdin, events on stdout.
-//! * `orbiters-capture record --source <spout[:name] | raw:<folder> | test> [--out <folder>] [--quality …] [--frames N]`
-//! * `orbiters-capture send-test [--name <sender>] [--width W] [--height H] [--fps F] [--depth-every N] [--seconds S]`
+//! * `orbiters-capture record --source <spout[:name] | raw:<folder> | test> [--out <folder>] [--quality …] [--frames N] [--rig]`
+//! * `orbiters-capture send-test [--name <sender>] [--width W] [--height H] [--fps F] [--depth-every N] [--seconds S] [--rig]`
+//!
+//! `--rig`: the test pattern's odd colour frames are capture-rig frames (contracts' Docs/rig-frames.md).
 //! * `orbiters-capture verify <raw capture folder> [--frames N]`
 //! * `orbiters-capture list-sources`
 
@@ -189,7 +191,8 @@ fn cli_record(args: &[String]) -> anyhow::Result<()> {
     };
     let mut source = match &source_spec {
         SourceSpec::TestPattern { width, height, fps, depth_every, frames } => {
-            Box::new(TestPatternSource::new(*width, *height, *fps, *depth_every, *frames, false)) as Box<dyn FrameSource>
+            let pattern = TestPatternSource::new(*width, *height, *fps, *depth_every, *frames, false);
+            Box::new(if args.iter().any(|a| a == "--rig") { pattern.with_rig(None) } else { pattern }) as Box<dyn FrameSource>
         }
         other => open_source(other)?,
     };
@@ -224,6 +227,7 @@ fn cli_send_test(args: &[String]) -> anyhow::Result<()> {
         check_pattern(width, height, fps)?;
         let mut sender = orbiters_spout::Sender::new(name, width, height)?;
         let pattern = TestPatternSource::new(width, height, fps, depth_every, 0, false);
+        let pattern = if args.iter().any(|a| a == "--rig") { pattern.with_rig(None) } else { pattern };
         eprintln!("sending \"{name}\" {width}x{height} at {fps} fps (Ctrl+C to stop)");
         let start = Instant::now();
         let mut i = 0u32;

@@ -219,6 +219,10 @@ pub struct CaptureStats {
     pub skeleton_frames: u64,
     /// Depth frames dropped because decoding them fell behind.
     pub depth_dropped: u64,
+    /// Faces of the capture rig's frames recorded as views of their own (contracts' Docs/rig-frames.md), and faces left
+    /// out because their camera rendered in another frame than the strip's (or their stamp could not be read).
+    pub rig_faces: u64,
+    pub rig_faces_late: u64,
     /// Seconds since a frame's strip was last read, while frames keep coming and after it was read once (0 while it
     /// is read): frames without it have no camera pose, so no keyframe. The capture kit's "Near you" reach draws it
     /// only while the camera sees the avatar or is near it.

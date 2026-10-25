@@ -835,6 +835,7 @@ impl Controller {
     /// kit's toggles back as they were.
     fn put_vrchat_back(&self) {
         self.osc_values.lock().unwrap().forwarding = false;
+        self.switch_rig_off();
         self.restore_camera();
         self.restore_kit();
     }

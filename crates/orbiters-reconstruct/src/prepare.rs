@@ -57,6 +57,17 @@ impl Prepared {
             l.depth_frames_over_budget,
             l.depth_frames_skipped
         )];
+        if let Some(f) = &self.data.faces {
+            out.push(format!(
+                "{} of the capture rig's {} faces at {}×{} ({} over the budget, {} unreadable or of another size)",
+                f.views.len(),
+                l.faces + l.faces_over_budget,
+                f.width,
+                f.height,
+                l.faces_over_budget,
+                l.faces_skipped
+            ));
+        }
         if let Some(p) = &l.first_problem {
             out.push(format!("first unreadable keyframe: {p}"));
         }

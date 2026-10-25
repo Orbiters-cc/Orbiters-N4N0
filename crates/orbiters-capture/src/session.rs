@@ -16,7 +16,7 @@ use orbiters_contracts::manifest::{self as bundle_files, depth_file, SessionMani
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_contracts::performance::tracking::Device;
 use orbiters_contracts::performance::{self as perf, audio::TrackKind};
-use orbiters_contracts::{depth, qoi, skeleton, strip};
+use orbiters_contracts::{depth, qoi, rig, skeleton, strip};
 use orbiters_core::bundle::{self, BundleWriter};
 use orbiters_core::clock;
 use orbiters_core::keyframes::{self, KeyframeSelector};
@@ -63,6 +63,13 @@ struct Picture {
     bgra: bool,
     /// The session's thumbnail, made from this picture below the strip (rows from `.1` down).
     thumbnail: Option<(PathBuf, u32)>,
+}
+
+/// A rig frame's face for a record of its own: read with its frame, its picture sent to the encoders once its record is
+/// queued (a picture finished before its record would have nothing to tell).
+struct FaceView {
+    record: FrameRecord,
+    picture: Option<Picture>,
 }
 
 /// A depth frame for the decoder, upright and tightly packed.
@@ -335,6 +342,18 @@ impl Buffers {
     }
 }
 
+/// Copies the part `tile` of a frame (top-down, as it shows upright) into `out`, tightly packed and upright.
+fn copy_tile_upright(view: &ImageView, flipped: bool, tile: orbiters_contracts::image::Rect, out: &mut Vec<u8>) {
+    let row = (tile.x1 - tile.x0) as usize * 4;
+    out.clear();
+    out.reserve(row * (tile.y1 - tile.y0) as usize);
+    for y in tile.y0 as usize..tile.y1 as usize {
+        let src = if flipped { view.height as usize - 1 - y } else { y };
+        let at = src * view.stride + tile.x0 as usize * 4;
+        out.extend_from_slice(&view.data[at..at + row]);
+    }
+}
+
 /// Copies a frame into `out`, tightly packed and upright (4 bytes per pixel, the source's channel order).
 fn copy_upright(view: &ImageView, flipped: bool, out: &mut Vec<u8>) {
     let row = view.width as usize * 4;
@@ -446,6 +465,10 @@ pub enum Processed {
 pub struct CaptureSession {
     writer: BundleWriter,
     selector: KeyframeSelector,
+    /// The rig's faces each have keyframes of their own, chosen as the frames' are (by face number - 1).
+    face_selectors: [KeyframeSelector; rig::FACES],
+    /// The faces of the frame being read, until its record is queued.
+    faces_read: Vec<FaceView>,
     /// Keyframes (and `depth-raw/` frames) to encode and write; depth frames to decode and write; what they finished.
     encoder: Workers<Picture>,
     depth: Workers<DepthJob>,
@@ -574,7 +597,8 @@ impl CaptureSession {
         let (done_tx, done) = unbounded::<Done>();
         let encoder = {
             let done = done_tx.clone();
-            Workers::spawn("encode", threads, threads * 2, move || {
+            // Room for a rig frame's faces besides the frames' keyframes.
+            Workers::spawn("encode", threads, threads * 2 + 2 * rig::FACES, move || {
                 let done = done.clone();
                 Box::new(move |job: Picture| encode(job, &done))
             })
@@ -625,6 +649,8 @@ impl CaptureSession {
         let mut session = Self {
             writer,
             selector: KeyframeSelector::new(cmd.keyframes.clone(), cmd.quality == StorageQuality::Lossless),
+            face_selectors: std::array::from_fn(|_| KeyframeSelector::new(cmd.keyframes.clone(), cmd.quality == StorageQuality::Lossless)),
+            faces_read: Vec::new(),
             encoder,
             depth,
             done,
@@ -884,6 +910,7 @@ impl CaptureSession {
             self.stats.gated += 1;
         }
         self.pending.push_back(Pending { record, waiting, since: Instant::now() });
+        self.queue_faces();
         self.flush_records();
         self.decode_time_total += t0.elapsed().as_secs_f64();
         read.map(|()| Processed::Frame)
@@ -924,16 +951,18 @@ impl CaptureSession {
                 // The capture kit's skeleton band rides on an avatar's colour frames (depth frames use the whole
                 // picture; the simulator draws none; the test pattern draws one like the kit).
                 let source = strip::flags::source(p.flags);
-                if !p.is_depth_frame() && (source == strip::flags::SOURCE_AVATAR || source == strip::flags::SOURCE_TEST) {
+                if !p.is_depth_frame() && !p.is_rig_frame() && (source == strip::flags::SOURCE_AVATAR || source == strip::flags::SOURCE_TEST) {
                     self.read_band(frame, d.flipped, p.time, record.capture_time_ns)?;
                 }
                 let pos = p.position();
                 self.stats.position = Some(pos);
                 self.stats.heading_deg = Some(p.camera_to_world[2].atan2(p.camera_to_world[10]).to_degrees());
 
-                // Gating: a repeated frame (same game time) or an impossible jump (teleport, respawn).
+                // Gating: a repeated frame (same game time) or an impossible jump (teleport, respawn). A rig frame's pose
+                // is the rig's, wherever it stands: it is gated on its time only, and leaves the camera's last pose as it was.
                 let gated = match &self.previous {
                     Some((bits, _, _)) if *bits == p.time.to_bits() => true,
+                    Some(_) if p.is_rig_frame() => false,
                     Some((_, prev_pose, prev_time)) => {
                         let dt = (p.time - prev_time).abs().max(1e-3);
                         let moved = keyframes::translation(&p.camera_to_world, prev_pose);
@@ -946,9 +975,14 @@ impl CaptureSession {
                     }
                     None => false,
                 };
-                self.previous = Some((p.time.to_bits(), p.camera_to_world, p.time));
+                self.previous = match self.previous {
+                    Some((_, pose, time)) if p.is_rig_frame() => Some((p.time.to_bits(), pose, time)),
+                    _ => Some((p.time.to_bits(), p.camera_to_world, p.time)),
+                };
                 if gated {
                     record.flags |= record_flags::GATED;
+                } else if p.is_rig_frame() {
+                    self.read_faces(frame, &p, d.flipped, record)?;
                 } else if p.is_depth_frame() {
                     self.wait_for(|s| s.depth.has_room() && s.buffers.room(bytes));
                     if self.depth.has_room() && self.buffers.room(bytes) {
@@ -1012,6 +1046,87 @@ impl CaptureSession {
             }
         }
         Ok(())
+    }
+
+    /// A rig frame's faces (contracts' Docs/rig-frames.md): each one its camera rendered in this frame (its stamp is the
+    /// strip's time) gets a record of its own, the next frame indices after its frame's, with the face's pose and size,
+    /// and its tile as a keyframe when the face's selector takes one. The frame's own record keeps the rig's pose and
+    /// names no picture. The records and pictures wait in `faces_read` for [`Self::queue_faces`].
+    fn read_faces(&mut self, frame: &mut dyn FrameAccess, p: &strip::StripPayload, flipped: bool, record: &FrameRecord) -> anyhow::Result<()> {
+        let Some(layout) = rig::RigLayout::new(record.width, record.height) else { return Ok(()) };
+        let face_bytes = layout.face as usize * layout.face as usize * 4;
+        let wanted: Vec<bool> = rig::TILE_FACES
+            .iter()
+            .map(|&face| self.face_selectors[face as usize - 1].clone().consider(&rig::face_camera_to_world(&p.camera_to_world, face), p.time))
+            .collect();
+        let bytes = face_bytes * wanted.iter().filter(|w| **w).count();
+        self.wait_for(|s| s.buffers.room(bytes));
+        let view = frame.full()?;
+        let Some(faces) = rig::faces(p, &view, flipped) else { return Ok(()) };
+        for (face, wanted) in faces.iter().zip(wanted) {
+            if !face.current(p.time) {
+                self.stats.rig_faces_late += 1;
+                continue;
+            }
+            self.stats.rig_faces += 1;
+            let shift = strip::flags::FACE_SHIFT;
+            let face_record = FrameRecord {
+                frame_index: self.frame_index,
+                flags: record.flags & (record_flags::STRIP_OK | record_flags::FLIPPED),
+                strip_flags: (p.flags & !(strip::flags::FACE_MASK << shift)) | face.face << shift,
+                camera_to_world: face.camera_to_world,
+                width: layout.face,
+                height: layout.face,
+                keyframe_index: -1,
+                depth_index: -1,
+                ..*record
+            };
+            self.frame_index += 1;
+            let picture = (wanted && self.buffers.room(face_bytes)).then(|| {
+                let mut data = self.buffers.take();
+                copy_tile_upright(&view, flipped, face.tile, &mut data);
+                self.buffers.lent(face_bytes);
+                self.face_selectors[face.face as usize - 1].consider(&face.camera_to_world, p.time);
+                Picture {
+                    frame: Some(face_record.frame_index),
+                    path: PathBuf::new(),
+                    data,
+                    width: layout.face,
+                    height: layout.face,
+                    bgra: view.order == PixelOrder::Bgra,
+                    thumbnail: None,
+                }
+            });
+            if wanted && picture.is_none() {
+                self.stats.dropped += 1;
+            }
+            self.faces_read.push(FaceView { record: face_record, picture });
+        }
+        Ok(())
+    }
+
+    /// Queues the faces read with the frame just queued: their records, then their pictures to the encoders.
+    fn queue_faces(&mut self) {
+        for FaceView { mut record, picture } in std::mem::take(&mut self.faces_read) {
+            let mut waiting = 0u8;
+            if let Some(mut picture) = picture {
+                let (index, path) = self.writer.reserve_keyframe();
+                picture.path = path;
+                match self.encoder.send(picture) {
+                    Ok(()) => {
+                        record.flags |= record_flags::KEYFRAME;
+                        record.keyframe_index = index;
+                        self.stats.keyframes += 1;
+                        waiting = 1;
+                    }
+                    Err(job) => {
+                        self.buffers.give(job.data);
+                        self.stats.dropped += 1;
+                    }
+                }
+            }
+            self.pending.push_back(Pending { record, waiting, since: Instant::now() });
+        }
     }
 
     /// For a source that waits (`offline`): until there is `room`, taking what the threads finish meanwhile, or
@@ -1675,6 +1790,47 @@ mod tests {
         assert_eq!(calibrations.calibrations.len(), 1);
         assert!(calibrations.calibrations[0].time_ns < 0, "made before the session");
         drop(session);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A rig frame's six faces become views of their own: records after their frame's, with the face's pose and size,
+    /// their tiles as keyframes; a face rendered in another frame is left out; the frame's own record names no picture.
+    #[test]
+    fn rig_frames_record_their_faces_as_views() {
+        let (root, mut session, src) = pattern_session("rig", 24);
+        let mut src = src.with_rig(Some(4));
+        while !matches!(src.next(std::time::Duration::from_millis(10), &mut |v| assert_eq!(session.process(v).unwrap(), Processed::Frame)), Ok(Next::End)) {}
+        let (late, faces) = (session.stats.rig_faces_late, session.stats.rig_faces);
+        let finished = session.finish();
+        assert!(finished.warnings.is_empty(), "{:?}", finished.warnings);
+        let records = bundle::read_records(&finished.dir).unwrap();
+        // 24 frames: 6 depth frames (index % 4 == 3), 6 rig frames (the other odd ones), each with 5 current faces.
+        let rig_frames: Vec<_> = records.iter().filter(|r| strip::flags::kind(r.strip_flags) == strip::flags::KIND_RIG && strip::flags::face(r.strip_flags) == 0).collect();
+        assert_eq!(rig_frames.len(), 6);
+        assert_eq!((faces, late), (30, 6));
+        assert_eq!(records.len(), 24 + 30);
+        assert!(records.windows(2).all(|w| w[1].frame_index == w[0].frame_index + 1), "consecutive frame indices");
+        let layout = rig::RigLayout::new(1280, 720).unwrap();
+        for frame in &rig_frames {
+            assert!(!frame.has(record_flags::KEYFRAME) && !frame.has(record_flags::DEPTH));
+            let faces: Vec<_> = records.iter().skip_while(|r| r.frame_index <= frame.frame_index).take_while(|r| strip::flags::face(r.strip_flags) != 0).collect();
+            assert_eq!(faces.iter().map(|r| strip::flags::face(r.strip_flags)).collect::<Vec<_>>(), vec![2, 5, 1, 6, 3]);
+            for r in faces {
+                let face = strip::flags::face(r.strip_flags);
+                assert_eq!((r.width, r.height, r.game_time.to_bits()), (layout.face, layout.face, frame.game_time.to_bits()));
+                assert_eq!(r.camera_to_world, rig::face_camera_to_world(&frame.camera_to_world, face));
+                assert_eq!(r.projection, rig::PROJECTION);
+            }
+        }
+        // Each face's first view is a keyframe: its tile, at the face's size, showing its face's colour.
+        for face in [1u32, 2, 3, 5, 6] {
+            let r = records.iter().find(|r| strip::flags::face(r.strip_flags) == face && r.has(record_flags::KEYFRAME)).unwrap();
+            let (hdr, rgb) = qoi::decode_rgba(&std::fs::read(finished.dir.join("keyframes").join(bundle::keyframe_file(r.keyframe_index))).unwrap()).unwrap();
+            assert_eq!((hdr.width, hdr.height), (layout.face, layout.face));
+            let mid = ((layout.face / 2 * layout.face + 5) * 4) as usize;
+            assert_eq!(rgb[mid], (face * 40) as u8, "face {face}");
+        }
+        assert!(records.iter().all(|r| strip::flags::face(r.strip_flags) != 4));
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -123,6 +123,12 @@ fn run(args: Args) -> anyhow::Result<Report> {
         eprintln!("depth seeded {from_depth} Gaussians: {} more along the keyframes' rays", seeded.len() - from_depth);
         settings.starved = true;
     }
+    // What only the capture rig's faces saw has no depth: seeds along their rays, a tenth of the seeding budget.
+    if let Some(faces) = &data.faces {
+        let before = seeded.len();
+        init::add_from_face_rays(&mut seeded, data, budget / 10, settings.seed ^ 0xFACE);
+        eprintln!("the rig's {} faces: {} seeds along their rays", faces.views.len(), seeded.len() - before);
+    }
     // The texels of the sky map that seeding saw (sky::SkyMap::fill keeps them).
     let mut sky_seen = Vec::new();
     if settings.sky_map > 0 {

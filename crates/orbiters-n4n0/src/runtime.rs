@@ -1179,7 +1179,15 @@ impl N4n0 {
         // Orbiters - N4N0's own toggles (the capture kit's) are never the assistant's, whatever the settings name them.
         let (record, pins, enabled, text_step_ms) =
             self.with_settings(|s| (s.osc.record_parameter.clone(), s.orb.pins.clone(), s.orb.enabled, s.orb.text_step_ms));
-        controls.withhold(&[record.as_str(), DEPTH_FRAMES_PARAMETER]);
+        controls.withhold(&[
+            record.as_str(),
+            DEPTH_FRAMES_PARAMETER,
+            orbiters_contracts::rig::PARAMETER,
+            orbiters_contracts::rig::PARAMETER_X,
+            orbiters_contracts::rig::PARAMETER_Y,
+            orbiters_contracts::rig::PARAMETER_Z,
+            orbiters_contracts::rig::PARAMETER_YAW,
+        ]);
         let has_gogo = names.iter().any(|n| n.starts_with("Go/"));
         let mut out: Vec<Message> =
             carry.iter().filter(|(p, _)| names.contains(*p) && (p.as_str() != "VRCEmote" || has_gogo)).map(|(p, v)| (parameter(p), osc_arg(v))).collect();

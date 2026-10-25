@@ -115,8 +115,8 @@ pub fn fit(source: &Rgb, width: usize, height: usize) -> Vec<[f32; 3]> {
                 while (x as f64) < right && x < source.width {
                     let cover = (right.min(x as f64 + 1.0) - left.max(x as f64)).max(0.0) * cover_y;
                     let at = (y * source.width + x) * 3;
-                    for c in 0..3 {
-                        sum[c] += source.pixels[at + c] as f64 * cover;
+                    for (s, v) in sum.iter_mut().zip(&source.pixels[at..at + 3]) {
+                        *s += *v as f64 * cover;
                     }
                     area += cover;
                     x += 1;

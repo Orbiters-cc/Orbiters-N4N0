@@ -19,7 +19,8 @@ sha2 = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
-ureq = { version = "3", default-features = false, features = ["native-tls"] }
+# Its TLS is orbiters-core's, per platform (`orbiters_core::http_tls`).
+ureq = { version = "3", default-features = false }
 tar = "0.4"
 bzip2 = "0.4"
 # The prebuilt shared libraries (sherpa-onnx's C API and ONNX Runtime) sit next to the worker: built with the MSVC

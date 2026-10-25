@@ -12,7 +12,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 rosc = { workspace = true }
-ureq = { version = "3", default-features = false, features = ["json", "native-tls", "gzip"] }
+# Its TLS is orbiters-core's, per platform (`orbiters_core::http_tls`).
+ureq = { version = "3", default-features = false, features = ["json", "gzip"] }
 # Thumbnails for the menu (already built for tiff in the lockfile).
 zune-jpeg = "0.5"
 zune-core = "0.5"

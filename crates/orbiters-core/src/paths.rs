@@ -1,9 +1,37 @@
 //! Default locations. Everything the user produces lives under `Documents/Orbiters/` (sessions under the home folder's
 //! `Orbiters/` when OneDrive syncs Documents); settings under the platform config folder (`%APPDATA%/Orbiters/Desktop`
 //! on Windows, `~/.config/orbiters-desktop` on Linux); logs and caches, which stay on this computer, under
-//! `%LOCALAPPDATA%/Orbiters`.
+//! `%LOCALAPPDATA%/Orbiters`. An app whose platform keeps its files elsewhere (Android: the app's own files folder)
+//! gives them once at start ([`set_roots`]).
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// The folders an app gives where the platform's own are not the ones to use: on Android, the app's files and cache
+/// folders, which only its Java side knows (`Context.getFilesDir`, `getCacheDir`), and no Documents folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Roots {
+    /// The settings and what the person keeps with them ([`config_dir`]).
+    pub config: PathBuf,
+    /// What stays on this device ([`local_data_root`]: speech models, avatar manifests, logs).
+    pub local_data: PathBuf,
+    /// What can be made again ([`cache_dir`]).
+    pub cache: PathBuf,
+    /// What the person makes ([`documents_root`]).
+    pub documents: PathBuf,
+}
+
+static ROOTS: OnceLock<Roots> = OnceLock::new();
+
+/// Gives the app's own folders, once, before any path is asked for: every path here derives from them from then on.
+pub fn set_roots(roots: Roots) -> anyhow::Result<()> {
+    ROOTS.set(roots).map_err(|_| anyhow::anyhow!("the app's folders were given already"))
+}
+
+/// The folders the app gave, when it gave some.
+pub fn roots() -> Option<&'static Roots> {
+    ROOTS.get()
+}
 
 /// A folder for when the system names none: never a relative path, which would land wherever the app was started
 /// from (System32 for a program started at sign-in).
@@ -13,7 +41,14 @@ fn fallback_dir() -> PathBuf {
 
 /// `Documents/Orbiters`.
 pub fn documents_root() -> PathBuf {
-    dirs::document_dir().unwrap_or_else(fallback_dir).join("Orbiters")
+    documents_root_in(roots())
+}
+
+fn documents_root_in(roots: Option<&Roots>) -> PathBuf {
+    match roots {
+        Some(r) => r.documents.clone(),
+        None => dirs::document_dir().unwrap_or_else(fallback_dir).join("Orbiters"),
+    }
 }
 
 /// Whether OneDrive syncs `dir` (its Known Folder Move puts Documents inside the OneDrive folder).
@@ -29,6 +64,9 @@ fn synced_by_onedrive(dir: &Path) -> bool {
 /// Documents (gigabytes of captures, other players in them, would go to the cloud, and OneDrive holds files while it
 /// uploads them, which fails the renames a recording makes).
 pub fn default_sessions_dir() -> PathBuf {
+    if let Some(r) = roots() {
+        return documents_root_in(Some(r)).join("Sessions");
+    }
     match (dirs::document_dir(), dirs::home_dir()) {
         (Some(documents), Some(home)) if synced_by_onedrive(&documents) && !synced_by_onedrive(&home) => home.join("Orbiters").join("Sessions"),
         _ => documents_root().join("Sessions"),
@@ -41,6 +79,13 @@ pub fn default_raw_captures_dir() -> PathBuf {
 }
 
 pub fn config_dir() -> PathBuf {
+    config_dir_in(roots())
+}
+
+fn config_dir_in(roots: Option<&Roots>) -> PathBuf {
+    if let Some(r) = roots {
+        return r.config.clone();
+    }
     let base = dirs::config_dir().unwrap_or_else(fallback_dir);
     if cfg!(windows) {
         base.join("Orbiters").join("Desktop")
@@ -58,13 +103,27 @@ pub fn mixer_inbox_dir() -> PathBuf {
 /// `%LOCALAPPDATA%/Orbiters` (`~/.local/share/Orbiters` on Linux): data shared by the Orbiters apps and tools on
 /// this computer, too big or too local for the config folder.
 pub fn local_data_root() -> PathBuf {
-    dirs::data_local_dir().unwrap_or_else(fallback_dir).join("Orbiters")
+    local_data_root_in(roots())
+}
+
+fn local_data_root_in(roots: Option<&Roots>) -> PathBuf {
+    match roots {
+        Some(r) => r.local_data.clone(),
+        None => dirs::data_local_dir().unwrap_or_else(fallback_dir).join("Orbiters"),
+    }
 }
 
 /// What Orbiters - N4N0 can make again (what screenshots say, world pages, thumbnails): on this computer only, not
 /// in the roaming config folder.
 pub fn cache_dir() -> PathBuf {
-    local_data_root().join("Desktop").join("cache")
+    cache_dir_in(roots())
+}
+
+fn cache_dir_in(roots: Option<&Roots>) -> PathBuf {
+    match roots {
+        Some(r) => r.cache.clone(),
+        None => local_data_root_in(None).join("Desktop").join("cache"),
+    }
 }
 
 /// Avatar manifests Orbiters Toolkit writes while the VRChat SDK builds an avatar (contracts `Docs/avatar-manifest.md`).
@@ -159,5 +218,20 @@ mod tests {
         assert!(logs_dir().starts_with(local_data_root()) && cache_dir().starts_with(local_data_root()));
         #[cfg(windows)]
         assert!(local_low().is_some_and(|low| low.ends_with("LocalLow")));
+    }
+
+    #[test]
+    fn an_app_s_own_folders_replace_the_platform_s() {
+        // A phone app's: its files folder (as Java gives it) for the settings and data, its cache folder for the cache.
+        let files = Path::new("/data/user/0/cc.orbiters.n4n0/files");
+        let given = Roots { config: files.join("config"), local_data: files.join("data"), cache: files.join("cache"), documents: files.join("documents") };
+        assert_eq!(config_dir_in(Some(&given)), files.join("config"));
+        assert_eq!(local_data_root_in(Some(&given)), files.join("data"));
+        assert_eq!(cache_dir_in(Some(&given)), files.join("cache"));
+        assert_eq!(documents_root_in(Some(&given)), files.join("documents"));
+        // None given (the desktop): the platform's, as before.
+        assert_eq!(config_dir_in(None), config_dir());
+        assert_eq!(cache_dir_in(None), local_data_root().join("Desktop").join("cache"));
+        assert!(roots().is_none(), "the desktop gives none");
     }
 }

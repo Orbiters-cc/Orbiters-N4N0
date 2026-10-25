@@ -21,7 +21,15 @@ memchr = "2"
 socket2 = "0.6"
 sha2 = "0.10"
 rusqlite = { version = "0.40", features = ["bundled"] }
-ureq = { version = "3", default-features = false, features = ["json", "native-tls", "gzip", "multipart"] }
+ureq = { version = "3", default-features = false, features = ["json", "gzip", "multipart"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_Security_Cryptography"] }
+
+# TLS (`http_tls`): Windows' own through native TLS on the desktop; rustls with ring on Android, where native TLS would
+# mean OpenSSL. Crates that reach the web through this one take its TLS.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls"] }

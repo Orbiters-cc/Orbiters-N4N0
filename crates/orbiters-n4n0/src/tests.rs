@@ -1331,7 +1331,7 @@ fn states_tree(id: &str) -> serde_json::Value {
         ("VRMode", "i", json!(1), 1),
         ("VelocityX", "f", json!(0.0), 1),
         ("N4N0/Visible", "T", json!(true), 3),
-        ("OrbitersRecord", "T", json!(false), 3),
+        ("N4N0/Capture/Record", "T", json!(false), 3),
     ] {
         put_node(&mut tree, &format!("{PARAMETERS_PREFIX}{name}"), kind, value, access);
     }

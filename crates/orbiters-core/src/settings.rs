@@ -49,6 +49,23 @@ pub struct Settings {
     pub development: bool,
     /// SteamVR's tracking smoothed by Orbiters - N4N0's driver (its Tracking page).
     pub tracking: TrackingSettings,
+    /// While recording, N4N0's camera rig (contracts' `Docs/rig-frames.md`) turns on for a moment every few metres the
+    /// camera goes: six more views around it (left, front, right, back, up, down) for the reconstruction.
+    pub rig_views: bool,
+    /// Where the SteamVR overlay shows what a recording has covered so far (the Capture page's camera path).
+    pub coverage_overlay: CoverageOverlay,
+}
+
+/// Where the SteamVR overlay shows a recording's coverage (the Capture page's camera path and its hints): above a
+/// controller, as a watch shows the time, or nowhere. Never in VRChat's camera: SteamVR draws overlays in the headset
+/// only, after VRChat rendered its frames.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageOverlay {
+    Off,
+    #[default]
+    LeftHand,
+    RightHand,
 }
 
 /// Tracking smoothing (Orbiters - N4N0's SteamVR driver): on or off, and each kind of device's strength as an index of
@@ -315,8 +332,6 @@ pub struct KeyframeSettings {
 #[serde(default)]
 pub struct OscSettings {
     pub enabled: bool,
-    /// Avatar parameter (bool) that toggles recording from the Action Menu.
-    pub record_parameter: String,
     /// Port VRChat listens on (camera and HUD messages are sent there).
     pub vrchat_port: u16,
     /// Record every avatar parameter VRChat sends (face tracking, gestures, visemes, locomotion) with sessions.
@@ -356,7 +371,7 @@ impl Default for KeyframeSettings {
 
 impl Default for OscSettings {
     fn default() -> Self {
-        Self { enabled: true, record_parameter: "OrbitersRecord".into(), vrchat_port: 9000, record_parameters: true, drive_camera: true }
+        Self { enabled: true, vrchat_port: 9000, record_parameters: true, drive_camera: true }
     }
 }
 
@@ -387,6 +402,8 @@ impl Default for Settings {
             startup: StartupSettings::default(),
             development: false,
             tracking: TrackingSettings::default(),
+            rig_views: true,
+            coverage_overlay: CoverageOverlay::default(),
         }
     }
 }
@@ -518,7 +535,7 @@ mod tests {
         std::fs::write(&path, r#"{"storage_limit_gb": 3}"#).unwrap();
         let partial = Settings::load_from(&path);
         assert_eq!(partial.storage_limit_gb, 3.0);
-        assert_eq!(partial.osc.record_parameter, "OrbitersRecord");
+        assert!(partial.rig_views && partial.coverage_overlay == CoverageOverlay::LeftHand, "the rig's views and the coverage overlay on");
         assert_eq!(partial.orb, OrbSettings::default(), "settings from before N4N0 get its defaults");
         assert_eq!(partial.window_gpu, WindowGpu::GraphicsCard, "the window draws on the graphics card unless chosen otherwise");
         assert_eq!(partial.view_gpu, ViewGpu::WhilePlaying, "its 3D view on the integrated GPU while VRChat runs unless chosen otherwise");
@@ -580,13 +597,13 @@ mod tests {
         let path = dir.join("settings.json");
         // A port out of range, a keyboard from a newer version, a byte order mark from an editor.
         let text = "\u{feff}{\"consent_acknowledged\": true, \"storage_limit_gb\": 7, \
-                    \"osc\": {\"vrchat_port\": 70000, \"record_parameter\": \"MyRecord\"}, \
+                    \"osc\": {\"vrchat_port\": 70000, \"drive_camera\": false}, \
                     \"orb\": {\"wake_word\": true, \"menu\": {\"keyboard\": \"dvorak\"}}}";
         std::fs::write(&path, text).unwrap();
         let s = Settings::load_from(&path);
         assert!(s.consent_acknowledged, "consent survives a bad field elsewhere");
         assert_eq!(s.storage_limit_gb, 7.0);
-        assert_eq!(s.osc.record_parameter, "MyRecord");
+        assert!(!s.osc.drive_camera);
         assert_eq!(s.osc.vrchat_port, OscSettings::default().vrchat_port);
         assert!(s.orb.wake_word);
         assert_eq!(s.orb.menu, MenuSettings::default());

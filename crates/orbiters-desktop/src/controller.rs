@@ -11,7 +11,7 @@ use orbiters_contracts::manifest::{ConsentInfo, WorldInfo};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::bundle::{self, SessionSummary};
 use orbiters_core::clock;
-use orbiters_core::osc::{Latest, Network, OscEvent, OscService, OscValue, AVATAR_CHANGE, DEPTH_FRAMES_PARAMETER, PARAMETERS_PREFIX};
+use orbiters_core::osc::{Latest, Network, OscEvent, OscService, OscValue, AVATAR_CHANGE, DEPTH_FRAMES_PARAMETER, PARAMETERS_PREFIX, RECORD_PARAMETER};
 use orbiters_core::protocol::{OscSample, PerformanceSpec, SourceSpec, StartCapture, WorkerCommand, WorkerEvent};
 use orbiters_core::reconstruction::Event as ReconstructEvent;
 use orbiters_core::settings::{Settings, WhilePlaying};
@@ -140,6 +140,8 @@ pub struct Controller {
     burst: Mutex<burst::BurstRuntime>,
     /// A scan under way (controller/scan.rs).
     scan: Mutex<scan::ScanRuntime>,
+    /// N4N0's camera rig while recording (controller/rig.rs).
+    rig: Mutex<rig::RigRuntime>,
     /// Calls with VRChat friends (controller/calls.rs).
     calls: Mutex<calls::CallsRuntime>,
     /// Updates of an installed app (controller/update.rs).
@@ -178,7 +180,6 @@ const SAVE_QUIET: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug)]
 struct AvatarToggles {
-    record: bool,
     depth: bool,
 }
 
@@ -279,6 +280,7 @@ mod cleanup;
 mod maps;
 mod n4n0;
 mod performance;
+mod rig;
 mod scan;
 pub mod update;
 mod videos;
@@ -321,6 +323,7 @@ impl Controller {
             performance: Mutex::new(performance::PerformanceRuntime::default()),
             burst: Mutex::new(burst::BurstRuntime::default()),
             scan: Mutex::new(scan::ScanRuntime::default()),
+            rig: Mutex::new(rig::RigRuntime::default()),
             calls: Mutex::new(calls::CallsRuntime::default()),
             updates: Mutex::new(update::UpdateRuntime::default()),
             cleanup: Mutex::new(cleanup::CleanupRuntime::default()),
@@ -763,6 +766,7 @@ impl Controller {
             s.capture.trail.clear();
             s.capture.coverage = None;
             s.capture.from_osc = from_osc;
+            s.capture.photo_3d = self.burst.lock().unwrap().recording;
         });
         // Training takes the whole GPU: the game and the recording come first; the run starts over once they are done
         // (stopped once the state says capturing, so the run's exit does not start it again).
@@ -779,14 +783,16 @@ impl Controller {
         let fetch_started = clock::now_ns();
         // A 3D picture always needs VRChat's camera streaming over Spout; a recording, as the setting says.
         let drive_camera = !importing && settings.osc.enabled && spout && (settings.osc.drive_camera || self.burst.lock().unwrap().recording);
-        // Started from the app: the capture kit draws only while its record toggle is on (the Action Menu sets it).
-        let drive_avatar = !importing && settings.osc.enabled && spout && (!from_osc || self.avatar_before.lock().unwrap().is_some());
+        // N4N0's capture kit draws only while its record toggle is on (the app sets it, or N4N0 › Record in the Action
+        // Menu did), with depth frames while its depth toggle is (only the app sets it); the camera rig follows the camera.
+        let drive_avatar = !importing && settings.osc.enabled && spout;
         let vrchat = if record_parameters || drive_camera || drive_avatar { self.vrchat_values() } else { Vec::new() };
         if drive_camera {
             self.open_stream_camera(&vrchat);
         }
         if drive_avatar {
-            self.switch_kit_on(&vrchat, &settings.osc.record_parameter);
+            self.switch_kit_on(&vrchat);
+            self.start_rig();
         }
         let sent = {
             let mut osc = self.osc_values.lock().unwrap();
@@ -836,7 +842,7 @@ impl Controller {
     /// kit's toggles back as they were.
     fn put_vrchat_back(&self) {
         self.osc_values.lock().unwrap().forwarding = false;
-        self.switch_rig_off();
+        self.stop_rig();
         self.restore_camera();
         self.restore_kit();
     }
@@ -868,14 +874,14 @@ impl Controller {
         });
     }
 
-    /// Switches the capture kit's record and depth-frames toggles on (OSC), remembering how they were.
-    fn switch_kit_on(&self, vrchat: &[(String, OscValue)], record_parameter: &str) {
+    /// Switches N4N0's capture kit's record and depth-frames toggles on (OSC), remembering how depth frames were.
+    fn switch_kit_on(&self, vrchat: &[(String, OscValue)]) {
         let on = |name: &str| vrchat.iter().any(|(p, v)| p.strip_prefix(PARAMETERS_PREFIX) == Some(name) && v.truthy());
-        let (record, depth) = (on(record_parameter), on(DEPTH_FRAMES_PARAMETER));
-        self.avatar_before.lock().unwrap().get_or_insert(AvatarToggles { record, depth });
+        let (record, depth) = (on(RECORD_PARAMETER), on(DEPTH_FRAMES_PARAMETER));
+        self.avatar_before.lock().unwrap().get_or_insert(AvatarToggles { depth });
         let _ = self.with_osc(|o| {
             if !record {
-                o.send(&format!("{PARAMETERS_PREFIX}{record_parameter}"), vec![rosc::OscType::Bool(true)])?;
+                o.send(&format!("{PARAMETERS_PREFIX}{RECORD_PARAMETER}"), vec![rosc::OscType::Bool(true)])?;
             }
             if !depth {
                 o.send(&format!("{PARAMETERS_PREFIX}{DEPTH_FRAMES_PARAMETER}"), vec![rosc::OscType::Bool(true)])?;
@@ -884,12 +890,12 @@ impl Controller {
         });
     }
 
-    /// The capture kit's toggles back as they were (first forgotten, so their echo is the person's again).
+    /// The capture kit's toggles back (first forgotten, so their echo is the person's again): record off, as no recording
+    /// runs any more, and depth frames as they were.
     fn restore_kit(&self) {
         let Some(before) = self.avatar_before.lock().unwrap().take() else { return };
-        let record = self.settings().osc.record_parameter;
         let _ = self.with_osc(|o| {
-            o.send(&format!("{PARAMETERS_PREFIX}{record}"), vec![rosc::OscType::Bool(before.record)])?;
+            o.send(&format!("{PARAMETERS_PREFIX}{RECORD_PARAMETER}"), vec![rosc::OscType::Bool(false)])?;
             o.send(&format!("{PARAMETERS_PREFIX}{DEPTH_FRAMES_PARAMETER}"), vec![rosc::OscType::Bool(before.depth)])
         });
     }
@@ -900,8 +906,7 @@ impl Controller {
         let driven = self.avatar_before.lock().unwrap().is_some();
         let reloading = self.avatar_changed_at.lock().unwrap().is_some_and(|t| t.elapsed() < AVATAR_RELOAD_GRACE);
         if driven && !on && reloading && self.is_capturing() {
-            let record = self.settings().osc.record_parameter;
-            self.switch_kit_on(&[], &record);
+            self.switch_kit_on(&[]);
             return;
         }
         let r = if on { self.start_capture(true) } else { self.stop_capture() };
@@ -930,8 +935,9 @@ impl Controller {
             }
             ctl.kit_rearm.store(false, Ordering::Release);
             if ctl.avatar_before.lock().unwrap().is_some() && ctl.is_capturing() {
-                let record = ctl.with_settings(|s| s.osc.record_parameter.clone());
-                ctl.switch_kit_on(&[], &record);
+                ctl.switch_kit_on(&[]);
+                // The new avatar's rig rests at its hips until told to follow again.
+                ctl.rig_avatar_changed();
             }
         });
         if spawned.is_err() {
@@ -1163,9 +1169,9 @@ impl Controller {
                 TOGGLE_OFF => false,
                 _ => return,
             };
-            let parameter = c.with_settings(|s| s.osc.record_parameter.clone());
+            let parameter = RECORD_PARAMETER;
             c.update(|s| s.osc.last_event = Some(format!("{parameter} = {}", if on { "on" } else { "off" })));
-            if !c.vrchat_agrees(&parameter, on) {
+            if !c.vrchat_agrees(parameter, on) {
                 eprintln!("{parameter} = {on} came over OSC, but VRChat's avatar does not say so: ignored");
                 return;
             }
@@ -1412,7 +1418,7 @@ impl Controller {
         // The service before goes outside the lock: stopping it waits for its receiving thread, which may be calling in.
         let before = self.osc.lock().unwrap().take();
         drop(before);
-        let (enabled, parameter, vrchat_port) = self.with_settings(|s| (s.osc.enabled, s.osc.record_parameter.clone(), s.osc.vrchat_port));
+        let (enabled, parameter, vrchat_port) = self.with_settings(|s| (s.osc.enabled, RECORD_PARAMETER.to_string(), s.osc.vrchat_port));
         if !enabled {
             self.update(|s| s.osc = state::OscStatus { enabled: false, ..Default::default() });
             return;
@@ -2120,10 +2126,11 @@ mod tests {
         settings.osc.vrchat_port = vrchat.local_addr().unwrap().port();
         let ctl = Controller::new(settings);
         ctl.start_osc_with(false);
-        let record = "/avatar/parameters/OrbitersRecord".to_string();
-        let depth = "/avatar/parameters/OrbitersDepthFrames".to_string();
-        // Depth frames already on (the person's menu choice): only the record toggle is switched.
-        ctl.switch_kit_on(&[(record.clone(), OscValue::Bool(false)), (depth.clone(), OscValue::Bool(true))], "OrbitersRecord");
+        let record = format!("/avatar/parameters/{RECORD_PARAMETER}");
+        let depth = format!("/avatar/parameters/{DEPTH_FRAMES_PARAMETER}");
+        assert_eq!((record.as_str(), depth.as_str()), ("/avatar/parameters/N4N0/Capture/Record", "/avatar/parameters/N4N0/Capture/Depth"));
+        // Depth frames already on: only the record toggle is switched.
+        ctl.switch_kit_on(&[(record.clone(), OscValue::Bool(false)), (depth.clone(), OscValue::Bool(true))]);
         assert_eq!(received(&vrchat, Duration::from_millis(200)), vec![(record.clone(), rosc::OscType::Bool(true))]);
         // Recording, then the avatar reloads (a new world): its reset to off is switched back on, not a stop.
         ctl.update(|s| s.capture.state = CaptureState::Recording);
@@ -2148,7 +2155,7 @@ mod tests {
         let ctl = Controller::new(settings);
         ctl.start_osc_with(false);
         ctl.open_stream_camera(&[(CAMERA_MODE.to_string(), OscValue::Int(1)), (CAMERA_STREAMING.to_string(), OscValue::Bool(false))]);
-        ctl.switch_kit_on(&[], "OrbitersRecord");
+        ctl.switch_kit_on(&[]);
         ctl.osc_values.lock().unwrap().forwarding = true;
         ctl.update(|s| s.capture.state = CaptureState::Starting);
         // Mode 2, record and depth on, then Spout Stream on.
@@ -2161,8 +2168,8 @@ mod tests {
         vec![
             (CAMERA_STREAMING.into(), rosc::OscType::Bool(false)),
             (CAMERA_MODE.into(), rosc::OscType::Int(1)),
-            ("/avatar/parameters/OrbitersRecord".into(), rosc::OscType::Bool(false)),
-            ("/avatar/parameters/OrbitersDepthFrames".into(), rosc::OscType::Bool(false)),
+            ("/avatar/parameters/N4N0/Capture/Record".into(), rosc::OscType::Bool(false)),
+            ("/avatar/parameters/N4N0/Capture/Depth".into(), rosc::OscType::Bool(false)),
         ]
     }
 
@@ -2195,7 +2202,7 @@ mod tests {
         ctl.start_osc_with(false);
         assert!(ctl.start_capture(false).is_err());
         let sent = received(&vrchat, Duration::from_millis(700));
-        assert_eq!(sent.last(), Some(&("/avatar/parameters/OrbitersDepthFrames".into(), rosc::OscType::Bool(false))), "{sent:?}");
+        assert_eq!(sent.last(), Some(&("/avatar/parameters/N4N0/Capture/Depth".into(), rosc::OscType::Bool(false))), "{sent:?}");
         assert!(!sent.contains(&(CAMERA_STREAMING.into(), rosc::OscType::Bool(true))), "{sent:?}");
         assert_eq!(ctl.view().capture.state, CaptureState::Idle);
         ctl.shutdown();
@@ -2320,8 +2327,8 @@ mod tests {
                 let Ok(mut s) = stream else { continue };
                 let mut buf = [0u8; 1024];
                 let n = s.read(&mut buf).unwrap_or(0);
-                let answer = if String::from_utf8_lossy(&buf[..n]).starts_with("GET /avatar/parameters/OrbitersRecord ") {
-                    let body = format!(r#"{{"FULL_PATH":"/avatar/parameters/OrbitersRecord","TYPE":"T","VALUE":[{}]}}"#, record.load(Ordering::Relaxed));
+                let answer = if String::from_utf8_lossy(&buf[..n]).starts_with("GET /avatar/parameters/N4N0/Capture/Record ") {
+                    let body = format!(r#"{{"FULL_PATH":"/avatar/parameters/N4N0/Capture/Record","TYPE":"T","VALUE":[{}]}}"#, record.load(Ordering::Relaxed));
                     format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len())
                 } else {
                     "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
@@ -2347,7 +2354,7 @@ mod tests {
         ctl.record_toggled(false);
         actions_done(&ctl);
         assert!(ctl.is_capturing());
-        assert_eq!(ctl.view().osc.last_event.as_deref(), Some("OrbitersRecord = off"));
+        assert_eq!(ctl.view().osc.last_event.as_deref(), Some("N4N0/Capture/Record = off"));
         // VRChat says off too: the recording stops (no worker in tests: it ends at once).
         record.store(false, Ordering::Relaxed);
         ctl.record_toggled(false);
@@ -2368,7 +2375,7 @@ mod tests {
         }
         hold.send(()).unwrap();
         actions_done(&ctl);
-        assert_eq!(ctl.view().osc.last_event.as_deref(), Some("OrbitersRecord = off"));
+        assert_eq!(ctl.view().osc.last_event.as_deref(), Some("N4N0/Capture/Record = off"));
         // Each "on" acted on would have tried to start (and told that the capture notice waits).
         assert!(ctl.take_notices().is_empty());
     }
@@ -2381,7 +2388,7 @@ mod tests {
         settings.osc.vrchat_port = vrchat.local_addr().unwrap().port();
         let ctl = Controller::new(settings);
         ctl.start_osc_with(false);
-        *ctl.avatar_before.lock().unwrap() = Some(AvatarToggles { record: false, depth: false });
+        *ctl.avatar_before.lock().unwrap() = Some(AvatarToggles { depth: false });
         ctl.update(|s| s.capture.state = CaptureState::Recording);
         for _ in 0..50 {
             ctl.on_avatar_changed();

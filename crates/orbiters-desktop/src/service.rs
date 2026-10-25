@@ -447,6 +447,8 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         svc.keep_tracking();
         std::thread::sleep(Duration::from_secs(2));
     })?;
+    // In desktop mode, a recording's coverage in a corner of the screen (in VR the SteamVR overlay shows it).
+    crate::coverage_window::start(service.ctl.clone());
 
     #[cfg(windows)]
     tray_loop(&service)?;

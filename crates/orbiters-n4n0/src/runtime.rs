@@ -22,7 +22,7 @@ use crate::Command;
 use orbiters_contracts::avatar::{self, AvatarManifest, Tag};
 use orbiters_contracts::orb::{self as contract, params};
 use orbiters_core::account::{Api, Server};
-use orbiters_core::osc::{OscValue, AVATAR_CHANGE, DEPTH_FRAMES_PARAMETER, PARAMETERS_PREFIX};
+use orbiters_core::osc::{OscValue, AVATAR_CHANGE, CAPTURE_PARAMETERS, PARAMETERS_PREFIX};
 use orbiters_core::settings::{OrbSettings, Pin, Settings};
 use orbiters_orb::assistant::{self, AssistantError, Display, Event, Input, Quota, Request, ToolCall, ToolResult};
 use orbiters_orb::context::{self, Moment, NAME_CHARS, URL_CHARS};
@@ -1176,18 +1176,9 @@ impl N4n0 {
             None => Controls::from_parameters(parameters.iter().copied()),
         };
         controls.learn_types(parameters.iter().copied());
-        // Orbiters - N4N0's own toggles (the capture kit's) are never the assistant's, whatever the settings name them.
-        let (record, pins, enabled, text_step_ms) =
-            self.with_settings(|s| (s.osc.record_parameter.clone(), s.orb.pins.clone(), s.orb.enabled, s.orb.text_step_ms));
-        controls.withhold(&[
-            record.as_str(),
-            DEPTH_FRAMES_PARAMETER,
-            orbiters_contracts::rig::PARAMETER,
-            orbiters_contracts::rig::PARAMETER_X,
-            orbiters_contracts::rig::PARAMETER_Y,
-            orbiters_contracts::rig::PARAMETER_Z,
-            orbiters_contracts::rig::PARAMETER_YAW,
-        ]);
+        // Orbiters - N4N0's own parameters (N4N0's capture kit and camera rig) are never the assistant's.
+        let (pins, enabled, text_step_ms) = self.with_settings(|s| (s.orb.pins.clone(), s.orb.enabled, s.orb.text_step_ms));
+        controls.withhold(&CAPTURE_PARAMETERS);
         let has_gogo = names.iter().any(|n| n.starts_with("Go/"));
         let mut out: Vec<Message> =
             carry.iter().filter(|(p, _)| names.contains(*p) && (p.as_str() != "VRCEmote" || has_gogo)).map(|(p, v)| (parameter(p), osc_arg(v))).collect();

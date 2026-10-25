@@ -74,6 +74,9 @@ pub struct CaptureStatus {
     /// What the running capture's depth frames have seen so far, with hints.
     #[serde(default)]
     pub coverage: Option<CoverageMap>,
+    /// The running capture is a 3D picture (its camera flies on its own: no coverage to follow).
+    #[serde(default)]
+    pub photo_3d: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -404,6 +407,7 @@ impl Snapshot {
                 trail: Vec::new(),
                 from_osc: false,
                 coverage: None,
+                photo_3d: false,
             },
             storage: StorageStatus { sessions_dir: settings.sessions_dir.clone(), limit_gb: settings.storage_limit_gb, ..Default::default() },
             settings,

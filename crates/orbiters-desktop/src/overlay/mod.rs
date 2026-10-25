@@ -11,6 +11,7 @@
 
 mod actions;
 pub mod calibration;
+pub mod coverage;
 #[cfg(windows)]
 pub mod eye_picture;
 mod frames;
@@ -212,6 +213,19 @@ impl Canvas {
         self.painter.set_textures(&mut full.textures_delta);
         let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
         // Textures egui let go of are freed once painted with (the frame may still draw them).
+        self.painter.paint(&primitives, full.pixels_per_point, egui::Color32::TRANSPARENT);
+        self.painter.free_textures(&mut full.textures_delta);
+        self.painter.pixels()
+    }
+
+    /// The same with a whole `Ui` to draw in (widgets that lay out or animate).
+    pub fn paint_ui(&mut self, time: f64, draw: impl FnMut(&mut egui::Ui)) -> &[u8] {
+        let mut draw = draw;
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), self.size)), time: Some(time), ..Default::default() };
+        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), ..Default::default() });
+        let mut full = self.ctx.run_ui(input, |ui| draw(ui));
+        self.painter.set_textures(&mut full.textures_delta);
+        let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
         self.painter.paint(&primitives, full.pixels_per_point, egui::Color32::TRANSPARENT);
         self.painter.free_textures(&mut full.textures_delta);
         self.painter.pixels()
@@ -477,6 +491,7 @@ struct Teardown<'a> {
     walk: walk::WalkBoost,
     world: World,
     menu: menu::MenuOverlay,
+    coverage: coverage::CoverageOverlayPanel,
 }
 
 impl Drop for Teardown<'_> {
@@ -487,6 +502,7 @@ impl Drop for Teardown<'_> {
         self.walk.reset(self.steamvr);
         self.world.destroy(self.overlay);
         self.menu.destroy(self.overlay);
+        self.coverage.destroy(self.overlay);
         let _ = self.overlay.destroy(self.main);
     }
 }
@@ -520,7 +536,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     state.walk_unavailable = walk.unavailable().map(str::to_string);
     let world = World::new(&overlay)?;
     let menu = menu::MenuOverlay::new(&overlay, KEY)?;
-    let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu };
+    let coverage = coverage::CoverageOverlayPanel::new(&overlay)?;
+    let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage };
     let mut frames = frames::FrameSampler::new(&steamvr);
 
     let mut poses = SteamVrPoses { client: &steamvr, described: HashMap::new() };
@@ -628,6 +645,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         let dashboard = overlay.is_dashboard_visible();
         t.state.tick(now, dashboard, &mut poses, &backend);
         t.world.update(&overlay, &mut presenter, &t.state.calibrator, now);
+        // What the recording has covered, on a hand (never in VRChat's camera: overlay/coverage.rs).
+        t.coverage.update(&overlay, &steamvr, &mut presenter, &snap, now);
         // VRChat has the scene (not a loading screen): its frames count, and walking may be boosted.
         if vrchat_read.is_none_or(|r| r.elapsed() >= Duration::from_millis(100)) {
             vrchat_read = Some(Instant::now());

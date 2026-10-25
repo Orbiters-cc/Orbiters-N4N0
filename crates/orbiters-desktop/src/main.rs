@@ -10,6 +10,7 @@ mod app;
 mod backend;
 mod bench;
 mod controller;
+mod coverage_window;
 mod device;
 mod gpu;
 mod ipc;

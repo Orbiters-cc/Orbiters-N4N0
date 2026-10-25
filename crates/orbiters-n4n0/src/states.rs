@@ -8,7 +8,7 @@
 
 use crate::runtime::{N4n0, OrbRuntime, Shared};
 use crate::status::{NoticeKind, StateAction, StateView, StatesNote, StatesView};
-use orbiters_core::osc::{OscValue, TreeNode, DEPTH_FRAMES_PARAMETER, PARAMETERS_PREFIX};
+use orbiters_core::osc::{OscValue, TreeNode, CAPTURE_PARAMETERS, PARAMETERS_PREFIX};
 use orbiters_core::vrchat_log::LogEvent;
 use orbiters_orb::menu::StateRow;
 use orbiters_orb::states::{self, Current, Loaded, Refused, Store};
@@ -333,8 +333,7 @@ impl N4n0 {
         if current.is_empty() {
             return Err("VRChat said no parameter of the avatar yet: wait for it to load, then save again.".into());
         }
-        let record = self.with_settings(|s| s.osc.record_parameter.clone());
-        let parameters = states::capture(&current, &[record.as_str(), DEPTH_FRAMES_PARAMETER]);
+        let parameters = states::capture(&current, &CAPTURE_PARAMETERS);
         let eye = eye.or_else(|| self.osc_latest_value(EYE_HEIGHT).as_ref().and_then(float));
         let avatar_name = self.host.world().avatar_name;
         let count = parameters.len();

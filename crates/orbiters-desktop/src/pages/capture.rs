@@ -194,7 +194,7 @@ fn chips(ui: &mut Ui, cx: &mut Cx) {
             "Action Menu",
             osc.last_event.clone().unwrap_or_else(|| {
                 if osc.listening {
-                    format!("“{}” toggle", snap.settings.osc.record_parameter)
+                    "N4N0 › Record".into()
                 } else {
                     osc.error.clone().unwrap_or_else(|| "OSC off".into())
                 }

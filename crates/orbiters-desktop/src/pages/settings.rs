@@ -8,7 +8,7 @@ use crate::backend::Ctl;
 use crate::ipc::UpdateAction;
 use crate::state::{AccountState, Snapshot, UpdateState};
 use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder};
-use orbiters_core::settings::{ViewGpu, WhilePlaying, WindowGpu};
+use orbiters_core::settings::{CoverageOverlay, ViewGpu, WhilePlaying, WindowGpu};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, SegOption, Size, Variant};
@@ -233,7 +233,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(
                     ui,
                     "Action Menu control",
-                    Some("Start and stop recording from your avatar's Action Menu (OSCQuery, works next to VRCFT and other OSC apps)."),
+                    Some("Start and stop recording with N4N0 › Record in your avatar's Action Menu, and let N4N0 and its capture kit hear Orbiters (OSCQuery, works next to VRCFT and other OSC apps)."),
                     48.0,
                     |ui| {
                         apply |= widgets::toggle(ui, "osc", &mut draft.osc.enabled);
@@ -250,12 +250,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     },
                 );
                 widgets::separator(ui);
-                widgets::field(ui, "Record parameter", Some("Bool avatar parameter that toggles recording."), 270.0, |ui| {
-                    if let Some(text) = form::text_row(ui, &mut state.texts, "record-parameter", &base.osc.record_parameter, "OrbitersRecord", 192.0, true) {
-                        draft.osc.record_parameter = text;
-                        apply = true;
-                    }
-                });
+                widgets::field(
+                    ui,
+                    "Six more views while recording",
+                    Some("N4N0's camera rig turns on for a moment every few metres the camera goes: six more views around it (left, front, right, back, up, down), so the reconstruction sees what you forgot to film. VRChat draws the world six more times for those moments."),
+                    48.0,
+                    |ui| {
+                        apply |= widgets::toggle(ui, "rig-views", &mut draft.rig_views);
+                    },
+                );
                 widgets::separator(ui);
                 let log_desc = snap.vrchat.world.log_file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| {
                     if snap.vrchat.log_found {
@@ -348,6 +351,21 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(ui, "SteamVR dashboard tab", Some(tab), 48.0, |ui| {
                     apply |= widgets::toggle(ui, "perf-overlay", &mut draft.steamvr_overlay);
                 });
+                widgets::separator(ui);
+                let hands = [
+                    SegOption::new(CoverageOverlay::Off, "Off"),
+                    SegOption::new(CoverageOverlay::LeftHand, "Left hand"),
+                    SegOption::new(CoverageOverlay::RightHand, "Right hand"),
+                ];
+                widgets::field(
+                    ui,
+                    "Coverage while recording",
+                    Some("In VR, the camera path and what it has covered float above a controller while you record, as on the Capture page. SteamVR shows it in your headset only: never in VRChat's camera or the recording."),
+                    300.0,
+                    |ui| {
+                        apply |= widgets::segmented(ui, "coverage-overlay", &mut draft.coverage_overlay, &hands, true);
+                    },
+                );
                 widgets::separator(ui);
                 widgets::field(
                     ui,

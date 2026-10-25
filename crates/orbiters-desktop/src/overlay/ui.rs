@@ -581,7 +581,7 @@ fn recorder(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
     widgets::text_truncated(&p, pos2(card.center().x, y + 8.0), Align2::CENTER_CENTER, &Txt::new(title, 18.0).weight(weight::SEMIBOLD), card.width() - 40.0);
     let sub = match (&c.source, c.state) {
         (Some(source), CaptureState::Recording | CaptureState::Paused) => source.clone(),
-        _ if snap.osc.listening => "or use the Record toggle in your Action Menu".into(),
+        _ if snap.osc.listening => "or N4N0 › Record in your Action Menu".into(),
         _ => "Saved as a session for Mixer".into(),
     };
     widgets::text_truncated(&p, pos2(card.center().x, y + 34.0), Align2::CENTER_CENTER, &Txt::new(sub, 13.5).color(theme::FG_3), card.width() - 40.0);

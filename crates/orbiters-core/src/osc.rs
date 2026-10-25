@@ -83,9 +83,12 @@ pub enum OscEvent {
 
 pub const PARAMETERS_PREFIX: &str = "/avatar/parameters/";
 pub const AVATAR_CHANGE: &str = "/avatar/change";
-/// The capture kit's depth-frames toggle (Mixer's `CaptureKit.DepthParameter`); its record toggle is the record
-/// parameter of the settings.
-pub const DEPTH_FRAMES_PARAMETER: &str = "OrbitersDepthFrames";
+/// N4N0's capture kit (contracts' `orb::params::CAPTURE_*`, `Docs/rig-frames.md`): its record toggle (N4N0 › Record
+/// in the Action Menu, or the app while it records), whose changes start and stop recording, and its depth-frames
+/// toggle. [`CAPTURE_PARAMETERS`] are all of N4N0's capture parameters, the camera rig's included: the app's own.
+pub const RECORD_PARAMETER: &str = crate::contracts::orb::params::CAPTURE_RECORD;
+pub const DEPTH_FRAMES_PARAMETER: &str = crate::contracts::orb::params::CAPTURE_DEPTH;
+pub const CAPTURE_PARAMETERS: [&str; 8] = crate::contracts::orb::params::CAPTURE;
 
 /// What VRChat sent last for each address (all of a message's arguments, and when, on the shared clock): a session's
 /// initial values, N4N0's carried parameters, the camera's mode. An avatar change forgets the last avatar's parameters

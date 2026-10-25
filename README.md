@@ -5,8 +5,10 @@ your avatar's saved states, side by side as equals on the window's Home, in the 
 your avatar. It also
 captures VRChat worlds while you play and brings them into Unity with [Mixer](https://github.com/Orbiters-cc/Mixer).
 
-A shader on your capture avatar draws a small *capture strip* into VRChat's Stream camera: the exact camera pose,
-projection and frame flags, bit-coded in grey blocks, plus *depth frames* that carry exact depth from the game.
+N4N0's capture kit on your avatar draws a small *capture strip* into VRChat's Stream camera: the exact camera pose,
+projection and frame flags, bit-coded in grey blocks, plus *depth frames* that carry exact depth from the game. The app
+drives it over OSC (contracts `Docs/rig-frames.md`, N4N0's capture kit); N4N0 › Record in the Action Menu starts and
+stops a recording too.
 Orbiters - N4N0 receives the Stream camera over Spout, decodes every frame, keeps lossless keyframes, poses and
 depth, and writes a session bundle that the reconstruction (next milestone) turns into Gaussian splats and meshes.
 It never asks for your VRChat login: it only reads VRChat's local log, OSC and Spout.
@@ -31,11 +33,16 @@ works on it; when your orb has the projected screen ("Replace Orbiters overlay" 
 opens on that screen in VRChat instead, where you touch it with your index finger and people around see it too
 (contracts `Docs/orb.md`, Menu and Screen). YouTube is read without an account or a key, as YouTube's own website does.
 
-A **3D picture** (1, 4 or 8 s) flies VRChat's camera around you while it records, then reconstructs the place. When
-your avatar's capture kit has the camera rig (Mixer installs it), the rig follows the camera and about every other
-frame shows six more views at once (left, front, right, back, up, down; contracts `Docs/rig-frames.md`): the same
-flight gives the reconstruction several times the angles. Those views have no depth of their own, and the rig renders
-the world six more times a frame, for the length of the picture only.
+A **3D picture** (1, 4 or 8 s) flies VRChat's camera around you while it records, then reconstructs the place. N4N0's
+camera rig follows the camera and about every other frame shows six more views at once (left, front, right, back, up,
+down; contracts `Docs/rig-frames.md`): the same flight gives the reconstruction several times the angles. Those views
+have no depth of their own, and the rig renders the world six more times a frame, for the length of the picture only.
+While you **record**, the rig follows VRChat's camera too and turns on for 0.3 s every few metres the camera goes (at
+most every 4 s; Settings, "Six more views while recording"), so the reconstruction also sees what you forgot to film,
+and N4N0's capture kit draws wherever the camera goes. In VR, what the recording has covered so far (the Capture page's
+camera path) floats above a controller while you record (Settings, "Coverage while recording"); in desktop mode it
+shows in a corner of the screen. Neither is ever in the recording: SteamVR draws overlays into the headset only, and
+the frames are VRChat's camera's own picture, shared over Spout before anything is drawn over it.
 
 In VR it also offers **walk boost**: while you push the stick you walk with, your play space moves along with you, so
 you cover more ground in VRChat. The chaperone stays on your room's walls, and the play space goes back when you

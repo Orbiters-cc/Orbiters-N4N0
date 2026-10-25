@@ -33,6 +33,11 @@ pub enum Part {
     Leftovers,
 }
 
+/// Where a session's keyframes wait while they are deleted. They leave `keyframes/` before anything goes: from then on
+/// the session is one reduced to its 3D view ([`trimmed`]) whatever stops the rest (the app quitting halfway), so a
+/// reconstruction never trains on half of its keyframes.
+const KEYFRAMES_GOING: &str = "keyframes.deleting";
+
 /// The performance streams of a session (contracts `Docs/performance.md`).
 const PERFORMANCE: [&str; 8] = [
     perf::PARAMETERS_FILE,
@@ -50,7 +55,7 @@ const PERFORMANCE: [&str; 8] = [
 /// `result_in_place`: the latest result is in `reconstruction/` (else `reconstruction.old/` holds it, and stays).
 pub fn capture_part(name: &str, video: Option<&str>, result_in_place: bool) -> Option<Part> {
     match name {
-        KEYFRAMES_DIR => Some(Part::Keyframes),
+        KEYFRAMES_DIR | KEYFRAMES_GOING => Some(Part::Keyframes),
         DEPTH_DIR | RAW_DEPTH_DIR => Some(Part::Depth),
         reconstruction::PARTIAL_DIR => Some(Part::Leftovers),
         reconstruction::OLD_DIR if result_in_place => Some(Part::Leftovers),
@@ -171,6 +176,14 @@ pub fn keep_only_view(dir: &Path, freed: &mut dyn FnMut(u64)) -> anyhow::Result<
     anyhow::ensure!(has_view(dir), "This session has no 3D view to keep: reconstruct it first.");
     let mut total = 0;
     let result = (|| {
+        let (keyframes, going) = (dir.join(KEYFRAMES_DIR), dir.join(KEYFRAMES_GOING));
+        if keyframes.is_dir() {
+            // What a deletion cut short left there goes first, to make room.
+            if std::fs::symlink_metadata(&going).is_ok() {
+                total += remove(&going, freed)?;
+            }
+            crate::rename_retrying(&keyframes, &going)?;
+        }
         for e in capture_files(dir) {
             total += remove(&e.path, freed)?;
         }
@@ -370,6 +383,29 @@ mod tests {
         keep_only_view(&dir, &mut |_| {}).unwrap();
         assert!(dir.join("reconstruction.old/splats.ply").is_file() && !dir.join("reconstruction.partial").exists());
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// A deletion cut short (the app quit halfway through the keyframes) left a session already reduced to its 3D
+    /// view: its keyframes had left `keyframes/` first. The next one finishes it.
+    #[test]
+    fn a_deletion_cut_short_leaves_no_half_keyframes_to_reconstruct_from() {
+        let (root, dir) = session("cut", true);
+        fs::rename(dir.join("keyframes"), dir.join(KEYFRAMES_GOING)).unwrap();
+        fs::remove_file(dir.join(KEYFRAMES_GOING).join("000000.qoi")).unwrap();
+        assert!(trimmed(&dir) && has_view(&dir));
+        let going = capture_files(&dir).into_iter().find(|e| e.path.ends_with(KEYFRAMES_GOING)).expect("listed");
+        assert_eq!((going.part, going.bytes, going.files), (Part::Keyframes, 4000, 4));
+        assert_eq!(measure(&dir, Some("colour.mkv")).capture, CAPTURE - 1000 + 900 + 1500);
+        keep_only_view(&dir, &mut |_| {}).unwrap();
+        assert!(!dir.join(KEYFRAMES_GOING).exists() && !dir.join("depth").exists());
+        // Both there (a session that got keyframes again): the leftover goes first, then the keyframes.
+        let (root2, dir2) = session("both", true);
+        fs::create_dir_all(dir2.join(KEYFRAMES_GOING)).unwrap();
+        fs::write(dir2.join(KEYFRAMES_GOING).join("old.qoi"), b"x").unwrap();
+        keep_only_view(&dir2, &mut |_| {}).unwrap();
+        assert!(!dir2.join(KEYFRAMES_GOING).exists() && !dir2.join("keyframes").exists());
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&root2).ok();
     }
 
     #[test]

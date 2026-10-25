@@ -363,12 +363,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         }
     }
     if let Some(v) = state.viewer.as_mut() {
+        let integrated = super::splats::on_integrated(cx);
         let window = ctx.content_rect();
         let rect = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
         let mut open = true;
         egui::Area::new(Id::unique(("splat-viewer-area", &v.session))).order(Order::Foreground).fixed_pos(rect.min).show(&ctx, |ui| {
             ui.set_min_size(rect.size());
-            open = v.show(ui, rect);
+            open = v.show(ui, rect, integrated);
         });
         if !open {
             state.viewer = None;
@@ -395,10 +396,11 @@ impl State {
         self.sessions.as_ref()?.iter().find(|s| s.dir == dir)?.reconstruction.as_ref().map(|r| r.created_utc.clone())
     }
 
-    /// Opens the 3D view of the open detail's session (screenshots).
-    pub fn open_viewer(&mut self, ctx: &egui::Context, gpu: &crate::gpu::Handles) {
+    /// Opens the 3D view of the open detail's session (screenshots, the GPU bench), its splats on the integrated GPU
+    /// with `integrated`.
+    pub fn open_viewer(&mut self, ctx: &egui::Context, gpu: &crate::gpu::Handles, integrated: bool) {
         let Some(s) = self.detail.as_ref().and_then(|d| self.sessions.as_ref()?.iter().find(|s| s.dir == d.dir)) else { return };
-        self.viewer = Some(super::splats::Viewer::open(ctx, gpu, &s.dir, title(s)));
+        self.viewer = Some(super::splats::Viewer::open(ctx, gpu, &s.dir, title(s), integrated));
     }
 }
 
@@ -1081,7 +1083,8 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
     }
     if open_viewer {
         if let Some(gpu) = cx.gpu {
-            state.viewer = Some(super::splats::Viewer::open(ctx, gpu, &session.dir, title(&session)));
+            let integrated = super::splats::on_integrated(cx);
+            state.viewer = Some(super::splats::Viewer::open(ctx, gpu, &session.dir, title(&session), integrated));
         }
     }
     if open_folder {

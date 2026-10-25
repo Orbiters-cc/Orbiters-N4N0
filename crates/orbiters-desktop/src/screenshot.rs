@@ -1419,7 +1419,7 @@ fn splats_3d(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, sc
     anyhow::ensure!(run.app.sessions_mut().open_dir().is_some(), "no session in {}", settings.sessions_dir.display());
     // The detail opens, then the 3D view over it.
     run.wait(1.0)?;
-    run.app.sessions_mut().open_viewer(&ctx, &handles);
+    run.app.sessions_mut().open_viewer(&ctx, &handles, false);
     run.until("the 3D view's splats", 120.0, |run| run.app.sessions_mut().viewer_loaded())?;
     run.wait(0.6)?;
     run.shoot(out, "splats-3d")?;

@@ -7,13 +7,19 @@
 //! the reach of the depth frames fogged towards the sky's horizon or cropped; both show as trained again. On the
 //! processor's integrated GPU a moving camera draws fewer pixels, then the view is drawn whole once it stops
 //! ([`MOVING_PIXELS`]): a million splats at 27 frames a second instead of 19 at 1280×780 on an Intel UHD 770.
+//! While the window draws on the graphics card, the splats can draw on the integrated GPU instead, by default while
+//! VRChat runs ([`orbiters_core::settings::ViewGpu`], [`super::splat_worker`]); they move between the two GPUs while
+//! the view is open, once loaded on the other.
 
-use super::Job;
+use super::splat_worker::{Request, Worker};
+use super::{Cx, Job};
 use crate::gpu::Handles;
 use eframe::egui_wgpu::{self, wgpu};
 use egui::{pos2, vec2, Align2, Color32, Id, Rect, Sense, Ui, UiBuilder};
 use crate::views::{self, View};
 use orbiters_core::reconstruction;
+use orbiters_core::settings::ViewGpu;
+use orbiters_reconstruct::gaussians::Gaussians;
 use orbiters_reconstruct::camera::{normalize, Camera};
 use orbiters_reconstruct::gpu::{Confidence, ConfidenceMode, FarField, FarMode, Gpu, Target};
 use orbiters_reconstruct::ply;
@@ -25,11 +31,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Behind the splats (encoded sRGB, like the trained colours).
-const BACKGROUND: [f32; 3] = [0.035, 0.035, 0.043];
+pub(super) const BACKGROUND: [f32; 3] = [0.035, 0.035, 0.043];
 
 /// What the loading thread hands over.
 struct Loaded {
-    renderer: Arc<Mutex<Renderer>>,
+    source: Source,
     splats: usize,
     views: Vec<View>,
     /// The view to start from and how far ahead its subject is.
@@ -42,6 +48,31 @@ struct Loaded {
     /// The sky's colour at the horizon (the sky map's band around it, else the sky shell's: orbiters_reconstruct::sky),
     /// else the background's: what fog and haze turn to.
     horizon: [f32; 3],
+}
+
+/// Where the splats are drawn.
+enum Source {
+    /// On the window's device, through the paint callback.
+    Window(Arc<Mutex<Renderer>>),
+    /// On the processor's integrated GPU, in a thread of its own; the window shows its frames.
+    Integrated(Worker),
+}
+
+impl Source {
+    fn integrated(&self) -> bool {
+        matches!(self, Source::Integrated(_))
+    }
+}
+
+/// Whether the 3D view draws on the integrated GPU now: the window draws on the graphics card of a computer that has
+/// both, and the settings ask for it (by default while VRChat runs).
+pub fn on_integrated(cx: &Cx<'_>) -> bool {
+    let both = cx.gpu.is_some_and(|g| g.adapter.choice && !g.adapter.integrated);
+    both && match cx.snap.settings.view_gpu {
+        ViewGpu::WhilePlaying => cx.snap.vrchat.running,
+        ViewGpu::Always => true,
+        ViewGpu::Never => false,
+    }
 }
 
 /// What the confidence control shows poorly seen splats as.
@@ -66,7 +97,7 @@ struct Renderer {
 }
 
 /// How many frames after a render its count is waited for.
-const REDRAW_CHECKS: u8 = 4;
+pub(super) const REDRAW_CHECKS: u8 = 4;
 
 /// On the processor's integrated GPU, a moving camera draws at most this many pixels, and the view is drawn whole once
 /// it has stood still for [`SHARP_AFTER`] seconds (docs/igpu-experiment.md).
@@ -121,15 +152,23 @@ pub struct Viewer {
     far: FarMode,
     /// The far field's distance: fog's thickness, the crop's soft edge (metres).
     far_distance: f32,
-    /// Drawn by the processor's integrated GPU ([`MOVING_PIXELS`]), and when the camera last moved.
+    /// The window drawn by the processor's integrated GPU ([`MOVING_PIXELS`]), and when the camera last moved.
     integrated: bool,
     moved: f64,
+    /// The window's device, to draw the splats on when they leave the integrated GPU.
+    window: (wgpu::Device, wgpu::Queue),
+    /// The splats loading on the other GPU (true: the integrated one), and a GPU they could not load on (not tried
+    /// again until the other is asked for).
+    moving: Option<(bool, Job<Result<Source, String>>)>,
+    refused: Option<bool>,
 }
 
 impl Viewer {
-    pub fn open(ctx: &egui::Context, gpu: &Handles, session: &Path, title: String) -> Self {
-        let (device, queue, dir) = (gpu.device.clone(), gpu.queue.clone(), session.to_path_buf());
-        let loading = Job::spawn(ctx, move || load(&dir, device, queue).map_err(|e| format!("{e:#}")));
+    /// Opens the 3D view of `session`, its splats on the integrated GPU with `integrated` ([`on_integrated`]).
+    pub fn open(ctx: &egui::Context, gpu: &Handles, session: &Path, title: String, integrated: bool) -> Self {
+        let window = (gpu.device.clone(), gpu.queue.clone());
+        let (w, dir, c) = (window.clone(), session.to_path_buf(), ctx.clone());
+        let loading = Job::spawn(ctx, move || load(&dir, &c, w, integrated).map_err(|e| format!("{e:#}")));
         Self {
             session: session.to_path_buf(),
             title,
@@ -144,6 +183,9 @@ impl Viewer {
             far_distance: 20.0,
             integrated: gpu.adapter.integrated,
             moved: f64::NEG_INFINITY,
+            window,
+            moving: None,
+            refused: None,
         }
     }
 
@@ -151,8 +193,44 @@ impl Viewer {
         self.loaded.is_some()
     }
 
-    /// Draws the viewer over `rect`; returns false once closed.
-    pub fn show(&mut self, ui: &mut Ui, rect: Rect) -> bool {
+    /// Moves the splats to the integrated GPU or the window's, as `integrated` asks, once loaded there (the view stays
+    /// where it is until then).
+    fn place(&mut self, ctx: &egui::Context, integrated: bool) {
+        if self.refused.is_some_and(|r| r != integrated) {
+            self.refused = None;
+        }
+        if let Some((to, job)) = self.moving.as_mut() {
+            let to = *to;
+            if let Some(result) = job.take() {
+                match result {
+                    Ok(source) => {
+                        if let Some(l) = self.loaded.as_mut() {
+                            l.source = source;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("3D view: {e}");
+                        self.refused = Some(to);
+                    }
+                }
+                self.moving = None;
+            }
+            return;
+        }
+        let Some(l) = self.loaded.as_ref() else { return };
+        if l.source.integrated() != integrated && self.refused != Some(integrated) {
+            let (dir, window, c) = (self.session.clone(), self.window.clone(), ctx.clone());
+            let job = Job::spawn(ctx, move || {
+                let (g, sky) = read(&dir).map_err(|e| format!("{e:#}"))?;
+                source(&c, window, integrated, &g, sky.as_ref()).map_err(|e| format!("{e:#}"))
+            });
+            self.moving = Some((integrated, job));
+        }
+    }
+
+    /// Draws the viewer over `rect`, its splats on the integrated GPU with `integrated` ([`on_integrated`]); returns
+    /// false once closed.
+    pub fn show(&mut self, ui: &mut Ui, rect: Rect, integrated: bool) -> bool {
         let ctx = ui.ctx().clone();
         if let Some(job) = self.loading.as_mut() {
             if let Some(result) = job.take() {
@@ -167,13 +245,14 @@ impl Viewer {
                 self.loading = None;
             }
         }
+        self.place(&ctx, integrated);
         let p = ui.painter().with_clip_rect(rect);
         p.rect_filled(rect, 0.0, Color32::from_rgb(9, 9, 11));
         let id = Id::unique(("splat-viewer", &self.session));
         let resp = ui.interact(rect, id, Sense::click_and_drag());
         let ppp = ctx.pixels_per_point();
         let (w, h) = (((rect.width() * ppp).round() as u32).max(16), ((rect.height() * ppp).round() as u32).max(16));
-        if let (Some(l), Some(orbit)) = (self.loaded.as_ref(), self.orbit.as_mut()) {
+        if let (Some(l), Some(orbit)) = (self.loaded.as_mut(), self.orbit.as_mut()) {
             let before = *orbit;
             steer(ui, &resp, orbit, rect, h);
             if resp.double_clicked() {
@@ -185,7 +264,7 @@ impl Viewer {
             if *orbit != before {
                 self.moved = now;
             }
-            let (w, h) = if self.integrated && now - self.moved < SHARP_AFTER {
+            let (w, h) = if (self.integrated || l.source.integrated()) && now - self.moved < SHARP_AFTER {
                 // Drawn whole once it stops.
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(SHARP_AFTER - (now - self.moved)));
                 within(w, h, MOVING_PIXELS)
@@ -201,13 +280,24 @@ impl Viewer {
             };
             let confidence = mode.map(|mode| Confidence { amount: self.amount, mode }).unwrap_or_default();
             let far = FarField { mode: self.far, distance: self.far_distance, horizon: l.horizon };
-            p.add(egui_wgpu::Callback::new_paint_callback(rect, SplatCallback { renderer: l.renderer.clone(), camera, confidence, far }));
-            let (error, checking) = l.renderer.lock().map(|r| (r.error.clone(), r.checks > 0)).unwrap_or_default();
+            let error = match &mut l.source {
+                Source::Window(renderer) => {
+                    p.add(egui_wgpu::Callback::new_paint_callback(rect, SplatCallback { renderer: renderer.clone(), camera, confidence, far }));
+                    let (error, checking) = renderer.lock().map(|r| (r.error.clone(), r.checks > 0)).unwrap_or_default();
+                    if checking {
+                        ctx.request_repaint();
+                    }
+                    error
+                }
+                Source::Integrated(worker) => {
+                    // Its thread asks for a repaint with each frame.
+                    worker.ask(Request { camera, confidence, far });
+                    p.add(egui_wgpu::Callback::new_paint_callback(rect, worker.callback()));
+                    worker.error()
+                }
+            };
             if let Some(e) = error {
                 widgets::text(&p, rect.center(), Align2::CENTER_CENTER, &Txt::new(format!("This view could not be drawn: {e}"), 13.0).color(theme::DANGER));
-            }
-            if checking {
-                ctx.request_repaint();
             }
         } else {
             let (text, color) = match &self.error {
@@ -388,24 +478,53 @@ fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_p
     }
 }
 
-/// Reads the splats, their sky map and the recorded views, and sets the renderer up on the window's device.
-fn load(dir: &Path, device: wgpu::Device, queue: wgpu::Queue) -> anyhow::Result<Loaded> {
+/// Reads a session's splats and their sky map.
+fn read(dir: &Path) -> anyhow::Result<(Gaussians, Option<SkyMap>)> {
     let result = reconstruction::result_dir(dir);
     let g = ply::read(&result.join(reconstruction::PLY_FILE))?;
     let sky_file = result.join(reconstruction::SKY_FILE);
     let sky = if sky_file.is_file() { Some(SkyMap::read(&sky_file)?) } else { None };
+    Ok((g, sky))
+}
+
+/// A renderer of `g` and its sky map on the integrated GPU (with `integrated`) or the window's device.
+fn source(ctx: &egui::Context, window: (wgpu::Device, wgpu::Queue), integrated: bool, g: &Gaussians, sky: Option<&SkyMap>) -> anyhow::Result<Source> {
+    let renderer = |device: wgpu::Device, queue: wgpu::Queue| -> anyhow::Result<Gpu> {
+        let mut gpu = Gpu::renderer(device, queue);
+        gpu.upload(g);
+        if let Some(map) = sky {
+            gpu.set_sky(Some((map.width, &map.rgb)))?;
+        }
+        Ok(gpu)
+    };
+    if integrated {
+        let (device, queue) = crate::gpu::integrated_device()?;
+        let gpu = renderer(device.clone(), queue.clone())?;
+        return Ok(Source::Integrated(Worker::start(ctx, gpu, device, queue)));
+    }
+    let gpu = renderer(window.0, window.1)?;
+    Ok(Source::Window(Arc::new(Mutex::new(Renderer { gpu, target: None, last: None, error: None, checks: 0 }))))
+}
+
+/// Reads the splats, their sky map and the recorded views, and sets the renderer up on the integrated GPU (with
+/// `integrated`, else or when that fails on the window's device).
+fn load(dir: &Path, ctx: &egui::Context, window: (wgpu::Device, wgpu::Queue), integrated: bool) -> anyhow::Result<Loaded> {
+    let (g, sky) = read(dir)?;
     let (views, start) = views::recorded(dir)?;
     // Orbit around what that view looks at.
     let depth = views::depth_ahead(&g, &views[start]);
-    let mut gpu = Gpu::renderer(device, queue);
-    gpu.upload(&g);
-    if let Some(map) = &sky {
-        gpu.set_sky(Some((map.width, &map.rgb)))?;
-    }
+    let source = match integrated.then(|| source(ctx, window.clone(), true, &g, sky.as_ref())) {
+        Some(Ok(s)) => s,
+        Some(Err(e)) => {
+            eprintln!("3D view on the window's GPU, not the integrated one: {e:#}");
+            source(ctx, window, false, &g, sky.as_ref())?
+        }
+        None => source(ctx, window, false, &g, sky.as_ref())?,
+    };
     let seen = g.seen.iter().any(|s| s.weight >= 0.0);
     let far = g.seen.iter().any(|s| s.beyond > 0.0);
     let horizon = sky.as_ref().map(SkyMap::horizon).or_else(|| orbiters_reconstruct::sky::horizon(&g)).unwrap_or(BACKGROUND);
-    Ok(Loaded { renderer: Arc::new(Mutex::new(Renderer { gpu, target: None, last: None, error: None, checks: 0 })), splats: g.len(), views, start, depth, seen, far, horizon })
+    Ok(Loaded { source, splats: g.len(), views, start, depth, seen, far, horizon })
 }
 
 const BLIT: &str = r#"
@@ -439,7 +558,7 @@ fn fs_main(v: V) -> @location(0) vec4<f32> {
 "#;
 
 /// The blit pipeline for the renderer's target (created on first use, kept in its callback resources).
-struct Blit {
+pub(super) struct Blit {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -499,6 +618,34 @@ impl Blit {
         });
         Self { pipeline, layout, sampler, params }
     }
+
+    /// The window's, made on first use.
+    pub(super) fn of<'a>(device: &wgpu::Device, resources: &'a mut egui_wgpu::CallbackResources) -> Option<&'a Blit> {
+        if resources.get::<Blit>().is_none() {
+            let target = resources.get::<orbiters_ui::RenderTarget>().copied()?;
+            resources.insert(Blit::new(device, target));
+        }
+        resources.get::<Blit>()
+    }
+
+    /// What draws `view` (an RGBA8 image of encoded sRGB) over the callback's rectangle.
+    pub(super) fn bind_group(&self, device: &wgpu::Device, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("splat blit"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: self.params.as_entire_binding() },
+            ],
+        })
+    }
+
+    pub(super) fn draw(&self, pass: &mut wgpu::RenderPass<'static>, bind_group: &wgpu::BindGroup) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
 }
 
 struct SplatCallback {
@@ -517,11 +664,7 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
         _encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        if resources.get::<Blit>().is_none() {
-            let Some(target) = resources.get::<orbiters_ui::RenderTarget>().copied() else { return Vec::new() };
-            resources.insert(Blit::new(device, target));
-        }
-        let blit = resources.get::<Blit>().expect("inserted");
+        let Some(blit) = Blit::of(device, resources) else { return Vec::new() };
         let mut r = self.renderer.lock().unwrap();
         let size = (self.camera.width, self.camera.height);
         if r.target.as_ref().is_none_or(|t| t.size != size) {
@@ -536,15 +679,7 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
                 view_formats: &[],
             });
             let view = texture.create_view(&Default::default());
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("splat blit"),
-                layout: &blit.layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&blit.sampler) },
-                    wgpu::BindGroupEntry { binding: 2, resource: blit.params.as_entire_binding() },
-                ],
-            });
+            let bind_group = blit.bind_group(device, &view);
             r.target = Some(Presented { size, view, bind_group });
             r.last = None;
         }
@@ -574,9 +709,7 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
     fn paint(&self, _info: egui::PaintCallbackInfo, pass: &mut wgpu::RenderPass<'static>, resources: &egui_wgpu::CallbackResources) {
         let (Some(blit), Ok(r)) = (resources.get::<Blit>(), self.renderer.lock()) else { return };
         let Some(t) = r.target.as_ref() else { return };
-        pass.set_pipeline(&blit.pipeline);
-        pass.set_bind_group(0, &t.bind_group, &[]);
-        pass.draw(0..3, 0..1);
+        blit.draw(pass, &t.bind_group);
     }
 }
 

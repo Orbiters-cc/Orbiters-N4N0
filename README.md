@@ -90,9 +90,9 @@ The app looks for `orbiters-capture`, `orbiters-reconstruct`, `orbiters-voice` a
 executable. What stays running is small: in the tray the
 service and the worker use about 25 MB together and no GPU. The window is a separate process that exists only
 while it is open (about 120 MB, mostly the GPU driver); it repaints only while something moves, and looping
-animations run only while it is focused. It draws on the processor's integrated GPU when the computer also has a
-graphics card (Settings, Interface, Window graphics), and while it is behind VRChat it draws the service's news at
-most five times a second ([what that saves VRChat](docs/igpu-experiment.md)). `orbiters-desktop --hidden` starts in
+animations run only while it is focused. It draws on the graphics card (Settings, Interface, Window graphics, can
+move it to the processor's integrated GPU), its 3D view's splats on the integrated GPU while VRChat runs (3D view on
+the integrated GPU), and while it is behind VRChat it draws the service's news at most five times a second ([what that saves VRChat](docs/igpu-experiment.md)). `orbiters-desktop --hidden` starts in
 the tray, `--quit` stops it.
 
 `orbiters-desktop --gpu-bench <scenario> [--gpu integrated|graphics-card]` opens the window over a stand-in controller

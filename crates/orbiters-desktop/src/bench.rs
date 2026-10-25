@@ -10,7 +10,8 @@
 //! orbiting), `splats-still` (that 3D view, still). `--publish` republishes the snapshot that many times a second, as
 //! the tray service does while recording or with N4N0's menu open; with `--background` it is drawn as a window behind
 //! VRChat draws it ([`crate::ipc::BACKGROUND_PACE`]). `--alternate` has `scroll` and `splats` move for that long, then
-//! rest as long, and so on.
+//! rest as long, and so on. `--view-gpu always` draws the 3D view's splats on the integrated GPU while the window draws
+//! on the graphics card (`settings::ViewGpu`; `never`, the default here, keeps them on the window's GPU).
 
 use crate::app::App;
 use crate::backend::{Ctl, Local};
@@ -18,7 +19,7 @@ use crate::controller::{self, Controller};
 use crate::pages::Page;
 use anyhow::Context as _;
 use egui::{pos2, vec2, Event, Pos2, RawInput, Rect, ViewportCommand, ViewportId};
-use orbiters_core::settings::{Settings, WindowGpu};
+use orbiters_core::settings::{Settings, ViewGpu, WindowGpu};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -43,9 +44,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         Some("pages") => Scenario::Pages,
         Some("splats") => Scenario::Splats,
         Some("splats-still") => Scenario::SplatsStill,
-        _ => anyhow::bail!("usage: --gpu-bench idle|still|live|scroll|pages|splats|splats-still [--gpu integrated|graphics-card] [--seconds s] [--warmup s] [--session name] [--publish hz [--background]] [--size WxH] [--position x,y] [--alternate s]"),
+        _ => anyhow::bail!("usage: --gpu-bench idle|still|live|scroll|pages|splats|splats-still [--gpu integrated|graphics-card] [--seconds s] [--warmup s] [--session name] [--publish hz [--background]] [--size WxH] [--position x,y] [--alternate s] [--view-gpu always|never]"),
     };
     let mut gpu = WindowGpu::IntegratedGpu;
+    let mut view_gpu = ViewGpu::Never;
     let (mut seconds, mut warmup, mut publish, mut alternate) = (30.0f64, 3.0f64, 0.0f64, 0.0f64);
     let mut size = [1280.0f32, 820.0];
     let mut background = false;
@@ -59,6 +61,13 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                     Some("integrated") => WindowGpu::IntegratedGpu,
                     Some("graphics-card") => WindowGpu::GraphicsCard,
                     _ => anyhow::bail!("--gpu integrated|graphics-card"),
+                }
+            }
+            "--view-gpu" => {
+                view_gpu = match it.next().map(String::as_str) {
+                    Some("always") => ViewGpu::Always,
+                    Some("never") => ViewGpu::Never,
+                    _ => anyhow::bail!("--view-gpu always|never"),
                 }
             }
             "--seconds" => seconds = it.next().context("--seconds <s>")?.parse()?,
@@ -78,8 +87,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             other => anyhow::bail!("unknown option {other}"),
         }
     }
-    let mut settings = Settings::default();
-    settings.consent_acknowledged = true;
+    let settings = Settings { consent_acknowledged: true, view_gpu, ..Default::default() };
     let sessions = controller::list_sessions(&settings.sessions_dir);
     let chosen = sessions.iter().find(|s| s.dir.file_name().is_some_and(|n| n.to_string_lossy().contains(&session))).map(|s| s.dir.clone());
     if matches!(scenario, Scenario::Splats | Scenario::SplatsStill) && chosen.is_none() {
@@ -113,7 +121,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "Orbiters - N4N0 GPU bench",
         options,
         Box::new(move |cc| {
-            let bench = Bench::new(cc, backend, scenario, chosen, seconds, warmup, alternate);
+            let bench = Bench::new(cc, backend, scenario, chosen, seconds, warmup, alternate, view_gpu == ViewGpu::Always && gpu == WindowGpu::GraphicsCard);
             if let Some(news) = news {
                 news.start(&cc.egui_ctx);
             }
@@ -178,6 +186,8 @@ struct Bench {
     pressed: bool,
     /// Seconds of moving, then of rest, in turn (0: always moving).
     alternate: f64,
+    /// The 3D view's splats on the integrated GPU.
+    view_integrated: bool,
 }
 
 #[derive(Default)]
@@ -188,7 +198,8 @@ struct Frames {
 }
 
 impl Bench {
-    fn new(cc: &eframe::CreationContext<'_>, backend: Ctl, scenario: Scenario, session: Option<PathBuf>, seconds: f64, warmup: f64, alternate: f64) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn new(cc: &eframe::CreationContext<'_>, backend: Ctl, scenario: Scenario, session: Option<PathBuf>, seconds: f64, warmup: f64, alternate: f64, view_integrated: bool) -> Self {
         let mut app = App::new(cc, backend, false);
         app.skip_splash();
         if let Some(rs) = &cc.wgpu_render_state {
@@ -215,6 +226,7 @@ impl Bench {
             pages: 0,
             pressed: false,
             alternate,
+            view_integrated,
         }
     }
 
@@ -238,11 +250,19 @@ impl Bench {
         std::thread::spawn(move || {
             let start = Instant::now();
             let mut tick = start;
+            let views = || crate::pages::splat_worker::DRAWN.load(std::sync::atomic::Ordering::Relaxed);
+            let (views_start, mut views_last) = (views(), views());
             while start.elapsed().as_secs_f64() < seconds {
                 tick += Duration::from_secs(1);
                 std::thread::sleep(tick.saturating_duration_since(Instant::now()));
                 let n = std::mem::take(&mut frames.lock().unwrap().this_second);
-                println!("{n} frames");
+                let k = views() - views_last;
+                views_last += k;
+                if k > 0 {
+                    println!("{n} frames, {k} of the 3D view from the integrated GPU");
+                } else {
+                    println!("{n} frames");
+                }
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             }
             let (mut v, drawn) = {
@@ -260,6 +280,10 @@ impl Bench {
                 pick(0.99),
                 v.last().copied().unwrap_or(f64::NAN)
             );
+            let k = views() - views_start;
+            if k > 0 {
+                println!("3D view: {k} frames from the integrated GPU ({:.1} a second)", k as f64 / seconds);
+            }
             let _ = std::io::Write::flush(&mut std::io::stdout());
             ctx.send_viewport_cmd(ViewportCommand::Close);
             ctx.request_repaint();
@@ -345,7 +369,7 @@ impl eframe::App for Bench {
             Stage::Detail(at) => {
                 if now - at > 1.0 {
                     if let Some(gpu) = self.gpu.clone() {
-                        self.app.sessions_mut().open_viewer(ctx, &gpu);
+                        self.app.sessions_mut().open_viewer(ctx, &gpu, self.view_integrated);
                     }
                     self.stage = Stage::Loading(now);
                 }

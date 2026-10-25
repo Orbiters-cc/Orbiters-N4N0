@@ -38,8 +38,10 @@ pub struct Settings {
     pub photo_3d_timer: u32,
     /// Where reconstructions train while VRChat runs.
     pub reconstruct_while_playing: WhilePlaying,
-    /// The GPU the window draws on, its 3D view included.
+    /// The GPU the window draws on.
     pub window_gpu: WindowGpu,
+    /// When the window's 3D view draws on the integrated GPU instead of the window's.
+    pub view_gpu: ViewGpu,
     /// Starting with SteamVR (starting with Windows is the person's registry, read where it is shown).
     pub startup: StartupSettings,
 }
@@ -71,7 +73,7 @@ pub enum WhilePlaying {
     AfterVrchat,
 }
 
-/// The GPU the window draws on, its 3D view included (chosen when the window opens). On the processor's integrated GPU
+/// The GPU the window draws on (chosen when the window opens), its 3D view too unless [`ViewGpu`] moves it. On the processor's integrated GPU
 /// the graphics card that drives the monitor only shows the window: Windows has it copy each frame, which takes a
 /// GPU-bound game about twice what drawing an interface frame there does (scrolling at 60 frames a second: 3.6 % of
 /// its frames instead of 1.6 %, on an RTX 4080), but the 3D view's splats stay off it (orbiting a million of them:
@@ -83,6 +85,20 @@ pub enum WindowGpu {
     IntegratedGpu,
     #[default]
     GraphicsCard,
+}
+
+/// When the window's 3D view draws on the processor's integrated GPU while the window draws on the graphics card: only
+/// its frames reach the graphics card, as pictures the window shows. Orbiting a million splats then takes a GPU-bound
+/// game on an RTX 4080 about what the interface does instead of a tenth of its frames, but moves at about 27 frames a
+/// second instead of 60 (docs/igpu-experiment.md). By default only while VRChat runs: without a game there is nothing
+/// to spare the graphics card for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewGpu {
+    #[default]
+    WhilePlaying,
+    Always,
+    Never,
 }
 
 /// A 3D picture's length: a gentle 1 s sweep, 4 s that circle you and fly 10 m out every way, or 8 s that also circle
@@ -345,6 +361,7 @@ impl Default for Settings {
             photo_3d_timer: 0,
             reconstruct_while_playing: WhilePlaying::default(),
             window_gpu: WindowGpu::default(),
+            view_gpu: ViewGpu::default(),
             startup: StartupSettings::default(),
         }
     }
@@ -480,6 +497,7 @@ mod tests {
         assert_eq!(partial.osc.record_parameter, "OrbitersRecord");
         assert_eq!(partial.orb, OrbSettings::default(), "settings from before N4N0 get its defaults");
         assert_eq!(partial.window_gpu, WindowGpu::GraphicsCard, "the window draws on the graphics card unless chosen otherwise");
+        assert_eq!(partial.view_gpu, ViewGpu::WhilePlaying, "its 3D view on the integrated GPU while VRChat runs unless chosen otherwise");
         std::fs::remove_dir_all(dir).ok();
     }
 

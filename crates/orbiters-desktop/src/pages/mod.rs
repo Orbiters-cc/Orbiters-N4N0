@@ -7,6 +7,7 @@ pub mod mic;
 pub mod orb;
 pub mod sessions;
 pub mod settings;
+pub mod splat_worker;
 pub mod splats;
 pub mod states;
 pub mod storage;

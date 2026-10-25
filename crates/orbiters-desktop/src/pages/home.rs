@@ -1,12 +1,15 @@
-//! Home: N4N0's menu as a page of the window. Its six features (fast walk, YouTube, calls, a 3D picture, music, the
-//! light) are cards like the rest of the app's, and each opens a page of its own drawn the same way. What they show and
-//! what a press does are the menu's (`orbiters_orb::menu`, run by [`crate::menu_host`] in step with the tray service
-//! like the menu in VR); only the drawing is the window's. Cards and choices act on the pointer's press, buttons on its
-//! release with the press shown at once, and the menu shows a change before the service answers.
+//! Home: N4N0's menu as a page of the window. Its seven features (fast walk, YouTube, calls, a 3D picture, music, the
+//! light, the avatar's saved states) are cards like the rest of the app's, and each opens a page of its own drawn the
+//! same way; what N4N0 says fills the grid's last row. What they show and what a press does are the menu's
+//! (`orbiters_orb::menu`, run by [`crate::menu_host`] in step with the tray service like the menu in VR); only the
+//! drawing is the window's (the States page is [`super::states`]). Cards and choices act on the pointer's press, buttons
+//! on its release with the press shown at once, and the menu shows a change before the service answers.
 
 use super::{block, section, Cx};
+use crate::ipc::OrbCommand;
 use crate::menu_host::MenuHost;
 use crate::overlay::menu_ui;
+use crate::state::StateAction;
 use egui::epaint::RectShape;
 use egui::{pos2, vec2, Align, Align2, Color32, CursorIcon, Id, Key, Layout, Painter, Pos2, Rect, Sense, Stroke, TextureId, Ui, UiBuilder, Vec2};
 use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
@@ -40,6 +43,8 @@ enum Act {
     Call(usize),
     /// The speakers' volume, in percent.
     Volume(u8),
+    /// What the States page asks of the service.
+    States(StateAction),
     /// Back to Home itself.
     Home,
 }
@@ -57,6 +62,8 @@ pub struct State {
     focus: bool,
     /// The result whose link was copied last, and when.
     copied: Option<(String, f64)>,
+    /// The States page's own state (what was asked and not yet seen, a name being typed).
+    states: super::states::StatesPage,
 }
 
 impl State {
@@ -93,7 +100,7 @@ fn go_home(host: &mut MenuHost) {
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let snap = cx.snap;
-    let State { host, shown, since, opened, focus, copied } = state;
+    let State { host, shown, since, opened, focus, copied, states } = state;
     let host = host.get_or_insert_with(|| {
         let mut host = MenuHost::new(ctx.clone());
         host.open(snap);
@@ -140,12 +147,21 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 40 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             match page {
-                Page::Home => home(ui, cx, menu, &idle, &mut acts),
+                // The window never shows a dropped card itself (the avatar's screen does).
+                Page::Home | Page::Card => home(ui, cx, menu, &idle, &mut acts),
                 Page::Search | Page::Results => youtube(ui, cx, menu, &picture, focus, copied_id, &mut acts),
                 Page::Call => call(ui, cx, menu, &mut acts),
                 Page::Photo => photo(ui, cx, menu, take_blocked, &mut acts),
                 Page::Music => music(ui, cx, menu, &picture, &mut acts),
                 Page::Light => light(ui, cx, menu, &mut acts),
+                Page::States => {
+                    let mut out = Vec::new();
+                    super::states::show(ui, cx, states, &mut out);
+                    acts.extend(out.into_iter().map(|o| match o {
+                        super::states::Out::Home => Act::Home,
+                        super::states::Out::Action(action) => Act::States(action),
+                    }));
+                }
             }
         });
     });
@@ -176,13 +192,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 host.menu.volume = Some(Volume { percent, muted: false });
                 effects.push(Effect::Media(MediaCommand::Volume(percent)));
             }
+            Act::States(action) => cx.ctl.orb(OrbCommand::States { action }),
             Act::Home => go_home(host),
         }
     }
-    // It stays open here (nothing closes it): a close goes back to Home.
+    // It stays open here (nothing closes it): a close goes back to Home. A dropped card is on the avatar's screen: the
+    // results stay here.
     if host.effects(effects, snap, cx.ctl) {
         host.open(snap);
     }
+    host.dropped = false;
 
     // What arrives on its own: YouTube's answers and thumbnails, the music, a call's clock; a copied link's note ends.
     let menu = &host.menu;
@@ -232,15 +251,30 @@ fn home(ui: &mut Ui, cx: &Cx, menu: &Menu, idle: &str, acts: &mut Vec<Act>) {
     });
 
     let w = ui.available_width().min(MAX_W);
-    let cols = if w >= 700.0 { 3 } else { 2 };
+    let cols = home_columns(w);
     let card_w = (w - GAP * (cols - 1) as f32) / cols as f32;
-    let rows = HOME_TILES.len().div_ceil(cols);
+    // The features, then what N4N0 says in the rest of the last row (one place at least): the grid stays whole.
+    let cells = HOME_TILES.len() + 1;
+    let rows = cells.div_ceil(cols);
     let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (CARD_H + GAP) - GAP), Sense::hover());
+    let cell = |i: usize| area.min + vec2((i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (CARD_H + GAP));
     for i in 0..HOME_TILES.len() {
-        let at = area.min + vec2((i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (CARD_H + GAP));
-        feature(ui, cx, i, Rect::from_min_size(at, vec2(card_w, CARD_H)), menu, acts);
+        feature(ui, cx, i, Rect::from_min_size(cell(i), vec2(card_w, CARD_H)), menu, acts);
     }
-    said(ui, cx, 1 + HOME_TILES.len(), menu);
+    let span = cols - HOME_TILES.len() % cols;
+    let at = cell(HOME_TILES.len());
+    said(ui, cx, 1 + HOME_TILES.len(), Rect::from_min_size(at, vec2(span as f32 * (card_w + GAP) - GAP, CARD_H)), menu);
+}
+
+/// Home's columns at `width`: four on a wide window, three, two on a narrow one.
+fn home_columns(width: f32) -> usize {
+    if width >= 900.0 {
+        4
+    } else if width >= 700.0 {
+        3
+    } else {
+        2
+    }
 }
 
 /// One of Home's features: its icon chip, its name and what it says now, with a switch for what turns on and off (fast
@@ -290,6 +324,7 @@ fn feature(ui: &mut Ui, cx: &Cx, i: usize, rect: Rect, menu: &Menu, acts: &mut V
             Target::Call => menu.call.is_some(),
             Target::Photo => menu.countdown.is_some(),
             Target::Music => menu.media.as_ref().is_some_and(|m| m.playing && !m.title.is_empty()),
+            Target::States => menu.states.iter().any(|s| s.default),
             _ => false,
         };
     let note = Txt::new(layout::text(menu, Content::TileNote(i as u8)), 12.5).color(if active { theme::ACCENT } else { theme::FG_3 });
@@ -318,24 +353,30 @@ fn feature(ui: &mut Ui, cx: &Cx, i: usize, rect: Rect, menu: &Menu, acts: &mut V
     }
 }
 
-/// What N4N0 said last (or heard: the owner's own words), quietly under the features.
-fn said(ui: &mut Ui, cx: &Cx, index: usize, menu: &Menu) {
-    let Some(text) = menu.heard.as_deref() else { return };
-    let w = ui.available_width().min(MAX_W);
-    let text_x = INSET + 36.0 + 12.0;
-    let line = ui.painter().layout_job(Txt::new(format!("“{text}”"), 13.5).color(theme::FG_2).line_height(20.0).job(w - text_x - INSET));
-    let h = 40.0 + line.size().y + 22.0;
-    block(ui, cx, index, h, |ui, rect| {
-        let r = Rect::from_min_size(rect.min, vec2(w, h));
-        let p = ui.painter();
-        widgets::card(p, r, theme::CARD_RADIUS);
-        let chip = Rect::from_min_size(r.min + vec2(INSET, 22.0), vec2(36.0, 36.0));
-        p.rect_filled(chip, theme::radius(11.0), theme::alpha(theme::ACCENT, 0.12));
-        orb_face(p, chip.center(), 10.0);
-        let caption = if menu.heard_private { "You said" } else { "N4N0 says" };
-        widgets::text(p, pos2(r.left() + text_x, r.top() + 31.0), Align2::LEFT_CENTER, &Txt::caps(caption));
-        p.galley(pos2(r.left() + text_x, r.top() + 40.0), line, theme::FG_2);
-    });
+/// What N4N0 said last (or heard: the owner's own words), in the last row of the features: N4N0 beside its caption, the
+/// words under them.
+fn said(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, menu: &Menu) {
+    let (r, alpha) = super::entering(ui, cx, index, rect);
+    let mut p = ui.painter().clone();
+    p.multiply_opacity(alpha);
+    widgets::frame(&p, r, theme::CARD_RADIUS, theme::surface());
+    let chip = Rect::from_min_size(r.min + vec2(INSET, 22.0), vec2(36.0, 36.0));
+    p.rect_filled(chip, theme::radius(11.0), theme::alpha(theme::ACCENT, 0.12));
+    orb_face(&p, chip.center(), 10.0);
+    let caption = match (&menu.heard, menu.heard_private) {
+        (None, _) => "N4N0",
+        (Some(_), true) => "You said",
+        (Some(_), false) => "N4N0 says",
+    };
+    widgets::text(&p, pos2(chip.right() + 12.0, chip.center().y), Align2::LEFT_CENTER, &Txt::caps(caption));
+    let (text, color) = match menu.heard.as_deref() {
+        Some(text) => (format!("“{text}”"), theme::FG_2),
+        None => ("Nothing said yet: N4N0's answers show here.".to_string(), theme::FG_3),
+    };
+    let mut job = Txt::new(text, 13.0).color(color).line_height(18.0).job(r.width() - 2.0 * INSET);
+    job.wrap.max_rows = 2;
+    let lines = p.layout_job(job);
+    p.galley(pos2(r.left() + INSET, chip.bottom() + 10.0), lines, color);
 }
 
 /// N4N0 itself, `radius` large: its green dot with its eyes, as the menu's back shows it.
@@ -472,8 +513,11 @@ fn results(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<T
             if i > 0 {
                 widgets::separator(ui);
             }
-            if result_row(ui, i, video, picture(&video.id), copied == Some(video.id.as_str())) {
-                acts.push(Act::Press(Target::Copy(i as u8)));
+            // After its Copy link, the row offers Drop (the avatar's screen shows the card in the world), and says it was
+            // copied as long as it does.
+            let drop = !layout::target_state(menu, Target::Drop(i as u8)).hidden;
+            if let Some(target) = result_row(ui, i, video, picture(&video.id), drop || copied == Some(video.id.as_str()), drop) {
+                acts.push(Act::Press(target));
             }
         }
         if menu.has_previous() || menu.has_next() {
@@ -485,13 +529,15 @@ fn results(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<T
     });
 }
 
-/// A result: its thumbnail and length, its title and channel, and its Copy link button; true when that was clicked.
-fn result_row(ui: &mut Ui, i: usize, video: &Video, texture: Option<TextureId>, copied: bool) -> bool {
+/// A result: its thumbnail and length, its title and channel, its Copy link button and, once copied where a card can be
+/// dropped, its Drop; the one clicked.
+fn result_row(ui: &mut Ui, i: usize, video: &Video, texture: Option<TextureId>, copied: bool, drop: bool) -> Option<Target> {
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), THUMB.y + 28.0), Sense::hover());
     let thumb = Rect::from_min_size(pos2(row.left(), row.center().y - THUMB.y / 2.0), THUMB);
     let button_w = 124.0;
+    let drop_w = if drop { 96.0 + 8.0 } else { 0.0 };
     let x = thumb.right() + 16.0;
-    let text_w = (row.right() - button_w - 20.0 - x).max(80.0);
+    let text_w = (row.right() - button_w - drop_w - 20.0 - x).max(80.0);
     {
         let p = ui.painter();
         thumbnail(p, thumb, texture, 10.0);
@@ -509,7 +555,19 @@ fn result_row(ui: &mut Ui, i: usize, video: &Video, texture: Option<TextureId>, 
     }
     let (label, glyph) = if copied { ("Copied", icons::CHECK) } else { ("Copy link", icons::COPY) };
     let copy = Button::new(label).icon(glyph).size(Size::Sm).width(button_w).id_salt(("orbiters-home-copy", i));
-    copy.show_at(ui, Rect::from_min_size(pos2(row.right() - button_w, row.center().y - 16.0), vec2(button_w, 32.0))).clicked()
+    let mut clicked = None;
+    if copy.show_at(ui, Rect::from_min_size(pos2(row.right() - button_w, row.center().y - 16.0), vec2(button_w, 32.0))).clicked() {
+        clicked = Some(Target::Copy(i as u8));
+    }
+    if drop {
+        let hint = "Drop it in the world as a card: whoever grabs it copies the link";
+        let button = Button::new("Drop").icon(icons::HAND_DEPOSIT).size(Size::Sm).variant(Variant::Primary).width(96.0).hint(hint);
+        let at = Rect::from_min_size(pos2(row.right() - button_w - 8.0 - 96.0, row.center().y - 16.0), vec2(96.0, 32.0));
+        if button.id_salt(("orbiters-home-drop", i)).show_at(ui, at).clicked() {
+            clicked = Some(Target::Drop(i as u8));
+        }
+    }
+    clicked
 }
 
 /// A result's place while the search runs.
@@ -857,7 +915,8 @@ mod tests {
         fn quit(&self) {}
     }
 
-    /// Home in a 1048 × 780 page, frame by frame: its cards are 316 wide from x 32, 128 high from y 140 (16 apart).
+    /// Home in a 1048 × 780 page, frame by frame: its cards are four to a row, 233 wide from x 32, 128 high from y 140
+    /// (16 apart): fast walk, YouTube, Call, 3D picture, then music, light, States and what N4N0 says.
     struct Harness {
         ctx: egui::Context,
         recorder: Arc<Recorder>,
@@ -930,7 +989,7 @@ mod tests {
         let mut h = Harness::new();
         h.settle();
         // YouTube's card, the second of the first row: its page on the press, and the search field takes the keys.
-        let youtube = pos2(522.0, 204.0);
+        let youtube = pos2(397.0, 204.0);
         h.press(youtube);
         assert_eq!(h.page(), Page::Search, "open on the press, before the release");
         h.release(youtube);
@@ -942,8 +1001,8 @@ mod tests {
         h.settle();
 
         // The light's card (away from its switch) opens the light's page; its Home button comes back on the release.
-        h.press(pos2(760.0, 380.0));
-        h.release(pos2(760.0, 380.0));
+        h.press(pos2(400.0, 380.0));
+        h.release(pos2(400.0, 380.0));
         assert_eq!(h.page(), Page::Light);
         h.settle();
         let back = pos2(60.0, 64.0);
@@ -958,7 +1017,7 @@ mod tests {
         let mut h = Harness::new();
         h.settle();
         // Fast walk's switch: one change, saved as the setting; the card under it does nothing more.
-        let walk = pos2(300.0, 180.0);
+        let walk = pos2(217.0, 180.0);
         h.press(walk);
         assert!(h.menu().fast_walk, "on at once");
         h.release(walk);
@@ -968,12 +1027,58 @@ mod tests {
         assert_eq!(h.page(), Page::Home);
 
         // The light's switch: off at once, and it stays off while the service has not said so yet.
-        let light = pos2(964.0, 324.0);
+        let light = pos2(466.0, 324.0);
         h.press(light);
         h.release(light);
         h.frame(Vec::new());
         assert!(matches!(h.recorder.orb.lock().unwrap().as_slice(), [OrbCommand::Light { on: false, .. }]));
         assert!(!h.menu().light.expect("a light").on, "as switched, though the service still says on");
         assert_eq!(h.page(), Page::Home, "its card did not open the light's page");
+    }
+
+    #[test]
+    fn the_states_page_saves_and_its_default_acts_on_the_press() {
+        use crate::state::{StateView, StatesView};
+        widgets::watch_controls();
+        let mut h = Harness::new();
+        h.snap.orb.states = StatesView {
+            avatar_id: Some("avtr_a".into()),
+            avatar_name: Some("Rexouium".into()),
+            states: vec![StateView {
+                id: "s1".into(),
+                name: "Hoodie on".into(),
+                parameters: 10,
+                pose_parameters: 2,
+                eye_height: Some(1.6),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        h.settle();
+        // The States card, the third of the second row: its page on the press.
+        let card = pos2(646.0, 348.0);
+        h.press(card);
+        assert_eq!(h.page(), Page::States, "open on the press");
+        h.release(card);
+        h.settle();
+        // Set as default is a choice: asked on the press, before the release.
+        let (default, _) = widgets::control(&h.ctx, "Set as default").expect("drawn");
+        h.press(default.center());
+        assert!(
+            matches!(h.recorder.orb.lock().unwrap().last(), Some(OrbCommand::States { action: StateAction::Default { id: Some(id) } }) if id == "s1"),
+            "{:?}",
+            h.recorder.orb.lock().unwrap()
+        );
+        h.release(default.center());
+        h.frame(Vec::new());
+        assert!(widgets::control(&h.ctx, "Default").is_some(), "marked at once, before the service says so");
+        // Save with no name: the next "State n".
+        let (save, _) = widgets::control(&h.ctx, "Save").expect("drawn");
+        h.press(save.center());
+        h.release(save.center());
+        assert!(matches!(
+            h.recorder.orb.lock().unwrap().last(),
+            Some(OrbCommand::States { action: StateAction::Save { name: Some(name) } }) if name == "State 2"
+        ));
     }
 }

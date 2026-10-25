@@ -14,7 +14,7 @@ use super::menu_ui::{self, View};
 use super::Canvas;
 use egui::{pos2, ColorImage, TextureHandle, TextureId, TextureOptions};
 use orbiters_orb::menu::layout::{self, ScreenPage, MAX_ELEMENTS, MAX_SLOTS, PICTURES};
-use orbiters_orb::menu::{screen, Call, Contact, KeyboardLayout, Keys, Light, Media, Menu, Page, PhotoLength, Target, Volume};
+use orbiters_orb::menu::{screen, Call, Card, Contact, KeyboardLayout, Keys, Light, Media, Menu, Page, Pages, PhotoLength, StateRow, Target, Volume};
 use orbiters_orb::picture;
 use orbiters_orb::youtube::{Results, Video};
 use std::path::Path;
@@ -264,8 +264,12 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     symbols.keys = Keys::Symbols;
     out.push((ScreenPage::SearchSymbols, symbols, None, None));
     let mut results = base();
+    results.pages = Pages::ALL;
+    results.can_drop = true;
     results.search_for("lofi hip hop");
     results.results_arrived(1, Results { videos: sample_videos(), continuation: Some("next".into()) }, false);
+    // The second result's link copied: its row says so and offers Drop.
+    results.press(Target::Copy(1));
     out.push((ScreenPage::Results, results, Some(9), None));
     let mut calls = base();
     calls.page = Page::Call;
@@ -283,7 +287,7 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     // The overlay's Home and screens from version 3: six tiles, music playing, N4N0's light on.
     let more = || {
         let mut m = base();
-        m.six_tiles = true;
+        m.pages = Pages::Six;
         m.media = Some(sample_media());
         m.volume = Some(Volume { percent: 40, muted: false });
         m.light = Some(Light { on: true, color: 1, level: 0.6 });
@@ -301,7 +305,39 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     let mut light = more();
     light.page = Page::Light;
     out.push((ScreenPage::Light, light, Some(5), None));
+    // The overlay's Home and screens from version 5: seven tiles, the avatar's saved states, what N4N0 says in its place.
+    let seven = || {
+        let mut m = more();
+        m.pages = Pages::Seven;
+        m.can_drop = true;
+        m.set_states(sample_states(), true, "");
+        m
+    };
+    let mut home = seven();
+    home.fast_walk = true;
+    home.heard = Some("Done, hoodie on. Now go find your friends instead of talking to a floating ball.".into());
+    out.push((ScreenPage::HomeSeven, home, Some(6), None));
+    let mut states = seven();
+    states.press(Target::States);
+    out.push((ScreenPage::States, states, Some(5), None));
+    let mut card = seven();
+    let video = &sample_videos()[3];
+    card.show_card(Card { link: video.link(), title: video.title.clone(), video: Some(video.id.clone()), left: 11 });
+    out.push((ScreenPage::Card, card, None, None));
     out
+}
+
+/// Saved states of the sample avatar: the second the default.
+pub(crate) fn sample_states() -> Vec<StateRow> {
+    [
+        ("s1", "Hoodie on", false, false, false),
+        ("s2", "Cosy evening", true, true, false),
+        ("s3", "Tall and sitting", false, true, true),
+        ("s4", "State 4", false, false, false),
+    ]
+    .into_iter()
+    .map(|(id, name, default, pose, size)| StateRow { id: id.into(), name: name.into(), default, pose, size })
+    .collect()
 }
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
@@ -361,9 +397,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let path = out.join(format!("menu-{}-retro.png", page.name()));
         write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
         println!("{}", path.display());
-        // Orbiters Toolkit's pictures of the two looks, for the Look option on N4N0's card in My Avatar: this Home,
-        // half size.
-        if page == ScreenPage::HomeSix {
+        // Orbiters Toolkit's pictures of the two looks, for the Look option on N4N0's card in My Avatar: the newest
+        // Home, half size.
+        if page == ScreenPage::HomeSeven {
             for (picture, name) in [(&modern, "N4N0 preview.png"), (&rgba, "N4N0 preview retro.png")] {
                 let path = out.join(name);
                 write_png(&path, WIDTH / 2, HEIGHT / 2, &half(&unpremultiply(picture), WIDTH as usize, HEIGHT as usize))?;
@@ -379,7 +415,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let flags = screen::Flags { listening: menu.listening, loading: menu.loading(), thinking: false };
         let bank = screen::Frame::new(&menu, hover, pressed, flags, 72, &pictures).bank;
         std::fs::write(out.join(format!("bank-{}.bin", page.name())), &bank[..screen::bank_bytes(72)])?;
-        if matches!(page, ScreenPage::Results | ScreenPage::Music) {
+        if matches!(page, ScreenPage::Results | ScreenPage::Music | ScreenPage::Card) {
             let bank = screen::Frame::new(&menu, hover, pressed, flags, 128, &pictures).bank;
             std::fs::write(out.join(format!("bank-{}-128.bin", page.name())), &bank[..screen::bank_bytes(128)])?;
         }

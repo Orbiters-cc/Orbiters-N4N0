@@ -278,6 +278,7 @@ mod orb;
 mod performance;
 mod scan;
 pub(crate) mod screen;
+mod states;
 pub mod update;
 mod voice;
 pub use account::open_url;
@@ -1940,6 +1941,8 @@ fn spawn_watchers(ctl: Shared) {
                     changed
                 });
                 split.read(&events, log.live(), Instant::now());
+                // A world joined: the avatar's default state goes back once it loaded there.
+                ctl.states_log(&events, log.live());
                 let (state, split_session) = {
                     let s = ctl.snapshot.lock().unwrap();
                     (s.capture.state, s.settings.split_on_world_change)

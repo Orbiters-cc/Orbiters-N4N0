@@ -244,6 +244,17 @@ pub enum OrbCommand {
         color: u8,
         level: f32,
     },
+    /// The avatar's saved states: save, apply, the default, rename, delete, what one puts back.
+    States {
+        action: crate::state::StateAction,
+    },
+    /// A copied link dropped in the world as a card, which the avatar's screen shows (contracts `Docs/orb.md`, Link card).
+    Drop {
+        link: String,
+        title: String,
+        /// The thumbnail's key (the video id).
+        video: Option<String>,
+    },
 }
 
 /// Longest Hello a client may send, and how long it has to send it. Any local process can connect: before it proves

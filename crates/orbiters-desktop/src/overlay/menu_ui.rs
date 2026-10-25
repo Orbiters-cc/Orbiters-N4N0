@@ -56,8 +56,18 @@ pub fn glyph(icon: Icon) -> &'static str {
         Icon::SpeakerLow => icons::SPEAKER_LOW,
         Icon::SpeakerHigh => icons::SPEAKER_HIGH,
         Icon::SpeakerOff => icons::SPEAKER_X,
+        Icon::States => icons::BOOKMARKS_SIMPLE,
+        Icon::Save => icons::FLOPPY_DISK,
+        Icon::Apply => icons::ARROW_COUNTER_CLOCKWISE,
+        Icon::Star => icons::STAR,
+        Icon::Drop => icons::HAND_DEPOSIT,
+        Icon::Grab => icons::HAND_GRABBING,
+        Icon::Link => icons::LINK_SIMPLE,
     }
 }
+
+/// The States tile's colour.
+pub const PINK: Color32 = Color32::from_rgb(0xff, 0x6e, 0xc7);
 
 pub fn tint(t: Tint) -> Color32 {
     match t {
@@ -67,6 +77,7 @@ pub fn tint(t: Tint) -> Color32 {
         Tint::Violet => theme::VIOLET,
         Tint::Cyan => theme::CYAN,
         Tint::Amber => theme::WARN,
+        Tint::Pink => PINK,
         Tint::Light(i) => {
             let [r, g, b] = orbiters_contracts::orb::LIGHT_COLORS.get(i as usize).map_or([255; 3], |c| c.1);
             Color32::from_rgb(r, g, b)
@@ -89,7 +100,7 @@ fn fill(look: Look) -> Color32 {
         Look::Round | Look::Key => theme::INK_750,
         Look::KeyDark => theme::INK_700,
         Look::Row => Color32::TRANSPARENT,
-        Look::Accent => theme::ACCENT,
+        Look::Accent | Look::Bar => theme::ACCENT,
         Look::Danger => theme::DANGER,
     }
 }
@@ -136,19 +147,21 @@ fn element(p: &Painter, e: &Element, origin: Pos2) {
     match e.look {
         Look::Tile => {
             let tint = e.tint.map(tint).unwrap_or(theme::ACCENT);
-            // A tall tile (four-tile Home): the icon at its top, the title low (its note under it); a wide one (six tiles):
-            // the icon at its left, the title beside it (its note under the title).
-            let wide = r.width() > r.height();
+            // A wide tile (six tiles): the icon at its left, the title beside it (its note under the title); one as wide
+            // as it is tall or taller (four and seven tiles): the icon at its top, the title low (its note under it).
+            let wide = tile_is_wide(e.rect);
             let tile = Rect::from_min_size(r.min + if wide { vec2(24.0, (r.height() - 72.0) / 2.0) } else { vec2(24.0, 24.0) }, vec2(72.0, 72.0));
             p.rect_filled(tile, theme::radius(20.0), theme::alpha(tint, 0.16));
             if let Some(icon) = e.icon {
                 widgets::icon(p, tile.center(), glyph(icon), 40.0, tint);
             }
             if let Some(title) = e.label {
-                let at = r.min + if wide { vec2(116.0, 40.0) } else { vec2(24.0, 232.0) };
+                let at = r.min + if wide { vec2(116.0, 40.0) } else { vec2(24.0, r.height() - 92.0) };
                 widgets::text(p, at, Align2::LEFT_TOP, &Txt::new(title, 30.0).weight(weight::SEMIBOLD).color(theme::FG));
             }
         }
+        // A countdown's segment: its colour is all of it.
+        Look::Bar => {}
         Look::Field => {
             if let Some(icon) = e.icon {
                 widgets::icon(p, pos2(r.min.x + 34.0, r.center().y), glyph(icon), 26.0, theme::FG_3);
@@ -187,10 +200,31 @@ fn element(p: &Painter, e: &Element, origin: Pos2) {
     }
 }
 
+/// Whether a home tile lays its icon beside its title (a tile half as wide again as it is tall, or wider) rather than
+/// above it.
+pub fn tile_is_wide(r: layout::Rect) -> bool {
+    2 * r.w as u32 > 3 * r.h as u32
+}
+
+/// N4N0 itself, `radius` large: its green dot with its eyes, as the menu's back shows it.
+pub fn orb_face(p: &Painter, center: Pos2, radius: f32) {
+    let s = radius / 26.0;
+    p.circle_filled(center, radius, theme::ACCENT);
+    for side in [-1.0, 1.0] {
+        p.rect_filled(Rect::from_center_size(center + vec2(side * 9.0 * s, -2.0 * s), vec2(7.0 * s, 13.0 * s)), theme::radius(3.5 * s), CARD);
+    }
+}
+
 /// The card, the page's pictures and its fixed labels.
 fn backdrop(p: &Painter, origin: Pos2, layout: &Layout, listening: Option<f64>) {
     let card = Rect::from_min_size(origin, vec2(layout::WIDTH as f32, layout::HEIGHT as f32));
     p.rect_filled(card, theme::radius(layout::CARD_RADIUS as f32), CARD);
+    // What N4N0 says has a place of its own on the seven-tile Home: a panel as a tile's, N4N0 at its top left.
+    for b in &layout.boxes {
+        let r = rect(*b, origin);
+        p.rect_filled(r, theme::radius(24.0), theme::INK_800);
+        orb_face(p, r.min + vec2(38.0, 36.0), 14.0);
+    }
     for (r, icon, t) in &layout.icons {
         let r = rect(*r, origin);
         let color = t.map(tint);

@@ -232,8 +232,7 @@ impl MenuOverlay {
             match e.event_type {
                 vr::event::MOUSE_MOVE => {
                     let (x, y, _) = e.mouse();
-                    let hover =
-                        layout::hit(page, x, HEIGHT as f32 - y).map(|(i, _)| i).filter(|&i| layout::state(&self.host.menu, &page.elements[i]).pointable());
+                    let hover = layout::hit_pointable(page, &self.host.menu, x, HEIGHT as f32 - y).map(|(i, _)| i);
                     if hover != self.hover {
                         self.hover = hover;
                         self.host.dirty = true;
@@ -241,14 +240,12 @@ impl MenuOverlay {
                 }
                 vr::event::MOUSE_BUTTON_DOWN => {
                     let (x, y, _) = e.mouse();
-                    if let Some((i, target)) = layout::hit(page, x, HEIGHT as f32 - y) {
-                        if layout::state(&self.host.menu, &page.elements[i]).pointable() {
-                            // The press shows at once; what it does follows.
-                            self.pressed = Some(i);
-                            effects.extend(self.host.press(target));
-                            clicked = true;
-                            self.last_activity = Instant::now();
-                        }
+                    if let Some((i, target)) = layout::hit_pointable(page, &self.host.menu, x, HEIGHT as f32 - y) {
+                        // The press shows at once; what it does follows.
+                        self.pressed = Some(i);
+                        effects.extend(self.host.press(target));
+                        clicked = true;
+                        self.last_activity = Instant::now();
                     }
                     self.host.dirty = true;
                 }
@@ -271,7 +268,8 @@ impl MenuOverlay {
         if Instant::now().duration_since(self.last_activity) > IDLE_CLOSE {
             effects.extend(self.host.menu.close());
         }
-        if self.host.effects(effects, snap, backend) {
+        // A close, or a link dropped as a card (it is in the world now, on the avatar's screen).
+        if self.host.effects(effects, snap, backend) || std::mem::take(&mut self.host.dropped) {
             self.close(overlay);
         }
         if !self.host.menu.open {

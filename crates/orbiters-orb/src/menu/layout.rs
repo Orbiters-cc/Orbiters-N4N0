@@ -4,7 +4,9 @@
 //! pressed, on or hidden). A page is [`WIDTH`] × [`HEIGHT`] pixels; every position is on a 4-pixel grid, so the screen's
 //! layout table holds it in a byte.
 
-use super::{Call, KeyboardLayout, Keys, Menu, Page, Target, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, TIMERS};
+use super::{
+    Call, KeyboardLayout, Keys, Menu, Page, Pages, Target, CARD_PUBLIC_STEP, CARD_SEGMENTS, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, STATES_PER_PAGE, TIMERS,
+};
 use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
 use std::sync::OnceLock;
 
@@ -28,14 +30,20 @@ pub enum ScreenPage {
     CallRinging = 7,
     CallActive = 8,
     Photo = 9,
-    /// Home with six tiles (music and light): screens from version 3, and the overlay.
+    /// Home with six tiles (music and light): screens of versions 3 and 4.
     HomeSix = 10,
     Music = 11,
     Light = 12,
+    /// Home with seven tiles (States) and what N4N0 says in the eighth place: screens from version 5, and the overlay.
+    HomeSeven = 13,
+    /// The avatar's saved states (from version 5).
+    States = 14,
+    /// A link card dropped in the world (from version 5).
+    Card = 15,
 }
 
 impl ScreenPage {
-    pub const ALL: [ScreenPage; 12] = [
+    pub const ALL: [ScreenPage; 15] = [
         ScreenPage::Home,
         ScreenPage::SearchQwerty,
         ScreenPage::SearchAzerty,
@@ -48,6 +56,9 @@ impl ScreenPage {
         ScreenPage::HomeSix,
         ScreenPage::Music,
         ScreenPage::Light,
+        ScreenPage::HomeSeven,
+        ScreenPage::States,
+        ScreenPage::Card,
     ];
 
     /// The page picture's file stem and the overlay screenshot's name.
@@ -65,16 +76,31 @@ impl ScreenPage {
             ScreenPage::HomeSix => "home-six",
             ScreenPage::Music => "music",
             ScreenPage::Light => "light",
+            ScreenPage::HomeSeven => "home-seven",
+            ScreenPage::States => "states",
+            ScreenPage::Card => "card",
         }
     }
 
-    /// The page `menu` shows.
+    /// The Home of a display with `pages`.
+    pub fn home(pages: Pages) -> ScreenPage {
+        match pages {
+            Pages::Four => ScreenPage::Home,
+            Pages::Six => ScreenPage::HomeSix,
+            Pages::Seven => ScreenPage::HomeSeven,
+        }
+    }
+
+    /// The page `menu` shows: a page the display does not have shows its Home.
     pub fn of(menu: &Menu) -> ScreenPage {
         match menu.page {
-            Page::Home | Page::Music | Page::Light if !menu.six_tiles => ScreenPage::Home,
-            Page::Home => ScreenPage::HomeSix,
+            Page::Music | Page::Light if !menu.pages.music_light() => ScreenPage::home(menu.pages),
+            Page::States | Page::Card if !menu.pages.states_cards() => ScreenPage::home(menu.pages),
+            Page::Home => ScreenPage::home(menu.pages),
             Page::Music => ScreenPage::Music,
             Page::Light => ScreenPage::Light,
+            Page::States => ScreenPage::States,
+            Page::Card => ScreenPage::Card,
             Page::Search => match (menu.keys, menu.layout) {
                 (Keys::Symbols, _) => ScreenPage::SearchSymbols,
                 (Keys::Letters, KeyboardLayout::Qwerty) => ScreenPage::SearchQwerty,
@@ -139,6 +165,8 @@ pub enum Look {
     Chip = 8,
     /// Hang up, decline: red.
     Danger = 9,
+    /// A segment of a countdown bar: lit while its second is still to come, hidden once it went.
+    Bar = 10,
 }
 
 /// The icons the pages use (Phosphor icons in Orbiters - N4N0's font).
@@ -169,18 +197,41 @@ pub enum Icon {
     SpeakerLow,
     SpeakerHigh,
     SpeakerOff,
+    /// Saved states (Home's seventh tile).
+    States,
+    /// Save how it is now.
+    Save,
+    /// Put back as it was.
+    Apply,
+    /// The default state.
+    Star,
+    /// Drop a copied link in the world.
+    Drop,
+    /// Grab a dropped card.
+    Grab,
+    Link,
 }
 
-/// Home's six features in their order (the first four as on the four-tile Home), each with its icon, title and colour:
-/// the six-tile Home here, and the window's Home in Orbiters - N4N0.
-pub const HOME_TILES: [(Target, Icon, &str, Tint); 6] = [
+/// Home's features in their order (the first four as on the four-tile Home, the first six as on the six-tile one), each
+/// with its icon, title and colour: the seven-tile Home here, and the window's Home in Orbiters - N4N0.
+pub const HOME_TILES: [(Target, Icon, &str, Tint); 7] = [
     (Target::FastWalk, Icon::Walk, "Fast walk", Tint::Green),
     (Target::YouTube, Icon::YouTube, "YouTube", Tint::Red),
     (Target::Call, Icon::Phone, "Call", Tint::Blue),
     (Target::Photo, Icon::Cube, "3D picture", Tint::Violet),
     (Target::Music, Icon::Music, "Music", Tint::Cyan),
     (Target::Light, Icon::Lightbulb, "Light", Tint::Amber),
+    (Target::States, Icon::States, "States", Tint::Pink),
 ];
+
+/// The tiles of a Home with `pages`.
+pub fn home_tiles(pages: Pages) -> &'static [(Target, Icon, &'static str, Tint)] {
+    match pages {
+        Pages::Four => &HOME_TILES[..4],
+        Pages::Six => &HOME_TILES[..6],
+        Pages::Seven => &HOME_TILES,
+    }
+}
 
 /// The 3D picture's timers as its page writes them ([`super::TIMERS`] in order), here and on the window's Home.
 pub const TIMER_LABELS: [&str; 4] = ["Off", "3 s", "5 s", "10 s"];
@@ -196,6 +247,7 @@ pub enum Tint {
     Violet,
     Cyan,
     Amber,
+    Pink,
     /// One of the light's colours (contracts `orb::LIGHT_COLORS`): a chip shows it as a swatch.
     Light(u8),
 }
@@ -217,7 +269,7 @@ impl Element {
     pub fn radius(&self) -> u16 {
         match self.look {
             Look::Tile => 24,
-            Look::Round | Look::Field => self.rect.h / 2,
+            Look::Round | Look::Field | Look::Bar => self.rect.h / 2,
             Look::Accent | Look::Danger | Look::Chip => self.rect.h.min(56) / 2,
             Look::Row => 16,
             Look::Key | Look::KeyDark => 12,
@@ -277,6 +329,16 @@ pub enum Content {
     /// Light: on or off, its colour and brightness; or why there is none.
     LightState,
     LightNote,
+    /// Seven-tile Home: who said what N4N0's place shows ("N4N0 says", "You said"), and its lines.
+    HeardCaption,
+    HeardLine(u8),
+    /// States: how many there are for this avatar, or the notice; each row's name and what it puts back.
+    StatesTitle,
+    StateName(u8),
+    StateMeta(u8),
+    /// A dropped card: its title on two lines, its link.
+    CardTitle(u8),
+    CardLink,
 }
 
 /// A line of changing text: `cols` cells of `size` pixels high and half as wide, from (`x`, `y`). On the screen, cell
@@ -327,6 +389,9 @@ pub struct Layout {
     pub labels: Vec<Label>,
     /// Icons drawn without being pressable (a page's illustration).
     pub icons: Vec<(Rect, Icon, Option<Tint>)>,
+    /// Panels drawn without being pressable: the seven-tile Home's place for what N4N0 says (N4N0's face at its top
+    /// left, its texts are slots).
+    pub boxes: Vec<Rect>,
 }
 
 /// The most elements a page has (the screen's masks and layout table hold this many).
@@ -349,6 +414,12 @@ pub fn cached(page: ScreenPage) -> &'static Layout {
 pub fn hit(layout: &Layout, x: f32, y: f32) -> Option<(usize, Target)> {
     // The last drawn wins (buttons sit on rows).
     layout.elements.iter().enumerate().rev().find(|(_, e)| e.rect.contains(x, y)).map(|(i, e)| (i, e.target))
+}
+
+/// What a pointer at (`x`, `y`) hovers and presses on `menu`'s page: the last drawn element there that shows and is
+/// available now (a hidden button lets the row under it take the press: a result's Drop before its link is copied).
+pub fn hit_pointable(layout: &Layout, menu: &Menu, x: f32, y: f32) -> Option<(usize, Target)> {
+    layout.elements.iter().enumerate().rev().find(|(_, e)| e.rect.contains(x, y) && state(menu, e).pointable()).map(|(i, e)| (i, e.target))
 }
 
 fn element(target: Target, rect: Rect, look: Look) -> Element {
@@ -433,6 +504,7 @@ pub fn layout(page: ScreenPage) -> Layout {
     let mut pictures = Vec::new();
     let mut labels = Vec::new();
     let mut icons = Vec::new();
+    let mut boxes = Vec::new();
     match page {
         ScreenPage::Home => {
             let tiles = [
@@ -481,6 +553,12 @@ pub fn layout(page: ScreenPage) -> Layout {
             for i in 0..RESULTS_PER_PAGE as u8 {
                 let y = 96 + i as u16 * 92 + 20;
                 elements.push(with(element(Target::Copy(i), Rect::new(820, y, 156, 48), Look::Accent), Some(Icon::Copy), Some("Copy link")));
+            }
+            // After its Copy link, a row offers Drop (screens from version 5): between its title (which ends at 696) and its
+            // Copy link. Last in the list, so the elements before keep their indices on older screens.
+            for i in 0..RESULTS_PER_PAGE as u8 {
+                let y = 96 + i as u16 * 92 + 20;
+                elements.push(with(element(Target::Drop(i), Rect::new(704, y, 108, 48), Look::KeyDark), Some(Icon::Drop), Some("Drop")));
             }
             slots.add(104, 40, 36, 24, Style::Primary, Content::ResultsTitle);
             slots.add(868, 40, 5, 24, Style::Secondary, Content::PageLabel).centered();
@@ -539,7 +617,7 @@ pub fn layout(page: ScreenPage) -> Layout {
         }
         ScreenPage::HomeSix => {
             // Two rows of three: the first four as on the four-tile Home, then music and light.
-            for (i, (target, icon, title, tint)) in HOME_TILES.into_iter().enumerate() {
+            for (i, &(target, icon, title, tint)) in home_tiles(Pages::Six).iter().enumerate() {
                 let (x, y) = (32 + (i as u16 % 3) * 324, 104 + (i as u16 / 3) * 176);
                 let mut tile = with(element(target, Rect::new(x, y, 312, 160), Look::Tile), Some(icon), Some(title));
                 tile.tint = Some(tint);
@@ -591,15 +669,94 @@ pub fn layout(page: ScreenPage) -> Layout {
             slots.add(356, 132, 28, 24, Style::Accent, Content::LightState);
             slots.add(100, 512, 72, 24, Style::Secondary, Content::LightNote);
         }
+        ScreenPage::HomeSeven => {
+            // Two rows of four: the six tiles of the six-tile Home in their order, then States; the eighth place holds
+            // what N4N0 says. The tiles are as wide as the four-tile Home's: the icon at the top, the title and the note
+            // under it.
+            for (i, &(target, icon, title, tint)) in home_tiles(Pages::Seven).iter().enumerate() {
+                let (x, y) = seven_cell(i);
+                let mut tile = with(element(target, Rect::new(x, y, 228, 216), Look::Tile), Some(icon), Some(title));
+                tile.tint = Some(tint);
+                elements.push(tile);
+            }
+            elements.push(round(Target::Close, 936, Icon::Close));
+            icons.push((Rect::new(32, 24, 56, 56), Icon::Microphone, Some(Tint::Green)));
+            labels.push(Label { x: 104, y: 34, size: 32, text: "N4N0", style: Style::Primary, bold: true });
+            slots.add(208, 40, 48, 24, Style::Accent, Content::Status);
+            for i in 0..HOME_TILES.len() {
+                let (x, y) = seven_cell(i);
+                slots.add(x + 24, y + 168, 15, 24, Style::Secondary, Content::TileNote(i as u8));
+            }
+            let (x, y) = seven_cell(HOME_TILES.len());
+            boxes.push(Rect::new(x, y, 228, 216));
+            slots.add(x + 60, y + 24, 12, 24, Style::Secondary, Content::HeardCaption);
+            for line in 0..HEARD_LINES as u16 {
+                slots.add(x + 24, y + 68 + line * 32, HEARD_COLUMNS as u8, 24, Style::Primary, Content::HeardLine(line as u8));
+            }
+        }
+        ScreenPage::States => {
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(with(element(Target::StateSave, Rect::new(616, 24, 176, 56), Look::Accent), Some(Icon::Save), Some("Save")));
+            elements.push(round(Target::Previous, 808, Icon::Previous));
+            elements.push(round(Target::Next, 936, Icon::Next));
+            for i in 0..STATES_PER_PAGE as u8 {
+                elements.push(element(Target::StateApply(i), Rect::new(32, 96 + i as u16 * 92, 960, 84), Look::Row));
+            }
+            for i in 0..STATES_PER_PAGE as u8 {
+                let y = 96 + i as u16 * 92 + 20;
+                elements.push(with(element(Target::StateApply(i), Rect::new(820, y, 156, 48), Look::Accent), Some(Icon::Apply), Some("Apply")));
+            }
+            // The default state's mark, between its name and its Apply.
+            for i in 0..STATES_PER_PAGE as u8 {
+                let y = 96 + i as u16 * 92 + 20;
+                elements.push(with(element(Target::StateMark(i), Rect::new(656, y, 148, 48), Look::Chip), Some(Icon::Star), Some("Default")));
+            }
+            labels.push(Label { x: 104, y: 34, size: 32, text: "States", style: Style::Primary, bold: true });
+            slots.add(232, 40, 30, 24, Style::Primary, Content::StatesTitle);
+            slots.add(868, 40, 5, 24, Style::Secondary, Content::PageLabel).centered();
+            for i in 0..STATES_PER_PAGE as u8 {
+                let y = 96 + i as u16 * 92;
+                slots.add(60, y + 12, 34, 28, Style::Primary, Content::StateName(i));
+                slots.add(60, y + 48, 30, 24, Style::Secondary, Content::StateMeta(i));
+            }
+        }
+        ScreenPage::Card => {
+            // The thumbnail at the top left; beside it the title, the link and the time left running down; under them,
+            // across the card, what to do with it.
+            pictures.push(Picture { rect: Rect::new(32, 32, 512, 288), result: 0 });
+            slots.add(576, 40, 26, 32, Style::Primary, Content::CardTitle(0));
+            slots.add(576, 84, 26, 32, Style::Primary, Content::CardTitle(1));
+            slots.add(576, 140, 34, 24, Style::Accent, Content::CardLink);
+            labels.push(Label { x: 576, y: 232, size: 24, text: "Time left", style: Style::Secondary, bold: false });
+            for i in 0..CARD_SEGMENTS as u8 {
+                elements.push(element(Target::CardTime(i), Rect::new(576 + i as u16 * 28, 276, 24, 16), Look::Bar));
+            }
+            icons.push((Rect::new(240, 400, 96, 96), Icon::Grab, Some(Tint::Green)));
+            labels.push(Label { x: 364, y: 408, size: 48, text: "Grab to copy link", style: Style::Primary, bold: true });
+            labels.push(Label { x: 364, y: 472, size: 24, text: "Anyone around with N4N0 can take it", style: Style::Secondary, bold: false });
+        }
     }
-    Layout { page, elements, slots: slots.slots, pictures, labels, icons }
+    Layout { page, elements, slots: slots.slots, pictures, labels, icons, boxes }
 }
+
+/// The seven-tile Home's place `i` (0 to 7): two rows of four, 228 × 216 each, 16 apart.
+fn seven_cell(i: usize) -> (u16, u16) {
+    (32 + (i as u16 % 4) * 244, 104 + (i as u16 / 4) * 232)
+}
+
+/// What N4N0 says on the seven-tile Home: lines of so many characters, so many at a time.
+pub const HEARD_COLUMNS: usize = 15;
+pub const HEARD_LINES: usize = 4;
+/// A dropped card's title lines and its link, in characters.
+const CARD_TITLE_COLUMNS: usize = 26;
+const CARD_LINK_COLUMNS: usize = 34;
 
 /// The thumbnail a page's picture shows, by the key the hosts keep pictures under (a video id, the music's art key).
 pub fn picture_key<'a>(menu: &'a Menu, picture: &Picture) -> Option<&'a str> {
     match menu.page {
         Page::Results => menu.page_results().get(picture.result as usize).map(|v| v.id.as_str()),
         Page::Music if picture.result == 0 => menu.media.as_ref().and_then(|m| m.art.as_deref()),
+        Page::Card if picture.result == 0 => menu.card.as_ref().and_then(|c| c.video.as_deref()),
         _ => None,
     }
 }
@@ -633,11 +790,66 @@ fn tile_note(menu: &Menu, tile: u8) -> String {
             Some(m) if !m.title.is_empty() => m.title.clone(),
             _ => "Nothing playing".into(),
         },
-        _ => match menu.light {
+        5 => match menu.light {
             Some(light) if light.on => format!("On · {}", LIGHT_COLORS.get(light.color as usize).map_or("", |c| c.0)),
             Some(_) => "Off".into(),
             None => "Not on this N4N0".into(),
         },
+        _ if !menu.states_ready => "Avatar not known".into(),
+        _ => match menu.states.len() {
+            0 => "Save how it is".into(),
+            1 => "1 saved".into(),
+            n => format!("{n} saved"),
+        },
+    }
+}
+
+/// The lines of what the seven-tile Home's place for N4N0's words shows (`text`, cut between words; the last ends
+/// in "…" when there is more).
+pub fn heard_lines(text: &str) -> Vec<String> {
+    let mut lines = super::pieces(text, HEARD_COLUMNS);
+    if lines.len() > HEARD_LINES {
+        lines.truncate(HEARD_LINES);
+        let last = &mut lines[HEARD_LINES - 1];
+        let kept: String = last.chars().take(HEARD_COLUMNS - 1).collect();
+        *last = format!("{}…", kept.trim_end());
+    }
+    lines
+}
+
+/// What N4N0 says, in the pieces the seven-tile Home's place shows one after the other (as many lines as it holds each).
+pub fn heard_pages(text: &str) -> Vec<String> {
+    super::pieces(&shown(text), HEARD_COLUMNS).chunks(HEARD_LINES).map(|lines| lines.join(" ")).collect()
+}
+
+/// What is left of a dropped card's time, in segments of its bar: whole seconds for its owner, steps of
+/// [`CARD_PUBLIC_STEP`] seconds for everyone else (each step costs a block of the synced channel).
+pub fn card_segments(menu: &Menu, public: bool) -> usize {
+    let left = menu.card.as_ref().map_or(0, |c| c.left);
+    let left = if public { left.div_ceil(CARD_PUBLIC_STEP) * CARD_PUBLIC_STEP } else { left };
+    (left as usize).min(CARD_SEGMENTS)
+}
+
+/// A link as a dropped card writes it: without its scheme and `www.`, and cut to `cols` with "…".
+pub fn short_link(link: &str, cols: usize) -> String {
+    let bare = link.trim();
+    let bare = bare.strip_prefix("https://").or_else(|| bare.strip_prefix("http://")).unwrap_or(bare);
+    let bare = bare.strip_prefix("www.").unwrap_or(bare);
+    ellipsis(bare.trim_end_matches('/'), cols)
+}
+
+/// What a state puts back, for its row.
+fn state_meta(state: &super::StateRow) -> String {
+    let what = match (state.pose, state.size) {
+        (true, true) => "Parameters, pose and size",
+        (true, false) => "Parameters and pose",
+        (false, true) => "Parameters and size",
+        (false, false) => "Parameters",
+    };
+    if state.id.is_empty() {
+        "Saving…".into()
+    } else {
+        what.into()
     }
 }
 
@@ -672,7 +884,7 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
                     None => String::new(),
                 }
             }
-            Content::Heard if menu.heard_private => return String::new(),
+            Content::Heard | Content::HeardLine(_) | Content::HeardCaption if menu.heard_private => return String::new(),
             _ => {}
         }
     }
@@ -701,9 +913,44 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             // "+": YouTube has more than the pages fetched so far.
             Page::Results => format!("{}/{}{}", menu.result_page + 1, menu.result_pages(), if menu.more_available() { "+" } else { "" }),
             Page::Call => format!("{}/{}", menu.contact_page + 1, menu.contacts.len().div_ceil(CONTACTS_PER_PAGE).max(1)),
+            Page::States => format!("{}/{}", menu.state_page + 1, menu.states.len().div_ceil(STATES_PER_PAGE).max(1)),
             _ => String::new(),
         },
+        Content::HeardCaption => match (&menu.heard, menu.heard_private) {
+            (None, _) => String::new(),
+            (Some(_), true) => "You said".into(),
+            (Some(_), false) => "N4N0 says".into(),
+        },
+        Content::HeardLine(i) => menu.heard.as_deref().map(|h| heard_lines(&shown(h))).and_then(|lines| lines.into_iter().nth(i as usize)).unwrap_or_default(),
+        Content::StatesTitle => {
+            if let Some(notice) = &menu.notice {
+                notice.clone()
+            } else if !menu.states_ready {
+                menu.states_note.clone()
+            } else {
+                match menu.states.len() {
+                    0 => "Nothing saved for this avatar".into(),
+                    1 => "1 saved for this avatar".into(),
+                    n => format!("{n} saved for this avatar"),
+                }
+            }
+        }
+        Content::StateName(i) => menu.page_states().get(i as usize).map(|s| s.name.clone()).unwrap_or_default(),
+        Content::StateMeta(i) => menu.page_states().get(i as usize).map(state_meta).unwrap_or_default(),
+        Content::CardTitle(line) => {
+            let Some(card) = &menu.card else { return String::new() };
+            let lines = super::pieces(&shown(&card.title), CARD_TITLE_COLUMNS);
+            match line {
+                0 => lines.first().cloned().unwrap_or_default(),
+                // The second line ends in "…" when the title goes on.
+                _ if lines.len() > 2 => ellipsis(&format!("{} {}", lines[1], lines[2]), CARD_TITLE_COLUMNS),
+                _ => lines.get(1).cloned().unwrap_or_default(),
+            }
+        }
+        Content::CardLink => menu.card.as_ref().map(|c| short_link(&c.link, CARD_LINK_COLUMNS)).unwrap_or_default(),
         Content::ResultTitle(i) => menu.page_results().get(i as usize).map(|v| v.title.clone()).unwrap_or_default(),
+        // The row whose link was copied says so (the notice says it too, and the row offers Drop).
+        Content::ResultMeta(i) if menu.page_results().get(i as usize).is_some_and(|v| menu.copied.as_deref() == Some(v.id.as_str())) => "✓ Link copied".into(),
         Content::ResultMeta(i) => menu
             .page_results()
             .get(i as usize)
@@ -782,6 +1029,12 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
     }
 }
 
+/// `text` as the screen's font writes it (folded, one space between words): what text is wrapped from, so that the lines
+/// keep their length on the screen.
+fn shown(text: &str) -> String {
+    orbiters_contracts::orb::panel_text(&crate::text::fold_more(text)).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// `text` cut to `cols` characters, ending in "…" when cut.
 pub fn ellipsis(text: &str, cols: usize) -> String {
     let count = text.chars().count();
@@ -841,6 +1094,15 @@ pub fn state(menu: &Menu, element: &Element) -> State {
     target_state(menu, element.target)
 }
 
+/// How an element shows to the owner or, `public`, to everyone else (the avatar's screen through the synced channel):
+/// there a dropped card's countdown moves in steps of [`CARD_PUBLIC_STEP`] seconds.
+pub fn state_for(menu: &Menu, element: &Element, public: bool) -> State {
+    match element.target {
+        Target::CardTime(i) => State { hidden: i as usize >= card_segments(menu, public), ..Default::default() },
+        target => target_state(menu, target),
+    }
+}
+
 /// What pressing `target` would find, wherever it is drawn (the window's Home draws its own controls for the same
 /// targets).
 pub fn target_state(menu: &Menu, target: Target) -> State {
@@ -852,6 +1114,8 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::LightColor(i) => menu.light.is_some_and(|l| l.color == i),
         Target::LightLevel(i) => menu.light.is_some_and(|l| l.level_choice() == i as usize),
         Target::Mute => menu.volume.is_some_and(|v| v.muted),
+        // The default state's mark: chosen, ringed in green.
+        Target::StateMark(i) => menu.page_states().get(i as usize).is_some_and(|s| s.default),
         _ => false,
     };
     let hidden = match target {
@@ -866,6 +1130,12 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::MediaNext => !menu.media.as_ref().is_some_and(|m| m.can_next),
         Target::Mute | Target::VolumeDown | Target::VolumeUp => menu.volume.is_none(),
         Target::LightSwitch | Target::LightColor(_) | Target::LightLevel(_) => menu.light.is_none(),
+        // Only the copied result offers Drop, where a card can be dropped.
+        Target::Drop(i) => !menu.can_drop || menu.page_results().get(i as usize).is_none_or(|v| menu.copied.as_deref() != Some(v.id.as_str())),
+        Target::StateApply(i) => i as usize >= menu.page_states().len(),
+        Target::StateMark(i) => !menu.page_states().get(i as usize).is_some_and(|s| s.default),
+        Target::StateSave => !menu.states_ready,
+        Target::CardTime(i) => i as usize >= card_segments(menu, false),
         _ => false,
     };
     let unavailable = target == Target::FastWalk && menu.desktop_mode;
@@ -883,7 +1153,8 @@ mod tests {
             assert!(l.elements.len() <= MAX_ELEMENTS, "{page:?}: {} elements", l.elements.len());
             assert!(l.slots.len() <= MAX_SLOTS, "{page:?}: {} slots", l.slots.len());
             assert!(l.pictures.len() <= PICTURES);
-            let rects = l.elements.iter().map(|e| e.rect).chain(l.pictures.iter().map(|p| p.rect)).chain(l.icons.iter().map(|i| i.0));
+            let rects =
+                l.elements.iter().map(|e| e.rect).chain(l.pictures.iter().map(|p| p.rect)).chain(l.icons.iter().map(|i| i.0)).chain(l.boxes.iter().copied());
             for r in rects {
                 assert!(r.right() <= WIDTH && r.bottom() <= HEIGHT, "{page:?}: {r:?} leaves the page");
                 for v in [r.x, r.y, r.w, r.h] {
@@ -932,6 +1203,16 @@ mod tests {
         assert_eq!(hit(&l, 400.0, 140.0).map(|h| h.1), Some(Target::Copy(0)), "the row copies too");
         assert_eq!(hit(&l, 60.0, 50.0).map(|h| h.1), Some(Target::Back));
         assert_eq!(hit(&l, 512.0, 570.0), None);
+        // Where a result's Drop would be: the row copies while Drop is hidden, Drop drops once it shows.
+        let mut menu = Menu { pages: super::super::Pages::Seven, can_drop: true, ..Default::default() };
+        menu.open();
+        menu.search_for("cats");
+        let video = |i: usize| crate::youtube::Video { id: format!("video{i:06}"), title: format!("T{i}"), channel: "C".into(), duration: None, live: false };
+        menu.results_arrived(1, crate::youtube::Results { videos: (0..5).map(video).collect(), continuation: None }, false);
+        assert_eq!(hit_pointable(&l, &menu, 760.0, 140.0).map(|h| h.1), Some(Target::Copy(0)));
+        menu.press(Target::Copy(0));
+        assert_eq!(hit_pointable(&l, &menu, 760.0, 140.0).map(|h| h.1), Some(Target::Drop(0)));
+        assert_eq!(hit_pointable(&l, &menu, 760.0, 232.0).map(|h| h.1), Some(Target::Copy(1)), "the next row has none");
     }
 
     #[test]
@@ -977,7 +1258,7 @@ mod tests {
         let mut menu = Menu::default();
         menu.open();
         assert_eq!(ScreenPage::of(&menu), ScreenPage::Home, "an older screen: four tiles");
-        menu.six_tiles = true;
+        menu.pages = Pages::Six;
         assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSix);
         let home = cached(ScreenPage::HomeSix);
         let four = cached(ScreenPage::Home);
@@ -986,13 +1267,121 @@ mod tests {
         assert_eq!(hit(home, 900.0, 400.0).map(|h| h.1), Some(Target::Light));
         menu.press(Target::Music);
         assert_eq!(ScreenPage::of(&menu), ScreenPage::Music);
-        menu.six_tiles = false;
+        menu.pages = Pages::Four;
         assert_eq!(ScreenPage::of(&menu), ScreenPage::Home, "a screen without the page shows Home");
     }
 
     #[test]
+    fn seven_tiles_from_version_5_and_older_screens_keep_their_pages() {
+        assert_eq!(Pages::of_screen(None), Pages::Four);
+        assert_eq!(Pages::of_screen(Some(3)), Pages::Six);
+        assert_eq!(Pages::of_screen(Some(4)), Pages::Six, "version 4 points with rays, its pages are version 3's");
+        assert_eq!(Pages::of_screen(Some(5)), Pages::Seven);
+        assert_eq!(Pages::of_screen(Some(9)), Pages::Seven);
+        let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
+        menu.open();
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSeven);
+        let seven = cached(ScreenPage::HomeSeven);
+        let six = cached(ScreenPage::HomeSix);
+        let tiles = |l: &Layout| l.elements.iter().filter(|e| e.look == Look::Tile).map(|e| e.target).collect::<Vec<_>>();
+        assert_eq!(tiles(seven)[..6], tiles(six)[..], "the six tiles keep their order, States last");
+        assert_eq!(tiles(seven).last(), Some(&Target::States));
+        // Two rows of four: the eighth place is what N4N0 says, beside the States tile.
+        let states = seven.elements.iter().find(|e| e.target == Target::States).unwrap();
+        assert_eq!(seven.boxes.len(), 1);
+        assert_eq!((seven.boxes[0].y, seven.boxes[0].w, seven.boxes[0].h), (states.rect.y, states.rect.w, states.rect.h));
+        assert!(seven.boxes[0].x > states.rect.right());
+        menu.press(Target::States);
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::States);
+        // An older screen has no States page: it shows its Home; and the six-tile Home's layout is as it was.
+        menu.pages = Pages::Six;
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSix);
+        assert_eq!(six.elements.len(), 7, "six tiles and Close, as screens of version 3 and 4 have them");
+        let results = cached(ScreenPage::Results);
+        let drops: Vec<usize> = results.elements.iter().enumerate().filter(|(_, e)| matches!(e.target, Target::Drop(_))).map(|(i, _)| i).collect();
+        assert_eq!(drops, (13..18).collect::<Vec<_>>(), "Drop comes after every element older screens know, which keep their indices");
+    }
+
+    #[test]
+    fn what_n4n0_says_fills_its_place_line_by_line() {
+        let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
+        menu.open();
+        let seven = cached(ScreenPage::HomeSeven);
+        let texts = |menu: &Menu, public: bool| {
+            seven
+                .slots
+                .iter()
+                .filter(|s| matches!(s.content, Content::HeardCaption | Content::HeardLine(_)))
+                .map(|s| slot_text_for(menu, s, public))
+                .collect::<Vec<_>>()
+        };
+        assert!(texts(&menu, false).iter().all(String::is_empty), "nothing heard: an empty place");
+        menu.heard = Some("Voilà ton sweat, va voir tes potes maintenant au lieu de parler à une boule".into());
+        menu.heard_private = false;
+        let shown = texts(&menu, false);
+        assert_eq!(shown[0], "N4N0 says");
+        assert_eq!(&shown[1..], ["Voilà ton", "sweat, va voir", "tes potes", "maintenant au…"].map(String::from).as_slice(), "{shown:?}");
+        assert!(shown.iter().all(|line| line.chars().count() <= HEARD_COLUMNS));
+        assert_eq!(texts(&menu, true), shown, "what N4N0 says is for everyone");
+        menu.heard("put my hoodie on");
+        assert_eq!(texts(&menu, false)[0], "You said");
+        assert!(texts(&menu, true).iter().all(String::is_empty), "the owner's own words stay theirs");
+    }
+
+    #[test]
+    fn states_list_marks_the_default_and_pages_like_the_others() {
+        let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
+        menu.open();
+        menu.press(Target::States);
+        let l = cached(ScreenPage::States);
+        let shown = |menu: &Menu| l.elements.iter().filter(|e| !state(menu, e).hidden).map(|e| e.target).collect::<Vec<_>>();
+        menu.set_states(Vec::new(), false, "VRChat's avatar is not known yet");
+        assert_eq!(shown(&menu), vec![Target::Back], "no avatar: nothing to save");
+        assert_eq!(text(&menu, Content::StatesTitle), "VRChat's avatar is not known yet");
+        let row = |n: usize, default: bool| super::super::StateRow { id: format!("s{n}"), name: format!("State {n}"), default, pose: n == 2, size: false };
+        menu.set_states((1..=7).map(|n| row(n, n == 6)).collect(), true, "");
+        assert_eq!(text(&menu, Content::StatesTitle), "7 saved for this avatar");
+        assert_eq!(text(&menu, Content::PageLabel), "1/2");
+        assert_eq!(text(&menu, Content::StateMeta(1)), "Parameters and pose");
+        assert!(!shown(&menu).contains(&Target::StateMark(0)), "no default on the first page");
+        menu.press(Target::Next);
+        assert_eq!(menu.page_states().len(), 2);
+        assert!(shown(&menu).contains(&Target::StateMark(0)), "the default's mark, on its row");
+        assert!(!shown(&menu).contains(&Target::StateApply(2)) && !shown(&menu).contains(&Target::Next));
+        assert_eq!(menu.press(Target::StateMark(0)), vec![super::super::Effect::ApplyState { id: "s6".into(), name: "State 6".into() }]);
+        assert_eq!(text(&menu, Content::StatesTitle), "Applied \"State 6\"");
+        assert_eq!(text(&menu, Content::TileNote(6)), "7 saved");
+    }
+
+    #[test]
+    fn a_dropped_card_shows_its_picture_title_link_and_time() {
+        let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
+        menu.show_card(super::super::Card {
+            link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into(),
+            title: "Rick Astley - Never Gonna Give You Up (Official Music Video) 4K Remaster".into(),
+            video: Some("dQw4w9WgXcQ".into()),
+            left: 14,
+        });
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::Card);
+        let l = cached(ScreenPage::Card);
+        let texts: Vec<String> = l.slots.iter().map(|s| slot_text(&menu, s)).collect();
+        assert_eq!(texts, ["Rick Astley - Never Gonna", "Give You Up (Official Mus…", "youtube.com/watch?v=dQw4w9WgXcQ"].map(String::from), "{texts:?}");
+        assert_eq!(picture_key(&menu, &l.pictures[0]), Some("dQw4w9WgXcQ"));
+        let lit = |menu: &Menu, public: bool| l.elements.iter().filter(|e| !state_for(menu, e, public).hidden).count();
+        assert_eq!((lit(&menu, false), lit(&menu, true)), (14, 15), "a segment a second for the owner, steps of three for everyone else");
+        menu.card.as_mut().unwrap().left = 7;
+        assert_eq!((lit(&menu, false), lit(&menu, true)), (7, 9));
+        assert!(menu.press(Target::CardTime(0)).is_empty() && menu.press(Target::Close).is_empty(), "nothing on a card is pressed");
+        assert!(l.elements.iter().all(|e| e.look == Look::Bar));
+        assert_eq!(short_link("http://example.com/a/very/long/path/that/goes/on/and/on/", 20), "example.com/a/very/…");
+        // Opening the menu takes the card back.
+        menu.open();
+        assert_eq!((menu.page, menu.card.is_none()), (Page::Home, true));
+    }
+
+    #[test]
     fn music_shows_what_plays_and_hides_what_it_cannot_do() {
-        let mut menu = Menu { six_tiles: true, ..Default::default() };
+        let mut menu = Menu { pages: Pages::Six, ..Default::default() };
         menu.open();
         menu.press(Target::Music);
         let l = cached(ScreenPage::Music);
@@ -1023,7 +1412,7 @@ mod tests {
 
     #[test]
     fn light_chips_show_the_light_as_the_avatar_holds_it() {
-        let mut menu = Menu { six_tiles: true, ..Default::default() };
+        let mut menu = Menu { pages: Pages::Six, ..Default::default() };
         menu.open();
         menu.press(Target::Light);
         let l = cached(ScreenPage::Light);

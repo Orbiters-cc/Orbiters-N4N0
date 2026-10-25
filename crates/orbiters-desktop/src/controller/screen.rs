@@ -7,15 +7,21 @@
 //!
 //! Everyone else's screen is built apart from the owner's ([`Frame::public`]): it never names the owner's friends, and
 //! leaves out the owner's hover and presses, which changed with every move of the finger and held the rest back.
+//!
+//! A link copied from the results can be dropped in the world as a card (contracts `Docs/orb.md`, Link card): the screen
+//! shows it frozen where it was for [`orb::CARD_SECONDS`] (`N4N0/Screen/Drop` for its owner, pointer 253 on the text
+//! channel for everyone else), Orbiters is told so that whoever grabs it there copies its link, and a hand on a card
+//! (`N4N0/Card/TouchL`, `TouchR`) copies the owner's own link, or asks Orbiters for the card dropped there.
 
 use super::orb::{OrbRuntime, Source};
 use super::{NoticeKind, Shared};
-use orbiters_contracts::orb::thumbnail;
+use orbiters_contracts::orb::{self, thumbnail};
+use orbiters_core::account::{Api, Server};
 use orbiters_core::osc::OscValue;
 use orbiters_orb::menu::layout::{Content, ScreenPage};
 use orbiters_orb::menu::screen::{self, Audience, Flags, Frame, Picture, LOCAL_VALUES};
 use orbiters_orb::menu::touch::{self, Gesture, Pointer, Touch, LOST_GRACE};
-use orbiters_orb::menu::{self, layout, Call, Contact, Effect, KeyboardLayout, Menu, Page, PhotoLength, SuggestQueue};
+use orbiters_orb::menu::{self, layout, Call, Card, Contact, Effect, KeyboardLayout, Menu, Page, Pages, PhotoLength, SuggestQueue};
 use orbiters_orb::text::{Message, TextSender};
 use orbiters_orb::youtube;
 use std::collections::{HashMap, VecDeque};
@@ -50,6 +56,10 @@ const GAZE_POLL: Duration = Duration::from_millis(15);
 const CLICK_AFTER_OPEN: Duration = Duration::from_millis(500);
 /// A click presses what the gaze rested on this long, not what it crossed mid-turn.
 const GAZE_REST: Duration = Duration::from_millis(150);
+/// A dropped card's freeze (pointer 253) goes again this often while it shows, for whoever loaded the avatar since.
+const FREEZE_AGAIN: Duration = Duration::from_secs(4);
+/// Two grabs closer than this are one (both hands, a hand brushing it twice).
+const GRAB_AGAIN: Duration = Duration::from_millis(1500);
 
 /// The mouse at a reading.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -141,9 +151,12 @@ impl Followups {
 }
 
 pub struct ScreenRuntime {
-    /// The avatar's N4N0 prop has the projected screen, with this many text values and thumbnails of this many bytes
-    /// (`N4N0/Screen/ThumbnailBytes`).
+    /// N4N0's menu shows on the avatar's projected screen (the prop has it and it replaces the overlay, or VRChat runs
+    /// in desktop mode), with this many text values and thumbnails of this many bytes (`N4N0/Screen/ThumbnailBytes`).
     pub available: bool,
+    /// The prop has the projected screen, written through the text channel, wherever the menu shows: a dropped link
+    /// card shows on it even while the menu is in the overlay.
+    pub(super) present: bool,
     sync: Option<usize>,
     pub(super) thumbnail: usize,
     pub menu: Menu,
@@ -225,6 +238,19 @@ pub struct ScreenRuntime {
     menu_settle_until: Option<Instant>,
     /// The media reading the menu shows (its version: [`crate::media::Watcher::reading`]).
     media_seen: u64,
+    /// The saved states the menu lists (the states' version, the avatar they are for).
+    states_seen: Option<(u64, Option<String>)>,
+    /// When the dropped card goes; what `N4N0/Screen/Drop` was last set to.
+    card_until: Option<Instant>,
+    drop_sent: Option<bool>,
+    /// Everyone else's copy of the card was told to freeze (pointer 253) since the screen last cleared; it is told
+    /// again ([`FREEZE_AGAIN`]) when due.
+    frozen: bool,
+    freeze_due: bool,
+    freeze_next: Option<Instant>,
+    /// The hands on a card (`N4N0/Card/TouchL`, `TouchR`), and when a grab was last taken.
+    grab: [bool; 2],
+    grab_at: Option<Instant>,
 }
 
 impl Default for ScreenRuntime {
@@ -286,20 +312,32 @@ impl Default for ScreenRuntime {
             menu_sent: Vec::new(),
             menu_settle_until: None,
             media_seen: 0,
+            states_seen: None,
+            card_until: None,
+            drop_sent: None,
+            frozen: false,
+            freeze_due: false,
+            freeze_next: None,
+            grab: [false; 2],
+            grab_at: None,
+            present: false,
         }
     }
 }
 
 impl ScreenRuntime {
-    /// The avatar changed: whether it has the screen, with `sync` text values and thumbnails of `thumbnail` bytes (its
-    /// memory is unknown again). The same avatar looked at again changes nothing.
-    pub fn avatar(&mut self, available: bool, sync: Option<usize>, thumbnail: usize) {
-        let available = available && sync.is_some_and(|n| screen::fits(n, thumbnail));
-        if available && self.available && sync == self.sync && thumbnail == self.thumbnail {
+    /// The avatar changed, or where the menu shows: whether the menu shows on its screen (`available`), whether it has
+    /// one at all (`present`: a dropped card shows there), with `sync` text values and thumbnails of `thumbnail` bytes
+    /// (its memory is unknown again). The same avatar looked at again changes nothing.
+    pub fn avatar(&mut self, available: bool, present: bool, sync: Option<usize>, thumbnail: usize) {
+        let present = present && sync.is_some_and(|n| screen::fits(n, thumbnail));
+        let available = available && present;
+        if available == self.available && present == self.present && (!present || (sync == self.sync && thumbnail == self.thumbnail)) {
             return;
         }
         self.available = available;
-        self.sync = sync.filter(|_| available);
+        self.present = present;
+        self.sync = sync.filter(|_| present);
         self.thumbnail = thumbnail;
         // A loaded avatar's copies start clear; where the text channel's pointer stands is not known.
         self.everyone = self.sync.map(|n| {
@@ -310,9 +348,49 @@ impl ScreenRuntime {
         self.owner = Audience::new(LOCAL_VALUES, thumbnail);
         self.owner.forget();
         self.open_sent = None;
-        if !self.available {
+        self.frozen = false;
+        // A card stays while the screen does (the menu moved to the overlay); the menu goes where it shows now.
+        if !self.present {
+            self.end_card();
+            self.drop_sent = None;
+        }
+        if !self.available && !self.menu.card_shown() {
             self.menu.close();
         }
+    }
+
+    /// A copied link can be dropped as a card here: the screen is of version 5 or later.
+    pub(super) fn card_ready(&self) -> bool {
+        self.present && self.menu.pages.states_cards()
+    }
+
+    /// The card the screen shows, for the window.
+    pub(super) fn card_view(&self) -> Option<crate::state::CardView> {
+        let card = self.menu.card.as_ref().filter(|_| self.menu.card_shown())?;
+        Some(crate::state::CardView { title: card.title.clone(), link: card.link.clone(), left: card.left })
+    }
+
+    /// The dropped card goes (its time is up, the menu opened again, the screen went): what it showed goes with it.
+    fn end_card(&mut self) {
+        if self.menu.end_card().is_some() {
+            self.hover = None;
+            self.pressed = None;
+        }
+        self.card_until = None;
+        self.freeze_due = false;
+        self.freeze_next = None;
+    }
+
+    /// A hand on a dropped card, the owner's own or someone else's (`right`: `N4N0/Card/TouchR`), now `on`: whether it
+    /// is a grab (either hand coming on, not twice in [`GRAB_AGAIN`]).
+    pub(super) fn card_touch(&mut self, right: bool, on: bool, now: Instant) -> bool {
+        let before = self.grab.iter().any(|h| *h);
+        self.grab[right as usize] = on;
+        let grabbed = !before && on && self.grab_at.is_none_or(|t| now.duration_since(t) >= GRAB_AGAIN);
+        if grabbed {
+            self.grab_at = Some(now);
+        }
+        grabbed
     }
 
     /// The app quits: the menu closes, and the owner's screen counts as told so (the quit's last message tells it), so
@@ -330,13 +408,18 @@ impl ScreenRuntime {
             everyone.forget();
         }
         self.open_sent = None;
+        // Said again (the opposite of what it now is was the last word VRChat may have).
+        if self.drop_sent.is_some() {
+            self.drop_sent = Some(!self.menu.card_shown());
+        }
     }
 
     /// Whether N4N0's menu shows: on the avatar's screen when it has one, else in the overlay (asked to open or close
     /// it, it counts as open or closed until it says, or does not answer in time).
     fn menu_shown(&self, now: Instant) -> bool {
         if self.available {
-            self.menu.open
+            // A dropped card is not the menu: the Menu toggle goes off while it shows.
+            self.menu.open && !self.menu.card_shown()
         } else {
             let closing = self.overlay_closing.is_some_and(|at| now.duration_since(at) < OVERLAY_ANSWER);
             (self.overlay_open && !closing) || self.overlay_asked.is_some_and(|at| now.duration_since(at) < OVERLAY_ANSWER)
@@ -422,7 +505,14 @@ impl ScreenRuntime {
                 at(asked + OVERLAY_ANSWER);
             }
         }
-        if self.available && self.menu.open {
+        // A dropped card's countdown moves each second, and it goes at its end.
+        if let Some(until) = self.card_until.filter(|_| self.menu.card_shown()) {
+            let left = until.saturating_duration_since(now);
+            let to_next = if left.subsec_nanos() == 0 { Duration::from_secs(1) } else { Duration::from_nanos(left.subsec_nanos() as u64) };
+            at((now + to_next).min(until));
+        }
+        let card = self.menu.card_shown();
+        if (self.available || card) && self.menu.open {
             at(if self.owner_settled { self.next_local.max(self.idle_until) } else { self.next_local });
             // A press shown ends once its time is up and the finger let go (which a touch point's change says).
             if let Some((_, t)) = self.pressed.filter(|_| !self.holding.iter().any(|h| *h) && !self.clicking) {
@@ -432,7 +522,9 @@ impl ScreenRuntime {
             if self.gaze {
                 at(now + GAZE_POLL);
             }
-            at(self.last_activity + IDLE_CLOSE);
+            if !card {
+                at(self.last_activity + IDLE_CLOSE);
+            }
             // What N4N0 said moves on only while Home shows.
             if let Some(t) = self.answer_next.filter(|_| self.menu.page == Page::Home) {
                 at(t);
@@ -447,10 +539,18 @@ impl ScreenRuntime {
         }
         // The screen's turn on the text channel; one already due waits for the panel's block to end, whose own steps
         // wake the orb thread.
-        if self.everyone.is_some() && (self.menu.open || self.close_everyone) && self.next_synced > now {
+        if self.everyone.is_some() && ((self.menu.open && (self.available || card)) || self.close_everyone) && self.next_synced > now {
             at(self.next_synced);
         }
         due
+    }
+
+    /// Testing: the dropped card's time is up now.
+    #[cfg(test)]
+    pub(super) fn card_ends_now(&mut self) {
+        if self.card_until.is_some() {
+            self.card_until = Some(Instant::now());
+        }
     }
 
     /// Testing: nothing happened on the menu for longer than it stays open idle.
@@ -503,7 +603,7 @@ impl ScreenRuntime {
     /// (mouse-look), [`CLICK_AFTER_OPEN`] after the menu opened, on what the gaze rested on for [`GAZE_REST`]; else it
     /// presses nothing, as with nothing looked at.
     fn look_and_click(&mut self, vrchat: Option<u32>, now: Instant, effects: &mut Vec<Effect>) {
-        if !(self.gaze && self.available && self.menu.open) {
+        if !(self.gaze && self.available && self.menu.open && !self.menu.card_shown()) {
             // The mouse is not read: a click before looking began is no click.
             self.mouse_down = None;
             self.clicking = false;
@@ -517,7 +617,7 @@ impl ScreenRuntime {
             self.looked_at = touch::look(self.eye, self.gaze_point);
         }
         let menu = &self.menu;
-        let looked = self.looked_at.and_then(|(x, y)| layout::hit(layout, x, y)).filter(|(i, _)| layout::state(menu, &layout.elements[*i]).pointable());
+        let looked = self.looked_at.and_then(|(x, y)| layout::hit_pointable(layout, menu, x, y));
         self.hover = looked.map(|(i, _)| i);
         // How long the gaze rests on what it looks at.
         let page = ScreenPage::of(&self.menu);
@@ -577,6 +677,51 @@ impl ScreenRuntime {
     }
 }
 
+impl ScreenRuntime {
+    /// The owner's screen dropped or not, and shown or not, as the card and the menu say now: dropped first, so that the
+    /// screen stays shown and frozen whatever the Menu toggle says next. A screen never dropped is never told it is not.
+    fn sync_open_and_drop(&mut self, out: &mut Vec<Message>) {
+        let dropped = self.menu.card_shown();
+        if self.drop_sent != Some(dropped) && (dropped || self.drop_sent.is_some()) {
+            self.drop_sent = Some(dropped);
+            out.push(screen::local_drop(dropped));
+        }
+        if self.open_sent != Some(self.menu.open) {
+            self.open_sent = Some(self.menu.open);
+            out.push(screen::local_open(self.menu.open));
+            if !self.menu.open {
+                self.close_everyone = true;
+            }
+        }
+    }
+}
+
+/// What N4N0 says, cut as the Home of a display with `pages` shows it, a piece at a time: a line on the four- and
+/// six-tile Home, what its place holds on the seven-tile one.
+fn answer_pieces(text: &str, pages: Pages) -> Vec<String> {
+    if pages.states_cards() {
+        return layout::heard_pages(text);
+    }
+    let home = layout::cached(ScreenPage::home(pages));
+    let cols = home.slots.iter().find(|s| s.content == Content::Heard).map_or(60, |s| s.cols as usize - 2);
+    menu::pieces(text, cols)
+}
+
+/// The press sound, as a copy's feedback in VR (the overlay's own, computed the first time).
+fn copy_sound() {
+    if cfg!(test) {
+        return;
+    }
+    static SOUND: std::sync::OnceLock<(orbiters_sound::Output, std::sync::Arc<orbiters_sound::Sound>)> = std::sync::OnceLock::new();
+    let _ = std::thread::Builder::new().name("copy-sound".into()).spawn(|| {
+        let (output, sound) = SOUND.get_or_init(|| {
+            use orbiters_sound::{render, sounds, Output, RATE};
+            (Output::new(), std::sync::Arc::new(render(&sounds::ROCKER, RATE)))
+        });
+        output.play(sound);
+    });
+}
+
 /// The ISO 639-1 code of this computer's language, for YouTube.
 fn language() -> String {
     let locale = super::orb::locale();
@@ -634,6 +779,10 @@ impl super::Controller {
     pub(super) fn menu_open(self: &Shared, toggle: bool) {
         let settings = self.settings();
         let mut rt = self.orb.lock().unwrap();
+        // Opening the menu again takes a dropped card back (on the screen, the menu replaces it).
+        if rt.screen.menu.card_shown() {
+            rt.screen.end_card();
+        }
         if rt.screen.available {
             if rt.screen.menu.open {
                 if toggle {
@@ -724,6 +873,9 @@ impl super::Controller {
             let mut rt = self.orb.lock().unwrap();
             let s = &mut rt.screen;
             let opened = open && !s.overlay_open;
+            if opened && s.menu.card_shown() {
+                s.end_card();
+            }
             s.overlay_open = open;
             s.overlay_dictation = open && dictation;
             if open {
@@ -781,6 +933,84 @@ impl super::Controller {
         }
         self.orb.lock().unwrap().screen.photo_at = Some(Instant::now() + Duration::from_secs(seconds as u64));
         self.orb_publish();
+    }
+
+    /// Drops a link card in the world (contracts `Docs/orb.md`, Link card): the avatar's screen shows it, frozen where it
+    /// is, for [`orb::CARD_SECONDS`]; Orbiters is told, so that whoever grabs it in this instance copies its link too.
+    /// From N4N0's menu on the screen, the overlay's or the window's Home.
+    pub(super) fn card_drop(self: &Shared, link: String, title: String, video: Option<String>) {
+        if !orbiters_orb::drops::copyable(&link) {
+            self.notify(NoticeKind::Warning, "Only web links can be dropped as cards.");
+            return;
+        }
+        let fetch = {
+            let mut rt = self.orb.lock().unwrap();
+            if !rt.screen.card_ready() {
+                drop(rt);
+                self.notify(NoticeKind::Info, "This avatar's N4N0 cannot drop cards: update N4N0 in My Avatar, then upload the avatar again.");
+                return;
+            }
+            let now = Instant::now();
+            let s = &mut rt.screen;
+            s.end_card();
+            s.menu.show_card(Card { link: link.clone(), title: title.clone(), video: video.clone(), left: orb::CARD_SECONDS });
+            s.card_until = Some(now + Duration::from_secs(orb::CARD_SECONDS as u64));
+            s.last_activity = now;
+            let fetch = video.filter(|id| !matches!(s.pictures.get(id), Some(Thumb::Ready(_))));
+            rt.wake();
+            fetch
+        };
+        if let Some(id) = fetch {
+            self.screen_thumbnails(vec![id]);
+        }
+        // Orbiters keeps it for whoever grabs it in this instance (a member's card only).
+        let instance = self.snapshot.lock().unwrap().vrchat.world.instance_hash();
+        match (self.orb_account(), instance) {
+            (Some((api, token)), Some(instance)) => {
+                let ctl = self.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = orbiters_orb::drops::post(&api, &token, &instance, &link, &title) {
+                        ctl.notify(NoticeKind::Warning, format!("People around cannot copy your card's link: {e:#}"));
+                    }
+                });
+            }
+            (None, Some(_)) => self.notify(NoticeKind::Info, "Sign in to Orbiters so that people around can copy your card's link too."),
+            _ => {}
+        }
+        self.orb_publish();
+    }
+
+    /// A hand on a dropped card (on the OSC action thread): the owner's own card's link is copied; with none out, someone
+    /// else's card was grabbed, and Orbiters gives the newest dropped in this instance.
+    pub(super) fn card_grab(self: &Shared) {
+        let own = self.orb.lock().unwrap().screen.card_view().map(|c| (c.link, c.title));
+        if let Some((link, title)) = own {
+            self.card_copied(&link, &title);
+            return;
+        }
+        let Some(instance) = self.snapshot.lock().unwrap().vrchat.world.instance_hash() else { return };
+        let api = self.orb_account().map(|(api, _)| api).unwrap_or_else(|| Api::new(Server::current()));
+        let ctl = self.clone();
+        std::thread::spawn(move || match orbiters_orb::drops::latest(&api, &instance) {
+            Ok(Some(card)) => ctl.card_copied(&card.link, &card.title),
+            Ok(None) => ctl.notify(NoticeKind::Info, "That card is gone: its link can no longer be copied."),
+            Err(e) => ctl.notify(NoticeKind::Warning, format!("Could not copy the card's link: {e:#}")),
+        });
+    }
+
+    /// A card's link in the clipboard, with the press sound and a toast, as Copy does.
+    fn card_copied(&self, link: &str, title: &str) {
+        match super::orb::copy_to_clipboard(link) {
+            Ok(()) => {
+                copy_sound();
+                let what = match title.trim() {
+                    "" => "the card's link".to_string(),
+                    title => format!("\"{}\"", layout::ellipsis(title, 60)),
+                };
+                self.notify(NoticeKind::Success, format!("Copied {what}: paste it in VRChat."));
+            }
+            Err(e) => self.notify(NoticeKind::Error, e),
+        }
     }
 
     /// Runs `fetch` on a thread of its own; what it brings back goes to the screen's next step, which it wakes.
@@ -888,6 +1118,9 @@ impl super::Controller {
                         self.notify(NoticeKind::Warning, e);
                     }
                 }
+                Effect::SaveState { name } => self.states_save(Some(name)),
+                Effect::ApplyState { id, .. } => self.states_apply(id, false),
+                Effect::Drop { link, title, video } => self.card_drop(link, title, video),
                 Effect::Close => {
                     let mut rt = self.orb.lock().unwrap();
                     rt.screen.hover = None;
@@ -910,11 +1143,9 @@ impl super::Controller {
         let mut out = Vec::new();
         // The screen stands where the panel would show: what N4N0 says goes on the screen's Home instead, whole, a line
         // at a time.
-        if rt.screen.available && rt.screen.menu.open {
+        if rt.screen.available && rt.screen.menu.open && !rt.screen.menu.card_shown() {
             if let Some(text) = rt.sender.as_mut().filter(|s| s.busy() && !s.sticky()).and_then(TextSender::take_text) {
-                let home = if rt.screen.menu.six_tiles { ScreenPage::HomeSix } else { ScreenPage::Home };
-                let cols = layout::cached(home).slots.iter().find(|s| s.content == Content::Heard).map_or(60, |s| s.cols as usize - 2);
-                rt.screen.answer = menu::pieces(&text, cols).into();
+                rt.screen.answer = answer_pieces(&text, rt.screen.menu.pages).into();
                 rt.screen.answer_next = Some(now);
             }
         } else if !rt.screen.answer.is_empty() {
@@ -926,10 +1157,19 @@ impl super::Controller {
         let listening = rt.listening.is_some();
         let thinking = rt.thinking();
         let light = rt.light;
+        // The avatar's saved states, as the States page lists them (again while one saved there waits for the list).
+        let states_key = (rt.states.version, rt.avatar_id.clone());
+        let rows = (rt.screen.states_seen.as_ref() != Some(&states_key) || rt.screen.menu.saving()).then(|| rt.states.rows(rt.avatar_id.as_deref()));
         let s = &mut rt.screen;
-        // The light as the avatar holds it; the music while the menu shows it (read on the media thread).
+        if let Some(rows) = rows {
+            s.menu.set_states(rows, states_key.1.is_some(), "VRChat's avatar is not known yet");
+            s.states_seen = Some(states_key);
+        }
+        // The light as the avatar holds it; whether a copied link drops as a card here; the music while the menu shows
+        // it (read on the media thread).
         s.menu.light = light;
-        if s.menu.open && s.menu.six_tiles {
+        s.menu.can_drop = s.card_ready();
+        if s.menu.open && s.menu.pages.music_light() {
             let media = crate::media::watcher();
             media.want();
             let (version, reading) = media.reading();
@@ -1016,13 +1256,29 @@ impl super::Controller {
         if s.menu.call != call {
             s.menu.set_call(call);
         }
-        if !s.available {
+        // A dropped card counts its seconds down, and goes at the end.
+        if let Some(until) = s.card_until {
+            if !s.menu.card_shown() {
+                s.card_until = None;
+            } else if now >= until {
+                s.end_card();
+            } else if let Some(card) = s.menu.card.as_mut() {
+                card.left = until.saturating_duration_since(now).as_secs_f32().ceil() as u32;
+            }
+        }
+        let card = s.menu.card_shown();
+        if !s.available && !card {
+            // The menu is not on this screen: only what a card that just went leaves to say (closed, not dropped).
+            if s.present && (s.open_sent == Some(true) || s.drop_sent == Some(true)) {
+                s.sync_open_and_drop(&mut out);
+            }
             return out;
         }
         // The finger: each hand's four touch points when they changed, else how long it went unseen.
         for hand in 0..2 {
             let touched = std::mem::take(&mut s.touched[hand]);
-            if !s.menu.open {
+            // A dropped card is not the menu: nothing on it is pointed at.
+            if !s.menu.open || card {
                 continue;
             }
             let gesture = match (s.pointing, touched) {
@@ -1040,15 +1296,13 @@ impl super::Controller {
                 Some(Gesture::Press { x, y }) => {
                     s.last_activity = now;
                     s.holding[hand] = true;
-                    if let Some((index, target)) = layout::hit(layout, x, y) {
-                        if layout::state(&s.menu, &layout.elements[index]).pointable() {
-                            s.pressed = Some((index, now));
-                            followups.effects.extend(s.menu.press(target));
-                        }
+                    if let Some((index, target)) = layout::hit_pointable(layout, &s.menu, x, y) {
+                        s.pressed = Some((index, now));
+                        followups.effects.extend(s.menu.press(target));
                     }
                 }
                 Some(Gesture::Hover { x, y } | Gesture::Hold { x, y }) => {
-                    s.hover = layout::hit(layout, x, y).map(|(i, _)| i).filter(|&i| layout::state(&s.menu, &layout.elements[i]).pointable());
+                    s.hover = layout::hit_pointable(layout, &s.menu, x, y).map(|(i, _)| i);
                 }
                 Some(Gesture::Away) => {
                     s.holding[hand] = false;
@@ -1066,7 +1320,7 @@ impl super::Controller {
         if s.menu.open && listening {
             s.last_activity = now;
         }
-        if s.menu.open && now.duration_since(s.last_activity) > IDLE_CLOSE {
+        if s.menu.open && !card && now.duration_since(s.last_activity) > IDLE_CLOSE {
             followups.effects.extend(s.menu.close());
         }
         // Another page: what was hovered or pressed was on the last one.
@@ -1076,14 +1330,8 @@ impl super::Controller {
             s.hover = None;
             s.pressed = None;
         }
-        // The owner's screen: open or closed, then a block per step.
-        if s.open_sent != Some(s.menu.open) {
-            s.open_sent = Some(s.menu.open);
-            out.push(screen::local_open(s.menu.open));
-            if !s.menu.open {
-                s.close_everyone = true;
-            }
-        }
+        // The owner's screen: dropped or not, open or closed, then a block per step.
+        s.sync_open_and_drop(&mut out);
         if !s.menu.open {
             s.owner_settled = false;
             return out;
@@ -1119,7 +1367,8 @@ impl super::Controller {
         let step = rt.sender.as_ref().map_or(Duration::from_millis(300), TextSender::step);
         let s = &mut rt.screen;
         let Some(everyone) = s.everyone.as_mut() else { return Vec::new() };
-        let screen_wants = s.close_everyone || s.menu.open;
+        // The screen's menu, or a dropped card (the only thing the screen shows while the menu is the overlay's).
+        let screen_wants = s.close_everyone || (s.menu.open && (s.available || s.menu.card_shown()));
         if !screen_wants || now < s.next_synced || panel_mid_block {
             return Vec::new();
         }
@@ -1131,17 +1380,37 @@ impl super::Controller {
         }
         s.screen_turn = false;
         let mut wait = step;
+        let card = s.menu.card_shown();
+        if card && s.frozen && s.freeze_next.is_some_and(|t| now >= t) {
+            s.freeze_due = true;
+        }
         let out = if s.close_everyone {
             s.close_everyone = false;
+            s.frozen = false;
             // Closing clears everyone else's memory, and leaves the pointer where it writes nothing.
             everyone.cleared(true);
             screen::synced_close()
+        } else if card && s.freeze_due && !everyone.mid_block() {
+            // A dropped card: once its first block is on its way, everyone else's copy freezes where it is (and again
+            // now and then, for whoever loaded the avatar since). 253 writes nothing: the next block's values may go.
+            s.freeze_due = false;
+            s.frozen = true;
+            s.freeze_next = Some(now + FREEZE_AGAIN);
+            everyone.park();
+            screen::synced_drop()
         } else {
             // Everyone else's frame: no hover nor press, no friend named. A new page clears their memory first.
             let pictures = &s.pictures;
             let flags = Flags { loading: s.menu.loading(), ..Default::default() };
             let frame = Frame::public(&s.menu, flags, s.thumbnail, &|id: &str| thumbnail(pictures, id));
             let send = everyone.step(&frame.bank);
+            if matches!(send, screen::Send::Clear) {
+                // 254 closed everyone else's copy: a card's freeze is undone with it.
+                s.frozen = false;
+            }
+            if card && !s.frozen && send.moves_to_block() {
+                s.freeze_due = true;
+            }
             if !send.holds() {
                 wait = orbiters_orb::text::PHASE_GAP;
             }
@@ -1232,7 +1501,7 @@ mod tests {
     #[test]
     fn what_waits_never_wakes_the_orb_thread_at_once() {
         let mut s = ScreenRuntime::default();
-        s.avatar(true, Some(8), 72);
+        s.avatar(true, true, Some(8), 72);
         s.menu.open();
         let now = Instant::now();
         let past = now - Duration::from_secs(1);
@@ -1262,7 +1531,7 @@ mod tests {
     /// Home on the screen in desktop mode, the stand-in mouse up, VRChat in front in mouse-look.
     fn looking(mouse: &FakeMouse) -> ScreenRuntime {
         let mut s = ScreenRuntime::default();
-        s.avatar(true, Some(8), 72);
+        s.avatar(true, true, Some(8), 72);
         s.set_gaze(true);
         s.menu.open();
         s.mouse = Box::new(mouse.clone());
@@ -1360,5 +1629,32 @@ mod tests {
         assert!(!step(&mut s, &mouse, start, 700, MouseState { cursor: true, ..UP }));
         // Back in mouse-look.
         assert!(step(&mut s, &mouse, start, 800, DOWN));
+    }
+
+    #[test]
+    fn the_screen_s_own_menu_offers_drop_from_version_5_only() {
+        use orbiters_orb::menu::Target;
+        let mut rt = OrbRuntime::default();
+        rt.screen.avatar(true, true, Some(8), 72);
+        let tick = |rt: &mut OrbRuntime| {
+            super::super::Controller::screen_tick(rt, Instant::now(), &crate::state::CallsStatus::default(), false, None, &mut Followups::default());
+        };
+        rt.screen.menu.pages = Pages::Six;
+        tick(&mut rt);
+        assert!(!rt.screen.menu.can_drop && !rt.screen.card_ready(), "a screen of version 4 has no card page");
+        rt.screen.menu.pages = Pages::Seven;
+        tick(&mut rt);
+        assert!(rt.screen.menu.can_drop && rt.screen.card_ready());
+        // A copied result's Drop drops it (the screen then shows the card: its host's part).
+        let menu = &mut rt.screen.menu;
+        menu.open();
+        menu.search_for("cats");
+        let video = youtube::Video { id: "dQw4w9WgXcQ".into(), title: "Never".into(), channel: "R".into(), duration: None, live: false };
+        menu.results_arrived(1, youtube::Results { videos: vec![video], continuation: None }, false);
+        menu.press(Target::Copy(0));
+        assert!(matches!(&menu.press(Target::Drop(0))[..], [Effect::Drop { video: Some(v), .. }] if v == "dQw4w9WgXcQ"));
+        // Without the screen (none, or one the text channel cannot reach), no card.
+        rt.screen.avatar(false, false, None, 72);
+        assert!(!rt.screen.card_ready());
     }
 }

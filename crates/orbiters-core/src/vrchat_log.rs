@@ -139,6 +139,17 @@ impl WorldState {
         out
     }
 
+    /// The instance as Orbiters knows it for N4N0's link cards (contracts `Docs/orb.md`, Link card): the lowercase hex
+    /// SHA-256 of `<world id>:<instance>`, as VRChat's log writes them on joining. `None` outside a world: everyone in the
+    /// same instance computes the same, and Orbiters never learns the world.
+    pub fn instance_hash(&self) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        let world = self.world_id.as_deref().filter(|_| self.in_world)?;
+        let instance = self.instance.as_deref().filter(|i| !i.is_empty())?;
+        let digest = Sha256::digest(format!("{world}:{instance}").as_bytes());
+        Some(digest.iter().map(|b| format!("{b:02x}")).collect())
+    }
+
     /// People in the instance other than the local player.
     pub fn others(&self) -> usize {
         let local = self.local_player.as_deref();
@@ -482,6 +493,17 @@ mod tests {
 
     fn event(message: &str) -> LogEvent {
         parse_line(&line(message)).unwrap_or_else(|| panic!("no event in {message}"))
+    }
+
+    #[test]
+    fn the_instance_is_known_by_its_hash_only_while_in_it() {
+        let mut world = WorldState::default();
+        assert_eq!(world.instance_hash(), None);
+        let line = "2026.10.25 10:00:00 Debug      -  [Behaviour] Joining wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b:77505~group(grp_1d2e3f40-1a2b-4c3d-9e8f-0a1b2c3d4e5f)~groupAccessType(public)~region(eu)";
+        world.apply(&parse_line(line).expect("a join"));
+        assert_eq!(world.instance_hash().as_deref(), Some("952c84c07b16eedff77c95ffef47dd8a24a378c20469b78964b4bad467770fbf"));
+        world.apply(&LogEvent::LeftRoom);
+        assert_eq!(world.instance_hash(), None, "left: no instance");
     }
 
     #[test]

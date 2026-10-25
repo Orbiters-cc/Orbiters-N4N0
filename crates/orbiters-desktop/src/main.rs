@@ -8,6 +8,7 @@
 
 mod app;
 mod backend;
+mod bench;
 mod controller;
 mod gpu;
 mod ipc;
@@ -35,6 +36,7 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--screenshot") => screenshot::run(&args[1..]),
+        Some("--gpu-bench") => bench::run(&args[1..]),
         Some("--window") => window::run(&args[1..]),
         Some("--overlay") => overlay::run(&args[1..]),
         Some("--orb-menu") => overlay::menu_pages::run(&args[1..]),

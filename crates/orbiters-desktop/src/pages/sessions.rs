@@ -104,6 +104,11 @@ impl State {
         }
     }
 
+    /// Opens the detail of the session in `dir` (the GPU bench).
+    pub fn open_session(&mut self, ctx: &egui::Context, dir: PathBuf, origin: Rect) {
+        self.open(ctx, dir, origin);
+    }
+
     pub fn loaded(&mut self) -> bool {
         if let Some(list) = self.list.take() {
             self.set_sessions(list);

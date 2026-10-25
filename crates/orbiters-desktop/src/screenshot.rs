@@ -1418,7 +1418,7 @@ fn with_account(base: &Snapshot, state: crate::state::AccountState, error: Optio
     s
 }
 
-fn idle_snapshot(settings: &Settings, sessions: &[orbiters_core::bundle::SessionSummary]) -> Snapshot {
+pub(crate) fn idle_snapshot(settings: &Settings, sessions: &[orbiters_core::bundle::SessionSummary]) -> Snapshot {
     let mut s = Snapshot::new(settings.clone());
     s.account.state = crate::state::AccountState::SignedIn { username: "Orbit".into() };
     s.vrchat.running = true;

@@ -83,6 +83,11 @@ pub enum ToService {
     Trash {
         dir: PathBuf,
     },
+    /// Frees space for good: the capture files of `trim` (their 3D views stay), and the whole of `delete`.
+    CleanUp {
+        trim: Vec<PathBuf>,
+        delete: Vec<PathBuf>,
+    },
     Reconstruct {
         dir: PathBuf,
     },
@@ -96,10 +101,8 @@ pub enum ToService {
         title: String,
     },
     WorkerLog,
-    /// Signs in to Orbiters through the browser with `provider` (`discord` or `telegram`).
-    SignIn {
-        provider: String,
-    },
+    /// Signs in to Orbiters through the browser (Connect on the page it opens).
+    SignIn,
     ReopenSignIn,
     CancelSignIn,
     SignOut,

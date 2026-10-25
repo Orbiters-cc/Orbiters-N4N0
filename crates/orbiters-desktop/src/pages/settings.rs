@@ -166,6 +166,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             });
 
             let st = &snap.storage;
+            let mut free_space = false;
             let storage_sub = format!(
                 "{} in {} sessions{}",
                 format::bytes(st.used_bytes as f64),
@@ -186,6 +187,22 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::progress(ui, Id::unique("storage-usage"), usage, 10.0);
                 ui.add_space(12.0);
                 widgets::separator(ui);
+                let can_go = if st.capture_bytes > 0 {
+                    format!(
+                        "The capture files of {} reconstructed capture{} take {}: only reconstructing again needs them, their 3D views stay.",
+                        st.capture_sessions,
+                        if st.capture_sessions == 1 { "" } else { "s" },
+                        format::bytes(st.capture_bytes as f64)
+                    )
+                } else {
+                    "What the captures and 3D pictures take, and deleting what they no longer need.".to_string()
+                };
+                widgets::field(ui, "Free up space", Some(&can_go), 160.0, |ui| {
+                    if Button::new("Free up space").icon(icons::BROOM).size(Size::Sm).show(ui).clicked() {
+                        free_space = true;
+                    }
+                });
+                widgets::separator(ui);
                 widgets::field(ui, "Storage limit", Some("Recording stops when the library reaches it (0 = no limit)."), 284.0, |ui| {
                     let mut v = draft.storage_limit_gb as f32;
                     if widgets::slider(ui, "limit", &mut v, 0.0..=2000.0, 10.0, |v| if v == 0.0 { "No limit".into() } else { format!("{v:.0} GB") }) {
@@ -202,6 +219,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     state.picker = Some((Folder::Raw, pick(&ctx, &draft.raw_captures_dir)));
                 }
             });
+            if free_space {
+                cx.go = Some(super::Go::FreeSpace);
+            }
 
             let osc = &snap.osc;
             let osc_sub = if osc.listening {
@@ -535,7 +555,7 @@ fn pick(ctx: &egui::Context, current: &std::path::Path) -> Job<Option<PathBuf>> 
     Job::spawn(ctx, move || rfd::FileDialog::new().set_directory(&start).pick_folder())
 }
 
-/// The Orbiters account the Unity tools share: who is signed in, or the browser sign-in and its code.
+/// The Orbiters account the Unity tools share: who is signed in, or the browser sign-in under way.
 fn account(ui: &mut Ui, cx: &Cx, confirm_sign_out: &mut bool) {
     let status = &cx.snap.account;
     let server = if status.development { " · development server" } else { "" };
@@ -544,7 +564,7 @@ fn account(ui: &mut Ui, cx: &Cx, confirm_sign_out: &mut bool) {
         AccountState::Checking { username } => format!("Checking {}…", username.as_deref().unwrap_or("your sign-in")),
         AccountState::Offline { username } => format!("Signed in as {} · Orbiters could not be reached", username.as_deref().unwrap_or("you")),
         AccountState::Expired { .. } => "Your sign-in expired".into(),
-        AccountState::SigningIn { .. } => "Finish in your browser".into(),
+        AccountState::SigningIn => format!("Finish in your browser{server}"),
         AccountState::SignedOut | AccountState::Unknown => format!("Not signed in{server}"),
     };
     if !matches!(status.state, AccountState::SignedIn { .. } | AccountState::Offline { .. } | AccountState::Checking { .. }) {
@@ -552,35 +572,23 @@ fn account(ui: &mut Ui, cx: &Cx, confirm_sign_out: &mut bool) {
     }
     section(ui, cx, 1, icons::USER_CIRCLE, "Orbiters account", Some(&sub), |ui| {
         match &status.state {
-            AccountState::SigningIn { code, provider } => {
-                let via = if provider == "telegram" { "Telegram" } else { "Discord" };
-                let desc = format!("Sign in with {via} on the Orbiters page that opened in your browser, then type this code there.");
-                widgets::field(ui, "Code", Some(&desc), 360.0, |ui| {
+            AccountState::SigningIn => {
+                let desc = "The Orbiters page opened in your browser: sign in there if it asks, then click Connect. Nothing to type here.";
+                widgets::field(ui, "Connect in your browser", Some(desc), 240.0, |ui| {
                     if Button::new("Cancel").variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
                         cx.ctl.cancel_sign_in();
                     }
                     ui.add_space(8.0);
-                    if Button::new("Open the page again").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
+                    if Button::new("Open again").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
                         cx.ctl.reopen_sign_in();
                     }
-                    ui.add_space(12.0);
-                    let t = Txt::new(code, 22.0).weight(weight::SEMIBOLD).tracking(0.3).mono();
-                    let s = widgets::text_size(ui, &t);
-                    let (chip, _) = ui.allocate_exact_size(vec2(s.x + 28.0, 40.0), Sense::hover());
-                    ui.painter().rect_filled(chip, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.14));
-                    widgets::text(ui.painter(), chip.center(), Align2::CENTER_CENTER, &t.color(theme::ACCENT));
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
                 });
             }
             AccountState::SignedOut | AccountState::Expired { .. } | AccountState::Unknown => {
                 let desc = "One sign-in for Orbiters - N4N0 and your Unity tools: MCB, My Avatar, ReFit and the Logger. Uploads to the Map explorer use it.";
-                widgets::field(ui, "Sign in", Some(desc), 260.0, |ui| {
-                    if Button::new("Telegram").icon(icons::TELEGRAM_LOGO).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
-                        cx.ctl.sign_in("telegram");
-                    }
-                    ui.add_space(8.0);
-                    if Button::new("Discord").icon(icons::DISCORD_LOGO).variant(Variant::Primary).size(Size::Sm).show(ui).clicked() {
-                        cx.ctl.sign_in("discord");
+                widgets::field(ui, "Sign in", Some(desc), 140.0, |ui| {
+                    if Button::new("Sign in").icon(icons::SIGN_IN).variant(Variant::Primary).size(Size::Sm).show(ui).clicked() {
+                        cx.ctl.sign_in();
                     }
                 });
             }

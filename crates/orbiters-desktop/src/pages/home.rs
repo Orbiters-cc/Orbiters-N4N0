@@ -830,11 +830,12 @@ mod tests {
         fn start_test_capture(&self) {}
         fn import_raw_capture(&self, _dir: PathBuf) {}
         fn trash_session(&self, _dir: PathBuf) {}
+        fn clean_up(&self, _trim: Vec<PathBuf>, _delete: Vec<PathBuf>) {}
         fn reconstruct(&self, _dir: PathBuf) {}
         fn stop_reconstruction(&self) {}
         fn unqueue_reconstruction(&self, _dir: PathBuf) {}
         fn send_to_mixer(&self, _dir: PathBuf, _title: String) {}
-        fn sign_in(&self, _provider: &str) {}
+        fn sign_in(&self) {}
         fn reopen_sign_in(&self) {}
         fn cancel_sign_in(&self) {}
         fn sign_out(&self) {}
@@ -886,7 +887,7 @@ mod tests {
                 RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1048.0, 780.0))), time: Some(self.time), events, ..Default::default() };
             let (ctl, snap, toasts, state) = (&self.ctl, &self.snap, &mut self.toasts, &mut self.state);
             let mut output = self.ctx.run_ui(input, |ui| {
-                let mut cx = Cx { ctl, snap, toasts: &mut *toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 40.0 };
+                let mut cx = Cx { ctl, snap, toasts: &mut *toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 40.0, go: None };
                 show(ui, &mut cx, state);
             });
             // Nothing paints these frames.

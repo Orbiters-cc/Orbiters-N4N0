@@ -151,6 +151,8 @@ pub struct Controller {
     calls: Mutex<calls::CallsRuntime>,
     /// Updates of an installed app (controller/update.rs).
     updates: Mutex<update::UpdateRuntime>,
+    /// Space being freed in the library (controller/cleanup.rs).
+    cleanup: Mutex<cleanup::CleanupRuntime>,
     /// The thread that writes the settings, the newest only ([`Controller::queue_save`]).
     settings_writer: Mutex<Option<(mpsc::Sender<Settings>, std::thread::JoinHandle<()>)>>,
     /// A capture asked for while the last one was still being saved: it starts once that one is (source, importing,
@@ -273,6 +275,7 @@ pub type Shared = Arc<Controller>;
 mod account;
 mod burst;
 mod calls;
+mod cleanup;
 mod maps;
 mod orb;
 mod performance;
@@ -317,6 +320,7 @@ impl Controller {
             scan: Mutex::new(scan::ScanRuntime::default()),
             calls: Mutex::new(calls::CallsRuntime::default()),
             updates: Mutex::new(update::UpdateRuntime::default()),
+            cleanup: Mutex::new(cleanup::CleanupRuntime::default()),
             settings_writer: Mutex::new(None),
             pending_start: Mutex::new(None),
             stopping_since: Mutex::new(None),
@@ -1537,6 +1541,7 @@ impl Controller {
         if !inside(&root, &dir) || !dir.join("manifest.json").is_file() {
             anyhow::bail!("Only sessions inside the sessions folder can be reconstructed.");
         }
+        self.ensure_frames_kept(&dir)?;
         if self.is_capturing() {
             anyhow::bail!("Finish the capture first: reconstruction takes the whole GPU.");
         }
@@ -1589,6 +1594,7 @@ impl Controller {
         if !inside(&root, &dir) || !dir.join("manifest.json").is_file() {
             anyhow::bail!("Only sessions inside the sessions folder can be reconstructed.");
         }
+        self.ensure_frames_kept(&dir)?;
         let running = self.running_reconstruction();
         self.change_queue(|q| {
             if !q.contains(&dir) && running.as_ref() != Some(&dir) {
@@ -1691,12 +1697,23 @@ impl Controller {
         self.next_reconstruction();
     }
 
+    /// A session reconstructs from its frames: not one whose capture files were deleted, nor one being cleaned up.
+    fn ensure_frames_kept(&self, dir: &Path) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.cleaning(dir), "Its capture files are being deleted.");
+        anyhow::ensure!(
+            !(orbiters_core::cleanup::trimmed(dir) && orbiters_core::cleanup::has_view(dir)),
+            "Only its 3D view is kept: its capture files were deleted."
+        );
+        Ok(())
+    }
+
     /// Moves a session folder to the recycle bin (only folders inside the sessions folder with a manifest).
     pub fn trash_session(self: &Shared, dir: &Path) -> anyhow::Result<()> {
         let root = self.settings().sessions_dir;
         if !inside(&root, dir) || !dir.join("manifest.json").is_file() {
             anyhow::bail!("Only session folders inside the sessions folder can be removed.");
         }
+        anyhow::ensure!(!self.cleaning(dir), "This session is being cleaned up: try again once that is done.");
         trash::delete(dir)?;
         refresh_storage(self);
         self.bump_library();
@@ -1827,6 +1844,8 @@ fn refresh_storage(ctl: &Shared) {
     };
     let sessions: Vec<_> = sessions.into_iter().filter(|s| current.as_ref() != Some(&s.dir)).collect();
     let used: u64 = sessions.iter().map(|s| s.size_bytes).sum();
+    // What keeping only their 3D views would free.
+    let trimmable: Vec<u64> = sessions.iter().filter(|s| s.reconstruction.is_some() && s.capture_bytes > 0).map(|s| s.capture_bytes).collect();
     let disks = sysinfo::Disks::new_with_refreshed_list();
     let free = disks
         .list()
@@ -1840,6 +1859,8 @@ fn refresh_storage(ctl: &Shared) {
         s.storage.free_bytes = free;
         s.storage.limit_gb = s.settings.storage_limit_gb;
         s.storage.sessions = sessions.len();
+        s.storage.capture_bytes = trimmable.iter().sum();
+        s.storage.capture_sessions = trimmable.len();
     });
 }
 

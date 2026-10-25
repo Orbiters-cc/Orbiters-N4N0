@@ -8,6 +8,7 @@ pub mod orb;
 pub mod sessions;
 pub mod settings;
 pub mod splats;
+pub mod storage;
 pub mod worlds;
 
 use crate::backend::Ctl;
@@ -43,6 +44,15 @@ pub struct Cx<'a> {
     pub gpu: Option<&'a crate::gpu::Handles>,
     /// Height of the title bar over the top of the page: content starts below it and scrolls on under it.
     pub top: f32,
+    /// Where the page sends the person next (after this frame).
+    pub go: Option<Go>,
+}
+
+/// Another page a page sends the person to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Go {
+    /// Sessions, its storage popover open.
+    FreeSpace,
 }
 
 impl Cx<'_> {

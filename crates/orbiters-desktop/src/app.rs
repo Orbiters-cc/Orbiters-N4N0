@@ -412,7 +412,7 @@ impl App {
             AccountState::SignedIn { username } => (username.clone(), widgets::Tone::Ok),
             AccountState::Checking { username } | AccountState::Offline { username } => (username.clone().unwrap_or_default(), widgets::Tone::Warn),
             AccountState::Expired { .. } => ("Sign-in expired".into(), widgets::Tone::Warn),
-            AccountState::SigningIn { .. } => ("Finishing in your browser".into(), widgets::Tone::Warn),
+            AccountState::SigningIn => ("Finishing in your browser".into(), widgets::Tone::Warn),
             AccountState::SignedOut | AccountState::Unknown => ("Not signed in".into(), widgets::Tone::Off),
         };
         side_status(ui, pos2(inner.left(), bottom - 34.0 - 132.0), "Orbiters", &account_text, account_tone, inner.width());
@@ -441,6 +441,7 @@ impl App {
             windowed: self.windowed,
             gpu: self.gpu.as_ref(),
             top: TITLE_H,
+            go: None,
         };
         match self.page {
             Page::Home => pages::home::show(&mut child, &mut cx, &mut self.home),
@@ -449,6 +450,14 @@ impl App {
             Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions),
             Page::Worlds => pages::worlds::show(&mut child, &mut cx, &mut self.worlds),
             Page::Settings => pages::settings::show(&mut child, &mut cx, &mut self.settings),
+        }
+        if let Some(go) = cx.go {
+            match go {
+                pages::Go::FreeSpace => {
+                    self.set_page(Page::Sessions, anim::time(&ctx));
+                    self.sessions.open_storage(false);
+                }
+            }
         }
     }
 }

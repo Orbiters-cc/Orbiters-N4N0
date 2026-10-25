@@ -1,6 +1,7 @@
 //! Sessions page: the library as cards with thumbnails. A card morphs into the session's detail; raw captures
 //! from Mixer's simulator are imported from a popover.
 
+use super::storage::{self, Pending, Popover, PopoverAction, TrimDialog};
 use super::{Cx, Job};
 use crate::controller::{self, RawCaptureSummary};
 use crate::state::ReconstructionJob;
@@ -44,6 +45,8 @@ struct Detail {
     progress: f32,
     trail: Job<Vec<[f32; 3]>>,
     confirm_trash: bool,
+    /// "Keep only the 3D view" asks first, over the detail.
+    trim: Option<TrimDialog>,
     view: View,
     /// The reconstruction's preview, keyed by the report's creation time (a new run replaces it).
     preview: Option<(String, Thumb)>,
@@ -92,6 +95,10 @@ pub struct State {
     /// The 3D view of a session's splats, over everything (the detail waits under it).
     viewer: Option<super::splats::Viewer>,
     import: Option<Import>,
+    /// The storage popover under "Free up space".
+    storage: Option<Popover>,
+    /// Clean-ups asked and shown as done already ([`Pending`]).
+    pending: Pending,
     serial: u64,
 }
 
@@ -111,9 +118,45 @@ impl State {
         self.sessions.is_some()
     }
 
-    /// Whether something is still being read (the list, pictures): the screenshots wait for it.
+    /// Whether something is still being read (the list, pictures, what a clean-up would delete): the screenshots
+    /// wait for it.
     pub fn busy(&self) -> bool {
-        self.list.running() || self.thumbs.values().any(|k| matches!(k.thumb, Thumb::Loading(_)))
+        self.list.running()
+            || self.thumbs.values().any(|k| matches!(k.thumb, Thumb::Loading(_)))
+            || self.detail.as_ref().and_then(|d| d.trim.as_ref()).is_some_and(TrimDialog::loading)
+    }
+
+    /// Opens the storage popover, on its confirmation when `confirming` (screenshots).
+    pub fn open_storage(&mut self, confirming: bool) {
+        self.serial += 1;
+        self.storage = Some(if confirming { Popover::confirming(self.serial) } else { Popover::new(self.serial) });
+    }
+
+    /// Asks the open detail's "Keep only the 3D view" (screenshots).
+    pub fn open_trim(&mut self, ctx: &egui::Context) {
+        self.serial += 1;
+        let serial = self.serial;
+        if let Some(d) = self.detail.as_mut() {
+            d.trim = Some(TrimDialog::new(ctx, d.dir.clone(), serial));
+        }
+    }
+
+    /// Opens the detail of the first session matching `pick` (screenshots).
+    pub fn open_where(&mut self, ctx: &egui::Context, origin: Rect, pick: impl Fn(&SessionSummary) -> bool) {
+        if let Some(dir) = self.sessions.as_ref().and_then(|l| l.iter().find(|s| pick(s))).map(|s| s.dir.clone()) {
+            self.open(ctx, dir, origin);
+        }
+    }
+
+    /// Frees space as the person asked: the service deletes, and the library shows it done at once.
+    fn clean_up(&mut self, cx: &Cx, trim: Vec<PathBuf>, delete: Vec<PathBuf>, now: f64) {
+        self.pending.ask(&trim, &delete, now);
+        if let Some(l) = self.sessions.as_mut() {
+            self.pending.apply(l);
+        }
+        let list = self.sessions.take().unwrap_or_default();
+        self.set_sessions(list);
+        cx.ctl.clean_up(trim, delete);
     }
 
     /// A new list: the pictures of sessions that went away (trashed, moved) go with them.
@@ -135,6 +178,7 @@ impl State {
             progress: 0.0,
             trail: Job::spawn(ctx, move || controller::session_trail(&d).unwrap_or_default()),
             confirm_trash: false,
+            trim: None,
             view: if reconstructed { View::Splats } else { View::Path },
             preview: None,
             reconstructing: false,
@@ -142,7 +186,7 @@ impl State {
     }
 }
 
-fn title(s: &SessionSummary) -> String {
+pub(super) fn title(s: &SessionSummary) -> String {
     s.manifest.world.as_ref().and_then(|w| w.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| {
         if s.manifest.capture.source_name.is_empty() {
             "Session".into()
@@ -172,10 +216,18 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         let dir = cx.snap.settings.sessions_dir.clone();
         state.list = Job::spawn(&ctx, move || crate::worlds::sessions(&dir));
     }
-    if let Some(list) = state.list.take() {
+    let now = anim::time(&ctx);
+    if let Some(mut list) = state.list.take() {
+        state.pending.on_list(&mut list, cx.snap.cleanup.as_ref(), now);
         state.set_sessions(list);
     }
-    let now = anim::time(&ctx);
+    // The service is done with a clean-up asked here (or turned it down): the library, read again, says how it went.
+    if state.pending.settled(cx.snap.cleanup.as_ref(), now) && !state.list.running() {
+        state.loaded = None;
+        ctx.request_repaint();
+    } else if !state.pending.is_empty() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    }
 
     // Heading and actions, fixed above the grid (drawn after it, over the cards scrolled up under them).
     let head = Rect::from_min_size(pos2(page.left() + super::PAD_X, page.top() + cx.top + 8.0), vec2(page.width() - super::PAD_X * 2.0, 72.0));
@@ -184,7 +236,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let import_btn = Button::new("Import raw capture").icon(icons::DOWNLOAD_SIMPLE);
     let import_w = import_btn.desired_width(ui);
     let import_r = Rect::from_min_size(pos2(folder_r.left() - 8.0 - import_w, actions_y), vec2(import_w, 40.0));
-    let search_r = Rect::from_min_size(pos2(import_r.left() - 8.0 - 224.0, actions_y), vec2(224.0, 40.0));
+    // What the library takes and freeing it; while the service deletes, how far it got (one width for both).
+    let freeing = cx.snap.cleanup.as_ref().map(|j| format!("Freeing… {:.0}%", j.fraction() * 100.0));
+    let space_label = freeing.as_deref().unwrap_or("Free up space");
+    let space_w = Button::new("Free up space").icon(icons::BROOM).desired_width(ui).max(Button::new("Freeing… 100%").icon(icons::BROOM).desired_width(ui));
+    let space_r = Rect::from_min_size(pos2(import_r.left() - 8.0 - space_w, actions_y), vec2(space_w, 40.0));
+    let search_r = Rect::from_min_size(pos2(space_r.left() - 8.0 - 224.0, actions_y), vec2(224.0, 40.0));
 
     // The grid rests below the heading and scrolls on under it and the title bar.
     let grid_top = head.bottom() + 20.0;
@@ -259,7 +316,19 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         let mut su = ui.new_child(UiBuilder::new().max_rect(search_r).id_salt("sessions-search"));
         widgets::search_field(&mut su, "sessions-search", &mut state.query, "Search worlds", 224.0);
     }
+    let space =
+        Button::new(space_label).icon(icons::BROOM).width(space_w).id_salt("free-up-space").hint("What the captures and 3D pictures take, and freeing it");
+    if space.show_at(ui, space_r).clicked() {
+        state.import = None;
+        if state.storage.is_some() {
+            state.storage = None;
+        } else {
+            state.serial += 1;
+            state.storage = Some(Popover::new(state.serial));
+        }
+    }
     if import_btn.show_at(ui, import_r).clicked() {
+        state.storage = None;
         if state.import.is_some() {
             state.import = None;
         } else {
@@ -279,6 +348,14 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
     if state.import.is_some() {
         import_popover(&ctx, cx, state, import_r);
+    }
+    if let Some(popover) = state.storage.as_mut() {
+        let overview = storage::overview(state.sessions.as_deref().unwrap_or_default(), cx.snap);
+        match storage::popover(&ctx, cx.snap, popover, &overview, space_r) {
+            Some(PopoverAction::Close) => state.storage = None,
+            Some(PopoverAction::CleanUp { trim, delete }) => state.clean_up(cx, trim, delete, now),
+            None => {}
+        }
     }
     if let Some(v) = state.viewer.as_mut() {
         let window = ctx.content_rect();
@@ -528,9 +605,11 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
     );
     let w = badge(&p, ui, pos2(thumb.left() + 12.0, thumb.top() + 12.0), &format::duration(s.manifest.stats.duration_s), theme::black(0.55), theme::FG_2, false);
     let job = cx.snap.reconstruction.as_ref().filter(|j| j.session_dir == s.dir);
+    let cleaning = cx.snap.cleanup.as_ref().is_some_and(|j| j.of(&s.dir).is_some());
     let splats = match job {
         Some(j) => Some((format!("Reconstructing {:.0}%", overall_progress(j) * 100.0), theme::ACCENT)),
         None if cx.snap.reconstruct_queue.contains(&s.dir) => Some(("Waiting to reconstruct".to_string(), theme::FG_2)),
+        None if cleaning => Some(("Freeing space".to_string(), theme::FG_2)),
         None => s.reconstruction.as_ref().map(|_| ("Splats".to_string(), theme::ACCENT)),
     };
     if let Some((label, color)) = splats {
@@ -546,12 +625,18 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
     let st = &s.manifest.stats;
     let mut px = x;
     let py = thumb.bottom() + 68.0;
-    for (glyph, label) in [
-        (Some(icons::STACK), format::integer(st.frames as f64)),
-        (Some(icons::CUBE), format::integer(st.keyframes as f64)),
-        (Some(icons::CPU), format::integer(st.depth_frames as f64)),
-        (None, format::bytes(s.size_bytes as f64)),
-    ] {
+    // A session reduced to its 3D view has no frames left to count.
+    let pills = if s.trimmed && s.reconstruction.is_some() {
+        vec![(Some(icons::CUBE_FOCUS), "3D view only".to_string()), (None, format::bytes(s.size_bytes as f64))]
+    } else {
+        vec![
+            (Some(icons::STACK), format::integer(st.frames as f64)),
+            (Some(icons::CUBE), format::integer(st.keyframes as f64)),
+            (Some(icons::CPU), format::integer(st.depth_frames as f64)),
+            (None, format::bytes(s.size_bytes as f64)),
+        ]
+    };
+    for (glyph, label) in pills {
         px += widgets::pill_at(&p, ui, pos2(px, py), glyph, &label) + 6.0;
     }
     resp.clicked()
@@ -739,8 +824,13 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
     let content = ((t - 0.55) / 0.45).clamp(0.0, 1.0);
     let mut close = false;
     let mut trash = false;
+    let mut trim = false;
+    let mut asked = false;
     let mut open_folder = false;
     let mut open_viewer = false;
+    let serial = state.serial + 1;
+    // Escape and clicks outside go to the dialog first, when one asks (this frame closes it, not the detail).
+    let asking = d.trim.is_some();
 
     // The whole window dims, sidebar and title bar included; a click anywhere but the title bar (which still moves,
     // minimises and closes the window) closes the detail.
@@ -748,7 +838,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
     let catcher = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
     egui::Area::new(id).order(Order::Foreground).fixed_pos(catcher.min).show(ctx, |ui| {
         let (_, backdrop) = ui.allocate_exact_size(catcher.size(), Sense::click());
-        if backdrop.clicked() && !rect.contains(backdrop.interact_pointer_pos().unwrap_or_default()) {
+        if backdrop.clicked() && !rect.contains(backdrop.interact_pointer_pos().unwrap_or_default()) && !asking {
             close = true;
         }
         ui.painter().with_clip_rect(window).rect_filled(window, 0.0, theme::alpha(theme::INK_950, 0.7 * k));
@@ -877,7 +967,14 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         }
         let mut y = info.bottom() + 12.0;
         let full = |y: f32| Rect::from_min_size(pos2(side.left(), y), vec2(side.width(), 40.0));
-        if job.is_some() {
+        // Reduced to its 3D view (or being): nothing left to reconstruct from.
+        let cleaning = cx.snap.cleanup.as_ref().and_then(|j| j.of(&session.dir));
+        let view_only = session.reconstruction.is_some() && (session.trimmed || cleaning == Some(false));
+        let queued = cx.snap.reconstruct_queue.contains(&session.dir);
+        let recording = cx.snap.capture.state != crate::state::CaptureState::Idle && cx.snap.capture.session_dir.as_ref() == Some(&session.dir);
+        if view_only && job.is_none() && !queued {
+            storage::view_only(&cp, full(y), cleaning.is_some());
+        } else if job.is_some() {
             if Button::new("Stop reconstruction").icon(icons::X).width(side.width()).show_at(&mut cu, full(y)).clicked() {
                 cx.ctl.stop_reconstruction();
             }
@@ -911,17 +1008,19 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             cx.ctl.send_to_mixer(session.dir.clone(), title(&session));
         }
         y += 52.0;
-        let open_r = Rect::from_min_size(pos2(side.left(), y), vec2(side.width() - 48.0, 40.0));
-        if Button::new("Open folder").icon(icons::FOLDER_OPEN).width(open_r.width()).show_at(&mut cu, open_r).clicked() {
-            open_folder = true;
-        }
         let bin = Rect::from_min_size(pos2(side.right() - 40.0, y), vec2(40.0, 40.0));
+        // Its capture files can go, its 3D view staying (when nothing else needs them now).
+        let can_trim = session.reconstruction.is_some() && session.capture_bytes > 0 && !view_only && job.is_none() && !queued && !recording;
         if d.confirm_trash {
             let w = 104.0;
             let r = Rect::from_min_size(pos2(side.right() - w, y), vec2(w, 40.0));
             let k = anim::spring_from(ctx, id.with("confirm"), [0.9], [1.0], Spring::SNAPPY)[0];
-            let mut bu = cu.new_child(UiBuilder::new().max_rect(r).id_salt("confirm"));
+            let mut bu = cu.new_child(UiBuilder::new().max_rect(side).id_salt("confirm"));
             bu.multiply_opacity(((k - 0.9) * 10.0).clamp(0.0, 1.0));
+            let cancel = Rect::from_min_size(pos2(side.left(), y), vec2(side.width() - w - 8.0, 40.0));
+            if Button::new("Cancel").variant(Variant::Ghost).width(cancel.width()).id_salt("trash-cancel").show_at(&mut bu, cancel).clicked() {
+                d.confirm_trash = false;
+            }
             if Button::new("Confirm")
                 .icon(icons::TRASH)
                 .variant(Variant::Danger)
@@ -931,11 +1030,48 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             {
                 trash = true;
             }
-        } else if IconButton::new(icons::TRASH, "Move to the recycle bin").size(40.0, 17.0).danger().show_at(&mut cu, bin).clicked() {
-            d.confirm_trash = true;
+        } else {
+            if can_trim {
+                let keep = Rect::from_min_size(pos2(side.left(), y), vec2(side.width() - 96.0, 40.0));
+                let hint = format!("Deletes its capture files ({}) for good; the splats stay", format::bytes(session.capture_bytes as f64));
+                if Button::new("Keep only the 3D view").icon(icons::BROOM).width(keep.width()).hint(&hint).show_at(&mut cu, keep).clicked() {
+                    d.trim = Some(TrimDialog::new(ctx, session.dir.clone(), serial));
+                    asked = true;
+                }
+                let folder = Rect::from_min_size(pos2(bin.left() - 48.0, y), vec2(40.0, 40.0));
+                if IconButton::new(icons::FOLDER_OPEN, "Open folder").size(40.0, 17.0).show_at(&mut cu, folder).clicked() {
+                    open_folder = true;
+                }
+            } else {
+                let open_r = Rect::from_min_size(pos2(side.left(), y), vec2(side.width() - 48.0, 40.0));
+                if Button::new("Open folder").icon(icons::FOLDER_OPEN).width(open_r.width()).show_at(&mut cu, open_r).clicked() {
+                    open_folder = true;
+                }
+            }
+            if IconButton::new(icons::TRASH, "Move to the recycle bin").size(40.0, 17.0).danger().show_at(&mut cu, bin).clicked() {
+                d.confirm_trash = true;
+            }
+        }
+        // Asked before anything goes, over the whole detail.
+        if let Some(dialog) = d.trim.as_mut() {
+            match storage::trim_dialog(ui, dialog, rect, session.capture_bytes) {
+                Some(true) => {
+                    trim = true;
+                    d.trim = None;
+                }
+                Some(false) => d.trim = None,
+                None => {}
+            }
         }
     });
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+    if asked {
+        // A dialog of its own each time (its entrance plays again).
+        state.serial = serial;
+    }
+    if trim {
+        state.clean_up(cx, vec![session.dir.clone()], Vec::new(), anim::time(ctx));
+    }
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !asking && !trim {
         close = true;
     }
     if open_viewer {

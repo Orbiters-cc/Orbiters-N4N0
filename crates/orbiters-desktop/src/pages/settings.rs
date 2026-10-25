@@ -8,7 +8,7 @@ use crate::backend::Ctl;
 use crate::ipc::UpdateAction;
 use crate::state::{AccountState, Snapshot, UpdateState};
 use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder};
-use orbiters_core::settings::WhilePlaying;
+use orbiters_core::settings::{WhilePlaying, WindowGpu};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, SegOption, Size, Variant};
@@ -396,6 +396,22 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     apply |= widgets::toggle(ui, "reduce-motion", &mut draft.reduce_motion);
                 });
                 widgets::separator(ui);
+                if let Some(gpu) = cx.gpu.map(|g| &g.adapter).filter(|a| a.choice) {
+                    let gpus = [
+                        SegOption::new(WindowGpu::IntegratedGpu, "Integrated GPU").hint("The processor's GPU draws; the graphics card only shows the frames"),
+                        SegOption::new(WindowGpu::GraphicsCard, "Graphics card").hint("Smoother 3D views, on the GPU VRChat plays on"),
+                    ];
+                    let now = if (draft.window_gpu == WindowGpu::IntegratedGpu) == gpu.integrated {
+                        format!("Now on the {}.", gpu.name)
+                    } else {
+                        format!("On the {} until the window opens again.", gpu.name)
+                    };
+                    let note = format!("The integrated GPU keeps the 3D view off VRChat's graphics card, which only shows the window; the graphics card draws it all faster. {now}");
+                    widgets::field(ui, "Window graphics", Some(&note), 260.0, |ui| {
+                        apply |= widgets::segmented(ui, "window-gpu", &mut draft.window_gpu, &gpus, true);
+                    });
+                    widgets::separator(ui);
+                }
                 widgets::field(ui, "Capture notice", Some("The consent reminder shown before the first capture."), 120.0, |ui| {
                     if Button::new("Show again").variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
                         draft.consent_acknowledged = false;

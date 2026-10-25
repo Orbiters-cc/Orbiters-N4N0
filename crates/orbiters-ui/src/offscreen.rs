@@ -6,6 +6,7 @@ use egui::{ColorImage, RawInput};
 use egui_wgpu::wgpu;
 
 pub struct Offscreen {
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: crate::blur::Textures,
@@ -40,7 +41,12 @@ impl Offscreen {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut renderer = egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions { msaa_samples: 1, dithering: true, ..Default::default() });
         crate::install_wgpu(&device, format, 1, &mut renderer.callback_resources);
-        Ok(Self { device, queue, renderer: std::sync::Arc::new(egui::mutex::RwLock::new(renderer)), format })
+        Ok(Self { adapter, device, queue, renderer: std::sync::Arc::new(egui::mutex::RwLock::new(renderer)), format })
+    }
+
+    /// The GPU frames render on.
+    pub fn adapter(&self) -> &wgpu::Adapter {
+        &self.adapter
     }
 
     /// The device frames render on (for interfaces that draw their own GPU content).

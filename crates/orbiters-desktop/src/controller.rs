@@ -371,7 +371,7 @@ impl Controller {
             pending.drain(..excess);
         }
         if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
-            ctx.request_repaint();
+            orbiters_ui::anim::request_frame(ctx);
         }
     }
 
@@ -416,7 +416,7 @@ impl Controller {
         *self.published.lock().unwrap() = s.clone();
         self.subscribers.lock().unwrap().retain(|m| m.post_snapshot(s.clone()));
         if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
-            ctx.request_repaint();
+            orbiters_ui::anim::request_frame(ctx);
         }
     }
 

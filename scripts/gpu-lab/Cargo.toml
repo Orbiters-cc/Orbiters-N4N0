@@ -1,0 +1,27 @@
+[package]
+name = "gpu-lab"
+description = "Measurements for docs/igpu-experiment.md: GPU counters per process, a GPU-bound load on one adapter, the SteamVR overlay's texture uploads."
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Not a member of the app's workspace: a tool of its own.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+pollster = "0.4"
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "dx12", "wgsl"] }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Performance",
+    "Win32_System_Threading",
+] }
+
+[profile.release]
+debug = "line-tables-only"

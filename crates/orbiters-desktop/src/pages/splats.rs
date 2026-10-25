@@ -4,7 +4,9 @@
 //! It opens on the camera of the keyframe the preview shows; drag to orbit, right-drag to pan, scroll to zoom,
 //! WASD/QE to fly, and step through the recorded keyframe views. What the keyframes saw poorly (weakly, rarely, from
 //! one side, or from much farther than the view now is) can be faded, blurred or turned to haze, and what lies beyond
-//! the reach of the depth frames fogged towards the sky's horizon or cropped; both show as trained again.
+//! the reach of the depth frames fogged towards the sky's horizon or cropped; both show as trained again. On the
+//! processor's integrated GPU a moving camera draws fewer pixels, then the view is drawn whole once it stops
+//! ([`MOVING_PIXELS`]): a million splats at 27 frames a second instead of 19 at 1280×780 on an Intel UHD 770.
 
 use super::Job;
 use crate::gpu::Handles;
@@ -66,6 +68,11 @@ struct Renderer {
 /// How many frames after a render its count is waited for.
 const REDRAW_CHECKS: u8 = 4;
 
+/// On the processor's integrated GPU, a moving camera draws at most this many pixels, and the view is drawn whole once
+/// it has stood still for [`SHARP_AFTER`] seconds (docs/igpu-experiment.md).
+const MOVING_PIXELS: u32 = 400_000;
+const SHARP_AFTER: f64 = 0.25;
+
 struct Presented {
     size: (u32, u32),
     view: wgpu::TextureView,
@@ -114,6 +121,9 @@ pub struct Viewer {
     far: FarMode,
     /// The far field's distance: fog's thickness, the crop's soft edge (metres).
     far_distance: f32,
+    /// Drawn by the processor's integrated GPU ([`MOVING_PIXELS`]), and when the camera last moved.
+    integrated: bool,
+    moved: f64,
 }
 
 impl Viewer {
@@ -132,6 +142,8 @@ impl Viewer {
             amount: 0.75,
             far: FarMode::Shown,
             far_distance: 20.0,
+            integrated: gpu.adapter.integrated,
+            moved: f64::NEG_INFINITY,
         }
     }
 
@@ -162,12 +174,24 @@ impl Viewer {
         let ppp = ctx.pixels_per_point();
         let (w, h) = (((rect.width() * ppp).round() as u32).max(16), ((rect.height() * ppp).round() as u32).max(16));
         if let (Some(l), Some(orbit)) = (self.loaded.as_ref(), self.orbit.as_mut()) {
+            let before = *orbit;
             steer(ui, &resp, orbit, rect, h);
             if resp.double_clicked() {
                 if let Some(v) = l.views.get(self.view) {
                     *orbit = Orbit::from_view(v, l.depth);
                 }
             }
+            let now = ctx.input(|i| i.time);
+            if *orbit != before {
+                self.moved = now;
+            }
+            let (w, h) = if self.integrated && now - self.moved < SHARP_AFTER {
+                // Drawn whole once it stops.
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(SHARP_AFTER - (now - self.moved)));
+                within(w, h, MOVING_PIXELS)
+            } else {
+                (w, h)
+            };
             let camera = orbit.camera(w, h);
             let mode = match self.unsure {
                 Unsure::Shown => None,
@@ -315,6 +339,12 @@ impl Viewer {
             control_chip(ui, p, "splat-far", right, first.top() - 10.0, "Far away", &mut self.far, &options, distance);
         }
     }
+}
+
+/// `w`×`h` scaled down to at most `pixels`, its aspect kept.
+fn within(w: u32, h: u32, pixels: u32) -> (u32, u32) {
+    let k = (pixels as f64 / (w as f64 * h as f64)).sqrt().min(1.0);
+    (((w as f64 * k) as u32).max(16), ((h as f64 * k) as u32).max(16))
 }
 
 /// Mouse and keyboard to the orbit.
@@ -547,5 +577,16 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
         pass.set_pipeline(&blit.pipeline);
         pass.set_bind_group(0, &t.bind_group, &[]);
         pass.draw(0..3, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_moving_view_on_the_integrated_gpu_keeps_its_aspect_within_its_pixels() {
+        assert_eq!(super::within(640, 390, 400_000), (640, 390), "small enough already");
+        let (w, h) = super::within(2560, 1400, 400_000);
+        assert!(w * h <= 400_000, "{w}x{h}");
+        assert!((w as f32 / h as f32 - 2560.0 / 1400.0).abs() < 0.01, "{w}x{h}");
     }
 }

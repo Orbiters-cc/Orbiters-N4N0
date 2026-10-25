@@ -38,6 +38,8 @@ pub struct Settings {
     pub photo_3d_timer: u32,
     /// Where reconstructions train while VRChat runs.
     pub reconstruct_while_playing: WhilePlaying,
+    /// The GPU the window draws on, its 3D view included.
+    pub window_gpu: WindowGpu,
     /// Starting with SteamVR (starting with Windows is the person's registry, read where it is shown).
     pub startup: StartupSettings,
 }
@@ -67,6 +69,19 @@ pub enum WhilePlaying {
     GraphicsCard,
     IntegratedGpu,
     AfterVrchat,
+}
+
+/// The GPU the window draws on, its 3D view included (chosen when the window opens). On the processor's integrated GPU
+/// the graphics card that drives the monitor only shows the window: Windows has it copy each frame, which takes a
+/// GPU-bound game about twice what drawing an interface frame there does (scrolling at 60 frames a second: 3.6 % of
+/// its frames instead of 1.6 %, on an RTX 4080), but the 3D view's splats stay off it (orbiting a million of them:
+/// 2.6 % instead of 11.4 %, at 27 frames a second instead of 60). docs/igpu-experiment.md has the measurements.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowGpu {
+    #[default]
+    IntegratedGpu,
+    GraphicsCard,
 }
 
 /// A 3D picture's length: a gentle 1 s sweep, 4 s that circle you and fly 10 m out every way, or 8 s that also circle
@@ -328,6 +343,7 @@ impl Default for Settings {
             photo_3d: Photo3dLength::default(),
             photo_3d_timer: 0,
             reconstruct_while_playing: WhilePlaying::default(),
+            window_gpu: WindowGpu::default(),
             startup: StartupSettings::default(),
         }
     }
@@ -462,6 +478,7 @@ mod tests {
         assert_eq!(partial.storage_limit_gb, 3.0);
         assert_eq!(partial.osc.record_parameter, "OrbitersRecord");
         assert_eq!(partial.orb, OrbSettings::default(), "settings from before N4N0 get its defaults");
+        assert_eq!(partial.window_gpu, WindowGpu::IntegratedGpu, "the window draws on the integrated GPU unless chosen otherwise");
         std::fs::remove_dir_all(dir).ok();
     }
 

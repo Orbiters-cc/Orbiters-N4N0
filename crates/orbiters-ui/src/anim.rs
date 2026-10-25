@@ -234,6 +234,13 @@ pub fn time(ctx: &Context) -> f64 {
     now(ctx)
 }
 
+/// One frame for something that changed outside the interface (the service's news). `request_repaint` runs two, to let
+/// layouts settle: a window told of changes 30 times a second drew 60 frames, each one GPU time and, on the processor's
+/// integrated GPU, a copy to the graphics card that drives the monitor.
+pub fn request_frame(ctx: &Context) {
+    ctx.request_repaint_after(Duration::from_millis(1));
+}
+
 /// Easing curves.
 pub mod ease {
     pub fn out_cubic(t: f32) -> f32 {

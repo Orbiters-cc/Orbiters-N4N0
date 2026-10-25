@@ -60,6 +60,16 @@ pub fn run(args: Args, payload: Option<&'static [u8]>) -> anyhow::Result<i32> {
             .with_inner_size(SIZE)
             .with_icon(window_icon()),
         renderer: eframe::Renderer::Wgpu,
+        // The least power-hungry GPU, the processor's integrated one where there is one, as the app's window: an update
+        // may install while VRChat plays on the graphics card.
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            wgpu_setup: eframe::egui_wgpu::WgpuSetupCreateNew {
+                power_preference: eframe::wgpu::PowerPreference::LowPower,
+                ..eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle()
+            }
+            .into(),
+            ..Default::default()
+        },
         centered: true,
         // `orbiters_ui::install` brings its own fallback fonts.
         system_font_fallback: false,

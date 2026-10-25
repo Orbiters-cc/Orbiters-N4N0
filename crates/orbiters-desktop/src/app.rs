@@ -54,8 +54,7 @@ impl App {
         round_corners(cc);
         let mut app = Self::offline(ctl);
         app.windowed = true;
-        app.gpu =
-            cc.wgpu_render_state.as_ref().map(|rs| crate::gpu::Handles { device: rs.device.clone(), queue: rs.queue.clone(), textures: rs.renderer.clone() });
+        app.gpu = cc.wgpu_render_state.as_ref().map(crate::gpu::Handles::of_window);
         app.show_splash = splash;
         app
     }
@@ -583,6 +582,8 @@ impl eframe::App for App {
         if self.ctl.take_show() {
             bring_to_front(ctx);
         }
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        self.ctl.set_background(!focused && self.ctl.view().vrchat.running);
         if self.ctl.should_close() {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }

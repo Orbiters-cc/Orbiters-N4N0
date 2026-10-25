@@ -748,6 +748,10 @@ pub fn layout(page: ScreenPage) -> Layout {
             elements.push(with(element(Target::WatchVideo, Rect::new(512, 316, 196, 48), Look::KeyDark), Some(Icon::Watch), Some("Watch")));
             elements.push(with(element(Target::SaveVideo, Rect::new(720, 316, 156, 48), Look::KeyDark), Some(Icon::Save), Some("Save")));
             slots.add(512, 280, 40, 24, Style::Secondary, Content::WorldVideo);
+            // The YouTube video the computer plays (screens from version 6), in the heading's row: its Copy link, then
+            // its Drop to the left once copied, as on a result's row.
+            elements.push(with(element(Target::CopyPlaying, Rect::new(836, 28, 156, 48), Look::Accent), Some(Icon::Copy), Some("Copy link")));
+            elements.push(with(element(Target::DropPlaying, Rect::new(720, 28, 108, 48), Look::KeyDark), Some(Icon::Drop), Some("Drop")));
         }
         ScreenPage::Light => {
             elements.push(round(Target::Back, 32, Icon::Back));
@@ -1196,6 +1200,8 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             Some(m) if !m.title.is_empty() => m.artist.clone(),
             _ => "Play music on this computer: it shows here".into(),
         },
+        // The YouTube video playing says its link was copied there (a YouTube page gives no album), as a result's row does.
+        Content::MediaAlbum if menu.pages.ten() && menu.media.as_ref().is_some_and(|m| m.video.is_some() && m.video == menu.copied) => "✓ Link copied".into(),
         Content::MediaAlbum => menu.media.as_ref().filter(|m| !m.title.is_empty()).map(|m| m.album.clone()).unwrap_or_default(),
         Content::MediaState => match &menu.media {
             Some(m) if !m.title.is_empty() || !m.app.is_empty() => {
@@ -1433,6 +1439,11 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::StateSave => !menu.states_ready,
         Target::CardTime(i) => i as usize >= card_segments(menu, false),
         Target::WatchVideo | Target::SaveVideo => menu.world_video.is_none() || !menu.pages.ten(),
+        // The YouTube video the computer plays, once found; its Drop once its link was copied, where cards drop.
+        Target::CopyPlaying => !menu.pages.ten() || menu.media.as_ref().is_none_or(|m| m.video.is_none()),
+        Target::DropPlaying => {
+            !menu.pages.ten() || !menu.can_drop || menu.media.as_ref().and_then(|m| m.video.as_ref()).is_none_or(|v| menu.copied.as_ref() != Some(v))
+        }
         _ => false,
     };
     let unavailable = match target {

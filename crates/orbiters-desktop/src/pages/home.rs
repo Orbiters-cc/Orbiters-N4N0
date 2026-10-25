@@ -150,11 +150,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             match page {
                 // The window never shows a dropped card itself (the avatar's screen does).
-                Page::Home | Page::Card => home(ui, cx, menu, &idle, &mut acts),
+                Page::Home | Page::Card => home(ui, cx, menu, &idle, copied_id, &mut acts),
                 Page::Search | Page::Results => youtube(ui, cx, menu, &picture, focus, copied_id, &mut acts),
                 Page::Call => call(ui, cx, menu, &mut acts),
                 Page::Photo => photo(ui, cx, menu, take_blocked, &mut acts),
-                Page::Music => music(ui, cx, menu, &picture, &mut acts),
+                Page::Music => music(ui, cx, menu, &picture, copied_id, &mut acts),
                 Page::Light => light(ui, cx, menu, &mut acts),
                 Page::Tracking => tracking(ui, cx, menu, &mut acts),
                 Page::Suggest | Page::Type => suggest(ui, cx, menu, &mut acts),
@@ -181,6 +181,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     if let Some(video) = host.menu.page_results().get(i as usize) {
                         *copied = Some((video.id.clone(), now));
                     }
+                }
+                // The YouTube video playing, as a result.
+                if let (Target::CopyPlaying, Some(video)) = (target, host.menu.media.as_ref().and_then(|m| m.video.clone())) {
+                    *copied = Some((video, now));
                 }
                 effects.extend(host.press(target));
             }
@@ -239,7 +243,7 @@ fn idle_line(settings: &Settings) -> String {
     }
 }
 
-fn home(ui: &mut Ui, cx: &Cx, menu: &Menu, idle: &str, acts: &mut Vec<Act>) {
+fn home(ui: &mut Ui, cx: &Cx, menu: &Menu, idle: &str, copied: Option<&str>, acts: &mut Vec<Act>) {
     block(ui, cx, 0, 72.0, |ui, rect| {
         let p = ui.painter();
         widgets::text(p, pos2(rect.left(), rect.top() + 7.0), Align2::LEFT_CENTER, &Txt::caps("N4N0 menu"));
@@ -264,7 +268,7 @@ fn home(ui: &mut Ui, cx: &Cx, menu: &Menu, idle: &str, acts: &mut Vec<Act>) {
     let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (CARD_H + GAP) - GAP), Sense::hover());
     let cell = |i: usize| area.min + vec2((i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (CARD_H + GAP));
     for i in 0..HOME_TILES.len() {
-        feature(ui, cx, i, Rect::from_min_size(cell(i), vec2(card_w, CARD_H)), menu, acts);
+        feature(ui, cx, i, Rect::from_min_size(cell(i), vec2(card_w, CARD_H)), menu, copied, acts);
     }
     let span = cols - HOME_TILES.len() % cols;
     let at = cell(HOME_TILES.len());
@@ -283,8 +287,8 @@ fn home_columns(width: f32) -> usize {
 }
 
 /// One of Home's features: its icon chip, its name and what it says now, with a switch for what turns on and off (fast
-/// walk, the light) or an arrow for what opens a page.
-fn feature(ui: &mut Ui, cx: &Cx, i: usize, rect: Rect, menu: &Menu, acts: &mut Vec<Act>) {
+/// walk, the light), the Copy link of the YouTube video playing (music), or an arrow for what opens a page.
+fn feature(ui: &mut Ui, cx: &Cx, i: usize, rect: Rect, menu: &Menu, copied: Option<&str>, acts: &mut Vec<Act>) {
     let (target, icon, title, tint) = HOME_TILES[i];
     let state = layout::target_state(menu, target);
     let (rect, alpha) = super::entering(ui, cx, 1 + i, rect);
@@ -335,6 +339,21 @@ fn feature(ui: &mut Ui, cx: &Cx, i: usize, rect: Rect, menu: &Menu, acts: &mut V
     let note = Txt::new(layout::text(menu, Content::TileNote(i as u8)), 12.5).color(if active { theme::ACCENT } else { theme::FG_3 });
     widgets::text_truncated(&p, pos2(x, r.bottom() - 24.0), Align2::LEFT_CENTER, &note, r.width() - 2.0 * INSET);
 
+    // The YouTube video playing: its link copied from the card (pressed apart from it), the page not opened.
+    let playing = match target {
+        Target::Music => menu.media.as_ref().and_then(|m| m.video.as_deref()),
+        _ => None,
+    };
+    if let Some(video) = playing {
+        let (glyph, label) = if copied == Some(video) { (icons::CHECK, "Link copied") } else { (icons::COPY, "Copy the video's link") };
+        let br = Rect::from_center_size(pos2(r.right() - INSET - 12.0, chip.center().y), Vec2::splat(36.0));
+        let mut bu = ui.new_child(UiBuilder::new().max_rect(br).id_salt(("orbiters-home-copy-playing", i)));
+        bu.multiply_opacity(alpha);
+        if IconButton::new(glyph, label).id_salt("copy").show_at(&mut bu, br).clicked() {
+            acts.push(Act::Press(Target::CopyPlaying));
+        }
+        return;
+    }
     // On the right: a switch over the card (pressed apart from it), or the way in.
     let switch = match target {
         Target::FastWalk => Some(Target::FastWalk),
@@ -712,7 +731,7 @@ fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Ve
     });
 }
 
-fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<TextureId>, acts: &mut Vec<Act>) {
+fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<TextureId>, copied: Option<&str>, acts: &mut Vec<Act>) {
     let media = menu.media.as_ref().filter(|m| !m.title.is_empty());
     let sub = match media {
         Some(_) => layout::text(menu, Content::MediaState),
@@ -769,6 +788,30 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
             }
         }
         ui.add_space(14.0);
+        // The YouTube video a browser or YouTube's app plays, found on YouTube: its link copied, then dropped as a card,
+        // as a search result's.
+        if let Some((video, link)) = media.and_then(|m| Some((m.video.as_deref()?, m.link()?))) {
+            widgets::separator(ui);
+            let drop = !layout::target_state(menu, Target::DropPlaying).hidden;
+            let was_copied = drop || copied == Some(video);
+            let width = 124.0 + if drop { 8.0 + 96.0 } else { 0.0 };
+            let shown = link.strip_prefix("https://www.").unwrap_or(&link);
+            widgets::field(ui, "On YouTube", Some(shown), width, |ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                let (label, glyph) = if was_copied { ("Copied", icons::CHECK) } else { ("Copy link", icons::COPY) };
+                let copy = Button::new(label).icon(glyph).size(Size::Sm).width(124.0).id_salt("orbiters-home-copy-playing");
+                if copy.hint("Paste it in a world's video player").show(ui).clicked() {
+                    acts.push(Act::Press(Target::CopyPlaying));
+                }
+                if drop {
+                    let hint = "Drop it in the world as a card: whoever grabs it copies the link";
+                    let button = Button::new("Drop").icon(icons::HAND_DEPOSIT).size(Size::Sm).variant(Variant::Primary).width(96.0).hint(hint);
+                    if button.id_salt("orbiters-home-drop-playing").show(ui).clicked() {
+                        acts.push(Act::Press(Target::DropPlaying));
+                    }
+                }
+            });
+        }
         if let Some(volume) = menu.volume {
             widgets::separator(ui);
             widgets::field(ui, "Volume", Some("This computer's speakers."), 340.0, |ui| {

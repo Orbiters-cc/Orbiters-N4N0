@@ -232,6 +232,7 @@ pub(crate) fn sample_media() -> Media {
         position: Some(83),
         duration: Some(243),
         art: Some(SAMPLE_ART.into()),
+        video: None,
     }
 }
 

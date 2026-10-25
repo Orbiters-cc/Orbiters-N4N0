@@ -279,6 +279,16 @@ pub struct Media {
     pub duration: Option<u32>,
     /// The art's picture key (the hosts keep the pictures by key), once there is art.
     pub art: Option<String>,
+    /// The YouTube video it is (its id), once found: a browser or YouTube's app plays it (`orbiters_n4n0::media` looks
+    /// it up). Its link can be copied and dropped as the results' are.
+    pub video: Option<String>,
+}
+
+impl Media {
+    /// The link of the YouTube video playing, once found.
+    pub fn link(&self) -> Option<String> {
+        self.video.as_deref().map(crate::youtube::link)
+    }
 }
 
 /// The computer's volume (its default speakers), in percent.
@@ -417,6 +427,9 @@ pub enum Target {
     /// Music: the world's video, watched on the computer from where the world is, or saved in N4N0's videos.
     WatchVideo,
     SaveVideo,
+    /// Music: the YouTube video the computer plays, its link copied, then dropped in the world as a card (as a result's).
+    CopyPlaying,
+    DropPlaying,
 }
 
 /// What the host does for the menu. Requests are numbered, and their answers carry the number back: an answer to an
@@ -931,6 +944,23 @@ impl Menu {
                 vec![Effect::SaveVideo]
             }
             Target::SaveVideo => Vec::new(),
+            // The YouTube video the computer plays: copied, then dropped, as a result is.
+            Target::CopyPlaying => match self.media.as_ref().and_then(|m| Some((m.link()?, m.title.clone(), m.video.clone()?))) {
+                Some((link, title, video)) => {
+                    self.copied = Some(video);
+                    let notice = if self.can_drop { "Link copied: paste it, or Drop it" } else { "Link copied: paste it in the video player" };
+                    self.notice = Some(notice.into());
+                    vec![Effect::Copy { link, title }]
+                }
+                None => Vec::new(),
+            },
+            Target::DropPlaying => match self.media.as_ref().and_then(|m| Some((m.link()?, m.title.clone(), m.video.clone()?))) {
+                Some((link, title, video)) if self.can_drop && self.copied.as_deref() == Some(video.as_str()) => {
+                    self.notice = Some("Dropped: grab the card to copy its link".into());
+                    vec![Effect::Drop { link, title, video: Some(video) }]
+                }
+                _ => Vec::new(),
+            },
             Target::Previous => self.turn(-1),
             Target::Next => self.turn(1),
             Target::Contact(i) => match self.page_contacts().get(i as usize) {
@@ -1876,6 +1906,49 @@ mod tests {
         assert!(matches!(&menu.press(Target::WatchVideo)[..], [Effect::WatchVideo { .. }]));
         menu.pages = Pages::Seven;
         assert!(layout::target_state(&menu, Target::WatchVideo).hidden, "older screens have no such buttons");
+    }
+
+    #[test]
+    fn the_youtube_video_playing_is_copied_then_dropped_as_a_result() {
+        let mut menu = Menu { pages: Pages::Ten, ..Default::default() };
+        menu.open();
+        menu.press(Target::Music);
+        let shown = |menu: &Menu, target: Target| !layout::target_state(menu, target).hidden;
+        menu.media = Some(Media { title: "Never Gonna Give You Up".into(), artist: "Rick Astley".into(), app: "Chrome".into(), ..Default::default() });
+        assert!(!shown(&menu, Target::CopyPlaying) && menu.press(Target::CopyPlaying).is_empty(), "not found on YouTube (yet)");
+        menu.media.as_mut().unwrap().video = Some("dQw4w9WgXcQ".into());
+        assert!(shown(&menu, Target::CopyPlaying) && !shown(&menu, Target::DropPlaying));
+        assert!(menu.press(Target::DropPlaying).is_empty(), "nothing copied yet");
+        assert_eq!(
+            menu.press(Target::CopyPlaying),
+            vec![Effect::Copy { link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into(), title: "Never Gonna Give You Up".into() }]
+        );
+        assert_eq!(layout::text(&menu, layout::Content::MediaAlbum), "✓ Link copied");
+        assert!(!shown(&menu, Target::DropPlaying) && menu.press(Target::DropPlaying).is_empty(), "no card can be dropped here");
+        menu.can_drop = true;
+        assert!(shown(&menu, Target::DropPlaying));
+        assert_eq!(
+            menu.press(Target::DropPlaying),
+            vec![Effect::Drop {
+                link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into(),
+                title: "Never Gonna Give You Up".into(),
+                video: Some("dQw4w9WgXcQ".into())
+            }]
+        );
+        // Another video plays: its own link is to copy first.
+        menu.media.as_mut().unwrap().video = Some("36YnV9STBqc".into());
+        assert!(!shown(&menu, Target::DropPlaying) && layout::text(&menu, layout::Content::MediaAlbum).is_empty());
+        // Older screens have no such buttons.
+        menu.pages = Pages::Seven;
+        assert!(!shown(&menu, Target::CopyPlaying));
+        // They sit apart from the page's other buttons.
+        let music = layout::cached(layout::ScreenPage::Music);
+        for (i, a) in music.elements.iter().enumerate() {
+            for b in &music.elements[i + 1..] {
+                let apart = a.rect.right() <= b.rect.x || b.rect.right() <= a.rect.x || a.rect.bottom() <= b.rect.y || b.rect.bottom() <= a.rect.y;
+                assert!(apart, "{:?} and {:?} overlap", a.target, b.target);
+            }
+        }
     }
 
     #[test]

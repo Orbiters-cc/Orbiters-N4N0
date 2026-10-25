@@ -383,6 +383,35 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             home: Some(HomeShot { page: MenuPage::Music, samples: true }),
             library: None,
         },
+        // A browser plays a YouTube video (found there): Home's music card copies its link, the music page offers Drop.
+        Scenario {
+            name: "home-playing-youtube",
+            page: Page::Home,
+            snapshot: home_drop.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Home, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-music-youtube",
+            page: Page::Home,
+            snapshot: home_drop.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Music, samples: true }),
+            library: None,
+        },
         Scenario {
             name: "home-light",
             page: Page::Home,
@@ -1255,6 +1284,31 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
 fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }: HomeShot) {
     use crate::overlay::menu_pages::{sample_rgba, sample_suggestions, sample_videos};
     use orbiters_orb::menu::{Effect, Target};
+    // Where a card can be dropped: a browser plays one of the sample results, found on YouTube (Home's music card copies
+    // its link; the music page shows it copied, offering Drop).
+    if samples && host.menu.can_drop && matches!(page, MenuPage::Home | MenuPage::Music) {
+        let video = &sample_videos()[3];
+        let (w, h, rgba) = sample_rgba(3);
+        host.put_picture(&video.id, egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba));
+        host.menu.media = Some(orbiters_orb::menu::Media {
+            title: video.title.clone(),
+            artist: video.channel.clone(),
+            app: "Chrome".into(),
+            playing: true,
+            can_play_pause: true,
+            can_next: true,
+            position: Some(1274),
+            duration: Some(3674),
+            art: Some(video.id.clone()),
+            video: Some(video.id.clone()),
+            ..Default::default()
+        });
+        if page == MenuPage::Music {
+            host.press(Target::Music);
+            host.press(Target::CopyPlaying);
+            return;
+        }
+    }
     let open = match page {
         MenuPage::Home => return,
         MenuPage::Search | MenuPage::Results => Target::YouTube,

@@ -174,6 +174,8 @@ mod platform {
             position,
             duration,
             art: None,
+            // Looked up on YouTube by the watcher (`orbiters_n4n0::media::Links`).
+            video: None,
         })
     }
 

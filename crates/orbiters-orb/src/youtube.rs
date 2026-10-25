@@ -268,6 +268,109 @@ fn video_of(item: &Value) -> Option<Video> {
     Some(Video { id: id.to_string(), title, channel, duration, live })
 }
 
+/// A length as YouTube writes it (`4:03`, `1:04:42`), in seconds.
+pub fn seconds(duration: &str) -> Option<u32> {
+    let mut total: u32 = 0;
+    let parts: Vec<&str> = duration.trim().split(':').collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        return None;
+    }
+    for part in parts {
+        if part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        total = total.checked_mul(60)?.checked_add(part.parse().ok()?)?;
+    }
+    Some(total)
+}
+
+/// How many seconds the length an app gives may differ from YouTube's: browsers round where YouTube cuts, and say it a
+/// moment late.
+const SAME_LENGTH: u32 = 3;
+
+/// Whether an app named `app` (as `orbiters_n4n0::media::app_name` names it) may be playing a YouTube video: a browser,
+/// or one of YouTube's own apps.
+pub fn may_play_youtube(app: &str) -> bool {
+    let app = app.to_ascii_lowercase();
+    app.contains("youtube") || ["chrome", "edge", "firefox", "brave", "opera", "opera gx", "vivaldi", "arc", "chromium", "zen"].contains(&app.as_str())
+}
+
+/// Whether what an app plays (`title`, `artist`, `album`, from `app`) is worth looking up on YouTube: one of YouTube's
+/// apps, or a browser playing something with a channel and no album (YouTube's page names the channel as the artist and
+/// gives no album; music sites give an album, and what plays there is not looked for on YouTube).
+pub fn worth_looking_up(app: &str, title: &str, artist: &str, album: &str) -> bool {
+    if title.trim().is_empty() || !may_play_youtube(app) {
+        return false;
+    }
+    app.to_ascii_lowercase().contains("youtube") || (!artist.trim().is_empty() && album.trim().is_empty())
+}
+
+/// The search that finds a playing video: its title, then its channel.
+pub fn playing_query(title: &str, channel: &str) -> String {
+    let query = format!("{} {}", title.trim(), channel.trim());
+    cut(query.trim(), MAX_QUERY).to_string()
+}
+
+/// A title or channel name compared without case, spacing or the quotes and dashes that differ between YouTube's page and
+/// its search.
+fn plain(text: &str) -> String {
+    let mapped: String = text
+        .chars()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' | '\u{02bc}' | '`' => '\'',
+            '\u{201c}' | '\u{201d}' | '\u{00ab}' | '\u{00bb}' => '"',
+            '\u{2013}' | '\u{2014}' => '-',
+            '\u{00a0}' | '\u{2009}' | '\u{202f}' => ' ',
+            c => c,
+        })
+        .flat_map(char::to_lowercase)
+        .collect();
+    mapped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The video among `results` that is the one playing: `title` from `channel` (the artist the app names), `duration`
+/// seconds long when the app says. Never one of another length (both known). The same title with the same channel or
+/// the same length (a renamed channel); of several, the closest in length, then YouTube's first. Else the one video of
+/// the channel with that length, when only one has it (a title YouTube shows translated).
+pub fn find_playing<'a>(results: &'a [Video], title: &str, channel: &str, duration: Option<u32>) -> Option<&'a Video> {
+    let (title, channel) = (plain(title), plain(channel));
+    if title.is_empty() {
+        return None;
+    }
+    let mut best: Option<(&Video, u32)> = None;
+    let mut by_length = Vec::new();
+    for video in results {
+        let same_title = plain(&video.title) == title;
+        let same_channel = !channel.is_empty() && plain(&video.channel) == channel;
+        let gap = match (duration, video.duration.as_deref().and_then(seconds)) {
+            (Some(a), Some(b)) => Some(a.abs_diff(b)),
+            _ => None,
+        };
+        let same_length = gap.map(|g| g <= SAME_LENGTH);
+        if same_length == Some(false) {
+            continue;
+        }
+        let gap = gap.unwrap_or(SAME_LENGTH);
+        if same_title && (same_channel || same_length == Some(true)) {
+            if best.is_none_or(|(_, g)| gap < g) {
+                best = Some((video, gap));
+            }
+        } else if same_channel && same_length == Some(true) {
+            by_length.push(video);
+        }
+    }
+    match (best, by_length.as_slice()) {
+        (Some((video, _)), _) => Some(video),
+        (None, [only]) => Some(only),
+        _ => None,
+    }
+}
+
+/// The playing video's YouTube results (see [`find_playing`] for which is it). Blocking, 8 s at most.
+pub fn search_playing(title: &str, channel: &str) -> anyhow::Result<Vec<Video>> {
+    Ok(search(&playing_query(title, channel), "")?.videos)
+}
+
 /// One agent for every request (the menu's suggestions, searches and thumbnails): its connections stay open from one
 /// keystroke or thumbnail to the next, where an agent each paid a TCP and TLS handshake every time. Each request sets
 /// its own time limit.
@@ -501,6 +604,67 @@ mod tests {
         assert_eq!(continuation_body("tok", "")["context"]["client"]["hl"], "en");
         assert_eq!(cut("été", 2), "ét");
         assert_eq!(thumbnail_url("n61ULEU7CO0"), "https://i.ytimg.com/vi/n61ULEU7CO0/mqdefault.jpg");
+    }
+
+    fn result(id: &str, title: &str, channel: &str, duration: Option<&str>) -> Video {
+        Video { id: id.into(), title: title.into(), channel: channel.into(), duration: duration.map(str::to_string), live: duration.is_none() }
+    }
+
+    #[test]
+    fn finds_the_video_a_browser_plays() {
+        assert_eq!(seconds("38:13"), Some(2293));
+        assert_eq!(seconds("1:04:42"), Some(3882));
+        assert_eq!((seconds("LIVE"), seconds("12"), seconds("1::2"), seconds("1:2:3:4")), (None, None, None, None));
+        let title = "iPhone Duo : Tous les tests sont truqués (et vous ne le savez pas)";
+        let results = vec![
+            result("_i2jHPcVlY0", "C'est fini : Voici la console portable parfaite.", "Léo - TechMaker", Some("17:10")),
+            result("NwGHNdbw1Ts", title, "Léo - TechMaker", Some("38:13")),
+            result("reupload000", title, "Someone Else", Some("38:20")),
+        ];
+        let found = |title: &str, channel: &str, duration: Option<u32>| find_playing(&results, title, channel, duration).map(|v| v.id.clone());
+        // Windows' media controls as Chrome fills them on YouTube: the title, the channel as the artist, the length cut.
+        assert_eq!(found(title, "Léo - TechMaker", Some(2292)).as_deref(), Some("NwGHNdbw1Ts"));
+        assert_eq!(found(&title.to_uppercase(), " Léo  -  TechMaker", None).as_deref(), Some("NwGHNdbw1Ts"), "no length: title and channel");
+        assert_eq!(found("iPhone Duo: all tests are rigged", "Léo – TechMaker", Some(2293)).as_deref(), Some("NwGHNdbw1Ts"), "translated: channel and length");
+        assert_eq!(found(title, "Léo - TechMaker", Some(15)), None, "an ad plays: its length is not the video's");
+        assert_eq!(found(title, "Another Channel", None), None, "the title alone is not enough");
+        assert_eq!(found("Something else", "Léo - TechMaker", None), None, "nor the channel alone");
+        assert_eq!(found("", "Léo - TechMaker", Some(2293)), None);
+        // The same title twice from the channel (a re-upload): the nearest length, else YouTube's first.
+        let twice = vec![result("aaaaaaaaaaa", "Song", "Band", Some("3:10")), result("bbbbbbbbbbb", "Song", "Band", Some("3:12"))];
+        assert_eq!(find_playing(&twice, "Song", "Band", Some(192)).map(|v| v.id.as_str()), Some("bbbbbbbbbbb"));
+        assert_eq!(find_playing(&twice, "Song", "Band", None).map(|v| v.id.as_str()), Some("aaaaaaaaaaa"));
+        // Two of the channel's videos with the length and neither title: not knowing which, none.
+        assert_eq!(find_playing(&twice, "Chanson", "Band", Some(191)), None);
+        // A live stream has no length: its title and channel.
+        let live = vec![result("uWzSqdcfPZw", "lofi hip hop radio 📚", "Lofi Girl", None)];
+        assert_eq!(find_playing(&live, "lofi hip hop radio 📚", "Lofi Girl", Some(7200)).map(|v| v.id.as_str()), Some("uWzSqdcfPZw"));
+        assert_eq!(playing_query(" Song ", "Band "), "Song Band");
+    }
+
+    #[test]
+    fn looks_up_only_what_may_be_youtube() {
+        assert!(worth_looking_up("Chrome", "A video", "A channel", ""));
+        assert!(worth_looking_up("YouTube", "A video", "", "An album"), "YouTube's own app, whatever it says");
+        assert!(worth_looking_up("YouTube Music", "Song", "Artist", "Album"));
+        assert!(!worth_looking_up("Chrome", "Song", "Artist", "Album"), "a music site in a browser");
+        assert!(!worth_looking_up("Edge", "A film", "", ""), "no channel");
+        assert!(!worth_looking_up("Spotify", "Song", "Artist", ""));
+        assert!(!worth_looking_up("Chrome", " ", "A channel", ""));
+    }
+
+    /// A playing video found on YouTube itself (`PLAYING_TITLE`, `PLAYING_CHANNEL` and `PLAYING_SECONDS` as Windows' media
+    /// controls give them): `cargo test -p orbiters-orb playing_live -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn playing_live() {
+        let title = std::env::var("PLAYING_TITLE").unwrap_or_else(|_| "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)".into());
+        let channel = std::env::var("PLAYING_CHANNEL").unwrap_or_else(|_| "Rick Astley".into());
+        let duration = std::env::var("PLAYING_SECONDS").ok().and_then(|s| s.parse().ok()).or(Some(213));
+        let results = search_playing(&title, &channel).unwrap();
+        let found = find_playing(&results, &title, &channel, duration);
+        println!("{title} | {channel} | {duration:?} -> {found:?}");
+        assert!(found.is_some());
     }
 
     /// Against YouTube itself: `cargo test -p orbiters-orb youtube_live -- --ignored --nocapture`.

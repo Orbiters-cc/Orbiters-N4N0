@@ -75,12 +75,13 @@ pub enum WhilePlaying {
 /// the graphics card that drives the monitor only shows the window: Windows has it copy each frame, which takes a
 /// GPU-bound game about twice what drawing an interface frame there does (scrolling at 60 frames a second: 3.6 % of
 /// its frames instead of 1.6 %, on an RTX 4080), but the 3D view's splats stay off it (orbiting a million of them:
-/// 2.6 % instead of 11.4 %, at 27 frames a second instead of 60). docs/igpu-experiment.md has the measurements.
+/// 2.6 % instead of 11.4 %, at 27 frames a second instead of 60). docs/igpu-experiment.md has the measurements. The
+/// graphics card by default: drawing the interface there costs a game less than the copy does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WindowGpu {
-    #[default]
     IntegratedGpu,
+    #[default]
     GraphicsCard,
 }
 
@@ -478,7 +479,7 @@ mod tests {
         assert_eq!(partial.storage_limit_gb, 3.0);
         assert_eq!(partial.osc.record_parameter, "OrbitersRecord");
         assert_eq!(partial.orb, OrbSettings::default(), "settings from before N4N0 get its defaults");
-        assert_eq!(partial.window_gpu, WindowGpu::IntegratedGpu, "the window draws on the integrated GPU unless chosen otherwise");
+        assert_eq!(partial.window_gpu, WindowGpu::GraphicsCard, "the window draws on the graphics card unless chosen otherwise");
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -135,7 +135,7 @@ most 5.3 %). The SteamVR overlay's process never drew (its tab was not shown).
 
 ## What changed
 
-- **Settings, Interface, Window graphics**: *Integrated GPU* (default) or *Graphics card*, for the window and its 3D
+- **Settings, Interface, Window graphics**: *Integrated GPU* or *Graphics card* (default since 0.3.0), for the window and its 3D
   view. The window chooses when it opens (eframe cannot move a window to another GPU), so a change applies the next
   time it opens, and the row says which GPU draws it now. Computers without both kinds of GPU do not show the row and
   draw on the adapter of the primary display, as before. DX12 reports every adapter as able to present to the window,
@@ -161,7 +161,10 @@ most 5.3 %). The SteamVR overlay's process never drew (its tab was not shown).
 
 ## Recommendation
 
-Keep the integrated GPU as the default, with the frame reductions. In the cases that come up while playing (the window
+Decision (Enzo, 2026-10-25): the graphics card is the default, since drawing the interface there costs a game less than
+the copy from the integrated GPU; the integrated GPU stays a choice, and is worth it for the 3D view alone.
+
+The experiment's own recommendation was to keep the integrated GPU as the default, with the frame reductions. In the cases that come up while playing (the window
 closed, idle, or behind VRChat while recording or with N4N0's menu open) the window now costs a GPU-bound VRChat at
 most about half a percent of its frames from the integrated GPU and nothing measurable from the graphics card, and the
 3D view, the one load that can take a quarter of the graphics card, stays off it. The price: interacting with the

@@ -72,6 +72,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
             target.join("release")
         }
     };
+    check_programs(&bin, &version)?;
     let mut ours = Vec::new();
     for program in PROGRAMS {
         let name = format!("{program}.exe");
@@ -247,6 +248,32 @@ impl Signer {
     }
 }
 
+/// Refuses programs from before this version: each built after the workspace's version last changed (a version bump
+/// rebuilds them all), and the window's program saying this version in its Windows version resource. A program the
+/// running app holds open cannot be replaced, and cargo then leaves the old one in place: 0.2.1's setup shipped a
+/// window labelled 0.2.0 that way.
+fn check_programs(bin: &Path, version: &str) -> anyhow::Result<()> {
+    let bumped = std::fs::metadata(crate::root().join("Cargo.toml"))?.modified()?;
+    for program in PROGRAMS {
+        let path = bin.join(format!("{program}.exe"));
+        let built = std::fs::metadata(&path).with_context(|| format!("{} is missing", path.display()))?.modified()?;
+        anyhow::ensure!(built >= bumped, "{} is older than the version in Cargo.toml: it was not rebuilt (is the app running from there?)", path.display());
+    }
+    let window = bin.join("orbiters-desktop.exe");
+    let embedded = product_version(&std::fs::read(&window)?);
+    anyhow::ensure!(embedded.as_deref() == Some(version), "{} says version {:?}, not {version}", window.display(), embedded);
+    Ok(())
+}
+
+/// The ProductVersion string of a Windows version resource (UTF-16: the key, its padding to 4 bytes, the value).
+fn product_version(bytes: &[u8]) -> Option<String> {
+    let key: Vec<u8> = "ProductVersion\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let at = bytes.windows(key.len()).position(|w| w == key.as_slice())?;
+    let start = (at + key.len() + 3) & !3;
+    let units: Vec<u16> = bytes.get(start..)?.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).take(64).collect();
+    String::from_utf16(&units).ok().filter(|v| !v.is_empty())
+}
+
 /// The newest x64 signtool of the Windows SDK.
 fn find_signtool() -> Option<PathBuf> {
     let kits = PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\bin");
@@ -259,6 +286,18 @@ fn find_signtool() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_product_version_is_read_from_a_version_resource() {
+        let mut bytes = vec![0u8; 6];
+        bytes.extend("ProductVersion\0".encode_utf16().flat_map(u16::to_le_bytes));
+        while bytes.len() % 4 != 0 {
+            bytes.push(0);
+        }
+        bytes.extend("0.3.0\0".encode_utf16().flat_map(u16::to_le_bytes));
+        assert_eq!(product_version(&bytes).as_deref(), Some("0.3.0"));
+        assert_eq!(product_version(b"no resource here"), None);
+    }
 
     #[test]
     fn version_folders_sort_as_numbers() {

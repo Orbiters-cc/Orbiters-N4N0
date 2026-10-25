@@ -12,7 +12,7 @@ use orbiters_core::settings::{CoverageOverlay, ViewGpu, WhilePlaying, WindowGpu}
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, SegOption, Size, Variant};
-use orbiters_ui::{format, icons, logo, toast};
+use orbiters_ui::{format, icons, toast};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -455,8 +455,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             section(ui, cx, 8, icons::INFO, "About", None, |ui| {
                 ui.add_space(8.0);
                 let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::hover());
-                let lr = Rect::from_min_size(pos2(row.left(), row.center().y - 21.0), logo::size_for_width(48.0));
-                logo::paint(ui.painter(), lr, logo::Look::default());
+                let lr = Rect::from_min_size(pos2(row.left(), row.center().y - 21.0), orbiters_ui::n4n0_logo::size_for_width(48.0));
+                orbiters_ui::n4n0_logo::paint(ui.painter(), lr, theme::MARK);
                 let x = lr.right() + 16.0;
                 let p = ui.painter();
                 widgets::text(

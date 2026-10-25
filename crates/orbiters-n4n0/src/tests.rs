@@ -813,8 +813,9 @@ fn an_avatar_change_keeps_what_is_not_the_avatar_s_and_pins_are_not_put_off() {
     // N4N0's own writes coming back are let go at once (the panel's and the screen's, hundreds a second).
     assert!(N4n0::echo("N4N0/Text/Sync3") && N4n0::echo("N4N0/Screen/Value7") && N4n0::echo("N4N0/State"));
     assert!(!N4n0::echo("N4N0/Screen/Touch/L0") && !N4n0::echo("N4N0/Talk"));
-    // VRChat's raycasts and contacts are VRChat's, not echoes; the drop flag is the app's own coming back.
-    assert!(!N4n0::echo("N4N0/Screen/Ray/L_Hit") && !N4n0::echo("N4N0/Screen/Ray/R_Ratio"));
+    // VRChat's contacts are VRChat's, not echoes; the drop flag and the size are the app's own coming back.
+    assert!(!N4n0::echo("N4N0/Screen/Aim/L0") && !N4n0::echo("N4N0/Screen/Others3"));
+    assert!(N4n0::echo("N4N0/Screen/Size"));
     assert!(!N4n0::echo("N4N0/Card/TouchL") && N4n0::echo("N4N0/Screen/Drop"));
 }
 

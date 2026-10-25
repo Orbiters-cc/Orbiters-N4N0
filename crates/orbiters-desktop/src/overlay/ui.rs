@@ -12,7 +12,7 @@ use orbiters_core::settings::Settings;
 use orbiters_ui::record::{self, RecState, RecordButton};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, SegOption, Size, Tone, Variant};
-use orbiters_ui::{format, icons, logo};
+use orbiters_ui::{format, icons, n4n0_logo};
 
 pub const SIZE: Vec2 = Vec2::new(1024.0, 640.0);
 
@@ -508,9 +508,9 @@ pub fn backdrop(ui: &Ui) {
 fn header(ui: &mut Ui, snap: &Snapshot, rect: Rect) {
     let p = ui.painter().clone();
     let recording = matches!(snap.capture.state, CaptureState::Recording | CaptureState::Paused);
-    let mark = Rect::from_min_size(pos2(28.0, 26.0), logo::size_for_width(44.0));
-    logo::paint(&p, mark, logo::Look::default());
-    widgets::text(&p, pos2(mark.right() + 14.0, 38.0), Align2::LEFT_CENTER, &Txt::new("Orbiters", 22.0).weight(weight::SEMIBOLD).tracking(-0.01));
+    let mark = Rect::from_min_size(pos2(28.0, 26.0), n4n0_logo::size_for_width(44.0));
+    n4n0_logo::paint(&p, mark, theme::MARK);
+    widgets::text(&p, pos2(mark.right() + 14.0, 38.0), Align2::LEFT_CENTER, &Txt::new("N4N0", 22.0).weight(weight::SEMIBOLD).tracking(0.02));
     let world = snap.vrchat.world.world_name.clone().filter(|_| snap.vrchat.world.in_world);
     let sub = match (&world, snap.vrchat.running) {
         (Some(w), _) => w.clone(),

@@ -22,7 +22,7 @@ use orbiters_core::account::{Api, Server};
 use orbiters_core::osc::OscValue;
 use orbiters_orb::menu::layout::{Content, ScreenPage};
 use orbiters_orb::menu::screen::{self, Audience, Flags, Frame, Picture, LOCAL_VALUES};
-use orbiters_orb::menu::touch::{self, Gesture, Pointer, Touch, LOST_GRACE};
+use orbiters_orb::menu::touch::{self, Gesture, Ray, Touch, LOST_GRACE};
 use orbiters_orb::menu::{self, layout, Card, Effect, KeyboardLayout, Menu, Page, Pages, PhotoLength, SuggestQueue};
 use orbiters_orb::text::{Message, TextSender};
 use orbiters_orb::youtube;
@@ -125,16 +125,25 @@ pub(crate) struct ScreenRuntime {
     next_synced: Instant,
     /// Whose turn it is when the panel and the screen both have something to send.
     screen_turn: bool,
+    /// Each hand's fingertip near the touch points (its four receivers), new since the last step, and its touch.
     proximity: [[f32; 4]; 2],
     touched: [bool; 2],
     touch: [Touch; 2],
-    /// The screen points with rays (version 4): each hand's ray (hit, ratio along it) and pointer, instead of fingers.
+    /// The screen points along the fingers (version 7): each hand's aim near the touch points, its trigger (and whether
+    /// it changed since the last step), its ray.
     pub(crate) pointing: bool,
-    ray: [(bool, f32); 2],
-    pointers: [Pointer; 2],
+    aim: [[f32; 4]; 2],
+    trigger: [bool; 2],
+    pulled: [bool; 2],
+    rays: [Ray; 2],
+    /// Everyone else's fingertips near the touch points (version 7), new since the last step, and their touch.
+    others: [f32; 4],
+    others_touched: bool,
+    others_touch: Touch,
     pub(crate) hover: Option<usize>,
     pub(crate) pressed: Option<(usize, Instant)>,
-    holding: [bool; 2],
+    /// The hands and everyone else's fingers holding a press.
+    holding: [bool; 3],
     /// The page hover and presses are for.
     page_shown: Option<ScreenPage>,
     /// Desktop mode with N4N0's menu on the screen: its owner points by looking and presses with a left click.
@@ -227,11 +236,16 @@ impl Default for ScreenRuntime {
             touched: [false; 2],
             touch: [Touch::default(); 2],
             pointing: false,
-            ray: [(false, 1.0); 2],
-            pointers: [Pointer::default(); 2],
+            aim: [[0.0; 4]; 2],
+            trigger: [false; 2],
+            pulled: [false; 2],
+            rays: [Ray::default(); 2],
+            others: [0.0; 4],
+            others_touched: false,
+            others_touch: Touch::default(),
             hover: None,
             pressed: None,
-            holding: [false; 2],
+            holding: [false; 3],
             page_shown: None,
             gaze: false,
             eye: [0.0; 4],
@@ -484,8 +498,8 @@ impl ScreenRuntime {
             if let Some(t) = self.suggest.next_due() {
                 at(t);
             }
-            // A finger or a dot no longer heard of is let go of a moment later.
-            if self.touch.iter().any(|t| t.finger.is_some()) || self.pointers.iter().any(|p| p.at.is_some()) {
+            // A finger or a ray no longer heard of is let go of a moment later.
+            if self.touch.iter().chain([&self.others_touch]).any(|t| t.finger.is_some()) || self.rays.iter().any(|r| r.at.is_some()) {
                 at(now + LOST_GRACE);
             }
         }
@@ -594,21 +608,86 @@ impl ScreenRuntime {
         self.mouse_down = Some(mouse.down);
     }
 
-    /// A hand's pointing ray (`N4N0/Screen/Ray/L_Hit`, `…_Ratio`, the right hand's): whether it meets the screen, where
-    /// along it.
-    pub fn ray_value(&mut self, name: &str, value: &OscValue) -> bool {
-        let Some(rest) = name.strip_prefix(screen::local::RAY_PREFIX) else { return false };
-        let hand = match rest.chars().next() {
+    /// The fingers at a step: each hand's receivers (and its trigger) when they changed, else how long they went unseen,
+    /// then everyone else's fingertips (version 7). Hovered where they point, pressed by the trigger or a touch. A dropped
+    /// card (`card`) is not the menu: nothing on it is pointed at.
+    fn point_and_touch(&mut self, card: bool, now: Instant, effects: &mut Vec<Effect>) {
+        for hand in 0..3 {
+            let touched =
+                if hand < 2 { std::mem::take(&mut self.touched[hand]) | std::mem::take(&mut self.pulled[hand]) } else { std::mem::take(&mut self.others_touched) };
+            if !self.menu.open || card {
+                continue;
+            }
+            let gesture = match (hand, self.pointing, touched) {
+                (2, false, _) => None,
+                (2, true, true) => Some(self.others_touch.update(self.others, touch::RADIUS, now)),
+                (2, true, false) => self.others_touch.tick(now),
+                // The fingertip touching, and the ray it points along with its trigger.
+                (_, true, true) => {
+                    let touch = self.touch[hand].update(self.proximity[hand], touch::REACH, now);
+                    let ray = self.rays[hand].update(touch::aimed(self.proximity[hand], self.aim[hand]), self.trigger[hand], now);
+                    touch::either(Some(touch), Some(ray))
+                }
+                (_, true, false) => touch::either(self.touch[hand].tick(now), self.rays[hand].tick(now)),
+                (_, false, true) => Some(self.touch[hand].update(self.proximity[hand], touch::RADIUS, now)),
+                (_, false, false) => self.touch[hand].tick(now),
+            };
+            let layout = Frame::layout(&self.menu);
+            match gesture {
+                None => {}
+                Some(Gesture::Press { x, y }) => {
+                    self.last_activity = now;
+                    self.holding[hand] = true;
+                    if let Some((index, target)) = layout::hit_pointable(layout, &self.menu, x, y) {
+                        self.pressed = Some((index, now));
+                        effects.extend(self.menu.press(target));
+                    }
+                }
+                Some(Gesture::Hover { x, y } | Gesture::Hold { x, y }) => {
+                    self.hover = layout::hit_pointable(layout, &self.menu, x, y).map(|(i, _)| i);
+                }
+                Some(Gesture::Away) => {
+                    self.holding[hand] = false;
+                    if !self.holding.iter().any(|h| *h) {
+                        self.hover = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// A hand's trigger, pulled or let go (screen version 7: it presses where the finger points).
+    pub fn trigger(&mut self, right: bool, down: bool) {
+        let hand = right as usize;
+        if self.trigger[hand] != down {
+            self.trigger[hand] = down;
+            self.pulled[hand] = true;
+        }
+    }
+
+    /// The point along an index finger near the screen: one of its four receivers (`N4N0/Screen/Aim/L0` …).
+    pub fn aim_point(&mut self, name: &str, value: f32) -> bool {
+        let Some(rest) = name.strip_prefix(screen::local::AIM_PREFIX) else { return false };
+        let mut chars = rest.chars();
+        let hand = match chars.next() {
             Some('L') => 0,
             Some('R') => 1,
             _ => return true,
         };
-        match (&rest[1..], value) {
-            ("_Hit", v) => self.ray[hand].0 = v.truthy(),
-            ("_Ratio", OscValue::Float(v)) => self.ray[hand].1 = *v,
-            _ => return true,
+        if let Some(i) = chars.as_str().parse::<usize>().ok().filter(|i| *i < 4) {
+            self.aim[hand][i] = value;
+            self.touched[hand] = true;
         }
-        self.touched[hand] = true;
+        true
+    }
+
+    /// Someone else's index fingertip near the screen: one of its four receivers (`N4N0/Screen/Others0` …).
+    pub fn others_point(&mut self, name: &str, value: f32) -> bool {
+        let Some(rest) = name.strip_prefix(screen::local::OTHERS_PREFIX) else { return false };
+        if let Some(i) = rest.parse::<usize>().ok().filter(|i| *i < 4) {
+            self.others[i] = value;
+            self.others_touched = true;
+        }
         true
     }
 
@@ -1182,15 +1261,11 @@ impl N4n0 {
         if !name.starts_with("N4N0/Screen/") {
             return false;
         }
-        if let (true, OscValue::Float(v)) = (name.starts_with(screen::local::TOUCH_PREFIX), value) {
+        let finger = [screen::local::TOUCH_PREFIX, screen::local::AIM_PREFIX, screen::local::OTHERS_PREFIX].iter().any(|p| name.starts_with(p));
+        if let (true, OscValue::Float(v)) = (finger, value) {
             let mut rt = self.orb.lock().unwrap();
-            rt.screen.touch_point(name, *v);
-            if rt.screen.menu.open {
-                rt.wake();
-            }
-        } else if name.starts_with(screen::local::RAY_PREFIX) {
-            let mut rt = self.orb.lock().unwrap();
-            rt.screen.ray_value(name, value);
+            let s = &mut rt.screen;
+            let _ = s.touch_point(name, *v) || s.aim_point(name, *v) || s.others_point(name, *v);
             if rt.screen.menu.open {
                 rt.wake();
             }
@@ -1357,45 +1432,8 @@ pub(crate) fn tick(
         }
         return out;
     }
-    // The finger: each hand's four touch points when they changed, else how long it went unseen.
-    for hand in 0..2 {
-        let touched = std::mem::take(&mut s.touched[hand]);
-        // A dropped card is not the menu: nothing on it is pointed at.
-        if !s.menu.open || card {
-            continue;
-        }
-        let gesture = match (s.pointing, touched) {
-            (true, true) => {
-                let [a, b, c, _] = s.proximity[hand];
-                Some(s.pointers[hand].update(s.ray[hand].0, s.ray[hand].1, [a, b, c], now))
-            }
-            (true, false) => s.pointers[hand].tick(now),
-            (false, true) => Some(s.touch[hand].update(s.proximity[hand], now)),
-            (false, false) => s.touch[hand].tick(now),
-        };
-        let layout = Frame::layout(&s.menu);
-        match gesture {
-            None => {}
-            Some(Gesture::Press { x, y }) => {
-                s.last_activity = now;
-                s.holding[hand] = true;
-                if let Some((index, target)) = layout::hit_pointable(layout, &s.menu, x, y) {
-                    s.pressed = Some((index, now));
-                    followups.effects.extend(s.menu.press(target));
-                }
-            }
-            Some(Gesture::Hover { x, y } | Gesture::Hold { x, y }) => {
-                s.hover = layout::hit_pointable(layout, &s.menu, x, y).map(|(i, _)| i);
-            }
-            Some(Gesture::Away) => {
-                s.holding[hand] = false;
-                if !s.holding.iter().any(|h| *h) {
-                    s.hover = None;
-                }
-            }
-        }
-    }
-    // Desktop mode: where the owner looks, and a left click.
+    // The fingers, then desktop mode: where the owner looks, and a left click.
+    s.point_and_touch(card, now, &mut followups.effects);
     s.look_and_click(vrchat, now, &mut followups.effects);
     if s.pressed.is_some_and(|(_, at)| now.duration_since(at) > PRESS_SHOWN && !s.holding.iter().any(|h| *h) && !s.clicking) {
         s.pressed = None;
@@ -1532,14 +1570,103 @@ mod tests {
     }
 
     #[test]
-    fn reads_pointing_rays() {
+    fn reads_the_aims_others_fingertips_and_triggers() {
         let mut s = ScreenRuntime::default();
-        assert!(s.ray_value("N4N0/Screen/Ray/R_Hit", &OscValue::Bool(true)));
-        assert!(s.ray_value("N4N0/Screen/Ray/R_Ratio", &OscValue::Float(0.2)));
-        assert!(s.ray_value("N4N0/Screen/Ray/L_Distance", &OscValue::Float(0.3)), "ours, not read");
-        assert!(!s.ray_value("N4N0/Screen/Touch/R0", &OscValue::Float(0.3)));
-        assert_eq!(s.ray, [(false, 1.0), (true, 0.2)]);
+        assert!(s.aim_point("N4N0/Screen/Aim/R1", 0.4));
+        assert!(!s.aim_point("N4N0/Screen/Touch/R0", 0.3));
+        assert_eq!(s.aim[1][1], 0.4);
         assert_eq!(s.touched, [false, true]);
+        assert!(s.others_point("N4N0/Screen/Others3", 0.7));
+        assert!(!s.others_point("N4N0/Screen/Aim/L0", 0.7));
+        assert!(s.others_touched && s.others[3] == 0.7);
+        s.trigger(false, true);
+        s.trigger(false, true);
+        assert_eq!((s.trigger, s.pulled), ([true, false], [true, false]), "a change, once");
+    }
+
+    /// What receivers of `radius` at the touch points read for a 2 mm contact at `at` (the screen's space).
+    fn reading(at: [f64; 3], radius: f64) -> [f32; 4] {
+        touch::RECEIVERS.map(|c| {
+            let d = ((at[0] - c[0]).powi(2) + (at[1] - c[1]).powi(2) + (at[2] - c[2]).powi(2)).sqrt() - 0.002;
+            (1.0 - d / radius).clamp(0.0, 1.0) as f32
+        })
+    }
+
+    /// The page pixel (`x`, `y`) in the screen's space.
+    fn on_screen(x: f32, y: f32) -> [f64; 3] {
+        [x as f64 / layout::WIDTH as f64 * touch::WIDTH - touch::WIDTH / 2.0, touch::HEIGHT / 2.0 - y as f64 / layout::HEIGHT as f64 * touch::HEIGHT, 0.0]
+    }
+
+    /// What VRChat sends of a hand's fingertip at `tip` and its aim when the finger points at `at` (both the screen's space).
+    fn point(s: &mut ScreenRuntime, right: bool, tip: [f64; 3], at: [f64; 3]) {
+        let along = [at[0] - tip[0], at[1] - tip[1], at[2] - tip[2]];
+        let length = (along[0] * along[0] + along[1] * along[1] + along[2] * along[2]).sqrt();
+        let aim = [0, 1, 2].map(|i| tip[i] + along[i] / length * orbiters_contracts::orb::AIM_DISTANCE);
+        let hand = if right { "R" } else { "L" };
+        for (i, v) in reading(tip, touch::REACH).into_iter().enumerate() {
+            assert!(s.touch_point(&format!("{}{hand}{i}", screen::local::TOUCH_PREFIX), v));
+        }
+        for (i, v) in reading(aim, touch::REACH).into_iter().enumerate() {
+            assert!(s.aim_point(&format!("{}{hand}{i}", screen::local::AIM_PREFIX), v));
+        }
+    }
+
+    /// Home on a screen of version 7, in VR.
+    fn pointing() -> ScreenRuntime {
+        let mut s = ScreenRuntime::default();
+        s.avatar(true, true, Some(8), 72);
+        s.pointing = true;
+        s.menu.open();
+        s
+    }
+
+    #[test]
+    fn a_finger_hovers_where_it_points_and_its_trigger_presses_there() {
+        let mut s = pointing();
+        let (x, y) = youtube_tile();
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        // From 45 cm away, beside the screen, pointing at the tile.
+        point(&mut s, true, [0.2, -0.15, -0.45], on_screen(x, y));
+        s.point_and_touch(false, ms(0), &mut Vec::new());
+        let tile = s.hover.expect("the tile pointed at is hovered");
+        assert!(s.pressed.is_none(), "pointing alone presses nothing");
+        s.trigger(true, true);
+        s.point_and_touch(false, ms(20), &mut Vec::new());
+        assert_eq!(s.pressed.map(|(i, _)| i), Some(tile), "the trigger presses what the finger points at");
+        assert_eq!(s.menu.page, Page::Search);
+        // The other hand's trigger, pointing nowhere, presses nothing.
+        s.trigger(false, true);
+        s.point_and_touch(false, ms(40), &mut Vec::new());
+        assert_eq!(s.menu.page, Page::Search);
+    }
+
+    #[test]
+    fn a_fingertip_touching_the_screen_presses_and_so_does_someone_else_s() {
+        let mut s = pointing();
+        let (x, y) = youtube_tile();
+        let target = on_screen(x, y);
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        // The left fingertip comes from in front onto the tile, no trigger.
+        for (n, z) in [(0, -0.06), (20, -0.03), (40, -0.005)] {
+            point(&mut s, false, [target[0], target[1], z], [target[0], target[1], 0.1]);
+            s.point_and_touch(false, ms(n), &mut Vec::new());
+        }
+        assert_eq!(s.menu.page, Page::Search, "the touch pressed the tile");
+        // Someone else's fingertip on Search's back button presses it too.
+        let back = layout::cached(ScreenPage::of(&s.menu)).elements.iter().find(|e| e.target == menu::Target::Back).map(|e| e.rect).expect("a back button");
+        let at = on_screen(back.x as f32 + back.w as f32 / 2.0, back.y as f32 + back.h as f32 / 2.0);
+        for (n, z) in [(100, -0.06), (120, -0.03), (140, -0.005)] {
+            for (i, v) in touch::RECEIVERS.iter().map(|c| {
+                let d = ((at[0] - c[0]).powi(2) + (at[1] - c[1]).powi(2) + (z - c[2]).powi(2)).sqrt() - 0.008;
+                (1.0 - d / touch::RADIUS).clamp(0.0, 1.0) as f32
+            }).enumerate() {
+                assert!(s.others_point(&format!("{}{i}", screen::local::OTHERS_PREFIX), v));
+            }
+            s.point_and_touch(false, ms(n), &mut Vec::new());
+        }
+        assert_eq!(s.menu.page, Page::Home, "someone else's touch went back");
     }
 
     #[test]
@@ -1554,7 +1681,7 @@ mod tests {
         s.answer.push_back("later".into());
         s.answer_next = Some(past);
         s.pressed = Some((3, past));
-        s.holding = [true, false];
+        s.holding = [true, false, false];
         s.next_synced = past;
         (s.owner_settled, s.next_local, s.idle_until) = (true, now + Duration::from_millis(10), now + LOCAL_IDLE);
         assert_eq!(s.next_due(now), Some(now + LOCAL_IDLE), "the owner's next resend, nothing sooner");

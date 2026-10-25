@@ -538,14 +538,16 @@ pub mod local {
     pub const DROP: &str = params::SCREEN_DROP;
     pub const POINTER: &str = params::SCREEN_POINTER;
     pub const VALUE_PREFIX: &str = params::SCREEN_VALUE_PREFIX;
-    /// `N4N0/Screen/Touch/L0` …: how near the left (`L`) or right (`R`) index finger is to each touch point (0 to 1).
+    /// `N4N0/Screen/Touch/L0` …: how near the left (`L`) or right (`R`) index fingertip is to each touch point (0 to 1).
     pub const TOUCH_PREFIX: &str = params::SCREEN_TOUCH_PREFIX;
+    /// `N4N0/Screen/Aim/L0` …: how near the point along each index finger is (screen version 7).
+    pub const AIM_PREFIX: &str = params::SCREEN_AIM_PREFIX;
+    /// `N4N0/Screen/Others0` …: how near everyone else's index fingertips are (screen version 7).
+    pub const OTHERS_PREFIX: &str = params::SCREEN_OTHERS_PREFIX;
     /// `N4N0/Screen/Eye0` … and `N4N0/Screen/Gaze0` …: how near the eyes and the gaze point are to each touch point
     /// (desktop mode's looking).
     pub const EYE_PREFIX: &str = params::SCREEN_EYE_PREFIX;
     pub const GAZE_PREFIX: &str = params::SCREEN_GAZE_PREFIX;
-    /// `N4N0/Screen/Ray/L_Hit`, `…_Ratio` and the right hand's: the pointing rays (screen version 4).
-    pub const RAY_PREFIX: &str = params::SCREEN_RAY_PREFIX;
 
     pub fn value(i: usize) -> String {
         format!("{VALUE_PREFIX}{i}")

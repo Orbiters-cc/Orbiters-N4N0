@@ -314,6 +314,10 @@ fn furniture(p: &Painter, origin: Pos2, layout: &Layout) {
     }
     for (r, icon, t) in &layout.icons {
         let r = rect(*r, origin);
+        if *icon == Icon::Mark {
+            orbiters_ui::n4n0_logo::paint(p, Rect::from_center_size(r.center(), orbiters_ui::n4n0_logo::size_for_width(r.width())), LINE);
+            continue;
+        }
         let color = if *t == Some(Tint::Red) { ALERT } else { LINE };
         if r.width() > 120.0 {
             // A big icon is a schematic: its crosshair and a dashed ring around it.

@@ -120,6 +120,12 @@ pub enum Command {
         /// The thumbnail's key (the video id).
         video: Option<String>,
     },
+    /// A controller's trigger pulled or let go (the SteamVR overlay reads it): on a screen of version 7 it presses where
+    /// that hand's index finger points.
+    Trigger {
+        right: bool,
+        down: bool,
+    },
 }
 
 #[cfg(test)]

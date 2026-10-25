@@ -72,6 +72,8 @@ pub fn glyph(icon: Icon) -> &'static str {
         Icon::Size => icons::ARROWS_OUT,
         Icon::Pose => icons::PERSON_SIMPLE_WALK,
         Icon::Watch => icons::MONITOR_PLAY,
+        // Drawn as the N4N0 mark (`orbiters_ui::n4n0_logo`), never as a glyph.
+        Icon::Mark => icons::STACK,
     }
 }
 
@@ -255,6 +257,10 @@ fn backdrop(p: &Painter, origin: Pos2, layout: &Layout, listening: Option<f64>) 
     }
     for (r, icon, t) in &layout.icons {
         let r = rect(*r, origin);
+        if *icon == Icon::Mark {
+            orbiters_ui::n4n0_logo::paint(p, Rect::from_center_size(r.center(), orbiters_ui::n4n0_logo::size_for_width(r.width())), theme::FG);
+            continue;
+        }
         let color = t.map(tint);
         p.circle_filled(r.center(), r.width() / 2.0, color.map_or(theme::INK_750, |c| theme::alpha(c, 0.16)));
         widgets::icon(p, r.center(), glyph(*icon), r.width() * 0.5, color.unwrap_or(theme::FG_3));

@@ -174,6 +174,8 @@ pub(crate) struct OrbRuntime {
     screen_version: Option<i32>,
     /// N4N0's light (the Light option), as the avatar holds it: `None` when its orb has none.
     pub(crate) light: Option<orbiters_orb::menu::Light>,
+    /// The screen's size last sent to this avatar (`N4N0/Screen/Size`, times its own size).
+    size_sent: Option<f32>,
     voice_hint_shown: bool,
     enabled: bool,
     /// Wakes the orb thread before its next deadline (`woken`: a wake came while it was busy).
@@ -418,12 +420,20 @@ struct TickSettings {
     text_step_ms: u64,
     /// The held parameters, when they are due to be put back.
     pins: Vec<Pin>,
+    /// The projected screen's size (times its own).
+    screen_size: f32,
 }
 
 impl TickSettings {
     fn of(orb: &OrbSettings, pins: bool) -> Self {
         let afk = (orb.enabled && orb.afk_message_enabled && !orb.afk_message.trim().is_empty()).then(|| orb.afk_message.clone());
-        Self { enabled: orb.enabled, afk, text_step_ms: orb.text_step_ms, pins: if pins { orb.pins.clone() } else { Vec::new() } }
+        Self {
+            enabled: orb.enabled,
+            afk,
+            text_step_ms: orb.text_step_ms,
+            pins: if pins { orb.pins.clone() } else { Vec::new() },
+            screen_size: orb.menu.screen_size.scale(),
+        }
     }
 }
 
@@ -708,6 +718,13 @@ impl N4n0 {
             if let Some(sender) = rt.sender.as_mut() {
                 out.extend(sender.tick(now));
             }
+            // The screen's size as Settings say (screens of version 7), again after each avatar change.
+            let size = settings.screen_size;
+            if rt.params.contains(params::SCREEN_SIZE) && rt.size_sent != Some(size) {
+                rt.size_sent = Some(size);
+                let (small, large) = contract::SCREEN_SIZES;
+                out.push((parameter(params::SCREEN_SIZE), OscType::Float(((size - small) / (large - small)).clamp(0.0, 1.0))));
+            }
             out.extend(crate::screen::tick(&mut rt, now, &calls, walk, scene.vrchat_pid, &self.device.media, &mut followups));
             // The Menu toggle in N4N0's expressions menu says whether the menu shows, however it opened or closed.
             out.extend(rt.menu_param_step(now));
@@ -896,7 +913,8 @@ impl N4n0 {
             || name == params::STATE
             || (name.starts_with("N4N0/Screen/")
                 && !name.starts_with(local::TOUCH_PREFIX)
-                && !name.starts_with(local::RAY_PREFIX)
+                && !name.starts_with(local::AIM_PREFIX)
+                && !name.starts_with(local::OTHERS_PREFIX)
                 && !name.starts_with(local::EYE_PREFIX)
                 && !name.starts_with(local::GAZE_PREFIX)
                 && name != params::SCREEN_REPLACE
@@ -1193,6 +1211,7 @@ impl N4n0 {
             }
             rt.avatar_id = Some(id.clone());
             rt.params = names;
+            rt.size_sent = None;
             rt.manifest = manifest.is_some();
             rt.n4n0_version = manifest.as_ref().and_then(|m| m.orb.as_ref()).and_then(|o| o.version.clone());
             rt.controls = controls;
@@ -1589,6 +1608,14 @@ impl N4n0 {
             }
             Command::States { action } => self.states_action(action),
             Command::Drop { link, title, video } => self.card_drop(link, title, video),
+            Command::Trigger { right, down } => {
+                let mut rt = self.orb.lock().unwrap();
+                rt.screen.trigger(right, down);
+                if rt.screen.menu.open {
+                    rt.wake();
+                }
+                return;
+            }
         }
         self.publish();
     }
@@ -2141,9 +2168,10 @@ fn media_word(command: orbiters_orb::menu::MediaCommand) -> String {
     }
 }
 
-/// Whether a screen of `version` points with rays from the fingertips (contracts `Docs/orb.md`, Pointing).
+/// Whether a screen of `version` points along the index fingers with contacts (contracts `Docs/orb.md`, Pointing): from
+/// version 7 (versions 4 to 6 had VRChat raycasts, which never met their own avatar).
 fn pointing(version: Option<i32>) -> bool {
-    version.is_some_and(|v| v >= contract::SCREEN_POINTING)
+    version.is_some_and(|v| v >= contract::SCREEN_FINGER_RAYS)
 }
 
 /// `N4N0/Light/Level` before the avatar says it (the prop's default).

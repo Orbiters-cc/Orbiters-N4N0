@@ -688,6 +688,15 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             input_read,
         };
         t.walk.update(&steamvr, &moment);
+        // The triggers press where the index fingers point on N4N0's screen (N4N0 reads them only while its menu is open
+        // there): each change goes, nothing else.
+        if input_read && snap.settings.orb.enabled {
+            for (hand, change) in actions.presses(&steamvr).into_iter().enumerate() {
+                if let Some(down) = change {
+                    backend.orb(OrbCommand::Trigger { right: hand == 1, down });
+                }
+            }
+        }
         let button = input_read && actions.menu_pressed(&steamvr);
         if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button) {
             sounds.click();
@@ -773,8 +782,8 @@ fn thumbnail() -> Option<Vec<u8>> {
     let mut out = None;
     for _ in 0..2 {
         let mut full = ctx.run_ui(input.clone(), |ui| {
-            let size = orbiters_ui::logo::size_for_width(96.0);
-            orbiters_ui::logo::paint(ui.painter(), Rect::from_center_size(pos2(64.0, 64.0), size), orbiters_ui::logo::Look::default());
+            let size = orbiters_ui::n4n0_logo::size_for_width(88.0);
+            orbiters_ui::n4n0_logo::paint(ui.painter(), Rect::from_center_size(pos2(64.0, 64.0), size), orbiters_ui::theme::MARK);
         });
         sw.set_textures(&mut full.textures_delta);
         let primitives = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);

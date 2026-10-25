@@ -277,6 +277,22 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply |= widgets::segmented(ui, "orb-menu-look", &mut draft.orb.menu.look, &options, true);
                     },
                 );
+                widgets::field(
+                    ui,
+                    "Screen size",
+                    Some("How large N4N0's projected screen is, for you and everyone around."),
+                    330.0,
+                    |ui| {
+                        use orbiters_core::settings::ScreenSize as S;
+                        let options = [
+                            widgets::SegOption::new(S::Small, "Small"),
+                            widgets::SegOption::new(S::Medium, "Medium"),
+                            widgets::SegOption::new(S::Large, "Large"),
+                            widgets::SegOption::new(S::Larger, "Larger"),
+                        ];
+                        apply |= widgets::segmented(ui, "orb-screen-size", &mut draft.orb.menu.screen_size, &options, true);
+                    },
+                );
             });
 
             let calls = &orb.calls;

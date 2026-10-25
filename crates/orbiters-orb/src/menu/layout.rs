@@ -260,6 +260,8 @@ pub enum Icon {
     Plus,
     /// Send a suggestion.
     Send,
+    /// The N4N0 mark (its name, drawn), at the top left of Home.
+    Mark,
     /// Done typing.
     Check,
     /// The state's size, its pose.
@@ -617,7 +619,7 @@ pub fn layout(page: ScreenPage) -> Layout {
             }
             elements.push(round(Target::Close, 936, Icon::Close));
             icons.push((Rect::new(32, 24, 56, 56), Icon::Microphone, Some(Tint::Green)));
-            labels.push(Label { x: 104, y: 34, size: 32, text: "N4N0", style: Style::Primary, bold: true });
+            icons.push((Rect::new(104, 28, 56, 48), Icon::Mark, None));
             slots.add(208, 40, 48, 24, Style::Accent, Content::Status);
             for i in 0..4u8 {
                 slots.add(56 + i as u16 * 244, 376, 14, 24, Style::Secondary, Content::TileNote(i));
@@ -721,7 +723,7 @@ pub fn layout(page: ScreenPage) -> Layout {
             }
             elements.push(round(Target::Close, 936, Icon::Close));
             icons.push((Rect::new(32, 24, 56, 56), Icon::Microphone, Some(Tint::Green)));
-            labels.push(Label { x: 104, y: 34, size: 32, text: "N4N0", style: Style::Primary, bold: true });
+            icons.push((Rect::new(104, 28, 56, 48), Icon::Mark, None));
             slots.add(208, 40, 48, 24, Style::Accent, Content::Status);
             for i in 0..6u16 {
                 slots.add(32 + (i % 3) * 324 + 116, 104 + (i / 3) * 176 + 92, 15, 24, Style::Secondary, Content::TileNote(i as u8));
@@ -785,7 +787,7 @@ pub fn layout(page: ScreenPage) -> Layout {
             }
             elements.push(round(Target::Close, 936, Icon::Close));
             icons.push((Rect::new(32, 24, 56, 56), Icon::Microphone, Some(Tint::Green)));
-            labels.push(Label { x: 104, y: 34, size: 32, text: "N4N0", style: Style::Primary, bold: true });
+            icons.push((Rect::new(104, 28, 56, 48), Icon::Mark, None));
             slots.add(208, 40, 48, 24, Style::Accent, Content::Status);
             for i in 0..home_tiles(Pages::Seven).len() {
                 let (x, y) = seven_cell(i);
@@ -850,7 +852,7 @@ pub fn layout(page: ScreenPage) -> Layout {
             }
             elements.push(round(Target::Close, 936, Icon::Close));
             icons.push((Rect::new(32, 24, 56, 56), Icon::Microphone, Some(Tint::Green)));
-            labels.push(Label { x: 104, y: 34, size: 32, text: "N4N0", style: Style::Primary, bold: true });
+            icons.push((Rect::new(104, 28, 56, 48), Icon::Mark, None));
             slots.add(208, 40, 48, 24, Style::Accent, Content::Status);
             for i in 0..HOME_TILES.len() {
                 let (x, y) = ten_cell(i);

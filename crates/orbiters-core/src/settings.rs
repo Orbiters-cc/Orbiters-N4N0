@@ -243,11 +243,36 @@ pub struct MenuSettings {
     pub keyboard: KeyboardLayout,
     /// How the overlay's menu looks (N4N0's screen has its own Look in My Avatar).
     pub look: MenuLook,
+    /// How large N4N0's projected screen is (screens of version 7: `N4N0/Screen/Size`).
+    pub screen_size: ScreenSize,
 }
 
 impl Default for MenuSettings {
     fn default() -> Self {
-        Self { button: true, wake_word: true, touch: true, keyboard: KeyboardLayout::Auto, look: MenuLook::Modern }
+        Self { button: true, wake_word: true, touch: true, keyboard: KeyboardLayout::Auto, look: MenuLook::Modern, screen_size: ScreenSize::Medium }
+    }
+}
+
+/// How large N4N0's projected screen is, everyone seeing it so.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+    Larger,
+}
+
+impl ScreenSize {
+    /// Times the screen's own size.
+    pub fn scale(self) -> f32 {
+        match self {
+            ScreenSize::Small => 0.75,
+            ScreenSize::Medium => 1.0,
+            ScreenSize::Large => 1.3,
+            ScreenSize::Larger => 1.6,
+        }
     }
 }
 

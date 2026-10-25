@@ -222,5 +222,10 @@ mod tests {
         println!("volume: {:?}", reading.volume);
         println!("art: {:?}", reading.art.as_ref().map(|a| (&a.key, a.rgb.width, a.rgb.height)));
         assert!(reading.volume.is_some(), "this computer has speakers");
+        // A YouTube video in a browser: found on YouTube within a few readings.
+        if reading.media.as_ref().is_some_and(|m| orbiters_orb::youtube::worth_looking_up(&m.app, &m.title, &m.artist, &m.album)) {
+            let found = (0..10).find_map(|_| watcher().fresh(Duration::from_secs(5)).media.and_then(|m| m.link()));
+            println!("YouTube link: {found:?}");
+        }
     }
 }

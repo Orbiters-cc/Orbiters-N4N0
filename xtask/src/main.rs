@@ -302,7 +302,11 @@ fn bump(version: &str) -> anyhow::Result<()> {
     lines[line] = format!("version = \"{version}\"");
     std::fs::write(&path, lines.join("\n") + "\n")?;
     run(cargo().args(["update", "--workspace", "--offline"]))?;
-    println!("Version {version}. Commit Cargo.toml and Cargo.lock, push, then: cargo xtask release");
+    if version.contains("-dev.") {
+        println!("Version {version}. Commit Cargo.toml and Cargo.lock (no push), then: cargo xtask release --dev");
+    } else {
+        println!("Version {version}. Commit Cargo.toml and Cargo.lock, push, then: cargo xtask release");
+    }
     Ok(())
 }
 

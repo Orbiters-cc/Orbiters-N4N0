@@ -406,6 +406,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::Results, samples: true }),
+            library: None,
         },
         Scenario {
             name: "home-states",
@@ -419,6 +420,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::States, samples: true }),
+            library: None,
         },
         Scenario {
             name: "home-plain-states",
@@ -432,6 +434,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::States, samples: false }),
+            library: None,
         },
         Scenario {
             name: "home-plain",

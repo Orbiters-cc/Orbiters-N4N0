@@ -25,6 +25,12 @@ works on it; when your orb has the projected screen ("Replace Orbiters overlay" 
 opens on that screen in VRChat instead, where you touch it with your index finger and people around see it too
 (contracts `Docs/orb.md`, Menu and Screen). YouTube is read without an account or a key, as YouTube's own website does.
 
+A **3D picture** (1, 4 or 8 s) flies VRChat's camera around you while it records, then reconstructs the place. When
+your avatar's capture kit has the camera rig (Mixer installs it), the rig follows the camera and about every other
+frame shows six more views at once (left, front, right, back, up, down; contracts `Docs/rig-frames.md`): the same
+flight gives the reconstruction several times the angles. Those views have no depth of their own, and the rig renders
+the world six more times a frame, for the length of the picture only.
+
 In VR it also offers **walk boost**: while you push the stick you walk with, your play space moves along with you, so
 you cover more ground in VRChat. The chaperone stays on your room's walls, and the play space goes back when you
 change world. Its strength is a slider in the SteamVR tab, in Settings, and in Orb's Walk boost radial on your avatar.

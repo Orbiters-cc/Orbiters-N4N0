@@ -1015,7 +1015,7 @@ impl Controller {
         let screen_version = value(params::SCREEN_VERSION).and_then(int_value).or_else(|| default(params::SCREEN_VERSION).map(|d| d.round() as i32));
         // The orb's light, as VRChat holds it (else the manifest's defaults).
         let light = (names.contains(params::LIGHT) || (!known && default(params::LIGHT).is_some())).then(|| orbiters_orb::menu::Light {
-            on: value(params::LIGHT).map_or(false, OscValue::truthy),
+            on: value(params::LIGHT).is_some_and(OscValue::truthy),
             color: value(params::LIGHT_COLOR).and_then(int_value).or_else(|| default(params::LIGHT_COLOR).map(|d| d.round() as i32)).unwrap_or(0).clamp(0, 7)
                 as u8,
             level: match value(params::LIGHT_LEVEL) {
@@ -1040,7 +1040,15 @@ impl Controller {
         // Orbiters desktop's own toggles (the capture kit's) are never the assistant's, whatever the settings name them.
         let (record, pins, enabled, text_step_ms) =
             self.with_settings(|s| (s.osc.record_parameter.clone(), s.orb.pins.clone(), s.orb.enabled, s.orb.text_step_ms));
-        controls.withhold(&[record.as_str(), DEPTH_FRAMES_PARAMETER]);
+        controls.withhold(&[
+            record.as_str(),
+            DEPTH_FRAMES_PARAMETER,
+            orbiters_contracts::rig::PARAMETER,
+            orbiters_contracts::rig::PARAMETER_X,
+            orbiters_contracts::rig::PARAMETER_Y,
+            orbiters_contracts::rig::PARAMETER_Z,
+            orbiters_contracts::rig::PARAMETER_YAW,
+        ]);
         let has_gogo = names.iter().any(|n| n.starts_with("Go/"));
         let mut out: Vec<Message> =
             carry.iter().filter(|(p, _)| names.contains(*p) && (p.as_str() != "VRCEmote" || has_gogo)).map(|(p, v)| (parameter(p), osc_arg(v))).collect();
@@ -1842,7 +1850,7 @@ impl Controller {
             Action::Light { on, color, level } => {
                 let now = self.orb.lock().unwrap().light;
                 let Some(now) =
-                    now.or_else(|| self.orb_avatar_has(params::LIGHT).then(|| orbiters_orb::menu::Light { on: false, color: 0, level: LIGHT_LEVEL_DEFAULT }))
+                    now.or_else(|| self.orb_avatar_has(params::LIGHT).then_some(orbiters_orb::menu::Light { on: false, color: 0, level: LIGHT_LEVEL_DEFAULT }))
                 else {
                     return Err("This avatar's orb has no light: the owner can turn Light on for it in My Avatar (the orb's card), then upload.".into());
                 };

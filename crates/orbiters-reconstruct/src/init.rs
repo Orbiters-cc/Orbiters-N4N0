@@ -8,7 +8,7 @@
 //! and colour.
 
 use crate::camera::{dot, Camera};
-use crate::dataset::{sample_rgb, Dataset, DepthView};
+use crate::dataset::{sample_rgb, Dataset, DepthView, View};
 use crate::gaussians::{logit, quat_from_z, Gaussians};
 use rayon::prelude::*;
 use std::collections::HashSet;
@@ -67,8 +67,20 @@ pub const RAY_FARTHEST: f32 = 50.0;
 /// spread evenly in inverse depth between [`RAY_NEAREST`] and [`RAY_FARTHEST`], the pixel's colour, a round footprint
 /// as wide as the seeds' spacing, opacity 0.1. Training keeps those the views agree on.
 pub fn add_from_rays(g: &mut Gaussians, data: &Dataset, count: usize, held_out: &[usize], seed: u64) {
-    let views: Vec<usize> = (0..data.views.len()).filter(|i| !held_out.contains(i)).collect();
-    let scene: Vec<u32> = (0..data.mask.len()).filter(|&p| data.mask[p] > 0.5).map(|p| p as u32).collect();
+    let views: Vec<&View> = (0..data.views.len()).filter(|i| !held_out.contains(i)).map(|i| &data.views[i]).collect();
+    rays(g, &views, &data.mask, data.width, data.height, count, seed);
+}
+
+/// The same along the rig's faces' rays (crate::dataset::Faces): what only they see has no depth to seed it.
+pub fn add_from_face_rays(g: &mut Gaussians, data: &Dataset, count: usize, seed: u64) {
+    if let Some(f) = &data.faces {
+        rays(g, &f.views.iter().collect::<Vec<_>>(), &f.mask, f.width, f.height, count, seed);
+    }
+}
+
+/// `count` seeds along the rays of `views`' scene pixels (all `width × height` with `mask`).
+fn rays(g: &mut Gaussians, views: &[&View], mask: &[f32], width: u32, height: u32, count: usize, seed: u64) {
+    let scene: Vec<u32> = (0..mask.len()).filter(|&p| mask[p] > 0.5).map(|p| p as u32).collect();
     if views.is_empty() || scene.is_empty() || count == 0 {
         return;
     }
@@ -78,11 +90,11 @@ pub fn add_from_rays(g: &mut Gaussians, data: &Dataset, count: usize, held_out: 
     let opacity = logit(0.1);
     let (near, far) = (1.0 / RAY_NEAREST, 1.0 / RAY_FARTHEST);
     for _ in 0..count {
-        let v = &data.views[views[rng.usize(..views.len())]];
+        let v = views[rng.usize(..views.len())];
         let p = scene[rng.usize(..scene.len())];
-        let (x, y) = ((p % data.width) as f32, (p / data.width) as f32);
+        let (x, y) = ((p % width) as f32, (p / width) as f32);
         let z = 1.0 / (far + rng.f32() * (near - far));
-        let Some(color) = sample_rgb(&v.image, data.width, data.height, x, y) else { continue };
+        let Some(color) = sample_rgb(&v.image, width, height, x, y) else { continue };
         let s = (z * spacing / v.camera.fx).max(1e-4).ln();
         g.push(v.camera.unproject(x, y, z), [s; 3], [1.0, 0.0, 0.0, 0.0], opacity, color);
     }
@@ -290,7 +302,7 @@ mod tests {
     fn dataset(views: Vec<View>, depth_views: Vec<DepthView>) -> Dataset {
         // The bottom rows are not scene (a skeleton band).
         let mask = (0..W * H).map(|p| if p / W >= 80 { 0.0 } else { 1.0 }).collect();
-        Dataset { dir: Default::default(), views, depth_views, width: W, height: H, geometry: Geometry::new(W, H, 1), mask, loaded: Default::default() }
+        Dataset { dir: Default::default(), views, depth_views, faces: None, width: W, height: H, geometry: Geometry::new(W, H, 1), mask, loaded: Default::default() }
     }
 
     /// Depth frames a second apart, each `step` metres to the right of the one before; a red keyframe at the start and

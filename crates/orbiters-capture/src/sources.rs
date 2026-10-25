@@ -4,7 +4,7 @@
 
 use orbiters_contracts::image::{ImageView, PixelOrder, RgbaImage};
 use orbiters_contracts::raw_capture::{self, RawCapture};
-use orbiters_contracts::{depth, qoi, skeleton, strip};
+use orbiters_contracts::{depth, qoi, rig, skeleton, strip};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -383,6 +383,10 @@ pub struct TestPatternSource {
     pub fps: f32,
     pub depth_every: u32,
     pub frames: u32,
+    /// Odd colour frames are rig frames (contracts' Docs/rig-frames.md), the rig where the camera is; `late_face` (a
+    /// face number) is stamped with the previous frame's time, as when its camera renders after VRChat's.
+    pub rig: bool,
+    pub late_face: Option<u32>,
     index: u32,
     started: Option<Instant>,
     paced: bool,
@@ -390,7 +394,23 @@ pub struct TestPatternSource {
 
 impl TestPatternSource {
     pub fn new(width: u32, height: u32, fps: f32, depth_every: u32, frames: u32, paced: bool) -> Self {
-        Self { width, height, fps, depth_every, frames, index: 0, started: None, paced }
+        Self { width, height, fps, depth_every, frames, rig: false, late_face: None, index: 0, started: None, paced }
+    }
+
+    /// The same with rig frames, `late_face` stamped late.
+    pub fn with_rig(mut self, late_face: Option<u32>) -> Self {
+        self.rig = true;
+        self.late_face = late_face;
+        self
+    }
+
+    /// Face `face`'s render at `t`: its own colour, a lighter square in the middle, the stamp.
+    pub fn face_render(face: u32, t: f32) -> RgbaImage {
+        let mut img = RgbaImage::new(128, 128);
+        img.fill_rect(0, 0, 128, 128, [(face * 40) as u8, 120, 200 - (face * 20) as u8]);
+        img.fill_rect(40, 40, 48, 48, [230, 220, 200]);
+        rig::draw_stamp(&mut img, t);
+        img
     }
 
     /// Camera on a 3 m circle at eye height, looking at the centre.
@@ -428,6 +448,17 @@ impl TestPatternSource {
         let pose = Self::pose(t);
         let depth_frame = self.depth_every > 0 && index % self.depth_every == self.depth_every - 1;
         let (w, h) = (self.width, self.height);
+        if self.rig && !depth_frame && index % 2 == 1 {
+            let mut img = RgbaImage::new(w, h);
+            let faces: [RgbaImage; rig::FACES] = std::array::from_fn(|i| {
+                let face = i as u32 + 1;
+                let stamped = if self.late_face == Some(face) { t - 1.0 / self.fps.max(1.0) } else { t };
+                Self::face_render(face, stamped)
+            });
+            if rig::encode(&mut img, &rig::payload(pose, t, w, h, 0, strip::flags::SOURCE_TEST), &faces).is_some() {
+                return img;
+            }
+        }
         let mut img = RgbaImage::new(w, h);
         let shift = (t * 120.0) as u32;
         // Ground (bottom third) and wall stripes that slide with the camera, so frames differ.

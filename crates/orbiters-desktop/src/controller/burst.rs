@@ -4,10 +4,14 @@
 //! lengths ([`Photo3dLength`]): a gentle 1 s sweep around what the camera aims at; 4 s that circle the starting point
 //! looking at it (the person taking the picture) then turn in place looking straight up and down and fly 10 m forward,
 //! to each side and up and back; 8 s that add four circles around points 8 m away.
+//!
+//! A capture kit with the camera rig (contracts' Docs/rig-frames.md) is switched to it for the flight and follows the
+//! camera: about every other colour frame then carries six more views, one along each axis around the camera.
 
 use super::{NoticeKind, Shared};
 use crate::state::CaptureState;
-use orbiters_core::osc::OscValue;
+use orbiters_contracts::rig;
+use orbiters_core::osc::{OscValue, PARAMETERS_PREFIX};
 use orbiters_core::settings::Photo3dLength;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -180,11 +184,29 @@ pub fn path(start: [f32; 6], length: Photo3dLength, focus: f32, rate: u32) -> Ve
     poses
 }
 
+/// The capture rig's parameters for a camera pose: where it stands (each axis over [`rig::REACH_M`]) and its heading
+/// (over [`rig::YAW_DEG`]), level. VRChat takes OSC floats from -1 to 1.
+pub fn rig_parameters(pose: &[f32; 6]) -> Vec<(String, Vec<rosc::OscType>)> {
+    let at = |v: f32| rosc::OscType::Float((v / rig::REACH_M).clamp(-1.0, 1.0));
+    let yaw = (pose[4] + 180.0).rem_euclid(360.0) - 180.0;
+    [(rig::PARAMETER_X, at(pose[0])), (rig::PARAMETER_Y, at(pose[1])), (rig::PARAMETER_Z, at(pose[2])), (rig::PARAMETER_YAW, rosc::OscType::Float(yaw / rig::YAW_DEG))]
+        .into_iter()
+        .map(|(name, value)| (format!("{PARAMETERS_PREFIX}{name}"), vec![value]))
+        .collect()
+}
+
+/// The capture rig on or off.
+pub fn rig_switch(on: bool) -> (String, Vec<rosc::OscType>) {
+    (format!("{PARAMETERS_PREFIX}{}", rig::PARAMETER), vec![rosc::OscType::Bool(on)])
+}
+
 /// What a 3D picture waits for once its recording stops.
 #[derive(Default)]
 pub struct BurstRuntime {
     /// A 3D picture's recording is under way (its reconstruction starts when it is saved).
     pub(super) recording: bool,
+    /// The capture rig was switched on for it: switched off when VRChat is put back, whatever ends the recording.
+    pub(super) rig: bool,
 }
 
 pub(super) fn floats(values: &[OscValue]) -> Vec<f32> {
@@ -229,16 +251,24 @@ impl super::Controller {
             };
             // Smoothing would trail the swing behind.
             send(SMOOTH, vec![rosc::OscType::Bool(false)]);
+            // The rig where the camera starts, then on (an avatar without it ignores both).
+            let _ = ctl.with_osc(|o| o.send_bundle(rig_parameters(&pose)));
+            ctl.burst.lock().unwrap().rig = true;
+            let _ = ctl.with_osc(|o| o.send_bundle(vec![rig_switch(true)]));
             let tick = Duration::from_secs_f32(1.0 / RATE_HZ as f32);
             let begin = Instant::now();
             for (i, p) in path(pose, length, focus, RATE_HZ).into_iter().enumerate() {
-                send(POSE, p.iter().map(|v| rosc::OscType::Float(*v)).collect());
+                // The camera and the rig in one bundle: VRChat applies them together.
+                let mut messages = vec![(POSE.to_string(), p.iter().map(|v| rosc::OscType::Float(*v)).collect())];
+                messages.extend(rig_parameters(&p));
+                let _ = ctl.with_osc(|o| o.send_bundle(messages));
                 let next = tick * (i as u32 + 1);
                 if let Some(wait) = next.checked_sub(begin.elapsed()) {
                     std::thread::sleep(wait);
                 }
             }
             send(POSE, pose.iter().map(|v| rosc::OscType::Float(*v)).collect());
+            ctl.switch_rig_off();
             if let Some(smooth) = smooth.filter(|s| *s) {
                 send(SMOOTH, vec![rosc::OscType::Bool(smooth)]);
             }
@@ -248,6 +278,13 @@ impl super::Controller {
             }
         })?;
         Ok(())
+    }
+
+    /// The capture rig off, when a 3D picture switched it on.
+    pub(super) fn switch_rig_off(&self) {
+        if std::mem::take(&mut self.burst.lock().unwrap().rig) {
+            let _ = self.with_osc(|o| o.send_bundle(vec![rig_switch(false)]));
+        }
     }
 
     /// A recording was saved: a 3D picture's goes on to its reconstruction.
@@ -289,6 +326,27 @@ mod tests {
 
     // At (1, 1.5, 0), facing +X (yaw 90), slightly down.
     const POSE: [f32; 6] = [1.0, 1.5, 0.0, 10.0, 90.0, 0.0];
+
+    #[test]
+    fn the_rig_follows_the_camera_within_vrchats_range() {
+        let values = |pose: [f32; 6]| -> Vec<f32> {
+            rig_parameters(&pose).into_iter().map(|(_, v)| if let rosc::OscType::Float(f) = v[0] { f } else { panic!() }).collect()
+        };
+        assert_eq!(rig_parameters(&POSE).iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>(), [
+            "/avatar/parameters/OrbitersRig/X",
+            "/avatar/parameters/OrbitersRig/Y",
+            "/avatar/parameters/OrbitersRig/Z",
+            "/avatar/parameters/OrbitersRig/Yaw"
+        ]);
+        let v = values([2048.0, 1.5, -409.6, 10.0, 270.0, 0.0]);
+        assert_eq!(v[0], 0.5);
+        assert!((v[1] * rig::REACH_M - 1.5).abs() < 1e-4 && (v[2] + 0.1).abs() < 1e-6);
+        // 270° is -90°: half a turn left of straight ahead.
+        assert!((v[3] + 0.5).abs() < 1e-6);
+        // Beyond the reach: at its edge.
+        assert_eq!(values([9000.0, 0.0, -9000.0, 0.0, -540.0, 0.0])[..3], [1.0, 0.0, -1.0]);
+        assert!((values([0.0; 6])[3]).abs() < 1e-6);
+    }
 
     #[test]
     fn one_second_sweeps_gently() {

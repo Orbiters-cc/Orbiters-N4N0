@@ -340,6 +340,7 @@ mod tests {
 
     fn dataset(depth_views: Vec<DepthView>) -> Dataset {
         Dataset {
+            faces: None,
             dir: Default::default(),
             views: Vec::new(),
             depth_views,

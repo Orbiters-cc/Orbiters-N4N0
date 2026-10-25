@@ -85,6 +85,10 @@ pub struct Settings {
     /// them; the shell's discs stay only where the parallax test cannot confirm sky (crate::sky::give_way). 0, or a
     /// capture none of whose pixels saw the sky: the shell of discs and its completion ([`Settings::sky_fill`]).
     pub sky_map: u32,
+    /// Of the colour steps, the share that trains on the capture rig's faces when the session has any
+    /// (crate::dataset::Faces): views around the camera's path the keyframes never had, at a lower resolution and with
+    /// no depth. Those steps leave the sky map as it is: what only a face sees has no depth to tell the sky from a wall.
+    pub face_share: f32,
     /// Depth seeded too few Gaussians, and seeds along the keyframes' rays made up for it (crate::init::add_from_rays;
     /// the worker sets it): relocation then grows the set while it is under a quarter of the budget, even while many
     /// Gaussians are dead. Otherwise the set grows only while few are, and a set that starts at a thousand never does.
@@ -108,6 +112,7 @@ impl Default for Settings {
             background: [0.0; 3],
             seed: 1,
             ssim: 0.2,
+            face_share: 0.5,
             robust: 0.0,
             robust_from: 0.25,
             quarter_until: 0.0,
@@ -197,7 +202,9 @@ pub fn extent(data: &Dataset) -> f32 {
 /// 100 steps per keyframe: VRChat Home trains as well at 75 to 150, and with relocation until half the run the Canine
 /// orbit scores higher at 100 than it did at 150.
 pub fn default_iterations(data: &Dataset) -> u32 {
-    (data.views.len() as u32 * 100).clamp(3_000, 30_000)
+    // The rig's faces count half a keyframe each: smaller, and six at a time from one place.
+    let faces = data.faces.as_ref().map_or(0, |f| f.views.len() as u32);
+    ((data.views.len() as u32 + faces / 2) * 100).clamp(3_000, 30_000)
 }
 
 /// PSNR over the scene pixels (rendered colour clamped to 0..1); NaN without any.
@@ -293,6 +300,11 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let scene_pixels = data.mask.iter().filter(|m| **m > 0.5).count() as f32;
     ensure!(scene_pixels > 0.0, "the capture strip and the skeleton band cover all of these {}×{} keyframes: nothing to train on", data.width, data.height);
     let depth_views: Vec<usize> = (0..data.depth_views.len()).filter(|&i| data.depth_views[i].valid() > 0).collect();
+    // The rig's faces, when they have scene pixels and a size of their own (their mask is kept per size).
+    let faces = data.faces.as_ref().filter(|f| !f.views.is_empty() && (f.width, f.height) != (data.width, data.height));
+    let face_pixels = faces.map_or(0.0, |f| f.mask.iter().filter(|m| **m > 0.5).count() as f32);
+    let faces = faces.filter(|_| face_pixels > 0.0);
+    let face_cams: Vec<Camera> = faces.map_or_else(Vec::new, |f| f.views.iter().map(|v| v.camera).collect());
     let extent = extent(data);
     let mut rng = fastrand::Rng::with_seed(settings.seed);
     // Mid-run scores on at most 16 held-out keyframes: enough to follow, cheap at any session length.
@@ -304,13 +316,16 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     gpu.reserve(settings.budget.max(init.len()));
     gpu.upload(&init);
     // The 3D filter follows the keyframes trained on, at their full resolution (the finest sampling).
-    let filter_cams: Vec<Camera> = train_views.iter().map(|&i| data.views[i].camera).collect();
+    let filter_cams: Vec<Camera> = train_views.iter().map(|&i| data.views[i].camera).chain(face_cams.iter().copied()).collect();
     gpu.update_filter_3d(&filter_cams, settings.filter_3d)?;
     let coarse = if settings.half_until > 0.0 { levels(data) } else { Vec::new() };
     for l in &coarse {
         gpu.set_mask(l.width, l.height, &l.mask)?;
     }
     gpu.set_mask(data.width, data.height, &data.mask)?;
+    if let Some(f) = faces {
+        gpu.set_mask(f.width, f.height, &f.mask)?;
+    }
     gpu.regularise_unseen = settings.regularise_unseen;
     gpu.adam_restart = settings.adam_restart;
     let regularise = |gpu: &mut Gpu, n: usize| {
@@ -361,6 +376,14 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             let stepped = gpu.step(&t.camera, settings.background, Target::Depth { samples: &t.samples, weight: settings.depth_weight }, Some(lr));
             gpu.filter_2d = full;
             stepped?
+        } else if let Some(f) = faces.filter(|_| rng.f32() < settings.face_share) {
+            // A face, at its own resolution, the sky map left as it is.
+            let v = &f.views[rng.usize(..f.views.len())];
+            let robust = if progress >= settings.robust_from { settings.robust } else { 0.0 };
+            let sky_lr = std::mem::replace(&mut gpu.sky_lr, 0.0);
+            let stepped = gpu.step(&v.camera, settings.background, Target::Color { rgba: &v.image, scene_pixels: face_pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr));
+            gpu.sky_lr = sky_lr;
+            stepped?
         } else {
             let v = train_views[rng.usize(..train_views.len())];
             let (camera, rgba, pixels) = match level {
@@ -372,7 +395,8 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
         };
         if fade_due(it, settings, relocate_until) {
             let _cpu = crate::priority::CpuWork::start();
-            let cams: Vec<Camera> = train_views.iter().map(|&i| data.views[i].camera).collect();
+            // The faces' views count: what only they see is not unseen.
+            let cams: Vec<Camera> = train_views.iter().map(|&i| data.views[i].camera).chain(face_cams.iter().copied()).collect();
             let seen = gpu.visibility(&cams, settings.background)?;
             if seen.iter().all(|w| *w <= 0.0) {
                 // Nothing seen at all is a broken round (a mask of zeros, a lost readback), not a model nothing sees.

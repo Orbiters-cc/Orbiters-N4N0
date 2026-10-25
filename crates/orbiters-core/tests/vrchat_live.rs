@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use orbiters_core::osc::{vrchat_value, OscEvent, OscService, OscValue};
+use orbiters_core::osc::{vrchat_value, Network, OscEvent, OscService, OscValue};
 use rosc::OscType;
 
 #[test]
@@ -14,7 +14,7 @@ use rosc::OscType;
 fn vrchat_sends_parameters_and_poses() {
     let seen: Arc<Mutex<BTreeMap<String, (usize, String)>>> = Arc::default();
     let s = seen.clone();
-    let service = OscService::start("Orbiters probe", &[], 9000, true, move |event, _| {
+    let service = OscService::start("Orbiters probe", &[], Network::Loopback { vrchat_port: 9000 }, true, move |event, _| {
         let (address, value) = match event {
             OscEvent::Parameter { name, value } => (format!("/avatar/parameters/{name}"), format!("{value:?}")),
             OscEvent::AvatarChanged { id } => ("/avatar/change".into(), id),
@@ -49,7 +49,7 @@ fn vrchat_sends_parameters_and_poses() {
 fn vrchat_sends_to_loopback_and_takes_bundles() {
     let echoes: Arc<Mutex<Vec<(String, OscValue)>>> = Arc::default();
     let e = echoes.clone();
-    let service = OscService::start("Orbiters probe", &[], 9000, true, move |event, _| {
+    let service = OscService::start("Orbiters probe", &[], Network::Loopback { vrchat_port: 9000 }, true, move |event, _| {
         if let OscEvent::Parameter { name, value } = event {
             e.lock().unwrap().push((name, value));
         }

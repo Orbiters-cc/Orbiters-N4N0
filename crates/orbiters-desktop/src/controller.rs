@@ -11,7 +11,7 @@ use orbiters_contracts::manifest::{ConsentInfo, WorldInfo};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::bundle::{self, SessionSummary};
 use orbiters_core::clock;
-use orbiters_core::osc::{OscEvent, OscService, OscValue, AVATAR_CHANGE, DEPTH_FRAMES_PARAMETER, PARAMETERS_PREFIX};
+use orbiters_core::osc::{Latest, Network, OscEvent, OscService, OscValue, AVATAR_CHANGE, DEPTH_FRAMES_PARAMETER, PARAMETERS_PREFIX};
 use orbiters_core::protocol::{OscSample, PerformanceSpec, SourceSpec, StartCapture, WorkerCommand, WorkerEvent};
 use orbiters_core::reconstruction::Event as ReconstructEvent;
 use orbiters_core::settings::{Settings, WhilePlaying};
@@ -59,7 +59,7 @@ pub struct RawCaptureSummary {
 #[derive(Default)]
 struct OscValues {
     /// The avatar worn's parameters (those of avatars worn before go when it changes), the poses, the camera.
-    latest: HashMap<String, (Vec<OscValue>, u64)>,
+    latest: Latest,
     forwarding: bool,
     pending: Vec<OscSample>,
     last_flush: Option<Instant>,
@@ -67,7 +67,8 @@ struct OscValues {
 
 /// Addresses kept in [`OscValues::latest`] at most: an avatar's parameters, the poses and the camera are a few
 /// hundred; past this, a new address is not kept.
-const MAX_LATEST: usize = 4096;
+#[cfg(test)]
+const MAX_LATEST: usize = Latest::MOST;
 
 /// One sample per argument (`index` only for messages with several; the receiver passes at most 16).
 fn osc_samples<'a>(address: &'a str, values: &'a [OscValue], at_ns: u64, initial: bool) -> impl Iterator<Item = OscSample> + 'a {
@@ -1144,15 +1145,7 @@ impl Controller {
                 let samples: Vec<OscSample> = osc_samples(&address, &values, at_ns, false).collect();
                 osc.pending.extend(samples);
             }
-            if address == AVATAR_CHANGE {
-                osc.latest.retain(|a, _| !a.starts_with(PARAMETERS_PREFIX));
-            }
-            // Changed in place: most messages are an address already known.
-            if let Some(latest) = osc.latest.get_mut(&address) {
-                *latest = (values, at_ns);
-            } else if osc.latest.len() < MAX_LATEST {
-                osc.latest.insert(address, (values, at_ns));
-            }
+            osc.latest.record(address, values, at_ns);
         }
         if osc.forwarding && osc.last_flush.is_none_or(|t| t.elapsed() >= Duration::from_millis(50)) {
             self.flush_osc(&mut osc);
@@ -1425,7 +1418,7 @@ impl Controller {
         let wanted = vec![parameter.clone()];
         // Starting a recording reads VRChat's current values over HTTP: the record toggle is acted on on the action
         // thread, in order (`record_toggled`).
-        let result = OscService::start_batched("Orbiters - N4N0", &wanted, vrchat_port, advertise, move |events, at_ns| {
+        let result = OscService::start_batched("Orbiters - N4N0", &wanted, Network::Loopback { vrchat_port }, advertise, move |events, at_ns| {
             ctl.on_osc_events(events, at_ns, &parameter);
         });
         match result {

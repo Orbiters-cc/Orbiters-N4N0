@@ -138,7 +138,9 @@ pub fn github(version: &str, notes: &str, unsigned: bool) -> anyhow::Result<()> 
         run(Command::new("gh").args(["release", "upload", &tag, "--repo", GITHUB_REPO, "--clobber"]).arg(&setup))?;
     } else {
         run(Command::new("gh")
-            .args(["release", "create", &tag, "--repo", GITHUB_REPO, "--verify-tag", "--title", &format!("Orbiters - N4N0 {version}"), "--notes-file"])
+            .args(["release", "create", &tag, "--repo", GITHUB_REPO, "--verify-tag", "--title", &format!("Orbiters - N4N0 {version}")])
+            .args(version.contains("-dev.").then_some("--prerelease"))
+            .arg("--notes-file")
             .arg(&notes_file)
             .arg(&setup))?;
     }

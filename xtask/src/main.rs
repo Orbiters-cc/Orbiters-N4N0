@@ -43,8 +43,8 @@ cargo xtask <command>
                                checks the commit, then dist, publish, the desktop-v<version> tag and its GitHub
                                release with the setup (--unsigned: no Authenticode signature yet)
   release --dev [--notes <file>] [--allow-dirty]
-                               a development build (bump --dev first): dist, then publish --dev; no push, tag or
-                               GitHub release. Installed apps switched to the development environment update to it
+                               a development build (bump --dev first): dist, publish --dev, push, tag and a GitHub
+                               pre-release. Installed apps switched to the development environment update to it
   github [--notes <file>] [--unsigned]
                                the GitHub release of target/dist/<version>/'s setup (its tag pushed already)
 
@@ -303,7 +303,7 @@ fn bump(version: &str) -> anyhow::Result<()> {
     std::fs::write(&path, lines.join("\n") + "\n")?;
     run(cargo().args(["update", "--workspace", "--offline"]))?;
     if version.contains("-dev.") {
-        println!("Version {version}. Commit Cargo.toml and Cargo.lock (no push), then: cargo xtask release --dev");
+        println!("Version {version}. Commit Cargo.toml and Cargo.lock, then: cargo xtask release --dev");
     } else {
         println!("Version {version}. Commit Cargo.toml and Cargo.lock, push, then: cargo xtask release");
     }
@@ -374,9 +374,18 @@ fn release_dev(config: &Config, channel: &str, notes: String, allow_dirty: bool)
     orbiters_update::set_development(true);
     publish::ensure_newer(&version, channel)?;
     let notes = if notes.is_empty() { format!("Development build {version} ({})", git(&["rev-parse", "--short", "HEAD"]).unwrap_or_default()) } else { notes };
-    let dist = dist::dist(config, &dist::Options { unsigned: true, channel: channel.into(), notes, programs: None })?;
+    let dist = dist::dist(config, &dist::Options { unsigned: true, channel: channel.into(), notes: notes.clone(), programs: None })?;
     publish::publish_dev(config, &version, channel, false)?;
-    println!("\nOrbiters - N4N0 {version} is in the development environment ({}).", dist.display());
+    // Every build Enzo is to try is also on GitHub's releases (a pre-release), tagged on the pushed commit.
+    let tag = format!("desktop-v{version}");
+    git(&["-C", "contracts", "push", "origin", "HEAD:main"])?;
+    git(&["push", "origin", "HEAD"])?;
+    if git(&["tag", "--list", &tag])?.is_empty() {
+        git(&["tag", "--annotate", &tag, "--message", &format!("Orbiters - N4N0 {version}")])?;
+    }
+    git(&["push", "origin", &tag])?;
+    publish::github(&version, &notes, true)?;
+    println!("\nOrbiters - N4N0 {version} is in the development environment ({}) and on GitHub's releases.", dist.display());
     Ok(())
 }
 

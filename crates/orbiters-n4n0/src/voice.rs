@@ -1,18 +1,18 @@
-//! N4N0's ears in the tray service: the voice worker (`orbiters-voice`, protocol `orbiters_core::voice`) runs while
+//! N4N0's ears: the voice worker (protocol `orbiters_core::voice`, started through the platform's [`Ears`]) runs while
 //! VRChat does and N4N0's assistant is on with its models installed, so a sentence is transcribed without waiting for
 //! models to load. It opens the microphone only while N4N0 listens, or all along when the wake word is on, and keeps
-//! only its small VAD loaded between sentences. It runs below normal priority: VRChat comes first.
+//! only its small VAD loaded between sentences. On the desktop it is a process below normal priority: VRChat comes
+//! first.
+//!
+//! [`Ears`]: crate::Ears
 
-use super::orb::Source;
-use super::{Controller, NoticeKind, Shared};
-use crate::state::OrbWho;
+use crate::platform::VoiceWorker;
+use crate::runtime::{N4n0, Shared, Source};
+use crate::status::{NoticeKind, OrbWho, VoiceStatus};
 use orbiters_core::voice::{self, VoiceCommand, VoiceEvent};
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// The service gives up on a sentence after this (the worker ends its own sooner).
+/// The app gives up on a sentence after this (the worker ends its own sooner).
 pub const LISTEN_LIMIT: Duration = Duration::from_secs(35);
 /// A worker that ended on its own is not started again before this, doubled each time it does so again.
 const RESTART_AFTER: Duration = Duration::from_secs(30);
@@ -27,103 +27,28 @@ const LISTEN_LEASE: Duration = Duration::from_secs(120);
 const CANCELLED_KEPT: usize = 32;
 /// Windows' "the program could not find a library it needs" (STATUS_DLL_NOT_FOUND).
 const DLL_NOT_FOUND: u32 = 0xC000_0135;
-/// What the worker says on stderr before it loads the recogniser: a worker that stops with this as its last line
-/// stopped while loading the models.
+/// What the worker says before it loads the recogniser: a worker that stops with this as its last line stopped while
+/// loading the models.
 const LOADING_LINE: &str = "loading the speech recogniser";
 
-pub fn models_installed() -> bool {
-    voice::installed(&orbiters_core::paths::models_dir())
-}
-
-struct VoiceHandle {
-    child: Child,
-    stdin: ChildStdin,
+/// A running worker, and what it was started with.
+struct Worker {
+    inner: Box<dyn VoiceWorker>,
+    /// Its number: its end is told by it.
+    serial: u64,
     /// The microphone and wake words it was started with (or switched to since).
     mic: String,
     wake_word: bool,
     wake_words: Vec<String>,
     started: Instant,
-    /// The last line it wrote on stderr: what it was doing when it stopped.
-    last_line: Arc<Mutex<Option<String>>>,
-}
-
-impl VoiceHandle {
-    fn spawn(ctl: Shared) -> anyhow::Result<Self> {
-        let path = crate::worker::sibling_exe("orbiters-voice");
-        anyhow::ensure!(path.is_file(), "N4N0's voice worker was not found at {}", path.display());
-        let mut cmd = Command::new(&path);
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            // CREATE_NO_WINDOW, BELOW_NORMAL_PRIORITY_CLASS: transcribing never takes VRChat's frames.
-            cmd.creation_flags(0x0800_0000 | 0x0000_4000);
-        }
-        let mut child = cmd.spawn()?;
-        crate::worker::keep_with_service(&child);
-        let stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
-        let pid = child.id();
-        std::thread::Builder::new().name("voice-stdout".into()).spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                match serde_json::from_str::<VoiceEvent>(&line) {
-                    Ok(e) => ctl.on_voice_event(e),
-                    // Not the line: it may hold what someone said.
-                    Err(e) => eprintln!("voice: unexpected output ({} bytes): {e}", line.len()),
-                }
-            }
-            ctl.on_voice_exit(pid);
-        })?;
-        let last_line = Arc::new(Mutex::new(None));
-        let last = last_line.clone();
-        std::thread::Builder::new().name("voice-stderr".into()).spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
-                let line = line.strip_prefix("voice: ").unwrap_or(&line).to_string();
-                eprintln!("voice: {line}");
-                *last.lock().unwrap() = Some(line);
-            }
-        })?;
-        Ok(Self { child, stdin, mic: String::new(), wake_word: false, wake_words: Vec::new(), started: Instant::now(), last_line })
-    }
-
-    fn send(&mut self, command: &VoiceCommand) -> anyhow::Result<()> {
-        writeln!(self.stdin, "{}", command.to_line())?;
-        self.stdin.flush()?;
-        Ok(())
-    }
-
-    /// Its exit code, waiting up to a second for it (its output ends a moment before it does).
-    fn exit_code(&mut self) -> Option<i32> {
-        for _ in 0..20 {
-            if let Ok(Some(status)) = self.child.try_wait() {
-                return status.code();
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        None
-    }
-}
-
-impl Drop for VoiceHandle {
-    fn drop(&mut self) {
-        let _ = self.send(&VoiceCommand::Quit);
-        for _ in 0..20 {
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let _ = self.child.kill();
-    }
 }
 
 #[derive(Default)]
-pub struct VoiceRuntime {
-    handle: Option<VoiceHandle>,
-    installer: Option<VoiceHandle>,
+pub(crate) struct VoiceRuntime {
+    handle: Option<Worker>,
+    installer: Option<Worker>,
+    /// The last worker's number.
+    workers: u64,
     ended_at: Option<Instant>,
     /// Workers that ended on their own in a row (each start after one waits longer), and how many of them while
     /// loading the models.
@@ -158,8 +83,8 @@ impl VoiceRuntime {
         RESTART_AFTER.saturating_mul(1 << self.crashes.saturating_sub(1).min(4))
     }
 
-    /// A worker that ran for `ran` ended on its own (exit `code`, its last stderr line `last`): counted, and what
-    /// the person is told. True in the answer when the models seem damaged.
+    /// A worker that ran for `ran` ended on its own (exit `code`, its last line `last`): counted, and what the person is
+    /// told. True in the answer when the models seem damaged.
     fn ended(&mut self, ran: Duration, code: Option<i32>, last: Option<&str>) -> (String, bool) {
         self.ended_at = Some(Instant::now());
         self.crashes = if ran > CRASH_WINDOW { 1 } else { self.crashes + 1 };
@@ -186,13 +111,35 @@ impl VoiceRuntime {
     }
 }
 
-impl Controller {
+impl N4n0 {
+    /// Whether the speech models are on this device.
+    pub(crate) fn models_installed(&self) -> bool {
+        voice::installed(&self.files.models)
+    }
+
+    /// Starts a worker through the platform, numbered: what it says comes to [`N4n0::on_voice_event`], its end to
+    /// [`N4n0::on_voice_exit`].
+    fn voice_spawn(self: &Shared, rt: &mut VoiceRuntime) -> anyhow::Result<Worker> {
+        rt.workers += 1;
+        let serial = rt.workers;
+        let events = {
+            let n = self.clone();
+            Box::new(move |e: VoiceEvent| n.on_voice_event(e))
+        };
+        let ended = {
+            let n = self.clone();
+            Box::new(move || n.on_voice_exit(serial))
+        };
+        let inner = self.device.ears.spawn(events, ended)?;
+        Ok(Worker { inner, serial, mic: String::new(), wake_word: false, wake_words: Vec::new(), started: Instant::now() })
+    }
+
     /// Starts the voice worker when N4N0 should be able to hear (VRChat runs, or a sentence was asked for meanwhile;
     /// the assistant is on, the models are here), stops it otherwise, and passes on a changed microphone or wake
     /// word (without loading anything again). Called once a second.
-    pub(super) fn voice_follow(self: &Shared) {
-        let settings = self.settings().orb;
-        let vrchat = self.snapshot.lock().unwrap().vrchat.running;
+    pub(crate) fn voice_follow(self: &Shared) {
+        let settings = self.with_settings(|s| s.orb.clone());
+        let vrchat = self.host.scene().vrchat;
         let installed = self.orb.lock().unwrap().voice.installed;
         let mut rt = self.voice.lock().unwrap();
         let leased = rt.lease_until.is_some_and(|t| Instant::now() < t);
@@ -200,7 +147,7 @@ impl Controller {
         if !wanted {
             if let Some(handle) = rt.handle.take() {
                 drop(rt);
-                // Its end waits a moment for the process: not under the lock.
+                // Its end waits a moment for the worker: not under the lock.
                 drop(handle);
                 self.voice_status(|v| v.running = false);
             }
@@ -210,12 +157,12 @@ impl Controller {
             if handle.mic != settings.mic_device {
                 handle.mic = settings.mic_device.clone();
                 let mic = (!handle.mic.is_empty()).then(|| handle.mic.clone());
-                let _ = handle.send(&VoiceCommand::Mic { mic });
+                let _ = handle.inner.send(&VoiceCommand::Mic { mic });
             }
             if handle.wake_word != settings.wake_word || handle.wake_words != settings.wake_words {
                 handle.wake_word = settings.wake_word;
                 handle.wake_words = settings.wake_words.clone();
-                let _ = handle.send(&VoiceCommand::WakeWord { on: settings.wake_word, words: settings.wake_words.clone() });
+                let _ = handle.inner.send(&VoiceCommand::WakeWord { on: settings.wake_word, words: settings.wake_words.clone() });
             }
             return;
         }
@@ -230,18 +177,18 @@ impl Controller {
     }
 
     fn voice_start(self: &Shared, rt: &mut VoiceRuntime, mic: &str, wake_word: bool, wake_words: &[String]) {
-        match VoiceHandle::spawn(self.clone()) {
+        match self.voice_spawn(rt) {
             Ok(mut handle) => {
                 handle.mic = mic.to_string();
                 handle.wake_word = wake_word;
                 handle.wake_words = wake_words.to_vec();
                 let start = VoiceCommand::Start {
-                    models: orbiters_core::paths::models_dir(),
+                    models: self.files.models.clone(),
                     mic: (!mic.is_empty()).then(|| mic.to_string()),
                     wake_word,
                     wake_words: wake_words.to_vec(),
                 };
-                if let Err(e) = handle.send(&start) {
+                if let Err(e) = handle.inner.send(&start) {
                     eprintln!("voice: {e:#}");
                 }
                 rt.handle = Some(handle);
@@ -256,8 +203,8 @@ impl Controller {
 
     /// N4N0 listens for a sentence from `source` (the worker starts if it was not running, as for the window's Talk
     /// button with VRChat closed, and stays a while after).
-    pub(super) fn voice_listen(self: &Shared, source: Source) {
-        let settings = self.settings().orb;
+    pub(crate) fn voice_listen(self: &Shared, source: Source) {
+        let settings = self.with_settings(|s| s.orb.clone());
         let mut rt = self.voice.lock().unwrap();
         rt.lease_until = Some(Instant::now() + LISTEN_LIMIT + LISTEN_LEASE);
         if rt.handle.is_none() {
@@ -269,21 +216,21 @@ impl Controller {
         let id = rt.next_listen;
         rt.current = Some(id);
         if let Some(handle) = rt.handle.as_mut() {
-            if let Err(e) = handle.send(&VoiceCommand::Listen { hold, id }) {
+            if let Err(e) = handle.inner.send(&VoiceCommand::Listen { hold, id }) {
                 eprintln!("voice: {e:#}");
             }
         }
     }
 
     /// The held sentence ended (the Talk button was let go): the worker transcribes it.
-    pub(super) fn voice_finish(self: &Shared) {
+    pub(crate) fn voice_finish(self: &Shared) {
         if let Some(handle) = self.voice.lock().unwrap().handle.as_mut() {
-            let _ = handle.send(&VoiceCommand::Finish);
+            let _ = handle.inner.send(&VoiceCommand::Finish);
         }
     }
 
     /// The sentence being listened to is dropped: nothing the worker heard for it goes anywhere.
-    pub(super) fn voice_cancel(self: &Shared) {
+    pub(crate) fn voice_cancel(self: &Shared) {
         let mut rt = self.voice.lock().unwrap();
         let Some(id) = rt.current.take() else { return };
         rt.cancelled.push_back(id);
@@ -291,21 +238,21 @@ impl Controller {
             rt.cancelled.pop_front();
         }
         if let Some(handle) = rt.handle.as_mut() {
-            let _ = handle.send(&VoiceCommand::Cancel);
+            let _ = handle.inner.send(&VoiceCommand::Cancel);
         }
     }
 
     /// Downloads the speech models in a worker of their own, its progress on the N4N0 page: what is missing or cut
     /// short, or all of it when they stopped loading (a repair).
-    pub(super) fn voice_install(self: &Shared) {
+    pub(crate) fn voice_install(self: &Shared) {
         let mut rt = self.voice.lock().unwrap();
         let repair = rt.repair;
-        if rt.installer.is_some() || (models_installed() && !repair) {
+        if rt.installer.is_some() || (self.models_installed() && !repair) {
             return;
         }
-        match VoiceHandle::spawn(self.clone()) {
+        match self.voice_spawn(&mut rt) {
             Ok(mut handle) => {
-                let _ = handle.send(&VoiceCommand::Install { models: orbiters_core::paths::models_dir(), repair });
+                let _ = handle.inner.send(&VoiceCommand::Install { models: self.files.models.clone(), repair });
                 rt.installer = Some(handle);
                 drop(rt);
                 self.voice_status(|v| {
@@ -322,31 +269,32 @@ impl Controller {
 
     /// Stops the speech models' download (the N4N0 page's Cancel): the installing worker removes what it unpacked and
     /// leaves; its end puts the Install button back.
-    pub(super) fn voice_cancel_install(&self) {
+    pub(crate) fn voice_cancel_install(&self) {
         if let Some(installer) = self.voice.lock().unwrap().installer.as_mut() {
-            if let Err(e) = installer.send(&VoiceCommand::Cancel) {
+            if let Err(e) = installer.inner.send(&VoiceCommand::Cancel) {
                 eprintln!("voice install: {e:#}");
             }
         }
     }
 
-    /// Stops the voice worker (the app quits).
-    pub(super) fn voice_stop(&self) {
+    /// Stops the voice workers (the app quits).
+    pub(crate) fn voice_stop(&self) {
         let (handle, installer) = {
             let mut rt = self.voice.lock().unwrap();
             (rt.handle.take(), rt.installer.take())
         };
-        // Each waits a moment for its process: not under the lock.
+        // Each waits a moment for its worker: not under the lock.
         drop(handle);
         drop(installer);
     }
 
-    fn voice_status(&self, f: impl FnOnce(&mut crate::state::VoiceStatus)) {
+    fn voice_status(&self, f: impl FnOnce(&mut VoiceStatus)) {
         f(&mut self.orb.lock().unwrap().voice);
-        self.orb_publish();
+        self.publish();
     }
 
-    pub(super) fn on_voice_event(self: &Shared, event: VoiceEvent) {
+    /// What a voice worker said.
+    pub(crate) fn on_voice_event(self: &Shared, event: VoiceEvent) {
         match event {
             VoiceEvent::Ready { engine, load_ms } => {
                 eprintln!("voice: {engine} ready in {load_ms} ms");
@@ -366,7 +314,7 @@ impl Controller {
                     changed
                 };
                 if changed {
-                    self.orb_publish();
+                    self.publish();
                 }
             }
             VoiceEvent::Heard { text, for_orb, seconds, decode_ms, listen } => {
@@ -387,7 +335,7 @@ impl Controller {
                 };
                 self.voice_status(|v| v.level = 0.0);
                 if !dropped {
-                    self.orb_heard(text, for_orb, current);
+                    self.heard(text, for_orb, current);
                 }
             }
             VoiceEvent::Installing { fraction } => self.voice_status(|v| v.downloading = Some(fraction)),
@@ -414,14 +362,14 @@ impl Controller {
         }
     }
 
-    /// A voice worker ended: the installer's job is over, or the listening one stopped on its own (crashed). One
-    /// that was replaced or stopped on purpose ends without a word.
-    fn on_voice_exit(self: &Shared, pid: u32) {
+    /// A voice worker ended (number `serial`): the installer's job is over, or the listening one stopped on its own
+    /// (crashed). One that was replaced or stopped on purpose ends without a word.
+    fn on_voice_exit(self: &Shared, serial: u64) {
         let (handle, installer) = {
             let mut rt = self.voice.lock().unwrap();
-            if rt.installer.as_ref().is_some_and(|h| h.child.id() == pid) {
+            if rt.installer.as_ref().is_some_and(|h| h.serial == serial) {
                 (None, rt.installer.take())
-            } else if rt.handle.as_ref().is_some_and(|h| h.child.id() == pid) {
+            } else if rt.handle.as_ref().is_some_and(|h| h.serial == serial) {
                 (rt.handle.take(), None)
             } else {
                 (None, None)
@@ -429,7 +377,7 @@ impl Controller {
         };
         if let Some(installer) = installer {
             drop(installer);
-            let installed = models_installed();
+            let installed = self.models_installed();
             self.voice_status(|v| {
                 v.downloading = None;
                 v.installed = installed;
@@ -437,8 +385,8 @@ impl Controller {
             return;
         }
         let Some(mut handle) = handle else { return };
-        let code = handle.exit_code();
-        let last = handle.last_line.lock().unwrap().clone();
+        let code = handle.inner.exit_code();
+        let last = handle.inner.last_line();
         let (message, damaged) = {
             let mut rt = self.voice.lock().unwrap();
             // Its listen will never be answered.

@@ -1,0 +1,1751 @@
+//! N4N0 in a stand-in app ([`TestHost`]: settings, VRChat as a test sets it, a real OSC service on the loopback
+//! interface talking with a stand-in VRChat) on a stand-in device (its clipboard, browser, sounds, language, ears, music
+//! and mouse as tests set them). The behaviour tests came from the desktop's controller; the platform tests check what
+//! N4N0 asks of each trait.
+
+use crate::media::{MediaBackend, NoMedia, Reading, Watcher};
+use crate::platform::*;
+use crate::runtime::{int_value, parameter, screen_replace, thumbnail_bytes, Shared};
+use crate::status::*;
+use crate::{Command, N4n0};
+use orbiters_contracts::avatar::AvatarManifest;
+use orbiters_contracts::orb::{self as contract, params, Page, POINTER_CLEAR, TEXT_LENGTH};
+use orbiters_core::account::Api;
+use orbiters_core::osc::{Latest, Network, OscEvent, OscService, OscValue, AVATAR_CHANGE, PARAMETERS_PREFIX};
+use orbiters_core::settings::{Pin, Settings};
+use orbiters_core::voice::{VoiceCommand, VoiceEvent};
+use orbiters_core::vrchat_log::WorldState;
+use orbiters_orb::menu::KeyboardLayout;
+use orbiters_orb::text::{Message, TextSender};
+use rosc::OscType;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, UdpSocket};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
+
+/// What the tests copied (they never touch this computer's clipboard).
+static CLIPBOARD: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The stand-in app.
+#[derive(Default)]
+pub(crate) struct TestHost {
+    settings: Mutex<Settings>,
+    scene: Mutex<Scene>,
+    world: Mutex<WorldState>,
+    published: Mutex<OrbStatus>,
+    notices: Mutex<Vec<(NoticeKind, String)>>,
+    /// A stand-in Orbiters and its credential.
+    server: Mutex<Option<(String, String)>>,
+    actions: Actions,
+    osc: Mutex<Option<OscService>>,
+    latest: Mutex<Latest>,
+    n4n0: Mutex<Weak<N4n0>>,
+    calls: Mutex<Vec<CallRequest>>,
+    ringing: Mutex<bool>,
+    photos: AtomicUsize,
+    capturing: Mutex<bool>,
+    walk: Mutex<Vec<f32>>,
+    motion: Mutex<Vec<Option<(String, OscValue)>>>,
+    /// N4N0's files, gone with the test.
+    _dir: TempDir,
+}
+
+/// A test's folder, gone with it.
+#[derive(Default)]
+struct TempDir(PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        if !self.0.as_os_str().is_empty() {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
+impl TestHost {
+    fn view(&self) -> OrbStatus {
+        self.published.lock().unwrap().clone()
+    }
+
+    fn settings(&self) -> Settings {
+        self.settings.lock().unwrap().clone()
+    }
+
+    fn scene(&self, change: impl FnOnce(&mut Scene)) {
+        change(&mut self.scene.lock().unwrap());
+    }
+
+    fn world(&self, change: impl FnOnce(&mut WorldState)) {
+        change(&mut self.world.lock().unwrap());
+    }
+
+    fn sign_in(&self, base: String, token: &str) {
+        *self.server.lock().unwrap() = Some((base, token.into()));
+    }
+
+    fn notices(&self) -> Vec<(NoticeKind, String)> {
+        self.notices.lock().unwrap().clone()
+    }
+
+    /// OSC on the loopback interface, not advertised, to the stand-in VRChat at the settings' port: what it hears goes
+    /// to N4N0 as the desktop routes it.
+    fn start_osc(self: &Arc<Self>) {
+        // The service before goes outside the lock: stopping it waits for its receiving thread.
+        let before = self.osc.lock().unwrap().take();
+        drop(before);
+        let port = self.settings.lock().unwrap().osc.vrchat_port;
+        let host = Arc::downgrade(self);
+        let service = OscService::start_batched("Orbiters - N4N0 test", &[], Network::Loopback { vrchat_port: port }, false, move |events, at| {
+            if let Some(h) = host.upgrade() {
+                h.on_osc_events(events, at);
+            }
+        })
+        .unwrap();
+        *self.osc.lock().unwrap() = Some(service);
+    }
+
+    fn stop_osc(&self) {
+        let osc = self.osc.lock().unwrap().take();
+        drop(osc);
+    }
+
+    fn set_vrchat_query(&self, query: SocketAddr) {
+        self.osc.lock().unwrap().as_ref().expect("OSC runs").set_vrchat_query(Some(query));
+    }
+
+    fn on_osc_events(&self, events: &mut Vec<OscEvent>, at: u64) {
+        let n = self.n4n0.lock().unwrap().upgrade();
+        let mut messages = Vec::new();
+        for event in events.drain(..) {
+            match event {
+                OscEvent::Parameter { name, value } => {
+                    if let Some(n) = &n {
+                        n.on_parameter(&name, &value);
+                    }
+                    messages.push((parameter(&name), vec![value]));
+                }
+                OscEvent::AvatarChanged { id } => {
+                    if let Some(n) = &n {
+                        n.on_avatar(id.clone());
+                    }
+                    messages.push((AVATAR_CHANGE.to_string(), vec![OscValue::Text(id)]));
+                }
+                OscEvent::Values { address, values } => messages.push((address, values)),
+            }
+        }
+        let mut latest = self.latest.lock().unwrap();
+        for (address, values) in messages {
+            latest.record(address, values, at);
+        }
+    }
+
+    /// The app quits: N4N0 closes what it drives, then OSC stops.
+    fn shutdown(&self, n: &Shared) {
+        n.shutdown();
+        self.stop_osc();
+    }
+}
+
+impl Host for TestHost {
+    fn with_settings(&self, read: &mut dyn FnMut(&Settings)) {
+        read(&self.settings.lock().unwrap());
+    }
+
+    fn update_settings(&self, change: &mut dyn FnMut(&mut Settings)) {
+        change(&mut self.settings.lock().unwrap());
+    }
+
+    fn scene(&self) -> Scene {
+        *self.scene.lock().unwrap()
+    }
+
+    fn world(&self) -> WorldState {
+        self.world.lock().unwrap().clone()
+    }
+
+    fn capturing(&self) -> bool {
+        *self.capturing.lock().unwrap()
+    }
+
+    fn publish(&self, mut status: OrbStatus) {
+        // As the desktop does: the avatar's name is VRChat's log's.
+        status.states.avatar_name = self.world.lock().unwrap().avatar_name.clone();
+        *self.published.lock().unwrap() = status;
+    }
+
+    fn notify(&self, kind: NoticeKind, message: String) {
+        self.notices.lock().unwrap().push((kind, message));
+    }
+
+    fn account(&self) -> Option<(Api, String)> {
+        self.server.lock().unwrap().clone().map(|(base, token)| (Api::at(&base), token))
+    }
+
+    fn queue(&self, action: Box<dyn FnOnce() + Send>) -> bool {
+        self.actions.run(action)
+    }
+
+    fn ringing_in(&self) -> bool {
+        *self.ringing.lock().unwrap()
+    }
+
+    fn call(&self, request: CallRequest) {
+        self.calls.lock().unwrap().push(request);
+    }
+
+    fn photo_3d(&self) -> anyhow::Result<()> {
+        self.photos.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn walk_boost(&self, strength: f32) {
+        self.walk.lock().unwrap().push(strength);
+    }
+
+    fn motion(&self, said: Option<(&str, &OscValue)>) {
+        self.motion.lock().unwrap().push(said.map(|(n, v)| (n.to_string(), v.clone())));
+    }
+}
+
+impl Osc for TestHost {
+    fn send(&self, bundles: &[&[Message]]) -> Option<Vec<anyhow::Result<()>>> {
+        let osc = self.osc.lock().unwrap();
+        let o = osc.as_ref()?;
+        Some(
+            bundles
+                .iter()
+                .map(|bundle| match bundle {
+                    [(address, arg)] => o.send(address, vec![arg.clone()]),
+                    _ => o.send_bundle(bundle.iter().map(|(address, arg)| (address.clone(), vec![arg.clone()])).collect()),
+                })
+                .collect(),
+        )
+    }
+
+    fn vrchat_query(&self) -> Option<Option<SocketAddr>> {
+        self.osc.lock().unwrap().as_ref().map(OscService::vrchat_query)
+    }
+
+    fn latest(&self, addresses: &mut dyn Iterator<Item = String>) -> HashMap<String, OscValue> {
+        let latest = self.latest.lock().unwrap();
+        addresses.filter_map(|a| latest.first(&a).map(|v| (a, v))).collect()
+    }
+
+    fn vrchat_values(&self) -> Vec<(String, OscValue)> {
+        match self.vrchat_query() {
+            Some(Some(addr)) => orbiters_core::osc::vrchat_values(addr, Duration::from_secs(1)).unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// The stand-in device's clipboard (shared with [`CLIPBOARD`]).
+struct FakeClipboard;
+
+impl Clipboard for FakeClipboard {
+    fn copy(&self, text: &str) -> Result<(), String> {
+        CLIPBOARD.lock().unwrap().push(text.to_string());
+        Ok(())
+    }
+}
+
+/// The pages the stand-in browser opened.
+#[derive(Clone, Default)]
+struct FakeBrowser(Arc<Mutex<Vec<String>>>);
+
+impl Browser for FakeBrowser {
+    fn open(&self, url: &str) -> anyhow::Result<()> {
+        self.0.lock().unwrap().push(url.to_string());
+        Ok(())
+    }
+}
+
+/// How many press sounds played.
+#[derive(Clone, Default)]
+struct FakeSounds(Arc<AtomicUsize>);
+
+impl Sounds for FakeSounds {
+    fn press(&self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+struct English;
+
+impl Locale for English {
+    fn locale(&self) -> String {
+        "en-GB".into()
+    }
+
+    fn keyboard(&self) -> KeyboardLayout {
+        KeyboardLayout::Azerty
+    }
+}
+
+/// The stand-in ears: none starts unless the test lets them (`workers`), and what N4N0 asked each.
+#[derive(Clone, Default)]
+struct FakeEars {
+    /// Workers may start.
+    allowed: Arc<Mutex<bool>>,
+    workers: Arc<Mutex<Vec<FakeWorkerState>>>,
+}
+
+/// What a stand-in worker was told, and the calls that make it speak or end.
+#[derive(Clone)]
+struct FakeWorkerState {
+    commands: Arc<Mutex<Vec<VoiceCommand>>>,
+    events: Arc<Mutex<Option<VoiceEvents>>>,
+    ended: Arc<Mutex<Option<VoiceEnded>>>,
+    exit: Arc<Mutex<Option<i32>>>,
+    last: Arc<Mutex<Option<String>>>,
+    dropped: Arc<Mutex<bool>>,
+}
+
+impl FakeWorkerState {
+    fn say(&self, event: VoiceEvent) {
+        let events = self.events.lock().unwrap();
+        (events.as_ref().expect("started"))(event);
+    }
+
+    /// The worker stops on its own, with `code` and `last` as its last words.
+    fn crash(&self, code: i32, last: &str) {
+        *self.exit.lock().unwrap() = Some(code);
+        *self.last.lock().unwrap() = Some(last.to_string());
+        let ended = self.ended.lock().unwrap().take().expect("running");
+        ended();
+    }
+
+    fn commands(&self) -> Vec<VoiceCommand> {
+        self.commands.lock().unwrap().clone()
+    }
+}
+
+struct FakeWorker(FakeWorkerState);
+
+impl VoiceWorker for FakeWorker {
+    fn send(&mut self, command: &VoiceCommand) -> anyhow::Result<()> {
+        self.0.commands.lock().unwrap().push(command.clone());
+        Ok(())
+    }
+
+    fn exit_code(&mut self) -> Option<i32> {
+        *self.0.exit.lock().unwrap()
+    }
+
+    fn last_line(&self) -> Option<String> {
+        self.0.last.lock().unwrap().clone()
+    }
+}
+
+impl Drop for FakeWorker {
+    fn drop(&mut self) {
+        *self.0.dropped.lock().unwrap() = true;
+    }
+}
+
+impl Ears for FakeEars {
+    fn spawn(&self, events: VoiceEvents, ended: VoiceEnded) -> anyhow::Result<Box<dyn VoiceWorker>> {
+        anyhow::ensure!(*self.allowed.lock().unwrap(), "N4N0's voice worker was not found (tests)");
+        let state = FakeWorkerState {
+            commands: Default::default(),
+            events: Arc::new(Mutex::new(Some(events))),
+            ended: Arc::new(Mutex::new(Some(ended))),
+            exit: Default::default(),
+            last: Default::default(),
+            dropped: Default::default(),
+        };
+        self.workers.lock().unwrap().push(state.clone());
+        Ok(Box::new(FakeWorker(state)))
+    }
+}
+
+/// The stand-in device, as a test reads it back.
+#[derive(Clone, Default)]
+struct Device {
+    browser: FakeBrowser,
+    sounds: FakeSounds,
+    ears: FakeEars,
+}
+
+/// N4N0 in a stand-in app with these settings, on the stand-in device (not started).
+fn n4n0_on(settings: Settings, media: Arc<Watcher>) -> (Arc<TestHost>, Shared, Device) {
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!("orbiters-n4n0-test-{}-{}", std::process::id(), SERIAL.fetch_add(1, Ordering::Relaxed)));
+    let host = Arc::new(TestHost { settings: Mutex::new(settings), _dir: TempDir(dir.clone()), ..Default::default() });
+    let device = Device::default();
+    let platform = Platform {
+        clipboard: Box::new(FakeClipboard),
+        browser: Box::new(device.browser.clone()),
+        sounds: Box::new(device.sounds.clone()),
+        locale: Box::new(English),
+        ears: Box::new(device.ears.clone()),
+        media,
+        mouse: None,
+    };
+    let n = N4n0::new(host.clone(), host.clone(), platform, Files::in_dir(&dir));
+    *host.n4n0.lock().unwrap() = Arc::downgrade(&n);
+    (host, n, device)
+}
+
+fn n4n0(settings: Settings) -> (Arc<TestHost>, Shared) {
+    let (host, n, _) = n4n0_on(settings, Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    (host, n)
+}
+
+/// A stand-in VRChat: its OSC input port, and its OSCQuery service answering `tree` to every request.
+fn vrchat(tree: serde_json::Value) -> (UdpSocket, SocketAddr) {
+    let input = UdpSocket::bind("127.0.0.1:0").unwrap();
+    input.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+    let query = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = query.local_addr().unwrap();
+    let body = tree.to_string();
+    std::thread::spawn(move || {
+        for stream in query.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = stream.write_all(format!("{head}{body}").as_bytes());
+        }
+    });
+    (input, addr)
+}
+
+/// VRChat's tree for an avatar with the N4N0 prop (8 sync values) and a Hoodie toggle.
+fn avatar_tree(id: &str) -> serde_json::Value {
+    let mut parameters = serde_json::Map::new();
+    let mut put = |name: &str, kind: &str, value: serde_json::Value| {
+        parameters.insert(name.replace('/', "_"), json!({ "FULL_PATH": format!("{PARAMETERS_PREFIX}{name}"), "TYPE": kind, "VALUE": [value] }));
+    };
+    for i in 0..8 {
+        put(&format!("N4N0/Text/Sync{i}"), "f", json!(0.0));
+    }
+    put("N4N0/Text/Pointer", "i", json!(0));
+    put("N4N0/Text/Visible", "T", json!(false));
+    put("N4N0/State", "i", json!(0));
+    put("Hoodie", "T", json!(false));
+    put("VelocityX", "f", json!(0.0));
+    json!({ "FULL_PATH": "/avatar", "CONTENTS": {
+        "change": { "FULL_PATH": "/avatar/change", "TYPE": "s", "VALUE": [id] },
+        "parameters": { "FULL_PATH": "/avatar/parameters", "CONTENTS": parameters }
+    } })
+}
+
+fn received(socket: &UdpSocket, wait: Duration) -> Vec<Message> {
+    // N4N0's steps go as bundles: their messages in order.
+    fn unpack(packet: rosc::OscPacket, out: &mut Vec<Message>) {
+        match packet {
+            rosc::OscPacket::Message(m) => out.push((m.addr, m.args[0].clone())),
+            rosc::OscPacket::Bundle(b) => b.content.into_iter().for_each(|p| unpack(p, out)),
+        }
+    }
+    let mut out = Vec::new();
+    let until = Instant::now() + wait;
+    let mut buf = [0u8; 8192];
+    while Instant::now() < until {
+        if let Ok(n) = socket.recv(&mut buf) {
+            if let Ok((_, packet)) = rosc::decoder::decode_udp(&buf[..n]) {
+                unpack(packet, &mut out);
+            }
+        }
+    }
+    out
+}
+
+fn first_row(page: &Page) -> String {
+    contract::page_text(page).lines().next().unwrap_or_default().trim_end().to_string()
+}
+
+/// N4N0 started on the stand-in avatar of `tree`, OSC with it running.
+fn started_on(tree: serde_json::Value) -> (Arc<TestHost>, Shared, UdpSocket) {
+    let (input, query) = vrchat(tree);
+    let mut settings = Settings::default();
+    settings.osc.vrchat_port = input.local_addr().unwrap().port();
+    let (t, n) = n4n0(settings);
+    t.start_osc();
+    t.set_vrchat_query(query);
+    n.start();
+    (t, n, input)
+}
+
+fn orb_with_vrchat() -> (Arc<TestHost>, Shared, UdpSocket) {
+    let (t, n, input) = started_on(avatar_tree("avtr_orb_test"));
+    n.refresh_avatar(None, HashMap::new(), 0);
+    (t, n, input)
+}
+
+#[test]
+fn finds_the_prop_and_shows_text_on_its_panel() {
+    let (t, n, vrchat) = orb_with_vrchat();
+    let status = t.view();
+    assert_eq!(status.avatar_id.as_deref(), Some("avtr_orb_test"));
+    assert_eq!(status.prop_sync, Some(8));
+    assert_eq!(status.controls, 1, "Hoodie: the system and N4N0 parameters are left out");
+    n.command(Command::Say { text: "Bonjour ! Ça va ?".into() });
+    let sent = received(&vrchat, Duration::from_millis(2700));
+    let mut cells: Page = [9; TEXT_LENGTH];
+    let visible = orbiters_orb::text::apply(&mut cells, 8, &sent);
+    assert_eq!(visible, Some(true), "{sent:?}");
+    assert_eq!(first_row(&cells), "Bonjour ! Ça va ?");
+    assert!(sent.contains(&(parameter(params::STATE), OscType::Int(3))), "N4N0 talks while it shows");
+    t.shutdown(&n);
+}
+
+#[test]
+fn testing_holds_a_state_then_plays_them_all() {
+    let (t, n, vrchat) = orb_with_vrchat();
+    n.command(Command::TestFace { face: Some(OrbFace::Happy) });
+    let sent = received(&vrchat, Duration::from_millis(400));
+    assert!(sent.contains(&(parameter(params::STATE), OscType::Int(5))), "held happy: {sent:?}");
+    assert_eq!(t.view().test_face, Some(OrbFace::Happy));
+    n.command(Command::TestCycle);
+    let sent = received(&vrchat, Duration::from_millis(2600));
+    let states: Vec<i32> =
+        sent.iter().filter(|(a, _)| *a == parameter(params::STATE)).filter_map(|(_, v)| if let OscType::Int(i) = v { Some(*i) } else { None }).collect();
+    assert_eq!(states, vec![0, 1], "idle, then listening two seconds later");
+    n.command(Command::TestVisible { on: false });
+    let sent = received(&vrchat, Duration::from_millis(300));
+    assert!(sent.contains(&(parameter(params::VISIBLE), OscType::Bool(false))));
+    t.shutdown(&n);
+}
+
+/// A stand-in Orbiters server: answers each turn request with the next of `answers` (server-sent events) and keeps the
+/// requests' bodies.
+fn orbiters(answers: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/", listener.local_addr().unwrap());
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let seen = bodies.clone();
+    std::thread::spawn(move || {
+        let mut answers = answers.into_iter();
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0usize;
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap_or(0);
+                }
+                line.clear();
+            }
+            let mut body = vec![0u8; length];
+            reader.read_exact(&mut body).unwrap();
+            seen.lock().unwrap().push(serde_json::from_slice::<Value>(&body).unwrap());
+            let events = answers.next().unwrap_or_default();
+            let mut stream = stream;
+            let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{events}").as_bytes());
+        }
+    });
+    (base, bodies)
+}
+
+#[test]
+fn a_turn_runs_the_tools_it_asks_for_and_answers_on_the_panel() {
+    let (t, n, vrchat) = orb_with_vrchat();
+    let first = format!(
+        "event: done\ndata: {}\n\n",
+        json!({ "messages": [{ "role": "user", "content": "mets mon sweat" }],
+                "tool_calls": [{ "id": "call_1", "name": "set_avatar_control", "input": { "control": "hoodie", "on": true } }],
+                "quota": { "used": 1, "limit": 80 } })
+    );
+    let second = format!(
+        "event: text\ndata: {}\n\nevent: text\ndata: {}\n\nevent: done\ndata: {}\n\n",
+        json!({ "delta": "Voilà, ton sweat. " }),
+        json!({ "delta": "Va voir tes potes." }),
+        json!({ "messages": [], "tool_calls": [], "quota": { "used": 2, "limit": 80 } })
+    );
+    let (base, bodies) = orbiters(vec![first, second]);
+    t.sign_in(base, "orbit-test");
+    n.ask("N4N0, mets mon sweat".into(), "typed");
+    let sent = received(&vrchat, Duration::from_millis(4000));
+    assert!(sent.contains(&(parameter("Hoodie"), OscType::Bool(true))), "{sent:?}");
+    let mut cells: Page = [0; TEXT_LENGTH];
+    orbiters_orb::text::apply(&mut cells, 8, &sent);
+    assert_eq!(first_row(&cells), "Voilà, ton sweat. Va voir tes");
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0]["input"]["text"], "N4N0, mets mon sweat");
+    assert!(bodies[0]["context"]["summary"].as_str().unwrap().contains("\"Hoodie\" (parameter"), "{}", bodies[0]["context"]["summary"]);
+    assert_eq!(bodies[0]["context"]["display"]["columns"], 32);
+    assert_eq!(bodies[0]["context"]["locale"], "en-GB", "the device's language");
+    assert!(bodies[0]["tools"].as_array().unwrap().iter().any(|t| t["name"] == "set_avatar_parameter"), "a bare avatar gets its parameters by name");
+    assert_eq!(bodies[1]["tool_results"][0]["id"], "call_1");
+    assert_eq!(bodies[1]["tool_results"][0]["is_error"], false);
+    assert_eq!(bodies[1]["messages"][0]["content"], "mets mon sweat", "the conversation comes back as the server returned it");
+    drop(bodies);
+    let status = t.view();
+    assert_eq!(status.quota.map(|q| q.used), Some(2));
+    let whos: Vec<OrbWho> = status.lines.iter().map(|l| l.who).collect();
+    assert_eq!(whos, vec![OrbWho::You, OrbWho::Note, OrbWho::Orb]);
+    assert!(!status.thinking);
+    t.shutdown(&n);
+}
+
+#[test]
+fn the_wake_word_starts_a_turn_and_other_sentences_stay_here() {
+    let mut settings = Settings::default();
+    settings.orb.wake_word = true;
+    let (t, n) = n4n0(settings);
+    let (base, bodies) = orbiters(vec![format!("event: done\ndata: {}\n\n", json!({ "messages": [], "tool_calls": [] }))]);
+    t.sign_in(base, "orbit-test");
+    // Heard while the wake word is on, but not for N4N0: nothing goes anywhere. A sentence that only starts like a
+    // misheard "Nano" is ordinary speech too.
+    n.heard("I saw a nano drone in that world".into(), false, false);
+    n.heard("Nana, passe-moi le sel.".into(), false, false);
+    // The wake word: the request carries what follows.
+    n.heard("Nano, mets mon sweat à capuche.".into(), false, false);
+    let started = Instant::now();
+    while bodies.lock().unwrap().is_empty() && started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["input"]["text"], "mets mon sweat à capuche.");
+    assert_eq!(bodies[0]["input"]["via"], "voice");
+    assert!(bodies[0]["context"]["display"].is_null(), "no N4N0 prop: no panel limits");
+}
+
+#[test]
+fn a_held_sentence_reaches_orb_after_the_button_is_let_go() {
+    let (t, n) = n4n0(Settings::default());
+    let done = format!("event: done\ndata: {}\n\n", json!({ "messages": [], "tool_calls": [] }));
+    let (base, bodies) = orbiters(vec![done]);
+    t.sign_in(base, "orbit-test");
+    n.orb.lock().unwrap().voice.installed = true;
+    // Pressed, then let go: the worker transcribes only now, so its sentence arrives after the button is up.
+    n.app_talk(true, false);
+    assert!(n.orb.lock().unwrap().listening.is_some());
+    n.app_talk(false, false);
+    assert!(n.orb.lock().unwrap().listening.is_none());
+    let heard = |text: &str, listen: u64| VoiceEvent::Heard { text: text.into(), for_orb: true, seconds: 1.2, decode_ms: 90, listen };
+    n.on_voice_event(heard("mets mon sweat", 1));
+    let started = Instant::now();
+    while bodies.lock().unwrap().is_empty() && started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(bodies.lock().unwrap().len(), 1, "the held sentence went to N4N0");
+    assert_eq!(bodies.lock().unwrap()[0]["input"]["text"], "mets mon sweat");
+    // The overlay goes away while its Talk is held: nothing it heard goes anywhere, even if the worker answers.
+    n.app_talk(true, true);
+    n.link_closed(true);
+    assert!(n.orb.lock().unwrap().listening.is_none());
+    n.on_voice_event(heard("this stays here", 2));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(bodies.lock().unwrap().len(), 1, "a cancelled listen's sentence is dropped");
+    t.shutdown(&n);
+}
+
+/// A `done` event (server-sent) with this conversation and these tool calls.
+fn done(messages: Value, tool_calls: Value) -> String {
+    format!("event: done\ndata: {}\n\n", json!({ "messages": messages, "tool_calls": tool_calls }))
+}
+
+/// Waits until the turn under way ended and the server got `requests` of them.
+fn turn_ended(n: &Shared, bodies: &Arc<Mutex<Vec<Value>>>, requests: usize) {
+    let started = Instant::now();
+    while (bodies.lock().unwrap().len() < requests || n.orb.lock().unwrap().thinking()) && started.elapsed() < Duration::from_secs(8) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(bodies.lock().unwrap().len(), requests);
+    assert!(!n.orb.lock().unwrap().thinking());
+}
+
+#[test]
+fn a_failed_round_leaves_the_conversation_as_it_was() {
+    let (t, n, _vrchat) = orb_with_vrchat();
+    let before = vec![json!({ "role": "user", "content": "salut" }), json!({ "role": "assistant", "content": "yo" })];
+    n.orb.lock().unwrap().conversation = before.clone();
+    // The first request asks for a tool; the round that brings its result fails (the quota used up mid-turn).
+    let call = json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": "call_1", "name": "set_avatar_control", "input": {} }] });
+    let first = done(
+        json!([before[0], before[1], { "role": "user", "content": "mets mon sweat" }, call]),
+        json!([{ "id": "call_1", "name": "set_avatar_control", "input": { "control": "hoodie", "on": true } }]),
+    );
+    let failed = format!("event: error\ndata: {}\n\n", json!({ "code": "quota_exhausted", "message": "Free quota used up until midnight." }));
+    let (base, bodies) = orbiters(vec![first, failed, done(json!([{ "role": "user", "content": "et alors ?" }]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("mets mon sweat".into(), "typed");
+    turn_ended(&n, &bodies, 2);
+    assert_eq!(n.orb.lock().unwrap().conversation, before, "no call without its result stays in the conversation");
+    assert_eq!(t.view().lines.last().map(|l| (l.who, l.text.clone())), Some((OrbWho::Error, "Free quota used up until midnight.".into())));
+    // The next turn starts from the conversation as it was, and hears what the failed one did.
+    n.ask("et alors ?".into(), "typed");
+    turn_ended(&n, &bodies, 3);
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies[2]["messages"], json!(before));
+    let summary = bodies[2]["context"]["summary"].as_str().unwrap();
+    assert!(summary.contains("did not arrive") && summary.contains("turn on \"Hoodie\""), "{summary}");
+    drop(bodies);
+    assert!(n.orb.lock().unwrap().notes.is_empty(), "heard, then dropped");
+    t.shutdown(&n);
+}
+
+#[test]
+fn what_lasts_waits_for_the_owner_s_yes_and_orb_s_own_parameters_are_never_reached() {
+    let (t, n, _vrchat) = orb_with_vrchat();
+    let calls = json!([
+        { "id": "c1", "name": "set_avatar_parameter", "input": { "name": "N4N0/Call/Go", "value": 1 } },
+        { "id": "c2", "name": "hold_avatar_control", "input": { "control": "hoodie", "on": true } },
+        { "id": "c3", "name": "set_afk_message", "input": { "text": "brb, tea", "enabled": true } }
+    ]);
+    let first = done(json!([{ "role": "user", "content": "q" }]), calls);
+    let second = format!("event: text\ndata: {}\n\n{}", json!({ "delta": "Say yes and it's done." }), done(json!([{ "role": "user", "content": "q" }]), json!([])));
+    let (base, bodies) = orbiters(vec![first, second]);
+    t.sign_in(base, "orbit-test");
+    n.ask("garde mon sweat et mets un message".into(), "typed");
+    turn_ended(&n, &bodies, 2);
+    {
+        let bodies = bodies.lock().unwrap();
+        let results = bodies[1]["tool_results"].as_array().unwrap();
+        assert_eq!(results[0]["is_error"], true, "N4N0's own parameters are never reached: {results:?}");
+        assert!(results[1]["content"].as_str().unwrap().contains("waiting_for_owner"));
+        assert!(results[2]["content"].as_str().unwrap().contains("waiting_for_owner"));
+    }
+    let settings = t.settings().orb;
+    assert!(settings.pins.is_empty() && settings.afk_message != "brb, tea", "nothing done before the yes");
+    let status = t.view();
+    assert!(status.confirmations.iter().any(|c| c.approve_url.starts_with(LOCAL_APPROVAL)));
+    assert!(status.lines.iter().any(|l| l.text.starts_with("N4N0 asks to keep \"Hoodie\" on")), "{:?}", status.lines);
+    assert!(status.panel.as_deref().is_some_and(|p| p.starts_with("Say yes and it's done.")), "{:?}", status.panel);
+    // The owner's yes, typed: done here, without the assistant.
+    n.ask("oui vas-y".into(), "typed");
+    let settings = t.settings().orb;
+    assert_eq!(settings.pins.iter().map(|p| p.parameter.as_str()).collect::<Vec<_>>(), vec!["Hoodie"]);
+    assert_eq!((settings.afk_message.as_str(), settings.afk_message_enabled), ("brb, tea", true));
+    assert_eq!(bodies.lock().unwrap().len(), 2, "the yes never went to the server");
+    assert!(t.view().confirmations.is_empty());
+    assert!(n.orb.lock().unwrap().notes.iter().any(|n| n.contains("said yes")), "the assistant hears of it next time");
+    t.shutdown(&n);
+}
+
+/// A stand-in VRChat whose OSCQuery service lists no avatar parameters until `after` (as while it loads a heavy
+/// avatar), then `tree`.
+fn vrchat_late(tree: serde_json::Value, after: Duration) -> (UdpSocket, SocketAddr) {
+    let input = UdpSocket::bind("127.0.0.1:0").unwrap();
+    input.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+    let query = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = query.local_addr().unwrap();
+    let ready = Instant::now() + after;
+    std::thread::spawn(move || {
+        for stream in query.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let body = if Instant::now() < ready { json!({ "FULL_PATH": "/avatar", "CONTENTS": {} }).to_string() } else { tree.to_string() };
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = stream.write_all(format!("{head}{body}").as_bytes());
+        }
+    });
+    (input, addr)
+}
+
+#[test]
+fn an_unread_tree_keeps_the_panel_and_is_read_again_and_vrchat_closing_forgets_the_avatar() {
+    let (input, query) = vrchat_late(avatar_tree("avtr_late"), Duration::from_millis(300));
+    let mut settings = Settings::default();
+    settings.osc.vrchat_port = input.local_addr().unwrap().port();
+    let (t, n) = n4n0(settings);
+    t.start_osc();
+    t.set_vrchat_query(query);
+    {
+        // The last avatar had the prop.
+        let mut rt = n.orb.lock().unwrap();
+        rt.avatar_id = Some("avtr_late".into());
+        rt.sender = Some(TextSender::new(8, Duration::from_millis(300)));
+    }
+    n.refresh_avatar(Some("avtr_late".into()), HashMap::new(), 0);
+    assert_eq!(t.view().prop_sync, Some(8), "not read is not gone: the panel stays");
+    assert!(n.orb.lock().unwrap().tree_unknown);
+    let started = Instant::now();
+    while n.orb.lock().unwrap().tree_unknown && started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let status = t.view();
+    assert_eq!((status.controls, status.prop_sync), (1, Some(8)), "read again a moment later");
+    // VRChat closes: the avatar, and what VRChat said of it, go with it.
+    n.start();
+    n.orb.lock().unwrap().afk = true;
+    t.scene(|s| s.vrchat = true);
+    // Once the orb thread saw VRChat run (a busy computer can take a while to run it).
+    let started = Instant::now();
+    while !n.orb.lock().unwrap().vrchat_running && started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    t.scene(|s| s.vrchat = false);
+    let started = Instant::now();
+    while n.orb.lock().unwrap().avatar_id.is_some() && started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let rt = n.orb.lock().unwrap();
+    assert!(rt.avatar_id.is_none() && rt.sender.is_none() && !rt.afk && rt.controls.is_empty());
+    drop(rt);
+    t.shutdown(&n);
+}
+
+#[test]
+fn an_avatar_change_keeps_what_is_not_the_avatar_s_and_pins_are_not_put_off() {
+    let mut settings = Settings::default();
+    settings.orb.pins.push(Pin { parameter: "Hoodie".into(), value: OscValue::Bool(true) });
+    let (_t, n) = n4n0(settings);
+    let later = Instant::now() + Duration::from_secs(5);
+    n.orb.lock().unwrap().send_at(
+        later,
+        [("/input/Voice".to_string(), OscType::Int(0)), (parameter("Hoodie"), OscType::Bool(true)), ("/usercamera/Mode".to_string(), OscType::Int(0))],
+    );
+    n.on_avatar("avtr_next".into());
+    let left: Vec<String> = n.orb.lock().unwrap().outbox.iter().map(|(_, (a, _))| a.clone()).collect();
+    assert_eq!(left, vec!["/input/Voice", "/usercamera/Mode"], "the mute press's end and the camera put back still go");
+    // A held parameter that keeps moving is put back all the same: its deadline is not pushed back by every change.
+    n.on_parameter("Hoodie", &OscValue::Bool(false));
+    let first = n.orb.lock().unwrap().pins_due;
+    assert!(first.is_some());
+    std::thread::sleep(Duration::from_millis(30));
+    n.on_parameter("Hoodie", &OscValue::Bool(false));
+    assert_eq!(n.orb.lock().unwrap().pins_due, first);
+    // N4N0's own writes coming back are let go at once (the panel's and the screen's, hundreds a second).
+    assert!(N4n0::echo("N4N0/Text/Sync3") && N4n0::echo("N4N0/Screen/Value7") && N4n0::echo("N4N0/State"));
+    assert!(!N4n0::echo("N4N0/Screen/Touch/L0") && !N4n0::echo("N4N0/Talk"));
+    // VRChat's raycasts and contacts are VRChat's, not echoes; the drop flag is the app's own coming back.
+    assert!(!N4n0::echo("N4N0/Screen/Ray/L_Hit") && !N4n0::echo("N4N0/Screen/Ray/R_Ratio"));
+    assert!(!N4n0::echo("N4N0/Card/TouchL") && N4n0::echo("N4N0/Screen/Drop"));
+}
+
+#[test]
+fn a_lost_send_has_the_text_sent_whole_again() {
+    let (t, n, vrchat) = orb_with_vrchat();
+    n.command(Command::Say { text: "Hi, I'm N4N0. Yes, the one in the menu.".into() });
+    let sent = received(&vrchat, Duration::from_millis(3200));
+    let mut panel: Page = [0; TEXT_LENGTH];
+    orbiters_orb::text::apply(&mut panel, 8, &sent);
+    assert_eq!(first_row(&panel), "Hi, I'm N4N0. Yes, the one in");
+    // OSC stops (its settings changed): what is sent meanwhile is lost, and the sender is told.
+    t.stop_osc();
+    let text = "Hi, I'm N4N0. Yes, the one in the menu! And no, I am not your friend, but I will help you all the same today.";
+    n.command(Command::Say { text: text.into() });
+    std::thread::sleep(Duration::from_millis(700));
+    // Back, while VRChat reloaded the avatar without a word: its panel holds nothing. It is cleared, then sent whole.
+    t.start_osc();
+    let sent = received(&vrchat, Duration::from_millis(3500));
+    assert!(sent.contains(&(parameter(params::TEXT_POINTER), OscType::Int(POINTER_CLEAR))), "cleared first: {sent:?}");
+    let mut wiped: Page = [0; TEXT_LENGTH];
+    orbiters_orb::text::apply(&mut wiped, 8, &sent);
+    assert_eq!(first_row(&wiped), "Hi, I'm N4N0. Yes, the one in");
+    t.shutdown(&n);
+}
+
+/// The stand-in avatar's tree with the Menu toggle, and the projected screen (`screen`) or not.
+fn menu_tree(id: &str, screen: bool) -> serde_json::Value {
+    let mut tree = avatar_tree(id);
+    let parameters = &mut tree["CONTENTS"]["parameters"]["CONTENTS"];
+    let mut put = |name: &str, kind: &str, value: serde_json::Value| {
+        parameters[name.replace('/', "_")] = json!({ "FULL_PATH": format!("{PARAMETERS_PREFIX}{name}"), "TYPE": kind, "VALUE": [value] });
+    };
+    put(params::MENU, "T", json!(false));
+    if screen {
+        put(params::SCREEN_OPEN, "T", json!(false));
+        put(params::SCREEN_POINTER, "i", json!(0));
+    }
+    tree
+}
+
+/// N4N0 on the stand-in avatar of `tree`, its startup messages to VRChat drained. Its ears are taken as not installed
+/// (whatever this computer has): opening the menu starts no listen, which would keep the menu from closing idle.
+fn orb_on(tree: serde_json::Value) -> (Arc<TestHost>, Shared, UdpSocket) {
+    let (t, n, input, _) = orb_started(tree);
+    (t, n, input)
+}
+
+/// [`orb_on`], with the startup messages it sent VRChat.
+fn orb_started(tree: serde_json::Value) -> (Arc<TestHost>, Shared, UdpSocket, Vec<Message>) {
+    let (t, n, input) = started_on(tree);
+    n.orb.lock().unwrap().voice.installed = false;
+    n.refresh_avatar(None, HashMap::new(), 0);
+    let sent = received(&input, Duration::from_millis(400));
+    (t, n, input, sent)
+}
+
+/// Waits up to two seconds for `done`.
+fn until(done: impl Fn() -> bool) -> bool {
+    let started = Instant::now();
+    while !done() && started.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    done()
+}
+
+/// What `sent` set `N4N0/Menu` to, in order.
+fn menu_values(sent: &[Message]) -> Vec<bool> {
+    sent.iter().filter(|(a, _)| *a == parameter(params::MENU)).filter_map(|(_, v)| if let OscType::Bool(b) = v { Some(*b) } else { None }).collect()
+}
+
+fn menu_is_open(n: &Shared) -> bool {
+    n.orb.lock().unwrap().screen.menu.open
+}
+
+#[test]
+fn the_menu_toggle_opens_orb_s_menu_and_is_kept_in_step() {
+    let (t, n, vrchat) = orb_on(menu_tree("avtr_menu", true));
+    assert!(t.view().screen, "the prop has the projected screen");
+    // The owner turns the Menu toggle on: the menu opens on the screen, as the binding opens it.
+    n.on_parameter(params::MENU, &OscValue::Bool(true));
+    assert!(until(|| menu_is_open(&n)));
+    let sent = received(&vrchat, Duration::from_millis(400));
+    assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(true))));
+    assert_eq!(menu_values(&sent), Vec::<bool>::new(), "the toggle says so already");
+    // Its echo, and the toggle on again, change nothing.
+    n.on_parameter(params::MENU, &OscValue::Bool(true));
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(menu_is_open(&n));
+    // Idle for too long, the menu closes on its own: the toggle is turned off.
+    n.orb.lock().unwrap().screen.idle_long_ago();
+    n.wake();
+    assert!(until(|| !menu_is_open(&n)));
+    let sent = received(&vrchat, Duration::from_millis(400));
+    assert_eq!(menu_values(&sent), vec![false]);
+    assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(false))));
+    // VRChat sends our false back: it closes nothing more, and opens nothing.
+    n.on_parameter(params::MENU, &OscValue::Bool(false));
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(!menu_is_open(&n));
+    // On, then off at once in VRChat (well within a second of our own off): the menu opens, then closes.
+    n.on_parameter(params::MENU, &OscValue::Bool(true));
+    assert!(until(|| menu_is_open(&n)));
+    n.on_parameter(params::MENU, &OscValue::Bool(false));
+    assert!(until(|| !menu_is_open(&n)));
+    assert_eq!(menu_values(&received(&vrchat, Duration::from_millis(300))), Vec::<bool>::new(), "the toggle said so itself");
+    t.shutdown(&n);
+}
+
+#[test]
+fn quitting_closes_n4n0_s_screen_and_its_menu_toggle() {
+    let (t, n, vrchat) = orb_on(menu_tree("avtr_quit", true));
+    n.menu_open(true);
+    assert!(until(|| menu_is_open(&n)));
+    let opened = received(&vrchat, Duration::from_millis(300));
+    assert!(opened.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(true))), "{opened:?}");
+    // The app quits with the menu on the avatar's screen: both go off, so nothing stays open without the app.
+    t.shutdown(&n);
+    let sent = received(&vrchat, Duration::from_millis(300));
+    assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(false))), "{sent:?}");
+    // The menu's own toggle may say so too as it closes: every word is off.
+    let menu = menu_values(&sent);
+    assert!(!menu.is_empty() && menu.iter().all(|on| !on), "{sent:?}");
+    let last_open = sent.iter().rposition(|m| m.0 == parameter(params::SCREEN_OPEN)).unwrap();
+    assert_eq!(sent[last_open].1, OscType::Bool(false), "nothing opens it again after: {sent:?}");
+}
+
+#[test]
+fn a_screen_left_open_is_closed_at_start() {
+    // The app ended without closing it (it stopped answering, or was killed): VRChat still holds the screen open.
+    let mut tree = menu_tree("avtr_stale_screen", true);
+    tree["CONTENTS"]["parameters"]["CONTENTS"][params::SCREEN_OPEN.replace('/', "_")]["VALUE"] = json!([true]);
+    let (t, n, _vrchat, sent) = orb_started(tree);
+    assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(false))), "the first state closes it: {sent:?}");
+    t.shutdown(&n);
+}
+
+#[test]
+fn our_own_menu_echoes_never_reopen_it_nor_loop() {
+    let (t, n, vrchat) = orb_on(menu_tree("avtr_menu_echo", true));
+    // Opened by another trigger (a hand on N4N0, the binding): the toggle is turned on.
+    n.menu_open(true);
+    assert!(menu_is_open(&n));
+    let sent = received(&vrchat, Duration::from_millis(300));
+    assert_eq!(menu_values(&sent), vec![true]);
+    // Closed again at once (touched again), before VRChat sent our on back: the toggle is turned off.
+    n.menu_open(true);
+    assert!(!menu_is_open(&n));
+    let sent = received(&vrchat, Duration::from_millis(300));
+    assert_eq!(menu_values(&sent), vec![false]);
+    // Now the late echo of our on, then of our off: the menu stays closed.
+    n.on_parameter(params::MENU, &OscValue::Bool(true));
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(!menu_is_open(&n), "an echo of ours asks nothing");
+    n.on_parameter(params::MENU, &OscValue::Bool(false));
+    // Nothing sent back for them: no loop.
+    assert_eq!(menu_values(&received(&vrchat, Duration::from_millis(600))), Vec::<bool>::new());
+    assert!(!menu_is_open(&n));
+    // A third, unexpected off (VRChat saying it again) asks nothing either: the menu is closed already.
+    n.on_parameter(params::MENU, &OscValue::Bool(false));
+    assert_eq!(menu_values(&received(&vrchat, Duration::from_millis(300))), Vec::<bool>::new());
+    assert!(!menu_is_open(&n));
+    t.shutdown(&n);
+}
+
+#[test]
+fn without_the_screen_the_toggle_asks_the_overlay_and_a_close_waits_for_its_answer() {
+    let (t, n, _vrchat) = orb_on(menu_tree("avtr_menu_overlay", false));
+    assert!(!t.view().screen);
+    let request = |t: &TestHost| (t.view().menu_request, t.view().menu_toggle);
+    let (before, _) = request(&t);
+    n.on_parameter(params::MENU, &OscValue::Bool(true));
+    assert!(until(|| request(&t).0 == before.wrapping_add(1)), "the overlay is asked to open its menu");
+    assert!(!request(&t).1, "an open, not a toggle");
+    // Off before the overlay said it opened: no request yet (it would read as another open)...
+    n.on_parameter(params::MENU, &OscValue::Bool(false));
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(request(&t).0, before.wrapping_add(1));
+    // ...the close goes once it says it did.
+    n.command(Command::MenuState { open: true, dictation: false });
+    assert_eq!(request(&t), (before.wrapping_add(2), true));
+    t.shutdown(&n);
+}
+
+/// The stand-in avatar's tree with the projected screen, `N4N0/Screen/Replace`, and VRChat's mode (`VRMode`, 1 in VR;
+/// `None`: not listed).
+fn mode_tree(id: &str, vr_mode: Option<i32>, replace: bool) -> serde_json::Value {
+    let mut tree = menu_tree(id, true);
+    let parameters = &mut tree["CONTENTS"]["parameters"]["CONTENTS"];
+    if let Some(vr_mode) = vr_mode {
+        parameters["VRMode"] = json!({ "FULL_PATH": parameter(params::VR_MODE), "TYPE": "i", "VALUE": [vr_mode] });
+    }
+    parameters["Orb_Screen_Replace"] = json!({ "FULL_PATH": parameter(params::SCREEN_REPLACE), "TYPE": "T", "VALUE": [replace] });
+    tree
+}
+
+/// Whether `sent` writes the avatar's screen (whether it shows, a block).
+fn writes_the_screen(sent: &[Message]) -> bool {
+    sent.iter().any(|(a, _)| a.starts_with(&parameter("N4N0/Screen/")))
+}
+
+/// The Menu toggle turned on: N4N0's menu opens on the avatar's screen, which gets its blocks; the overlay is not asked.
+fn opens_on_the_screen(t: &TestHost, n: &Shared, vrchat: &UdpSocket) {
+    let asked = t.view().menu_request;
+    n.on_parameter(params::MENU, &OscValue::Bool(true));
+    assert!(until(|| menu_is_open(n)));
+    let sent = received(vrchat, Duration::from_millis(600));
+    assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(true))), "{sent:?}");
+    assert!(sent.iter().any(|(a, _)| *a == parameter(params::SCREEN_POINTER)), "the owner's screen gets its blocks");
+    assert_eq!(t.view().menu_request, asked, "the overlay is not asked");
+}
+
+#[test]
+fn in_vr_without_replace_the_overlay_shows_the_menu_and_the_screen_is_never_written() {
+    let (t, n, vrchat, startup) = orb_started(mode_tree("avtr_vr", Some(1), false));
+    assert!(!t.view().screen, "in VR, a screen that does not replace the overlay is not used");
+    assert_eq!(t.view().prop_sync, Some(8), "the panel is used all the same");
+    // The Menu toggle on: the overlay is asked to open N4N0's menu, and says it did; off: to close it.
+    let asked = t.view().menu_request;
+    n.on_parameter(params::MENU, &OscValue::Bool(true));
+    assert!(until(|| t.view().menu_request == asked.wrapping_add(1)), "the overlay is asked to open its menu");
+    n.command(Command::MenuState { open: true, dictation: false });
+    n.on_parameter(params::MENU, &OscValue::Bool(false));
+    assert!(until(|| t.view().menu_request == asked.wrapping_add(2)));
+    assert!(t.view().menu_toggle, "a close");
+    // Until the overlay says it closed, the toggle the owner turned off is left so (not turned on, then off).
+    let mut sent = received(&vrchat, Duration::from_millis(200));
+    n.command(Command::MenuState { open: false, dictation: false });
+    sent.extend(received(&vrchat, Duration::from_millis(300)));
+    assert_eq!(menu_values(&sent), Vec::<bool>::new());
+    assert!(!writes_the_screen(&startup) && !writes_the_screen(&sent), "{startup:?} {sent:?}");
+    assert!(!menu_is_open(&n));
+    // N4N0/Screen/Replace on, as VRChat says: the screen shows the menu from now on.
+    n.on_parameter(params::SCREEN_REPLACE, &OscValue::Bool(true));
+    assert!(until(|| t.view().screen));
+    opens_on_the_screen(&t, &n, &vrchat);
+    t.shutdown(&n);
+}
+
+#[test]
+fn with_replace_in_vr_or_in_desktop_mode_the_screen_shows_the_menu() {
+    for (id, vr_mode, replace) in [("avtr_replace", 1, true), ("avtr_desktop", 0, false)] {
+        let (t, n, vrchat) = orb_on(mode_tree(id, Some(vr_mode), replace));
+        assert!(t.view().screen, "{id}");
+        opens_on_the_screen(&t, &n, &vrchat);
+        t.shutdown(&n);
+    }
+}
+
+#[test]
+fn the_screen_keeps_the_thumbnail_size_vrchat_says() {
+    // 128 bytes as the avatar's tree says: the owner's blocks reach past the 744 bytes of 72-byte thumbnails.
+    let mut tree = mode_tree("avtr_thumbnails_128", Some(0), false);
+    tree["CONTENTS"]["parameters"]["CONTENTS"]["Orb_Screen_ThumbnailBytes"] =
+        json!({ "FULL_PATH": parameter(params::SCREEN_THUMBNAIL_BYTES), "TYPE": "i", "VALUE": [128] });
+    let (t, n, vrchat) = orb_on(tree);
+    assert!(until(|| n.orb.lock().unwrap().screen.thumbnail == 128));
+    opens_on_the_screen(&t, &n, &vrchat);
+    // A size no screen keeps: 72, the default.
+    n.on_parameter(params::SCREEN_THUMBNAIL_BYTES, &OscValue::Int(100));
+    assert!(until(|| n.orb.lock().unwrap().screen.thumbnail == 72));
+    t.shutdown(&n);
+    // Neither VRChat nor a manifest says: 72.
+    let (t, n, _vrchat) = orb_on(mode_tree("avtr_thumbnails_default", Some(0), false));
+    assert!(until(|| t.view().screen));
+    assert_eq!(n.orb.lock().unwrap().screen.thumbnail, 72);
+    t.shutdown(&n);
+    assert_eq!(thumbnail_bytes(Some(128), None), Some(128));
+    assert_eq!(thumbnail_bytes(Some(4), None), None);
+    assert_eq!(int_value(&OscValue::Float(72.0)), Some(72));
+}
+
+#[test]
+fn vrchat_in_vr_without_replace_takes_the_menu_off_the_screen_and_the_toggle_follows() {
+    let (t, n, vrchat) = orb_on(mode_tree("avtr_desktop_then_vr", Some(0), false));
+    opens_on_the_screen(&t, &n, &vrchat);
+    // VRChat says it runs in VR: the screen's menu closes (the animator hides the screen), the Menu toggle is turned
+    // off, and nothing more is written to the screen.
+    n.on_parameter(params::VR_MODE, &OscValue::Int(1));
+    assert!(until(|| !t.view().screen));
+    assert!(!menu_is_open(&n));
+    let mut sent = received(&vrchat, Duration::from_millis(50));
+    let later = received(&vrchat, Duration::from_millis(400));
+    assert!(!writes_the_screen(&later), "{later:?}");
+    sent.extend(later);
+    assert_eq!(menu_values(&sent), vec![false]);
+    // The toggle on again: the overlay is asked.
+    let asked = t.view().menu_request;
+    n.on_parameter(params::MENU, &OscValue::Bool(true));
+    assert!(until(|| t.view().menu_request == asked.wrapping_add(1)));
+    let sent = received(&vrchat, Duration::from_millis(300));
+    assert!(!writes_the_screen(&sent), "{sent:?}");
+    t.shutdown(&n);
+}
+
+#[test]
+fn until_vrchat_says_its_mode_vr_is_taken_while_steamvr_runs() {
+    let (t, n, _vrchat) = orb_on(mode_tree("avtr_mode_unknown", None, false));
+    assert!(t.view().screen, "no SteamVR: desktop mode, the screen");
+    t.scene(|s| s.steamvr = true);
+    n.wake();
+    assert!(until(|| !t.view().screen), "SteamVR runs: VR, the overlay");
+    // VRChat says it runs in desktop mode, SteamVR open beside it: the screen.
+    n.on_parameter(params::VR_MODE, &OscValue::Int(0));
+    assert!(until(|| t.view().screen));
+    t.shutdown(&n);
+}
+
+#[test]
+fn the_menu_shows_on_the_screen_in_desktop_mode_or_with_replace() {
+    let (_t, n) = n4n0(Settings::default());
+    let mut rt = n.orb.lock().unwrap();
+    rt.screen_present = true;
+    rt.screen_sync = Some(8);
+    // VRChat's mode (VR), N4N0/Screen/Replace, SteamVR runs: the screen.
+    for (vr, replace, steamvr, screen) in [
+        (Some(false), Some(false), true, true),
+        (Some(true), Some(false), false, false),
+        (Some(true), Some(true), true, true),
+        (Some(true), None, true, true),
+        (None, Some(false), true, false),
+        (None, Some(false), false, true),
+    ] {
+        rt.vr_mode = vr;
+        rt.screen_replace = replace;
+        rt.screen_place(steamvr);
+        assert_eq!(rt.screen.available, screen, "VR {vr:?}, Replace {replace:?}, SteamVR {steamvr}");
+    }
+    // A prop without the screen (or text values it cannot use) never has it.
+    rt.vr_mode = Some(false);
+    rt.screen_sync = None;
+    rt.screen_place(false);
+    assert!(!rt.screen.available);
+    rt.screen_present = false;
+    rt.screen_sync = Some(8);
+    rt.screen_place(false);
+    assert!(!rt.screen.available);
+    drop(rt);
+    // Replace as VRChat holds it, else the manifest's default; neither: a prop from before it.
+    let manifest = |default: f32| {
+        AvatarManifest::parse(&format!(
+            r#"{{ "format": "orbiters.avatar", "version": 1, "avatar_id": "avtr_x",
+                 "parameters": [ {{ "name": "{}", "type": "bool", "synced": false, "default": {default} }} ] }}"#,
+            params::SCREEN_REPLACE
+        ))
+        .unwrap()
+    };
+    assert_eq!(screen_replace(Some(false), Some(&manifest(1.0))), Some(false));
+    assert_eq!(screen_replace(None, Some(&manifest(1.0))), Some(true));
+    assert_eq!(screen_replace(None, Some(&manifest(0.0))), Some(false));
+    let old = AvatarManifest::parse(r#"{ "format": "orbiters.avatar", "version": 1, "avatar_id": "avtr_x" }"#).unwrap();
+    assert_eq!(screen_replace(None, Some(&old)), None);
+    assert_eq!(screen_replace(None, None), None);
+}
+
+/// The stand-in mouse: the left button and VRChat in front as a test sets them, and how often it was read.
+#[derive(Clone, Default)]
+struct FakeMouse(Arc<Mutex<(bool, bool, usize)>>);
+
+impl Mouse for FakeMouse {
+    fn read(&mut self, vrchat: u32) -> MouseState {
+        assert_eq!(vrchat, VRCHAT_PID);
+        let mut m = self.0.lock().unwrap();
+        m.2 += 1;
+        // VRChat in mouse-look: its cursor hidden.
+        MouseState { down: m.0, front: m.1, cursor: false }
+    }
+}
+
+impl FakeMouse {
+    fn set(&self, down: bool, front: bool) {
+        let mut m = self.0.lock().unwrap();
+        (m.0, m.1) = (down, front);
+    }
+
+    fn reads(&self) -> usize {
+        self.0.lock().unwrap().2
+    }
+}
+
+const VRCHAT_PID: u32 = 4242;
+
+/// [`orb_on`] with the stand-in mouse, VRChat's process known.
+fn orb_with_mouse(tree: serde_json::Value) -> (Arc<TestHost>, Shared, UdpSocket, FakeMouse) {
+    let (t, n, vrchat) = orb_on(tree);
+    let mouse = FakeMouse::default();
+    n.orb.lock().unwrap().screen.mouse = Box::new(mouse.clone());
+    t.scene(|s| s.vrchat_pid = Some(VRCHAT_PID));
+    (t, n, vrchat, mouse)
+}
+
+/// What VRChat sends of the eyes (at rest) and the gaze point when the owner looks at pixel (`x`, `y`) of the page, each
+/// contact 1 cm as the prop's.
+fn look_at(n: &Shared, x: f32, y: f32) {
+    use orbiters_orb::menu::{layout, touch};
+    let eyes = params::GAZE_EYES;
+    let on = [x as f64 / layout::WIDTH as f64 * touch::WIDTH - touch::WIDTH / 2.0, touch::HEIGHT / 2.0 - y as f64 / layout::HEIGHT as f64 * touch::HEIGHT, 0.0];
+    let ahead = [on[0] - eyes[0], on[1] - eyes[1], on[2] - eyes[2]];
+    let length = (ahead[0].powi(2) + ahead[1].powi(2) + ahead[2].powi(2)).sqrt();
+    let gaze = [eyes[0] + 0.38 * ahead[0] / length, eyes[1] + 0.38 * ahead[1] / length, eyes[2] + 0.38 * ahead[2] / length];
+    for (prefix, at) in [(params::SCREEN_EYE_PREFIX, eyes), (params::SCREEN_GAZE_PREFIX, gaze)] {
+        for (i, receiver) in touch::RECEIVERS.iter().enumerate() {
+            let d = ((at[0] - receiver[0]).powi(2) + (at[1] - receiver[1]).powi(2) + (at[2] - receiver[2]).powi(2)).sqrt() - 0.01;
+            n.on_parameter(&format!("{prefix}{i}"), &OscValue::Float((1.0 - d / touch::RADIUS).clamp(0.0, 1.0) as f32));
+        }
+    }
+}
+
+/// Home's YouTube tile: its index in the page's layout, and its middle on the page.
+fn youtube_tile() -> (usize, f32, f32) {
+    use orbiters_orb::menu::layout::{self, ScreenPage};
+    let home = layout::cached(ScreenPage::Home);
+    let (i, e) = home.elements.iter().enumerate().find(|(_, e)| e.target == orbiters_orb::menu::Target::YouTube).unwrap();
+    (i, e.rect.x as f32 + e.rect.w as f32 / 2.0, e.rect.y as f32 + e.rect.h as f32 / 2.0)
+}
+
+/// A left click: down, then up a tenth of a second later.
+fn click(mouse: &FakeMouse, front: bool) {
+    mouse.set(true, front);
+    std::thread::sleep(Duration::from_millis(100));
+    mouse.set(false, front);
+    std::thread::sleep(Duration::from_millis(100));
+}
+
+#[test]
+fn in_desktop_mode_looking_hovers_and_a_left_click_presses() {
+    use orbiters_orb::menu::Page as MenuPage;
+    let (t, n, vrchat, mouse) = orb_with_mouse(mode_tree("avtr_look", Some(0), false));
+    let screen = |n: &Shared| {
+        let rt = n.orb.lock().unwrap();
+        (rt.screen.hover, rt.screen.menu.page)
+    };
+    // The menu closed: the mouse is never read.
+    click(&mouse, true);
+    assert_eq!(mouse.reads(), 0);
+    opens_on_the_screen(&t, &n, &vrchat);
+    // The hovered element follows the gaze.
+    let (tile, x, y) = youtube_tile();
+    look_at(&n, x, y);
+    assert!(until(|| screen(&n).0 == Some(tile)), "the tile looked at is hovered");
+    look_at(&n, x, -100.0);
+    assert!(until(|| screen(&n).0.is_none()), "above the screen: nothing");
+    // A click with nothing looked at presses nothing.
+    click(&mouse, true);
+    assert_eq!(screen(&n), (None, MenuPage::Home));
+    // Back on the tile, VRChat behind another window: its click is not for VRChat.
+    look_at(&n, x, y);
+    assert!(until(|| screen(&n).0 == Some(tile)));
+    click(&mouse, false);
+    assert_eq!(screen(&n).1, MenuPage::Home);
+    assert!(n.orb.lock().unwrap().screen.pressed.is_none());
+    // VRChat in front: the click presses the tile (YouTube's search opens); the press ends once let go.
+    mouse.set(true, true);
+    assert!(until(|| screen(&n).1 == MenuPage::Search));
+    mouse.set(false, true);
+    assert!(until(|| n.orb.lock().unwrap().screen.pressed.is_none()));
+    assert!(mouse.reads() > 0);
+    t.shutdown(&n);
+}
+
+#[test]
+fn in_vr_the_gaze_and_the_mouse_are_left_alone() {
+    let (t, n, vrchat, mouse) = orb_with_mouse(mode_tree("avtr_look_vr", Some(1), true));
+    opens_on_the_screen(&t, &n, &vrchat);
+    let (_, x, y) = youtube_tile();
+    look_at(&n, x, y);
+    click(&mouse, true);
+    let rt = n.orb.lock().unwrap();
+    assert_eq!(rt.screen.hover, None, "the fingers point in VR");
+    assert_eq!(rt.screen.menu.page, orbiters_orb::menu::Page::Home);
+    drop(rt);
+    assert_eq!(mouse.reads(), 0, "the mouse is not read in VR");
+    t.shutdown(&n);
+}
+
+/// A stand-in VRChat whose OSCQuery tree the test changes as it goes.
+fn vrchat_live(tree: Arc<Mutex<serde_json::Value>>) -> (UdpSocket, SocketAddr) {
+    let input = UdpSocket::bind("127.0.0.1:0").unwrap();
+    input.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+    let query = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = query.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in query.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let body = tree.lock().unwrap().to_string();
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = stream.write_all(format!("{head}{body}").as_bytes());
+        }
+    });
+    (input, addr)
+}
+
+/// Sets a node of the stand-in avatar's tree (`access` 3: OSC may write it, 1: read only).
+fn put_node(tree: &mut serde_json::Value, path: &str, kind: &str, value: serde_json::Value, access: u8) {
+    let node = json!({ "FULL_PATH": path, "TYPE": kind, "ACCESS": access, "VALUE": [value] });
+    match path.strip_prefix(PARAMETERS_PREFIX) {
+        Some(name) => tree["CONTENTS"]["parameters"]["CONTENTS"][name.replace('/', "_")] = node,
+        None => tree["CONTENTS"][path.replace('/', "_")] = node,
+    }
+}
+
+/// The stand-in avatar for saved states: toggles, a slider, an outfit, GoGoLoco, VRChat's own (read only), N4N0's, the
+/// capture kit's toggle, and its size.
+fn states_tree(id: &str) -> serde_json::Value {
+    let mut tree = avatar_tree(id);
+    for (name, kind, value, access) in [
+        ("Hoodie", "T", json!(true), 3),
+        ("Hue", "f", json!(0.25), 3),
+        ("Outfit", "i", json!(2), 3),
+        ("Go/Stationary", "T", json!(true), 3),
+        ("VRCEmote", "i", json!(5), 3),
+        ("VRMode", "i", json!(1), 1),
+        ("VelocityX", "f", json!(0.0), 1),
+        ("N4N0/Visible", "T", json!(true), 3),
+        ("OrbitersRecord", "T", json!(false), 3),
+    ] {
+        put_node(&mut tree, &format!("{PARAMETERS_PREFIX}{name}"), kind, value, access);
+    }
+    put_node(&mut tree, orbiters_orb::states::EYE_HEIGHT, "f", json!(1.62), 3);
+    put_node(&mut tree, orbiters_orb::states::EYE_HEIGHT_SCALING_ALLOWED, "T", json!(true), 1);
+    tree
+}
+
+/// What `sent` set the stand-in avatar's own parameters and its size to (N4N0's own and the menu's left out).
+fn avatar_writes(sent: &[Message]) -> Vec<(String, OscType)> {
+    sent.iter()
+        .filter(|(a, _)| (a.starts_with(PARAMETERS_PREFIX) && !a.contains("N4N0/")) || a == orbiters_orb::states::EYE_HEIGHT)
+        .map(|(a, v)| (a.trim_start_matches(PARAMETERS_PREFIX).to_string(), v.clone()))
+        .collect()
+}
+
+#[test]
+fn a_state_keeps_what_osc_may_write_and_puts_back_only_what_it_should() {
+    let tree = Arc::new(Mutex::new(states_tree("avtr_states")));
+    let (input, query) = vrchat_live(tree.clone());
+    let mut settings = Settings::default();
+    settings.osc.vrchat_port = input.local_addr().unwrap().port();
+    let (t, n) = n4n0(settings);
+    t.start_osc();
+    t.set_vrchat_query(query);
+    n.start();
+    n.orb.lock().unwrap().voice.installed = false;
+    n.refresh_avatar(None, HashMap::new(), 0);
+    received(&input, Duration::from_millis(300));
+    // Saved: what OSC may write (GoGoLoco's too), never VRChat's own, N4N0's nor the capture kit's toggle.
+    n.command(Command::States { action: StateAction::Save { name: Some("Cosy".into()) } });
+    assert!(until(|| t.view().states.states.len() == 1 && !t.view().states.saving));
+    let state = t.view().states.states[0].clone();
+    assert_eq!((state.name.as_str(), state.parameters, state.pose_parameters), ("Cosy", 5, 2), "{state:?}");
+    assert_eq!(state.eye_height, Some(1.62));
+    assert!(!state.pose && !state.size && !state.default, "the boxes are off, no default");
+    // The avatar changes: applying puts back what differs, the pose and the size only with their boxes.
+    {
+        let mut t = tree.lock().unwrap();
+        for (name, kind, value) in [("Hoodie", "T", json!(false)), ("Outfit", "i", json!(0)), ("Go/Stationary", "T", json!(false)), ("VRCEmote", "i", json!(0))] {
+            put_node(&mut t, &format!("{PARAMETERS_PREFIX}{name}"), kind, value, 3);
+        }
+        put_node(&mut t, orbiters_orb::states::EYE_HEIGHT, "f", json!(1.2), 3);
+    }
+    n.command(Command::States { action: StateAction::Apply { id: state.id.clone() } });
+    let sent = avatar_writes(&received(&input, Duration::from_millis(800)));
+    let expected = vec![("Hoodie".into(), OscType::Bool(true)), ("Hue".into(), OscType::Float(0.25)), ("Outfit".into(), OscType::Int(2))];
+    assert_eq!(sent, expected, "every parameter it saved, forced: neither the pose nor the size");
+    n.command(Command::States { action: StateAction::Options { id: state.id.clone(), pose: true, size: true } });
+    assert!(until(|| t.view().states.states[0].pose));
+    n.command(Command::States { action: StateAction::Apply { id: state.id.clone() } });
+    let sent = avatar_writes(&received(&input, Duration::from_millis(800)));
+    let names: Vec<&str> = sent.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["Go/Stationary", "Hoodie", "Hue", "Outfit", "VRCEmote", orbiters_orb::states::EYE_HEIGHT]);
+    assert_eq!(sent.last().unwrap().1, OscType::Float(1.62));
+    // The default: put back once VRChat loaded the avatar again (a world joined, or a switch back to it).
+    n.command(Command::States { action: StateAction::Default { id: Some(state.id.clone()) } });
+    assert!(until(|| t.view().states.states[0].default));
+    n.on_avatar("avtr_states".into());
+    let early = avatar_writes(&received(&input, Duration::from_millis(1000)));
+    assert!(early.iter().all(|(n, _)| n != "Go/Stationary"), "VRChat applies its own first: {early:?}");
+    let later = avatar_writes(&received(&input, Duration::from_millis(2600)));
+    assert!(
+        later.contains(&("Go/Stationary".into(), OscType::Bool(true))) && later.contains(&(orbiters_orb::states::EYE_HEIGHT.into(), OscType::Float(1.62))),
+        "{later:?}"
+    );
+    // Renamed, deleted: the list follows, the default with it.
+    n.command(Command::States { action: StateAction::Rename { id: state.id.clone(), name: "Evening".into() } });
+    assert!(until(|| t.view().states.states[0].name == "Evening"));
+    n.command(Command::States { action: StateAction::Delete { id: state.id } });
+    assert!(until(|| t.view().states.states.is_empty()));
+    // They were kept in N4N0's own file.
+    assert!(n.files.states.is_file());
+    t.shutdown(&n);
+}
+
+/// A stand-in Orbiters for link cards: each request answered with the next of `answers` (status, body); what it got.
+#[allow(clippy::type_complexity)]
+fn drops_server(answers: Vec<(u16, &'static str)>) -> (String, Arc<Mutex<Vec<(String, Option<String>, String)>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/", listener.local_addr().unwrap());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let kept = seen.clone();
+    std::thread::spawn(move || {
+        let mut answers = answers.into_iter();
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let (mut first, mut auth, mut length) = (String::new(), None, 0usize);
+            reader.read_line(&mut first).unwrap();
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                let lower = line.to_ascii_lowercase();
+                if let Some(v) = lower.strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap_or(0);
+                }
+                if lower.starts_with("authorization:") {
+                    auth = Some(line["authorization:".len()..].trim().to_string());
+                }
+                line.clear();
+            }
+            let mut body = vec![0u8; length];
+            reader.read_exact(&mut body).unwrap();
+            kept.lock().unwrap().push((first.trim().to_string(), auth, String::from_utf8_lossy(&body).into_owned()));
+            let (status, text) = answers.next().unwrap_or((500, "{}"));
+            let mut stream = stream;
+            let _ = write!(stream, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len());
+        }
+    });
+    (base, seen)
+}
+
+/// The stand-in avatar's tree with a screen of version 5 (cards), in VRChat's desktop mode.
+fn card_tree(id: &str) -> serde_json::Value {
+    let mut tree = mode_tree(id, Some(0), false);
+    put_node(&mut tree, &parameter(params::SCREEN_VERSION), "i", json!(5), 3);
+    for name in [params::SCREEN_DROP, params::CARD_TOUCH_L, params::CARD_TOUCH_R] {
+        put_node(&mut tree, &parameter(name), "T", json!(false), 3);
+    }
+    tree
+}
+
+/// The values `sent` set `N4N0/Text/Pointer` to, in order.
+fn text_pointers(sent: &[Message]) -> Vec<i32> {
+    sent.iter().filter(|(a, _)| *a == parameter(params::TEXT_POINTER)).filter_map(|(_, v)| if let OscType::Int(i) = v { Some(*i) } else { None }).collect()
+}
+
+fn copied(text: &str) -> bool {
+    CLIPBOARD.lock().unwrap().iter().any(|t| t == text)
+}
+
+#[test]
+fn a_dropped_card_stays_frozen_for_everyone_then_goes_or_the_menu_takes_it_back() {
+    let (t, n, vrchat) = orb_on(card_tree("avtr_card"));
+    assert!(until(|| t.view().can_drop), "a screen of version 5 drops cards");
+    let link = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    n.command(Command::Drop { link: link.into(), title: "Never Gonna Give You Up".into(), video: None });
+    let sent = received(&vrchat, Duration::from_millis(1600));
+    let drop_at = sent.iter().position(|m| *m == (parameter(params::SCREEN_DROP), OscType::Bool(true))).expect("dropped");
+    let open_at = sent.iter().position(|m| *m == (parameter(params::SCREEN_OPEN), OscType::Bool(true))).expect("shown");
+    assert!(drop_at < open_at, "dropped before it shows: it stays whatever the Menu toggle says");
+    assert_eq!(n.orb.lock().unwrap().screen.menu.page, orbiters_orb::menu::Page::Card);
+    // Everyone else: the card's first block, then 253 (their copy freezes where it is).
+    let pointers = text_pointers(&sent);
+    let first = orbiters_orb::menu::screen::first_pointer(8) as i32;
+    let block = pointers.iter().position(|&p| p >= first && p < 253).expect("a block for everyone else");
+    let freeze = pointers.iter().position(|&p| p == 253).expect("frozen");
+    assert!(freeze > block, "{pointers:?}");
+    let card = t.view().card.clone().expect("the card shows");
+    assert!((13..=15).contains(&card.left), "{card:?}");
+    assert!(menu_values(&sent).iter().all(|on| !on), "the card is not the menu: {:?}", menu_values(&sent));
+    // A hand on it: its link is copied, here.
+    n.on_parameter(params::CARD_TOUCH_R, &OscValue::Bool(true));
+    assert!(until(|| copied(link)));
+    n.on_parameter(params::CARD_TOUCH_R, &OscValue::Bool(false));
+    // Opening the menu again takes it back: no longer dropped, everyone else's copy closed (254), then Home.
+    n.menu_open(false);
+    let sent = received(&vrchat, Duration::from_millis(900));
+    assert!(sent.contains(&(parameter(params::SCREEN_DROP), OscType::Bool(false))), "{sent:?}");
+    assert!(text_pointers(&sent).contains(&254));
+    {
+        let rt = n.orb.lock().unwrap();
+        assert!(rt.screen.menu.open && rt.screen.menu.page == orbiters_orb::menu::Page::Home && rt.screen.menu.card.is_none());
+    }
+    assert!(t.view().card.is_none());
+    // Dropped again, and its time is up: no longer dropped, the screen closes for its owner and everyone else.
+    n.command(Command::Drop { link: link.into(), title: "Again".into(), video: None });
+    assert!(until(|| t.view().card.is_some()));
+    received(&vrchat, Duration::from_millis(400));
+    n.orb.lock().unwrap().screen.card_ends_now();
+    n.wake();
+    let sent = received(&vrchat, Duration::from_millis(900));
+    assert!(sent.contains(&(parameter(params::SCREEN_DROP), OscType::Bool(false))), "{sent:?}");
+    assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(false))));
+    assert!(text_pointers(&sent).contains(&254));
+    assert!(!menu_is_open(&n) && t.view().card.is_none());
+    t.shutdown(&n);
+}
+
+#[test]
+fn a_card_is_told_to_orbiters_and_someone_else_s_is_fetched_when_grabbed() {
+    let (t, n, _vrchat) = orb_on(card_tree("avtr_card_server"));
+    let (base, seen) = drops_server(vec![
+        (201, r#"{ "expiresAt": "2026-10-25T10:00:20.000Z" }"#),
+        (200, r#"{ "link": "https://www.youtube.com/watch?v=jNQXAC9IVRw", "title": "Me at the zoo", "droppedAt": "2026-10-25T10:00:30.000Z" }"#),
+        (404, r#"{ "error": "No card was dropped here in the last twenty seconds." }"#),
+    ]);
+    t.sign_in(base, "orbit-test");
+    let world = "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b";
+    t.world(|w| {
+        w.world_id = Some(world.into());
+        w.instance = Some("12345~private(usr_1339e525-d75d-4832-9104-98dd89287681)".into());
+        w.in_world = true;
+    });
+    let hash = t.world.lock().unwrap().instance_hash().unwrap();
+    assert!(until(|| t.view().can_drop));
+    let link = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    n.command(Command::Drop { link: link.into(), title: "Never Gonna".into(), video: None });
+    assert!(until(|| !seen.lock().unwrap().is_empty()));
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].0, "POST /orb/drops HTTP/1.1");
+        assert_eq!(seen[0].1.as_deref(), Some("Bearer orbit-test"));
+        let body: serde_json::Value = serde_json::from_str(&seen[0].2).unwrap();
+        assert_eq!(body, json!({ "instance": hash, "link": link, "title": "Never Gonna" }));
+    }
+    // The owner's card gone, a hand on someone else's: Orbiters gives the newest dropped here.
+    n.orb.lock().unwrap().screen.card_ends_now();
+    n.wake();
+    assert!(until(|| t.view().card.is_none()));
+    n.on_parameter(params::CARD_TOUCH_L, &OscValue::Bool(true));
+    assert!(until(|| copied("https://www.youtube.com/watch?v=jNQXAC9IVRw")));
+    assert_eq!(seen.lock().unwrap()[1].0, format!("GET /orb/drops/latest?instance={hash} HTTP/1.1"));
+    // Both hands at once, or one brushing it again at once: one grab.
+    n.on_parameter(params::CARD_TOUCH_R, &OscValue::Bool(true));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(seen.lock().unwrap().len(), 2, "no second request");
+    t.shutdown(&n);
+}
+
+#[test]
+fn in_vr_without_replace_a_card_shows_on_the_screen_only_while_it_lasts() {
+    let mut tree = card_tree("avtr_card_vr");
+    tree["CONTENTS"]["parameters"]["CONTENTS"]["VRMode"] = json!({ "FULL_PATH": parameter(params::VR_MODE), "TYPE": "i", "VALUE": [1] });
+    let (t, n, vrchat, startup) = orb_started(tree);
+    assert!(!t.view().screen, "the menu is the overlay's");
+    assert!(t.view().can_drop, "the screen is there for cards");
+    assert!(!writes_the_screen(&startup), "{startup:?}");
+    // Dropped from the overlay's menu: the screen shows it, dropped, for its owner and everyone else.
+    let link = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    n.command(Command::Drop { link: link.into(), title: "Never Gonna".into(), video: None });
+    let sent = received(&vrchat, Duration::from_millis(1200));
+    assert!(sent.contains(&(parameter(params::SCREEN_DROP), OscType::Bool(true))), "{sent:?}");
+    assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(true))));
+    assert!(text_pointers(&sent).contains(&253));
+    // The overlay's menu opening takes it back: the screen closes again, and stays unwritten.
+    n.command(Command::MenuState { open: true, dictation: false });
+    let sent = received(&vrchat, Duration::from_millis(800));
+    assert!(sent.contains(&(parameter(params::SCREEN_DROP), OscType::Bool(false))), "{sent:?}");
+    assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(false))));
+    assert!(text_pointers(&sent).contains(&254));
+    let later = received(&vrchat, Duration::from_millis(400));
+    assert!(!writes_the_screen(&later), "{later:?}");
+    assert!(t.view().card.is_none());
+    t.shutdown(&n);
+}
+
+// What N4N0 asks of each platform trait, with the stand-ins.
+
+/// Waits up to two seconds for `done`, then says whether it came.
+fn soon(done: impl Fn() -> bool) -> bool {
+    until(done)
+}
+
+#[test]
+fn the_ears_start_with_vrchat_listen_and_stop_and_a_crash_is_told() {
+    let media = Arc::new(Watcher::new(|| Box::new(NoMedia)));
+    let (t, n, device) = n4n0_on(Settings::default(), media);
+    *device.ears.allowed.lock().unwrap() = true;
+    n.orb.lock().unwrap().voice.installed = true;
+    // VRChat closed: no worker; open: one, started with the models' folder.
+    n.voice_follow();
+    assert!(device.ears.workers.lock().unwrap().is_empty());
+    t.scene(|s| s.vrchat = true);
+    n.voice_follow();
+    let worker = device.ears.workers.lock().unwrap()[0].clone();
+    assert!(matches!(&worker.commands()[..], [VoiceCommand::Start { models, wake_word: false, .. }] if *models == n.files.models));
+    worker.say(VoiceEvent::Ready { engine: "test".into(), load_ms: 1 });
+    assert!(t.view().voice.running);
+    // A wake word turned on reaches the running worker, without starting another.
+    t.settings.lock().unwrap().orb.wake_word = true;
+    n.voice_follow();
+    assert!(matches!(worker.commands().last(), Some(VoiceCommand::WakeWord { on: true, .. })));
+    assert_eq!(device.ears.workers.lock().unwrap().len(), 1);
+    // Talk: a held listen, then its end.
+    n.app_talk(true, false);
+    assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { hold: true, id: 1 })));
+    n.app_talk(false, false);
+    assert!(matches!(worker.commands().last(), Some(VoiceCommand::Finish)));
+    // It stops on its own: N4N0 says so and the next start waits.
+    worker.crash(3, "something went wrong");
+    assert!(soon(|| t.view().voice.error.as_deref() == Some("N4N0's ears stopped (exit code 0x3): something went wrong.")));
+    assert!(*worker.dropped.lock().unwrap());
+    n.voice_follow();
+    assert_eq!(device.ears.workers.lock().unwrap().len(), 1, "not started again at once");
+    // VRChat closes: no worker at all (none runs now; the lease of the last Talk keeps none either once it ended).
+    t.scene(|s| s.vrchat = false);
+    n.voice_stop();
+    // Installing runs a worker of its own.
+    n.command(Command::InstallVoice);
+    assert!(soon(|| t.view().voice.downloading == Some(0.0)));
+    let installer = device.ears.workers.lock().unwrap().last().unwrap().clone();
+    assert!(matches!(&installer.commands()[..], [VoiceCommand::Install { repair: false, .. }]));
+    installer.say(VoiceEvent::Installing { fraction: 0.5 });
+    assert_eq!(t.view().voice.downloading, Some(0.5));
+    installer.say(VoiceEvent::Installed);
+    let view = t.view();
+    assert!(view.voice.installed && view.voice.downloading.is_none());
+    assert!(t.notices().iter().any(|(k, m)| *k == NoticeKind::Success && m == "N4N0 can hear now."));
+    n.shutdown();
+}
+
+#[test]
+fn copying_goes_to_the_device_s_clipboard_with_its_press_sound() {
+    let media = Arc::new(Watcher::new(|| Box::new(NoMedia)));
+    let (t, n, device) = n4n0_on(Settings::default(), media);
+    n.command(Command::CopyText { text: "https://example.com/copied-by-a-test".into() });
+    assert!(copied("https://example.com/copied-by-a-test"));
+    assert!(t.notices().contains(&(NoticeKind::Success, "Copied: paste it in VRChat.".into())));
+    // A dropped card's link copied when a hand grabs it: the press sound too (the person may be in VR).
+    {
+        let mut rt = n.orb.lock().unwrap();
+        rt.screen.avatar(true, true, Some(8), 72);
+        rt.screen.menu.pages = orbiters_orb::menu::Pages::Seven;
+    }
+    n.command(Command::Drop { link: "https://example.com/card".into(), title: "A card".into(), video: None });
+    n.card_grab();
+    assert!(copied("https://example.com/card"));
+    assert_eq!(device.sounds.0.load(Ordering::Relaxed), 1);
+    assert!(t.notices().iter().any(|(_, m)| m == "Copied \"A card\": paste it in VRChat."), "{:?}", t.notices());
+    n.shutdown();
+}
+
+#[test]
+fn only_orbiters_pages_reach_the_device_s_browser() {
+    let media = Arc::new(Watcher::new(|| Box::new(NoMedia)));
+    let (_t, n, device) = n4n0_on(Settings::default(), media);
+    n.command(Command::OpenLink { url: "https://evil.example/phish".into() });
+    let approve = format!("{}approve/42", orbiters_core::account::Server::current().website());
+    n.command(Command::OpenLink { url: approve.clone() });
+    assert_eq!(device.browser.0.lock().unwrap().as_slice(), &[approve]);
+    n.shutdown();
+}
+
+#[test]
+fn the_avatar_s_triggers_go_to_the_app_s_own_features_in_order() {
+    let (t, n) = n4n0(Settings::default());
+    // An avatar whose parameters are known, with N4N0's call and 3D picture triggers and the walk boost.
+    n.orb.lock().unwrap().params = [params::CALL_MENU, params::CALL_GO, params::CALL_PICK, params::PHOTO_3D, params::WALK_BOOST]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    n.on_parameter(params::CALL_MENU, &OscValue::Bool(true));
+    n.on_parameter(params::CALL_PICK, &OscValue::Float(0.4));
+    n.on_parameter(params::CALL_GO, &OscValue::Bool(true));
+    n.on_parameter(params::PHOTO_3D, &OscValue::Bool(true));
+    n.on_parameter(params::WALK_BOOST, &OscValue::Float(0.75));
+    n.on_parameter("Seated", &OscValue::Bool(true));
+    assert!(soon(|| t.photos.load(Ordering::Relaxed) == 1 && t.walk.lock().unwrap().len() == 1));
+    assert_eq!(t.calls.lock().unwrap().as_slice(), &[CallRequest::Menu, CallRequest::Pick(0.4), CallRequest::Go]);
+    assert_eq!(t.walk.lock().unwrap().as_slice(), &[0.75]);
+    assert_eq!(t.motion.lock().unwrap().as_slice(), &[Some(("Seated".to_string(), OscValue::Bool(true)))]);
+    // A trigger the avatar lacks does nothing (another OSC app cannot press it).
+    n.on_parameter(params::CALL_END, &OscValue::Bool(true));
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(t.calls.lock().unwrap().len(), 3);
+    // A new avatar: it has not said how it moves yet.
+    n.on_avatar("avtr_other".into());
+    assert_eq!(t.motion.lock().unwrap().last(), Some(&None));
+    // The interfaces' call buttons, and a touch while a call rings: answered.
+    n.command(Command::Call { contact: "c1".into() });
+    n.command(Command::MuteCall { on: true });
+    *t.ringing.lock().unwrap() = true;
+    n.orb.lock().unwrap().params.insert(params::TOUCH.to_string());
+    n.on_parameter(params::TOUCH, &OscValue::Bool(true));
+    assert!(soon(|| t.calls.lock().unwrap().last() == Some(&CallRequest::Answer)));
+    assert_eq!(&t.calls.lock().unwrap()[3..5], &[CallRequest::Contact("c1".into()), CallRequest::Mute(true)]);
+    // A picture with VRChat's camera waits for no recording.
+    *t.capturing.lock().unwrap() = true;
+    n.command(Command::Photo { delay_seconds: 0 });
+    assert!(t.notices().iter().any(|(k, m)| *k == NoticeKind::Warning && m.contains("recording")), "{:?}", t.notices());
+    n.shutdown();
+}
+
+#[test]
+fn the_menu_opens_with_the_device_s_keyboard_and_drives_its_music() {
+    /// What the stand-in music backend was asked.
+    struct Asked(Arc<Mutex<Vec<orbiters_orb::menu::MediaCommand>>>);
+    impl MediaBackend for Asked {
+        fn run(&mut self, command: orbiters_orb::menu::MediaCommand) -> Result<(), String> {
+            self.0.lock().unwrap().push(command);
+            Ok(())
+        }
+        fn read(&mut self, _previous: &Reading) -> Reading {
+            Reading::default()
+        }
+    }
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let kept = asked.clone();
+    let media = Arc::new(Watcher::new(move || Box::new(Asked(kept))));
+    let (_t, n, _) = n4n0_on(Settings::default(), media);
+    n.orb.lock().unwrap().screen.avatar(true, true, Some(8), 72);
+    n.menu_open(false);
+    assert_eq!(n.orb.lock().unwrap().screen.menu.layout, KeyboardLayout::Azerty, "Auto: the device's keyboard");
+    n.screen_effects(vec![orbiters_orb::menu::Effect::Media(orbiters_orb::menu::MediaCommand::Next)]);
+    assert!(soon(|| asked.lock().unwrap().as_slice() == [orbiters_orb::menu::MediaCommand::Next]));
+    n.shutdown();
+}
+
+#[test]
+fn n4n0_keeps_its_files_where_the_app_says() {
+    let (t, n) = n4n0(Settings::default());
+    std::fs::create_dir_all(&n.files.avatars).unwrap();
+    // A manifest Orbiters Toolkit wrote for the avatar: N4N0 reads it there.
+    let manifest = r#"{ "format": "orbiters.avatar", "version": 1, "avatar_id": "avtr_files", "orb": { "text_sync": 8, "screen": 0 } }"#;
+    std::fs::write(n.files.avatars.join(orbiters_contracts::avatar::file_name("avtr_files")), manifest).unwrap();
+    // (OSC off: VRChat's tree says nothing, and it is not asked again.)
+    n.refresh_avatar(Some("avtr_files".into()), HashMap::new(), crate::runtime::TREE_RETRIES);
+    assert!(n.orb.lock().unwrap().manifest, "read from the app's avatars folder");
+    assert_eq!(t.view().prop_sync, Some(8), "the manifest's panel");
+    // A state saved goes to the app's states file.
+    n.orb.lock().unwrap().states.store().add("avtr_files", None, Some("Cosy"), Default::default(), None, "t".into()).unwrap();
+    n.command(Command::States { action: StateAction::Default { id: Some("s1".into()) } });
+    assert!(n.files.states.is_file(), "{}", n.files.states.display());
+    assert!(std::fs::read_to_string(&n.files.states).unwrap().contains("Cosy"));
+    n.shutdown();
+}

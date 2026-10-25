@@ -1,0 +1,16 @@
+[package]
+name = "orbiters-n4n0"
+description = "N4N0's runtime, shared by Orbiters - N4N0 on Windows and on Android: the companion on the avatar, its assistant's turns, its menu on the avatar's screen and in the apps, saved states, link cards and its ears, behind small traits for what each platform does its own way."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+orbiters-contracts = { workspace = true }
+orbiters-core = { workspace = true }
+orbiters-orb = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+rosc = { workspace = true }
+time = { workspace = true }

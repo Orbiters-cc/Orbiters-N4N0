@@ -11,7 +11,7 @@ use orbiters_contracts::manifest::{ConsentInfo, WorldInfo};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::bundle::{self, SessionSummary};
 use orbiters_core::clock;
-use orbiters_core::osc::{OscEvent, OscService, OscValue, AVATAR_CHANGE, DEPTH_FRAMES_PARAMETER, PARAMETERS_PREFIX};
+use orbiters_core::osc::{Latest, Network, OscEvent, OscService, OscValue, AVATAR_CHANGE, DEPTH_FRAMES_PARAMETER, PARAMETERS_PREFIX};
 use orbiters_core::protocol::{OscSample, PerformanceSpec, SourceSpec, StartCapture, WorkerCommand, WorkerEvent};
 use orbiters_core::reconstruction::Event as ReconstructEvent;
 use orbiters_core::settings::{Settings, WhilePlaying};
@@ -24,14 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NoticeKind {
-    Info,
-    Success,
-    Warning,
-    Error,
-}
+pub use orbiters_n4n0::NoticeKind;
 
 /// Something the interface should tell the person about.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -59,7 +52,7 @@ pub struct RawCaptureSummary {
 #[derive(Default)]
 struct OscValues {
     /// The avatar worn's parameters (those of avatars worn before go when it changes), the poses, the camera.
-    latest: HashMap<String, (Vec<OscValue>, u64)>,
+    latest: Latest,
     forwarding: bool,
     pending: Vec<OscSample>,
     last_flush: Option<Instant>,
@@ -67,7 +60,8 @@ struct OscValues {
 
 /// Addresses kept in [`OscValues::latest`] at most: an avatar's parameters, the poses and the camera are a few
 /// hundred; past this, a new address is not kept.
-const MAX_LATEST: usize = 4096;
+#[cfg(test)]
+const MAX_LATEST: usize = Latest::MOST;
 
 /// One sample per argument (`index` only for messages with several; the receiver passes at most 16).
 fn osc_samples<'a>(address: &'a str, values: &'a [OscValue], at_ns: u64, initial: bool) -> impl Iterator<Item = OscSample> + 'a {
@@ -138,9 +132,8 @@ pub struct Controller {
     /// What this member added to the Map explorer, and the uploads' numbering (controller/maps.rs).
     maps_mine: Mutex<Option<MapsMine>>,
     upload_serial: AtomicU64,
-    /// N4N0, the companion on the avatar (controller/orb.rs), and its ears (controller/voice.rs).
-    orb: Mutex<orb::OrbRuntime>,
-    voice: Mutex<voice::VoiceRuntime>,
+    /// N4N0, the companion on the avatar (`orbiters_n4n0`; the service's side in controller/n4n0.rs).
+    n4n0: orbiters_n4n0::Shared,
     /// VRChat's frame rate per world, gathered for Orbiters (controller/performance.rs).
     performance: Mutex<performance::PerformanceRuntime>,
     /// A 3D picture under way (controller/burst.rs).
@@ -161,7 +154,7 @@ pub struct Controller {
     /// Since when the running capture is being stopped (a worker that never says it finished is restarted).
     stopping_since: Mutex<Option<Instant>>,
     /// The thread that does what OSC messages ask for, in their order ([`Controller::osc_action`]).
-    osc_actions: Mutex<Option<mpsc::SyncSender<OscAction>>>,
+    osc_actions: orbiters_n4n0::Actions,
     /// The record toggle's newest value not acted on yet ([`TOGGLE_NONE`], [`TOGGLE_OFF`], [`TOGGLE_ON`]): toggles that
     /// come faster than they are acted on are acted on once, for the last.
     record_toggle: AtomicU8,
@@ -170,12 +163,6 @@ pub struct Controller {
     /// The app quits: no capture worker starts again, nor a capture.
     quitting: AtomicBool,
 }
-
-/// Work an OSC message asks for (Talk, a hand on N4N0, the record toggle).
-type OscAction = Box<dyn FnOnce(&Shared) + Send>;
-
-/// OSC actions waiting at most: past this (a flood of messages), new ones are dropped rather than kept without end.
-const OSC_ACTIONS: usize = 64;
 
 const TOGGLE_NONE: u8 = 0;
 const TOGGLE_OFF: u8 = 1;
@@ -277,13 +264,10 @@ mod burst;
 mod calls;
 mod cleanup;
 mod maps;
-mod orb;
+mod n4n0;
 mod performance;
 mod scan;
-pub(crate) mod screen;
-mod states;
 pub mod update;
-mod voice;
 pub use account::open_url;
 
 impl Controller {
@@ -291,7 +275,8 @@ impl Controller {
         let mut snapshot = Snapshot::new(settings);
         let calibration = read_calibration();
         snapshot.steamvr.calibration = calibration.as_ref().map(calibration_info);
-        Arc::new(Self {
+        // N4N0 lives in the controller and reaches it through a weak link: no cycle keeps either alive.
+        Arc::new_cyclic(|me| Self {
             published: Mutex::new(Arc::new(snapshot.clone())),
             snapshot: Mutex::new(snapshot),
             worker: Mutex::new(None),
@@ -314,8 +299,10 @@ impl Controller {
             account_runtime: Mutex::new(account::AccountRuntime::default()),
             maps_mine: Mutex::new(None),
             upload_serial: AtomicU64::new(0),
-            orb: Mutex::new(orb::OrbRuntime::default()),
-            voice: Mutex::new(voice::VoiceRuntime::default()),
+            n4n0: {
+                let link = Arc::new(n4n0::Link(me.clone()));
+                orbiters_n4n0::N4n0::new(link.clone(), link, crate::device::platform(), n4n0::files())
+            },
             performance: Mutex::new(performance::PerformanceRuntime::default()),
             burst: Mutex::new(burst::BurstRuntime::default()),
             scan: Mutex::new(scan::ScanRuntime::default()),
@@ -325,7 +312,7 @@ impl Controller {
             settings_writer: Mutex::new(None),
             pending_start: Mutex::new(None),
             stopping_since: Mutex::new(None),
-            osc_actions: Mutex::new(None),
+            osc_actions: orbiters_n4n0::Actions::default(),
             record_toggle: AtomicU8::new(TOGGLE_NONE),
             kit_rearm: AtomicBool::new(false),
             quitting: AtomicBool::new(false),
@@ -1066,44 +1053,18 @@ impl Controller {
     }
 
     /// Does what an OSC message asked for on the OSC action thread (started on first use), after what earlier
-    /// messages asked for: a record toggle pressed twice stops what it started. Not on the receiving thread, which
-    /// must keep reading (face tracking sends hundreds of values a second into a small socket buffer) while starting
-    /// a capture or N4N0's ears takes a while.
-    pub(super) fn osc_action(self: &Shared, action: impl FnOnce(&Shared) + Send + 'static) {
-        self.try_osc_action(action);
-    }
-
-    /// [`Controller::osc_action`]; false when the action was dropped: [`OSC_ACTIONS`] wait already (a flood of
-    /// messages, which must not pile up work and memory without end).
-    fn try_osc_action(self: &Shared, action: impl FnOnce(&Shared) + Send + 'static) -> bool {
-        let mut actions = self.osc_actions.lock().unwrap();
-        if actions.is_none() {
-            let (tx, rx) = mpsc::sync_channel::<OscAction>(OSC_ACTIONS);
-            let ctl = Arc::downgrade(self);
-            let spawned = std::thread::Builder::new().name("osc-actions".into()).spawn(move || {
-                for action in rx {
-                    let Some(ctl) = ctl.upgrade() else { return };
-                    action(&ctl);
-                }
-            });
-            match spawned {
-                Ok(_) => *actions = Some(tx),
-                Err(e) => {
-                    eprintln!("OSC actions: {e}");
-                    drop(actions);
-                    action(self);
-                    return true;
-                }
+    /// messages asked for (N4N0's among them): a record toggle pressed twice stops what it started. Not on the receiving
+    /// thread, which must keep reading (face tracking sends hundreds of values a second into a small socket buffer)
+    /// while starting a capture or N4N0's ears takes a while. False when the action was dropped:
+    /// [`orbiters_n4n0::Actions::MOST`] wait already (a flood of messages, which must not pile up work and memory without
+    /// end). A waiting action holds the controller weakly: once it is gone, what waited does nothing.
+    pub(super) fn osc_action(self: &Shared, action: impl FnOnce(&Shared) + Send + 'static) -> bool {
+        let ctl = Arc::downgrade(self);
+        self.osc_actions.run(Box::new(move || {
+            if let Some(ctl) = ctl.upgrade() {
+                action(&ctl);
             }
-        }
-        match actions.as_ref().map(|tx| tx.try_send(Box::new(action))) {
-            Some(Ok(())) => true,
-            Some(Err(mpsc::TrySendError::Full(_))) => {
-                eprintln!("OSC actions: {OSC_ACTIONS} are waiting already, one more is dropped");
-                false
-            }
-            _ => false,
-        }
+        }))
     }
 
     /// What one datagram from VRChat said, on the OSC receiving thread, which never waits for the OSC lock (see
@@ -1116,7 +1077,7 @@ impl Controller {
                 OscEvent::Parameter { name, value } => {
                     // Face tracking's flood skips N4N0's buttons (none is one of its parameters).
                     if !face_tracking(&name) {
-                        self.orb_on_parameter(&name, &value);
+                        self.n4n0.on_parameter(&name, &value);
                     }
                     if name == record_parameter {
                         self.record_toggled(value.truthy());
@@ -1126,7 +1087,7 @@ impl Controller {
                 OscEvent::AvatarChanged { id } => {
                     self.on_avatar_changed();
                     // N4N0 reads the parameters the last avatar held before they go (`on_osc`).
-                    self.orb_on_avatar(id.clone());
+                    self.n4n0.on_avatar(id.clone());
                     messages.push((AVATAR_CHANGE.to_string(), vec![OscValue::Text(id)]));
                 }
                 OscEvent::Values { address, values } => messages.push((address, values)),
@@ -1144,15 +1105,7 @@ impl Controller {
                 let samples: Vec<OscSample> = osc_samples(&address, &values, at_ns, false).collect();
                 osc.pending.extend(samples);
             }
-            if address == AVATAR_CHANGE {
-                osc.latest.retain(|a, _| !a.starts_with(PARAMETERS_PREFIX));
-            }
-            // Changed in place: most messages are an address already known.
-            if let Some(latest) = osc.latest.get_mut(&address) {
-                *latest = (values, at_ns);
-            } else if osc.latest.len() < MAX_LATEST {
-                osc.latest.insert(address, (values, at_ns));
-            }
+            osc.latest.record(address, values, at_ns);
         }
         if osc.forwarding && osc.last_flush.is_none_or(|t| t.elapsed() >= Duration::from_millis(50)) {
             self.flush_osc(&mut osc);
@@ -1167,7 +1120,7 @@ impl Controller {
             // An action waits already: it takes this value.
             return;
         }
-        let queued = self.try_osc_action(|c| {
+        let queued = self.osc_action(|c| {
             let on = match c.record_toggle.swap(TOGGLE_NONE, Ordering::AcqRel) {
                 TOGGLE_ON => true,
                 TOGGLE_OFF => false,
@@ -1305,7 +1258,7 @@ impl Controller {
         };
         self.publish();
         if echo && previous.walk_boost.strength != settings.walk_boost.strength {
-            self.orb_send_parameter(orbiters_contracts::orb::params::WALK_BOOST, rosc::OscType::Float(settings.walk_boost.strength));
+            self.n4n0.send_parameter(orbiters_contracts::orb::params::WALK_BOOST, rosc::OscType::Float(settings.walk_boost.strength));
         }
         if previous.reconstruct_while_playing != settings.reconstruct_while_playing {
             // Reconstructions held while VRChat runs may start now.
@@ -1425,7 +1378,7 @@ impl Controller {
         let wanted = vec![parameter.clone()];
         // Starting a recording reads VRChat's current values over HTTP: the record toggle is acted on on the action
         // thread, in order (`record_toggled`).
-        let result = OscService::start_batched("Orbiters - N4N0", &wanted, vrchat_port, advertise, move |events, at_ns| {
+        let result = OscService::start_batched("Orbiters - N4N0", &wanted, Network::Loopback { vrchat_port }, advertise, move |events, at_ns| {
             ctl.on_osc_events(events, at_ns, &parameter);
         });
         match result {
@@ -1454,9 +1407,8 @@ impl Controller {
             eprintln!("stopping the capture: {e:#}");
         }
         self.quitting.store(true, Ordering::Relaxed);
-        self.voice_stop();
-        self.orb_stop();
-        self.orb_close_on_quit();
+        // N4N0's ears and its thread stop, and its screen is closed while OSC can still tell VRChat.
+        self.n4n0.shutdown();
         self.calls_stop();
         self.put_vrchat_back();
         // Stopped outside the lock: stopping waits for the receiving thread.
@@ -1963,7 +1915,7 @@ fn spawn_watchers(ctl: Shared) {
                 });
                 split.read(&events, log.live(), Instant::now());
                 // A world joined: the avatar's default state goes back once it loaded there.
-                ctl.states_log(&events, log.live());
+                ctl.n4n0.states_log(&events, log.live());
                 let (state, split_session) = {
                     let s = ctl.snapshot.lock().unwrap();
                     (s.capture.state, s.settings.split_on_world_change)

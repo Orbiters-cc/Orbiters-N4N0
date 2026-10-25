@@ -24,11 +24,31 @@ pub use orbiters_contracts as contracts;
 /// Version of the app and its workers (they must match: the shell refuses a worker of another version).
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// TLS for HTTP clients: the build carries ureq's native TLS only (Windows' SChannel, certificates checked against
-/// Windows' store). An agent left on ureq's default provider, rustls, panics at its first `https` request.
-pub fn http_tls() -> ureq::tls::TlsConfig {
+/// The TLS the HTTP clients use: on the desktop, ureq's native TLS (Windows' SChannel, certificates checked against
+/// Windows' store); on Android, rustls with ring (native TLS would mean OpenSSL there), checked against Mozilla's roots
+/// (webpki-roots: the platform's verifier would need the app's Java context). Each build carries its own platform's
+/// alone: an agent left on another provider panics at its first `https` request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TlsStack {
+    Native,
+    Rustls,
+}
+
+/// This platform's TLS.
+pub const TLS_STACK: TlsStack = if cfg!(target_os = "android") { TlsStack::Rustls } else { TlsStack::Native };
+
+/// The TLS configuration of `stack`.
+pub fn tls_config(stack: TlsStack) -> ureq::tls::TlsConfig {
     use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
-    TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier).build()
+    match stack {
+        TlsStack::Native => TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier).build(),
+        TlsStack::Rustls => TlsConfig::builder().provider(TlsProvider::Rustls).root_certs(RootCerts::WebPki).build(),
+    }
+}
+
+/// TLS for HTTP clients, this platform's ([`TLS_STACK`]).
+pub fn http_tls() -> ureq::tls::TlsConfig {
+    tls_config(TLS_STACK)
 }
 
 /// An HTTP client that can reach `https` addresses ([`http_tls`]), with these timeouts.
@@ -202,6 +222,20 @@ pub fn safe_file_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_platform_has_its_own_tls() {
+        use ureq::tls::{RootCerts, TlsProvider};
+        assert_eq!(TLS_STACK, if cfg!(target_os = "android") { TlsStack::Rustls } else { TlsStack::Native });
+        let native = tls_config(TlsStack::Native);
+        assert_eq!(native.provider(), TlsProvider::NativeTls);
+        assert!(matches!(native.root_certs(), RootCerts::PlatformVerifier));
+        // Android's: rustls, with the roots it carries.
+        let android = tls_config(TlsStack::Rustls);
+        assert_eq!(android.provider(), TlsProvider::Rustls);
+        assert!(matches!(android.root_certs(), RootCerts::WebPki));
+        assert_eq!(http_tls().provider(), tls_config(TLS_STACK).provider());
+    }
 
     #[test]
     fn names() {

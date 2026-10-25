@@ -1,6 +1,7 @@
 //! Fetching a channel's release and downloading its setup. Everything goes over HTTPS with Windows' own TLS and
-//! certificate store (ureq's native TLS, as everywhere in the app); plain HTTP is allowed to this computer only (a
-//! test feed). The release is trusted for its signature, the setup for the size and SHA-256 the release gives.
+//! certificate store (ureq's native TLS, as everywhere in the app; on Android, rustls with Mozilla's roots, as
+//! `orbiters_core::http_tls` there); plain HTTP is allowed to this computer only (a test feed). The release is trusted
+//! for its signature, the setup for the size and SHA-256 the release gives.
 
 use crate::{feed, release_url, Artifact, Release, SignedRelease};
 use anyhow::Context as _;
@@ -15,7 +16,11 @@ const MAX_RELEASE: u64 = 256 * 1024;
 
 fn agent() -> ureq::Agent {
     use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
-    let tls = TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier).build();
+    let tls = if cfg!(target_os = "android") {
+        TlsConfig::builder().provider(TlsProvider::Rustls).root_certs(RootCerts::WebPki).build()
+    } else {
+        TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier).build()
+    };
     ureq::Agent::config_builder()
         .tls_config(tls)
         .timeout_connect(Some(Duration::from_secs(20)))

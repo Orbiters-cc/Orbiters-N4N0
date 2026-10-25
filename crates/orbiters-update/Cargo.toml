@@ -23,10 +23,17 @@ sha2 = "0.10"
 base64 = { version = "0.22", optional = true }
 # Ed25519 signatures (already built for the call worker's WebRTC).
 ring = { version = "0.17", optional = true }
-ureq = { version = "3", default-features = false, features = ["native-tls"], optional = true }
+ureq = { version = "3", default-features = false, optional = true }
 zstd = { version = "0.13", optional = true }
 tar = { version = "0.4", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # The start with Windows (the person's registry): `windows_start`.
 windows = { workspace = true }
+
+# TLS for `net`: Windows' own on the desktop, rustls with ring on Android (as `orbiters_core::http_tls`).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+ureq = { version = "3", default-features = false, features = ["native-tls"], optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }

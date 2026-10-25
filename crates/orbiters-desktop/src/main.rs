@@ -9,6 +9,7 @@
 mod app;
 mod backend;
 mod controller;
+mod device;
 mod gpu;
 mod ipc;
 mod mailbox;

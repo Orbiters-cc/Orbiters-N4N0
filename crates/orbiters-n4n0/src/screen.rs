@@ -1,5 +1,5 @@
-//! N4N0's menu in the tray service (contracts `Docs/orb.md`, Menu and Screen): on the avatar's projected screen when
-//! the N4N0 prop has one, and the requests that open it in the SteamVR overlay otherwise.
+//! N4N0's menu in the app (contracts `Docs/orb.md`, Menu and Screen): on the avatar's projected screen when the N4N0
+//! prop has one, and the requests that open it in the SteamVR overlay otherwise.
 //!
 //! The screen's menu lives here, beside the OSC link: the orb thread writes its memory (the owner's through local
 //! values, a block every step; everyone else's through the text channel, in turn with the panel), the screen's touch
@@ -13,15 +13,17 @@
 //! channel for everyone else), Orbiters is told so that whoever grabs it there copies its link, and a hand on a card
 //! (`N4N0/Card/TouchL`, `TouchR`) copies the owner's own link, or asks Orbiters for the card dropped there.
 
-use super::orb::{OrbRuntime, Source};
-use super::{NoticeKind, Shared};
+use crate::media::Watcher;
+use crate::platform::{CallRequest, Locale, Mouse, NoMouse};
+use crate::runtime::{N4n0, OrbRuntime, Shared, Source};
+use crate::status::{CallsStatus, CardView, NoticeKind};
 use orbiters_contracts::orb::{self, thumbnail};
 use orbiters_core::account::{Api, Server};
 use orbiters_core::osc::OscValue;
 use orbiters_orb::menu::layout::{Content, ScreenPage};
 use orbiters_orb::menu::screen::{self, Audience, Flags, Frame, Picture, LOCAL_VALUES};
 use orbiters_orb::menu::touch::{self, Gesture, Pointer, Touch, LOST_GRACE};
-use orbiters_orb::menu::{self, layout, Call, Card, Contact, Effect, KeyboardLayout, Menu, Page, Pages, PhotoLength, SuggestQueue};
+use orbiters_orb::menu::{self, layout, Card, Effect, KeyboardLayout, Menu, Page, Pages, PhotoLength, SuggestQueue};
 use orbiters_orb::text::{Message, TextSender};
 use orbiters_orb::youtube;
 use std::collections::{HashMap, VecDeque};
@@ -43,7 +45,7 @@ const IDLE_CLOSE: Duration = Duration::from_secs(120);
 /// A thumbnail that failed is tried again after this (times the tries), so many times.
 const THUMB_RETRY: Duration = Duration::from_secs(3);
 const THUMB_TRIES: u8 = 3;
-/// VRChat sends back the `N4N0/Menu` the desktop set within this: the same value then is its echo, not the owner's.
+/// VRChat sends back the `N4N0/Menu` the app set within this: the same value then is its echo, not the owner's.
 const MENU_ECHO: Duration = Duration::from_secs(1);
 /// After an avatar change, what VRChat sends of `N4N0/Menu` for this long is the loaded avatar's default.
 const MENU_SETTLE: Duration = Duration::from_secs(2);
@@ -60,59 +62,6 @@ const GAZE_REST: Duration = Duration::from_millis(150);
 const FREEZE_AGAIN: Duration = Duration::from_secs(4);
 /// Two grabs closer than this are one (both hands, a hand brushing it twice).
 const GRAB_AGAIN: Duration = Duration::from_millis(1500);
-
-/// The mouse at a reading.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(super) struct MouseState {
-    /// The left button is down.
-    pub down: bool,
-    /// The window in front is VRChat's.
-    pub front: bool,
-    /// VRChat shows the cursor: its Action Menu or Quick Menu is open, the view frozen (in mouse-look it hides it). Read
-    /// only with VRChat in front.
-    pub cursor: bool,
-}
-
-/// The left mouse button, the window in front and the cursor, as desktop mode's clicks read them (tests feed their own).
-pub(super) trait Mouse: Send {
-    /// The mouse now, VRChat being process `vrchat`.
-    fn read(&mut self, vrchat: u32) -> MouseState;
-}
-
-/// This computer's mouse.
-struct WindowsMouse;
-
-impl Mouse for WindowsMouse {
-    fn read(&mut self, vrchat: u32) -> MouseState {
-        #[cfg(windows)]
-        {
-            use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
-            use windows::Win32::UI::WindowsAndMessaging::{
-                GetCursorInfo, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, CURSORINFO, CURSOR_SHOWING, SM_SWAPBUTTON,
-            };
-            // SAFETY: plain reads of the input state; the process id and the cursor's state are written to locals that
-            // outlive the calls.
-            unsafe {
-                // The left button as the owner set it up (swapped: the physical right one).
-                let button = if GetSystemMetrics(SM_SWAPBUTTON) != 0 { VK_RBUTTON } else { VK_LBUTTON };
-                let down = (GetAsyncKeyState(button.0 as i32) as u16) & 0x8000 != 0;
-                let window = GetForegroundWindow();
-                let mut pid = 0u32;
-                let front = !window.is_invalid() && GetWindowThreadProcessId(window, Some(&mut pid as *mut u32)) != 0 && pid == vrchat;
-                let cursor = front && {
-                    let mut info = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
-                    GetCursorInfo(&mut info).is_ok() && info.flags.0 & CURSOR_SHOWING.0 != 0
-                };
-                MouseState { down, front, cursor }
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = vrchat;
-            MouseState::default()
-        }
-    }
-}
 
 /// What a thread brings back.
 enum Done {
@@ -135,7 +84,7 @@ enum Thumb {
 
 /// What a step of the screen leaves to do once the orb's lock is let go.
 #[derive(Default)]
-pub(super) struct Followups {
+pub(crate) struct Followups {
     pub effects: Vec<Effect>,
     pub photo_due: bool,
     /// Suggestions to ask for now, and thumbnails to try again.
@@ -150,15 +99,15 @@ impl Followups {
     }
 }
 
-pub struct ScreenRuntime {
+pub(crate) struct ScreenRuntime {
     /// N4N0's menu shows on the avatar's projected screen (the prop has it and it replaces the overlay, or VRChat runs
     /// in desktop mode), with this many text values and thumbnails of this many bytes (`N4N0/Screen/ThumbnailBytes`).
     pub available: bool,
     /// The prop has the projected screen, written through the text channel, wherever the menu shows: a dropped link
     /// card shows on it even while the menu is in the overlay.
-    pub(super) present: bool,
+    pub(crate) present: bool,
     sync: Option<usize>,
-    pub(super) thumbnail: usize,
+    pub(crate) thumbnail: usize,
     pub menu: Menu,
     owner: Audience,
     everyone: Option<Audience>,
@@ -180,11 +129,11 @@ pub struct ScreenRuntime {
     touched: [bool; 2],
     touch: [Touch; 2],
     /// The screen points with rays (version 4): each hand's ray (hit, ratio along it) and pointer, instead of fingers.
-    pub(super) pointing: bool,
+    pub(crate) pointing: bool,
     ray: [(bool, f32); 2],
     pointers: [Pointer; 2],
-    pub(super) hover: Option<usize>,
-    pub(super) pressed: Option<(usize, Instant)>,
+    pub(crate) hover: Option<usize>,
+    pub(crate) pressed: Option<(usize, Instant)>,
     holding: [bool; 2],
     /// The page hover and presses are for.
     page_shown: Option<ScreenPage>,
@@ -196,7 +145,7 @@ pub struct ScreenRuntime {
     gazed: bool,
     looked_at: Option<(f32, f32)>,
     /// The left mouse button and the window in front, read only while looking points.
-    pub(super) mouse: Box<dyn Mouse>,
+    pub(crate) mouse: Box<dyn Mouse>,
     /// The button at the last reading (`None`: not read since looking began), and a click holds its press.
     mouse_down: Option<bool>,
     clicking: bool,
@@ -230,13 +179,13 @@ pub struct ScreenRuntime {
     /// When the overlay was last asked to close its menu, until it says it did (it counts as closed meanwhile: the Menu
     /// toggle the owner just turned off is not turned on again).
     overlay_closing: Option<Instant>,
-    /// The Menu toggle of N4N0's expressions menu (`N4N0/Menu`) as the avatar holds it, as far as the desktop knows
-    /// (`None`: not known, after an avatar change); the values the desktop set it to lately (VRChat sends them back,
+    /// The Menu toggle of N4N0's expressions menu (`N4N0/Menu`) as the avatar holds it, as far as the app knows
+    /// (`None`: not known, after an avatar change); the values the app set it to lately (VRChat sends them back,
     /// and an echo asks nothing); until when what VRChat sends of it is a loaded avatar's default, not the owner's.
     menu_param: Option<bool>,
     menu_sent: Vec<(bool, Instant)>,
     menu_settle_until: Option<Instant>,
-    /// The media reading the menu shows (its version: [`crate::media::Watcher::reading`]).
+    /// The media reading the menu shows (its version: [`Watcher::reading`]).
     media_seen: u64,
     /// The saved states the menu lists (the states' version, the avatar they are for).
     states_seen: Option<(u64, Option<String>)>,
@@ -287,7 +236,7 @@ impl Default for ScreenRuntime {
             gaze_point: [0.0; 4],
             gazed: false,
             looked_at: None,
-            mouse: Box::new(WindowsMouse),
+            mouse: Box::new(NoMouse),
             mouse_down: None,
             clicking: false,
             look_began: None,
@@ -360,14 +309,14 @@ impl ScreenRuntime {
     }
 
     /// A copied link can be dropped as a card here: the screen is of version 5 or later.
-    pub(super) fn card_ready(&self) -> bool {
+    pub(crate) fn card_ready(&self) -> bool {
         self.present && self.menu.pages.states_cards()
     }
 
     /// The card the screen shows, for the window.
-    pub(super) fn card_view(&self) -> Option<crate::state::CardView> {
+    pub(crate) fn card_view(&self) -> Option<CardView> {
         let card = self.menu.card.as_ref().filter(|_| self.menu.card_shown())?;
-        Some(crate::state::CardView { title: card.title.clone(), link: card.link.clone(), left: card.left })
+        Some(CardView { title: card.title.clone(), link: card.link.clone(), left: card.left })
     }
 
     /// The dropped card goes (its time is up, the menu opened again, the screen went): what it showed goes with it.
@@ -383,7 +332,7 @@ impl ScreenRuntime {
 
     /// A hand on a dropped card, the owner's own or someone else's (`right`: `N4N0/Card/TouchR`), now `on`: whether it
     /// is a grab (either hand coming on, not twice in [`GRAB_AGAIN`]).
-    pub(super) fn card_touch(&mut self, right: bool, on: bool, now: Instant) -> bool {
+    pub(crate) fn card_touch(&mut self, right: bool, on: bool, now: Instant) -> bool {
         let before = self.grab.iter().any(|h| *h);
         self.grab[right as usize] = on;
         let grabbed = !before && on && self.grab_at.is_none_or(|t| now.duration_since(t) >= GRAB_AGAIN);
@@ -395,14 +344,14 @@ impl ScreenRuntime {
 
     /// The app quits: the menu closes, and the owner's screen counts as told so (the quit's last message tells it), so
     /// a step still under way sends nothing more.
-    pub(super) fn quit(&mut self) {
+    pub(crate) fn quit(&mut self) {
         let _ = self.menu.close();
         self.open_sent = Some(false);
     }
 
     /// Messages to VRChat were lost: neither screen's memory is known any more (each is cleared at its next step), nor
     /// whether it is open.
-    pub(super) fn lost(&mut self) {
+    pub(crate) fn lost(&mut self) {
         self.owner.forget();
         if let Some(everyone) = self.everyone.as_mut() {
             everyone.forget();
@@ -441,14 +390,14 @@ impl ScreenRuntime {
 
     /// An avatar changed or went: its Menu toggle is not known, and what VRChat sends of it a moment is the loaded
     /// avatar's default.
-    pub(super) fn menu_param_reset(&mut self, now: Instant) {
+    pub(crate) fn menu_param_reset(&mut self, now: Instant) {
         self.menu_param = None;
         self.menu_settle_until = Some(now + MENU_SETTLE);
     }
 
     /// The value to set `N4N0/Menu` to, when the avatar's toggle no longer says whether the menu shows (another trigger
     /// opened it, it closed on its own), taken as sent.
-    pub(super) fn menu_sync(&mut self, now: Instant) -> Option<bool> {
+    pub(crate) fn menu_sync(&mut self, now: Instant) -> Option<bool> {
         if self.menu_settle_until.is_some_and(|t| now < t) {
             return None;
         }
@@ -466,16 +415,16 @@ impl ScreenRuntime {
         Some(shown)
     }
 
-    /// `N4N0/Menu` as VRChat sent it: what the owner asks (`Some(open)`), or nothing: the echo of a value the desktop
-    /// set, a loaded avatar's default, the menu already so.
-    pub(super) fn menu_toggled(&mut self, on: bool, now: Instant) -> Option<bool> {
+    /// `N4N0/Menu` as VRChat sent it: what the owner asks (`Some(open)`), or nothing: the echo of a value the app set, a
+    /// loaded avatar's default, the menu already so.
+    pub(crate) fn menu_toggled(&mut self, on: bool, now: Instant) -> Option<bool> {
         self.menu_sent.retain(|(_, at)| now.duration_since(*at) < MENU_ECHO);
-        // VRChat sends back what the desktop set, in order: this echo is done, and so are the sends before it.
+        // VRChat sends back what the app set, in order: this echo is done, and so are the sends before it.
         if let Some(i) = self.menu_sent.iter().position(|&(sent, _)| sent == on) {
             self.menu_sent.drain(..=i);
             return None;
         }
-        // The owner's own (or the avatar's default): whatever the desktop set before was sent back already.
+        // The owner's own (or the avatar's default): whatever the app set before was sent back already.
         self.menu_sent.clear();
         self.menu_param = Some(on);
         if self.menu_settle_until.is_some_and(|t| now < t) {
@@ -490,7 +439,7 @@ impl ScreenRuntime {
     }
 
     /// When the screen next has something to do (for the orb thread's sleep).
-    pub(super) fn next_due(&self, now: Instant) -> Option<Instant> {
+    pub(crate) fn next_due(&self, now: Instant) -> Option<Instant> {
         let mut due: Option<Instant> = None;
         let mut at = |t: Instant| due = Some(due.map_or(t, |d: Instant| d.min(t)));
         if let Some(t) = self.photo_at {
@@ -547,7 +496,7 @@ impl ScreenRuntime {
 
     /// Testing: the dropped card's time is up now.
     #[cfg(test)]
-    pub(super) fn card_ends_now(&mut self) {
+    pub(crate) fn card_ends_now(&mut self) {
         if self.card_until.is_some() {
             self.card_until = Some(Instant::now());
         }
@@ -555,7 +504,7 @@ impl ScreenRuntime {
 
     /// Testing: nothing happened on the menu for longer than it stays open idle.
     #[cfg(test)]
-    pub(super) fn idle_long_ago(&mut self) {
+    pub(crate) fn idle_long_ago(&mut self) {
         self.last_activity = Instant::now().checked_sub(IDLE_CLOSE + Duration::from_secs(1)).unwrap_or(self.last_activity);
     }
 
@@ -565,7 +514,7 @@ impl ScreenRuntime {
     }
 
     /// Looking points (desktop mode with N4N0's menu on the screen) or no longer does: what was read of it goes.
-    pub(super) fn set_gaze(&mut self, on: bool) {
+    pub(crate) fn set_gaze(&mut self, on: bool) {
         if self.gaze == on {
             return;
         }
@@ -675,9 +624,7 @@ impl ScreenRuntime {
         }
         true
     }
-}
 
-impl ScreenRuntime {
     /// The owner's screen dropped or not, and shown or not, as the card and the menu say now: dropped first, so that the
     /// screen stays shown and frozen whatever the Menu toggle says next. A screen never dropped is never told it is not.
     fn sync_open_and_drop(&mut self, out: &mut Vec<Message>) {
@@ -696,6 +643,17 @@ impl ScreenRuntime {
     }
 }
 
+/// Closes N4N0's menu under N4N0's lock: the screen's (what it leaves to do), or the overlay's.
+fn close_menu(rt: &mut OrbRuntime) -> Vec<Effect> {
+    let s = &mut rt.screen;
+    if s.available {
+        s.menu.close()
+    } else {
+        s.overlay_close();
+        Vec::new()
+    }
+}
+
 /// What N4N0 says, cut as the Home of a display with `pages` shows it, a piece at a time: a line on the four- and
 /// six-tile Home, what its place holds on the seven-tile one.
 fn answer_pieces(text: &str, pages: Pages) -> Vec<String> {
@@ -707,51 +665,13 @@ fn answer_pieces(text: &str, pages: Pages) -> Vec<String> {
     menu::pieces(text, cols)
 }
 
-/// The press sound, as a copy's feedback in VR (the overlay's own, computed the first time).
-fn copy_sound() {
-    if cfg!(test) {
-        return;
-    }
-    static SOUND: std::sync::OnceLock<(orbiters_sound::Output, std::sync::Arc<orbiters_sound::Sound>)> = std::sync::OnceLock::new();
-    let _ = std::thread::Builder::new().name("copy-sound".into()).spawn(|| {
-        let (output, sound) = SOUND.get_or_init(|| {
-            use orbiters_sound::{render, sounds, Output, RATE};
-            (Output::new(), std::sync::Arc::new(render(&sounds::ROCKER, RATE)))
-        });
-        output.play(sound);
-    });
-}
-
-/// The ISO 639-1 code of this computer's language, for YouTube.
-fn language() -> String {
-    let locale = super::orb::locale();
-    let code = locale.split(['-', '_']).next().unwrap_or("").to_lowercase();
-    if code.len() == 2 {
-        code
-    } else {
-        "en".into()
-    }
-}
-
-/// The keyboard's letters for the setting (Auto: this computer's keyboard).
-pub fn keyboard(setting: orbiters_core::settings::KeyboardLayout) -> KeyboardLayout {
+/// The keyboard's letters for the setting (Auto: the device's keyboard, as `locale` says).
+pub fn keyboard(setting: orbiters_core::settings::KeyboardLayout, locale: &dyn Locale) -> KeyboardLayout {
     use orbiters_core::settings::KeyboardLayout as Setting;
     match setting {
         Setting::Qwerty => KeyboardLayout::Qwerty,
         Setting::Azerty => KeyboardLayout::Azerty,
-        Setting::Auto => {
-            #[cfg(windows)]
-            {
-                // SAFETY: no arguments that could be invalid; 0 is the calling thread.
-                let layout = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout(0) };
-                let language = (layout.0 as usize & 0xffff) as u16;
-                // French (0x0c), and Belgian French; Swiss and Canadian French keep QWERTZ/QWERTY.
-                if language & 0x3ff == 0x0c && matches!(language >> 10, 0x01 | 0x02) {
-                    return KeyboardLayout::Azerty;
-                }
-            }
-            KeyboardLayout::Qwerty
-        }
+        Setting::Auto => locale.keyboard(),
     }
 }
 
@@ -773,26 +693,38 @@ pub fn photo_setting(length: PhotoLength) -> orbiters_core::settings::Photo3dLen
     }
 }
 
-impl super::Controller {
+/// What opening N4N0's menu leaves to do once N4N0's lock is let go.
+enum Opened {
+    /// It was open, and this closed it: the menu's effects.
+    Closed(Vec<Effect>),
+    /// It was open already.
+    Nothing,
+    /// The overlay is asked to close its menu.
+    Told,
+    /// It opens: N4N0 listens.
+    Listen,
+}
+
+impl N4n0 {
     /// Something asked for N4N0's menu (the wake word alone, a hand on N4N0, a controller button): it opens on the
     /// avatar's screen when there is one, else in the overlay; N4N0 listens either way. Opening it again closes it.
-    pub(super) fn menu_open(self: &Shared, toggle: bool) {
+    pub(crate) fn menu_open(self: &Shared, toggle: bool) {
         let settings = self.settings();
-        let mut rt = self.orb.lock().unwrap();
+        let opened = self.open_menu(&mut self.orb.lock().unwrap(), toggle, &settings);
+        self.menu_opened(opened);
+    }
+
+    /// [`N4n0::menu_open`] under N4N0's lock.
+    fn open_menu(&self, rt: &mut OrbRuntime, toggle: bool, settings: &orbiters_core::settings::Settings) -> Opened {
         // Opening the menu again takes a dropped card back (on the screen, the menu replaces it).
         if rt.screen.menu.card_shown() {
             rt.screen.end_card();
         }
         if rt.screen.available {
             if rt.screen.menu.open {
-                if toggle {
-                    let effects = rt.screen.menu.close();
-                    drop(rt);
-                    self.screen_effects(effects);
-                }
-                return;
+                return if toggle { Opened::Closed(rt.screen.menu.close()) } else { Opened::Nothing };
             }
-            let keyboard = keyboard(settings.orb.menu.keyboard);
+            let keyboard = keyboard(settings.orb.menu.keyboard, &*self.device.locale);
             let s = &mut rt.screen;
             s.menu.layout = keyboard;
             s.menu.photo_timer = settings.photo_3d_timer;
@@ -811,49 +743,54 @@ impl super::Controller {
             if toggle && s.overlay_open {
                 // A close, which starts no listen (as on the screen).
                 s.overlay_closing = Some(Instant::now());
-                drop(rt);
-                self.orb_publish();
-                return;
+                return Opened::Told;
             }
             s.overlay_asked = Some(Instant::now());
             s.overlay_close_after = false;
             s.overlay_closing = None;
         }
-        drop(rt);
-        self.menu_listen();
-        self.orb_publish();
+        Opened::Listen
     }
 
-    /// Closes N4N0's menu: the screen's, or the overlay's (asked to when it is open, or as soon as it says it opened).
-    pub(super) fn menu_close(self: &Shared) {
-        let effects = {
-            let mut rt = self.orb.lock().unwrap();
-            let s = &mut rt.screen;
-            if s.available {
-                s.menu.close()
-            } else {
-                s.overlay_close();
-                Vec::new()
+    /// What opening the menu left to do, N4N0's lock let go.
+    fn menu_opened(self: &Shared, opened: Opened) {
+        match opened {
+            Opened::Closed(effects) => self.screen_effects(effects),
+            Opened::Nothing => {}
+            Opened::Told => self.publish(),
+            Opened::Listen => {
+                self.menu_listen();
+                self.publish();
             }
-        };
-        self.screen_effects(effects);
-        self.orb_publish();
+        }
     }
 
-    /// The Menu toggle of N4N0's expressions menu (`N4N0/Menu`, on the OSC action thread): on opens N4N0's menu as the
-    /// binding does, off closes it. VRChat sending back what the desktop set asks nothing.
-    pub(super) fn menu_toggled(self: &Shared, on: bool) {
-        let asked = self.orb.lock().unwrap().screen.menu_toggled(on, Instant::now());
-        match asked {
-            Some(true) => self.menu_open(false),
-            Some(false) => self.menu_close(),
+    /// The Menu toggle of N4N0's expressions menu (`N4N0/Menu`, on the OSC action queue): on opens N4N0's menu as the
+    /// binding does, off closes it. VRChat sending back what the app set asks nothing. The toggle is read and the menu
+    /// opened or closed in one turn of N4N0's lock: a step of the orb thread in between would find the toggle and the
+    /// menu apart, and send the toggle back as it was.
+    pub(crate) fn menu_toggled(self: &Shared, on: bool) {
+        let settings = self.settings();
+        let mut rt = self.orb.lock().unwrap();
+        match rt.screen.menu_toggled(on, Instant::now()) {
+            Some(true) => {
+                let opened = self.open_menu(&mut rt, false, &settings);
+                drop(rt);
+                self.menu_opened(opened);
+            }
+            Some(false) => {
+                let effects = close_menu(&mut rt);
+                drop(rt);
+                self.screen_effects(effects);
+                self.publish();
+            }
             None => {}
         }
     }
 
     /// N4N0 listens to one sentence (as a hand on N4N0 does), unless it already listens.
     fn menu_listen(self: &Shared) {
-        let settings = self.settings().orb;
+        let settings = self.with_settings(|s| s.orb.clone());
         if !settings.enabled || !settings.assistant {
             return;
         }
@@ -868,7 +805,7 @@ impl super::Controller {
     }
 
     /// The overlay's menu opened, closed, or moved to or from its search page.
-    pub(super) fn menu_overlay_state(self: &Shared, open: bool, dictation: bool) {
+    pub(crate) fn menu_overlay_state(self: &Shared, open: bool, dictation: bool) {
         let listen = {
             let mut rt = self.orb.lock().unwrap();
             let s = &mut rt.screen;
@@ -895,11 +832,11 @@ impl super::Controller {
         if listen {
             self.menu_listen();
         }
-        self.orb_publish();
+        self.publish();
     }
 
     /// A sentence N4N0 heard while a menu is open: the screen's search page takes it, or the overlay's (`true`: taken).
-    pub(super) fn menu_heard(self: &Shared, text: &str) -> bool {
+    pub(crate) fn menu_heard(self: &Shared, text: &str) -> bool {
         let mut rt = self.orb.lock().unwrap();
         if rt.screen.menu.open {
             rt.screen.last_activity = Instant::now();
@@ -914,31 +851,31 @@ impl super::Controller {
             let n = rt.screen.dictation.as_ref().map_or(1, |(n, _)| n.wrapping_add(1));
             rt.screen.dictation = Some((n, text.trim().to_string()));
             drop(rt);
-            self.orb_publish();
+            self.publish();
             return true;
         }
         false
     }
 
     /// A 3D picture in `seconds` (now when 0); the menus count down.
-    pub(super) fn photo_3d_in(self: &Shared, seconds: u32) {
+    pub(crate) fn photo_3d_in(self: &Shared, seconds: u32) {
         if seconds == 0 {
-            let ctl = self.clone();
+            let n = self.clone();
             std::thread::spawn(move || {
-                if let Err(e) = ctl.take_3d_picture() {
-                    ctl.notify(NoticeKind::Warning, e.to_string());
+                if let Err(e) = n.host.photo_3d() {
+                    n.notify(NoticeKind::Warning, e.to_string());
                 }
             });
             return;
         }
         self.orb.lock().unwrap().screen.photo_at = Some(Instant::now() + Duration::from_secs(seconds as u64));
-        self.orb_publish();
+        self.publish();
     }
 
     /// Drops a link card in the world (contracts `Docs/orb.md`, Link card): the avatar's screen shows it, frozen where it
     /// is, for [`orb::CARD_SECONDS`]; Orbiters is told, so that whoever grabs it in this instance copies its link too.
     /// From N4N0's menu on the screen, the overlay's or the window's Home.
-    pub(super) fn card_drop(self: &Shared, link: String, title: String, video: Option<String>) {
+    pub(crate) fn card_drop(self: &Shared, link: String, title: String, video: Option<String>) {
         if !orbiters_orb::drops::copyable(&link) {
             self.notify(NoticeKind::Warning, "Only web links can be dropped as cards.");
             return;
@@ -964,45 +901,45 @@ impl super::Controller {
             self.screen_thumbnails(vec![id]);
         }
         // Orbiters keeps it for whoever grabs it in this instance (a member's card only).
-        let instance = self.snapshot.lock().unwrap().vrchat.world.instance_hash();
-        match (self.orb_account(), instance) {
+        let instance = self.host.world().instance_hash();
+        match (self.host.account(), instance) {
             (Some((api, token)), Some(instance)) => {
-                let ctl = self.clone();
+                let n = self.clone();
                 std::thread::spawn(move || {
                     if let Err(e) = orbiters_orb::drops::post(&api, &token, &instance, &link, &title) {
-                        ctl.notify(NoticeKind::Warning, format!("People around cannot copy your card's link: {e:#}"));
+                        n.notify(NoticeKind::Warning, format!("People around cannot copy your card's link: {e:#}"));
                     }
                 });
             }
             (None, Some(_)) => self.notify(NoticeKind::Info, "Sign in to Orbiters so that people around can copy your card's link too."),
             _ => {}
         }
-        self.orb_publish();
+        self.publish();
     }
 
-    /// A hand on a dropped card (on the OSC action thread): the owner's own card's link is copied; with none out, someone
+    /// A hand on a dropped card (on the OSC action queue): the owner's own card's link is copied; with none out, someone
     /// else's card was grabbed, and Orbiters gives the newest dropped in this instance.
-    pub(super) fn card_grab(self: &Shared) {
+    pub(crate) fn card_grab(self: &Shared) {
         let own = self.orb.lock().unwrap().screen.card_view().map(|c| (c.link, c.title));
         if let Some((link, title)) = own {
             self.card_copied(&link, &title);
             return;
         }
-        let Some(instance) = self.snapshot.lock().unwrap().vrchat.world.instance_hash() else { return };
-        let api = self.orb_account().map(|(api, _)| api).unwrap_or_else(|| Api::new(Server::current()));
-        let ctl = self.clone();
+        let Some(instance) = self.host.world().instance_hash() else { return };
+        let api = self.host.account().map(|(api, _)| api).unwrap_or_else(|| Api::new(Server::current()));
+        let n = self.clone();
         std::thread::spawn(move || match orbiters_orb::drops::latest(&api, &instance) {
-            Ok(Some(card)) => ctl.card_copied(&card.link, &card.title),
-            Ok(None) => ctl.notify(NoticeKind::Info, "That card is gone: its link can no longer be copied."),
-            Err(e) => ctl.notify(NoticeKind::Warning, format!("Could not copy the card's link: {e:#}")),
+            Ok(Some(card)) => n.card_copied(&card.link, &card.title),
+            Ok(None) => n.notify(NoticeKind::Info, "That card is gone: its link can no longer be copied."),
+            Err(e) => n.notify(NoticeKind::Warning, format!("Could not copy the card's link: {e:#}")),
         });
     }
 
     /// A card's link in the clipboard, with the press sound and a toast, as Copy does.
     fn card_copied(&self, link: &str, title: &str) {
-        match super::orb::copy_to_clipboard(link) {
+        match self.device.clipboard.copy(link) {
             Ok(()) => {
-                copy_sound();
+                self.device.sounds.press();
                 let what = match title.trim() {
                     "" => "the card's link".to_string(),
                     title => format!("\"{}\"", layout::ellipsis(title, 60)),
@@ -1015,11 +952,11 @@ impl super::Controller {
 
     /// Runs `fetch` on a thread of its own; what it brings back goes to the screen's next step, which it wakes.
     fn screen_fetch(self: &Shared, fetch: impl FnOnce() -> Done + Send + 'static) {
-        let ctl = self.clone();
+        let n = self.clone();
         let tx = self.orb.lock().unwrap().screen.done_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(fetch());
-            ctl.orb_wake();
+            n.wake();
         });
     }
 
@@ -1055,14 +992,15 @@ impl super::Controller {
     }
 
     /// What a step of the screen left to do: the menu's effects, a picture's timer, the suggestions and thumbnails due.
-    pub(super) fn screen_followups(self: &Shared, followups: Followups) {
+    pub(crate) fn screen_followups(self: &Shared, followups: Followups) {
         self.screen_effects(followups.effects);
         if followups.photo_due {
             self.photo_3d_in(0);
         }
         if let Some((id, text)) = followups.suggest {
+            let language = self.device.locale.language();
             self.screen_fetch(move || {
-                let result = youtube::suggestions(&text, &language());
+                let result = youtube::suggestions(&text, &language);
                 Done::Suggestions { id, text, result }
             });
         }
@@ -1072,7 +1010,7 @@ impl super::Controller {
     }
 
     /// Carries out what the screen's menu asked for.
-    pub(super) fn screen_effects(self: &Shared, effects: Vec<Effect>) {
+    pub(crate) fn screen_effects(self: &Shared, effects: Vec<Effect>) {
         for effect in effects {
             match effect {
                 Effect::Suggest { id, text } => {
@@ -1081,26 +1019,32 @@ impl super::Controller {
                     rt.screen.suggest.want(id, text, Instant::now());
                     rt.wake();
                 }
-                Effect::Search { id, query } => self.screen_fetch(move || Done::Results { id, more: false, result: youtube::search(&query, &language()) }),
-                Effect::More { id, token, .. } => self.screen_fetch(move || Done::Results { id, more: true, result: youtube::more(&token, &language()) }),
+                Effect::Search { id, query } => {
+                    let language = self.device.locale.language();
+                    self.screen_fetch(move || Done::Results { id, more: false, result: youtube::search(&query, &language) })
+                }
+                Effect::More { id, token, .. } => {
+                    let language = self.device.locale.language();
+                    self.screen_fetch(move || Done::Results { id, more: true, result: youtube::more(&token, &language) })
+                }
                 Effect::Thumbnails(ids) => self.screen_thumbnails(ids),
                 Effect::Copy { link, .. } => {
-                    if let Err(e) = super::orb::copy_to_clipboard(&link) {
+                    if let Err(e) = self.device.clipboard.copy(&link) {
                         self.notify(NoticeKind::Error, e);
                     }
                 }
                 Effect::FastWalk(on) => self.update_settings(|s| s.walk_boost.enabled = on),
                 Effect::CallContact { id } => {
-                    let ctl = self.clone();
-                    std::thread::spawn(move || ctl.call_contact(id));
+                    let n = self.clone();
+                    std::thread::spawn(move || n.host.call(CallRequest::Contact(id)));
                 }
                 Effect::Answer => {
-                    let ctl = self.clone();
-                    std::thread::spawn(move || ctl.call_answer());
+                    let n = self.clone();
+                    std::thread::spawn(move || n.host.call(CallRequest::Answer));
                 }
                 Effect::HangUp => {
-                    let ctl = self.clone();
-                    std::thread::spawn(move || ctl.call_end());
+                    let n = self.clone();
+                    std::thread::spawn(move || n.host.call(CallRequest::End));
                 }
                 Effect::PhotoChoice { timer, length } | Effect::Photo3d { timer, length } => {
                     let take = matches!(effect, Effect::Photo3d { .. });
@@ -1112,9 +1056,9 @@ impl super::Controller {
                         self.photo_3d_in(timer);
                     }
                 }
-                Effect::Media(command) => crate::media::watcher().command(command),
+                Effect::Media(command) => self.device.media.command(command),
                 Effect::Light(light) => {
-                    if let Err(e) = self.orb_set_light(light) {
+                    if let Err(e) = self.set_light(light) {
                         self.notify(NoticeKind::Warning, e);
                     }
                 }
@@ -1130,302 +1074,9 @@ impl super::Controller {
         }
     }
 
-    /// The screen's part of the orb thread's tick: what came back from threads, the finger, the picture timer, then
-    /// the steps to the screen. Returns the messages for VRChat; what is left to do goes in `followups`.
-    pub(super) fn screen_tick(
-        rt: &mut OrbRuntime,
-        now: Instant,
-        snapshot_calls: &crate::state::CallsStatus,
-        settings_walk: bool,
-        vrchat: Option<u32>,
-        followups: &mut Followups,
-    ) -> Vec<Message> {
-        let mut out = Vec::new();
-        // The screen stands where the panel would show: what N4N0 says goes on the screen's Home instead, whole, a line
-        // at a time.
-        if rt.screen.available && rt.screen.menu.open && !rt.screen.menu.card_shown() {
-            if let Some(text) = rt.sender.as_mut().filter(|s| s.busy() && !s.sticky()).and_then(TextSender::take_text) {
-                rt.screen.answer = answer_pieces(&text, rt.screen.menu.pages).into();
-                rt.screen.answer_next = Some(now);
-            }
-        } else if !rt.screen.answer.is_empty() {
-            // The menu closed before N4N0's answer was read: the rest goes on the panel.
-            let rest = std::mem::take(&mut rt.screen.answer).into_iter().collect::<Vec<_>>().join(" ");
-            rt.screen.answer_next = None;
-            rt.show(&rest);
-        }
-        let listening = rt.listening.is_some();
-        let thinking = rt.thinking();
-        let light = rt.light;
-        // The avatar's saved states, as the States page lists them (again while one saved there waits for the list).
-        let states_key = (rt.states.version, rt.avatar_id.clone());
-        let rows = (rt.screen.states_seen.as_ref() != Some(&states_key) || rt.screen.menu.saving()).then(|| rt.states.rows(rt.avatar_id.as_deref()));
-        let s = &mut rt.screen;
-        if let Some(rows) = rows {
-            s.menu.set_states(rows, states_key.1.is_some(), "VRChat's avatar is not known yet");
-            s.states_seen = Some(states_key);
-        }
-        // The light as the avatar holds it; whether a copied link drops as a card here; the music while the menu shows
-        // it (read on the media thread).
-        s.menu.light = light;
-        s.menu.can_drop = s.card_ready();
-        if s.menu.open && s.menu.pages.music_light() {
-            let media = crate::media::watcher();
-            media.want();
-            let (version, reading) = media.reading();
-            if version != s.media_seen {
-                s.media_seen = version;
-                s.menu.media = reading.media;
-                s.menu.volume = reading.volume;
-                if let Some(art) = reading.art {
-                    if !matches!(s.pictures.get(&art.key), Some(Thumb::Ready(_))) {
-                        s.pictures.insert(art.key.clone(), Thumb::Ready(screen::picture_from_rgb(&art.rgb)));
-                    }
-                }
-            }
-        }
-        if s.photo_at.is_some_and(|at| now >= at) {
-            s.photo_at = None;
-            followups.photo_due = true;
-        }
-        while let Ok(done) = s.done_rx.try_recv() {
-            match done {
-                Done::Suggestions { id, text, result } => {
-                    s.suggest.answered(id);
-                    match result {
-                        Ok(list) => s.menu.suggestions_arrived(id, &text, list),
-                        Err(e) => eprintln!("orb menu: YouTube suggestions: {e:#}"),
-                    }
-                }
-                Done::Results { id, more, result: Ok(results) } => followups.effects.extend(s.menu.results_arrived(id, results, more)),
-                Done::Results { id, result: Err(e), .. } => s.menu.results_failed(id, &e.to_string()),
-                Done::Picture { id, tries, picture } => {
-                    let thumb = match picture {
-                        Some(picture) => Thumb::Ready(picture),
-                        None => Thumb::Failed { at: now, tries: tries + 1 },
-                    };
-                    s.pictures.insert(id, thumb);
-                }
-            }
-        }
-        // Suggestions once typing paused, one request at a time.
-        followups.suggest = s.suggest.due(now);
-        // Thumbnails of the results shown that failed: tried again once their wait is over.
-        if s.menu.open && s.menu.page == Page::Results {
-            for video in s.menu.page_results() {
-                if let Some(Thumb::Failed { at, tries }) = s.pictures.get(&video.id) {
-                    if *tries < THUMB_TRIES && now >= *at + THUMB_RETRY * *tries as u32 {
-                        followups.retry.push(video.id.clone());
-                    }
-                }
-            }
-        }
-        // What N4N0 said, on Home a line at a time (the next once the last was read; it waits while another page shows).
-        if s.menu.open && s.menu.page == Page::Home && s.answer_next.is_some_and(|t| now >= t) {
-            match s.answer.pop_front() {
-                Some(line) => {
-                    s.answer_next = Some(now + menu::reading_time(&line));
-                    s.menu.heard = Some(line);
-                    s.menu.heard_private = false;
-                }
-                None => s.answer_next = None,
-            }
-        }
-        // What the menu shows from elsewhere.
-        s.menu.listening = listening;
-        s.menu.fast_walk = settings_walk;
-        s.menu.countdown = s.photo_at.map(|at| at.saturating_duration_since(now).as_secs_f32().ceil() as u32);
-        let contacts: Vec<Contact> = snapshot_calls.contacts.iter().map(|c| Contact { id: c.id.clone(), name: c.name.clone() }).collect();
-        let (ready, note) = match &snapshot_calls.link {
-            crate::state::CallLink::Linked { .. } => (true, String::new()),
-            crate::state::CallLink::Off => (false, "Calls are off: Orbiters - N4N0 › N4N0 › Calls".to_string()),
-            crate::state::CallLink::SignedOut => (false, "Sign in to Orbiters to call friends".to_string()),
-            crate::state::CallLink::NoAccount => (false, "VRChat's account here is unknown: open VRChat".to_string()),
-            crate::state::CallLink::NotLinked { .. } => (false, "Link this VRChat account on Orbiters to call".to_string()),
-        };
-        if s.menu.contacts != contacts || s.menu.calls_ready != ready || s.menu.call_note != note {
-            s.menu.set_contacts(contacts, ready, &note);
-        }
-        let call = snapshot_calls.call.as_ref().map(|c| match c.phase {
-            crate::state::CallPhase::Ringing => Call::Ringing { name: c.name.clone() },
-            crate::state::CallPhase::Calling | crate::state::CallPhase::Connecting => Call::Calling { name: c.name.clone() },
-            crate::state::CallPhase::Connected => {
-                Call::Connected { name: c.name.clone(), seconds: c.connected_at_ms.map_or(0, |at| super::unix_ms().saturating_sub(at) / 1000), muted: c.muted }
-            }
-        });
-        if s.menu.call != call {
-            s.menu.set_call(call);
-        }
-        // A dropped card counts its seconds down, and goes at the end.
-        if let Some(until) = s.card_until {
-            if !s.menu.card_shown() {
-                s.card_until = None;
-            } else if now >= until {
-                s.end_card();
-            } else if let Some(card) = s.menu.card.as_mut() {
-                card.left = until.saturating_duration_since(now).as_secs_f32().ceil() as u32;
-            }
-        }
-        let card = s.menu.card_shown();
-        if !s.available && !card {
-            // The menu is not on this screen: only what a card that just went leaves to say (closed, not dropped).
-            if s.present && (s.open_sent == Some(true) || s.drop_sent == Some(true)) {
-                s.sync_open_and_drop(&mut out);
-            }
-            return out;
-        }
-        // The finger: each hand's four touch points when they changed, else how long it went unseen.
-        for hand in 0..2 {
-            let touched = std::mem::take(&mut s.touched[hand]);
-            // A dropped card is not the menu: nothing on it is pointed at.
-            if !s.menu.open || card {
-                continue;
-            }
-            let gesture = match (s.pointing, touched) {
-                (true, true) => {
-                    let [a, b, c, _] = s.proximity[hand];
-                    Some(s.pointers[hand].update(s.ray[hand].0, s.ray[hand].1, [a, b, c], now))
-                }
-                (true, false) => s.pointers[hand].tick(now),
-                (false, true) => Some(s.touch[hand].update(s.proximity[hand], now)),
-                (false, false) => s.touch[hand].tick(now),
-            };
-            let layout = Frame::layout(&s.menu);
-            match gesture {
-                None => {}
-                Some(Gesture::Press { x, y }) => {
-                    s.last_activity = now;
-                    s.holding[hand] = true;
-                    if let Some((index, target)) = layout::hit_pointable(layout, &s.menu, x, y) {
-                        s.pressed = Some((index, now));
-                        followups.effects.extend(s.menu.press(target));
-                    }
-                }
-                Some(Gesture::Hover { x, y } | Gesture::Hold { x, y }) => {
-                    s.hover = layout::hit_pointable(layout, &s.menu, x, y).map(|(i, _)| i);
-                }
-                Some(Gesture::Away) => {
-                    s.holding[hand] = false;
-                    if !s.holding.iter().any(|h| *h) {
-                        s.hover = None;
-                    }
-                }
-            }
-        }
-        // Desktop mode: where the owner looks, and a left click.
-        s.look_and_click(vrchat, now, &mut followups.effects);
-        if s.pressed.is_some_and(|(_, at)| now.duration_since(at) > PRESS_SHOWN && !s.holding.iter().any(|h| *h) && !s.clicking) {
-            s.pressed = None;
-        }
-        if s.menu.open && listening {
-            s.last_activity = now;
-        }
-        if s.menu.open && !card && now.duration_since(s.last_activity) > IDLE_CLOSE {
-            followups.effects.extend(s.menu.close());
-        }
-        // Another page: what was hovered or pressed was on the last one.
-        let page = s.menu.open.then(|| ScreenPage::of(&s.menu));
-        if s.page_shown != page {
-            s.page_shown = page;
-            s.hover = None;
-            s.pressed = None;
-        }
-        // The owner's screen: dropped or not, open or closed, then a block per step.
-        s.sync_open_and_drop(&mut out);
-        if !s.menu.open {
-            s.owner_settled = false;
-            return out;
-        }
-        if now >= s.next_local {
-            let frame = {
-                let pictures = &s.pictures;
-                let flags = Flags { listening, loading: s.menu.loading(), thinking };
-                Frame::new(&s.menu, s.hover, s.pressed.map(|(i, _)| i), flags, s.thumbnail, &|id: &str| thumbnail(pictures, id))
-            };
-            // Once it holds the whole page, blocks go again only now and then (they repair a block VRChat dropped).
-            let settled = s.owner.settled(&frame.bank);
-            if !settled || now >= s.idle_until {
-                // A new page's clear, a changed block, else one in turn, in three steps (VRChat's frames apart).
-                let send = s.owner.step(&frame.bank);
-                out.extend(screen::local_messages(&send));
-                s.next_local = now + s.local_step();
-                if send.moves_to_block() && s.owner.resending() {
-                    s.idle_until = now + LOCAL_IDLE;
-                }
-            }
-            s.owner_settled = settled;
-        }
-        out
-    }
-
-    /// The screen's turn on the text channel, when it is due: everyone else's screen, a block a step (its three steps
-    /// a phase apart, then the pointer stays on it a whole step).
-    pub(super) fn screen_synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
-        let panel_wants = rt.sender.as_ref().is_some_and(|p| p.wants_step(now));
-        // A panel block between its steps finishes first.
-        let panel_mid_block = rt.sender.as_ref().is_some_and(TextSender::mid_block);
-        let step = rt.sender.as_ref().map_or(Duration::from_millis(300), TextSender::step);
-        let s = &mut rt.screen;
-        let Some(everyone) = s.everyone.as_mut() else { return Vec::new() };
-        // The screen's menu, or a dropped card (the only thing the screen shows while the menu is the overlay's).
-        let screen_wants = s.close_everyone || (s.menu.open && (s.available || s.menu.card_shown()));
-        if !screen_wants || now < s.next_synced || panel_mid_block {
-            return Vec::new();
-        }
-        // Both want the channel: they take turns, a whole block each.
-        if panel_wants && !s.screen_turn && !everyone.mid_block() {
-            s.screen_turn = true;
-            s.next_synced = now + step;
-            return Vec::new();
-        }
-        s.screen_turn = false;
-        let mut wait = step;
-        let card = s.menu.card_shown();
-        if card && s.frozen && s.freeze_next.is_some_and(|t| now >= t) {
-            s.freeze_due = true;
-        }
-        let out = if s.close_everyone {
-            s.close_everyone = false;
-            s.frozen = false;
-            // Closing clears everyone else's memory, and leaves the pointer where it writes nothing.
-            everyone.cleared(true);
-            screen::synced_close()
-        } else if card && s.freeze_due && !everyone.mid_block() {
-            // A dropped card: once its first block is on its way, everyone else's copy freezes where it is (and again
-            // now and then, for whoever loaded the avatar since). 253 writes nothing: the next block's values may go.
-            s.freeze_due = false;
-            s.frozen = true;
-            s.freeze_next = Some(now + FREEZE_AGAIN);
-            everyone.park();
-            screen::synced_drop()
-        } else {
-            // Everyone else's frame: no hover nor press, no friend named. A new page clears their memory first.
-            let pictures = &s.pictures;
-            let flags = Flags { loading: s.menu.loading(), ..Default::default() };
-            let frame = Frame::public(&s.menu, flags, s.thumbnail, &|id: &str| thumbnail(pictures, id));
-            let send = everyone.step(&frame.bank);
-            if matches!(send, screen::Send::Clear) {
-                // 254 closed everyone else's copy: a card's freeze is undone with it.
-                s.frozen = false;
-            }
-            if card && !s.frozen && send.moves_to_block() {
-                s.freeze_due = true;
-            }
-            if !send.holds() {
-                wait = orbiters_orb::text::PHASE_GAP;
-            }
-            screen::synced_messages(rt.sender.as_ref().map_or(8, TextSender::sync), &send)
-        };
-        s.next_synced = now + wait;
-        if let Some(sender) = rt.sender.as_mut() {
-            sender.hold_until(now + wait);
-        }
-        out
-    }
-
     /// What the screen's touch points send (on the OSC receiving thread: record only, and wake the orb thread while the
     /// menu is open). The other `N4N0/Screen/` parameters are the app's own writes coming back.
-    pub(super) fn screen_parameter(&self, name: &str, value: &OscValue) -> bool {
+    pub(crate) fn screen_parameter(&self, name: &str, value: &OscValue) -> bool {
         if !name.starts_with("N4N0/Screen/") {
             return false;
         }
@@ -1448,10 +1099,10 @@ impl super::Controller {
         true
     }
 
-    /// VRChat's frame times as the SteamVR overlay measured them (milliseconds between frames, what
-    /// [`super::Controller::frames`] gets): the owner's screen paces its steps by the slowest tenth of them, two frames
-    /// a step. Until a measure comes, it steps at [`LOCAL_STEP_UNMEASURED`].
-    pub(super) fn screen_frames(&self, intervals_ms: &[f32]) {
+    /// VRChat's frame times as the SteamVR overlay measured them (milliseconds between frames): the owner's screen paces
+    /// its steps by the slowest tenth of them, two frames a step. Until a measure comes, it steps at
+    /// [`LOCAL_STEP_UNMEASURED`].
+    pub fn frames(&self, intervals_ms: &[f32]) {
         let mut sorted: Vec<f32> = intervals_ms.iter().copied().filter(|v| v.is_finite() && *v > 0.0).collect();
         if sorted.len() < 10 {
             return;
@@ -1460,6 +1111,289 @@ impl super::Controller {
         let slow = sorted[sorted.len() * 9 / 10];
         self.orb.lock().unwrap().screen.frame_ms = Some(slow.min(200.0));
     }
+}
+
+/// The screen's part of the orb thread's tick: what came back from threads, the finger, the picture timer, then the
+/// steps to the screen (`calls`: the app's, for the screen's menu; `walk`: fast walk is on; `vrchat`: VRChat's
+/// process, for desktop mode's clicks; `media`: the music the menu shows). Returns the messages for VRChat; what is
+/// left to do goes in `followups`.
+pub(crate) fn tick(
+    rt: &mut OrbRuntime,
+    now: Instant,
+    calls: &CallsStatus,
+    walk: bool,
+    vrchat: Option<u32>,
+    media: &Watcher,
+    followups: &mut Followups,
+) -> Vec<Message> {
+    let mut out = Vec::new();
+    // The screen stands where the panel would show: what N4N0 says goes on the screen's Home instead, whole, a line at
+    // a time.
+    if rt.screen.available && rt.screen.menu.open && !rt.screen.menu.card_shown() {
+        if let Some(text) = rt.sender.as_mut().filter(|s| s.busy() && !s.sticky()).and_then(TextSender::take_text) {
+            rt.screen.answer = answer_pieces(&text, rt.screen.menu.pages).into();
+            rt.screen.answer_next = Some(now);
+        }
+    } else if !rt.screen.answer.is_empty() {
+        // The menu closed before N4N0's answer was read: the rest goes on the panel.
+        let rest = std::mem::take(&mut rt.screen.answer).into_iter().collect::<Vec<_>>().join(" ");
+        rt.screen.answer_next = None;
+        rt.show(&rest);
+    }
+    let listening = rt.listening.is_some();
+    let thinking = rt.thinking();
+    let light = rt.light;
+    // The avatar's saved states, as the States page lists them (again while one saved there waits for the list).
+    let states_key = (rt.states.version, rt.avatar_id.clone());
+    let rows = (rt.screen.states_seen.as_ref() != Some(&states_key) || rt.screen.menu.saving()).then(|| rt.states.rows(rt.avatar_id.as_deref()));
+    let s = &mut rt.screen;
+    if let Some(rows) = rows {
+        s.menu.set_states(rows, states_key.1.is_some(), "VRChat's avatar is not known yet");
+        s.states_seen = Some(states_key);
+    }
+    // The light as the avatar holds it; whether a copied link drops as a card here; the music while the menu shows it
+    // (read on the media thread).
+    s.menu.light = light;
+    s.menu.can_drop = s.card_ready();
+    if s.menu.open && s.menu.pages.music_light() {
+        media.want();
+        let (version, reading) = media.reading();
+        if version != s.media_seen {
+            s.media_seen = version;
+            s.menu.media = reading.media;
+            s.menu.volume = reading.volume;
+            if let Some(art) = reading.art {
+                if !matches!(s.pictures.get(&art.key), Some(Thumb::Ready(_))) {
+                    s.pictures.insert(art.key.clone(), Thumb::Ready(screen::picture_from_rgb(&art.rgb)));
+                }
+            }
+        }
+    }
+    if s.photo_at.is_some_and(|at| now >= at) {
+        s.photo_at = None;
+        followups.photo_due = true;
+    }
+    while let Ok(done) = s.done_rx.try_recv() {
+        match done {
+            Done::Suggestions { id, text, result } => {
+                s.suggest.answered(id);
+                match result {
+                    Ok(list) => s.menu.suggestions_arrived(id, &text, list),
+                    Err(e) => eprintln!("orb menu: YouTube suggestions: {e:#}"),
+                }
+            }
+            Done::Results { id, more, result: Ok(results) } => followups.effects.extend(s.menu.results_arrived(id, results, more)),
+            Done::Results { id, result: Err(e), .. } => s.menu.results_failed(id, &e.to_string()),
+            Done::Picture { id, tries, picture } => {
+                let thumb = match picture {
+                    Some(picture) => Thumb::Ready(picture),
+                    None => Thumb::Failed { at: now, tries: tries + 1 },
+                };
+                s.pictures.insert(id, thumb);
+            }
+        }
+    }
+    // Suggestions once typing paused, one request at a time.
+    followups.suggest = s.suggest.due(now);
+    // Thumbnails of the results shown that failed: tried again once their wait is over.
+    if s.menu.open && s.menu.page == Page::Results {
+        for video in s.menu.page_results() {
+            if let Some(Thumb::Failed { at, tries }) = s.pictures.get(&video.id) {
+                if *tries < THUMB_TRIES && now >= *at + THUMB_RETRY * *tries as u32 {
+                    followups.retry.push(video.id.clone());
+                }
+            }
+        }
+    }
+    // What N4N0 said, on Home a line at a time (the next once the last was read; it waits while another page shows).
+    if s.menu.open && s.menu.page == Page::Home && s.answer_next.is_some_and(|t| now >= t) {
+        match s.answer.pop_front() {
+            Some(line) => {
+                s.answer_next = Some(now + menu::reading_time(&line));
+                s.menu.heard = Some(line);
+                s.menu.heard_private = false;
+            }
+            None => s.answer_next = None,
+        }
+    }
+    // What the menu shows from elsewhere.
+    s.menu.listening = listening;
+    s.menu.fast_walk = walk;
+    s.menu.countdown = s.photo_at.map(|at| at.saturating_duration_since(now).as_secs_f32().ceil() as u32);
+    let contacts = calls.menu_contacts();
+    let (ready, note) = calls.menu_ready();
+    if s.menu.contacts != contacts || s.menu.calls_ready != ready || s.menu.call_note != note {
+        s.menu.set_contacts(contacts, ready, note);
+    }
+    let call = calls.menu_call(crate::unix_ms());
+    if s.menu.call != call {
+        s.menu.set_call(call);
+    }
+    // A dropped card counts its seconds down, and goes at the end.
+    if let Some(until) = s.card_until {
+        if !s.menu.card_shown() {
+            s.card_until = None;
+        } else if now >= until {
+            s.end_card();
+        } else if let Some(card) = s.menu.card.as_mut() {
+            card.left = until.saturating_duration_since(now).as_secs_f32().ceil() as u32;
+        }
+    }
+    let card = s.menu.card_shown();
+    if !s.available && !card {
+        // The menu is not on this screen: only what a card that just went leaves to say (closed, not dropped).
+        if s.present && (s.open_sent == Some(true) || s.drop_sent == Some(true)) {
+            s.sync_open_and_drop(&mut out);
+        }
+        return out;
+    }
+    // The finger: each hand's four touch points when they changed, else how long it went unseen.
+    for hand in 0..2 {
+        let touched = std::mem::take(&mut s.touched[hand]);
+        // A dropped card is not the menu: nothing on it is pointed at.
+        if !s.menu.open || card {
+            continue;
+        }
+        let gesture = match (s.pointing, touched) {
+            (true, true) => {
+                let [a, b, c, _] = s.proximity[hand];
+                Some(s.pointers[hand].update(s.ray[hand].0, s.ray[hand].1, [a, b, c], now))
+            }
+            (true, false) => s.pointers[hand].tick(now),
+            (false, true) => Some(s.touch[hand].update(s.proximity[hand], now)),
+            (false, false) => s.touch[hand].tick(now),
+        };
+        let layout = Frame::layout(&s.menu);
+        match gesture {
+            None => {}
+            Some(Gesture::Press { x, y }) => {
+                s.last_activity = now;
+                s.holding[hand] = true;
+                if let Some((index, target)) = layout::hit_pointable(layout, &s.menu, x, y) {
+                    s.pressed = Some((index, now));
+                    followups.effects.extend(s.menu.press(target));
+                }
+            }
+            Some(Gesture::Hover { x, y } | Gesture::Hold { x, y }) => {
+                s.hover = layout::hit_pointable(layout, &s.menu, x, y).map(|(i, _)| i);
+            }
+            Some(Gesture::Away) => {
+                s.holding[hand] = false;
+                if !s.holding.iter().any(|h| *h) {
+                    s.hover = None;
+                }
+            }
+        }
+    }
+    // Desktop mode: where the owner looks, and a left click.
+    s.look_and_click(vrchat, now, &mut followups.effects);
+    if s.pressed.is_some_and(|(_, at)| now.duration_since(at) > PRESS_SHOWN && !s.holding.iter().any(|h| *h) && !s.clicking) {
+        s.pressed = None;
+    }
+    if s.menu.open && listening {
+        s.last_activity = now;
+    }
+    if s.menu.open && !card && now.duration_since(s.last_activity) > IDLE_CLOSE {
+        followups.effects.extend(s.menu.close());
+    }
+    // Another page: what was hovered or pressed was on the last one.
+    let page = s.menu.open.then(|| ScreenPage::of(&s.menu));
+    if s.page_shown != page {
+        s.page_shown = page;
+        s.hover = None;
+        s.pressed = None;
+    }
+    // The owner's screen: dropped or not, open or closed, then a block per step.
+    s.sync_open_and_drop(&mut out);
+    if !s.menu.open {
+        s.owner_settled = false;
+        return out;
+    }
+    if now >= s.next_local {
+        let frame = {
+            let pictures = &s.pictures;
+            let flags = Flags { listening, loading: s.menu.loading(), thinking };
+            Frame::new(&s.menu, s.hover, s.pressed.map(|(i, _)| i), flags, s.thumbnail, &|id: &str| thumbnail(pictures, id))
+        };
+        // Once it holds the whole page, blocks go again only now and then (they repair a block VRChat dropped).
+        let settled = s.owner.settled(&frame.bank);
+        if !settled || now >= s.idle_until {
+            // A new page's clear, a changed block, else one in turn, in three steps (VRChat's frames apart).
+            let send = s.owner.step(&frame.bank);
+            out.extend(screen::local_messages(&send));
+            s.next_local = now + s.local_step();
+            if send.moves_to_block() && s.owner.resending() {
+                s.idle_until = now + LOCAL_IDLE;
+            }
+        }
+        s.owner_settled = settled;
+    }
+    out
+}
+
+/// The screen's turn on the text channel, when it is due: everyone else's screen, a block a step (its three steps a
+/// phase apart, then the pointer stays on it a whole step).
+pub(crate) fn synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
+    let panel_wants = rt.sender.as_ref().is_some_and(|p| p.wants_step(now));
+    // A panel block between its steps finishes first.
+    let panel_mid_block = rt.sender.as_ref().is_some_and(TextSender::mid_block);
+    let step = rt.sender.as_ref().map_or(Duration::from_millis(300), TextSender::step);
+    let s = &mut rt.screen;
+    let Some(everyone) = s.everyone.as_mut() else { return Vec::new() };
+    // The screen's menu, or a dropped card (the only thing the screen shows while the menu is the overlay's).
+    let screen_wants = s.close_everyone || (s.menu.open && (s.available || s.menu.card_shown()));
+    if !screen_wants || now < s.next_synced || panel_mid_block {
+        return Vec::new();
+    }
+    // Both want the channel: they take turns, a whole block each.
+    if panel_wants && !s.screen_turn && !everyone.mid_block() {
+        s.screen_turn = true;
+        s.next_synced = now + step;
+        return Vec::new();
+    }
+    s.screen_turn = false;
+    let mut wait = step;
+    let card = s.menu.card_shown();
+    if card && s.frozen && s.freeze_next.is_some_and(|t| now >= t) {
+        s.freeze_due = true;
+    }
+    let out = if s.close_everyone {
+        s.close_everyone = false;
+        s.frozen = false;
+        // Closing clears everyone else's memory, and leaves the pointer where it writes nothing.
+        everyone.cleared(true);
+        screen::synced_close()
+    } else if card && s.freeze_due && !everyone.mid_block() {
+        // A dropped card: once its first block is on its way, everyone else's copy freezes where it is (and again now
+        // and then, for whoever loaded the avatar since). 253 writes nothing: the next block's values may go.
+        s.freeze_due = false;
+        s.frozen = true;
+        s.freeze_next = Some(now + FREEZE_AGAIN);
+        everyone.park();
+        screen::synced_drop()
+    } else {
+        // Everyone else's frame: no hover nor press, no friend named. A new page clears their memory first.
+        let pictures = &s.pictures;
+        let flags = Flags { loading: s.menu.loading(), ..Default::default() };
+        let frame = Frame::public(&s.menu, flags, s.thumbnail, &|id: &str| thumbnail(pictures, id));
+        let send = everyone.step(&frame.bank);
+        if matches!(send, screen::Send::Clear) {
+            // 254 closed everyone else's copy: a card's freeze is undone with it.
+            s.frozen = false;
+        }
+        if card && !s.frozen && send.moves_to_block() {
+            s.freeze_due = true;
+        }
+        if !send.holds() {
+            wait = orbiters_orb::text::PHASE_GAP;
+        }
+        screen::synced_messages(rt.sender.as_ref().map_or(8, TextSender::sync), &send)
+    };
+    s.next_synced = now + wait;
+    if let Some(sender) = rt.sender.as_mut() {
+        sender.hold_until(now + wait);
+    }
+    out
 }
 
 /// Thumbnail `id`, when the screen has it.
@@ -1473,6 +1407,7 @@ fn thumbnail(pictures: &HashMap<String, Thumb>, id: &str) -> Option<Picture> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::MouseState;
 
     #[test]
     fn reads_touch_points() {
@@ -1484,7 +1419,6 @@ mod tests {
         assert_eq!(s.proximity[1][3], 0.25);
         assert_eq!(s.touched, [true, true]);
         assert!(s.touch_point("N4N0/Screen/Touch/X0", 1.0), "ours, ignored");
-        assert_eq!(language().len(), 2);
     }
 
     #[test]
@@ -1636,8 +1570,9 @@ mod tests {
         use orbiters_orb::menu::Target;
         let mut rt = OrbRuntime::default();
         rt.screen.avatar(true, true, Some(8), 72);
+        let media = Watcher::new(|| Box::new(crate::media::NoMedia));
         let tick = |rt: &mut OrbRuntime| {
-            super::super::Controller::screen_tick(rt, Instant::now(), &crate::state::CallsStatus::default(), false, None, &mut Followups::default());
+            super::tick(rt, Instant::now(), &CallsStatus::default(), false, None, &media, &mut Followups::default());
         };
         rt.screen.menu.pages = Pages::Six;
         tick(&mut rt);
@@ -1656,5 +1591,23 @@ mod tests {
         // Without the screen (none, or one the text channel cannot reach), no card.
         rt.screen.avatar(false, false, None, 72);
         assert!(!rt.screen.card_ready());
+    }
+
+    #[test]
+    fn the_keyboard_follows_its_setting_or_the_device() {
+        use orbiters_core::settings::KeyboardLayout as Setting;
+        struct French;
+        impl Locale for French {
+            fn locale(&self) -> String {
+                "fr-FR".into()
+            }
+            fn keyboard(&self) -> KeyboardLayout {
+                KeyboardLayout::Azerty
+            }
+        }
+        assert_eq!(keyboard(Setting::Auto, &French), KeyboardLayout::Azerty);
+        assert_eq!(keyboard(Setting::Qwerty, &French), KeyboardLayout::Qwerty);
+        assert_eq!(French.language(), "fr");
+        assert_eq!(photo_setting(photo_length(orbiters_core::settings::Photo3dLength::Full)), orbiters_core::settings::Photo3dLength::Full);
     }
 }

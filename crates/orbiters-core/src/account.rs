@@ -2,7 +2,8 @@
 //! one sign-in per server in Unity's preferences folder (`Preferences/MCB/account.dat`, `account_dev.dat` for the
 //! development server), written by Toolkit's `AuthenticationService`. On Windows the JSON is protected with DPAPI for
 //! the current user (with Toolkit's entropy), elsewhere it is plain JSON readable by the user only. Signing in here
-//! writes the same file, so every tool shares it; signing out removes it for every tool.
+//! writes the same file, so every tool shares it; signing out removes it for every tool. An app without Unity beside it
+//! keeps its own ([`set_store`]: on Android, in its files folder, sealed with a key of the Android Keystore).
 //!
 //! A sign-in is the same browser pairing the tools use (`/editor-links`): Orbiters - N4N0 listens on this computer's
 //! loopback ([`Callback`]), asks Orbiters for a link naming where it listens, and opens it; the person signs in on the
@@ -18,7 +19,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 /// The Orbiters server the Unity tools talk to (their **Production** / **Development** switch).
@@ -139,14 +140,66 @@ fn unity_preferences() -> Option<PathBuf> {
     }
 }
 
+/// Where and how the account is kept: the file of each server's account, and its bytes protected for this user.
+pub trait CredentialStore: Send + Sync {
+    /// The file of `server`'s account.
+    fn path(&self, server: Server) -> Option<PathBuf>;
+    /// The file's bytes for the account's JSON, protected for this user.
+    fn seal(&self, plain: &[u8]) -> anyhow::Result<Vec<u8>>;
+    /// The account's JSON from the file's bytes (an error when they were not sealed for this user, or were tampered with).
+    fn open(&self, sealed: &[u8]) -> anyhow::Result<Vec<u8>>;
+}
+
+/// The Unity tools' own: `MCB/account.dat` in Unity's preferences folder, protected with DPAPI on Windows (with
+/// Toolkit's entropy), plain JSON readable by the user only elsewhere.
+pub struct UnityStore;
+
+impl CredentialStore for UnityStore {
+    fn path(&self, server: Server) -> Option<PathBuf> {
+        unity_preferences().map(|p| p.join("MCB").join(server.file_name()))
+    }
+
+    fn seal(&self, plain: &[u8]) -> anyhow::Result<Vec<u8>> {
+        if cfg!(windows) {
+            protect::protect(plain)
+        } else {
+            Ok(plain.to_vec())
+        }
+    }
+
+    fn open(&self, sealed: &[u8]) -> anyhow::Result<Vec<u8>> {
+        if cfg!(windows) {
+            protect::unprotect(sealed)
+        } else {
+            Ok(sealed.to_vec())
+        }
+    }
+}
+
+static STORE: OnceLock<Box<dyn CredentialStore>> = OnceLock::new();
+
+/// Keeps the account in `store` from now on, instead of the Unity tools' file: once, at start, before the account is
+/// read.
+pub fn set_store(store: Box<dyn CredentialStore>) -> anyhow::Result<()> {
+    STORE.set(store).map_err(|_| anyhow::anyhow!("the account's store was given already"))
+}
+
+/// Where the account is kept: the app's store, else the Unity tools'.
+fn store() -> &'static dyn CredentialStore {
+    match STORE.get() {
+        Some(store) => store.as_ref(),
+        None => &UnityStore,
+    }
+}
+
 /// Where the tools keep the account for `server`.
 pub fn account_path(server: Server) -> Option<PathBuf> {
-    unity_preferences().map(|p| p.join("MCB").join(server.file_name()))
+    store().path(server)
 }
 
 /// The account signed in for `server`, if any (an unreadable or tampered file reads as signed out, as in Unity).
 pub fn read(server: Server) -> Option<Account> {
-    read_file(&account_path(server)?)
+    read_file(store(), &account_path(server)?)
 }
 
 /// When the account file of `server` last changed (another tool signed in or out), or `None` without one.
@@ -157,7 +210,7 @@ pub fn modified(server: Server) -> Option<std::time::SystemTime> {
 /// Signs `account` in for every tool on `server`.
 pub fn save(server: Server, account: &Account) -> anyhow::Result<()> {
     let path = account_path(server).context("no Unity preferences folder")?;
-    write_file(&path, account)?;
+    write_file(store(), &path, account)?;
     let _ = std::fs::remove_file(path.with_file_name(server.legacy_file_name()));
     Ok(())
 }
@@ -174,9 +227,9 @@ pub fn remove(server: Server) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_file(path: &Path) -> Option<Account> {
+fn read_file(store: &dyn CredentialStore, path: &Path) -> Option<Account> {
     let data = std::fs::read(path).ok()?;
-    let json = if cfg!(windows) { protect::unprotect(&data).ok()? } else { data };
+    let json = store.open(&data).ok()?;
     let account: Account = serde_json::from_slice(&json).ok()?;
     (!account.token.trim().is_empty()).then_some(account)
 }
@@ -184,13 +237,13 @@ fn read_file(path: &Path) -> Option<Account> {
 /// Writes the account whole, through a temporary file renamed over the old one ([`crate::write_atomic_private`]): a
 /// Unity tool reading it meanwhile, a crash or a power cut never finds half a blob, which every tool reads as signed
 /// out.
-fn write_file(path: &Path, account: &Account) -> anyhow::Result<()> {
+fn write_file(store: &dyn CredentialStore, path: &Path, account: &Account) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     // Toolkit writes nulls for empty fields; serde does the same for `None`.
     let json = serde_json::to_vec(account)?;
-    let data = if cfg!(windows) { protect::protect(&json)? } else { json };
+    let data = store.seal(&json)?;
     crate::write_atomic_private(path, &data)?;
     Ok(())
 }
@@ -686,8 +739,8 @@ mod tests {
             username: Some("Example".into()),
             avatar_url: None,
         };
-        write_file(&path, &account).unwrap();
-        assert_eq!(read_file(&path), Some(account.clone()));
+        write_file(&UnityStore, &path, &account).unwrap();
+        assert_eq!(read_file(&UnityStore, &path), Some(account.clone()));
         assert!(!format!("{account:?} {:?}", Exchange::Done(account.clone())).contains("orbit-"), "no credential in what is printed");
         let link = Link {
             link_url: "https://orbiters.cc/link-editor?token=secret".into(),
@@ -696,7 +749,7 @@ mod tests {
         };
         assert!(!format!("{link:?}").contains("secret") && format!("{link:?}").contains("connected?client=desktop"));
         // Written again over itself: no temporary file is left beside.
-        write_file(&path, &account).unwrap();
+        write_file(&UnityStore, &path, &account).unwrap();
         assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
         let raw = std::fs::read(&path).unwrap();
         if cfg!(windows) {
@@ -711,8 +764,50 @@ mod tests {
         }
         // Tampered: signed out.
         std::fs::write(&path, b"nonsense").unwrap();
-        assert_eq!(read_file(&path), None);
+        assert_eq!(read_file(&UnityStore, &path), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A stand-in for a phone's store: a folder of its own, its bytes sealed with a key only it holds (as the Android
+    /// Keystore's would be).
+    struct Sealed {
+        dir: PathBuf,
+        key: u8,
+    }
+
+    impl CredentialStore for Sealed {
+        fn path(&self, server: Server) -> Option<PathBuf> {
+            Some(self.dir.join(server.file_name()))
+        }
+
+        fn seal(&self, plain: &[u8]) -> anyhow::Result<Vec<u8>> {
+            Ok([b"SEALED".as_slice(), &plain.iter().map(|b| b ^ self.key).collect::<Vec<u8>>()].concat())
+        }
+
+        fn open(&self, sealed: &[u8]) -> anyhow::Result<Vec<u8>> {
+            let body = sealed.strip_prefix(b"SEALED").ok_or_else(|| anyhow::anyhow!("not sealed here"))?;
+            Ok(body.iter().map(|b| b ^ self.key).collect())
+        }
+    }
+
+    #[test]
+    fn an_app_s_own_store_keeps_the_account_sealed() {
+        let dir = std::env::temp_dir().join(format!("orbiters-account-store-{}", std::process::id()));
+        let store = Sealed { dir: dir.clone(), key: 0x5a };
+        let path = store.path(Server::Production).unwrap();
+        assert_eq!(path, dir.join("account.dat"));
+        let account = Account { token: "orbit-phone".into(), user: Some("7".into()), username: Some("Quest".into()), avatar_url: None };
+        write_file(&store, &path, &account).unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        assert!(raw.starts_with(b"SEALED") && !String::from_utf8_lossy(&raw).contains("orbit-phone"), "only sealed bytes on disk");
+        assert_eq!(read_file(&store, &path), Some(account));
+        // Sealed with another key (another install), or not by this store at all: signed out.
+        assert_eq!(read_file(&Sealed { dir: dir.clone(), key: 0x33 }, &path), None);
+        std::fs::write(&path, br#"{"token":"orbit-plain"}"#).unwrap();
+        assert_eq!(read_file(&store, &path), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+        // The desktop sets none: the Unity tools' file.
+        assert_eq!(account_path(Server::Production), UnityStore.path(Server::Production));
     }
 
     /// What a browser gets from `url` (`http://127.0.0.1:…`, `method`, `host` as the Host header when not the URL's

@@ -3624,6 +3624,7 @@ dependencies = [
  "egui",
  "orbiters-contracts",
  "orbiters-core",
+ "orbiters-n4n0",
  "orbiters-openvr",
  "orbiters-orb",
  "orbiters-reconstruct",
@@ -3645,6 +3646,20 @@ dependencies = [
  "uuid",
  "windows 0.62.2",
  "winresource",
+]
+
+[[package]]
+name = "orbiters-n4n0"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "orbiters-contracts",
+ "orbiters-core",
+ "orbiters-orb",
+ "rosc",
+ "serde",
+ "serde_json",
+ "time",
 ]
 
 [[package]]
@@ -5846,12 +5861,14 @@ dependencies = [
  "mime_guess",
  "native-tls",
  "percent-encoding",
+ "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
  "ureq-proto",
  "utf8-zero",
  "webpki-root-certs",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]

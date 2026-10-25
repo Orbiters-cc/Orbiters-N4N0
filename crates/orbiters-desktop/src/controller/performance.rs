@@ -153,7 +153,7 @@ impl super::Controller {
     /// VRChat's frames from the overlay: added to this minute in this world (the setting on).
     pub fn frames(self: &Shared, chunk: FrameChunk) {
         // They pace N4N0's projected screen whether or not they are gathered for Orbiters.
-        self.screen_frames(&chunk.intervals_ms);
+        self.n4n0.frames(&chunk.intervals_ms);
         if !self.with_settings(|s| s.world_performance) {
             return;
         }

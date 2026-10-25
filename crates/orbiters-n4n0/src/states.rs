@@ -1,14 +1,13 @@
-//! N4N0's saved avatar states in the tray service (`orbiters_orb::states`; contracts `Docs/orb.md`, States): saving how
-//! the avatar worn is (every parameter OSC may write, as VRChat's OSCQuery tree has it, and its eye height), putting it
-//! back over OSC a step at a time, and the default state each avatar may have, put back after each world join and each
-//! switch to it, once VRChat has applied the avatar's own values.
+//! N4N0's saved avatar states (`orbiters_orb::states`; contracts `Docs/orb.md`, States): saving how the avatar worn is
+//! (every parameter OSC may write, as VRChat's OSCQuery tree has it, and its eye height), putting it back over OSC a
+//! step at a time, and the default state each avatar may have, put back after each world join and each switch to it,
+//! once VRChat has applied the avatar's own values.
 //!
 //! The file is read once and written whole after each change, outside the orb's lock (the screen's steps never wait for
 //! the disk), one write at a time and the newest last.
 
-use super::orb::OrbRuntime;
-use super::{NoticeKind, Shared};
-use crate::state::{StateAction, StateView, StatesNote, StatesView};
+use crate::runtime::{N4n0, OrbRuntime, Shared};
+use crate::status::{NoticeKind, StateAction, StateView, StatesNote, StatesView};
 use orbiters_core::osc::{OscValue, TreeNode, DEPTH_FRAMES_PARAMETER, PARAMETERS_PREFIX};
 use orbiters_core::vrchat_log::LogEvent;
 use orbiters_orb::menu::StateRow;
@@ -19,7 +18,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// An avatar's default state goes this long after its last `/avatar/change`: VRChat has applied the avatar's own defaults
-/// and saved values by then, and Orbiters - N4N0 has read its parameters (1.5 s after the change).
+/// and saved values by then, and N4N0 has read its parameters (1.5 s after the change).
 const DEFAULT_SETTLE: Duration = Duration::from_millis(if cfg!(test) { 1800 } else { 3000 });
 /// It waits at most this long for the avatar's parameters to be read (a heavy avatar loading).
 const DEFAULT_WAIT: Duration = Duration::from_secs(30);
@@ -45,24 +44,26 @@ struct Due {
     until: Instant,
 }
 
-pub struct StatesRuntime {
+pub(crate) struct StatesRuntime {
     path: PathBuf,
     store: Option<Store>,
     /// The file could not be read: nothing is written over it until it can be.
     unreadable: Option<String>,
     /// Bumped on every change (the screen's menu follows it).
-    pub(super) version: u64,
+    pub(crate) version: u64,
     note: Option<StatesNote>,
     notes: u64,
     saving: bool,
     due: Option<Due>,
-    joined: Option<Instant>,
+    pub(crate) joined: Option<Instant>,
     applied: Option<(String, Instant)>,
 }
 
+/// Without a file of its own (the runtime gives it the app's, [`crate::Files::states`]); a test's own runtime gets one
+/// of its own, which goes with it.
 impl Default for StatesRuntime {
     fn default() -> Self {
-        Self::at(if cfg!(test) { test_file() } else { states::file() })
+        Self::at(if cfg!(test) { test_file() } else { PathBuf::new() })
     }
 }
 
@@ -87,7 +88,7 @@ impl StatesRuntime {
     }
 
     /// The store, read from the file the first time. One that could not be read is read again (it may be free now).
-    fn store(&mut self) -> &mut Store {
+    pub(crate) fn store(&mut self) -> &mut Store {
         if self.store.is_none() || self.unreadable.is_some() {
             let (store, loaded) = Store::read(&self.path);
             match loaded {
@@ -111,7 +112,7 @@ impl StatesRuntime {
     }
 
     /// Reads the file (the app starts).
-    pub(super) fn load(&mut self) {
+    pub(crate) fn load(&mut self) {
         self.store();
     }
 
@@ -122,12 +123,12 @@ impl StatesRuntime {
     }
 
     /// The menu's rows for `avatar`.
-    pub(super) fn rows(&self, avatar: Option<&str>) -> Vec<StateRow> {
+    pub(crate) fn rows(&self, avatar: Option<&str>) -> Vec<StateRow> {
         avatar.and_then(|a| self.store.as_ref()?.avatar(a)).map(states::rows).unwrap_or_default()
     }
 
     /// What the window and the menus show for `avatar`.
-    pub(super) fn view(&self, avatar: Option<&str>) -> StatesView {
+    pub(crate) fn view(&self, avatar: Option<&str>) -> StatesView {
         let entry = avatar.and_then(|a| self.store.as_ref()?.avatar(a));
         let states = entry
             .map(|e| {
@@ -151,13 +152,13 @@ impl StatesRuntime {
     }
 
     /// VRChat loaded `avatar` (a switch, or the same one again in a new world): its default goes once it settled.
-    pub(super) fn avatar_changed(&mut self, avatar: &str, now: Instant) {
+    pub(crate) fn avatar_changed(&mut self, avatar: &str, now: Instant) {
         self.due = Some(Due { avatar: avatar.to_string(), at: now + DEFAULT_SETTLE, until: now + DEFAULT_WAIT });
         self.joined = None;
     }
 
     /// When the orb thread should next look (a default due).
-    pub(super) fn next_due(&self) -> Option<Instant> {
+    pub(crate) fn next_due(&self) -> Option<Instant> {
         let due = self.due.as_ref().map(|d| d.at);
         let joined = self.joined.map(|t| t + JOIN_WAIT);
         due.into_iter().chain(joined).min()
@@ -189,7 +190,7 @@ fn float(value: &OscValue) -> Option<f32> {
 
 /// At the orb thread's step: the default state to put back now, as (avatar, state id). An avatar change's default once
 /// it settled and its parameters were read; a world join's when no reload came (and none went lately).
-pub(super) fn tick(rt: &mut OrbRuntime, now: Instant) -> Option<(String, String)> {
+pub(crate) fn tick(rt: &mut OrbRuntime, now: Instant) -> Option<(String, String)> {
     let avatar = rt.avatar_id.clone();
     let known = !rt.params.is_empty() && !rt.tree_unknown;
     let s = &mut rt.states;
@@ -217,17 +218,17 @@ pub(super) fn tick(rt: &mut OrbRuntime, now: Instant) -> Option<(String, String)
     Some((avatar, id))
 }
 
-impl super::Controller {
+impl N4n0 {
     /// The avatar's nodes of VRChat's OSCQuery tree (empty when VRChat or its tree is not found), read without the OSC
     /// lock.
     fn vrchat_nodes(&self) -> anyhow::Result<Vec<TreeNode>> {
-        let query = self.with_osc(|o| o.vrchat_query()).flatten().ok_or_else(|| anyhow::anyhow!("VRChat's OSCQuery service was not found"))?;
+        let query = self.osc.vrchat_query().flatten().ok_or_else(|| anyhow::anyhow!("VRChat's OSCQuery service was not found"))?;
         orbiters_core::osc::vrchat_nodes(query, TREE_TIMEOUT)
     }
 
     /// The latest value VRChat sent for `address` (the eye height, which it sends when it changes).
     fn osc_latest_value(&self, address: &str) -> Option<OscValue> {
-        self.osc_values.lock().unwrap().latest.get(address).and_then(|(v, _)| v.first().cloned())
+        self.osc.latest(&mut std::iter::once(address.to_string())).remove(address)
     }
 
     /// Writes the states file, the newest content: refused while it could not be read (it would be replaced).
@@ -245,8 +246,8 @@ impl super::Controller {
         store.save(&path).map_err(|e| format!("Could not save the states: {e}"))
     }
 
-    /// What the window and the menus ask of the saved states of the avatar worn.
-    pub(super) fn states_action(self: &Shared, action: StateAction) {
+    /// What the interfaces and the menus ask of the saved states of the avatar worn.
+    pub(crate) fn states_action(self: &Shared, action: StateAction) {
         match action {
             StateAction::Save { name } => self.states_save(name),
             StateAction::Apply { id } => self.states_apply(id, false),
@@ -264,7 +265,7 @@ impl super::Controller {
             let Some(avatar) = rt.avatar_id.clone() else {
                 rt.states.say("VRChat's avatar is not known yet.", true);
                 drop(rt);
-                self.orb_publish();
+                self.publish();
                 return;
             };
             let s = &mut rt.states;
@@ -272,7 +273,7 @@ impl super::Controller {
             if let Some(e) = s.unreadable.clone() {
                 s.say(format!("The saved states could not be read ({e}): nothing was changed, so they stay whole."), true);
                 drop(rt);
-                self.orb_publish();
+                self.publish();
                 return;
             }
             let done = change(s.store(), &avatar);
@@ -287,19 +288,19 @@ impl super::Controller {
             self.orb.lock().unwrap().states.say(e.clone(), true);
             self.notify(NoticeKind::Warning, e);
         }
-        self.orb_publish();
+        self.publish();
     }
 
     /// Saves how the avatar worn is now as a state named `name` ("State n" without one), on a thread of its own: VRChat's
     /// tree takes a moment to read.
-    pub(super) fn states_save(self: &Shared, name: Option<String>) {
+    pub(crate) fn states_save(self: &Shared, name: Option<String>) {
         self.orb.lock().unwrap().states.saving = true;
-        self.orb_publish();
-        let ctl = self.clone();
+        self.publish();
+        let n = self.clone();
         let _ = std::thread::Builder::new().name("orb-state-save".into()).spawn(move || {
-            let said = ctl.states_save_now(name);
+            let said = n.states_save_now(name);
             {
-                let mut rt = ctl.orb.lock().unwrap();
+                let mut rt = n.orb.lock().unwrap();
                 rt.states.saving = false;
                 match &said {
                     Ok(text) => rt.states.say(text.clone(), false),
@@ -311,9 +312,9 @@ impl super::Controller {
                 }
             }
             if let Err(e) = said {
-                ctl.notify(NoticeKind::Warning, e);
+                n.notify(NoticeKind::Warning, e);
             }
-            ctl.orb_publish();
+            n.publish();
         });
     }
 
@@ -327,7 +328,7 @@ impl super::Controller {
         let record = self.with_settings(|s| s.osc.record_parameter.clone());
         let parameters = states::capture(&current, &[record.as_str(), DEPTH_FRAMES_PARAMETER]);
         let eye = eye.or_else(|| self.osc_latest_value(EYE_HEIGHT).as_ref().and_then(float));
-        let avatar_name = self.snapshot.lock().unwrap().vrchat.world.avatar_name.clone();
+        let avatar_name = self.host.world().avatar_name;
         let count = parameters.len();
         let saved = {
             let mut rt = self.orb.lock().unwrap();
@@ -350,13 +351,13 @@ impl super::Controller {
 
     /// Puts the avatar worn back as its state `id` holds it (`by_default`: its default, after a join or a switch), on a
     /// thread of its own: what VRChat holds now is read first, then the messages go in steps.
-    pub(super) fn states_apply(self: &Shared, id: String, by_default: bool) {
-        let ctl = self.clone();
+    pub(crate) fn states_apply(self: &Shared, id: String, by_default: bool) {
+        let n = self.clone();
         let _ = std::thread::Builder::new().name("orb-state-apply".into()).spawn(move || {
-            let said = ctl.states_apply_now(&id);
+            let said = n.states_apply_now(&id);
             let quiet = by_default && said.is_ok();
             {
-                let mut rt = ctl.orb.lock().unwrap();
+                let mut rt = n.orb.lock().unwrap();
                 match &said {
                     Ok(text) => rt.states.say(if by_default { format!("{text} (the default)") } else { text.clone() }, false),
                     Err(e) => rt.states.say(e.clone(), true),
@@ -369,9 +370,9 @@ impl super::Controller {
                 }
             }
             if let (Err(e), false) = (&said, quiet) {
-                ctl.notify(NoticeKind::Warning, e.clone());
+                n.notify(NoticeKind::Warning, e.clone());
             }
-            ctl.orb_publish();
+            n.publish();
         });
     }
 
@@ -399,9 +400,9 @@ impl super::Controller {
         Ok(plan.summary(&state.name))
     }
 
-    /// What VRChat's log said (the watchers' thread): a world joined as it happens puts the default state back once the
-    /// avatar loaded there.
-    pub(super) fn states_log(self: &Shared, events: &[LogEvent], live: bool) {
+    /// What VRChat's log said (the app's watchers): a world joined as it happens (`live`) puts the default state back
+    /// once the avatar loaded there.
+    pub fn states_log(&self, events: &[LogEvent], live: bool) {
         if !live || !events.iter().any(|e| matches!(e, LogEvent::JoinedRoom { .. })) {
             return;
         }

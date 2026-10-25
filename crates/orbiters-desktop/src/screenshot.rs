@@ -868,7 +868,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
     let mut world_opened = false;
     backend.attach(&ctx);
     let mut app = App::offline(backend);
-    app.set_gpu(crate::gpu::Handles { device: gpu.device().clone(), queue: gpu.queue().clone(), textures: gpu.textures().clone() });
+    app.set_gpu(crate::gpu::Handles::of_offscreen(gpu));
     if !sc.splash {
         app.skip_splash();
     }
@@ -1175,7 +1175,7 @@ fn splats_3d(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, sc
     let sessions = controller::list_sessions(&settings.sessions_dir);
     ctl.set_snapshot(idle_snapshot(settings, &sessions));
     let backend: Ctl = std::sync::Arc::new(Local::new(ctl));
-    let handles = crate::gpu::Handles { device: gpu.device().clone(), queue: gpu.queue().clone(), textures: gpu.textures().clone() };
+    let handles = crate::gpu::Handles::of_offscreen(gpu);
     let mut run = Run::new(gpu, backend, scale);
     run.app.set_gpu(handles.clone());
     let t = run.time();

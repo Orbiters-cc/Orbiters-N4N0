@@ -54,8 +54,7 @@ impl App {
         round_corners(cc);
         let mut app = Self::offline(ctl);
         app.windowed = true;
-        app.gpu =
-            cc.wgpu_render_state.as_ref().map(|rs| crate::gpu::Handles { device: rs.device.clone(), queue: rs.queue.clone(), textures: rs.renderer.clone() });
+        app.gpu = cc.wgpu_render_state.as_ref().map(crate::gpu::Handles::of_window);
         app.show_splash = splash;
         app
     }

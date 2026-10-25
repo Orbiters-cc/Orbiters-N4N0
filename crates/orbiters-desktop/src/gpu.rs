@@ -1,14 +1,15 @@
 //! GPU setup for the window. wgpu's defaults suit games: the "performance" memory hint reserves 128 MB device and
 //! 64 MB host blocks (system RAM on an integrated GPU), and the D3D12 backend maps a million-entry descriptor heap
-//! (32 MB). The window asks for small blocks and a small heap instead (it then costs about the driver's own floor),
-//! renders on the adapter that drives the primary display (no copy between GPUs; on a laptop that is the integrated
-//! GPU that owns the panel) unless it opens while VRChat runs: then on the processor's integrated GPU where it can show
-//! the window, it and the 3D view on its device leave VRChat's graphics card alone (Windows copies the frames to the
-//! display's GPU). On Windows it loads only the DX12 drivers (no Vulkan or OpenGL probing), and it reports GPU errors
-//! instead of closing ([`report_errors`]).
+//! (32 MB). The window asks for small blocks and a small heap instead (it then costs about the driver's own floor).
+//! It renders on the GPU the settings choose ([`WindowGpu`]): the processor's integrated GPU, where the 3D view on its
+//! device stays off VRChat's graphics card (which still copies each frame, to show it on the monitor it drives), or
+//! the graphics card; without that kind of GPU, on the adapter that drives the primary display. DX12 says every
+//! adapter can present to a window, so there is nothing to test beforehand. On Windows it loads only the DX12 drivers
+//! (no Vulkan or OpenGL probing), and it reports GPU errors instead of closing ([`report_errors`]).
 
 use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetupCreateNew};
 use eframe::wgpu;
+use orbiters_core::settings::WindowGpu;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -26,29 +27,66 @@ pub fn report_errors(device: &wgpu::Device) {
     }));
 }
 
-/// The window's device, for pages that draw their own GPU content (the 3D view of splats), and its renderer, whose
-/// textures the progressive blur under the title bar draws with.
+/// The window's device, for pages that draw their own GPU content (the 3D view of splats), its renderer, whose
+/// textures the progressive blur under the title bar draws with, and what Settings says of its GPU.
 #[derive(Clone)]
 pub struct Handles {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub textures: orbiters_ui::blur::Textures,
+    pub adapter: Adapter,
 }
 
-/// `integrated`: the window opens while VRChat runs (see the module).
-pub fn options(integrated: bool) -> WgpuConfiguration {
+impl Handles {
+    /// A window's.
+    pub fn of_window(rs: &eframe::egui_wgpu::RenderState) -> Self {
+        Self { device: rs.device.clone(), queue: rs.queue.clone(), textures: rs.renderer.clone(), adapter: Adapter::of(&rs.adapter, &rs.available_adapters) }
+    }
+
+    /// An offscreen renderer's (screenshots), shown as if the computer had both kinds of GPU.
+    pub fn of_offscreen(gpu: &orbiters_ui::offscreen::Offscreen) -> Self {
+        let adapter = Adapter { choice: true, ..Adapter::of(gpu.adapter(), &[]) };
+        Self { device: gpu.device().clone(), queue: gpu.queue().clone(), textures: gpu.textures().clone(), adapter }
+    }
+}
+
+/// The GPU the window draws on, and whether Settings can move it to another kind ([`WindowGpu`]): the computer has an
+/// integrated GPU and a graphics card.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Adapter {
+    pub name: String,
+    pub integrated: bool,
+    pub choice: bool,
+}
+
+impl Adapter {
+    fn of(adapter: &wgpu::Adapter, available: &[wgpu::Adapter]) -> Self {
+        let info = adapter.get_info();
+        let has = |kind| available.iter().any(|a| a.get_info().device_type == kind);
+        Self {
+            name: info.name,
+            integrated: info.device_type == wgpu::DeviceType::IntegratedGpu,
+            choice: has(wgpu::DeviceType::IntegratedGpu) && has(wgpu::DeviceType::DiscreteGpu),
+        }
+    }
+}
+
+/// The window's GPU setup, on the kind of GPU `gpu` asks for (see the module).
+pub fn options(gpu: WindowGpu) -> WgpuConfiguration {
     let mut setup = WgpuSetupCreateNew::without_display_handle();
     if wgpu::Backends::from_env().is_none() {
         setup.instance_descriptor.backends = if cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::VULKAN | wgpu::Backends::GL };
     }
+    let kind = match gpu {
+        WindowGpu::IntegratedGpu => wgpu::DeviceType::IntegratedGpu,
+        WindowGpu::GraphicsCard => wgpu::DeviceType::DiscreteGpu,
+    };
     setup.native_adapter_selector = Some(Arc::new(move |adapters: &[wgpu::Adapter], surface: Option<&wgpu::Surface<'_>>| {
-        if integrated {
-            let shows = |a: &wgpu::Adapter| a.get_info().device_type == wgpu::DeviceType::IntegratedGpu && surface.is_none_or(|s| a.is_surface_supported(s));
-            if let Some(a) = adapters.iter().find(|a| shows(a)) {
-                return Ok(a.clone());
-            }
+        let shows = |a: &wgpu::Adapter| a.get_info().device_type == kind && surface.is_none_or(|s| a.is_surface_supported(s));
+        match adapters.iter().find(|a| shows(a)) {
+            Some(a) => Ok(a.clone()),
+            None => select(adapters),
         }
-        select(adapters)
     }));
     setup.device_descriptor = Arc::new(|adapter: &wgpu::Adapter| {
         let base = if adapter.get_info().backend == wgpu::Backend::Gl { wgpu::Limits::downlevel_webgl2_defaults() } else { wgpu::Limits::default() };

@@ -259,6 +259,8 @@ impl OrbRuntime {
         self.screen.pointing = false;
         self.screen.avatar(false, false, None, contract::thumbnail::SIZES[0]);
         self.screen.set_gaze(false);
+        // VRChat loaded the avatar again (another avatar, another world): no card of the last load is out.
+        self.screen.set_card_capable(false);
     }
 
     /// Puts N4N0's menu where it shows now (contracts `Docs/orb.md`, Menu): on the avatar's screen when the prop has one
@@ -1212,6 +1214,8 @@ impl N4n0 {
             rt.avatar_id = Some(id.clone());
             rt.params = names;
             rt.size_sent = None;
+            let capable = rt.params.contains(contract::card::OUT);
+            rt.screen.set_card_capable(capable);
             rt.manifest = manifest.is_some();
             rt.n4n0_version = manifest.as_ref().and_then(|m| m.orb.as_ref()).and_then(|o| o.version.clone());
             rt.controls = controls;
@@ -1803,9 +1807,9 @@ impl N4n0 {
     /// parameters an avatar lacks.
     fn close_on_quit(&self) {
         self.orb.lock().unwrap().screen.quit();
-        // A dropped card first: its screen shows whatever the Menu toggle says.
+        // The card goes back too: nobody could take its link from the app any more.
         let off = [
-            (parameter(params::SCREEN_DROP), OscType::Bool(false)),
+            (parameter(contract::card::OUT), OscType::Bool(false)),
             (parameter(params::SCREEN_OPEN), OscType::Bool(false)),
             (parameter(params::MENU), OscType::Bool(false)),
         ];

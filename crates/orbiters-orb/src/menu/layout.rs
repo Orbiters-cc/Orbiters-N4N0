@@ -5,7 +5,7 @@
 //! layout table holds it in a byte.
 
 use super::{
-    Call, KeyboardLayout, Keys, Menu, Page, Pages, Target, Typing, CARD_PUBLIC_STEP, CARD_SEGMENTS, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, SMOOTHING_LABELS,
+    Call, KeyboardLayout, Keys, Menu, Page, Pages, Target, Typing, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, SMOOTHING_LABELS,
     STATES_PER_PAGE, TIMERS, TRACKING_KINDS,
 };
 use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
@@ -827,16 +827,12 @@ pub fn layout(page: ScreenPage) -> Layout {
             }
         }
         ScreenPage::Card => {
-            // The thumbnail at the top left; beside it the title, the link and the time left running down; under them,
-            // across the card, what to do with it.
+            // The thumbnail at the top left; beside it the title and the link; under them, across the card, what to do
+            // with it. The card stays out (screen version 7: an object of its own), so it counts no time down.
             pictures.push(Picture { rect: Rect::new(32, 32, 512, 288), result: 0 });
             slots.add(576, 40, 26, 32, Style::Primary, Content::CardTitle(0));
             slots.add(576, 84, 26, 32, Style::Primary, Content::CardTitle(1));
             slots.add(576, 140, 34, 24, Style::Accent, Content::CardLink);
-            labels.push(Label { x: 576, y: 232, size: 24, text: "Time left", style: Style::Secondary, bold: false });
-            for i in 0..CARD_SEGMENTS as u8 {
-                elements.push(element(Target::CardTime(i), Rect::new(576 + i as u16 * 28, 276, 24, 16), Look::Bar));
-            }
             icons.push((Rect::new(240, 400, 96, 96), Icon::Grab, Some(Tint::Green)));
             labels.push(Label { x: 364, y: 408, size: 48, text: "Grab to copy link", style: Style::Primary, bold: true });
             labels.push(Label { x: 364, y: 472, size: 24, text: "Anyone around with N4N0 can take it", style: Style::Secondary, bold: false });
@@ -1018,14 +1014,6 @@ pub fn heard_lines(text: &str) -> Vec<String> {
 /// What N4N0 says, in the pieces the seven-tile Home's place shows one after the other (as many lines as it holds each).
 pub fn heard_pages(text: &str) -> Vec<String> {
     super::pieces(&shown(text), HEARD_COLUMNS).chunks(HEARD_LINES).map(|lines| lines.join(" ")).collect()
-}
-
-/// What is left of a dropped card's time, in segments of its bar: whole seconds for its owner, steps of
-/// [`CARD_PUBLIC_STEP`] seconds for everyone else (each step costs a block of the synced channel).
-pub fn card_segments(menu: &Menu, public: bool) -> usize {
-    let left = menu.card.as_ref().map_or(0, |c| c.left);
-    let left = if public { left.div_ceil(CARD_PUBLIC_STEP) * CARD_PUBLIC_STEP } else { left };
-    (left as usize).min(CARD_SEGMENTS)
 }
 
 /// A link as a dropped card writes it: without its scheme and `www.`, and cut to `cols` with "…".
@@ -1392,13 +1380,9 @@ pub fn state(menu: &Menu, element: &Element) -> State {
     target_state(menu, element.target)
 }
 
-/// How an element shows to the owner or, `public`, to everyone else (the avatar's screen through the synced channel):
-/// there a dropped card's countdown moves in steps of [`CARD_PUBLIC_STEP`] seconds.
-pub fn state_for(menu: &Menu, element: &Element, public: bool) -> State {
-    match element.target {
-        Target::CardTime(i) => State { hidden: i as usize >= card_segments(menu, public), ..Default::default() },
-        target => target_state(menu, target),
-    }
+/// How an element shows to the owner or, `public`, to everyone else (the avatar's screen through the synced channel).
+pub fn state_for(menu: &Menu, element: &Element, _public: bool) -> State {
+    target_state(menu, element.target)
 }
 
 /// What pressing `target` would find, wherever it is drawn (the window's Home draws its own controls for the same
@@ -1439,7 +1423,6 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::StateApply(i) => i as usize >= menu.page_states().len(),
         Target::StateMark(i) => !menu.page_states().get(i as usize).is_some_and(|s| s.default),
         Target::StateSave => !menu.states_ready,
-        Target::CardTime(i) => i as usize >= card_segments(menu, false),
         Target::WatchVideo | Target::SaveVideo => menu.world_video.is_none() || !menu.pages.ten(),
         // The YouTube video the computer plays, once found; its Drop once its link was copied, where cards drop.
         Target::CopyPlaying => !menu.pages.ten() || menu.media.as_ref().is_none_or(|m| m.video.is_none()),
@@ -1671,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_card_shows_its_picture_title_link_and_time() {
+    fn a_dropped_card_shows_its_picture_title_and_link() {
         let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
         menu.show_card(super::super::Card {
             link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into(),
@@ -1684,12 +1667,7 @@ mod tests {
         let texts: Vec<String> = l.slots.iter().map(|s| slot_text(&menu, s)).collect();
         assert_eq!(texts, ["Rick Astley - Never Gonna", "Give You Up (Official Mus…", "youtube.com/watch?v=dQw4w9WgXcQ"].map(String::from), "{texts:?}");
         assert_eq!(picture_key(&menu, &l.pictures[0]), Some("dQw4w9WgXcQ"));
-        let lit = |menu: &Menu, public: bool| l.elements.iter().filter(|e| !state_for(menu, e, public).hidden).count();
-        assert_eq!((lit(&menu, false), lit(&menu, true)), (14, 15), "a segment a second for the owner, steps of three for everyone else");
-        menu.card.as_mut().unwrap().left = 7;
-        assert_eq!((lit(&menu, false), lit(&menu, true)), (7, 9));
-        assert!(menu.press(Target::CardTime(0)).is_empty() && menu.press(Target::Close).is_empty(), "nothing on a card is pressed");
-        assert!(l.elements.iter().all(|e| e.look == Look::Bar));
+        assert!(l.elements.is_empty() && menu.press(Target::Close).is_empty(), "nothing on a card is pressed: it counts no time down");
         assert_eq!(short_link("http://example.com/a/very/long/path/that/goes/on/and/on/", 20), "example.com/a/very/…");
         // Opening the menu takes the card back.
         menu.open();

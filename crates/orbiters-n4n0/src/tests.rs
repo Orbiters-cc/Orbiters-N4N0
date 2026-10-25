@@ -1445,11 +1445,11 @@ fn drops_server(answers: Vec<(u16, &'static str)>) -> (String, Arc<Mutex<Vec<(St
     (base, seen)
 }
 
-/// The stand-in avatar's tree with a screen of version 5 (cards), in VRChat's desktop mode.
+/// The stand-in avatar's tree with a screen of version 7 (its card of its own), in VRChat's desktop mode.
 fn card_tree(id: &str) -> serde_json::Value {
     let mut tree = mode_tree(id, Some(0), false);
-    put_node(&mut tree, &parameter(params::SCREEN_VERSION), "i", json!(5), 3);
-    for name in [params::SCREEN_DROP, params::CARD_TOUCH_L, params::CARD_TOUCH_R] {
+    put_node(&mut tree, &parameter(params::SCREEN_VERSION), "i", json!(7), 3);
+    for name in [orbiters_contracts::orb::card::OUT, params::CARD_TOUCH_L, params::CARD_TOUCH_R] {
         put_node(&mut tree, &parameter(name), "T", json!(false), 3);
     }
     tree
@@ -1465,50 +1465,43 @@ fn copied(text: &str) -> bool {
 }
 
 #[test]
-fn a_dropped_card_stays_frozen_for_everyone_then_goes_or_the_menu_takes_it_back() {
+fn a_dropped_card_is_out_for_everyone_beside_the_menu_until_its_time_is_up() {
+    use orbiters_contracts::orb::card;
     let (t, n, vrchat) = orb_on(card_tree("avtr_card"));
-    assert!(until(|| t.view().can_drop), "a screen of version 5 drops cards");
+    assert!(until(|| t.view().can_drop), "a screen of version 7 drops cards");
     let link = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
     n.command(Command::Drop { link: link.into(), title: "Never Gonna Give You Up".into(), video: None });
-    let sent = received(&vrchat, Duration::from_millis(1600));
-    let drop_at = sent.iter().position(|m| *m == (parameter(params::SCREEN_DROP), OscType::Bool(true))).expect("dropped");
-    let open_at = sent.iter().position(|m| *m == (parameter(params::SCREEN_OPEN), OscType::Bool(true))).expect("shown");
-    assert!(drop_at < open_at, "dropped before it shows: it stays whatever the Menu toggle says");
-    assert_eq!(n.orb.lock().unwrap().screen.menu.page, orbiters_orb::menu::Page::Card);
-    // Everyone else: the card's first block, then 253 (their copy freezes where it is).
+    let sent = received(&vrchat, Duration::from_millis(2500));
+    assert!(sent.contains(&(parameter(card::OUT), OscType::Bool(true))), "the card is out: {sent:?}");
+    assert_ne!(n.orb.lock().unwrap().screen.menu.page, orbiters_orb::menu::Page::Card, "the menu is not the card");
+    // Everyone's card memory: cleared (252), then the card's blocks past the screen's.
     let pointers = text_pointers(&sent);
-    let first = orbiters_orb::menu::screen::first_pointer(8) as i32;
-    let block = pointers.iter().position(|&p| p >= first && p < 253).expect("a block for everyone else");
-    let freeze = pointers.iter().position(|&p| p == 253).expect("frozen");
-    assert!(freeze > block, "{pointers:?}");
-    let card = t.view().card.clone().expect("the card shows");
-    assert!((13..=15).contains(&card.left), "{card:?}");
-    assert!(menu_values(&sent).iter().all(|on| !on), "the card is not the menu: {:?}", menu_values(&sent));
+    let first = card::first_pointer(8, 72) as i32;
+    let clear = pointers.iter().position(|&p| p == card::POINTER_CLEAR).expect("cleared first");
+    let block = pointers.iter().position(|&p| p >= first && p < card::POINTER_CLEAR).expect("a card block");
+    assert!(clear < block, "{pointers:?}");
+    assert!(!pointers.contains(&253), "no screen freeze any more");
+    let view = t.view().card.clone().expect("the card is out");
+    assert_eq!(view.link, link);
+    assert!(view.left > card::LIFE_SECONDS - 10, "{view:?}");
     // A hand on it: its link is copied, here.
     n.on_parameter(params::CARD_TOUCH_R, &OscValue::Bool(true));
     assert!(until(|| copied(link)));
     n.on_parameter(params::CARD_TOUCH_R, &OscValue::Bool(false));
-    // Opening the menu again takes it back: no longer dropped, everyone else's copy closed (254), then Home.
+    // The menu opens and closes beside it: the card stays out.
     n.menu_open(false);
-    let sent = received(&vrchat, Duration::from_millis(900));
-    assert!(sent.contains(&(parameter(params::SCREEN_DROP), OscType::Bool(false))), "{sent:?}");
-    assert!(text_pointers(&sent).contains(&254));
-    {
-        let rt = n.orb.lock().unwrap();
-        assert!(rt.screen.menu.open && rt.screen.menu.page == orbiters_orb::menu::Page::Home && rt.screen.menu.card.is_none());
-    }
-    assert!(t.view().card.is_none());
-    // Dropped again, and its time is up: no longer dropped, the screen closes for its owner and everyone else.
-    n.command(Command::Drop { link: link.into(), title: "Again".into(), video: None });
-    assert!(until(|| t.view().card.is_some()));
-    received(&vrchat, Duration::from_millis(400));
+    received(&vrchat, Duration::from_millis(500));
+    assert!(menu_is_open(&n) && t.view().card.is_some(), "the menu beside the card");
+    n.menu_open(true);
+    let sent = received(&vrchat, Duration::from_millis(500));
+    assert!(!sent.contains(&(parameter(card::OUT), OscType::Bool(false))), "{sent:?}");
+    assert!(t.view().card.is_some());
+    // Its time is up: no longer out.
     n.orb.lock().unwrap().screen.card_ends_now();
     n.wake();
     let sent = received(&vrchat, Duration::from_millis(900));
-    assert!(sent.contains(&(parameter(params::SCREEN_DROP), OscType::Bool(false))), "{sent:?}");
-    assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(false))));
-    assert!(text_pointers(&sent).contains(&254));
-    assert!(!menu_is_open(&n) && t.view().card.is_none());
+    assert!(sent.contains(&(parameter(card::OUT), OscType::Bool(false))), "{sent:?}");
+    assert!(t.view().card.is_none());
     t.shutdown(&n);
 }
 
@@ -1554,29 +1547,25 @@ fn a_card_is_told_to_orbiters_and_someone_else_s_is_fetched_when_grabbed() {
 }
 
 #[test]
-fn in_vr_without_replace_a_card_shows_on_the_screen_only_while_it_lasts() {
+fn in_vr_without_replace_a_card_drops_while_the_menu_is_the_overlay_s() {
+    use orbiters_contracts::orb::card;
     let mut tree = card_tree("avtr_card_vr");
     tree["CONTENTS"]["parameters"]["CONTENTS"]["VRMode"] = json!({ "FULL_PATH": parameter(params::VR_MODE), "TYPE": "i", "VALUE": [1] });
     let (t, n, vrchat, startup) = orb_started(tree);
     assert!(!t.view().screen, "the menu is the overlay's");
-    assert!(t.view().can_drop, "the screen is there for cards");
+    assert!(t.view().can_drop, "the avatar's card is there");
     assert!(!writes_the_screen(&startup), "{startup:?}");
-    // Dropped from the overlay's menu: the screen shows it, dropped, for its owner and everyone else.
+    // Dropped from the overlay's menu: the card is out and its blocks go; the screen stays closed.
     let link = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
     n.command(Command::Drop { link: link.into(), title: "Never Gonna".into(), video: None });
-    let sent = received(&vrchat, Duration::from_millis(1200));
-    assert!(sent.contains(&(parameter(params::SCREEN_DROP), OscType::Bool(true))), "{sent:?}");
-    assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(true))));
-    assert!(text_pointers(&sent).contains(&253));
-    // The overlay's menu opening takes it back: the screen closes again, and stays unwritten.
+    let sent = received(&vrchat, Duration::from_millis(1500));
+    assert!(sent.contains(&(parameter(card::OUT), OscType::Bool(true))), "{sent:?}");
+    assert!(!sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(true))), "the screen stays closed");
+    assert!(text_pointers(&sent).iter().any(|&p| p >= card::first_pointer(8, 72) as i32 && p < card::POINTER_CLEAR));
+    // The overlay's menu opening changes nothing for the card.
     n.command(Command::MenuState { open: true, dictation: false, keyboard: false });
-    let sent = received(&vrchat, Duration::from_millis(800));
-    assert!(sent.contains(&(parameter(params::SCREEN_DROP), OscType::Bool(false))), "{sent:?}");
-    assert!(sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(false))));
-    assert!(text_pointers(&sent).contains(&254));
-    let later = received(&vrchat, Duration::from_millis(400));
-    assert!(!writes_the_screen(&later), "{later:?}");
-    assert!(t.view().card.is_none());
+    received(&vrchat, Duration::from_millis(400));
+    assert!(t.view().card.is_some());
     t.shutdown(&n);
 }
 
@@ -1646,7 +1635,8 @@ fn copying_goes_to_the_device_s_clipboard_with_its_press_sound() {
     {
         let mut rt = n.orb.lock().unwrap();
         rt.screen.avatar(true, true, Some(8), 72);
-        rt.screen.menu.pages = orbiters_orb::menu::Pages::Seven;
+        rt.screen.menu.pages = orbiters_orb::menu::Pages::Ten;
+        rt.screen.set_card_capable(true);
     }
     n.command(Command::Drop { link: "https://example.com/card".into(), title: "A card".into(), video: None });
     n.card_grab();

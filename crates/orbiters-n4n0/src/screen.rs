@@ -8,9 +8,11 @@
 //! Everyone else's screen is built apart from the owner's ([`Frame::public`]): it never names the owner's friends, and
 //! leaves out the owner's hover and presses, which changed with every move of the finger and held the rest back.
 //!
-//! A link copied from the results can be dropped in the world as a card (contracts `Docs/orb.md`, Link card): the screen
-//! shows it frozen where it was for [`orb::CARD_SECONDS`] (`N4N0/Screen/Drop` for its owner, pointer 253 on the text
-//! channel for everyone else), Orbiters is told so that whoever grabs it there copies its link, and a hand on a card
+//! A copied link can be dropped in the world as a card (contracts `Docs/orb.md`, Link card; screen version 7): an object
+//! of the avatar's own beside the screen, which appears in front of its owner and stays where it is (anyone may move
+//! it) until another replaces it, [`orb::card::LIFE_SECONDS`] pass, or the owner goes to another world or avatar
+//! (`N4N0/Card/Out`). Its memory, the card page's words, goes to every client through the text channel (in turn with the
+//! panel and the screen). Orbiters is told so that whoever grabs it there copies its link, and a hand on a card
 //! (`N4N0/Card/TouchL`, `TouchR`) copies the owner's own link, or asks Orbiters for the card dropped there.
 
 use crate::media::Watcher;
@@ -58,8 +60,6 @@ const GAZE_POLL: Duration = Duration::from_millis(15);
 const CLICK_AFTER_OPEN: Duration = Duration::from_millis(500);
 /// A click presses what the gaze rested on this long, not what it crossed mid-turn.
 const GAZE_REST: Duration = Duration::from_millis(150);
-/// A dropped card's freeze (pointer 253) goes again this often while it shows, for whoever loaded the avatar since.
-const FREEZE_AGAIN: Duration = Duration::from_secs(4);
 /// Two grabs closer than this are one (both hands, a hand brushing it twice).
 const GRAB_AGAIN: Duration = Duration::from_millis(1500);
 
@@ -80,6 +80,16 @@ enum Thumb {
         at: Instant,
         tries: u8,
     },
+}
+
+/// The link card out in the world: what it holds, the page it is drawn from (with its picture when that fits), its
+/// memory's sender, when it goes, and whether `N4N0/Card/Out` went on.
+struct CardOut {
+    menu: Menu,
+    picture: bool,
+    sender: screen::CardSender,
+    until: Instant,
+    out_sent: bool,
 }
 
 /// What a step of the screen leaves to do once the orb's lock is let go.
@@ -200,14 +210,13 @@ pub(crate) struct ScreenRuntime {
     media_seen: u64,
     /// The saved states the menu lists (the states' version, the avatar they are for).
     states_seen: Option<(u64, Option<String>)>,
-    /// When the dropped card goes; what `N4N0/Screen/Drop` was last set to.
-    card_until: Option<Instant>,
-    drop_sent: Option<bool>,
-    /// Everyone else's copy of the card was told to freeze (pointer 253) since the screen last cleared; it is told
+    /// The avatar's N4N0 has the link card of its own (screen version 7, `N4N0/Card/Out`).
+    pub(crate) card_capable: bool,
+    /// The link card out in the world; `N4N0/Card/Out` is to go off; the card's turn on the text channel is next.
+    card: Option<CardOut>,
+    card_off: bool,
+    card_turn: bool,
     /// again ([`FREEZE_AGAIN`]) when due.
-    frozen: bool,
-    freeze_due: bool,
-    freeze_next: Option<Instant>,
     /// The hands on a card (`N4N0/Card/TouchL`, `TouchR`), and when a grab was last taken.
     grab: [bool; 2],
     grab_at: Option<Instant>,
@@ -279,11 +288,10 @@ impl Default for ScreenRuntime {
             menu_settle_until: None,
             media_seen: 0,
             states_seen: None,
-            card_until: None,
-            drop_sent: None,
-            frozen: false,
-            freeze_due: false,
-            freeze_next: None,
+            card_capable: false,
+            card: None,
+            card_off: false,
+            card_turn: false,
             grab: [false; 2],
             grab_at: None,
             present: false,
@@ -314,37 +322,82 @@ impl ScreenRuntime {
         self.owner = Audience::new(LOCAL_VALUES, thumbnail);
         self.owner.forget();
         self.open_sent = None;
-        self.frozen = false;
-        // A card stays while the screen does (the menu moved to the overlay); the menu goes where it shows now.
-        if !self.present {
-            self.end_card();
-            self.drop_sent = None;
+        // A loaded avatar starts without its card out: the card is said again, whole.
+        if let Some(card) = self.card.as_mut() {
+            card.sender.forget();
+            card.out_sent = false;
         }
-        if !self.available && !self.menu.card_shown() {
+        if !self.available {
             self.menu.close();
         }
     }
 
-    /// A copied link can be dropped as a card here: the screen is of version 5 or later.
-    pub(crate) fn card_ready(&self) -> bool {
-        self.present && self.menu.pages.states_cards()
-    }
-
-    /// The card the screen shows, for the window.
-    pub(crate) fn card_view(&self) -> Option<CardView> {
-        let card = self.menu.card.as_ref().filter(|_| self.menu.card_shown())?;
-        Some(CardView { title: card.title.clone(), link: card.link.clone(), left: card.left })
-    }
-
-    /// The dropped card goes (its time is up, the menu opened again, the screen went): what it showed goes with it.
-    fn end_card(&mut self) {
-        if self.menu.end_card().is_some() {
-            self.hover = None;
-            self.pressed = None;
+    /// The avatar's N4N0 has the link card of its own, or not (another avatar): a card out on the last one is gone.
+    pub(crate) fn set_card_capable(&mut self, capable: bool) {
+        if !capable {
+            self.card = None;
+            self.card_off = false;
         }
-        self.card_until = None;
-        self.freeze_due = false;
-        self.freeze_next = None;
+        self.card_capable = capable;
+    }
+
+    /// A copied link can be dropped as a card here: the avatar's N4N0 has the card of its own and its text channel
+    /// reaches the card's blocks.
+    pub(crate) fn card_ready(&self) -> bool {
+        self.card_capable && self.sync.is_some_and(|n| orb::card::fits(n, self.thumbnail))
+    }
+
+    /// The card out in the world, for the window.
+    pub(crate) fn card_view(&self) -> Option<CardView> {
+        let card = self.card.as_ref()?.menu.card.as_ref()?;
+        let left = self.card.as_ref().map_or(0, |c| c.until.saturating_duration_since(Instant::now()).as_secs() as u32);
+        Some(CardView { title: card.title.clone(), link: card.link.clone(), left })
+    }
+
+    /// The card goes (its time is up, the owner went to another world, another replaces it): `N4N0/Card/Out` goes off.
+    pub(crate) fn end_card(&mut self) {
+        if self.card.take().is_some() {
+            self.card_off = true;
+        }
+    }
+
+    /// A new card out with `card` on it: drawn from the card page as everyone sees it (its picture when the prop's text
+    /// channel reaches it), its memory cleared first and written whole.
+    fn put_card(&mut self, card: Card, now: Instant) {
+        let Some(sync) = self.sync else { return };
+        let picture = orb::card::picture_fits(sync, self.thumbnail);
+        let mut menu = Menu::default();
+        menu.pages = self.menu.pages;
+        menu.show_card(card);
+        let bytes = self.card_bytes(&menu, picture);
+        self.card_off = false;
+        self.card = Some(CardOut { menu, picture, sender: screen::CardSender::new(sync, bytes), until: now + Duration::from_secs(orb::card::LIFE_SECONDS as u64), out_sent: false });
+    }
+
+    /// The card's memory for `menu` (its card page) as everyone sees it.
+    fn card_bytes(&self, menu: &Menu, picture: bool) -> Vec<u8> {
+        let pictures = &self.pictures;
+        let frame = Frame::public(menu, Flags::default(), self.thumbnail, &|id: &str| thumbnail(pictures, id));
+        screen::card_bytes(&frame.bank, self.thumbnail, picture)
+    }
+
+    /// The card's step at `now`: it goes at its end; its picture arrived since (its memory then changes); `N4N0/Card/Out`
+    /// on once, or off once.
+    fn card_step(&mut self, now: Instant, out: &mut Vec<Message>) {
+        if self.card.as_ref().is_some_and(|c| now >= c.until) {
+            self.end_card();
+        }
+        if std::mem::take(&mut self.card_off) {
+            out.push((crate::runtime::parameter(orb::card::OUT), rosc::OscType::Bool(false)));
+        }
+        let Some(card) = self.card.as_ref() else { return };
+        let bytes = self.card_bytes(&card.menu, card.picture);
+        let card = self.card.as_mut().unwrap();
+        card.sender.update(bytes);
+        if !card.out_sent {
+            card.out_sent = true;
+            out.push((crate::runtime::parameter(orb::card::OUT), rosc::OscType::Bool(true)));
+        }
     }
 
     /// A hand on a dropped card, the owner's own or someone else's (`right`: `N4N0/Card/TouchR`), now `on`: whether it
@@ -374,9 +427,10 @@ impl ScreenRuntime {
             everyone.forget();
         }
         self.open_sent = None;
-        // Said again (the opposite of what it now is was the last word VRChat may have).
-        if self.drop_sent.is_some() {
-            self.drop_sent = Some(!self.menu.card_shown());
+        // The card is said again, whole.
+        if let Some(card) = self.card.as_mut() {
+            card.sender.forget();
+            card.out_sent = false;
         }
     }
 
@@ -384,8 +438,7 @@ impl ScreenRuntime {
     /// it, it counts as open or closed until it says, or does not answer in time).
     fn menu_shown(&self, now: Instant) -> bool {
         if self.available {
-            // A dropped card is not the menu: the Menu toggle goes off while it shows.
-            self.menu.open && !self.menu.card_shown()
+            self.menu.open
         } else {
             let closing = self.overlay_closing.is_some_and(|at| now.duration_since(at) < OVERLAY_ANSWER);
             (self.overlay_open && !closing) || self.overlay_asked.is_some_and(|at| now.duration_since(at) < OVERLAY_ANSWER)
@@ -471,14 +524,14 @@ impl ScreenRuntime {
                 at(asked + OVERLAY_ANSWER);
             }
         }
-        // A dropped card's countdown moves each second, and it goes at its end.
-        if let Some(until) = self.card_until.filter(|_| self.menu.card_shown()) {
-            let left = until.saturating_duration_since(now);
-            let to_next = if left.subsec_nanos() == 0 { Duration::from_secs(1) } else { Duration::from_nanos(left.subsec_nanos() as u64) };
-            at((now + to_next).min(until));
+        // The card goes at its end, and its blocks go again now and then.
+        if let Some(card) = self.card.as_ref() {
+            at(card.until);
+            if let Some(t) = card.sender.resend_due() {
+                at(t);
+            }
         }
-        let card = self.menu.card_shown();
-        if (self.available || card) && self.menu.open {
+        if self.available && self.menu.open {
             at(if self.owner_settled { self.next_local.max(self.idle_until) } else { self.next_local });
             // A press shown ends once its time is up and the finger let go (which a touch point's change says).
             if let Some((_, t)) = self.pressed.filter(|_| !self.holding.iter().any(|h| *h) && !self.clicking) {
@@ -488,9 +541,7 @@ impl ScreenRuntime {
             if self.gaze {
                 at(now + GAZE_POLL);
             }
-            if !card {
-                at(self.last_activity + IDLE_CLOSE);
-            }
+            at(self.last_activity + IDLE_CLOSE);
             // What N4N0 said moves on only while Home shows.
             if let Some(t) = self.answer_next.filter(|_| self.menu.page == Page::Home) {
                 at(t);
@@ -505,17 +556,18 @@ impl ScreenRuntime {
         }
         // The screen's turn on the text channel; one already due waits for the panel's block to end, whose own steps
         // wake the orb thread.
-        if self.everyone.is_some() && ((self.menu.open && (self.available || card)) || self.close_everyone) && self.next_synced > now {
+        let card_wants = self.card.as_ref().is_some_and(|c| c.sender.wants(now));
+        if self.everyone.is_some() && ((self.menu.open && self.available) || self.close_everyone || card_wants) && self.next_synced > now {
             at(self.next_synced);
         }
         due
     }
 
-    /// Testing: the dropped card's time is up now.
+    /// Testing: the card's time is up now.
     #[cfg(test)]
     pub(crate) fn card_ends_now(&mut self) {
-        if self.card_until.is_some() {
-            self.card_until = Some(Instant::now());
+        if let Some(card) = self.card.as_mut() {
+            card.until = Instant::now();
         }
     }
 
@@ -569,7 +621,7 @@ impl ScreenRuntime {
     /// (mouse-look), [`CLICK_AFTER_OPEN`] after the menu opened, on what the gaze rested on for [`GAZE_REST`]; else it
     /// presses nothing, as with nothing looked at.
     fn look_and_click(&mut self, vrchat: Option<u32>, now: Instant, effects: &mut Vec<Effect>) {
-        if !(self.gaze && self.available && self.menu.open && !self.menu.card_shown()) {
+        if !(self.gaze && self.available && self.menu.open) {
             // The mouse is not read: a click before looking began is no click.
             self.mouse_down = None;
             self.clicking = false;
@@ -609,13 +661,12 @@ impl ScreenRuntime {
     }
 
     /// The fingers at a step: each hand's receivers (and its trigger) when they changed, else how long they went unseen,
-    /// then everyone else's fingertips (version 7). Hovered where they point, pressed by the trigger or a touch. A dropped
-    /// card (`card`) is not the menu: nothing on it is pointed at.
-    fn point_and_touch(&mut self, card: bool, now: Instant, effects: &mut Vec<Effect>) {
+    /// then everyone else's fingertips (version 7). Hovered where they point, pressed by the trigger or a touch.
+    fn point_and_touch(&mut self, now: Instant, effects: &mut Vec<Effect>) {
         for hand in 0..3 {
             let touched =
                 if hand < 2 { std::mem::take(&mut self.touched[hand]) | std::mem::take(&mut self.pulled[hand]) } else { std::mem::take(&mut self.others_touched) };
-            if !self.menu.open || card {
+            if !self.menu.open {
                 continue;
             }
             let gesture = match (hand, self.pointing, touched) {
@@ -707,14 +758,8 @@ impl ScreenRuntime {
         true
     }
 
-    /// The owner's screen dropped or not, and shown or not, as the card and the menu say now: dropped first, so that the
-    /// screen stays shown and frozen whatever the Menu toggle says next. A screen never dropped is never told it is not.
-    fn sync_open_and_drop(&mut self, out: &mut Vec<Message>) {
-        let dropped = self.menu.card_shown();
-        if self.drop_sent != Some(dropped) && (dropped || self.drop_sent.is_some()) {
-            self.drop_sent = Some(dropped);
-            out.push(screen::local_drop(dropped));
-        }
+    /// The owner's screen shown or not, as the menu says now.
+    fn sync_open(&mut self, out: &mut Vec<Message>) {
         if self.open_sent != Some(self.menu.open) {
             self.open_sent = Some(self.menu.open);
             out.push(screen::local_open(self.menu.open));
@@ -801,10 +846,6 @@ impl N4n0 {
 
     /// [`N4n0::menu_open`] under N4N0's lock.
     fn open_menu(&self, rt: &mut OrbRuntime, toggle: bool, settings: &orbiters_core::settings::Settings) -> Opened {
-        // Opening the menu again takes a dropped card back (on the screen, the menu replaces it).
-        if rt.screen.menu.card_shown() {
-            rt.screen.end_card();
-        }
         if rt.screen.available {
             if rt.screen.menu.open {
                 return if toggle { Opened::Closed(rt.screen.menu.close()) } else { Opened::Nothing };
@@ -935,9 +976,6 @@ impl N4n0 {
             let mut rt = self.orb.lock().unwrap();
             let s = &mut rt.screen;
             let opened = open && !s.overlay_open;
-            if opened && s.menu.card_shown() {
-                s.end_card();
-            }
             s.overlay_open = open;
             s.overlay_dictation = open && dictation;
             if open {
@@ -1041,8 +1079,8 @@ impl N4n0 {
         self.publish();
     }
 
-    /// Drops a link card in the world (contracts `Docs/orb.md`, Link card): the avatar's screen shows it, frozen where it
-    /// is, for [`orb::CARD_SECONDS`]; Orbiters is told, so that whoever grabs it in this instance copies its link too.
+    /// Drops a link card in the world (contracts `Docs/orb.md`, Link card): the avatar's card of its own shows it where it
+    /// appears and stays (contracts `orb::card`); Orbiters is told, so that whoever grabs it in this instance copies its link.
     /// From N4N0's menu on the screen, the overlay's or the window's Home.
     pub(crate) fn card_drop(self: &Shared, link: String, title: String, video: Option<String>) {
         if !orbiters_orb::drops::copyable(&link) {
@@ -1058,9 +1096,7 @@ impl N4n0 {
             }
             let now = Instant::now();
             let s = &mut rt.screen;
-            s.end_card();
-            s.menu.show_card(Card { link: link.clone(), title: title.clone(), video: video.clone(), left: orb::CARD_SECONDS });
-            s.card_until = Some(now + Duration::from_secs(orb::CARD_SECONDS as u64));
+            s.put_card(Card { link: link.clone(), title: title.clone(), video: video.clone(), left: orb::card::LIFE_SECONDS }, now);
             s.last_activity = now;
             let fetch = video.filter(|id| !matches!(s.pictures.get(id), Some(Thumb::Ready(_))));
             rt.wake();
@@ -1306,7 +1342,7 @@ pub(crate) fn tick(
     let mut out = Vec::new();
     // The screen stands where the panel would show: what N4N0 says goes on the screen's Home instead, whole, a line at
     // a time.
-    if rt.screen.available && rt.screen.menu.open && !rt.screen.menu.card_shown() {
+    if rt.screen.available && rt.screen.menu.open {
         if let Some(text) = rt.sender.as_mut().filter(|s| s.busy() && !s.sticky()).and_then(TextSender::take_text) {
             rt.screen.answer = answer_pieces(&text, rt.screen.menu.pages).into();
             rt.screen.answer_next = Some(now);
@@ -1414,26 +1450,17 @@ pub(crate) fn tick(
     if s.menu.call != call {
         s.menu.set_call(call);
     }
-    // A dropped card counts its seconds down, and goes at the end.
-    if let Some(until) = s.card_until {
-        if !s.menu.card_shown() {
-            s.card_until = None;
-        } else if now >= until {
-            s.end_card();
-        } else if let Some(card) = s.menu.card.as_mut() {
-            card.left = until.saturating_duration_since(now).as_secs_f32().ceil() as u32;
-        }
-    }
-    let card = s.menu.card_shown();
-    if !s.available && !card {
-        // The menu is not on this screen: only what a card that just went leaves to say (closed, not dropped).
-        if s.present && (s.open_sent == Some(true) || s.drop_sent == Some(true)) {
-            s.sync_open_and_drop(&mut out);
+    // The card, wherever the menu shows.
+    s.card_step(now, &mut out);
+    if !s.available {
+        // The menu is not on this screen: only a close it still has to say.
+        if s.present && s.open_sent == Some(true) {
+            s.sync_open(&mut out);
         }
         return out;
     }
     // The fingers, then desktop mode: where the owner looks, and a left click.
-    s.point_and_touch(card, now, &mut followups.effects);
+    s.point_and_touch(now, &mut followups.effects);
     s.look_and_click(vrchat, now, &mut followups.effects);
     if s.pressed.is_some_and(|(_, at)| now.duration_since(at) > PRESS_SHOWN && !s.holding.iter().any(|h| *h) && !s.clicking) {
         s.pressed = None;
@@ -1441,7 +1468,7 @@ pub(crate) fn tick(
     if s.menu.open && listening {
         s.last_activity = now;
     }
-    if s.menu.open && !card && now.duration_since(s.last_activity) > IDLE_CLOSE {
+    if s.menu.open && now.duration_since(s.last_activity) > IDLE_CLOSE {
         followups.effects.extend(s.menu.close());
     }
     // Another page: what was hovered or pressed was on the last one.
@@ -1452,7 +1479,7 @@ pub(crate) fn tick(
         s.pressed = None;
     }
     // The owner's screen: dropped or not, open or closed, then a block per step.
-    s.sync_open_and_drop(&mut out);
+    s.sync_open(&mut out);
     if !s.menu.open {
         s.owner_settled = false;
         return out;
@@ -1480,62 +1507,77 @@ pub(crate) fn tick(
 }
 
 /// The screen's turn on the text channel, when it is due: everyone else's screen, a block a step (its three steps a
-/// phase apart, then the pointer stays on it a whole step).
+/// The screen's and the card's turns on the text channel, when due: everyone else's screen a block a step (its three
+/// steps a phase apart, then the pointer stays on it a whole step), and every client's card the same way. The panel,
+/// the screen and the card take turns, a whole block each; whoever takes the channel after another moved the pointer
+/// onto a block of its own rests the pointer first, so its values never write that block.
 pub(crate) fn synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
     let panel_wants = rt.sender.as_ref().is_some_and(|p| p.wants_step(now));
     // A panel block between its steps finishes first.
     let panel_mid_block = rt.sender.as_ref().is_some_and(TextSender::mid_block);
     let step = rt.sender.as_ref().map_or(Duration::from_millis(300), TextSender::step);
+    let sync = rt.sender.as_ref().map_or(8, TextSender::sync);
     let s = &mut rt.screen;
-    let Some(everyone) = s.everyone.as_mut() else { return Vec::new() };
-    // The screen's menu, or a dropped card (the only thing the screen shows while the menu is the overlay's).
-    let screen_wants = s.close_everyone || (s.menu.open && (s.available || s.menu.card_shown()));
-    if !screen_wants || now < s.next_synced || panel_mid_block {
+    if s.everyone.is_none() {
         return Vec::new();
     }
-    // Both want the channel: they take turns, a whole block each.
-    if panel_wants && !s.screen_turn && !everyone.mid_block() {
+    let screen_wants = s.close_everyone || (s.menu.open && s.available);
+    let card_wants = s.card.as_ref().is_some_and(|c| c.sender.wants(now));
+    if !(screen_wants || card_wants) || now < s.next_synced || panel_mid_block {
+        return Vec::new();
+    }
+    let screen_mid = s.everyone.as_ref().is_some_and(Audience::mid_block);
+    let card_mid = s.card.as_ref().is_some_and(|c| c.sender.mid_block());
+    // The panel wants the channel too: they take turns, a whole block each.
+    if panel_wants && !s.screen_turn && !screen_mid && !card_mid {
         s.screen_turn = true;
         s.next_synced = now + step;
+        // The panel moves the pointer onto its own blocks.
+        s.everyone.as_mut().unwrap().moved_elsewhere();
+        if let Some(card) = s.card.as_mut() {
+            card.sender.moved_elsewhere();
+        }
         return Vec::new();
     }
     s.screen_turn = false;
     let mut wait = step;
-    let card = s.menu.card_shown();
-    if card && s.frozen && s.freeze_next.is_some_and(|t| now >= t) {
-        s.freeze_due = true;
-    }
-    let out = if s.close_everyone {
+    // The card's turn: its block between its steps, else when the screen wants nothing or after the screen's block.
+    let card_goes = card_wants && (card_mid || (!screen_mid && (!screen_wants || s.card_turn)));
+    let out = if card_goes {
+        let card = s.card.as_mut().unwrap();
+        let send = card.sender.step(now);
+        if send.moves_to_block() {
+            // The pointer on the card's block: the screen's next block rests first; the screen goes next.
+            s.everyone.as_mut().unwrap().moved_elsewhere();
+            s.card_turn = false;
+        }
+        if !send.holds() {
+            wait = orbiters_orb::text::PHASE_GAP;
+        }
+        screen::card_messages(sync, s.thumbnail, &send)
+    } else if s.close_everyone {
         s.close_everyone = false;
-        s.frozen = false;
         // Closing clears everyone else's memory, and leaves the pointer where it writes nothing.
-        everyone.cleared(true);
+        s.everyone.as_mut().unwrap().cleared(true);
+        s.card_turn = true;
         screen::synced_close()
-    } else if card && s.freeze_due && !everyone.mid_block() {
-        // A dropped card: once its first block is on its way, everyone else's copy freezes where it is (and again now
-        // and then, for whoever loaded the avatar since). 253 writes nothing: the next block's values may go.
-        s.freeze_due = false;
-        s.frozen = true;
-        s.freeze_next = Some(now + FREEZE_AGAIN);
-        everyone.park();
-        screen::synced_drop()
     } else {
         // Everyone else's frame: no hover nor press, no friend named. A new page clears their memory first.
         let pictures = &s.pictures;
         let flags = Flags { loading: s.menu.loading(), ..Default::default() };
         let frame = Frame::public(&s.menu, flags, s.thumbnail, &|id: &str| thumbnail(pictures, id));
-        let send = everyone.step(&frame.bank);
-        if matches!(send, screen::Send::Clear) {
-            // 254 closed everyone else's copy: a card's freeze is undone with it.
-            s.frozen = false;
-        }
-        if card && !s.frozen && send.moves_to_block() {
-            s.freeze_due = true;
+        let send = s.everyone.as_mut().unwrap().step(&frame.bank);
+        if send.moves_to_block() {
+            // The pointer on the screen's block: the card's next block rests first; the card goes next.
+            if let Some(card) = s.card.as_mut() {
+                card.sender.moved_elsewhere();
+            }
+            s.card_turn = true;
         }
         if !send.holds() {
             wait = orbiters_orb::text::PHASE_GAP;
         }
-        screen::synced_messages(rt.sender.as_ref().map_or(8, TextSender::sync), &send)
+        screen::synced_messages(sync, &send)
     };
     s.next_synced = now + wait;
     if let Some(sender) = rt.sender.as_mut() {
@@ -1628,16 +1670,16 @@ mod tests {
         let ms = |n: u64| t0 + Duration::from_millis(n);
         // From 45 cm away, beside the screen, pointing at the tile.
         point(&mut s, true, [0.2, -0.15, -0.45], on_screen(x, y));
-        s.point_and_touch(false, ms(0), &mut Vec::new());
+        s.point_and_touch(ms(0), &mut Vec::new());
         let tile = s.hover.expect("the tile pointed at is hovered");
         assert!(s.pressed.is_none(), "pointing alone presses nothing");
         s.trigger(true, true);
-        s.point_and_touch(false, ms(20), &mut Vec::new());
+        s.point_and_touch(ms(20), &mut Vec::new());
         assert_eq!(s.pressed.map(|(i, _)| i), Some(tile), "the trigger presses what the finger points at");
         assert_eq!(s.menu.page, Page::Search);
         // The other hand's trigger, pointing nowhere, presses nothing.
         s.trigger(false, true);
-        s.point_and_touch(false, ms(40), &mut Vec::new());
+        s.point_and_touch(ms(40), &mut Vec::new());
         assert_eq!(s.menu.page, Page::Search);
     }
 
@@ -1651,7 +1693,7 @@ mod tests {
         // The left fingertip comes from in front onto the tile, no trigger.
         for (n, z) in [(0, -0.06), (20, -0.03), (40, -0.005)] {
             point(&mut s, false, [target[0], target[1], z], [target[0], target[1], 0.1]);
-            s.point_and_touch(false, ms(n), &mut Vec::new());
+            s.point_and_touch(ms(n), &mut Vec::new());
         }
         assert_eq!(s.menu.page, Page::Search, "the touch pressed the tile");
         // Someone else's fingertip on Search's back button presses it too.
@@ -1664,7 +1706,7 @@ mod tests {
             }).enumerate() {
                 assert!(s.others_point(&format!("{}{i}", screen::local::OTHERS_PREFIX), v));
             }
-            s.point_and_touch(false, ms(n), &mut Vec::new());
+            s.point_and_touch(ms(n), &mut Vec::new());
         }
         assert_eq!(s.menu.page, Page::Home, "someone else's touch went back");
     }
@@ -1803,7 +1845,7 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_s_own_menu_offers_drop_from_version_5_only() {
+    fn the_screen_s_own_menu_offers_drop_with_the_avatar_s_card_only() {
         use orbiters_orb::menu::Target;
         let mut rt = OrbRuntime::default();
         rt.screen.avatar(true, true, Some(8), 72);
@@ -1811,13 +1853,13 @@ mod tests {
         let tick = |rt: &mut OrbRuntime| {
             super::tick(rt, Instant::now(), &CallsStatus::default(), false, None, &media, &mut Followups::default());
         };
-        rt.screen.menu.pages = Pages::Six;
+        rt.screen.menu.pages = Pages::Ten;
         tick(&mut rt);
-        assert!(!rt.screen.menu.can_drop && !rt.screen.card_ready(), "a screen of version 4 has no card page");
-        rt.screen.menu.pages = Pages::Seven;
+        assert!(!rt.screen.menu.can_drop && !rt.screen.card_ready(), "an N4N0 without its card of its own (before screen version 7)");
+        rt.screen.set_card_capable(true);
         tick(&mut rt);
         assert!(rt.screen.menu.can_drop && rt.screen.card_ready());
-        // A copied result's Drop drops it (the screen then shows the card: its host's part).
+        // A copied result's Drop drops it (the card then goes out: its host's part).
         let menu = &mut rt.screen.menu;
         menu.open();
         menu.search_for("cats");

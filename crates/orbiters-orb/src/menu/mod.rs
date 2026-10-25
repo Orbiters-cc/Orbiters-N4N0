@@ -30,11 +30,6 @@ pub const TIMERS: [u32; 4] = [0, 3, 5, 10];
 pub const VOLUME_STEP: u8 = 5;
 /// Saved states on a page of the States list.
 pub const STATES_PER_PAGE: usize = 5;
-/// The segments of a dropped card's countdown bar: one a second (contracts `orb::CARD_SECONDS`).
-pub const CARD_SEGMENTS: usize = orbiters_contracts::orb::CARD_SECONDS as usize;
-/// Everyone else's copy of a card's countdown moves in steps of this many seconds: each step is a block on the slow
-/// synced channel, which the card's texts and picture need more.
-pub const CARD_PUBLIC_STEP: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Page {
@@ -404,7 +399,6 @@ pub enum Target {
     // Results: a copied link dropped in the world.
     Drop(u8),
     /// A segment of a dropped card's countdown bar (nothing to press).
-    CardTime(u8),
     // New state: its name (opens the keyboard), what it puts back, Save.
     DraftName,
     DraftSize,
@@ -839,7 +833,6 @@ impl Menu {
                 }
                 _ => Vec::new(),
             },
-            Target::CardTime(_) => Vec::new(),
             Target::States => {
                 self.go(Page::States);
                 Vec::new()

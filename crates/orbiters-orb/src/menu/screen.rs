@@ -361,6 +361,14 @@ impl Audience {
         self.queued.is_some() || self.pending.is_some()
     }
 
+    /// Something else moved the pointer onto a block of its own (the link card's): the next block rests first, or its
+    /// values would write that block.
+    pub fn moved_elsewhere(&mut self) {
+        if !self.mid_block() {
+            self.resting = false;
+        }
+    }
+
     /// Whether the block in its steps, or the last one, was sent again only because nothing differed.
     pub fn resending(&self) -> bool {
         self.resending
@@ -534,8 +542,6 @@ pub mod local {
     use orbiters_contracts::orb::params;
 
     pub const OPEN: &str = params::SCREEN_OPEN;
-    /// The owner's screen is a dropped link card (from version 5): it shows, frozen, whatever else says.
-    pub const DROP: &str = params::SCREEN_DROP;
     pub const POINTER: &str = params::SCREEN_POINTER;
     pub const VALUE_PREFIX: &str = params::SCREEN_VALUE_PREFIX;
     /// `N4N0/Screen/Touch/L0` …: how near the left (`L`) or right (`R`) index fingertip is to each touch point (0 to 1).
@@ -573,11 +579,6 @@ pub fn local_open(open: bool) -> Message {
     (parameter(local::OPEN), OscType::Bool(open))
 }
 
-/// The owner's screen is a dropped link card (`N4N0/Screen/Drop`), or no longer.
-pub fn local_drop(dropped: bool) -> Message {
-    (parameter(local::DROP), OscType::Bool(dropped))
-}
-
 /// The first `N4N0/Text/Pointer` of the screen for a prop with `sync` values: right after the panel's blocks.
 pub fn first_pointer(sync: usize) -> usize {
     orb::pointer_count(sync) + 1
@@ -608,9 +609,159 @@ pub fn synced_close() -> Vec<Message> {
     vec![(parameter(params::TEXT_POINTER), OscType::Int(POINTER_SCREEN_CLOSE))]
 }
 
-/// Everyone else's screen is a dropped link card: it freezes where it is (until it closes) and can be grabbed.
-pub fn synced_drop() -> Vec<Message> {
-    vec![(parameter(params::TEXT_POINTER), OscType::Int(POINTER_SCREEN_DROP))]
+/// The link card's memory (screen version 7, contracts `orb::card`): the words of `bank` (a card page's frame) the card
+/// keeps, two bytes each, its picture's with `picture`.
+pub fn card_bytes(bank: &[u8; BANK], size: usize, picture: bool) -> Vec<u8> {
+    orb::card::words(size, picture).into_iter().flat_map(|w| [bank[2 * w], bank[2 * w + 1]]).collect()
+}
+
+/// Everyone's copy of the link card's memory, as the synced channel's steps wrote it (every client reads the card's
+/// blocks, its owner's too): a new card clears it first, then each block that differs goes in the screen's three steps
+/// (the pointer to 0, its values, the pointer to it); once all went, they go again in turn now and then, for whoever
+/// loaded the avatar since.
+pub struct CardSender {
+    sync: usize,
+    want: Vec<u8>,
+    sent: Vec<u8>,
+    /// The memory must be cleared first (a new card, an avatar load).
+    clear: bool,
+    /// The next block resent in turn, and when the next pass of resends is due.
+    resend: usize,
+    resend_due: Option<std::time::Instant>,
+    queued: Option<usize>,
+    pending: Option<usize>,
+    resting: bool,
+}
+
+/// How long after a card went whole its blocks go again (one pass), for whoever loaded the avatar since.
+pub const CARD_RESEND: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl CardSender {
+    /// A sender for a card of `bytes` on a prop with `sync` values; its memory is cleared first.
+    pub fn new(sync: usize, bytes: Vec<u8>) -> Self {
+        let sync = sync.max(2);
+        Self { sync, sent: vec![0; bytes.len()], want: bytes, clear: true, resend: 0, resend_due: None, queued: None, pending: None, resting: false }
+    }
+
+    /// The same card's bytes again (its picture arrived): what changed goes next.
+    pub fn update(&mut self, bytes: Vec<u8>) {
+        if bytes.len() == self.want.len() {
+            self.want = bytes;
+        }
+    }
+
+    /// The memory was cleared without a step saying so (an avatar loaded): everything goes again, cleared first.
+    pub fn forget(&mut self) {
+        self.clear = true;
+        self.queued = None;
+        self.pending = None;
+        self.resting = false;
+    }
+
+    /// Something else (the screen, the panel) moved the pointer onto a block of its own: the next block rests first.
+    pub fn moved_elsewhere(&mut self) {
+        if !self.mid_block() {
+            self.resting = false;
+        }
+    }
+
+    pub fn blocks(&self) -> usize {
+        self.want.len().div_ceil(self.sync)
+    }
+
+    /// When the next pass of resends is due, while nothing else waits.
+    pub fn resend_due(&self) -> Option<std::time::Instant> {
+        self.resend_due
+    }
+
+    /// Whether a block is between its steps: nothing else may use the channel until it is done.
+    pub fn mid_block(&self) -> bool {
+        self.queued.is_some() || self.pending.is_some()
+    }
+
+    /// Whether the card has a step to send at `now`: the clear, a block between its steps, one that differs, or a pass
+    /// of resends (under way, or due).
+    pub fn wants(&self, now: std::time::Instant) -> bool {
+        self.clear || self.mid_block() || self.differing().is_some() || self.resend > 0 || self.resend_due.is_some_and(|due| now >= due)
+    }
+
+    fn differing(&self) -> Option<usize> {
+        (0..self.blocks()).find(|&b| {
+            let range = b * self.sync..((b + 1) * self.sync).min(self.want.len());
+            self.want[range.clone()] != self.sent[range]
+        })
+    }
+
+    fn bytes(&self, block: usize) -> Vec<u8> {
+        let mut out = vec![0; self.sync];
+        let from = block * self.sync;
+        let to = (from + self.sync).min(self.want.len());
+        out[..to - from].copy_from_slice(&self.want[from..to]);
+        out
+    }
+
+    /// The next step at `now`: the clear, else the next block in three steps (a differing one, else one in turn).
+    pub fn step(&mut self, now: std::time::Instant) -> Send {
+        if self.clear {
+            self.clear = false;
+            self.sent.iter_mut().for_each(|b| *b = 0);
+            // The clear writes no block: the next block's values may go at once.
+            self.resting = true;
+            return Send::Clear;
+        }
+        if let Some(block) = self.pending.take() {
+            self.resting = false;
+            let from = block * self.sync;
+            let to = (from + self.sync).min(self.want.len());
+            let (want, sent) = (&self.want[from..to], &mut self.sent[from..to]);
+            sent.copy_from_slice(want);
+            // The card went whole for the first time: its first pass of resends waits.
+            if self.differing().is_none() && self.resend == 0 && self.resend_due.is_none() {
+                self.resend_due = Some(now + CARD_RESEND);
+            }
+            return Send::Pointer(block);
+        }
+        let block = match self.queued.take() {
+            Some(block) => block,
+            None => {
+                let block = match self.differing() {
+                    Some(block) => block,
+                    None => {
+                        // All went: a pass of resends, a block a step, then a wait before the next pass.
+                        self.resend_due = None;
+                        let block = self.resend;
+                        self.resend += 1;
+                        if self.resend >= self.blocks() {
+                            self.resend = 0;
+                            self.resend_due = Some(now + CARD_RESEND);
+                        }
+                        block
+                    }
+                };
+                if !self.resting {
+                    self.resting = true;
+                    self.queued = Some(block);
+                    return Send::Rest;
+                }
+                block
+            }
+        };
+        self.pending = Some(block);
+        Send::Values(block, self.bytes(block))
+    }
+}
+
+/// The card's step through the synced channel (block `b` is pointer `orb::card::first_pointer(sync, size) + b`; the
+/// clear, pointer 252).
+pub fn card_messages(sync: usize, size: usize, send: &Send) -> Vec<Message> {
+    match send {
+        Send::Rest => vec![(parameter(params::TEXT_POINTER), OscType::Int(0))],
+        Send::Values(_, bytes) => {
+            bytes.iter().take(sync).enumerate().map(|(i, &b)| (parameter(&params::text_sync(i)), OscType::Float(orb::sync_value(b)))).collect()
+        }
+        Send::Pointer(block) => vec![(parameter(params::TEXT_POINTER), OscType::Int((orb::card::first_pointer(sync, size) + block) as i32))],
+        Send::Clear => vec![(parameter(params::TEXT_POINTER), OscType::Int(orb::card::POINTER_CLEAR))],
+    }
 }
 
 #[cfg(test)]
@@ -836,18 +987,49 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_card_s_countdown_moves_in_steps_for_everyone_else() {
-        use crate::menu::{Card, Pages, CARD_SEGMENTS};
-        let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
-        menu.show_card(Card { link: "https://www.youtube.com/watch?v=video000001".into(), title: "Song".into(), video: Some("video000001".into()), left: 13 });
+    fn a_card_keeps_its_page_texts_and_picture_and_goes_whole_then_again_now_and_then() {
+        use crate::menu::{Card, Pages};
+        let mut menu = Menu { pages: Pages::Ten, ..Default::default() };
+        menu.show_card(Card { link: "https://www.youtube.com/watch?v=video000001".into(), title: "Song".into(), video: Some("video000001".into()), left: 0 });
         let thumb = picture(5);
-        let owner = Frame::new(&menu, None, None, Flags::default(), 72, &|_| Some(thumb.clone())).bank;
-        let public = Frame::public(&menu, Flags::default(), 72, &|_| Some(thumb.clone())).bank;
+        let owner = Frame::public(&menu, Flags::default(), 72, &|_| Some(thumb.clone())).bank;
         assert_eq!(owner[PAGE], ScreenPage::Card as u8);
-        let hidden = |bank: &[u8; BANK]| (0..CARD_SEGMENTS).filter(|&i| bank[HIDDEN + i / 7] >> (i % 7) & 1 == 1).count();
-        assert_eq!((hidden(&owner), hidden(&public)), (2, 0), "13 s left: the owner's bar shows 13, everyone else's 15");
         assert_eq!(owner[LAYER_COUNTS], 3);
         assert_eq!(&owner[PICTURES_AT..PICTURES_AT + 72], thumb.bytes(72));
+        // The card's memory: its words of the page, the title and link, the picture; nothing else of the page is read.
+        let card = card_bytes(&owner, 72, true);
+        assert_eq!(card.len(), 2 * orb::card::words(72, true).len());
+        assert_eq!((card[0], card[2]), (ScreenPage::Card as u8, 3), "the page and the picture's layers");
+        assert_eq!(&card[4..4 + 86], &owner[TEXT..TEXT + 86], "the title's two lines and the link");
+        assert_eq!(&card[90..], thumb.bytes(72));
+        let mask = visible(owner[PAGE], 72);
+        assert!((0..BANK).filter(|&i| mask[i] && owner[i] != 0).all(|i| orb::card::words(72, true).contains(&(i / 2))), "every byte the page shows is the card's");
+        // Cleared, then each block in three steps, then again in turn once the wait is over.
+        let start = std::time::Instant::now();
+        let mut sender = CardSender::new(8, card.clone());
+        assert!(sender.wants(start));
+        assert_eq!(sender.step(start), Send::Clear);
+        let mut written = vec![0u8; card.len()];
+        let mut steps = 0;
+        while sender.wants(start) {
+            match sender.step(start) {
+                Send::Values(b, bytes) => {
+                    assert!(matches!(sender.step(start), Send::Pointer(p) if p == b), "the values, then their pointer");
+                    let to = (b * 8 + 8).min(card.len());
+                    written[b * 8..to].copy_from_slice(&bytes[..to - b * 8]);
+                }
+                Send::Rest => {}
+                other => panic!("{other:?}"),
+            }
+            steps += 1;
+            assert!(steps < 200);
+        }
+        assert_eq!(written, card, "whole");
+        assert!(!sender.wants(start + CARD_RESEND / 2), "nothing more until the wait is over");
+        assert!(sender.wants(start + CARD_RESEND), "then a pass of resends");
+        let prefix = orbiters_core::osc::PARAMETERS_PREFIX;
+        assert_eq!(card_messages(8, 72, &Send::Clear), vec![(format!("{prefix}N4N0/Text/Pointer"), OscType::Int(252))]);
+        assert_eq!(card_messages(8, 72, &Send::Pointer(2)), vec![(format!("{prefix}N4N0/Text/Pointer"), OscType::Int(17 + 93 + 2))]);
         // Only the page's own picture is read: the other thumbnails' places are never sent for it, nor resent.
         let mask = visible(owner[PAGE], 72);
         assert!(mask[PICTURES_AT] && !mask[PICTURES_AT + 72] && !mask[bank_bytes(72) - 1]);
@@ -855,9 +1037,6 @@ mod tests {
         assert!(music[PICTURES_AT] && !music[PICTURES_AT + 72]);
         let results = visible(ScreenPage::Results as u8, 128);
         assert!(results[PICTURES_AT] && results[bank_bytes(128) - 1], "the results read all five");
-        let prefix = orbiters_core::osc::PARAMETERS_PREFIX;
-        assert_eq!(synced_drop(), vec![(format!("{prefix}N4N0/Text/Pointer"), OscType::Int(253))]);
-        assert_eq!(local_drop(true), (format!("{prefix}N4N0/Screen/Drop"), OscType::Bool(true)));
     }
 
     #[test]

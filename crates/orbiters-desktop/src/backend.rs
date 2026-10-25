@@ -35,6 +35,9 @@ pub trait Backend: Send + Sync {
         }
     }
     fn trash_session(&self, dir: PathBuf);
+    /// Frees space for good: the capture files of `trim` (reconstructed sessions, their 3D views kept), and the whole
+    /// of `delete`. The snapshot's `cleanup` follows it.
+    fn clean_up(&self, trim: Vec<PathBuf>, delete: Vec<PathBuf>);
     /// Trains splats from a session in the reconstruction worker, after the ones waiting before it.
     fn reconstruct(&self, dir: PathBuf);
     fn stop_reconstruction(&self);
@@ -136,6 +139,12 @@ impl Backend for Remote {
 
     fn trash_session(&self, dir: PathBuf) {
         self.0.send(&ToService::Trash { dir });
+    }
+
+    fn clean_up(&self, trim: Vec<PathBuf>, delete: Vec<PathBuf>) {
+        // Under way at once; the service's snapshots carry it on (and end it, a refusal too).
+        self.0.update_local(|s| s.cleanup.get_or_insert_with(Default::default).add(&trim, &delete));
+        self.0.send(&ToService::CleanUp { trim, delete });
     }
 
     fn reconstruct(&self, dir: PathBuf) {
@@ -309,6 +318,10 @@ impl Backend for Local {
             self.ctl.notify(NoticeKind::Success, "Session moved to the recycle bin.");
         }
         self.report(r);
+    }
+
+    fn clean_up(&self, trim: Vec<PathBuf>, delete: Vec<PathBuf>) {
+        self.report(self.ctl.clean_up(trim, delete));
     }
 
     fn reconstruct(&self, dir: PathBuf) {

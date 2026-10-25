@@ -223,6 +223,12 @@ pub struct SessionSummary {
     pub manifest: SessionManifest,
     pub has_thumbnail: bool,
     pub size_bytes: u64,
+    /// Of `size_bytes`, the capture files only reconstructing it again needs (frames, depth, sound and the other
+    /// streams): what keeping only its 3D view frees ([`crate::cleanup`]).
+    pub capture_bytes: u64,
+    /// Its keyframes are gone ([`crate::cleanup::trimmed`]): with a reconstruction, its capture files were deleted to
+    /// keep only its 3D view, and it is not reconstructed again.
+    pub trimmed: bool,
     /// Seconds since the Unix epoch of the manifest's last change.
     pub modified: u64,
     /// The latest finished reconstruction.
@@ -246,38 +252,58 @@ pub fn read_manifest(dir: &Path) -> anyhow::Result<SessionManifest> {
 }
 
 /// What a session folder's size was measured with: when its manifest, the folder itself (files added or removed
-/// there) and its latest reconstruction's report last changed. A recording rewrites the manifest every few seconds, a
-/// finished reconstruction is renamed into the folder with a report of its own.
-type Stamp = [Option<SystemTime>; 3];
+/// there), its latest reconstruction's report and its keyframes and depth folders last changed. A recording rewrites
+/// the manifest every few seconds, a finished reconstruction is renamed into the folder with a report of its own, and
+/// freeing space ([`crate::cleanup`]) empties or removes the keyframes and depth folders.
+pub(crate) type Stamp = [Option<SystemTime>; 5];
 
-fn stamp(dir: &Path) -> Stamp {
+pub(crate) fn stamp(dir: &Path) -> Stamp {
     let modified = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
     let report = crate::reconstruction::result_dir(dir).join(crate::reconstruction::REPORT_FILE);
-    [modified(&dir.join(manifest::MANIFEST_FILE)), modified(dir), modified(&report)]
+    [
+        modified(&dir.join(manifest::MANIFEST_FILE)),
+        modified(dir),
+        modified(&report),
+        modified(&dir.join(manifest::KEYFRAMES_DIR)),
+        modified(&dir.join(manifest::DEPTH_DIR)),
+    ]
 }
 
-/// [`folder_size`] of a session, measured again only once something in it changed ([`Stamp`]): the library's size is
-/// known again without stating every file of every session (thousands of keyframes each).
-pub fn session_size(dir: &Path) -> u64 {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    static SIZES: Mutex<Option<HashMap<PathBuf, (Stamp, u64)>>> = Mutex::new(None);
+/// Session sizes measured, by folder, with what they were measured with.
+type Measured = std::collections::HashMap<PathBuf, (Stamp, crate::cleanup::Sizes)>;
+
+fn measured() -> std::sync::MutexGuard<'static, Option<Measured>> {
+    static SIZES: std::sync::Mutex<Option<Measured>> = std::sync::Mutex::new(None);
+    SIZES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// [`crate::cleanup::measure`] of a session (`video`: its manifest's `capture.video`), measured again only once
+/// something in it changed ([`Stamp`]): the library's size is known again without stating every file of every session
+/// (thousands of keyframes each).
+pub fn session_sizes(dir: &Path, video: Option<&str>) -> crate::cleanup::Sizes {
     let now = stamp(dir);
-    let known = SIZES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().and_then(|sizes| sizes.get(dir).copied());
-    if let Some((then, size)) = known {
+    let known = measured().as_ref().and_then(|sizes| sizes.get(dir).copied());
+    if let Some((then, sizes)) = known {
         if then == now && now[0].is_some() {
-            return size;
+            return sizes;
         }
     }
-    let size = folder_size(dir);
-    let mut sizes = SIZES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let sizes = sizes.get_or_insert_with(HashMap::new);
+    let sizes = crate::cleanup::measure(dir, video);
+    let mut all = measured();
+    let all = all.get_or_insert_with(Measured::new);
     // Folders gone (trashed, another library) are forgotten now and then.
-    if sizes.len() > 4096 {
-        sizes.retain(|d, _| d.is_dir());
+    if all.len() > 4096 {
+        all.retain(|d, _| d.is_dir());
     }
-    sizes.insert(dir.to_path_buf(), (now, size));
-    size
+    all.insert(dir.to_path_buf(), (now, sizes));
+    sizes
+}
+
+/// Forgets the size kept for a session: files were deleted from it, it is measured again when next listed.
+pub fn forget_sizes(dir: &Path) {
+    if let Some(all) = measured().as_mut() {
+        all.remove(dir);
+    }
 }
 
 /// Total size of a folder's files (recursive).
@@ -313,9 +339,12 @@ pub fn list_sessions(root: &Path) -> Vec<SessionSummary> {
         };
         let changed = fs::metadata(&manifest_file).and_then(|m| m.modified()).or_else(|_| fs::metadata(&dir).and_then(|m| m.modified()));
         let modified = changed.ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+        let sizes = session_sizes(&dir, manifest.capture.video.as_deref());
         out.push(SessionSummary {
             has_thumbnail: dir.join(manifest::THUMBNAIL_FILE).is_file(),
-            size_bytes: session_size(&dir),
+            size_bytes: sizes.total,
+            capture_bytes: sizes.capture,
+            trimmed: crate::cleanup::trimmed(&dir),
             reconstruction: crate::reconstruction::read_report(&dir),
             dir,
             manifest,
@@ -439,12 +468,16 @@ mod tests {
         fs::write(dir.join(manifest::MANIFEST_FILE), "not json").unwrap();
         assert!(read_manifest(&dir).is_err());
         // The size is measured again once the folder changes.
-        let before = session_size(&dir);
-        assert_eq!(session_size(&dir), before);
+        let before = session_sizes(&dir, None);
+        assert_eq!(session_sizes(&dir, None), before);
         // Past the file system clock's tick (about 16 ms on Windows), so the change has a time of its own.
         std::thread::sleep(Duration::from_millis(40));
         fs::write(dir.join("extra.bin"), vec![0u8; 1000]).unwrap();
-        assert_eq!(session_size(&dir), before + 1000);
+        assert_eq!(session_sizes(&dir, None).total, before.total + 1000);
+        // Frames added to the keyframes folder alone (the session folder itself unchanged): measured again too.
+        std::thread::sleep(Duration::from_millis(40));
+        fs::write(dir.join(manifest::KEYFRAMES_DIR).join(keyframe_file(0)), vec![0u8; 500]).unwrap();
+        assert_eq!(session_sizes(&dir, None), crate::cleanup::Sizes { total: before.total + 1500, capture: before.capture + 500 });
         fs::remove_dir_all(&root).ok();
         assert_eq!(downscale(&[], 0, 0, 0), (0, 0, Vec::new()));
         assert_eq!(downscale(&[1, 2, 3, 4], 1, 1, 0).0, 1, "no division by a width of 0");

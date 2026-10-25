@@ -212,6 +212,8 @@ impl Service {
                 }
                 report(r);
             }
+            // Deleting runs on a thread of its own; the job shows in the snapshot.
+            ToService::CleanUp { trim, delete } => report(ctl.clean_up(trim, delete)),
             ToService::Reconstruct { dir } => report(ctl.reconstruct(dir)),
             ToService::SendToMixer { dir, title } => report(ctl.send_to_mixer(dir, title)),
             ToService::SignIn => {

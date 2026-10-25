@@ -83,6 +83,11 @@ pub enum ToService {
     Trash {
         dir: PathBuf,
     },
+    /// Frees space for good: the capture files of `trim` (their 3D views stay), and the whole of `delete`.
+    CleanUp {
+        trim: Vec<PathBuf>,
+        delete: Vec<PathBuf>,
+    },
     Reconstruct {
         dir: PathBuf,
     },

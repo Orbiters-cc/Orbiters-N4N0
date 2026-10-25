@@ -166,6 +166,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             });
 
             let st = &snap.storage;
+            let mut free_space = false;
             let storage_sub = format!(
                 "{} in {} sessions{}",
                 format::bytes(st.used_bytes as f64),
@@ -186,6 +187,22 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::progress(ui, Id::unique("storage-usage"), usage, 10.0);
                 ui.add_space(12.0);
                 widgets::separator(ui);
+                let can_go = if st.capture_bytes > 0 {
+                    format!(
+                        "The capture files of {} reconstructed capture{} take {}: only reconstructing again needs them, their 3D views stay.",
+                        st.capture_sessions,
+                        if st.capture_sessions == 1 { "" } else { "s" },
+                        format::bytes(st.capture_bytes as f64)
+                    )
+                } else {
+                    "What the captures and 3D pictures take, and deleting what they no longer need.".to_string()
+                };
+                widgets::field(ui, "Free up space", Some(&can_go), 160.0, |ui| {
+                    if Button::new("Free up space").icon(icons::BROOM).size(Size::Sm).show(ui).clicked() {
+                        free_space = true;
+                    }
+                });
+                widgets::separator(ui);
                 widgets::field(ui, "Storage limit", Some("Recording stops when the library reaches it (0 = no limit)."), 284.0, |ui| {
                     let mut v = draft.storage_limit_gb as f32;
                     if widgets::slider(ui, "limit", &mut v, 0.0..=2000.0, 10.0, |v| if v == 0.0 { "No limit".into() } else { format!("{v:.0} GB") }) {
@@ -202,6 +219,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     state.picker = Some((Folder::Raw, pick(&ctx, &draft.raw_captures_dir)));
                 }
             });
+            if free_space {
+                cx.go = Some(super::Go::FreeSpace);
+            }
 
             let osc = &snap.osc;
             let osc_sub = if osc.listening {

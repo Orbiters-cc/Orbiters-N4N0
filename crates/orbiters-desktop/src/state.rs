@@ -83,6 +83,60 @@ pub struct StorageStatus {
     pub free_bytes: Option<u64>,
     pub limit_gb: f64,
     pub sessions: usize,
+    /// Of `used_bytes`, the capture files of reconstructed sessions (their frames, depth and sound), which keeping only
+    /// their 3D views frees, in that many sessions.
+    #[serde(default)]
+    pub capture_bytes: u64,
+    #[serde(default)]
+    pub capture_sessions: usize,
+}
+
+/// Space being freed (controller/cleanup.rs), for good: the capture files of sessions whose 3D views stay, and sessions
+/// that go whole.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CleanupJob {
+    /// Waiting, in order: sessions keeping only their 3D view, then sessions going whole.
+    pub trim: Vec<PathBuf>,
+    pub delete: Vec<PathBuf>,
+    /// The session being done now, and whether it goes whole.
+    pub current: Option<(PathBuf, bool)>,
+    /// Bytes freed so far, of what the whole job frees (as measured when it was asked).
+    pub freed: u64,
+    pub total: u64,
+}
+
+impl CleanupJob {
+    /// Whether the job has `dir` still to do or doing: `Some(true)` when it goes whole.
+    pub fn of(&self, dir: &std::path::Path) -> Option<bool> {
+        match &self.current {
+            Some((current, whole)) if current == dir => Some(*whole),
+            _ if self.trim.iter().any(|d| d == dir) => Some(false),
+            _ if self.delete.iter().any(|d| d == dir) => Some(true),
+            _ => None,
+        }
+    }
+
+    /// Adds sessions to do, each once (one already waiting or being done keeps its place).
+    pub fn add(&mut self, trim: &[PathBuf], delete: &[PathBuf]) {
+        for dir in trim {
+            if self.of(dir).is_none() {
+                self.trim.push(dir.clone());
+            }
+        }
+        for dir in delete {
+            if self.of(dir).is_none() {
+                self.delete.push(dir.clone());
+            }
+        }
+    }
+
+    pub fn fraction(&self) -> f32 {
+        if self.total == 0 {
+            0.0
+        } else {
+            (self.freed as f64 / self.total as f64).min(1.0) as f32
+        }
+    }
 }
 
 /// Where the Orbiters account stands (the one the Unity tools share).
@@ -536,6 +590,9 @@ pub struct Snapshot {
     pub orb: OrbStatus,
     #[serde(default)]
     pub update: UpdateStatus,
+    /// Space being freed in the library.
+    #[serde(default)]
+    pub cleanup: Option<CleanupJob>,
 }
 
 impl Snapshot {
@@ -572,6 +629,7 @@ impl Snapshot {
             uploads: Vec::new(),
             orb: OrbStatus::default(),
             update: UpdateStatus::default(),
+            cleanup: None,
         }
     }
 
@@ -592,6 +650,8 @@ impl Snapshot {
             Some("the upload")
         } else if self.orb.voice.downloading.is_some() {
             Some("the speech models' download")
+        } else if self.cleanup.is_some() {
+            Some("the clean-up")
         } else {
             None
         }

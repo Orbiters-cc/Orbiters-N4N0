@@ -441,6 +441,7 @@ impl App {
             windowed: self.windowed,
             gpu: self.gpu.as_ref(),
             top: TITLE_H,
+            go: None,
         };
         match self.page {
             Page::Home => pages::home::show(&mut child, &mut cx, &mut self.home),
@@ -449,6 +450,14 @@ impl App {
             Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions),
             Page::Worlds => pages::worlds::show(&mut child, &mut cx, &mut self.worlds),
             Page::Settings => pages::settings::show(&mut child, &mut cx, &mut self.settings),
+        }
+        if let Some(go) = cx.go {
+            match go {
+                pages::Go::FreeSpace => {
+                    self.set_page(Page::Sessions, anim::time(&ctx));
+                    self.sessions.open_storage(false);
+                }
+            }
         }
     }
 }

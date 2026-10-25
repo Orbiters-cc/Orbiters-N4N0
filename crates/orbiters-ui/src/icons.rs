@@ -7,6 +7,7 @@ pub const ARROW_SQUARE_OUT: &str = "\u{E5DE}";
 pub const ARROW_UP_LEFT: &str = "\u{E090}";
 pub const BACKSPACE: &str = "\u{E0AE}";
 pub const BROADCAST: &str = "\u{E0F2}";
+pub const BROOM: &str = "\u{EC54}";
 pub const CAMERA: &str = "\u{E10E}";
 pub const CARET_DOWN: &str = "\u{E136}";
 pub const CARET_LEFT: &str = "\u{E138}";

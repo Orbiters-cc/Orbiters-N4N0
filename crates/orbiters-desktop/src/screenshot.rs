@@ -39,6 +39,18 @@ struct Scenario {
     world: Option<WorldShot>,
     /// Home with one of its features' pages open ([`stage_home`]).
     home: Option<HomeShot>,
+    /// The Sessions page's storage popover, or a session's detail picked by what it is.
+    library: Option<LibraryShot>,
+}
+
+/// On the Sessions page: the storage popover (its overview, or its confirmation with the captures without a 3D view
+/// chosen too), or the detail of a reconstructed session that still has its capture files (with "Keep only the 3D view"
+/// asked), or of one reduced to its 3D view.
+#[derive(Clone, Copy)]
+enum LibraryShot {
+    Storage { confirming: bool },
+    Trim { asking: bool },
+    ViewOnly,
 }
 
 /// One of Home's pages open: with the overlay's sample content (a search typed, its results), or as it opens.
@@ -85,6 +97,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("splats-3d") {
         return splats_3d(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("e2e-cleanup") {
+        return e2e_cleanup(&mut Offscreen::new()?, &out, &settings, scale);
     }
     if only.as_deref() == Some("e2e-reconstruct") {
         return e2e_reconstruct(&mut Offscreen::new()?, &out, &settings, scale);
@@ -187,6 +202,20 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         });
     }
 
+    // Freeing space: three reconstructed captures keeping only their 3D views, the first under way.
+    let freeing = {
+        let mut s = idle.clone();
+        let viewed: Vec<PathBuf> = sessions.iter().filter(|x| x.reconstruction.is_some() && !x.trimmed).map(|x| x.dir.clone()).take(3).collect();
+        let total: u64 = sessions.iter().filter(|x| viewed.contains(&x.dir)).map(|x| x.capture_bytes).sum();
+        s.cleanup = Some(crate::state::CleanupJob {
+            current: viewed.first().map(|d| (d.clone(), false)),
+            trim: viewed.iter().skip(1).cloned().collect(),
+            delete: Vec::new(),
+            freed: total * 2 / 5,
+            total,
+        });
+        s
+    };
     let orb_busy = orb_snapshot(&signed_in);
     let orb_new = {
         let mut s = with_account(&idle, crate::state::AccountState::SignedOut, None);
@@ -229,6 +258,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "home-listening",
@@ -242,6 +272,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "home-youtube",
@@ -255,6 +286,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::Search, samples: true }),
+            library: None,
         },
         Scenario {
             name: "home-results",
@@ -268,6 +300,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::Results, samples: true }),
+            library: None,
         },
         Scenario {
             name: "home-results-scrolled",
@@ -281,6 +314,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 560.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::Results, samples: true }),
+            library: None,
         },
         Scenario {
             name: "home-call",
@@ -294,6 +328,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::Call, samples: true }),
+            library: None,
         },
         Scenario {
             name: "home-ringing",
@@ -307,6 +342,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "home-photo",
@@ -320,6 +356,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::Photo, samples: true }),
+            library: None,
         },
         Scenario {
             name: "home-music",
@@ -333,6 +370,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::Music, samples: true }),
+            library: None,
         },
         Scenario {
             name: "home-light",
@@ -346,6 +384,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::Light, samples: true }),
+            library: None,
         },
         Scenario {
             name: "home-plain",
@@ -359,6 +398,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "home-plain-youtube",
@@ -372,6 +412,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::Search, samples: false }),
+            library: None,
         },
         Scenario {
             name: "home-plain-call",
@@ -385,6 +426,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::Call, samples: false }),
+            library: None,
         },
         Scenario {
             name: "home-plain-light",
@@ -398,6 +440,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::Light, samples: false }),
+            library: None,
         },
         Scenario {
             name: "orb-calls",
@@ -411,6 +454,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 1060.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "orb",
@@ -424,6 +468,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "orb-testing",
@@ -442,6 +487,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 100_000.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "orb-scrolled",
@@ -455,6 +501,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 760.0,
             world: None,
             home: None,
+            library: None,
         },
         // N4N0's menu settings: its keyboard and look.
         Scenario {
@@ -469,6 +516,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 1180.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "orb-new",
@@ -482,6 +530,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "splash",
@@ -495,6 +544,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "capture-idle",
@@ -508,6 +558,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "capture-recording",
@@ -521,6 +572,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "capture-consent",
@@ -534,6 +586,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "toasts",
@@ -550,6 +603,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "sessions",
@@ -563,6 +617,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "session-detail",
@@ -576,6 +631,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "sessions-waiting",
@@ -589,6 +645,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "session-waiting",
@@ -602,6 +659,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "session-reconstructing",
@@ -615,6 +673,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "settings",
@@ -628,6 +687,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         // The Orbiters account: signed out, then finishing in the browser.
         Scenario {
@@ -642,6 +702,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "settings-signing-in",
@@ -655,6 +716,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: None,
+            library: None,
         },
         // Content under the title bar (and the sessions under their heading): blurred, not cut.
         Scenario {
@@ -669,6 +731,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 112.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "settings-walk",
@@ -687,6 +750,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 1750.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "settings-scrolled",
@@ -700,6 +764,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 250.0,
             world: None,
             home: None,
+            library: None,
         },
         // The end of Settings: starting with Windows and SteamVR (SteamVR to be told at its next start), interface, about.
         Scenario {
@@ -719,6 +784,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 100_000.0,
             world: None,
             home: None,
+            library: None,
         },
         Scenario {
             name: "worlds",
@@ -732,6 +798,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: Some(WorldShot { maps: Some(maps.clone()), ..Default::default() }),
             home: None,
+            library: None,
         },
         // The card flying into the world's page, a sixth of a second in.
         Scenario {
@@ -746,6 +813,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: Some(WorldShot { maps: Some(maps.clone()), ..Default::default() }),
             home: None,
+            library: None,
         },
         Scenario {
             name: "world-detail",
@@ -759,6 +827,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: Some(WorldShot { maps: Some(maps.clone()), ..Default::default() }),
             home: None,
+            library: None,
         },
         Scenario {
             name: "world-waiting",
@@ -772,6 +841,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: Some(WorldShot { maps: Some(maps.clone()), ..Default::default() }),
             home: None,
+            library: None,
         },
         Scenario {
             name: "world-pictures",
@@ -785,6 +855,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 560.0,
             world: Some(WorldShot { pictures: true, select: 3, maps: Some(maps.clone()), ..Default::default() }),
             home: None,
+            library: None,
         },
         Scenario {
             name: "world-sharing",
@@ -798,6 +869,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 560.0,
             world: Some(WorldShot { pictures: true, maps: Some(maps.clone()), ..Default::default() }),
             home: None,
+            library: None,
         },
         Scenario {
             name: "world-signed-out",
@@ -811,6 +883,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 560.0,
             world: Some(WorldShot { pictures: true, select: 2, ..Default::default() }),
             home: None,
+            library: None,
         },
         Scenario {
             name: "world-viewer",
@@ -824,6 +897,92 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: Some(WorldShot { pictures: true, view: Some(1), maps: Some(maps), ..Default::default() }),
             home: None,
+            library: None,
+        },
+        Scenario {
+            name: "sessions-storage",
+            page: Page::Sessions,
+            snapshot: idle.clone(),
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: Some(LibraryShot::Storage { confirming: false }),
+        },
+        Scenario {
+            name: "sessions-storage-confirm",
+            page: Page::Sessions,
+            snapshot: idle.clone(),
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: Some(LibraryShot::Storage { confirming: true }),
+        },
+        // The service deleting: how far it got, in the popover and on the cards.
+        Scenario {
+            name: "sessions-freeing",
+            page: Page::Sessions,
+            snapshot: freeing,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: Some(LibraryShot::Storage { confirming: false }),
+        },
+        Scenario {
+            name: "session-trim",
+            page: Page::Sessions,
+            snapshot: idle.clone(),
+            frames: 150,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: Some(LibraryShot::Trim { asking: false }),
+        },
+        Scenario {
+            name: "session-trim-asking",
+            page: Page::Sessions,
+            snapshot: idle.clone(),
+            frames: 180,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: Some(LibraryShot::Trim { asking: true }),
+        },
+        Scenario {
+            name: "session-view-only",
+            page: Page::Sessions,
+            snapshot: idle.clone(),
+            frames: 150,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: Some(LibraryShot::ViewOnly),
         },
         Scenario {
             name: "sessions-scrolled",
@@ -837,6 +996,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 140.0,
             world: None,
             home: None,
+            library: None,
         },
     ];
 
@@ -866,6 +1026,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
     ctl.set_snapshot(sc.snapshot.clone());
     let backend: Ctl = std::sync::Arc::new(Local::new(ctl.clone()));
     let mut world_opened = false;
+    let mut library_staged = false;
     backend.attach(&ctx);
     let mut app = App::offline(backend);
     app.set_gpu(crate::gpu::Handles { device: gpu.device().clone(), queue: gpu.queue().clone(), textures: gpu.textures().clone() });
@@ -905,6 +1066,22 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         }
         if sc.open_detail && sc.world.is_none() && f == 45 && app.sessions_mut().loaded() {
             app.sessions_mut().open_first(&ctx, Rect::from_min_size(pos2(264.0, 160.0), vec2(300.0, 265.0)));
+        }
+        if let Some(shot) = sc.library {
+            if !library_staged && f >= 45 && app.sessions_mut().loaded() {
+                library_staged = true;
+                let origin = Rect::from_min_size(pos2(264.0, 160.0), vec2(300.0, 265.0));
+                match shot {
+                    LibraryShot::Storage { confirming } => app.sessions_mut().open_storage(confirming),
+                    LibraryShot::Trim { .. } => {
+                        app.sessions_mut().open_where(&ctx, origin, |s| s.reconstruction.is_some() && !s.trimmed && s.capture_bytes > 0)
+                    }
+                    LibraryShot::ViewOnly => app.sessions_mut().open_where(&ctx, origin, |s| s.reconstruction.is_some() && s.trimmed),
+                }
+            }
+            if matches!(shot, LibraryShot::Trim { asking: true }) && f == 120 {
+                app.sessions_mut().open_trim(&ctx);
+            }
         }
         if let Some(ws) = &sc.world {
             // After the page asked for it (the stand-in controller has no account and answers nothing).
@@ -1260,6 +1437,66 @@ fn e2e_reconstruct(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settin
     Ok(())
 }
 
+/// `--only e2e-cleanup`: freeing space through the interface, on a throwaway library (`--sessions` under the temporary
+/// folder: this deletes for good). Keeps only the 3D view of one reconstructed session from its detail, then frees the
+/// rest at once from the storage popover, the captures without a 3D view included; shoots each step and checks the
+/// folders after.
+fn e2e_cleanup(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {
+    let library = settings.sessions_dir.canonicalize().context("--sessions <throwaway library>")?;
+    anyhow::ensure!(
+        library.starts_with(std::env::temp_dir().canonicalize()?),
+        "e2e-cleanup deletes for good: give it a throwaway library under {}",
+        std::env::temp_dir().display()
+    );
+    let before = controller::list_sessions(&settings.sessions_dir);
+    let ctl = Controller::new(settings.clone());
+    ctl.set_snapshot(idle_snapshot(settings, &before));
+    let backend: Ctl = std::sync::Arc::new(Local::new(ctl.clone()));
+    let mut run = Run::new(gpu, backend, scale);
+    let t = run.time();
+    run.app.set_page(Page::Sessions, t);
+    run.until("the session list", 30.0, |run| run.app.sessions_mut().loaded())?;
+    let ctx = run.ctx.clone();
+    // One session from its detail.
+    let one =
+        before.iter().find(|s| s.reconstruction.is_some() && !s.trimmed && s.capture_bytes > 0).context("no reconstructed session with capture files")?.clone();
+    run.app.sessions_mut().open_where(&ctx, Rect::from_min_size(pos2(264.0, 160.0), vec2(300.0, 265.0)), |s| s.dir == one.dir);
+    run.click("Keep only the 3D view", 20.0)?;
+    run.until("what would go", 20.0, |run| !run.app.page_busy())?;
+    run.wait(0.6)?;
+    run.shoot(out, "e2e-trim-asking")?;
+    run.click(&format!("Delete {}", orbiters_ui::format::bytes(one.capture_bytes as f64)), 10.0)?;
+    run.until("the capture files to go", 60.0, |_| ctl.view().cleanup.is_none() && orbiters_core::cleanup::trimmed(&one.dir))?;
+    run.wait(1.2)?;
+    run.shoot(out, "e2e-trim-done")?;
+    // The rest at once, the captures without a 3D view too.
+    run.frame(vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }], false)?;
+    run.wait(0.8)?;
+    let now = controller::list_sessions(&settings.sessions_dir);
+    let overview = crate::pages::storage::overview(&now, &ctl.view());
+    run.app.sessions_mut().open_storage(true);
+    run.wait(0.6)?;
+    run.shoot(out, "e2e-cleanup-confirm")?;
+    run.click(&format!("Delete {}", orbiters_ui::format::bytes((overview.trim_bytes + overview.unviewed_bytes) as f64)), 10.0)?;
+    run.shoot(out, "e2e-cleanup-running")?;
+    run.until("the clean-up to end", 120.0, |_| ctl.view().cleanup.is_none())?;
+    run.wait(1.5)?;
+    run.shoot(out, "e2e-cleanup-done")?;
+    let after = controller::list_sessions(&settings.sessions_dir);
+    for n in ctl.take_notices() {
+        println!("notice: {n:?}");
+    }
+    let freed: u64 = before.iter().map(|s| s.size_bytes).sum::<u64>() - after.iter().map(|s| s.size_bytes).sum::<u64>();
+    println!("sessions: {} before, {} after; {} freed", before.len(), after.len(), orbiters_ui::format::bytes(freed as f64));
+    for s in &after {
+        anyhow::ensure!(s.reconstruction.is_some() && s.trimmed && s.capture_bytes == 0, "{} still has capture files", s.dir.display());
+        anyhow::ensure!(orbiters_core::cleanup::has_view(&s.dir), "{} lost its 3D view", s.dir.display());
+    }
+    anyhow::ensure!(after.len() == before.iter().filter(|s| s.reconstruction.is_some()).count(), "the captures without a 3D view are gone");
+    ctl.shutdown();
+    Ok(())
+}
+
 /// What VRChat would do for the e2e run: an OSCQuery tree with current values (read once, when recording starts)
 /// and parameter changes sent to the app's OSC port while it records.
 struct StandInVrchat {
@@ -1449,6 +1686,9 @@ fn idle_snapshot(settings: &Settings, sessions: &[orbiters_core::bundle::Session
     ];
     s.storage.used_bytes = sessions.iter().map(|x| x.size_bytes).sum();
     s.storage.sessions = sessions.len();
+    let trimmable: Vec<u64> = sessions.iter().filter(|x| x.reconstruction.is_some() && x.capture_bytes > 0).map(|x| x.capture_bytes).collect();
+    s.storage.capture_bytes = trimmable.iter().sum();
+    s.storage.capture_sessions = trimmable.len();
     s.storage.free_bytes = Some(512_000_000_000);
     s.worker.ready = true;
     s
@@ -1526,6 +1766,7 @@ impl crate::backend::Backend for Still {
     fn import_raw_capture(&self, _dir: PathBuf) {}
     fn patch_settings(&self, _patch: serde_json::Value) {}
     fn trash_session(&self, _dir: PathBuf) {}
+    fn clean_up(&self, _trim: Vec<PathBuf>, _delete: Vec<PathBuf>) {}
     fn reconstruct(&self, _dir: PathBuf) {}
     fn stop_reconstruction(&self) {}
     fn unqueue_reconstruction(&self, _dir: PathBuf) {}

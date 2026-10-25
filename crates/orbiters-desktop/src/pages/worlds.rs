@@ -910,6 +910,9 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
     widgets::text(&p, pos2(x, rect.top() + 26.0), Align2::LEFT_CENTER, &Txt::new(title, 14.0).weight(weight::SEMIBOLD));
     let st = &s.manifest.stats;
     let mut line = format!("{} · {} keyframes", format::duration(st.duration_s), format::integer(st.keyframes as f64));
+    if s.trimmed && s.reconstruction.is_some() {
+        line.push_str(" · 3D view only");
+    }
     let job = cx.snap.reconstruction.as_ref().filter(|j| j.session_dir == s.dir);
     let upload = sharing.preview_upload(&s.dir);
     let waiting = cx.snap.reconstruct_queue.contains(&s.dir);

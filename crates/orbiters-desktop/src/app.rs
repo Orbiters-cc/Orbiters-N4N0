@@ -35,6 +35,7 @@ pub struct App {
     capture: pages::capture::State,
     sessions: pages::sessions::State,
     worlds: pages::worlds::State,
+    videos: pages::videos::State,
     settings: pages::settings::State,
     orb: pages::orb::State,
     logo_glitch: Option<(f64, f32)>,
@@ -76,6 +77,7 @@ impl App {
             capture: Default::default(),
             sessions: Default::default(),
             worlds: Default::default(),
+            videos: Default::default(),
             settings: Default::default(),
             orb: Default::default(),
             logo_glitch: None,
@@ -122,6 +124,10 @@ impl App {
         &mut self.worlds
     }
 
+    pub fn videos_mut(&mut self) -> &mut pages::videos::State {
+        &mut self.videos
+    }
+
     pub fn toasts_mut(&mut self) -> &mut toast::Toasts {
         &mut self.toasts
     }
@@ -131,6 +137,7 @@ impl App {
         match self.page {
             Page::Sessions => self.sessions.busy(),
             Page::Worlds => self.worlds.busy(),
+            Page::Videos => self.videos.busy(),
             _ => false,
         }
     }
@@ -312,6 +319,7 @@ impl App {
             (Page::Capture, "Capture", icons::APERTURE),
             (Page::Sessions, "Sessions", icons::FOLDER_OPEN),
             (Page::Worlds, "Visited worlds", icons::GLOBE),
+            (Page::Videos, "Videos", icons::FILM_STRIP),
             (Page::Settings, "Settings", icons::SLIDERS_HORIZONTAL),
         ];
         let item_rect = |i: usize| Rect::from_min_size(pos2(inner.left(), nav_top + i as f32 * 48.0), vec2(inner.width(), 44.0));
@@ -480,6 +488,7 @@ impl App {
             Page::Orb => pages::orb::show(&mut child, &mut cx, &mut self.orb),
             Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions),
             Page::Worlds => pages::worlds::show(&mut child, &mut cx, &mut self.worlds),
+            Page::Videos => pages::videos::show(&mut child, &mut cx, &mut self.videos),
             Page::Settings => pages::settings::show(&mut child, &mut cx, &mut self.settings),
         }
         if let Some(go) = cx.go {

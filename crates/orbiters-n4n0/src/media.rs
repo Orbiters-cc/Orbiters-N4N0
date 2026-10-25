@@ -94,6 +94,16 @@ enum Lookup {
     Failed(Instant),
 }
 
+/// A playing video: its title and channel.
+type Playing = (String, String);
+
+/// The searches made, and their order (the oldest first, forgotten first).
+#[derive(Default)]
+struct Searches {
+    lookups: HashMap<Playing, Lookup>,
+    order: VecDeque<Playing>,
+}
+
 /// Finds the YouTube video a browser or YouTube's app plays ([`youtube::worth_looking_up`]): Windows' media controls
 /// (and Android's) give its title, its channel as the artist and its length, never its link. YouTube's search for the
 /// title and channel, once per video on a thread of its own, then the result with the same title, channel and length
@@ -102,7 +112,7 @@ enum Lookup {
 #[derive(Clone)]
 pub struct Links {
     search: Search,
-    found: Arc<Mutex<(HashMap<(String, String), Lookup>, VecDeque<(String, String)>)>>,
+    found: Arc<Mutex<Searches>>,
 }
 
 impl Links {
@@ -124,7 +134,7 @@ impl Links {
         }
         let key = (media.title.clone(), media.artist.clone());
         let mut found = self.found.lock().unwrap();
-        match found.0.get(&key) {
+        match found.lookups.get(&key) {
             Some(Lookup::Found(results)) => {
                 media.video = youtube::find_playing(results, &media.title, &media.artist, media.duration).map(|v| v.id.clone());
                 return;
@@ -133,15 +143,15 @@ impl Links {
             Some(Lookup::Failed(at)) if at.elapsed() < SEARCH_RETRY => return,
             Some(Lookup::Failed(_)) => {}
             None => {
-                found.1.push_back(key.clone());
-                while found.1.len() > SEARCHES_KEPT {
-                    if let Some(old) = found.1.pop_front() {
-                        found.0.remove(&old);
+                found.order.push_back(key.clone());
+                while found.order.len() > SEARCHES_KEPT {
+                    if let Some(old) = found.order.pop_front() {
+                        found.lookups.remove(&old);
                     }
                 }
             }
         }
-        found.0.insert(key.clone(), Lookup::Asked);
+        found.lookups.insert(key.clone(), Lookup::Asked);
         drop(found);
         let (search, kept) = (self.search.clone(), self.found.clone());
         let spawned = std::thread::Builder::new().name("orbiters-media-link".into()).spawn(move || {
@@ -154,12 +164,12 @@ impl Links {
             };
             let mut found = kept.lock().unwrap();
             // Kept only while still asked for (not forgotten meanwhile).
-            if let Some(slot) = found.0.get_mut(&key) {
+            if let Some(slot) = found.lookups.get_mut(&key) {
                 *slot = lookup;
             }
         });
         if spawned.is_err() {
-            self.found.lock().unwrap().0.insert((media.title.clone(), media.artist.clone()), Lookup::Failed(Instant::now()));
+            self.found.lock().unwrap().lookups.insert((media.title.clone(), media.artist.clone()), Lookup::Failed(Instant::now()));
         }
     }
 }

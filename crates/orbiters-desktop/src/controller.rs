@@ -281,6 +281,7 @@ mod n4n0;
 mod performance;
 mod scan;
 pub mod update;
+mod videos;
 pub use account::open_url;
 
 impl Controller {
@@ -1869,6 +1870,8 @@ fn spawn_watchers(ctl: Shared) {
             let history_file = visited::history_file();
             let mut history = visited::History::load(&history_file);
             let mut history_changed = false;
+            // The videos the worlds played, the same way (the Videos page).
+            let mut videos = videos::Videos::load();
             let mut system = sysinfo::System::new();
             let mut tick = 0u64;
             let mut running = false;
@@ -1938,6 +1941,7 @@ fn spawn_watchers(ctl: Shared) {
                 if let Some((name, from, to)) = log.last_read() {
                     history_changed |= history.follow(name, from, to, &events);
                 }
+                videos.step(log.last_read(), &events, tick.is_multiple_of(10));
                 let log_found = log.state.log_file.is_some() || orbiters_core::paths::vrchat_log_dir().is_some();
                 let world = log.caught_up().then(|| {
                     let world = log.state.clone();

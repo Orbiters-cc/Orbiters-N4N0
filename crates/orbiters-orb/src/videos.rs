@@ -89,29 +89,15 @@ impl Videos {
     }
 }
 
-/// A YouTube video's id, from the URL forms worlds use (`watch?v=`, `youtu.be/`, `shorts/`, `live/`, `embed/`).
+/// A YouTube video's id, from the URL forms worlds use (`watch?v=`, `youtu.be/`, `shorts/`, `live/`, `embed/`): the
+/// video history's ([`orbiters_core::video_history::youtube_id`]).
 pub fn youtube_id(url: &str) -> Option<String> {
-    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let host = host.trim_start_matches("www.").trim_start_matches("m.").trim_start_matches("music.");
-    let id = match host {
-        "youtu.be" => path.split(['?', '&', '#', '/']).next(),
-        "youtube.com" => {
-            if let Some(q) = path.strip_prefix("watch?").or_else(|| path.split_once("?").filter(|(p, _)| *p == "watch").map(|(_, q)| q)) {
-                q.split('&').find_map(|kv| kv.strip_prefix("v="))
-            } else {
-                ["shorts/", "live/", "embed/"].iter().find_map(|p| path.strip_prefix(p)).and_then(|r| r.split(['?', '&', '#', '/']).next())
-            }
-        }
-        _ => None,
-    }?;
-    let id: String = id.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-    (id.len() == 11).then_some(id)
+    orbiters_core::video_history::youtube_id(url)
 }
 
 /// The same video whatever the URL's form.
 pub fn canonical(url: &str) -> String {
-    youtube_id(url).map(|id| format!("https://www.youtube.com/watch?v={id}")).unwrap_or_else(|| url.trim().to_string())
+    orbiters_core::video_history::canonical(url)
 }
 
 /// A URL's query component, percent-encoded.
@@ -129,16 +115,33 @@ pub(crate) fn encode(value: &str) -> String {
 
 /// A YouTube video's title through YouTube's oEmbed endpoint (no key), `None` for other sites or on failure.
 pub fn youtube_title(url: &str) -> Option<String> {
-    let id = youtube_id(url)?;
+    youtube_oembed(url).ok().flatten().map(|(title, _)| title)
+}
+
+/// A YouTube video's title and channel through YouTube's oEmbed endpoint (no key): `Ok(None)` when YouTube has no such
+/// public video to show (private, removed, not embeddable) or the link is not YouTube's, an error when YouTube could
+/// not be asked (no network). Blocking, 5 s at most.
+pub fn youtube_oembed(url: &str) -> anyhow::Result<Option<(String, String)>> {
+    let Some(id) = youtube_id(url) else { return Ok(None) };
     let agent = orbiters_core::http_agent(None, Some(std::time::Duration::from_secs(5)));
     let link = format!("https://www.youtube.com/watch?v={id}");
-    let mut response = agent.get(&format!("https://www.youtube.com/oembed?format=json&url={}", encode(&link))).call().ok()?;
-    if response.status().as_u16() != 200 {
-        return None;
+    let request = agent.get(&format!("https://www.youtube.com/oembed?format=json&url={}", encode(&link)));
+    let mut response = request.config().http_status_as_error(false).build().call()?;
+    match response.status().as_u16() {
+        200 => {}
+        400..=499 => return Ok(None),
+        status => anyhow::bail!("YouTube answered {status}"),
     }
-    let text = response.body_mut().with_config().limit(64 * 1024).read_to_string().ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    value.get("title")?.as_str().map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+    let text = response.body_mut().with_config().limit(64 * 1024).read_to_string()?;
+    Ok(parse_oembed(&text))
+}
+
+/// The title and channel (`author_name`) of an oEmbed answer.
+fn parse_oembed(text: &str) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let title = value.get("title")?.as_str().map(|t| t.trim().to_string()).filter(|t| !t.is_empty())?;
+    let channel = value.get("author_name").and_then(|a| a.as_str()).map(|a| a.trim().to_string()).unwrap_or_default();
+    Some((title, channel))
 }
 
 #[cfg(test)]
@@ -160,6 +163,26 @@ mod tests {
         assert_eq!(youtube_id("https://vimeo.com/123"), None);
         assert_eq!(youtube_id("https://www.youtube.com/watch?v=short"), None);
         assert_eq!(encode("https://a.b/?v=1&x=é"), "https%3A%2F%2Fa.b%2F%3Fv%3D1%26x%3D%C3%A9");
+    }
+
+    #[test]
+    fn reads_oembed_answers() {
+        let text = r#"{"title":" Never Gonna Give You Up ","author_name":"Rick Astley","type":"video"}"#;
+        assert_eq!(parse_oembed(text), Some(("Never Gonna Give You Up".into(), "Rick Astley".into())));
+        assert_eq!(parse_oembed(r#"{"title":"Only a title"}"#), Some(("Only a title".into(), String::new())));
+        assert_eq!(parse_oembed(r#"{"title":""}"#), None);
+        assert_eq!(parse_oembed("Unauthorized"), None);
+        assert!(matches!(youtube_oembed("https://vimeo.com/1"), Ok(None)), "not YouTube's: nothing asked");
+    }
+
+    /// Against YouTube itself: `cargo test -p orbiters-orb oembed_live -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn oembed_live() {
+        let found = youtube_oembed("https://youtu.be/dQw4w9WgXcQ").unwrap();
+        println!("{found:?}");
+        assert_eq!(found.map(|(_, channel)| channel).as_deref(), Some("Rick Astley"));
+        assert_eq!(youtube_oembed("https://www.youtube.com/watch?v=aaaaaaaaaaa").unwrap(), None, "no such video");
     }
 
     #[test]

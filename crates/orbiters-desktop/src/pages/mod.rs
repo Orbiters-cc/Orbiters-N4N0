@@ -11,6 +11,7 @@ pub mod splat_worker;
 pub mod splats;
 pub mod states;
 pub mod storage;
+pub mod videos;
 pub mod worlds;
 
 use crate::backend::Ctl;
@@ -29,6 +30,8 @@ pub enum Page {
     Orb,
     Sessions,
     Worlds,
+    /// The videos the worlds played, and the bookmark lists.
+    Videos,
     Settings,
 }
 

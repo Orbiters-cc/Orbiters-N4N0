@@ -1114,6 +1114,63 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             home: None,
             library: Some(LibraryShot::ViewOnly),
         },
+        // The videos the worlds played ([`stage_videos`]): the history by day, a bookmark list, the bookmark picker.
+        Scenario {
+            name: "videos",
+            page: Page::Videos,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "videos-scrolled",
+            page: Page::Videos,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 260.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "videos-list",
+            page: Page::Videos,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "videos-picker",
+            page: Page::Videos,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
         Scenario {
             name: "sessions-scrolled",
             page: Page::Sessions,
@@ -1182,6 +1239,9 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         }
         if f == 0 {
             app.set_page(sc.page, t);
+            if sc.page == Page::Videos {
+                stage_videos(&ctx, &mut app, sc.name);
+            }
         }
         // Home made its menu on the first frame.
         if let (Some(shot), 2) = (sc.home, f) {
@@ -1276,6 +1336,52 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         std::thread::sleep(Duration::from_millis(3));
     }
     Ok(())
+}
+
+/// The Videos page over made-up videos and lists, never this computer's (`videos`: the history; `videos-list`: the
+/// second list; `videos-picker`: the bookmark picker on the first video), YouTube's thumbnails the overlay's samples.
+fn stage_videos(ctx: &egui::Context, app: &mut App, name: &str) {
+    use crate::overlay::menu_pages::{sample_rgba, sample_videos};
+    use orbiters_core::video_history::{Bookmark, Bookmarks, History};
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let samples = sample_videos();
+    let mut history = History::default();
+    let yt = |i: usize| format!("https://www.youtube.com/watch?v={}", samples[i].id);
+    let plays: [(String, u64, &str); 9] = [
+        (yt(1), 3 * 86_400, "Japan Shrine"),
+        (yt(4), 3 * 86_400 - 1800, "Japan Shrine"),
+        (yt(2), 86_400 + 3600, "The Black Cat"),
+        ("https://stream.vrcdn.live/live/clubnight.live.ts".into(), 2 * 3600, "The Black Cat"),
+        ("https://vimeo.com/76979871".into(), 9 * 86_400, "Movie Night"),
+        (yt(3), 50 * 60, "Movie Night"),
+        (yt(0), 4 * 3600, "Movie Night"),
+        (yt(0), 2 * 3600 + 600, "Movie Night"),
+        (yt(0), 12 * 60, "Movie Night"),
+    ];
+    for (url, ago, world) in &plays {
+        history.record(url, now - ago, Some("wrld_99123966-6b37-4b5b-9f3c-0a1b2c3d4e5f"), Some(world));
+    }
+    for (i, v) in samples.iter().enumerate() {
+        history.set_title(&yt(i), Some((v.title.clone(), v.channel.clone())));
+    }
+    let mut bookmarks = Bookmarks::default();
+    let mark = |url: String, ago: u64| Bookmark { url, added: now - ago, ..Default::default() };
+    let favourites = bookmarks.create("Favourites");
+    bookmarks.add(&favourites, mark(yt(3), 2 * 86_400));
+    bookmarks.add(&favourites, mark(yt(1), 3600));
+    let movies = bookmarks.create("Movie night");
+    bookmarks.add(&movies, mark("https://vimeo.com/76979871".into(), 8 * 86_400));
+    bookmarks.add(&movies, mark(yt(0), 600));
+    bookmarks.create("Study");
+    let pictures = (0..samples.len())
+        .map(|i| {
+            let (w, h, rgba) = sample_rgba(i);
+            let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+            (samples[i].id.clone(), ctx.load_texture(format!("video-{i}"), image, egui::TextureOptions::LINEAR))
+        })
+        .collect();
+    let list = (name == "videos-list").then_some(1);
+    app.videos_mut().stand_in(history, bookmarks, list, name == "videos-picker", pictures);
 }
 
 /// Home with one of its features' pages open: YouTube with the overlay's sample suggestions or results (their

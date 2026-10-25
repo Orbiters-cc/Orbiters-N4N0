@@ -7,6 +7,7 @@ pub const ARROW_SQUARE_OUT: &str = "\u{E5DE}";
 pub const ARROW_UP_LEFT: &str = "\u{E090}";
 pub const ARROWS_OUT: &str = "\u{E0A2}";
 pub const BACKSPACE: &str = "\u{E0AE}";
+pub const BOOKMARK_SIMPLE: &str = "\u{E0EA}";
 pub const BOOKMARKS_SIMPLE: &str = "\u{E5F0}";
 pub const BROADCAST: &str = "\u{E0F2}";
 pub const BROOM: &str = "\u{EC54}";

@@ -7,7 +7,7 @@
 //! the disk), one write at a time and the newest last.
 
 use crate::runtime::{N4n0, OrbRuntime, Shared};
-use crate::status::{NoticeKind, StateAction, StateView, StatesNote, StatesView};
+use crate::status::{AvatarView, NoticeKind, StateAction, StateView, StatesNote, StatesView};
 use orbiters_core::osc::{OscValue, TreeNode, CAPTURE_PARAMETERS, PARAMETERS_PREFIX};
 use orbiters_core::vrchat_log::LogEvent;
 use orbiters_orb::menu::StateRow;
@@ -135,28 +135,63 @@ impl StatesRuntime {
         avatar.and_then(|a| self.store.as_ref()?.avatar(a)).map(states::rows).unwrap_or_default()
     }
 
-    /// What the window and the menus show for `avatar`.
-    pub(crate) fn view(&self, avatar: Option<&str>) -> StatesView {
+    /// What the window and the menus show for `avatar`, the avatar worn (`name`: its name as VRChat's OSCQuery gives it):
+    /// its states, and every avatar's for the window's cards.
+    pub(crate) fn view(&self, avatar: Option<&str>, name: Option<&str>) -> StatesView {
+        let views = |e: &states::AvatarStates| -> Vec<StateView> {
+            e.states
+                .iter()
+                .map(|s| StateView {
+                    id: s.id.clone(),
+                    name: s.name.clone(),
+                    saved_utc: s.saved_utc.clone(),
+                    default: e.default.as_deref() == Some(s.id.as_str()),
+                    pose: s.pose,
+                    size: s.size,
+                    parameters: s.parameters.len(),
+                    pose_parameters: s.pose_parameters(),
+                    eye_height: s.eye_height,
+                })
+                .collect()
+        };
         let entry = avatar.and_then(|a| self.store.as_ref()?.avatar(a));
-        let states = entry
-            .map(|e| {
-                e.states
+        let states = entry.map(views).unwrap_or_default();
+        let name = name.map(str::to_string).or_else(|| entry.and_then(|e| e.name.clone()));
+        // Every avatar with states, the worn one first (with or without), then the one saved in last.
+        let mut avatars: Vec<AvatarView> = self
+            .store
+            .as_ref()
+            .map(|store| {
+                store
+                    .avatars
                     .iter()
-                    .map(|s| StateView {
-                        id: s.id.clone(),
-                        name: s.name.clone(),
-                        saved_utc: s.saved_utc.clone(),
-                        default: e.default.as_deref() == Some(s.id.as_str()),
-                        pose: s.pose,
-                        size: s.size,
-                        parameters: s.parameters.len(),
-                        pose_parameters: s.pose_parameters(),
-                        eye_height: s.eye_height,
-                    })
+                    .filter(|(id, e)| !e.states.is_empty() && Some(id.as_str()) != avatar)
+                    .map(|(id, e)| AvatarView { id: id.clone(), name: e.name.clone(), worn: false, states: views(e) })
                     .collect()
             })
             .unwrap_or_default();
-        StatesView { avatar_id: avatar.map(str::to_string), avatar_name: None, states, note: self.note.clone(), saving: self.saving }
+        let newest = |a: &AvatarView| a.states.iter().map(|s| s.saved_utc.clone()).max().unwrap_or_default();
+        avatars.sort_by(|a, b| newest(b).cmp(&newest(a)).then_with(|| a.id.cmp(&b.id)));
+        if let Some(worn) = avatar {
+            avatars.insert(0, AvatarView { id: worn.to_string(), name: name.clone(), worn: true, states: states.clone() });
+        }
+        StatesView { avatar_id: avatar.map(str::to_string), avatar_name: name, states, note: self.note.clone(), saving: self.saving, avatars }
+    }
+
+    /// `avatar`'s name as set in its SDK (VRChat's OSCQuery `/avatar/name`): kept with its states, when it has some.
+    /// Whether that changed the store (to be written).
+    pub(crate) fn named(&mut self, avatar: &str, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() || self.unreadable.is_some() {
+            return false;
+        }
+        let Some(entry) = self.store().avatars.get_mut(avatar) else { return false };
+        if entry.name.as_deref() == Some(name) {
+            return false;
+        }
+        entry.name = Some(name.to_string());
+        self.version += 1;
+        true
     }
 
     /// VRChat loaded `avatar` (a switch, or the same one again in a new world): its default goes once it settled.
@@ -254,23 +289,43 @@ impl N4n0 {
         store.save(&path).map_err(|e| format!("Could not save the states: {e}"))
     }
 
-    /// What the interfaces and the menus ask of the saved states of the avatar worn.
-    pub(crate) fn states_action(self: &Shared, action: StateAction) {
+    /// What the interfaces and the menus ask of the saved states: the avatar worn's, or `avatar`'s (the window's States
+    /// page, another avatar's card: its default, names, options and deletes; applying and saving are the worn one's).
+    pub(crate) fn states_action(self: &Shared, action: StateAction, avatar: Option<String>) {
+        let worn = self.orb.lock().unwrap().avatar_id.clone();
+        let other = avatar.filter(|a| Some(a) != worn.as_ref());
         match action {
+            StateAction::Save { .. } | StateAction::Apply { .. } if other.is_some() => {
+                let e = "Wear this avatar in VRChat to save or apply its states.";
+                self.orb.lock().unwrap().states.say(e, true);
+                self.notify(NoticeKind::Info, e);
+                self.publish();
+            }
             StateAction::Save { name, size, pose, default } => self.states_save(name, SaveOptions { size, pose, default }),
             StateAction::Apply { id } => self.states_apply(id, false),
-            StateAction::Default { id } => self.states_change(|store, avatar| store.set_default(avatar, id.as_deref())),
-            StateAction::Rename { id, name } => self.states_change(|store, avatar| store.rename(avatar, &id, &name)),
-            StateAction::Delete { id } => self.states_change(|store, avatar| store.delete(avatar, &id)),
-            StateAction::Options { id, pose, size } => self.states_change(|store, avatar| store.set_options(avatar, &id, pose, size)),
+            StateAction::Default { id } => self.states_change(other, |store, avatar| store.set_default(avatar, id.as_deref())),
+            StateAction::Rename { id, name } => self.states_change(other, |store, avatar| store.rename(avatar, &id, &name)),
+            StateAction::Delete { id } => self.states_change(other, |store, avatar| store.delete(avatar, &id)),
+            StateAction::Options { id, pose, size } => self.states_change(other, |store, avatar| store.set_options(avatar, &id, pose, size)),
         }
     }
 
-    /// A change to the avatar worn's states, kept at once.
-    fn states_change(self: &Shared, change: impl FnOnce(&mut Store, &str) -> Result<(), Refused>) {
+    /// `avatar`'s name as set in its SDK (VRChat's OSCQuery `/avatar/name`), kept with its states when it has some (the
+    /// file written when that changed it).
+    pub(crate) fn states_remember_name(self: &Shared, avatar: &str, name: &str) {
+        if !self.orb.lock().unwrap().states.named(avatar, name) {
+            return;
+        }
+        if let Err(e) = self.states_write() {
+            eprintln!("states: the avatar's name: {e}");
+        }
+    }
+
+    /// A change to the states of `avatar` (`None`: the avatar worn), kept at once.
+    fn states_change(self: &Shared, avatar: Option<String>, change: impl FnOnce(&mut Store, &str) -> Result<(), Refused>) {
         let refused = {
             let mut rt = self.orb.lock().unwrap();
-            let Some(avatar) = rt.avatar_id.clone() else {
+            let Some(avatar) = avatar.or_else(|| rt.avatar_id.clone()) else {
                 rt.states.say("VRChat's avatar is not known yet.", true);
                 drop(rt);
                 self.publish();
@@ -335,7 +390,9 @@ impl N4n0 {
         }
         let parameters = states::capture(&current, &CAPTURE_PARAMETERS);
         let eye = eye.or_else(|| self.osc_latest_value(EYE_HEIGHT).as_ref().and_then(float));
-        let avatar_name = self.host.world().avatar_name;
+        // Its name as set in its SDK (VRChat's OSCQuery), else as VRChat's log calls it.
+        let sdk_name = self.orb.lock().unwrap().avatar_name.clone();
+        let avatar_name = sdk_name.or_else(|| self.host.world().avatar_name);
         let count = parameters.len();
         let saved = {
             let mut rt = self.orb.lock().unwrap();

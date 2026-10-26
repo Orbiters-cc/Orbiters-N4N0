@@ -48,6 +48,10 @@ pub enum CallRequest {
     Pick(f32),
 }
 
+/// What every menu, the overlay, the window and a toast say when a 3D picture is asked for with VRChat's camera closed:
+/// OSC cannot open it (VRChat's `/usercamera/Mode` switches the camera's mode once it is open, nothing opens it).
+pub const CAMERA_CLOSED: &str = "Open the camera before";
+
 /// The app N4N0 runs in: its settings, what it knows of VRChat, where N4N0's state goes, the Orbiters account, the
 /// order of what OSC messages ask for, and the features that are the app's own (calls, 3D pictures, the walk boost),
 /// which an app without them leaves as they are.
@@ -84,9 +88,14 @@ pub trait Host: Send + Sync + 'static {
         false
     }
     fn call(&self, _request: CallRequest) {}
-    /// A 3D picture where VRChat's camera stands.
+    /// A 3D picture where VRChat's camera stands (VRChat's camera closed: an error saying [`CAMERA_CLOSED`]).
     fn photo_3d(&self) -> anyhow::Result<()> {
         anyhow::bail!("3D pictures are taken by Orbiters - N4N0 on the computer that runs VRChat.")
+    }
+    /// Whether VRChat's camera is open (`/usercamera/Mode` not 0, as VRChat's OSCQuery says): `None` when it does not say
+    /// (VRChat not found, before 2025.3.3). Asked before a 3D picture's timer starts: OSC cannot open the camera.
+    fn camera_open(&self) -> Option<bool> {
+        None
     }
     /// The avatar's Walk boost radial moved (`N4N0/WalkBoost`): the strength, 0 to 1.
     fn walk_boost(&self, _strength: f32) {}

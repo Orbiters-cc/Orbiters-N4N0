@@ -15,7 +15,7 @@ use egui::{pos2, vec2, Align, Align2, Color32, CursorIcon, Id, Key, Layout, Pain
 use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
 use orbiters_core::settings::Settings;
 use orbiters_orb::menu::layout::{self, Content, Tint, HOME_TILES, LENGTH_LABELS, TIMER_LABELS};
-use orbiters_orb::menu::{Call, Effect, MediaCommand, Menu, Page, PhotoLength, Target, Volume, SMOOTHING_LABELS, TIMERS, TRACKING_KINDS};
+use orbiters_orb::menu::{Call, Effect, Media, MediaCommand, Menu, Page, PhotoLength, Target, Volume, SMOOTHING_LABELS, TIMERS, TRACKING_KINDS};
 use orbiters_orb::youtube::Video;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
@@ -43,8 +43,10 @@ enum Act {
     Call(usize),
     /// The speakers' volume, in percent.
     Volume(u8),
-    /// What the States page asks of the service.
-    States(StateAction),
+    /// What plays, to this second (its timeline dragged or clicked).
+    Seek(u32),
+    /// What the States page asks of the service (`Some`: another avatar's states than the worn one's).
+    States(StateAction, Option<String>),
     /// The suggestion's new text.
     Suggestion(String),
     /// Back to Home itself.
@@ -79,6 +81,11 @@ impl State {
     /// The menu Home runs, once shown (the screenshot review opens its pages).
     pub fn menu_host(&mut self) -> Option<&mut MenuHost> {
         self.host.as_mut()
+    }
+
+    /// The States page (the screenshot review opens an avatar's states).
+    pub fn states_mut(&mut self) -> &mut super::states::StatesPage {
+        &mut self.states
     }
 }
 
@@ -123,6 +130,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         *since = now;
         *opened += 1;
         *focus = page == Page::Search;
+        // States opens on the avatars' cards.
+        if page == Page::States {
+            states.show_cards();
+        }
     }
     let (visit, entered) = (cx.visit, cx.entered);
     cx.visit = (visit << 20) | *opened;
@@ -163,7 +174,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     super::states::show(ui, cx, states, &mut out);
                     acts.extend(out.into_iter().map(|o| match o {
                         super::states::Out::Home => Act::Home,
-                        super::states::Out::Action(action) => Act::States(action),
+                        super::states::Out::Action(action, avatar) => Act::States(action, avatar),
                     }));
                 }
             }
@@ -200,7 +211,14 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 host.menu.volume = Some(Volume { percent, muted: false });
                 effects.push(Effect::Media(MediaCommand::Volume(percent)));
             }
-            Act::States(action) => cx.ctl.orb(OrbCommand::States { action }),
+            // Shown where it goes at once; the computer follows.
+            Act::Seek(at) => {
+                if let Some(media) = host.menu.media.as_mut() {
+                    media.position = Some(at);
+                }
+                effects.push(Effect::Media(MediaCommand::Seek(at)));
+            }
+            Act::States(action, avatar) => cx.ctl.orb(OrbCommand::States { action, avatar }),
             Act::Suggestion(text) => host.menu.suggestion = text,
             Act::Home => go_home(host),
         }
@@ -494,9 +512,77 @@ fn youtube(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<T
             acts.push(Act::Press(Target::Search));
         }
     });
+    // The card dropped from here, out in the world: taken back from the top of the page.
+    card_out(ui, cx, 2, acts);
     match menu.page {
         Page::Results => results(ui, cx, menu, picture, copied, acts),
         _ => suggestions(ui, cx, menu, acts),
+    }
+}
+
+/// The link card out in the world (dropped from the results or the music): its title and link, the time it has left,
+/// and Take back.
+fn card_out(ui: &mut Ui, cx: &Cx, index: usize, acts: &mut Vec<Act>) {
+    let Some(card) = cx.snap.orb.card.as_ref() else { return };
+    let left = match card.left {
+        0..60 => "less than a minute left".to_string(),
+        s => format!("{} min left", s.div_ceil(60)),
+    };
+    let sub = format!("In the world, where anyone near can grab it · {left}");
+    section(ui, cx, index, icons::HAND_DEPOSIT, "Your link card is out", Some(&sub), |ui| {
+        let title = if card.title.trim().is_empty() { "Link card" } else { card.title.as_str() };
+        let shown = card.link.strip_prefix("https://").unwrap_or(&card.link);
+        widgets::field(ui, title, Some(shown.strip_prefix("www.").unwrap_or(shown)), 150.0, |ui| {
+            let take = Button::new("Take back").icon(icons::X_CIRCLE).size(Size::Sm).width(150.0).hint("Takes the card out of the world");
+            if take.id_salt("orbiters-home-take-back").show(ui).clicked() {
+                acts.push(Act::Press(Target::TakeBack));
+            }
+        });
+    });
+}
+
+/// Where what plays is, as a bar to drag or click along (where the app lets others move in its timeline), the time at
+/// either end; an app that does not says so under it.
+fn timeline(ui: &mut Ui, media: &Media, acts: &mut Vec<Act>) {
+    let Some(length) = media.duration.filter(|d| *d > 0) else { return };
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+    let label_w = 58.0;
+    let bar = Rect::from_min_max(pos2(row.left() + label_w, row.center().y - 3.0), pos2(row.right() - label_w, row.center().y + 3.0));
+    let id = Id::unique("orbiters-home-timeline");
+    let sense = if media.can_seek { Sense::click_and_drag() } else { Sense::hover() };
+    let resp = ui.interact(bar.expand2(vec2(10.0, 12.0)), id, sense);
+    let pointer = resp.interact_pointer_pos().or(resp.hover_pos()).map(|p| ((p.x - bar.left()) / bar.width()).clamp(0.0, 1.0));
+    let held = media.can_seek && (resp.dragged() || resp.is_pointer_button_down_on());
+    let at = media.position.unwrap_or(0).min(length);
+    let fraction = match (held, pointer) {
+        (true, Some(f)) => f,
+        _ => at as f32 / length as f32,
+    };
+    if media.can_seek && (resp.drag_stopped() || resp.clicked()) {
+        if let Some(f) = pointer {
+            acts.push(Act::Seek((f * length as f32).round() as u32));
+        }
+    }
+    if media.can_seek {
+        resp.clone().on_hover_cursor(CursorIcon::PointingHand);
+    }
+    let hover = anim::toggle(ui.ctx(), id.with("hover"), media.can_seek && (resp.hovered() || held), Spring::SNAPPY);
+    let p = ui.painter();
+    p.rect_filled(bar, theme::radius(3.0), theme::white(0.08));
+    let filled = Rect::from_min_max(bar.min, pos2(bar.left() + bar.width() * fraction, bar.max.y));
+    p.rect_filled(filled, theme::radius(3.0), if media.can_seek { theme::ACCENT } else { theme::FG_3 });
+    if media.can_seek {
+        p.circle_filled(pos2(filled.right(), bar.center().y), 4.0 + 3.0 * hover, theme::FG);
+    }
+    let shown_at = if held { (fraction * length as f32).round() as u64 } else { at as u64 };
+    let time = |s: u64| Txt::new(orbiters_orb::menu::clock(s), 12.0).color(theme::FG_3);
+    widgets::text(p, pos2(row.left(), row.center().y), Align2::LEFT_CENTER, &time(shown_at));
+    widgets::text(p, pos2(row.right(), row.center().y), Align2::RIGHT_CENTER, &time(length as u64));
+    if !media.can_seek {
+        let app = if media.app.is_empty() { "This player" } else { media.app.as_str() };
+        let (note, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
+        let txt = Txt::new(format!("{app} lets no app move in its timeline"), 12.0).color(theme::FG_4);
+        widgets::text(ui.painter(), pos2(bar.left(), note.center().y), Align2::LEFT_CENTER, &txt);
     }
 }
 
@@ -683,7 +769,13 @@ fn call(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
 }
 
 fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Vec<Act>) {
-    top(ui, cx, "3D picture", &layout::text(menu, Content::PhotoStatus), acts);
+    // What stopped the last picture ("Open the camera before") shows by the button, plainly.
+    let warning = menu.notice.as_deref().filter(|_| menu.countdown.is_none());
+    let sub = match warning {
+        Some(_) => "VRChat's camera flies around what it looks at".to_string(),
+        None => layout::text(menu, Content::PhotoStatus),
+    };
+    top(ui, cx, "3D picture", &sub, acts);
     section(ui, cx, 1, icons::CUBE_FOCUS, "Camera", Some("The timer and the flight stay as chosen"), |ui| {
         let mut timer = menu.photo_timer;
         let timers: Vec<SegOption<u32>> = TIMERS.iter().zip(TIMER_LABELS).map(|(&t, label)| SegOption::new(t, label)).collect();
@@ -728,6 +820,13 @@ fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Ve
         if take.width(w).show_at(ui, Rect::from_min_size(row.min, vec2(w, 40.0))).clicked() {
             acts.push(Act::Press(Target::Take));
         }
+        if let Some(warning) = warning {
+            let x = row.left() + w + 16.0;
+            let p = ui.painter();
+            widgets::icon(p, pos2(x + 9.0, row.center().y), icons::WARNING, 18.0, theme::WARN);
+            let txt = Txt::new(warning, 14.0).weight(weight::SEMIBOLD).color(theme::WARN);
+            widgets::text_truncated(p, pos2(x + 26.0, row.center().y), Align2::LEFT_CENTER, &txt, (row.right() - x - 26.0).max(40.0));
+        }
         ui.add_space(8.0);
     });
 }
@@ -768,7 +867,9 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
         }
         if let Some(m) = media {
             let (cy, mut x) = (row.center().y, row.right() - controls_w);
-            if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_BACK, "Previous", m.can_previous) {
+            // Previous, or back to the start of what has nothing before it.
+            let previous = !layout::target_state(menu, Target::MediaPrevious).hidden;
+            if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_BACK, "Previous", previous) {
                 acts.push(Act::Press(Target::MediaPrevious));
             }
             x += 50.0;
@@ -787,6 +888,10 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
             if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_FORWARD, "Next", m.can_next) {
                 acts.push(Act::Press(Target::MediaNext));
             }
+        }
+        if let Some(m) = media.filter(|m| m.duration.is_some_and(|d| d > 0)) {
+            ui.add_space(8.0);
+            timeline(ui, m, acts);
         }
         ui.add_space(14.0);
         // The YouTube video a browser or YouTube's app plays, found on YouTube: its link copied, then dropped as a card,
@@ -829,10 +934,11 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
             });
         }
     });
+    card_out(ui, cx, 2, acts);
     // What the world's video player plays (VRChat's log): watched here from where the world is, or saved.
     if let Some(video) = &menu.world_video {
         let title = video.title.clone().unwrap_or_else(|| video.url.clone());
-        section(ui, cx, 2, icons::MONITOR_PLAY, "In the world", Some("What the world's video player plays now"), |ui| {
+        section(ui, cx, 3, icons::MONITOR_PLAY, "In the world", Some("What the world's video player plays now"), |ui| {
             widgets::field(ui, &title, Some(&video.url), 260.0, |ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
                 if Button::new("Save").icon(icons::FLOPPY_DISK).size(Size::Sm).show(ui).clicked() {
@@ -1174,34 +1280,58 @@ mod tests {
 
     #[test]
     fn the_states_page_saves_and_its_default_acts_on_the_press() {
-        use crate::state::{StateView, StatesView};
+        use crate::state::{AvatarView, StateView, StatesView};
         widgets::watch_controls();
         let mut h = Harness::new();
+        let states =
+            vec![StateView { id: "s1".into(), name: "Hoodie on".into(), parameters: 10, pose_parameters: 2, eye_height: Some(1.6), ..Default::default() }];
+        let party = StateView { id: "s9".into(), name: "Party".into(), ..Default::default() };
         h.snap.orb.states = StatesView {
             avatar_id: Some("avtr_a".into()),
             avatar_name: Some("Rexouium".into()),
-            states: vec![StateView {
-                id: "s1".into(),
-                name: "Hoodie on".into(),
-                parameters: 10,
-                pose_parameters: 2,
-                eye_height: Some(1.6),
-                ..Default::default()
-            }],
+            states: states.clone(),
+            avatars: vec![
+                AvatarView { id: "avtr_a".into(), name: Some("Rexouium".into()), worn: true, states },
+                AvatarView { id: "avtr_b".into(), name: Some("Ultirex ✨".into()), worn: false, states: vec![party] },
+            ],
             ..Default::default()
         };
         h.settle();
-        // The States card, the third of the second row: its page on the press.
+        // The States card, the third of the second row: its page on the press, a card per avatar.
         let card = pos2(646.0, 348.0);
         h.press(card);
         assert_eq!(h.page(), Page::States, "open on the press");
         h.release(card);
         h.settle();
+        assert!(widgets::control(&h.ctx, "Set as default").is_none(), "the avatars' cards first");
+        // Another avatar's card: its states, which apply only once it is worn; its default is its own.
+        let (other, _) = widgets::control(&h.ctx, "Ultirex ✨").expect("its card");
+        h.press(other.center());
+        h.release(other.center());
+        h.settle();
+        assert!(matches!(widgets::control(&h.ctx, "Apply"), Some((_, false))), "applied once it is worn");
+        let (default, _) = widgets::control(&h.ctx, "Set as default").expect("drawn");
+        h.press(default.center());
+        assert!(
+            matches!(h.recorder.orb.lock().unwrap().last(), Some(OrbCommand::States { action: StateAction::Default { id: Some(id) }, avatar: Some(a) }) if id == "s9" && a == "avtr_b"),
+            "{:?}",
+            h.recorder.orb.lock().unwrap()
+        );
+        h.release(default.center());
+        // Back to the cards, then the avatar worn's.
+        let (back, _) = widgets::control(&h.ctx, "States").expect("back to the cards");
+        h.press(back.center());
+        h.release(back.center());
+        h.settle();
+        let (worn, _) = widgets::control(&h.ctx, "Rexouium").expect("its card");
+        h.press(worn.center());
+        h.release(worn.center());
+        h.settle();
         // Set as default is a choice: asked on the press, before the release.
         let (default, _) = widgets::control(&h.ctx, "Set as default").expect("drawn");
         h.press(default.center());
         assert!(
-            matches!(h.recorder.orb.lock().unwrap().last(), Some(OrbCommand::States { action: StateAction::Default { id: Some(id) } }) if id == "s1"),
+            matches!(h.recorder.orb.lock().unwrap().last(), Some(OrbCommand::States { action: StateAction::Default { id: Some(id) }, avatar: None }) if id == "s1"),
             "{:?}",
             h.recorder.orb.lock().unwrap()
         );
@@ -1214,7 +1344,7 @@ mod tests {
         h.release(save.center());
         assert!(matches!(
             h.recorder.orb.lock().unwrap().last(),
-            Some(OrbCommand::States { action: StateAction::Save { name: Some(name), .. } }) if name == "State 2"
+            Some(OrbCommand::States { action: StateAction::Save { name: Some(name), .. }, avatar: None }) if name == "State 2"
         ));
     }
 }

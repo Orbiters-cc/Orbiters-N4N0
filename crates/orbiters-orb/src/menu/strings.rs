@@ -119,6 +119,8 @@ texts! {
     /// A dropped link card.
     CardGrabToCopy = "card.grabToCopy" => "Grab to copy link",
     CardAnyoneCanTake = "card.anyoneCanTake" => "Anyone around with N4N0 can take it",
+    /// Take back, on the results and the music page while the owner's card is out (from screen version 9).
+    CardTakeBack = "card.takeBack" => "Take back card",
     /// New state.
     NewStateTitle = "newState.title" => "New state",
     NewStateName = "newState.name" => "Name",

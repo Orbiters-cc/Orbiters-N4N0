@@ -191,6 +191,10 @@ pub struct OrbStatus {
     /// The video the world's player plays (VRChat's log), its title once known, and when it started (Unix seconds).
     #[serde(default)]
     pub world_video: Option<(String, Option<String>, Option<u64>)>,
+    /// What stopped the last 3D picture asked for ("Open the camera before": VRChat's camera was closed), numbered: the
+    /// menus show it on their 3D picture page.
+    #[serde(default)]
+    pub photo_note: Option<(u32, String)>,
 }
 
 /// Tracking smoothing (the app's SteamVR driver), as the Tracking page shows it.
@@ -208,13 +212,29 @@ pub struct TrackingView {
 pub struct StatesView {
     /// The avatar they are for (`None`: VRChat's avatar is not known yet).
     pub avatar_id: Option<String>,
-    /// What VRChat's log calls the avatar.
+    /// The avatar's name: as set in its SDK (VRChat's OSCQuery `/avatar/name`), else as remembered with its states, else
+    /// as VRChat's log calls it.
     pub avatar_name: Option<String>,
     pub states: Vec<StateView>,
     /// What the last save, apply or change said (an error too).
     pub note: Option<StatesNote>,
     /// A save is under way.
     pub saving: bool,
+    /// Every avatar with saved states, and the avatar worn (with or without): the worn one first, then the one saved in
+    /// last.
+    #[serde(default)]
+    pub avatars: Vec<AvatarView>,
+}
+
+/// An avatar's saved states, as the window's States page shows it: a card per avatar, opening its states.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AvatarView {
+    pub id: String,
+    /// Its name as set in its SDK (VRChat's OSCQuery `/avatar/name`), remembered with its states.
+    pub name: Option<String>,
+    /// The avatar worn now: only its states are applied and saved.
+    pub worn: bool,
+    pub states: Vec<StateView>,
 }
 
 /// A line about the states, numbered (each new one shows again, even when it says the same).

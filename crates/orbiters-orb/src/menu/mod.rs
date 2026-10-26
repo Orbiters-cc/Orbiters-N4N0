@@ -33,6 +33,9 @@ pub const TIMERS: [u32; 4] = [0, 3, 5, 10];
 pub const VOLUME_STEP: u8 = 5;
 /// Saved states on a page of the States list.
 pub const STATES_PER_PAGE: usize = 5;
+/// The segments of the music page's timeline (from screen version 9): a press on segment `i` moves the music to `i` /
+/// this of its length.
+pub const TIMELINE_STEPS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Page {
@@ -166,16 +169,20 @@ pub enum Pages {
     /// From version 6: the ten-tile Home (Tracking, Suggest features, the versions), New state, the keyboard for
     /// names and suggestions, Tracking and Suggest features.
     Ten,
+    /// From version 9: the music page's timeline (tapped or dragged to move in what plays), and Take back on the
+    /// results and the music page while the link card is out.
+    Timeline,
 }
 
 impl Pages {
     /// Every page: the overlay's and the window's.
-    pub const ALL: Pages = Pages::Ten;
+    pub const ALL: Pages = Pages::Timeline;
 
     /// The pages of a screen of `version` (`None`: a screen from before `N4N0/Screen/Version`).
     pub fn of_screen(version: Option<i32>) -> Pages {
-        use orbiters_contracts::orb::{SCREEN_MUSIC_LIGHT, SCREEN_STATES_CARDS, SCREEN_TEN_TILES};
+        use orbiters_contracts::orb::{SCREEN_MUSIC_LIGHT, SCREEN_STATES_CARDS, SCREEN_TEN_TILES, SCREEN_TIMELINE};
         match version {
+            Some(v) if v >= SCREEN_TIMELINE => Pages::Timeline,
             Some(v) if v >= SCREEN_TEN_TILES => Pages::Ten,
             Some(v) if v >= SCREEN_STATES_CARDS => Pages::Seven,
             Some(v) if v >= SCREEN_MUSIC_LIGHT => Pages::Six,
@@ -196,6 +203,11 @@ impl Pages {
     /// Home has the Tracking and Suggest features tiles and the versions; States makes a new state on its own page.
     pub fn ten(self) -> bool {
         self >= Pages::Ten
+    }
+
+    /// The music page has its timeline, and the results and the music page Take back.
+    pub fn timeline(self) -> bool {
+        self >= Pages::Timeline
     }
 }
 
@@ -273,6 +285,8 @@ pub struct Media {
     pub can_play_pause: bool,
     pub can_previous: bool,
     pub can_next: bool,
+    /// The app lets others move in its timeline ([`MediaCommand::Seek`]).
+    pub can_seek: bool,
     /// Where it is and how long it lasts, in seconds, when the app says.
     pub position: Option<u32>,
     pub duration: Option<u32>,
@@ -305,6 +319,8 @@ pub enum MediaCommand {
     Pause,
     Previous,
     Next,
+    /// To this many seconds from the start of what plays (when the app lets others move in its timeline).
+    Seek(u32),
     /// The volume to this percent (unmuted).
     Volume(u8),
     Mute(bool),
@@ -428,6 +444,20 @@ pub enum Target {
     /// Music: the YouTube video the computer plays, its link copied, then dropped in the world as a card (as a result's).
     CopyPlaying,
     DropPlaying,
+    /// Music's timeline (from screen version 9): its segment `i` of [`TIMELINE_STEPS`], lit once the music reached it, and
+    /// the place over it that a finger presses or drags along. Either moves the music to the segment's start.
+    Timeline(u8),
+    Seek(u8),
+    /// The link card back from the world (from screen version 9: on the results and the music page while it is out).
+    TakeBack,
+}
+
+/// The timeline segment a target is (the segment, or the place over it), for a drag along the timeline.
+pub fn timeline_segment(target: Target) -> Option<u8> {
+    match target {
+        Target::Timeline(i) | Target::Seek(i) => Some(i),
+        _ => None,
+    }
 }
 
 /// What the host does for the menu. Requests are numbered, and their answers carry the number back: an answer to an
@@ -515,6 +545,8 @@ pub enum Effect {
         /// The thumbnail's key (the video id).
         video: Option<String>,
     },
+    /// Take the link card out in the world back (as when its time is up).
+    TakeBack,
     /// The menu closed.
     Close,
 }
@@ -592,6 +624,8 @@ pub struct Menu {
     pub can_drop: bool,
     /// The link card the avatar's screen shows (the menu's page is then [`Page::Card`]).
     pub card: Option<Card>,
+    /// The owner's link card is out in the world: the results and the music page offer Take back (from screen version 9).
+    pub card_out: bool,
     /// The state the New state page makes.
     pub draft: Draft,
     /// What the keyboard page types for, and what it holds.
@@ -960,6 +994,13 @@ impl Menu {
             },
             Target::Previous => self.turn(-1),
             Target::Next => self.turn(1),
+            Target::Timeline(i) | Target::Seek(i) => self.seek(i),
+            Target::TakeBack if self.card_out => {
+                self.card_out = false;
+                self.notice = Some("Card taken back".into());
+                vec![Effect::TakeBack]
+            }
+            Target::TakeBack => Vec::new(),
             Target::Contact(i) => match self.page_contacts().get(i as usize) {
                 Some(contact) if self.call.is_none() => vec![Effect::CallContact { id: contact.id.clone() }],
                 _ => Vec::new(),
@@ -1000,8 +1041,13 @@ impl Menu {
                 }
                 _ => Vec::new(),
             },
-            Target::MediaPrevious => match &self.media {
+            Target::MediaPrevious => match self.media.as_mut() {
                 Some(media) if media.can_previous => vec![Effect::Media(MediaCommand::Previous)],
+                // An app with nothing before (a single video): back to its start, where it lets others move in it.
+                Some(media) if media.can_seek && media.duration.is_some() => {
+                    media.position = Some(0);
+                    vec![Effect::Media(MediaCommand::Seek(0))]
+                }
                 _ => Vec::new(),
             },
             Target::MediaNext => match &self.media {
@@ -1049,6 +1095,30 @@ impl Menu {
                 }
                 None => Vec::new(),
             },
+        }
+    }
+
+    /// The music to the start of timeline segment `i`, shown there at once; an app that lets no one move in its timeline
+    /// is said so.
+    fn seek(&mut self, i: u8) -> Vec<Effect> {
+        let Some(media) = self.media.as_mut() else { return Vec::new() };
+        let Some(duration) = media.duration.filter(|d| *d > 0) else { return Vec::new() };
+        if !media.can_seek {
+            let app = if media.app.is_empty() { "This player" } else { media.app.as_str() };
+            self.notice = Some(format!("{app} lets no app move in its timeline"));
+            return Vec::new();
+        }
+        let at = (duration as u64 * (i as u64).min(TIMELINE_STEPS as u64 - 1) / TIMELINE_STEPS as u64) as u32;
+        media.position = Some(at);
+        vec![Effect::Media(MediaCommand::Seek(at))]
+    }
+
+    /// A press held and moved along the music's timeline (a drag) from segment `from` onto `target`: the music moves to
+    /// that segment when it is another. Returns the segment the drag is on now, and what follows.
+    pub fn drag(&mut self, from: u8, target: Target) -> (u8, Vec<Effect>) {
+        match timeline_segment(target) {
+            Some(to) if to != from && self.open && self.page == Page::Music => (to, self.seek(to)),
+            _ => (from, Vec::new()),
         }
     }
 
@@ -1570,6 +1640,69 @@ mod tests {
         assert!(menu.press(Target::LightColor(8)).is_empty(), "no ninth colour");
     }
 
+    #[test]
+    fn the_timeline_moves_the_music_where_it_is_tapped_or_dragged_to() {
+        let mut menu = Menu { pages: Pages::Timeline, ..Default::default() };
+        menu.open();
+        menu.press(Target::Music);
+        assert!(menu.press(Target::Seek(4)).is_empty(), "nothing plays");
+        menu.media = Some(Media { title: "A song".into(), app: "Chrome".into(), can_seek: true, position: Some(10), duration: Some(160), ..Default::default() });
+        // Segment 4 of 16 starts at a quarter: 40 s, shown there at once.
+        assert_eq!(menu.press(Target::Seek(4)), vec![Effect::Media(MediaCommand::Seek(40))]);
+        assert_eq!(menu.media.as_ref().unwrap().position, Some(40));
+        assert_eq!(menu.press(Target::Timeline(0)), vec![Effect::Media(MediaCommand::Seek(0))], "a segment itself too");
+        assert_eq!(menu.press(Target::Seek(200)), vec![Effect::Media(MediaCommand::Seek(150))], "never past the last segment");
+        // A drag: each new segment under the finger moves the music once.
+        assert_eq!(menu.drag(4, Target::Seek(4)), (4, vec![]));
+        assert_eq!(menu.drag(4, Target::Seek(6)), (6, vec![Effect::Media(MediaCommand::Seek(60))]));
+        assert_eq!(menu.drag(6, Target::MediaNext), (6, vec![]), "off the timeline: it stays where it was");
+        // An app that lets no one move in its timeline says so; nothing to move in without a length.
+        menu.media.as_mut().unwrap().can_seek = false;
+        assert!(menu.press(Target::Seek(2)).is_empty());
+        assert_eq!(menu.notice.as_deref(), Some("Chrome lets no app move in its timeline"));
+        menu.media = Some(Media { title: "Radio".into(), can_seek: true, ..Default::default() });
+        assert!(menu.press(Target::Seek(2)).is_empty());
+        // Elsewhere than the music page, a drag does nothing.
+        menu.media = Some(Media { title: "A song".into(), can_seek: true, duration: Some(160), ..Default::default() });
+        menu.press(Target::Back);
+        assert_eq!(menu.drag(1, Target::Seek(3)), (1, vec![]));
+    }
+
+    #[test]
+    fn previous_goes_back_to_the_start_of_what_has_nothing_before() {
+        let mut menu = Menu { pages: Pages::Timeline, ..Default::default() };
+        menu.open();
+        menu.press(Target::Music);
+        menu.media = Some(Media { title: "A video".into(), can_seek: true, position: Some(95), duration: Some(300), ..Default::default() });
+        assert_eq!(menu.press(Target::MediaPrevious), vec![Effect::Media(MediaCommand::Seek(0))]);
+        assert_eq!(menu.media.as_ref().unwrap().position, Some(0));
+        assert!(!layout::target_state(&menu, Target::MediaPrevious).hidden);
+        menu.media.as_mut().unwrap().can_previous = true;
+        assert_eq!(menu.press(Target::MediaPrevious), vec![Effect::Media(MediaCommand::Previous)], "the app's own previous first");
+        menu.media = Some(Media { title: "A video".into(), duration: Some(300), ..Default::default() });
+        assert!(menu.press(Target::MediaPrevious).is_empty());
+        assert!(layout::target_state(&menu, Target::MediaPrevious).hidden);
+    }
+
+    #[test]
+    fn take_back_shows_while_the_card_is_out_on_screens_that_have_it() {
+        let mut menu = Menu { pages: Pages::Timeline, ..Default::default() };
+        menu.open();
+        menu.press(Target::Music);
+        assert!(layout::target_state(&menu, Target::TakeBack).hidden, "no card out");
+        assert!(menu.press(Target::TakeBack).is_empty());
+        menu.card_out = true;
+        assert!(!layout::target_state(&menu, Target::TakeBack).hidden);
+        assert_eq!(menu.press(Target::TakeBack), vec![Effect::TakeBack]);
+        assert!(!menu.card_out && layout::target_state(&menu, Target::TakeBack).hidden, "gone at once");
+        assert_eq!(menu.notice.as_deref(), Some("Card taken back"));
+        assert!(menu.press(Target::TakeBack).is_empty(), "once");
+        // A screen before version 9 has no Take back (its picture has none there).
+        menu.pages = Pages::Ten;
+        menu.card_out = true;
+        assert!(layout::target_state(&menu, Target::TakeBack).hidden);
+    }
+
     fn video(id: &str) -> Video {
         Video { id: format!("{id:0>11}"), title: format!("Title {id}"), channel: "Channel".into(), duration: Some("3:21".into()), live: false }
     }
@@ -1938,10 +2071,15 @@ mod tests {
         // Older screens have no such buttons.
         menu.pages = Pages::Seven;
         assert!(!shown(&menu, Target::CopyPlaying));
-        // They sit apart from the page's other buttons.
+        // They sit apart from the page's other buttons (the timeline's segments lie under the places a finger presses).
         let music = layout::cached(layout::ScreenPage::Music);
         for (i, a) in music.elements.iter().enumerate() {
             for b in &music.elements[i + 1..] {
+                if let (Target::Timeline(s), Target::Seek(p)) = (a.target, b.target) {
+                    if s == p {
+                        continue;
+                    }
+                }
                 let apart = a.rect.right() <= b.rect.x || b.rect.right() <= a.rect.x || a.rect.bottom() <= b.rect.y || b.rect.bottom() <= a.rect.y;
                 assert!(apart, "{:?} and {:?} overlap", a.target, b.target);
             }

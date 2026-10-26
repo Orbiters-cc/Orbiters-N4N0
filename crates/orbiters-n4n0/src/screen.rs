@@ -194,6 +194,11 @@ pub(crate) struct ScreenRuntime {
     pub dictation: Option<(u32, String)>,
     /// When the 3D picture starts (a menu's timer).
     pub photo_at: Option<Instant>,
+    /// What stopped the last 3D picture ("Open the camera before"), numbered: every menu shows it on its 3D picture page.
+    pub(crate) photo_note: Option<(u32, String)>,
+    /// A press held on the music's timeline, by each hand (the left, the right, everyone else's) and by looking and
+    /// clicking: the segment it is on, so that moving along the timeline moves the music.
+    dragging: [Option<u8>; 4],
     /// When the overlay was last asked to open its menu, until it says it did (it counts as open meanwhile), and
     /// whether it is to close it once it did (asked to close before it answered).
     overlay_asked: Option<Instant>,
@@ -303,6 +308,8 @@ impl Default for ScreenRuntime {
             menu_toggle: false,
             dictation: None,
             photo_at: None,
+            photo_note: None,
+            dragging: [None; 4],
             overlay_asked: None,
             overlay_close_after: false,
             overlay_closing: None,
@@ -707,10 +714,21 @@ impl ScreenRuntime {
             self.last_activity = now;
             self.pressed = Some((index, now));
             self.clicking = true;
+            self.dragging[3] = menu::timeline_segment(target);
             effects.extend(self.menu.press(target));
+        } else if let (Some(from), Some((index, target)), true) = (self.dragging[3], looked, mouse.down && self.clicking) {
+            // The click held and the gaze moved along the music's timeline.
+            let (on, more) = self.menu.drag(from, target);
+            if !more.is_empty() {
+                self.last_activity = now;
+                self.pressed = Some((index, now));
+            }
+            self.dragging[3] = Some(on);
+            effects.extend(more);
         }
         if !mouse.down {
             self.clicking = false;
+            self.dragging[3] = None;
         }
         self.mouse_down = Some(mouse.down);
     }
@@ -744,15 +762,33 @@ impl ScreenRuntime {
                 Some(Gesture::Press { x, y }) => {
                     self.last_activity = now;
                     self.holding[hand] = true;
+                    self.dragging[hand] = None;
                     if let Some((index, target)) = layout::hit_pointable(layout, &self.menu, x, y) {
                         self.pressed = Some((index, now));
+                        self.dragging[hand] = menu::timeline_segment(target);
                         effects.extend(self.menu.press(target));
                     }
                 }
-                Some(Gesture::Hover { x, y } | Gesture::Hold { x, y }) => {
+                Some(Gesture::Hold { x, y }) => {
+                    let hit = layout::hit_pointable(layout, &self.menu, x, y);
+                    self.hover = hit.map(|(i, _)| i);
+                    // Held and moved along the music's timeline: the music follows, a segment at a time.
+                    if let (Some(from), Some((index, target))) = (self.dragging[hand], hit) {
+                        let (on, more) = self.menu.drag(from, target);
+                        if !more.is_empty() {
+                            self.last_activity = now;
+                            self.pressed = Some((index, now));
+                        }
+                        self.dragging[hand] = Some(on);
+                        effects.extend(more);
+                    }
+                }
+                Some(Gesture::Hover { x, y }) => {
+                    self.dragging[hand] = None;
                     self.hover = layout::hit_pointable(layout, &self.menu, x, y).map(|(i, _)| i);
                 }
                 Some(Gesture::Away) => {
+                    self.dragging[hand] = None;
                     self.holding[hand] = false;
                     if !self.holding.iter().any(|h| *h) {
                         self.hover = None;
@@ -1239,29 +1275,60 @@ impl N4n0 {
         });
     }
 
-    /// A 3D picture now. What stops it (VRChat's camera off) is told, and shown on the menu's 3D picture page.
+    /// A 3D picture now. What stops it (VRChat's camera closed: [`crate::platform::CAMERA_CLOSED`]) is told, and shown on
+    /// every menu's 3D picture page.
     pub(crate) fn photo_3d_now(self: &Shared) {
         if let Err(e) = self.host.photo_3d() {
-            let text = e.to_string();
-            {
-                let mut rt = self.orb.lock().unwrap();
-                if rt.screen.menu.open && rt.screen.menu.page == orbiters_orb::menu::Page::Photo {
-                    rt.screen.menu.notice = Some(text.clone());
-                }
-            }
-            self.notify(NoticeKind::Warning, text);
-            self.publish();
+            self.photo_stopped(e.to_string());
         }
     }
 
-    /// A 3D picture in `seconds` (now when 0); the menus count down.
-    pub(crate) fn photo_3d_in(self: &Shared, seconds: u32) {
-        if seconds == 0 {
-            let n = self.clone();
-            std::thread::spawn(move || n.photo_3d_now());
-            return;
+    /// What stopped a 3D picture: a toast, and the 3D picture page's line on the screen's menu and, through the status
+    /// (numbered), on the overlay's and the window's.
+    fn photo_stopped(self: &Shared, text: String) {
+        {
+            let mut rt = self.orb.lock().unwrap();
+            if rt.screen.menu.open && rt.screen.menu.page == orbiters_orb::menu::Page::Photo {
+                rt.screen.menu.notice = Some(text.clone());
+            }
+            let number = rt.screen.photo_note.as_ref().map_or(1, |(n, _)| n.wrapping_add(1));
+            rt.screen.photo_note = Some((number, text.clone()));
         }
-        self.orb.lock().unwrap().screen.photo_at = Some(Instant::now() + Duration::from_secs(seconds as u64));
+        self.notify(NoticeKind::Warning, text);
+        self.publish();
+    }
+
+    /// A 3D picture in `seconds` (now when 0); the menus count down. VRChat's camera closed (OSC cannot open it) is said
+    /// at once, not once the timer ran out.
+    pub(crate) fn photo_3d_in(self: &Shared, seconds: u32) {
+        let n = self.clone();
+        std::thread::spawn(move || {
+            if seconds == 0 {
+                return n.photo_3d_now();
+            }
+            if n.host.camera_open() == Some(false) {
+                return n.photo_stopped(crate::platform::CAMERA_CLOSED.to_string());
+            }
+            n.orb.lock().unwrap().screen.photo_at = Some(Instant::now() + Duration::from_secs(seconds as u64));
+            n.publish();
+        });
+    }
+
+    /// Takes the link card out in the world back (from N4N0's menu, the overlay or the window), as when its time is up:
+    /// `N4N0/Card/Out` goes off at the next step.
+    pub(crate) fn card_take_back(self: &Shared) {
+        let taken = {
+            let mut rt = self.orb.lock().unwrap();
+            let taken = rt.screen.card.is_some();
+            rt.screen.end_card();
+            rt.screen.menu.card_out = false;
+            rt.wake();
+            taken
+        };
+        if taken {
+            self.device.sounds.press();
+            self.notify(NoticeKind::Info, "Card taken back: it is gone from the world.".to_string());
+        }
         self.publish();
     }
 
@@ -1456,6 +1523,7 @@ impl N4n0 {
                 Effect::SaveState { name, size, pose, default } => self.states_save(Some(name), crate::states::SaveOptions { size, pose, default }),
                 Effect::ApplyState { id, .. } => self.states_apply(id, false),
                 Effect::Drop { link, title, video } => self.card_drop(link, title, video),
+                Effect::TakeBack => self.card_take_back(),
                 Effect::Tracking { on, levels } => self.update_settings(|s| {
                     s.tracking.enabled = on;
                     s.tracking.levels = levels;
@@ -1556,6 +1624,7 @@ pub(crate) fn tick(
     // (read on the media thread).
     s.menu.light = light;
     s.menu.can_drop = s.card_ready();
+    s.menu.card_out = s.card.is_some();
     s.menu.tracking = tracking;
     s.menu.tracking_note = tracking_note;
     s.menu.versions = versions;
@@ -1922,6 +1991,44 @@ mod tests {
         s.trigger(false, true);
         s.point_and_touch(ms(40), &mut Vec::new());
         assert_eq!(s.menu.page, Page::Search);
+    }
+
+    #[test]
+    fn a_held_trigger_drags_the_music_along_its_timeline() {
+        let mut s = pointing();
+        s.menu.pages = Pages::Timeline;
+        s.menu.media = Some(menu::Media { title: "Song".into(), can_seek: true, position: Some(0), duration: Some(320), ..Default::default() });
+        s.menu.press(menu::Target::Music);
+        let place = |i: u8| {
+            let r = layout::cached(ScreenPage::Music).elements.iter().find(|e| e.target == menu::Target::Seek(i)).unwrap().rect;
+            on_screen(r.x as f32 + r.w as f32 / 2.0, r.y as f32 + r.h as f32 / 2.0)
+        };
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let seeks = |effects: &[Effect]| {
+            effects.iter().filter_map(|e| if let Effect::Media(menu::MediaCommand::Seek(at)) = e { Some(*at) } else { None }).collect::<Vec<_>>()
+        };
+        // The trigger on segment 2 (of 16, 20 s each): the music to 40 s.
+        point(&mut s, true, [0.0, -0.2, -0.45], place(2));
+        s.point_and_touch(ms(0), &mut Vec::new());
+        s.trigger(true, true);
+        let mut effects = Vec::new();
+        s.point_and_touch(ms(20), &mut effects);
+        assert_eq!(seeks(&effects), vec![40]);
+        // Held and moved along: each new segment moves it once; the same segment again does nothing.
+        let mut effects = Vec::new();
+        for (n, i) in [(40, 2), (60, 5), (80, 5), (100, 9)] {
+            point(&mut s, true, [0.0, -0.2, -0.45], place(i));
+            s.point_and_touch(ms(n), &mut effects);
+        }
+        assert_eq!(seeks(&effects), vec![100, 180]);
+        // Let go, then pointed elsewhere on the timeline: nothing more until pressed.
+        s.trigger(true, false);
+        s.point_and_touch(ms(120), &mut Vec::new());
+        let mut effects = Vec::new();
+        point(&mut s, true, [0.0, -0.2, -0.45], place(12));
+        s.point_and_touch(ms(140), &mut effects);
+        assert!(seeks(&effects).is_empty(), "{effects:?}");
     }
 
     #[test]

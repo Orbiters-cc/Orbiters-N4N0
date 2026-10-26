@@ -299,8 +299,8 @@ pub struct MapsMine {
 
 // N4N0's part of the snapshot, shared with the phone app (`orbiters_n4n0::status`).
 pub use orbiters_n4n0::status::{
-    CallContact, CallLink, CallPhase, CallView, CallsStatus, OrbConfirmation, OrbFace, OrbLight, OrbLine, OrbStatus, OrbWho, ProcessUsage, StateAction,
-    StateView, StatesView, VoiceStatus,
+    AvatarView, CallContact, CallLink, CallPhase, CallView, CallsStatus, OrbConfirmation, OrbFace, OrbLight, OrbLine, OrbStatus, OrbWho, ProcessUsage,
+    StateAction, StateView, StatesView, VoiceStatus,
 };
 
 /// VRChat's frames the SteamVR overlay saw, about ten seconds of them (contracts `Docs/world-performance.md`).

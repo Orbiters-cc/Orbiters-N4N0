@@ -47,6 +47,8 @@ pub(crate) struct TestHost {
     calls: Mutex<Vec<CallRequest>>,
     ringing: Mutex<bool>,
     photos: AtomicUsize,
+    /// VRChat's camera open, as the stand-in VRChat says (`None`: it does not say).
+    camera: Mutex<Option<bool>>,
     capturing: Mutex<bool>,
     walk: Mutex<Vec<f32>>,
     motion: Mutex<Vec<Option<(String, OscValue)>>>,
@@ -172,8 +174,10 @@ impl Host for TestHost {
     }
 
     fn publish(&self, mut status: OrbStatus) {
-        // As the desktop does: the avatar's name is VRChat's log's.
-        status.states.avatar_name = self.world.lock().unwrap().avatar_name.clone();
+        // As the desktop does: the avatar's name is VRChat's log's when N4N0 has none (VRChat's OSCQuery, its states).
+        if status.states.avatar_name.is_none() {
+            status.states.avatar_name = self.world.lock().unwrap().avatar_name.clone();
+        }
         *self.published.lock().unwrap() = status;
     }
 
@@ -198,8 +202,13 @@ impl Host for TestHost {
     }
 
     fn photo_3d(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(*self.camera.lock().unwrap() != Some(false), crate::platform::CAMERA_CLOSED);
         self.photos.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn camera_open(&self) -> Option<bool> {
+        *self.camera.lock().unwrap()
     }
 
     fn walk_boost(&self, strength: f32) {
@@ -1363,7 +1372,7 @@ fn a_state_keeps_what_osc_may_write_and_puts_back_only_what_it_should() {
     n.refresh_avatar(None, HashMap::new(), 0);
     received(&input, Duration::from_millis(300));
     // Saved: what OSC may write (GoGoLoco's too), never VRChat's own, N4N0's nor the capture kit's toggle.
-    n.command(Command::States { action: StateAction::Save { name: Some("Cosy".into()), size: false, pose: false, default: false } });
+    n.command(Command::States { action: StateAction::Save { name: Some("Cosy".into()), size: false, pose: false, default: false }, avatar: None });
     assert!(until(|| t.view().states.states.len() == 1 && !t.view().states.saving));
     let state = t.view().states.states[0].clone();
     assert_eq!((state.name.as_str(), state.parameters, state.pose_parameters), ("Cosy", 5, 2), "{state:?}");
@@ -1377,19 +1386,19 @@ fn a_state_keeps_what_osc_may_write_and_puts_back_only_what_it_should() {
         }
         put_node(&mut t, orbiters_orb::states::EYE_HEIGHT, "f", json!(1.2), 3);
     }
-    n.command(Command::States { action: StateAction::Apply { id: state.id.clone() } });
+    n.command(Command::States { action: StateAction::Apply { id: state.id.clone() }, avatar: None });
     let sent = avatar_writes(&received(&input, Duration::from_millis(800)));
     let expected = vec![("Hoodie".into(), OscType::Bool(true)), ("Hue".into(), OscType::Float(0.25)), ("Outfit".into(), OscType::Int(2))];
     assert_eq!(sent, expected, "every parameter it saved, forced: neither the pose nor the size");
-    n.command(Command::States { action: StateAction::Options { id: state.id.clone(), pose: true, size: true } });
+    n.command(Command::States { action: StateAction::Options { id: state.id.clone(), pose: true, size: true }, avatar: None });
     assert!(until(|| t.view().states.states[0].pose));
-    n.command(Command::States { action: StateAction::Apply { id: state.id.clone() } });
+    n.command(Command::States { action: StateAction::Apply { id: state.id.clone() }, avatar: None });
     let sent = avatar_writes(&received(&input, Duration::from_millis(800)));
     let names: Vec<&str> = sent.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, vec!["Go/Stationary", "Hoodie", "Hue", "Outfit", "VRCEmote", orbiters_orb::states::EYE_HEIGHT]);
     assert_eq!(sent.last().unwrap().1, OscType::Float(1.62));
     // The default: put back once VRChat loaded the avatar again (a world joined, or a switch back to it).
-    n.command(Command::States { action: StateAction::Default { id: Some(state.id.clone()) } });
+    n.command(Command::States { action: StateAction::Default { id: Some(state.id.clone()) }, avatar: None });
     assert!(until(|| t.view().states.states[0].default));
     n.on_avatar("avtr_states".into());
     let early = avatar_writes(&received(&input, Duration::from_millis(1000)));
@@ -1400,12 +1409,109 @@ fn a_state_keeps_what_osc_may_write_and_puts_back_only_what_it_should() {
         "{later:?}"
     );
     // Renamed, deleted: the list follows, the default with it.
-    n.command(Command::States { action: StateAction::Rename { id: state.id.clone(), name: "Evening".into() } });
+    n.command(Command::States { action: StateAction::Rename { id: state.id.clone(), name: "Evening".into() }, avatar: None });
     assert!(until(|| t.view().states.states[0].name == "Evening"));
-    n.command(Command::States { action: StateAction::Delete { id: state.id } });
+    n.command(Command::States { action: StateAction::Delete { id: state.id }, avatar: None });
     assert!(until(|| t.view().states.states.is_empty()));
     // They were kept in N4N0's own file.
     assert!(n.files.states.is_file());
+    t.shutdown(&n);
+}
+
+#[test]
+fn each_avatar_s_states_carry_its_name_from_vrchat_s_oscquery() {
+    let mut tree = states_tree("avtr_named");
+    // Its name as set in its SDK, whole in UTF-8 over OSCQuery.
+    put_node(&mut tree, orbiters_core::osc::AVATAR_NAME, "s", json!("Ultirex ✨ Noir"), 1);
+    let tree = Arc::new(Mutex::new(tree));
+    let (input, query) = vrchat_live(tree.clone());
+    let mut settings = Settings::default();
+    settings.osc.vrchat_port = input.local_addr().unwrap().port();
+    let (t, n) = n4n0(settings);
+    t.start_osc();
+    t.set_vrchat_query(query);
+    t.world(|w| w.avatar_name = Some("Ultirex Noir (log)".into()));
+    n.start();
+    n.orb.lock().unwrap().voice.installed = false;
+    // Another avatar's states, saved before.
+    n.orb.lock().unwrap().states.store().add("avtr_other", Some("Rexouium"), Some("Party"), Default::default(), None, "2026-10-20T10:00:00Z".into()).unwrap();
+    n.refresh_avatar(None, HashMap::new(), 0);
+    assert!(until(|| t.view().states.avatar_name.as_deref() == Some("Ultirex ✨ Noir")), "{:?}", t.view().states.avatar_name);
+    // A card for the avatar worn (nothing saved yet), then the other.
+    let cards = |t: &TestHost| t.view().states.avatars.iter().map(|a| (a.id.clone(), a.name.clone(), a.worn, a.states.len())).collect::<Vec<_>>();
+    assert_eq!(cards(&t), vec![
+        ("avtr_named".into(), Some("Ultirex ✨ Noir".into()), true, 0),
+        ("avtr_other".into(), Some("Rexouium".into()), false, 1)
+    ]);
+    // Saved: the state keeps the SDK's name with it.
+    n.command(Command::States { action: StateAction::Save { name: Some("Cosy".into()), size: false, pose: false, default: false }, avatar: None });
+    assert!(until(|| t.view().states.states.len() == 1 && !t.view().states.saving));
+    assert_eq!(n.orb.lock().unwrap().states.store().avatar("avtr_named").and_then(|a| a.name.clone()).as_deref(), Some("Ultirex ✨ Noir"));
+    // The other avatar's states change from the window; applying them waits for that avatar to be worn.
+    let other = n.orb.lock().unwrap().states.store().avatar("avtr_other").unwrap().states[0].id.clone();
+    n.command(Command::States { action: StateAction::Rename { id: other.clone(), name: "Party night".into() }, avatar: Some("avtr_other".into()) });
+    assert!(until(|| t.view().states.avatars.get(1).is_some_and(|a| a.states[0].name == "Party night")));
+    assert_eq!(t.view().states.states[0].name, "Cosy", "the worn avatar's own are untouched");
+    n.command(Command::States { action: StateAction::Apply { id: other }, avatar: Some("avtr_other".into()) });
+    assert!(until(|| t.view().states.note.as_ref().is_some_and(|note| note.error && note.text.contains("Wear this avatar"))));
+    // Renamed in its SDK and uploaded again: its states follow, and so does the file.
+    put_node(&mut tree.lock().unwrap(), orbiters_core::osc::AVATAR_NAME, "s", json!("Ultirex Blanc"), 1);
+    n.refresh_avatar(None, HashMap::new(), 0);
+    assert!(until(|| t.view().states.avatars[0].name.as_deref() == Some("Ultirex Blanc")));
+    let file = std::fs::read_to_string(&n.files.states).unwrap();
+    assert!(file.contains("Ultirex Blanc") && file.contains("Party night"), "{file}");
+    t.shutdown(&n);
+}
+
+#[test]
+fn a_3d_picture_with_vrchat_s_camera_closed_says_open_the_camera_before() {
+    let (t, n) = n4n0(Settings::default());
+    *t.camera.lock().unwrap() = Some(false);
+    // With a timer: said at once, no countdown.
+    n.command(Command::Photo3DIn { seconds: 5 });
+    assert!(until(|| t.view().photo_note.as_ref().is_some_and(|(_, text)| text == crate::platform::CAMERA_CLOSED)));
+    assert!(t.view().photo_countdown.is_none());
+    assert!(t.notices().iter().any(|(kind, text)| *kind == NoticeKind::Warning && text == crate::platform::CAMERA_CLOSED));
+    // At once: the same, numbered anew (each menu shows it again).
+    let first = t.view().photo_note.unwrap().0;
+    n.command(Command::Photo3DIn { seconds: 0 });
+    assert!(until(|| t.view().photo_note.as_ref().is_some_and(|(k, _)| *k != first)));
+    assert_eq!(t.photos.load(Ordering::Relaxed), 0);
+    // Opened: the countdown starts.
+    *t.camera.lock().unwrap() = Some(true);
+    n.command(Command::Photo3DIn { seconds: 5 });
+    assert!(until(|| t.view().photo_countdown.is_some()));
+}
+
+#[test]
+fn a_card_is_taken_back_from_n4n0_s_menu_the_overlay_or_the_window() {
+    use orbiters_contracts::orb::card;
+    let mut tree = card_tree("avtr_take_back");
+    put_node(&mut tree, &parameter(params::SCREEN_VERSION), "i", json!(contract::SCREEN_TIMELINE), 3);
+    let (t, n, vrchat) = orb_on(tree);
+    assert!(until(|| t.view().can_drop));
+    let drop = || Command::Drop { link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into(), title: "Never Gonna Give You Up".into(), video: None };
+    n.command(drop());
+    assert!(until(|| t.view().card.is_some()));
+    received(&vrchat, Duration::from_millis(600));
+    // The screen's menu offers Take back while it is out (screen version 9).
+    n.menu_open(false);
+    assert!(until(|| {
+        let rt = n.orb.lock().unwrap();
+        rt.screen.menu.card_out && rt.screen.menu.pages.timeline()
+    }));
+    // Taken back from the window or the overlay: out no more, as when its time is up.
+    n.command(Command::TakeBack);
+    let sent = received(&vrchat, Duration::from_millis(900));
+    assert!(sent.contains(&(parameter(card::OUT), OscType::Bool(false))), "{sent:?}");
+    assert!(t.view().card.is_none() && !n.orb.lock().unwrap().screen.menu.card_out);
+    // Dropped again, then taken back from the screen's own menu.
+    n.command(drop());
+    assert!(until(|| t.view().card.is_some()));
+    n.screen_effects(vec![orbiters_orb::menu::Effect::TakeBack]);
+    assert!(until(|| t.view().card.is_none()));
+    let sent = received(&vrchat, Duration::from_millis(900));
+    assert!(sent.contains(&(parameter(card::OUT), OscType::Bool(false))), "{sent:?}");
     t.shutdown(&n);
 }
 
@@ -1767,7 +1873,7 @@ fn n4n0_keeps_its_files_where_the_app_says() {
     assert_eq!(t.view().prop_sync, Some(8), "the manifest's panel");
     // A state saved goes to the app's states file.
     n.orb.lock().unwrap().states.store().add("avtr_files", None, Some("Cosy"), Default::default(), None, "t".into()).unwrap();
-    n.command(Command::States { action: StateAction::Default { id: Some("s1".into()) } });
+    n.command(Command::States { action: StateAction::Default { id: Some("s1".into()) }, avatar: None });
     assert!(n.files.states.is_file(), "{}", n.files.states.display());
     assert!(std::fs::read_to_string(&n.files.states).unwrap().contains("Cosy"));
     n.shutdown();

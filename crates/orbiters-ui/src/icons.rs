@@ -1,4 +1,4 @@
-//! Phosphor icon code points used by the Orbiters interfaces (draw them with [`crate::widgets::icon`]).
+//! Phosphor icon code points used by the Orbiters interfaces (draw them with [`crate::widgets::icon`]), and N4N0's face.
 
 pub const APERTURE: &str = "\u{E00A}";
 pub const ARROW_COUNTER_CLOCKWISE: &str = "\u{E038}";
@@ -56,6 +56,9 @@ pub const MICROPHONE: &str = "\u{E326}";
 pub const MINUS: &str = "\u{E32A}";
 pub const MONITOR_PLAY: &str = "\u{E58C}";
 pub const MUSIC_NOTES: &str = "\u{E340}";
+/// N4N0's face (its logo, [`crate::n4n0_face`]), not a Phosphor glyph: [`crate::widgets::icon`] and
+/// [`crate::widgets::icon_fill`] draw it as a picture in the colour asked, wherever a glyph goes.
+pub const N4N0: &str = "\u{F0A40}";
 pub const PATH: &str = "\u{E39C}";
 pub const PAPER_PLANE_TILT: &str = "\u{E398}";
 pub const PAUSE: &str = "\u{E39E}";

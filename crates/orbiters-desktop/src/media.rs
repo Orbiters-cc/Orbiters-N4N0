@@ -77,6 +77,16 @@ mod platform {
                         MediaCommand::Play => session.TryPlayAsync()?,
                         MediaCommand::Pause => session.TryPauseAsync()?,
                         MediaCommand::Next => session.TrySkipNextAsync()?,
+                        // From the timeline's start (most apps' is 0), in 100 ns ticks; the app answers whether it moved.
+                        MediaCommand::Seek(seconds) => {
+                            let start = session.GetTimelineProperties().and_then(|t| t.StartTime()).map(|t| t.Duration).unwrap_or(0);
+                            let moved = session.TryChangePlaybackPositionAsync(start + seconds as i64 * 10_000_000)?.join()?;
+                            if !moved {
+                                // E_FAIL: the app said no.
+                                return Err(windows::core::Error::new(windows::core::HRESULT(0x8000_4005_u32 as i32), "the app did not move in its timeline"));
+                            }
+                            return Ok(());
+                        }
                         _ => session.TrySkipPreviousAsync()?,
                     };
                     done.join().map(|_| ())
@@ -171,6 +181,8 @@ mod platform {
             can_play_pause: flag(controls.IsPlayPauseToggleEnabled()) || flag(controls.IsPlayEnabled()) || flag(controls.IsPauseEnabled()),
             can_previous: flag(controls.IsPreviousEnabled()),
             can_next: flag(controls.IsNextEnabled()),
+            // The app takes a position (a browser's page that handles "seekto", Spotify, Windows' Media Player).
+            can_seek: flag(controls.IsPlaybackPositionEnabled()),
             position,
             duration,
             art: None,

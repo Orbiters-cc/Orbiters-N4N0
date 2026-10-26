@@ -35,6 +35,8 @@ pub struct MenuOverlay {
     pub host: MenuHost,
     hover: Option<usize>,
     pressed: Option<usize>,
+    /// The laser's press held on the music's timeline: the segment it is on (moving along it moves the music).
+    dragging: Option<u8>,
     shown: bool,
     last_paint: Option<Instant>,
     last_activity: Instant,
@@ -104,6 +106,7 @@ impl MenuOverlay {
             host,
             hover: None,
             pressed: None,
+            dragging: None,
             shown: false,
             last_paint: None,
             last_activity: Instant::now(),
@@ -236,10 +239,22 @@ impl MenuOverlay {
             match e.event_type {
                 vr::event::MOUSE_MOVE => {
                     let (x, y, _) = e.mouse();
-                    let hover = layout::hit_pointable(page, &self.host.menu, x, HEIGHT as f32 - y).map(|(i, _)| i);
+                    let hit = layout::hit_pointable(page, &self.host.menu, x, HEIGHT as f32 - y);
+                    let hover = hit.map(|(i, _)| i);
                     if hover != self.hover {
                         self.hover = hover;
                         self.host.dirty = true;
+                    }
+                    // Held and moved along the music's timeline: the music follows, a segment at a time.
+                    if let (Some(from), Some((i, target))) = (self.dragging, hit) {
+                        let (on, more) = self.host.menu.drag(from, target);
+                        if !more.is_empty() {
+                            self.pressed = Some(i);
+                            self.host.dirty = true;
+                            self.last_activity = Instant::now();
+                        }
+                        self.dragging = Some(on);
+                        effects.extend(more);
                     }
                 }
                 vr::event::MOUSE_BUTTON_DOWN => {
@@ -247,6 +262,7 @@ impl MenuOverlay {
                     if let Some((i, target)) = layout::hit_pointable(page, &self.host.menu, x, HEIGHT as f32 - y) {
                         // The press shows at once; what it does follows.
                         self.pressed = Some(i);
+                        self.dragging = orbiters_orb::menu::timeline_segment(target);
                         effects.extend(self.host.press(target));
                         clicked = true;
                         self.last_activity = Instant::now();
@@ -255,11 +271,13 @@ impl MenuOverlay {
                 }
                 vr::event::MOUSE_BUTTON_UP => {
                     self.pressed = None;
+                    self.dragging = None;
                     self.host.dirty = true;
                 }
                 vr::event::FOCUS_LEAVE => {
                     self.hover = None;
                     self.pressed = None;
+                    self.dragging = None;
                     self.host.dirty = true;
                 }
                 _ => {}

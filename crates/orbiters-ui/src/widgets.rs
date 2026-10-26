@@ -34,7 +34,8 @@ pub fn control(ctx: &egui::Context, label: &str) -> Option<(Rect, bool)> {
     drawn.0.get(label).filter(|(_, _, p)| p + 1 >= pass).map(|(r, enabled, _)| (*r, *enabled))
 }
 
-pub(crate) fn note_control(ctx: &egui::Context, label: &str, rect: Rect, enabled: bool) {
+/// Notes where a control labelled `label` was drawn, for [`control`] (an automated run only).
+pub fn note_control(ctx: &egui::Context, label: &str, rect: Rect, enabled: bool) {
     if !WATCH.load(Ordering::Relaxed) {
         return;
     }
@@ -44,13 +45,19 @@ pub(crate) fn note_control(ctx: &egui::Context, label: &str, rect: Rect, enabled
     });
 }
 
-/// Paints a Phosphor glyph centred on `center`.
+/// Paints a Phosphor glyph centred on `center` (or N4N0's face, [`icons::N4N0`]).
 pub fn icon(painter: &Painter, center: Pos2, glyph: &str, size: f32, color: Color32) {
+    if glyph == icons::N4N0 {
+        return crate::n4n0_face::icon(painter, center, size, color);
+    }
     painter.text(center, Align2::CENTER_CENTER, glyph, FontId::new(size, fonts::icons()), color);
 }
 
-/// Paints the filled variant of a Phosphor glyph.
+/// Paints the filled variant of a Phosphor glyph (N4N0's face is filled already).
 pub fn icon_fill(painter: &Painter, center: Pos2, glyph: &str, size: f32, color: Color32) {
+    if glyph == icons::N4N0 {
+        return crate::n4n0_face::icon(painter, center, size, color);
+    }
     painter.text(center, Align2::CENTER_CENTER, glyph, FontId::new(size, fonts::icons_fill()), color);
 }
 

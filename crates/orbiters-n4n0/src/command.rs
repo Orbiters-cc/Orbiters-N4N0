@@ -96,9 +96,12 @@ pub enum Command {
         color: u8,
         level: f32,
     },
-    /// The avatar's saved states: save, apply, the default, rename, delete, what one puts back.
+    /// The avatar's saved states: save, apply, the default, rename, delete, what one puts back. `avatar`: another avatar's
+    /// states than the worn one's (the window's States page: its default, names, options and deletes only).
     States {
         action: StateAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        avatar: Option<String>,
     },
     /// Tracking smoothing as N4N0's menu set it (its Tracking page): on or off, each kind's strength (an index of
     /// `orbiters_orb::menu::SMOOTHING_LABELS`: headset, controllers, trackers).
@@ -124,6 +127,8 @@ pub enum Command {
         /// The thumbnail's key (the video id).
         video: Option<String>,
     },
+    /// The link card out in the world taken back (as when its time is up): from N4N0's menu, the overlay or the window.
+    TakeBack,
     /// A controller's trigger pulled or let go (the SteamVR overlay reads it): on a screen of version 7 it presses where
     /// that hand's index finger points.
     Trigger {
@@ -145,10 +150,16 @@ mod tests {
         assert_eq!(json(&Command::Photo3D), r#"{"kind":"photo3_d"}"#);
         assert_eq!(json(&Command::TestFace { face: Some(OrbFace::Happy) }), r#"{"kind":"test_face","face":"happy"}"#);
         assert_eq!(
-            json(&Command::States { action: StateAction::Save { name: None, size: true, pose: false, default: false } }),
+            json(&Command::States { action: StateAction::Save { name: None, size: true, pose: false, default: false }, avatar: None }),
             r#"{"kind":"states","action":{"do":"save","name":null,"size":true,"pose":false,"default":false}}"#
         );
         let back: Command = serde_json::from_str(r#"{"kind":"drop","link":"https://x.y/","title":"t","video":null}"#).unwrap();
         assert_eq!(back, Command::Drop { link: "https://x.y/".into(), title: "t".into(), video: None });
+        // Another avatar's states: the avatar named; the worn one's read as before.
+        let other = Command::States { action: StateAction::Delete { id: "s1".into() }, avatar: Some("avtr_b".into()) };
+        assert_eq!(json(&other), r#"{"kind":"states","action":{"do":"delete","id":"s1"},"avatar":"avtr_b"}"#);
+        let worn: Command = serde_json::from_str(r#"{"kind":"states","action":{"do":"delete","id":"s1"}}"#).unwrap();
+        assert_eq!(worn, Command::States { action: StateAction::Delete { id: "s1".into() }, avatar: None });
+        assert_eq!(json(&Command::TakeBack), r#"{"kind":"take_back"}"#);
     }
 }

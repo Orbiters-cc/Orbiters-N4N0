@@ -265,6 +265,12 @@ impl Watcher {
                     volume.muted = muted;
                 }
             }
+            // Shown where it goes at once (the next reading says where the app took it).
+            MediaCommand::Seek(at) => {
+                if let Some(media) = reading.media.as_mut() {
+                    media.position = Some(media.duration.map_or(at, |d| at.min(d)));
+                }
+            }
             MediaCommand::Previous | MediaCommand::Next => {}
         }
         state.version += 1;
@@ -451,8 +457,10 @@ mod tests {
         let (before, _) = watcher.reading();
         watcher.command(MediaCommand::PlayPause);
         watcher.command(MediaCommand::Volume(55));
+        watcher.command(MediaCommand::Seek(42));
         let (after, reading) = watcher.reading();
         assert!(after > before);
+        assert_eq!(reading.media.as_ref().unwrap().position, Some(42), "moved in its timeline at once");
         assert!(!reading.media.unwrap().playing);
         assert_eq!(reading.volume, Some(Volume { percent: 55, muted: false }));
     }

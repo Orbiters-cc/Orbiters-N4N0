@@ -22,7 +22,7 @@ use crate::Command;
 use orbiters_contracts::avatar::{self, AvatarManifest, Tag};
 use orbiters_contracts::orb::{self as contract, params};
 use orbiters_core::account::{Api, Server};
-use orbiters_core::osc::{OscValue, AVATAR_CHANGE, CAPTURE_PARAMETERS, PARAMETERS_PREFIX};
+use orbiters_core::osc::{OscValue, AVATAR_CHANGE, AVATAR_NAME, CAPTURE_PARAMETERS, PARAMETERS_PREFIX};
 use orbiters_core::settings::{OrbSettings, Pin, Settings};
 use orbiters_orb::assistant::{self, AssistantError, Display, Event, Input, Quota, Request, ToolCall, ToolResult};
 use orbiters_orb::context::{self, Moment, NAME_CHARS, URL_CHARS};
@@ -119,6 +119,8 @@ struct TurnTools {
 pub(crate) struct OrbRuntime {
     pub(crate) sender: Option<TextSender>,
     pub(crate) avatar_id: Option<String>,
+    /// The avatar's name as set in its SDK (VRChat's OSCQuery `/avatar/name`, whole in UTF-8), once read after its change.
+    pub(crate) avatar_name: Option<String>,
     /// The avatar's parameter names, as VRChat listed them when it settled.
     pub(crate) params: HashSet<String>,
     pub(crate) controls: Controls,
@@ -230,6 +232,7 @@ impl OrbRuntime {
     /// to be sent to it.
     fn forget_avatar(&mut self) {
         self.avatar_id = None;
+        self.avatar_name = None;
         self.params.clear();
         self.controls = Controls::default();
         self.manifest = false;
@@ -378,7 +381,7 @@ impl OrbRuntime {
             dictation: self.screen.dictation.clone(),
             photo_countdown: self.screen.countdown(Instant::now()),
             light: self.light.map(|l| OrbLight { on: l.on, color: l.color, level: l.level }),
-            states: self.states.view(self.avatar_id.as_deref()),
+            states: self.states.view(self.avatar_id.as_deref(), self.avatar_name.as_deref()),
             can_drop: self.screen.card_ready(),
             card: self.screen.card_view(),
             tracking: self.tracking.clone(),
@@ -387,6 +390,7 @@ impl OrbRuntime {
             versions: self.versions.clone(),
             keys: self.keys.iter().cloned().collect(),
             world_video: self.world_video.as_ref().map(|v| (v.url.clone(), v.title.clone(), v.at)),
+            photo_note: self.screen.photo_note.clone(),
         }
     }
 
@@ -1121,6 +1125,10 @@ impl N4n0 {
         };
         {
             let mut rt = self.orb.lock().unwrap();
+            if rt.avatar_id.as_deref() != Some(id.as_str()) {
+                // Another avatar's name is read once it settled.
+                rt.avatar_name = None;
+            }
             rt.avatar_id = Some(id.clone());
             if let Some(sender) = rt.sender.as_mut() {
                 // The page up (the AFK message among them) is shown again once the reloaded panel is cleared.
@@ -1158,6 +1166,12 @@ impl N4n0 {
             })
         });
         let Some(id) = id else { return };
+        // Its name as set in its SDK (`/avatar/name`, newer VRChat versions): read from OSCQuery, which carries UTF-8
+        // whole (VRChat's UDP messages may not yet).
+        let name = values.iter().find(|(a, _)| a == AVATAR_NAME).and_then(|(_, v)| match v {
+            OscValue::Text(t) if !t.trim().is_empty() => Some(t.trim().to_string()),
+            _ => None,
+        });
         let parameters: Vec<(&str, &OscValue)> = values.iter().filter(|(a, _)| a.starts_with(PARAMETERS_PREFIX)).map(|(a, v)| (a.as_str(), v)).collect();
         let known = !parameters.is_empty();
         let names: HashSet<String> = parameters.iter().map(|(a, _)| a[PARAMETERS_PREFIX.len()..].to_string()).collect();
@@ -1215,6 +1229,9 @@ impl N4n0 {
                 return;
             }
             rt.avatar_id = Some(id.clone());
+            if name.is_some() {
+                rt.avatar_name = name.clone();
+            }
             rt.params = names;
             rt.size_sent = None;
             let capable = rt.params.contains(contract::card::OUT);
@@ -1262,6 +1279,10 @@ impl N4n0 {
             }
             rt.face_sent = None;
             rt.send_now(out);
+        }
+        // Its name kept with its saved states (the window's States page shows a card per avatar by its name).
+        if let Some(name) = &name {
+            self.states_remember_name(&id, name);
         }
         self.publish();
         if !known && attempt < TREE_RETRIES {
@@ -1618,8 +1639,9 @@ impl N4n0 {
                 rt.test_hidden = !on;
                 rt.outbox.push((Instant::now(), (parameter(params::VISIBLE), OscType::Bool(on))));
             }
-            Command::States { action } => self.states_action(action),
+            Command::States { action, avatar } => self.states_action(action, avatar),
             Command::Drop { link, title, video } => self.card_drop(link, title, video),
+            Command::TakeBack => self.card_take_back(),
             Command::Trigger { right, down } => {
                 let mut rt = self.orb.lock().unwrap();
                 rt.screen.trigger(right, down);
@@ -1858,7 +1880,7 @@ impl N4n0 {
             vrchat_running: running,
             world_name: world.in_world.then(|| world.world_name.clone()).flatten(),
             others: world.others(),
-            avatar_name: world.avatar_name.clone(),
+            avatar_name: rt.avatar_name.clone().or_else(|| world.avatar_name.clone()),
             orb_prop: rt.sender.is_some(),
             afk: rt.afk,
             last_video,
@@ -2174,6 +2196,7 @@ fn media_word(command: orbiters_orb::menu::MediaCommand) -> String {
         MediaCommand::Pause => "paused".into(),
         MediaCommand::Next => "skipped to the next".into(),
         MediaCommand::Previous => "went back".into(),
+        MediaCommand::Seek(at) => format!("moved to {}", orbiters_orb::menu::clock(at as u64)),
         MediaCommand::Volume(v) => format!("volume at {v} %"),
         MediaCommand::Mute(true) => "muted".into(),
         MediaCommand::Mute(false) => "unmuted".into(),

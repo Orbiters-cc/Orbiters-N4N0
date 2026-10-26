@@ -5,7 +5,9 @@
 //! layout table holds it in a byte.
 
 use super::strings::{self, Text};
-use super::{Call, KeyboardLayout, Keys, Menu, Page, Pages, Target, Typing, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, STATES_PER_PAGE, TIMERS, TRACKING_KINDS};
+use super::{
+    Call, KeyboardLayout, Keys, Menu, Page, Pages, Target, Typing, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, STATES_PER_PAGE, TIMELINE_STEPS, TIMERS, TRACKING_KINDS,
+};
 use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
 use std::sync::OnceLock;
 
@@ -114,7 +116,7 @@ impl ScreenPage {
             Pages::Four => ScreenPage::Home,
             Pages::Six => ScreenPage::HomeSix,
             Pages::Seven => ScreenPage::HomeSeven,
-            Pages::Ten => ScreenPage::HomeTen,
+            Pages::Ten | Pages::Timeline => ScreenPage::HomeTen,
         }
     }
 
@@ -205,6 +207,8 @@ pub enum Look {
     Bar = 10,
     /// A text area: a dark panel the text sits on (a suggestion, a name being typed).
     Area = 11,
+    /// A segment of the music's timeline (from screen version 9): a dim line, lit (switched on) once the music reached it.
+    Track = 12,
 }
 
 /// The icons the pages use (Phosphor icons in Orbiters - N4N0's font).
@@ -267,6 +271,8 @@ pub enum Icon {
     Pose,
     /// Watch a video on the computer.
     Watch,
+    /// Take a dropped card back.
+    TakeBack,
 }
 
 /// Home's features in their order (the first four as on the four-tile Home, the first six as on the six-tile one), each
@@ -289,7 +295,7 @@ pub fn home_tiles(pages: Pages) -> &'static [(Target, Icon, Text, Tint)] {
         Pages::Four => &HOME_TILES[..4],
         Pages::Six => &HOME_TILES[..6],
         Pages::Seven => &HOME_TILES[..7],
-        Pages::Ten => &HOME_TILES,
+        Pages::Ten | Pages::Timeline => &HOME_TILES,
     }
 }
 
@@ -332,7 +338,7 @@ impl Element {
     pub fn radius(&self) -> u16 {
         match self.look {
             Look::Tile | Look::Area => 24,
-            Look::Round | Look::Field | Look::Bar => self.rect.h / 2,
+            Look::Round | Look::Field | Look::Bar | Look::Track => self.rect.h / 2,
             Look::Accent | Look::Danger | Look::Chip => self.rect.h.min(56) / 2,
             Look::Row => 16,
             Look::Key | Look::KeyDark => 12,
@@ -419,6 +425,9 @@ pub enum Content {
     SuggestNote,
     /// Music: the world's video (from screen version 6).
     WorldVideo,
+    /// Music: where it is and how long it lasts, at either end of its timeline (from screen version 9).
+    MediaPosition,
+    MediaDuration,
 }
 
 /// A line of changing text: `cols` cells of `size` pixels high and half as wide, from (`x`, `y`). On the screen, cell
@@ -591,6 +600,10 @@ pub const SUGGEST_LINES: usize = 4;
 pub const HEARD_WIDE_COLUMNS: usize = 44;
 pub const HEARD_WIDE_LINES: usize = 3;
 
+/// Where the music's timeline starts across the page, and its segments' pitch: sixteen of them reach 896.
+const TIMELINE_X: u16 = 128;
+const TIMELINE_STEP: u16 = 48;
+
 /// The ten-tile Home's place `i` (0 to 11): three rows of four, 228 × 140 each, 16 apart across and 12 down.
 fn ten_cell(i: usize) -> (u16, u16) {
     (32 + (i as u16 % 4) * 244, 96 + (i as u16 / 4) * 152)
@@ -653,6 +666,9 @@ pub fn layout(page: ScreenPage) -> Layout {
                 let y = 96 + i as u16 * 92 + 20;
                 elements.push(with(element(Target::Drop(i), Rect::new(704, y, 108, 48), Look::KeyDark), Some(Icon::Drop), Some(Text::LinkDrop)));
             }
+            // While the link card is out (screens from version 9): Take back, in the heading's row between the search's
+            // words (which end at 536) and the pages' buttons.
+            elements.push(with(element(Target::TakeBack, Rect::new(576, 28, 220, 48), Look::KeyDark), Some(Icon::TakeBack), Some(Text::CardTakeBack)));
             slots.add(104, 40, 36, 24, Style::Primary, Content::ResultsTitle);
             slots.add(868, 40, 5, 24, Style::Secondary, Content::PageLabel).centered();
             for i in 0..RESULTS_PER_PAGE as u8 {
@@ -735,8 +751,8 @@ pub fn layout(page: ScreenPage) -> Layout {
             elements.push(with(element(Target::MediaNext, Rect::new(612, 388, 96, 96), Look::Round), Some(Icon::SkipForward), None));
             elements.push(with(element(Target::VolumeDown, Rect::new(800, 400, 92, 72), Look::KeyDark), Some(Icon::SpeakerLow), None));
             elements.push(with(element(Target::VolumeUp, Rect::new(900, 400, 92, 72), Look::KeyDark), Some(Icon::SpeakerHigh), None));
-            // Clear of the playing video's Drop (from 720).
-            labels.push(Label { x: 104, y: 34, size: 32, text: Text::MusicTitle, style: Style::Primary, bold: true, width: 600 });
+            // Clear of Take back (from 496) and the playing video's Drop (from 720).
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::MusicTitle, style: Style::Primary, bold: true, width: 376 });
             pictures.push(Picture { rect: Rect::new(32, 104, 448, 252), result: 0 });
             slots.add(512, 112, 30, 32, Style::Primary, Content::MediaTitle);
             slots.add(512, 160, 40, 24, Style::Primary, Content::MediaArtist);
@@ -751,6 +767,19 @@ pub fn layout(page: ScreenPage) -> Layout {
             // its Drop to the left once copied, as on a result's row.
             elements.push(with(element(Target::CopyPlaying, Rect::new(836, 28, 156, 48), Look::Accent), Some(Icon::Copy), Some(Text::LinkCopy)));
             elements.push(with(element(Target::DropPlaying, Rect::new(720, 28, 108, 48), Look::KeyDark), Some(Icon::Drop), Some(Text::LinkDrop)));
+            // The timeline (screens from version 9), under the playback: its segments lit up to where the music is (they
+            // are switched on, so they come first: elements 11 to 26 of the 28 the screen switches on), then Take back
+            // in the heading's row (never on), then the places over the segments that a finger presses or drags along
+            // (shown only when hovered); the time at either end.
+            for i in 0..TIMELINE_STEPS as u16 {
+                elements.push(element(Target::Timeline(i as u8), Rect::new(TIMELINE_X + i * TIMELINE_STEP, 532, TIMELINE_STEP - 4, 4), Look::Track));
+            }
+            elements.push(with(element(Target::TakeBack, Rect::new(496, 28, 212, 48), Look::KeyDark), Some(Icon::TakeBack), Some(Text::CardTakeBack)));
+            for i in 0..TIMELINE_STEPS as u16 {
+                elements.push(element(Target::Seek(i as u8), Rect::new(TIMELINE_X + i * TIMELINE_STEP, 512, TIMELINE_STEP, 44), Look::Row));
+            }
+            slots.add(32, 524, 7, 24, Style::Secondary, Content::MediaPosition).centered();
+            slots.add(908, 524, 7, 24, Style::Secondary, Content::MediaDuration).centered();
         }
         ScreenPage::Light => {
             elements.push(round(Target::Back, 32, Icon::Back));
@@ -1186,6 +1215,25 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
         // The YouTube video playing says its link was copied there (a YouTube page gives no album), as a result's row does.
         Content::MediaAlbum if menu.pages.ten() && menu.media.as_ref().is_some_and(|m| m.video.is_some() && m.video == menu.copied) => "✓ Link copied".into(),
         Content::MediaAlbum => menu.media.as_ref().filter(|m| !m.title.is_empty()).map(|m| m.album.clone()).unwrap_or_default(),
+        // With the timeline (from screen version 9): what was just done, else whether it plays and which app (the time is
+        // at the timeline's ends).
+        Content::MediaState if menu.pages.timeline() => match (&menu.notice, &menu.media) {
+            (Some(notice), _) => notice.clone(),
+            (None, Some(m)) if !m.title.is_empty() || !m.app.is_empty() => {
+                let parts = [if m.playing { "Playing" } else { "Paused" }, m.app.as_str()];
+                parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" · ")
+            }
+            _ => String::new(),
+        },
+        Content::MediaPosition | Content::MediaDuration if !menu.pages.timeline() => String::new(),
+        Content::MediaPosition => match &menu.media {
+            Some(m) if m.duration.is_some_and(|d| d > 0) => super::clock(m.position.unwrap_or(0).min(m.duration.unwrap_or(0)) as u64),
+            _ => String::new(),
+        },
+        Content::MediaDuration => match menu.media.as_ref().and_then(|m| m.duration).filter(|d| *d > 0) {
+            Some(length) => super::clock(length as u64),
+            None => String::new(),
+        },
         Content::MediaState => match &menu.media {
             Some(m) if !m.title.is_empty() || !m.app.is_empty() => {
                 let parts = [if m.playing { "Playing".to_string() } else { "Paused".to_string() }, media_time(m.position, m.duration), m.app.clone()];
@@ -1397,6 +1445,8 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::TrackingSwitch => menu.tracking.as_ref().is_some_and(|t| t.on),
         Target::Smoothing(i) => menu.tracking.as_ref().is_some_and(|t| t.on && t.levels.get((i / 4) as usize) == Some(&(i % 4))),
         Target::SuggestTalk => menu.dictating,
+        // The timeline's segments the music reached.
+        Target::Timeline(i) => menu.media.as_ref().is_some_and(|m| timeline_lit(m, i)),
         _ => false,
     };
     let hidden = match target {
@@ -1407,7 +1457,8 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::Next => !menu.has_next(),
         Target::Take => menu.countdown.is_some(),
         Target::MediaPlayPause => !menu.media.as_ref().is_some_and(|m| m.can_play_pause),
-        Target::MediaPrevious => !menu.media.as_ref().is_some_and(|m| m.can_previous),
+        // Previous, or back to the start of what has nothing before it.
+        Target::MediaPrevious => !menu.media.as_ref().is_some_and(|m| m.can_previous || (m.can_seek && m.duration.is_some())),
         Target::MediaNext => !menu.media.as_ref().is_some_and(|m| m.can_next),
         Target::Mute | Target::VolumeDown | Target::VolumeUp => menu.volume.is_none(),
         Target::LightSwitch | Target::LightColor(_) | Target::LightLevel(_) => menu.light.is_none(),
@@ -1422,6 +1473,10 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::DropPlaying => {
             !menu.pages.ten() || !menu.can_drop || menu.media.as_ref().and_then(|m| m.video.as_ref()).is_none_or(|v| menu.copied.as_ref() != Some(v))
         }
+        // The timeline, for what has a length (from screen version 9).
+        Target::Timeline(_) | Target::Seek(_) => !menu.pages.timeline() || menu.media.as_ref().and_then(|m| m.duration).is_none_or(|d| d == 0),
+        // While the link card is out.
+        Target::TakeBack => !menu.pages.timeline() || !menu.card_out,
         _ => false,
     };
     let unavailable = match target {
@@ -1432,6 +1487,14 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         _ => false,
     };
     State { on: on && !unavailable, hidden, unavailable }
+}
+
+/// Whether timeline segment `i` is lit: the music reached its start (and played on from there).
+pub fn timeline_lit(media: &super::Media, i: u8) -> bool {
+    match (media.position, media.duration) {
+        (Some(at), Some(length)) if length > 0 => at as u64 * TIMELINE_STEPS as u64 > i as u64 * length as u64,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -1583,7 +1646,9 @@ mod tests {
         assert_eq!(Pages::of_screen(Some(4)), Pages::Six, "version 4 points with rays, its pages are version 3's");
         assert_eq!(Pages::of_screen(Some(5)), Pages::Seven);
         assert_eq!(Pages::of_screen(Some(6)), Pages::Ten);
-        assert_eq!(Pages::of_screen(Some(9)), Pages::Ten);
+        assert_eq!(Pages::of_screen(Some(8)), Pages::Ten, "version 8 added no page");
+        assert_eq!(Pages::of_screen(Some(9)), Pages::Timeline);
+        assert_eq!(Pages::of_screen(Some(12)), Pages::Timeline);
         let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
         menu.open();
         assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSeven);
@@ -1709,6 +1774,49 @@ mod tests {
         assert_eq!(picture_key(&menu, &l.pictures[0]), None, "no art yet");
         menu.media.as_mut().unwrap().art = Some("art:1".into());
         assert_eq!(picture_key(&menu, &l.pictures[0]), Some("art:1"));
+    }
+
+    #[test]
+    fn the_music_timeline_lights_up_to_where_it_is_from_version_9() {
+        let l = cached(ScreenPage::Music);
+        let index = |t: Target| l.elements.iter().position(|e| e.target == t).unwrap();
+        // The segments are switched on (the screen switches elements 0 to 27 on); Take back and the places over them
+        // never are, and come after.
+        for i in 0..TIMELINE_STEPS as u8 {
+            assert!(index(Target::Timeline(i)) < 28 && index(Target::Timeline(i)) > index(Target::DropPlaying), "segment {i}");
+            assert!(index(Target::Seek(i)) > index(Target::TakeBack), "place {i}");
+            let (segment, place) = (l.elements[index(Target::Timeline(i))].rect, l.elements[index(Target::Seek(i))].rect);
+            assert!(segment.x >= place.x && segment.right() <= place.right() && segment.y > place.y && segment.bottom() < place.bottom());
+        }
+        assert_eq!(l.elements.len(), 44);
+        // A finger on the timeline finds the place over the segment, not the segment.
+        let place = l.elements[index(Target::Seek(3))].rect;
+        let mut menu = Menu { pages: Pages::Timeline, ..Default::default() };
+        menu.open();
+        menu.press(Target::Music);
+        let shown = |menu: &Menu| l.elements.iter().filter(|e| !state(menu, e).hidden).map(|e| e.target).collect::<Vec<_>>();
+        assert!(!shown(&menu).contains(&Target::Seek(0)), "nothing plays: no timeline");
+        menu.media = Some(super::super::Media { title: "Song".into(), app: "Spotify".into(), playing: true, position: Some(61), duration: Some(240), ..Default::default() });
+        assert!(shown(&menu).contains(&Target::Seek(0)) && shown(&menu).contains(&Target::Timeline(15)));
+        let (cx, cy) = (place.x as f32 + 10.0, place.y as f32 + 30.0);
+        assert_eq!(hit_pointable(l, &menu, cx, cy).map(|(_, t)| t), Some(Target::Seek(3)));
+        // 61 s of 240: four segments reached (their starts at 0, 15, 30 and 45 s), the fifth at 60 s too.
+        let lit: Vec<u8> = (0..TIMELINE_STEPS as u8).filter(|&i| target_state(&menu, Target::Timeline(i)).on).collect();
+        assert_eq!(lit, vec![0, 1, 2, 3, 4]);
+        assert!(!target_state(&menu, Target::Seek(0)).on, "the places are never switched on");
+        assert_eq!((text(&menu, Content::MediaPosition), text(&menu, Content::MediaDuration)), ("1:01".into(), "4:00".into()));
+        assert_eq!(text(&menu, Content::MediaState), "Playing · Spotify", "the time is at the timeline's ends");
+        menu.notice = Some("Spotify lets no app move in its timeline".into());
+        assert_eq!(text(&menu, Content::MediaState), "Spotify lets no app move in its timeline");
+        // A screen of version 6 to 8 keeps its music page as it was.
+        menu.pages = Pages::Ten;
+        menu.notice = None;
+        assert!(!shown(&menu).contains(&Target::Seek(0)) && !shown(&menu).contains(&Target::Timeline(0)));
+        assert_eq!(text(&menu, Content::MediaState), "Playing · 1:01 / 4:00 · Spotify");
+        assert_eq!(text(&menu, Content::MediaPosition), "");
+        // The results' Take back, after every element older screens have.
+        let results = cached(ScreenPage::Results);
+        assert_eq!(results.elements.last().map(|e| e.target), Some(Target::TakeBack));
     }
 
     #[test]

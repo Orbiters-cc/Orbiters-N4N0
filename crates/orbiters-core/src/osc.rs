@@ -83,6 +83,9 @@ pub enum OscEvent {
 
 pub const PARAMETERS_PREFIX: &str = "/avatar/parameters/";
 pub const AVATAR_CHANGE: &str = "/avatar/change";
+/// The avatar's name as set in its SDK (newer VRChat versions): in VRChat's OSCQuery tree, which carries it whole in
+/// UTF-8 (its UDP messages may not yet), read once the avatar changed.
+pub const AVATAR_NAME: &str = "/avatar/name";
 /// N4N0's capture kit (contracts' `orb::params::CAPTURE_*`, `Docs/rig-frames.md`): its record toggle (N4N0 › Record
 /// in the Action Menu, or the app while it records), whose changes start and stop recording, and its depth-frames
 /// toggle. [`CAPTURE_PARAMETERS`] are all of N4N0's capture parameters, the camera rig's included: the app's own.

@@ -242,6 +242,16 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         s.orb.can_drop = true;
         s
     };
+    // The same with a link card out in the world (Take back).
+    let home_card = {
+        let mut s = home_drop.clone();
+        s.orb.card = Some(orbiters_n4n0::status::CardView {
+            title: "1 A.M Study Session 📚 [lofi hip hop]".into(),
+            link: "https://www.youtube.com/watch?v=sample00003".into(),
+            left: 452,
+        });
+        s
+    };
     // Home as many first see it: VRChat in desktop mode (no fast walk), calls off, no light on this N4N0.
     let home_plain = {
         let mut s = idle.clone();
@@ -500,6 +510,76 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::States, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-states-avatar",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::States, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-states-other",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::States, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-photo-camera",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Photo, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-music-card",
+            page: Page::Home,
+            snapshot: home_card.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Music, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-results-card",
+            page: Page::Home,
+            snapshot: home_card.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Results, samples: true }),
             library: None,
         },
         Scenario {
@@ -1247,6 +1327,21 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         if let (Some(shot), 2) = (sc.home, f) {
             if let Some(host) = app.home_mut().menu_host() {
                 stage_home(host, shot);
+                // VRChat's camera was closed when the picture was asked for.
+                if sc.name == "home-photo-camera" {
+                    host.menu.notice = Some(orbiters_n4n0::platform::CAMERA_CLOSED.into());
+                }
+            }
+        }
+        // An avatar's card opened on the States page (once the page opened on the cards).
+        if f == 4 {
+            let opened = match sc.name {
+                "home-states-avatar" => sc.snapshot.orb.states.avatar_id.clone(),
+                "home-states-other" => sc.snapshot.orb.states.avatars.iter().find(|a| !a.worn).map(|a| a.id.clone()),
+                _ => None,
+            };
+            if let Some(id) = opened {
+                app.home_mut().states_mut().open_avatar(&id);
             }
         }
         if f == 1 {
@@ -1403,6 +1498,8 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
             playing: true,
             can_play_pause: true,
             can_next: true,
+            // YouTube's page takes a position (its "seekto"), as Chrome tells Windows.
+            can_seek: true,
             position: Some(1274),
             duration: Some(3674),
             art: Some(video.id.clone()),
@@ -1932,17 +2029,33 @@ fn sample_states(avatar: Option<String>) -> crate::state::StatesView {
         pose_parameters,
         eye_height: Some(1.62),
     };
-    StatesView {
-        avatar_id: avatar,
-        avatar_name: Some("Rexouium".into()),
-        states: vec![
-            StateView { eye_height: None, ..state("s1", "Hoodie on", "2026-10-21T19:40:00Z", false, false, false, 46, 12) },
-            state("s2", "Cosy evening", "2026-10-23T21:05:00Z", true, true, false, 46, 12),
-            state("s3", "Tall and sitting", "2026-10-24T18:12:00Z", false, true, true, 46, 12),
-        ],
-        note: None,
-        saving: false,
+    let states = vec![
+        StateView { eye_height: None, ..state("s1", "Hoodie on", "2026-10-21T19:40:00Z", false, false, false, 46, 12) },
+        state("s2", "Cosy evening", "2026-10-23T21:05:00Z", true, true, false, 46, 12),
+        state("s3", "Tall and sitting", "2026-10-24T18:12:00Z", false, true, true, 46, 12),
+    ];
+    // The avatars' cards: the one worn, then others saved in before (one from before names were kept).
+    let mut avatars = vec![
+        crate::state::AvatarView {
+            id: "avtr_2b8e41c7-5f1a-4d90-8e3b-77a1c0d4e9f2".into(),
+            name: Some("Ultirex ✨ Noir".into()),
+            worn: false,
+            states: vec![
+                state("u1", "Club night", "2026-10-22T23:10:00Z", true, false, false, 88, 0),
+                state("u2", "Daytime", "2026-10-20T14:00:00Z", false, false, true, 88, 0),
+            ],
+        },
+        crate::state::AvatarView {
+            id: "avtr_9d04a3e2-1c55-4b7e-a0f1-2e6c8b5d7a13".into(),
+            name: None,
+            worn: false,
+            states: vec![state("o1", "State 1", "2026-09-30T10:00:00Z", false, false, false, 12, 0)],
+        },
+    ];
+    if let Some(id) = &avatar {
+        avatars.insert(0, crate::state::AvatarView { id: id.clone(), name: Some("Rexouium".into()), worn: true, states: states.clone() });
     }
+    StatesView { avatar_id: avatar, avatar_name: Some("Rexouium".into()), states, note: None, saving: false, avatars }
 }
 
 fn with_account(base: &Snapshot, state: crate::state::AccountState, error: Option<&str>) -> Snapshot {

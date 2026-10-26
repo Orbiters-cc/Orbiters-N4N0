@@ -243,6 +243,7 @@ pub(crate) fn sample_media() -> Media {
         can_play_pause: true,
         can_previous: true,
         can_next: true,
+        can_seek: true,
         position: Some(83),
         duration: Some(243),
         art: Some(SAMPLE_ART.into()),
@@ -285,8 +286,9 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     results.can_drop = true;
     results.search_for("lofi hip hop");
     results.results_arrived(1, Results { videos: sample_videos(), continuation: Some("next".into()) }, false);
-    // The second result's link copied: its row says so and offers Drop.
+    // The second result's link copied: its row says so and offers Drop; a card is out (Take back).
     results.press(Target::Copy(1));
+    results.card_out = true;
     out.push((ScreenPage::Results, results, Some(9), None));
     let mut calls = base();
     calls.page = Page::Call;
@@ -316,9 +318,14 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     home.desktop_mode = true;
     home.heard = Some("play some music".into());
     out.push((ScreenPage::HomeSix, home, Some(4), None));
+    // The music with its timeline (screens from version 9 and the overlay), a card out (Take back), a place over the
+    // timeline hovered.
     let mut music = more();
+    music.pages = Pages::ALL;
+    music.card_out = true;
     music.page = Page::Music;
-    out.push((ScreenPage::Music, music, Some(3), None));
+    let hovered = layout::cached(ScreenPage::Music).elements.iter().position(|e| e.target == Target::Seek(9));
+    out.push((ScreenPage::Music, music, hovered, None));
     let mut light = more();
     light.page = Page::Light;
     out.push((ScreenPage::Light, light, Some(5), None));

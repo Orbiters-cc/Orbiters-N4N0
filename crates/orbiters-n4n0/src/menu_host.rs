@@ -91,6 +91,8 @@ pub struct MenuHost<P: Pictures> {
     suggestion_seen: Option<u32>,
     /// The number of the last key of the computer's keyboard taken (the first status sets it).
     keys_seen: Option<u32>,
+    /// The number of the last 3D picture note N4N0 published that this menu saw (the first status sets it).
+    photo_note_seen: Option<u32>,
 }
 
 impl<P: Pictures> MenuHost<P> {
@@ -115,6 +117,7 @@ impl<P: Pictures> MenuHost<P> {
             dropped: false,
             suggestion_seen: None,
             keys_seen: None,
+            photo_note_seen: None,
         }
     }
 
@@ -162,6 +165,21 @@ impl<P: Pictures> MenuHost<P> {
         changed |= set(&mut m.light, light);
         changed |= set(&mut m.countdown, orb.photo_countdown);
         changed |= set(&mut m.can_drop, orb.can_drop);
+        // The link card out in the world: Take back.
+        changed |= set(&mut m.card_out, orb.card.is_some());
+        // What stopped a 3D picture (VRChat's camera closed), on the 3D picture page.
+        match (&orb.photo_note, self.photo_note_seen) {
+            (Some((n, text)), Some(seen)) if *n != seen => {
+                if m.page == Page::Photo {
+                    m.notice = Some(text.clone());
+                    changed = true;
+                }
+                self.photo_note_seen = Some(*n);
+            }
+            (Some((n, _)), None) => self.photo_note_seen = Some(*n),
+            (None, None) => self.photo_note_seen = Some(0),
+            _ => {}
+        }
         // The avatar's saved states (a state saved here shows until N4N0 lists it), and what N4N0 said of the last save
         // or apply, on the States page.
         let view = &orb.states;
@@ -387,9 +405,10 @@ impl<P: Pictures> MenuHost<P> {
                     service.command(Command::Light { on: light.on, color: light.color, level: light.level });
                 }
                 Effect::SaveState { name, size, pose, default } => {
-                    service.command(Command::States { action: StateAction::Save { name: Some(name), size, pose, default } })
+                    service.command(Command::States { action: StateAction::Save { name: Some(name), size, pose, default }, avatar: None })
                 }
-                Effect::ApplyState { id, .. } => service.command(Command::States { action: StateAction::Apply { id } }),
+                Effect::ApplyState { id, .. } => service.command(Command::States { action: StateAction::Apply { id }, avatar: None }),
+                Effect::TakeBack => service.command(Command::TakeBack),
                 Effect::Drop { link, title, video } => {
                     service.command(Command::Drop { link, title, video });
                     self.dropped = true;
@@ -512,6 +531,32 @@ mod tests {
     }
 
     #[test]
+    fn the_card_out_and_a_stopped_picture_show_in_the_menu() {
+        let mut h = host();
+        let settings = Settings::default();
+        h.open(&settings);
+        let service = Recorder::default();
+        // A note from before this menu was opened is not its own.
+        let mut orb = OrbStatus { photo_note: Some((3, "Open the camera before".into())), ..Default::default() };
+        h.follow(&orb, &settings);
+        h.press(Target::Photo);
+        h.follow(&orb, &settings);
+        assert_eq!(h.menu.notice, None);
+        orb.photo_note = Some((4, "Open the camera before".into()));
+        h.follow(&orb, &settings);
+        assert_eq!(h.menu.notice.as_deref(), Some("Open the camera before"));
+        // A card out: Take back asks N4N0 to take it back.
+        orb.card = Some(crate::status::CardView { title: "t".into(), link: "https://x.y/".into(), left: 500 });
+        h.follow(&orb, &settings);
+        assert!(h.menu.card_out);
+        h.press(Target::Back);
+        h.press(Target::Music);
+        let effects = h.press(Target::TakeBack);
+        assert!(!h.effects(effects, &settings, &service));
+        assert!(matches!(service.commands.lock().unwrap().as_slice(), [Command::TakeBack]));
+    }
+
+    #[test]
     fn a_light_set_here_stays_until_n4n0_says_it() {
         let mut h = host();
         let settings = Settings::default();
@@ -553,7 +598,7 @@ mod tests {
         assert!(matches!(&commands[..], [
             Command::CopyText { .. },
             Command::Photo3DIn { seconds: 5 },
-            Command::States { action: StateAction::Save { name: Some(n), .. } },
+            Command::States { action: StateAction::Save { name: Some(n), .. }, avatar: None },
             Command::Drop { .. },
         ] if n == "State 2"), "{commands:?}");
         let saved = service.saved.lock().unwrap();

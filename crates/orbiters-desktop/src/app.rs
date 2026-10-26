@@ -315,7 +315,7 @@ impl App {
         let nav_top = logo_rect.bottom() + 28.0;
         let items = [
             (Page::Home, "Home", icons::HOUSE),
-            (Page::Orb, "N4N0", icons::SMILEY),
+            (Page::Orb, "N4N0", icons::N4N0),
             (Page::Capture, "Capture", icons::APERTURE),
             (Page::Sessions, "Sessions", icons::FOLDER_OPEN),
             (Page::Worlds, "Visited worlds", icons::GLOBE),

@@ -67,12 +67,14 @@ impl Host for Link {
     }
 
     /// Into the snapshot, with the calls' part (published by the calls themselves) and the avatar's name (VRChat's
-    /// log's), and only when it changed.
+    /// log's, when N4N0 has none: VRChat's OSCQuery, its states), and only when it changed.
     fn publish(&self, mut status: OrbStatus) {
         self.with(|c| {
             c.update_if(|s| {
                 status.calls = s.orb.calls.clone();
-                status.states.avatar_name = s.vrchat.world.avatar_name.clone();
+                if status.states.avatar_name.is_none() {
+                    status.states.avatar_name = s.vrchat.world.avatar_name.clone();
+                }
                 let changed = s.orb != status;
                 s.orb = status;
                 changed
@@ -117,6 +119,10 @@ impl Host for Link {
 
     fn photo_3d(&self) -> anyhow::Result<()> {
         self.with(|c| c.take_3d_picture()).unwrap_or(Ok(()))
+    }
+
+    fn camera_open(&self) -> Option<bool> {
+        self.with(|c| c.camera_open()).flatten()
     }
 
     /// A video's link opened in the default browser (http or https only).

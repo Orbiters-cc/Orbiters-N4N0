@@ -74,7 +74,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             super::block(ui, cx, 0, 72.0, |ui, rect| super::heading(ui, rect, "Companion", "N4N0", Some(&sub)));
 
             let talk_sub = assistant_line(orb, &snap.settings, &snap.account.state);
-            section(ui, cx, 1, icons::SMILEY, "Talk to N4N0", Some(&talk_sub), |ui| {
+            section(ui, cx, 1, icons::N4N0, "Talk to N4N0", Some(&talk_sub), |ui| {
                 conversation(ui, orb);
                 ui.add_space(12.0);
                 let signed_in = matches!(snap.account.state, AccountState::SignedIn { .. } | AccountState::Offline { .. } | AccountState::Checking { .. });

@@ -91,6 +91,8 @@ impl RetroPalette {
             Look::Key => Ink { fill: p.panel, stroke: p.dim, text: p.text, icon: p.text },
             Look::Tile | Look::Field | Look::Round => Ink { fill: p.panel, stroke: p.line, text: p.text, icon: p.line },
             Look::Area => Ink { fill: p.panel, stroke: p.dim, text: p.text, icon: p.line },
+            // A timeline's segment: a dim line (switched on, the brackets light it).
+            Look::Track => Ink { fill: p.dim, stroke: p.dim, text: p.text2, icon: p.text2 },
         }
     }
 
@@ -300,7 +302,7 @@ fn element_metrics(e: &Element) -> Option<Place> {
             let size = if e.rect.h >= 64 { 22.0 } else { 18.0 };
             Place { room: beside_icon(w, icon, size), size }
         }
-        Look::Round | Look::Field | Look::Row | Look::Bar | Look::Area => return None,
+        Look::Round | Look::Field | Look::Row | Look::Bar | Look::Area | Look::Track => return None,
     })
 }
 
@@ -350,6 +352,12 @@ fn element(p: &Painter, e: &Element, origin: Pos2, ink: Ink, skin: &Skin) {
     let small = r.height() < 64.0;
     let cut = if small { 7.0 } else { 14.0 };
     match e.look {
+        // The places over the music's timeline: nothing drawn (the timeline is the rule).
+        Look::Row if matches!(e.target, orbiters_orb::menu::Target::Seek(_)) => {}
+        // A timeline's segment: a plain line.
+        Look::Track => {
+            p.rect_filled(r, 0.0, ink.fill);
+        }
         Look::Row => {
             // A dotted rule under the row.
             let mut x = r.min.x + 8.0;
@@ -424,8 +432,8 @@ fn element(p: &Painter, e: &Element, origin: Pos2, ink: Ink, skin: &Skin) {
             _ => icon_and_label(p, r, e.icon, label, place, ink),
         },
         Look::Accent | Look::Danger => icon_and_label(p, r, e.icon, label, place, ink),
-        // A countdown's segment: lit, nothing on it; a text area is its panel.
-        Look::Bar | Look::Area => {}
+        // A countdown's segment: lit, nothing on it; a text area is its panel; a timeline's segment is its line.
+        Look::Bar | Look::Area | Look::Track => {}
     }
     if let (Look::Key, orbiters_orb::menu::Target::Key(c), None) = (e.look, e.target, e.label) {
         widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new(c.to_string(), 28.0).mono().color(ink.text));

@@ -28,8 +28,6 @@ const STRAIGHT: f32 = 88.0;
 const RATE_HZ: u32 = 90;
 /// After the recording started, before the camera moves: Spout and the kit's first frames.
 const SETTLE: Duration = Duration::from_millis(700);
-/// A camera switched to Stream mode says so within this (VRChat's OSCQuery tree).
-const CAMERA_OPENS: Duration = Duration::from_millis(1200);
 
 /// Eases in and out.
 fn smooth(t: f32) -> f32 {
@@ -221,6 +219,20 @@ pub(super) fn floats(values: &[OscValue]) -> Vec<f32> {
 }
 
 impl super::Controller {
+    /// Whether VRChat's camera is open (`/usercamera/Mode` not 0): `None` when VRChat does not say (not found, or before
+    /// 2025.3.3, whose tree has no camera).
+    pub fn camera_open(&self) -> Option<bool> {
+        // VRChat's camera node alone (its tree), else what VRChat sent when it last changed.
+        let query = self.with_osc(|o| o.vrchat_query()).flatten();
+        let camera = query.map(|addr| orbiters_core::osc::vrchat_camera_values(addr, Duration::from_millis(500))).unwrap_or_default();
+        let mode = camera.into_iter().find(|(p, _)| p == super::CAMERA_MODE).map(|(_, v)| v);
+        let mode = mode.or_else(|| self.osc_values.lock().unwrap().latest.get(super::CAMERA_MODE).and_then(|(v, _)| v.first().cloned()));
+        match mode {
+            Some(OscValue::Int(mode)) => Some(mode != 0),
+            _ => None,
+        }
+    }
+
     /// Takes a 3D picture with VRChat's camera where it stands now.
     pub fn take_3d_picture(self: &Shared) -> anyhow::Result<()> {
         anyhow::ensure!(self.snapshot.lock().unwrap().vrchat.running, "Start VRChat and open its camera first.");
@@ -234,15 +246,9 @@ impl super::Controller {
             (pose, focus, smooth, zoom)
         };
         let length = self.settings().photo_3d;
-        // VRChat's camera must be open: OSC switches its mode (to Stream, for Spout) but does not open it.
-        let mode = |values: &[(String, OscValue)]| values.iter().find(|(p, _)| p == super::CAMERA_MODE).map(|(_, v)| v.clone());
-        if let Some(OscValue::Int(0)) = mode(&self.vrchat_values()) {
-            let _ = self.with_osc(|o| o.send(super::CAMERA_MODE, vec![rosc::OscType::Int(super::STREAM_MODE)]));
-            std::thread::sleep(CAMERA_OPENS);
-            if let Some(OscValue::Int(0)) = mode(&self.vrchat_values()) {
-                anyhow::bail!("VRChat's camera is off: open it (Quick Menu, Camera), then take the 3D picture again.");
-            }
-        }
+        // VRChat's camera must be open: OSC switches its mode once it is (to Stream, for Spout), nothing opens it
+        // (VRChat's `/usercamera/Mode` changes nothing while the camera is closed, and there is no endpoint to open it).
+        anyhow::ensure!(self.camera_open() != Some(false), orbiters_n4n0::platform::CAMERA_CLOSED);
         let Some(pose) = pose else {
             anyhow::bail!("Move VRChat's camera once so Orbiters knows where it is, then try again.");
         };

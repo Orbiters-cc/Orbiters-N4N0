@@ -203,7 +203,8 @@ impl Palette {
         match look {
             Look::Tile | Look::Field | Look::Chip | Look::Area => self.surface,
             Look::Round | Look::Key => self.raised,
-            Look::KeyDark => self.raised2,
+            // A timeline's segment: dim until the music reached it (switched on, it is the accent).
+            Look::KeyDark | Look::Track => self.raised2,
             Look::Row => Color32::TRANSPARENT,
             Look::Accent | Look::Bar => self.accent,
             Look::Danger => self.danger,
@@ -267,6 +268,7 @@ pub fn glyph(icon: Icon) -> &'static str {
         Icon::Size => icons::ARROWS_OUT,
         Icon::Pose => icons::PERSON_SIMPLE_WALK,
         Icon::Watch => icons::MONITOR_PLAY,
+        Icon::TakeBack => icons::X_CIRCLE,
         // Drawn as the N4N0 mark (`orbiters_ui::n4n0_logo`), never as a glyph.
         Icon::Mark => icons::STACK,
     }
@@ -380,7 +382,7 @@ fn element_metrics(e: &Element) -> Option<Place> {
             let size = if e.rect.h >= 64 { 26.0 } else { 21.0 };
             Place { room: beside_icon(w, icon, size), size }
         }
-        Look::Round | Look::Field | Look::Row | Look::Bar | Look::Area => return None,
+        Look::Round | Look::Field | Look::Row | Look::Bar | Look::Area | Look::Track => return None,
     })
 }
 
@@ -467,8 +469,8 @@ fn element(p: &Painter, e: &Element, origin: Pos2, skin: &Skin) {
                 widgets::text(p, at + vec2(0.0, fitted.dy), Align2::LEFT_TOP, &fitted.txt);
             }
         }
-        // A countdown's segment: its colour is all of it; a text area is its panel, its text slots over it.
-        Look::Bar | Look::Area => {}
+        // A countdown's or a timeline's segment: its colour is all of it; a text area is its panel, its text slots over it.
+        Look::Bar | Look::Area | Look::Track => {}
         Look::Field => {
             if let Some(icon) = e.icon {
                 widgets::icon(p, pos2(r.min.x + 34.0, r.center().y), glyph(icon), 26.0, pal.muted);
@@ -654,7 +656,10 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
         } else if view.hover == Some(i) {
             p.rect_filled(r, radius, if matches!(e.look, Look::Accent | Look::Danger) { theme::white(0.14) } else { theme::white(0.06) });
         }
-        if state.on {
+        if state.on && e.look == Look::Track {
+            // The screen's ring fills a segment as thin as this whole: the accent.
+            p.rect_filled(r, radius, pal.accent);
+        } else if state.on {
             p.rect_stroke(r.shrink(1.0), radius, Stroke::new(3.0, pal.accent), StrokeKind::Inside);
         }
     }

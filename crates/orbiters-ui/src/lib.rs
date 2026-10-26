@@ -9,6 +9,7 @@ pub mod format;
 pub mod glow;
 pub mod icons;
 pub mod logo;
+pub mod n4n0_face;
 pub mod n4n0_logo;
 pub mod offscreen;
 pub mod paint;

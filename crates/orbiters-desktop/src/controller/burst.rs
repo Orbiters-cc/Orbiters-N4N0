@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 pub const POSE: &str = "/usercamera/Pose";
 const FOCAL_DISTANCE: &str = "/usercamera/FocalDistance";
+const ZOOM: &str = "/usercamera/Zoom";
 pub(super) const SMOOTH: &str = "/usercamera/SmoothMovement";
 /// How far the flight goes from where the camera stands, each way.
 pub const REACH_M: f32 = 10.0;
@@ -224,12 +225,13 @@ impl super::Controller {
     pub fn take_3d_picture(self: &Shared) -> anyhow::Result<()> {
         anyhow::ensure!(self.snapshot.lock().unwrap().vrchat.running, "Start VRChat and open its camera first.");
         self.ensure_capture_idle()?;
-        let (pose, focus, smooth) = {
+        let (pose, focus, smooth, zoom) = {
             let osc = self.osc_values.lock().unwrap();
             let pose = osc.latest.get(POSE).map(|(v, _)| floats(v)).filter(|v| v.len() == 6 && v.iter().any(|f| *f != 0.0));
             let focus = osc.latest.get(FOCAL_DISTANCE).and_then(|(v, _)| floats(v).first().copied()).unwrap_or(2.0).clamp(0.5, 8.0);
             let smooth = osc.latest.get(SMOOTH).and_then(|(v, _)| v.first().map(OscValue::truthy));
-            (pose, focus, smooth)
+            let zoom = osc.latest.get(ZOOM).and_then(|(v, _)| floats(v).first().copied()).filter(|z| (20.0..=150.0).contains(z)).unwrap_or(45.0);
+            (pose, focus, smooth, zoom)
         };
         let length = self.settings().photo_3d;
         // VRChat's camera must be open: OSC switches its mode (to Stream, for Spout) but does not open it.
@@ -273,14 +275,22 @@ impl super::Controller {
             ctl.place_rig(None, &pose);
             ctl.hold_rig(true);
             let tick = Duration::from_secs_f32(1.0 / RATE_HZ as f32);
+            let flight = path(pose, length, focus, RATE_HZ);
+            // Experimental (VRC+): the camera dolly flies the camera and three more cameras around it (controller/dolly.rs).
+            let dolly = ctl.with_settings(|s| s.dolly_streams) && ctl.start_dolly(&flight, zoom, focus);
             let begin = Instant::now();
-            for (i, p) in path(pose, length, focus, RATE_HZ).into_iter().enumerate() {
-                // The camera and the rig in one bundle: VRChat applies them together.
-                ctl.place_rig(Some((POSE.to_string(), p.iter().map(|v| rosc::OscType::Float(*v)).collect())), &p);
+            for (i, p) in flight.into_iter().enumerate() {
+                // The camera and the rig in one bundle: VRChat applies them together. The dolly moves the camera
+                // itself: the rig only follows.
+                let camera = (!dolly).then(|| (POSE.to_string(), p.iter().map(|v| rosc::OscType::Float(*v)).collect()));
+                ctl.place_rig(camera, &p);
                 let next = tick * (i as u32 + 1);
                 if let Some(wait) = next.checked_sub(begin.elapsed()) {
                     std::thread::sleep(wait);
                 }
+            }
+            if dolly {
+                ctl.stop_dolly();
             }
             send(POSE, pose.iter().map(|v| rosc::OscType::Float(*v)).collect());
             ctl.hold_rig(false);
@@ -293,6 +303,43 @@ impl super::Controller {
             }
         })?;
         Ok(())
+    }
+
+    /// Hands the flight to VRChat's camera dolly as four paths and plays them (`/dolly/Import`, `/dolly/Play`): false
+    /// when that could not be done (the flight then moves the camera alone).
+    fn start_dolly(&self, flight: &[[f32; 6]], zoom: f32, focus: f32) -> bool {
+        let seconds = flight.len() as f32 / RATE_HZ as f32;
+        let file = match super::dolly::write(&super::dolly::paths(flight, seconds, zoom, focus)) {
+            Ok(file) => file,
+            Err(e) => {
+                self.notify(NoticeKind::Warning, format!("The camera dolly's paths could not be written ({e}): the 3D picture uses the camera alone."));
+                return false;
+            }
+        };
+        let imported = self.with_osc(|o| o.send(super::dolly::IMPORT, vec![rosc::OscType::String(file.display().to_string())]));
+        if !imported.is_some_and(|r| r.is_ok()) {
+            return false;
+        }
+        // VRChat reads the file before it plays.
+        std::thread::sleep(Duration::from_millis(300));
+        self.with_osc(|o| o.send(super::dolly::PLAY, vec![rosc::OscType::Bool(true)])).is_some_and(|r| r.is_ok())
+    }
+
+    /// Stops the dolly's animation and tells what its extra streams gave.
+    fn stop_dolly(&self) {
+        let _ = self.with_osc(|o| o.send(super::dolly::PLAY, vec![rosc::OscType::Bool(false)]));
+        let stats = self.snapshot.lock().unwrap().capture.stats.clone().unwrap_or_default();
+        let message = if stats.extra_frames == 0 {
+            "The camera dolly's other cameras sent nothing: in VRChat set Camera › Dolly › Streaming to Multi (VRC+), then try again.".to_string()
+        } else if stats.extra_keyframes == 0 {
+            format!(
+                "The camera dolly's other cameras sent {} frames, none with your capture kit's strip: VRChat does not draw it in them, so they add nothing.",
+                stats.extra_frames
+            )
+        } else {
+            format!("The camera dolly's other cameras sent {} frames: {} more views for the reconstruction.", stats.extra_frames, stats.extra_keyframes)
+        };
+        self.notify(NoticeKind::Info, message);
     }
 
     /// A recording was saved: a 3D picture's goes on to its reconstruction.

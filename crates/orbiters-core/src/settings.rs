@@ -54,6 +54,10 @@ pub struct Settings {
     pub rig_views: bool,
     /// Where the SteamVR overlay shows what a recording has covered so far (the Capture page's camera path).
     pub coverage_overlay: CoverageOverlay,
+    /// Experimental, VRC+: recordings also read VRChat's camera dolly's other streams (Spout `VRCSender2` to
+    /// `VRCSender4`), and a 3D picture flies four cameras with the dolly (multi-stream) instead of moving the camera
+    /// alone. The person sets the dolly's Streaming to Multi once in VRChat.
+    pub dolly_streams: bool,
 }
 
 /// Where the SteamVR overlay shows a recording's coverage (the Capture page's camera path and its hints): above a
@@ -429,6 +433,7 @@ impl Default for Settings {
             tracking: TrackingSettings::default(),
             rig_views: true,
             coverage_overlay: CoverageOverlay::default(),
+            dolly_streams: false,
         }
     }
 }

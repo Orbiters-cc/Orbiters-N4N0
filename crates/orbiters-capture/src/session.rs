@@ -72,6 +72,13 @@ struct FaceView {
     picture: Option<Picture>,
 }
 
+/// An extra stream's state (a camera dolly's stream): the last pose read (game time bits, pose, time) and its keyframes'
+/// choice, as the main stream's.
+struct ExtraStream {
+    previous: Option<(u32, [f32; 12], f32)>,
+    selector: KeyframeSelector,
+}
+
 /// A depth frame for the decoder, upright and tightly packed.
 struct DepthJob {
     frame: u64,
@@ -498,6 +505,9 @@ pub struct CaptureSession {
     frame_index: u64,
     prefer_flipped: bool,
     previous: Option<(u32, [f32; 12], f32)>,
+    /// The extra streams' own (the camera dolly's other cameras, [`FrameAccess::stream`] 1 and on): their last pose,
+    /// for gating, and their keyframe choice. The main stream's are `previous` and `selector`.
+    extra: Vec<ExtraStream>,
     thumbnail_done: bool,
     decode_time_total: f64,
     fps_window: (Instant, u64),
@@ -579,6 +589,7 @@ impl CaptureSession {
         manifest.capture.mode = cmd.mode;
         manifest.capture.quality = cmd.quality;
         manifest.capture.source = match &cmd.source {
+            orbiters_core::protocol::SourceSpec::Spout { extra, .. } if !extra.is_empty() => "spout_streams",
             orbiters_core::protocol::SourceSpec::Spout { .. } => "spout",
             orbiters_core::protocol::SourceSpec::RawSequence { .. } => "raw_sequence",
             orbiters_core::protocol::SourceSpec::TestPattern { .. } => "test",
@@ -680,6 +691,7 @@ impl CaptureSession {
             frame_index: 0,
             prefer_flipped: false,
             previous: None,
+            extra: Vec::new(),
             thumbnail_done: false,
             decode_time_total: 0.0,
             raw_depth_kept: 0,
@@ -881,7 +893,17 @@ impl CaptureSession {
         let t0 = Instant::now();
         self.collect();
         let (width, height) = (frame.width(), frame.height());
+        let stream = frame.stream();
         let capture = &mut self.writer.manifest_mut().capture;
+        if stream > 0 && (capture.width, capture.height) != (width, height) {
+            // An extra stream (a camera dolly's) never sets nor changes the session's size: until the main stream's
+            // first frame, and at another size, its frames are left out.
+            self.stats.extra_other_size += 1;
+            return Ok(Processed::Frame);
+        }
+        if stream > 0 {
+            self.stats.extra_frames += 1;
+        }
         if capture.width == 0 {
             capture.width = width;
             capture.height = height;
@@ -922,18 +944,35 @@ impl CaptureSession {
         let (width, height) = (record.width, record.height);
         let bytes = width as usize * height as usize * 4;
         let now = record.capture_time_ns;
-        self.last_frame_ns = now;
+        let stream = frame.stream();
+        // The main stream's: what tells the person their camera's strip is read, its camera's place on the map, the
+        // skeleton band, the rig's faces and the thumbnail. Extra streams (a camera dolly's) add views.
+        let main = stream == 0;
+        if !main && self.extra.len() < stream {
+            // The main stream's choice, from scratch.
+            let mut selector = self.selector.clone();
+            selector.reset();
+            self.extra.resize_with(stream, || ExtraStream { previous: None, selector: selector.clone() });
+        }
+        if main {
+            self.last_frame_ns = now;
+        }
         match self.decode_strip(frame)? {
+            Err(e) if !main => {
+                let _ = e;
+            }
             Err(e) => {
                 self.stats.strip_failed += 1;
                 self.stats.last_error = Some(e.to_string());
                 self.strip_missed(now);
             }
             Ok(d) => {
-                self.strip_read(now);
-                self.prefer_flipped = d.flipped;
-                self.stats.flipped = d.flipped;
-                self.stats.strip_ok += 1;
+                if main {
+                    self.strip_read(now);
+                    self.prefer_flipped = d.flipped;
+                    self.stats.flipped = d.flipped;
+                    self.stats.strip_ok += 1;
+                }
                 let p = d.payload;
                 record.flags |= record_flags::STRIP_OK;
                 if d.flipped {
@@ -951,23 +990,27 @@ impl CaptureSession {
                 // The capture kit's skeleton band rides on an avatar's colour frames (depth frames use the whole
                 // picture; the simulator draws none; the test pattern draws one like the kit).
                 let source = strip::flags::source(p.flags);
-                if !p.is_depth_frame() && !p.is_rig_frame() && (source == strip::flags::SOURCE_AVATAR || source == strip::flags::SOURCE_TEST) {
+                if main && !p.is_depth_frame() && !p.is_rig_frame() && (source == strip::flags::SOURCE_AVATAR || source == strip::flags::SOURCE_TEST) {
                     self.read_band(frame, d.flipped, p.time, record.capture_time_ns)?;
                 }
-                let pos = p.position();
-                self.stats.position = Some(pos);
-                self.stats.heading_deg = Some(p.camera_to_world[2].atan2(p.camera_to_world[10]).to_degrees());
+                if main {
+                    let pos = p.position();
+                    self.stats.position = Some(pos);
+                    self.stats.heading_deg = Some(p.camera_to_world[2].atan2(p.camera_to_world[10]).to_degrees());
+                }
 
                 // Gating: a repeated frame (same game time) or an impossible jump (teleport, respawn). A rig frame's pose
                 // is the rig's, wherever it stands: it is gated on its time only, and leaves the camera's last pose as it was.
-                let gated = match &self.previous {
+                // Each stream against its own last pose: the camera dolly's cameras stand elsewhere in the same frames.
+                let previous = if main { self.previous } else { self.extra[stream - 1].previous };
+                let gated = match &previous {
                     Some((bits, _, _)) if *bits == p.time.to_bits() => true,
                     Some(_) if p.is_rig_frame() => false,
                     Some((_, prev_pose, prev_time)) => {
                         let dt = (p.time - prev_time).abs().max(1e-3);
                         let moved = keyframes::translation(&p.camera_to_world, prev_pose);
                         if moved > 3.0 && moved / dt > 40.0 {
-                            self.selector.reset();
+                            self.selector_of(stream).reset();
                             true
                         } else {
                             false
@@ -975,12 +1018,19 @@ impl CaptureSession {
                     }
                     None => false,
                 };
-                self.previous = match self.previous {
+                let previous = match previous {
                     Some((_, pose, time)) if p.is_rig_frame() => Some((p.time.to_bits(), pose, time)),
                     _ => Some((p.time.to_bits(), p.camera_to_world, p.time)),
                 };
+                if main {
+                    self.previous = previous;
+                } else {
+                    self.extra[stream - 1].previous = previous;
+                }
                 if gated {
                     record.flags |= record_flags::GATED;
+                } else if p.is_rig_frame() && !main {
+                    // The rig's faces are the same in every stream: the main stream's are kept.
                 } else if p.is_rig_frame() {
                     self.read_faces(frame, &p, d.flipped, record)?;
                 } else if p.is_depth_frame() {
@@ -1007,7 +1057,7 @@ impl CaptureSession {
                         // The decoder is behind: this one is dropped rather than waited for.
                         self.stats.depth_dropped += 1;
                     }
-                } else if self.selector.clone().consider(&p.camera_to_world, p.time) {
+                } else if self.selector_of(stream).clone().consider(&p.camera_to_world, p.time) {
                     // A keyframe it is (asked on a copy of the selector, which keeps waiting for one until it is taken).
                     self.wait_for(|s| s.encoder.has_room() && s.buffers.room(bytes));
                     if !self.encoder.has_room() || !self.buffers.room(bytes) {
@@ -1020,9 +1070,9 @@ impl CaptureSession {
                             copy_upright(&view, d.flipped, &mut data);
                             view.order == PixelOrder::Bgra
                         };
-                        self.selector.consider(&p.camera_to_world, p.time);
+                        self.selector_of(stream).consider(&p.camera_to_world, p.time);
                         // The first keyframe makes the thumbnail, from below the strip and its patches.
-                        let thumbnail = (!self.thumbnail_done).then(|| {
+                        let thumbnail = (main && !self.thumbnail_done).then(|| {
                             let top = self.areas.as_ref().and_then(|a| a.strip).map_or(0, |l| l.reserved.y1.min(height - 1));
                             (self.writer.dir().join(bundle_files::THUMBNAIL_FILE), top)
                         });
@@ -1033,7 +1083,11 @@ impl CaptureSession {
                                 record.flags |= record_flags::KEYFRAME;
                                 record.keyframe_index = index;
                                 self.stats.keyframes += 1;
-                                self.thumbnail_done = true;
+                                if main {
+                                    self.thumbnail_done = true;
+                                } else {
+                                    self.stats.extra_keyframes += 1;
+                                }
                                 *waiting += 1;
                             }
                             Err(job) => {
@@ -1046,6 +1100,15 @@ impl CaptureSession {
             }
         }
         Ok(())
+    }
+
+    /// The keyframe choice of stream `stream` (0 the main one).
+    fn selector_of(&mut self, stream: usize) -> &mut KeyframeSelector {
+        if stream == 0 {
+            &mut self.selector
+        } else {
+            &mut self.extra[stream - 1].selector
+        }
     }
 
     /// A rig frame's faces (contracts' Docs/rig-frames.md): each one its camera rendered in this frame (its stamp is the
@@ -1544,6 +1607,55 @@ mod tests {
         let src = TestPatternSource::new(1280, 720, 30.0, 4, frames, false);
         let session = CaptureSession::start(&cmd, src.describe(), &src.folder_hint()).unwrap();
         (root, session, src)
+    }
+
+    /// The camera dolly's streams (a multi-stream animation): three more cameras of the same frames, elsewhere. Their
+    /// frames join the session as views of their own, each stream gated and choosing keyframes against its own last
+    /// pose (the same game times in every stream are no repeats); the skeleton band and the camera's place come from
+    /// the main stream only; a stream of another size is left out, never a change of the session's size.
+    #[test]
+    fn the_camera_dollys_streams_join_the_session_as_views_of_their_own() {
+        use crate::sources::MultiSource;
+        let (root, mut session, src) = pattern_session("dolly-streams", 48);
+        let extra: Vec<Box<dyn FrameSource>> = vec![
+            Box::new(TestPatternSource::new(1280, 720, 30.0, 4, 48, false).with_stream(1)),
+            Box::new(TestPatternSource::new(1280, 720, 30.0, 4, 48, false).with_stream(2)),
+            // Another size: left out.
+            Box::new(TestPatternSource::new(960, 540, 30.0, 4, 48, false).with_stream(3)),
+        ];
+        let mut multi = MultiSource::new(Box::new(src), extra);
+        assert!(multi.describe().starts_with("Test pattern 1280x720 + "));
+        let mut streams = [0u32; 4];
+        loop {
+            let next = multi
+                .next(Duration::from_millis(10), &mut |v| {
+                    streams[v.stream()] += 1;
+                    assert_eq!(session.process(v).unwrap(), Processed::Frame);
+                })
+                .unwrap();
+            if matches!(next, Next::End) {
+                break;
+            }
+        }
+        assert_eq!(streams[0], 48, "the main stream whole");
+        let stats = session.refresh_stats().clone();
+        assert_eq!((stats.extra_other_size, stats.gated), (u64::from(streams[3]), 0), "no repeats across streams, the odd size left out");
+        assert_eq!(stats.extra_frames, u64::from(streams[1] + streams[2]));
+        assert!(stats.extra_keyframes >= 4, "views from the other cameras: {}", stats.extra_keyframes);
+        assert_eq!(stats.skeleton_frames, 36, "the band of the main stream's colour frames only");
+        let finished = session.finish();
+        assert!(finished.warnings.is_empty(), "{:?}", finished.warnings);
+        let records = bundle::read_records(&finished.dir).unwrap();
+        assert_eq!(records.len() as u32, streams[0] + streams[1] + streams[2]);
+        assert!(records.windows(2).all(|w| w[1].frame_index == w[0].frame_index + 1), "consecutive frame indices");
+        // Each stream's keyframes carry its own camera's pose.
+        let poses: Vec<[f32; 12]> = records.iter().filter(|r| r.has(record_flags::KEYFRAME)).map(|r| r.camera_to_world).collect();
+        for stream in 0..3 {
+            let t = records.iter().find(|r| r.has(record_flags::KEYFRAME) && r.camera_to_world == TestPatternSource::stream_pose(r.game_time, stream));
+            assert!(t.is_some(), "a keyframe of stream {stream} among {}", poses.len());
+        }
+        assert_eq!(finished.manifest.capture.source, "test");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Keyframes and depth frames that cannot be written are named by no record: the session stays readable whole.

@@ -28,6 +28,10 @@ pub trait FrameAccess {
     fn rows(&mut self, ranges: &[(u32, u32)]) -> anyhow::Result<ImageView<'_>>;
     /// The whole picture.
     fn full(&mut self) -> anyhow::Result<ImageView<'_>>;
+    /// Which of a [`MultiSource`]'s sources it came from: 0 the main one (VRChat's own camera), then the extra ones.
+    fn stream(&self) -> usize {
+        0
+    }
 }
 
 /// A frame held whole in memory (files, test patterns).
@@ -74,6 +78,10 @@ pub trait FrameSource: Send {
     /// that could not be read): the source keeps going.
     fn warning(&mut self) -> Option<String> {
         None
+    }
+    /// Whether [`FrameSource::next`] without waiting is worth calling now (a source read beside others in turn).
+    fn ready(&self) -> bool {
+        true
     }
 }
 
@@ -267,6 +275,136 @@ impl FrameSource for SpoutSource {
     fn warning(&mut self) -> Option<String> {
         self.trouble.take()
     }
+
+    fn ready(&self) -> bool {
+        if self.connected {
+            self.receiver.due()
+        } else {
+            self.retry_at.is_none_or(|t| Instant::now() >= t)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- Several sources
+
+/// Several sources read as one: VRChat's camera (`VRCSender1`) and the camera dolly's other streams (`VRCSender2` to
+/// `VRCSender4`, only while a multi-stream dolly animation plays). Each frame is lent with the number of the source it
+/// came from ([`FrameAccess::stream`]). The main source is looked at first, then the others in turn, each only when a
+/// frame may be due ([`FrameSource::ready`]); extra sources may come and go, and their trouble is told but never ends
+/// the capture.
+pub struct MultiSource {
+    sources: Vec<Box<dyn FrameSource>>,
+    /// The extra source to look at first next time, so that each gets its turn.
+    turn: usize,
+    ended: Vec<bool>,
+}
+
+/// A frame of one of a [`MultiSource`]'s sources, with its number.
+struct Tagged<'a> {
+    inner: &'a mut dyn FrameAccess,
+    stream: usize,
+}
+
+impl FrameAccess for Tagged<'_> {
+    fn width(&self) -> u32 {
+        self.inner.width()
+    }
+
+    fn height(&self) -> u32 {
+        self.inner.height()
+    }
+
+    fn seen_ns(&self) -> u64 {
+        self.inner.seen_ns()
+    }
+
+    fn rows(&mut self, ranges: &[(u32, u32)]) -> anyhow::Result<ImageView<'_>> {
+        self.inner.rows(ranges)
+    }
+
+    fn full(&mut self) -> anyhow::Result<ImageView<'_>> {
+        self.inner.full()
+    }
+
+    fn stream(&self) -> usize {
+        self.stream
+    }
+}
+
+impl MultiSource {
+    /// `main` first, then the `extra` sources.
+    pub fn new(main: Box<dyn FrameSource>, extra: Vec<Box<dyn FrameSource>>) -> Self {
+        let mut sources = vec![main];
+        sources.extend(extra);
+        let ended = vec![false; sources.len()];
+        Self { sources, turn: 0, ended }
+    }
+
+    /// Lends a frame of source `i` without waiting, when it has one.
+    fn try_one(&mut self, i: usize, wait: Duration, f: &mut dyn FnMut(&mut dyn FrameAccess)) -> anyhow::Result<bool> {
+        if self.ended[i] {
+            return Ok(false);
+        }
+        let next = self.sources[i].next(wait, &mut |frame| f(&mut Tagged { inner: frame, stream: i }));
+        match next {
+            Ok(Next::Frame) => Ok(true),
+            Ok(Next::Timeout) => Ok(false),
+            Ok(Next::End) => {
+                self.ended[i] = true;
+                Ok(false)
+            }
+            // An extra source's trouble is not the capture's.
+            Err(e) if i > 0 => {
+                eprintln!("extra source {i}: {e:#}");
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl FrameSource for MultiSource {
+    fn describe(&self) -> String {
+        let extra: Vec<String> = self.sources[1..].iter().map(|s| s.describe()).collect();
+        format!("{} + {}", self.sources[0].describe(), extra.join(", "))
+    }
+
+    fn folder_hint(&self) -> String {
+        self.sources[0].folder_hint()
+    }
+
+    fn next(&mut self, timeout: Duration, f: &mut dyn FnMut(&mut dyn FrameAccess)) -> anyhow::Result<Next> {
+        let deadline = Instant::now() + timeout;
+        let extra = self.sources.len() - 1;
+        loop {
+            if self.sources[0].ready() && self.try_one(0, Duration::ZERO, f)? {
+                return Ok(Next::Frame);
+            }
+            for k in 0..extra {
+                let i = 1 + (self.turn + k) % extra;
+                if self.sources[i].ready() && self.try_one(i, Duration::ZERO, f)? {
+                    self.turn = i % extra;
+                    return Ok(Next::Frame);
+                }
+            }
+            if self.ended[0] {
+                return Ok(Next::End);
+            }
+            if Instant::now() >= deadline {
+                return Ok(Next::Timeout);
+            }
+            std::thread::sleep(Duration::from_millis(1).min(deadline.saturating_duration_since(Instant::now())));
+        }
+    }
+
+    fn warning(&mut self) -> Option<String> {
+        let warnings: Vec<String> = self.sources.iter_mut().filter_map(|s| s.warning()).collect();
+        (!warnings.is_empty()).then(|| warnings.join(" · "))
+    }
+
+    fn ready(&self) -> bool {
+        self.sources.iter().any(|s| s.ready())
+    }
 }
 
 // ---------------------------------------------------------------- Raw capture folders
@@ -387,6 +525,9 @@ pub struct TestPatternSource {
     /// face number) is stamped with the previous frame's time, as when its camera renders after VRChat's.
     pub rig: bool,
     pub late_face: Option<u32>,
+    /// Another camera of the same frames (a camera dolly's stream): the same game times, the camera elsewhere on the
+    /// circle ([`TestPatternSource::stream_pose`]).
+    pub stream: u32,
     index: u32,
     started: Option<Instant>,
     paced: bool,
@@ -394,7 +535,18 @@ pub struct TestPatternSource {
 
 impl TestPatternSource {
     pub fn new(width: u32, height: u32, fps: f32, depth_every: u32, frames: u32, paced: bool) -> Self {
-        Self { width, height, fps, depth_every, frames, rig: false, late_face: None, index: 0, started: None, paced }
+        Self { width, height, fps, depth_every, frames, rig: false, late_face: None, stream: 0, index: 0, started: None, paced }
+    }
+
+    /// The same frames seen by camera `stream` (0 the main one).
+    pub fn with_stream(mut self, stream: u32) -> Self {
+        self.stream = stream;
+        self
+    }
+
+    /// Camera `stream`'s pose at `t`: the main camera's circle, a quarter turn further on for each stream.
+    pub fn stream_pose(t: f32, stream: u32) -> [f32; 12] {
+        Self::pose(t + stream as f32 * std::f32::consts::FRAC_PI_2 / 0.4)
     }
 
     /// The same with rig frames, `late_face` stamped late.
@@ -445,7 +597,7 @@ impl TestPatternSource {
 
     pub fn render(&self, index: u32) -> RgbaImage {
         let t = index as f32 / self.fps.max(1.0);
-        let pose = Self::pose(t);
+        let pose = Self::stream_pose(t, self.stream);
         let depth_frame = self.depth_every > 0 && index % self.depth_every == self.depth_every - 1;
         let (w, h) = (self.width, self.height);
         if self.rig && !depth_frame && index % 2 == 1 {
@@ -460,7 +612,7 @@ impl TestPatternSource {
             }
         }
         let mut img = RgbaImage::new(w, h);
-        let shift = (t * 120.0) as u32;
+        let shift = (t * 120.0) as u32 + self.stream * 32;
         // Ground (bottom third) and wall stripes that slide with the camera, so frames differ.
         for y in 0..h {
             for x in 0..w {

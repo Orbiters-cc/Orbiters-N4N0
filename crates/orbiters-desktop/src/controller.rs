@@ -277,6 +277,7 @@ mod account;
 mod burst;
 mod calls;
 mod cleanup;
+mod dolly;
 mod maps;
 mod n4n0;
 mod performance;
@@ -1207,8 +1208,14 @@ impl Controller {
         if self.is_capturing() {
             return Ok(());
         }
-        let name = self.settings().spout_sender;
-        self.start_with(SourceSpec::Spout { name }, false, from_osc)
+        let (name, dolly) = self.with_settings(|s| (s.spout_sender.clone(), s.dolly_streams));
+        // The camera dolly's other streams (experimental): VRChat's own camera is then VRCSender1, whatever else sends.
+        let (name, extra) = if dolly {
+            (if name.is_empty() { dolly::MAIN_SENDER.to_string() } else { name }, dolly::EXTRA_SENDERS.map(String::from).to_vec())
+        } else {
+            (name, Vec::new())
+        };
+        self.start_with(SourceSpec::Spout { name, extra }, false, from_osc)
     }
 
     pub fn start_test_capture(self: &Shared) -> anyhow::Result<()> {

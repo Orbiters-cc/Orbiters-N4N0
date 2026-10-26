@@ -55,8 +55,14 @@ pub struct OscSample {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SourceSpec {
-    /// A Spout sender; an empty name picks VRChat's sender when present, else the active one.
-    Spout { name: String },
+    /// A Spout sender; an empty name picks VRChat's sender when present, else the active one. `extra` senders are read
+    /// beside it whenever they send (VRChat's camera dolly's other streams, `VRCSender2` to `VRCSender4`): their frames
+    /// carry the capture strip of their own camera and join the session as views of their own.
+    Spout {
+        name: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extra: Vec<String>,
+    },
     /// A raw capture folder (Mixer's simulator). `realtime` paces frames at the capture's fps.
     RawSequence { path: PathBuf, realtime: bool },
     /// Generated frames with valid strips and depth frames, for checks without VRChat or Unity.
@@ -223,6 +229,14 @@ pub struct CaptureStats {
     /// out because their camera rendered in another frame than the strip's (or their stamp could not be read).
     pub rig_faces: u64,
     pub rig_faces_late: u64,
+    /// Frames from the extra senders (the camera dolly's other streams) and the keyframes they gave; their frames of
+    /// another size than the main stream's, left out.
+    #[serde(default)]
+    pub extra_frames: u64,
+    #[serde(default)]
+    pub extra_keyframes: u64,
+    #[serde(default)]
+    pub extra_other_size: u64,
     /// Seconds since a frame's strip was last read, while frames keep coming and after it was read once (0 while it
     /// is read): frames without it have no camera pose, so no keyframe. The capture kit's "Near you" reach draws it
     /// only while the camera sees the avatar or is near it.
@@ -309,7 +323,7 @@ mod tests {
     #[test]
     fn json_shapes() {
         let c = WorkerCommand::Start(Box::new(StartCapture {
-            source: SourceSpec::Spout { name: "VRChat".into() },
+            source: SourceSpec::Spout { name: "VRChat".into(), extra: Vec::new() },
             sessions_dir: "C:/s".into(),
             mode: CaptureMode::RecordOnly,
             quality: StorageQuality::High,

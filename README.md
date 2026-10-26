@@ -43,6 +43,11 @@ and N4N0's capture kit draws wherever the camera goes. In VR, what the recording
 camera path) floats above a controller while you record (Settings, "Coverage while recording"); in desktop mode it
 shows in a corner of the screen. Neither is ever in the recording: SteamVR draws overlays into the headset only, and
 the frames are VRChat's camera's own picture, shared over Spout before anything is drawn over it.
+With **camera dolly streams** on (Settings, experimental, VRC+), a 3D picture flies four cameras with VRChat's camera
+dolly in its multi-stream mode: yours, and one left, one right and one above it (1.2 m off), all looking where yours
+does; the dolly gives each extra camera a Spout sender of its own (`VRCSender2` to `VRCSender4`), which recordings then
+read beside `VRCSender1`. Their frames that carry your capture kit's strip join the session as views of their own. In
+VRChat, set Camera › Dolly › Streaming to Multi once (an import does not carry it).
 
 In VR it also offers **walk boost**: while you push the stick you walk with, your play space moves along with you, so
 you cover more ground in VRChat. The chaperone stays on your room's walls, and the play space goes back when you
@@ -139,6 +144,8 @@ cargo run -p orbiters-capture -- list-sources
 cargo run -p orbiters-capture -- send-test --name "Orbiters Test Pattern"           # a Spout sender with valid strips
 cargo run -p orbiters-capture -- record --source "spout:Orbiters Test Pattern" --seconds 10
 cargo run -p orbiters-capture -- record --source "raw:<raw capture folder>"          # replay a Mixer simulator capture
+cargo run -p orbiters-capture -- send-test --name Dolly2 --stream 1                  # another camera's view of the same frames
+cargo run -p orbiters-capture -- record --source spout:Dolly1 --extra Dolly2,Dolly3   # several senders as one session
 cargo run -p orbiters-capture -- verify "<raw capture folder>"                        # compare with its ground truth
 cargo run --release -p orbiters-reconstruct -- "<session folder>" [--iterations N] [--budget N] [--width N]
 cargo run -p orbiters-desktop -- --orb-menu <folder>    # N4N0's screen pages and layout table (for Toolkit), sample pages

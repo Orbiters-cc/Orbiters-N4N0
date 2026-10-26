@@ -260,6 +260,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     },
                 );
                 widgets::separator(ui);
+                widgets::field(
+                    ui,
+                    "Camera dolly streams (experimental)",
+                    Some("VRC+: a 3D picture flies four cameras with VRChat's camera dolly, one left, one right and one above yours, all looking where yours does, and recordings also read the dolly's other streams. In VRChat, set Camera › Dolly › Streaming to Multi once."),
+                    48.0,
+                    |ui| {
+                        apply |= widgets::toggle(ui, "dolly-streams", &mut draft.dolly_streams);
+                    },
+                );
+                widgets::separator(ui);
                 let log_desc = snap.vrchat.world.log_file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| {
                     if snap.vrchat.log_found {
                         "Found, waiting for VRChat".into()

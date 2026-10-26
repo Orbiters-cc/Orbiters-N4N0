@@ -392,6 +392,8 @@ pub fn label_place(label: &Label) -> Place {
 }
 
 /// The back's title and hint: centred, clear of the card's sides.
+/// N4N0's face's height for its width (its view box's).
+pub const FACE_ASPECT: f32 = orbiters_ui::n4n0_face::VIEW.y / orbiters_ui::n4n0_face::VIEW.x;
 pub const BACK_PLACES: [(Text, Place); 2] =
     [(Text::BackTitle, Place { room: layout::WIDTH as f32 - 96.0, size: 52.0 }), (Text::BackHint, Place { room: layout::WIDTH as f32 - 96.0, size: 28.0 })];
 
@@ -613,19 +615,16 @@ fn picture(p: &Painter, r: Rect, texture: Option<TextureId>, pal: &Palette) {
     }
 }
 
-/// The overlay seen from behind: N4N0 (a green dot with its eyes) over "N4N0 menu" and "look at the other side", as the
-/// avatar's screen shows its back. The menu is on the side its owner faces.
+/// The overlay seen from behind: N4N0's face (its logo, `orbiters_ui::n4n0_face`) over "N4N0 menu" and "look at the other
+/// side", as the avatar's screen shows its back. The menu is on the side its owner faces.
 pub fn draw_back(p: &Painter, origin: Pos2, skin: &Skin) {
     let pal = &skin.palette;
     let card = Rect::from_min_size(origin, vec2(layout::WIDTH as f32, layout::HEIGHT as f32));
     p.rect_filled(card, theme::radius(layout::CARD_RADIUS as f32), pal.card);
     let centre = card.center().x;
-    let orb = pos2(centre, card.center().y - 86.0);
-    p.circle_filled(orb, 40.0, theme::alpha(pal.accent, 0.16));
-    p.circle_filled(orb, 26.0, pal.accent);
-    for side in [-1.0, 1.0] {
-        p.rect_filled(Rect::from_center_size(orb + vec2(side * 9.0, -2.0), vec2(7.0, 13.0)), theme::radius(3.5), pal.card);
-    }
+    let face = pos2(centre, card.center().y - 86.0);
+    p.circle_filled(face, 46.0, theme::alpha(pal.accent, 0.12));
+    orbiters_ui::n4n0_face::paint(p, Rect::from_center_size(face, vec2(64.0, 64.0 * FACE_ASPECT)), pal.accent);
     let [(title_text, title), (hint_text, hint)] = BACK_PLACES;
     let title = fit(p, Txt::new(skin.text(title_text), title.size).weight(weight::SEMIBOLD).color(pal.text), title.room);
     widgets::text(p, pos2(centre, card.center().y + 6.0), Align2::CENTER_CENTER, &title.txt);

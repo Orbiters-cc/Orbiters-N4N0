@@ -232,7 +232,18 @@ pub(crate) struct ScreenRuntime {
     picture_send: Option<bool>,
     picture_next: Instant,
     picture_repair: Option<Instant>,
+    /// Testing: the screen shows the full pictures' diagnostics (its flags' bit 3), here and to everyone.
+    pub(crate) pictures_diagnostics: bool,
+    /// What the pictures log last said of the slots wanted, and of the chunks sent since.
+    picture_logged: Vec<(usize, usize)>,
+    picture_state_logged: Option<PictureState>,
+    picture_log_at: Option<Instant>,
+    picture_sent: [u32; 2],
 }
+
+/// What the pictures log last said of the full pictures: on, the screen's version, the menu on the screen, the screen on
+/// the avatar, its text values, its thumbnails' bytes.
+type PictureState = (bool, Option<i32>, bool, bool, Option<usize>, usize);
 
 impl Default for ScreenRuntime {
     fn default() -> Self {
@@ -314,6 +325,11 @@ impl Default for ScreenRuntime {
             picture_send: None,
             picture_next: now,
             picture_repair: None,
+            pictures_diagnostics: false,
+            picture_logged: Vec::new(),
+            picture_state_logged: None,
+            picture_log_at: None,
+            picture_sent: [0; 2],
         }
     }
 }
@@ -799,7 +815,19 @@ impl ScreenRuntime {
 
     /// The owner's screen shown or not, as the menu says now.
     /// Whether the avatar's screen shows full pictures (its version, `N4N0/Screen/Version` 8 or later).
-    pub(crate) fn set_full_pictures(&mut self, on: bool) {
+    pub(crate) fn set_full_pictures(&mut self, on: bool, version: Option<i32>) {
+        let state = (on, version, self.available, self.present, self.sync, self.thumbnail);
+        if self.picture_state_logged != Some(state) {
+            self.picture_state_logged = Some(state);
+            picture_log(&format!(
+                "full pictures {} (screen version {version:?}, the menu on it {}, on the avatar {}, {:?} text values, {} B thumbnails)",
+                if on { "on" } else { "off" },
+                self.available,
+                self.present,
+                self.sync,
+                self.thumbnail
+            ));
+        }
         if on != self.full_pictures {
             self.full_pictures = on;
             self.reset_pictures();
@@ -852,6 +880,21 @@ impl ScreenRuntime {
             return;
         }
         let wanted = self.wanted_pictures();
+        let summary: Vec<(usize, usize)> = wanted.iter().map(|(slot, stream)| (*slot, stream.len())).collect();
+        if summary != self.picture_logged {
+            picture_log(&format!(
+                "slots wanted (slot, stream bytes): {summary:?}; everyone's lane {}",
+                if self.picture_everyone.is_some() { "on" } else { "off (the text channel cannot reach the picture pointers)" }
+            ));
+            self.picture_logged = summary;
+        }
+        if self.picture_log_at.is_none_or(|t| now >= t) {
+            if self.picture_sent != [0; 2] {
+                picture_log(&format!("chunks sent in the last 10 s: {} to the owner, {} to everyone", self.picture_sent[0], self.picture_sent[1]));
+                self.picture_sent = [0; 2];
+            }
+            self.picture_log_at = Some(now + std::time::Duration::from_secs(10));
+        }
         self.picture_owner.want(&wanted);
         if let Some(everyone) = self.picture_everyone.as_mut() {
             everyone.lane.want(&wanted);
@@ -866,15 +909,18 @@ impl ScreenRuntime {
         if wants && now >= self.picture_next {
             if self.picture_send != Some(true) {
                 self.picture_send = Some(true);
+                picture_log("N4N0/Picture/Send on");
                 out.push(full::local_send(true));
             }
             if let Some(chunk) = self.picture_owner.next_chunk() {
+                self.picture_sent[0] += 1;
                 out.extend(full::local_messages(&chunk));
             }
             self.picture_next = now + self.local_step();
         } else if !wants && now >= self.picture_next {
             if self.picture_send != Some(false) {
                 self.picture_send = Some(false);
+                picture_log("N4N0/Picture/Send off (every chunk went its rounds)");
                 out.push(full::local_send(false));
             }
             if !wanted.is_empty() && self.picture_repair.is_none() {
@@ -892,6 +938,29 @@ impl ScreenRuntime {
             }
         }
     }
+}
+
+/// A line in `%LOCALAPPDATA%/Orbiters/logs/n4n0-pictures.log` (what the full pictures' lanes do: whether the avatar's
+/// screen has them, the slots wanted, N4N0/Picture/Send, the chunks sent), kept under 1 MB (the last one renamed .old).
+/// Tests write none.
+fn picture_log(line: &str) {
+    #[cfg(not(test))]
+    {
+        use std::io::Write;
+        let dir = orbiters_core::paths::logs_dir();
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let path = dir.join("n4n0-pictures.log");
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
+            let _ = std::fs::rename(&path, dir.join("n4n0-pictures.old.log"));
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "{} {line}", orbiters_core::now_utc_iso());
+        }
+    }
+    #[cfg(test)]
+    let _ = line;
 }
 
 /// Closes N4N0's menu under N4N0's lock: the screen's (what it leaves to do), or the overlay's.
@@ -1605,7 +1674,7 @@ pub(crate) fn tick(
     if now >= s.next_local {
         let frame = {
             let pictures = &s.pictures;
-            let flags = Flags { listening, loading: s.menu.loading(), thinking };
+            let flags = Flags { listening, loading: s.menu.loading(), thinking, pictures: s.pictures_diagnostics };
             Frame::new(&s.menu, s.hover, s.pressed.map(|(i, _)| i), flags, s.thumbnail, &|id: &str| thumbnail(pictures, id))
         };
         // Once it holds the whole page, blocks go again only now and then (they repair a block VRChat dropped).
@@ -1668,7 +1737,7 @@ pub(crate) fn synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
     let screen_settled = !screen_wants
         || (!s.close_everyone && !screen_mid && {
             let pictures = &s.pictures;
-            let frame = Frame::public(&s.menu, Flags { loading: s.menu.loading(), ..Default::default() }, s.thumbnail, &|id: &str| thumbnail(pictures, id));
+            let frame = Frame::public(&s.menu, Flags { loading: s.menu.loading(), pictures: s.pictures_diagnostics, ..Default::default() }, s.thumbnail, &|id: &str| thumbnail(pictures, id));
             s.everyone.as_ref().unwrap().settled(&frame.bank)
         });
     let picture_goes = pictures_want && (picture_mid || (!screen_mid && !card_mid && !card_wants && screen_settled && (!screen_wants || s.picture_turns % 4 != 3)));
@@ -1685,6 +1754,7 @@ pub(crate) fn synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
                         card.sender.moved_elsewhere();
                     }
                     s.picture_turns = s.picture_turns.wrapping_add(1);
+                    s.picture_sent[1] += 1;
                 } else {
                     wait = orbiters_orb::text::PHASE_GAP;
                 }
@@ -1732,7 +1802,7 @@ pub(crate) fn synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
     } else {
         // Everyone else's frame: no hover nor press, no friend named. A new page clears their memory first.
         let pictures = &s.pictures;
-        let flags = Flags { loading: s.menu.loading(), ..Default::default() };
+        let flags = Flags { loading: s.menu.loading(), pictures: s.pictures_diagnostics, ..Default::default() };
         let frame = Frame::public(&s.menu, flags, s.thumbnail, &|id: &str| thumbnail(pictures, id));
         let send = s.everyone.as_mut().unwrap().step(&frame.bank);
         if send.moves_to_block() {
@@ -2041,6 +2111,39 @@ mod tests {
         // Without the screen (none, or one the text channel cannot reach), no card.
         rt.screen.avatar(false, false, None, 72);
         assert!(!rt.screen.card_ready());
+    }
+
+    #[test]
+    fn a_results_page_on_a_version_8_screen_sends_its_full_pictures_through_the_owner_s_values() {
+        use orbiters_contracts::orb::params;
+        let mut rt = OrbRuntime::default();
+        rt.screen.avatar(true, true, Some(8), 128);
+        rt.screen.menu.pages = Pages::of_screen(Some(8));
+        rt.screen.set_full_pictures(true, Some(8));
+        let media = Watcher::new(|| Box::new(crate::media::NoMedia));
+        let menu = &mut rt.screen.menu;
+        menu.open();
+        menu.search_for("cats");
+        let videos: Vec<youtube::Video> = (0..5)
+            .map(|i| youtube::Video { id: format!("video{i:06}"), title: format!("Cats {i}"), channel: "C".into(), duration: None, live: false })
+            .collect();
+        menu.results_arrived(1, youtube::Results { videos: videos.clone(), continuation: None }, false);
+        assert_eq!(menu.page, Page::Results);
+        for (i, v) in videos.iter().enumerate() {
+            let rgb = orbiters_orb::picture::Rgb { width: 320, height: 180, pixels: (0..320 * 180 * 3).map(|p| ((p * (7 + i)) % 251) as u8).collect() };
+            rt.screen.put_picture(&v.id, orbiters_orb::menu::screen::picture_from_rgb(&rgb));
+        }
+        let mut sent = Vec::new();
+        let start = Instant::now();
+        for step in 0..400u64 {
+            sent.extend(super::tick(&mut rt, start + Duration::from_millis(step * 25), &CallsStatus::default(), false, None, &media, &mut Followups::default()));
+        }
+        assert!(sent.contains(&full::local_send(true)), "the bridge on");
+        // Each chunk's first value: slot + 8 × salt (contracts Docs/orb-picture.md, local chunks).
+        let first = crate::runtime::parameter(&params::picture_value(0));
+        let firsts: Vec<f32> = sent.iter().filter(|(a, _)| *a == first).filter_map(|(_, v)| if let rosc::OscType::Float(f) = v { Some(*f) } else { None }).collect();
+        let slots: std::collections::BTreeSet<i32> = firsts.iter().map(|f| ((f * 127.0).round() as i32).rem_euclid(256) & 7).collect();
+        assert_eq!(slots.into_iter().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4], "the five results' pictures, {} chunks", firsts.len());
     }
 
     #[test]

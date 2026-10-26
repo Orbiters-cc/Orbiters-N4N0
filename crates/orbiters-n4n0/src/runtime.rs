@@ -282,7 +282,7 @@ impl OrbRuntime {
         // In desktop mode its owner points by looking and clicks; in VR the fingers do. Fast walk is VR's only.
         self.screen.set_gaze(used && desktop);
         // Screens of version 8 show full pictures (contracts Docs/orb-picture.md).
-        self.screen.set_full_pictures(present && self.screen_version.is_some_and(|v| v >= contract::SCREEN_FULL_PICTURES));
+        self.screen.set_full_pictures(present && self.screen_version.is_some_and(|v| v >= contract::SCREEN_FULL_PICTURES), self.screen_version);
         self.screen.menu.desktop_mode = desktop;
     }
 
@@ -368,6 +368,7 @@ impl OrbRuntime {
             test_cycle: self.test_cycle.is_some(),
             test_afk: self.test_afk,
             test_hidden: self.test_hidden,
+            test_pictures: self.screen.pictures_diagnostics,
             calls: Default::default(),
             screen: self.screen.available,
             screen_open: self.screen.menu.open,
@@ -1606,6 +1607,11 @@ impl N4n0 {
                 if let Err(e) = self.set_light(orbiters_orb::menu::Light { on, color, level }) {
                     self.notify(NoticeKind::Warning, e);
                 }
+            }
+            Command::TestPictures { on } => {
+                let mut rt = self.orb.lock().unwrap();
+                rt.screen.pictures_diagnostics = on;
+                rt.wake();
             }
             Command::TestVisible { on } => {
                 let mut rt = self.orb.lock().unwrap();

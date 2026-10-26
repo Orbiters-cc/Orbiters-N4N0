@@ -600,6 +600,19 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     }
                 });
                 widgets::separator(ui);
+                let mut diagnostics = orb.test_pictures;
+                widgets::field(
+                    ui,
+                    "Picture diagnostics",
+                    Some("The avatar's screen frames each picture in the colour of why it shows its thumbnail or its full picture, and shows the textures' state in a row at its bottom left (N4N0 screens of revision 12)."),
+                    64.0,
+                    |ui| {
+                        if widgets::toggle(ui, "orb-test-pictures", &mut diagnostics) {
+                            cx.ctl.orb(OrbCommand::TestPictures { on: diagnostics });
+                        }
+                    },
+                );
+                widgets::separator(ui);
                 widgets::field(ui, "Touch N4N0", Some("As if your hand touched it: the menu opens (or N4N0 listens for one sentence, with that off)."), 110.0, |ui| {
                     let ears = orb.voice.installed && snap.settings.orb.assistant;
                     if Button::new("Touch").icon(icons::CROSSHAIR).variant(Variant::Secondary).size(Size::Sm).enabled(prop && ears).show(ui).clicked() {

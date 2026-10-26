@@ -596,7 +596,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
             id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).map(sample_picture)
         };
-        let flags = screen::Flags { listening: menu.listening, loading: menu.loading(), thinking: false };
+        let flags = screen::Flags { listening: menu.listening, loading: menu.loading(), ..Default::default() };
         let bank = screen::Frame::new(&menu, hover, pressed, flags, 72, &pictures).bank;
         std::fs::write(out.join(format!("bank-{}.bin", page.name())), &bank[..screen::bank_bytes(72)])?;
         if matches!(page, ScreenPage::Results | ScreenPage::Music | ScreenPage::Card) {

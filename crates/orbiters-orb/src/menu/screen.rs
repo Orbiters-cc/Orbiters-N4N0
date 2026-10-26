@@ -73,6 +73,8 @@ pub struct Flags {
     pub listening: bool,
     pub loading: bool,
     pub thinking: bool,
+    /// The full pictures' diagnostics show (screens of revision 12, contracts `Docs/orb-picture.md`, Diagnostics).
+    pub pictures: bool,
 }
 
 /// What the screen should hold for `menu`: [`bank_bytes`] of its thumbnails' size (the rest stays 0).
@@ -172,7 +174,7 @@ impl Frame {
         let page = ScreenPage::of(menu);
         let layout = layout::cached(page);
         bank[PAGE] = page as u8;
-        bank[FLAGS] = flags.listening as u8 | (flags.loading as u8) << 1 | (flags.thinking as u8) << 2;
+        bank[FLAGS] = flags.listening as u8 | (flags.loading as u8) << 1 | (flags.thinking as u8) << 2 | (flags.pictures as u8) << 3;
         bank[HOVER] = hover.filter(|&h| h < layout.elements.len()).map_or(0, |h| h as u8 + 1);
         bank[PRESSED] = pressed.filter(|&p| p < layout.elements.len()).map_or(0, |p| p as u8 + 1);
         for (i, element) in layout.elements.iter().enumerate() {

@@ -135,6 +135,9 @@ pub struct OrbStatus {
     /// Testing: the whole orb is hidden (`N4N0/Visible` sent false).
     #[serde(default)]
     pub test_hidden: bool,
+    /// Testing: the avatar's screen shows the full pictures' diagnostics.
+    #[serde(default)]
+    pub test_pictures: bool,
     /// Calls with VRChat friends (the app's own: [`crate::Host::calls`]).
     #[serde(default)]
     pub calls: CallsStatus,

@@ -70,6 +70,10 @@ pub enum Command {
     TestVisible {
         on: bool,
     },
+    /// Testing: the avatar's screen shows the full pictures' diagnostics (contracts `Docs/orb-picture.md`, Diagnostics).
+    TestPictures {
+        on: bool,
+    },
     /// The overlay's N4N0 menu opened or closed, and whether a sentence N4N0 hears is what to search for (its search
     /// page is up). Opening it makes N4N0 listen.
     MenuState {

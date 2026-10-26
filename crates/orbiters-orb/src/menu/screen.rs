@@ -80,17 +80,31 @@ pub struct Frame {
     pub bank: [u8; BANK],
 }
 
-/// A thumbnail as the screen shows it (contracts `orb::thumbnail`), in both sizes a prop may keep.
+/// A thumbnail as the screen shows it (contracts `orb::thumbnail`), in both sizes a prop may keep, and the picture at
+/// its full sizes when made from one (contracts `orb::picture`: the screens of version 8 show those once they arrived).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Picture {
     small: Vec<u8>,
     large: Vec<u8>,
+    full: Option<std::sync::Arc<super::pictures::Full>>,
 }
 
 impl Picture {
     /// From a 64 × 36 picture (sRGB values 0 to 1, rows top first).
     pub fn new(picture: &[[f32; 3]]) -> Self {
-        Self { small: thumbnail::encode(picture, 72), large: thumbnail::encode(picture, 128) }
+        Self { small: thumbnail::encode(picture, 72), large: thumbnail::encode(picture, 128), full: None }
+    }
+
+    /// With its full sizes.
+    pub fn with_full(mut self, full: super::pictures::Full) -> Self {
+        self.full = Some(std::sync::Arc::new(full));
+        self
+    }
+
+    /// The full picture's stream for picture slot `slot` (contracts `orb::picture`), under this thumbnail as a prop of
+    /// `size`-byte thumbnails keeps it (its signature).
+    pub fn full_stream(&self, slot: usize, size: usize) -> Option<std::sync::Arc<Vec<u8>>> {
+        self.full.as_ref()?.stream(slot, self.bytes(size))
     }
 
     /// The memory of a thumbnail of `size` bytes (72 or 128).
@@ -108,8 +122,9 @@ pub fn picture_of(jpeg: &[u8]) -> anyhow::Result<Picture> {
     Ok(picture_from_rgb(&crate::picture::rgb_jpeg(jpeg)?))
 }
 
+/// A picture made into a screen picture: its thumbnail (fitted to 64 × 36) and its full sizes.
 pub fn picture_from_rgb(rgb: &crate::picture::Rgb) -> Picture {
-    Picture::new(&crate::picture::fit(rgb, thumbnail::WIDTH, thumbnail::HEIGHT))
+    Picture::new(&crate::picture::fit(rgb, thumbnail::WIDTH, thumbnail::HEIGHT)).with_full(super::pictures::Full::from_rgb(rgb))
 }
 
 /// Glyph indices for `text` in `cols` cells (aligned as the slot says).

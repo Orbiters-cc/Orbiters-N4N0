@@ -23,6 +23,7 @@ use orbiters_contracts::orb::{self, thumbnail};
 use orbiters_core::account::{Api, Server};
 use orbiters_core::osc::OscValue;
 use orbiters_orb::menu::layout::{Content, ScreenPage};
+use orbiters_orb::menu::pictures::{self as full, Lane, Synced};
 use orbiters_orb::menu::screen::{self, Audience, Flags, Frame, Picture, LOCAL_VALUES};
 use orbiters_orb::menu::touch::{self, Gesture, Ray, Touch, LOST_GRACE};
 use orbiters_orb::menu::{self, layout, Card, Effect, KeyboardLayout, Menu, Page, Pages, PhotoLength, SuggestQueue};
@@ -220,6 +221,17 @@ pub(crate) struct ScreenRuntime {
     /// The hands on a card (`N4N0/Card/TouchL`, `TouchR`), and when a grab was last taken.
     grab: [bool; 2],
     grab_at: Option<Instant>,
+    /// Full pictures (screen version 8, contracts `Docs/orb-picture.md`): the avatar's screen has them; its owner's lane
+    /// (the local values, a chunk a local step) and everyone's (the text channel, with 8 or 16 values); how many turns
+    /// everyone's took since the screen's last; `N4N0/Picture/Send` as last sent; when the owner's next chunk may go and
+    /// when its lane goes round again.
+    pub(crate) full_pictures: bool,
+    picture_owner: Lane,
+    picture_everyone: Option<Synced>,
+    picture_turns: u8,
+    picture_send: Option<bool>,
+    picture_next: Instant,
+    picture_repair: Option<Instant>,
 }
 
 impl Default for ScreenRuntime {
@@ -295,6 +307,13 @@ impl Default for ScreenRuntime {
             grab: [false; 2],
             grab_at: None,
             present: false,
+            full_pictures: false,
+            picture_owner: Lane::local(),
+            picture_everyone: None,
+            picture_turns: 0,
+            picture_send: None,
+            picture_next: now,
+            picture_repair: None,
         }
     }
 }
@@ -322,6 +341,7 @@ impl ScreenRuntime {
         self.owner = Audience::new(LOCAL_VALUES, thumbnail);
         self.owner.forget();
         self.open_sent = None;
+        self.reset_pictures();
         // A loaded avatar starts without its card out: the card is said again, whole.
         if let Some(card) = self.card.as_mut() {
             card.sender.forget();
@@ -422,6 +442,11 @@ impl ScreenRuntime {
     /// Messages to VRChat were lost: neither screen's memory is known any more (each is cleared at its next step), nor
     /// whether it is open.
     pub(crate) fn lost(&mut self) {
+        self.picture_owner.forget();
+        if let Some(everyone) = self.picture_everyone.as_mut() {
+            everyone.forget();
+        }
+        self.picture_send = None;
         self.owner.forget();
         if let Some(everyone) = self.everyone.as_mut() {
             everyone.forget();
@@ -524,6 +549,13 @@ impl ScreenRuntime {
                 at(asked + OVERLAY_ANSWER);
             }
         }
+        // The owner's picture chunks, a local step apart; the bridge off after the last; a round again later.
+        if self.picture_owner.wants() || self.picture_send == Some(true) {
+            at(self.picture_next.max(now));
+        }
+        if let Some(t) = self.picture_repair {
+            at(t);
+        }
         // The card goes at its end, and its blocks go again now and then.
         if let Some(card) = self.card.as_ref() {
             at(card.until);
@@ -557,10 +589,17 @@ impl ScreenRuntime {
         // The screen's turn on the text channel; one already due waits for the panel's block to end, whose own steps
         // wake the orb thread.
         let card_wants = self.card.as_ref().is_some_and(|c| c.sender.wants(now));
-        if self.everyone.is_some() && ((self.menu.open && self.available) || self.close_everyone || card_wants) && self.next_synced > now {
+        let pictures_want = self.picture_everyone.as_ref().is_some_and(Synced::wants);
+        if self.everyone.is_some() && ((self.menu.open && self.available) || self.close_everyone || card_wants || pictures_want) && self.next_synced > now {
             at(self.next_synced);
         }
         due
+    }
+
+    /// Testing: thumbnail `id` arrived.
+    #[cfg(test)]
+    pub(crate) fn put_picture(&mut self, id: &str, picture: Picture) {
+        self.pictures.insert(id.to_string(), Thumb::Ready(picture));
     }
 
     /// Testing: the card's time is up now.
@@ -759,6 +798,91 @@ impl ScreenRuntime {
     }
 
     /// The owner's screen shown or not, as the menu says now.
+    /// Whether the avatar's screen shows full pictures (its version, `N4N0/Screen/Version` 8 or later).
+    pub(crate) fn set_full_pictures(&mut self, on: bool) {
+        if on != self.full_pictures {
+            self.full_pictures = on;
+            self.reset_pictures();
+        }
+    }
+
+    /// Both picture lanes start over (another avatar, another screen): everyone's when its text channel reaches the
+    /// picture pointers.
+    fn reset_pictures(&mut self) {
+        self.picture_owner = Lane::local();
+        self.picture_everyone = self.sync.filter(|&n| self.full_pictures && orbiters_contracts::orb::picture::chunk::reaches_everyone(n, self.thumbnail)).map(Synced::new);
+        self.picture_send = None;
+        self.picture_repair = None;
+    }
+
+    /// What the picture slots should hold now (contracts `Docs/orb-picture.md`, Slots): the results' thumbnails (slots
+    /// 0 to 4) or the music's art (slot 5) while the menu shows on the screen, and the card's picture (slot 6) while it
+    /// is out with its picture; each under its thumbnail as the prop keeps it.
+    fn wanted_pictures(&self) -> Vec<(usize, std::sync::Arc<Vec<u8>>)> {
+        use orbiters_contracts::orb::picture::{SLOT_CARD, SLOT_MUSIC};
+        let mut out = Vec::new();
+        if !self.full_pictures {
+            return out;
+        }
+        if self.available && self.menu.open {
+            let page = ScreenPage::of(&self.menu);
+            for p in &Frame::layout(&self.menu).pictures {
+                let slot = match page {
+                    ScreenPage::Results => p.result as usize,
+                    ScreenPage::Music => SLOT_MUSIC,
+                    _ => continue,
+                };
+                if let Some(stream) = layout::picture_key(&self.menu, p).and_then(|key| thumbnail(&self.pictures, key)).and_then(|t| t.full_stream(slot, self.thumbnail)) {
+                    out.push((slot, stream));
+                }
+            }
+        }
+        if let Some(card) = self.card.as_ref().filter(|c| c.picture) {
+            if let Some(stream) = card.menu.card.as_ref().and_then(|c| c.video.as_deref()).and_then(|id| thumbnail(&self.pictures, id)).and_then(|t| t.full_stream(SLOT_CARD, self.thumbnail)) {
+                out.push((SLOT_CARD, stream));
+            }
+        }
+        out
+    }
+
+    /// The owner's picture lane at `now`: what the slots should hold, then a chunk a local step while one is due, the bridge
+    /// on meanwhile (`N4N0/Picture/Send`), off once every chunk went its rounds; a round again every so often.
+    fn picture_owner_step(&mut self, now: Instant, out: &mut Vec<Message>) {
+        if !self.full_pictures {
+            return;
+        }
+        let wanted = self.wanted_pictures();
+        self.picture_owner.want(&wanted);
+        if let Some(everyone) = self.picture_everyone.as_mut() {
+            everyone.lane.want(&wanted);
+        }
+        if wanted.is_empty() {
+            self.picture_repair = None;
+        } else if self.picture_repair.is_some_and(|t| now >= t) {
+            self.picture_owner.again();
+            self.picture_repair = None;
+        }
+        let wants = self.picture_owner.wants();
+        if wants && now >= self.picture_next {
+            if self.picture_send != Some(true) {
+                self.picture_send = Some(true);
+                out.push(full::local_send(true));
+            }
+            if let Some(chunk) = self.picture_owner.next_chunk() {
+                out.extend(full::local_messages(&chunk));
+            }
+            self.picture_next = now + self.local_step();
+        } else if !wants && now >= self.picture_next {
+            if self.picture_send != Some(false) {
+                self.picture_send = Some(false);
+                out.push(full::local_send(false));
+            }
+            if !wanted.is_empty() && self.picture_repair.is_none() {
+                self.picture_repair = Some(now + full::LOCAL_REPAIR);
+            }
+        }
+    }
+
     fn sync_open(&mut self, out: &mut Vec<Message>) {
         if self.open_sent != Some(self.menu.open) {
             self.open_sent = Some(self.menu.open);
@@ -1443,8 +1567,9 @@ pub(crate) fn tick(
     if s.menu.call != call {
         s.menu.set_call(call);
     }
-    // The card, wherever the menu shows.
+    // The card, wherever the menu shows; then the full pictures (the card's too).
     s.card_step(now, &mut out);
+    s.picture_owner_step(now, &mut out);
     if !s.available {
         // The menu is not on this screen: only a close it still has to say.
         if s.present && s.open_sent == Some(true) {
@@ -1516,13 +1641,15 @@ pub(crate) fn synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
     }
     let screen_wants = s.close_everyone || (s.menu.open && s.available);
     let card_wants = s.card.as_ref().is_some_and(|c| c.sender.wants(now));
-    if !(screen_wants || card_wants) || now < s.next_synced || panel_mid_block {
+    let pictures_want = s.picture_everyone.as_ref().is_some_and(Synced::wants);
+    if !(screen_wants || card_wants || pictures_want) || now < s.next_synced || panel_mid_block {
         return Vec::new();
     }
     let screen_mid = s.everyone.as_ref().is_some_and(Audience::mid_block);
     let card_mid = s.card.as_ref().is_some_and(|c| c.sender.mid_block());
+    let picture_mid = s.picture_everyone.as_ref().is_some_and(Synced::mid_block);
     // The panel wants the channel too: they take turns, a whole block each.
-    if panel_wants && !s.screen_turn && !screen_mid && !card_mid {
+    if panel_wants && !s.screen_turn && !screen_mid && !card_mid && !picture_mid {
         s.screen_turn = true;
         s.next_synced = now + step;
         // The panel moves the pointer onto its own blocks.
@@ -1530,7 +1657,52 @@ pub(crate) fn synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
         if let Some(card) = s.card.as_mut() {
             card.sender.moved_elsewhere();
         }
+        if let Some(pictures) = s.picture_everyone.as_mut() {
+            pictures.moved_elsewhere();
+        }
         return Vec::new();
+    }
+    // Full pictures (contracts Docs/orb-picture.md): a chunk between its steps finishes first; else, once the screen's page
+    // went whole (its blocks only go again) or the screen wants nothing, three turns of every four, when the card waits for
+    // nothing.
+    let screen_settled = !screen_wants
+        || (!s.close_everyone && !screen_mid && {
+            let pictures = &s.pictures;
+            let frame = Frame::public(&s.menu, Flags { loading: s.menu.loading(), ..Default::default() }, s.thumbnail, &|id: &str| thumbnail(pictures, id));
+            s.everyone.as_ref().unwrap().settled(&frame.bank)
+        });
+    let picture_goes = pictures_want && (picture_mid || (!screen_mid && !card_mid && !card_wants && screen_settled && (!screen_wants || s.picture_turns % 4 != 3)));
+    if picture_goes {
+        s.screen_turn = false;
+        let step_now = s.picture_everyone.as_mut().unwrap().step();
+        let mut wait = step;
+        let out = match step_now {
+            Some(p) => {
+                if p.moves_to_block() {
+                    // The pointer on a picture chunk: the screen's and the card's next blocks rest first.
+                    s.everyone.as_mut().unwrap().moved_elsewhere();
+                    if let Some(card) = s.card.as_mut() {
+                        card.sender.moved_elsewhere();
+                    }
+                    s.picture_turns = s.picture_turns.wrapping_add(1);
+                } else {
+                    wait = orbiters_orb::text::PHASE_GAP;
+                }
+                p.messages()
+            }
+            None => Vec::new(),
+        };
+        s.next_synced = now + wait;
+        if let Some(sender) = rt.sender.as_mut() {
+            sender.hold_until(now + wait);
+        }
+        return out;
+    }
+    if screen_wants && !s.close_everyone {
+        // The screen's own block: picture turns count again from it.
+        if s.picture_turns % 4 == 3 {
+            s.picture_turns = s.picture_turns.wrapping_add(1);
+        }
     }
     s.screen_turn = false;
     let mut wait = step;
@@ -1543,6 +1715,9 @@ pub(crate) fn synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
             // The pointer on the card's block: the screen's next block rests first; the screen goes next.
             s.everyone.as_mut().unwrap().moved_elsewhere();
             s.card_turn = false;
+            if let Some(pictures) = s.picture_everyone.as_mut() {
+                pictures.moved_elsewhere();
+            }
         }
         if !send.holds() {
             wait = orbiters_orb::text::PHASE_GAP;
@@ -1566,6 +1741,9 @@ pub(crate) fn synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
                 card.sender.moved_elsewhere();
             }
             s.card_turn = true;
+            if let Some(pictures) = s.picture_everyone.as_mut() {
+                pictures.moved_elsewhere();
+            }
         }
         if !send.holds() {
             wait = orbiters_orb::text::PHASE_GAP;

@@ -1506,6 +1506,38 @@ fn a_dropped_card_is_out_for_everyone_beside_the_menu_until_its_time_is_up() {
 }
 
 #[test]
+fn a_screen_of_version_8_sends_the_card_s_full_picture_to_its_owner_then_to_everyone() {
+    use orbiters_contracts::orb::picture::{chunk, SLOT_CARD};
+    let mut tree = card_tree("avtr_pictures");
+    put_node(&mut tree, &parameter(params::SCREEN_VERSION), "i", json!(contract::SCREEN_FULL_PICTURES), 3);
+    for i in 0..chunk::LOCAL_VALUES {
+        put_node(&mut tree, &parameter(&params::picture_value(i)), "f", json!(0.0), 3);
+    }
+    put_node(&mut tree, &parameter(params::PICTURE_SEND), "T", json!(false), 3);
+    let (t, n, vrchat) = orb_on(tree);
+    assert!(until(|| t.view().can_drop && n.orb.lock().unwrap().screen.full_pictures), "a screen of version 8 shows full pictures");
+    let id = "dQw4w9WgXcQ";
+    let rgb = orbiters_orb::picture::Rgb { width: 320, height: 180, pixels: (0..320 * 180 * 3).map(|i| (i * 7 % 251) as u8).collect() };
+    let picture = orbiters_orb::menu::screen::picture_from_rgb(&rgb);
+    let stream = picture.full_stream(SLOT_CARD, 72).expect("a full picture");
+    n.orb.lock().unwrap().screen.put_picture(id, picture);
+    n.command(Command::Drop { link: format!("https://www.youtube.com/watch?v={id}"), title: "Never Gonna Give You Up".into(), video: Some(id.into()) });
+    // The owner: the bridge on, then the stream's chunks through the local values (each one checked, rebuilding it).
+    let sent = received(&vrchat, Duration::from_millis(1500));
+    assert!(sent.contains(&(parameter(params::PICTURE_SEND), OscType::Bool(true))), "the bridge on");
+    let value = |sent: &[Message], i: usize| sent.iter().filter(|(a, _)| *a == parameter(&params::picture_value(i))).count();
+    assert!(value(&sent, 0) >= stream.len().div_ceil(chunk::LOCAL_PAYLOAD), "every local chunk went");
+    // Everyone: once the card's own blocks went, picture chunks on pointers 188 to 251 (slot 6's: 236 to 243).
+    let sent = received(&vrchat, Duration::from_millis(9000));
+    let pointers: Vec<i32> = text_pointers(&sent).into_iter().filter(|p| (chunk::POINTER_FIRST..chunk::POINTER_FIRST + 64).contains(p)).collect();
+    assert!(!pointers.is_empty(), "picture chunks for everyone");
+    assert!(pointers.iter().all(|p| (p - chunk::POINTER_FIRST) / 8 == SLOT_CARD as i32), "{pointers:?}");
+    // Its two rounds went: the owner's bridge off.
+    assert!(sent.contains(&(parameter(params::PICTURE_SEND), OscType::Bool(false))), "the bridge off once its rounds went");
+    t.shutdown(&n);
+}
+
+#[test]
 fn a_card_is_told_to_orbiters_and_someone_else_s_is_fetched_when_grabbed() {
     let (t, n, _vrchat) = orb_on(card_tree("avtr_card_server"));
     let (base, seen) = drops_server(vec![

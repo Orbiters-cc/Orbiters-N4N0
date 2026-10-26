@@ -111,15 +111,43 @@ impl Service {
         }
     }
 
-    /// Tracking smoothing as the settings say: the driver installed, on or off, each device's strength; what it does now
-    /// goes to N4N0's Tracking page.
+    /// Tracking smoothing as the settings say: the driver registered for SteamVR, on or off, each device's strength;
+    /// what it does now goes to N4N0's Tracking page. Run every keeper turn, at once when the settings change
+    /// (`follow_tracking`) and when the overlay says which device is which.
     fn keep_tracking(&self) {
         if self.quitting.load(Ordering::Relaxed) {
             return;
         }
         let snap = self.ctl.view();
-        let note = self.smoothing.lock().unwrap().keep(&snap.settings.tracking, snap.steamvr.running);
+        let world = crate::tracking::World {
+            settings: &snap.settings.tracking,
+            steamvr: snap.steamvr.running,
+            steamvr_pid: snap.steamvr.pid,
+            overlay: snap.steamvr.overlay,
+        };
+        let note = self.smoothing.lock().unwrap().keep(&world);
         self.ctl.set_tracking_note(note);
+    }
+
+    /// Smoothing's settings reach the driver the moment they change (it reads them on SteamVR's next frame), not at
+    /// the keeper's next turn: every published state is looked at, the tracking settings compared.
+    fn follow_tracking(self: &Arc<Self>) {
+        let mailbox = Mailbox::new(false);
+        self.ctl.subscribe(mailbox.clone());
+        let mut seen = None;
+        while let Some((_, snapshot)) = mailbox.take() {
+            if self.quitting.load(Ordering::Relaxed) {
+                return;
+            }
+            let Some(snapshot) = snapshot else { continue };
+            if seen.as_ref() != Some(&snapshot.settings.tracking) {
+                let first = seen.is_none();
+                seen = Some(snapshot.settings.tracking.clone());
+                if !first {
+                    self.keep_tracking();
+                }
+            }
+        }
     }
 
     /// Starts the SteamVR overlay process while SteamVR runs (and the setting allows it); closes it otherwise.
@@ -257,6 +285,10 @@ impl Service {
             ToService::Calibrated { calibration } => ctl.calibrated(*calibration),
             ToService::Frames { chunk } => ctl.frames(chunk),
             ToService::Headset { in_use } => ctl.set_headset(Some(in_use)),
+            ToService::SteamVrDevices { kinds } => {
+                self.smoothing.lock().unwrap().set_kinds(kinds);
+                self.keep_tracking();
+            }
             ToService::WalkBoost { strength } => ctl.set_walk_boost(strength, false),
             // Which Talk button is held matters: the service lets it go when that window or overlay goes away.
             ToService::Orb { command: OrbCommand::Talk { down } } => ctl.orb_app_talk(down, role == Role::Overlay),
@@ -447,6 +479,8 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         svc.keep_tracking();
         std::thread::sleep(Duration::from_secs(2));
     })?;
+    let svc = service.clone();
+    std::thread::Builder::new().name("smoothing".into()).spawn(move || svc.follow_tracking())?;
     // In desktop mode, a recording's coverage in a corner of the screen (in VR the SteamVR overlay shows it).
     crate::coverage_window::start(service.ctl.clone());
 

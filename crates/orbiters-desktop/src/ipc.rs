@@ -138,6 +138,10 @@ pub enum ToService {
     Headset {
         in_use: bool,
     },
+    /// What each of SteamVR's device indices is (read by the overlay), for tracking smoothing's strengths.
+    SteamVrDevices {
+        kinds: Vec<crate::tracking::DeviceKind>,
+    },
     /// The overlay changed the walk boost's strength (also sent to the avatar's `N4N0/WalkBoost`).
     WalkBoost {
         strength: f32,

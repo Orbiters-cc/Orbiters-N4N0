@@ -3,18 +3,36 @@
 //! `bin\win64\driver_orbiters_smooth.dll`, registered in the `external_drivers` of
 //! `%LOCALAPPDATA%\openvr\openvrpaths.vrpath` (the list `vrpathreg adddriver` edits).
 //!
-//! SteamVR reads that list and loads drivers only when it starts: an install or an uninstall takes effect at its
-//! next start. After a crash SteamVR starts in Safe Mode, with add-on drivers like this one turned off until the
-//! person turns them on again (Settings, Startup / Shutdown, Manage Add-ons).
+//! SteamVR reads that list and loads drivers only when it starts, so the app registers the driver once and for all
+//! (at its first start, SteamVR running or not) and never takes it out: loaded at every SteamVR start, the driver
+//! does nothing until the app turns smoothing on, and every change after that is live. Only a first registration
+//! made while SteamVR already runs waits for SteamVR's next start ([`Installation::registered_since`] tells when it
+//! was made). Uninstalling takes the driver out. After a crash SteamVR starts in Safe Mode, with add-on drivers like
+//! this one turned off until the person turns them on again (Settings, Startup / Shutdown, Manage Add-ons):
+//! [`Installation::add_on_state`] reads that.
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The driver's name in its manifest (and its DLL's, `driver_<name>.dll`).
 pub const DRIVER_NAME: &str = "orbiters_smooth";
 /// The DLL SteamVR loads, in `bin\win64` under the driver folder; also its name in the app's install folder.
 pub const DLL_NAME: &str = "driver_orbiters_smooth.dll";
+/// In the driver folder: when the driver was registered in SteamVR's list (Unix seconds).
+const REGISTERED_FILE: &str = "registered";
+
+/// What SteamVR's own settings say of the driver (`steamvr.vrsettings`, `driver_orbiters_smooth`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddOnState {
+    /// Nothing against it: SteamVR loads it at its start.
+    On,
+    /// Turned off in SteamVR's Manage Add-ons.
+    TurnedOff,
+    /// Turned off by SteamVR's Safe Mode after a crash, until turned on again in Manage Add-ons.
+    BlockedBySafeMode,
+}
 
 /// Where the driver goes and where SteamVR's driver list is. [`Installation::for_user`] is the real one; tests make
 /// their own with [`Installation::new`].
@@ -74,6 +92,30 @@ impl Installation {
         Ok(external_drivers(&vrpath).iter().any(|d| same_path(d, &self.driver_dir)))
     }
 
+    /// When the driver was registered in SteamVR's list (a SteamVR started before then has not loaded it): the time
+    /// [`Installation::install`] added it, or, for a registration older than that record, its manifest's.
+    pub fn registered_since(&self) -> Option<SystemTime> {
+        if !self.registered().unwrap_or(false) {
+            return None;
+        }
+        let recorded = std::fs::read_to_string(self.driver_dir.join(REGISTERED_FILE)).ok().and_then(|t| t.trim().parse::<u64>().ok());
+        match recorded {
+            Some(secs) => UNIX_EPOCH.checked_add(Duration::from_secs(secs)),
+            None => std::fs::metadata(self.manifest_path()).and_then(|m| m.modified()).ok(),
+        }
+    }
+
+    /// What SteamVR's settings say of the driver: turned off in Manage Add-ons, or by Safe Mode after a crash. A
+    /// settings file that cannot be read says nothing against it.
+    pub fn add_on_state(&self) -> AddOnState {
+        let settings = read_vrpath(&self.vrpath).ok().and_then(|vrpath| {
+            let config = vrpath.get("config")?.as_array()?.iter().find_map(Value::as_str)?.to_owned();
+            let text = std::fs::read_to_string(Path::new(&config).join("steamvr.vrsettings")).ok()?;
+            serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}')).ok()
+        });
+        add_on_state_in(settings.as_ref())
+    }
+
     /// Writes the driver folder (the manifest, and the DLL copied from `driver_dll`) and registers it in
     /// `openvrpaths.vrpath`, keeping everything else there; again is harmless (nothing rewritten that is the same,
     /// never a second entry). A DLL in use by a running SteamVR is moved aside, so the new one loads at its next
@@ -95,12 +137,18 @@ impl Installation {
             kept.push(Value::String(dir));
             set_external_drivers(&mut vrpath, kept)?;
             write_vrpath(&self.vrpath, &vrpath)?;
+            if ours == 0 {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let _ = std::fs::write(self.driver_dir.join(REGISTERED_FILE), now.to_string());
+            }
         }
         Ok(self.driver_dir.clone())
     }
 
-    /// Unregisters the driver and removes its folder. When SteamVR runs with the driver loaded, the folder may stay
-    /// (its DLL in use): the error says so, and the driver is gone at SteamVR's next start all the same.
+    /// Unregisters the driver and removes its folder. When SteamVR runs with the driver loaded, its DLL cannot be
+    /// deleted: it is moved into the temporary folder (Windows lets a loaded DLL be renamed), so the folder still
+    /// goes; if even that fails the error says so, and SteamVR no longer loads the driver from its next start all the
+    /// same.
     pub fn uninstall(&self) -> Result<()> {
         if self.vrpath.is_file() {
             let mut vrpath = read_vrpath(&self.vrpath)?;
@@ -111,7 +159,8 @@ impl Installation {
                 write_vrpath(&self.vrpath, &vrpath)?;
             }
         }
-        if self.driver_dir.exists() {
+        if self.driver_dir.exists() && std::fs::remove_dir_all(&self.driver_dir).is_err() {
+            move_out_files_in_use(&self.driver_dir);
             std::fs::remove_dir_all(&self.driver_dir).with_context(|| {
                 format!(
                     "SteamVR no longer loads the smoothing driver, but its folder {} could not be removed (SteamVR may still be using it; close SteamVR and try again)",
@@ -128,6 +177,37 @@ impl Installation {
             }
         }
         Ok(())
+    }
+}
+
+/// What `steamvr.vrsettings` (parsed, if it could be) says of the driver.
+fn add_on_state_in(settings: Option<&Value>) -> AddOnState {
+    let Some(section) = settings.and_then(|s| s.get(format!("driver_{DRIVER_NAME}"))) else { return AddOnState::On };
+    if section.get("blocked_by_safe_mode").and_then(Value::as_bool) == Some(true) {
+        AddOnState::BlockedBySafeMode
+    } else if section.get("enable").and_then(Value::as_bool) == Some(false) {
+        AddOnState::TurnedOff
+    } else {
+        AddOnState::On
+    }
+}
+
+/// Moves the files left in `dir` (a DLL a running SteamVR holds) into the temporary folder, each under a name of its
+/// own, so that the folder can go. Best effort: a file on another drive than the temporary folder stays.
+fn move_out_files_in_use(dir: &Path) {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(folder) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if std::fs::remove_file(&path).is_err() {
+                let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let _ = std::fs::rename(&path, std::env::temp_dir().join(format!("orbiters-smooth-{stamp}-{name}.old")));
+            }
+        }
     }
 }
 
@@ -398,6 +478,79 @@ mod tests {
         // The next install tidies the old copy once nothing holds it.
         install.install(&dll).unwrap();
         assert!(!aside.exists());
+    }
+
+    #[test]
+    fn the_registration_time_is_kept() {
+        let (_temp, install, dll) = setup("registered-since", Some(VRPATH));
+        assert_eq!(install.registered_since(), None, "not registered");
+        let before = SystemTime::now() - Duration::from_secs(2);
+        install.install(&dll).unwrap();
+        let since = install.registered_since().expect("registered");
+        assert!(since >= before && since <= SystemTime::now() + Duration::from_secs(2), "{since:?}");
+        // Installing again (each start of the app) keeps the first registration's time: SteamVR started since loads it.
+        std::fs::write(install.driver_dir.join(REGISTERED_FILE), "1000").unwrap();
+        install.install(&dll).unwrap();
+        assert_eq!(install.registered_since(), UNIX_EPOCH.checked_add(Duration::from_secs(1000)));
+        // An older registration without the record: the manifest's time stands for it.
+        std::fs::remove_file(install.driver_dir.join(REGISTERED_FILE)).unwrap();
+        assert!(install.registered_since().is_some());
+        install.uninstall().unwrap();
+        assert_eq!(install.registered_since(), None);
+    }
+
+    #[test]
+    fn steamvr_add_on_states() {
+        let parse = |t: &str| serde_json::from_str::<Value>(t).unwrap();
+        assert_eq!(add_on_state_in(None), AddOnState::On);
+        assert_eq!(add_on_state_in(Some(&parse(r#"{ "steamvr": {} }"#))), AddOnState::On);
+        assert_eq!(add_on_state_in(Some(&parse(r#"{ "driver_orbiters_smooth": { "enable": false } }"#))), AddOnState::TurnedOff);
+        assert_eq!(add_on_state_in(Some(&parse(r#"{ "driver_orbiters_smooth": { "enable": true } }"#))), AddOnState::On);
+        assert_eq!(add_on_state_in(Some(&parse(r#"{ "driver_orbiters_smooth": { "blocked_by_safe_mode": true } }"#))), AddOnState::BlockedBySafeMode);
+        assert_eq!(add_on_state_in(Some(&parse(r#"{ "driver_standable": { "blocked_by_safe_mode": true } }"#))), AddOnState::On, "another driver's");
+
+        // Read from SteamVR's config folder, which openvrpaths.vrpath names.
+        let (temp, install, _dll) = setup("add-on", None);
+        let config = temp.0.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let vrpath = serde_json::json!({ "config": [config.to_string_lossy()], "external_drivers": null, "version": 1 });
+        std::fs::write(&install.vrpath, vrpath.to_string()).unwrap();
+        assert_eq!(install.add_on_state(), AddOnState::On, "no settings file yet");
+        std::fs::write(config.join("steamvr.vrsettings"), "\u{feff}{ \"driver_orbiters_smooth\" : { \"blocked_by_safe_mode\" : true } }").unwrap();
+        assert_eq!(install.add_on_state(), AddOnState::BlockedBySafeMode);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn uninstall_with_steamvr_holding_the_dll_still_removes_it() {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn LoadLibraryExW(name: *const u16, file: isize, flags: u32) -> isize;
+            fn FreeLibrary(module: isize) -> i32;
+        }
+        const LOAD_LIBRARY_AS_IMAGE_RESOURCE: u32 = 0x20;
+        let (temp, install, dll) = setup("uninstall-in-use", Some(VRPATH));
+        std::fs::copy(std::env::current_exe().unwrap(), &dll).unwrap();
+        install.install(&dll).unwrap();
+        let wide: Vec<u16> = install.dll_path().to_string_lossy().encode_utf16().chain(Some(0)).collect();
+        // SAFETY: mapped as an image resource only (as SteamVR's loaded driver holds it), freed below.
+        let module = unsafe { LoadLibraryExW(wide.as_ptr(), 0, LOAD_LIBRARY_AS_IMAGE_RESOURCE) };
+        assert_ne!(module, 0, "could not map the stand-in DLL");
+        let result = install.uninstall();
+        let folder_gone = !install.driver_dir.exists();
+        // SAFETY: the module mapped above.
+        unsafe { FreeLibrary(module) };
+        // The copy moved out of the way, left for the temporary folder's clean-up, goes now.
+        for entry in std::fs::read_dir(std::env::temp_dir()).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("orbiters-smooth-") && name.ends_with(&format!("{DLL_NAME}.old")) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        result.unwrap();
+        assert!(folder_gone, "the DLL in use was moved out and the folder removed");
+        assert_eq!(vrpath_json(&install)["external_drivers"], Value::Null, "and SteamVR's list no longer has it");
+        assert!(!temp.0.join("Orbiters").join("SteamVR").exists());
     }
 
     #[test]

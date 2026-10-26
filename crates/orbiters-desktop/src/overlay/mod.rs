@@ -533,6 +533,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let mut actions = actions::Actions::load(&steamvr);
     let mut walk = walk::WalkBoost::new(actions.walk, actions.failed.clone());
     walk.set_frame(steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0).map(|hz| Duration::from_secs_f32(1.0 / hz)));
+    let mut devices = crate::tracking::DeviceKindsWatch::default();
     let mut state = ui::OverlayUi::default();
     state.walk_unavailable = walk.unavailable().map(str::to_string);
     let world = World::new(&overlay)?;
@@ -571,10 +572,11 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                     steamvr.acknowledge_quit();
                     return Ok(Ended::SteamVrGone);
                 }
-                vr::event::TRACKED_DEVICE_ACTIVATED
-                | vr::event::TRACKED_DEVICE_DEACTIVATED
-                | vr::event::TRACKED_DEVICE_ROLE_CHANGED
-                | vr::event::PROPERTY_CHANGED => poses.forget(&e),
+                vr::event::TRACKED_DEVICE_ACTIVATED | vr::event::TRACKED_DEVICE_DEACTIVATED | vr::event::TRACKED_DEVICE_ROLE_CHANGED => {
+                    poses.forget(&e);
+                    devices.changed();
+                }
+                vr::event::PROPERTY_CHANGED => poses.forget(&e),
                 _ => {
                     // A recenter, room setup, another universe: walk boost ends its carry; its own previews' echoes
                     // change nothing.
@@ -583,6 +585,11 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                     }
                 }
             }
+        }
+        // Which device is which, for tracking smoothing's strengths: the service asks SteamVR nothing itself while this
+        // overlay runs (its connections, every few seconds, disturbed this one's input and play space).
+        if let Some(kinds) = devices.due(Instant::now(), |i| steamvr.device_class(i)) {
+            backend.steamvr_devices(kinds);
         }
         // Laser-pointer input: SteamVR's mouse coordinates start at the bottom left.
         while let Some(e) = overlay.poll_event(main) {

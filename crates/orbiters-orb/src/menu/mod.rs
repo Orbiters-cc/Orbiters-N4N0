@@ -140,7 +140,7 @@ pub struct Tracking {
     pub on: bool,
     /// Each kind's strength, an index of [`SMOOTHING_LABELS`]: the headset, the controllers, the trackers.
     pub levels: [u8; 3],
-    /// What the driver does now ("Smoothing your trackers", "Restart SteamVR to start it"), or why it cannot.
+    /// What the driver does now ("Smoothing your devices now", "Ready: smoothing starts with SteamVR"), or why it cannot.
     pub note: String,
 }
 

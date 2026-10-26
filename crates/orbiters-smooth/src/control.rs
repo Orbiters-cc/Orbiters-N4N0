@@ -155,6 +155,25 @@ impl Control {
         Ok(Control { mapping, writer: Mutex::new(()) })
     }
 
+    /// The process whose exit ends smoothing (the one that last opened or claimed the block).
+    pub fn owner_pid(&self) -> u32 {
+        self.mapping.block().owner_pid.load(Ordering::Acquire)
+    }
+
+    /// Makes this process the block's owner again, should another one have opened it since (it ended, and the driver
+    /// stopped smoothing with it). Returns whether it had to.
+    pub fn claim(&self) -> bool {
+        #[cfg(windows)]
+        {
+            let me = crate::win::current_pid();
+            self.mapping.block().owner_pid.swap(me, Ordering::AcqRel) != me
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
     fn write(&self, write: impl FnOnce(&ControlBlock)) {
         let _one_writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         self.mapping.block().write_settings(write);
@@ -265,6 +284,18 @@ mod tests {
         // A second app process keeps the settings and becomes the owner.
         let again = Control::open_or_create_named(&name).unwrap();
         assert_eq!(again.settings().strengths[1], 0.25);
+    }
+
+    #[test]
+    fn the_app_claims_the_block_back() {
+        let name = unique_name("claim");
+        let control = Control::open_or_create_named(&name).unwrap();
+        assert_eq!(control.owner_pid(), std::process::id());
+        assert!(!control.claim(), "already its own");
+        // Another process opened it (and, say, ended): the app takes it back on its next look.
+        control.block().owner_pid.store(4242, Ordering::Release);
+        assert!(control.claim());
+        assert_eq!(control.owner_pid(), std::process::id());
     }
 
     #[test]

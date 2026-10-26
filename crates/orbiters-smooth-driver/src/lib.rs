@@ -1,9 +1,14 @@
 //! Orbiters - N4N0's SteamVR server driver for tracking smoothing (`driver_orbiters_smooth.dll`), an equivalent of
-//! OVR-SmoothTracking. SteamVR loads it into `vrserver.exe`; it asks the server driver host for every driver's pose
-//! updates by patching one entry of the host's function table (as OpenVR-SpaceCalibrator does to read poses), eases
-//! the position and rotation of the devices the app marks (`orbiters_smooth::filter`) and damps the velocities
-//! SteamVR predicts with, then hands the pose on. It reads what to do, without locks, from the control block the app
-//! shares (`orbiters_smooth`), and smooths nothing while that block is missing, off, stale or of another version.
+//! OVR-SmoothTracking. SteamVR loads it into `vrserver.exe` at every start (the app registers it once, and it stays
+//! registered); it asks the server driver host for every driver's pose updates by patching one entry of the host's
+//! function table (as OpenVR-SpaceCalibrator does to read poses), eases the position and rotation of the devices the
+//! app marks (`orbiters_smooth::filter`) and damps the velocities SteamVR predicts with, then hands the pose on. It
+//! reads what to do, without locks, from the control block the app shares (`orbiters_smooth`), every SteamVR frame:
+//! the app turns smoothing on and off and changes its strengths live, never a restart.
+//!
+//! Until smoothing is first turned on it touches nothing of SteamVR's: no table is patched, every pose goes from
+//! driver to SteamVR as if it were not loaded. The first frame smoothing is on (from the control block) it hooks the
+//! hosts, and stays hooked, passing poses on untouched while off, until SteamVR ends it (`Cleanup`).
 //!
 //! Across the FFI boundary it never unwinds (every entry catches panics) and never blocks the pose thread (the hook
 //! takes no lock that another pose or a frame could hold, and allocates nothing per pose).
@@ -35,6 +40,9 @@ use std::time::Instant;
 /// older drivers). Each has its own function table; each is hooked at most once.
 const MAX_HOOKS: usize = 2;
 
+/// Hooking found no host to patch: tried again this often (milliseconds) while smoothing is on.
+const HOOK_RETRY_MS: u64 = 1000;
+
 /// The crate version, reported in the control block's heartbeat.
 const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -53,12 +61,12 @@ struct State {
     smoothed: AtomicU64,
     /// Host interfaces hooked.
     hooks_installed: AtomicU32,
-    /// `GetGenericInterface`'s table entry while hooked (restored in `Cleanup`), and its original.
-    get_interface_entry: AtomicPtr<*mut c_void>,
+    /// The context's `GetGenericInterface` (slot 0 of its table, read in `Init`, never patched).
     get_interface_original: AtomicUsize,
-    /// Pose-update originals the detours call through, one per hook index.
+    /// Pose-update originals the detours call through, one per hook index. Stored before the table entry is
+    /// patched, so a pose that reaches a detour always finds its original.
     pose_originals: [AtomicUsize; MAX_HOOKS],
-    /// `IVRDriverContext*`, to fetch the hosts lazily (the first `GetGenericInterface` may precede them).
+    /// `IVRDriverContext*`, to fetch the hosts when smoothing is first turned on.
     context: AtomicPtr<c_void>,
     /// `IVRDriverLog`, when the host gave us one.
     log: AtomicPtr<c_void>,
@@ -78,7 +86,9 @@ struct Setup {
     control: Option<Mapping>,
     /// `GetTickCount64()` at the last attempt to open it (retry about once a second).
     last_open_attempt_ms: u64,
-    /// Patched vtable entries to restore: (entry address, the detour we wrote), for the hosts and `GetGenericInterface`.
+    /// `GetTickCount64()` at the last attempt to hook the hosts (0: never).
+    last_hook_attempt_ms: u64,
+    /// Patched vtable entries to restore: (entry address, the detour we wrote).
     patched: Vec<(usize, usize)>,
 }
 
@@ -129,12 +139,11 @@ impl State {
             poses: AtomicU64::new(0),
             smoothed: AtomicU64::new(0),
             hooks_installed: AtomicU32::new(0),
-            get_interface_entry: AtomicPtr::new(ptr::null_mut()),
             get_interface_original: AtomicUsize::new(0),
             pose_originals: [ORIGINAL; MAX_HOOKS],
             context: AtomicPtr::new(ptr::null_mut()),
             log: AtomicPtr::new(ptr::null_mut()),
-            setup: Mutex::new(Setup { control: None, last_open_attempt_ms: 0, patched: Vec::new() }),
+            setup: Mutex::new(Setup { control: None, last_open_attempt_ms: 0, last_hook_attempt_ms: 0, patched: Vec::new() }),
             clock: UnsafeCell::new(None),
         }
     }
@@ -150,12 +159,22 @@ impl State {
 
 static STATE: State = State::new();
 
+/// The control block's name (`CONTROL_NAME`), NUL-terminated UTF-16, unless a test chose another.
+static CONTROL_NAME_OVERRIDE: Mutex<Option<Vec<u16>>> = Mutex::new(None);
+
+/// Tests only: the driver opens the control block under `name` instead of `Local\OrbitersSmoothTracking`, so a test
+/// never reaches the block of an Orbiters - N4N0 running on the same computer.
+#[doc(hidden)]
+pub fn use_control_name_for_tests(name: &str) {
+    *CONTROL_NAME_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = Some(orbiters_smooth::win::wide(name));
+}
+
 /// The pose hook for one host index: copy the pose, smooth it, call the host's original. `extern "system"` is the
 /// x64 Windows convention C++ methods use; `this` comes first. Never unwinds, never blocks, allocates nothing.
 extern "system" fn detour<const INDEX: usize>(this: *mut c_void, device: u32, pose: *const DriverPose, pose_size: u32) {
     let original: Option<PoseUpdatedFn> = {
         let bits = STATE.pose_originals[INDEX].load(Ordering::Acquire);
-        // SAFETY: a function pointer this crate stored when it patched the table; never null once set.
+        // SAFETY: a function pointer this crate stored before it patched the table; never null once set.
         (bits != 0).then(|| unsafe { std::mem::transmute::<usize, PoseUpdatedFn>(bits) })
     };
     let _ = catch_unwind(AssertUnwindSafe(|| {
@@ -186,7 +205,8 @@ extern "system" fn detour<const INDEX: usize>(this: *mut c_void, device: u32, po
 }
 
 /// `this` is a host object; patch slot [`HOST_POSE_UPDATED_SLOT`] of its table to `detour::<INDEX>`, keeping the
-/// original in `STATE.pose_originals[INDEX]`. Does nothing when already pointing at one of our detours.
+/// original in `STATE.pose_originals[INDEX]` (stored first: poses flow on other threads while this runs). Does
+/// nothing when already pointing at one of our detours.
 ///
 /// SAFETY: `host` must be a live C++ object whose first word is its function table.
 unsafe fn hook_host(setup: &mut Setup, host: *mut c_void, index: usize, detour_ptr: usize) -> bool {
@@ -195,13 +215,13 @@ unsafe fn hook_host(setup: &mut Setup, host: *mut c_void, index: usize, detour_p
     }
     let entry = vtable_entry(host, HOST_POSE_UPDATED_SLOT);
     let current = *entry as usize;
-    if is_our_pose_detour(current) {
+    if current == 0 || is_our_pose_detour(current) {
         return false; // This table (shared by every host of this version) is already hooked.
     }
+    STATE.pose_originals[index].store(current, Ordering::Release);
     if !patch_entry(entry, detour_ptr) {
         return false;
     }
-    STATE.pose_originals[index].store(current, Ordering::Release);
     setup.patched.push((entry as usize, detour_ptr));
     true
 }
@@ -214,8 +234,9 @@ unsafe fn vtable_entry(object: *mut c_void, slot: usize) -> *mut *mut c_void {
     vtable.add(slot)
 }
 
-/// Writes `value` into a function-table slot, making the page writable around the write and putting its protection
-/// back. Returns whether it succeeded.
+/// Writes `value` into a function-table slot (one aligned pointer-sized store, so a thread calling through it sees
+/// the old function or the new one), making the page writable around the write and putting its protection back.
+/// Returns whether it succeeded.
 ///
 /// SAFETY: `entry` must be a writable-after-`VirtualProtect` table slot.
 unsafe fn patch_entry(entry: *mut *mut c_void, value: usize) -> bool {
@@ -224,7 +245,7 @@ unsafe fn patch_entry(entry: *mut *mut c_void, value: usize) -> bool {
     if VirtualProtect(entry as *const c_void, size, PAGE_READWRITE, &mut old) == 0 {
         return false;
     }
-    *entry = value as *mut c_void;
+    std::ptr::write_volatile(entry, value as *mut c_void);
     let mut back = 0u32;
     // Tables sit in executable, read-only pages; restore whatever protection the loader gave them.
     VirtualProtect(entry as *const c_void, size, old, &mut back);
@@ -248,7 +269,7 @@ fn is_our_pose_detour(ptr: usize) -> bool {
     pose_detours().contains(&ptr)
 }
 
-/// `GetGenericInterface(version)` through the saved context, calling the original if we hooked it.
+/// `GetGenericInterface(version)` through the saved context.
 ///
 /// SAFETY: a valid, NUL-terminated `version`.
 unsafe fn get_interface(version: &CStr) -> *mut c_void {
@@ -261,10 +282,12 @@ unsafe fn get_interface(version: &CStr) -> *mut c_void {
     call(context, version.as_ptr(), ptr::null_mut())
 }
 
-/// Hooks whichever server-driver hosts the context has (both share the one pose-update table entry we care about).
+/// Hooks whichever server-driver hosts the context has. Every driver's host of one version is an object of the same
+/// class, so patching the table of the one we are given puts the hook between all of them and SteamVR.
 ///
-/// SAFETY: called from `Init` or the `GetGenericInterface` detour, with the context set.
+/// SAFETY: called from `Init` or `RunFrame`, with the context set.
 unsafe fn install_host_hooks(setup: &mut Setup) {
+    setup.last_hook_attempt_ms = tick_ms().max(1);
     let detours = pose_detours();
     let mut hooked = STATE.hooks_installed.load(Ordering::Relaxed);
     for (index, version) in [SERVER_DRIVER_HOST_006, SERVER_DRIVER_HOST_005].into_iter().enumerate() {
@@ -274,9 +297,7 @@ unsafe fn install_host_hooks(setup: &mut Setup) {
         }
     }
     STATE.hooks_installed.store(hooked, Ordering::Relaxed);
-    if STATE.log.load(Ordering::Acquire).is_null() {
-        STATE.log.store(get_interface(DRIVER_LOG), Ordering::Release);
-    }
+    log_line(&format!("Orbiters smoothing driver {DRIVER_VERSION}: smoothing turned on, {hooked} host hook(s) installed"));
 }
 
 /// A line in SteamVR's `vrserver.txt`, prefixed with the driver name, when the host gave us a log. Best effort.
@@ -295,33 +316,6 @@ fn log_line(message: &str) {
     }
 }
 
-/// The `GetGenericInterface` detour: call the original, and the first time the server-driver host appears, hook it.
-extern "system" fn get_interface_detour(this: *mut c_void, version: *const c_char, error: *mut i32) -> *mut c_void {
-    let original: Option<GetGenericInterfaceFn> = {
-        let bits = STATE.get_interface_original.load(Ordering::Acquire);
-        (bits != 0).then(|| unsafe { std::mem::transmute::<usize, GetGenericInterfaceFn>(bits) })
-    };
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        let result = match original {
-            // SAFETY: the context's own method, arguments passed straight through.
-            Some(call) => unsafe { call(this, version, error) },
-            None => ptr::null_mut(),
-        };
-        if !version.is_null() {
-            // SAFETY: SteamVR passes a NUL-terminated interface version string.
-            let asked = unsafe { CStr::from_ptr(version) };
-            if asked == SERVER_DRIVER_HOST_006 || asked == SERVER_DRIVER_HOST_005 {
-                if let Ok(mut setup) = STATE.setup.lock() {
-                    // SAFETY: the context is set; hooking reads live host objects.
-                    unsafe { install_host_hooks(&mut setup) };
-                }
-            }
-        }
-        result
-    }));
-    result.unwrap_or(ptr::null_mut())
-}
-
 // ---- IServerTrackedDeviceProvider, as a C++ object with its own table ----
 
 extern "system" fn provider_init(_this: *mut c_void, context: *mut c_void) -> i32 {
@@ -331,27 +325,19 @@ extern "system" fn provider_init(_this: *mut c_void, context: *mut c_void) -> i3
         }
         // SAFETY: `clock` is set here, once, before any pose flows.
         unsafe { *STATE.clock.get() = Some(Instant::now()) };
+        // SAFETY: `context` is a live `IVRDriverContext`; its first word is its table, `GetGenericInterface` slot 0.
+        // Only read: nothing of SteamVR's is patched until smoothing is turned on.
+        let get_interface_fn = unsafe { *vtable_entry(context, 0) as usize };
+        STATE.get_interface_original.store(get_interface_fn, Ordering::Release);
         STATE.context.store(context, Ordering::Release);
+        // SAFETY: the context is set.
+        STATE.log.store(unsafe { get_interface(DRIVER_LOG) }, Ordering::Release);
         let Ok(mut setup) = STATE.setup.lock() else {
-            return openvr::INIT_NONE;
+            return INIT_NONE;
         };
-        // Hook the context's own `GetGenericInterface` (slot 0) so we catch the hosts whenever they are requested,
-        // then try the hosts now in case they already exist.
-        // SAFETY: `context` is a live `IVRDriverContext`; its first word is its table.
-        unsafe {
-            let entry = vtable_entry(context, 0);
-            let current = *entry as usize;
-            if current != get_interface_detour as *const () as usize {
-                STATE.get_interface_original.store(current, Ordering::Release);
-                if patch_entry(entry, get_interface_detour as *const () as usize) {
-                    STATE.get_interface_entry.store(entry, Ordering::Release);
-                    setup.patched.push((entry as usize, get_interface_detour as *const () as usize));
-                }
-            }
-            install_host_hooks(&mut setup);
-        }
-        try_open_control(&mut setup, true);
-        log_line(&format!("Orbiters smoothing driver {DRIVER_VERSION}: {} host hook(s) installed", STATE.hooks_installed.load(Ordering::Relaxed)));
+        try_open_control(&mut setup);
+        log_line(&format!("Orbiters smoothing driver {DRIVER_VERSION}: loaded, waiting for Orbiters - N4N0 to turn smoothing on"));
+        refresh_from_control(&mut setup);
         INIT_NONE
     })
     .unwrap_or(INIT_INTERFACE_NOT_FOUND)
@@ -361,23 +347,20 @@ extern "system" fn provider_cleanup(_this: *mut c_void) {
     let _ = catch_unwind(|| {
         STATE.active.store(false, Ordering::Release);
         if let Ok(mut setup) = STATE.setup.lock() {
-            let get_interface = get_interface_detour as *const () as usize;
             let pose = pose_detours();
             for (entry_addr, detour_ptr) in setup.patched.drain(..) {
                 let entry = entry_addr as *mut *mut c_void;
-                let original = if detour_ptr == get_interface {
-                    STATE.get_interface_original.load(Ordering::Acquire)
-                } else {
-                    pose.iter().position(|&d| d == detour_ptr).map(|i| STATE.pose_originals[i].load(Ordering::Acquire)).unwrap_or(0)
-                };
+                let original = pose.iter().position(|&d| d == detour_ptr).map(|i| STATE.pose_originals[i].load(Ordering::Acquire)).unwrap_or(0);
                 if original != 0 {
                     // SAFETY: an entry this crate patched; restored only if it still holds our detour.
                     unsafe { restore_entry(entry, detour_ptr, original) };
                 }
             }
             setup.control = None;
+            setup.last_hook_attempt_ms = 0;
         }
         STATE.context.store(ptr::null_mut(), Ordering::Release);
+        STATE.get_interface_original.store(0, Ordering::Release);
         STATE.log.store(ptr::null_mut(), Ordering::Release);
         STATE.hooks_installed.store(0, Ordering::Relaxed);
     });
@@ -393,10 +376,10 @@ extern "system" fn provider_run_frame(_this: *mut c_void) {
             if setup.control.is_none() {
                 let now = tick_ms();
                 if now.saturating_sub(setup.last_open_attempt_ms) >= 1000 {
-                    try_open_control(&mut setup, false);
+                    try_open_control(&mut setup);
                 }
             }
-            refresh_from_control(&setup);
+            refresh_from_control(&mut setup);
         }
     });
 }
@@ -421,26 +404,22 @@ static PROVIDER_VTABLE: ProviderVtable = ProviderVtable {
 
 static PROVIDER: Object<ProviderVtable> = Object { vtable: &PROVIDER_VTABLE };
 
-/// Opens the control block if the app has made it. `initial` is the first attempt in `Init`.
-fn try_open_control(setup: &mut Setup, initial: bool) {
+/// Opens the control block if the app has made it (else `RunFrame` tries again a second later).
+fn try_open_control(setup: &mut Setup) {
     setup.last_open_attempt_ms = tick_ms();
-    let name = orbiters_smooth::win::wide(CONTROL_NAME);
-    match Mapping::open(&name) {
-        Ok(mapping) => {
-            let valid = mapping.block().is_valid();
-            setup.control = Some(mapping);
-            if !valid {
-                log_line("Orbiters smoothing: the control block is of another version; smoothing stays off");
-            }
+    let name = CONTROL_NAME_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| orbiters_smooth::win::wide(CONTROL_NAME));
+    if let Ok(mapping) = Mapping::open(&name) {
+        let valid = mapping.block().is_valid();
+        setup.control = Some(mapping);
+        if !valid {
+            log_line("Orbiters smoothing: the control block is of another version; smoothing stays off");
         }
-        Err(_) if initial => {} // The app may not have started yet; RunFrame retries.
-        Err(_) => {}
     }
 }
 
-/// Reads the app's settings into the lock-free cache and bumps the heartbeat. Smoothing goes inactive when the block
-/// is gone, invalid, disabled, or its owner process has exited.
-fn refresh_from_control(setup: &Setup) {
+/// Reads the app's settings into the lock-free cache, hooks the hosts the first time smoothing is on, and bumps the
+/// heartbeat. Smoothing goes inactive when the block is gone, invalid, disabled, or its owner process has exited.
+fn refresh_from_control(setup: &mut Setup) {
     let now = tick_ms();
     let Some(mapping) = setup.control.as_ref() else {
         STATE.active.store(false, Ordering::Release);
@@ -454,13 +433,23 @@ fn refresh_from_control(setup: &Setup) {
         }
     }
     let alive = owner_alive(block);
-    let active = block.is_valid() && alive && settings.map(|s| s.enabled).unwrap_or(false);
+    let wanted = block.is_valid() && alive && settings.map(|s| s.enabled).unwrap_or(false);
+    // Turned on: the hosts are hooked now (once; again a second later if none could be).
+    if wanted
+        && STATE.hooks_installed.load(Ordering::Relaxed) == 0
+        && (setup.last_hook_attempt_ms == 0 || now.saturating_sub(setup.last_hook_attempt_ms) >= HOOK_RETRY_MS)
+    {
+        // SAFETY: the context is set from `Init` until `Cleanup`, which runs under the same lock.
+        unsafe { install_host_hooks(setup) };
+    }
+    let active = wanted && STATE.hooks_installed.load(Ordering::Relaxed) > 0;
     let was = STATE.active.swap(active, Ordering::Release);
     if was && !active {
         for i in 0..MAX_DEVICES {
             STATE.filters.reset(i);
         }
     }
+    let Some(mapping) = setup.control.as_ref() else { return };
     let report = DriverReport {
         version: DRIVER_VERSION,
         hooks: STATE.hooks_installed.load(Ordering::Relaxed),
@@ -468,7 +457,7 @@ fn refresh_from_control(setup: &Setup) {
         poses: STATE.poses.load(Ordering::Relaxed),
         smoothed: STATE.smoothed.load(Ordering::Relaxed),
     };
-    block.report_driver(&report, now);
+    mapping.block().report_driver(&report, now);
 }
 
 /// Whether the process that owns the control block is still running (so a crashed app stops smoothing). An owner of

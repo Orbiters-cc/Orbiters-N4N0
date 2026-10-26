@@ -13,6 +13,8 @@ path = "src/main.rs"
 orbiters-update = { workspace = true, features = ["payload"] }
 # SteamVR's start of the app (its application manifest), set while SteamVR runs.
 orbiters-openvr = { workspace = true }
+# Tracking smoothing's SteamVR driver, which the app registers: an uninstall takes it out of SteamVR's list.
+orbiters-smooth = { path = "../orbiters-smooth" }
 serde_json = { workspace = true }
 orbiters-ui = { workspace = true }
 egui = { workspace = true }

@@ -11,9 +11,12 @@
 //! it has exited: smoothing lasts as long as the app that holds the [`Control`], so hold it in the long-lived process.
 //!
 //! [`install`] puts the driver where SteamVR finds it (`%LOCALAPPDATA%\Orbiters\SteamVR\drivers\orbiters_smooth`,
-//! registered in `openvrpaths.vrpath`). SteamVR loads drivers only when it starts, so installing or removing it takes
-//! effect at SteamVR's next start; and after SteamVR crashes it starts in Safe Mode, which turns add-on drivers like
-//! this one off until the person turns them on again (SteamVR, Settings, Startup / Shutdown, Manage Add-ons).
+//! registered in `openvrpaths.vrpath`). SteamVR loads drivers only when it starts, so the app registers it once, at
+//! its first start, and leaves it registered: loaded at every SteamVR start and doing nothing until the block says on,
+//! the driver then follows every change live (as OVR-SmoothTracking's, which its setup puts in SteamVR's own drivers
+//! folder). Only the very first registration, if SteamVR was already running, waits for SteamVR's next start. After
+//! SteamVR crashes it starts in Safe Mode, which turns add-on drivers like this one off until the person turns them
+//! on again (SteamVR, Settings, Startup / Shutdown, Manage Add-ons).
 
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
@@ -26,7 +29,7 @@ pub mod win;
 
 pub use control::{Control, Mapping};
 #[cfg(feature = "install")]
-pub use install::{install, installed, uninstall, Installation};
+pub use install::{install, installed, uninstall, AddOnState, Installation};
 
 /// The named memory the app creates and the driver opens (this Windows session's namespace).
 pub const CONTROL_NAME: &str = r"Local\OrbitersSmoothTracking";

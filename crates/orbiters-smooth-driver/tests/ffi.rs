@@ -1,7 +1,11 @@
 //! End to end over the real FFI: build fake SteamVR objects (an `IVRDriverContext` and an `IVRServerDriverHost`,
 //! each a C++ object with its own function table), hand them to the provider that `HmdDriverFactory` returns, and
-//! check that a pose sent through the host's now-patched table reaches the fake host's original smoothed — then
-//! that `Cleanup` puts the table back.
+//! check that it touches nothing while smoothing is off, hooks the host's table on the first frame smoothing is on
+//! (live, no restart), that a pose sent through the patched table reaches the fake host's original smoothed, that
+//! turning smoothing off passes poses on untouched, and that `Cleanup` puts the table back.
+//!
+//! The control block is one of the test's own (`use_control_name_for_tests`), never the one of an Orbiters - N4N0
+//! running on this computer.
 //!
 //! Runs on Windows only; the driver is Windows-only (it patches a vtable with `VirtualProtect`).
 #![cfg(target_os = "windows")]
@@ -93,11 +97,13 @@ fn host_pose_entry() -> usize {
 
 #[test]
 fn factory_init_hook_filter_and_cleanup() {
-    // The app side: a control block asking for strong smoothing on device 2.
-    let control = Control::open_or_create().expect("open control block");
+    // The app side: a control block of the test's own, smoothing off for now but strong on device 2.
+    let name = format!(r"Local\OrbitersSmoothFfiTest-{}", std::process::id());
+    driver_orbiters_smooth::use_control_name_for_tests(&name);
+    let control = Control::open_or_create_named(&name).expect("open control block");
     control.set_all(&[0.0; MAX_DEVICES]);
     control.set_strength(2, 1.0);
-    control.set_enabled(true);
+    control.set_enabled(false);
 
     // SteamVR asks the factory for the provider.
     let provider = unsafe { HmdDriverFactory(c"IServerTrackedDeviceProvider_004".as_ptr(), std::ptr::null_mut()) };
@@ -111,14 +117,26 @@ fn factory_init_hook_filter_and_cleanup() {
 
     let unhooked = host_pose_entry();
 
-    // Init hooks the context's GetGenericInterface and the host it returns.
+    // Init with smoothing off: nothing of SteamVR's is patched, not even the context's own table.
+    let context_entry = unsafe { *(*(&CONTEXT_OBJECT as *const _ as *const *const usize)) };
     let init = unsafe { (vtable.init)(provider, &CONTEXT_OBJECT as *const _ as *mut c_void) };
     assert_eq!(init, 0, "Init returns VRInitError_None");
-    assert!(ASKED.load(Ordering::Relaxed) > 0, "Init asked the context for the host");
-    assert_ne!(host_pose_entry(), unhooked, "the host's pose-update slot now points at the driver");
+    for _ in 0..3 {
+        unsafe { (vtable.run_frame)(provider) };
+    }
+    assert_eq!(host_pose_entry(), unhooked, "off: the host's table is untouched");
+    assert_eq!(unsafe { *(*(&CONTEXT_OBJECT as *const _ as *const *const usize)) }, context_entry, "and so is the context's");
+    let status = control.driver_heartbeat().expect("the driver beats while off");
+    assert_eq!(status.hooks, 0);
+    send_pose(2, DriverPose::at([4.0, 0.0, 0.0], Quaternion::IDENTITY));
+    assert_eq!(LAST_POSE.lock().unwrap().unwrap().1.vec_position, [4.0, 0.0, 0.0], "a pose goes to SteamVR as it came");
 
-    // RunFrame reads the control block and makes smoothing active.
+    // The app turns smoothing on: the next frame hooks the host (asked through the context) and smooths.
+    control.set_enabled(true);
     unsafe { (vtable.run_frame)(provider) };
+    assert!(ASKED.load(Ordering::Relaxed) > 0, "the driver asked the context for the host");
+    assert_ne!(host_pose_entry(), unhooked, "the host's pose-update slot now points at the driver");
+    assert_eq!(control.driver_heartbeat().unwrap().hooks, 1, "the heartbeat says it hooked the host");
 
     // A device the app did not mark (strength 0) passes through bit for bit.
     send_pose(0, DriverPose::at([3.0, 0.0, 0.0], Quaternion::IDENTITY));
@@ -138,6 +156,19 @@ fn factory_init_hook_filter_and_cleanup() {
     assert_eq!(device, 2);
     assert!(pose.vec_position[0] < 1.0, "the jump is eased, not passed as 1.0: {}", pose.vec_position[0]);
     assert_eq!(pose.vec_velocity, [0.0, 0.0, 0.0], "prediction velocity damped at full strength");
+
+    // Turned off live: the hook stays but passes every pose on untouched; on again, it smooths again.
+    control.set_enabled(false);
+    unsafe { (vtable.run_frame)(provider) };
+    let mut fast = DriverPose::at([2.0, 0.0, 0.0], Quaternion::IDENTITY);
+    fast.vec_velocity = [5.0, 0.0, 0.0];
+    send_pose(2, fast);
+    let (_, pose) = LAST_POSE.lock().unwrap().unwrap();
+    assert_eq!((pose.vec_position, pose.vec_velocity), ([2.0, 0.0, 0.0], [5.0, 0.0, 0.0]), "off: untouched");
+    control.set_enabled(true);
+    unsafe { (vtable.run_frame)(provider) };
+    send_pose(2, fast);
+    assert_eq!(LAST_POSE.lock().unwrap().unwrap().1.vec_velocity, [0.0, 0.0, 0.0], "on again: damped");
 
     // Cleanup restores the host's table.
     unsafe { (vtable.cleanup)(provider) };

@@ -90,7 +90,7 @@ pub trait Host: Send + Sync + 'static {
     }
     /// The avatar's Walk boost radial moved (`N4N0/WalkBoost`): the strength, 0 to 1.
     fn walk_boost(&self, _strength: f32) {}
-    /// SteamVR's tracking smoothing here: what its driver does now ("Smoothing", "Restart SteamVR to start it"), or
+    /// SteamVR's tracking smoothing here: what its driver does now ("Smoothing your devices now", "Ready: smoothing starts with SteamVR"), or
     /// `None` where the app cannot smooth SteamVR's tracking (the settings' `tracking` say what is chosen).
     fn smoothing(&self) -> Option<String> {
         None

@@ -893,7 +893,7 @@ fn tracking(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
     top(ui, cx, "Tracking", &tracking.note, acts);
     let sub = "Less jitter, a little more lag: SteamVR's prediction is damped and each device's motion eased";
     section(ui, cx, 1, icons::VIRTUAL_REALITY, "Smooth tracking", Some(sub), |ui| {
-        widgets::field(ui, "Smoothing", Some("Orbiters - N4N0's SteamVR driver: SteamVR loads it when it starts"), 48.0, |ui| {
+        widgets::field(ui, "Smoothing", Some("Orbiters - N4N0's SteamVR driver: on, off and strengths at once"), 48.0, |ui| {
             let mut on = tracking.on;
             if widgets::toggle(ui, "orbiters-home-tracking", &mut on) {
                 acts.push(Act::Press(Target::TrackingSwitch));

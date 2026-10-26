@@ -3718,6 +3718,7 @@ dependencies = [
  "eframe",
  "egui",
  "orbiters-openvr",
+ "orbiters-smooth",
  "orbiters-ui",
  "orbiters-update",
  "png",

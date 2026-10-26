@@ -26,6 +26,7 @@ pub const ERROR_INVALID_PARAMETER: u32 = 87;
 pub const ERROR_ALREADY_EXISTS: u32 = 183;
 
 pub const SYNCHRONIZE: u32 = 0x0010_0000;
+pub const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 pub const WAIT_OBJECT_0: u32 = 0;
 
 pub const GET_MODULE_HANDLE_EX_FLAG_PIN: u32 = 0x1;
@@ -77,6 +78,29 @@ extern "system" {
     pub fn OpenProcess(access: u32, inherit: i32, pid: u32) -> HANDLE;
     pub fn WaitForSingleObject(handle: HANDLE, milliseconds: u32) -> u32;
     pub fn GetModuleHandleExW(flags: u32, name: *const u16, module: *mut HANDLE) -> i32;
+    pub fn GetProcessTimes(process: HANDLE, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
+}
+
+/// When process `pid` started, if it runs and may be asked (`GetProcessTimes`).
+pub fn process_started(pid: u32) -> Option<std::time::SystemTime> {
+    // SAFETY: a query-only handle, closed before returning; FILETIMEs are written as 64-bit counts.
+    let creation = unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle == 0 {
+            return None;
+        }
+        let (mut creation, mut exit, mut kernel, mut user) = (0u64, 0u64, 0u64, 0u64);
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) != 0;
+        CloseHandle(handle);
+        if !ok {
+            return None;
+        }
+        creation
+    };
+    // FILETIME: 100 ns steps since 1601-01-01.
+    const UNIX_EPOCH_AS_FILETIME: u64 = 116_444_736_000_000_000;
+    let since_epoch = creation.checked_sub(UNIX_EPOCH_AS_FILETIME)?;
+    std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_nanos(since_epoch.saturating_mul(100)))
 }
 
 /// `name` as a NUL-terminated UTF-16 string.
@@ -94,4 +118,18 @@ pub fn tick_ms() -> u64 {
 pub fn current_pid() -> u32 {
     // SAFETY: no arguments, cannot fail.
     unsafe { GetCurrentProcessId() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn this_process_started_a_moment_ago() {
+        let started = process_started(current_pid()).expect("this process can be asked");
+        let now = std::time::SystemTime::now();
+        assert!(started <= now, "{started:?} is after {now:?}");
+        assert!(now.duration_since(started).unwrap() < std::time::Duration::from_secs(3600), "a test process is not an hour old");
+        assert_eq!(process_started(0xFFFF_FFF0), None, "no such process");
+    }
 }

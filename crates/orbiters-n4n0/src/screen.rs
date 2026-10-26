@@ -947,13 +947,6 @@ impl N4n0 {
         self.publish();
     }
 
-    /// Closes N4N0's menu wherever it shows: a 3D picture starts, and the menu would be in it.
-    pub fn hide_menu(self: &Shared) {
-        let effects = close_menu(&mut self.orb.lock().unwrap());
-        self.screen_effects(effects);
-        self.publish();
-    }
-
     /// N4N0 listens to one sentence (as a hand on N4N0 does), unless it already listens.
     pub(crate) fn menu_listen(self: &Shared) {
         let settings = self.with_settings(|s| s.orb.clone());

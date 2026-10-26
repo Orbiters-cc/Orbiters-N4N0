@@ -245,8 +245,8 @@ impl super::Controller {
             anyhow::bail!("Move VRChat's camera once so Orbiters knows where it is, then try again.");
         };
         let pose: [f32; 6] = pose.try_into().expect("six values");
-        // N4N0's menu stands in front of its owner: it closes, out of the picture.
-        self.n4n0.hide_menu();
+        // N4N0's menu and link card stand in front of their owner: while the capture kit records (N4N0/Capture/Record),
+        // the avatar hides them on its owner's client, out of the picture, and shows them again after it.
         self.burst.lock().unwrap().recording = true;
         if let Err(e) = self.start_capture(false) {
             self.burst.lock().unwrap().recording = false;

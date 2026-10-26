@@ -46,7 +46,7 @@ the frames are VRChat's camera's own picture, shared over Spout before anything 
 
 In VR it also offers **walk boost**: while you push the stick you walk with, your play space moves along with you, so
 you cover more ground in VRChat. The chaperone stays on your room's walls, and the play space goes back when you
-change world. Its strength is a slider in the SteamVR tab, in Settings, and in N4N0's Walk boost radial on your avatar.
+change world or recenter. Its strength is a slider in the SteamVR tab, in Settings, and in N4N0's Walk boost radial on your avatar.
 **States** keep how an avatar is: every parameter OSC can set (GoGoLoco's pose and the avatar's size only when the state
 says so, N4N0's own never), saved under a name from Home's States page or N4N0's menu, and put back over OSC in one
 press. One state per avatar can be its default, put back after each world join and each switch to that avatar. They

@@ -531,7 +531,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         presenter.show(&overlay, thumb, &icon, 128, 128);
     }
     let mut actions = actions::Actions::load(&steamvr);
-    let walk = walk::WalkBoost::new(actions.walk, actions.failed.clone());
+    let mut walk = walk::WalkBoost::new(actions.walk, actions.failed.clone());
+    walk.set_frame(steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0).map(|hz| Duration::from_secs_f32(1.0 / hz)));
     let mut state = ui::OverlayUi::default();
     state.walk_unavailable = walk.unavailable().map(str::to_string);
     let world = World::new(&overlay)?;
@@ -562,7 +563,6 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         if client.should_close() {
             return Ok(Ended::Closed);
         }
-        let mut play_space_changed = false;
         while let Some(e) = steamvr.poll_event() {
             match e.event_type {
                 vr::event::QUIT => {
@@ -575,21 +575,14 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 | vr::event::TRACKED_DEVICE_DEACTIVATED
                 | vr::event::TRACKED_DEVICE_ROLE_CHANGED
                 | vr::event::PROPERTY_CHANGED => poses.forget(&e),
-                vr::event::ROOM_SETUP_STARTING => t.walk.room_setup_started(&steamvr),
-                vr::event::ROOM_SETUP_COMMITTED => {
-                    t.walk.room_setup_ended();
-                    play_space_changed = true;
+                _ => {
+                    // A recenter, room setup, another universe: walk boost ends its carry; its own previews' echoes
+                    // change nothing.
+                    if let Some(event) = walk::PlaySpaceEvent::from_event(&e) {
+                        t.walk.play_space_event(&steamvr, event);
+                    }
                 }
-                vr::event::CHAPERONE_UNIVERSE_CHANGED
-                | vr::event::SEATED_ZERO_POSE_RESET
-                | vr::event::STANDING_ZERO_POSE_RESET
-                | vr::event::CHAPERONE_FLUSH_CACHE => play_space_changed = true,
-                _ => {}
             }
-        }
-        if play_space_changed {
-            // A recenter or a saved change: walk boost carries on from it rather than writing the old setup back.
-            t.walk.play_space_changed(&steamvr);
         }
         // Laser-pointer input: SteamVR's mouse coordinates start at the bottom left.
         while let Some(e) = overlay.poll_event(main) {

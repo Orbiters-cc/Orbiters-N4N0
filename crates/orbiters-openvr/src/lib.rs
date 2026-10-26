@@ -235,6 +235,11 @@ impl Event {
         (f32::from_bits(w[0]), f32::from_bits(w[1]))
     }
 
+    /// `VREvent_Chaperone_t`: the tracking universe before and after (`ChaperoneUniverseHasChanged`).
+    pub fn chaperone_universes(&self) -> (u64, u64) {
+        (self.data[0], self.data[1])
+    }
+
     fn words(&self) -> [u32; 12] {
         let mut out = [0u32; 12];
         for (i, d) in self.data.iter().enumerate() {

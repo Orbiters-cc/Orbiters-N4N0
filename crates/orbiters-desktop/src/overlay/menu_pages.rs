@@ -1,25 +1,35 @@
-//! `orbiters-desktop --orb-menu <out>`: N4N0's menu pages as files.
+//! `orbiters-desktop --orb-menu <out> [--theme <theme.json>] [--strings <strings.json>]`: N4N0's menu pages as files
+//! (contracts `Docs/orb.md`, Pages and layout; Menu themes and translations).
 //!
 //! - `N4N0 screen pages.png`: the picture of every page's unchanging part, one 1024 × 576 slice per page (slice 0 is
-//!   empty; slice `n` is page `n`), top first: Toolkit imports it as the projected screen's page texture array.
+//!   the back; slice `n` is page `n`), top first: Toolkit imports it as the projected screen's page texture array.
+//!   Without `--theme`, Orbiters' own look, and `N4N0 screen pages retro.png` the retro one; with `--theme`, only this
+//!   file, in the theme's style and colours.
 //! - `N4N0 screen layout.png`: where each page's changing parts go, a row per page, for the screen's shader (see
-//!   [`layout_table`]).
-//! - `menu-<page>.png`: each page as the SteamVR overlay shows it with sample content, for reviewing the design;
-//!   `bank-<page>.bin`: what the avatar's screen is sent for the same page (its 744 bytes, 72-byte thumbnails), to draw
-//!   it with the screen's shader and compare; `bank-results-128.bin`, the results page with 128-byte thumbnails (1024
-//!   bytes).
+//!   [`layout_table`]; the same whatever the theme and language).
+//! - Without `--theme`: `menu-<page>.png`: each page as the SteamVR overlay shows it with sample content, for reviewing
+//!   the design; `bank-<page>.bin`: what the avatar's screen is sent for the same page (its 744 bytes, 72-byte
+//!   thumbnails), to draw it with the screen's shader and compare; `bank-results-128.bin`, the results page with
+//!   128-byte thumbnails (1024 bytes).
+//!
+//! `--strings` draws the pages' texts in another language (missing keys stay English); `orbiters-desktop
+//! --orb-menu-strings <file>` writes the English base with each key's `max` ([`run_strings`]).
 
 use super::menu_retro;
-use super::menu_ui::{self, View};
+use super::menu_ui::{self, Skin, View};
 use super::Canvas;
+use anyhow::{anyhow, bail};
 use egui::{pos2, ColorImage, TextureHandle, TextureId, TextureOptions};
+use orbiters_core::settings::MenuLook;
 use orbiters_orb::menu::layout::{self, ScreenPage, MAX_ELEMENTS, MAX_SLOTS, PICTURES};
+use orbiters_orb::menu::strings::{Strings, Text};
+use orbiters_orb::menu::theme::Theme;
 use orbiters_orb::menu::{
     screen, Call, Card, Contact, KeyboardLayout, Keys, Light, Media, Menu, Page, Pages, PhotoLength, StateRow, Target, Tracking, Volume, WorldVideo,
 };
 use orbiters_orb::picture;
 use orbiters_orb::youtube::{Results, Video};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const WIDTH: u32 = layout::WIDTH as u32;
 pub const HEIGHT: u32 = layout::HEIGHT as u32;
@@ -128,17 +138,21 @@ fn paint(canvas: &mut Canvas, draw: impl Fn(&egui::Painter)) -> Vec<u8> {
 }
 
 /// The page texture: every page's unchanging part, slice by slice, straight alpha, in Orbiters' own look or the retro
-/// one (`retro`: the avatar's retro screen has these).
-pub fn page_pictures(retro: bool) -> Vec<u8> {
+/// one (`retro`: the avatar's retro screen has these), in `skin`'s colours and texts.
+pub fn page_pictures(retro: bool, skin: &Skin) -> Vec<u8> {
     let mut canvas = Canvas::new(WIDTH, HEIGHT);
     let slice = (WIDTH * HEIGHT * 4) as usize;
     let mut out = vec![0u8; slice * SLICES];
     // Slice 0: the back, what the screen shows from behind.
-    let rgba = paint(&mut canvas, |p| if retro { menu_retro::draw_back(p, pos2(0.0, 0.0)) } else { menu_ui::draw_back(p, pos2(0.0, 0.0)) });
+    let rgba = paint(&mut canvas, |p| if retro { menu_retro::draw_back(p, pos2(0.0, 0.0), skin) } else { menu_ui::draw_back(p, pos2(0.0, 0.0), skin) });
     out[..slice].copy_from_slice(&unpremultiply(&rgba));
     for page in ScreenPage::ALL {
         let l = layout::layout(page);
-        let rgba = paint(&mut canvas, |p| if retro { menu_retro::draw_chrome(p, pos2(0.0, 0.0), &l) } else { menu_ui::draw_chrome(p, pos2(0.0, 0.0), &l) });
+        let rgba =
+            paint(
+                &mut canvas,
+                |p| if retro { menu_retro::draw_chrome(p, pos2(0.0, 0.0), &l, skin) } else { menu_ui::draw_chrome(p, pos2(0.0, 0.0), &l, skin) },
+            );
         let at = page as usize * slice;
         out[at..at + slice].copy_from_slice(&unpremultiply(&rgba));
     }
@@ -381,12 +395,141 @@ pub(crate) fn sample_states() -> Vec<StateRow> {
     .collect()
 }
 
+/// What `--orb-menu` was asked for.
+struct Options {
+    out: PathBuf,
+    theme: Option<Theme>,
+    strings: Strings,
+}
+
+/// Reads `<out> [--theme <file>] [--strings <file>]` (in any order), and the files, telling what they leave out.
+fn options(args: &[String]) -> anyhow::Result<Options> {
+    let (mut out, mut theme, mut strings) = (None, None, None);
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--theme" | "--strings" => {
+                let path = args.next().ok_or_else(|| anyhow!("{arg} needs a file: {arg} <file.json>"))?;
+                if arg == "--theme" {
+                    let (t, warnings) = Theme::load(Path::new(path)).map_err(|e| anyhow!("--theme: {e}"))?;
+                    for w in warnings {
+                        eprintln!("warning: {path}: {w}");
+                    }
+                    theme = Some(t);
+                } else {
+                    let parsed = Strings::load(Path::new(path)).map_err(|e| anyhow!("--strings: {e}"))?;
+                    for w in parsed.warnings.iter().cloned().chain(too_long(&parsed.strings)) {
+                        eprintln!("warning: {path}: {w}");
+                    }
+                    strings = Some(parsed.strings);
+                }
+            }
+            flag if flag.starts_with("--") => bail!("unknown option {flag} (--orb-menu <out> [--theme <theme.json>] [--strings <strings.json>])"),
+            path if out.is_none() => out = Some(PathBuf::from(path)),
+            extra => bail!("one output folder only ({extra:?} is a second)"),
+        }
+    }
+    Ok(Options { out: out.unwrap_or_else(|| PathBuf::from("orb-menu")), theme, strings: strings.unwrap_or_else(|| Strings::english().clone()) })
+}
+
+/// Each key's `max`: the characters that fit its places ([`menu_ui::max_length`]).
+pub fn max_lengths() -> Vec<(Text, usize)> {
+    let places = menu_ui::all_places();
+    Text::ALL.iter().map(|&t| (t, menu_ui::max_length(t, &places))).collect()
+}
+
+/// The texts of `strings` longer than their key's `max` (they are drawn smaller to fit).
+fn too_long(strings: &Strings) -> Vec<String> {
+    max_lengths()
+        .into_iter()
+        .filter_map(|(t, max)| {
+            let n = strings.given(t)?.chars().count();
+            (n > max).then(|| format!("{:?} has {n} characters, more than its {max}: it is drawn smaller to fit", t.key()))
+        })
+        .collect()
+}
+
+/// The avatar's screen's colours for `theme` (`N4N0 screen colors.json`), by the screen shader's property names: what it
+/// draws the changing parts with (texts, a hovered or chosen element, a picture's place, the retro look's dim lines and
+/// hot colour), as the page pictures were drawn, and the theme's own `screen` colours (the projected plate and edge)
+/// passed through, with its glow. The base themes give the shader's own defaults (Orbiters' look) and Toolkit's retro
+/// colours.
+pub fn screen_colors(theme: &Theme) -> String {
+    let skin = Skin::new(theme, Strings::english().clone());
+    let retro = theme.style == MenuLook::Retro;
+    let hex = |c: egui::Color32| format!("#{:02X}{:02X}{:02X}", c.r(), c.g(), c.b());
+    let hexa = |c: [u8; 4]| format!("#{:02X}{:02X}{:02X}{:02X}", c[0], c[1], c[2], c[3]);
+    let (pal, rp) = (&skin.palette, &skin.retro);
+    let colours = [
+        ("_Card", hex(if retro { rp.bg } else { pal.card })),
+        ("_Text", hex(if retro { rp.text } else { pal.text })),
+        ("_Text2", hex(if retro { rp.text2 } else { pal.muted })),
+        ("_Accent", hex(if retro { rp.line } else { pal.accent })),
+        ("_Placeholder", hex(if retro { rp.panel } else { pal.raised })),
+        ("_Dim", hex(rp.dim)),
+        ("_Hot", hex(rp.hot)),
+        ("_Plate", hexa(theme.screen.tint)),
+        ("_Edge", hexa(theme.screen.edge)),
+    ];
+    let mut out = format!("{{\n  \"schema\": 1,\n  \"style\": \"{}\",\n  \"shader\": {{\n", if retro { "retro" } else { "modern" });
+    for (i, (name, value)) in colours.iter().enumerate() {
+        out += &format!("    \"{name}\": \"{value}\"{}\n", if i + 1 < colours.len() { "," } else { "" });
+    }
+    out += &format!("  }},\n  \"glow\": {}\n}}\n", theme.screen.glow);
+    out
+}
+
+/// Draws with `draw`, then tells on the error stream which texts were drawn smaller to fit their places.
+fn noting_shrunk<T>(draw: impl FnOnce() -> T) -> T {
+    menu_ui::watch_shrinking();
+    let out = draw();
+    for (text, scale) in menu_ui::shrunk() {
+        eprintln!("note: {text:?} is drawn at {:.0} % of its size to fit its place", scale * 100.0);
+    }
+    out
+}
+
+/// The English base strings file, with each key's `max`: what `--orb-menu-strings` writes.
+pub fn base_strings() -> String {
+    let max = max_lengths();
+    Strings::english().to_json(Some(&|t: Text| max.iter().find(|(k, _)| *k == t).map_or(0, |(_, m)| *m)))
+}
+
+/// `orbiters-desktop --orb-menu-strings <file>`: the English base strings file, with each key's `max`.
+pub fn run_strings(args: &[String]) -> anyhow::Result<()> {
+    let path = PathBuf::from(args.first().ok_or_else(|| anyhow!("--orb-menu-strings needs a file to write: --orb-menu-strings <file.json>"))?);
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, base_strings())?;
+    println!("{}", path.display());
+    Ok(())
+}
+
 pub fn run(args: &[String]) -> anyhow::Result<()> {
-    let out = Path::new(args.first().map(String::as_str).unwrap_or("orb-menu"));
+    let Options { out, theme, strings } = options(args)?;
+    let out = out.as_path();
     std::fs::create_dir_all(out)?;
+    // Japanese (or Chinese, Korean) texts in their own language's font, whatever this computer's locale.
+    orbiters_ui::fonts::prefer_language(strings.language());
+    if let Some(theme) = theme {
+        // A theme's pages only, under the one name the avatar's screen is given, and the layout.
+        let skin = Skin::new(&theme, strings);
+        let path = out.join("N4N0 screen pages.png");
+        write_png(&path, WIDTH, HEIGHT * SLICES as u32, &noting_shrunk(|| page_pictures(theme.style == MenuLook::Retro, &skin)))?;
+        println!("{}", path.display());
+        let path = out.join("N4N0 screen layout.png");
+        write_png(&path, TABLE_WIDTH as u32, SLICES as u32, &layout_table())?;
+        println!("{}", path.display());
+        let path = out.join("N4N0 screen colors.json");
+        std::fs::write(&path, screen_colors(&theme))?;
+        println!("{}", path.display());
+        return Ok(());
+    }
+    let skin = &Skin::standard(strings);
     for (retro, name) in [(false, "N4N0 screen pages.png"), (true, "N4N0 screen pages retro.png")] {
         let path = out.join(name);
-        write_png(&path, WIDTH, HEIGHT * SLICES as u32, &page_pictures(retro))?;
+        write_png(&path, WIDTH, HEIGHT * SLICES as u32, &noting_shrunk(|| page_pictures(retro, skin)))?;
         println!("{}", path.display());
     }
     let path = out.join("N4N0 screen layout.png");
@@ -411,7 +554,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let art_dots = canvas.ctx().load_texture("art-dots", menu_retro::dots(&art_image, 1), TextureOptions::NEAREST);
     let art_texture = canvas.ctx().load_texture(SAMPLE_ART, art_image, TextureOptions::LINEAR);
     for (retro, name) in [(false, "menu-back.png"), (true, "menu-back-retro.png")] {
-        let rgba = paint(&mut canvas, |p| if retro { menu_retro::draw_back(p, pos2(0.0, 0.0)) } else { menu_ui::draw_back(p, pos2(0.0, 0.0)) });
+        let rgba = paint(&mut canvas, |p| if retro { menu_retro::draw_back(p, pos2(0.0, 0.0), skin) } else { menu_ui::draw_back(p, pos2(0.0, 0.0), skin) });
         let path = out.join(name);
         write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
         println!("{}", path.display());
@@ -424,7 +567,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
             id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).and_then(|i| thumbs.get(i)).map(|t| t.id())
         };
-        let modern = paint(&mut canvas, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &picture, time: 0.4 }));
+        let modern = paint(&mut canvas, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &picture, time: 0.4, skin }));
         let path = out.join(format!("menu-{}.png", page.name()));
         write_png(&path, WIDTH, HEIGHT, &unpremultiply(&modern))?;
         println!("{}", path.display());
@@ -434,7 +577,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
             id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).and_then(|i| dots.get(i)).map(|t| t.id())
         };
-        let rgba = paint(&mut canvas, |p| menu_retro::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &dotted, time: 0.4 }));
+        let rgba = paint(&mut canvas, |p| menu_retro::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &dotted, time: 0.4, skin }));
         let path = out.join(format!("menu-{}-retro.png", page.name()));
         write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
         println!("{}", path.display());
@@ -462,4 +605,175 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::overlay::menu_retro::{self, RetroPalette};
+    use crate::overlay::menu_ui::Palette;
+    use orbiters_ui::theme;
+
+    /// A base strings file beside `orbiters-orb`.
+    fn base(name: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../orbiters-orb/menu-strings").join(format!("{name}.json"));
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).replace("\r\n", "\n")
+    }
+
+    const LANGUAGES: [&str; 5] = ["en", "fr", "es", "pt", "ja"];
+
+    #[test]
+    fn the_base_themes_draw_with_todays_colours() {
+        let p = Palette::new(&Theme::MODERN.colors);
+        let expected = [
+            (p.card, theme::INK_900),
+            (p.surface, theme::INK_800),
+            (p.raised, theme::INK_750),
+            (p.raised2, theme::INK_700),
+            (p.text, theme::FG),
+            (p.text2, theme::FG_2),
+            (p.muted, theme::FG_3),
+            (p.faint, theme::FG_4),
+            (p.accent, theme::ACCENT),
+            (p.on_accent, theme::ON_ACCENT),
+            (p.danger, theme::DANGER),
+            (p.green, theme::ACCENT),
+            (p.red, theme::REC),
+            (p.blue, theme::BLUE),
+            (p.violet, theme::VIOLET),
+            (p.cyan, theme::CYAN),
+            (p.amber, theme::WARN),
+            (p.pink, menu_ui::PINK),
+            (p.indigo, theme::INDIGO),
+            (p.purple, theme::PURPLE),
+        ];
+        for (i, (got, want)) in expected.into_iter().enumerate() {
+            assert_eq!(got, want, "colour {i}");
+        }
+        assert_eq!(RetroPalette::new(&Theme::RETRO.colors), menu_retro::BASE);
+        assert_eq!(menu_ui::CARD, p.card);
+    }
+
+    #[test]
+    fn a_theme_of_its_own_derives_sensible_steps() {
+        // A light theme: keys a step darker than its surface, ink on a dark accent light.
+        let mut colors = Theme::MODERN.colors;
+        colors.background = [0xf4, 0xf4, 0xf6];
+        colors.surface = [0xff, 0xff, 0xff];
+        colors.text = [0x10, 0x10, 0x12];
+        colors.muted = [0x60, 0x60, 0x68];
+        colors.accent = [0x1a, 0x3c, 0xa0];
+        let p = Palette::new(&colors);
+        assert!(p.raised.r() < 0xff && p.raised2.r() < p.raised.r(), "{:?} {:?}", p.raised, p.raised2);
+        assert!(p.text2.r() > 0x10 && p.text2.r() < 0x60, "{:?}", p.text2);
+        assert!(p.on_accent.r() > 0xc0, "{:?}", p.on_accent);
+        let retro = RetroPalette::new(&colors);
+        let (lo, hi) = (colors.background[2].min(colors.accent[2]), colors.background[2].max(colors.accent[2]));
+        assert!(retro.dim.b() > lo && retro.dim.b() < hi, "{:?}", retro.dim);
+    }
+
+    /// The base themes give the screen shader's own colours: its defaults for Orbiters' look, Orbiters Toolkit's retro
+    /// colours for the retro one.
+    #[test]
+    fn screen_colours_of_the_base_themes_are_the_shaders() {
+        let modern = screen_colors(&Theme::MODERN);
+        for (name, value) in [("_Card", "#101012"), ("_Text", "#ECEDEE"), ("_Text2", "#8B8B94"), ("_Accent", "#00DA6D"), ("_Placeholder", "#27272A")] {
+            assert!(modern.contains(&format!("\"{name}\": \"{value}\"")), "{name} {value}: {modern}");
+        }
+        let retro = screen_colors(&Theme::RETRO);
+        for (name, value) in [
+            ("_Card", "#020A04"),
+            ("_Text", "#7DFFA6"),
+            ("_Text2", "#2FB85E"),
+            ("_Accent", "#2BE36A"),
+            ("_Placeholder", "#05180B"),
+            ("_Dim", "#186232"),
+            ("_Hot", "#C8FFD7"),
+            ("_Plate", "#020805D1"),
+            ("_Edge", "#00DA6DFF"),
+        ] {
+            assert!(retro.contains(&format!("\"{name}\": \"{value}\"")), "{name} {value}: {retro}");
+        }
+        let parsed: serde_json::Value = serde_json::from_str(&retro).unwrap();
+        assert_eq!(parsed["style"], "retro");
+        assert_eq!(parsed["glow"], 1.0);
+    }
+
+    #[test]
+    fn the_english_base_file_is_what_the_layout_gives() {
+        assert_eq!(base("en"), base_strings(), "write it again: orbiters-desktop --orb-menu-strings crates/orbiters-orb/menu-strings/en.json");
+    }
+
+    #[test]
+    fn every_key_has_a_place_and_a_max() {
+        let places = menu_ui::all_places();
+        for t in Text::ALL {
+            assert!(places.iter().any(|(k, _, _)| k == t), "{} is drawn nowhere", t.key());
+            assert!(menu_ui::max_length(*t, &places) >= t.en().chars().count());
+        }
+    }
+
+    #[test]
+    fn the_base_translations_keep_within_their_max() {
+        for name in LANGUAGES {
+            let parsed = Strings::parse(&base(name)).unwrap();
+            assert!(too_long(&parsed.strings).is_empty(), "{name}: {:?}", too_long(&parsed.strings));
+        }
+    }
+
+    /// Every page and the back in both looks: English is never drawn smaller (the pictures stay as they were); the base
+    /// translations are, a little, where they are longer than their place (`cargo test -p orbiters-desktop texts_fit --
+    /// --nocapture` lists them).
+    #[test]
+    fn texts_fit_their_places() {
+        for name in LANGUAGES {
+            let strings = Strings::parse(&base(name)).unwrap().strings;
+            orbiters_ui::fonts::prefer_language(strings.language());
+            let skin = Skin::standard(strings);
+            menu_ui::watch_shrinking();
+            for retro in [false, true] {
+                page_pictures(retro, &skin);
+            }
+            let shrunk = menu_ui::shrunk();
+            if name == "en" {
+                assert!(shrunk.is_empty(), "English drawn smaller: {shrunk:?}");
+            }
+            for (text, scale) in &shrunk {
+                println!("{name}: {text:?} at {:.0} %", scale * 100.0);
+                assert!(*scale >= 0.75, "{name}: {text:?} shrinks to {:.0} %", scale * 100.0);
+            }
+        }
+        orbiters_ui::fonts::prefer_language("en");
+    }
+
+    #[test]
+    fn options_read_their_files_and_refuse_what_is_wrong() {
+        let dir = std::env::temp_dir().join(format!("orbiters-orb-menu-options-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let theme = dir.join("theme.json");
+        std::fs::write(&theme, r##"{ "schema": 1, "style": "retro", "colors": { "accent": "#FFC247" } }"##).unwrap();
+        let strings = dir.join("strings.json");
+        std::fs::write(&strings, base("fr")).unwrap();
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, r#"{ "schema": 1, "style": "neon" }"#).unwrap();
+        let arg = |p: &Path| p.display().to_string();
+        let o = options(&["out".into(), "--strings".into(), arg(&strings), "--theme".into(), arg(&theme)]).unwrap();
+        assert_eq!(o.out, PathBuf::from("out"));
+        let t = o.theme.unwrap();
+        assert_eq!((t.style, t.colors.accent, t.colors.background), (MenuLook::Retro, [0xff, 0xc2, 0x47], Theme::RETRO.colors.background));
+        assert_eq!(o.strings.language(), "fr");
+        let o = options(&[]).unwrap();
+        assert!(o.theme.is_none() && o.strings.language() == "en" && o.out == Path::new("orb-menu"));
+        for (args, says) in [
+            (vec!["out".to_string(), "--theme".into()], "needs a file"),
+            (vec!["a".into(), "b".into()], "one output folder"),
+            (vec!["--colour".into(), "x".into()], "unknown option"),
+            (vec!["--theme".into(), arg(&bad)], "style"),
+            (vec!["--strings".into(), arg(&dir.join("none.json"))], "none.json"),
+        ] {
+            let error = options(&args).err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(error.contains(says), "{args:?}: {error}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

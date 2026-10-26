@@ -11,6 +11,8 @@
 pub mod layout;
 pub mod retro;
 pub mod screen;
+pub mod strings;
+pub mod theme;
 pub mod touch;
 
 use crate::youtube::{Results, Video};
@@ -142,10 +144,11 @@ pub struct Tracking {
     pub note: String,
 }
 
-/// The kinds of devices the Tracking page smooths, in its rows' order.
-pub const TRACKING_KINDS: [&str; 3] = ["Headset", "Controllers", "Trackers"];
-/// The strengths it offers, and what each is (0 leaves the device as SteamVR tracks it, 1 the strongest).
-pub const SMOOTHING_LABELS: [&str; 4] = ["Off", "Low", "Medium", "High"];
+/// The kinds of devices the Tracking page smooths, in its rows' order (in English: [`strings::TRACKING_KINDS`]).
+pub const TRACKING_KINDS: [&str; 3] = [strings::TRACKING_KINDS[0].en(), strings::TRACKING_KINDS[1].en(), strings::TRACKING_KINDS[2].en()];
+/// The strengths it offers, and what each is (0 leaves the device as SteamVR tracks it, 1 the strongest; in English:
+/// [`strings::SMOOTHING`]).
+pub const SMOOTHING_LABELS: [&str; 4] = [strings::SMOOTHING[0].en(), strings::SMOOTHING[1].en(), strings::SMOOTHING[2].en(), strings::SMOOTHING[3].en()];
 pub const SMOOTHING_STRENGTHS: [f32; 4] = [0.0, 0.35, 0.65, 0.9];
 
 /// The pages a display has (contracts `Docs/orb.md`, Menu): the avatar's screen by its version (`N4N0/Screen/Version`),

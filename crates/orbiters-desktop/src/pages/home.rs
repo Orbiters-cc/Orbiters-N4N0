@@ -290,6 +290,7 @@ fn home_columns(width: f32) -> usize {
 /// walk, the light), the Copy link of the YouTube video playing (music), or an arrow for what opens a page.
 fn feature(ui: &mut Ui, cx: &Cx, i: usize, rect: Rect, menu: &Menu, copied: Option<&str>, acts: &mut Vec<Act>) {
     let (target, icon, title, tint) = HOME_TILES[i];
+    let title = title.en();
     let state = layout::target_state(menu, target);
     let (rect, alpha) = super::entering(ui, cx, 1 + i, rect);
     let ctx = ui.ctx().clone();

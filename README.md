@@ -142,11 +142,17 @@ cargo run -p orbiters-capture -- record --source "raw:<raw capture folder>"     
 cargo run -p orbiters-capture -- verify "<raw capture folder>"                        # compare with its ground truth
 cargo run --release -p orbiters-reconstruct -- "<session folder>" [--iterations N] [--budget N] [--width N]
 cargo run -p orbiters-desktop -- --orb-menu <folder>    # N4N0's screen pages and layout table (for Toolkit), sample pages
+cargo run -p orbiters-desktop -- --orb-menu <folder> --theme <theme.json> --strings <strings.json>   # in a theme and language
+cargo run -p orbiters-desktop -- --orb-menu-strings <file.json>    # the menu's English texts by key, with each key's max
 ```
 
 `--orb-menu` writes `N4N0 screen pages.png` and `N4N0 screen layout.png`, which Orbiters Toolkit carries as
 `Editor/VRChat/OrbScreenPages.png.bytes` and `OrbScreenLayout.png.bytes`: run it and copy them over whenever the
-menu's layout or look changes, so the avatar's screen matches the overlay.
+menu's layout or look changes, so the avatar's screen matches the overlay. With `--theme` it writes only that theme's
+pages (as `N4N0 screen pages.png`), the layout and `N4N0 screen colors.json`; `--strings` draws the pages' texts in
+another language. The base themes and translations are `crates/orbiters-orb/menu-themes/` and
+`crates/orbiters-orb/menu-strings/` (contracts `Docs/orb.md`, Menu themes and translations); write `en.json` again with
+`--orb-menu-strings` when a text or a place changes (a test says so).
 
 ## Tests
 

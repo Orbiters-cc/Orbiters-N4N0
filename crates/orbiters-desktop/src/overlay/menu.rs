@@ -6,7 +6,7 @@
 //! to the tray service.
 
 use super::menu_retro;
-use super::menu_ui::{self, View};
+use super::menu_ui::{self, Skin, View};
 use super::{Canvas, Presenter};
 use crate::backend::Ctl;
 use crate::ipc::OrbCommand;
@@ -300,10 +300,11 @@ impl MenuOverlay {
             let (host, hover, pressed, retro) = (&self.host, self.hover, self.pressed, self.retro);
             let menu = &host.menu;
             let picture = |id: &str| -> Option<TextureId> { host.picture(id, retro) };
-            let view = View { menu, hover, pressed, picture: &picture, time };
+            let skin = Skin::english();
+            let view = View { menu, hover, pressed, picture: &picture, time, skin };
             self.canvas.paint(time, |p| match (self.behind, retro) {
-                (true, false) => menu_ui::draw_back(p, pos2(0.0, 0.0)),
-                (true, true) => menu_retro::draw_back(p, pos2(0.0, 0.0)),
+                (true, false) => menu_ui::draw_back(p, pos2(0.0, 0.0), skin),
+                (true, true) => menu_retro::draw_back(p, pos2(0.0, 0.0), skin),
                 (false, false) => menu_ui::draw(p, pos2(0.0, 0.0), &view),
                 (false, true) => menu_retro::draw(p, pos2(0.0, 0.0), &view),
             });

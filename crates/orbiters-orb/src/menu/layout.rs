@@ -4,10 +4,8 @@
 //! pressed, on or hidden). A page is [`WIDTH`] × [`HEIGHT`] pixels; every position is on a 4-pixel grid, so the screen's
 //! layout table holds it in a byte.
 
-use super::{
-    Call, KeyboardLayout, Keys, Menu, Page, Pages, Target, Typing, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, SMOOTHING_LABELS,
-    STATES_PER_PAGE, TIMERS, TRACKING_KINDS,
-};
+use super::strings::{self, Text};
+use super::{Call, KeyboardLayout, Keys, Menu, Page, Pages, Target, Typing, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, STATES_PER_PAGE, TIMERS, TRACKING_KINDS};
 use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
 use std::sync::OnceLock;
 
@@ -272,21 +270,21 @@ pub enum Icon {
 }
 
 /// Home's features in their order (the first four as on the four-tile Home, the first six as on the six-tile one), each
-/// with its icon, title and colour: the seven-tile Home here, and the window's Home in Orbiters - N4N0.
-pub const HOME_TILES: [(Target, Icon, &str, Tint); 9] = [
-    (Target::FastWalk, Icon::Walk, "Fast walk", Tint::Green),
-    (Target::YouTube, Icon::YouTube, "YouTube", Tint::Red),
-    (Target::Call, Icon::Phone, "Call", Tint::Blue),
-    (Target::Photo, Icon::Cube, "3D picture", Tint::Violet),
-    (Target::Music, Icon::Music, "Music", Tint::Cyan),
-    (Target::Light, Icon::Lightbulb, "Light", Tint::Amber),
-    (Target::States, Icon::States, "States", Tint::Pink),
-    (Target::Tracking, Icon::Tracking, "Tracking", Tint::Indigo),
-    (Target::Suggest, Icon::Suggest, "Suggest", Tint::Purple),
+/// with its icon, title and colour: every Home here, and the window's Home in Orbiters - N4N0 (in English).
+pub const HOME_TILES: [(Target, Icon, Text, Tint); 9] = [
+    (Target::FastWalk, Icon::Walk, Text::HomeFastWalk, Tint::Green),
+    (Target::YouTube, Icon::YouTube, Text::HomeYouTube, Tint::Red),
+    (Target::Call, Icon::Phone, Text::HomeCall, Tint::Blue),
+    (Target::Photo, Icon::Cube, Text::HomePhoto, Tint::Violet),
+    (Target::Music, Icon::Music, Text::HomeMusic, Tint::Cyan),
+    (Target::Light, Icon::Lightbulb, Text::HomeLight, Tint::Amber),
+    (Target::States, Icon::States, Text::HomeStates, Tint::Pink),
+    (Target::Tracking, Icon::Tracking, Text::HomeTracking, Tint::Indigo),
+    (Target::Suggest, Icon::Suggest, Text::HomeSuggest, Tint::Purple),
 ];
 
 /// The tiles of a Home with `pages`.
-pub fn home_tiles(pages: Pages) -> &'static [(Target, Icon, &'static str, Tint)] {
+pub fn home_tiles(pages: Pages) -> &'static [(Target, Icon, Text, Tint)] {
     match pages {
         Pages::Four => &HOME_TILES[..4],
         Pages::Six => &HOME_TILES[..6],
@@ -295,10 +293,10 @@ pub fn home_tiles(pages: Pages) -> &'static [(Target, Icon, &'static str, Tint)]
     }
 }
 
-/// The 3D picture's timers as its page writes them ([`super::TIMERS`] in order), here and on the window's Home.
-pub const TIMER_LABELS: [&str; 4] = ["Off", "3 s", "5 s", "10 s"];
-/// Its camera flights ([`super::PhotoLength::ALL`] in order).
-pub const LENGTH_LABELS: [&str; 3] = ["1 s", "4 s", "8 s"];
+/// The 3D picture's timers in English ([`super::TIMERS`] in order, [`strings::TIMERS`]), on the window's Home.
+pub const TIMER_LABELS: [&str; 4] = [strings::TIMERS[0].en(), strings::TIMERS[1].en(), strings::TIMERS[2].en(), strings::TIMERS[3].en()];
+/// Its camera flights in English ([`super::PhotoLength::ALL`] in order, [`strings::FLIGHTS`]).
+pub const LENGTH_LABELS: [&str; 3] = [strings::FLIGHTS[0].en(), strings::FLIGHTS[1].en(), strings::FLIGHTS[2].en()];
 
 /// A tinted icon tile's colour (home tiles).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -323,7 +321,8 @@ pub struct Element {
     pub rect: Rect,
     pub look: Look,
     pub icon: Option<Icon>,
-    pub label: Option<&'static str>,
+    /// What is written on it (in the menu's language: [`strings::Strings`]).
+    pub label: Option<Text>,
     /// Home tiles: the icon tile's colour.
     pub tint: Option<Tint>,
 }
@@ -456,9 +455,11 @@ pub struct Label {
     pub x: u16,
     pub y: u16,
     pub size: u8,
-    pub text: &'static str,
+    pub text: Text,
     pub style: Style,
     pub bold: bool,
+    /// The room it has from `x`: a text wider than this (another language's) is drawn smaller to fit.
+    pub width: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -507,7 +508,7 @@ fn element(target: Target, rect: Rect, look: Look) -> Element {
     Element { target, rect, look, icon: None, label: None, tint: None }
 }
 
-fn with(mut e: Element, icon: Option<Icon>, label: Option<&'static str>) -> Element {
+fn with(mut e: Element, icon: Option<Icon>, label: Option<Text>) -> Element {
     e.icon = icon;
     e.label = label;
     e
@@ -558,7 +559,7 @@ const KEY_GAP: u16 = 8;
 const KEY_ROWS_Y: [u16; 4] = [320, 380, 440, 500];
 
 /// The keyboard's keys; its green key at the bottom right is `accent` (Search, or the keyboard page's Done).
-fn keyboard(elements: &mut Vec<Element>, page: ScreenPage, layout: KeyboardLayout, accent: (Target, Icon, &'static str)) {
+fn keyboard(elements: &mut Vec<Element>, page: ScreenPage, layout: KeyboardLayout, accent: (Target, Icon, Text)) {
     let symbols = page == ScreenPage::SearchSymbols || page == ScreenPage::TypeSymbols;
     let rows = if symbols { SYMBOL_ROWS } else { letter_rows(layout) };
     for (r, (keys, x0)) in rows.iter().enumerate() {
@@ -574,9 +575,9 @@ fn keyboard(elements: &mut Vec<Element>, page: ScreenPage, layout: KeyboardLayou
         }
     }
     let y = KEY_ROWS_Y[3];
-    let switch = if symbols { (Target::Letters, "ABC") } else { (Target::Symbols, "?123") };
+    let switch = if symbols { (Target::Letters, Text::KeyboardLetters) } else { (Target::Symbols, Text::KeyboardSymbols) };
     elements.push(with(element(switch.0, Rect::new(36, y, 184, KEY_H), Look::KeyDark), None, Some(switch.1)));
-    elements.push(with(element(Target::Space, Rect::new(228, y, 568, KEY_H), Look::Key), None, Some("space")));
+    elements.push(with(element(Target::Space, Rect::new(228, y, 568, KEY_H), Look::Key), None, Some(Text::KeyboardSpace)));
     elements.push(with(element(accent.0, Rect::new(804, y, 184, KEY_H), Look::Accent), Some(accent.1), Some(accent.2)));
 }
 
@@ -605,13 +606,7 @@ pub fn layout(page: ScreenPage) -> Layout {
     let mut boxes = Vec::new();
     match page {
         ScreenPage::Home => {
-            let tiles = [
-                (Target::FastWalk, Icon::Walk, "Fast walk", Tint::Green),
-                (Target::YouTube, Icon::YouTube, "YouTube", Tint::Red),
-                (Target::Call, Icon::Phone, "Call", Tint::Blue),
-                (Target::Photo, Icon::Cube, "3D picture", Tint::Violet),
-            ];
-            for (i, (target, icon, title, tint)) in tiles.into_iter().enumerate() {
+            for (i, &(target, icon, title, tint)) in home_tiles(Pages::Four).iter().enumerate() {
                 let x = 32 + i as u16 * 244;
                 let mut tile = with(element(target, Rect::new(x, 104, 228, 324), Look::Tile), Some(icon), Some(title));
                 tile.tint = Some(tint);
@@ -629,13 +624,13 @@ pub fn layout(page: ScreenPage) -> Layout {
         ScreenPage::SearchQwerty | ScreenPage::SearchAzerty | ScreenPage::SearchSymbols => {
             elements.push(round(Target::Back, 32, Icon::Back));
             elements.push(with(element(Target::Field, Rect::new(100, 24, 712, 56), Look::Field), Some(Icon::Search), None));
-            elements.push(with(element(Target::Search, Rect::new(824, 24, 168, 56), Look::Accent), Some(Icon::Search), Some("Search")));
+            elements.push(with(element(Target::Search, Rect::new(824, 24, 168, 56), Look::Accent), Some(Icon::Search), Some(Text::Search)));
             for i in 0..super::SUGGESTIONS as u8 {
                 let row = Rect::new(32, 96 + i as u16 * 44, 960, 40);
                 elements.push(with(element(Target::Suggestion(i), row, Look::Row), Some(Icon::Fill), None));
             }
             let layout = if page == ScreenPage::SearchAzerty { KeyboardLayout::Azerty } else { KeyboardLayout::Qwerty };
-            keyboard(&mut elements, page, layout, (Target::Search, Icon::Search, "Search"));
+            keyboard(&mut elements, page, layout, (Target::Search, Icon::Search, Text::Search));
             slots.add(164, 40, super::QUERY_MAX as u8, 24, Style::Primary, Content::Query);
             for i in 0..super::SUGGESTIONS as u8 {
                 slots.add(60, 104 + i as u16 * 44, 64, 24, Style::Primary, Content::Suggestion(i));
@@ -650,13 +645,13 @@ pub fn layout(page: ScreenPage) -> Layout {
             }
             for i in 0..RESULTS_PER_PAGE as u8 {
                 let y = 96 + i as u16 * 92 + 20;
-                elements.push(with(element(Target::Copy(i), Rect::new(820, y, 156, 48), Look::Accent), Some(Icon::Copy), Some("Copy link")));
+                elements.push(with(element(Target::Copy(i), Rect::new(820, y, 156, 48), Look::Accent), Some(Icon::Copy), Some(Text::LinkCopy)));
             }
             // After its Copy link, a row offers Drop (screens from version 5): between its title (which ends at 696) and its
             // Copy link. Last in the list, so the elements before keep their indices on older screens.
             for i in 0..RESULTS_PER_PAGE as u8 {
                 let y = 96 + i as u16 * 92 + 20;
-                elements.push(with(element(Target::Drop(i), Rect::new(704, y, 108, 48), Look::KeyDark), Some(Icon::Drop), Some("Drop")));
+                elements.push(with(element(Target::Drop(i), Rect::new(704, y, 108, 48), Look::KeyDark), Some(Icon::Drop), Some(Text::LinkDrop)));
             }
             slots.add(104, 40, 36, 24, Style::Primary, Content::ResultsTitle);
             slots.add(868, 40, 5, 24, Style::Secondary, Content::PageLabel).centered();
@@ -677,7 +672,7 @@ pub fn layout(page: ScreenPage) -> Layout {
             }
             for i in 0..CONTACTS_PER_PAGE as u8 {
                 let y = 96 + i as u16 * 92;
-                elements.push(with(element(Target::Contact(i), Rect::new(840, y + 20, 136, 48), Look::Accent), Some(Icon::Phone), Some("Call")));
+                elements.push(with(element(Target::Contact(i), Rect::new(840, y + 20, 136, 48), Look::Accent), Some(Icon::Phone), Some(Text::CallsCall)));
             }
             slots.add(104, 40, 52, 24, Style::Primary, Content::CallsTitle);
             slots.add(868, 40, 5, 24, Style::Secondary, Content::PageLabel).centered();
@@ -688,10 +683,10 @@ pub fn layout(page: ScreenPage) -> Layout {
         ScreenPage::CallRinging | ScreenPage::CallActive => {
             elements.push(round(Target::Back, 32, Icon::Back));
             if page == ScreenPage::CallRinging {
-                elements.push(with(element(Target::Answer, Rect::new(292, 400, 200, 72), Look::Accent), Some(Icon::Phone), Some("Answer")));
-                elements.push(with(element(Target::HangUp, Rect::new(532, 400, 200, 72), Look::Danger), Some(Icon::PhoneOff), Some("Decline")));
+                elements.push(with(element(Target::Answer, Rect::new(292, 400, 200, 72), Look::Accent), Some(Icon::Phone), Some(Text::CallsAnswer)));
+                elements.push(with(element(Target::HangUp, Rect::new(532, 400, 200, 72), Look::Danger), Some(Icon::PhoneOff), Some(Text::CallsDecline)));
             } else {
-                elements.push(with(element(Target::HangUp, Rect::new(412, 400, 200, 72), Look::Danger), Some(Icon::PhoneOff), Some("Hang up")));
+                elements.push(with(element(Target::HangUp, Rect::new(412, 400, 200, 72), Look::Danger), Some(Icon::PhoneOff), Some(Text::CallsHangUp)));
             }
             icons.push((Rect::new(464, 92, 96, 96), Icon::User, Some(Tint::Blue)));
             slots.add(272, 212, 20, 48, Style::Primary, Content::CallName).centered();
@@ -699,16 +694,17 @@ pub fn layout(page: ScreenPage) -> Layout {
         }
         ScreenPage::Photo => {
             elements.push(round(Target::Back, 32, Icon::Back));
-            for (i, label) in TIMER_LABELS.into_iter().enumerate() {
+            for (i, label) in strings::TIMERS.into_iter().enumerate() {
                 elements.push(with(element(Target::Timer(i as u8), Rect::new(100 + i as u16 * 136, 156, 124, 56), Look::Chip), None, Some(label)));
             }
-            for (i, label) in LENGTH_LABELS.into_iter().enumerate() {
+            for (i, label) in strings::FLIGHTS.into_iter().enumerate() {
                 elements.push(with(element(Target::Length(i as u8), Rect::new(100 + i as u16 * 136, 292, 124, 56), Look::Chip), None, Some(label)));
             }
-            elements.push(with(element(Target::Take, Rect::new(100, 400, 444, 76), Look::Accent), Some(Icon::Cube), Some("Take 3D picture")));
-            labels.push(Label { x: 104, y: 34, size: 32, text: "3D picture", style: Style::Primary, bold: true });
-            labels.push(Label { x: 100, y: 116, size: 24, text: "Timer", style: Style::Secondary, bold: false });
-            labels.push(Label { x: 100, y: 252, size: 24, text: "Camera flight", style: Style::Secondary, bold: false });
+            elements.push(with(element(Target::Take, Rect::new(100, 400, 444, 76), Look::Accent), Some(Icon::Cube), Some(Text::PhotoTake)));
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::PhotoTitle, style: Style::Primary, bold: true, width: 888 });
+            // Clear of the cube (from 712).
+            labels.push(Label { x: 100, y: 116, size: 24, text: Text::PhotoTimer, style: Style::Secondary, bold: false, width: 600 });
+            labels.push(Label { x: 100, y: 252, size: 24, text: Text::PhotoFlight, style: Style::Secondary, bold: false, width: 600 });
             // Clear of the chips (the last one ends at 632).
             icons.push((Rect::new(712, 140, 240, 240), Icon::Cube, Some(Tint::Violet)));
             slots.add(100, 504, 56, 28, Style::Accent, Content::PhotoStatus);
@@ -739,7 +735,8 @@ pub fn layout(page: ScreenPage) -> Layout {
             elements.push(with(element(Target::MediaNext, Rect::new(612, 388, 96, 96), Look::Round), Some(Icon::SkipForward), None));
             elements.push(with(element(Target::VolumeDown, Rect::new(800, 400, 92, 72), Look::KeyDark), Some(Icon::SpeakerLow), None));
             elements.push(with(element(Target::VolumeUp, Rect::new(900, 400, 92, 72), Look::KeyDark), Some(Icon::SpeakerHigh), None));
-            labels.push(Label { x: 104, y: 34, size: 32, text: "Music", style: Style::Primary, bold: true });
+            // Clear of the playing video's Drop (from 720).
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::MusicTitle, style: Style::Primary, bold: true, width: 600 });
             pictures.push(Picture { rect: Rect::new(32, 104, 448, 252), result: 0 });
             slots.add(512, 112, 30, 32, Style::Primary, Content::MediaTitle);
             slots.add(512, 160, 40, 24, Style::Primary, Content::MediaArtist);
@@ -747,29 +744,30 @@ pub fn layout(page: ScreenPage) -> Layout {
             slots.add(512, 244, 40, 24, Style::Accent, Content::MediaState);
             slots.add(800, 484, 16, 24, Style::Secondary, Content::VolumeLabel).centered();
             // The world's video (screens from version 6): last, so the elements before keep their indices on older ones.
-            elements.push(with(element(Target::WatchVideo, Rect::new(512, 316, 196, 48), Look::KeyDark), Some(Icon::Watch), Some("Watch")));
-            elements.push(with(element(Target::SaveVideo, Rect::new(720, 316, 156, 48), Look::KeyDark), Some(Icon::Save), Some("Save")));
+            elements.push(with(element(Target::WatchVideo, Rect::new(512, 316, 196, 48), Look::KeyDark), Some(Icon::Watch), Some(Text::MusicWatch)));
+            elements.push(with(element(Target::SaveVideo, Rect::new(720, 316, 156, 48), Look::KeyDark), Some(Icon::Save), Some(Text::MusicSave)));
             slots.add(512, 280, 40, 24, Style::Secondary, Content::WorldVideo);
             // The YouTube video the computer plays (screens from version 6), in the heading's row: its Copy link, then
             // its Drop to the left once copied, as on a result's row.
-            elements.push(with(element(Target::CopyPlaying, Rect::new(836, 28, 156, 48), Look::Accent), Some(Icon::Copy), Some("Copy link")));
-            elements.push(with(element(Target::DropPlaying, Rect::new(720, 28, 108, 48), Look::KeyDark), Some(Icon::Drop), Some("Drop")));
+            elements.push(with(element(Target::CopyPlaying, Rect::new(836, 28, 156, 48), Look::Accent), Some(Icon::Copy), Some(Text::LinkCopy)));
+            elements.push(with(element(Target::DropPlaying, Rect::new(720, 28, 108, 48), Look::KeyDark), Some(Icon::Drop), Some(Text::LinkDrop)));
         }
         ScreenPage::Light => {
             elements.push(round(Target::Back, 32, Icon::Back));
-            elements.push(with(element(Target::LightSwitch, Rect::new(100, 112, 236, 64), Look::Chip), Some(Icon::Lightbulb), Some("Light")));
-            for (i, (name, _)) in LIGHT_COLORS.into_iter().enumerate() {
+            elements.push(with(element(Target::LightSwitch, Rect::new(100, 112, 236, 64), Look::Chip), Some(Icon::Lightbulb), Some(Text::LightSwitch)));
+            for (i, name) in strings::LIGHT_COLORS.into_iter().enumerate() {
                 let (x, y) = (100 + (i as u16 % 4) * 136, 248 + (i as u16 / 4) * 68);
                 let mut chip = with(element(Target::LightColor(i as u8), Rect::new(x, y, 124, 56), Look::Chip), None, Some(name));
                 chip.tint = Some(Tint::Light(i as u8));
                 elements.push(chip);
             }
-            for (i, (name, _)) in LIGHT_LEVELS.into_iter().enumerate() {
+            for (i, name) in strings::LIGHT_LEVELS.into_iter().enumerate() {
                 elements.push(with(element(Target::LightLevel(i as u8), Rect::new(100 + i as u16 * 136, 428, 124, 56), Look::Chip), None, Some(name)));
             }
-            labels.push(Label { x: 104, y: 34, size: 32, text: "Light", style: Style::Primary, bold: true });
-            labels.push(Label { x: 100, y: 212, size: 24, text: "Colour", style: Style::Secondary, bold: false });
-            labels.push(Label { x: 100, y: 392, size: 24, text: "Brightness", style: Style::Secondary, bold: false });
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::LightTitle, style: Style::Primary, bold: true, width: 888 });
+            // Clear of the bulb (from 712).
+            labels.push(Label { x: 100, y: 212, size: 24, text: Text::LightColour, style: Style::Secondary, bold: false, width: 600 });
+            labels.push(Label { x: 100, y: 392, size: 24, text: Text::LightBrightness, style: Style::Secondary, bold: false, width: 600 });
             // Clear of the chips (the last colour ends at 632).
             icons.push((Rect::new(712, 140, 240, 240), Icon::Lightbulb, Some(Tint::Amber)));
             slots.add(356, 132, 28, 24, Style::Accent, Content::LightState);
@@ -802,7 +800,7 @@ pub fn layout(page: ScreenPage) -> Layout {
         }
         ScreenPage::States => {
             elements.push(round(Target::Back, 32, Icon::Back));
-            elements.push(with(element(Target::StateSave, Rect::new(616, 24, 176, 56), Look::Accent), Some(Icon::Plus), Some("New state")));
+            elements.push(with(element(Target::StateSave, Rect::new(616, 24, 176, 56), Look::Accent), Some(Icon::Plus), Some(Text::StatesNew)));
             elements.push(round(Target::Previous, 808, Icon::Previous));
             elements.push(round(Target::Next, 936, Icon::Next));
             for i in 0..STATES_PER_PAGE as u8 {
@@ -810,14 +808,15 @@ pub fn layout(page: ScreenPage) -> Layout {
             }
             for i in 0..STATES_PER_PAGE as u8 {
                 let y = 96 + i as u16 * 92 + 20;
-                elements.push(with(element(Target::StateApply(i), Rect::new(820, y, 156, 48), Look::Accent), Some(Icon::Apply), Some("Apply")));
+                elements.push(with(element(Target::StateApply(i), Rect::new(820, y, 156, 48), Look::Accent), Some(Icon::Apply), Some(Text::StatesApply)));
             }
             // The default state's mark, between its name and its Apply.
             for i in 0..STATES_PER_PAGE as u8 {
                 let y = 96 + i as u16 * 92 + 20;
-                elements.push(with(element(Target::StateMark(i), Rect::new(656, y, 148, 48), Look::Chip), Some(Icon::Star), Some("Default")));
+                elements.push(with(element(Target::StateMark(i), Rect::new(656, y, 148, 48), Look::Chip), Some(Icon::Star), Some(Text::StatesDefault)));
             }
-            labels.push(Label { x: 104, y: 34, size: 32, text: "States", style: Style::Primary, bold: true });
+            // Up to the count beside it (from 232).
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::StatesTitle, style: Style::Primary, bold: true, width: 120 });
             slots.add(232, 40, 30, 24, Style::Primary, Content::StatesTitle);
             slots.add(868, 40, 5, 24, Style::Secondary, Content::PageLabel).centered();
             for i in 0..STATES_PER_PAGE as u8 {
@@ -834,8 +833,8 @@ pub fn layout(page: ScreenPage) -> Layout {
             slots.add(576, 84, 26, 32, Style::Primary, Content::CardTitle(1));
             slots.add(576, 140, 34, 24, Style::Accent, Content::CardLink);
             icons.push((Rect::new(240, 400, 96, 96), Icon::Grab, Some(Tint::Green)));
-            labels.push(Label { x: 364, y: 408, size: 48, text: "Grab to copy link", style: Style::Primary, bold: true });
-            labels.push(Label { x: 364, y: 472, size: 24, text: "Anyone around with N4N0 can take it", style: Style::Secondary, bold: false });
+            labels.push(Label { x: 364, y: 408, size: 48, text: Text::CardGrabToCopy, style: Style::Primary, bold: true, width: 628 });
+            labels.push(Label { x: 364, y: 472, size: 24, text: Text::CardAnyoneCanTake, style: Style::Secondary, bold: false, width: 628 });
         }
         ScreenPage::HomeTen => {
             // Three rows of four: the nine features, then what N4N0 says across the last row's three other places; the
@@ -864,10 +863,10 @@ pub fn layout(page: ScreenPage) -> Layout {
         }
         ScreenPage::TypeQwerty | ScreenPage::TypeAzerty | ScreenPage::TypeSymbols => {
             elements.push(round(Target::Back, 32, Icon::Back));
-            elements.push(with(element(Target::Done, Rect::new(824, 24, 168, 56), Look::Accent), Some(Icon::Check), Some("Done")));
+            elements.push(with(element(Target::Done, Rect::new(824, 24, 168, 56), Look::Accent), Some(Icon::Check), Some(Text::TypeDone)));
             elements.push(element(Target::Field, Rect::new(32, 96, 960, 208), Look::Area));
             let layout = if page == ScreenPage::TypeAzerty { KeyboardLayout::Azerty } else { KeyboardLayout::Qwerty };
-            keyboard(&mut elements, page, layout, (Target::Done, Icon::Check, "Done"));
+            keyboard(&mut elements, page, layout, (Target::Done, Icon::Check, Text::TypeDone));
             slots.add(104, 40, 52, 24, Style::Primary, Content::TypeTitle);
             for line in 0..TYPE_LINES as u16 {
                 slots.add(56, 116 + line * 44, TYPE_COLUMNS as u8, 24, Style::Primary, Content::TypeLine(line as u8));
@@ -876,28 +875,29 @@ pub fn layout(page: ScreenPage) -> Layout {
         ScreenPage::NewState => {
             elements.push(round(Target::Back, 32, Icon::Back));
             elements.push(with(element(Target::DraftName, Rect::new(100, 136, 824, 64), Look::Field), Some(Icon::Keyboard), None));
-            elements.push(with(element(Target::DraftSize, Rect::new(100, 276, 236, 64), Look::Chip), Some(Icon::Size), Some("Size")));
-            elements.push(with(element(Target::DraftPose, Rect::new(352, 276, 236, 64), Look::Chip), Some(Icon::Pose), Some("Pose")));
-            elements.push(with(element(Target::DraftDefault, Rect::new(604, 276, 236, 64), Look::Chip), Some(Icon::Star), Some("Default")));
-            elements.push(with(element(Target::DraftSave, Rect::new(100, 444, 300, 76), Look::Accent), Some(Icon::Save), Some("Save state")));
-            labels.push(Label { x: 104, y: 34, size: 32, text: "New state", style: Style::Primary, bold: true });
-            labels.push(Label { x: 100, y: 100, size: 24, text: "Name", style: Style::Secondary, bold: false });
-            labels.push(Label { x: 100, y: 240, size: 24, text: "Options", style: Style::Secondary, bold: false });
+            elements.push(with(element(Target::DraftSize, Rect::new(100, 276, 236, 64), Look::Chip), Some(Icon::Size), Some(Text::NewStateSize)));
+            elements.push(with(element(Target::DraftPose, Rect::new(352, 276, 236, 64), Look::Chip), Some(Icon::Pose), Some(Text::NewStatePose)));
+            elements.push(with(element(Target::DraftDefault, Rect::new(604, 276, 236, 64), Look::Chip), Some(Icon::Star), Some(Text::NewStateDefault)));
+            elements.push(with(element(Target::DraftSave, Rect::new(100, 444, 300, 76), Look::Accent), Some(Icon::Save), Some(Text::NewStateSave)));
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::NewStateTitle, style: Style::Primary, bold: true, width: 888 });
+            labels.push(Label { x: 100, y: 100, size: 24, text: Text::NewStateName, style: Style::Secondary, bold: false, width: 824 });
+            labels.push(Label { x: 100, y: 240, size: 24, text: Text::NewStateOptions, style: Style::Secondary, bold: false, width: 824 });
             slots.add(164, 156, super::STATE_NAME_MAX as u8 + 1, 24, Style::Primary, Content::DraftName);
             slots.add(100, 372, 70, 24, Style::Secondary, Content::DraftNote);
         }
         ScreenPage::Tracking => {
             elements.push(round(Target::Back, 32, Icon::Back));
-            elements.push(with(element(Target::TrackingSwitch, Rect::new(100, 104, 300, 64), Look::Chip), Some(Icon::Tracking), Some("Smoothing")));
+            elements.push(with(element(Target::TrackingSwitch, Rect::new(100, 104, 300, 64), Look::Chip), Some(Icon::Tracking), Some(Text::TrackingSmoothing)));
             for (k, _) in TRACKING_KINDS.iter().enumerate() {
-                for (i, label) in SMOOTHING_LABELS.iter().enumerate() {
+                for (i, label) in strings::SMOOTHING.into_iter().enumerate() {
                     let rect = Rect::new(340 + i as u16 * 136, 200 + k as u16 * 92, 124, 56);
                     elements.push(with(element(Target::Smoothing((k * 4 + i) as u8), rect, Look::Chip), None, Some(label)));
                 }
             }
-            labels.push(Label { x: 104, y: 34, size: 32, text: "Tracking", style: Style::Primary, bold: true });
-            for (k, kind) in TRACKING_KINDS.iter().enumerate() {
-                labels.push(Label { x: 100, y: 214 + k as u16 * 92, size: 28, text: *kind, style: Style::Primary, bold: false });
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::TrackingTitle, style: Style::Primary, bold: true, width: 888 });
+            for (k, kind) in strings::TRACKING_KINDS.into_iter().enumerate() {
+                // Up to the strengths (from 340).
+                labels.push(Label { x: 100, y: 214 + k as u16 * 92, size: 28, text: kind, style: Style::Primary, bold: false, width: 228 });
             }
             slots.add(424, 124, 46, 24, Style::Accent, Content::TrackingState);
             slots.add(100, 492, 72, 24, Style::Secondary, Content::TrackingNote);
@@ -905,18 +905,11 @@ pub fn layout(page: ScreenPage) -> Layout {
         ScreenPage::Suggest => {
             elements.push(round(Target::Back, 32, Icon::Back));
             elements.push(element(Target::SuggestType, Rect::new(32, 96, 960, 196), Look::Area));
-            elements.push(with(element(Target::SuggestType, Rect::new(32, 316, 220, 72), Look::KeyDark), Some(Icon::Keyboard), Some("Type")));
-            elements.push(with(element(Target::SuggestTalk, Rect::new(268, 316, 220, 72), Look::KeyDark), Some(Icon::Microphone), Some("Talk")));
-            elements.push(with(element(Target::SuggestSend, Rect::new(772, 316, 220, 72), Look::Accent), Some(Icon::Send), Some("Send")));
-            labels.push(Label { x: 104, y: 34, size: 32, text: "Suggest a feature", style: Style::Primary, bold: true });
-            labels.push(Label {
-                x: 32,
-                y: 488,
-                size: 24,
-                text: "What should N4N0 do next? The Orbiters team reads every idea.",
-                style: Style::Secondary,
-                bold: false,
-            });
+            elements.push(with(element(Target::SuggestType, Rect::new(32, 316, 220, 72), Look::KeyDark), Some(Icon::Keyboard), Some(Text::SuggestType)));
+            elements.push(with(element(Target::SuggestTalk, Rect::new(268, 316, 220, 72), Look::KeyDark), Some(Icon::Microphone), Some(Text::SuggestTalk)));
+            elements.push(with(element(Target::SuggestSend, Rect::new(772, 316, 220, 72), Look::Accent), Some(Icon::Send), Some(Text::SuggestSend)));
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::SuggestTitle, style: Style::Primary, bold: true, width: 888 });
+            labels.push(Label { x: 32, y: 488, size: 24, text: Text::SuggestHint, style: Style::Secondary, bold: false, width: 960 });
             for line in 0..SUGGEST_LINES as u16 {
                 slots.add(56, 116 + line * 40, SUGGEST_COLUMNS as u8, 24, Style::Primary, Content::SuggestLine(line as u8));
             }
@@ -1444,6 +1437,19 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A label's room stays on the page, clear of its edge, and every Home tile's title is a Home text.
+    #[test]
+    fn labels_have_room_on_the_page() {
+        for page in ScreenPage::ALL {
+            for label in &layout(page).labels {
+                assert!(label.width > 0 && label.x + label.width <= WIDTH - 32, "{page:?}: {:?} leaves the page", label.text);
+            }
+        }
+        for (_, _, title, _) in HOME_TILES {
+            assert!(title.key().starts_with("home."));
+        }
+    }
 
     #[test]
     fn every_page_fits_the_screen_and_its_tables() {

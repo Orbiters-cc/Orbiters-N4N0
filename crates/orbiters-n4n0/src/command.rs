@@ -129,6 +129,11 @@ pub enum Command {
     },
     /// The link card out in the world taken back (as when its time is up): from N4N0's menu, the overlay or the window.
     TakeBack,
+    /// Orbiters' VRChat account invites the player to this previous instance (`wrld_…:<instance>`; N4N0's menu, More,
+    /// Previous instances): its answer is the status' `invite`.
+    InviteMe {
+        location: String,
+    },
     /// A controller's trigger pulled or let go (the SteamVR overlay reads it): on a screen of version 7 it presses where
     /// that hand's index finger points.
     Trigger {
@@ -161,5 +166,6 @@ mod tests {
         let worn: Command = serde_json::from_str(r#"{"kind":"states","action":{"do":"delete","id":"s1"}}"#).unwrap();
         assert_eq!(worn, Command::States { action: StateAction::Delete { id: "s1".into() }, avatar: None });
         assert_eq!(json(&Command::TakeBack), r#"{"kind":"take_back"}"#);
+        assert_eq!(json(&Command::InviteMe { location: "wrld_a:1".into() }), r#"{"kind":"invite_me","location":"wrld_a:1"}"#);
     }
 }

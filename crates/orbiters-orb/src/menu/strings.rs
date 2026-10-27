@@ -146,6 +146,23 @@ texts! {
     SuggestTalk = "suggest.talk" => "Talk",
     SuggestSend = "suggest.send" => "Send",
     SuggestHint = "suggest.hint" => "What should N4N0 do next? The Orbiters team reads every idea.",
+    /// The simple Home's large tiles (from screen version 10): 3D capture and More.
+    HomeCapture = "home.capture" => "3D capture",
+    HomeMore = "home.more" => "More",
+    /// More: its title and its cards (light and suggest keep Home's).
+    MoreTitle = "more.title" => "More",
+    MoreInstances = "more.instances" => "Previous instances",
+    MoreTracking = "more.tracking" => "Smooth tracking",
+    /// Previous instances: its title and each row's Invite me.
+    InstancesTitle = "instances.title" => "Instances",
+    InstancesInvite = "instances.invite" => "Invite me",
+    /// Add Orbiters as a friend: its title, why and how, its buttons.
+    FriendTitle = "friend.title" => "Add Orbiters as a friend",
+    FriendWhy = "friend.why" => "VRChat lets Orbiters invite only its friends.",
+    FriendHow = "friend.how" => "In VRChat: Social, search the name, Add friend",
+    FriendCopy = "friend.copy" => "Copy name",
+    FriendOpen = "friend.open" => "Open link",
+    FriendRetry = "friend.retry" => "Try again",
     /// The retro look's own words: the plate on the frame's top line (the screen's version follows it), the memory plate
     /// at the bottom right, the caption under a big icon, a picture's place before it came.
     RetroSystem = "retro.system" => "N4N0·OS",

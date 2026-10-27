@@ -7,6 +7,9 @@
 //! The control block is one of the test's own (`use_control_name_for_tests`), never the one of an Orbiters - N4N0
 //! running on this computer.
 //!
+//! The context also gives a fake `IVRDriverLog` laid out as SteamVR's (an object whose first word is its table): the
+//! driver's lines must reach its `Log`, as calling anything else crashes `vrserver.exe` (it did, up to 0.3.2-dev.5).
+//!
 //! Runs on Windows only; the driver is Windows-only (it patches a vtable with `VirtualProtect`).
 #![cfg(target_os = "windows")]
 
@@ -41,6 +44,24 @@ extern "system" fn host_pose_updated(_this: *mut c_void, device: u32, pose: *con
 
 static HOST_VTABLE: HostVtable = HostVtable { tracked_device_added: host_tracked_device_added, pose_updated: host_pose_updated };
 
+// ---- A fake IVRDriverLog: Log (slot 0) ----
+
+/// Every line the driver logged.
+static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[repr(C)]
+struct LogVtable {
+    log: extern "system" fn(*mut c_void, *const c_char),
+}
+
+extern "system" fn log_log(_this: *mut c_void, message: *const c_char) {
+    // SAFETY: the driver passes a NUL-terminated line.
+    let line = unsafe { CStr::from_ptr(message) }.to_string_lossy().into_owned();
+    LOGGED.lock().unwrap().push(line);
+}
+
+static LOG_VTABLE: LogVtable = LogVtable { log: log_log };
+
 // ---- A fake IVRDriverContext: GetGenericInterface (slot 0), GetDriverHandle (slot 1) ----
 
 #[repr(C)]
@@ -59,7 +80,8 @@ extern "system" fn context_get_generic_interface(_this: *mut c_void, version: *c
     let host = &HOST_OBJECT as *const _ as *mut c_void;
     match version.to_str() {
         Ok("IVRServerDriverHost_006") => host,
-        // Pretend _005 and the log are absent, as a modern SteamVR would.
+        Ok("IVRDriverLog_001") => &LOG_OBJECT as *const _ as *mut c_void,
+        // Pretend _005 is absent, as a modern SteamVR would.
         _ => std::ptr::null_mut(),
     }
 }
@@ -73,6 +95,7 @@ static CONTEXT_VTABLE: ContextVtable = ContextVtable { get_generic_interface: co
 // The fake objects live for the whole test (static, as SteamVR's do).
 static HOST_OBJECT: Object<HostVtable> = Object { vtable: &HOST_VTABLE };
 static CONTEXT_OBJECT: Object<ContextVtable> = Object { vtable: &CONTEXT_VTABLE };
+static LOG_OBJECT: Object<LogVtable> = Object { vtable: &LOG_VTABLE };
 
 /// The provider's function table, as laid out in `openvr::ProviderVtable`.
 #[repr(C)]
@@ -121,6 +144,7 @@ fn factory_init_hook_filter_and_cleanup() {
     let context_entry = unsafe { *(*(&CONTEXT_OBJECT as *const _ as *const *const usize)) };
     let init = unsafe { (vtable.init)(provider, &CONTEXT_OBJECT as *const _ as *mut c_void) };
     assert_eq!(init, 0, "Init returns VRInitError_None");
+    assert!(LOGGED.lock().unwrap().iter().any(|l| l.contains("loaded")), "Init's line reached the log's Log: {:?}", LOGGED.lock().unwrap());
     for _ in 0..3 {
         unsafe { (vtable.run_frame)(provider) };
     }
@@ -137,6 +161,7 @@ fn factory_init_hook_filter_and_cleanup() {
     assert!(ASKED.load(Ordering::Relaxed) > 0, "the driver asked the context for the host");
     assert_ne!(host_pose_entry(), unhooked, "the host's pose-update slot now points at the driver");
     assert_eq!(control.driver_heartbeat().unwrap().hooks, 1, "the heartbeat says it hooked the host");
+    assert!(LOGGED.lock().unwrap().iter().any(|l| l.contains("1 host hook")), "the hook is logged: {:?}", LOGGED.lock().unwrap());
 
     // A device the app did not mark (strength 0) passes through bit for bit.
     send_pose(0, DriverPose::at([3.0, 0.0, 0.0], Quaternion::IDENTITY));

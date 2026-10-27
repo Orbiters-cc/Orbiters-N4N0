@@ -98,6 +98,8 @@ struct CardOut {
 pub(crate) struct Followups {
     pub effects: Vec<Effect>,
     pub photo_due: bool,
+    /// Something on the screen was pressed (a finger, a trigger, a click): the overlay's press sound plays.
+    pub pressed: bool,
     /// Suggestions to ask for now, and thumbnails to try again.
     suggest: Option<(u64, String)>,
     retry: Vec<String>,
@@ -153,6 +155,8 @@ pub(crate) struct ScreenRuntime {
     others_touch: Touch,
     pub(crate) hover: Option<usize>,
     pub(crate) pressed: Option<(usize, Instant)>,
+    /// Presses so far (a drag along the timeline is none), for the press sound.
+    presses: u32,
     /// The hands and everyone else's fingers holding a press.
     holding: [bool; 3],
     /// The page hover and presses are for.
@@ -282,6 +286,7 @@ impl Default for ScreenRuntime {
             others_touch: Touch::default(),
             hover: None,
             pressed: None,
+            presses: 0,
             holding: [false; 3],
             page_shown: None,
             gaze: false,
@@ -713,6 +718,7 @@ impl ScreenRuntime {
         if let Some((index, target)) = looked.filter(|_| click && rested) {
             self.last_activity = now;
             self.pressed = Some((index, now));
+            self.presses = self.presses.wrapping_add(1);
             self.clicking = true;
             self.dragging[3] = menu::timeline_segment(target);
             effects.extend(self.menu.press(target));
@@ -765,6 +771,7 @@ impl ScreenRuntime {
                     self.dragging[hand] = None;
                     if let Some((index, target)) = layout::hit_pointable(layout, &self.menu, x, y) {
                         self.pressed = Some((index, now));
+                        self.presses = self.presses.wrapping_add(1);
                         self.dragging[hand] = menu::timeline_segment(target);
                         effects.extend(self.menu.press(target));
                     }
@@ -1013,6 +1020,10 @@ fn close_menu(rt: &mut OrbRuntime) -> Vec<Effect> {
 /// What N4N0 says, cut as the Home of a display with `pages` shows it, a piece at a time: a line on the four- and
 /// six-tile Home, what its place holds on the seven-tile one.
 fn answer_pieces(text: &str, pages: Pages) -> Vec<String> {
+    // The simple Home's one line under its status.
+    if pages.simple() {
+        return menu::pieces(text, layout::SIMPLE_HEARD_COLUMNS - 2);
+    }
     if pages.ten() {
         return layout::wide_heard_pages(text);
     }
@@ -1275,6 +1286,37 @@ impl N4n0 {
         });
     }
 
+    /// Orbiters' VRChat account invites the player to `location` (Previous instances' Invite me), from the screen's menu
+    /// (`screen`) or another's (the answer then goes in the status' `invite`); a toast says how it went.
+    pub(crate) fn invite_send(self: &Shared, location: String, screen: bool) {
+        use orbiters_orb::menu::InviteAnswer;
+        let n = self.clone();
+        let _ = std::thread::Builder::new().name("orb-invite".into()).spawn(move || {
+            let answer = match n.host.account() {
+                Some((api, token)) => orbiters_orb::invites::send(&api, &token, &location),
+                None => InviteAnswer::Failed { message: "Sign in to Orbiters in Orbiters - N4N0 first (Settings)".into() },
+            };
+            {
+                let mut rt = n.orb.lock().unwrap();
+                if screen {
+                    rt.screen.menu.invite_answered(answer.clone());
+                    rt.screen.last_activity = Instant::now();
+                } else {
+                    let number = rt.invite.as_ref().map_or(1, |(k, _)| k.wrapping_add(1));
+                    rt.invite = Some((number, answer.clone()));
+                }
+            }
+            match &answer {
+                InviteAnswer::Sent => n.notify(NoticeKind::Success, "Orbiters invited you: open the invite in VRChat's notifications.".to_string()),
+                InviteAnswer::NeedsFriend { account, .. } => {
+                    n.notify(NoticeKind::Info, format!("Add {} as a friend on VRChat, then try again.", account.name))
+                }
+                InviteAnswer::Failed { message } => n.notify(NoticeKind::Warning, format!("No invite: {message}")),
+            }
+            n.publish();
+        });
+    }
+
     /// A 3D picture now. What stops it (VRChat's camera closed: [`crate::platform::CAMERA_CLOSED`]) is told, and shown on
     /// every menu's 3D picture page.
     pub(crate) fn photo_3d_now(self: &Shared) {
@@ -1451,6 +1493,9 @@ impl N4n0 {
 
     /// What a step of the screen left to do: the menu's effects, a picture's timer, the suggestions and thumbnails due.
     pub(crate) fn screen_followups(self: &Shared, followups: Followups) {
+        if followups.pressed {
+            self.device.sounds.press();
+        }
         self.screen_effects(followups.effects);
         if followups.photo_due {
             self.photo_3d_in(0);
@@ -1536,6 +1581,25 @@ impl N4n0 {
                     }
                 }
                 Effect::SaveVideo => self.command(crate::Command::SaveVideo),
+                Effect::Instances => {
+                    let n = self.clone();
+                    std::thread::spawn(move || {
+                        let rows = orbiters_orb::invites::read_rows();
+                        n.orb.lock().unwrap().screen.menu.set_instances(rows, true, "");
+                        n.publish();
+                    });
+                }
+                Effect::InviteMe { location } => self.invite_send(location, true),
+                Effect::CopyText { text } => {
+                    if let Err(e) = self.device.clipboard.copy(&text) {
+                        self.notify(NoticeKind::Error, e);
+                    }
+                }
+                Effect::OpenLink { link } => {
+                    if let Err(e) = self.host.watch(&link) {
+                        self.notify(NoticeKind::Warning, e);
+                    }
+                }
                 Effect::Close => {
                     let mut rt = self.orb.lock().unwrap();
                     rt.screen.hover = None;
@@ -1715,9 +1779,11 @@ pub(crate) fn tick(
         }
         return out;
     }
-    // The fingers, then desktop mode: where the owner looks, and a left click.
+    // The fingers, then desktop mode: where the owner looks, and a left click. A press plays the overlay's sound.
+    let presses = s.presses;
     s.point_and_touch(now, &mut followups.effects);
     s.look_and_click(vrchat, now, &mut followups.effects);
+    followups.pressed |= s.presses != presses;
     if s.pressed.is_some_and(|(_, at)| now.duration_since(at) > PRESS_SHOWN && !s.holding.iter().any(|h| *h) && !s.clicking) {
         s.pressed = None;
     }
@@ -2022,6 +2088,7 @@ mod tests {
             s.point_and_touch(ms(n), &mut effects);
         }
         assert_eq!(seeks(&effects), vec![100, 180]);
+        assert_eq!(s.presses, 1, "a drag is no new press: one click");
         // Let go, then pointed elsewhere on the timeline: nothing more until pressed.
         s.trigger(true, false);
         s.point_and_touch(ms(120), &mut Vec::new());
@@ -2044,6 +2111,7 @@ mod tests {
             s.point_and_touch(ms(n), &mut Vec::new());
         }
         assert_eq!(s.menu.page, Page::Search, "the touch pressed the tile");
+        assert_eq!(s.presses, 1, "one press, one click of the overlay's sound");
         // Someone else's fingertip on Search's back button presses it too.
         let back = layout::cached(ScreenPage::of(&s.menu)).elements.iter().find(|e| e.target == menu::Target::Back).map(|e| e.rect).expect("a back button");
         let at = on_screen(back.x as f32 + back.w as f32 / 2.0, back.y as f32 + back.h as f32 / 2.0);
@@ -2057,6 +2125,7 @@ mod tests {
             s.point_and_touch(ms(n), &mut Vec::new());
         }
         assert_eq!(s.menu.page, Page::Home, "someone else's touch went back");
+        assert_eq!(s.presses, 2);
     }
 
     #[test]

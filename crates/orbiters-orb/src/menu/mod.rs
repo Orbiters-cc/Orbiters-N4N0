@@ -36,6 +36,8 @@ pub const STATES_PER_PAGE: usize = 5;
 /// The segments of the music page's timeline (from screen version 9): a press on segment `i` moves the music to `i` /
 /// this of its length.
 pub const TIMELINE_STEPS: usize = 16;
+/// Previous instances on a page of their list.
+pub const INSTANCES_PER_PAGE: usize = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Page {
@@ -63,6 +65,12 @@ pub enum Page {
     Tracking,
     /// A feature to suggest to Orbiters, typed or said.
     Suggest,
+    /// The simple Home's More (from screen version 10): light, previous instances, smooth tracking, suggest.
+    More,
+    /// The instances the player was in, each with Invite me (Orbiters' VRChat account invites them there).
+    Instances,
+    /// Orbiters' VRChat account has to be the player's friend to invite them: its name to copy, its page to open.
+    AddFriend,
 }
 
 /// What the keyboard page ([`Page::Type`]) types.
@@ -172,16 +180,20 @@ pub enum Pages {
     /// From version 9: the music page's timeline (tapped or dragged to move in what plays), and Take back on the
     /// results and the music page while the link card is out.
     Timeline,
+    /// From version 10: the simple Home (YouTube, 3D capture and More large; fast walk, calls and states under them;
+    /// what plays at the bottom when something does), More, Previous instances and Add Orbiters as a friend.
+    Simple,
 }
 
 impl Pages {
     /// Every page: the overlay's and the window's.
-    pub const ALL: Pages = Pages::Timeline;
+    pub const ALL: Pages = Pages::Simple;
 
     /// The pages of a screen of `version` (`None`: a screen from before `N4N0/Screen/Version`).
     pub fn of_screen(version: Option<i32>) -> Pages {
-        use orbiters_contracts::orb::{SCREEN_MUSIC_LIGHT, SCREEN_STATES_CARDS, SCREEN_TEN_TILES, SCREEN_TIMELINE};
+        use orbiters_contracts::orb::{SCREEN_MUSIC_LIGHT, SCREEN_SIMPLE, SCREEN_STATES_CARDS, SCREEN_TEN_TILES, SCREEN_TIMELINE};
         match version {
+            Some(v) if v >= SCREEN_SIMPLE => Pages::Simple,
             Some(v) if v >= SCREEN_TIMELINE => Pages::Timeline,
             Some(v) if v >= SCREEN_TEN_TILES => Pages::Ten,
             Some(v) if v >= SCREEN_STATES_CARDS => Pages::Seven,
@@ -209,6 +221,79 @@ impl Pages {
     pub fn timeline(self) -> bool {
         self >= Pages::Timeline
     }
+
+    /// Home is the simple one, with More, Previous instances and Add Orbiters as a friend.
+    pub fn simple(self) -> bool {
+        self >= Pages::Simple
+    }
+}
+
+/// An instance the player was in (VRChat's logs), as Previous instances lists it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InstanceRow {
+    /// VRChat's location, `wrld_…:<instance>`, which an invite names.
+    pub location: String,
+    /// The world's name, when its join said it.
+    pub world: String,
+    /// When it was joined last (Unix seconds).
+    pub at: u64,
+}
+
+impl InstanceRow {
+    /// Who may join it, as VRChat names it: Public, Friends+, Friends, Invite+, Invite, Group, Group+, Group Public.
+    pub fn kind(&self) -> &'static str {
+        let tags = self.location.split_once('~').map_or("", |(_, t)| t);
+        let has = |tag: &str| tags.split('~').any(|t| t.starts_with(tag));
+        if has("group(") {
+            return match tags.split('~').find_map(|t| t.strip_prefix("groupAccessType(")).map(|t| t.trim_end_matches(')')) {
+                Some("public") => "Group Public",
+                Some("plus") => "Group+",
+                _ => "Group",
+            };
+        }
+        if has("private(") {
+            return if has("canRequestInvite") { "Invite+" } else { "Invite" };
+        }
+        if has("friends(") {
+            return "Friends";
+        }
+        if has("hidden(") {
+            return "Friends+";
+        }
+        "Public"
+    }
+
+    /// Its region (`EU`, `JP`, `US W`, `US E`), when the location says.
+    pub fn region(&self) -> Option<&'static str> {
+        let tags = self.location.split_once('~').map_or("", |(_, t)| t);
+        let region = tags.split('~').find_map(|t| t.strip_prefix("region(")).map(|r| r.trim_end_matches(')'))?;
+        match region {
+            "eu" => Some("EU"),
+            "jp" => Some("JP"),
+            "us" => Some("US W"),
+            "use" => Some("US E"),
+            _ => None,
+        }
+    }
+}
+
+/// Orbiters' VRChat account, which invites the player: its VRChat name and its page.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InviteAccount {
+    pub name: String,
+    pub link: String,
+}
+
+/// How an Invite me went (Orbiters' answer).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum InviteAnswer {
+    /// VRChat has the invite.
+    Sent,
+    /// Orbiters' account is not the player's friend yet (or is accepting their friend request): add it, then try again.
+    NeedsFriend { account: InviteAccount, message: String },
+    /// Why it was not sent.
+    Failed { message: String },
 }
 
 /// A saved state of the avatar worn, as the menu lists it (Orbiters - N4N0 keeps them: contracts `Docs/orb.md`, States).
@@ -450,6 +535,15 @@ pub enum Target {
     Seek(u8),
     /// The link card back from the world (from screen version 9: on the results and the music page while it is out).
     TakeBack,
+    // The simple Home (from screen version 10): More, and on More, Previous instances.
+    More,
+    Instances,
+    /// A previous instance's row or its Invite me: Orbiters' VRChat account invites the player there.
+    InviteMe(u8),
+    /// Add Orbiters as a friend: its name in the clipboard, its VRChat page opened on the computer, the invite again.
+    CopyFriendName,
+    OpenFriendLink,
+    InviteAgain,
 }
 
 /// The timeline segment a target is (the segment, or the place over it), for a drag along the timeline.
@@ -547,6 +641,20 @@ pub enum Effect {
     },
     /// Take the link card out in the world back (as when its time is up).
     TakeBack,
+    /// The instances the player was in, for Previous instances (the host answers with [`Menu::set_instances`]).
+    Instances,
+    /// Orbiters' VRChat account invites the player to this location (the host answers with [`Menu::invite_answered`]).
+    InviteMe {
+        location: String,
+    },
+    /// Put a text in the clipboard (Orbiters' account's name).
+    CopyText {
+        text: String,
+    },
+    /// Open this page on the computer (Orbiters' account's VRChat page).
+    OpenLink {
+        link: String,
+    },
     /// The menu closed.
     Close,
 }
@@ -644,6 +752,18 @@ pub struct Menu {
     pub versions: String,
     /// The video the world's player plays (VRChat's log).
     pub world_video: Option<WorldVideo>,
+    /// The instances the player was in, the newest first (`instances_ready` once the host read them, else
+    /// `instances_note` says why there are none), and the page of them shown (from 0).
+    pub instances: Vec<InstanceRow>,
+    pub instances_ready: bool,
+    pub instances_note: String,
+    pub instance_page: usize,
+    /// The location an Invite me was asked for (Try again on Add Orbiters as a friend asks it again), and whether
+    /// Orbiters' answer is awaited.
+    pub inviting: Option<String>,
+    pub invite_waiting: bool,
+    /// Orbiters' VRChat account to befriend first, once an invite said so.
+    pub invite_account: Option<InviteAccount>,
 }
 
 /// How long a state saved here shows before the host's list has it.
@@ -799,6 +919,9 @@ impl Menu {
                     Page::Results => Page::Search,
                     Page::Type => self.typed_from(),
                     Page::NewState => Page::States,
+                    Page::AddFriend => Page::Instances,
+                    // The simple Home's More holds these.
+                    Page::Light | Page::Tracking | Page::Suggest | Page::Instances if self.pages.simple() => Page::More,
                     _ => Page::Home,
                 };
                 self.go(to);
@@ -1001,6 +1124,46 @@ impl Menu {
                 vec![Effect::TakeBack]
             }
             Target::TakeBack => Vec::new(),
+            Target::More => {
+                self.go(Page::More);
+                Vec::new()
+            }
+            Target::Instances => {
+                self.go(Page::Instances);
+                self.instance_page = 0;
+                vec![Effect::Instances]
+            }
+            Target::InviteMe(i) => match self.page_instances().get(i as usize) {
+                Some(row) if !self.invite_waiting => {
+                    let location = row.location.clone();
+                    self.notice = Some(format!("Asking Orbiters to invite you to {}…", if row.world.is_empty() { "this instance" } else { &row.world }));
+                    self.ask_invite(location)
+                }
+                _ => Vec::new(),
+            },
+            Target::InviteAgain => match self.inviting.clone() {
+                Some(location) if !self.invite_waiting => {
+                    self.notice = Some("Asking Orbiters again…".into());
+                    self.ask_invite(location)
+                }
+                _ => Vec::new(),
+            },
+            Target::CopyFriendName => match &self.invite_account {
+                Some(account) => {
+                    let text = account.name.clone();
+                    self.notice = Some(format!("Copied \"{text}\": search it in VRChat's Social menu"));
+                    vec![Effect::CopyText { text }]
+                }
+                None => Vec::new(),
+            },
+            Target::OpenFriendLink => match &self.invite_account {
+                Some(account) => {
+                    let link = account.link.clone();
+                    self.notice = Some("Opened on the computer: send the friend request there".into());
+                    vec![Effect::OpenLink { link }]
+                }
+                None => Vec::new(),
+            },
             Target::Contact(i) => match self.page_contacts().get(i as usize) {
                 Some(contact) if self.call.is_none() => vec![Effect::CallContact { id: contact.id.clone() }],
                 _ => Vec::new(),
@@ -1307,6 +1470,7 @@ impl Menu {
             Page::Results => self.result_page > 0,
             Page::Call => self.contact_page > 0,
             Page::States => self.state_page > 0,
+            Page::Instances => self.instance_page > 0,
             _ => false,
         }
     }
@@ -1316,6 +1480,7 @@ impl Menu {
             Page::Results => (self.result_page + 1) * RESULTS_PER_PAGE < self.results.len() || self.continuation.is_some(),
             Page::Call => (self.contact_page + 1) * CONTACTS_PER_PAGE < self.contacts.len(),
             Page::States => (self.state_page + 1) * STATES_PER_PAGE < self.states.len(),
+            Page::Instances => (self.instance_page + 1) * INSTANCES_PER_PAGE < self.instances.len(),
             _ => false,
         }
     }
@@ -1358,6 +1523,12 @@ impl Menu {
             Page::States => {
                 let pages = self.states.len().div_ceil(STATES_PER_PAGE).max(1);
                 self.state_page = (self.state_page as i32 + by).clamp(0, pages as i32 - 1) as usize;
+                self.notice = None;
+                Vec::new()
+            }
+            Page::Instances => {
+                let pages = self.instances.len().div_ceil(INSTANCES_PER_PAGE).max(1);
+                self.instance_page = (self.instance_page as i32 + by).clamp(0, pages as i32 - 1) as usize;
                 self.notice = None;
                 Vec::new()
             }
@@ -1443,6 +1614,51 @@ impl Menu {
     /// Whether a state saved here waits for the host's list.
     pub fn saving(&self) -> bool {
         self.pending_save.is_some()
+    }
+
+    /// The previous instances of the page shown.
+    pub fn page_instances(&self) -> &[InstanceRow] {
+        let start = (self.instance_page * INSTANCES_PER_PAGE).min(self.instances.len());
+        &self.instances[start..(start + INSTANCES_PER_PAGE).min(self.instances.len())]
+    }
+
+    /// The instances the player was in, the newest first, as the host read them (`ready`: read; else `note` says why
+    /// there are none).
+    pub fn set_instances(&mut self, instances: Vec<InstanceRow>, ready: bool, note: &str) {
+        self.instances = instances;
+        self.instances_ready = ready;
+        self.instances_note = note.to_string();
+        let pages = self.instances.len().div_ceil(INSTANCES_PER_PAGE).max(1);
+        self.instance_page = self.instance_page.min(pages - 1);
+    }
+
+    fn ask_invite(&mut self, location: String) -> Vec<Effect> {
+        self.inviting = Some(location.clone());
+        self.invite_waiting = true;
+        vec![Effect::InviteMe { location }]
+    }
+
+    /// Orbiters answered the last Invite me: sent, the page says so; its account to befriend first, Add Orbiters as a
+    /// friend shows; failed, why.
+    pub fn invite_answered(&mut self, answer: InviteAnswer) {
+        self.invite_waiting = false;
+        match answer {
+            InviteAnswer::Sent => {
+                if self.page == Page::AddFriend {
+                    self.go(Page::Instances);
+                }
+                self.invite_account = None;
+                self.notice = Some("Invite sent: open it in VRChat's notifications".into());
+            }
+            InviteAnswer::NeedsFriend { account, message } => {
+                self.invite_account = Some(account);
+                if self.open && matches!(self.page, Page::Instances | Page::AddFriend) {
+                    self.go(Page::AddFriend);
+                }
+                self.notice = Some(cut(&message, 80));
+            }
+            InviteAnswer::Failed { message } => self.notice = Some(format!("Not invited: {}", cut(&message, 60))),
+        }
     }
 
     /// A call started, changed or ended. A ringing call opens the call page.
@@ -2132,5 +2348,92 @@ mod tests {
         // Everyone else's screen never shows what the owner writes.
         menu.suggestion = "private idea".into();
         assert_eq!(layout::text_for(&menu, layout::Content::SuggestLine(0), true), "");
+    }
+
+    fn instance(i: u64) -> InstanceRow {
+        InstanceRow { location: format!("wrld_99123966-6b37-4b5b-9f3c-0a1b2c3d4e5f:{i}~region(eu)"), world: format!("World {i}"), at: 1000 + i }
+    }
+
+    #[test]
+    fn the_simple_home_shows_what_plays_and_more_holds_the_rest() {
+        use layout::ScreenPage;
+        let mut menu = Menu { pages: Pages::Simple, ..Default::default() };
+        menu.open();
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeQuiet, "nothing plays: the tiles take its place");
+        menu.media = Some(Media { title: "Midnight City".into(), ..Default::default() });
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSimple);
+        menu.press(Target::More);
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::More);
+        for (target, page) in [(Target::Light, Page::Light), (Target::Tracking, Page::Tracking), (Target::Suggest, Page::Suggest)] {
+            menu.press(target);
+            assert_eq!(menu.page, page);
+            menu.press(Target::Back);
+            assert_eq!(menu.page, Page::More, "{page:?} goes back to More");
+        }
+        menu.press(Target::Back);
+        assert_eq!(menu.page, Page::Home);
+        // A screen of version 9 keeps its ten-tile Home, and never shows More's pages.
+        let mut old = Menu { pages: Pages::Timeline, ..Default::default() };
+        old.open();
+        old.press(Target::More);
+        assert_eq!(ScreenPage::of(&old), ScreenPage::HomeTen);
+        old.page = Page::Light;
+        old.press(Target::Back);
+        assert_eq!(old.page, Page::Home, "its Light is on Home");
+    }
+
+    #[test]
+    fn previous_instances_page_and_invite_through_orbiters() {
+        let mut menu = Menu { pages: Pages::Simple, ..Default::default() };
+        menu.open();
+        menu.press(Target::More);
+        assert_eq!(menu.press(Target::Instances), [Effect::Instances], "the host reads them");
+        assert_eq!(menu.page, Page::Instances);
+        menu.set_instances((0..7).rev().map(instance).collect(), true, "");
+        assert_eq!(menu.page_instances().len(), INSTANCES_PER_PAGE);
+        assert!(menu.has_next() && !menu.has_previous());
+        menu.press(Target::Next);
+        assert_eq!(menu.page_instances().len(), 2);
+        assert!(layout::target_state(&menu, Target::InviteMe(2)).hidden, "no third row on the last page");
+        // Invite me: asked once at a time, Orbiters' account to befriend first.
+        let location = menu.page_instances()[1].location.clone();
+        assert_eq!(menu.press(Target::InviteMe(1)), [Effect::InviteMe { location: location.clone() }]);
+        assert!(menu.invite_waiting && layout::target_state(&menu, Target::InviteMe(0)).unavailable);
+        assert!(menu.press(Target::InviteMe(0)).is_empty(), "one at a time");
+        let account = InviteAccount { name: "Orbiters".into(), link: "https://vrchat.com/home/user/usr_1".into() };
+        menu.invite_answered(InviteAnswer::NeedsFriend { account: account.clone(), message: "Add it first".into() });
+        assert_eq!(menu.page, Page::AddFriend);
+        assert_eq!(layout::text(&menu, layout::Content::FriendName), "Orbiters");
+        assert_eq!(layout::text(&menu, layout::Content::FriendLink), "vrchat.com/home/user/usr_1");
+        assert_eq!(menu.press(Target::CopyFriendName), [Effect::CopyText { text: "Orbiters".into() }]);
+        assert_eq!(menu.press(Target::OpenFriendLink), [Effect::OpenLink { link: account.link.clone() }]);
+        // Try again asks for the same instance; sent, the list shows again.
+        assert_eq!(menu.press(Target::InviteAgain), [Effect::InviteMe { location }]);
+        menu.invite_answered(InviteAnswer::Sent);
+        assert_eq!(menu.page, Page::Instances);
+        assert!(!menu.invite_waiting);
+        assert_eq!(layout::text(&menu, layout::Content::InstancesTitle), "Invite sent: open it in VRChat's notifications");
+        menu.press(Target::InviteMe(0));
+        menu.invite_answered(InviteAnswer::Failed { message: "Link your VRChat account on Orbiters first.".into() });
+        assert_eq!(menu.page, Page::Instances);
+        assert!(menu.notice.as_deref().is_some_and(|n| n.starts_with("Not invited: Link your VRChat account")));
+        menu.press(Target::Back);
+        assert_eq!(menu.page, Page::More);
+    }
+
+    #[test]
+    fn an_instance_says_who_may_join_and_where() {
+        let row = |tags: &str| InstanceRow { location: format!("wrld_a:1{tags}"), ..Default::default() };
+        assert_eq!((row("").kind(), row("").region()), ("Public", None));
+        assert_eq!(row("~hidden(usr_x)~region(eu)").kind(), "Friends+");
+        assert_eq!(row("~friends(usr_x)").kind(), "Friends");
+        assert_eq!(row("~private(usr_x)").kind(), "Invite");
+        assert_eq!(row("~private(usr_x)~canRequestInvite~region(jp)").kind(), "Invite+");
+        assert_eq!(row("~group(grp_x)~groupAccessType(public)").kind(), "Group Public");
+        assert_eq!(row("~group(grp_x)~groupAccessType(plus)").kind(), "Group+");
+        assert_eq!(row("~group(grp_x)~groupAccessType(members)").kind(), "Group");
+        assert_eq!(row("~region(use)").region(), Some("US E"));
+        assert_eq!(row("~region(us)").region(), Some("US W"));
+        assert_eq!((layout::ago(30), layout::ago(300), layout::ago(7200), layout::ago(3 * 86400)), ("just now".into(), "5 min ago".into(), "2 h ago".into(), "3 d ago".into()));
     }
 }

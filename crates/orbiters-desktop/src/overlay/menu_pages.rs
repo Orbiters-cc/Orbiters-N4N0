@@ -25,7 +25,8 @@ use orbiters_orb::menu::layout::{self, ScreenPage, MAX_ELEMENTS, MAX_SLOTS, PICT
 use orbiters_orb::menu::strings::{Strings, Text};
 use orbiters_orb::menu::theme::Theme;
 use orbiters_orb::menu::{
-    screen, Call, Card, Contact, KeyboardLayout, Keys, Light, Media, Menu, Page, Pages, PhotoLength, StateRow, Target, Tracking, Volume, WorldVideo,
+    screen, Call, Card, Contact, InstanceRow, InviteAccount, InviteAnswer, KeyboardLayout, Keys, Light, Media, Menu, Page, Pages, PhotoLength, StateRow, Target, Tracking,
+    Volume, WorldVideo,
 };
 use orbiters_orb::picture;
 use orbiters_orb::youtube::{Results, Video};
@@ -386,7 +387,51 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     suggest.press(Target::Suggest);
     suggest.suggestion = "A dance mode where N4N0 bounces to the music the world plays, with a switch on its card".into();
     out.push((ScreenPage::Suggest, suggest, Some(4), None));
+    // The overlay's Home and screens from version 10: the simple Home with music playing and without, More, Previous
+    // instances, Add Orbiters as a friend.
+    let simple = || {
+        let mut m = ten();
+        m.pages = Pages::Simple;
+        m.set_instances(sample_instances(), true, "");
+        m
+    };
+    let mut home = simple();
+    home.fast_walk = true;
+    home.heard = Some("Done, hoodie on. Now go find your friends.".into());
+    out.push((ScreenPage::HomeSimple, home, Some(1), None));
+    let mut quiet = simple();
+    quiet.media = None;
+    quiet.listening = true;
+    out.push((ScreenPage::HomeQuiet, quiet, Some(0), None));
+    let mut more = simple();
+    more.press(Target::More);
+    out.push((ScreenPage::More, more, Some(2), None));
+    let mut instances = simple();
+    instances.page = Page::Instances;
+    out.push((ScreenPage::Instances, instances, Some(7), None));
+    let mut friend = simple();
+    friend.page = Page::Instances;
+    friend.press(Target::InviteMe(0));
+    let account = InviteAccount { name: "Orbiters".into(), link: "https://vrchat.com/home/user/usr_0c5b8f2e-3a41-4d7c-9e2b-5f6a7b8c9d0e".into() };
+    friend.invite_answered(InviteAnswer::NeedsFriend { account, message: "Add Orbiters' VRChat account as a friend on VRChat first, then try again.".into() });
+    out.push((ScreenPage::AddFriend, friend, Some(3), None));
     out
+}
+
+/// Instances the sample player was in, the newest first.
+pub(crate) fn sample_instances() -> Vec<InstanceRow> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    [
+        ("wrld_7281543e-6888-4676-896a-fdd090552fc4:41822~hidden(usr_a)~region(eu)", "Exoplanet Journey", 300),
+        ("wrld_9936b6ff-e523-4066-9e40-a333320ff5d3:12093~region(jp)", "New Generation", 2 * 3600),
+        ("wrld_a7e4d38f-8fac-47ab-9e30-628bf015e62b:77001~private(usr_a)~canRequestInvite~region(us)", "Palm Point - Night", 26 * 3600),
+        ("wrld_266523e8-9161-40da-acd0-6bd82e075833:5512~group(grp_x)~groupAccessType(plus)~region(use)", "Popcorn Palace", 3 * 86400),
+        ("wrld_99123966-6b37-46d9-835c-25c2f6e0706c:9040~friends(usr_a)~region(eu)", "VRC Volleyball", 9 * 86400),
+        ("wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd:1", "VRChat Home", 12 * 86400),
+    ]
+    .into_iter()
+    .map(|(location, world, ago)| InstanceRow { location: location.into(), world: world.into(), at: now - ago })
+    .collect()
 }
 
 /// Saved states of the sample avatar: the second the default.
@@ -606,7 +651,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let flags = screen::Flags { listening: menu.listening, loading: menu.loading(), ..Default::default() };
         let bank = screen::Frame::new(&menu, hover, pressed, flags, 72, &pictures).bank;
         std::fs::write(out.join(format!("bank-{}.bin", page.name())), &bank[..screen::bank_bytes(72)])?;
-        if matches!(page, ScreenPage::Results | ScreenPage::Music | ScreenPage::Card) {
+        if matches!(page, ScreenPage::Results | ScreenPage::Music | ScreenPage::Card | ScreenPage::HomeSimple) {
             let bank = screen::Frame::new(&menu, hover, pressed, flags, 128, &pictures).bank;
             std::fs::write(out.join(format!("bank-{}-128.bin", page.name())), &bank[..screen::bank_bytes(128)])?;
         }

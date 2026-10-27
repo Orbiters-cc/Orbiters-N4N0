@@ -203,6 +203,8 @@ pub(crate) struct OrbRuntime {
     pub(crate) tracking_note: String,
     /// The last suggestion a menu other than the screen's sent, numbered, and why it failed.
     pub(crate) suggestion: Option<(u32, Option<String>)>,
+    /// How the last Invite me of a menu other than the screen's went, numbered.
+    pub(crate) invite: Option<(u32, orbiters_orb::menu::InviteAnswer)>,
     /// The computer's keys for the overlay menu's keyboard (the last few, numbered), and whether the keyboard is taken.
     pub(crate) keys: std::collections::VecDeque<(u32, orbiters_orb::menu::KeyInput)>,
     pub(crate) keyboard_taken: bool,
@@ -391,6 +393,7 @@ impl OrbRuntime {
             keys: self.keys.iter().cloned().collect(),
             world_video: self.world_video.as_ref().map(|v| (v.url.clone(), v.title.clone(), v.at)),
             photo_note: self.screen.photo_note.clone(),
+            invite: self.invite.clone(),
         }
     }
 
@@ -1616,6 +1619,7 @@ impl N4n0 {
                 s.tracking.levels = levels;
             }),
             Command::Suggest { text, voice } => self.suggestion_send(text, voice, false),
+            Command::InviteMe { location } => self.invite_send(location, false),
             Command::Dictate => self.menu_listen(),
             Command::Watch { link } => {
                 if let Err(e) = self.host.watch(&link) {

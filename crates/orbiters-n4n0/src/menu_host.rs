@@ -89,6 +89,8 @@ pub struct MenuHost<P: Pictures> {
     pub dropped: bool,
     /// The number of the last suggestion result N4N0 published that this menu saw (the first status sets it).
     suggestion_seen: Option<u32>,
+    /// The same for the last Invite me's answer.
+    invite_seen: Option<u32>,
     /// The number of the last key of the computer's keyboard taken (the first status sets it).
     keys_seen: Option<u32>,
     /// The number of the last 3D picture note N4N0 published that this menu saw (the first status sets it).
@@ -116,6 +118,7 @@ impl<P: Pictures> MenuHost<P> {
             note_seen: None,
             dropped: false,
             suggestion_seen: None,
+            invite_seen: None,
             keys_seen: None,
             photo_note_seen: None,
         }
@@ -224,6 +227,18 @@ impl<P: Pictures> MenuHost<P> {
             }
             (Some((n, _)), None) => self.suggestion_seen = Some(*n),
             (None, None) => self.suggestion_seen = Some(0),
+            _ => {}
+        }
+        match (&orb.invite, self.invite_seen) {
+            (Some((n, answer)), Some(seen)) if *n != seen => {
+                if m.invite_waiting {
+                    m.invite_answered(answer.clone());
+                    changed = true;
+                }
+                self.invite_seen = Some(*n);
+            }
+            (Some((n, _)), None) => self.invite_seen = Some(*n),
+            (None, None) => self.invite_seen = Some(0),
             _ => {}
         }
         let calls = &orb.calls;
@@ -418,6 +433,11 @@ impl<P: Pictures> MenuHost<P> {
                 Effect::SendSuggestion { text, voice } => service.command(Command::Suggest { text, voice }),
                 Effect::WatchVideo { link } => service.command(Command::Watch { link }),
                 Effect::SaveVideo => service.command(Command::SaveVideo),
+                // This computer's visits, read here (a small file): the service keeps it as VRChat's logs grow.
+                Effect::Instances => self.menu.set_instances(orbiters_orb::invites::read_rows(), true, ""),
+                Effect::InviteMe { location } => service.command(Command::InviteMe { location }),
+                Effect::CopyText { text } => service.command(Command::CopyText { text }),
+                Effect::OpenLink { link } => service.command(Command::Watch { link }),
                 Effect::Close => close = true,
             }
         }

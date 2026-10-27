@@ -26,7 +26,10 @@ use openvr::{
     DriverPose, GetGenericInterfaceFn, LogFn, Object, PoseUpdatedFn, ProviderVtable, DRIVER_LOG, HOST_POSE_UPDATED_SLOT, INIT_INTERFACE_NOT_FOUND, INIT_NONE,
     INTERFACE_VERSIONS, MAX_DEVICES, SERVER_DRIVER_HOST_005, SERVER_DRIVER_HOST_006, SERVER_TRACKED_DEVICE_PROVIDER,
 };
-use orbiters_smooth::win::{tick_ms, VirtualProtect, PAGE_READWRITE};
+use orbiters_smooth::win::{
+    tick_ms, VirtualProtect, VirtualQuery, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
+    PAGE_READWRITE,
+};
 use orbiters_smooth::{ControlBlock, DriverReport, Mapping, CONTROL_NAME};
 use std::cell::UnsafeCell;
 use std::ffi::{c_char, c_void, CStr};
@@ -241,8 +244,13 @@ unsafe fn vtable_entry(object: *mut c_void, slot: usize) -> *mut *mut c_void {
 /// SAFETY: `entry` must be a writable-after-`VirtualProtect` table slot.
 unsafe fn patch_entry(entry: *mut *mut c_void, value: usize) -> bool {
     let size = std::mem::size_of::<usize>();
+    // A table on a page that also runs code (one another hooking driver made) keeps running while it is written.
+    let mut info = MEMORY_BASIC_INFORMATION::zeroed();
+    let executable = VirtualQuery(entry as *const c_void, &mut info, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) != 0
+        && info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY) != 0;
+    let writable = if executable { PAGE_EXECUTE_READWRITE } else { PAGE_READWRITE };
     let mut old = 0u32;
-    if VirtualProtect(entry as *const c_void, size, PAGE_READWRITE, &mut old) == 0 {
+    if VirtualProtect(entry as *const c_void, size, writable, &mut old) == 0 {
         return false;
     }
     std::ptr::write_volatile(entry, value as *mut c_void);
@@ -307,9 +315,14 @@ fn log_line(message: &str) {
         return;
     }
     if let Ok(text) = std::ffi::CString::new(message) {
-        // SAFETY: `IVRDriverLog::Log` is slot 0; `log` is the interface the host returned.
+        // SAFETY: `log` is the interface the host returned: its first word is its table, `IVRDriverLog::Log` slot 0.
+        // (The function is the table's first entry, not the table: calling the table itself ran SteamVR's read-only
+        // data and crashed vrserver.exe at the driver's first line, sending SteamVR to Safe Mode up to 0.3.2-dev.5.)
         unsafe {
-            let entry = *(log as *const *mut c_void);
+            let entry = *vtable_entry(log, 0);
+            if entry.is_null() {
+                return;
+            }
             let call: LogFn = std::mem::transmute::<*mut c_void, LogFn>(entry);
             call(log, text.as_ptr());
         }

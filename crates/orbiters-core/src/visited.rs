@@ -17,6 +17,8 @@ const MAX_VISITS: usize = 200;
 /// Worlds kept (those visited longest ago go first): a log that names worlds without end cannot grow the file
 /// without end.
 const MAX_WORLDS: usize = 5000;
+/// Instances kept (the newest): N4N0's Previous instances lists them.
+pub const MAX_INSTANCES: usize = 100;
 /// Log bytes one [`History::read_logs_following`] reads at most: a first look at days of logs is spread over several
 /// calls rather than holding up the thread that makes them.
 const READ_BUDGET: u64 = 64 << 20;
@@ -39,6 +41,23 @@ impl WorldVisits {
     }
 }
 
+/// An instance joined (VRChat's location: `wrld_…:<instance>`), and when it was joined last.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceVisit {
+    pub world_id: String,
+    /// What follows the world's id: its number and its tags (`12345~private(usr_…)~region(eu)`).
+    pub instance: String,
+    /// Unix seconds.
+    pub at: u64,
+}
+
+impl InstanceVisit {
+    /// VRChat's location, as an invite names it.
+    pub fn location(&self) -> String {
+        format!("{}:{}", self.world_id, self.instance)
+    }
+}
+
 /// `visited-worlds.json`: every world seen in VRChat's logs, with when.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct History {
@@ -49,6 +68,13 @@ pub struct History {
     /// The world joined last ("Joining or Creating Room" after the join names it).
     #[serde(default)]
     last: Option<String>,
+    /// The instances joined, each once, the one joined last at the end ([`MAX_INSTANCES`] of them).
+    #[serde(default)]
+    pub instances: Vec<InstanceVisit>,
+    /// The instances were read from every log there was (a history from before them is read again once, which adds
+    /// no visit twice).
+    #[serde(default)]
+    instances_read: bool,
     /// The name of the world being joined ("Entering Room" comes right before the join).
     #[serde(skip)]
     entering: Option<String>,
@@ -110,6 +136,32 @@ impl History {
         true
     }
 
+    /// Adds a join of `world_id:instance` at `at` (one entry per instance: joining it again moves it to the end);
+    /// returns whether it changed anything.
+    pub fn record_instance(&mut self, world_id: &str, instance: &str, at: u64) -> bool {
+        if instance.is_empty() {
+            return false;
+        }
+        if let Some(i) = self.instances.iter().position(|v| v.world_id == world_id && v.instance == instance) {
+            if self.instances[i].at >= at {
+                return false;
+            }
+            self.instances.remove(i);
+        }
+        let visit = InstanceVisit { world_id: world_id.to_string(), instance: instance.to_string(), at };
+        let i = self.instances.partition_point(|v| v.at <= at);
+        self.instances.insert(i, visit);
+        if self.instances.len() > MAX_INSTANCES {
+            self.instances.remove(0);
+        }
+        true
+    }
+
+    /// The instances joined, the newest first, with their world's name when known.
+    pub fn recent_instances(&self) -> Vec<(InstanceVisit, Option<String>)> {
+        self.instances.iter().rev().map(|v| (v.clone(), self.worlds.get(&v.world_id).and_then(|w| w.name.clone()))).collect()
+    }
+
     fn name_last(&mut self, name: &str) -> bool {
         let Some(w) = self.last.as_ref().and_then(|id| self.worlds.get_mut(id)) else { return false };
         if w.name.as_deref() == Some(name) {
@@ -138,6 +190,11 @@ impl History {
             .collect();
         // Their names hold the start time: oldest first, so the last world joined is the newest.
         logs.sort();
+        // A history from before instances were kept reads every log there is again, once, for them.
+        if !self.instances_read {
+            self.instances_read = true;
+            self.logs.clear();
+        }
         let mut changed = false;
         let mut budget = READ_BUDGET;
         for (name, path) in &logs {
@@ -193,8 +250,9 @@ impl History {
     // A join reads "Entering Room: <name>", "Joining wrld_…:<instance>", then "Joining or Creating Room: <name>".
     fn observe(&mut self, event: &LogEvent) -> bool {
         match event {
-            LogEvent::Joining { world_id, at: Some(at), .. } => {
+            LogEvent::Joining { world_id, instance, at: Some(at) } => {
                 let mut changed = self.record(world_id, *at);
+                changed |= self.record_instance(world_id, instance, *at);
                 if let Some(name) = self.entering.take() {
                     changed |= self.name_last(&name);
                 }
@@ -609,6 +667,10 @@ mod tests {
         assert_eq!(h.worlds[B].name.as_deref(), Some("B (renamed)"));
         assert_eq!(h.worlds[A].name.as_deref(), Some("A"));
         assert_eq!(h.worlds[A].visits.len(), 2);
+        // Each instance once, the newest first; a script's line is none.
+        let instances: Vec<String> = h.recent_instances().iter().map(|(v, _)| v.location()).collect();
+        assert_eq!(instances, [format!("{A}:3"), format!("{B}:2"), format!("{A}:1~region(eu)")]);
+        assert_eq!(h.recent_instances()[1].1.as_deref(), Some("B (renamed)"));
         assert!(!h.read_logs(&dir));
         let saved = dir.join("visited-worlds.json");
         h.save(&saved).unwrap();
@@ -618,6 +680,42 @@ mod tests {
         let mut again = again;
         assert!(again.read_logs(&dir));
         assert_eq!(again.worlds.len(), 2);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn instances_are_kept_once_each_newest_last_and_bounded() {
+        let mut h = History::default();
+        assert!(h.record_instance(A, "1~region(eu)", 100));
+        assert!(h.record_instance(B, "2", 200));
+        assert!(!h.record_instance(A, "1~region(eu)", 100), "the same join twice");
+        assert!(!h.record_instance(A, "", 300), "no instance");
+        assert!(h.record_instance(A, "1~region(eu)", 300), "joined again: it moves to the end");
+        assert_eq!(h.instances.iter().map(|v| v.at).collect::<Vec<_>>(), [200, 300]);
+        for i in 0..MAX_INSTANCES as u64 + 5 {
+            h.record_instance(B, &format!("{}", 1000 + i), 1000 + i);
+        }
+        assert_eq!(h.instances.len(), MAX_INSTANCES);
+        assert_eq!(h.instances.last().unwrap().instance, format!("{}", 1000 + MAX_INSTANCES as u64 + 4));
+    }
+
+    #[test]
+    fn a_history_from_before_instances_reads_its_logs_again_once() {
+        let dir = std::env::temp_dir().join(format!("orbiters-visits-instances-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("output_log_2026-10-18_20-17-45.txt");
+        let text = format!("2026.10.18 20:23:20 Debug      -  [Behaviour] Joining {A}:7~friends(usr_x)
+");
+        std::fs::write(&log, &text).unwrap();
+        // Read up to its end by a version that kept no instances.
+        let old = format!(r#"{{"worlds":{{"{A}":{{"name":"A","visits":[1]}}}},"logs":{{"output_log_2026-10-18_20-17-45.txt":{}}}}}"#, text.len());
+        let mut h: History = serde_json::from_str(&old).unwrap();
+        assert!(h.read_logs(&dir));
+        assert_eq!(h.instances.len(), 1);
+        assert_eq!(h.instances[0].location(), format!("{A}:7~friends(usr_x)"));
+        assert_eq!(h.worlds[A].visits.len(), 2, "the earlier visit and the log's, each once");
+        assert!(!h.read_logs(&dir), "read once");
         std::fs::remove_dir_all(dir).ok();
     }
 

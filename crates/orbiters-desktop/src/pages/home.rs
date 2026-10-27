@@ -160,8 +160,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 40 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             match page {
-                // The window never shows a dropped card itself (the avatar's screen does).
-                Page::Home | Page::Card => home(ui, cx, menu, &idle, copied_id, &mut acts),
+                // The window never shows a dropped card itself (the avatar's screen does), nor the simple Home's More pages
+                // (its Home has them all).
+                Page::Home | Page::Card | Page::More | Page::Instances | Page::AddFriend => home(ui, cx, menu, &idle, copied_id, &mut acts),
                 Page::Search | Page::Results => youtube(ui, cx, menu, &picture, focus, copied_id, &mut acts),
                 Page::Call => call(ui, cx, menu, &mut acts),
                 Page::Photo => photo(ui, cx, menu, take_blocked, &mut acts),

@@ -1522,7 +1522,7 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
         MenuPage::States | MenuPage::NewState => Target::States,
         MenuPage::Tracking => Target::Tracking,
         MenuPage::Suggest | MenuPage::Type => Target::Suggest,
-        MenuPage::Card => return,
+        MenuPage::Card | MenuPage::More | MenuPage::Instances | MenuPage::AddFriend => return,
     };
     host.press(open);
     if !samples {

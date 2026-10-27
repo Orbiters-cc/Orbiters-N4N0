@@ -6,7 +6,8 @@
 
 use super::strings::{self, Text};
 use super::{
-    Call, KeyboardLayout, Keys, Menu, Page, Pages, Target, Typing, CONTACTS_PER_PAGE, RESULTS_PER_PAGE, STATES_PER_PAGE, TIMELINE_STEPS, TIMERS, TRACKING_KINDS,
+    Call, KeyboardLayout, Keys, Menu, Page, Pages, Target, Typing, CONTACTS_PER_PAGE, INSTANCES_PER_PAGE, RESULTS_PER_PAGE, STATES_PER_PAGE, TIMELINE_STEPS, TIMERS,
+    TRACKING_KINDS,
 };
 use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
 use std::sync::OnceLock;
@@ -54,10 +55,21 @@ pub enum ScreenPage {
     Tracking = 21,
     /// A feature to suggest (from version 6).
     Suggest = 22,
+    /// The simple Home (from version 10): YouTube, 3D capture and More large, fast walk, calls and states under them, and
+    /// what the computer plays at the bottom; [`ScreenPage::HomeQuiet`] while nothing plays.
+    HomeSimple = 23,
+    /// The simple Home with nothing playing: its tiles take the place of the music's.
+    HomeQuiet = 24,
+    /// More (from version 10): light, previous instances, smooth tracking, suggest.
+    More = 25,
+    /// The instances the player was in, each with Invite me (from version 10).
+    Instances = 26,
+    /// Add Orbiters' VRChat account as a friend first (from version 10).
+    AddFriend = 27,
 }
 
 impl ScreenPage {
-    pub const ALL: [ScreenPage; 22] = [
+    pub const ALL: [ScreenPage; 27] = [
         ScreenPage::Home,
         ScreenPage::SearchQwerty,
         ScreenPage::SearchAzerty,
@@ -80,6 +92,11 @@ impl ScreenPage {
         ScreenPage::NewState,
         ScreenPage::Tracking,
         ScreenPage::Suggest,
+        ScreenPage::HomeSimple,
+        ScreenPage::HomeQuiet,
+        ScreenPage::More,
+        ScreenPage::Instances,
+        ScreenPage::AddFriend,
     ];
 
     /// The page picture's file stem and the overlay screenshot's name.
@@ -107,16 +124,31 @@ impl ScreenPage {
             ScreenPage::NewState => "new-state",
             ScreenPage::Tracking => "tracking",
             ScreenPage::Suggest => "suggest",
+            ScreenPage::HomeSimple => "home-simple",
+            ScreenPage::HomeQuiet => "home-quiet",
+            ScreenPage::More => "more",
+            ScreenPage::Instances => "instances",
+            ScreenPage::AddFriend => "add-friend",
         }
     }
 
-    /// The Home of a display with `pages`.
+    /// The Home of a display with `pages` (the simple Home as it is with nothing playing).
     pub fn home(pages: Pages) -> ScreenPage {
         match pages {
             Pages::Four => ScreenPage::Home,
             Pages::Six => ScreenPage::HomeSix,
             Pages::Seven => ScreenPage::HomeSeven,
             Pages::Ten | Pages::Timeline => ScreenPage::HomeTen,
+            Pages::Simple => ScreenPage::HomeQuiet,
+        }
+    }
+
+    /// The Home `menu` shows: the simple one has what plays at its bottom, when something does.
+    pub fn home_of(menu: &Menu) -> ScreenPage {
+        if menu.pages.simple() && plays(menu) {
+            ScreenPage::HomeSimple
+        } else {
+            ScreenPage::home(menu.pages)
         }
     }
 
@@ -126,6 +158,10 @@ impl ScreenPage {
             Page::Music | Page::Light if !menu.pages.music_light() => ScreenPage::home(menu.pages),
             Page::States | Page::Card if !menu.pages.states_cards() => ScreenPage::home(menu.pages),
             Page::NewState | Page::Type | Page::Tracking | Page::Suggest if !menu.pages.ten() => ScreenPage::home(menu.pages),
+            Page::More | Page::Instances | Page::AddFriend if !menu.pages.simple() => ScreenPage::home(menu.pages),
+            Page::More => ScreenPage::More,
+            Page::Instances => ScreenPage::Instances,
+            Page::AddFriend => ScreenPage::AddFriend,
             Page::NewState => ScreenPage::NewState,
             Page::Tracking => ScreenPage::Tracking,
             Page::Suggest => ScreenPage::Suggest,
@@ -134,7 +170,7 @@ impl ScreenPage {
                 (Keys::Letters, KeyboardLayout::Qwerty) => ScreenPage::TypeQwerty,
                 (Keys::Letters, KeyboardLayout::Azerty) => ScreenPage::TypeAzerty,
             },
-            Page::Home => ScreenPage::home(menu.pages),
+            Page::Home => ScreenPage::home_of(menu),
             Page::Music => ScreenPage::Music,
             Page::Light => ScreenPage::Light,
             Page::States => ScreenPage::States,
@@ -268,6 +304,12 @@ pub enum Icon {
     Check,
     /// The state's size, its pose.
     Size,
+    /// The simple Home's More.
+    More,
+    /// Previous instances.
+    Instances,
+    /// Open a page on the computer.
+    Open,
     Pose,
     /// Watch a video on the computer.
     Watch,
@@ -289,13 +331,39 @@ pub const HOME_TILES: [(Target, Icon, Text, Tint); 9] = [
     (Target::Suggest, Icon::Suggest, Text::HomeSuggest, Tint::Purple),
 ];
 
+/// The simple Home's large tiles, then its small buttons (from screen version 10), as [`HOME_TILES`] are.
+pub const SIMPLE_TILES: [(Target, Icon, Text, Tint); 3] = [
+    (Target::YouTube, Icon::YouTube, Text::HomeYouTube, Tint::Red),
+    (Target::Photo, Icon::Cube, Text::HomeCapture, Tint::Violet),
+    (Target::More, Icon::More, Text::HomeMore, Tint::Cyan),
+];
+pub const SIMPLE_BUTTONS: [(Target, Icon, Text); 3] =
+    [(Target::FastWalk, Icon::Walk, Text::HomeFastWalk), (Target::Call, Icon::Phone, Text::HomeCall), (Target::States, Icon::States, Text::HomeStates)];
+/// More's cards (from screen version 10).
+pub const MORE_CARDS: [(Target, Icon, Text, Tint); 4] = [
+    (Target::Light, Icon::Lightbulb, Text::HomeLight, Tint::Amber),
+    (Target::Instances, Icon::Instances, Text::MoreInstances, Tint::Blue),
+    (Target::Tracking, Icon::Tracking, Text::MoreTracking, Tint::Indigo),
+    (Target::Suggest, Icon::Suggest, Text::HomeSuggest, Tint::Purple),
+];
+
+/// The tile notes ([`Content::TileNote`]) of the simple Home's More and of More's Previous instances, past
+/// [`HOME_TILES`]' own.
+pub const NOTE_MORE: u8 = 9;
+pub const NOTE_INSTANCES: u8 = 10;
+
+/// Whether the computer plays something the simple Home shows (a title, from Windows' media controls).
+pub fn plays(menu: &Menu) -> bool {
+    menu.media.as_ref().is_some_and(|m| !m.title.is_empty())
+}
+
 /// The tiles of a Home with `pages`.
 pub fn home_tiles(pages: Pages) -> &'static [(Target, Icon, Text, Tint)] {
     match pages {
         Pages::Four => &HOME_TILES[..4],
         Pages::Six => &HOME_TILES[..6],
         Pages::Seven => &HOME_TILES[..7],
-        Pages::Ten | Pages::Timeline => &HOME_TILES,
+        Pages::Ten | Pages::Timeline | Pages::Simple => &HOME_TILES,
     }
 }
 
@@ -428,6 +496,15 @@ pub enum Content {
     /// Music: where it is and how long it lasts, at either end of its timeline (from screen version 9).
     MediaPosition,
     MediaDuration,
+    /// Previous instances (from screen version 10): how many, or the notice; each row's world and what it is (who may
+    /// join, its region, when).
+    InstancesTitle,
+    InstanceWorld(u8),
+    InstanceMeta(u8),
+    /// Add Orbiters as a friend: the account's VRChat name, its page, and what was just done.
+    FriendName,
+    FriendLink,
+    FriendNote,
 }
 
 /// A line of changing text: `cols` cells of `size` pixels high and half as wide, from (`x`, `y`). On the screen, cell
@@ -944,9 +1021,104 @@ pub fn layout(page: ScreenPage) -> Layout {
             }
             slots.add(32, 420, 60, 24, Style::Accent, Content::SuggestNote);
         }
+        ScreenPage::HomeSimple | ScreenPage::HomeQuiet => {
+            // Three large tiles (YouTube, 3D capture, More), three buttons under them (fast walk, calls, states), and at
+            // the bottom what the computer plays; with nothing playing the tiles and buttons take its place.
+            let quiet = page == ScreenPage::HomeQuiet;
+            let (tile_h, buttons_y, buttons_h) = if quiet { (340, 452, 100) } else { (216, 328, 72) };
+            for (i, &(target, icon, title, tint)) in SIMPLE_TILES.iter().enumerate() {
+                let mut tile = with(element(target, Rect::new(32 + i as u16 * 324, 96, 312, tile_h), Look::Tile), Some(icon), Some(title));
+                tile.tint = Some(tint);
+                elements.push(tile);
+            }
+            // Switched on (fast walk) and greyed out (fast walk in desktop mode) among the first elements, as the screen
+            // keeps them.
+            for (i, &(target, icon, label)) in SIMPLE_BUTTONS.iter().enumerate() {
+                elements.push(with(element(target, Rect::new(32 + i as u16 * 324, buttons_y, 312, buttons_h), Look::Chip), Some(icon), Some(label)));
+            }
+            elements.push(round(Target::Close, 936, Icon::Close));
+            icons.push((Rect::new(32, 24, 56, 56), Icon::Microphone, Some(Tint::Green)));
+            icons.push((Rect::new(104, 28, 56, 48), Icon::Mark, None));
+            slots.add(208, 28, 48, 24, Style::Accent, Content::Status);
+            slots.add(208, 56, SIMPLE_HEARD_COLUMNS as u8, 20, Style::Secondary, Content::Heard);
+            for (i, &(target, ..)) in SIMPLE_TILES.iter().enumerate() {
+                let note = match target {
+                    Target::More => NOTE_MORE,
+                    _ => HOME_TILES.iter().position(|t| t.0 == target).unwrap_or(0) as u8,
+                };
+                slots.add(32 + i as u16 * 324 + 24, 96 + tile_h - 48, 22, 24, Style::Secondary, Content::TileNote(note));
+            }
+            if !quiet {
+                // What plays: the whole strip opens Music; its art, title and artist, and the playback beside them.
+                boxes.push(Rect::new(32, 416, 960, 136));
+                elements.push(element(Target::Music, Rect::new(32, 416, 960, 136), Look::Row));
+                elements.push(with(element(Target::MediaPrevious, Rect::new(756, 456, 64, 64), Look::Round), Some(Icon::SkipBack), None));
+                elements.push(with(element(Target::MediaPlayPause, Rect::new(828, 448, 80, 80), Look::Accent), Some(Icon::PlayPause), None));
+                elements.push(with(element(Target::MediaNext, Rect::new(916, 456, 64, 64), Look::Round), Some(Icon::SkipForward), None));
+                pictures.push(Picture { rect: Rect::new(48, 432, 192, 108), result: 0 });
+                slots.add(264, 444, 34, 28, Style::Primary, Content::MediaTitle);
+                slots.add(264, 488, 40, 24, Style::Secondary, Content::MediaArtist);
+            }
+        }
+        ScreenPage::More => {
+            // Two rows of two wide cards: the icon at the left, the title and the note beside it.
+            elements.push(round(Target::Back, 32, Icon::Back));
+            for (i, &(target, icon, title, tint)) in MORE_CARDS.iter().enumerate() {
+                let (x, y) = (32 + (i as u16 % 2) * 488, 96 + (i as u16 / 2) * 216);
+                let mut card = with(element(target, Rect::new(x, y, 472, 200), Look::Tile), Some(icon), Some(title));
+                card.tint = Some(tint);
+                elements.push(card);
+                let note = match target {
+                    Target::Instances => NOTE_INSTANCES,
+                    _ => HOME_TILES.iter().position(|t| t.0 == target).unwrap_or(0) as u8,
+                };
+                slots.add(x + 116, y + 92, 27, 24, Style::Secondary, Content::TileNote(note));
+            }
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::MoreTitle, style: Style::Primary, bold: true, width: 800 });
+            slots.add(672, 548, 40, 16, Style::Secondary, Content::Versions);
+        }
+        ScreenPage::Instances => {
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(round(Target::Previous, 808, Icon::Previous));
+            elements.push(round(Target::Next, 936, Icon::Next));
+            for i in 0..INSTANCES_PER_PAGE as u8 {
+                elements.push(element(Target::InviteMe(i), Rect::new(32, 96 + i as u16 * 92, 960, 84), Look::Row));
+            }
+            for i in 0..INSTANCES_PER_PAGE as u8 {
+                let y = 96 + i as u16 * 92 + 20;
+                elements.push(with(element(Target::InviteMe(i), Rect::new(784, y, 192, 48), Look::Accent), Some(Icon::Send), Some(Text::InstancesInvite)));
+            }
+            // Up to how many there are (from 316).
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::InstancesTitle, style: Style::Primary, bold: true, width: 196 });
+            slots.add(316, 40, 30, 24, Style::Primary, Content::InstancesTitle);
+            slots.add(868, 40, 5, 24, Style::Secondary, Content::PageLabel).centered();
+            for i in 0..INSTANCES_PER_PAGE as u8 {
+                let y = 96 + i as u16 * 92;
+                slots.add(60, y + 12, 32, 28, Style::Primary, Content::InstanceWorld(i));
+                slots.add(60, y + 48, 32, 24, Style::Secondary, Content::InstanceMeta(i));
+            }
+        }
+        ScreenPage::AddFriend => {
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(with(element(Target::CopyFriendName, Rect::new(100, 300, 252, 72), Look::KeyDark), Some(Icon::Copy), Some(Text::FriendCopy)));
+            elements.push(with(element(Target::OpenFriendLink, Rect::new(368, 300, 252, 72), Look::KeyDark), Some(Icon::Open), Some(Text::FriendOpen)));
+            elements.push(with(element(Target::InviteAgain, Rect::new(636, 300, 288, 72), Look::Accent), Some(Icon::Send), Some(Text::FriendRetry)));
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::FriendTitle, style: Style::Primary, bold: true, width: 888 });
+            labels.push(Label { x: 100, y: 104, size: 24, text: Text::FriendWhy, style: Style::Secondary, bold: false, width: 824 });
+            labels.push(Label { x: 100, y: 404, size: 24, text: Text::FriendHow, style: Style::Secondary, bold: false, width: 824 });
+            icons.push((Rect::new(100, 156, 96, 96), Icon::User, Some(Tint::Blue)));
+            slots.add(220, 164, 28, 48, Style::Primary, Content::FriendName);
+            slots.add(220, 228, FRIEND_LINK_COLUMNS as u8, 24, Style::Accent, Content::FriendLink);
+            slots.add(100, 456, 76, 20, Style::Accent, Content::FriendNote);
+        }
     }
     Layout { page, elements, slots: slots.slots, pictures, labels, icons, boxes }
 }
+
+/// What N4N0 says on the simple Home, under the status line: one line of so many characters at a time.
+pub const SIMPLE_HEARD_COLUMNS: usize = 60;
+/// Orbiters' account's page on Add Orbiters as a friend, in characters.
+const FRIEND_LINK_COLUMNS: usize = 56;
 
 /// The seven-tile Home's place `i` (0 to 7): two rows of four, 228 × 216 each, 16 apart.
 fn seven_cell(i: usize) -> (u16, u16) {
@@ -964,7 +1136,7 @@ const CARD_LINK_COLUMNS: usize = 34;
 pub fn picture_key<'a>(menu: &'a Menu, picture: &Picture) -> Option<&'a str> {
     match menu.page {
         Page::Results => menu.page_results().get(picture.result as usize).map(|v| v.id.as_str()),
-        Page::Music if picture.result == 0 => menu.media.as_ref().and_then(|m| m.art.as_deref()),
+        Page::Music | Page::Home if picture.result == 0 => menu.media.as_ref().and_then(|m| m.art.as_deref()),
         Page::Card if picture.result == 0 => menu.card.as_ref().and_then(|c| c.video.as_deref()),
         _ => None,
     }
@@ -1014,6 +1186,13 @@ fn tile_note(menu: &Menu, tile: u8) -> String {
             Some(t) if t.on => "Smoothing on".into(),
             Some(_) => "Smoothing off".into(),
             None => "Not here".into(),
+        },
+        NOTE_MORE => "Light, instances, more".into(),
+        NOTE_INSTANCES if !menu.instances_ready && menu.instances.is_empty() => "Join them again".into(),
+        NOTE_INSTANCES => match menu.instances.len() {
+            0 => "None yet".into(),
+            1 => "1 instance".into(),
+            n => format!("{n} instances"),
         },
         _ if menu.sending => "Sending…".into(),
         _ => "Tell the team".into(),
@@ -1125,6 +1304,7 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             Page::Results => format!("{}/{}{}", menu.result_page + 1, menu.result_pages(), if menu.more_available() { "+" } else { "" }),
             Page::Call => format!("{}/{}", menu.contact_page + 1, menu.contacts.len().div_ceil(CONTACTS_PER_PAGE).max(1)),
             Page::States => format!("{}/{}", menu.state_page + 1, menu.states.len().div_ceil(STATES_PER_PAGE).max(1)),
+            Page::Instances => format!("{}/{}", menu.instance_page + 1, menu.instances.len().div_ceil(INSTANCES_PER_PAGE).max(1)),
             _ => String::new(),
         },
         Content::HeardCaption => match (&menu.heard, menu.heard_private) {
@@ -1311,6 +1491,54 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
                 String::new()
             }
         }
+        Content::InstancesTitle => {
+            if let Some(notice) = &menu.notice {
+                notice.clone()
+            } else if !menu.instances_ready {
+                menu.instances_note.clone()
+            } else {
+                match menu.instances.len() {
+                    0 => "None yet: join a world in VRChat".into(),
+                    1 => "1 instance".into(),
+                    n => format!("{n} instances"),
+                }
+            }
+        }
+        Content::InstanceWorld(i) => {
+            menu.page_instances().get(i as usize).map(|r| if r.world.is_empty() { "A world".to_string() } else { r.world.clone() }).unwrap_or_default()
+        }
+        Content::InstanceMeta(i) => menu.page_instances().get(i as usize).map(instance_meta).unwrap_or_default(),
+        Content::FriendName => menu.invite_account.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
+        Content::FriendLink => menu.invite_account.as_ref().map(|a| short_link(&a.link, FRIEND_LINK_COLUMNS)).unwrap_or_default(),
+        Content::FriendNote => {
+            if menu.invite_waiting {
+                "Asking Orbiters…".into()
+            } else {
+                menu.notice.clone().unwrap_or_else(|| "Then press Try again".into())
+            }
+        }
+    }
+}
+
+/// A previous instance's line under its world: who may join it, its region, when it was joined.
+fn instance_meta(row: &super::InstanceRow) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut parts = vec![row.kind().to_string()];
+    if let Some(region) = row.region() {
+        parts.push(region.to_string());
+    }
+    parts.push(ago(now.saturating_sub(row.at)));
+    parts.join(" · ")
+}
+
+/// How long ago, in a few characters (a row's meta holds "Group Public · US E · 12 d ago"): "just now", "5 min ago",
+/// "3 h ago", "2 d ago".
+pub fn ago(seconds: u64) -> String {
+    match seconds {
+        0..60 => "just now".into(),
+        60..3600 => format!("{} min ago", seconds / 60),
+        3600..86400 => format!("{} h ago", seconds / 3600),
+        _ => format!("{} d ago", seconds / 86400),
     }
 }
 
@@ -1477,6 +1705,9 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::Timeline(_) | Target::Seek(_) => !menu.pages.timeline() || menu.media.as_ref().and_then(|m| m.duration).is_none_or(|d| d == 0),
         // While the link card is out.
         Target::TakeBack => !menu.pages.timeline() || !menu.card_out,
+        Target::InviteMe(i) => i as usize >= menu.page_instances().len(),
+        Target::CopyFriendName | Target::OpenFriendLink => menu.invite_account.is_none(),
+        Target::InviteAgain => menu.inviting.is_none(),
         _ => false,
     };
     let unavailable = match target {
@@ -1484,6 +1715,7 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::DraftSave => !menu.states_ready,
         Target::TrackingSwitch | Target::Smoothing(_) => menu.tracking.is_none(),
         Target::SuggestSend => menu.sending || menu.suggestion.trim().is_empty(),
+        Target::InviteMe(_) | Target::InviteAgain => menu.invite_waiting,
         _ => false,
     };
     State { on: on && !unavailable, hidden, unavailable }
@@ -1648,7 +1880,8 @@ mod tests {
         assert_eq!(Pages::of_screen(Some(6)), Pages::Ten);
         assert_eq!(Pages::of_screen(Some(8)), Pages::Ten, "version 8 added no page");
         assert_eq!(Pages::of_screen(Some(9)), Pages::Timeline);
-        assert_eq!(Pages::of_screen(Some(12)), Pages::Timeline);
+        assert_eq!(Pages::of_screen(Some(10)), Pages::Simple);
+        assert_eq!(Pages::of_screen(Some(12)), Pages::Simple);
         let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
         menu.open();
         assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSeven);

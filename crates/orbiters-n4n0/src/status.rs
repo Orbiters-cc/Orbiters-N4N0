@@ -195,6 +195,9 @@ pub struct OrbStatus {
     /// menus show it on their 3D picture page.
     #[serde(default)]
     pub photo_note: Option<(u32, String)>,
+    /// How the last Invite me a menu other than the screen's asked went (Previous instances), numbered.
+    #[serde(default)]
+    pub invite: Option<(u32, orbiters_orb::menu::InviteAnswer)>,
 }
 
 /// Tracking smoothing (the app's SteamVR driver), as the Tracking page shows it.

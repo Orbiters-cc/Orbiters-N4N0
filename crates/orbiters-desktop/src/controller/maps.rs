@@ -263,4 +263,23 @@ mod tests {
         println!("previews {before} → {}", page.previews);
         assert!(page.previews >= before.max(1));
     }
+
+    /// Shares sessions in 3D with the account signed in on this PC, on Orbiters itself, as **Share in 3D** does:
+    /// `ORBITERS_SHARE="<world id>|<session folder>;…" cargo test -p orbiters-desktop shares_sessions_with_the_signed_in_account
+    /// -- --ignored --nocapture` (the credential is read like the app reads it, never printed).
+    #[test]
+    #[ignore]
+    fn shares_sessions_with_the_signed_in_account() {
+        use orbiters_core::account::{self, Api, Server};
+        let account = account::read(Server::Production).expect("sign in to Orbiters first");
+        let api = Api::new(Server::Production);
+        for item in std::env::var("ORBITERS_SHARE").expect("ORBITERS_SHARE").split(';').filter(|s| !s.is_empty()) {
+            let (world, session) = item.split_once('|').expect("<world id>|<session folder>");
+            let t = Instant::now();
+            let (files, sky, metadata) = web_preview(Path::new(session)).unwrap();
+            println!("{world}: {:.1} MB in {:.1} s, sky {}", files.len() as f64 / 1e6, t.elapsed().as_secs_f32(), sky.is_some());
+            api.add_preview(&account.token, world, files, sky.as_deref(), &metadata, |_, _| {}).unwrap();
+            println!("{world}: shared");
+        }
+    }
 }

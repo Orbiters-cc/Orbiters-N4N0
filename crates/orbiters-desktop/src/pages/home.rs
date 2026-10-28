@@ -1,5 +1,6 @@
-//! Home: N4N0's menu as a page of the window. Its seven features (fast walk, YouTube, calls, a 3D picture, music, the
-//! light, the avatar's saved states) are cards like the rest of the app's, and each opens a page of its own drawn the
+//! Home: N4N0's menu as a page of the window. Its features (fast walk, YouTube, calls, a 3D picture, music, the light,
+//! the avatar's saved states, tracking, suggest, previous instances, the QR code scanner) are cards like the rest of the
+//! app's, and each opens a page of its own drawn the
 //! same way; what N4N0 says fills the grid's last row. What they show and what a press does are the menu's
 //! (`orbiters_orb::menu`, run by [`crate::menu_host`] in step with the tray service like the menu in VR); only the
 //! drawing is the window's (the States page is [`super::states`]). Cards and choices act on the pointer's press, buttons
@@ -14,7 +15,8 @@ use egui::epaint::RectShape;
 use egui::{pos2, vec2, Align, Align2, Color32, CursorIcon, Id, Key, Layout, Painter, Pos2, Rect, Sense, Stroke, TextureId, Ui, UiBuilder, Vec2};
 use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
 use orbiters_core::settings::Settings;
-use orbiters_orb::menu::layout::{self, Content, Tint, HOME_TILES, LENGTH_LABELS, TIMER_LABELS};
+use orbiters_orb::menu::layout::{self, Content, Icon, Tint, HOME_TILES, LENGTH_LABELS, MORE_CARDS_QR, TIMER_LABELS};
+use orbiters_orb::menu::strings::Text;
 use orbiters_orb::menu::{Call, Effect, Media, MediaCommand, Menu, Page, PhotoLength, Target, Volume, SMOOTHING_LABELS, TIMERS, TRACKING_KINDS};
 use orbiters_orb::youtube::Video;
 use orbiters_ui::anim::{self, Spring};
@@ -33,6 +35,12 @@ const INSET: f32 = 24.0;
 const THUMB: Vec2 = vec2(160.0, 90.0);
 /// How long a result's button says its link was copied.
 const COPIED_FOR: f64 = 2.0;
+
+/// The window's features: every Home tile, then previous instances and the QR code scanner (More's, on the avatar's
+/// screen).
+fn features() -> impl Iterator<Item = (Target, Icon, Text, Tint)> {
+    HOME_TILES.into_iter().chain(MORE_CARDS_QR.into_iter().filter(|t| matches!(t.0, Target::Instances | Target::Qr)))
+}
 
 /// What a press asks of the menu, done once the page is drawn.
 enum Act {
@@ -68,13 +76,16 @@ pub struct State {
     copied: Option<(String, f64)>,
     /// The States page's own state (what was asked and not yet seen, a name being typed).
     states: super::states::StatesPage,
+    /// What going back to Home asked of the menu's host from outside a frame (the sidebar's Home: the QR code scanner
+    /// stops), done at the next one.
+    pending: Vec<Effect>,
 }
 
 impl State {
     /// Back to Home itself (the sidebar's Home pressed on a feature's page).
     pub fn back_home(&mut self) {
         if let Some(host) = self.host.as_mut() {
-            go_home(host);
+            self.pending.extend(go_home(host));
         }
     }
 
@@ -97,19 +108,22 @@ fn shown_page(page: Page) -> Page {
     }
 }
 
-fn go_home(host: &mut MenuHost) {
-    // Results go back to the search, the search to Home.
+/// Back to Home (results go back to the search, the search to Home), with what leaving a page asks for (the QR code
+/// scanner stops).
+fn go_home(host: &mut MenuHost) -> Vec<Effect> {
+    let mut effects = Vec::new();
     for _ in 0..2 {
         if host.menu.page != Page::Home {
-            host.press(Target::Back);
+            effects.extend(host.press(Target::Back));
         }
     }
+    effects
 }
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let snap = cx.snap;
-    let State { host, shown, since, opened, focus, copied, states } = state;
+    let State { host, shown, since, opened, focus, copied, states, pending } = state;
     let host = host.get_or_insert_with(|| {
         let mut host = MenuHost::new(ctx.clone());
         host.open(snap);
@@ -121,6 +135,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         host.follow_media();
     }
     let mut effects = host.poll();
+    effects.append(pending);
 
     // A page opened enters as a page of its own: its blocks count from then.
     let page = shown_page(host.menu.page);
@@ -160,9 +175,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 40 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             match page {
-                // The window never shows a dropped card itself (the avatar's screen does), nor the simple Home's More pages
-                // (its Home has them all).
-                Page::Home | Page::Card | Page::More | Page::Instances | Page::AddFriend => home(ui, cx, menu, &idle, copied_id, &mut acts),
+                // The window never shows a dropped card itself (the avatar's screen does), nor the simple Home's More (its
+                // Home has every feature).
+                Page::Home | Page::Card | Page::More => home(ui, cx, menu, &idle, copied_id, &mut acts),
+                Page::Instances | Page::AddFriend => instances(ui, cx, menu, &mut acts),
                 Page::Search | Page::Results => youtube(ui, cx, menu, &picture, focus, copied_id, &mut acts),
                 Page::Call => call(ui, cx, menu, &mut acts),
                 Page::Photo => photo(ui, cx, menu, take_blocked, &mut acts),
@@ -170,6 +186,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 Page::Light => light(ui, cx, menu, &mut acts),
                 Page::Tracking => tracking(ui, cx, menu, &mut acts),
                 Page::Suggest | Page::Type => suggest(ui, cx, menu, &mut acts),
+                Page::Qr => qr(ui, cx, menu, &mut acts),
                 Page::States | Page::NewState => {
                     let mut out = Vec::new();
                     super::states::show(ui, cx, states, &mut out);
@@ -221,7 +238,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             }
             Act::States(action, avatar) => cx.ctl.orb(OrbCommand::States { action, avatar }),
             Act::Suggestion(text) => host.menu.suggestion = text,
-            Act::Home => go_home(host),
+            Act::Home => effects.extend(go_home(host)),
         }
     }
     // It stays open here (nothing closes it): a close goes back to Home. A dropped card is on the avatar's screen: the
@@ -282,16 +299,17 @@ fn home(ui: &mut Ui, cx: &Cx, menu: &Menu, idle: &str, copied: Option<&str>, act
     let cols = home_columns(w);
     let card_w = (w - GAP * (cols - 1) as f32) / cols as f32;
     // The features, then what N4N0 says in the rest of the last row (one place at least): the grid stays whole.
-    let cells = HOME_TILES.len() + 1;
+    let count = features().count();
+    let cells = count + 1;
     let rows = cells.div_ceil(cols);
     let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (CARD_H + GAP) - GAP), Sense::hover());
     let cell = |i: usize| area.min + vec2((i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (CARD_H + GAP));
-    for i in 0..HOME_TILES.len() {
-        feature(ui, cx, i, Rect::from_min_size(cell(i), vec2(card_w, CARD_H)), menu, copied, acts);
+    for (i, tile) in features().enumerate() {
+        feature(ui, cx, i, tile, Rect::from_min_size(cell(i), vec2(card_w, CARD_H)), menu, copied, acts);
     }
-    let span = cols - HOME_TILES.len() % cols;
-    let at = cell(HOME_TILES.len());
-    said(ui, cx, 1 + HOME_TILES.len(), Rect::from_min_size(at, vec2(span as f32 * (card_w + GAP) - GAP, CARD_H)), menu);
+    let span = cols - count % cols;
+    let at = cell(count);
+    said(ui, cx, 1 + count, Rect::from_min_size(at, vec2(span as f32 * (card_w + GAP) - GAP, CARD_H)), menu);
 }
 
 /// Home's columns at `width`: four on a wide window, three, two on a narrow one.
@@ -307,8 +325,8 @@ fn home_columns(width: f32) -> usize {
 
 /// One of Home's features: its icon chip, its name and what it says now, with a switch for what turns on and off (fast
 /// walk, the light), the Copy link of the YouTube video playing (music), or an arrow for what opens a page.
-fn feature(ui: &mut Ui, cx: &Cx, i: usize, rect: Rect, menu: &Menu, copied: Option<&str>, acts: &mut Vec<Act>) {
-    let (target, icon, title, tint) = HOME_TILES[i];
+fn feature(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Tint), rect: Rect, menu: &Menu, copied: Option<&str>, acts: &mut Vec<Act>) {
+    let (target, icon, title, tint) = tile;
     let title = title.en();
     let state = layout::target_state(menu, target);
     let (rect, alpha) = super::entering(ui, cx, 1 + i, rect);
@@ -354,9 +372,10 @@ fn feature(ui: &mut Ui, cx: &Cx, i: usize, rect: Rect, menu: &Menu, copied: Opti
             Target::Photo => menu.countdown.is_some(),
             Target::Music => menu.media.as_ref().is_some_and(|m| m.playing && !m.title.is_empty()),
             Target::States => menu.states.iter().any(|s| s.default),
+            Target::Qr => menu.qr.scanning(),
             _ => false,
         };
-    let note = Txt::new(layout::text(menu, Content::TileNote(i as u8)), 12.5).color(if active { theme::ACCENT } else { theme::FG_3 });
+    let note = Txt::new(layout::text(menu, Content::TileNote(layout::note_of(target))), 12.5).color(if active { theme::ACCENT } else { theme::FG_3 });
     widgets::text_truncated(&p, pos2(x, r.bottom() - 24.0), Align2::LEFT_CENTER, &note, r.width() - 2.0 * INSET);
 
     // The YouTube video playing: its link copied from the card (pressed apart from it), the page not opened.
@@ -1055,6 +1074,129 @@ fn suggest(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
     });
 }
 
+/// The QR code scanner: what it does now (VRChat's stream camera is read while this page shows), how to turn the stream
+/// camera on, and the last link it opened with Copy link and Open again.
+fn qr(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
+    top(ui, cx, "QR code scanner", "Point VRChat's stream camera at a QR code: its web link opens in your browser", acts);
+    let scanner = &menu.qr;
+    let note = layout::qr_note(scanner);
+    section(
+        ui,
+        cx,
+        1,
+        icons::QR_CODE,
+        "VRChat's stream camera",
+        Some("Read about three times a second while this page shows, for two minutes at most"),
+        |ui| {
+            use orbiters_orb::qr::QrPhase;
+            let tone = match scanner.phase {
+                QrPhase::Looking => Tone::Ok,
+                QrPhase::Starting => Tone::Info,
+                QrPhase::NoCamera => Tone::Warn,
+                QrPhase::Off | QrPhase::Stopped => Tone::Off,
+            };
+            let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::hover());
+            let p = ui.painter();
+            widgets::status_dot(p, pos2(row.left() + 5.0, row.top() + 20.0), tone, scanner.scanning());
+            let state = Txt::new(layout::qr_state(scanner), 15.0).weight(weight::SEMIBOLD);
+            widgets::text(p, pos2(row.left() + 20.0, row.top() + 20.0), Align2::LEFT_CENTER, &state);
+            let room = row.width() - 200.0;
+            widgets::text_truncated(p, pos2(row.left() + 20.0, row.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(&note, 12.5).color(theme::FG_3), room);
+            if !scanner.scanning() {
+                let button = Button::new("Scan again").icon(icons::QR_CODE).variant(Variant::Primary);
+                let bw = button.desired_width(ui);
+                if button.show_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.center().y - 18.0), vec2(bw, 36.0))).clicked() {
+                    acts.push(Act::Press(Target::QrAgain));
+                }
+            }
+        },
+    );
+    let link = scanner.link.as_deref();
+    let shown = link.map_or_else(|| "None yet".to_string(), |l| layout::short_link(l, 90));
+    let policy = "Only http and https links open, each once while it stays before the camera";
+    let notice = menu.notice.clone();
+    section(ui, cx, 2, icons::LINK_SIMPLE, "Last link opened", Some(notice.as_deref().unwrap_or(policy)), |ui| {
+        widgets::field(ui, &shown, None, 260.0, |ui| {
+            if Button::new("Open again").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).enabled(link.is_some()).show(ui).clicked() {
+                acts.push(Act::Press(Target::QrOpen));
+            }
+            ui.add_space(8.0);
+            if Button::new("Copy link").icon(icons::COPY).variant(Variant::Secondary).enabled(link.is_some()).show(ui).clicked() {
+                acts.push(Act::Press(Target::QrCopy));
+            }
+        });
+    });
+    note_card(
+        ui,
+        cx,
+        3,
+        icons::INFO,
+        "Turning the stream camera on",
+        "In VRChat, open the camera, choose Stream, then switch Spout Stream on in the camera's settings. Settings › Spout sender picks another sender.",
+    );
+}
+
+/// Previous instances: Orbiters' VRChat account invites the player back to one (Invite me), once it is their friend (Add
+/// Orbiters as a friend, with its name and page, shows above the list when Orbiters asked for it).
+fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
+    top(ui, cx, "Previous instances", &layout::text(menu, Content::InstancesTitle), acts);
+    let mut index = 1;
+    if let Some(account) = &menu.invite_account {
+        let why = "VRChat lets Orbiters invite only its friends: in VRChat, Social, search the name, Add friend; then Try again";
+        section(ui, cx, index, icons::USER, "Add Orbiters as a friend", Some(why), |ui| {
+            let link = layout::short_link(&account.link, 70);
+            widgets::field(ui, &account.name, Some(&link), 420.0, |ui| {
+                let again =
+                    Button::new("Try again").icon(icons::PAPER_PLANE_TILT).variant(Variant::Primary).enabled(!menu.invite_waiting && menu.inviting.is_some());
+                if again.show(ui).clicked() {
+                    acts.push(Act::Press(Target::InviteAgain));
+                }
+                ui.add_space(8.0);
+                if Button::new("Open link").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).show(ui).clicked() {
+                    acts.push(Act::Press(Target::OpenFriendLink));
+                }
+                ui.add_space(8.0);
+                if Button::new("Copy name").icon(icons::COPY).variant(Variant::Secondary).show(ui).clicked() {
+                    acts.push(Act::Press(Target::CopyFriendName));
+                }
+            });
+        });
+        index += 1;
+    }
+    if menu.instances.is_empty() {
+        let text = if menu.instances_ready { "Worlds you join in VRChat show here, newest first." } else { "Reading VRChat's logs…" };
+        return note_card(ui, cx, index, icons::GLOBE, "No instance yet", text);
+    }
+    section(ui, cx, index, icons::GLOBE, "Instances you were in", Some("Orbiters' VRChat account invites you back: open the invite in VRChat"), |ui| {
+        ui.add_space(4.0);
+        for i in 0..menu.page_instances().len() {
+            if i > 0 {
+                widgets::separator(ui);
+            }
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 60.0), Sense::hover());
+            let invite =
+                Button::new("Invite me").icon(icons::PAPER_PLANE_TILT).size(Size::Sm).enabled(!menu.invite_waiting).id_salt(("orbiters-home-invite", i));
+            let invite_w = invite.desired_width(ui);
+            {
+                let p = ui.painter();
+                let room = r.width() - invite_w - 16.0;
+                let world = Txt::new(layout::text(menu, Content::InstanceWorld(i as u8)), 13.5).weight(weight::MEDIUM);
+                widgets::text_truncated(p, pos2(r.left(), r.center().y - 9.0), Align2::LEFT_CENTER, &world, room);
+                let meta = Txt::new(layout::text(menu, Content::InstanceMeta(i as u8)), 12.0).color(theme::FG_3);
+                widgets::text_truncated(p, pos2(r.left(), r.center().y + 11.0), Align2::LEFT_CENTER, &meta, room);
+            }
+            if invite.show_at(ui, Rect::from_min_size(pos2(r.right() - invite_w, r.center().y - 16.0), vec2(invite_w, 32.0))).clicked() {
+                acts.push(Act::Press(Target::InviteMe(i as u8)));
+            }
+        }
+        if menu.has_previous() || menu.has_next() {
+            if let Some(target) = pager(ui, menu) {
+                acts.push(Act::Press(target));
+            }
+        }
+    });
+}
+
 const SWATCH: f32 = 26.0;
 const SWATCH_GAP: f32 = 10.0;
 
@@ -1253,6 +1395,30 @@ mod tests {
         assert_eq!(h.page(), Page::Light, "a button acts on its release");
         h.release(back);
         assert_eq!(h.page(), Page::Home);
+    }
+
+    #[test]
+    fn the_qr_code_scanner_scans_while_its_page_shows() {
+        let mut h = Harness::new();
+        h.settle();
+        // The third row: suggest, previous instances, the QR code scanner, then what N4N0 says.
+        let qr = pos2(640.0, 490.0);
+        h.press(qr);
+        h.release(qr);
+        assert_eq!(h.page(), Page::Qr);
+        assert!(matches!(h.recorder.orb.lock().unwrap().as_slice(), [OrbCommand::Qr { on: true }]));
+        h.settle();
+        // Back home: the scanner stops.
+        let back = pos2(60.0, 64.0);
+        h.press(back);
+        h.release(back);
+        assert_ne!(h.page(), Page::Qr);
+        assert!(matches!(h.recorder.orb.lock().unwrap().as_slice(), [OrbCommand::Qr { on: true }, OrbCommand::Qr { on: false }]));
+        h.settle();
+        // Previous instances, beside it, opens its own page.
+        h.press(pos2(397.0, 490.0));
+        h.release(pos2(397.0, 490.0));
+        assert_eq!(h.page(), Page::Instances);
     }
 
     #[test]

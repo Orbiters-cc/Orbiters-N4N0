@@ -66,10 +66,14 @@ pub enum ScreenPage {
     Instances = 26,
     /// Add Orbiters' VRChat account as a friend first (from version 10).
     AddFriend = 27,
+    /// More with five cards, the QR code scanner among them (from version 11).
+    MoreQr = 28,
+    /// The QR code scanner (from version 11).
+    Qr = 29,
 }
 
 impl ScreenPage {
-    pub const ALL: [ScreenPage; 27] = [
+    pub const ALL: [ScreenPage; 29] = [
         ScreenPage::Home,
         ScreenPage::SearchQwerty,
         ScreenPage::SearchAzerty,
@@ -97,6 +101,8 @@ impl ScreenPage {
         ScreenPage::More,
         ScreenPage::Instances,
         ScreenPage::AddFriend,
+        ScreenPage::MoreQr,
+        ScreenPage::Qr,
     ];
 
     /// The page picture's file stem and the overlay screenshot's name.
@@ -129,6 +135,8 @@ impl ScreenPage {
             ScreenPage::More => "more",
             ScreenPage::Instances => "instances",
             ScreenPage::AddFriend => "add-friend",
+            ScreenPage::MoreQr => "more-qr",
+            ScreenPage::Qr => "qr",
         }
     }
 
@@ -139,7 +147,7 @@ impl ScreenPage {
             Pages::Six => ScreenPage::HomeSix,
             Pages::Seven => ScreenPage::HomeSeven,
             Pages::Ten | Pages::Timeline => ScreenPage::HomeTen,
-            Pages::Simple => ScreenPage::HomeQuiet,
+            Pages::Simple | Pages::Qr => ScreenPage::HomeQuiet,
         }
     }
 
@@ -159,7 +167,10 @@ impl ScreenPage {
             Page::States | Page::Card if !menu.pages.states_cards() => ScreenPage::home(menu.pages),
             Page::NewState | Page::Type | Page::Tracking | Page::Suggest if !menu.pages.ten() => ScreenPage::home(menu.pages),
             Page::More | Page::Instances | Page::AddFriend if !menu.pages.simple() => ScreenPage::home(menu.pages),
+            Page::Qr if !menu.pages.qr() => ScreenPage::home_of(menu),
+            Page::More if menu.pages.qr() => ScreenPage::MoreQr,
             Page::More => ScreenPage::More,
+            Page::Qr => ScreenPage::Qr,
             Page::Instances => ScreenPage::Instances,
             Page::AddFriend => ScreenPage::AddFriend,
             Page::NewState => ScreenPage::NewState,
@@ -315,6 +326,8 @@ pub enum Icon {
     Watch,
     /// Take a dropped card back.
     TakeBack,
+    /// The QR code scanner.
+    Qr,
 }
 
 /// Home's features in their order (the first four as on the four-tile Home, the first six as on the six-tile one), each
@@ -347,10 +360,30 @@ pub const MORE_CARDS: [(Target, Icon, Text, Tint); 4] = [
     (Target::Suggest, Icon::Suggest, Text::HomeSuggest, Tint::Purple),
 ];
 
-/// The tile notes ([`Content::TileNote`]) of the simple Home's More and of More's Previous instances, past
-/// [`HOME_TILES`]' own.
+/// More's cards from screen version 11: the QR code scanner before suggest.
+pub const MORE_CARDS_QR: [(Target, Icon, Text, Tint); 5] = [
+    (Target::Light, Icon::Lightbulb, Text::HomeLight, Tint::Amber),
+    (Target::Instances, Icon::Instances, Text::MoreInstances, Tint::Blue),
+    (Target::Tracking, Icon::Tracking, Text::MoreTracking, Tint::Indigo),
+    (Target::Qr, Icon::Qr, Text::MoreQr, Tint::Green),
+    (Target::Suggest, Icon::Suggest, Text::HomeSuggest, Tint::Purple),
+];
+
+/// The tile notes ([`Content::TileNote`]) of the simple Home's More, of More's Previous instances and of its QR code
+/// scanner, past [`HOME_TILES`]' own.
 pub const NOTE_MORE: u8 = 9;
 pub const NOTE_INSTANCES: u8 = 10;
+pub const NOTE_QR: u8 = 11;
+
+/// The tile note of a feature's tile or card.
+pub fn note_of(target: Target) -> u8 {
+    match target {
+        Target::More => NOTE_MORE,
+        Target::Instances => NOTE_INSTANCES,
+        Target::Qr => NOTE_QR,
+        _ => HOME_TILES.iter().position(|t| t.0 == target).unwrap_or(0) as u8,
+    }
+}
 
 /// Whether the computer plays something the simple Home shows (a title, from Windows' media controls).
 pub fn plays(menu: &Menu) -> bool {
@@ -363,7 +396,7 @@ pub fn home_tiles(pages: Pages) -> &'static [(Target, Icon, Text, Tint)] {
         Pages::Four => &HOME_TILES[..4],
         Pages::Six => &HOME_TILES[..6],
         Pages::Seven => &HOME_TILES[..7],
-        Pages::Ten | Pages::Timeline | Pages::Simple => &HOME_TILES,
+        Pages::Ten | Pages::Timeline | Pages::Simple | Pages::Qr => &HOME_TILES,
     }
 }
 
@@ -505,6 +538,12 @@ pub enum Content {
     FriendName,
     FriendLink,
     FriendNote,
+    /// The QR code scanner (from screen version 11): what it does, the lines of how (or why it stopped), the last link
+    /// it opened (the owner's: everyone else's screen leaves it out), and what was just done.
+    QrState,
+    QrNote(u8),
+    QrLink,
+    QrNotice,
 }
 
 /// A line of changing text: `cols` cells of `size` pixels high and half as wide, from (`x`, `y`). On the screen, cell
@@ -1077,6 +1116,36 @@ pub fn layout(page: ScreenPage) -> Layout {
             labels.push(Label { x: 104, y: 34, size: 32, text: Text::MoreTitle, style: Style::Primary, bold: true, width: 800 });
             slots.add(672, 548, 40, 16, Style::Secondary, Content::Versions);
         }
+        ScreenPage::MoreQr => {
+            // Two columns of three rows of wide cards (the last place, at the bottom right, is the versions'): the icon at
+            // the left, the title and the note beside it.
+            elements.push(round(Target::Back, 32, Icon::Back));
+            for (i, &(target, icon, title, tint)) in MORE_CARDS_QR.iter().enumerate() {
+                let (x, y) = (32 + (i as u16 % 2) * 488, 96 + (i as u16 / 2) * 148);
+                let mut card = with(element(target, Rect::new(x, y, 472, 136), Look::Tile), Some(icon), Some(title));
+                card.tint = Some(tint);
+                elements.push(card);
+                slots.add(x + 116, y + 84, 27, 24, Style::Secondary, Content::TileNote(note_of(target)));
+            }
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::MoreTitle, style: Style::Primary, bold: true, width: 800 });
+            slots.add(672, 548, 40, 16, Style::Secondary, Content::Versions);
+        }
+        ScreenPage::Qr => {
+            // The scanner's picture with what it does and how beside it, then the last link it opened and the buttons.
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(with(element(Target::QrCopy, Rect::new(100, 396, 252, 72), Look::KeyDark), Some(Icon::Copy), Some(Text::QrCopy)));
+            elements.push(with(element(Target::QrOpen, Rect::new(368, 396, 252, 72), Look::KeyDark), Some(Icon::Open), Some(Text::QrOpen)));
+            elements.push(with(element(Target::QrAgain, Rect::new(636, 396, 288, 72), Look::Accent), Some(Icon::Qr), Some(Text::QrAgain)));
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::QrTitle, style: Style::Primary, bold: true, width: 888 });
+            labels.push(Label { x: 100, y: 300, size: 20, text: Text::QrLast, style: Style::Secondary, bold: false, width: 600 });
+            icons.push((Rect::new(100, 112, 112, 112), Icon::Qr, Some(Tint::Green)));
+            slots.add(236, 116, 42, 32, Style::Primary, Content::QrState);
+            for i in 0..QR_NOTE_LINES as u8 {
+                slots.add(236, 164 + i as u16 * 32, QR_NOTE_COLUMNS as u8, 24, Style::Secondary, Content::QrNote(i));
+            }
+            slots.add(100, 332, QR_LINK_COLUMNS as u8, 28, Style::Accent, Content::QrLink);
+            slots.add(100, 500, 76, 20, Style::Accent, Content::QrNotice);
+        }
         ScreenPage::Instances => {
             elements.push(round(Target::Back, 32, Icon::Back));
             elements.push(round(Target::Previous, 808, Icon::Previous));
@@ -1119,6 +1188,10 @@ pub fn layout(page: ScreenPage) -> Layout {
 pub const SIMPLE_HEARD_COLUMNS: usize = 60;
 /// Orbiters' account's page on Add Orbiters as a friend, in characters.
 const FRIEND_LINK_COLUMNS: usize = 56;
+/// The QR code scanner's lines of how (or why it stopped), and its last link, in characters.
+pub const QR_NOTE_LINES: usize = 3;
+pub const QR_NOTE_COLUMNS: usize = 56;
+const QR_LINK_COLUMNS: usize = 58;
 
 /// The seven-tile Home's place `i` (0 to 7): two rows of four, 228 × 216 each, 16 apart.
 fn seven_cell(i: usize) -> (u16, u16) {
@@ -1194,6 +1267,8 @@ fn tile_note(menu: &Menu, tile: u8) -> String {
             1 => "1 instance".into(),
             n => format!("{n} instances"),
         },
+        NOTE_QR if menu.qr.scanning() => "Scanning…".into(),
+        NOTE_QR => "Open a link from the camera".into(),
         _ if menu.sending => "Sending…".into(),
         _ => "Tell the team".into(),
     }
@@ -1274,6 +1349,8 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             Content::Heard | Content::HeardLine(_) | Content::HeardWide(_) | Content::HeardCaption if menu.heard_private => return String::new(),
             // What the owner writes to Orbiters is theirs: everyone else's screen shows the page without it.
             Content::SuggestLine(_) => return String::new(),
+            // So are the links the owner's camera found.
+            Content::QrLink | Content::QrNotice => return String::new(),
             Content::TypeLine(_) if menu.typing == Typing::Suggestion => return String::new(),
             _ => {}
         }
@@ -1517,6 +1594,38 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
                 menu.notice.clone().unwrap_or_else(|| "Then press Try again".into())
             }
         }
+        Content::QrState => qr_state(&menu.qr).into(),
+        Content::QrNote(i) => super::pieces(&qr_note(&menu.qr), QR_NOTE_COLUMNS).into_iter().nth(i as usize).unwrap_or_default(),
+        Content::QrLink => match &menu.qr.link {
+            Some(link) => short_link(link, QR_LINK_COLUMNS),
+            None => "None yet".into(),
+        },
+        Content::QrNotice => menu.notice.clone().unwrap_or_default(),
+    }
+}
+
+/// What the QR code scanner does, in a line.
+pub fn qr_state(qr: &crate::qr::QrView) -> &'static str {
+    use crate::qr::QrPhase;
+    match qr.phase {
+        QrPhase::Off => "Not scanning",
+        QrPhase::Starting => "Starting…",
+        QrPhase::NoCamera => "Waiting for VRChat's camera",
+        QrPhase::Looking if qr.link.is_some() => "Opened · looking for more",
+        QrPhase::Looking => "Point the stream camera at a QR code",
+        QrPhase::Stopped => "Stopped",
+    }
+}
+
+/// The scanner's lines under what it does: how to turn the stream camera on, why it stopped, what a code held, or what
+/// it does with what it finds.
+pub fn qr_note(qr: &crate::qr::QrView) -> String {
+    if !qr.note.is_empty() {
+        return qr.note.clone();
+    }
+    match qr.phase {
+        crate::qr::QrPhase::Off => "Press Scan again to read VRChat's stream camera".into(),
+        _ => "Its web link opens in the computer's browser at once".into(),
     }
 }
 
@@ -1707,6 +1816,9 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::TakeBack => !menu.pages.timeline() || !menu.card_out,
         Target::InviteMe(i) => i as usize >= menu.page_instances().len(),
         Target::CopyFriendName | Target::OpenFriendLink => menu.invite_account.is_none(),
+        // The scanner's buttons: Scan again once it stopped, the last link's once there is one.
+        Target::QrAgain => !menu.pages.qr() || menu.qr.scanning(),
+        Target::QrCopy | Target::QrOpen => !menu.pages.qr() || menu.qr.link.is_none(),
         Target::InviteAgain => menu.inviting.is_none(),
         _ => false,
     };
@@ -1881,7 +1993,8 @@ mod tests {
         assert_eq!(Pages::of_screen(Some(8)), Pages::Ten, "version 8 added no page");
         assert_eq!(Pages::of_screen(Some(9)), Pages::Timeline);
         assert_eq!(Pages::of_screen(Some(10)), Pages::Simple);
-        assert_eq!(Pages::of_screen(Some(12)), Pages::Simple);
+        assert_eq!(Pages::of_screen(Some(11)), Pages::Qr);
+        assert_eq!(Pages::of_screen(Some(13)), Pages::Qr);
         let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
         menu.open();
         assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSeven);

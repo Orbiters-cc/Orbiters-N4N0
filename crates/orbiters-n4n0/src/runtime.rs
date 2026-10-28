@@ -205,6 +205,8 @@ pub(crate) struct OrbRuntime {
     pub(crate) suggestion: Option<(u32, Option<String>)>,
     /// How the last Invite me of a menu other than the screen's went, numbered.
     pub(crate) invite: Option<(u32, orbiters_orb::menu::InviteAnswer)>,
+    /// The QR code scanner (qr.rs): the scan running, and what the menus show of it.
+    pub(crate) qr: crate::qr::QrRuntime,
     /// The computer's keys for the overlay menu's keyboard (the last few, numbered), and whether the keyboard is taken.
     pub(crate) keys: std::collections::VecDeque<(u32, orbiters_orb::menu::KeyInput)>,
     pub(crate) keyboard_taken: bool,
@@ -320,6 +322,7 @@ impl OrbRuntime {
         at(self.pending_at.map(|t| t + CONFIRM_FOR));
         at(self.screen.next_due(now));
         at(self.states.next_due());
+        at(self.qr.next_due());
         if vrchat && (self.avatar_id.is_none() || self.tree_unknown) {
             let every = if self.avatar_id.is_none() { Duration::from_secs(10) } else { TREE_RECHECK };
             at(Some(self.last_avatar_check.map_or(now, |t| t + every)));
@@ -394,6 +397,7 @@ impl OrbRuntime {
             world_video: self.world_video.as_ref().map(|v| (v.url.clone(), v.title.clone(), v.at)),
             photo_note: self.screen.photo_note.clone(),
             invite: self.invite.clone(),
+            qr: self.qr.view.clone(),
         }
     }
 
@@ -662,6 +666,7 @@ impl N4n0 {
         let mut title_wanted: Option<String> = None;
         let mut gave_up = false;
         let mut expired = Vec::new();
+        let qr_ended;
         let before;
         let after;
         let due;
@@ -772,6 +777,8 @@ impl N4n0 {
             }
             // An avatar's default state, once it settled after a switch or a world join.
             default_state = crate::states::tick(&mut rt, now);
+            // The QR code scanner stops after its time without a link.
+            qr_ended = crate::qr::tick(&mut rt, now);
             after = (
                 rt.face(),
                 rt.sender.as_ref().and_then(TextSender::current_text),
@@ -783,6 +790,11 @@ impl N4n0 {
             due = rt.next_due(now, vrchat);
         }
         self.send(&out);
+        if let Some(scan) = qr_ended {
+            // Its thread ends on its own; the menus show why it stopped.
+            drop(scan);
+            self.publish();
+        }
         if let Some(url) = title_wanted {
             let n = self.clone();
             let _ = std::thread::Builder::new().name("orb-video-title".into()).spawn(move || {
@@ -1620,6 +1632,7 @@ impl N4n0 {
             }),
             Command::Suggest { text, voice } => self.suggestion_send(text, voice, false),
             Command::InviteMe { location } => self.invite_send(location, false),
+            Command::Qr { on } => self.qr_scan(on),
             Command::Dictate => self.menu_listen(),
             Command::Watch { link } => {
                 if let Err(e) = self.host.watch(&link) {

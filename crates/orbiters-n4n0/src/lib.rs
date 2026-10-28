@@ -13,6 +13,7 @@ mod command;
 pub mod media;
 pub mod menu_host;
 pub mod platform;
+mod qr;
 mod runtime;
 mod screen;
 mod states;
@@ -24,8 +25,8 @@ mod tests;
 
 pub use command::Command;
 pub use platform::{
-    language_of, Actions, Browser, CallRequest, Clipboard, Ears, Files, Host, Locale, Mouse, MouseState, NoMouse, Osc, Platform, Scene, Sounds,
-    VoiceEnded, VoiceEvents, VoiceWorker,
+    language_of, Actions, Browser, CallRequest, Clipboard, Ears, Files, Host, Locale, Mouse, MouseState, NoMouse, Osc, Platform, QrEvents, QrScan, QrSeen,
+    Scene, Sounds, VoiceEnded, VoiceEvents, VoiceWorker,
 };
 pub use runtime::{N4n0, Shared, Source};
 pub use status::NoticeKind;

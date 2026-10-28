@@ -415,7 +415,30 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     let account = InviteAccount { name: "Orbiters".into(), link: "https://vrchat.com/home/user/usr_0c5b8f2e-3a41-4d7c-9e2b-5f6a7b8c9d0e".into() };
     friend.invite_answered(InviteAnswer::NeedsFriend { account, message: "Add Orbiters' VRChat account as a friend on VRChat first, then try again.".into() });
     out.push((ScreenPage::AddFriend, friend, Some(3), None));
+    // Screens from version 11: More with the QR code scanner, and the scanner having opened a link.
+    let qr = || {
+        let mut m = simple();
+        m.pages = Pages::Qr;
+        m
+    };
+    let mut more = qr();
+    more.press(Target::More);
+    out.push((ScreenPage::MoreQr, more, Some(4), None));
+    let mut scanner = qr();
+    scanner.page = Page::Qr;
+    scanner.qr = sample_qr();
+    out.push((ScreenPage::Qr, scanner, Some(3), None));
     out
+}
+
+/// The QR code scanner having opened a link, looking for more.
+pub(crate) fn sample_qr() -> orbiters_orb::qr::QrView {
+    orbiters_orb::qr::QrView {
+        phase: orbiters_orb::qr::QrPhase::Looking,
+        note: String::new(),
+        link: Some("https://orbiters.cc/maps/wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b".into()),
+        opened: 1,
+    }
 }
 
 /// Instances the sample player was in, the newest first.

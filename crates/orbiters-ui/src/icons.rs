@@ -74,6 +74,7 @@ pub const PLAY_PAUSE: &str = "\u{E8BE}";
 pub const PLUS: &str = "\u{E3D4}";
 pub const POWER: &str = "\u{E3DA}";
 pub const PROHIBIT: &str = "\u{E3DE}";
+pub const QR_CODE: &str = "\u{E3E6}";
 pub const RECORD: &str = "\u{E3EE}";
 pub const SCAN: &str = "\u{EBB6}";
 pub const SCROLL: &str = "\u{EB7A}";

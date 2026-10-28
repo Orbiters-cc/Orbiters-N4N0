@@ -134,6 +134,11 @@ pub enum Command {
     InviteMe {
         location: String,
     },
+    /// The QR code scanner reads VRChat's stream camera (`on`: its page opened, Scan again) or no longer (its page closed):
+    /// what it does is the status' `qr`.
+    Qr {
+        on: bool,
+    },
     /// A controller's trigger pulled or let go (the SteamVR overlay reads it): on a screen of version 7 it presses where
     /// that hand's index finger points.
     Trigger {
@@ -167,5 +172,6 @@ mod tests {
         assert_eq!(worn, Command::States { action: StateAction::Delete { id: "s1".into() }, avatar: None });
         assert_eq!(json(&Command::TakeBack), r#"{"kind":"take_back"}"#);
         assert_eq!(json(&Command::InviteMe { location: "wrld_a:1".into() }), r#"{"kind":"invite_me","location":"wrld_a:1"}"#);
+        assert_eq!(json(&Command::Qr { on: true }), r#"{"kind":"qr","on":true}"#);
     }
 }

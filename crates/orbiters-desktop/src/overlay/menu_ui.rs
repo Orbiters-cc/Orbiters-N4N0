@@ -272,6 +272,7 @@ pub fn glyph(icon: Icon) -> &'static str {
         Icon::More => icons::DOTS_THREE,
         Icon::Instances => icons::GLOBE,
         Icon::Open => icons::ARROW_SQUARE_OUT,
+        Icon::Qr => icons::QR_CODE,
         // Drawn as the N4N0 mark (`orbiters_ui::n4n0_logo`), never as a glyph.
         Icon::Mark => icons::STACK,
     }

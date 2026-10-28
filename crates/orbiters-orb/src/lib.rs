@@ -9,6 +9,7 @@ pub mod invites;
 pub mod menu;
 pub mod picture;
 pub mod policy;
+pub mod qr;
 pub mod states;
 pub mod suggestions;
 pub mod text;

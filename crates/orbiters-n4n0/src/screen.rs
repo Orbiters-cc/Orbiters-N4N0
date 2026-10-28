@@ -184,7 +184,7 @@ pub(crate) struct ScreenRuntime {
     answer_next: Option<Instant>,
     done_tx: mpsc::Sender<Done>,
     done_rx: mpsc::Receiver<Done>,
-    last_activity: Instant,
+    pub(crate) last_activity: Instant,
     /// The overlay's menu: open, and whether a sentence N4N0 hears is what to search for.
     pub overlay_open: bool,
     pub overlay_dictation: bool,
@@ -1590,6 +1590,10 @@ impl N4n0 {
                     });
                 }
                 Effect::InviteMe { location } => self.invite_send(location, true),
+                Effect::QrScan(on) => {
+                    let n = self.clone();
+                    std::thread::spawn(move || n.qr_scan(on));
+                }
                 Effect::CopyText { text } => {
                     if let Err(e) = self.device.clipboard.copy(&text) {
                         self.notify(NoticeKind::Error, e);

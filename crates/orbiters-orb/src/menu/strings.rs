@@ -163,6 +163,14 @@ texts! {
     FriendCopy = "friend.copy" => "Copy name",
     FriendOpen = "friend.open" => "Open link",
     FriendRetry = "friend.retry" => "Try again",
+    /// More's QR code scanner (from screen version 11), and its page: its title, the caption over the last link, its
+    /// buttons.
+    MoreQr = "more.qr" => "QR code scanner",
+    QrTitle = "qr.title" => "QR code scanner",
+    QrLast = "qr.last" => "Last link opened",
+    QrCopy = "qr.copy" => "Copy link",
+    QrOpen = "qr.open" => "Open again",
+    QrAgain = "qr.again" => "Scan again",
     /// The retro look's own words: the plate on the frame's top line (the screen's version follows it), the memory plate
     /// at the bottom right, the caption under a big icon, a picture's place before it came.
     RetroSystem = "retro.system" => "N4N0·OS",

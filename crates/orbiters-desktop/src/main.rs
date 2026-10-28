@@ -21,6 +21,7 @@ mod menu_host;
 mod mixer_inbox;
 mod overlay;
 mod pages;
+mod qr;
 mod reconstruct;
 mod screenshot;
 mod service;

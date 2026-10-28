@@ -71,6 +71,9 @@ pub enum Page {
     Instances,
     /// Orbiters' VRChat account has to be the player's friend to invite them: its name to copy, its page to open.
     AddFriend,
+    /// The QR code scanner (from screen version 11): VRChat's stream camera is read while it shows, a QR code's web link
+    /// opens on the computer.
+    Qr,
 }
 
 /// What the keyboard page ([`Page::Type`]) types.
@@ -183,16 +186,19 @@ pub enum Pages {
     /// From version 10: the simple Home (YouTube, 3D capture and More large; fast walk, calls and states under them;
     /// what plays at the bottom when something does), More, Previous instances and Add Orbiters as a friend.
     Simple,
+    /// From version 11: More with five cards (the QR code scanner among them) and the QR code scanner's page.
+    Qr,
 }
 
 impl Pages {
     /// Every page: the overlay's and the window's.
-    pub const ALL: Pages = Pages::Simple;
+    pub const ALL: Pages = Pages::Qr;
 
     /// The pages of a screen of `version` (`None`: a screen from before `N4N0/Screen/Version`).
     pub fn of_screen(version: Option<i32>) -> Pages {
-        use orbiters_contracts::orb::{SCREEN_MUSIC_LIGHT, SCREEN_SIMPLE, SCREEN_STATES_CARDS, SCREEN_TEN_TILES, SCREEN_TIMELINE};
+        use orbiters_contracts::orb::{SCREEN_MUSIC_LIGHT, SCREEN_QR, SCREEN_SIMPLE, SCREEN_STATES_CARDS, SCREEN_TEN_TILES, SCREEN_TIMELINE};
         match version {
+            Some(v) if v >= SCREEN_QR => Pages::Qr,
             Some(v) if v >= SCREEN_SIMPLE => Pages::Simple,
             Some(v) if v >= SCREEN_TIMELINE => Pages::Timeline,
             Some(v) if v >= SCREEN_TEN_TILES => Pages::Ten,
@@ -225,6 +231,11 @@ impl Pages {
     /// Home is the simple one, with More, Previous instances and Add Orbiters as a friend.
     pub fn simple(self) -> bool {
         self >= Pages::Simple
+    }
+
+    /// More has the QR code scanner (and its page).
+    pub fn qr(self) -> bool {
+        self >= Pages::Qr
     }
 }
 
@@ -544,6 +555,12 @@ pub enum Target {
     CopyFriendName,
     OpenFriendLink,
     InviteAgain,
+    /// More's QR code scanner (from screen version 11), and on its page: scan again once it stopped, the last link
+    /// copied, opened again.
+    Qr,
+    QrAgain,
+    QrCopy,
+    QrOpen,
 }
 
 /// The timeline segment a target is (the segment, or the place over it), for a drag along the timeline.
@@ -651,10 +668,13 @@ pub enum Effect {
     CopyText {
         text: String,
     },
-    /// Open this page on the computer (Orbiters' account's VRChat page).
+    /// Open this page on the computer (Orbiters' account's VRChat page, the QR code scanner's last link).
     OpenLink {
         link: String,
     },
+    /// Read VRChat's stream camera for QR codes (`true`: the scanner's page opened, Scan again), or no longer (it closed);
+    /// the host answers with [`Menu::qr`].
+    QrScan(bool),
     /// The menu closed.
     Close,
 }
@@ -764,6 +784,8 @@ pub struct Menu {
     pub invite_waiting: bool,
     /// Orbiters' VRChat account to befriend first, once an invite said so.
     pub invite_account: Option<InviteAccount>,
+    /// The QR code scanner, as the host runs it.
+    pub qr: crate::qr::QrView,
 }
 
 /// How long a state saved here shows before the host's list has it.
@@ -796,6 +818,10 @@ impl Menu {
         if self.page == Page::Card {
             self.card = None;
             self.page = Page::Home;
+        }
+        // The scanner reads VRChat's camera only while its page shows.
+        if self.page == Page::Qr {
+            return vec![Effect::QrScan(false), Effect::Close];
         }
         vec![Effect::Close]
     }
@@ -906,8 +932,17 @@ impl Menu {
         }
     }
 
-    /// The person pressed `target`.
+    /// The person pressed `target`. Leaving the QR code scanner's page stops it.
     pub fn press(&mut self, target: Target) -> Vec<Effect> {
+        let scanner = self.page == Page::Qr && self.open;
+        let mut effects = self.press_on(target);
+        if scanner && self.open && self.page != Page::Qr {
+            effects.push(Effect::QrScan(false));
+        }
+        effects
+    }
+
+    fn press_on(&mut self, target: Target) -> Vec<Effect> {
         // A dropped card is not the menu: nothing on it is pressed.
         if !self.open || self.page == Page::Card {
             return Vec::new();
@@ -921,7 +956,7 @@ impl Menu {
                     Page::NewState => Page::States,
                     Page::AddFriend => Page::Instances,
                     // The simple Home's More holds these.
-                    Page::Light | Page::Tracking | Page::Suggest | Page::Instances if self.pages.simple() => Page::More,
+                    Page::Light | Page::Tracking | Page::Suggest | Page::Instances | Page::Qr if self.pages.simple() => Page::More,
                     _ => Page::Home,
                 };
                 self.go(to);
@@ -1153,6 +1188,28 @@ impl Menu {
                     let text = account.name.clone();
                     self.notice = Some(format!("Copied \"{text}\": search it in VRChat's Social menu"));
                     vec![Effect::CopyText { text }]
+                }
+                None => Vec::new(),
+            },
+            Target::Qr => {
+                self.go(Page::Qr);
+                vec![Effect::QrScan(true)]
+            }
+            Target::QrAgain if !self.qr.scanning() => vec![Effect::QrScan(true)],
+            Target::QrAgain => Vec::new(),
+            Target::QrCopy => match &self.qr.link {
+                Some(link) => {
+                    let text = link.clone();
+                    self.notice = Some("Link copied".into());
+                    vec![Effect::CopyText { text }]
+                }
+                None => Vec::new(),
+            },
+            Target::QrOpen => match &self.qr.link {
+                Some(link) => {
+                    let link = link.clone();
+                    self.notice = Some("Opened again on the computer".into());
+                    vec![Effect::OpenLink { link }]
                 }
                 None => Vec::new(),
             },
@@ -2380,6 +2437,59 @@ mod tests {
         old.page = Page::Light;
         old.press(Target::Back);
         assert_eq!(old.page, Page::Home, "its Light is on Home");
+    }
+
+    #[test]
+    fn more_has_the_qr_code_scanner_from_version_11_and_its_page_scans_while_it_shows() {
+        use crate::qr::{QrPhase, QrView};
+        use layout::{cached, target_state, text, text_for, Content, Look, ScreenPage};
+        let mut menu = Menu { pages: Pages::Qr, ..Default::default() };
+        menu.open();
+        menu.press(Target::More);
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::MoreQr);
+        let cards = |page: ScreenPage| cached(page).elements.iter().filter(|e| e.look == Look::Tile).map(|e| e.target).collect::<Vec<_>>();
+        assert_eq!(cards(ScreenPage::MoreQr), [Target::Light, Target::Instances, Target::Tracking, Target::Qr, Target::Suggest]);
+        assert_eq!(cards(ScreenPage::More), [Target::Light, Target::Instances, Target::Tracking, Target::Suggest], "version 10's More as it was");
+        // Opening the page starts the scanner; its buttons show as it stands.
+        assert_eq!(menu.press(Target::Qr), [Effect::QrScan(true)]);
+        assert_eq!((menu.page, ScreenPage::of(&menu)), (Page::Qr, ScreenPage::Qr));
+        menu.qr = QrView { phase: QrPhase::Starting, ..Default::default() };
+        assert!(target_state(&menu, Target::QrAgain).hidden && target_state(&menu, Target::QrCopy).hidden);
+        assert_eq!(text(&menu, Content::QrState), "Starting…");
+        assert_eq!(text(&menu, Content::TileNote(layout::NOTE_QR)), "Scanning…");
+        menu.qr = QrView { phase: QrPhase::NoCamera, note: crate::qr::no_camera_note(Some(false)), ..Default::default() };
+        assert_eq!(text(&menu, Content::QrState), "Waiting for VRChat's camera");
+        let note: Vec<String> = (0..layout::QR_NOTE_LINES as u8).map(|i| text(&menu, Content::QrNote(i))).collect();
+        assert_eq!(note.iter().filter(|l| !l.is_empty()).cloned().collect::<Vec<_>>().join(" "), crate::qr::no_camera_note(Some(false)));
+        assert!(note[0].starts_with("Open VRChat's camera") && note.iter().all(|l| l.chars().count() <= layout::QR_NOTE_COLUMNS), "{note:?}");
+        // A link opened: shown to the owner only, copied, opened again.
+        menu.qr = QrView { phase: QrPhase::Looking, link: Some("https://orbiters.cc/maps".into()), opened: 1, note: String::new() };
+        assert_eq!(text(&menu, Content::QrState), "Opened · looking for more");
+        assert_eq!(text(&menu, Content::QrLink), "orbiters.cc/maps");
+        assert_eq!(text_for(&menu, Content::QrLink, true), "", "everyone else's screen leaves the link out");
+        assert_eq!(menu.press(Target::QrCopy), [Effect::CopyText { text: "https://orbiters.cc/maps".into() }]);
+        assert_eq!(text(&menu, Content::QrNotice), "Link copied");
+        assert_eq!(menu.press(Target::QrOpen), [Effect::OpenLink { link: "https://orbiters.cc/maps".into() }]);
+        assert!(menu.press(Target::QrAgain).is_empty(), "it scans already");
+        // Stopped on its own: Scan again starts it.
+        menu.qr.phase = QrPhase::Stopped;
+        assert!(!target_state(&menu, Target::QrAgain).hidden);
+        assert_eq!(menu.press(Target::QrAgain), [Effect::QrScan(true)]);
+        // Leaving the page stops it: back to More, or the menu closing.
+        assert_eq!(menu.press(Target::Back), [Effect::QrScan(false)]);
+        assert_eq!(menu.page, Page::More);
+        menu.press(Target::Qr);
+        assert_eq!(menu.press(Target::Close), [Effect::QrScan(false), Effect::Close]);
+        menu.open();
+        assert_eq!(menu.page, Page::Home);
+        // A screen of version 10 has no scanner: its More is version 10's.
+        let mut old = Menu { pages: Pages::Simple, ..Default::default() };
+        old.open();
+        old.press(Target::More);
+        assert_eq!(ScreenPage::of(&old), ScreenPage::More);
+        old.page = Page::Qr;
+        assert_eq!(ScreenPage::of(&old), ScreenPage::HomeQuiet);
+        assert!(target_state(&old, Target::QrAgain).hidden);
     }
 
     #[test]

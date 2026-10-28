@@ -229,6 +229,10 @@ impl<P: Pictures> MenuHost<P> {
             (None, None) => self.suggestion_seen = Some(0),
             _ => {}
         }
+        if m.qr != orb.qr {
+            m.qr = orb.qr.clone();
+            changed = true;
+        }
         match (&orb.invite, self.invite_seen) {
             (Some((n, answer)), Some(seen)) if *n != seen => {
                 if m.invite_waiting {
@@ -438,6 +442,7 @@ impl<P: Pictures> MenuHost<P> {
                 Effect::InviteMe { location } => service.command(Command::InviteMe { location }),
                 Effect::CopyText { text } => service.command(Command::CopyText { text }),
                 Effect::OpenLink { link } => service.command(Command::Watch { link }),
+                Effect::QrScan(on) => service.command(Command::Qr { on }),
                 Effect::Close => close = true,
             }
         }

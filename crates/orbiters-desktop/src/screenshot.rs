@@ -457,6 +457,60 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
+            name: "home-qr",
+            page: Page::Home,
+            snapshot: {
+                let mut s = home.clone();
+                s.orb.qr = crate::overlay::menu_pages::sample_qr();
+                s
+            },
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Qr, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-instances",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::AddFriend, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-qr-no-camera",
+            page: Page::Home,
+            snapshot: {
+                let mut s = home.clone();
+                s.orb.qr = orbiters_orb::qr::QrView {
+                    phase: orbiters_orb::qr::QrPhase::NoCamera,
+                    note: orbiters_orb::qr::no_camera_note(Some(false)),
+                    ..Default::default()
+                };
+                s
+            },
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Qr, samples: true }),
+            library: None,
+        },
+        Scenario {
             name: "home-tracking",
             page: Page::Home,
             snapshot: home.clone(),
@@ -1522,13 +1576,28 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
         MenuPage::States | MenuPage::NewState => Target::States,
         MenuPage::Tracking => Target::Tracking,
         MenuPage::Suggest | MenuPage::Type => Target::Suggest,
-        MenuPage::Card | MenuPage::More | MenuPage::Instances | MenuPage::AddFriend => return,
+        MenuPage::Qr => Target::Qr,
+        MenuPage::Instances | MenuPage::AddFriend => Target::Instances,
+        MenuPage::Card | MenuPage::More => return,
     };
     host.press(open);
     if !samples {
         return;
     }
     match page {
+        // The sample player's instances (never this computer's), and Orbiters asking to be added as a friend first.
+        MenuPage::Instances | MenuPage::AddFriend => {
+            use orbiters_orb::menu::{InviteAccount, InviteAnswer};
+            host.menu.set_instances(crate::overlay::menu_pages::sample_instances(), true, "");
+            if page == MenuPage::AddFriend {
+                host.press(Target::InviteMe(0));
+                let account = InviteAccount { name: "Orbiters".into(), link: "https://vrchat.com/home/user/usr_0c5b8f2e-3a41-4d7c-9e2b-5f6a7b8c9d0e".into() };
+                host.menu.invite_answered(InviteAnswer::NeedsFriend {
+                    account,
+                    message: "Add Orbiters' VRChat account as a friend on VRChat first, then try again.".into(),
+                });
+            }
+        }
         MenuPage::Search => {
             if let Some(Effect::Suggest { id, text }) = host.menu.set_query("lofi hi").into_iter().next() {
                 host.menu.suggestions_arrived(id, &text, sample_suggestions());

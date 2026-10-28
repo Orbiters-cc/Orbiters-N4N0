@@ -48,6 +48,24 @@ pub enum CallRequest {
     Pick(f32),
 }
 
+/// What a QR code scanner ([`Host::qr_scan`]) sees in VRChat's stream camera, told as it goes (on its own thread).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QrSeen {
+    /// Frames come from VRChat's camera (`true`), or none came for a while (`false`: the camera is closed, not in Stream
+    /// mode, or its Spout Stream is off).
+    Camera(bool),
+    /// A QR code's text, each time a frame shows one.
+    Code(String),
+    /// The scanner cannot run: why (it stops).
+    Failed(String),
+}
+
+/// What a QR code scanner tells N4N0 ([`QrSeen`]); never called once the scan was dropped and its thread saw it.
+pub type QrEvents = Box<dyn Fn(QrSeen) + Send + Sync>;
+
+/// A QR code scanner reading VRChat's stream camera: dropping it stops it (its thread ends on its own, never waited for).
+pub trait QrScan: Send {}
+
 /// What every menu, the overlay, the window and a toast say when a 3D picture is asked for with VRChat's camera closed:
 /// OSC cannot open it (VRChat's `/usercamera/Mode` switches the camera's mode once it is open, nothing opens it).
 pub const CAMERA_CLOSED: &str = "Open the camera before";
@@ -96,6 +114,12 @@ pub trait Host: Send + Sync + 'static {
     /// (VRChat not found, before 2025.3.3). Asked before a 3D picture's timer starts: OSC cannot open the camera.
     fn camera_open(&self) -> Option<bool> {
         None
+    }
+    /// Starts reading VRChat's stream camera for QR codes (N4N0's menu, More, QR code scanner): downscaled frames decoded
+    /// a few times a second on a thread of its own, what it sees told to `events`. Dropping the scan stops it. A device
+    /// without VRChat's camera says why it cannot.
+    fn qr_scan(&self, _events: QrEvents) -> Result<Box<dyn QrScan>, String> {
+        Err("QR codes are read from VRChat's camera by Orbiters - N4N0 on the computer running VRChat".into())
     }
     /// The avatar's Walk boost radial moved (`N4N0/WalkBoost`): the strength, 0 to 1.
     fn walk_boost(&self, _strength: f32) {}

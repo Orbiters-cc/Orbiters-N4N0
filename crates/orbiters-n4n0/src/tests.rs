@@ -52,6 +52,12 @@ pub(crate) struct TestHost {
     capturing: Mutex<bool>,
     walk: Mutex<Vec<f32>>,
     motion: Mutex<Vec<Option<(String, OscValue)>>>,
+    /// The QR code scanner as the stand-in app runs it: what N4N0 hears from the last one started, how many started and
+    /// were dropped; the links it opened.
+    qr: Mutex<Option<QrEvents>>,
+    qr_started: AtomicUsize,
+    qr_dropped: Arc<AtomicUsize>,
+    watched: Mutex<Vec<String>>,
     /// N4N0's files, gone with the test.
     _dir: TempDir,
 }
@@ -215,6 +221,17 @@ impl Host for TestHost {
         self.walk.lock().unwrap().push(strength);
     }
 
+    fn qr_scan(&self, events: QrEvents) -> Result<Box<dyn QrScan>, String> {
+        self.qr_started.fetch_add(1, Ordering::Relaxed);
+        *self.qr.lock().unwrap() = Some(events);
+        Ok(Box::new(FakeScan(self.qr_dropped.clone())))
+    }
+
+    fn watch(&self, link: &str) -> Result<(), String> {
+        self.watched.lock().unwrap().push(link.to_string());
+        Ok(())
+    }
+
     fn motion(&self, said: Option<(&str, &OscValue)>) {
         self.motion.lock().unwrap().push(said.map(|(n, v)| (n.to_string(), v.clone())));
     }
@@ -249,6 +266,25 @@ impl Osc for TestHost {
             Some(Some(addr)) => orbiters_core::osc::vrchat_values(addr, Duration::from_secs(1)).unwrap_or_default(),
             _ => Vec::new(),
         }
+    }
+}
+
+/// A stand-in QR code scan: counts its drop.
+struct FakeScan(Arc<AtomicUsize>);
+
+impl QrScan for FakeScan {}
+
+impl Drop for FakeScan {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl TestHost {
+    /// The stand-in scanner sees `seen`.
+    fn qr_sees(&self, seen: QrSeen) {
+        let events = self.qr.lock().unwrap();
+        (events.as_ref().expect("a scan started"))(seen);
     }
 }
 
@@ -1876,5 +1912,62 @@ fn n4n0_keeps_its_files_where_the_app_says() {
     n.command(Command::States { action: StateAction::Default { id: Some("s1".into()) }, avatar: None });
     assert!(n.files.states.is_file(), "{}", n.files.states.display());
     assert!(std::fs::read_to_string(&n.files.states).unwrap().contains("Cosy"));
+    n.shutdown();
+}
+
+#[test]
+fn the_qr_code_scanner_opens_web_links_once_and_stops_with_its_page() {
+    use orbiters_orb::qr::QrPhase;
+    let (host, n) = n4n0(Settings::default());
+    let phase = |host: &TestHost| host.view().qr.phase;
+    n.command(Command::Qr { on: true });
+    assert_eq!(host.qr_started.load(Ordering::Relaxed), 1);
+    assert_eq!(phase(&host), QrPhase::Starting);
+    n.command(Command::Qr { on: true });
+    assert_eq!(host.qr_started.load(Ordering::Relaxed), 1, "asked again while it runs: the same scan");
+    // No picture from VRChat's camera: what to do, by whether the camera is open.
+    *host.camera.lock().unwrap() = Some(false);
+    host.qr_sees(QrSeen::Camera(false));
+    let view = host.view().qr;
+    assert_eq!(view.phase, QrPhase::NoCamera);
+    assert!(view.note.starts_with("Open VRChat's camera"), "{}", view.note);
+    *host.camera.lock().unwrap() = Some(true);
+    host.qr_sees(QrSeen::Camera(false));
+    assert!(host.view().qr.note.contains("choose Stream"), "the camera open: Stream mode and Spout Stream");
+    host.qr_sees(QrSeen::Camera(true));
+    assert_eq!((phase(&host), host.view().qr.note.as_str()), (QrPhase::Looking, ""));
+    // A web link opens at once, once; anything else opens nothing and only says so.
+    host.qr_sees(QrSeen::Code("https://orbiters.cc/maps".into()));
+    host.qr_sees(QrSeen::Code("https://orbiters.cc/maps".into()));
+    host.qr_sees(QrSeen::Code("javascript:alert(1)".into()));
+    host.qr_sees(QrSeen::Code("https://bank.example@evil.example/".into()));
+    host.qr_sees(QrSeen::Code("HTTPS://example.com/a".into()));
+    assert_eq!(*host.watched.lock().unwrap(), ["https://orbiters.cc/maps", "https://example.com/a"]);
+    let view = host.view().qr;
+    assert_eq!((view.link.as_deref(), view.opened), (Some("https://example.com/a"), 2));
+    assert!(host.notices().iter().any(|(k, m)| *k == NoticeKind::Success && m == "Opened from a QR code: orbiters.cc/maps"));
+    // The screen's menu shows the same scanner.
+    assert_eq!(n.orb.lock().unwrap().screen.menu.qr, view);
+    // Its page closed: it stops, and what that scan still says is not heard.
+    n.command(Command::Qr { on: false });
+    assert_eq!(host.qr_dropped.load(Ordering::Relaxed), 1);
+    assert_eq!(phase(&host), QrPhase::Off);
+    host.qr_sees(QrSeen::Code("https://late.example/".into()));
+    assert_eq!(host.watched.lock().unwrap().len(), 2, "a stopped scan opens nothing");
+    // Started again, it stops on its own after its time without a link.
+    n.command(Command::Qr { on: true });
+    assert_eq!(host.qr_started.load(Ordering::Relaxed), 2);
+    {
+        let mut rt = n.orb.lock().unwrap();
+        let ended = crate::qr::tick(&mut rt, Instant::now() + orbiters_orb::qr::SCAN_FOR + Duration::from_secs(1));
+        assert!(ended.is_some());
+        assert_eq!(rt.qr.view.phase, QrPhase::Stopped);
+        assert!(rt.qr.next_due().is_none());
+    }
+    assert_eq!(host.qr_dropped.load(Ordering::Relaxed), 2);
+    // A scanner that cannot run says why.
+    n.command(Command::Qr { on: true });
+    host.qr_sees(QrSeen::Failed("The stream camera cannot be read".into()));
+    assert_eq!((phase(&host), host.view().qr.note), (QrPhase::Stopped, "The stream camera cannot be read".to_string()));
     n.shutdown();
 }

@@ -198,6 +198,9 @@ pub struct OrbStatus {
     /// How the last Invite me a menu other than the screen's asked went (Previous instances), numbered.
     #[serde(default)]
     pub invite: Option<(u32, orbiters_orb::menu::InviteAnswer)>,
+    /// The QR code scanner, as every menu shows it.
+    #[serde(default)]
+    pub qr: orbiters_orb::qr::QrView,
 }
 
 /// Tracking smoothing (the app's SteamVR driver), as the Tracking page shows it.

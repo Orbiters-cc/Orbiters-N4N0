@@ -143,6 +143,12 @@ impl Host for Link {
         self.0.upgrade().map(|c| c.tracking_note())
     }
 
+    /// N4N0's QR code scanner: VRChat's stream camera (or Settings' Spout sender) read on a thread of its own.
+    fn qr_scan(&self, events: orbiters_n4n0::QrEvents) -> Result<Box<dyn orbiters_n4n0::QrScan>, String> {
+        let wanted = self.with(|c| c.with_settings(|s| s.spout_sender.clone())).unwrap_or_default();
+        crate::qr::start(wanted, events)
+    }
+
     /// The avatar's Walk boost radial: kept, and not sent back to the radial.
     fn walk_boost(&self, strength: f32) {
         self.with(|c| c.set_walk_boost(strength, true));

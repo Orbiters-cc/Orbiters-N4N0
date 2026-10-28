@@ -131,6 +131,24 @@ pub struct Added {
     pub skipped: usize,
 }
 
+/// What a 3D preview sends: the web `.splat` and VRChat's splat trees for PC, Quest and the coarse first view.
+pub struct PreviewFiles {
+    pub splat: Vec<u8>,
+    pub vrchat_pc: Vec<u8>,
+    pub vrchat_quest: Vec<u8>,
+    pub vrchat_coarse: Vec<u8>,
+}
+
+impl PreviewFiles {
+    pub fn len(&self) -> u64 {
+        (self.splat.len() + self.vrchat_pc.len() + self.vrchat_quest.len() + self.vrchat_coarse.len()) as u64
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// One file of a multipart upload.
 pub struct Part {
     pub field: &'static str,
@@ -197,20 +215,26 @@ impl Api {
         Self::json(response)
     }
 
-    /// Adds a 3D preview (`.splat`) with its sky map (a reconstruction's sky.png, when there is one), replacing this
-    /// member's earlier one of the world. `metadata` holds the start view (`{"view":{"position":[…],"target":[…]}}`),
-    /// quality and capture date.
+    /// Adds a 3D preview with its sky map (a reconstruction's sky.png, when there is one), replacing this member's
+    /// earlier one of the world: the web `.splat` and VRChat's splat trees (OrbitersContracts Docs/splat-tree.md).
+    /// `metadata` holds the start view (`{"view":{"position":[…],"target":[…]}}`), quality and capture date.
     pub fn add_preview(
         &self,
         token: &str,
         world_id: &str,
-        splat: Vec<u8>,
+        files: PreviewFiles,
         sky: Option<&Path>,
         metadata: &serde_json::Value,
         progress: impl FnMut(u64, u64) + Send + 'static,
     ) -> anyhow::Result<()> {
         let world_id = world_path(world_id)?;
-        let mut parts = vec![Part::bytes("splat", format!("{world_id}.splat"), "application/octet-stream", splat)];
+        let tree = |field: &'static str, name: &str, bytes: Vec<u8>| Part::bytes(field, format!("{world_id}-{name}.n4tree"), "application/octet-stream", bytes);
+        let mut parts = vec![
+            Part::bytes("splat", format!("{world_id}.splat"), "application/octet-stream", files.splat),
+            tree("vrchatPc", "pc", files.vrchat_pc),
+            tree("vrchatQuest", "quest", files.vrchat_quest),
+            tree("vrchatCoarse", "coarse", files.vrchat_coarse),
+        ];
         if let Some(sky) = sky {
             parts.push(Part::file("sky", "sky.png", "image/png", sky)?);
         }

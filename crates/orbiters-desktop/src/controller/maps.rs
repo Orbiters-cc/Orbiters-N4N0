@@ -6,7 +6,7 @@
 use super::{Controller, NoticeKind, Shared};
 use crate::ipc::ToClient;
 use crate::state::{MapsMine, UploadKind, UploadState, UploadStatus};
-use orbiters_core::maps::Part;
+use orbiters_core::maps::{Part, PreviewFiles};
 use orbiters_core::{bundle, reconstruction, visited};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -182,8 +182,8 @@ impl Controller {
         let id = self.start_upload(&world_id, &world_name, UploadKind::Preview, vec![session.clone()])?;
         let c = self.clone();
         std::thread::spawn(move || {
-            let state = match web_preview(&session).and_then(|(bytes, sky, metadata)| {
-                let total = bytes.len() as u64 + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
+            let state = match web_preview(&session).and_then(|(files, sky, metadata)| {
+                let total = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
                 c.update_if(|s| match s.uploads.iter_mut().find(|u| u.id == id) {
                     Some(u) => {
                         u.state = UploadState::Sending;
@@ -192,7 +192,7 @@ impl Controller {
                     }
                     None => false,
                 });
-                api.add_preview(&token, &world_id, bytes, sky.as_deref(), &metadata, c.progress(id))
+                api.add_preview(&token, &world_id, files, sky.as_deref(), &metadata, c.progress(id))
             }) {
                 Ok(()) => UploadState::Done { added: 1, skipped: 0 },
                 Err(e) => UploadState::Failed { message: e.to_string() },
@@ -203,10 +203,10 @@ impl Controller {
     }
 }
 
-/// A session's splats as a web `.splat`, its sky map (sky.png as trained, when training learnt one) and the upload's
-/// metadata: the start view (right-handed like the file: Unity's Z negated), the held-out quality and when the session
-/// was recorded.
-fn web_preview(session: &Path) -> anyhow::Result<(Vec<u8>, Option<PathBuf>, serde_json::Value)> {
+/// A session's splats as a web `.splat` and as VRChat's splat trees (their merged boxes tuned on the GPU when there is
+/// one), its sky map (sky.png as trained, when training learnt one) and the upload's metadata: the start view
+/// (right-handed like the files: Unity's Z negated), the held-out quality and when the session was recorded.
+fn web_preview(session: &Path) -> anyhow::Result<(PreviewFiles, Option<PathBuf>, serde_json::Value)> {
     let result = reconstruction::result_dir(session);
     let g = orbiters_reconstruct::ply::read(&result.join(reconstruction::PLY_FILE))?;
     let (views, start) = crate::views::recorded(session)?;
@@ -215,6 +215,12 @@ fn web_preview(session: &Path) -> anyhow::Result<(Vec<u8>, Option<PathBuf>, serd
     let target = [v.position[0] + v.forward[0] * depth, v.position[1] + v.forward[1] * depth, v.position[2] + v.forward[2] * depth];
     let web = orbiters_reconstruct::web::splat_file(&g, orbiters_reconstruct::web::DEFAULT_MAX, v.position);
     anyhow::ensure!(web.count >= 1000, "This reconstruction has too few splats to show the world.");
+    let cameras = orbiters_reconstruct::tree_tune::session_cameras(session)?;
+    let mut gpu = orbiters_reconstruct::gpu::Gpu::new().ok();
+    // Names this upload in its three trees, so a world can tell when a slot's files have been replaced.
+    let key = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u32) ^ web.count as u32;
+    let trees = orbiters_reconstruct::tree_tune::vrchat_files(&g, &cameras, gpu.as_mut(), key, |_| {})?;
+    let files = PreviewFiles { splat: web.bytes, vrchat_pc: trees.pc, vrchat_quest: trees.quest, vrchat_coarse: trees.coarse };
     let flip = |p: [f32; 3]| [p[0], p[1], -p[2]];
     let report = reconstruction::read_report(session);
     let recorded = bundle::read_manifest(session).map(|m| m.created_utc).ok();
@@ -224,7 +230,7 @@ fn web_preview(session: &Path) -> anyhow::Result<(Vec<u8>, Option<PathBuf>, serd
         "capturedAt": recorded,
     });
     let sky = Some(result.join(reconstruction::SKY_FILE)).filter(|p| p.is_file());
-    Ok((web.bytes, sky, metadata))
+    Ok((files, sky, metadata))
 }
 
 #[cfg(test)]
@@ -241,16 +247,17 @@ mod tests {
         let api = orbiters_core::account::Api::at(&env("ORBITERS_TEST_API"));
         let world = env("ORBITERS_TEST_WORLD");
         let t = Instant::now();
-        let (bytes, sky, metadata) = web_preview(Path::new(&env("ORBITERS_TEST_SESSION"))).unwrap();
-        println!("{:.1} MB web preview in {:?}: {metadata}", bytes.len() as f64 / 1e6, t.elapsed());
-        assert_eq!(bytes.len() % orbiters_reconstruct::web::SPLAT_BYTES, 0);
+        let (files, sky, metadata) = web_preview(Path::new(&env("ORBITERS_TEST_SESSION"))).unwrap();
+        println!("{:.1} MB web preview and VRChat trees in {:?}: {metadata}", files.len() as f64 / 1e6, t.elapsed());
+        assert_eq!(files.splat.len() % orbiters_reconstruct::web::SPLAT_BYTES, 0);
+        assert_eq!(&files.vrchat_pc[..8], orbiters_reconstruct::tree::MAGIC);
         let view = &metadata["view"];
         assert_eq!(view["position"].as_array().unwrap().len(), 3);
         let before = api.world(&world).unwrap().unwrap().previews;
         let sent = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let s = sent.clone();
-        let total = bytes.len() as u64;
-        api.add_preview(&env("ORBITERS_TEST_TOKEN"), &world, bytes, sky.as_deref(), &metadata, move |n, _| s.store(n, Ordering::Relaxed)).unwrap();
+        let total = files.len();
+        api.add_preview(&env("ORBITERS_TEST_TOKEN"), &world, files, sky.as_deref(), &metadata, move |n, _| s.store(n, Ordering::Relaxed)).unwrap();
         assert!(sent.load(Ordering::Relaxed) >= total);
         let page = api.world(&world).unwrap().unwrap();
         println!("previews {before} → {}", page.previews);

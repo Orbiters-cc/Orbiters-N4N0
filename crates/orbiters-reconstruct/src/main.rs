@@ -334,11 +334,45 @@ fn web_preview(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned]`: the reconstruction's files for VRChat
+/// worlds (orbiters_reconstruct::tree_tune): pc.n4tree, quest.n4tree and coarse.n4tree.
+fn vrchat(args: &[String]) -> anyhow::Result<()> {
+    let (Some(session), Some(out)) = (args.first(), args.get(1)) else { bail!("usage: orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned]") };
+    let session = std::path::Path::new(session);
+    let g = ply::read(&rec::result_dir(session).join(rec::PLY_FILE))?;
+    let cameras = orbiters_reconstruct::tree_tune::session_cameras(session)?;
+    let mut gpu = if args.iter().any(|a| a == "--untuned") { None } else { Some(gpu::Gpu::new()?) };
+    let start = std::time::Instant::now();
+    let files = orbiters_reconstruct::tree_tune::vrchat_files(&g, &cameras, gpu.as_mut(), fastrand::u32(..), |p| eprintln!("{:.0} %", p * 100.0))?;
+    let out = std::path::Path::new(out);
+    std::fs::create_dir_all(out)?;
+    for (name, bytes) in [("pc.n4tree", &files.pc), ("quest.n4tree", &files.quest), ("coarse.n4tree", &files.coarse)] {
+        std::fs::write(out.join(name), bytes)?;
+    }
+    println!(
+        "{} splats, {} cameras: PC {} ({:.1} MB), Quest {} ({:.1} MB), coarse {} in {:.1} s",
+        g.len(),
+        cameras.len(),
+        files.splats[0],
+        files.pc.len() as f64 / 1e6,
+        files.splats[1],
+        files.quest.len() as f64 / 1e6,
+        files.splats[2],
+        start.elapsed().as_secs_f32()
+    );
+    Ok(())
+}
+
 fn main() {
     orbiters_core::panic_log::install();
     let all: Vec<String> = std::env::args().skip(1).collect();
-    if all.first().map(String::as_str) == Some("--web-preview") {
-        if let Err(e) = web_preview(&all[1..]) {
+    let tool: Option<fn(&[String]) -> anyhow::Result<()>> = match all.first().map(String::as_str) {
+        Some("--web-preview") => Some(web_preview),
+        Some("--vrchat") => Some(vrchat),
+        _ => None,
+    };
+    if let Some(tool) = tool {
+        if let Err(e) = tool(&all[1..]) {
             eprintln!("{e:#}");
             std::process::exit(1);
         }

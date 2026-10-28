@@ -47,20 +47,25 @@ pub fn splat_file(g: &Gaussians, max: usize, origin: [f32; 3]) -> WebPreview {
     keep.sort_by(|a, b| distance(a.0).total_cmp(&distance(b.0)));
     let mut bytes = Vec::with_capacity(keep.len() * SPLAT_BYTES);
     for &(i, _) in &keep {
-        let [x, y, z] = g.means[i];
-        let s = g.log_scales[i];
-        let c = g.colors[i];
-        let q = g.rotations[i];
-        let n = q.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
-        // Mirroring Z: positions negate z; a rotation R becomes S R S, the quaternion (w, -x, -y, z).
-        let rotation = [q[0] / n, -q[1] / n, -q[2] / n, q[3] / n];
-        for v in [x, y, -z, s[0].exp(), s[1].exp(), s[2].exp()] {
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
-        bytes.extend_from_slice(&[byte(c[0]), byte(c[1]), byte(c[2]), byte(sigmoid(g.opacity_logits[i]))]);
-        bytes.extend(rotation.map(|v| (v * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8));
+        write_splat(&mut bytes, g, i);
     }
     WebPreview { count: keep.len(), bytes }
+}
+
+/// Splat `i` of `g` in the `.splat` layout (also each splat of a VRChat tree, crate::tree).
+pub fn write_splat(bytes: &mut Vec<u8>, g: &Gaussians, i: usize) {
+    let [x, y, z] = g.means[i];
+    let s = g.log_scales[i];
+    let c = g.colors[i];
+    let q = g.rotations[i];
+    let n = q.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
+    // Mirroring Z: positions negate z; a rotation R becomes S R S, the quaternion (w, -x, -y, z).
+    let rotation = [q[0] / n, -q[1] / n, -q[2] / n, q[3] / n];
+    for v in [x, y, -z, s[0].exp(), s[1].exp(), s[2].exp()] {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    bytes.extend_from_slice(&[byte(c[0]), byte(c[1]), byte(c[2]), byte(sigmoid(g.opacity_logits[i]))]);
+    bytes.extend(rotation.map(|v| (v * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8));
 }
 
 #[cfg(test)]

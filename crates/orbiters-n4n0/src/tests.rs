@@ -58,6 +58,12 @@ pub(crate) struct TestHost {
     qr_started: AtomicUsize,
     qr_dropped: Arc<AtomicUsize>,
     watched: Mutex<Vec<String>>,
+    /// The 3D captures: how often they were listed, the shares asked, the friends the stand-in app reads and the pictures
+    /// asked for.
+    listed: AtomicUsize,
+    shares: Mutex<Vec<orbiters_orb::captures::ShareAsk>>,
+    friends: Mutex<Option<Result<Vec<orbiters_orb::captures::Friend>, String>>>,
+    capture_pictures: Mutex<Vec<String>>,
     /// N4N0's files, gone with the test.
     _dir: TempDir,
 }
@@ -230,6 +236,24 @@ impl Host for TestHost {
     fn watch(&self, link: &str) -> Result<(), String> {
         self.watched.lock().unwrap().push(link.to_string());
         Ok(())
+    }
+
+    fn captures_list(&self) {
+        self.listed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn share_capture(&self, ask: orbiters_orb::captures::ShareAsk) -> Result<(), String> {
+        self.shares.lock().unwrap().push(ask);
+        Ok(())
+    }
+
+    fn friends(&self) -> Result<Vec<orbiters_orb::captures::Friend>, String> {
+        self.friends.lock().unwrap().clone().unwrap_or(Ok(Vec::new()))
+    }
+
+    fn capture_picture(&self, key: &str) -> Option<orbiters_orb::picture::Rgb> {
+        self.capture_pictures.lock().unwrap().push(key.to_string());
+        Some(orbiters_orb::picture::Rgb { width: 16, height: 9, pixels: vec![200; 16 * 9 * 3] })
     }
 
     fn motion(&self, said: Option<(&str, &OscValue)>) {
@@ -1912,6 +1936,51 @@ fn n4n0_keeps_its_files_where_the_app_says() {
     n.command(Command::States { action: StateAction::Default { id: Some("s1".into()) }, avatar: None });
     assert!(n.files.states.is_file(), "{}", n.files.states.display());
     assert!(std::fs::read_to_string(&n.files.states).unwrap().contains("Cosy"));
+    n.shutdown();
+}
+
+#[test]
+fn n4n0_hands_its_menus_the_3d_captures_shares_them_and_reads_friends_while_share_to_shows() {
+    use orbiters_orb::captures::{CapturePhase, CaptureRow, CapturesView, Friend, Friends, ShareAsk};
+    use orbiters_orb::menu::{Effect, Page, Pages};
+    let (host, n) = n4n0(Settings::default());
+    // The app hands its captures over: the status has them for the overlay, the screen's menu directly.
+    let row = CaptureRow { key: "C:/s/a".into(), world: "Rooftop".into(), phase: CapturePhase::Ready, ..Default::default() };
+    let view = CapturesView { latest: Some(row.clone()), history: vec![row.clone()], listed: true, note: String::new() };
+    n.set_captures(view.clone());
+    assert_eq!(host.view().captures, view);
+    assert_eq!(n.orb.lock().unwrap().screen.menu.captures, view);
+    // History opened in the overlay lists them again; a share goes to the app as asked.
+    n.command(Command::Captures);
+    assert!(until(|| host.listed.load(Ordering::Relaxed) == 1));
+    let ask = ShareAsk { key: "C:/s/a".into(), public: true, recipients: Vec::new(), acknowledge_explicit: true };
+    n.command(Command::ShareCapture { share: ask.clone() });
+    assert!(until(|| host.shares.lock().unwrap().as_slice() == std::slice::from_ref(&ask)));
+    // Friends: read while Share to … shows (by name), forgotten when it closes; why they could not be read.
+    let f = |id: &str, name: &str| Friend { id: id.into(), name: name.into() };
+    *host.friends.lock().unwrap() = Some(Ok(vec![f("usr_b", "bob"), f("usr_a", "Alice")]));
+    n.command(Command::Friends { on: true });
+    assert!(until(|| matches!(host.view().friends, Friends::Ready { .. })));
+    assert_eq!(host.view().friends.list(), [f("usr_a", "Alice"), f("usr_b", "bob")]);
+    assert_eq!(n.orb.lock().unwrap().screen.menu.friends, host.view().friends);
+    n.command(Command::Friends { on: false });
+    assert_eq!(host.view().friends, Friends::None);
+    *host.friends.lock().unwrap() = Some(Err("VRCX and VRCNext were not found".into()));
+    n.command(Command::Friends { on: true });
+    assert!(until(|| host.view().friends == Friends::Failed { message: "VRCX and VRCNext were not found".into() }));
+    // The screen's menu fetches a capture's picture from the app, by its key.
+    {
+        let mut rt = n.orb.lock().unwrap();
+        rt.screen.menu.pages = Pages::Share;
+        rt.screen.menu.open();
+        rt.screen.menu.page = Page::Photo;
+    }
+    n.screen_effects(vec![Effect::Thumbnails(vec![row.picture_key()])]);
+    assert!(until(|| host.capture_pictures.lock().unwrap().as_slice() == ["C:/s/a"]));
+    // The same captures again change nothing.
+    let published = host.view();
+    n.set_captures(view);
+    assert_eq!(host.view(), published);
     n.shutdown();
 }
 

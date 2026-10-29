@@ -1673,7 +1673,8 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
         MenuPage::Home => return,
         MenuPage::Search | MenuPage::Results => Target::YouTube,
         MenuPage::Call => Target::Call,
-        MenuPage::Photo => Target::Photo,
+        // The window shares captures in Photos & captures: its 3D picture page stands for the menu's sharing pages.
+        MenuPage::Photo | MenuPage::History | MenuPage::ShareTo | MenuPage::Explicit => Target::Photo,
         MenuPage::Music => Target::Music,
         MenuPage::Light => Target::Light,
         MenuPage::States | MenuPage::NewState => Target::States,
@@ -2535,6 +2536,61 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
             println!("{}", out.join(format!("{mirror}.png")).display());
         }
     }
+    overlay_menu_shots(out, &talking)
+}
+
+/// N4N0's menu in the play space sharing 3D captures (screen version 12's pages), driven as the overlay drives it: the
+/// service's snapshot followed (the sample captures, then the sample friends), presses as a player makes them, drawn in
+/// the overlay's look. The pictures are the sample thumbnails, never this computer's sessions.
+fn overlay_menu_shots(out: &std::path::Path, snap: &Snapshot) -> anyhow::Result<()> {
+    use crate::menu_host::MenuHost;
+    use crate::overlay::menu_pages::{sample_captures, sample_friends, sample_rgba};
+    use orbiters_orb::captures::Friends;
+    use orbiters_orb::menu::Target;
+    let backend: Ctl = std::sync::Arc::new(Still);
+    let mut snap = snap.clone();
+    snap.orb.captures = sample_captures();
+    let mut canvas = crate::overlay::Canvas::new(1024, 576);
+    let mut host = MenuHost::new(canvas.ctx().clone());
+    for row in &snap.orb.captures.history {
+        let (w, h, rgba) = sample_rgba(row.key.trim_start_matches("sample").parse().unwrap_or(0));
+        host.put_picture(&row.picture_key(), egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba));
+    }
+    host.open(&snap);
+    host.follow(&snap);
+    let press = |host: &mut MenuHost, snap: &Snapshot, target: Target| {
+        let effects = host.press(target);
+        host.effects(effects, snap, &backend);
+    };
+    let mut shoot = |host: &MenuHost, name: &str, hover: Target| -> anyhow::Result<()> {
+        use crate::overlay::menu_ui::{self, Skin, View};
+        use orbiters_orb::menu::layout::{self, ScreenPage};
+        let hover = layout::cached(ScreenPage::of(&host.menu)).elements.iter().position(|e| e.target == hover);
+        let picture = |id: &str| host.picture(id, false);
+        let view = View { menu: &host.menu, hover, pressed: None, picture: &picture, time: 0.4, skin: Skin::english() };
+        let rgba = canvas.paint(0.4, |p| menu_ui::draw(p, pos2(0.0, 0.0), &view)).to_vec();
+        let path = out.join(format!("{name}.png"));
+        save_png(&path, &over_ground(&rgba, 1024, 576))?;
+        println!("{}", path.display());
+        Ok(())
+    };
+    press(&mut host, &snap, Target::Photo);
+    shoot(&host, "overlay-menu-photo-share", Target::ShareLatestTo)?;
+    press(&mut host, &snap, Target::History);
+    shoot(&host, "overlay-menu-history", Target::SharePublic(3))?;
+    // Share to …: the friends come with the next snapshot, two are chosen.
+    press(&mut host, &snap, Target::ShareTo(0));
+    shoot(&host, "overlay-menu-share-to-loading", Target::FindFriend)?;
+    snap.orb.friends = Friends::ready(sample_friends());
+    host.follow(&snap);
+    press(&mut host, &snap, Target::Friend(0));
+    press(&mut host, &snap, Target::Friend(4));
+    shoot(&host, "overlay-menu-share-to", Target::SendShare)?;
+    press(&mut host, &snap, Target::SendShare);
+    snap.orb.friends = Friends::None;
+    // The flagged capture's Share publicly: the warning first.
+    press(&mut host, &snap, Target::SharePublic(2));
+    shoot(&host, "overlay-menu-explicit", Target::ShareAnyway)?;
     Ok(())
 }
 

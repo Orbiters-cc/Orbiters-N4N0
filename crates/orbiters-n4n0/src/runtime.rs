@@ -207,6 +207,11 @@ pub(crate) struct OrbRuntime {
     pub(crate) invite: Option<(u32, orbiters_orb::menu::InviteAnswer)>,
     /// The QR code scanner (qr.rs): the scan running, and what the menus show of it.
     pub(crate) qr: crate::qr::QrRuntime,
+    /// The 3D captures as the app last handed them, and the VRChat friends read for Share to … (captures.rs), the number
+    /// of the last read asked for.
+    pub(crate) captures: orbiters_orb::captures::CapturesView,
+    pub(crate) friends: orbiters_orb::captures::Friends,
+    pub(crate) friends_asked: u32,
     /// The computer's keys for the overlay menu's keyboard (the last few, numbered), and whether the keyboard is taken.
     pub(crate) keys: std::collections::VecDeque<(u32, orbiters_orb::menu::KeyInput)>,
     pub(crate) keyboard_taken: bool,
@@ -398,6 +403,8 @@ impl OrbRuntime {
             photo_note: self.screen.photo_note.clone(),
             invite: self.invite.clone(),
             qr: self.qr.view.clone(),
+            captures: self.captures.clone(),
+            friends: self.friends.clone(),
         }
     }
 
@@ -1633,6 +1640,9 @@ impl N4n0 {
             Command::Suggest { text, voice } => self.suggestion_send(text, voice, false),
             Command::InviteMe { location } => self.invite_send(location, false),
             Command::Qr { on } => self.qr_scan(on),
+            Command::Captures => self.captures_list(),
+            Command::Friends { on } => self.friends(on),
+            Command::ShareCapture { share } => self.share_capture(share),
             Command::Dictate => self.menu_listen(),
             Command::Watch { link } => {
                 if let Err(e) = self.host.watch(&link) {

@@ -69,7 +69,9 @@ impl std::ops::DerefMut for MenuHost {
 impl MenuHost {
     /// A menu drawn by `ctx`, in this computer's language and keyboard, showing this process's music.
     pub fn new(ctx: egui::Context) -> Self {
-        Self(shared::MenuHost::new(Textures { ctx }, Arc::new(crate::device::WindowsLocale), crate::media::watcher().clone()))
+        let host = shared::MenuHost::new(Textures { ctx }, Arc::new(crate::device::WindowsLocale), crate::media::watcher().clone());
+        // The 3D captures' pictures are the sessions' thumbnails, on this computer.
+        Self(host.with_capture_pictures(Arc::new(crate::controller::menu_shares::capture_picture)))
     }
 
     /// Opens the menu on Home with the settings it starts from (keyboard, the 3D picture's timer and length).

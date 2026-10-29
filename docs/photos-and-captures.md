@@ -59,6 +59,20 @@ with animated width, label fades and separating halves. Its spring matches the w
 world's card chooses its newest reconstructed capture, or its pictures when it has no reconstructed capture;
 individual captures and selected pictures are also available from the world's detail.
 
+## From N4N0's menu
+
+N4N0's menu on the avatar's screen (screen version 12) and in the SteamVR overlay shares 3D captures too (contracts
+`Docs/orb.md`, Menu): the 3D picture page shows the last capture the desktop made with Share publicly and Share to …,
+History lists the computer's captures (Photos & captures' own listing, sessions only, the newest 60), Share to … lists
+the VRChat friends from `Controller::vrchat_source()` (the member's VRChat session, else VRCX or VRCNext), and a capture
+flagged explicit (or answered 409) shows the contract's warning with Share anyway / Cancel. The tray controller
+(`controller/menu_shares.rs`) turns each menu share into the same `capture_share` job as this page's, so uploads,
+records and retries are shared; a share asked before a capture's 3D view is made waits for its reconstruction (queued
+when nothing makes it) and gives up when nothing has made nor queued it for 15 s. Once a second it hands N4N0 where the
+captures stand (recording, saving, waiting for or making the 3D view, sharing, shared, why it failed), which the screen,
+the overlay and their pictures (the sessions' thumbnails, never sent for a flagged capture to everyone else's screen)
+follow.
+
 Share, revoke and download mutations are submitted over IPC to the tray controller. Its bounded job history is
 part of the published snapshot; the dialog shows progress immediately and reconciles the controller's result.
 Closing a window leaves the job running in the tray, with a completion notice waiting for the next window.

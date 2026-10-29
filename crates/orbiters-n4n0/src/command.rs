@@ -139,6 +139,17 @@ pub enum Command {
     Qr {
         on: bool,
     },
+    /// The overlay's N4N0 menu opened History: the 3D captures listed again (the status' `captures`).
+    Captures,
+    /// The overlay's Share to … opened (`on`) or closed: the VRChat friends read again (the status' `friends`), or
+    /// forgotten.
+    Friends {
+        on: bool,
+    },
+    /// A 3D capture shared from the overlay's menu: how it goes comes in its row of the status' `captures`.
+    ShareCapture {
+        share: orbiters_orb::captures::ShareAsk,
+    },
     /// A controller's trigger pulled or let go (the SteamVR overlay reads it): on a screen of version 7 it presses where
     /// that hand's index finger points.
     Trigger {
@@ -173,5 +184,16 @@ mod tests {
         assert_eq!(json(&Command::TakeBack), r#"{"kind":"take_back"}"#);
         assert_eq!(json(&Command::InviteMe { location: "wrld_a:1".into() }), r#"{"kind":"invite_me","location":"wrld_a:1"}"#);
         assert_eq!(json(&Command::Qr { on: true }), r#"{"kind":"qr","on":true}"#);
+        assert_eq!(json(&Command::Friends { on: false }), r#"{"kind":"friends","on":false}"#);
+        let share = Command::ShareCapture {
+            share: orbiters_orb::captures::ShareAsk {
+                key: "C:/s/a".into(),
+                public: false,
+                recipients: vec![orbiters_orb::captures::Friend { id: "usr_a".into(), name: "A".into() }],
+                acknowledge_explicit: false,
+            },
+        };
+        let back: Command = serde_json::from_str(&json(&share)).unwrap();
+        assert_eq!(back, share);
     }
 }

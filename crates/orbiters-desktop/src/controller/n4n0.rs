@@ -149,6 +149,26 @@ impl Host for Link {
         crate::qr::start(wanted, events)
     }
 
+    /// N4N0's menu opened History: the captures listed again (controller/menu_shares.rs).
+    fn captures_list(&self) {
+        self.with(|c| c.menu_captures_list());
+    }
+
+    /// A 3D capture shared from N4N0's menu, as Photos & captures shares it.
+    fn share_capture(&self, ask: orbiters_orb::captures::ShareAsk) -> Result<(), String> {
+        self.with(|c| c.menu_capture_share(ask)).unwrap_or(Ok(()))
+    }
+
+    /// The VRChat friends for N4N0's Share to … (the member's VRChat session, else VRCX's or VRCNext's).
+    fn friends(&self) -> Result<Vec<orbiters_orb::captures::Friend>, String> {
+        self.with(|c| c.menu_friends()).unwrap_or_else(|| Ok(Vec::new()))
+    }
+
+    /// A capture's picture: its session's thumbnail.
+    fn capture_picture(&self, key: &str) -> Option<orbiters_orb::picture::Rgb> {
+        super::menu_shares::capture_picture(key)
+    }
+
     /// The avatar's Walk boost radial: kept, and not sent back to the radial.
     fn walk_boost(&self, strength: f32) {
         self.with(|c| c.set_walk_boost(strength, true));
@@ -215,7 +235,8 @@ impl Osc for Link {
 
 impl Controller {
     /// N4N0 starts, with the service's own watch beside it: the footprint of Orbiters' processes and VRChat's (the N4N0
-    /// page's), and the world performance summaries still waiting (VRChat closed before they were sent).
+    /// page's), the world performance summaries still waiting (VRChat closed before they were sent), and the 3D captures
+    /// its menu shows.
     pub(super) fn start_orb(self: &Shared) {
         self.n4n0.start();
         let ctl = self.clone();
@@ -226,6 +247,8 @@ impl Controller {
                 if beat.is_multiple_of(3) {
                     ctl.orb_resources(&mut system);
                 }
+                // Where the 3D captures N4N0's menu shows stand (their recording, 3D view and shares).
+                ctl.menu_captures_tick();
                 if beat.is_multiple_of(60) && ctl.settings().world_performance {
                     ctl.performance_send_if_due(false);
                 }

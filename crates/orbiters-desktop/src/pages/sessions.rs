@@ -534,7 +534,7 @@ pub(super) fn stage_label(stage: Stage) -> &'static str {
 }
 
 /// The whole run's progress: reading and seeding are short, training is most of it.
-pub(super) fn overall_progress(j: &ReconstructionJob) -> f32 {
+pub(crate) fn overall_progress(j: &ReconstructionJob) -> f32 {
     match j.stage {
         Stage::Loading => 0.05 * j.progress,
         Stage::Seeding => 0.05,

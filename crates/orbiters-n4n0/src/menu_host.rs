@@ -32,6 +32,10 @@ pub trait Pictures {
     fn make(&self, name: &str, image: &Rgb) -> Self::Picture;
 }
 
+/// Reads a 3D capture's picture by its key (`CaptureRow::key`) where the interface runs: the computer's sessions for
+/// the desktop's overlay and window. Called on a thread of its own.
+pub type CapturePictures = Arc<dyn Fn(&str) -> Option<Rgb> + Send + Sync>;
+
 /// What the menu asks of N4N0 and of the app's settings, from where it is drawn.
 pub trait MenuService {
     /// Asks N4N0 for `command`.
@@ -95,6 +99,8 @@ pub struct MenuHost<P: Pictures> {
     keys_seen: Option<u32>,
     /// The number of the last 3D picture note N4N0 published that this menu saw (the first status sets it).
     photo_note_seen: Option<u32>,
+    /// Where the 3D captures' pictures are read (none: they show as placeholders).
+    capture_pictures: Option<CapturePictures>,
 }
 
 impl<P: Pictures> MenuHost<P> {
@@ -121,7 +127,14 @@ impl<P: Pictures> MenuHost<P> {
             invite_seen: None,
             keys_seen: None,
             photo_note_seen: None,
+            capture_pictures: None,
         }
+    }
+
+    /// The same, reading the 3D captures' pictures with `read`.
+    pub fn with_capture_pictures(mut self, read: CapturePictures) -> Self {
+        self.capture_pictures = Some(read);
+        self
     }
 
     /// Opens the menu on Home with the settings it starts from (keyboard, the 3D picture's timer and length). It has
@@ -233,6 +246,16 @@ impl<P: Pictures> MenuHost<P> {
             m.qr = orb.qr.clone();
             changed = true;
         }
+        // The 3D captures (their pictures fetched as they show) and Share to …'s friends.
+        let mut pictures = Vec::new();
+        if m.captures != orb.captures {
+            pictures = m.set_captures(orb.captures.clone());
+            changed = true;
+        }
+        if m.friends != orb.friends {
+            m.set_friends(orb.friends.clone());
+            changed = true;
+        }
         match (&orb.invite, self.invite_seen) {
             (Some((n, answer)), Some(seen)) if *n != seen => {
                 if m.invite_waiting {
@@ -261,6 +284,11 @@ impl<P: Pictures> MenuHost<P> {
         }
         if changed {
             self.dirty = true;
+        }
+        for effect in pictures {
+            if let Effect::Thumbnails(ids) = effect {
+                self.thumbnails(ids);
+            }
         }
     }
 
@@ -333,16 +361,17 @@ impl<P: Pictures> MenuHost<P> {
                 let _ = tx.send(Done::Suggestions { id, text, result });
             });
         }
-        if self.menu.page == Page::Results {
+        if matches!(self.menu.page, Page::Results | Page::History) {
             let now = Instant::now();
-            let retry: Vec<String> = self
-                .menu
-                .page_results()
-                .iter()
+            let shown: Vec<String> = match self.menu.page {
+                Page::Results => self.menu.page_results().iter().map(|v| v.id.clone()).collect(),
+                _ => self.menu.page_captures().iter().map(orbiters_orb::captures::CaptureRow::picture_key).collect(),
+            };
+            let retry: Vec<String> = shown
+                .into_iter()
                 .filter(
-                    |v| matches!(self.thumbs.get(&v.id), Some(Thumb::Failed { at, tries }) if *tries < THUMB_TRIES && now >= *at + THUMB_RETRY * *tries as u32),
+                    |id| matches!(self.thumbs.get(id), Some(Thumb::Failed { at, tries }) if *tries < THUMB_TRIES && now >= *at + THUMB_RETRY * *tries as u32),
                 )
-                .map(|v| v.id.clone())
                 .collect();
             if !retry.is_empty() {
                 self.thumbnails(retry);
@@ -365,8 +394,13 @@ impl<P: Pictures> MenuHost<P> {
             };
             self.thumbs.insert(id.clone(), Thumb::Loading);
             let tx = self.done_tx.clone();
+            let captures = self.capture_pictures.clone();
             std::thread::spawn(move || {
-                let image = youtube::thumbnail(&id).ok().and_then(|jpeg| picture::rgb_jpeg(&jpeg).ok());
+                // A 3D capture's picture is read where the interface runs; the rest are YouTube's.
+                let image = match id.strip_prefix(orbiters_orb::captures::PICTURE_PREFIX) {
+                    Some(key) => captures.and_then(|read| read(key)),
+                    None => youtube::thumbnail(&id).ok().and_then(|jpeg| picture::rgb_jpeg(&jpeg).ok()),
+                };
                 let _ = tx.send(Done::Thumbnail { id, tries, image });
             });
         }
@@ -443,6 +477,9 @@ impl<P: Pictures> MenuHost<P> {
                 Effect::CopyText { text } => service.command(Command::CopyText { text }),
                 Effect::OpenLink { link } => service.command(Command::Watch { link }),
                 Effect::QrScan(on) => service.command(Command::Qr { on }),
+                Effect::Captures => service.command(Command::Captures),
+                Effect::Friends(on) => service.command(Command::Friends { on }),
+                Effect::ShareCapture(share) => service.command(Command::ShareCapture { share }),
                 Effect::Close => close = true,
             }
         }

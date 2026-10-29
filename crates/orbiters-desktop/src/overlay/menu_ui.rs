@@ -273,6 +273,10 @@ pub fn glyph(icon: Icon) -> &'static str {
         Icon::Instances => icons::GLOBE,
         Icon::Open => icons::ARROW_SQUARE_OUT,
         Icon::Qr => icons::QR_CODE,
+        Icon::History => icons::CLOCK,
+        Icon::Public => icons::GLOBE_HEMISPHERE_WEST,
+        Icon::Friends => icons::USERS,
+        Icon::Warning => icons::WARNING,
         // Drawn as the N4N0 mark (`orbiters_ui::n4n0_logo`), never as a glyph.
         Icon::Mark => icons::STACK,
     }
@@ -671,13 +675,15 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
     }
     for pic in &layout.pictures {
         let r = rect(pic.rect, origin);
-        match (layout::picture_key(menu, pic), menu.page) {
+        match (layout::picture_key(menu, pic).as_deref(), menu.page) {
             (Some(key), _) => match (view.picture)(key) {
                 Some(texture) => picture(p, r, Some(texture), pal),
                 None if menu.page == Page::Music => art_placeholder(p, r, pal),
                 None => picture(p, r, None, pal),
             },
             (None, Page::Music) => art_placeholder(p, r, pal),
+            // The 3D picture page's last capture, before there is one (as the screen shows it).
+            (None, Page::Photo) if menu.pages.share() => picture(p, r, None, pal),
             (None, _) => {}
         }
     }

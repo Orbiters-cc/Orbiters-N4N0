@@ -2,6 +2,7 @@
 //! avatar and to talk to N4N0's assistant, without threads of its own (the desktop's controller runs it).
 
 pub mod assistant;
+pub mod captures;
 pub mod context;
 pub mod controls;
 pub mod drops;

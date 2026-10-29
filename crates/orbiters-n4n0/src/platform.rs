@@ -121,6 +121,23 @@ pub trait Host: Send + Sync + 'static {
     fn qr_scan(&self, _events: QrEvents) -> Result<Box<dyn QrScan>, String> {
         Err("QR codes are read from VRChat's camera by Orbiters - N4N0 on the computer running VRChat".into())
     }
+    /// Lists the 3D captures again (N4N0's menu opened History; contracts `Docs/orb.md`, Menu, from screen version 12):
+    /// the app reads them off N4N0's threads and hands them over with [`crate::N4n0::set_captures`], as it does whenever
+    /// one of them changes (recorded, its 3D view made, shared).
+    fn captures_list(&self) {}
+    /// Shares a 3D capture as the app's own pages do (contracts `Docs/capture-sharing.md`): how it goes comes back in its
+    /// row ([`crate::N4n0::set_captures`]). A device that does not keep the captures says why.
+    fn share_capture(&self, _ask: orbiters_orb::captures::ShareAsk) -> Result<(), String> {
+        Err("3D captures are shared by Orbiters - N4N0 on the computer that took them".into())
+    }
+    /// The VRChat friends a capture can go to (called on a thread of its own: it may ask VRChat or read VRCX).
+    fn friends(&self) -> Result<Vec<orbiters_orb::captures::Friend>, String> {
+        Err("VRChat friends are read by Orbiters - N4N0 on the computer".into())
+    }
+    /// A 3D capture's picture for the menus (its key: `CaptureRow::key`), read on a thread of its own.
+    fn capture_picture(&self, _key: &str) -> Option<orbiters_orb::picture::Rgb> {
+        None
+    }
     /// The avatar's Walk boost radial moved (`N4N0/WalkBoost`): the strength, 0 to 1.
     fn walk_boost(&self, _strength: f32) {}
     /// SteamVR's tracking smoothing here: what its driver does now ("Smoothing your devices now", "Ready: smoothing starts with SteamVR"), or

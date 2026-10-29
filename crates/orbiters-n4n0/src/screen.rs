@@ -899,11 +899,15 @@ impl ScreenRuntime {
             let page = ScreenPage::of(&self.menu);
             for p in &Frame::layout(&self.menu).pictures {
                 let slot = match page {
-                    ScreenPage::Results => p.result as usize,
+                    // The captures' pictures take the results' slots (screens from version 12).
+                    ScreenPage::Results | ScreenPage::History | ScreenPage::PhotoShare | ScreenPage::Explicit => p.result as usize,
                     ScreenPage::Music => SLOT_MUSIC,
                     _ => continue,
                 };
-                if let Some(stream) = layout::picture_key(&self.menu, p).and_then(|key| thumbnail(&self.pictures, key)).and_then(|t| t.full_stream(slot, self.thumbnail)) {
+                if let Some(stream) = layout::picture_key_for(&self.menu, p, true)
+                    .and_then(|key| thumbnail(&self.pictures, &key))
+                    .and_then(|t| t.full_stream(slot, self.thumbnail))
+                {
                     out.push((slot, stream));
                 }
             }
@@ -1484,8 +1488,13 @@ impl N4n0 {
                 .collect()
         };
         for (id, tries) in wanted {
+            let n = self.clone();
             self.screen_fetch(move || {
-                let picture = youtube::thumbnail(&id).ok().and_then(|jpeg| screen::picture_of(&jpeg).ok());
+                // A 3D capture's picture is the app's (its key after the prefix); the rest are YouTube's.
+                let picture = match id.strip_prefix(orbiters_orb::captures::PICTURE_PREFIX) {
+                    Some(key) => n.host.capture_picture(key).map(|rgb| screen::picture_from_rgb(&rgb)),
+                    None => youtube::thumbnail(&id).ok().and_then(|jpeg| screen::picture_of(&jpeg).ok()),
+                };
                 Done::Picture { id, tries, picture }
             });
         }
@@ -1594,6 +1603,9 @@ impl N4n0 {
                     let n = self.clone();
                     std::thread::spawn(move || n.qr_scan(on));
                 }
+                Effect::Captures => self.captures_list(),
+                Effect::Friends(on) => self.friends(on),
+                Effect::ShareCapture(ask) => self.share_capture(ask),
                 Effect::CopyText { text } => {
                     if let Err(e) = self.device.clipboard.copy(&text) {
                         self.notify(NoticeKind::Error, e);
@@ -1736,12 +1748,16 @@ pub(crate) fn tick(
     }
     // Suggestions once typing paused, one request at a time.
     followups.suggest = s.suggest.due(now);
-    // Thumbnails of the results shown that failed: tried again once their wait is over.
-    if s.menu.open && s.menu.page == Page::Results {
-        for video in s.menu.page_results() {
-            if let Some(Thumb::Failed { at, tries }) = s.pictures.get(&video.id) {
+    // Thumbnails of the results (or the 3D captures) shown that failed: tried again once their wait is over.
+    if s.menu.open && matches!(s.menu.page, Page::Results | Page::History) {
+        let ids: Vec<String> = match s.menu.page {
+            Page::Results => s.menu.page_results().iter().map(|v| v.id.clone()).collect(),
+            _ => s.menu.page_captures().iter().map(orbiters_orb::captures::CaptureRow::picture_key).collect(),
+        };
+        for id in ids {
+            if let Some(Thumb::Failed { at, tries }) = s.pictures.get(&id) {
                 if *tries < THUMB_TRIES && now >= *at + THUMB_RETRY * *tries as u32 {
-                    followups.retry.push(video.id.clone());
+                    followups.retry.push(id);
                 }
             }
         }

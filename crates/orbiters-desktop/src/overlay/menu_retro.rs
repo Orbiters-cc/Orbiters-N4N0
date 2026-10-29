@@ -580,9 +580,10 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
     }
     for pic in &layout.pictures {
         let r = rect(pic.rect, origin);
-        match (layout::picture_key(menu, pic), menu.page) {
+        match (layout::picture_key(menu, pic).as_deref(), menu.page) {
             (Some(key), _) => picture(p, r, (view.picture)(key), skin),
             (None, orbiters_orb::menu::Page::Music) => no_picture(p, r, skin),
+            (None, orbiters_orb::menu::Page::Photo) if menu.pages.share() => no_picture(p, r, skin),
             (None, _) => {}
         }
     }

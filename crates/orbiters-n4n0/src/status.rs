@@ -201,6 +201,12 @@ pub struct OrbStatus {
     /// The QR code scanner, as every menu shows it.
     #[serde(default)]
     pub qr: orbiters_orb::qr::QrView,
+    /// The 3D captures as the app keeps them (the last one made, History's), and the VRChat friends a capture goes to
+    /// while a menu's Share to … shows (contracts `Docs/orb.md`, Menu, from screen version 12).
+    #[serde(default)]
+    pub captures: orbiters_orb::captures::CapturesView,
+    #[serde(default)]
+    pub friends: orbiters_orb::captures::Friends,
 }
 
 /// Tracking smoothing (the app's SteamVR driver), as the Tracking page shows it.

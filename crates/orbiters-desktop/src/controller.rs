@@ -129,6 +129,8 @@ pub struct Controller {
     upload_serial: AtomicU64,
     /// N4N0, the companion on the avatar (`orbiters_n4n0`; the service's side in controller/n4n0.rs).
     n4n0: orbiters_n4n0::Shared,
+    /// The 3D captures N4N0's menu lists and shares (controller/menu_shares.rs).
+    menu_shares: Mutex<menu_shares::MenuShares>,
     /// VRChat's frame rate per world, gathered for Orbiters (controller/performance.rs).
     performance: Mutex<performance::PerformanceRuntime>,
     /// A 3D picture under way (controller/burst.rs).
@@ -274,6 +276,7 @@ mod calls;
 mod cleanup;
 mod dolly;
 mod maps;
+pub(crate) mod menu_shares;
 mod n4n0;
 mod performance;
 mod rig;
@@ -320,6 +323,7 @@ impl Controller {
                 let link = Arc::new(n4n0::Link(me.clone()));
                 orbiters_n4n0::N4n0::new(link.clone(), link, crate::device::platform(), n4n0::files())
             },
+            menu_shares: Mutex::new(menu_shares::MenuShares::default()),
             performance: Mutex::new(performance::PerformanceRuntime::default()),
             burst: Mutex::new(burst::BurstRuntime::default()),
             scan: Mutex::new(scan::ScanRuntime::default()),

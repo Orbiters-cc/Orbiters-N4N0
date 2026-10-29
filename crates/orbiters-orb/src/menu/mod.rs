@@ -1,6 +1,6 @@
 //! N4N0's menu (contracts `Docs/orb.md`, Menu): what opens when the person calls N4N0 (a controller button, the wake word
-//! on its own, touching N4N0): fast walk, YouTube, calls, a 3D picture, the computer's music, N4N0's light and the
-//! avatar's saved states. Orbiters - N4N0's SteamVR overlay shows it, or the avatar's projected screen when the N4N0 prop
+//! on its own, touching N4N0): fast walk, YouTube, calls, a 3D picture (and sharing 3D captures), the computer's music,
+//! N4N0's light and the avatar's saved states. Orbiters - N4N0's SteamVR overlay shows it, or the avatar's projected screen when the N4N0 prop
 //! has one; both draw the same pages from [`layout`]. A link copied from the results can be dropped in the world as a card
 //! (contracts `Docs/orb.md`, Link card), which the avatar's screen shows.
 //!
@@ -16,6 +16,7 @@ pub mod strings;
 pub mod theme;
 pub mod touch;
 
+use crate::captures::{CaptureRow, CapturesView, Friend, Friends, ShareAsk};
 use crate::youtube::{Results, Video};
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,9 @@ pub const STATES_PER_PAGE: usize = 5;
 pub const TIMELINE_STEPS: usize = 16;
 /// Previous instances on a page of their list.
 pub const INSTANCES_PER_PAGE: usize = 5;
+/// 3D captures on a page of History, and friends on a page of Share to ….
+pub const CAPTURES_PER_PAGE: usize = 5;
+pub const FRIENDS_PER_PAGE: usize = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Page {
@@ -74,6 +78,12 @@ pub enum Page {
     /// The QR code scanner (from screen version 11): VRChat's stream camera is read while it shows, a QR code's web link
     /// opens on the computer.
     Qr,
+    /// The 3D captures on the computer, each with Share publicly and Share to … (from screen version 12).
+    History,
+    /// The friends a capture goes to: choose them, Send.
+    ShareTo,
+    /// Sharing a capture flagged explicit publicly: the warning, Share anyway or Cancel.
+    Explicit,
 }
 
 /// What the keyboard page ([`Page::Type`]) types.
@@ -84,6 +94,8 @@ pub enum Typing {
     StateName,
     /// A feature suggestion.
     Suggestion,
+    /// Part of a friend's name, for Share to … (from screen version 12).
+    Friend,
 }
 
 impl Typing {
@@ -92,6 +104,7 @@ impl Typing {
         match self {
             Typing::StateName => STATE_NAME_MAX,
             Typing::Suggestion => SUGGESTION_MAX,
+            Typing::Friend => crate::captures::FIND_MAX,
         }
     }
 }
@@ -188,16 +201,20 @@ pub enum Pages {
     Simple,
     /// From version 11: More with five cards (the QR code scanner among them) and the QR code scanner's page.
     Qr,
+    /// From version 12: the 3D picture page with the last capture and its shares, History, Share to … and the explicit
+    /// warning.
+    Share,
 }
 
 impl Pages {
     /// Every page: the overlay's and the window's.
-    pub const ALL: Pages = Pages::Qr;
+    pub const ALL: Pages = Pages::Share;
 
     /// The pages of a screen of `version` (`None`: a screen from before `N4N0/Screen/Version`).
     pub fn of_screen(version: Option<i32>) -> Pages {
-        use orbiters_contracts::orb::{SCREEN_MUSIC_LIGHT, SCREEN_QR, SCREEN_SIMPLE, SCREEN_STATES_CARDS, SCREEN_TEN_TILES, SCREEN_TIMELINE};
+        use orbiters_contracts::orb::{SCREEN_MUSIC_LIGHT, SCREEN_QR, SCREEN_SHARE, SCREEN_SIMPLE, SCREEN_STATES_CARDS, SCREEN_TEN_TILES, SCREEN_TIMELINE};
         match version {
+            Some(v) if v >= SCREEN_SHARE => Pages::Share,
             Some(v) if v >= SCREEN_QR => Pages::Qr,
             Some(v) if v >= SCREEN_SIMPLE => Pages::Simple,
             Some(v) if v >= SCREEN_TIMELINE => Pages::Timeline,
@@ -236,6 +253,11 @@ impl Pages {
     /// More has the QR code scanner (and its page).
     pub fn qr(self) -> bool {
         self >= Pages::Qr
+    }
+
+    /// The 3D picture page shares the last capture and opens History (with Share to … and the explicit warning).
+    pub fn share(self) -> bool {
+        self >= Pages::Share
     }
 }
 
@@ -561,6 +583,21 @@ pub enum Target {
     QrAgain,
     QrCopy,
     QrOpen,
+    /// The 3D picture page's History (from screen version 12), and its last capture shared publicly or to friends.
+    History,
+    ShareLatest,
+    ShareLatestTo,
+    /// History: a capture's Share publicly and Share to ….
+    SharePublic(u8),
+    ShareTo(u8),
+    /// Share to …: a friend chosen or no longer (their row, or its mark shown while they are chosen), Find a friend, Send.
+    Friend(u8),
+    FriendMark(u8),
+    FindFriend,
+    SendShare,
+    /// The explicit warning: share publicly all the same, or not.
+    ShareAnyway,
+    CancelShare,
 }
 
 /// The timeline segment a target is (the segment, or the place over it), for a drag along the timeline.
@@ -675,6 +712,13 @@ pub enum Effect {
     /// Read VRChat's stream camera for QR codes (`true`: the scanner's page opened, Scan again), or no longer (it closed);
     /// the host answers with [`Menu::qr`].
     QrScan(bool),
+    /// List the 3D captures again (History opened); the host answers with [`Menu::set_captures`].
+    Captures,
+    /// Read the VRChat friends a capture can go to (`true`: Share to … opened), or forget them (it closed); the host
+    /// answers with [`Menu::set_friends`].
+    Friends(bool),
+    /// Share a 3D capture (`Docs/capture-sharing.md`): its progress comes back in its row ([`Menu::set_captures`]).
+    ShareCapture(ShareAsk),
     /// The menu closed.
     Close,
 }
@@ -786,6 +830,21 @@ pub struct Menu {
     pub invite_account: Option<InviteAccount>,
     /// The QR code scanner, as the host runs it.
     pub qr: crate::qr::QrView,
+    /// The 3D captures as the host lists them (the last one made, History's), and the page of History shown (from 0).
+    pub captures: CapturesView,
+    pub capture_page: usize,
+    /// The VRChat friends Share to … lists, its page shown (from 0), the friends chosen (in the order chosen) and the
+    /// part of a name it lists only those with ([`Typing::Friend`]).
+    pub friends: Friends,
+    pub friend_page: usize,
+    pub chosen: Vec<Friend>,
+    pub find: String,
+    /// The capture Share to … and the explicit warning are for, and the page they go back to.
+    pub sharing: Option<String>,
+    pub share_from: Page,
+    /// The share whose answer the menu waits for, and its capture's share state when it was asked (or last changed):
+    /// the explicit warning shows when the server asks for it, a state left from an earlier share counting for nothing.
+    asked: Option<(String, crate::captures::Sharing)>,
 }
 
 /// How long a state saved here shows before the host's list has it.
@@ -819,11 +878,19 @@ impl Menu {
             self.card = None;
             self.page = Page::Home;
         }
-        // The scanner reads VRChat's camera only while its page shows.
+        // The scanner reads VRChat's camera only while its page shows; the friends are kept only while Share to … is up.
         if self.page == Page::Qr {
             return vec![Effect::QrScan(false), Effect::Close];
         }
+        if self.choosing_friends() {
+            return vec![Effect::Friends(false), Effect::Close];
+        }
         vec![Effect::Close]
+    }
+
+    /// Share to … shows, or the keyboard finding a friend for it.
+    fn choosing_friends(&self) -> bool {
+        self.page == Page::ShareTo || (self.page == Page::Type && self.typing == Typing::Friend)
     }
 
     /// The avatar's screen shows `card`, dropped in the world: its own page, while the menu itself is closed (nothing
@@ -870,6 +937,7 @@ impl Menu {
         match self.typing {
             Typing::StateName => Page::NewState,
             Typing::Suggestion => Page::Suggest,
+            Typing::Friend => Page::ShareTo,
         }
     }
 
@@ -935,9 +1003,14 @@ impl Menu {
     /// The person pressed `target`. Leaving the QR code scanner's page stops it.
     pub fn press(&mut self, target: Target) -> Vec<Effect> {
         let scanner = self.page == Page::Qr && self.open;
+        let friends = self.choosing_friends() && self.open;
         let mut effects = self.press_on(target);
         if scanner && self.open && self.page != Page::Qr {
             effects.push(Effect::QrScan(false));
+        }
+        // Leaving Share to … (but for its keyboard) forgets the friends.
+        if friends && self.open && !self.choosing_friends() {
+            effects.push(Effect::Friends(false));
         }
         effects
     }
@@ -955,6 +1028,8 @@ impl Menu {
                     Page::Type => self.typed_from(),
                     Page::NewState => Page::States,
                     Page::AddFriend => Page::Instances,
+                    Page::History => Page::Photo,
+                    Page::ShareTo | Page::Explicit => self.share_from,
                     // The simple Home's More holds these.
                     Page::Light | Page::Tracking | Page::Suggest | Page::Instances | Page::Qr if self.pages.simple() => Page::More,
                     _ => Page::Home,
@@ -977,7 +1052,7 @@ impl Menu {
             }
             Target::Photo => {
                 self.go(Page::Photo);
-                Vec::new()
+                self.capture_thumbnails()
             }
             Target::Music => {
                 self.go(Page::Music);
@@ -1074,6 +1149,10 @@ impl Menu {
                     Typing::StateName if !text.is_empty() => self.draft.name = text,
                     Typing::StateName => {}
                     Typing::Suggestion => self.suggestion = cut(&text, SUGGESTION_MAX),
+                    Typing::Friend => {
+                        self.find = text;
+                        self.friend_page = 0;
+                    }
                 }
                 self.go(self.typed_from());
                 Vec::new()
@@ -1221,6 +1300,68 @@ impl Menu {
                 }
                 None => Vec::new(),
             },
+            // Sharing 3D captures (from screen version 12).
+            Target::History if self.pages.share() => {
+                self.go(Page::History);
+                self.capture_page = 0;
+                let mut effects = vec![Effect::Captures];
+                effects.extend(self.capture_thumbnails());
+                effects
+            }
+            Target::ShareLatest => match self.captures.latest.as_ref().map(|c| c.key.clone()) {
+                Some(key) if self.pages.share() => self.share_public(key),
+                _ => Vec::new(),
+            },
+            Target::SharePublic(i) => match self.page_captures().get(i as usize).map(|c| c.key.clone()) {
+                Some(key) => self.share_public(key),
+                None => Vec::new(),
+            },
+            Target::ShareLatestTo => match self.captures.latest.as_ref().map(|c| c.key.clone()) {
+                Some(key) if self.pages.share() => self.share_to(key),
+                _ => Vec::new(),
+            },
+            Target::ShareTo(i) => match self.page_captures().get(i as usize).map(|c| c.key.clone()) {
+                Some(key) => self.share_to(key),
+                None => Vec::new(),
+            },
+            Target::Friend(i) | Target::FriendMark(i) => {
+                let Some(friend) = self.page_friends().get(i as usize).map(|f| (*f).clone()) else { return Vec::new() };
+                if let Some(at) = self.chosen.iter().position(|f| f.id == friend.id) {
+                    self.chosen.remove(at);
+                    self.notice = None;
+                } else if self.chosen.len() >= crate::captures::RECIPIENTS_MAX {
+                    self.notice = Some(format!("At most {} friends at a time", crate::captures::RECIPIENTS_MAX));
+                } else {
+                    self.chosen.push(friend);
+                    self.notice = None;
+                }
+                Vec::new()
+            }
+            Target::FindFriend if self.page == Page::ShareTo => {
+                self.type_for(Typing::Friend, self.find.clone());
+                Vec::new()
+            }
+            Target::SendShare if self.page == Page::ShareTo && !self.chosen.is_empty() => {
+                let Some(key) = self.sharing.clone() else { return Vec::new() };
+                let recipients = std::mem::take(&mut self.chosen);
+                let n = recipients.len();
+                self.asked = Some((key.clone(), self.sharing_of(&key)));
+                self.go(self.share_from);
+                self.notice = Some(if n == 1 { "Sharing with 1 friend…".into() } else { format!("Sharing with {n} friends…") });
+                vec![Effect::ShareCapture(ShareAsk { key, public: false, recipients, acknowledge_explicit: false })]
+            }
+            Target::ShareAnyway if self.page == Page::Explicit => {
+                let Some(key) = self.sharing.clone() else { return Vec::new() };
+                self.asked = Some((key.clone(), self.sharing_of(&key)));
+                self.go(self.share_from);
+                self.notice = Some("Sharing publicly…".into());
+                vec![Effect::ShareCapture(ShareAsk { key, public: true, recipients: Vec::new(), acknowledge_explicit: true })]
+            }
+            Target::CancelShare if self.page == Page::Explicit => {
+                self.go(self.share_from);
+                Vec::new()
+            }
+            Target::History | Target::FindFriend | Target::SendShare | Target::ShareAnyway | Target::CancelShare => Vec::new(),
             Target::Contact(i) => match self.page_contacts().get(i as usize) {
                 Some(contact) if self.call.is_none() => vec![Effect::CallContact { id: contact.id.clone() }],
                 _ => Vec::new(),
@@ -1528,6 +1669,8 @@ impl Menu {
             Page::Call => self.contact_page > 0,
             Page::States => self.state_page > 0,
             Page::Instances => self.instance_page > 0,
+            Page::History => self.capture_page > 0,
+            Page::ShareTo => self.friend_page > 0,
             _ => false,
         }
     }
@@ -1538,6 +1681,8 @@ impl Menu {
             Page::Call => (self.contact_page + 1) * CONTACTS_PER_PAGE < self.contacts.len(),
             Page::States => (self.state_page + 1) * STATES_PER_PAGE < self.states.len(),
             Page::Instances => (self.instance_page + 1) * INSTANCES_PER_PAGE < self.instances.len(),
+            Page::History => (self.capture_page + 1) * CAPTURES_PER_PAGE < self.captures.history.len(),
+            Page::ShareTo => (self.friend_page + 1) * FRIENDS_PER_PAGE < self.found_friends().len(),
             _ => false,
         }
     }
@@ -1587,6 +1732,17 @@ impl Menu {
                 let pages = self.instances.len().div_ceil(INSTANCES_PER_PAGE).max(1);
                 self.instance_page = (self.instance_page as i32 + by).clamp(0, pages as i32 - 1) as usize;
                 self.notice = None;
+                Vec::new()
+            }
+            Page::History => {
+                let pages = self.captures.history.len().div_ceil(CAPTURES_PER_PAGE).max(1);
+                self.capture_page = (self.capture_page as i32 + by).clamp(0, pages as i32 - 1) as usize;
+                self.notice = None;
+                self.capture_thumbnails()
+            }
+            Page::ShareTo => {
+                let pages = self.found_friends().len().div_ceil(FRIENDS_PER_PAGE).max(1);
+                self.friend_page = (self.friend_page as i32 + by).clamp(0, pages as i32 - 1) as usize;
                 Vec::new()
             }
             _ => Vec::new(),
@@ -1677,6 +1833,139 @@ impl Menu {
     pub fn page_instances(&self) -> &[InstanceRow] {
         let start = (self.instance_page * INSTANCES_PER_PAGE).min(self.instances.len());
         &self.instances[start..(start + INSTANCES_PER_PAGE).min(self.instances.len())]
+    }
+
+    /// History's captures on the page shown.
+    pub fn page_captures(&self) -> &[CaptureRow] {
+        let history = &self.captures.history;
+        let start = (self.capture_page * CAPTURES_PER_PAGE).min(history.len());
+        &history[start..(start + CAPTURES_PER_PAGE).min(history.len())]
+    }
+
+    /// The capture Share to … or the explicit warning is for.
+    pub fn shared_capture(&self) -> Option<&CaptureRow> {
+        self.sharing.as_deref().and_then(|key| self.captures.find(key))
+    }
+
+    /// The friends Share to … lists: those whose name has [`Menu::find`] (case aside), every one without it.
+    pub fn found_friends(&self) -> Vec<&Friend> {
+        let find = self.find.trim().to_lowercase();
+        self.friends.list().iter().filter(|f| find.is_empty() || f.name.to_lowercase().contains(&find)).collect()
+    }
+
+    /// Share to …'s friends on the page shown.
+    pub fn page_friends(&self) -> Vec<&Friend> {
+        self.found_friends().into_iter().skip(self.friend_page * FRIENDS_PER_PAGE).take(FRIENDS_PER_PAGE).collect()
+    }
+
+    /// Whether `friend` is chosen on Share to ….
+    pub fn is_chosen(&self, friend: &Friend) -> bool {
+        self.chosen.iter().any(|f| f.id == friend.id)
+    }
+
+    /// The pictures of the captures the page shows (the last capture, History's page, the warning's capture), which
+    /// the host fetches when it has not got them.
+    pub fn capture_thumbnails(&self) -> Vec<Effect> {
+        if !self.pages.share() {
+            return Vec::new();
+        }
+        let keys: Vec<String> = match self.page {
+            Page::Photo => self.captures.latest.iter().map(CaptureRow::picture_key).collect(),
+            Page::History => self.page_captures().iter().map(CaptureRow::picture_key).collect(),
+            Page::Explicit => self.shared_capture().map(CaptureRow::picture_key).into_iter().collect(),
+            _ => Vec::new(),
+        };
+        if keys.is_empty() {
+            Vec::new()
+        } else {
+            vec![Effect::Thumbnails(keys)]
+        }
+    }
+
+    /// The 3D captures as the host lists them now. A share asked here that the server wants acknowledged (explicit)
+    /// opens the warning, from the page it was asked on. Returns the pictures to fetch.
+    pub fn set_captures(&mut self, captures: CapturesView) -> Vec<Effect> {
+        if self.captures == captures {
+            return Vec::new();
+        }
+        self.captures = captures;
+        let pages = self.captures.history.len().div_ceil(CAPTURES_PER_PAGE).max(1);
+        self.capture_page = self.capture_page.min(pages - 1);
+        if let Some((key, was)) = self.asked.clone() {
+            use crate::captures::Sharing;
+            match self.captures.find(&key).map(|c| c.sharing.clone()) {
+                // The host has not taken it yet.
+                Some(now) if now == was => {}
+                Some(Sharing::Explicit) => {
+                    self.asked = None;
+                    if self.open && matches!(self.page, Page::Photo | Page::History) {
+                        self.sharing = Some(key);
+                        self.share_from = self.page;
+                        self.go(Page::Explicit);
+                    }
+                }
+                Some(now @ (Sharing::Waiting { .. } | Sharing::Busy { .. })) => self.asked = Some((key, now)),
+                // Why it failed, where the page says what was just done; done, its row says so.
+                Some(Sharing::Failed { message }) => {
+                    self.asked = None;
+                    self.notice = Some(format!("Not shared: {message}"));
+                }
+                Some(_) | None => {
+                    self.asked = None;
+                    self.notice = None;
+                }
+            }
+        }
+        self.capture_thumbnails()
+    }
+
+    /// The VRChat friends as the host read them (`Friends::None`: forgotten).
+    pub fn set_friends(&mut self, friends: Friends) {
+        if self.friends == friends {
+            return;
+        }
+        self.friends = friends;
+        let pages = self.found_friends().len().div_ceil(FRIENDS_PER_PAGE).max(1);
+        self.friend_page = self.friend_page.min(pages - 1);
+    }
+
+    /// Share publicly: at once, or after the warning for a capture flagged explicit.
+    fn share_public(&mut self, key: String) -> Vec<Effect> {
+        let Some(capture) = self.captures.find(&key) else { return Vec::new() };
+        if !capture.shareable() {
+            return Vec::new();
+        }
+        if capture.explicit {
+            self.sharing = Some(key);
+            self.share_from = self.page;
+            self.go(Page::Explicit);
+            return self.capture_thumbnails();
+        }
+        self.asked = Some((key.clone(), self.sharing_of(&key)));
+        self.notice = Some("Sharing publicly…".into());
+        vec![Effect::ShareCapture(ShareAsk { key, public: true, recipients: Vec::new(), acknowledge_explicit: false })]
+    }
+
+    /// Where capture `key`'s shares stand now.
+    fn sharing_of(&self, key: &str) -> crate::captures::Sharing {
+        self.captures.find(key).map(|c| c.sharing.clone()).unwrap_or_default()
+    }
+
+    /// Share to …: the friends to choose for capture `key`, read again when they are not.
+    fn share_to(&mut self, key: String) -> Vec<Effect> {
+        if !self.captures.find(&key).is_some_and(CaptureRow::shareable) {
+            return Vec::new();
+        }
+        self.sharing = Some(key);
+        self.share_from = self.page;
+        self.chosen.clear();
+        self.find.clear();
+        self.friend_page = 0;
+        self.go(Page::ShareTo);
+        if !matches!(self.friends, Friends::Ready { .. }) {
+            self.friends = Friends::Loading;
+        }
+        vec![Effect::Friends(true)]
     }
 
     /// The instances the player was in, the newest first, as the host read them (`ready`: read; else `note` says why
@@ -2490,6 +2779,118 @@ mod tests {
         old.page = Page::Qr;
         assert_eq!(ScreenPage::of(&old), ScreenPage::HomeQuiet);
         assert!(target_state(&old, Target::QrAgain).hidden);
+    }
+
+    #[test]
+    fn the_3d_picture_page_shares_the_last_capture_and_history_from_version_12() {
+        use crate::captures::{CapturePhase, CaptureRow, CapturesView, Friend, Friends, ShareAsk, Sharing, EXPLICIT_WARNING};
+        use layout::{cached, picture_key_for, target_state, text, text_for, Content, ScreenPage};
+        let row = |key: &str, world: &str| CaptureRow { key: key.into(), world: world.into(), phase: CapturePhase::Ready, ..Default::default() };
+        let mut menu = Menu { pages: Pages::Share, ..Default::default() };
+        menu.open();
+        // No capture yet: the page and its History, no shares.
+        assert!(menu.press(Target::Photo).is_empty());
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::PhotoShare);
+        assert!(target_state(&menu, Target::ShareLatest).hidden && target_state(&menu, Target::ShareLatestTo).hidden);
+        assert!(!target_state(&menu, Target::History).hidden);
+        assert_eq!(text(&menu, Content::LastWorld), "No 3D capture yet");
+        // One being recorded: its picture asked for, its shares greyed out until it is saved.
+        let mut latest = row("C:/s/2026-10-29_10-00-00", "Rooftop");
+        latest.phase = CapturePhase::Recording;
+        let view = |latest: &CaptureRow| CapturesView { latest: Some(latest.clone()), ..Default::default() };
+        assert_eq!(menu.set_captures(view(&latest)), [Effect::Thumbnails(vec!["capture:C:/s/2026-10-29_10-00-00".into()])]);
+        assert!(target_state(&menu, Target::ShareLatest).unavailable && target_state(&menu, Target::ShareLatestTo).unavailable);
+        assert_eq!((text(&menu, Content::LastWorld), text(&menu, Content::LastState)), ("Rooftop".into(), "Recording…".into()));
+        // Its 3D view being made: a share is asked at once and waits for it, one at a time.
+        latest.phase = CapturePhase::Making { percent: 40 };
+        menu.set_captures(view(&latest));
+        assert!(target_state(&menu, Target::ShareLatest).pointable());
+        let public = ShareAsk { key: latest.key.clone(), public: true, ..Default::default() };
+        assert_eq!(menu.press(Target::ShareLatest), [Effect::ShareCapture(public.clone())]);
+        latest.sharing = Sharing::Waiting { public: true, people: 0 };
+        menu.set_captures(view(&latest));
+        assert_eq!(text(&menu, Content::LastState), "Shares when ready");
+        assert!(target_state(&menu, Target::ShareLatest).unavailable);
+        // The server wants its explicit content acknowledged: the warning, then Share anyway asks again.
+        latest.sharing = Sharing::Explicit;
+        menu.set_captures(view(&latest));
+        assert_eq!((menu.page, ScreenPage::of(&menu)), (Page::Explicit, ScreenPage::Explicit));
+        assert_eq!(format!("{} {}", text(&menu, Content::ExplicitLine(0)), text(&menu, Content::ExplicitLine(1))), EXPLICIT_WARNING);
+        assert_eq!(menu.press(Target::ShareAnyway), [Effect::ShareCapture(ShareAsk { acknowledge_explicit: true, ..public })]);
+        assert_eq!(menu.page, Page::Photo);
+        // The answer before, still in its row until the host takes the new share, opens no warning again.
+        menu.set_captures(CapturesView { note: "again".into(), ..view(&latest) });
+        assert_eq!(menu.page, Page::Photo);
+        latest.sharing = Sharing::Busy { public: true, people: 0 };
+        // History: listed as it opens, five a page, both shares on each row.
+        let mut flagged = row("C:/s/b", "Club");
+        flagged.explicit = true;
+        flagged.explicit_reasons = vec!["osc-parameter:NSFW/Toggle".into()];
+        let mut history = vec![flagged];
+        history.extend((0..7).map(|i| row(&format!("C:/s/{i}"), "World")));
+        assert_eq!(menu.press(Target::History), [Effect::Captures]);
+        assert_eq!(text(&menu, Content::HistoryTitle), "Listing…");
+        let listed = CapturesView { latest: Some(latest.clone()), history: history.clone(), listed: true, note: String::new() };
+        let keys = |rows: &[CaptureRow]| rows.iter().map(CaptureRow::picture_key).collect::<Vec<_>>();
+        assert_eq!(menu.set_captures(listed.clone()), [Effect::Thumbnails(keys(&history[..5]))]);
+        assert_eq!((text(&menu, Content::HistoryTitle), text(&menu, Content::PageLabel)), ("8 captures".into(), "1/2".into()));
+        assert!(text(&menu, Content::CaptureMeta(1)).ends_with("· Ready to share"), "{}", text(&menu, Content::CaptureMeta(1)));
+        assert_eq!(menu.press(Target::Next), [Effect::Thumbnails(keys(&history[5..]))]);
+        assert!(target_state(&menu, Target::SharePublic(2)).pointable() && target_state(&menu, Target::ShareTo(3)).hidden);
+        menu.press(Target::Previous);
+        // A capture flagged explicit warns before it is shared publicly, and shows its picture to its owner only.
+        assert_eq!(menu.press(Target::SharePublic(0)), [Effect::Thumbnails(vec!["capture:C:/s/b".into()])]);
+        assert_eq!(menu.page, Page::Explicit);
+        assert_eq!(text(&menu, Content::ExplicitWhy(0)), "Why: osc-parameter:NSFW/Toggle");
+        assert_eq!(text_for(&menu, Content::ExplicitWhy(0), true), "", "why is the owner's");
+        let picture = &cached(ScreenPage::Explicit).pictures[0];
+        assert_eq!(picture_key_for(&menu, picture, false).as_deref(), Some("capture:C:/s/b"));
+        assert_eq!(picture_key_for(&menu, picture, true), None, "everyone else's screen never shows it");
+        assert!(menu.press(Target::CancelShare).is_empty());
+        assert_eq!(menu.page, Page::History);
+        // Share to …: the friends read, chosen, found by name, sent to.
+        assert_eq!(menu.press(Target::ShareTo(1)), [Effect::Friends(true)]);
+        assert_eq!((menu.page, text(&menu, Content::FriendsTitle)), (Page::ShareTo, "Loading friends…".into()));
+        let f = |id: &str, name: &str| Friend { id: id.into(), name: name.into() };
+        let names = ["Alice", "bob", "Carol", "Dave", "Eve", "Bobby", "Zed"];
+        menu.set_friends(Friends::ready(names.iter().enumerate().map(|(i, n)| f(&format!("usr_{i}"), n)).collect()));
+        assert_eq!((text(&menu, Content::FriendsTitle), text(&menu, Content::ShareFriend(1))), ("7 friends".into(), "bob".into()));
+        assert_eq!(text_for(&menu, Content::ShareFriend(1), true), "", "the owner's friends are never named to everyone");
+        assert!(target_state(&menu, Target::SendShare).unavailable);
+        menu.press(Target::Friend(0));
+        menu.press(Target::Friend(1));
+        assert!(target_state(&menu, Target::FriendMark(1)).on && target_state(&menu, Target::FriendMark(2)).hidden);
+        assert_eq!(text(&menu, Content::FriendsNote), "2 friends chosen");
+        menu.press(Target::FriendMark(0));
+        assert_eq!(menu.chosen, [f("usr_1", "bob")], "its mark unchooses a friend");
+        // Finding "bo": the keyboard, then only those, the chosen ones kept.
+        assert!(menu.press(Target::FindFriend).is_empty(), "the friends stay while their keyboard shows");
+        assert_eq!((menu.page, text(&menu, Content::TypeTitle)), (Page::Type, "Find a friend by name".into()));
+        menu.type_text("bo");
+        assert_eq!(text_for(&menu, Content::TypeLine(0), true), "");
+        menu.press(Target::Done);
+        assert_eq!((menu.page, text(&menu, Content::FriendsTitle)), (Page::ShareTo, "\"bo\": 2".into()));
+        menu.press(Target::Friend(1));
+        let sent = ShareAsk { key: "C:/s/0".into(), public: false, recipients: vec![f("usr_1", "bob"), f("usr_5", "Bobby")], acknowledge_explicit: false };
+        assert_eq!(menu.press(Target::SendShare), [Effect::ShareCapture(sent), Effect::Friends(false)]);
+        assert_eq!((menu.page, text(&menu, Content::HistoryTitle)), (Page::History, "Sharing with 2 friends…".into()));
+        // It failed: why, where the page says what was just done; its row says it in short.
+        let mut failed = listed.clone();
+        failed.history[1].sharing = Sharing::Failed { message: "Sign in to Orbiters first".into() };
+        menu.set_captures(failed);
+        assert_eq!(text(&menu, Content::HistoryTitle), "Not shared: Sign in to Orbiters first");
+        assert!(text(&menu, Content::CaptureMeta(1)).ends_with("· Not shared"));
+        // Closing the menu on Share to … forgets the friends too.
+        menu.press(Target::ShareTo(2));
+        assert_eq!(menu.press(Target::Close), [Effect::Friends(false), Effect::Close]);
+        // A screen of version 11 keeps its 3D picture page, without History.
+        let mut old = Menu { pages: Pages::Qr, captures: listed, ..Default::default() };
+        old.open();
+        old.press(Target::Photo);
+        assert_eq!(ScreenPage::of(&old), ScreenPage::Photo);
+        assert!(old.press(Target::History).is_empty() && old.page == Page::Photo);
+        old.page = Page::History;
+        assert_eq!(ScreenPage::of(&old), ScreenPage::HomeQuiet);
     }
 
     #[test]

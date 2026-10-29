@@ -9,6 +9,7 @@
 //! where N4N0 keeps its files ([`Files`]). The desktop implements them with Windows' own; TLS, the folders and the
 //! account's credential are `orbiters_core`'s, per platform.
 
+mod captures;
 mod command;
 pub mod media;
 pub mod menu_host;

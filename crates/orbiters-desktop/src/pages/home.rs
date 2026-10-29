@@ -187,6 +187,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 Page::Tracking => tracking(ui, cx, menu, &mut acts),
                 Page::Suggest | Page::Type => suggest(ui, cx, menu, &mut acts),
                 Page::Qr => qr(ui, cx, menu, &mut acts),
+                // The window shares captures in Photos & captures: its 3D picture page has no History.
+                Page::History | Page::ShareTo | Page::Explicit => photo(ui, cx, menu, take_blocked, &mut acts),
                 Page::States | Page::NewState => {
                     let mut out = Vec::new();
                     super::states::show(ui, cx, states, &mut out);

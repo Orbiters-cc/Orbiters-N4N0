@@ -6,9 +6,10 @@
 
 use super::strings::{self, Text};
 use super::{
-    Call, KeyboardLayout, Keys, Menu, Page, Pages, Target, Typing, CONTACTS_PER_PAGE, INSTANCES_PER_PAGE, RESULTS_PER_PAGE, STATES_PER_PAGE, TIMELINE_STEPS, TIMERS,
-    TRACKING_KINDS,
+    Call, KeyboardLayout, Keys, Menu, Page, Pages, Target, Typing, CAPTURES_PER_PAGE, CONTACTS_PER_PAGE, FRIENDS_PER_PAGE, INSTANCES_PER_PAGE,
+    RESULTS_PER_PAGE, STATES_PER_PAGE, TIMELINE_STEPS, TIMERS, TRACKING_KINDS,
 };
+use crate::captures::{CaptureRow, Friends, Sharing};
 use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
 use std::sync::OnceLock;
 
@@ -70,10 +71,18 @@ pub enum ScreenPage {
     MoreQr = 28,
     /// The QR code scanner (from version 11).
     Qr = 29,
+    /// The 3D picture with the last capture, its shares and History (from version 12).
+    PhotoShare = 30,
+    /// The 3D captures on the computer, each with Share publicly and Share to … (from version 12).
+    History = 31,
+    /// The friends a capture goes to (from version 12).
+    ShareTo = 32,
+    /// Sharing an explicit capture publicly: the warning (from version 12).
+    Explicit = 33,
 }
 
 impl ScreenPage {
-    pub const ALL: [ScreenPage; 29] = [
+    pub const ALL: [ScreenPage; 33] = [
         ScreenPage::Home,
         ScreenPage::SearchQwerty,
         ScreenPage::SearchAzerty,
@@ -103,6 +112,10 @@ impl ScreenPage {
         ScreenPage::AddFriend,
         ScreenPage::MoreQr,
         ScreenPage::Qr,
+        ScreenPage::PhotoShare,
+        ScreenPage::History,
+        ScreenPage::ShareTo,
+        ScreenPage::Explicit,
     ];
 
     /// The page picture's file stem and the overlay screenshot's name.
@@ -137,6 +150,10 @@ impl ScreenPage {
             ScreenPage::AddFriend => "add-friend",
             ScreenPage::MoreQr => "more-qr",
             ScreenPage::Qr => "qr",
+            ScreenPage::PhotoShare => "photo-share",
+            ScreenPage::History => "history",
+            ScreenPage::ShareTo => "share-to",
+            ScreenPage::Explicit => "explicit",
         }
     }
 
@@ -147,7 +164,7 @@ impl ScreenPage {
             Pages::Six => ScreenPage::HomeSix,
             Pages::Seven => ScreenPage::HomeSeven,
             Pages::Ten | Pages::Timeline => ScreenPage::HomeTen,
-            Pages::Simple | Pages::Qr => ScreenPage::HomeQuiet,
+            Pages::Simple | Pages::Qr | Pages::Share => ScreenPage::HomeQuiet,
         }
     }
 
@@ -168,6 +185,11 @@ impl ScreenPage {
             Page::NewState | Page::Type | Page::Tracking | Page::Suggest if !menu.pages.ten() => ScreenPage::home(menu.pages),
             Page::More | Page::Instances | Page::AddFriend if !menu.pages.simple() => ScreenPage::home(menu.pages),
             Page::Qr if !menu.pages.qr() => ScreenPage::home_of(menu),
+            Page::History | Page::ShareTo | Page::Explicit if !menu.pages.share() => ScreenPage::home_of(menu),
+            Page::History => ScreenPage::History,
+            Page::ShareTo => ScreenPage::ShareTo,
+            Page::Explicit => ScreenPage::Explicit,
+            Page::Photo if menu.pages.share() => ScreenPage::PhotoShare,
             Page::More if menu.pages.qr() => ScreenPage::MoreQr,
             Page::More => ScreenPage::More,
             Page::Qr => ScreenPage::Qr,
@@ -328,6 +350,14 @@ pub enum Icon {
     TakeBack,
     /// The QR code scanner.
     Qr,
+    /// Previous 3D captures.
+    History,
+    /// Share publicly.
+    Public,
+    /// Share to friends.
+    Friends,
+    /// The explicit warning.
+    Warning,
 }
 
 /// Home's features in their order (the first four as on the four-tile Home, the first six as on the six-tile one), each
@@ -396,7 +426,7 @@ pub fn home_tiles(pages: Pages) -> &'static [(Target, Icon, Text, Tint)] {
         Pages::Four => &HOME_TILES[..4],
         Pages::Six => &HOME_TILES[..6],
         Pages::Seven => &HOME_TILES[..7],
-        Pages::Ten | Pages::Timeline | Pages::Simple | Pages::Qr => &HOME_TILES,
+        Pages::Ten | Pages::Timeline | Pages::Simple | Pages::Qr | Pages::Share => &HOME_TILES,
     }
 }
 
@@ -544,6 +574,24 @@ pub enum Content {
     QrNote(u8),
     QrLink,
     QrNotice,
+    /// The 3D picture page of version 12: the last capture's world, where it stands, and the lines of what that means.
+    LastWorld,
+    LastState,
+    LastNote(u8),
+    /// History: how many captures (or the notice), each row's world and when it was taken with where it stands.
+    HistoryTitle,
+    CaptureWorld(u8),
+    CaptureMeta(u8),
+    /// Share to …: how many friends (or which part of a name is found), each row's name (the owner's: everyone else's
+    /// screen leaves them out), and how many are chosen (or the notice).
+    FriendsTitle,
+    ShareFriend(u8),
+    FriendsNote,
+    /// The explicit warning: the capture's world and where it stands, why it is flagged (the owner's), the warning.
+    ExplicitWorld,
+    ExplicitState,
+    ExplicitWhy(u8),
+    ExplicitLine(u8),
 }
 
 /// A line of changing text: `cols` cells of `size` pixels high and half as wide, from (`x`, `y`). On the screen, cell
@@ -1146,6 +1194,95 @@ pub fn layout(page: ScreenPage) -> Layout {
             slots.add(100, 332, QR_LINK_COLUMNS as u8, 28, Style::Accent, Content::QrLink);
             slots.add(100, 500, 76, 20, Style::Accent, Content::QrNotice);
         }
+        ScreenPage::PhotoShare => {
+            // The 3D picture page with, at its right, the last capture: its picture, world, where it stands, its shares;
+            // History at the top right.
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(with(element(Target::History, Rect::new(820, 28, 172, 48), Look::KeyDark), Some(Icon::History), Some(Text::HistoryOpen)));
+            for (i, label) in strings::TIMERS.into_iter().enumerate() {
+                elements.push(with(element(Target::Timer(i as u8), Rect::new(100 + i as u16 * 136, 156, 124, 56), Look::Chip), None, Some(label)));
+            }
+            for (i, label) in strings::FLIGHTS.into_iter().enumerate() {
+                elements.push(with(element(Target::Length(i as u8), Rect::new(100 + i as u16 * 136, 292, 124, 56), Look::Chip), None, Some(label)));
+            }
+            elements.push(with(element(Target::Take, Rect::new(100, 400, 444, 76), Look::Accent), Some(Icon::Cube), Some(Text::PhotoTake)));
+            elements.push(with(element(Target::ShareLatest, Rect::new(672, 436, 320, 56), Look::Accent), Some(Icon::Public), Some(Text::SharePublic)));
+            elements.push(with(element(Target::ShareLatestTo, Rect::new(672, 500, 320, 56), Look::KeyDark), Some(Icon::Friends), Some(Text::ShareTo)));
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::PhotoTitle, style: Style::Primary, bold: true, width: 700 });
+            labels.push(Label { x: 100, y: 116, size: 24, text: Text::PhotoTimer, style: Style::Secondary, bold: false, width: 540 });
+            labels.push(Label { x: 100, y: 252, size: 24, text: Text::PhotoFlight, style: Style::Secondary, bold: false, width: 540 });
+            labels.push(Label { x: 672, y: 100, size: 20, text: Text::ShareLast, style: Style::Secondary, bold: false, width: 320 });
+            pictures.push(Picture { rect: Rect::new(672, 128, 320, 180), result: 0 });
+            // Clear of the last capture's column (from 672).
+            slots.add(100, 504, 40, 28, Style::Accent, Content::PhotoStatus);
+            slots.add(672, 320, 22, 28, Style::Primary, Content::LastWorld);
+            slots.add(672, 352, 26, 24, Style::Accent, Content::LastState);
+            for i in 0..LAST_NOTE_LINES as u8 {
+                slots.add(672, 384 + i as u16 * 24, LAST_NOTE_COLUMNS as u8, 20, Style::Secondary, Content::LastNote(i));
+            }
+        }
+        ScreenPage::History => {
+            // The results' list: each capture's picture, world, when and where it stands, then its two shares.
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(round(Target::Previous, 808, Icon::Previous));
+            elements.push(round(Target::Next, 936, Icon::Next));
+            for i in 0..CAPTURES_PER_PAGE as u8 {
+                let y = 96 + i as u16 * 92 + 20;
+                elements.push(with(element(Target::SharePublic(i), Rect::new(604, y, 196, 48), Look::Accent), Some(Icon::Public), Some(Text::SharePublic)));
+            }
+            for i in 0..CAPTURES_PER_PAGE as u8 {
+                let y = 96 + i as u16 * 92 + 20;
+                elements.push(with(element(Target::ShareTo(i), Rect::new(808, y, 168, 48), Look::KeyDark), Some(Icon::Friends), Some(Text::ShareTo)));
+            }
+            // Up to how many there are (from 316).
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::HistoryTitle, style: Style::Primary, bold: true, width: 196 });
+            slots.add(316, 40, 30, 24, Style::Primary, Content::HistoryTitle);
+            slots.add(868, 40, 5, 24, Style::Secondary, Content::PageLabel).centered();
+            for i in 0..CAPTURES_PER_PAGE as u8 {
+                let y = 96 + i as u16 * 92;
+                pictures.push(Picture { rect: Rect::new(44, y + 4, 128, 72), result: i });
+                slots.add(192, y + 12, 28, 28, Style::Primary, Content::CaptureWorld(i));
+                slots.add(192, y + 48, 33, 24, Style::Secondary, Content::CaptureMeta(i));
+            }
+        }
+        ScreenPage::ShareTo => {
+            // The friends, a row each (their mark at its right while chosen), Find a friend and Send at the bottom.
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(round(Target::Previous, 808, Icon::Previous));
+            elements.push(round(Target::Next, 936, Icon::Next));
+            for i in 0..FRIENDS_PER_PAGE as u8 {
+                elements.push(with(element(Target::Friend(i), Rect::new(32, 96 + i as u16 * 80, 960, 72), Look::Row), Some(Icon::User), None));
+            }
+            for i in 0..FRIENDS_PER_PAGE as u8 {
+                elements.push(with(element(Target::FriendMark(i), Rect::new(912, 104 + i as u16 * 80, 56, 56), Look::Chip), Some(Icon::Check), None));
+            }
+            elements.push(with(element(Target::FindFriend, Rect::new(32, 500, 280, 56), Look::KeyDark), Some(Icon::Search), Some(Text::FriendsFind)));
+            elements.push(with(element(Target::SendShare, Rect::new(752, 500, 240, 56), Look::Accent), Some(Icon::Send), Some(Text::FriendsSend)));
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::FriendsTitle, style: Style::Primary, bold: true, width: 400 });
+            slots.add(520, 40, 22, 24, Style::Primary, Content::FriendsTitle);
+            slots.add(868, 40, 5, 24, Style::Secondary, Content::PageLabel).centered();
+            for i in 0..FRIENDS_PER_PAGE as u8 {
+                slots.add(124, 96 + i as u16 * 80 + 20, 40, 28, Style::Primary, Content::ShareFriend(i));
+            }
+            slots.add(328, 516, 34, 24, Style::Secondary, Content::FriendsNote);
+        }
+        ScreenPage::Explicit => {
+            // The capture's picture, its world and why it is flagged, the warning under them, Cancel and Share anyway.
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(with(element(Target::CancelShare, Rect::new(100, 440, 360, 72), Look::KeyDark), Some(Icon::Close), Some(Text::ExplicitCancel)));
+            elements.push(with(element(Target::ShareAnyway, Rect::new(476, 440, 448, 72), Look::Accent), Some(Icon::Public), Some(Text::ExplicitAnyway)));
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::ExplicitTitle, style: Style::Primary, bold: true, width: 888 });
+            pictures.push(Picture { rect: Rect::new(100, 112, 320, 180), result: 0 });
+            icons.push((Rect::new(100, 320, 48, 48), Icon::Warning, Some(Tint::Amber)));
+            slots.add(452, 120, 38, 28, Style::Primary, Content::ExplicitWorld);
+            slots.add(452, 160, 44, 24, Style::Secondary, Content::ExplicitState);
+            for i in 0..EXPLICIT_WHY_LINES as u8 {
+                slots.add(452, 200 + i as u16 * 28, EXPLICIT_WHY_COLUMNS as u8, 20, Style::Secondary, Content::ExplicitWhy(i));
+            }
+            for i in 0..EXPLICIT_LINES as u8 {
+                slots.add(164, 316 + i as u16 * 36, EXPLICIT_COLUMNS as u8, 28, Style::Primary, Content::ExplicitLine(i));
+            }
+        }
         ScreenPage::Instances => {
             elements.push(round(Target::Back, 32, Icon::Back));
             elements.push(round(Target::Previous, 808, Icon::Previous));
@@ -1192,6 +1329,14 @@ const FRIEND_LINK_COLUMNS: usize = 56;
 pub const QR_NOTE_LINES: usize = 3;
 pub const QR_NOTE_COLUMNS: usize = 56;
 const QR_LINK_COLUMNS: usize = 58;
+/// The 3D picture page's lines under its last capture's state, the explicit warning's lines of why a capture is flagged
+/// and of the warning itself, in characters.
+pub const LAST_NOTE_LINES: usize = 2;
+pub const LAST_NOTE_COLUMNS: usize = 32;
+pub const EXPLICIT_WHY_LINES: usize = 2;
+pub const EXPLICIT_WHY_COLUMNS: usize = 54;
+pub const EXPLICIT_LINES: usize = 2;
+pub const EXPLICIT_COLUMNS: usize = 58;
 
 /// The seven-tile Home's place `i` (0 to 7): two rows of four, 228 × 216 each, 16 apart.
 fn seven_cell(i: usize) -> (u16, u16) {
@@ -1206,11 +1351,21 @@ const CARD_TITLE_COLUMNS: usize = 26;
 const CARD_LINK_COLUMNS: usize = 34;
 
 /// The thumbnail a page's picture shows, by the key the hosts keep pictures under (a video id, the music's art key).
-pub fn picture_key<'a>(menu: &'a Menu, picture: &Picture) -> Option<&'a str> {
+pub fn picture_key(menu: &Menu, picture: &Picture) -> Option<String> {
+    picture_key_for(menu, picture, false)
+}
+
+/// The key of the thumbnail `picture` shows to the owner or, `public`, to everyone else: a capture flagged explicit
+/// shows its picture to its owner only.
+pub fn picture_key_for(menu: &Menu, picture: &Picture, public: bool) -> Option<String> {
+    let capture = |c: Option<&CaptureRow>| c.filter(|c| !(public && c.explicit)).map(CaptureRow::picture_key);
     match menu.page {
-        Page::Results => menu.page_results().get(picture.result as usize).map(|v| v.id.as_str()),
-        Page::Music | Page::Home if picture.result == 0 => menu.media.as_ref().and_then(|m| m.art.as_deref()),
-        Page::Card if picture.result == 0 => menu.card.as_ref().and_then(|c| c.video.as_deref()),
+        Page::Results => menu.page_results().get(picture.result as usize).map(|v| v.id.clone()),
+        Page::Music | Page::Home if picture.result == 0 => menu.media.as_ref().and_then(|m| m.art.clone()),
+        Page::Card if picture.result == 0 => menu.card.as_ref().and_then(|c| c.video.clone()),
+        Page::Photo if menu.pages.share() && picture.result == 0 => capture(menu.captures.latest.as_ref()),
+        Page::History => capture(menu.page_captures().get(picture.result as usize)),
+        Page::Explicit if picture.result == 0 => capture(menu.shared_capture()),
         _ => None,
     }
 }
@@ -1351,7 +1506,10 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             Content::SuggestLine(_) => return String::new(),
             // So are the links the owner's camera found.
             Content::QrLink | Content::QrNotice => return String::new(),
-            Content::TypeLine(_) if menu.typing == Typing::Suggestion => return String::new(),
+            Content::TypeLine(_) if matches!(menu.typing, Typing::Suggestion | Typing::Friend) => return String::new(),
+            // The owner's friends, which part of a name they look for, and why their capture is flagged.
+            Content::ShareFriend(_) | Content::ExplicitWhy(_) => return String::new(),
+            Content::FriendsTitle => return "Friends".into(),
             _ => {}
         }
     }
@@ -1382,6 +1540,8 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             Page::Call => format!("{}/{}", menu.contact_page + 1, menu.contacts.len().div_ceil(CONTACTS_PER_PAGE).max(1)),
             Page::States => format!("{}/{}", menu.state_page + 1, menu.states.len().div_ceil(STATES_PER_PAGE).max(1)),
             Page::Instances => format!("{}/{}", menu.instance_page + 1, menu.instances.len().div_ceil(INSTANCES_PER_PAGE).max(1)),
+            Page::History => format!("{}/{}", menu.capture_page + 1, menu.captures.history.len().div_ceil(CAPTURES_PER_PAGE).max(1)),
+            Page::ShareTo => format!("{}/{}", menu.friend_page + 1, menu.found_friends().len().div_ceil(FRIENDS_PER_PAGE).max(1)),
             _ => String::new(),
         },
         Content::HeardCaption => match (&menu.heard, menu.heard_private) {
@@ -1459,7 +1619,12 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
         },
         Content::PhotoStatus => match menu.countdown {
             Some(n) => format!("Starting in {n}… hold still"),
-            None => menu.notice.clone().unwrap_or_else(|| "VRChat's camera flies around what it looks at".into()),
+            None => match &menu.notice {
+                Some(notice) => notice.clone(),
+                // Shorter beside the last capture (from screen version 12).
+                None if menu.pages.share() => "The camera circles what it looks at".into(),
+                None => "VRChat's camera flies around what it looks at".into(),
+            },
         },
         Content::MediaTitle => match &menu.media {
             Some(m) if !m.title.is_empty() => m.title.clone(),
@@ -1522,6 +1687,7 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
         Content::TypeTitle => match menu.typing {
             Typing::StateName => "Name the new state".into(),
             Typing::Suggestion => "Your idea for N4N0".into(),
+            Typing::Friend => "Find a friend by name".into(),
         },
         Content::TypeLine(i) => typed_lines(&menu.typed).into_iter().nth(i as usize).unwrap_or_default(),
         Content::DraftName => menu.draft.name.clone(),
@@ -1601,6 +1767,85 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             None => "None yet".into(),
         },
         Content::QrNotice => menu.notice.clone().unwrap_or_default(),
+        Content::LastWorld => match &menu.captures.latest {
+            Some(c) => world_name(c),
+            None => "No 3D capture yet".into(),
+        },
+        Content::LastState => menu.captures.latest.as_ref().map(CaptureRow::state).unwrap_or_default(),
+        Content::LastNote(i) => super::pieces(&last_note(menu.captures.latest.as_ref()), LAST_NOTE_COLUMNS).into_iter().nth(i as usize).unwrap_or_default(),
+        Content::HistoryTitle => match &menu.notice {
+            Some(notice) => notice.clone(),
+            None if !menu.captures.listed => "Listing…".into(),
+            None => match menu.captures.history.len() {
+                0 if !menu.captures.note.is_empty() => menu.captures.note.clone(),
+                0 => "None on this computer yet".into(),
+                1 => "1 capture".into(),
+                n => format!("{n} captures"),
+            },
+        },
+        Content::CaptureWorld(i) => menu.page_captures().get(i as usize).map(world_name).unwrap_or_default(),
+        Content::CaptureMeta(i) => menu.page_captures().get(i as usize).map(capture_meta).unwrap_or_default(),
+        Content::FriendsTitle => match &menu.friends {
+            Friends::None | Friends::Loading => "Loading friends…".into(),
+            Friends::Failed { .. } => "Friends not found".into(),
+            Friends::Ready { friends } if friends.is_empty() => "No friends found".into(),
+            Friends::Ready { .. } if !menu.find.trim().is_empty() => format!("\"{}\": {}", menu.find.trim(), menu.found_friends().len()),
+            Friends::Ready { friends } => format!("{} friends", friends.len()),
+        },
+        Content::ShareFriend(i) => menu.page_friends().get(i as usize).map(|f| f.name.clone()).unwrap_or_default(),
+        Content::FriendsNote => match (&menu.notice, &menu.friends) {
+            (Some(notice), _) => notice.clone(),
+            (None, Friends::Failed { message }) => message.clone(),
+            (None, _) if menu.chosen.is_empty() => "Choose friends, then Send".into(),
+            (None, _) if menu.chosen.len() == 1 => "1 friend chosen".into(),
+            (None, _) => format!("{} friends chosen", menu.chosen.len()),
+        },
+        Content::ExplicitWorld => menu.shared_capture().map(world_name).unwrap_or_default(),
+        Content::ExplicitState => "Flagged explicit content".into(),
+        Content::ExplicitWhy(i) => {
+            let why = match menu.shared_capture().map(|c| c.explicit_reasons.join(", ")) {
+                Some(reasons) if !reasons.is_empty() => format!("Why: {reasons}"),
+                _ => "Why: Orbiters flagged it when it was shared".into(),
+            };
+            super::pieces(&why, EXPLICIT_WHY_COLUMNS).into_iter().nth(i as usize).unwrap_or_default()
+        }
+        Content::ExplicitLine(i) => super::pieces(crate::captures::EXPLICIT_WARNING, EXPLICIT_COLUMNS).into_iter().nth(i as usize).unwrap_or_default(),
+    }
+}
+
+/// A capture's world, as its rows name it.
+fn world_name(capture: &CaptureRow) -> String {
+    if capture.world.trim().is_empty() {
+        "Unknown world".into()
+    } else {
+        capture.world.clone()
+    }
+}
+
+/// A History row's line under its world: when it was taken, then where it stands.
+fn capture_meta(capture: &CaptureRow) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    format!("{} · {}", ago(now.saturating_sub(capture.taken)), capture.state())
+}
+
+/// What the last capture's state means on the 3D picture page, in a sentence or two.
+fn last_note(capture: Option<&CaptureRow>) -> String {
+    use crate::captures::CapturePhase;
+    let Some(capture) = capture else { return "Take a 3D picture here, or record one from the avatar's menu".into() };
+    match &capture.sharing {
+        Sharing::Waiting { .. } => return "Orbiters - N4N0 makes its 3D view, then shares it".into(),
+        Sharing::Busy { .. } => return "Preparing and uploading its 3D view".into(),
+        Sharing::Done { public: true, .. } => return "On orbiters.cc/maps and in the world's viewer".into(),
+        Sharing::Done { .. } => return "Your friends find it in their Orbiters gallery".into(),
+        Sharing::Explicit => return "Press Share publicly to see why".into(),
+        Sharing::Failed { message } => return message.clone(),
+        Sharing::Idle => {}
+    }
+    match capture.phase {
+        CapturePhase::Recording | CapturePhase::Saving => "Share it once it is saved".into(),
+        CapturePhase::Waiting | CapturePhase::Making { .. } | CapturePhase::NoView => "Share it now: it goes once its 3D view is made".into(),
+        CapturePhase::Ready if capture.explicit => "Flagged explicit: sharing it publicly asks first".into(),
+        CapturePhase::Ready => "Publicly, or with the friends you choose".into(),
     }
 }
 
@@ -1784,6 +2029,8 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::SuggestTalk => menu.dictating,
         // The timeline's segments the music reached.
         Target::Timeline(i) => menu.media.as_ref().is_some_and(|m| timeline_lit(m, i)),
+        // A friend chosen on Share to ….
+        Target::FriendMark(i) => menu.page_friends().get(i as usize).is_some_and(|f| menu.is_chosen(f)),
         _ => false,
     };
     let hidden = match target {
@@ -1820,6 +2067,13 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::QrAgain => !menu.pages.qr() || menu.qr.scanning(),
         Target::QrCopy | Target::QrOpen => !menu.pages.qr() || menu.qr.link.is_none(),
         Target::InviteAgain => menu.inviting.is_none(),
+        // Sharing 3D captures (from screen version 12): the last capture's shares once there is one, History's rows', a
+        // friend's row and their mark while they are chosen.
+        Target::History => !menu.pages.share(),
+        Target::ShareLatest | Target::ShareLatestTo => !menu.pages.share() || menu.captures.latest.is_none(),
+        Target::SharePublic(i) | Target::ShareTo(i) => i as usize >= menu.page_captures().len(),
+        Target::Friend(i) => i as usize >= menu.page_friends().len(),
+        Target::FriendMark(i) => !menu.page_friends().get(i as usize).is_some_and(|f| menu.is_chosen(f)),
         _ => false,
     };
     let unavailable = match target {
@@ -1828,6 +2082,10 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::TrackingSwitch | Target::Smoothing(_) => menu.tracking.is_none(),
         Target::SuggestSend => menu.sending || menu.suggestion.trim().is_empty(),
         Target::InviteMe(_) | Target::InviteAgain => menu.invite_waiting,
+        // A capture still being recorded or saved, or with a share on its way, waits.
+        Target::ShareLatest | Target::ShareLatestTo => !menu.captures.latest.as_ref().is_some_and(CaptureRow::shareable),
+        Target::SharePublic(i) | Target::ShareTo(i) => !menu.page_captures().get(i as usize).is_some_and(CaptureRow::shareable),
+        Target::SendShare => menu.chosen.is_empty(),
         _ => false,
     };
     State { on: on && !unavailable, hidden, unavailable }
@@ -1994,7 +2252,8 @@ mod tests {
         assert_eq!(Pages::of_screen(Some(9)), Pages::Timeline);
         assert_eq!(Pages::of_screen(Some(10)), Pages::Simple);
         assert_eq!(Pages::of_screen(Some(11)), Pages::Qr);
-        assert_eq!(Pages::of_screen(Some(13)), Pages::Qr);
+        assert_eq!(Pages::of_screen(Some(12)), Pages::Share);
+        assert_eq!(Pages::of_screen(Some(14)), Pages::Share);
         let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
         menu.open();
         assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSeven);
@@ -2083,7 +2342,7 @@ mod tests {
         let l = cached(ScreenPage::Card);
         let texts: Vec<String> = l.slots.iter().map(|s| slot_text(&menu, s)).collect();
         assert_eq!(texts, ["Rick Astley - Never Gonna", "Give You Up (Official Mus…", "youtube.com/watch?v=dQw4w9WgXcQ"].map(String::from), "{texts:?}");
-        assert_eq!(picture_key(&menu, &l.pictures[0]), Some("dQw4w9WgXcQ"));
+        assert_eq!(picture_key(&menu, &l.pictures[0]).as_deref(), Some("dQw4w9WgXcQ"));
         assert!(l.elements.is_empty() && menu.press(Target::Close).is_empty(), "nothing on a card is pressed: it counts no time down");
         assert_eq!(short_link("http://example.com/a/very/long/path/that/goes/on/and/on/", 20), "example.com/a/very/…");
         // Opening the menu takes the card back.
@@ -2119,7 +2378,7 @@ mod tests {
         assert_eq!(text(&menu, Content::TileNote(4)), "Midnight City");
         assert_eq!(picture_key(&menu, &l.pictures[0]), None, "no art yet");
         menu.media.as_mut().unwrap().art = Some("art:1".into());
-        assert_eq!(picture_key(&menu, &l.pictures[0]), Some("art:1"));
+        assert_eq!(picture_key(&menu, &l.pictures[0]).as_deref(), Some("art:1"));
     }
 
     #[test]

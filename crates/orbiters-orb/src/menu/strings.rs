@@ -171,6 +171,20 @@ texts! {
     QrCopy = "qr.copy" => "Copy link",
     QrOpen = "qr.open" => "Open again",
     QrAgain = "qr.again" => "Scan again",
+    /// Sharing 3D captures (from screen version 12): the 3D picture page's History and its last capture's caption, the
+    /// shares (there and on History's rows), History's title, Share to …'s title and buttons, the explicit warning's
+    /// title and buttons.
+    HistoryOpen = "history.open" => "History",
+    HistoryTitle = "history.title" => "3D captures",
+    SharePublic = "share.public" => "Share publicly",
+    ShareTo = "share.to" => "Share to …",
+    ShareLast = "share.last" => "Last capture",
+    FriendsTitle = "friends.title" => "Share with friends",
+    FriendsFind = "friends.find" => "Find a friend",
+    FriendsSend = "friends.send" => "Send",
+    ExplicitTitle = "explicit.title" => "Share publicly?",
+    ExplicitAnyway = "explicit.anyway" => "Share anyway",
+    ExplicitCancel = "explicit.cancel" => "Cancel",
     /// The retro look's own words: the plate on the frame's top line (the screen's version follows it), the memory plate
     /// at the bottom right, the caption under a big icon, a picture's place before it came.
     RetroSystem = "retro.system" => "N4N0·OS",

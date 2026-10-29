@@ -196,7 +196,7 @@ impl Frame {
         }
         // The results' thumbnails, the music's art.
         for picture in &layout.pictures {
-            let Some(thumb) = layout::picture_key(menu, picture).and_then(pictures) else { continue };
+            let Some(thumb) = layout::picture_key_for(menu, picture, public).and_then(|key| pictures(&key)) else { continue };
             let at = PICTURES_AT + picture.result as usize * size;
             bank[at..at + size].copy_from_slice(thumb.bytes(size));
             bank[LAYER_COUNTS + picture.result as usize] = thumbnail::layers_in(size) as u8;

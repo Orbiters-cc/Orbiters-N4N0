@@ -428,7 +428,69 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     scanner.page = Page::Qr;
     scanner.qr = sample_qr();
     out.push((ScreenPage::Qr, scanner, Some(3), None));
+    // Screens from version 12 (and the overlay): the last capture ready to share, History, Share to … with two friends
+    // chosen, the warning before an explicit capture goes public.
+    let share = || {
+        let mut m = simple();
+        m.pages = Pages::ALL;
+        m.set_captures(sample_captures());
+        m
+    };
+    let hovered = |page: ScreenPage, target: Target| layout::cached(page).elements.iter().position(|e| e.target == target);
+    let mut photo = share();
+    photo.press(Target::Photo);
+    out.push((ScreenPage::PhotoShare, photo, hovered(ScreenPage::PhotoShare, Target::ShareLatest), None));
+    let mut history = share();
+    history.press(Target::Photo);
+    history.press(Target::History);
+    out.push((ScreenPage::History, history.clone(), hovered(ScreenPage::History, Target::ShareTo(0)), None));
+    let mut friends = history.clone();
+    friends.press(Target::ShareTo(0));
+    friends.set_friends(orbiters_orb::captures::Friends::ready(sample_friends()));
+    friends.press(Target::Friend(1));
+    friends.press(Target::Friend(3));
+    out.push((ScreenPage::ShareTo, friends, hovered(ScreenPage::ShareTo, Target::SendShare), None));
+    let mut explicit = history;
+    explicit.press(Target::SharePublic(2));
+    out.push((ScreenPage::Explicit, explicit, hovered(ScreenPage::Explicit, Target::CancelShare), None));
     out
+}
+
+/// The sample player's 3D captures: the last one ready to share, History's in every state (one flagged explicit), each
+/// picture a sample thumbnail ([`sample_rgba`] by the number in its key).
+pub(crate) fn sample_captures() -> orbiters_orb::captures::CapturesView {
+    use orbiters_orb::captures::{CapturePhase, CaptureRow, CapturesView, Sharing};
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let row = |n: usize, world: &str, ago: u64| CaptureRow {
+        key: format!("sample{n}"),
+        world: world.into(),
+        taken: now - ago,
+        phase: CapturePhase::Ready,
+        ..Default::default()
+    };
+    let latest = row(1, "The Black Cat", 90);
+    let mut making = row(2, "Japan Shrine", 1800);
+    making.phase = CapturePhase::Making { percent: 62 };
+    making.sharing = Sharing::Waiting { public: true, people: 0 };
+    let mut flagged = row(3, "Club Orion", 3 * 3600);
+    flagged.explicit = true;
+    flagged.explicit_reasons = vec!["osc-parameter:NSFW/Toggle".into(), "avatar-label:sexually_explicit".into()];
+    let mut public = row(4, "Movie Night", 2 * 86_400);
+    public.public = true;
+    public.people = 2;
+    let mut friends = row(0, "Midnight Rooftops", 5 * 86_400);
+    friends.sharing = Sharing::Done { public: false, people: 3 };
+    let history = vec![latest.clone(), making, flagged, public, friends, row(2, "Japan Shrine", 9 * 86_400), row(3, "The Great Pug", 12 * 86_400)];
+    CapturesView { latest: Some(latest), history, listed: true, note: String::new() }
+}
+
+/// The sample player's VRChat friends.
+pub(crate) fn sample_friends() -> Vec<orbiters_orb::captures::Friend> {
+    ["Kasumi", "Lyra Nightfall", "Bob the Builder", "Ana", "Mika", "Zephyr", "Juniper", "Orion"]
+        .iter()
+        .enumerate()
+        .map(|(i, n)| orbiters_orb::captures::Friend { id: format!("usr_{i:04}"), name: n.to_string() })
+        .collect()
 }
 
 /// The QR code scanner having opened a link, looking for more.
@@ -640,6 +702,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             if id == SAMPLE_ART {
                 return Some(art_texture.id());
             }
+            let id = id.strip_prefix(orbiters_orb::captures::PICTURE_PREFIX).unwrap_or(id);
             id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).and_then(|i| thumbs.get(i)).map(|t| t.id())
         };
         let modern = paint(&mut canvas, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &picture, time: 0.4, skin }));
@@ -650,6 +713,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             if id == SAMPLE_ART {
                 return Some(art_dots.id());
             }
+            let id = id.strip_prefix(orbiters_orb::captures::PICTURE_PREFIX).unwrap_or(id);
             id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).and_then(|i| dots.get(i)).map(|t| t.id())
         };
         let rgba = paint(&mut canvas, |p| menu_retro::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &dotted, time: 0.4, skin }));
@@ -669,12 +733,13 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             if id == SAMPLE_ART {
                 return Some(screen::picture_from_rgb(&art));
             }
+            let id = id.strip_prefix(orbiters_orb::captures::PICTURE_PREFIX).unwrap_or(id);
             id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).map(sample_picture)
         };
         let flags = screen::Flags { listening: menu.listening, loading: menu.loading(), ..Default::default() };
         let bank = screen::Frame::new(&menu, hover, pressed, flags, 72, &pictures).bank;
         std::fs::write(out.join(format!("bank-{}.bin", page.name())), &bank[..screen::bank_bytes(72)])?;
-        if matches!(page, ScreenPage::Results | ScreenPage::Music | ScreenPage::Card | ScreenPage::HomeSimple) {
+        if matches!(page, ScreenPage::Results | ScreenPage::Music | ScreenPage::Card | ScreenPage::HomeSimple | ScreenPage::History | ScreenPage::PhotoShare) {
             let bank = screen::Frame::new(&menu, hover, pressed, flags, 128, &pictures).bank;
             std::fs::write(out.join(format!("bank-{}-128.bin", page.name())), &bank[..screen::bank_bytes(128)])?;
         }

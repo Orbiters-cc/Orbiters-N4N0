@@ -24,7 +24,7 @@ Repositories:
 | D | Photos & captures page (rename of Sessions), Share publicly / Share to …, Visited worlds share morph, friends picker, faster upload preparation, explicit detection | desktop | |
 | E | Website `/gallery` shares tab, 3D captures in the gallery modal, `/maps/wrld_…` shares, unshare | server frontend | |
 | F | World: "I want to capture" menu, tutorials, capture avatar pedestal, N4N0 logo, shared captures row | world | |
-| G | N4N0 on the avatar: share buttons after a capture, History page (screen version 12) | desktop menu + Toolkit | |
+| G | N4N0 on the avatar: share buttons after a capture, History page (screen version 12) | desktop menu + Toolkit | Built 2026-10-29 (contracts `SCREEN_SHARE`, desktop `controller/menu_shares.rs`, Toolkit screen files revision 17); not yet tried in VRChat |
 | H | VRChat sign-in in N4N0 behind the ADMIN-only feature `n4n0-vrchat-login`, token kept locally | desktop (+ server feature row) | |
 | I | My Avatar: "Install N4N0 desktop" when the item is on an avatar but the app is missing | My Avatar | |
 | J | My World: thumbnail creation (from My Avatar), Publish 3D captures (coverage gizmo, capture, share, "official previews"), per-platform display variants | My World + world + server | |

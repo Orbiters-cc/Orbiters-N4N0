@@ -53,6 +53,8 @@ pub struct MenuOverlay {
     behind: bool,
     /// The menu is drawn in the retro look (Orbiters - N4N0 › N4N0 › N4N0's menu › Look).
     retro: bool,
+    /// 3D worlds: its pill under the menu, its panel in the menu's place, the capture shown around the person.
+    pub worlds: super::worlds::Worlds,
 }
 
 /// A toggling request this soon after the menu closed is the close it meant, already done.
@@ -100,6 +102,7 @@ impl MenuOverlay {
         let _ = overlay.set_sort_order(handle, 10);
         let canvas = Canvas::new(WIDTH, HEIGHT);
         let host = MenuHost::new(canvas.ctx().clone());
+        let worlds = super::worlds::Worlds::new(overlay, key, canvas.ctx().clone())?;
         Ok(Self {
             handle,
             canvas,
@@ -117,10 +120,12 @@ impl MenuOverlay {
             placed: None,
             behind: false,
             retro: false,
+            worlds,
         })
     }
 
-    pub fn destroy(&self, overlay: &vr::Overlay) {
+    pub fn destroy(&mut self, overlay: &vr::Overlay) {
+        self.worlds.destroy(overlay);
         let _ = overlay.destroy(self.handle);
     }
 
@@ -149,6 +154,7 @@ impl MenuOverlay {
         // (The menu's own close, idle or its button, closed `menu` already: this hides the overlay.)
         self.closed_at = Some(Instant::now());
         self.host.menu.close();
+        self.worlds.open = false;
         if self.shown {
             let _ = overlay.hide(self.handle);
             self.shown = false;
@@ -184,8 +190,19 @@ impl MenuOverlay {
             // The avatar now has N4N0's screen: the menu lives there.
             self.close(overlay);
         }
-        // What the service reads: open, and whether a sentence is for the search field.
-        let state = (self.host.menu.open, self.host.menu.takes_speech(), self.host.menu.shows_keyboard());
+        // 3D worlds: the capture around the person and its download whether the menu shows or not, the pill under the
+        // menu while it shows its front (not over its keyboard).
+        let menu_at = self.placed.filter(|_| self.host.menu.open && self.shown && !self.behind && !self.host.menu.shows_keyboard());
+        let (open_worlds, pressed) = self.worlds.update(overlay, steamvr, presenter, snap, menu_at.as_ref());
+        clicked |= pressed;
+        if open_worlds {
+            self.worlds.open_panel(self.host.menu.layout);
+            self.canvas.invalidate();
+            self.last_activity = Instant::now();
+        }
+        // What the service reads: open, and whether a sentence is for the search field (the 3D worlds panel types only).
+        let worlds = self.worlds.open;
+        let state = (self.host.menu.open, self.host.menu.takes_speech() && !worlds, if worlds { self.worlds.typing() } else { self.host.menu.shows_keyboard() });
         if self.reported != Some(state) {
             self.reported = Some(state);
             backend.orb(OrbCommand::MenuState { open: state.0, dictation: state.1, keyboard: state.2 });
@@ -198,6 +215,7 @@ impl MenuOverlay {
         self.host.follow(snap);
         self.host.follow_media();
         // The computer's keyboard typing on the menu's keyboard (the service took the keys from VRChat).
+        self.worlds.keys(&snap.orb.keys);
         let mut effects = self.host.take_keys(&snap.orb);
         if !effects.is_empty() {
             self.last_activity = Instant::now();
@@ -234,6 +252,18 @@ impl MenuOverlay {
         let page = layout::cached(ScreenPage::of(&self.host.menu));
         while let Some(e) = overlay.poll_event(self.handle) {
             if self.behind {
+                continue;
+            }
+            if self.worlds.open {
+                if self.worlds.mouse(&e, overlay, steamvr) {
+                    clicked = true;
+                    self.last_activity = Instant::now();
+                }
+                if !self.worlds.open {
+                    // Back to the menu's page.
+                    self.canvas.invalidate();
+                    self.host.dirty = true;
+                }
                 continue;
             }
             match e.event_type {
@@ -304,9 +334,25 @@ impl MenuOverlay {
             self.canvas.invalidate();
             self.host.dirty = true;
         }
+        if self.worlds.open && !self.behind {
+            if self.worlds.wants_paint() || !self.shown {
+                self.last_paint = Some(Instant::now());
+                if !self.shown {
+                    self.canvas.invalidate();
+                }
+                self.worlds.paint(&mut self.canvas);
+                if let Some(changed) = self.canvas.damage() {
+                    presenter.show_part(overlay, self.handle, self.canvas.pixels(), WIDTH, HEIGHT, changed);
+                }
+                if !self.shown {
+                    let _ = overlay.show(self.handle);
+                    self.shown = true;
+                }
+            }
+            return clicked;
+        }
         // The microphone breathes while N4N0 listens: about 20 pictures a second then, else only on changes.
-        // A like or a label switched on pops for a moment too.
-        let animating = self.host.menu.listening || self.host.menu.popping().is_some();
+        let animating = self.host.menu.listening;
         let due = self.last_paint.is_none_or(|t| t.elapsed() >= Duration::from_millis(if animating { 50 } else { 22 }));
         if (self.host.dirty || animating) && due {
             self.host.dirty = false;

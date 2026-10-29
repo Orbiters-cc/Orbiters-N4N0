@@ -21,6 +21,7 @@ pub mod menu_retro;
 pub mod menu_ui;
 pub mod ui;
 pub mod walk;
+pub mod worlds;
 
 use crate::backend::{Ctl, Remote};
 use crate::ipc::{Client, Endpoint, OrbCommand, Role};

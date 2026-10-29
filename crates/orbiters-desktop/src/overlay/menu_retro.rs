@@ -396,7 +396,7 @@ fn element(p: &Painter, e: &Element, origin: Pos2, ink: Ink, skin: &Skin) {
             }
             if let Some(title) = label {
                 let fitted = fit(p, mono(title, place.size, ink.text), place.room);
-                let at = r.min + if wide { vec2(116.0, 38.0) } else { vec2(24.0, r.height() - 96.0) };
+                let at = r.min + if wide { vec2(116.0, super::menu_ui::wide_title_y(r.height(), 38.0)) } else { vec2(24.0, r.height() - 96.0) };
                 widgets::text(p, at + vec2(0.0, fitted.dy), Align2::LEFT_TOP, &fitted.txt);
             }
             // A level bar in the top right corner: the tile's own instrument.

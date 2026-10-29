@@ -1826,6 +1826,7 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
         MenuPage::Suggest | MenuPage::Type => Target::Suggest,
         MenuPage::Qr => Target::Qr,
         MenuPage::Instances | MenuPage::AddFriend => Target::Instances,
+        MenuPage::Feedback | MenuPage::FeedbackLabels | MenuPage::Comments => Target::WorldFeedback,
         MenuPage::Card | MenuPage::More => return,
     };
     host.press(open);

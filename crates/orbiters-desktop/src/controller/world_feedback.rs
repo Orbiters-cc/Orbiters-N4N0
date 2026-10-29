@@ -1,0 +1,697 @@
+//! World feedback in the tray service (contracts `Docs/world-feedback.md`): the N4N0 world's `[N4N0-Feedback]` lines
+//! read from VRChat's log (a follower of its own, read to its end before each answer), the local address the world
+//! loads to know Orbiters - N4N0 runs (`http://127.0.0.1:22541/n4n0/feedback/v1`), the member's likes, labels and
+//! comments sent to Orbiters under the signed-in account through a queue kept on disk (retried with backoff), and the
+//! worlds N4N0's menus give feedback on (the shown capture's world, the one the player is in, previous instances'),
+//! handed to N4N0 ([`orbiters_n4n0::N4n0::set_feedback`]) whenever what they show changes.
+
+use super::Shared;
+use orbiters_contracts::world_feedback::{self as contract, Action as Line, Refusal};
+use orbiters_core::account::Api;
+use orbiters_core::vrchat_log::{LogEvent, LogWatcher};
+use orbiters_core::world_feedback::{client_id, Action, Client, Failure, Known, Queue, Seen, Set};
+use orbiters_orb::feedback::{CommentRow, FeedbackAsk, FeedbackView, LabelCount, Subject, Why, WorldFeedback, SUBJECTS_MAX};
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+/// How often the world's lines are looked for while VRChat's log is followed.
+const LOG_EVERY: Duration = Duration::from_millis(250);
+/// A world shown somewhere is read again from Orbiters after this long, for as long as it is wanted.
+const READ_AGAIN: Duration = Duration::from_secs(30);
+const WANTED_FOR: Duration = Duration::from_secs(300);
+/// Previous instances are read again from their file after this long.
+const INSTANCES_EVERY: Duration = Duration::from_secs(10);
+/// What the answer gives the member's own comments as their author (the world says "You").
+const ME: &str = "You";
+
+fn now_ms() -> u64 {
+    orbiters_n4n0::unix_ms()
+}
+
+/// The world's session as its lines tell it, the subject it selected, and the last action refused.
+#[derive(Default)]
+struct WorldSession {
+    session: Option<String>,
+    seen: u64,
+    selected: Option<(String, String)>,
+    error: Option<(u64, String, String)>,
+}
+
+pub(super) struct WorldFeedbackRuntime {
+    log: LogWatcher,
+    /// The world the log last joined (lowercase), while in it.
+    joined: Option<String>,
+    world: WorldSession,
+    known: HashMap<String, Known>,
+    /// Worlds shown somewhere (the menus, the N4N0 world), since when.
+    wanted: HashMap<String, Instant>,
+    /// Names the menus and the world gave worlds.
+    names: HashMap<String, String>,
+    queue: Queue,
+    queue_path: PathBuf,
+    /// The last error of a menu's action, by world.
+    menu_errors: HashMap<String, String>,
+    instances: (Vec<orbiters_orb::menu::InstanceRow>, Option<Instant>),
+    /// Why the local address cannot be served (another program has the port).
+    pub(super) port_note: Option<String>,
+    sent: Option<FeedbackView>,
+}
+
+impl Default for WorldFeedbackRuntime {
+    fn default() -> Self {
+        let queue_path = if cfg!(test) { std::env::temp_dir().join(format!("orbiters-feedback-test-{}.json", std::process::id())) } else { Queue::file() };
+        Self {
+            log: LogWatcher::new(None),
+            joined: None,
+            world: WorldSession::default(),
+            known: HashMap::new(),
+            wanted: HashMap::new(),
+            names: HashMap::new(),
+            queue: Queue::load(&queue_path, now_ms()),
+            queue_path,
+            menu_errors: HashMap::new(),
+            instances: (Vec::new(), None),
+            port_note: None,
+            sent: None,
+        }
+    }
+}
+
+/// Whether the log's world is one whose lines count (the N4N0 world, or any in the Development environment).
+fn accepted(world: Option<&str>, development: bool) -> bool {
+    world.is_some_and(|w| development || w.eq_ignore_ascii_case(contract::N4N0_WORLD))
+}
+
+impl WorldFeedbackRuntime {
+    /// Reads VRChat's log to its end and acts on the world's lines. `signed_in`: an account can send what they ask.
+    fn follow(&mut self, development: bool, signed_in: bool) -> bool {
+        let events = self.log.poll();
+        let live = self.log.live();
+        let mut changed = false;
+        for e in events {
+            match e {
+                LogEvent::Joining { world_id, .. } => {
+                    let world = world_id.to_ascii_lowercase();
+                    if self.joined.as_deref() != Some(world.as_str()) {
+                        self.world = WorldSession::default();
+                        changed = true;
+                    }
+                    self.joined = Some(world);
+                }
+                LogEvent::LeftRoom => {
+                    self.joined = None;
+                    self.world.selected = None;
+                    changed = true;
+                }
+                LogEvent::WorldLine { message, at } if accepted(self.joined.as_deref(), development) => {
+                    // A line read back from before following began, long ago, is not acted on (a like never goes twice).
+                    let stale = !live && at.is_some_and(|at| (now_ms() / 1000).saturating_sub(at) > contract::STALE_SECONDS);
+                    if let Some(line) = contract::parse(&message) {
+                        changed |= self.line(line, stale, signed_in);
+                    }
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
+
+    /// One of the world's lines.
+    fn line(&mut self, line: contract::Line, stale: bool, signed_in: bool) -> bool {
+        if self.world.session.as_deref() != Some(line.session.as_str()) {
+            // A new session (the world loaded again), or one under way when Orbiters - N4N0 started.
+            self.world = WorldSession { session: Some(line.session.clone()), ..Default::default() };
+        } else if line.seq <= self.world.seen {
+            return false;
+        }
+        self.world.seen = line.seq;
+        let seq = line.seq;
+        match line.action {
+            Line::Hello => {}
+            Line::Select { world, name, .. } => {
+                let world = world.to_ascii_lowercase();
+                if !name.is_empty() {
+                    self.names.insert(world.clone(), name.clone());
+                }
+                self.wanted.insert(world.clone(), Instant::now());
+                self.world.selected = Some((world, name));
+            }
+            _ if stale => {}
+            _ if !signed_in => self.world.error = Some((seq, Refusal::SignIn.code().into(), Refusal::SignIn.text().into())),
+            action => match world_action(action, &line.session) {
+                Ok((world, action)) => {
+                    self.world.error = None;
+                    self.push(&world, action);
+                }
+                Err(refusal) => self.world.error = Some((seq, refusal.code().into(), refusal.text().into())),
+            },
+        }
+        true
+    }
+
+    /// Queues an action (kept on disk at once).
+    fn push(&mut self, world: &str, action: Action) {
+        if let Action::Comment { client_id, .. } = &action {
+            if self.queue.items.iter().any(|p| matches!(&p.action, Action::Comment { client_id: c, .. } if c == client_id)) {
+                return;
+            }
+        }
+        self.queue.push(world, action, now_ms());
+        self.wanted.insert(world.to_string(), Instant::now());
+        self.save();
+    }
+
+    fn save(&self) {
+        if let Err(e) = self.queue.save(&self.queue_path) {
+            eprintln!("world feedback: the queue could not be kept: {e}");
+        }
+    }
+
+    fn seen(&self, world: &str) -> Seen {
+        self.known.get(world).cloned().unwrap_or_default().seen(world, &self.queue, ME)
+    }
+
+    /// The local address's answer (contracts `Docs/world-feedback.md`, The probe and the state).
+    fn answer(&self, signed_in: bool) -> serde_json::Value {
+        let subject = self.world.selected.as_ref().map(|(world, name)| {
+            let seen = self.seen(world);
+            serde_json::json!({
+                "world": world,
+                "name": name,
+                "loading": seen.loading,
+                "likes": seen.likes,
+                "liked": seen.liked,
+                "labels": seen.labels.iter().map(|(id, count, mine)| serde_json::json!({ "id": id, "count": count, "mine": mine })).collect::<Vec<_>>(),
+                "justification": seen.justification,
+                "comments": {
+                    "count": seen.comment_count,
+                    "items": seen.comments.iter().take(contract::COMMENTS_SHOWN).map(|(id, by, text, at, mine)| serde_json::json!({
+                        "id": id, "by": by, "text": text, "at": at, "mine": mine,
+                    })).collect::<Vec<_>>(),
+                },
+                "pending": seen.pending,
+            })
+        });
+        serde_json::json!({
+            "n4n0": contract::ANSWER_VERSION,
+            "app": format!("Orbiters - N4N0 {}", orbiters_core::APP_VERSION),
+            "signedIn": signed_in,
+            "session": self.world.session,
+            "seen": self.world.seen,
+            "subject": subject,
+            "error": self.world.error.as_ref().map(|(seq, code, message)| serde_json::json!({ "seq": seq, "code": code, "message": message })),
+        })
+    }
+
+    /// The worlds N4N0's menus give feedback on, and what they show of each.
+    fn view(&mut self, here: Option<(String, String)>, signed_in: bool) -> FeedbackView {
+        if self.instances.1.is_none_or(|at| at.elapsed() > INSTANCES_EVERY) {
+            self.instances = (orbiters_orb::invites::read_rows(), Some(Instant::now()));
+        }
+        let mut subjects: Vec<Subject> = Vec::new();
+        let mut add = |subjects: &mut Vec<Subject>, world: &str, name: &str, why: Why| {
+            let world = world.to_ascii_lowercase();
+            if subjects.len() < SUBJECTS_MAX && contract::is_world_id(&world) && !subjects.iter().any(|s| s.world == world) {
+                subjects.push(Subject { world, name: name.to_string(), why });
+            }
+        };
+        if let Some((world, name)) = &self.world.selected {
+            add(&mut subjects, world, name, Why::Capture);
+        }
+        if let Some((world, name)) = &here {
+            add(&mut subjects, world, name, Why::Here);
+        }
+        for row in &self.instances.0 {
+            let world = row.location.split(':').next().unwrap_or_default();
+            add(&mut subjects, world, &row.world, Why::Instance { at: row.at });
+        }
+        let worlds = subjects
+            .iter()
+            .map(|s| {
+                let seen = self.seen(&s.world);
+                WorldFeedback {
+                    world: s.world.clone(),
+                    loading: seen.loading,
+                    likes: seen.likes,
+                    liked: seen.liked,
+                    labels: seen.labels.iter().map(|(id, count, mine)| LabelCount { id: id.clone(), count: *count, mine: *mine }).collect(),
+                    justification: seen.justification.clone(),
+                    comments: seen
+                        .comments
+                        .iter()
+                        .map(|(id, by, text, at, mine)| CommentRow {
+                            id: *id,
+                            by: by.clone(),
+                            text: text.clone(),
+                            at: at.as_deref().map_or(now_ms() / 1000, rfc3339_seconds),
+                            mine: *mine,
+                        })
+                        .collect(),
+                    comment_count: seen.comment_count,
+                    pending: seen.pending,
+                    error: self.menu_errors.get(&s.world).cloned(),
+                }
+            })
+            .collect();
+        FeedbackView { signed_in, subjects, worlds }
+    }
+
+    /// The next thing to do with Orbiters: an action due, else a wanted world not read lately.
+    fn next_call(&mut self) -> Option<Call> {
+        let now = now_ms();
+        self.wanted.retain(|_, at| at.elapsed() < WANTED_FOR);
+        if let Some(i) = self.queue.due(now) {
+            let p = &self.queue.items[i];
+            return Some(Call::Send { world: p.world.clone(), action: p.action.clone(), since: p.since });
+        }
+        let stale = |k: Option<&Known>| k.is_none_or(|k| now.saturating_sub(k.read_at) > READ_AGAIN.as_millis() as u64);
+        let world = self.wanted.keys().find(|w| stale(self.known.get(*w))).cloned()?;
+        // Not asked again before this answer comes.
+        self.known.entry(world.clone()).or_default().read_at = now;
+        Some(Call::Read { world })
+    }
+
+    /// What Orbiters answered to `call`.
+    fn answered(&mut self, call: &Call, result: Result<Option<orbiters_core::world_feedback::ServerView>, Failure>) {
+        let now = now_ms();
+        let index = |q: &Queue| match call {
+            Call::Send { world, action, since } => q.items.iter().position(|p| &p.world == world && &p.action == action && p.since == *since),
+            Call::Read { .. } => None,
+        };
+        match (call, result) {
+            (Call::Read { world }, Ok(Some(view))) | (Call::Send { world, .. }, Ok(Some(view))) => {
+                self.known.insert(world.clone(), Known { view: Some(view), read_at: now });
+                if let Some(i) = index(&self.queue) {
+                    self.queue.items.remove(i);
+                    self.save();
+                }
+                self.menu_errors.remove(world);
+            }
+            (Call::Send { world, .. }, Ok(None)) => {
+                if let Some(i) = index(&self.queue) {
+                    self.queue.items.remove(i);
+                    self.save();
+                }
+                // Read again at once: the comment shows with its id.
+                if let Some(k) = self.known.get_mut(world) {
+                    k.read_at = 0;
+                }
+                self.wanted.insert(world.clone(), Instant::now());
+                self.menu_errors.remove(world);
+            }
+            (Call::Read { world }, Ok(None)) => {
+                self.known.entry(world.clone()).or_default().read_at = now;
+            }
+            (Call::Send { world, .. }, Err(Failure::Refused { code, message })) => {
+                if let Some(i) = index(&self.queue) {
+                    self.queue.items.remove(i);
+                    self.save();
+                }
+                let code = code.map_or("refused", |c| c.code()).to_string();
+                self.world.error = Some((self.world.seen, code, message.clone()));
+                self.menu_errors.insert(world.clone(), message);
+            }
+            (Call::Send { .. }, Err(_)) => {
+                if let Some(i) = index(&self.queue) {
+                    self.queue.retry(i, now);
+                    self.save();
+                }
+            }
+            (Call::Read { world }, Err(_)) => {
+                // Tried again after READ_AGAIN.
+                self.known.entry(world.clone()).or_default().read_at = now;
+            }
+        }
+    }
+}
+
+/// A world's line as an action to send, or why it is refused (the contract's rules, as Orbiters checks them too).
+fn world_action(action: Line, session: &str) -> Result<(String, Action), Refusal> {
+    Ok(match action {
+        Line::Like { world, on } => (world.to_ascii_lowercase(), Action::Set(Set { liked: Some(on), ..Default::default() })),
+        Line::Label { world, label, on, text } => {
+            let known = contract::label(&label).ok_or(Refusal::UnknownLabel)?;
+            let justification = match (on, known.justify) {
+                (true, Some(_)) => Some(contract::justification(known, text.as_deref().unwrap_or(""))?),
+                _ => None,
+            };
+            (world.to_ascii_lowercase(), Action::Set(Set { labels: [(label, on)].into_iter().collect(), justification, ..Default::default() }))
+        }
+        Line::Comment { world, text, id } => {
+            (world.to_ascii_lowercase(), Action::Comment { text: contract::comment(&text)?, client_id: format!("n4n0w-{session}-{id}") })
+        }
+        Line::Uncomment { world, comment } => (world.to_ascii_lowercase(), Action::Uncomment { comment }),
+        Line::Report { world, comment, reason } => (world.to_ascii_lowercase(), Action::Report { comment, reason }),
+        Line::Hello | Line::Select { .. } => return Err(Refusal::NotFound),
+    })
+}
+
+/// A menu's ask as an action to send (`Show` reads a world).
+fn menu_action(ask: &FeedbackAsk) -> Option<(String, Action)> {
+    Some(match ask.clone() {
+        FeedbackAsk::Show { .. } => return None,
+        FeedbackAsk::Like { world, on } => (world, Action::Set(Set { liked: Some(on), ..Default::default() })),
+        FeedbackAsk::Label { world, label, on, text } => {
+            (world, Action::Set(Set { labels: [(label, on)].into_iter().collect(), justification: text, ..Default::default() }))
+        }
+        FeedbackAsk::Comment { world, text } => (world, Action::Comment { text, client_id: client_id() }),
+        FeedbackAsk::Uncomment { world, comment } => (world, Action::Uncomment { comment }),
+    })
+}
+
+/// A call to Orbiters.
+#[derive(Clone, Debug)]
+enum Call {
+    Read { world: String },
+    Send { world: String, action: Action, since: u64 },
+}
+
+fn perform(call: &Call, api: Option<&(Api, String)>) -> Result<Option<orbiters_core::world_feedback::ServerView>, Failure> {
+    let read_api;
+    let client = match api {
+        Some((api, token)) => Client { api, token: Some(token.as_str()) },
+        None => {
+            read_api = Api::new(orbiters_core::account::Server::current());
+            Client { api: &read_api, token: None }
+        }
+    };
+    match call {
+        Call::Read { world } => client.read(world).map(Some),
+        Call::Send { .. } if api.is_none() => Err(Failure::SignedOut),
+        Call::Send { world, action, .. } => match action {
+            Action::Set(set) => client.set(world, set).map(Some),
+            Action::Comment { text, client_id } => client.comment(world, text, client_id).map(|_| None),
+            Action::Uncomment { comment } => client.uncomment(*comment).map(|_| None),
+            Action::Report { comment, reason } => client.report(*comment, reason.as_deref()).map(|_| None),
+        },
+    }
+}
+
+/// `2026-10-29T21:04:00Z` (or with milliseconds) in Unix seconds; now when it does not read.
+fn rfc3339_seconds(text: &str) -> u64 {
+    let b = text.as_bytes();
+    let n = |from: usize, len: usize| text.get(from..from + len).and_then(|s| s.parse::<i64>().ok());
+    let parsed = (|| {
+        if b.len() < 19 || b[4] != b'-' || b[10] != b'T' {
+            return None;
+        }
+        let (y, mo, d, h, mi, s) = (n(0, 4)?, n(5, 2)?, n(8, 2)?, n(11, 2)?, n(14, 2)?, n(17, 2)?);
+        // Days from the civil date (Howard Hinnant's algorithm).
+        let y = if mo <= 2 { y - 1 } else { y };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let doy = (153 * (mo + if mo > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468;
+        Some((days * 86_400 + h * 3600 + mi * 60 + s) as u64)
+    })();
+    parsed.unwrap_or_else(|| now_ms() / 1000)
+}
+
+impl super::Controller {
+    fn feedback_api(&self) -> Option<(Api, String)> {
+        self.account_api()
+    }
+
+    /// The world the player is in now (VRChat's log as the watchers read it), with its name.
+    fn feedback_here(&self) -> Option<(String, String)> {
+        let s = self.snapshot.lock().unwrap();
+        let w = &s.vrchat.world;
+        if !w.in_world {
+            return None;
+        }
+        w.world_id.clone().map(|id| (id, w.world_name.clone().unwrap_or_default()))
+    }
+
+    /// Hands N4N0's menus what they show of world feedback, when it changed.
+    fn feedback_publish(self: &Shared) {
+        let here = self.feedback_here();
+        let signed_in = self.feedback_api().is_some();
+        let view = {
+            let mut rt = self.world_feedback.lock().unwrap();
+            let view = rt.view(here, signed_in);
+            if rt.sent.as_ref() == Some(&view) {
+                return;
+            }
+            rt.sent = Some(view.clone());
+            view
+        };
+        self.n4n0.set_feedback(view);
+    }
+
+    /// What one of N4N0's menus asked (controller/n4n0.rs: `Host::world_feedback`).
+    pub(super) fn world_feedback_ask(self: &Shared, ask: FeedbackAsk) {
+        {
+            let mut rt = self.world_feedback.lock().unwrap();
+            match menu_action(&ask) {
+                Some((world, action)) => {
+                    rt.menu_errors.remove(&world);
+                    rt.push(&world.to_ascii_lowercase(), action);
+                }
+                None => {
+                    if let FeedbackAsk::Show { world } = &ask {
+                        let world = world.to_ascii_lowercase();
+                        rt.wanted.insert(world.clone(), Instant::now());
+                        // Read now rather than when it was last read.
+                        if let Some(k) = rt.known.get_mut(&world) {
+                            k.read_at = k.read_at.min(now_ms().saturating_sub(READ_AGAIN.as_millis() as u64 - 1000));
+                        }
+                    }
+                }
+            }
+        }
+        self.feedback_publish();
+    }
+
+    /// Why the N4N0 world cannot reach this app, when it cannot (for the window).
+    pub fn world_feedback_note(&self) -> Option<String> {
+        self.world_feedback.lock().unwrap().port_note.clone()
+    }
+
+    fn feedback_follow(self: &Shared) -> bool {
+        let development = self.settings().development;
+        let signed_in = self.feedback_api().is_some();
+        self.world_feedback.lock().unwrap().follow(development, signed_in)
+    }
+}
+
+/// Starts world feedback: the log's follower, the calls to Orbiters and the local address.
+pub(super) fn spawn(ctl: Shared) {
+    let c = ctl.clone();
+    let _ = std::thread::Builder::new().name("world-feedback-log".into()).spawn(move || {
+        let mut beat = 0u32;
+        while !c.quitting.load(std::sync::atomic::Ordering::Relaxed) {
+            let changed = c.feedback_follow();
+            // The menus follow the world, the queue and what Orbiters answers (at most every second when nothing moves).
+            if changed || beat.is_multiple_of(4) {
+                c.feedback_publish();
+            }
+            beat = beat.wrapping_add(1);
+            std::thread::sleep(LOG_EVERY);
+        }
+    });
+    let c = ctl.clone();
+    let _ = std::thread::Builder::new().name("world-feedback-send".into()).spawn(move || {
+        while !c.quitting.load(std::sync::atomic::Ordering::Relaxed) {
+            let call = c.world_feedback.lock().unwrap().next_call();
+            let Some(call) = call else {
+                std::thread::sleep(Duration::from_millis(300));
+                continue;
+            };
+            let api = c.feedback_api();
+            let result = perform(&call, api.as_ref());
+            if matches!(result, Err(Failure::SignedOut)) && api.is_none() {
+                // Nothing to send with: kept until an account is signed in.
+                if let Call::Send { world, action, since } = &call {
+                    let mut rt = c.world_feedback.lock().unwrap();
+                    if let Some(i) = rt.queue.items.iter().position(|p| &p.world == world && &p.action == action && p.since == *since) {
+                        rt.queue.items[i].due = now_ms() + 10_000;
+                    }
+                }
+            } else {
+                c.world_feedback.lock().unwrap().answered(&call, result);
+            }
+            c.feedback_publish();
+        }
+    });
+    let _ = std::thread::Builder::new().name("world-feedback-probe".into()).spawn(move || serve(ctl));
+}
+
+/// The local address: `GET /n4n0/feedback/v1` on 127.0.0.1:22541 (contracts `Docs/world-feedback.md`).
+fn serve(ctl: Shared) {
+    let listener = loop {
+        if ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        match TcpListener::bind(("127.0.0.1", contract::PORT)) {
+            Ok(l) => {
+                ctl.world_feedback.lock().unwrap().port_note = None;
+                break l;
+            }
+            Err(e) => {
+                ctl.world_feedback.lock().unwrap().port_note =
+                    Some(format!("Port {} is taken ({e}): the N4N0 world cannot reach Orbiters - N4N0 to give feedback", contract::PORT));
+                std::thread::sleep(Duration::from_secs(30));
+            }
+        }
+    };
+    for stream in listener.incoming() {
+        if ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let Ok(stream) = stream else { continue };
+        let c = ctl.clone();
+        let _ = std::thread::Builder::new().name("world-feedback-answer".into()).spawn(move || {
+            let _ = answer(&c, stream);
+        });
+    }
+}
+
+/// The request's method, path and Host, from at most 8 KB of it.
+fn request(stream: &mut TcpStream) -> Option<(String, String, String)> {
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    let mut data = Vec::new();
+    let mut buf = [0u8; 2048];
+    while !data.windows(4).any(|w| w == b"\r\n\r\n") && data.len() < 8192 {
+        let n = stream.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        data.extend_from_slice(&buf[..n]);
+    }
+    let text = String::from_utf8_lossy(&data);
+    let mut lines = text.split("\r\n");
+    let mut first = lines.next()?.split(' ');
+    let (method, target) = (first.next()?.to_string(), first.next()?.to_string());
+    let host =
+        lines.find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("host")).map(|(_, v)| v.trim().to_string())).unwrap_or_default();
+    Some((method, target, host))
+}
+
+/// The status and body for a request: only `GET` of the path, only to 127.0.0.1:22541 or localhost:22541, only while
+/// the player is in a world whose lines count.
+fn route(method: &str, target: &str, host: &str, in_world: bool) -> Result<(), (u16, &'static str)> {
+    let path = target.split('?').next().unwrap_or_default();
+    let hosts = [format!("127.0.0.1:{}", contract::PORT), format!("localhost:{}", contract::PORT)];
+    if !hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
+        return Err((421, "Misdirected Request"));
+    }
+    if method != "GET" || path != contract::PATH || !in_world {
+        return Err((404, "Not Found"));
+    }
+    Ok(())
+}
+
+fn answer(ctl: &Shared, mut stream: TcpStream) -> std::io::Result<()> {
+    let Some((method, target, host)) = request(&mut stream) else { return Ok(()) };
+    let development = ctl.settings().development;
+    let signed_in = ctl.feedback_api().is_some();
+    let (status, body) = {
+        let mut rt = ctl.world_feedback.lock().unwrap();
+        // What the world logged before asking counts in this answer.
+        rt.follow(development, signed_in);
+        match route(&method, &target, &host, accepted(rt.joined.as_deref(), development)) {
+            Ok(()) => ((200, "OK"), rt.answer(signed_in).to_string()),
+            Err(status) => (status, String::new()),
+        }
+    };
+    let head = if body.is_empty() {
+        format!("HTTP/1.1 {} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status.0, status.1)
+    } else {
+        format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            status.0,
+            status.1,
+            body.len()
+        )
+    };
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body.as_bytes())?;
+    stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WORLD: &str = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";
+
+    fn line(seq: u64, body: &str) -> contract::Line {
+        contract::parse(&format!(r#"[N4N0-Feedback] {{"v":1,"session":"5f3a9c01","seq":{seq},{body}}}"#)).expect("a line")
+    }
+
+    #[test]
+    fn the_worlds_lines_become_actions_once_each() {
+        let mut rt =
+            WorldFeedbackRuntime { queue: Queue::default(), queue_path: std::env::temp_dir().join("orbiters-feedback-unit.json"), ..Default::default() };
+        assert!(rt.line(line(1, r#""t":"hello""#), false, true));
+        rt.line(line(2, &format!(r#""t":"select","world":"{WORLD}","name":"Home","preview":1,"slot":2,"key":3"#)), false, true);
+        assert_eq!(rt.world.selected, Some((WORLD.into(), "Home".into())));
+        rt.line(line(3, &format!(r#""t":"like","world":"{WORLD}","on":true"#)), false, true);
+        assert!(!rt.line(line(3, &format!(r#""t":"like","world":"{WORLD}","on":false"#)), false, true), "the same number again");
+        rt.line(line(4, &format!(r#""t":"label","world":"{WORLD}","label":"ai-world","on":true,"text":"too short""#)), false, true);
+        assert_eq!(rt.world.error.as_ref().map(|e| e.1.as_str()), Some("justification-too-short"));
+        rt.line(line(5, &format!(r#""t":"label","world":"{WORLD}","label":"mirror","on":true"#)), false, true);
+        assert_eq!(rt.world.error, None, "an accepted action clears the error");
+        rt.line(line(6, &format!(r#""t":"comment","world":"{WORLD}","text":"Great!","id":"9c1e04ab""#)), false, true);
+        rt.line(line(7, &format!(r#""t":"comment","world":"{WORLD}","text":"Great!","id":"9c1e04ab""#)), false, true);
+        assert_eq!(rt.queue.items.len(), 2, "likes and labels together, one comment");
+        let Action::Set(set) = &rt.queue.items[0].action else { panic!() };
+        assert_eq!((set.liked, set.labels.get("mirror")), (Some(true), Some(&true)));
+        assert!(matches!(&rt.queue.items[1].action, Action::Comment { client_id, .. } if client_id == "n4n0w-5f3a9c01-9c1e04ab"));
+        rt.line(line(8, &format!(r#""t":"like","world":"{WORLD}","on":false"#)), true, true);
+        let Action::Set(set) = &rt.queue.items[0].action else { panic!() };
+        assert_eq!(set.liked, Some(true), "a stale line is not acted on");
+        rt.line(line(9, &format!(r#""t":"like","world":"{WORLD}","on":false"#)), false, false);
+        assert_eq!(rt.world.error.as_ref().map(|e| e.1.as_str()), Some("sign-in"));
+        let answer = rt.answer(true);
+        assert_eq!(answer["seen"], 9);
+        assert_eq!(answer["subject"]["world"], WORLD);
+        assert_eq!(answer["subject"]["liked"], true);
+        assert_eq!(answer["subject"]["likes"], 1);
+        assert_eq!(answer["subject"]["comments"]["items"][0]["text"], "Great!");
+        assert_eq!(answer["subject"]["comments"]["items"][0]["by"], "You");
+        assert_eq!(answer["error"]["code"], "sign-in");
+        // A new session (the world loaded again) starts over.
+        let again = contract::parse(r#"[N4N0-Feedback] {"v":1,"t":"hello","session":"00000001","seq":1}"#).unwrap();
+        assert!(rt.line(again, false, true));
+        assert_eq!((rt.world.seen, rt.world.selected.clone()), (1, None));
+    }
+
+    #[test]
+    fn only_the_n4n0_world_and_the_development_environment_count() {
+        assert!(accepted(Some(contract::N4N0_WORLD), false));
+        assert!(!accepted(Some(WORLD), false));
+        assert!(accepted(Some(WORLD), true));
+        assert!(!accepted(None, true));
+    }
+
+    #[test]
+    fn the_address_answers_its_path_to_its_own_host_only() {
+        assert_eq!(route("GET", "/n4n0/feedback/v1", "127.0.0.1:22541", true), Ok(()));
+        assert_eq!(route("GET", "/n4n0/feedback/v1?x=1", "localhost:22541", true), Ok(()));
+        assert_eq!(route("GET", "/n4n0/feedback/v1", "evil.example:22541", true), Err((421, "Misdirected Request")));
+        assert_eq!(route("POST", "/n4n0/feedback/v1", "127.0.0.1:22541", true), Err((404, "Not Found")));
+        assert_eq!(route("GET", "/other", "127.0.0.1:22541", true), Err((404, "Not Found")));
+        assert_eq!(route("GET", "/n4n0/feedback/v1", "127.0.0.1:22541", false), Err((404, "Not Found")), "another world learns nothing");
+    }
+
+    #[test]
+    fn times_read() {
+        assert_eq!(rfc3339_seconds("2026-10-29T21:04:00Z"), 1_793_307_840);
+        assert_eq!(rfc3339_seconds("2026-10-29T21:04:00.000Z"), 1_793_307_840);
+        assert_eq!(rfc3339_seconds("1970-01-01T00:00:00Z"), 0);
+    }
+
+    #[test]
+    fn menus_ask_the_same_actions() {
+        let ask = FeedbackAsk::Label { world: WORLD.into(), label: "ai-world".into(), on: true, text: Some("x".into()) };
+        let (world, Action::Set(set)) = menu_action(&ask).unwrap() else { panic!() };
+        assert_eq!((world.as_str(), set.justification.as_deref()), (WORLD, Some("x")));
+        assert!(menu_action(&FeedbackAsk::Show { world: WORLD.into() }).is_none());
+        assert!(matches!(menu_action(&FeedbackAsk::Comment { world: WORLD.into(), text: "hi".into() }), Some((_, Action::Comment { .. }))));
+    }
+}

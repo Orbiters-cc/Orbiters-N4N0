@@ -207,6 +207,10 @@ pub struct OrbStatus {
     pub captures: orbiters_orb::captures::CapturesView,
     #[serde(default)]
     pub friends: orbiters_orb::captures::Friends,
+    /// The worlds' feedback as the app keeps it, the player's actions not sent yet included (contracts `Docs/orb.md`,
+    /// Menu, from screen version 13).
+    #[serde(default)]
+    pub feedback: orbiters_orb::feedback::FeedbackView,
     /// How many of N4N0's controller input parameters (contracts `Docs/orb-input.md`) the worn avatar lists.
     #[serde(default)]
     pub input_params: u8,

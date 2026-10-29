@@ -137,6 +137,8 @@ pub struct Controller {
     burst: Mutex<burst::BurstRuntime>,
     /// What My World asked for (controller/world_captures.rs).
     world_captures: Mutex<world_captures::WorldCapturesRuntime>,
+    /// World feedback: the N4N0 world's lines, the queue to Orbiters, the menus' worlds (controller/world_feedback.rs).
+    world_feedback: Mutex<world_feedback::WorldFeedbackRuntime>,
     /// A scan under way (controller/scan.rs).
     scan: Mutex<scan::ScanRuntime>,
     /// N4N0's camera rig while recording (controller/rig.rs).
@@ -289,6 +291,7 @@ mod videos;
 pub mod vrchat_data;
 pub mod vrchat_login;
 mod world_captures;
+mod world_feedback;
 pub use account::open_url;
 pub(crate) use maps::prepare as prepare_upload;
 
@@ -331,6 +334,7 @@ impl Controller {
             performance: Mutex::new(performance::PerformanceRuntime::default()),
             burst: Mutex::new(burst::BurstRuntime::default()),
             world_captures: Mutex::new(world_captures::WorldCapturesRuntime::default()),
+            world_feedback: Mutex::new(world_feedback::WorldFeedbackRuntime::default()),
             scan: Mutex::new(scan::ScanRuntime::default()),
             rig: Mutex::new(rig::RigRuntime::default()),
             calls: Mutex::new(calls::CallsRuntime::default()),
@@ -378,6 +382,7 @@ impl Controller {
         spawn_watchers(self.clone());
         shares::spawn_presence(self.clone());
         world_captures::spawn(self.clone());
+        world_feedback::spawn(self.clone());
         self.start_account();
         self.start_vrchat_login();
         self.start_orb();

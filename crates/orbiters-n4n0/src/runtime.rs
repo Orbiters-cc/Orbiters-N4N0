@@ -212,6 +212,8 @@ pub(crate) struct OrbRuntime {
     pub(crate) captures: orbiters_orb::captures::CapturesView,
     pub(crate) friends: orbiters_orb::captures::Friends,
     pub(crate) friends_asked: u32,
+    /// The worlds' feedback as the app last handed it (feedback.rs).
+    pub(crate) feedback: orbiters_orb::feedback::FeedbackView,
     /// The computer's keys for the overlay menu's keyboard (the last few, numbered), and whether the keyboard is taken.
     pub(crate) keys: std::collections::VecDeque<(u32, orbiters_orb::menu::KeyInput)>,
     pub(crate) keyboard_taken: bool,
@@ -408,6 +410,7 @@ impl OrbRuntime {
             invite: self.invite.clone(),
             qr: self.qr.view.clone(),
             captures: self.captures.clone(),
+            feedback: self.feedback.clone(),
             friends: self.friends.clone(),
             input_params: crate::input::InputRuntime::used(&self.params) as u8,
         }
@@ -1656,6 +1659,7 @@ impl N4n0 {
             Command::Captures => self.captures_list(),
             Command::Friends { on } => self.friends(on),
             Command::ShareCapture { share } => self.share_capture(share),
+            Command::Feedback { ask } => self.feedback_ask(ask),
             Command::Dictate => self.menu_listen(),
             Command::Watch { link } => {
                 if let Err(e) = self.host.watch(&link) {

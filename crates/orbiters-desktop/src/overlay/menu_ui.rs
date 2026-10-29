@@ -277,6 +277,11 @@ pub fn glyph(icon: Icon) -> &'static str {
         Icon::Public => icons::GLOBE_HEMISPHERE_WEST,
         Icon::Friends => icons::USERS,
         Icon::Warning => icons::WARNING,
+        Icon::Heart => icons::HEART,
+        Icon::Tag => icons::TAG,
+        Icon::Chat => icons::CHAT_CIRCLE_TEXT,
+        Icon::Pencil => icons::PENCIL_SIMPLE,
+        Icon::Trash => icons::TRASH,
         // Drawn as the N4N0 mark (`orbiters_ui::n4n0_logo`), never as a glyph.
         Icon::Mark => icons::STACK,
     }
@@ -473,7 +478,8 @@ fn element(p: &Painter, e: &Element, origin: Pos2, skin: &Skin) {
             }
             if let Some(title) = label {
                 let fitted = fit(p, Txt::new(title, place.size).weight(weight::SEMIBOLD).color(pal.text), place.room);
-                let at = r.min + if wide { vec2(116.0, 40.0) } else { vec2(24.0, r.height() - 92.0) };
+                // A wide tile under 136 high (More's eight cards) has its title higher, over its note.
+                let at = r.min + if wide { vec2(116.0, wide_title_y(r.height(), 40.0)) } else { vec2(24.0, r.height() - 92.0) };
                 widgets::text(p, at + vec2(0.0, fitted.dy), Align2::LEFT_TOP, &fitted.txt);
             }
         }
@@ -524,6 +530,16 @@ fn element(p: &Painter, e: &Element, origin: Pos2, skin: &Skin) {
 /// above it.
 pub fn tile_is_wide(r: layout::Rect) -> bool {
     2 * r.w as u32 > 3 * r.h as u32
+}
+
+/// Where a wide tile's title starts down from its top: `usual` (from 136 high), higher in a shorter one, so that it
+/// sits over the note More's eight cards put 64 below their top.
+pub fn wide_title_y(height: f32, usual: f32) -> f32 {
+    if height < 136.0 {
+        usual - (136.0 - height) / 2.0
+    } else {
+        usual
+    }
 }
 
 /// Whether a home tile is one of the ten-tile Home's small ones: its icon smaller, its title beside it.

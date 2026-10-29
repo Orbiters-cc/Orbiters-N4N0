@@ -177,7 +177,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             match page {
                 // The window never shows a dropped card itself (the avatar's screen does), nor the simple Home's More (its
                 // Home has every feature).
-                Page::Home | Page::Card | Page::More => home(ui, cx, menu, &idle, copied_id, &mut acts),
+                // World feedback is given from the world's window (Visited worlds) and the menus, not from this Home.
+                Page::Home | Page::Card | Page::More | Page::Feedback | Page::FeedbackLabels | Page::Comments => home(ui, cx, menu, &idle, copied_id, &mut acts),
                 Page::Instances | Page::AddFriend => instances(ui, cx, menu, &mut acts),
                 Page::Search | Page::Results => youtube(ui, cx, menu, &picture, focus, copied_id, &mut acts),
                 Page::Call => call(ui, cx, menu, &mut acts),

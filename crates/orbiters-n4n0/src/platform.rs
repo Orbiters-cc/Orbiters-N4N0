@@ -134,6 +134,10 @@ pub trait Host: Send + Sync + 'static {
     fn friends(&self) -> Result<Vec<orbiters_orb::captures::Friend>, String> {
         Err("VRChat friends are read by Orbiters - N4N0 on the computer".into())
     }
+    /// World feedback a menu asked (contracts `Docs/world-feedback.md`): a world's read again, or the player's like,
+    /// label or comment sent, called on a thread of its own. The app answers with [`crate::N4n0::set_feedback`], at once
+    /// with the action applied (before it reaches Orbiters). A device that cannot send feedback leaves it.
+    fn world_feedback(&self, _ask: orbiters_orb::feedback::FeedbackAsk) {}
     /// A 3D capture's picture for the menus (its key: `CaptureRow::key`), read on a thread of its own.
     fn capture_picture(&self, _key: &str) -> Option<orbiters_orb::picture::Rgb> {
         None

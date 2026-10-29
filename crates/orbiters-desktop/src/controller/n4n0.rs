@@ -164,6 +164,12 @@ impl Host for Link {
         self.with(|c| c.menu_friends()).unwrap_or_else(|| Ok(Vec::new()))
     }
 
+    /// World feedback N4N0's menu asked: read a world's, or send the player's like, label or comment (controller/
+    /// world_feedback.rs).
+    fn world_feedback(&self, ask: orbiters_orb::feedback::FeedbackAsk) {
+        self.with(|c| c.world_feedback_ask(ask));
+    }
+
     /// A capture's picture: its session's thumbnail.
     fn capture_picture(&self, key: &str) -> Option<orbiters_orb::picture::Rgb> {
         super::menu_shares::capture_picture(key)

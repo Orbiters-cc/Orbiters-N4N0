@@ -10,6 +10,7 @@ use super::{
     RESULTS_PER_PAGE, STATES_PER_PAGE, TIMELINE_STEPS, TIMERS, TRACKING_KINDS,
 };
 use crate::captures::{CaptureRow, Friends, Sharing};
+use crate::feedback::{self, COMMENTS_PER_PAGE, TOP_LABELS};
 use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
 use std::sync::OnceLock;
 
@@ -79,10 +80,18 @@ pub enum ScreenPage {
     ShareTo = 32,
     /// Sharing an explicit capture publicly: the warning (from version 12).
     Explicit = 33,
+    /// A world's feedback: likes, the labels people gave most, the newest comment (from version 13).
+    Feedback = 34,
+    /// The world's labels, to give or take back (from version 13).
+    FeedbackLabels = 35,
+    /// The world's comments (from version 13).
+    Comments = 36,
+    /// More with room for eight cards, World feedback among them (from version 13).
+    MoreFeedback = 37,
 }
 
 impl ScreenPage {
-    pub const ALL: [ScreenPage; 33] = [
+    pub const ALL: [ScreenPage; 37] = [
         ScreenPage::Home,
         ScreenPage::SearchQwerty,
         ScreenPage::SearchAzerty,
@@ -116,6 +125,10 @@ impl ScreenPage {
         ScreenPage::History,
         ScreenPage::ShareTo,
         ScreenPage::Explicit,
+        ScreenPage::Feedback,
+        ScreenPage::FeedbackLabels,
+        ScreenPage::Comments,
+        ScreenPage::MoreFeedback,
     ];
 
     /// The page picture's file stem and the overlay screenshot's name.
@@ -154,6 +167,10 @@ impl ScreenPage {
             ScreenPage::History => "history",
             ScreenPage::ShareTo => "share-to",
             ScreenPage::Explicit => "explicit",
+            ScreenPage::Feedback => "feedback",
+            ScreenPage::FeedbackLabels => "feedback-labels",
+            ScreenPage::Comments => "comments",
+            ScreenPage::MoreFeedback => "more-feedback",
         }
     }
 
@@ -164,7 +181,7 @@ impl ScreenPage {
             Pages::Six => ScreenPage::HomeSix,
             Pages::Seven => ScreenPage::HomeSeven,
             Pages::Ten | Pages::Timeline => ScreenPage::HomeTen,
-            Pages::Simple | Pages::Qr | Pages::Share => ScreenPage::HomeQuiet,
+            Pages::Simple | Pages::Qr | Pages::Share | Pages::Feedback => ScreenPage::HomeQuiet,
         }
     }
 
@@ -189,6 +206,11 @@ impl ScreenPage {
             Page::History => ScreenPage::History,
             Page::ShareTo => ScreenPage::ShareTo,
             Page::Explicit => ScreenPage::Explicit,
+            Page::Feedback | Page::FeedbackLabels | Page::Comments if !menu.pages.feedback() => ScreenPage::home_of(menu),
+            Page::Feedback => ScreenPage::Feedback,
+            Page::FeedbackLabels => ScreenPage::FeedbackLabels,
+            Page::Comments => ScreenPage::Comments,
+            Page::More if menu.pages.feedback() => ScreenPage::MoreFeedback,
             Page::Photo if menu.pages.share() => ScreenPage::PhotoShare,
             Page::More if menu.pages.qr() => ScreenPage::MoreQr,
             Page::More => ScreenPage::More,
@@ -358,6 +380,16 @@ pub enum Icon {
     Friends,
     /// The explicit warning.
     Warning,
+    /// Like a world.
+    Heart,
+    /// A world's labels.
+    Tag,
+    /// Comments.
+    Chat,
+    /// Write a comment.
+    Pencil,
+    /// Delete one's own comment.
+    Trash,
 }
 
 /// Home's features in their order (the first four as on the four-tile Home, the first six as on the six-tile one), each
@@ -399,11 +431,46 @@ pub const MORE_CARDS_QR: [(Target, Icon, Text, Tint); 5] = [
     (Target::Suggest, Icon::Suggest, Text::HomeSuggest, Tint::Purple),
 ];
 
-/// The tile notes ([`Content::TileNote`]) of the simple Home's More, of More's Previous instances and of its QR code
-/// scanner, past [`HOME_TILES`]' own.
+/// More's cards from screen version 13, in two columns of four rows (the last row left for more): World feedback
+/// beside suggest.
+pub const MORE_CARDS_FEEDBACK: [(Target, Icon, Text, Tint); 6] = [
+    (Target::Light, Icon::Lightbulb, Text::HomeLight, Tint::Amber),
+    (Target::Instances, Icon::Instances, Text::MoreInstances, Tint::Blue),
+    (Target::Tracking, Icon::Tracking, Text::MoreTracking, Tint::Indigo),
+    (Target::Qr, Icon::Qr, Text::MoreQr, Tint::Green),
+    (Target::WorldFeedback, Icon::Heart, Text::MoreFeedback, Tint::Pink),
+    (Target::Suggest, Icon::Suggest, Text::HomeSuggest, Tint::Purple),
+];
+
+/// The labels page's chips: each label of the list (contracts `Schemas/world-feedback-labels.json`) in its order, by
+/// its name's text.
+pub const LABEL_TEXTS: [Text; 18] = [
+    Text::LabelMeetup,
+    Text::LabelChill,
+    Text::LabelBright,
+    Text::LabelDark,
+    Text::LabelAiThumbnail,
+    Text::LabelAiWorld,
+    Text::LabelVideoPlayer,
+    Text::LabelMirror,
+    Text::LabelPens,
+    Text::LabelPhotoSpot,
+    Text::LabelMusic,
+    Text::LabelGame,
+    Text::LabelHorror,
+    Text::LabelNature,
+    Text::LabelCity,
+    Text::LabelSleep,
+    Text::LabelAvatars,
+    Text::LabelQuest,
+];
+
+/// The tile notes ([`Content::TileNote`]) of the simple Home's More, of More's Previous instances, of its QR code
+/// scanner and of its World feedback, past [`HOME_TILES`]' own.
 pub const NOTE_MORE: u8 = 9;
 pub const NOTE_INSTANCES: u8 = 10;
 pub const NOTE_QR: u8 = 11;
+pub const NOTE_FEEDBACK: u8 = 12;
 
 /// The tile note of a feature's tile or card.
 pub fn note_of(target: Target) -> u8 {
@@ -411,6 +478,7 @@ pub fn note_of(target: Target) -> u8 {
         Target::More => NOTE_MORE,
         Target::Instances => NOTE_INSTANCES,
         Target::Qr => NOTE_QR,
+        Target::WorldFeedback => NOTE_FEEDBACK,
         _ => HOME_TILES.iter().position(|t| t.0 == target).unwrap_or(0) as u8,
     }
 }
@@ -426,7 +494,7 @@ pub fn home_tiles(pages: Pages) -> &'static [(Target, Icon, Text, Tint)] {
         Pages::Four => &HOME_TILES[..4],
         Pages::Six => &HOME_TILES[..6],
         Pages::Seven => &HOME_TILES[..7],
-        Pages::Ten | Pages::Timeline | Pages::Simple | Pages::Qr | Pages::Share => &HOME_TILES,
+        Pages::Ten | Pages::Timeline | Pages::Simple | Pages::Qr | Pages::Share | Pages::Feedback => &HOME_TILES,
     }
 }
 
@@ -592,6 +660,24 @@ pub enum Content {
     ExplicitState,
     ExplicitWhy(u8),
     ExplicitLine(u8),
+    /// World feedback (from screen version 13): the world's name, why it is there, what Like's card says (how many like
+    /// it), a label people gave most with its count, the comments' count, the newest comment's author and when, its
+    /// lines, and what was just done (or why nothing can be).
+    FeedbackWorld,
+    FeedbackWhy,
+    LikeNote,
+    TopChip(u8),
+    CommentsCount,
+    NewestMeta,
+    NewestLine(u8),
+    FeedbackNote,
+    /// The labels page: the world's name and its note.
+    LabelsWorld,
+    LabelsNote,
+    /// Comments: how many (or the notice), each comment's author and when, and its lines (comment × 2 + line).
+    CommentsTitle,
+    CommentMeta(u8),
+    CommentLine(u8),
 }
 
 /// A line of changing text: `cols` cells of `size` pixels high and half as wide, from (`x`, `y`). On the screen, cell
@@ -1284,6 +1370,86 @@ pub fn layout(page: ScreenPage) -> Layout {
                 slots.add(164, 316 + i as u16 * 36, EXPLICIT_COLUMNS as u8, 28, Style::Primary, Content::ExplicitLine(i));
             }
         }
+        ScreenPage::Feedback => {
+            // Like's card and the labels people gave most at the left (switched on: the player's), the newest comment's
+            // panel, the labels and comments buttons and Write a comment at the right, the worlds to step through at the
+            // top right.
+            let mut like = with(element(Target::Like, Rect::new(32, 96, 472, 112), Look::Tile), Some(Icon::Heart), Some(Text::FeedbackLike));
+            like.tint = Some(Tint::Pink);
+            elements.push(like);
+            for i in 0..TOP_LABELS as u16 {
+                elements.push(element(Target::TopLabel(i as u8), Rect::new(32 + (i % 2) * 240, 256 + (i / 2) * 64, 232, 56), Look::Chip));
+            }
+            elements.push(element(Target::Comments, Rect::new(520, 96, 472, 240), Look::Area));
+            elements.push(with(element(Target::Labels, Rect::new(520, 352, 232, 56), Look::KeyDark), Some(Icon::Tag), Some(Text::FeedbackLabels)));
+            elements.push(with(element(Target::Comments, Rect::new(760, 352, 232, 56), Look::KeyDark), Some(Icon::Chat), Some(Text::FeedbackComments)));
+            elements.push(with(element(Target::WriteComment, Rect::new(520, 424, 472, 64), Look::Accent), Some(Icon::Pencil), Some(Text::FeedbackWrite)));
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(round(Target::Previous, 808, Icon::Previous));
+            elements.push(round(Target::Next, 936, Icon::Next));
+            labels.push(Label { x: 32, y: 224, size: 20, text: Text::FeedbackPeople, style: Style::Secondary, bold: false, width: 472 });
+            slots.add(104, 28, 30, 28, Style::Primary, Content::FeedbackWorld);
+            slots.add(104, 60, 34, 20, Style::Secondary, Content::FeedbackWhy);
+            slots.add(868, 40, 5, 24, Style::Secondary, Content::PageLabel).centered();
+            slots.add(148, 168, 22, 24, Style::Secondary, Content::LikeNote);
+            for i in 0..TOP_LABELS as u16 {
+                slots.add(52 + (i % 2) * 240, 272 + (i / 2) * 64, 17, 24, Style::Primary, Content::TopChip(i as u8));
+            }
+            slots.add(544, 116, 18, 24, Style::Accent, Content::CommentsCount);
+            slots.add(544, 156, 30, 20, Style::Secondary, Content::NewestMeta);
+            for i in 0..NEWEST_LINES as u16 {
+                slots.add(544, 192 + i * 36, NEWEST_COLUMNS as u8, 24, Style::Primary, Content::NewestLine(i as u8));
+            }
+            slots.add(32, 512, 48, 24, Style::Accent, Content::FeedbackNote);
+        }
+        ScreenPage::FeedbackLabels => {
+            // Every label in three columns of six (switched on: the player's), the world's name by the title.
+            for (i, &text) in LABEL_TEXTS.iter().enumerate() {
+                let i = i as u16;
+                elements.push(with(element(Target::LabelChip(i as u8), Rect::new(32 + (i % 3) * 324, 96 + (i / 3) * 64, 312, 56), Look::Chip), None, Some(text)));
+            }
+            elements.push(round(Target::Back, 32, Icon::Back));
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::FeedbackLabelsTitle, style: Style::Primary, bold: true, width: 260 });
+            slots.add(380, 40, 40, 24, Style::Secondary, Content::LabelsWorld);
+            slots.add(32, 500, 76, 24, Style::Accent, Content::LabelsNote);
+        }
+        ScreenPage::Comments => {
+            // Three comments a page, each on its panel (Delete on the player's own), Write a comment under them.
+            for i in 0..COMMENTS_PER_PAGE as u16 {
+                elements.push(element(Target::CommentCard(i as u8), Rect::new(32, 96 + i * 128, 960, 120), Look::Area));
+            }
+            for i in 0..COMMENTS_PER_PAGE as u16 {
+                elements.push(with(element(Target::DeleteComment(i as u8), Rect::new(812, 128 + i * 128, 156, 56), Look::KeyDark), Some(Icon::Trash), Some(Text::FeedbackDelete)));
+            }
+            elements.push(with(element(Target::WriteComment, Rect::new(32, 488, 400, 64), Look::Accent), Some(Icon::Pencil), Some(Text::FeedbackWrite)));
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(round(Target::Previous, 808, Icon::Previous));
+            elements.push(round(Target::Next, 936, Icon::Next));
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::FeedbackCommentsTitle, style: Style::Primary, bold: true, width: 300 });
+            slots.add(420, 40, 30, 24, Style::Secondary, Content::CommentsTitle);
+            slots.add(868, 40, 5, 24, Style::Secondary, Content::PageLabel).centered();
+            for i in 0..COMMENTS_PER_PAGE as u16 {
+                let y = 96 + i * 128;
+                slots.add(56, y + 16, 22, 20, Style::Secondary, Content::CommentMeta(i as u8));
+                for line in 0..COMMENT_LINES as u16 {
+                    slots.add(56, y + 44 + line * 36, COMMENT_COLUMNS as u8, 28, Style::Primary, Content::CommentLine((i * COMMENT_LINES as u16 + line) as u8));
+                }
+            }
+        }
+        ScreenPage::MoreFeedback => {
+            // Two columns of four rows of wide cards (the last row left for more): the icon at the left, the title and
+            // the note beside it.
+            elements.push(round(Target::Back, 32, Icon::Back));
+            for (i, &(target, icon, title, tint)) in MORE_CARDS_FEEDBACK.iter().enumerate() {
+                let (x, y) = (32 + (i as u16 % 2) * 488, 96 + (i as u16 / 2) * 112);
+                let mut card = with(element(target, Rect::new(x, y, 472, 100), Look::Tile), Some(icon), Some(title));
+                card.tint = Some(tint);
+                elements.push(card);
+                slots.add(x + 116, y + 64, 27, 24, Style::Secondary, Content::TileNote(note_of(target)));
+            }
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::MoreTitle, style: Style::Primary, bold: true, width: 800 });
+            slots.add(672, 548, 40, 16, Style::Secondary, Content::Versions);
+        }
         ScreenPage::Instances => {
             elements.push(round(Target::Back, 32, Icon::Back));
             elements.push(round(Target::Previous, 808, Icon::Previous));
@@ -1338,6 +1504,23 @@ pub const EXPLICIT_WHY_LINES: usize = 2;
 pub const EXPLICIT_WHY_COLUMNS: usize = 54;
 pub const EXPLICIT_LINES: usize = 2;
 pub const EXPLICIT_COLUMNS: usize = 58;
+/// World feedback's newest comment, and each comment on Comments: lines of so many characters (the last ending in "…"
+/// when there is more).
+pub const NEWEST_LINES: usize = 2;
+pub const NEWEST_COLUMNS: usize = 34;
+pub const COMMENT_LINES: usize = 2;
+pub const COMMENT_COLUMNS: usize = 42;
+
+/// `text` in at most `lines` lines of `cols` characters, cut between words, the last ending in "…" when there is more.
+pub fn wrapped(text: &str, cols: usize, lines: usize) -> Vec<String> {
+    let mut out = super::pieces(&shown(text), cols);
+    if out.len() > lines {
+        out.truncate(lines);
+        let last = out.pop().unwrap_or_default();
+        out.push(ellipsis(&format!("{last} …"), cols));
+    }
+    out
+}
 
 /// The seven-tile Home's place `i` (0 to 7): two rows of four, 228 × 216 each, 16 apart.
 fn seven_cell(i: usize) -> (u16, u16) {
@@ -1425,6 +1608,10 @@ fn tile_note(menu: &Menu, tile: u8) -> String {
         },
         NOTE_QR if menu.qr.scanning() => "Scanning…".into(),
         NOTE_QR => "Open a link from the camera".into(),
+        NOTE_FEEDBACK => match menu.feedback.subjects.first() {
+            Some(s) if s.why == feedback::Why::Here && !s.name.is_empty() => s.name.clone(),
+            _ => "Like, label, comment".into(),
+        },
         _ if menu.sending => "Sending…".into(),
         _ => "Tell the team".into(),
     }
@@ -1543,6 +1730,8 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             Page::Instances => format!("{}/{}", menu.instance_page + 1, menu.instances.len().div_ceil(INSTANCES_PER_PAGE).max(1)),
             Page::History => format!("{}/{}", menu.capture_page + 1, menu.captures.history.len().div_ceil(CAPTURES_PER_PAGE).max(1)),
             Page::ShareTo => format!("{}/{}", menu.friend_page + 1, menu.found_friends().len().div_ceil(FRIENDS_PER_PAGE).max(1)),
+            Page::Feedback if menu.feedback.subjects.len() > 1 => format!("{}/{}", menu.subject + 1, menu.feedback.subjects.len()),
+            Page::Comments => format!("{}/{}", menu.comment_page + 1, menu.shown_feedback().map_or(0, |f| f.comments.len()).div_ceil(COMMENTS_PER_PAGE).max(1)),
             _ => String::new(),
         },
         Content::HeardCaption => match (&menu.heard, menu.heard_private) {
@@ -1689,6 +1878,18 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             Typing::StateName => "Name the new state".into(),
             Typing::Suggestion => "Your idea for N4N0".into(),
             Typing::Friend => "Find a friend by name".into(),
+            Typing::Comment => match menu.shown_subject() {
+                Some(s) if !s.name.is_empty() => format!("Comment on {}", s.name),
+                _ => "Your comment".into(),
+            },
+            Typing::Justification => {
+                let words = orbiters_contracts::world_feedback::words(&menu.typed);
+                match &menu.notice {
+                    Some(notice) => notice.clone(),
+                    None if words >= 10 => format!("Why it is an AI world · {words} words"),
+                    None => format!("Why it is an AI world · {words} of 10 words"),
+                }
+            }
         },
         Content::TypeLine(i) => typed_lines(&menu.typed).into_iter().nth(i as usize).unwrap_or_default(),
         Content::DraftName => menu.draft.name.clone(),
@@ -1810,7 +2011,77 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             super::pieces(&why, EXPLICIT_WHY_COLUMNS).into_iter().nth(i as usize).unwrap_or_default()
         }
         Content::ExplicitLine(i) => super::pieces(crate::captures::EXPLICIT_WARNING, EXPLICIT_COLUMNS).into_iter().nth(i as usize).unwrap_or_default(),
+        Content::FeedbackWorld | Content::LabelsWorld => match menu.shown_subject() {
+            Some(s) if !s.name.is_empty() => s.name.clone(),
+            Some(_) => "This world".into(),
+            None => "No world yet".into(),
+        },
+        Content::FeedbackWhy => match menu.shown_subject() {
+            Some(s) => feedback::why_text(s.why, now()),
+            None => "Join a world to give it feedback".into(),
+        },
+        Content::LikeNote => match menu.shown_feedback() {
+            Some(f) if f.loading && f.likes == 0 => "Reading…".into(),
+            Some(f) if f.liked => format!("{} · You like it", feedback::likes_text(f.likes)),
+            Some(f) => feedback::likes_text(f.likes),
+            None => String::new(),
+        },
+        Content::TopChip(i) => match menu.shown_feedback().and_then(|f| f.top().get(i as usize).map(|l| (l.id.clone(), l.count))) {
+            Some((id, count)) => format!("{} · {count}", orbiters_contracts::world_feedback::label(&id).map_or(id.as_str(), |l| l.name("en"))),
+            None => String::new(),
+        },
+        Content::CommentsCount => menu.shown_feedback().map(|f| feedback::comments_text(f.comment_count)).unwrap_or_default(),
+        Content::NewestMeta => menu.shown_feedback().and_then(|f| f.comments.first()).map(|c| comment_meta(c, 30)).unwrap_or_default(),
+        Content::NewestLine(i) => menu
+            .shown_feedback()
+            .and_then(|f| f.comments.first())
+            .and_then(|c| wrapped(&c.text, NEWEST_COLUMNS, NEWEST_LINES).into_iter().nth(i as usize))
+            .unwrap_or_else(|| match (i, menu.shown_feedback()) {
+                (0, Some(f)) if !f.loading && f.comments.is_empty() => "Be the first to say something".into(),
+                _ => String::new(),
+            }),
+        Content::FeedbackNote | Content::LabelsNote => match (&menu.notice, menu.shown_feedback()) {
+            (Some(notice), _) => notice.clone(),
+            _ if menu.shown_subject().is_none() => String::new(),
+            _ if !menu.feedback.signed_in => "Sign in to Orbiters - N4N0 to give feedback".into(),
+            (None, Some(f)) if f.error.is_some() => f.error.clone().unwrap_or_default(),
+            (None, Some(f)) if f.pending > 0 => "Sending…".into(),
+            (None, _) if content == Content::LabelsNote => "AI world asks why, in at least 10 words".into(),
+            _ => String::new(),
+        },
+        Content::CommentsTitle => match (&menu.notice, menu.shown_feedback()) {
+            (Some(notice), _) => notice.clone(),
+            (None, Some(f)) if f.loading && f.comments.is_empty() => "Reading…".into(),
+            (None, Some(f)) => feedback::comments_text(f.comment_count),
+            (None, None) => String::new(),
+        },
+        Content::CommentMeta(i) => menu.page_comments().get(i as usize).map(|c| comment_meta(c, 22)).unwrap_or_default(),
+        Content::CommentLine(i) => {
+            let (comment, line) = (i as usize / COMMENT_LINES, i as usize % COMMENT_LINES);
+            menu.page_comments().get(comment).and_then(|c| wrapped(&c.text, COMMENT_COLUMNS, COMMENT_LINES).into_iter().nth(line)).unwrap_or_default()
+        }
     }
+}
+
+/// Now, in Unix seconds.
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// A comment's author and when in `cols` characters, the time always whole: `Enzo · 2 h ago`, `Lyra Nightf… · 3 d`,
+/// `You · Sending…`.
+fn comment_meta(c: &feedback::CommentRow, cols: usize) -> String {
+    let seconds = now().saturating_sub(c.at);
+    let long = feedback::ago(seconds);
+    let by = if c.by.trim().is_empty() { "Someone" } else { c.by.trim() };
+    let when = if c.id == 0 {
+        "Sending…".to_string()
+    } else if by.chars().count() + 3 + long.chars().count() <= cols {
+        long
+    } else {
+        feedback::ago_short(seconds)
+    };
+    format!("{} · {when}", ellipsis(by, cols.saturating_sub(3 + when.chars().count()).max(1)))
 }
 
 /// A capture's world, as its rows name it.
@@ -2031,6 +2302,10 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::Timeline(i) => menu.media.as_ref().is_some_and(|m| timeline_lit(m, i)),
         // A friend chosen on Share to ….
         Target::FriendMark(i) => menu.page_friends().get(i as usize).is_some_and(|f| menu.is_chosen(f)),
+        // World feedback: the player's like and labels.
+        Target::Like => menu.shown_feedback().is_some_and(|f| f.liked),
+        Target::TopLabel(i) => menu.shown_feedback().is_some_and(|f| f.top().get(i as usize).is_some_and(|l| l.mine)),
+        Target::LabelChip(i) => feedback::label_at(i as usize).is_some_and(|l| menu.shown_feedback().is_some_and(|f| f.has(&l.id))),
         _ => false,
     };
     let hidden = match target {
@@ -2074,6 +2349,13 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::SharePublic(i) | Target::ShareTo(i) => i as usize >= menu.page_captures().len(),
         Target::Friend(i) => i as usize >= menu.page_friends().len(),
         Target::FriendMark(i) => !menu.page_friends().get(i as usize).is_some_and(|f| menu.is_chosen(f)),
+        // World feedback (from screen version 13): what needs a world, the labels people gave, the page's comments and
+        // Delete on the player's own once Orbiters has it.
+        Target::WorldFeedback => !menu.pages.feedback(),
+        Target::Like | Target::Labels | Target::Comments | Target::WriteComment => menu.shown_subject().is_none(),
+        Target::TopLabel(i) => menu.shown_feedback().is_none_or(|f| i as usize >= f.top().len()),
+        Target::CommentCard(i) => i as usize >= menu.page_comments().len(),
+        Target::DeleteComment(i) => !menu.page_comments().get(i as usize).is_some_and(|c| c.mine && c.id != 0),
         _ => false,
     };
     let unavailable = match target {
@@ -2086,6 +2368,8 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::ShareLatest | Target::ShareLatestTo => !menu.captures.latest.as_ref().is_some_and(CaptureRow::shareable),
         Target::SharePublic(i) | Target::ShareTo(i) => !menu.page_captures().get(i as usize).is_some_and(CaptureRow::shareable),
         Target::SendShare => menu.chosen.is_empty(),
+        // Feedback is given signed in.
+        Target::Like | Target::TopLabel(_) | Target::LabelChip(_) | Target::WriteComment => !menu.feedback.signed_in,
         _ => false,
     };
     State { on: on && !unavailable, hidden, unavailable }
@@ -2253,7 +2537,8 @@ mod tests {
         assert_eq!(Pages::of_screen(Some(10)), Pages::Simple);
         assert_eq!(Pages::of_screen(Some(11)), Pages::Qr);
         assert_eq!(Pages::of_screen(Some(12)), Pages::Share);
-        assert_eq!(Pages::of_screen(Some(14)), Pages::Share);
+        assert_eq!(Pages::of_screen(Some(13)), Pages::Feedback);
+        assert_eq!(Pages::of_screen(Some(14)), Pages::Feedback);
         let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
         menu.open();
         assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSeven);

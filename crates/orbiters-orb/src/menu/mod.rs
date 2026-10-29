@@ -17,6 +17,7 @@ pub mod theme;
 pub mod touch;
 
 use crate::captures::{CaptureRow, CapturesView, Friend, Friends, ShareAsk};
+use crate::feedback::{FeedbackAsk, FeedbackView, Subject, WorldFeedback, COMMENTS_PER_PAGE};
 use crate::youtube::{Results, Video};
 use std::time::{Duration, Instant};
 
@@ -84,6 +85,13 @@ pub enum Page {
     ShareTo,
     /// Sharing a capture flagged explicit publicly: the warning, Share anyway or Cancel.
     Explicit,
+    /// A world's feedback (from screen version 13): its likes and Like, the labels people gave it most, its newest
+    /// comment, the worlds to step through.
+    Feedback,
+    /// The world's labels, to give or take back.
+    FeedbackLabels,
+    /// The world's comments, three a page: Write a comment, Delete on the player's own.
+    Comments,
 }
 
 /// What the keyboard page ([`Page::Type`]) types.
@@ -96,6 +104,10 @@ pub enum Typing {
     Suggestion,
     /// Part of a friend's name, for Share to … (from screen version 12).
     Friend,
+    /// A comment on the world World feedback shows (from screen version 13).
+    Comment,
+    /// Why the world is what the label waiting for it says (the AI world label's justification).
+    Justification,
 }
 
 impl Typing {
@@ -105,6 +117,8 @@ impl Typing {
             Typing::StateName => STATE_NAME_MAX,
             Typing::Suggestion => SUGGESTION_MAX,
             Typing::Friend => crate::captures::FIND_MAX,
+            Typing::Comment => orbiters_contracts::world_feedback::max_comment(),
+            Typing::Justification => orbiters_contracts::world_feedback::max_justification(),
         }
     }
 }
@@ -204,16 +218,21 @@ pub enum Pages {
     /// From version 12: the 3D picture page with the last capture and its shares, History, Share to … and the explicit
     /// warning.
     Share,
+    /// From version 13: World feedback (likes, labels, comments), its labels and comments, More with room for eight cards.
+    Feedback,
 }
 
 impl Pages {
     /// Every page: the overlay's and the window's.
-    pub const ALL: Pages = Pages::Share;
+    pub const ALL: Pages = Pages::Feedback;
 
     /// The pages of a screen of `version` (`None`: a screen from before `N4N0/Screen/Version`).
     pub fn of_screen(version: Option<i32>) -> Pages {
-        use orbiters_contracts::orb::{SCREEN_MUSIC_LIGHT, SCREEN_QR, SCREEN_SHARE, SCREEN_SIMPLE, SCREEN_STATES_CARDS, SCREEN_TEN_TILES, SCREEN_TIMELINE};
+        use orbiters_contracts::orb::{
+            SCREEN_FEEDBACK, SCREEN_MUSIC_LIGHT, SCREEN_QR, SCREEN_SHARE, SCREEN_SIMPLE, SCREEN_STATES_CARDS, SCREEN_TEN_TILES, SCREEN_TIMELINE,
+        };
         match version {
+            Some(v) if v >= SCREEN_FEEDBACK => Pages::Feedback,
             Some(v) if v >= SCREEN_SHARE => Pages::Share,
             Some(v) if v >= SCREEN_QR => Pages::Qr,
             Some(v) if v >= SCREEN_SIMPLE => Pages::Simple,
@@ -258,6 +277,11 @@ impl Pages {
     /// The 3D picture page shares the last capture and opens History (with Share to … and the explicit warning).
     pub fn share(self) -> bool {
         self >= Pages::Share
+    }
+
+    /// More has World feedback (with its labels and comments pages).
+    pub fn feedback(self) -> bool {
+        self >= Pages::Feedback
     }
 }
 
@@ -598,6 +622,20 @@ pub enum Target {
     /// The explicit warning: share publicly all the same, or not.
     ShareAnyway,
     CancelShare,
+    /// More's World feedback (from screen version 13), and on its page: Like, one of the labels people gave most (the
+    /// player gives it or takes it back), the labels page, the comments (the newest's panel, or the button), Write a
+    /// comment. Previous and Next step through the worlds there, through the pages on Comments.
+    WorldFeedback,
+    Like,
+    TopLabel(u8),
+    Labels,
+    Comments,
+    WriteComment,
+    /// The labels page's label `i` of the list (contracts `Schemas/world-feedback-labels.json`).
+    LabelChip(u8),
+    /// Comments: a comment's card (nothing to press), and Delete on the player's own.
+    CommentCard(u8),
+    DeleteComment(u8),
 }
 
 /// The timeline segment a target is (the segment, or the place over it), for a drag along the timeline.
@@ -719,6 +757,8 @@ pub enum Effect {
     Friends(bool),
     /// Share a 3D capture (`Docs/capture-sharing.md`): its progress comes back in its row ([`Menu::set_captures`]).
     ShareCapture(ShareAsk),
+    /// Read or send world feedback (`Docs/world-feedback.md`): the host answers with [`Menu::set_feedback`].
+    Feedback(FeedbackAsk),
     /// The menu closed.
     Close,
 }
@@ -845,6 +885,12 @@ pub struct Menu {
     /// The share whose answer the menu waits for, and its capture's share state when it was asked (or last changed):
     /// the explicit warning shows when the server asks for it, a state left from an earlier share counting for nothing.
     asked: Option<(String, crate::captures::Sharing)>,
+    /// World feedback as the host knows it, the world shown (an index of its subjects), the page of Comments shown (from
+    /// 0), and the label waiting for its justification on the keyboard.
+    pub feedback: FeedbackView,
+    pub subject: usize,
+    pub comment_page: usize,
+    pub justifying: Option<String>,
 }
 
 /// How long a state saved here shows before the host's list has it.
@@ -938,6 +984,8 @@ impl Menu {
             Typing::StateName => Page::NewState,
             Typing::Suggestion => Page::Suggest,
             Typing::Friend => Page::ShareTo,
+            Typing::Comment => Page::Comments,
+            Typing::Justification => Page::FeedbackLabels,
         }
     }
 
@@ -1030,6 +1078,8 @@ impl Menu {
                     Page::AddFriend => Page::Instances,
                     Page::History => Page::Photo,
                     Page::ShareTo | Page::Explicit => self.share_from,
+                    Page::FeedbackLabels | Page::Comments => Page::Feedback,
+                    Page::Feedback if self.pages.simple() => Page::More,
                     // The simple Home's More holds these.
                     Page::Light | Page::Tracking | Page::Suggest | Page::Instances | Page::Qr if self.pages.simple() => Page::More,
                     _ => Page::Home,
@@ -1153,6 +1203,8 @@ impl Menu {
                         self.find = text;
                         self.friend_page = 0;
                     }
+                    Typing::Comment => return self.send_comment(&text),
+                    Typing::Justification => return self.send_justification(&text),
                 }
                 self.go(self.typed_from());
                 Vec::new()
@@ -1362,6 +1414,61 @@ impl Menu {
                 Vec::new()
             }
             Target::History | Target::FindFriend | Target::SendShare | Target::ShareAnyway | Target::CancelShare => Vec::new(),
+            // World feedback (from screen version 13).
+            Target::WorldFeedback if self.pages.feedback() => {
+                self.subject = 0;
+                self.go(Page::Feedback);
+                self.show_feedback()
+            }
+            Target::Like => match self.shown_world() {
+                Some(world) if self.feedback.signed_in => {
+                    let entry = self.feedback.world_mut(&world);
+                    let on = !entry.liked;
+                    entry.set_like(on);
+                    self.notice = None;
+                    vec![Effect::Feedback(FeedbackAsk::Like { world, on })]
+                }
+                Some(_) => self.sign_in_first(),
+                None => Vec::new(),
+            },
+            Target::TopLabel(i) => {
+                let id = self.shown_feedback().and_then(|f| f.top().get(i as usize).map(|l| l.id.clone()));
+                match id {
+                    Some(id) => self.toggle_label(&id),
+                    None => Vec::new(),
+                }
+            }
+            Target::LabelChip(i) => match crate::feedback::label_at(i as usize) {
+                Some(label) => self.toggle_label(&label.id.clone()),
+                None => Vec::new(),
+            },
+            Target::Labels if self.shown_world().is_some() => {
+                self.go(Page::FeedbackLabels);
+                Vec::new()
+            }
+            Target::Comments if self.shown_world().is_some() => {
+                self.comment_page = 0;
+                self.go(Page::Comments);
+                Vec::new()
+            }
+            Target::WriteComment => match self.shown_world() {
+                Some(_) if self.feedback.signed_in => {
+                    self.type_for(Typing::Comment, String::new());
+                    Vec::new()
+                }
+                Some(_) => self.sign_in_first(),
+                None => Vec::new(),
+            },
+            Target::DeleteComment(i) => {
+                let Some(world) = self.shown_world() else { return Vec::new() };
+                let Some(id) = self.page_comments().get(i as usize).filter(|c| c.mine && c.id != 0).map(|c| c.id) else { return Vec::new() };
+                let entry = self.feedback.world_mut(&world);
+                entry.comments.retain(|c| c.id != id);
+                entry.comment_count = entry.comment_count.saturating_sub(1);
+                self.notice = Some("Comment deleted".into());
+                vec![Effect::Feedback(FeedbackAsk::Uncomment { world, comment: id })]
+            }
+            Target::WorldFeedback | Target::Labels | Target::Comments | Target::CommentCard(_) => Vec::new(),
             Target::Contact(i) => match self.page_contacts().get(i as usize) {
                 Some(contact) if self.call.is_none() => vec![Effect::CallContact { id: contact.id.clone() }],
                 _ => Vec::new(),
@@ -1671,6 +1778,8 @@ impl Menu {
             Page::Instances => self.instance_page > 0,
             Page::History => self.capture_page > 0,
             Page::ShareTo => self.friend_page > 0,
+            Page::Feedback => self.subject > 0,
+            Page::Comments => self.comment_page > 0,
             _ => false,
         }
     }
@@ -1683,6 +1792,8 @@ impl Menu {
             Page::Instances => (self.instance_page + 1) * INSTANCES_PER_PAGE < self.instances.len(),
             Page::History => (self.capture_page + 1) * CAPTURES_PER_PAGE < self.captures.history.len(),
             Page::ShareTo => (self.friend_page + 1) * FRIENDS_PER_PAGE < self.found_friends().len(),
+            Page::Feedback => self.subject + 1 < self.feedback.subjects.len(),
+            Page::Comments => (self.comment_page + 1) * COMMENTS_PER_PAGE < self.shown_feedback().map_or(0, |f| f.comments.len()),
             _ => false,
         }
     }
@@ -1743,6 +1854,21 @@ impl Menu {
             Page::ShareTo => {
                 let pages = self.found_friends().len().div_ceil(FRIENDS_PER_PAGE).max(1);
                 self.friend_page = (self.friend_page as i32 + by).clamp(0, pages as i32 - 1) as usize;
+                Vec::new()
+            }
+            Page::Feedback => {
+                let last = self.feedback.subjects.len().max(1) - 1;
+                let next = (self.subject as i32 + by).clamp(0, last as i32) as usize;
+                if next == self.subject {
+                    return Vec::new();
+                }
+                self.subject = next;
+                self.notice = None;
+                self.show_feedback()
+            }
+            Page::Comments => {
+                let pages = self.shown_feedback().map_or(0, |f| f.comments.len()).div_ceil(COMMENTS_PER_PAGE).max(1);
+                self.comment_page = (self.comment_page as i32 + by).clamp(0, pages as i32 - 1) as usize;
                 Vec::new()
             }
             _ => Vec::new(),
@@ -1970,6 +2096,120 @@ impl Menu {
 
     /// The instances the player was in, the newest first, as the host read them (`ready`: read; else `note` says why
     /// there are none).
+    /// The world World feedback shows, when there is one.
+    pub fn shown_subject(&self) -> Option<&Subject> {
+        self.feedback.subjects.get(self.subject).or_else(|| self.feedback.subjects.last())
+    }
+
+    pub fn shown_world(&self) -> Option<String> {
+        self.shown_subject().map(|s| s.world.clone())
+    }
+
+    /// The feedback of the world shown, once the host has any.
+    pub fn shown_feedback(&self) -> Option<&WorldFeedback> {
+        self.shown_subject().and_then(|s| self.feedback.world(&s.world))
+    }
+
+    /// The comments on the page of Comments shown.
+    pub fn page_comments(&self) -> &[crate::feedback::CommentRow] {
+        let Some(f) = self.shown_feedback() else { return &[] };
+        let start = (self.comment_page * COMMENTS_PER_PAGE).min(f.comments.len());
+        &f.comments[start..(start + COMMENTS_PER_PAGE).min(f.comments.len())]
+    }
+
+    /// Asks the host for the shown world's feedback.
+    fn show_feedback(&mut self) -> Vec<Effect> {
+        match self.shown_world() {
+            Some(world) => vec![Effect::Feedback(FeedbackAsk::Show { world })],
+            None => Vec::new(),
+        }
+    }
+
+    fn sign_in_first(&mut self) -> Vec<Effect> {
+        self.notice = Some("Sign in to Orbiters - N4N0 to give feedback".into());
+        Vec::new()
+    }
+
+    /// The player gives the label (or takes it back); one that needs a justification asks for it on the keyboard first.
+    fn toggle_label(&mut self, id: &str) -> Vec<Effect> {
+        let Some(world) = self.shown_world() else { return Vec::new() };
+        if !self.feedback.signed_in {
+            return self.sign_in_first();
+        }
+        let Some(label) = orbiters_contracts::world_feedback::label(id) else { return Vec::new() };
+        let entry = self.feedback.world_mut(&world);
+        let on = !entry.has(id);
+        if on && label.justify.is_some() {
+            let kept = entry.justification.clone().unwrap_or_default();
+            self.justifying = Some(id.to_string());
+            self.type_for(Typing::Justification, kept);
+            return Vec::new();
+        }
+        entry.set_label(id, on);
+        self.notice = None;
+        vec![Effect::Feedback(FeedbackAsk::Label { world, label: id.to_string(), on, text: None })]
+    }
+
+    /// Done on the keyboard of a justification: given with it once it has enough words, else the keyboard stays.
+    fn send_justification(&mut self, text: &str) -> Vec<Effect> {
+        use orbiters_contracts::world_feedback as contract;
+        let (Some(world), Some(id)) = (self.shown_world(), self.justifying.clone()) else {
+            self.go(self.typed_from());
+            return Vec::new();
+        };
+        let Some(label) = contract::label(&id) else { return Vec::new() };
+        match contract::justification(label, text) {
+            Ok(text) => {
+                let entry = self.feedback.world_mut(&world);
+                entry.set_label(&id, true);
+                entry.justification = Some(text.clone());
+                self.justifying = None;
+                self.go(Page::FeedbackLabels);
+                self.notice = Some(format!("{} given, with your reason", label.name("en")));
+                vec![Effect::Feedback(FeedbackAsk::Label { world, label: id, on: true, text: Some(text) })]
+            }
+            Err(refusal) => {
+                self.notice = Some(refusal.text().trim_end_matches('.').to_string());
+                Vec::new()
+            }
+        }
+    }
+
+    /// Done on the keyboard of a comment: it shows first in Comments at once, on its way.
+    fn send_comment(&mut self, text: &str) -> Vec<Effect> {
+        let Some(world) = self.shown_world() else {
+            self.go(self.typed_from());
+            return Vec::new();
+        };
+        match orbiters_contracts::world_feedback::comment(text) {
+            Ok(text) => {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                let entry = self.feedback.world_mut(&world);
+                entry.comments.insert(0, crate::feedback::CommentRow { id: 0, by: "You".into(), text: text.clone(), at: now, mine: true });
+                entry.comment_count += 1;
+                self.comment_page = 0;
+                self.typed.clear();
+                self.go(Page::Comments);
+                self.notice = Some("Sending your comment…".into());
+                vec![Effect::Feedback(FeedbackAsk::Comment { world, text })]
+            }
+            Err(refusal) => {
+                self.notice = Some(refusal.text().trim_end_matches('.').to_string());
+                Vec::new()
+            }
+        }
+    }
+
+    /// The host's world feedback: the worlds and what it read and sent. The world shown stays the same world when it
+    /// is still among them.
+    pub fn set_feedback(&mut self, view: FeedbackView) {
+        let shown = self.shown_world();
+        self.feedback = view;
+        self.subject = shown.and_then(|w| self.feedback.subjects.iter().position(|s| s.world == w)).unwrap_or(0);
+        let pages = self.shown_feedback().map_or(0, |f| f.comments.len()).div_ceil(COMMENTS_PER_PAGE).max(1);
+        self.comment_page = self.comment_page.min(pages - 1);
+    }
+
     pub fn set_instances(&mut self, instances: Vec<InstanceRow>, ready: bool, note: &str) {
         self.instances = instances;
         self.instances_ready = ready;
@@ -2946,5 +3186,81 @@ mod tests {
         assert_eq!(row("~region(use)").region(), Some("US E"));
         assert_eq!(row("~region(us)").region(), Some("US W"));
         assert_eq!((layout::ago(30), layout::ago(300), layout::ago(7200), layout::ago(3 * 86400)), ("just now".into(), "5 min ago".into(), "2 h ago".into(), "3 d ago".into()));
+    }
+
+    /// World feedback (screen version 13): More's card opens the world's page, Like and the labels show at once and ask
+    /// the host, AI world asks for its reason on the keyboard (enough words or it stays), a comment shows first while
+    /// on its way, the player's own can be deleted, the worlds are stepped through; older screens have none of it.
+    #[test]
+    fn world_feedback_flows_through_the_menu() {
+        use crate::feedback::{FeedbackView, LabelCount, Subject, Why, WorldFeedback};
+        use layout::{target_state, ScreenPage};
+        let w = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";
+        let other = "wrld_9936b6ff-e523-4066-9e40-a333320ff5d3";
+        let mut menu = Menu { pages: Pages::ALL, ..Default::default() };
+        menu.open();
+        menu.set_feedback(FeedbackView {
+            signed_in: true,
+            subjects: vec![Subject { world: w.into(), name: "Home".into(), why: Why::Here }, Subject { world: other.into(), name: "Shrine".into(), why: Why::Capture }],
+            worlds: vec![WorldFeedback { world: w.into(), likes: 2, labels: vec![LabelCount { id: "mirror".into(), count: 3, mine: false }], ..Default::default() }],
+        });
+        menu.press(Target::More);
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::MoreFeedback);
+        assert_eq!(menu.press(Target::WorldFeedback), [Effect::Feedback(FeedbackAsk::Show { world: w.into() })]);
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::Feedback);
+        assert_eq!(menu.press(Target::Like), [Effect::Feedback(FeedbackAsk::Like { world: w.into(), on: true })]);
+        assert_eq!(menu.shown_feedback().map(|f| (f.likes, f.liked)), Some((3, true)));
+        assert!(target_state(&menu, Target::Like).on);
+        assert_eq!(layout::text(&menu, layout::Content::TopChip(0)), "Mirror · 3");
+        assert_eq!(menu.press(Target::TopLabel(0)), [Effect::Feedback(FeedbackAsk::Label { world: w.into(), label: "mirror".into(), on: true, text: None })]);
+        assert!(target_state(&menu, Target::TopLabel(0)).on);
+        // AI world: its reason first.
+        menu.press(Target::Labels);
+        let ai = orbiters_contracts::world_feedback::labels().iter().position(|l| l.id == "ai-world").unwrap() as u8;
+        assert!(menu.press(Target::LabelChip(ai)).is_empty());
+        assert_eq!((menu.page, menu.typing), (Page::Type, Typing::Justification));
+        menu.type_text("looks generated");
+        assert!(menu.press(Target::Done).is_empty(), "not enough words");
+        assert_eq!(menu.page, Page::Type);
+        assert!(layout::text(&menu, layout::Content::TypeTitle).contains("10 words"));
+        menu.type_text(" because the signs are unreadable and the textures melt everywhere");
+        let effects = menu.press(Target::Done);
+        assert!(matches!(&effects[..], [Effect::Feedback(FeedbackAsk::Label { label, on: true, text: Some(t), .. })] if label == "ai-world" && t.starts_with("looks generated")));
+        assert_eq!(menu.page, Page::FeedbackLabels);
+        assert!(target_state(&menu, Target::LabelChip(ai)).on);
+        assert_eq!(menu.press(Target::LabelChip(ai)), [Effect::Feedback(FeedbackAsk::Label { world: w.into(), label: "ai-world".into(), on: false, text: None })]);
+        // A comment shows first, on its way; the player's own once Orbiters has it can be deleted.
+        menu.press(Target::Back);
+        menu.press(Target::WriteComment);
+        assert_eq!((menu.page, menu.typing), (Page::Type, Typing::Comment));
+        menu.type_text("Great mirror");
+        assert_eq!(menu.press(Target::Done), [Effect::Feedback(FeedbackAsk::Comment { world: w.into(), text: "Great mirror".into() })]);
+        assert_eq!(menu.page, Page::Comments);
+        assert_eq!(menu.page_comments()[0].text, "Great mirror");
+        assert!(target_state(&menu, Target::DeleteComment(0)).hidden, "not sent yet");
+        let mut view = menu.feedback.clone();
+        view.worlds[0].comments[0].id = 12;
+        menu.set_feedback(view);
+        assert!(!target_state(&menu, Target::DeleteComment(0)).hidden);
+        assert_eq!(menu.press(Target::DeleteComment(0)), [Effect::Feedback(FeedbackAsk::Uncomment { world: w.into(), comment: 12 })]);
+        assert!(menu.page_comments().is_empty());
+        // The worlds to step through.
+        menu.press(Target::Back);
+        assert_eq!(menu.press(Target::Next), [Effect::Feedback(FeedbackAsk::Show { world: other.into() })]);
+        assert_eq!(layout::text(&menu, layout::Content::FeedbackWorld), "Shrine");
+        assert_eq!(layout::text(&menu, layout::Content::PageLabel), "2/2");
+        // Signed out: nothing is sent, the page says why.
+        let mut out = menu.feedback.clone();
+        out.signed_in = false;
+        menu.set_feedback(out);
+        assert!(menu.press(Target::Like).is_empty());
+        assert!(target_state(&menu, Target::Like).unavailable);
+        // A screen of version 12 has no World feedback.
+        let mut old = Menu { pages: Pages::of_screen(Some(12)), ..Default::default() };
+        old.open();
+        old.press(Target::More);
+        assert_eq!(ScreenPage::of(&old), ScreenPage::MoreQr);
+        assert!(old.press(Target::WorldFeedback).is_empty());
+        assert_ne!(old.page, Page::Feedback);
     }
 }

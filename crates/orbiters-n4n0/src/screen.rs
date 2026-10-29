@@ -1606,6 +1606,7 @@ impl N4n0 {
                 Effect::Captures => self.captures_list(),
                 Effect::Friends(on) => self.friends(on),
                 Effect::ShareCapture(ask) => self.share_capture(ask),
+                Effect::Feedback(ask) => self.feedback_ask(ask),
                 Effect::CopyText { text } => {
                     if let Err(e) = self.device.clipboard.copy(&text) {
                         self.notify(NoticeKind::Error, e);

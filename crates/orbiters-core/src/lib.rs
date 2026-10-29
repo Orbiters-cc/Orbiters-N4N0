@@ -25,6 +25,7 @@ pub mod vrchat_accounts;
 pub mod vrchat_api;
 pub mod vrchat_log;
 pub mod vrchat_source;
+pub mod world_feedback;
 
 pub use orbiters_contracts as contracts;
 

@@ -6,6 +6,7 @@ pub mod captures;
 pub mod context;
 pub mod controls;
 pub mod drops;
+pub mod feedback;
 pub mod invites;
 pub mod menu;
 pub mod picture;

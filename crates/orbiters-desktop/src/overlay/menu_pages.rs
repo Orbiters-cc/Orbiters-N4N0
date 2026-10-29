@@ -453,7 +453,60 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     let mut explicit = history;
     explicit.press(Target::SharePublic(2));
     out.push((ScreenPage::Explicit, explicit, hovered(ScreenPage::Explicit, Target::CancelShare), None));
+    // Screens from version 13 (and the overlay): a world's feedback with the player's like and labels, its labels page,
+    // its comments, More with World feedback.
+    let feedback = || {
+        let mut m = share();
+        m.set_feedback(sample_feedback());
+        m
+    };
+    let mut more = feedback();
+    more.press(Target::More);
+    out.push((ScreenPage::MoreFeedback, more, hovered(ScreenPage::MoreFeedback, Target::WorldFeedback), None));
+    let mut world = feedback();
+    world.press(Target::More);
+    world.press(Target::WorldFeedback);
+    out.push((ScreenPage::Feedback, world.clone(), hovered(ScreenPage::Feedback, Target::WriteComment), None));
+    let mut labels = world.clone();
+    labels.press(Target::Labels);
+    out.push((ScreenPage::FeedbackLabels, labels, hovered(ScreenPage::FeedbackLabels, Target::LabelChip(7)), None));
+    let mut comments = world;
+    comments.press(Target::Comments);
+    out.push((ScreenPage::Comments, comments, hovered(ScreenPage::Comments, Target::DeleteComment(0)), None));
     out
+}
+
+/// The sample player's world feedback: the world they are in (liked, two labels of theirs, comments of theirs and
+/// others'), and two worlds to step to.
+pub(crate) fn sample_feedback() -> orbiters_orb::feedback::FeedbackView {
+    use orbiters_orb::feedback::{CommentRow, FeedbackView, LabelCount, Subject, WorldFeedback, Why};
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let here = "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b";
+    let label = |id: &str, count: u32, mine: bool| LabelCount { id: id.into(), count, mine };
+    let comment = |id: u64, by: &str, text: &str, ago: u64, mine: bool| CommentRow { id, by: by.into(), text: text.into(), at: now - ago, mine };
+    let world = WorldFeedback {
+        world: here.into(),
+        likes: 41,
+        liked: true,
+        labels: vec![label("meetup", 12, true), label("mirror", 9, false), label("photo-spot", 6, true), label("bright", 4, false), label("pens", 3, false), label("video-player", 2, false), label("chill", 1, false)],
+        comments: vec![
+            comment(381, "Enzo", "The mirror room upstairs is perfect for photos, and the lighting at sunset is unreal.", 7200, true),
+            comment(377, "Kasumi", "Great place for meetups! The video player works with every link we tried.", 26 * 3600, false),
+            comment(360, "Lyra Nightfall", "Cozy. Wish the pens were near the spawn.", 3 * 86_400, false),
+            comment(352, "Bob the Builder", "We held our build club here, everyone loved the rooftop.", 5 * 86_400, false),
+        ],
+        comment_count: 7,
+        ..Default::default()
+    };
+    FeedbackView {
+        signed_in: true,
+        subjects: vec![
+            Subject { world: here.into(), name: "The Black Cat".into(), why: Why::Here },
+            Subject { world: "wrld_9936b6ff-e523-4066-9e40-a333320ff5d3".into(), name: "Japan Shrine".into(), why: Why::Capture },
+            Subject { world: "wrld_a7e4d38f-8fac-47ab-9e30-628bf015e62b".into(), name: "Palm Point - Night".into(), why: Why::Instance { at: now - 26 * 3600 } },
+        ],
+        worlds: vec![world],
+    }
 }
 
 /// The sample player's 3D captures: the last one ready to share, History's in every state (one flagged explicit), each

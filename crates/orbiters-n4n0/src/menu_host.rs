@@ -101,6 +101,8 @@ pub struct MenuHost<P: Pictures> {
     photo_note_seen: Option<u32>,
     /// Where the 3D captures' pictures are read (none: they show as placeholders).
     capture_pictures: Option<CapturePictures>,
+    /// The worlds' feedback in the last status taken: the app's changes replace the menu's (its own presses show at once).
+    feedback_seen: orbiters_orb::feedback::FeedbackView,
 }
 
 impl<P: Pictures> MenuHost<P> {
@@ -128,6 +130,7 @@ impl<P: Pictures> MenuHost<P> {
             keys_seen: None,
             photo_note_seen: None,
             capture_pictures: None,
+            feedback_seen: Default::default(),
         }
     }
 
@@ -254,6 +257,12 @@ impl<P: Pictures> MenuHost<P> {
         }
         if m.friends != orb.friends {
             m.set_friends(orb.friends.clone());
+            changed = true;
+        }
+        // World feedback: taken when the app's changes (the menu's own presses show at once, before the app has them).
+        if self.feedback_seen != orb.feedback {
+            self.feedback_seen = orb.feedback.clone();
+            m.set_feedback(orb.feedback.clone());
             changed = true;
         }
         match (&orb.invite, self.invite_seen) {
@@ -480,6 +489,7 @@ impl<P: Pictures> MenuHost<P> {
                 Effect::Captures => service.command(Command::Captures),
                 Effect::Friends(on) => service.command(Command::Friends { on }),
                 Effect::ShareCapture(share) => service.command(Command::ShareCapture { share }),
+                Effect::Feedback(ask) => service.command(Command::Feedback { ask }),
                 Effect::Close => close = true,
             }
         }

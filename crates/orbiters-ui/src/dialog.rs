@@ -129,10 +129,12 @@ impl<'a> Dialog<'a> {
         );
         let radius = lerp((self.origin.height() * 0.5).min(18.0), 24.0).max(4.0);
         let k = t.clamp(0.0, 1.0);
-        // The contents come once the shape is mostly there, and leave first; meanwhile they travel with the shape's
-        // centre, so that they open out of it instead of being cut by it.
-        let content = if closing { ((t - 0.6) / 0.4).clamp(0.0, 1.0) } else { ((t - 0.45) / 0.55).clamp(0.0, 1.0) };
-        let travel = shape.center() - fin.center();
+        // The contents fly with the shape, scaled as one (never unequally) to fit inside it, so that they grow out of
+        // what opened the dialog instead of being cut by it; they fade in on the way and leave first when it closes.
+        let content = if closing { ((t - 0.55) / 0.35).clamp(0.0, 1.0) } else { ((t - 0.2) / 0.6).clamp(0.0, 1.0) };
+        let scale = (shape.width() / fin.width()).min(shape.height() / fin.height()).clamp(0.05, 1.1);
+        let flight = egui::emath::TSTransform::new(shape.center().to_vec2() - fin.center().to_vec2() * scale, scale);
+        let landed = (scale - 1.0).abs() < 0.002 && (shape.center() - fin.center()).length() < 0.25;
         let mut response = Response { closing, closed: false };
 
         // Opaque from its first frame (egui fades new areas in): it grows out of its origin instead.
@@ -149,66 +151,19 @@ impl<'a> Dialog<'a> {
             widgets::frame(p, shape, radius, theme::mix(self.origin_fill, theme::INK_850, (k * 1.7).clamp(0.0, 1.0)));
             let _ = ui.interact(shape, id.with("shape"), Sense::click());
 
-            let mut du = ui.new_child(UiBuilder::new().max_rect(fin.translate(travel)).id_salt(id.with("contents")));
-            du.set_clip_rect(shape.shrink(2.0).intersect(ui.clip_rect()));
+            // The contents are laid out where the dialog lands and drawn through the flight's transform (pictures and
+            // text included); clicks wait until it landed, as the transform moves only what is drawn.
+            let mut du = ui.new_child(UiBuilder::new().max_rect(fin).id_salt(id.with("contents")));
+            du.set_clip_rect(fin.shrink(2.0));
             du.multiply_opacity(content);
             if closing || content < 0.05 {
                 du.disable();
             }
-            let dy = 10.0 * (1.0 - content);
-            let inner = fin.shrink(PAD).translate(travel + vec2(0.0, dy));
-
-            // Heading: icon tile, title and subtitle, the ×.
-            let head = Rect::from_min_size(inner.min, vec2(inner.width(), HEAD_H));
-            let mut x = head.left();
-            let p = du.painter();
-            if let Some(g) = self.glyph {
-                let tile = Rect::from_min_size(pos2(x, head.center().y - 20.0), vec2(40.0, 40.0));
-                p.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12));
-                widgets::icon(p, tile.center(), g, 19.0, theme::ACCENT);
-                x = tile.right() + 14.0;
-            }
-            let title_w = head.right() - 48.0 - x;
-            match self.subtitle {
-                Some(sub) => {
-                    widgets::text_truncated(
-                        p,
-                        pos2(x, head.center().y - 10.0),
-                        Align2::LEFT_CENTER,
-                        &Txt::new(self.title, 18.0).weight(weight::SEMIBOLD),
-                        title_w,
-                    );
-                    widgets::text_truncated(p, pos2(x, head.center().y + 12.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3), title_w);
-                }
-                None => {
-                    widgets::text_truncated(p, pos2(x, head.center().y), Align2::LEFT_CENTER, &Txt::new(self.title, 18.0).weight(weight::SEMIBOLD), title_w);
-                }
-            }
-            let close_r = Rect::from_center_size(pos2(head.right() - 16.0, head.center().y), vec2(32.0, 32.0));
-            if widgets::activated(&widgets::IconButton::new(icons::X, "Close").size(32.0, 16.0).id_salt(id).show_at(&mut du, close_r)) {
-                close(ctx, id);
-            }
-
-            // Body, scrolling once it is taller than the window allows.
-            let body = Rect::from_min_size(pos2(inner.left(), head.bottom() + 16.0), vec2(inner.width(), body_h));
-            // A few points of room around the content (selection rings, a pressed tile) inside the scroll's clip.
-            let room = body.expand(BODY_ROOM as f32);
-            let mut bu = du.new_child(UiBuilder::new().max_rect(room).id_salt(id.with("body")));
-            bu.set_clip_rect(room.intersect(du.clip_rect()));
-            let out = egui::ScrollArea::vertical().id_salt(id.with("scroll")).auto_shrink([false, false]).max_height(room.height()).show(&mut bu, |ui| {
-                egui::Frame::NONE.inner_margin(BODY_ROOM).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing = vec2(0.0, 12.0);
-                    contents(ui, Part::Body);
-                });
-            });
-            ctx.data_mut(|d| d.insert_temp(id.with("content-h"), (out.content_size.y - 2.0 * BODY_ROOM as f32).ceil()));
-
-            if self.footer {
-                let footer = Rect::from_min_size(pos2(inner.left(), body.bottom() + 16.0), vec2(inner.width(), FOOT_H));
-                let mut fu =
-                    du.new_child(UiBuilder::new().max_rect(footer).layout(egui::Layout::right_to_left(egui::Align::Center)).id_salt(id.with("footer")));
-                fu.spacing_mut().item_spacing = vec2(8.0, 0.0);
-                contents(&mut fu, Part::Footer);
+            if landed {
+                self.contents(&mut du, ctx, fin, body_h, true, &mut contents);
+            } else {
+                du.with_visual_transform(flight, |du| self.contents(du, ctx, fin, body_h, false, &mut contents));
+                let _ = ui.interact(shape.union(fin), id.with("flying"), Sense::click_and_drag());
             }
         });
         if !closing && !self.busy && !popup::any_open(ctx) && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -216,5 +171,62 @@ impl<'a> Dialog<'a> {
         }
         response.closing = is_closing(ctx, id);
         response
+    }
+
+    /// The heading, the body and the footer, laid out in `fin` (where the dialog lands); the body's scroll bar only
+    /// once `landed`.
+    fn contents(&self, du: &mut Ui, ctx: &egui::Context, fin: Rect, body_h: f32, landed: bool, contents: &mut impl FnMut(&mut Ui, Part)) {
+        let id = self.id;
+        let inner = fin.shrink(PAD);
+        // Heading: icon tile, title and subtitle, the ×.
+        let head = Rect::from_min_size(inner.min, vec2(inner.width(), HEAD_H));
+        let mut x = head.left();
+        let p = du.painter();
+        if let Some(g) = self.glyph {
+            let tile = Rect::from_min_size(pos2(x, head.center().y - 20.0), vec2(40.0, 40.0));
+            p.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12));
+            widgets::icon(p, tile.center(), g, 19.0, theme::ACCENT);
+            x = tile.right() + 14.0;
+        }
+        let title_w = head.right() - 48.0 - x;
+        match self.subtitle {
+            Some(sub) => {
+                widgets::text_truncated(p, pos2(x, head.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(self.title, 18.0).weight(weight::SEMIBOLD), title_w);
+                widgets::text_truncated(p, pos2(x, head.center().y + 12.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3), title_w);
+            }
+            None => {
+                widgets::text_truncated(p, pos2(x, head.center().y), Align2::LEFT_CENTER, &Txt::new(self.title, 18.0).weight(weight::SEMIBOLD), title_w);
+            }
+        }
+        let close_r = Rect::from_center_size(pos2(head.right() - 16.0, head.center().y), vec2(32.0, 32.0));
+        if widgets::activated(&widgets::IconButton::new(icons::X, "Close").size(32.0, 16.0).id_salt(id).show_at(du, close_r)) {
+            close(ctx, id);
+        }
+
+        // Body, scrolling once it is taller than the window allows.
+        let body = Rect::from_min_size(pos2(inner.left(), head.bottom() + 16.0), vec2(inner.width(), body_h));
+        // A few points of room around the content (selection rings, a pressed tile) inside the scroll's clip.
+        let room = body.expand(BODY_ROOM as f32);
+        let mut bu = du.new_child(UiBuilder::new().max_rect(room).id_salt(id.with("body")));
+        bu.set_clip_rect(room.intersect(du.clip_rect()));
+        let bars = if landed { egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded } else { egui::scroll_area::ScrollBarVisibility::AlwaysHidden };
+        let out =
+            egui::ScrollArea::vertical().id_salt(id.with("scroll")).auto_shrink([false, false]).max_height(room.height()).scroll_bar_visibility(bars).show(
+                &mut bu,
+                |ui| {
+                    egui::Frame::NONE.inner_margin(BODY_ROOM).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = vec2(0.0, 12.0);
+                        contents(ui, Part::Body);
+                    });
+                },
+            );
+        ctx.data_mut(|d| d.insert_temp(id.with("content-h"), (out.content_size.y - 2.0 * BODY_ROOM as f32).ceil()));
+
+        if self.footer {
+            let footer = Rect::from_min_size(pos2(inner.left(), body.bottom() + 16.0), vec2(inner.width(), FOOT_H));
+            let mut fu = du.new_child(UiBuilder::new().max_rect(footer).layout(egui::Layout::right_to_left(egui::Align::Center)).id_salt(id.with("footer")));
+            fu.spacing_mut().item_spacing = vec2(8.0, 0.0);
+            contents(&mut fu, Part::Footer);
+        }
     }
 }

@@ -1236,30 +1236,38 @@ pub fn morph(ui: &mut Ui, id: Id, right: egui::Pos2, expanded_width: f32, enable
                 result = Some(false);
             }
         } else {
+            // While they part the halves overlap: the green one lies over the grey one, opaque (the grey of a
+            // secondary button on a card, mixed rather than see-through), and each label stays inside its own half.
             let p = ui.painter();
+            let grey = theme::mix(theme::INK_850, theme::INK_600, 0.55);
+            let inn = ((kc - 0.45) / 0.55).clamp(0.0, 1.0);
+            let label = |r: Rect, text: &str, glyph: &str, fg: Color32| {
+                let mut lp = p.with_clip_rect(r.shrink(2.0).intersect(p.clip_rect()));
+                lp.multiply_opacity(inn);
+                let t = Txt::new(text, 13.5).weight(weight::MEDIUM).color(fg);
+                let tw = widgets::text_size(ui, &t).x + if with_icons { 23.0 } else { 0.0 };
+                let x = r.center().x - tw * 0.5 + 10.0 * (1.0 - inn);
+                if with_icons {
+                    widgets::icon(&lp, pos2(x + 7.5, r.center().y), glyph, 15.0, fg);
+                }
+                widgets::text(&lp, pos2(x + if with_icons { 23.0 } else { 0.0 }, r.center().y), Align2::LEFT_CENTER, &t);
+            };
             p.rect_filled(b, theme::radius(20.0), theme::control());
-            p.rect_filled(a, theme::radius(20.0), theme::mix(theme::control(), theme::ACCENT, kc));
-            // "Share" leaves, the halves' labels come in from where the button was.
+            if inn > 0.0 {
+                // Centred on what the green half leaves of it.
+                label(Rect::from_min_max(pos2(b.left().max(a.right()), b.top()), b.max), to_label, icons::USERS, theme::FG);
+            }
+            p.rect_filled(a, theme::radius(20.0), theme::mix(grey, theme::ACCENT, kc));
+            // "Share" leaves from where the button was, the halves' labels come in.
             let out = (1.0 - kc * 3.0).clamp(0.0, 1.0);
             if out > 0.0 {
-                let mut lp = p.clone();
+                let mut lp = p.with_clip_rect(a.intersect(p.clip_rect()));
                 lp.multiply_opacity(out);
                 widgets::icon(&lp, pos2(small.left() + 18.0 + 7.5, small.center().y), icons::CLOUD_ARROW_UP, 15.0, theme::FG);
                 widgets::text(&lp, pos2(small.left() + 18.0 + 23.0, small.center().y), Align2::LEFT_CENTER, &Txt::new("Share", 13.5).weight(weight::MEDIUM));
             }
-            let inn = ((kc - 0.45) / 0.55).clamp(0.0, 1.0);
             if inn > 0.0 {
-                let mut lp = p.clone();
-                lp.multiply_opacity(inn);
-                for (r, label, glyph, fg) in [(a, public_label, icons::GLOBE, theme::ON_ACCENT), (b, to_label, icons::USERS, theme::FG)] {
-                    let t = Txt::new(label, 13.5).weight(weight::MEDIUM).color(fg);
-                    let tw = widgets::text_size(ui, &t).x + if with_icons { 23.0 } else { 0.0 };
-                    let x = r.center().x - tw * 0.5 + 10.0 * (1.0 - inn);
-                    if with_icons {
-                        widgets::icon(&lp, pos2(x + 7.5, r.center().y), glyph, 15.0, fg);
-                    }
-                    widgets::text(&lp, pos2(x + if with_icons { 23.0 } else { 0.0 }, r.center().y), Align2::LEFT_CENTER, &t);
-                }
+                label(a, public_label, icons::GLOBE, theme::ON_ACCENT);
             }
             let _ = ui.interact(full, id.with("moving"), Sense::click());
         }

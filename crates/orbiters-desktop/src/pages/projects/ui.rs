@@ -1,63 +1,39 @@
-use super::state::{server, Modal, Outcome, State};
-use crate::pages::Cx;
-use egui::{pos2, vec2, Align2, Id, Rect, Sense, Ui, UiBuilder};
-use orbiters_projects::{
-    avatars::Avatar,
-    discovery::{self, Project},
-    setup, templates, vpm,
-};
-use orbiters_ui::{
-    anim::{self, Spring},
-    icons,
-    theme::{self, weight, Txt},
-    widgets::{self, Button, Size, Variant},
-};
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+//! The Unity projects page: a static header (the title, the search and the actions on one row), the projects as cards
+//! and those found on the computer as rows under them, and the selected project's panel: beside the cards on wide
+//! windows (the cards make room for it with a spring), sliding over them on narrow ones. Dialogs grow out of what
+//! opened them ([`super::dialogs`]).
 
-fn text(ui: &mut Ui, s: &str, size: f32, color: egui::Color32) {
-    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), size + 9.), Sense::hover());
-    widgets::text_truncated(ui.painter(), r.left_center(), Align2::LEFT_CENTER, &Txt::new(s, size).color(color), r.width());
+use super::art;
+use super::panel;
+use super::state::{server, Modal, Outcome, State};
+use crate::pages::header::{Action, Header};
+use crate::pages::{self, Cx, PAD_X};
+use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui, UiBuilder};
+use orbiters_projects::{discovery::Project, vpm};
+use orbiters_ui::anim::{self, ease, Spring};
+use orbiters_ui::layout::{self, PANE_GAP};
+use orbiters_ui::paint::{self, Gradient};
+use orbiters_ui::theme::{self, weight, Txt};
+use orbiters_ui::widgets::{self, Button, Size, Tone, Variant};
+use orbiters_ui::{feedback, format, icons, logo};
+use std::sync::atomic::Ordering;
+
+pub use super::dialogs::modals;
+
+/// Narrowest project card, and the space between cards.
+const CARD_MIN: f32 = 250.0;
+const GAP: f32 = 16.0;
+/// What a card has under its cover: name, when it was edited, its pills.
+const CARD_BODY: f32 = 96.0;
+/// Projects found on the computer listed before "Show all".
+const FOUND_FIRST: usize = 6;
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
-fn title(ui: &mut Ui, s: &str) {
-    text(ui, s, 18., theme::FG);
-}
-fn button(ui: &mut Ui, label: &str, icon: &str, primary: bool, enabled: bool) -> bool {
-    widgets::activated(
-        &Button::new(label).icon(icon).size(Size::Sm).variant(if primary { Variant::Primary } else { Variant::Secondary }).enabled(enabled).show(ui),
-    )
-}
-fn error(ui: &mut Ui, state: &mut State) {
-    if let Some(e) = state.error.clone() {
-        egui::Frame::NONE.fill(theme::alpha(theme::DANGER, 0.09)).corner_radius(12.).inner_margin(12).show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.colored_label(theme::DANGER, &e);
-                if button(ui, "Dismiss", icons::X, false, true) {
-                    state.error = None;
-                }
-            });
-        });
-    }
-}
-fn progress(ui: &mut Ui, state: &State) {
-    if state.action.running() {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label(&state.action_label);
-        });
-        let p = state.copy_progress.lock().unwrap().clone();
-        if p.total > 0 {
-            ui.add(egui::ProgressBar::new(p.copied as f32 / p.total as f32).text(format!("{} · {} / {}", p.phase, p.copied, p.total)));
-            text(ui, &p.file, 12., theme::FG_3);
-            if p.phase == "Copying project" && button(ui, "Cancel copy", icons::X, false, true) {
-                state.copy_cancel.store(true, Ordering::Relaxed);
-            }
-        }
-    }
+
+fn now() -> u64 {
+    orbiters_projects::discovery::now()
 }
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
@@ -70,766 +46,523 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         }
     }
     state.poll(&ctx, cx);
-    let from = orbiters_ui::blur::next_shape(ui);
-    let rect = ui.max_rect();
-    let head = Rect::from_min_size(pos2(rect.left() + 32., rect.top() + cx.top + 8.), vec2(rect.width() - 64., 90.));
-    egui::ScrollArea::vertical().id_salt("unity-projects").auto_shrink([false, false]).scroll_bar_rect(crate::pages::below_bar(ui, cx)).show(ui, |ui| {
-        egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 32 }).show(ui, |ui| {
-            ui.add_space(cx.top + 108.);
-            ui.spacing_mut().item_spacing = vec2(12., 16.);
-            ui.add_enabled_ui(state.selected.is_none(), |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if button(ui, "Add existing project", icons::FOLDER_OPEN, false, !state.action.running()) {
-                        state.task(&ctx, "Choose a Unity project…", move || {
-                            if let Some(p) = rfd::FileDialog::new().set_title("Add a Unity project").pick_folder() {
-                                orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &p, true))?;
-                                Ok(Outcome::Changed("Project added. VCC and ALCOM can see it too.".into()))
-                            } else {
-                                Ok(Outcome::Picked(None))
-                            }
-                        });
-                    }
-                    if button(ui, "Create new project", icons::PLUS, true, !state.action.running()) {
-                        state.modal = Some(Modal::New);
-                    }
-                    if button(ui, "Manage package repos", icons::STACK, false, !state.action.running()) {
-                        state.modal = Some(Modal::Repos);
-                        state.catalog(&ctx, server(cx));
-                    }
-                    if button(ui, if state.scan_rx.is_some() { "Scanning…" } else { "Refresh" }, icons::ARROW_COUNTER_CLOCKWISE, false, state.scan_rx.is_none())
-                    {
-                        state.refresh(&ctx, true);
-                        state.load_view(&ctx, true);
-                        state.thumb_ids.clear();
-                    }
-                });
-                error(ui, state);
-                progress(ui, state);
-                ui.horizontal(|ui| {
-                    widgets::search_field(ui, "project-search", &mut state.query, "Find a project", ui.available_width().min(360.));
-                });
-                if !state.scan.warnings.is_empty() {
-                    for warning in &state.scan.warnings {
-                        ui.colored_label(theme::WARN, warning);
-                    }
-                }
-                let q = state.query.to_lowercase();
-                let projects: Vec<_> = state
-                    .scan
-                    .projects
-                    .iter()
-                    .filter(|p| q.is_empty() || p.name.to_lowercase().contains(&q) || p.path.to_string_lossy().to_lowercase().contains(&q))
-                    .cloned()
-                    .collect();
-                let registered: Vec<_> = projects.iter().filter(|p| p.registered).cloned().collect();
-                let proposals: Vec<_> = projects.iter().filter(|p| !p.registered).cloned().collect();
-                title(ui, &format!("Your projects · {}", registered.len()));
-                if registered.is_empty() {
-                    empty(
-                        ui,
-                        if state.scan_rx.is_some() { "Finding your Unity projects…" } else { "Your avatar starts here" },
-                        "Add a Unity project or create one from a VRChat template.",
-                    );
-                }
-                grid(ui, cx, state, &registered, false);
-                if !proposals.is_empty() {
-                    ui.add_space(12.);
-                    title(ui, &format!("Found on this computer · {}", proposals.len()));
-                    text(ui, "Add a project to manage its avatars and packages here, in VCC and in ALCOM.", 13., theme::FG_3);
-                    grid(ui, cx, state, &proposals, true);
-                }
-                if state.scan_rx.is_some() {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Looking through local disks in the background. Your projects are ready to use.");
-                    });
-                }
-            });
-        });
-    });
-    crate::pages::under_top(ui, cx, "unity-projects", from, head.bottom() + 8.);
-    crate::pages::heading(ui, head, "Create & prepare", "Unity projects", Some("Your avatars, worlds and packages. Everything in one place."));
-    if state.selected.is_some() {
-        panel(ui, cx, state);
-    }
-    modals(ui, cx, state);
-}
-fn empty(ui: &mut Ui, heading: &str, sub: &str) {
-    egui::Frame::NONE.fill(theme::surface()).corner_radius(18.).inner_margin(24).show(ui, |ui| {
-        title(ui, heading);
-        ui.label(egui::RichText::new(sub).color(theme::FG_3));
-    });
-}
-fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[Project], proposal: bool) {
-    let columns = (ui.available_width() / 250.).floor().max(1.) as usize;
-    let width = (ui.available_width() - 16. * (columns - 1) as f32) / columns as f32;
-    for row in projects.chunks(columns) {
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 16.;
-            for p in row {
-                ui.push_id((&p.path, proposal), |ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(width, 236.), Sense::hover());
-                    let response = ui.interact(r, ui.scope_id().with("card"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-                    let hover = anim::toggle(ui.ctx(), response.id.with("hover"), response.hovered(), Spring::SNAPPY);
-                    let mut card = ui.new_child(UiBuilder::new().max_rect(r));
-                    if proposal {
-                        card.multiply_opacity(0.63);
-                    }
-                    widgets::frame(card.painter(), r, 18., theme::mix(theme::surface(), theme::INK_750, hover * 0.45));
-                    let image = Rect::from_min_max(r.min + vec2(4., 4.), pos2(r.right() - 4., r.top() + 142.));
-                    project_image(&card, state, p, image);
-                    widgets::text_truncated(
-                        card.painter(),
-                        pos2(r.left() + 16., r.top() + 164.),
-                        Align2::LEFT_CENTER,
-                        &Txt::new(&p.name, 16.).weight(weight::MEDIUM),
-                        r.width() - 32.,
-                    );
-                    widgets::text_truncated(
-                        card.painter(),
-                        pos2(r.left() + 16., r.top() + 187.),
-                        Align2::LEFT_CENTER,
-                        &Txt::new(format!("Unity {} · {}", p.unity, p.kind.label()), 12.).color(theme::FG_3),
-                        r.width() - 32.,
-                    );
-                    widgets::text_truncated(
-                        card.painter(),
-                        pos2(r.left() + 16., r.top() + 215.),
-                        Align2::LEFT_CENTER,
-                        &Txt::new(if p.missing { "Folder unavailable".into() } else { crate::pages::local_time_unix(p.modified) }, 11.).color(theme::FG_3),
-                        r.width() - if proposal { 96. } else { 32. },
-                    );
-                    let mut add = false;
-                    if proposal {
-                        let b = Rect::from_min_size(pos2(r.right() - 81., r.bottom() - 37.), vec2(66., 28.));
-                        add = widgets::activated(
-                            &Button::new("Add +").variant(Variant::Secondary).size(Size::Sm).enabled(!state.action.running()).show_at(&mut card, b),
-                        );
-                    }
-                    if add {
-                        let path = p.path.clone();
-                        state.task(ui.ctx(), "Adding project…", move || {
-                            orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &path, true))?;
-                            Ok(Outcome::Changed("Project added".into()))
-                        });
-                    } else if widgets::activated(&response) {
-                        state.open(ui.ctx(), p.path.clone());
-                    }
-                });
-            }
-        });
-        ui.add_space(8.);
-    }
-    let _ = cx;
-}
-fn project_image(ui: &Ui, state: &State, p: &Project, r: Rect) {
-    let count = p.avatars.len().min(9);
-    if count == 0 {
-        widgets::frame(ui.painter(), r, 14., theme::INK_800);
-        widgets::icon(ui.painter(), r.center(), if p.kind == discovery::Kind::Worlds { icons::GLOBE } else { icons::CUBE }, 42., theme::FG_4);
-        return;
-    }
-    let cols = if count == 1 {
-        1
-    } else if count <= 4 {
-        2
-    } else {
-        3
-    };
-    let rows = count.div_ceil(cols);
-    let gap = 3.;
-    let size = vec2((r.width() - gap * (cols - 1) as f32) / cols as f32, (r.height() - gap * (rows - 1) as f32) / rows as f32);
-    for (i, a) in p.avatars.iter().take(count).enumerate() {
-        let tile = Rect::from_min_size(r.min + vec2((i % cols) as f32 * (size.x + gap), (i / cols) as f32 * (size.y + gap)), size);
-        avatar_image(ui, state, a, tile);
-    }
-}
-fn avatar_image(ui: &Ui, state: &State, a: &Avatar, r: Rect) {
-    widgets::frame(ui.painter(), r, 12., theme::INK_800);
-    if let Some(t) = state.thumbs.get(&a.id) {
-        let size = t.size_vec2();
-        let ratio = r.aspect_ratio();
-        let source = size.x / size.y;
-        let uv = if source > ratio {
-            let w = ratio / source;
-            Rect::from_min_max(pos2((1. - w) / 2., 0.), pos2((1. + w) / 2., 1.))
-        } else {
-            let h = source / ratio;
-            Rect::from_min_max(pos2(0., (1. - h) / 2.), pos2(1., (1. + h) / 2.))
-        };
-        egui::Image::new(t).uv(uv).corner_radius(12.).paint_at(ui, r);
-    } else {
-        widgets::icon(ui.painter(), r.center(), icons::PERSON_ARMS_SPREAD, 32., theme::FG_4);
-    }
-}
-
-fn panel(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
-    let Some(project) = state.scan.projects.iter().find(|p| Some(&p.path) == state.selected.as_ref()).cloned() else {
-        state.selected = None;
-        return;
-    };
     let page = ui.max_rect();
-    let width = (page.width() * 0.72).clamp(420., 700.).min(page.width());
-    let v = anim::spring_from(ui.ctx(), Id::unique(("project-panel", state.panel_serial)), [0.], [1.], Spring::SOFT)[0];
-    let r = Rect::from_min_max(pos2(page.right() - width + (1. - v) * width, page.top() + cx.top + 6.), page.max + vec2((1. - v) * width, 0.));
-    ui.painter().rect_filled(page, 0., theme::black(0.45 * v));
-    widgets::frame(ui.painter(), r, 20., theme::INK_850);
-    let mut panel = ui.new_child(UiBuilder::new().max_rect(r.shrink(24.)).id_salt("project-panel"));
-    panel.set_clip_rect(r.intersect(ui.clip_rect()));
-    panel.spacing_mut().item_spacing = vec2(10., 14.);
-    panel.horizontal(|ui| {
-        title(ui, &project.name);
-    });
-    let close = Rect::from_min_size(pos2(r.right() - 56., r.top() + 18.), vec2(32., 32.));
-    if widgets::activated(&widgets::IconButton::new(icons::X, "Close project").show_at(&mut panel, close)) {
+
+    // Short, so that the toolbar keeps to the title's row on narrow windows (what the computer has besides is counted
+    // in its own section).
+    let registered = state.scan.projects.iter().filter(|p| p.registered).count();
+    let avatars: usize = state.scan.projects.iter().filter(|p| p.registered).map(|p| p.avatars.len()).sum();
+    let sub = if state.scanning() && state.scan.projects.is_empty() {
+        "Looking for Unity projects…".to_string()
+    } else if state.scanning() {
+        format!("{} · looking for more…", plural(registered, "project", "projects"))
+    } else {
+        format!("{} · {}", plural(registered, "project", "projects"), plural(avatars, "avatar", "avatars"))
+    };
+    let header = Header {
+        caption: "Create & prepare",
+        title: "Unity projects",
+        sub: &sub,
+        busy: state.scanning(),
+        search: Some(("project-search", "Find a project")),
+        actions: vec![
+            Action::new("refresh", "Look for projects again", icons::ARROW_COUNTER_CLOCKWISE).icon_only().spinning(state.scanning()),
+            Action::new("repos", "Package repos", icons::STACK),
+            Action::new("add", "Add existing", icons::FOLDER_OPEN).enabled(!state.running()),
+            Action::new("new", "New project", icons::PLUS).primary(),
+        ],
+    };
+    let placed = header.place(ui, page, cx);
+    let split = layout::split(page.width(), PAD_X, state.panel_width);
+
+    // A selected project that went away (removed from the list): none.
+    if state.selected.as_ref().is_some_and(|s| !state.scan.projects.iter().any(|p| &p.path == s)) && state.reveal.is_none() && !state.fixture {
         state.selected = None;
-        return;
     }
-    let ctx = ui.ctx().clone();
-    egui::ScrollArea::vertical().id_salt("project-detail").show(&mut panel, |ui| {
-        ui.add(egui::Label::new(egui::RichText::new(project.path.display().to_string()).color(theme::FG_3).size(12.)).wrap());
-        text(ui, &format!("Unity {} · {}", project.unity, project.kind.label()), 13., theme::FG_2);
-        ui.horizontal_wrapped(|ui| {
-            if button(ui, "Open project", icons::PLAY, true, !project.missing && !state.action.running()) {
-                let p = project.clone();
-                state.task(&ctx, "Opening Unity…", move || {
-                    orbiters_projects::open_project(&p)?;
-                    Ok(Outcome::Changed("Project sent to Unity".into()))
-                });
-            }
-            if button(ui, "Open folder", icons::FOLDER_OPEN, false, !project.missing && !state.action.running()) {
-                let path = project.path.clone();
-                state.task(&ctx, "Opening folder…", move || {
-                    orbiters_projects::hidden_command("explorer.exe").arg(path).spawn()?;
-                    Ok(Outcome::Picked(None))
-                });
-            }
-            if button(ui, "Unity Hub", icons::CUBE, false, true) {
-                state.task(&ctx, "Opening Unity Hub…", move || {
-                    orbiters_projects::open_hub()?;
-                    Ok(Outcome::Picked(None))
-                });
-            }
-        });
-        error(ui, state);
-        progress(ui, state);
-        if !state.packages_only {
-            title(ui, "Avatars in this project");
-            if project.avatars.is_empty() {
-                ui.label(egui::RichText::new("No uploaded avatar IDs were found in this project's text scenes.").color(theme::FG_3));
-            }
-            for a in &project.avatars {
-                ui.push_id((&a.id, &a.scene, &a.path), |ui| {
-                    egui::Frame::NONE.fill(theme::surface_soft()).corner_radius(14.).inner_margin(14).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let (r, _) = ui.allocate_exact_size(vec2(76., 76.), Sense::hover());
-                            avatar_image(ui, state, a, r);
-                            ui.vertical(|ui| {
-                                text(ui, &a.name, 16., theme::FG);
-                                text(ui, &a.scene, 12., theme::FG_3);
-                            });
-                        });
-                        ui.horizontal_wrapped(|ui| {
-                            if button(ui, "Add N4N0", icons::N4N0, true, project.registered && !state.action.running()) {
-                                state.install(&ctx, project.clone(), a.clone(), true, server(cx));
-                            }
-                            if button(ui, "Add My Avatar", icons::PERSON, false, project.registered && !state.action.running()) {
-                                state.install(&ctx, project.clone(), a.clone(), false, server(cx));
-                            }
-                        });
-                    });
-                });
-            }
-            if !state.commits.is_empty() {
-                title(ui, "Recent commits");
-                for commit in &state.commits {
-                    let parts: Vec<_> = commit.split('\x1f').collect();
-                    if parts.len() == 4 {
-                        text(ui, &format!("{}  {}", parts[0], parts[1]), 13., theme::FG_2);
-                        text(ui, &format!("{} · {}", parts[2], parts[3]), 11., theme::FG_3);
-                    }
-                }
-            }
+    // Wide windows always show a project: the most recent one until another is picked.
+    if split.docked && (state.selected.is_none() || state.panel_closing) {
+        if let Some(p) = state.scan.projects.iter().filter(|p| p.registered).max_by_key(|p| p.modified) {
+            let path = p.path.clone();
+            state.open(&ctx, path);
         }
-        packages(ui, cx, state, &project);
-        ui.add_space(12.);
-        if project.registered && button(ui, "Remove from project list", icons::TRASH, false, !state.action.running()) {
-            let path = project.path.clone();
-            state.selected = None;
-            state.task(&ctx, "Removing from list…", move || {
-                orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &path, false))?;
-                Ok(Outcome::Changed("Removed from the shared project list. Files were kept.".into()))
-            });
-        }
-    });
-}
-fn packages(ui: &mut Ui, _cx: &mut Cx, state: &mut State, project: &Project) {
-    title(ui, "Packages");
-    let ctx = ui.ctx().clone();
-    if state.view_job.running() {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label("Reading packages…");
-        });
     }
-    ui.horizontal_wrapped(|ui| {
-        if button(ui, "Resolve missing packages", icons::ARROW_COUNTER_CLOCKWISE, false, !state.action.running() && !project.missing) {
-            package_action(state, &ctx, project, vpm::Change::Resolve, "Restoring packages…");
-        }
-        ui.checkbox(&mut state.prerelease, "Show pre-release");
-    });
-    let installed: Vec<_> = state.view.packages.iter().filter(|p| p.installed.is_some()).cloned().collect();
-    for p in installed {
-        ui.push_id(&p.name, |ui| {
-            egui::Frame::NONE.fill(theme::surface_soft()).corner_radius(12.).inner_margin(12).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 4.;
-                ui.horizontal_wrapped(|ui| {
-                    let names_width = (ui.available_width() - 284.).max(130.);
-                    ui.allocate_ui_with_layout(vec2(names_width, 44.), egui::Layout::top_down(egui::Align::Min), |ui| {
-                        text(ui, &p.display_name, 14., theme::FG);
-                        text(ui, &p.name, 11., theme::FG_3);
-                    });
-                    ui.horizontal_wrapped(|ui| {
-                        let installed = p.installed.as_deref().unwrap();
-                        let mut selected = installed.to_string();
-                        egui::ComboBox::from_id_salt("version").selected_text(installed).width(150.).show_ui(ui, |ui| {
-                            for version in &p.versions {
-                                if state.prerelease || !version.contains('-') || version == installed {
-                                    ui.selectable_value(&mut selected, version.clone(), version);
-                                }
-                            }
-                        });
-                        if selected != installed {
-                            package_action(
-                                state,
-                                &ctx,
-                                project,
-                                vpm::Change::Install { names: vec![(p.name.clone(), Some(selected))], prerelease: state.prerelease },
-                                "Changing package version…",
-                            );
-                        }
-                        if button(ui, "Remove", icons::MINUS, false, !state.action.running()) {
-                            package_action(state, &ctx, project, vpm::Change::Remove(p.name.clone()), "Removing package…");
-                        }
-                    });
-                });
-            });
-        });
-    }
-    ui.add_space(10.);
-    title(ui, "Available packages");
-    widgets::search_field(ui, "package-search", &mut state.package_query, "Search packages", ui.available_width());
-    let q = state.package_query.to_lowercase();
-    let available: Vec<_> = state
-        .view
-        .packages
-        .iter()
-        .filter(|p| p.installed.is_none() && (q.is_empty() || p.name.to_lowercase().contains(&q) || p.display_name.to_lowercase().contains(&q)))
-        .cloned()
-        .collect();
-    for p in available {
-        let versions: Vec<_> = p.versions.iter().filter(|v| state.prerelease || !v.contains('-')).collect();
-        if versions.is_empty() {
-            continue;
-        }
-        ui.push_id(&p.name, |ui| {
-            egui::Frame::NONE.fill(theme::surface_soft()).corner_radius(12.).inner_margin(12).show(ui, |ui| {
-                text(ui, &p.display_name, 14., theme::FG);
-                text(ui, &p.name, 11., theme::FG_3);
-                ui.horizontal_wrapped(|ui| {
-                    let id = ui.scope_id().with("available-version");
-                    let mut chosen = ui.ctx().data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| versions[0].clone());
-                    egui::ComboBox::from_id_salt("available-version").selected_text(&chosen).width(150.).show_ui(ui, |ui| {
-                        for v in &versions {
-                            ui.selectable_value(&mut chosen, (*v).clone(), *v);
-                        }
-                    });
-                    ui.ctx().data_mut(|d| d.insert_temp(id, chosen.clone()));
-                    if button(ui, "Add", icons::PLUS, false, !state.action.running()) {
-                        package_action(
-                            state,
-                            &ctx,
-                            project,
-                            vpm::Change::Install { names: vec![(p.name.clone(), Some(chosen))], prerelease: state.prerelease },
-                            "Installing package…",
-                        );
-                    }
-                });
-            });
-        });
-    }
-}
-fn package_action(state: &mut State, ctx: &egui::Context, p: &Project, change: vpm::Change, label: &str) {
-    let path = p.path.clone();
-    state.task(ctx, label, move || {
-        orbiters_projects::runtime()?.block_on(vpm::change(&orbiters_projects::vcc_dir(), &path, change))?;
-        Ok(Outcome::Changed("Packages updated".into()))
-    });
-}
+    let docked = split.docked && state.selected.is_some();
+    // The cards make room for the panel (or take the width back) with a spring.
+    let dock = anim::toggle(&ctx, Id::unique("projects-dock"), docked, Spring::SOFT).clamp(0.0, 1.0);
+    let panel_w = anim::value(&ctx, Id::unique("projects-panel-w"), split.panel, Spring::SNAPPY);
+    let gallery_right = page.right() - PAD_X - (panel_w + PANE_GAP) * dock;
+    let edge = PAD_X + (12.0 - PAD_X) * dock;
 
-pub fn capture_banner(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
-    let ctx = ui.ctx().clone();
-    state.poll(&ctx, cx);
-    ui.horizontal_wrapped(|ui| {
-        if button(ui, "Add to my avatar", icons::N4N0, false, !state.action.running()) {
-            state.ensure(&ctx);
-            state.preselected = cx.snap.orb.avatar_id.clone();
-            state.modal = Some(Modal::Avatars);
-        }
-        if cx.snap.orb.manifest && cx.snap.orb.prop_sync.is_some() {
-            ui.colored_label(theme::ACCENT, "N4N0 is on your avatar, you're ready to capture");
-        } else {
-            ui.label(egui::RichText::new("Put N4N0 on your avatar to capture in VRChat.").color(theme::FG_3));
-        }
-        if state.action.running() {
-            ui.spinner();
-            ui.label(&state.action_label);
-        } else if state.flow.is_some() && button(ui, "View setup", icons::ARROW_SQUARE_OUT, false, true) {
-            state.modal = Some(Modal::Setup);
-        }
+    let from = orbiters_ui::blur::next_shape(ui);
+    let gallery_rect = Rect::from_min_max(page.min, pos2(gallery_right + edge, page.bottom()));
+    let mut gu = ui.new_child(UiBuilder::new().max_rect(gallery_rect).id_salt("projects-gallery"));
+    let bar = Rect::from_min_max(pos2(gallery_rect.left(), placed.content_top), gallery_rect.max);
+    egui::ScrollArea::vertical().id_salt("unity-projects").auto_shrink([false, false]).scroll_bar_rect(bar).show(&mut gu, |ui| {
+        egui::Frame::NONE.inner_margin(egui::Margin { left: PAD_X as i8, right: edge.round() as i8, top: 0, bottom: 104 }).show(ui, |ui| {
+            ui.add_space(placed.content_top - page.top());
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            gallery(ui, cx, state);
+        });
     });
-}
+    pages::under_top(&gu, cx, "unity-projects", from, placed.band_bottom);
 
-pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
-    let Some(modal) = state.modal.clone() else { return };
-    let ctx = ui.ctx().clone();
-    let width = (ctx.content_rect().width() - 72.).clamp(300., 760.);
-    let max_h = (ctx.content_rect().height() - 100.).max(200.);
-    let modal_id = Id::unique("unity-project-modal");
-    let response = egui::Modal::new(modal_id)
-        .area(egui::Modal::default_area(modal_id).default_size(vec2(width + 48., max_h)))
-        .frame(egui::Frame::NONE.fill(theme::INK_850).corner_radius(24.).inner_margin(24))
-        .show(&ctx, |ui| {
-            ui.set_width(width);
-            ui.spacing_mut().item_spacing = vec2(10., 14.);
-            ui.visuals_mut().selection.bg_fill = theme::INK_700;
-            ui.visuals_mut().selection.stroke.color = theme::FG;
-            let heading = match &modal {
-                Modal::Repos => "Package repositories",
-                Modal::New => "Create a Unity project",
-                Modal::Avatars => "Add N4N0 to my avatar",
-                Modal::ChooseProject(_) => "Which project should we use?",
-                Modal::Setup => {
-                    if state.flow.as_ref().is_some_and(|f| f.packages_only) {
-                        "Add My Avatar"
-                    } else {
-                        "Add N4N0 to your avatar"
-                    }
-                }
-            };
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(heading).size(24.).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if widgets::activated(&widgets::IconButton::new(icons::X, "Close dialog").show(ui)) {
-                        state.modal = None;
-                    }
-                });
-            });
-            egui::ScrollArea::vertical().id_salt("project-modal-scroll").max_height(max_h - 60.).show(ui, |ui| {
-                error(ui, state);
-                progress(ui, state);
-                match modal {
-                    Modal::Repos => repos(ui, cx, state),
-                    Modal::New => new_project(ui, state),
-                    Modal::Avatars => avatar_picker(ui, cx, state),
-                    Modal::ChooseProject(id) => project_choice(ui, cx, state, &id),
-                    Modal::Setup => setup_flow(ui, cx, state),
-                }
-            });
-        });
-    if response.should_close() {
-        state.modal = None;
+    let pressed = header.show(ui, cx, &placed, Some(&mut state.query));
+    for (a, r) in header.actions.iter().zip(&placed.actions) {
+        state.anchors.insert(a.key.to_string(), *r);
     }
-}
-fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
-    let ctx = ui.ctx().clone();
-    ui.label(egui::RichText::new("Shared with VCC and ALCOM. Disabled repositories stay saved but their packages are excluded here.").color(theme::FG_3));
-    if button(ui, "Refresh repositories", icons::ARROW_COUNTER_CLOCKWISE, false, !state.action.running() && !state.view_job.running()) {
-        state.load_view(&ctx, true);
-        state.catalog(&ctx, server(cx));
-    }
-    for r in state.view.repos.clone() {
-        ui.push_id(&r.id, |ui| {
-            egui::Frame::NONE.fill(theme::surface_soft()).corner_radius(12.).inner_margin(12).show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    let mut enabled = r.enabled;
-                    if ui.add_enabled(!state.action.running(), egui::Checkbox::new(&mut enabled, &r.name)).changed() {
-                        if let Some(repo) = state.view.repos.iter_mut().find(|repo| repo.id == r.id) {
-                            repo.enabled = enabled;
-                        }
-                        let id = r.id.clone();
-                        state.task(&ctx, "Updating repository…", move || {
-                            orbiters_projects::runtime()?.block_on(vpm::set_enabled(&orbiters_projects::vcc_dir(), &id, enabled))?;
-                            Ok(Outcome::Changed("Repository updated".into()))
-                        });
-                    }
-                    if !r.builtin && button(ui, "Remove", icons::MINUS, false, !state.action.running()) {
-                        let id = r.id.clone();
-                        state.task(&ctx, "Removing repository…", move || {
-                            orbiters_projects::runtime()?.block_on(vpm::remove_repo(&orbiters_projects::vcc_dir(), &id))?;
-                            Ok(Outcome::Changed("Repository removed".into()))
-                        });
-                    }
-                });
-                text(ui, &r.url, 12., theme::FG_3);
-            });
-        });
-    }
-    title(ui, "Add a repository");
-    widgets::text_field(ui, "repo-url", &mut state.repo_url, "https://example.com/index.json", ui.available_width(), false);
-    ui.collapsing("Optional request headers", |ui| {
-        ui.label("One header per line, for example Authorization: Bearer …");
-        ui.add(egui::TextEdit::multiline(&mut state.repo_headers).desired_width(f32::INFINITY).desired_rows(2));
-    });
-    if button(ui, "Add repository", icons::PLUS, true, !state.repo_url.trim().is_empty() && !state.action.running()) {
-        let url = state.repo_url.trim().to_string();
-        let mut headers = BTreeMap::new();
-        let mut valid = true;
-        for line in state.repo_headers.lines().filter(|l| !l.trim().is_empty()) {
-            if let Some((k, v)) = line.split_once(':') {
-                headers.insert(k.trim().to_string(), v.trim().to_string());
-            } else {
-                state.error = Some("Headers need a name and value separated by a colon.".into());
-                valid = false;
-            }
+    match pressed {
+        Some("refresh") if !state.scanning() => {
+            state.refresh(&ctx, true);
+            state.load_view(&ctx, true);
+            state.thumb_ids.clear();
         }
-        if valid {
-            add_repo(state, &ctx, url, headers);
-            state.repo_headers.clear();
-        }
-    }
-    for (heading, list) in [("Known VPM repositories", state.catalog.known.clone()), ("Repositories on Orbiters", state.catalog.public.clone())] {
-        title(ui, heading);
-        if list.is_empty() {
-            ui.label(egui::RichText::new(if state.catalog_job.running() { "Loading…" } else { "No repositories to show." }).color(theme::FG_3));
-        }
-        for r in list {
-            ui.push_id((&r.url, heading), |ui| {
-                egui::Frame::NONE.fill(theme::surface_soft()).corner_radius(12.).inner_margin(12).show(ui, |ui| {
-                    text(ui, &r.name, 14., theme::FG);
-                    ui.label(egui::RichText::new(&r.description).size(12.).color(theme::FG_3));
-                    let added = state.view.repos.iter().any(|repo| repo.url.trim_end_matches('/') == r.url.trim_end_matches('/'));
-                    if button(ui, if added { "Added" } else { "Add" }, icons::PLUS, false, !added && !state.action.running()) {
-                        add_repo(state, &ctx, r.url.clone(), BTreeMap::new());
-                    }
-                });
-            });
-        }
-    }
-    if !state.catalog.errors.is_empty() {
-        ui.colored_label(theme::WARN, "Orbiters' suggestions could not be loaded.");
-        if button(ui, "Retry suggestions", icons::ARROW_COUNTER_CLOCKWISE, false, !state.catalog_job.running()) {
+        Some("repos") => {
+            state.open_modal(&ctx, Modal::Repos, state.anchor("repos"));
+            state.modal_fill = theme::control();
             state.catalog(&ctx, server(cx));
         }
+        Some("add") => add_existing(&ctx, state),
+        Some("new") => {
+            state.open_modal(&ctx, Modal::New, state.anchor("new"));
+            state.modal_fill = theme::ACCENT;
+        }
+        _ => {}
     }
+
+    if state.selected.is_some() {
+        panel::show(ui, cx, state, page, placed.content_top, split, dock, panel_w);
+    }
+    activity(ui, state, Rect::from_min_max(pos2(page.left(), page.top()), pos2(gallery_right + PAD_X * (1.0 - dock), page.bottom())));
+    modals(ui, cx, state);
 }
-fn add_repo(state: &mut State, ctx: &egui::Context, url: String, headers: BTreeMap<String, String>) {
-    state.task(ctx, "Adding repository…", move || {
-        orbiters_projects::runtime()?.block_on(vpm::add_repo(&orbiters_projects::vcc_dir(), &url, headers))?;
-        Ok(Outcome::Changed("Repository added".into()))
+
+/// Asks for a Unity project's folder and adds it to the list VCC and ALCOM share; it opens once the scan lists it.
+pub(super) fn add_existing(ctx: &egui::Context, state: &mut State) {
+    state.task(ctx, "Choose a Unity project…", move || {
+        if let Some(p) = rfd::FileDialog::new().set_title("Add a Unity project").pick_folder() {
+            orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &p, true))?;
+            Ok(Outcome::Added(p, "Project added: VCC and ALCOM list it too".into()))
+        } else {
+            Ok(Outcome::Picked(None))
+        }
     });
 }
-fn new_project(ui: &mut Ui, state: &mut State) {
+
+/// The banner of the page's last error (and the scan's warnings), dismissable.
+pub(super) fn errors(ui: &mut Ui, state: &mut State, salt: &str) {
+    if let Some(e) = state.error.clone() {
+        if feedback::banner(ui, Id::unique(("projects-error", salt, &e)), Tone::Danger, &e, true) {
+            state.error = None;
+        }
+        ui.add_space(12.0);
+    }
+}
+
+fn section_title(ui: &mut Ui, title: &str, count: Option<usize>, sub: Option<&str>) {
+    let h = if sub.is_some() { 52.0 } else { 34.0 };
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
+    let p = ui.painter();
+    let tr = widgets::text(p, pos2(r.left(), r.top() + 12.0), Align2::LEFT_CENTER, &Txt::new(title, 16.0).weight(weight::SEMIBOLD));
+    if let Some(n) = count {
+        widgets::pill_at(p, ui, pos2(tr.right() + 8.0, tr.center().y), None, &n.to_string());
+    }
+    if let Some(s) = sub {
+        widgets::text_truncated(p, pos2(r.left(), r.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(s, 12.5).color(theme::FG_3), r.width());
+    }
+}
+
+fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
+    if state.selected.is_none() && state.modal.is_none() {
+        errors(ui, state, "gallery");
+    }
+    for (i, w) in state.scan.warnings.clone().iter().enumerate() {
+        feedback::banner(ui, Id::unique(("projects-warning", i, w)), Tone::Warn, w, false);
+        ui.add_space(12.0);
+    }
+    let q = state.query.trim().to_lowercase();
+    let matches = |p: &&Project| q.is_empty() || p.name.to_lowercase().contains(&q) || p.path.to_string_lossy().to_lowercase().contains(&q);
+    let mut registered: Vec<Project> = state.scan.projects.iter().filter(|p| p.registered).filter(matches).cloned().collect();
+    registered.sort_by_key(|p| std::cmp::Reverse(p.modified));
+    let mut proposals: Vec<Project> = state.scan.projects.iter().filter(|p| !p.registered).filter(matches).cloned().collect();
+    proposals.sort_by_key(|p| std::cmp::Reverse(p.modified));
+
+    section_title(ui, "Your projects", (!registered.is_empty()).then_some(registered.len()), None);
+    ui.add_space(6.0);
+    if registered.is_empty() {
+        if state.scanning() {
+            skeletons(ui, 3);
+        } else if !q.is_empty() {
+            quiet_empty(ui, cx, "No project matches", "Try another name, or clear the search.");
+        } else {
+            empty(ui, cx, state);
+        }
+    } else {
+        grid(ui, cx, state, &registered);
+    }
+    if !proposals.is_empty() {
+        ui.add_space(32.0);
+        section_title(ui, "Found on this computer", Some(proposals.len()), Some("Add one to manage its avatars and packages here, in VCC and in ALCOM."));
+        ui.add_space(10.0);
+        found(ui, state, &proposals);
+    }
+}
+
+fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[Project]) {
     let ctx = ui.ctx().clone();
-    ui.horizontal_wrapped(|ui| {
-        ui.selectable_value(&mut state.duplicate, false, "From a template");
-        ui.selectable_value(&mut state.duplicate, true, "Duplicate an existing project");
+    let w = ui.available_width();
+    let (cols, card_w) = layout::columns(w, CARD_MIN, GAP);
+    let card_h = (card_w * 0.5625).round() + CARD_BODY;
+    let rows = projects.len().div_ceil(cols);
+    let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + GAP) - GAP), Sense::hover());
+    let mut opened = None;
+    for (i, p) in projects.iter().enumerate() {
+        // Each card springs to its place (in the grid's own coordinates, so scrolling never animates): when the panel
+        // takes room or gives it back, the cards reflow instead of jumping.
+        let target = [(i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (card_h + GAP), card_w];
+        let [x, y, cw] = anim::spring(&ctx, Id::unique(("project-card-slot", &p.path)), target, Spring::SOFT);
+        let r = Rect::from_min_size(area.min + vec2(x, y), vec2(cw, (cw * 0.5625).round() + CARD_BODY));
+        state.anchors.insert(format!("card-{i}"), r);
+        if !ui.is_rect_visible(r.expand(12.0)) {
+            continue;
+        }
+        if card(ui, cx, state, i, p, r) {
+            opened = Some(p.path.clone());
+        }
+    }
+    if let Some(path) = opened {
+        state.open(&ctx, path);
+    }
+}
+
+/// One project's card; true when pressed.
+fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) -> bool {
+    let ctx = ui.ctx().clone();
+    let id = Id::unique(("project-card", &p.path));
+    let resp = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+    let enter = entrance(&ctx, cx, id, i);
+    let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SOFT);
+    let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
+    let selected = state.selected.as_ref() == Some(&p.path) && !state.panel_closing;
+    let scale = (0.97 + 0.03 * enter) * (1.0 - 0.035 * press);
+    let r = Rect::from_center_size(rect.center() + vec2(0.0, 18.0 * (1.0 - enter) - 3.0 * hover), rect.size() * scale);
+    let mut pt = ui.painter().clone();
+    pt.multiply_opacity(enter.clamp(0.0, 1.0));
+    let sel = art::selection(&pt, id.with("selected"), r, theme::CARD_RADIUS, selected);
+    widgets::frame(&pt, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover.max(sel * 0.6)));
+    let cover = Rect::from_min_size(r.min, vec2(r.width(), (r.width() * 0.5625).round()));
+    art::cover(&pt, state, p, cover, [theme::CARD_RADIUS, theme::CARD_RADIUS, 0.0, 0.0], 1.0 + 0.05 * ease::out_cubic(hover));
+    // The picture darkens towards its bottom edge, for the badges and the step to the card.
+    let shade = paint::rounded_rect_points_corners(Rect::from_min_max(pos2(cover.left(), cover.center().y), cover.max), [0.0; 4]);
+    paint::fill_gradient(
+        &pt,
+        &shade,
+        &Gradient::vertical(Rect::from_min_max(pos2(cover.left(), cover.center().y), cover.max), &[(0.0, Color32::TRANSPARENT), (1.0, theme::black(0.35))]),
+    );
+    let (tint, glyph) = art::kind_look(p);
+    badge(&pt, ui, pos2(cover.left() + 12.0, cover.top() + 12.0), Some(glyph), p.kind.label(), theme::black(0.6), tint, false);
+    if p.missing {
+        badge(
+            &pt,
+            ui,
+            pos2(cover.right() - 12.0, cover.top() + 12.0),
+            Some(icons::WARNING),
+            "Folder missing",
+            theme::alpha(theme::DANGER, 0.25),
+            theme::DANGER,
+            true,
+        );
+    }
+    let x = r.left() + 16.0;
+    widgets::text_truncated(&pt, pos2(x, cover.bottom() + 22.0), Align2::LEFT_CENTER, &Txt::new(&p.name, 15.0).weight(weight::SEMIBOLD), r.width() - 32.0);
+    widgets::text_truncated(
+        &pt,
+        pos2(x, cover.bottom() + 43.0),
+        Align2::LEFT_CENTER,
+        &Txt::new(format!("Edited {}", format::relative_time(p.modified, now())), 12.0).color(theme::FG_3),
+        r.width() - 32.0,
+    );
+    let mut px = x;
+    let py = cover.bottom() + 70.0;
+    let pills = [
+        (Some(icons::CUBE), p.unity.clone()),
+        if p.avatars.is_empty() {
+            (Some(icons::GLOBE), if p.kind == orbiters_projects::discovery::Kind::Worlds { "World".into() } else { "No avatar yet".into() })
+        } else {
+            (Some(icons::PERSON), plural(p.avatars.len(), "avatar", "avatars"))
+        },
+    ];
+    for (g, label) in pills {
+        if label.is_empty() {
+            continue;
+        }
+        let w = widgets::pill_at(&pt, ui, pos2(px, py), g, &label);
+        px += w + 6.0;
+    }
+    widgets::activated(&resp)
+}
+
+/// A card's entrance: up and in, 35 ms apart, once per visit (a card that appears later, a project just added, comes
+/// in as it appears).
+fn entrance(ctx: &egui::Context, cx: &Cx, id: Id, i: usize) -> f32 {
+    let delay = 0.05 + i.min(12) as f64 * 0.035;
+    let elapsed = anim::time(ctx) - cx.entered;
+    if elapsed < delay {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(delay - elapsed));
+    }
+    anim::spring_from(ctx, id.with(("enter", cx.visit)), [0.0], [if elapsed >= delay { 1.0 } else { 0.0 }], Spring::SOFT)[0]
+}
+
+/// A small label on a picture, its left (or with `right` its right) edge at `at`.
+#[allow(clippy::too_many_arguments)]
+fn badge(p: &egui::Painter, ui: &Ui, at: egui::Pos2, glyph: Option<&str>, label: &str, bg: Color32, fg: Color32, right: bool) {
+    let t = Txt::new(label, 10.5).weight(weight::SEMIBOLD).tracking(0.02).color(theme::FG);
+    let tw = widgets::text_size(ui, &t).x;
+    let w = tw + 20.0 + if glyph.is_some() { 16.0 } else { 0.0 };
+    let rect = Rect::from_min_size(if right { pos2(at.x - w, at.y) } else { at }, vec2(w, 22.0));
+    p.rect_filled(rect, theme::radius(11.0), bg);
+    let mut x = rect.left() + 10.0;
+    if let Some(g) = glyph {
+        widgets::icon(p, pos2(x + 6.0, rect.center().y), g, 12.0, fg);
+        x += 16.0;
+    }
+    widgets::text(p, pos2(x, rect.center().y), Align2::LEFT_CENTER, &t);
+}
+
+/// Grey cards that shimmer while the first projects are found.
+fn skeletons(ui: &mut Ui, n: usize) {
+    let w = ui.available_width();
+    let (cols, card_w) = layout::columns(w, CARD_MIN, GAP);
+    let card_h = (card_w * 0.5625).round() + CARD_BODY;
+    let rows = n.div_ceil(cols);
+    let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + GAP) - GAP), Sense::hover());
+    let p = ui.painter();
+    for i in 0..n {
+        let r = Rect::from_min_size(area.min + vec2((i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (card_h + GAP)), vec2(card_w, card_h));
+        widgets::frame(p, r, theme::CARD_RADIUS, theme::surface());
+        let cover = Rect::from_min_size(r.min, vec2(card_w, card_h - CARD_BODY));
+        feedback::shimmer(p, cover.shrink(6.0), theme::CARD_RADIUS - 6.0);
+        feedback::shimmer(p, Rect::from_min_size(pos2(r.left() + 16.0, cover.bottom() + 15.0), vec2(card_w * 0.5, 14.0)), 7.0);
+        feedback::shimmer(p, Rect::from_min_size(pos2(r.left() + 16.0, cover.bottom() + 38.0), vec2(card_w * 0.32, 10.0)), 5.0);
+        feedback::shimmer(p, Rect::from_min_size(pos2(r.left() + 16.0, cover.bottom() + 60.0), vec2(card_w * 0.6, 20.0)), 10.0);
+    }
+}
+
+/// No project yet: the logo, what this page is for and its two ways in.
+fn empty(ui: &mut Ui, cx: &Cx, state: &mut State) {
+    let ctx = ui.ctx().clone();
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 340.0), Sense::hover());
+    let (rect, alpha) = pages::entering(ui, cx, 2, rect);
+    let mut p = ui.painter().clone();
+    p.multiply_opacity(alpha);
+    let t = anim::clock(&ctx, 30.0);
+    let bob = -8.0 * ease::in_out(ease::mirror(t, 2.0));
+    let lr = Rect::from_center_size(rect.center() + vec2(0.0, -96.0 + bob), logo::size_for_width(70.0));
+    logo::paint(&p, lr, logo::Look::default());
+    widgets::text(&p, rect.center() + vec2(0.0, -24.0), Align2::CENTER_CENTER, &Txt::new("Your avatar starts here", 19.0).weight(weight::SEMIBOLD));
+    let g = p.layout_job({
+        let mut job = Txt::new("Create a project from a VRChat template, or add one you already have: its avatars and packages show up here.", 13.0)
+            .color(theme::FG_3)
+            .line_height(20.0)
+            .job(420.0);
+        job.halign = egui::Align::Center;
+        job
     });
-    let projects: Vec<_> = state.scan.projects.iter().filter(|p| p.registered && !p.missing).cloned().collect();
-    if state.duplicate {
-        egui::ComboBox::from_id_salt("duplicate-source")
-            .selected_text(projects.get(state.duplicate_index).map(|p| p.name.as_str()).unwrap_or("Choose a project"))
-            .width(ui.available_width())
-            .show_ui(ui, |ui| {
-                for (i, p) in projects.iter().enumerate() {
-                    ui.selectable_value(&mut state.duplicate_index, i, &p.name);
-                }
-            });
-        ui.label(egui::RichText::new("Copies Assets, Packages and settings. Generated files and Git history stay behind.").color(theme::FG_3));
-    } else {
-        title(ui, "Project template");
-        if state.templates.is_empty() {
-            ui.label("No installed VCC templates were found in Templates or VRCTemplates.");
-        }
-        for (i, t) in state.templates.iter().enumerate() {
-            ui.selectable_value(
-                &mut state.template_index,
-                i,
-                format!("{}{}", t.name, if t.unity.is_empty() { String::new() } else { format!(" · Unity {}", t.unity) }),
-            );
-        }
+    p.galley(pos2(rect.center().x, rect.center().y - 4.0), g, theme::FG_3);
+    let create = Button::new("New project").icon(icons::PLUS).variant(Variant::Primary);
+    let add = Button::new("Add existing").icon(icons::FOLDER_OPEN);
+    let (cw, aw) = (create.desired_width(ui), add.desired_width(ui));
+    let x0 = rect.center().x - (cw + aw + 10.0) * 0.5;
+    let y = rect.center().y + 60.0;
+    let mut bu = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("projects-empty"));
+    bu.multiply_opacity(alpha);
+    let cr = Rect::from_min_size(pos2(x0, y), vec2(cw, 40.0));
+    if widgets::activated(&create.id_salt("empty-new").show_at(&mut bu, cr)) {
+        state.open_modal(&ctx, Modal::New, cr);
+        state.modal_fill = theme::ACCENT;
     }
-    title(ui, "Project name");
-    widgets::text_field(ui, "new-name", &mut state.new_name, "My avatar", ui.available_width(), false);
-    title(ui, "Location");
-    widgets::text_field(ui, "new-location", &mut state.new_location, "Choose a folder", ui.available_width(), false);
-    if button(ui, "Choose location", icons::FOLDER_OPEN, false, !state.action.running()) {
-        state.task(&ctx, "Choose a location…", move || Ok(Outcome::Picked(rfd::FileDialog::new().pick_folder())));
-    }
-    let template = state.templates.get(state.template_index).cloned();
-    if !state.duplicate && template.as_ref().is_some_and(|t| t.unity.is_empty()) {
-        title(ui, "Unity version");
-        widgets::text_field(ui, "new-unity", &mut state.new_unity, "Exact installed editor version", ui.available_width(), false);
-    }
-    if let Err(e) = templates::validate_name(&state.new_name) {
-        if !state.new_name.is_empty() {
-            ui.colored_label(theme::WARN, e.to_string());
-        }
-    }
-    let source = if state.duplicate {
-        projects.get(state.duplicate_index).map(|p| (p.path.clone(), p.unity.clone()))
-    } else {
-        template.map(|t| (t.path, if t.unity.is_empty() { state.new_unity.clone() } else { t.unity }))
-    };
-    let enabled = source.is_some() && !state.new_name.is_empty() && !state.new_location.is_empty() && !state.action.running();
-    if button(ui, if state.duplicate { "Duplicate project" } else { "Create project" }, icons::PLUS, true, enabled) {
-        let (source, unity) = source.unwrap();
-        let name = state.new_name.clone();
-        let location = PathBuf::from(&state.new_location);
-        let duplicate = state.duplicate;
-        state.copy_cancel = Arc::new(AtomicBool::new(false));
-        *state.copy_progress.lock().unwrap() = Default::default();
-        let cancel = state.copy_cancel.clone();
-        let progress = state.copy_progress.clone();
-        state.task(&ctx, "Creating project…", move || {
-            let path = orbiters_projects::runtime()?.block_on(templates::create(
-                &orbiters_projects::vcc_dir(),
-                &source,
-                &location,
-                &name,
-                &unity,
-                duplicate,
-                &cancel,
-                &progress,
-            ))?;
-            Ok(Outcome::Changed(format!("Project created at {}", path.display())))
-        });
+    if widgets::activated(&add.id_salt("empty-add").enabled(!state.running()).show_at(&mut bu, Rect::from_min_size(pos2(cr.right() + 10.0, y), vec2(aw, 40.0))))
+    {
+        add_existing(&ctx, state);
     }
 }
-fn avatar_picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
-    ui.label(egui::RichText::new("Choose the avatar you want to capture with. N4N0 will ask for confirmation inside Unity.").color(theme::FG_3));
-    if state.scan_rx.is_some() {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label("Finding avatars in your registered projects…");
-        });
-    }
-    let mut avatars: BTreeMap<String, (Project, Avatar, usize)> = BTreeMap::new();
-    for p in state.scan.projects.iter().filter(|p| p.registered) {
-        for a in &p.avatars {
-            avatars.entry(a.id.clone()).and_modify(|v| v.2 += 1).or_insert((p.clone(), a.clone(), 1));
+
+/// A quiet line where a list is empty (a search that matched nothing).
+fn quiet_empty(ui: &mut Ui, cx: &Cx, title: &str, text: &str) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 120.0), Sense::hover());
+    let (rect, alpha) = pages::entering(ui, cx, 2, rect);
+    let mut p = ui.painter().clone();
+    p.multiply_opacity(alpha);
+    widgets::frame(&p, rect, theme::CARD_RADIUS, theme::white(0.02));
+    widgets::icon(&p, rect.center() + vec2(0.0, -24.0), icons::MAGNIFYING_GLASS, 22.0, theme::FG_4);
+    widgets::text(&p, rect.center() + vec2(0.0, 6.0), Align2::CENTER_CENTER, &Txt::new(title, 14.5).weight(weight::SEMIBOLD));
+    widgets::text(&p, rect.center() + vec2(0.0, 28.0), Align2::CENTER_CENTER, &Txt::new(text, 12.5).color(theme::FG_3));
+}
+
+/// Projects found on the computer that are not in the list yet: compact rows, the first few until "Show all".
+fn found(ui: &mut Ui, state: &mut State, list: &[Project]) {
+    let ctx = ui.ctx().clone();
+    let w = ui.available_width();
+    let (cols, row_w) = layout::columns(w, 300.0, 12.0);
+    let shown = if state.all_proposals { list.len() } else { list.len().min(FOUND_FIRST) };
+    let rows = shown.div_ceil(cols);
+    let row_h = 76.0;
+    let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (row_h + 12.0) - 12.0), Sense::hover());
+    let mut open = None;
+    let mut add = None;
+    for (i, p) in list.iter().take(shown).enumerate() {
+        let target = [(i % cols) as f32 * (row_w + 12.0), (i / cols) as f32 * (row_h + 12.0), row_w];
+        let [x, y, rw] = anim::spring(&ctx, Id::unique(("found-slot", &p.path)), target, Spring::SOFT);
+        let r = Rect::from_min_size(area.min + vec2(x, y), vec2(rw, row_h));
+        if !ui.is_rect_visible(r.expand(8.0)) {
+            continue;
+        }
+        match found_row(ui, state, p, r) {
+            Some(true) => add = Some(p.path.clone()),
+            Some(false) => open = Some(p.path.clone()),
+            None => {}
         }
     }
-    let mut list: Vec<_> = avatars.into_values().collect();
-    list.sort_by_key(|(_, a, _)| (Some(&a.id) != state.preselected.as_ref(), a.name.clone()));
-    if list.is_empty() {
-        empty(ui, "No uploaded avatars found yet", "Add an avatar project on the Unity projects page. Save its scene in Unity after the first upload.");
-    }
-    let cols = (ui.available_width() / 200.).floor().max(1.) as usize;
-    let width = (ui.available_width() - (cols - 1) as f32 * 12.) / cols as f32;
-    for row in list.chunks(cols) {
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 12.;
-            for (p, a, n) in row {
-                ui.push_id(&a.id, |ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(width, 216.), Sense::hover());
-                    let response = ui.interact(r, ui.scope_id().with("avatar"), Sense::click());
-                    widgets::frame(ui.painter(), r, 16., if Some(&a.id) == state.preselected.as_ref() { theme::INK_700 } else { theme::surface_soft() });
-                    avatar_image(ui, state, a, Rect::from_min_size(r.min + vec2(6., 6.), vec2(width - 12., 134.)));
-                    widgets::text_truncated(ui.painter(), pos2(r.left() + 12., r.top() + 158.), Align2::LEFT_CENTER, &Txt::new(&a.name, 15.), width - 24.);
-                    widgets::text_truncated(
-                        ui.painter(),
-                        pos2(r.left() + 12., r.top() + 180.),
-                        Align2::LEFT_CENTER,
-                        &Txt::new(if *n > 1 { format!("{n} project locations") } else { p.name.clone() }, 12.).color(theme::FG_3),
-                        width - 24.,
-                    );
-                    if Some(&a.id) == cx.snap.orb.avatar_id.as_ref() {
-                        widgets::text(
-                            ui.painter(),
-                            pos2(r.left() + 12., r.top() + 201.),
-                            Align2::LEFT_CENTER,
-                            &Txt::new("Wearing in VRChat", 11.).color(theme::ACCENT),
-                        );
-                    }
-                    if widgets::activated(&response) {
-                        state.choose_avatar(ui.ctx(), a.id.clone(), server(cx));
-                    }
-                });
-            }
+    if let Some(path) = add {
+        state.task(&ctx, "Adding the project…", move || {
+            orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &path, true))?;
+            Ok(Outcome::Added(path, "Project added: VCC and ALCOM list it too".into()))
         });
-        ui.add_space(8.);
+    } else if let Some(path) = open {
+        state.open(&ctx, path);
+    }
+    if list.len() > FOUND_FIRST {
+        ui.add_space(12.0);
+        let label = if state.all_proposals { "Show fewer".to_string() } else { format!("Show all {}", list.len()) };
+        let b = Button::new(&label)
+            .icon(if state.all_proposals { icons::CARET_LEFT } else { icons::CARET_DOWN })
+            .variant(Variant::Ghost)
+            .size(Size::Sm)
+            .id_salt("found-all");
+        let bw = b.desired_width(ui);
+        let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
+        if widgets::activated(&b.show_at(ui, Rect::from_min_size(pos2(r.center().x - bw * 0.5, r.top()), vec2(bw, 32.0)))) {
+            state.all_proposals = !state.all_proposals;
+        }
     }
 }
-fn project_choice(ui: &mut Ui, cx: &mut Cx, state: &mut State, id: &str) {
-    ui.label(egui::RichText::new("This avatar is saved in more than one project or scene. Choose the copy to prepare.").color(theme::FG_3));
-    let choices: Vec<_> =
-        state.scan.projects.iter().filter(|p| p.registered).flat_map(|p| p.avatars.iter().filter(|a| a.id == id).map(|a| (p.clone(), a.clone()))).collect();
-    for (p, a) in choices {
-        ui.push_id((&p.path, &a.scene, &a.path), |ui| {
-            egui::Frame::NONE.fill(theme::surface_soft()).corner_radius(14.).inner_margin(16).show(ui, |ui| {
-                title(ui, &p.name);
-                ui.label(egui::RichText::new(p.path.display().to_string()).color(theme::FG_3));
-                text(ui, &format!("{} · {}", a.scene, crate::pages::local_time_unix(p.modified)), 12., theme::FG_3);
-                if button(ui, "Use this project", icons::ARROW_SQUARE_OUT, true, !state.action.running()) {
-                    state.install(ui.ctx(), p.clone(), a.clone(), true, server(cx));
-                }
-            });
-        });
-    }
-    if button(ui, "Back to avatars", icons::ARROW_LEFT, false, !state.action.running()) {
-        state.modal = Some(Modal::Avatars);
-    }
-}
-fn setup_flow(ui: &mut Ui, _cx: &mut Cx, state: &mut State) {
-    let Some(flow) = state.flow.as_ref() else {
-        if !state.action.running() {
-            ui.label("Choose an avatar to start setup.");
-        }
-        return;
-    };
-    let project = flow.project.clone();
-    let name = flow.avatar.name.clone();
-    let packages_only = flow.packages_only;
-    let unity_open = flow.unity_open;
-    let result = flow.result.clone();
-    text(ui, &format!("{} · {}", name, project.name), 16., theme::FG);
-    let (glyph, heading, message) = if let Some(result) = result {
-        match result.status {
-            setup::Status::Done => (
-                icons::CHECK_CIRCLE,
-                "N4N0 is ready in Unity",
-                format!("{}\nUpload the avatar from the VRChat SDK panel that just opened, then come back here.", result.message),
-            ),
-            setup::Status::Declined => (icons::CLOCK, "Setup was declined", result.message),
-            setup::Status::Failed => (icons::WARNING, "Setup needs attention", result.message),
-        }
-    } else if packages_only {
-        (icons::CHECK_CIRCLE, "My Avatar is installed", "Open the project to use My Avatar in Unity.".into())
-    } else if unity_open {
-        (icons::CLOCK, "Confirm in Unity", "Unity is open on this project: switch to it to confirm".into())
+
+/// One project found on the computer: `Some(true)` when Add was pressed, `Some(false)` when the row was.
+fn found_row(ui: &mut Ui, state: &State, p: &Project, rect: Rect) -> Option<bool> {
+    let ctx = ui.ctx().clone();
+    let id = Id::unique(("found-row", &p.path));
+    let resp = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+    let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SOFT);
+    let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
+    let selected = state.selected.as_ref() == Some(&p.path) && !state.panel_closing;
+    let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.02 * press));
+    let pt = ui.painter();
+    let sel = art::selection(pt, id.with("selected"), r, 16.0, selected);
+    widgets::frame(pt, r, 16.0, theme::mix(theme::alpha(theme::INK_850, 0.6), theme::INK_800, hover.max(sel * 0.6)));
+    let thumb = Rect::from_min_size(pos2(r.left() + 10.0, r.center().y - 28.0), vec2(56.0, 56.0));
+    art::cover(pt, state, p, thumb, [12.0; 4], 1.0);
+    let add_b = Button::new("Add").icon(icons::PLUS).size(Size::Sm).id_salt(("found-add", &p.path)).enabled(!state.running());
+    let aw = add_b.desired_width(ui);
+    let x = thumb.right() + 12.0;
+    let tw = r.right() - 14.0 - aw - 12.0 - x;
+    widgets::text_truncated(pt, pos2(x, r.center().y - 17.0), Align2::LEFT_CENTER, &Txt::new(&p.name, 14.0).weight(weight::SEMIBOLD), tw);
+    widgets::text_truncated(pt, pos2(x, r.center().y + 1.0), Align2::LEFT_CENTER, &Txt::new(p.path.display().to_string(), 11.5).color(theme::FG_3), tw);
+    let meta = if p.avatars.is_empty() {
+        format!("Unity {} · {}", p.unity, p.kind.label())
     } else {
-        (icons::CUBE, "Open Unity to continue", "My Avatar and Toolkit are installed. Open this project and confirm adding N4N0 to your avatar.".into())
+        format!("Unity {} · {}", p.unity, plural(p.avatars.len(), "avatar", "avatars"))
     };
-    ui.horizontal(|ui| {
-        widgets::icon(ui.painter(), ui.cursor().min + vec2(20., 20.), glyph, 30., theme::FG_2);
-        ui.add_space(52.);
-        ui.vertical(|ui| {
-            title(ui, heading);
-            ui.label(egui::RichText::new(message).color(theme::FG_2));
-        });
+    widgets::text_truncated(pt, pos2(x, r.center().y + 18.0), Align2::LEFT_CENTER, &Txt::new(meta, 11.5).color(theme::FG_4), tw);
+    let br = Rect::from_min_size(pos2(r.right() - 14.0 - aw, r.center().y - 16.0), vec2(aw, 32.0));
+    if widgets::activated(&add_b.show_at(ui, br)) {
+        return Some(true);
+    }
+    widgets::activated(&resp).then_some(false)
+}
+
+/// The capsule over the bottom of the cards while an action runs (unless a dialog shows it), with a project copy's
+/// progress and its Cancel.
+fn activity(ui: &mut Ui, state: &mut State, area: Rect) {
+    let shown_in_dialog = matches!(state.modal, Some(Modal::New | Modal::Setup | Modal::Repos));
+    let label = state.acting().map(str::to_string).filter(|_| !shown_in_dialog);
+    let p = state.copy_progress.lock().unwrap().clone();
+    let copying = p.total > 0 && label.is_some();
+    let detail = copying.then(|| format!("{} of {} files · {}", format::integer(p.copied as f64), format::integer(p.total as f64), p.file));
+    let a = label.as_deref().map(|l| feedback::Activity {
+        label: l,
+        detail: detail.as_deref(),
+        fraction: copying.then(|| p.copied as f32 / p.total.max(1) as f32),
+        cancel: copying && p.phase == "Copying project",
     });
-    if button(ui, "Open project", icons::PLAY, true, !state.action.running()) {
-        state.task(ui.ctx(), "Opening Unity…", move || {
-            orbiters_projects::open_project(&project)?;
-            Ok(Outcome::Picked(None))
-        });
+    if feedback::activity(ui, Id::unique("projects-activity"), area, a.as_ref()) {
+        state.copy_cancel.store(true, Ordering::Relaxed);
     }
-    if button(ui, "Open Unity Hub", icons::CUBE, false, true) {
-        state.task(ui.ctx(), "Opening Unity Hub…", move || {
-            orbiters_projects::open_hub()?;
-            Ok(Outcome::Picked(None))
-        });
+}
+
+/// The Capture page's N4N0 card, among its status cards: whether N4N0 is on the avatar worn in VRChat, or the way to put
+/// it there (the avatar picker, which grows out of this card).
+pub fn capture_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
+    let ctx = ui.ctx().clone();
+    state.poll(&ctx, cx);
+    state.anchors.insert("capture-card".into(), rect);
+    let on_avatar = cx.snap.orb.manifest && cx.snap.orb.prop_sync.is_some();
+    let waiting = state.flow.as_ref().is_some_and(|f| f.request.is_some() && f.result.is_none());
+    let (value, tone, trailing) = if state.running() {
+        ("Setting up…", Tone::Info, None)
+    } else if waiting && !on_avatar {
+        ("Confirm in Unity", Tone::Warn, Some(art::glyph::ARROW_RIGHT))
+    } else if on_avatar {
+        ("On your avatar", Tone::Ok, Some(icons::CHECK))
+    } else {
+        ("Add to my avatar", Tone::Ok, Some(icons::PLUS))
+    };
+    let id = Id::unique("capture-n4n0-card");
+    let resp = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+    let resp = resp.on_hover_text(if on_avatar {
+        "N4N0 is on your avatar: you're ready to capture. Press to put it on another avatar."
+    } else {
+        "Put N4N0 on the avatar you capture with: Orbiters installs it in its Unity project, you confirm in Unity"
+    });
+    let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SOFT);
+    let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
+    let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.03 * press));
+    let p = ui.painter();
+    widgets::frame(p, r, 16.0, theme::mix(theme::surface(), theme::INK_800, hover));
+    let tile = Rect::from_min_size(pos2(r.left() + 14.0, r.center().y - 18.0), vec2(36.0, 36.0));
+    // A call to act stands out with the green tile while N4N0 is not on the avatar.
+    let c = anim::color(&ctx, id.with("tone"), tone.color(), Spring::SOFT);
+    p.rect_filled(tile, theme::radius(12.0), theme::alpha(c, if on_avatar { 0.1 } else { 0.16 }));
+    if state.running() {
+        feedback::spinner(p, tile.center(), 8.0, 2.0, c);
+    } else {
+        widgets::icon(p, tile.center(), icons::N4N0, 18.0, c);
     }
-    state.acknowledge_result(ui.ctx());
+    let x = tile.right() + 12.0;
+    let tw = r.right() - x - 12.0 - if trailing.is_some() { 26.0 } else { 0.0 };
+    widgets::text(p, pos2(x, r.center().y - 9.0), Align2::LEFT_CENTER, &Txt::caps("N4N0"));
+    widgets::sliding_value(
+        ui,
+        id.with("value"),
+        pos2(x, r.center().y + 9.0),
+        Align2::LEFT_CENTER,
+        value,
+        &Txt::new("", 13.0).weight(weight::MEDIUM).color(theme::FG),
+        tw,
+    );
+    if let Some(g) = trailing {
+        let tc = Rect::from_center_size(pos2(r.right() - 24.0, r.center().y), vec2(24.0, 24.0));
+        let shift = 2.0 * hover;
+        p.circle_filled(tc.center() + vec2(shift, 0.0), 12.0, theme::white(0.04 + 0.05 * hover));
+        widgets::icon(p, tc.center() + vec2(shift, 0.0), g, 13.0, if on_avatar { theme::ACCENT } else { theme::mix(theme::FG_2, theme::FG, hover) });
+    }
+    if widgets::activated(&resp) {
+        state.ensure(&ctx);
+        state.modal_fill = theme::surface();
+        if waiting && !on_avatar && !state.running() {
+            state.open_modal(&ctx, Modal::Setup, rect);
+        } else {
+            let worn = cx.snap.orb.avatar_id.clone().filter(|id| state.scan.projects.iter().any(|p| p.registered && p.avatars.iter().any(|a| &a.id == id)));
+            state.preselected = worn.or_else(|| state.preselected.clone());
+            state.open_modal(&ctx, if state.running() { Modal::Setup } else { Modal::Avatars }, rect);
+        }
+    }
 }

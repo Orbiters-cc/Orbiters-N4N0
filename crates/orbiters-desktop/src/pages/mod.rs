@@ -64,6 +64,8 @@ pub struct Cx<'a> {
 pub enum Go {
     /// Sessions, its storage popover open.
     FreeSpace,
+    /// Unity projects (Capture's avatar picker, when it has no avatar to offer).
+    Projects,
 }
 
 impl Cx<'_> {

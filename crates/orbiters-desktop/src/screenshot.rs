@@ -1323,32 +1323,85 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         },
     ];
 
+    // Unity projects and Capture's N4N0 card: every state, the dialogs, and frames in the middle of their motion
+    // (`-mid`: a few frames after the press that starts it). The panel docks on the default window; `--width 1040`
+    // shows the narrow layout (`projects-narrow-detail`, `projects-sheet-*`).
     for name in [
         "projects-gallery",
         "projects-detail",
         "projects-packages",
+        "projects-narrow-detail",
+        "projects-loading",
+        "projects-scanning",
+        "projects-empty",
+        "projects-panel-loading",
+        "projects-error",
+        "projects-busy",
+        "projects-search",
+        "projects-proposals",
         "projects-repos",
+        "projects-repos-loading",
+        "projects-repos-mid",
         "projects-new",
-        "projects-avatars",
-        "projects-choice",
+        "projects-new-custom",
+        "projects-new-duplicate",
+        "projects-new-copying",
+        "projects-new-mid",
+        "projects-new-open",
+        "projects-installing",
         "projects-setup",
+        "projects-setup-closed",
+        "projects-setup-done",
+        "projects-setup-declined",
+        "projects-setup-failed",
+        "projects-installed",
+        "projects-setup-from-panel",
+        "projects-sheet-mid",
+        "projects-sheet-open",
+        "projects-switch-mid",
+        "projects-press",
+        "projects-hover",
+        "projects-dropdown",
+        "projects-menu",
+        "projects-avatars",
+        "projects-avatars-loading",
+        "projects-avatars-empty",
+        "projects-avatars-mid",
+        "projects-avatars-open",
+        "projects-choice",
         "projects-ready",
+        "projects-capture",
+        "projects-crossfade",
+        "projects-resize",
+        "projects-resize-mid",
     ] {
-        let capture = matches!(name, "projects-avatars" | "projects-choice" | "projects-ready");
+        let capture = name.starts_with("projects-avatars") || matches!(name, "projects-choice" | "projects-ready" | "projects-capture");
         let mut snapshot = scenarios[0].snapshot.clone();
         snapshot.orb.avatar_id = Some("avtr_00000000-0000-4000-8000-000000000000".into());
         snapshot.orb.manifest = name == "projects-ready";
         snapshot.orb.prop_sync = (name == "projects-ready").then_some(8);
+        // The development gallery, which has N4N0.
+        snapshot.account.development = true;
         scenarios.push(Scenario {
             name,
             page: if capture { Page::Capture } else { Page::Projects },
             snapshot,
-            frames: 90,
+            frames: if name == "projects-resize-mid" {
+                60
+            } else if name == "projects-crossfade" {
+                66
+            } else if name.ends_with("-mid") {
+                67
+            } else if name.ends_with("-open") || matches!(name, "projects-dropdown" | "projects-menu" | "projects-setup-from-panel") {
+                100
+            } else {
+                90
+            },
             splash: false,
             open_detail: false,
             toasts: vec![],
             pointer: None,
-            scroll: 0.0,
+            scroll: if name == "projects-proposals" { 560.0 } else { 0.0 },
             world: None,
             home: None,
             library: None,
@@ -1433,6 +1486,8 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
     let backend: Ctl = std::sync::Arc::new(Local::new(ctl.clone()));
     let mut world_opened = false;
     let mut library_staged = false;
+    // A press staged on the last frame, released on this one.
+    let mut release: Option<Pos2> = None;
     backend.attach(&ctx);
     let mut app = App::offline(backend);
     if sc.name == "vrchat-login-entering-password" {
@@ -1466,6 +1521,26 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             }
             if sc.page == Page::Videos {
                 stage_videos(&ctx, &mut app, sc.name);
+            }
+        }
+        // What the person does on this frame of a Unity projects scenario: a press where a control was drawn.
+        if let Some(p) = release.take() {
+            input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        }
+        if sc.name.starts_with("projects-") && f > 0 {
+            use crate::pages::projects::Poke;
+            match app.projects_mut().stage_frame(sc.name, f) {
+                Some(Poke::Press(p)) => {
+                    input.events.push(Event::PointerMoved(p));
+                    input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+                    release = Some(p);
+                }
+                Some(Poke::Hold(p)) => {
+                    input.events.push(Event::PointerMoved(p));
+                    input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+                }
+                Some(Poke::Hover(p)) => input.events.push(Event::PointerMoved(p)),
+                None => {}
             }
         }
         if sc.page == Page::Sessions && (f == 0 || f == 45) {

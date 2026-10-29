@@ -30,9 +30,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State, projects: &mut super::
     egui::ScrollArea::vertical().id_salt("capture").auto_shrink([false, false]).scroll_bar_rect(super::below_bar(ui, cx)).show(ui, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 32 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
-            super::projects::capture_banner(ui, cx, projects);
             header(ui, cx);
-            chips(ui, cx);
+            chips(ui, cx, projects);
             grid(ui, cx);
             performance(ui, cx);
             camera_path(ui, cx);
@@ -160,7 +159,9 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
     }
 }
 
-fn chips(ui: &mut Ui, cx: &mut Cx) {
+/// What capturing needs, as status cards: VRChat, N4N0 on the avatar (the one card to act on: it opens the avatar
+/// picker), the Spout source, the Action Menu and the storage. Five on a row, or three then two on narrow windows.
+fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
     let snap = cx.snap;
     let world = &snap.vrchat.world;
     let source = if snap.settings.spout_sender.is_empty() {
@@ -221,13 +222,36 @@ fn chips(ui: &mut Ui, cx: &mut Cx) {
                 if storage.free_bytes.is_some_and(|f| f < 20_000_000_000) { Tone::Warn } else { Tone::Ok },
             ),
         ];
-    block(ui, cx, 1, 62.0, |ui, rect| {
-        let w = (rect.width() - 36.0) / 4.0;
-        for (i, (glyph, label, value, tone)) in chips.iter().enumerate() {
-            let r = Rect::from_min_size(pos2(rect.left() + i as f32 * (w + 12.0), rect.top()), vec2(w, rect.height()));
-            widgets::status_chip(ui, r, Id::unique(("capture-chip", i)), glyph, label, value, *tone);
+    // Each card as wide as its words want, the row filled; three then two on windows too narrow for that.
+    let width = ui.available_width();
+    let want = |label: &str, value: &str| {
+        14.0 + 36.0 + 12.0 + widgets::text_size(ui, &Txt::caps(label)).x.max(widgets::text_size(ui, &Txt::new(value, 13.0).weight(weight::MEDIUM)).x) + 14.0
+    };
+    let mut wanted: Vec<f32> = chips.iter().map(|(_, label, value, _)| want(label, value)).collect();
+    wanted.insert(1, want("N4N0", "Add to my avatar") + 26.0);
+    let one_row = orbiters_ui::layout::share_scale(&wanted, width, 12.0) >= 0.82;
+    let rows: Vec<std::ops::Range<usize>> = if one_row { vec![0..5] } else { vec![0..3, 3..5] };
+    let (rect, _) = ui.allocate_exact_size(vec2(width, rows.len() as f32 * 74.0 - 12.0), Sense::hover());
+    let (rect, alpha) = entering(ui, cx, 1, rect);
+    let mut cells = Vec::with_capacity(5);
+    for (r, range) in rows.iter().enumerate() {
+        let widths =
+            if one_row { orbiters_ui::layout::share(&wanted[range.clone()], rect.width(), 12.0) } else { vec![(rect.width() - 24.0) / 3.0; range.len()] };
+        let mut x = rect.left();
+        for w in widths {
+            cells.push(Rect::from_min_size(pos2(x, rect.top() + r as f32 * 74.0), vec2(w, 62.0)));
+            x += w + 12.0;
         }
-    });
+    }
+    let cell = |i: usize| cells[i];
+    let mut cu = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("capture-chips"));
+    cu.multiply_opacity(alpha);
+    // N4N0 second, after VRChat.
+    for (i, (glyph, label, value, tone)) in chips.iter().enumerate() {
+        let slot = if i == 0 { 0 } else { i + 1 };
+        widgets::status_chip(&mut cu, cell(slot), Id::unique(("capture-chip", i)), glyph, label, value, *tone);
+    }
+    super::projects::capture_card(&mut cu, cx, projects, cell(1));
 }
 
 fn grid(ui: &mut Ui, cx: &mut Cx) {

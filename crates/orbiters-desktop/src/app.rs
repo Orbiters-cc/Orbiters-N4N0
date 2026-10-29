@@ -510,6 +510,7 @@ impl App {
                     self.set_page(Page::Sessions, anim::time(&ctx));
                     self.sessions.open_storage(false);
                 }
+                pages::Go::Projects => self.set_page(Page::Projects, anim::time(&ctx)),
             }
         }
     }

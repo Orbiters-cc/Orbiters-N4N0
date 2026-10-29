@@ -7,8 +7,10 @@ use orbiters_core::{
     visited,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
+use std::time::Instant;
 
 /// The sharing contract keeps the member's world captures wanted while they are in VRChat. Screenshots do not
 /// start the controller, so they never send presence. Failed calls back off; a world change is sent on the next tick.
@@ -104,17 +106,38 @@ pub enum Outcome {
 pub struct ShareJob {
     pub id: String,
     pub key: String,
+    /// Where it stands while it runs.
+    pub stage: Stage,
     pub outcome: Option<Outcome>,
 }
+/// What a running share is doing (docs/share-speed-2026-10-29.md): what the window and the gallery's card say.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum Stage {
+    /// Just asked.
+    #[default]
+    Starting,
+    /// Waiting for another change to the same item to finish.
+    Waiting,
+    /// Making a 3D capture's upload files, or waiting for their background preparation.
+    Preparing,
+    /// Sending its files: bytes sent of all.
+    Sending { sent: u64, total: u64 },
+    /// Telling Orbiters who sees it.
+    Sharing,
+    /// Several items (a world's pictures): how many are shared of all.
+    Items { done: u32, total: u32 },
+}
+/// Several items shared at once at most (each its upload and its grant).
+const SHARES_AT_ONCE: usize = 3;
+/// Where a share reports its stage.
+pub type Report<'a> = &'a (dyn Fn(Stage) + Sync);
 
-fn run_request(request: Request) -> anyhow::Result<Outcome> {
+fn run_request(request: Request, report: Report) -> anyhow::Result<Outcome> {
     match request.operation {
+        Operation::Share(r) if request.extra.is_empty() => share(request.server, request.entry, r, report).map(Outcome::Shared),
         Operation::Share(r) => {
-            let first = share(request.server, request.entry, r.clone())?;
-            for entry in request.extra {
-                share(request.server, entry, r.clone())?;
-            }
-            Ok(Outcome::Shared(first))
+            let entries = std::iter::once(request.entry).chain(request.extra).collect();
+            share_all(entries, report, |entry| share(request.server, entry, r.clone(), &|_| {})).map(Outcome::Shared)
         }
         Operation::Unshare(r) => unshare(request.server, request.entry, r).map(Outcome::Unshared),
         Operation::Answer { id, approve, acknowledge_explicit } => {
@@ -124,17 +147,47 @@ fn run_request(request: Request) -> anyhow::Result<Outcome> {
         Operation::Download => download(request.server, request.entry.remote.ok_or_else(|| anyhow::anyhow!("No uploaded item"))?).map(Outcome::Downloaded),
     }
 }
+/// A share of several items ([`SHARES_AT_ONCE`] at a time, none started after one failed): the first item's answer, or
+/// the first failure in their order.
+fn share_all(entries: Vec<Entry>, report: Report, one: impl Fn(Entry) -> anyhow::Result<shares::Shared> + Sync) -> anyhow::Result<shares::Shared> {
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::SeqCst};
+    let total = entries.len() as u32;
+    report(Stage::Items { done: 0, total });
+    let (next, done, failed) = (AtomicUsize::new(0), AtomicU32::new(0), AtomicBool::new(false));
+    let results: Vec<Mutex<Option<anyhow::Result<shares::Shared>>>> = entries.iter().map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..SHARES_AT_ONCE.min(entries.len()) {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, SeqCst);
+                if i >= entries.len() || failed.load(SeqCst) {
+                    break;
+                }
+                let result = one(entries[i].clone());
+                failed.fetch_or(result.is_err(), SeqCst);
+                *results[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+                report(Stage::Items { done: done.fetch_add(1, SeqCst) + 1, total });
+            });
+        }
+    });
+    let mut first = None;
+    for result in results.into_iter().filter_map(|r| r.into_inner().unwrap_or_else(|e| e.into_inner())) {
+        let shared = result?;
+        first.get_or_insert(shared);
+    }
+    first.ok_or_else(|| anyhow::anyhow!("Nothing was shared"))
+}
+
 impl super::Controller {
     /// The tray owns each mutation until completion, even if the submitting window closes.
     pub fn capture_share(self: &super::Shared, request: Request) {
         self.capture_share_with(request, run_request);
     }
-    fn capture_share_with(self: &super::Shared, request: Request, work: impl FnOnce(Request) -> anyhow::Result<Outcome> + Send + 'static) {
+    fn capture_share_with(self: &super::Shared, request: Request, work: impl FnOnce(Request, Report) -> anyhow::Result<Outcome> + Send + 'static) {
         let accepted = self.update(|s| {
             if s.capture_shares.iter().any(|j| j.id == request.id) {
                 return false;
             }
-            s.capture_shares.push(ShareJob { id: request.id.clone(), key: request.entry.key.clone(), outcome: None });
+            s.capture_shares.push(ShareJob { id: request.id.clone(), key: request.entry.key.clone(), stage: Stage::Starting, outcome: None });
             true
         });
         if !accepted {
@@ -143,7 +196,25 @@ impl super::Controller {
         let ctl = self.clone();
         let id = request.id.clone();
         std::thread::spawn(move || {
-            let outcome = work(request)
+            // Every change goes to every window: bytes at most every 100 ms, the other stages as they come.
+            let last = Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(1));
+            let report = |stage: Stage| {
+                if let Stage::Sending { sent, total } = stage {
+                    let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+                    if sent < total && last.elapsed().as_millis() < 100 {
+                        return;
+                    }
+                    *last = std::time::Instant::now();
+                }
+                ctl.update_if(|s| match s.capture_shares.iter_mut().find(|j| j.id == id && j.stage != stage) {
+                    Some(j) => {
+                        j.stage = stage;
+                        true
+                    }
+                    None => false,
+                });
+            };
+            let outcome = work(request, &report)
                 .unwrap_or_else(|e| Outcome::Failed { explicit: e.downcast_ref::<shares::ExplicitAcknowledgement>().is_some(), message: e.to_string() });
             let (kind, message) = match &outcome {
                 Outcome::Failed { message, explicit: false } => (super::NoticeKind::Error, message.clone()),
@@ -170,6 +241,26 @@ impl super::Controller {
             ctl.notify(kind, message);
             ctl.bump_library();
             ctl.refresh_maps();
+        });
+    }
+
+    /// Share to … opened on `session`: a reconstructed 3D capture this account has not uploaded gets its upload files
+    /// made while friends are chosen (maps::web_preview, whose cache the share then reads at once). Nothing is sent.
+    pub fn prepare_share(&self, session: PathBuf) {
+        static AHEAD: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+        let server = if self.settings().development { Server::Development } else { Server::Production };
+        let uploaded = records_path(server).ok().is_some_and(|p| read_records(&p).iter().any(|r| r.path == session));
+        if uploaded
+            || orbiters_core::reconstruction::read_report(&session).is_none()
+            || !AHEAD.lock().unwrap_or_else(|e| e.into_inner()).insert(session.clone())
+        {
+            return;
+        }
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let failed = super::maps::web_preview(&session).err().map(|e| format!(", failed: {e}")).unwrap_or_default();
+            share_log(&format!("3D capture {} prepared ahead of its share in {:.2} s{failed}", session.display(), started.elapsed().as_secs_f64()));
+            AHEAD.lock().unwrap_or_else(|e| e.into_inner()).remove(&session);
         });
     }
 }
@@ -307,9 +398,10 @@ pub fn uploads(server: Server) -> Vec<(PathBuf, Item)> {
 fn read_records(path: &Path) -> Vec<Record> {
     std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
-fn save_record(server: Server, entry: &Entry, item: &Item) -> anyhow::Result<()> {
+fn save_record(records: anyhow::Result<&Path>, entry: &Entry, item: &Item) -> anyhow::Result<()> {
     if let Some(local) = &entry.local {
-        let path = records_path(server)?;
+        let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+        let path = records?;
         let mut records = read_records(&path);
         records.retain(|r| r.path != local.path());
         records.push(Record {
@@ -321,20 +413,82 @@ fn save_record(server: Server, entry: &Entry, item: &Item) -> anyhow::Result<()>
     }
     Ok(())
 }
-static MUTATION: Mutex<()> = Mutex::new(());
-/// Upload identity is saved before granting: retry after a failed share never uploads a duplicate.
-pub fn share(server: Server, entry: Entry, request: shares::Share) -> anyhow::Result<shares::Shared> {
-    let _one = MUTATION.lock().unwrap_or_else(|e| e.into_inner());
-    let (api, token) = api(server)?;
+/// The items being changed (their local file, else their server key): one change at a time each, different items at
+/// once. A share uploading a 3D capture no longer holds up another item's share.
+static CHANGING: (Mutex<BTreeSet<String>>, Condvar) = (Mutex::new(BTreeSet::new()), Condvar::new());
+/// The upload records are read, changed and written whole: one writer at a time.
+static RECORDS: Mutex<()> = Mutex::new(());
+struct Changing(String);
+impl Changing {
+    fn of(entry: &Entry, report: Report) -> Self {
+        let key = entry.local.as_ref().map_or_else(|| entry.key.clone(), |l| l.path().to_string_lossy().into_owned());
+        let (set, wake) = &CHANGING;
+        let mut set = set.lock().unwrap_or_else(|e| e.into_inner());
+        if set.contains(&key) {
+            report(Stage::Waiting);
+        }
+        while set.contains(&key) {
+            set = wake.wait(set).unwrap_or_else(|e| e.into_inner());
+        }
+        set.insert(key.clone());
+        Self(key)
+    }
+}
+impl Drop for Changing {
+    fn drop(&mut self) {
+        let (set, wake) = &CHANGING;
+        set.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+        wake.notify_all();
+    }
+}
+/// Upload identity is saved before granting: retry after a failed share never uploads a duplicate. An item already
+/// uploaded (as the gallery or its record says) is shared with one request, never sent or fetched again. How long
+/// each step took goes to `%LOCALAPPDATA%/Orbiters/logs/shares.log`.
+pub fn share(server: Server, entry: Entry, request: shares::Share, report: Report) -> anyhow::Result<shares::Shared> {
+    let started = Instant::now();
+    let mut steps = Vec::new();
+    let result = api(server).and_then(|(api, token)| share_with(&api, &token, records_path(server), &entry, &request, report, &mut steps));
+    let whom = match (request.public, request.recipients.len()) {
+        (true, 0) => "publicly".to_string(),
+        (public, n) => format!("{}with {n} friend{}", if public { "publicly and " } else { "" }, if n == 1 { "" } else { "s" }),
+    };
+    let what = if entry.is_picture() { "picture" } else { "3D capture" };
+    let end = match &result {
+        Ok(_) => String::new(),
+        Err(e) => format!(", failed: {e}"),
+    };
+    share_log(&format!("{what} {} shared {whom}: {}; {:.2} s in all{end}", entry.key, steps.join(", "), started.elapsed().as_secs_f64()));
+    result
+}
+/// [`share`] through `api` as `token`, this account's upload records in `records`; what took how long in `steps`.
+fn share_with(
+    api: &Api,
+    token: &str,
+    records: anyhow::Result<PathBuf>,
+    entry: &Entry,
+    request: &shares::Share,
+    report: Report,
+    steps: &mut Vec<String>,
+) -> anyhow::Result<shares::Shared> {
+    let mut at = Instant::now();
+    let mut step = |what: &str, at: &mut Instant| {
+        steps.push(format!("{what} {:.2} s", at.elapsed().as_secs_f64()));
+        *at = Instant::now();
+    };
+    let _one = Changing::of(entry, report);
+    if at.elapsed().as_millis() > 50 {
+        step("waited for its other change", &mut at);
+    }
+    let records = records.as_deref().map_err(|e| anyhow::anyhow!("{e}"));
     let remembered = entry
         .local
         .as_ref()
-        .and_then(|l| records_path(server).ok().and_then(|p| read_records(&p).into_iter().find(|r| r.path == l.path())))
-        .map(|r| api.capture_item(&token, r.uploaded.kind, r.uploaded.id))
-        .transpose()?;
-    let existing = entry.remote.clone().or(remembered);
-    let item = if let Some(item) = existing {
-        item
+        .and_then(|l| records.as_ref().ok().and_then(|p| read_records(p).into_iter().find(|r| r.path == l.path())))
+        .map(|r| (r.uploaded.kind, r.uploaded.id));
+    let existing = entry.remote.as_ref().map(|i| (i.kind, i.id)).or(remembered);
+    let uploaded_now = existing.is_none();
+    let (kind, id) = if let Some(known) = existing {
+        known
     } else {
         anyhow::ensure!(!request.public || !entry.content.explicit || request.acknowledge_explicit, "{}", shares::EXPLICIT_WARNING);
         let source_key = match entry.local.as_ref().ok_or_else(|| anyhow::anyhow!("No local file to upload"))? {
@@ -352,19 +506,37 @@ pub fn share(server: Server, entry: Entry, request: shares::Share) -> anyhow::Re
 
         let uploaded: Uploaded = match entry.local.as_ref().ok_or_else(|| anyhow::anyhow!("No local file to upload"))? {
             Local::Session(dir) => {
+                report(Stage::Preparing);
                 let (files, sky, view) = super::maps::web_preview(dir)?;
+                step("prepared", &mut at);
+                let bytes = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
                 metadata.as_object_mut().unwrap().extend(view.as_object().unwrap().clone());
-                api.add_preview(&token, &entry.world_id, files, sky.as_deref(), &metadata, |_, _| {})?
+                // The upload's progress callback must be 'static: it reports over a channel read here.
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::scope(|scope| {
+                    let sending = scope.spawn(|| {
+                        api.add_preview(token, &entry.world_id, files, sky.as_deref(), &metadata, move |sent, total| {
+                            let _ = tx.send((sent, total));
+                        })
+                    });
+                    for (sent, total) in rx {
+                        report(Stage::Sending { sent, total });
+                    }
+                    sending.join().unwrap_or_else(|_| Err(anyhow::anyhow!("The upload stopped unexpectedly")))
+                })
+                .inspect(|_| step(&format!("sent {:.1} MB and stored", bytes as f64 / 1e6), &mut at))?
             }
             Local::Picture(path) => {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
                 let part = Part::file("pictures", name.as_ref(), "image/png", path)?;
                 metadata["takenAt"] = serde_json::json!([iso(entry.taken)]);
-                let result = api.add_shared_pictures(&token, &entry.world_id, vec![part], &metadata)?;
+                report(Stage::Sending { sent: 0, total: std::fs::metadata(path).map_or(0, |m| m.len()) });
+                let result = api.add_shared_pictures(token, &entry.world_id, vec![part], &metadata)?;
+                step("sent and stored", &mut at);
                 match result.added.into_iter().next() {
                     Some(uploaded) => uploaded,
                     None => {
-                        let item = api.capture_by_source_key(&token, &entry.world_id, Kind::Picture, &source_key)?.ok_or_else(|| {
+                        let item = api.capture_by_source_key(token, &entry.world_id, Kind::Picture, &source_key)?.ok_or_else(|| {
                             anyhow::anyhow!("The server skipped this picture, but its source identity is not available yet. Refresh the gallery and retry.")
                         })?;
                         Uploaded { kind: item.kind, id: item.id, visibility: if item.public { "public" } else { "private" }.into() }
@@ -372,28 +544,61 @@ pub fn share(server: Server, entry: Entry, request: shares::Share) -> anyhow::Re
                 }
             }
         };
-        let file = records_path(server)?;
-        let mut records = read_records(&file);
-        let local = entry.local.as_ref().unwrap();
-        records.retain(|r| r.path != local.path());
-        records.push(Record { path: local.path().into(), item: None, uploaded: uploaded.clone() });
-        orbiters_core::write_atomic(&file, &serde_json::to_vec(&records)?)?;
-        let item = api.capture_item(&token, uploaded.kind, uploaded.id)?;
-        save_record(server, &entry, &item)?;
-        item
+        {
+            let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+            let file = records.as_ref().map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut known = read_records(file);
+            let local = entry.local.as_ref().unwrap();
+            known.retain(|r| r.path != local.path());
+            known.push(Record { path: local.path().into(), item: None, uploaded: uploaded.clone() });
+            orbiters_core::write_atomic(file, &serde_json::to_vec(&known)?)?;
+        }
+        (uploaded.kind, uploaded.id)
     };
-    let result = api.share_capture(&token, item.kind, item.id, &request)?;
-    if let shares::Shared::Item { item } = &result {
-        save_record(server, &entry, item)?;
+    report(Stage::Sharing);
+    let shared = api.share_capture(token, kind, id, request);
+    step("shared", &mut at);
+    match shared {
+        Ok(result) => {
+            if let shares::Shared::Item { item } = &result {
+                save_record(records, entry, item)?;
+            }
+            Ok(result)
+        }
+        Err(e) => {
+            // Uploaded but not shared: its item is remembered whole all the same, so the gallery shows it uploaded.
+            if uploaded_now {
+                if let Ok(item) = api.capture_item(token, kind, id) {
+                    let _ = save_record(records, entry, &item);
+                }
+            }
+            Err(e)
+        }
     }
-    Ok(result)
+}
+/// A line in `%LOCALAPPDATA%/Orbiters/logs/shares.log`, kept under 1 MB (the last one renamed .old). Tests write none.
+fn share_log(line: &str) {
+    #[cfg(not(test))]
+    {
+        use std::io::Write;
+        let dir = orbiters_core::paths::logs_dir();
+        let path = dir.join("shares.log");
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
+            let _ = std::fs::rename(&path, dir.join("shares.old.log"));
+        }
+        if let Ok(mut f) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(&path)) {
+            let _ = writeln!(f, "{} {line}", orbiters_core::now_utc_iso());
+        }
+    }
+    #[cfg(test)]
+    let _ = line;
 }
 pub fn unshare(server: Server, entry: Entry, request: shares::Unshare) -> anyhow::Result<Item> {
-    let _one = MUTATION.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = Changing::of(&entry, &|_| {});
     let (api, token) = api(server)?;
     let item = entry.remote.as_ref().ok_or_else(|| anyhow::anyhow!("This item has not been uploaded"))?;
     let item = api.unshare_capture(&token, item.kind, item.id, &request)?;
-    save_record(server, &entry, &item)?;
+    save_record(records_path(server).as_deref().map_err(|e| anyhow::anyhow!("{e}")), &entry, &item)?;
     Ok(item)
 }
 pub fn download(server: Server, item: Item) -> anyhow::Result<PathBuf> {
@@ -440,7 +645,7 @@ mod tests {
         let parsed: crate::ipc::ToService = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, crate::ipc::ToService::CaptureShare { .. }));
         let (tx, rx) = std::sync::mpsc::channel();
-        ctl.capture_share_with(request, move |_| {
+        ctl.capture_share_with(request, move |_, _| {
             rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
             Ok(Outcome::Shared(shares::Shared::Request { request: shares::ShareRequest { id: 5, ..Default::default() } }))
         });
@@ -460,6 +665,159 @@ mod tests {
         let decoded: crate::state::Snapshot = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.capture_shares[0].id, "fixture-job");
     }
+    /// A stand-in for Orbiters on a loopback port, answering by the start of the request line; the requests it got, in
+    /// order ("POST /captures/capture/3/share").
+    fn fake_orbiters(answers: Vec<(&'static str, String)>) -> (Api, std::sync::Arc<Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = Api::at(&format!("http://{}/", listener.local_addr().unwrap()));
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let (mut line, mut length) = (String::new(), 0);
+                reader.read_line(&mut line).unwrap();
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                }
+                reader.read_exact(&mut vec![0; length]).unwrap();
+                let request = line.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+                let answer = answers.iter().find(|(start, _)| request.starts_with(start)).map_or("{}".to_string(), |(_, a)| a.clone());
+                log.lock().unwrap().push(request);
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len())
+                    .unwrap();
+            }
+        });
+        (api, seen)
+    }
+
+    fn shared_item(kind: Kind, id: u64) -> String {
+        let grants = vec![shares::Grant { id: 1, vrchat_user_id: "usr_friend".into(), display_name: Some("Friend".into()), ..Default::default() }];
+        serde_json::to_string(&shares::Shared::Item { item: Item { kind, id, mine: true, can_share: true, grants, ..Default::default() } }).unwrap()
+    }
+
+    fn to_a_friend() -> shares::Share {
+        shares::Share { recipients: vec![shares::Recipient { vrchat_user_id: "usr_friend".into(), display_name: "Friend".into() }], ..Default::default() }
+    }
+
+    /// An item uploaded before (its record says so) is shared with one request: nothing sent again, nothing fetched.
+    #[test]
+    fn an_uploaded_item_is_shared_with_one_request() {
+        let dir = std::env::temp_dir().join(format!("orbiters-share-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("Silent Dawn 2026-10-28 23-52-12");
+        let records = dir.join("capture-uploads.json");
+        let uploaded = Uploaded { kind: Kind::Capture, id: 3, visibility: "private".into() };
+        std::fs::write(&records, serde_json::to_vec(&[Record { path: session.clone(), item: None, uploaded }]).unwrap()).unwrap();
+        let (api, seen) = fake_orbiters(vec![("POST /captures/capture/3/share", shared_item(Kind::Capture, 3))]);
+        let mut entry = remote_entry(Item::default());
+        entry.remote = None;
+        entry.local = Some(Local::Session(session.clone()));
+        let stages = Mutex::new(Vec::new());
+        let result = share_with(&api, "token", Ok(records.clone()), &entry, &to_a_friend(), &|s| stages.lock().unwrap().push(s), &mut Vec::new()).unwrap();
+        assert!(matches!(result, shares::Shared::Item { ref item } if item.grants.len() == 1));
+        assert_eq!(*seen.lock().unwrap(), ["POST /captures/capture/3/share"]);
+        assert_eq!(*stages.lock().unwrap(), [Stage::Sharing]);
+        let saved = read_records(&records);
+        assert_eq!(saved[0].item.as_ref().map(|i| i.id), Some(3), "the item the share answered is remembered");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A picture not uploaded yet: sent once, shared with the identity the upload answered (no fetch in between), and
+    /// that identity remembered before the share is asked.
+    #[test]
+    fn a_new_picture_is_sent_then_shared_without_fetching_it() {
+        let dir = std::env::temp_dir().join(format!("orbiters-share-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let picture = dir.join("VRChat_2026-10-29_19-00-00.000_1920x1080.png");
+        std::fs::write(&picture, [7u8; 4096]).unwrap();
+        let records = dir.join("capture-uploads.json");
+        let world = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";
+        let added = r#"{"added":[{"type":"picture","id":9,"visibility":"private"}],"skipped":0}"#.to_string();
+        let (api, seen) = fake_orbiters(vec![(r"POST /maps/worlds/", added), ("POST /captures/picture/9/share", shared_item(Kind::Picture, 9))]);
+        let mut entry = remote_entry(Item::default());
+        entry.remote = None;
+        entry.world_id = world.into();
+        entry.source_key = Some("a".repeat(64));
+        entry.local = Some(Local::Picture(picture.clone()));
+        let stages = Mutex::new(Vec::new());
+        share_with(&api, "token", Ok(records.clone()), &entry, &to_a_friend(), &|s| stages.lock().unwrap().push(s), &mut Vec::new()).unwrap();
+        assert_eq!(*seen.lock().unwrap(), [format!("POST /maps/worlds/{world}/pictures"), "POST /captures/picture/9/share".to_string()]);
+        assert_eq!(*stages.lock().unwrap(), [Stage::Sending { sent: 0, total: 4096 }, Stage::Sharing]);
+        let saved = read_records(&records);
+        assert_eq!((saved[0].uploaded.id, saved[0].item.as_ref().map(|i| i.id)), (9, Some(9)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A world's pictures go three at a time, their count shared said as it grows; after a failure none is started, and
+    /// the failure is the answer.
+    #[test]
+    fn several_items_are_shared_three_at_a_time() {
+        let entries: Vec<Entry> = (0..7).map(|i| remote_entry(Item { kind: Kind::Picture, id: i, ..Default::default() })).collect();
+        let flight = Mutex::new((0, 0));
+        let stages = Mutex::new(Vec::new());
+        let one = |e: Entry| {
+            {
+                let mut f = flight.lock().unwrap();
+                f.0 += 1;
+                f.1 = f.1.max(f.0);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            flight.lock().unwrap().0 -= 1;
+            Ok(shares::Shared::Item { item: e.remote.unwrap() })
+        };
+        let first = share_all(entries.clone(), &|s| stages.lock().unwrap().push(s), one).unwrap();
+        assert!(matches!(first, shares::Shared::Item { ref item } if item.id == 0), "the first item's answer");
+        assert_eq!(flight.lock().unwrap().1, SHARES_AT_ONCE);
+        let said = stages.into_inner().unwrap();
+        assert_eq!((said.first(), said.last(), said.len()), (Some(&Stage::Items { done: 0, total: 7 }), Some(&Stage::Items { done: 7, total: 7 }), 8));
+        let started = Mutex::new(0);
+        let failing = |e: Entry| {
+            *started.lock().unwrap() += 1;
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            if e.remote.as_ref().unwrap().id == 1 {
+                anyhow::bail!("Orbiters could not be reached")
+            }
+            Ok(shares::Shared::Item { item: e.remote.unwrap() })
+        };
+        let error = share_all(entries, &|_| {}, failing).unwrap_err();
+        assert_eq!(error.to_string(), "Orbiters could not be reached");
+        assert!(*started.lock().unwrap() < 7, "none started after the failure");
+    }
+
+    /// Two changes of one item wait for each other (the second says so); another item's goes at once.
+    #[test]
+    fn changes_wait_only_for_the_same_item() {
+        let item = |name: &str| {
+            let mut e = remote_entry(Item::default());
+            e.local = Some(Local::Session(PathBuf::from(format!("C:/Sessions/{name}-{}", uuid::Uuid::new_v4()))));
+            e
+        };
+        let (a, b) = (item("a"), item("b"));
+        let held = Changing::of(&a, &|_| {});
+        let other = std::time::Instant::now();
+        drop(Changing::of(&b, &|_| panic!("another item never waits")));
+        assert!(other.elapsed().as_millis() < 500);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let said = Mutex::new(Vec::new());
+            let _second = Changing::of(&a, &|s| said.lock().unwrap().push(s));
+            tx.send(said.into_inner().unwrap()).unwrap();
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "the same item waits");
+        drop(held);
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap(), [Stage::Waiting]);
+        waiter.join().unwrap();
+    }
+
     #[test]
     fn recording_start_saves_the_actual_osc_names_even_when_false() {
         let dir = std::env::temp_dir().join(format!("orbiters-content-{}", uuid::Uuid::new_v4()));

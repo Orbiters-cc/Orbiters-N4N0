@@ -66,6 +66,8 @@ pub trait Backend: Send + Sync {
     fn request_maps(&self);
     fn maps(&self) -> Option<MapsMine>;
     fn capture_share(&self, _request: controller::shares::Request) {}
+    /// Share to … opened on a 3D capture not uploaded yet: the tray makes its upload files while friends are chosen.
+    fn prepare_share(&self, _session: PathBuf) {}
     /// A T-pose calibration taken in the overlay.
     fn calibrated(&self, calibration: Calibration);
     /// N4N0: a question, the Talk button, the panel, saved videos.
@@ -232,6 +234,10 @@ impl Backend for Remote {
 
     fn capture_share(&self, request: controller::shares::Request) {
         self.0.send(&ToService::CaptureShare { request: Box::new(request) });
+    }
+
+    fn prepare_share(&self, session: PathBuf) {
+        self.0.send(&ToService::PrepareShare { session });
     }
 
     fn frames(&self, chunk: crate::state::FrameChunk) {
@@ -428,6 +434,10 @@ impl Backend for Local {
 
     fn capture_share(&self, request: controller::shares::Request) {
         self.ctl.capture_share(request);
+    }
+
+    fn prepare_share(&self, session: PathBuf) {
+        self.ctl.prepare_share(session);
     }
 
     fn frames(&self, chunk: crate::state::FrameChunk) {

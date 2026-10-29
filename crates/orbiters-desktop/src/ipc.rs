@@ -135,6 +135,10 @@ pub enum ToService {
     CaptureShare {
         request: Box<crate::controller::shares::Request>,
     },
+    /// Share to … opened on a 3D capture not uploaded yet: its upload files are made while friends are chosen.
+    PrepareShare {
+        session: PathBuf,
+    },
     /// A T-pose calibration taken in the overlay (`time_ns` is a shared-clock reading).
     Calibrated {
         calibration: Box<Calibration>,

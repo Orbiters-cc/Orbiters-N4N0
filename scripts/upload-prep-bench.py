@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--binary", required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--test", default="upload_prep_timings")
     parser.add_argument("sessions", nargs="+")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -28,7 +29,7 @@ def main():
         env.pop("ORBITERS_PREP_PROFILE", None)
     started = time.perf_counter()
     with (args.out / "run.log").open("w", encoding="utf-8") as log:
-        with subprocess.Popen([args.binary, "upload_prep_timings", "--ignored", "--nocapture",
+        with subprocess.Popen([args.binary, args.test, "--ignored", "--nocapture",
                                "--test-threads=1"], env=env, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, text=True, encoding="utf-8") as process:
             for line in process.stdout:

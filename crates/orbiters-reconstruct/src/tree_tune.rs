@@ -276,6 +276,8 @@ mod tests {
 
     /// Compare the actual serialized upload files, including colour/rotation quantization, on identical views.
     /// ORBITERS_TEST_SESSION=<semicolon-separated sessions>, ORBITERS_PREP_BASE/FINAL=<saved numbered files>.
+    /// Optional ORBITERS_PREP_BASE_REPEAT averages an independently recorded baseline's scores, since float-atomic
+    /// training varies between identical runs. The gate stays 0.05 dB; each baseline score is printed too.
     #[test]
     #[ignore]
     fn serialized_upload_quality() {
@@ -308,6 +310,7 @@ mod tests {
             Tree { nodes, splats: crate::web::read_splat(&bytes[(1 + count) * 32..]).unwrap() }
         }
         let base = std::path::PathBuf::from(std::env::var_os("ORBITERS_PREP_BASE").unwrap());
+        let repeat = std::env::var_os("ORBITERS_PREP_BASE_REPEAT").map(std::path::PathBuf::from);
         let final_dir = std::path::PathBuf::from(std::env::var_os("ORBITERS_PREP_FINAL").unwrap());
         let mut gpu = Gpu::new().unwrap();
         let mut failed = Vec::new();
@@ -318,12 +321,19 @@ mod tests {
             for platform in ["pc", "quest", "coarse"] {
                 let relative = format!("{index}/{platform}.tree");
                 let before = read(&base.join(&relative));
+                let repeated = repeat.as_ref().map(|dir| read(&dir.join(&relative)));
                 let after = read(&final_dir.join(&relative));
                 assert_eq!(before.nodes, after.nodes);
+                if let Some(repeated) = &repeated {
+                    assert_eq!(before.nodes, repeated.nodes);
+                    if platform != "coarse" {
+                        assert!(before.leaf_splats() == repeated.leaf_splats(), "baseline leaf splats changed");
+                    }
+                }
                 let reference = if platform == "coarse" { read(&base.join(format!("{index}/quest.tree"))) } else { before.clone() };
                 let leaves = reference.leaf_splats();
                 if platform != "coarse" {
-                    assert_eq!(leaves, after.leaf_splats());
+                    assert!(leaves == after.leaf_splats(), "exported leaf splats changed");
                 }
                 let deepest = before.nodes.iter().map(|n| n.depth).max().unwrap();
                 for depth in 0..=deepest {
@@ -336,8 +346,9 @@ mod tests {
                     if views.is_empty() {
                         continue;
                     }
-                    let cuts = [&before, &after].map(|tree| tree.select(|n| n.depth == depth || (n.leaf && n.depth < depth)));
-                    let mut scores = [0.0f32; 2];
+                    let trees = std::iter::once(&before).chain(repeated.iter()).chain(std::iter::once(&after));
+                    let cuts: Vec<_> = trees.map(|tree| tree.select(|n| n.depth == depth || (n.leaf && n.depth < depth))).collect();
+                    let mut scores = vec![0.0f32; cuts.len()];
                     for v in &views {
                         gpu.upload(&leaves);
                         let target = packed(&crate::train::render(&mut gpu, v, [0.0; 3]).unwrap());
@@ -348,10 +359,13 @@ mod tests {
                             scores[i] += gpu.score(v, [0.0; 3], &target).unwrap() / views.len() as f32;
                         }
                     }
-                    let delta = scores[1] - scores[0];
+                    let final_score = *scores.last().unwrap();
+                    let baselines = &scores[..scores.len() - 1];
+                    let baseline = baselines.iter().sum::<f32>() / baselines.len() as f32;
+                    let delta = final_score - baseline;
                     eprintln!(
                         "file_quality {}",
-                        serde_json::json!({"session":index,"platform":platform,"depth":depth,"baseline_db":scores[0],"final_db":scores[1],"delta_db":delta})
+                        serde_json::json!({"session":index,"platform":platform,"depth":depth,"baseline_db":baseline,"baseline_runs_db":baselines,"final_db":final_score,"delta_db":delta})
                     );
                     if delta < -0.05 {
                         failed.push((index, platform, depth, delta));

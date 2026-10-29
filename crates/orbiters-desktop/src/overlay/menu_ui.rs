@@ -419,6 +419,9 @@ pub fn places() -> Vec<(Text, Place)> {
         let l = layout::cached(page);
         out.extend(l.labels.iter().map(|label| (label.text, label_place(label))));
         out.extend(l.elements.iter().filter_map(|e| Some((e.label?, element_place(e)?))));
+        if page == ScreenPage::Mirror {
+            out.extend(l.pictures.iter().map(|pic| (Text::MirrorPlaceholder, mirror_placeholder_place(pic.rect.w as f32))));
+        }
     }
     out
 }
@@ -632,8 +635,14 @@ fn mirror_placeholder(p: &Painter, r: Rect, skin: &Skin) {
     let middle = r.center() - vec2(0.0, 18.0);
     p.circle_filled(middle, 46.0, theme::alpha(pal.accent, 0.10));
     widgets::icon(p, middle, glyph(Icon::Mirror), 48.0, pal.accent);
-    let caption = fit(p, Txt::new(skin.text(Text::MirrorPlaceholder), 22.0).weight(weight::MEDIUM).color(pal.muted), r.width() - 2.0 * inset - 40.0);
+    let place = mirror_placeholder_place(r.width());
+    let caption = fit(p, Txt::new(skin.text(Text::MirrorPlaceholder), place.size).weight(weight::MEDIUM).color(pal.muted), place.room);
     widgets::text(p, pos2(r.center().x, middle.y + 70.0), Align2::CENTER_CENTER, &caption.txt);
+}
+
+/// The mirror placeholder's caption under its viewfinder corners (inset 22 on each side, 20 more inside them).
+fn mirror_placeholder_place(width: f32) -> Place {
+    Place { room: width - 2.0 * 22.0 - 40.0, size: 22.0 }
 }
 
 /// Music without art: a note on the picture's place.

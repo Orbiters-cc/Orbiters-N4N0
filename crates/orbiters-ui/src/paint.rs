@@ -308,14 +308,77 @@ fn outline_feather(painter: &Painter, points: &[Pos2], color_at: impl Fn(Pos2) -
     painter.add(Shape::mesh(mesh));
 }
 
-/// CSS-like box shadow of a rounded rectangle.
+/// CSS-like box shadow of a rounded rectangle: a gaussian fall-off reaching `blur` points past its edge, made of rings
+/// of the shape grown and shrunk. egui's blurred rectangles crease on shapes thinner than their blur (a hard line along
+/// the middle, streaks under the corners: a tooltip's shadow); here a thin shape's shadow is the blurred box across its
+/// narrower side, lighter in the middle and smooth through it.
 pub fn shadow(painter: &Painter, rect: Rect, radius: f32, offset: Vec2, blur: f32, spread: f32, color: Color32) {
     let r = rect.translate(offset).expand(spread);
-    if r.width() <= 0.0 || r.height() <= 0.0 {
+    if !r.is_finite() || r.width() <= 0.0 || r.height() <= 0.0 || color.a() == 0 {
         return;
     }
-    let shape = egui::epaint::RectShape::filled(r, crate::theme::radius(radius + spread.max(0.0)), color).with_blur_width(blur * 2.0);
-    painter.add(shape);
+    painter.add(Shape::mesh(shadow_mesh(r, radius + spread.max(0.0), blur, color)));
+}
+
+/// Rings of [`shadow`], from inside the shape (or its middle line) to `blur` outside it.
+const SHADOW_RINGS: usize = 12;
+/// Points on each ring's quarter circles.
+const SHADOW_ARC: usize = 7;
+
+fn shadow_mesh(r: Rect, radius: f32, blur: f32, color: Color32) -> Mesh {
+    let blur = blur.max(0.5);
+    let half = 0.5 * r.width().min(r.height());
+    // The blurred box across the narrower side at a signed distance `d` from the edge (outside positive), the kernel a
+    // gaussian of sigma blur / 2 cut at ±blur.
+    let edge = normal_cdf(-2.0);
+    let kernel = |u: f32| ((normal_cdf(2.0 * u / blur) - edge) / (1.0 - 2.0 * edge)).clamp(0.0, 1.0);
+    let value = |d: f32| (kernel(-d) - kernel(-2.0 * half - d)).clamp(0.0, 1.0);
+    let inner = (-blur).max(-half);
+    let n = 4 * (SHADOW_ARC + 1);
+    let mut mesh = Mesh::default();
+    for k in 0..SHADOW_RINGS {
+        let d = inner + (blur - inner) * k as f32 / (SHADOW_RINGS - 1) as f32;
+        let ring = r.expand(d);
+        let cr = (radius + d).clamp(0.0, 0.5 * ring.width().min(ring.height()));
+        let c = color.gamma_multiply(value(d));
+        // Corners clockwise from the bottom right, each a quarter circle (one point when sharp).
+        let centres = [
+            pos2(ring.right() - cr, ring.bottom() - cr),
+            pos2(ring.left() + cr, ring.bottom() - cr),
+            pos2(ring.left() + cr, ring.top() + cr),
+            pos2(ring.right() - cr, ring.top() + cr),
+        ];
+        for (q, centre) in centres.iter().enumerate() {
+            for j in 0..=SHADOW_ARC {
+                let a = (q as f32 + j as f32 / SHADOW_ARC as f32) * TAU / 4.0;
+                mesh.colored_vertex(*centre + Vec2::angled(a) * cr, c);
+            }
+        }
+    }
+    for k in 0..SHADOW_RINGS as u32 - 1 {
+        let (a, b) = (k * n as u32, (k + 1) * n as u32);
+        for i in 0..n as u32 {
+            let j = (i + 1) % n as u32;
+            mesh.add_triangle(a + i, b + i, b + j);
+            mesh.add_triangle(a + i, b + j, a + j);
+        }
+    }
+    // The innermost ring filled (a line, no area, on shapes thinner than twice the blur).
+    let centre = mesh.vertices.len() as u32;
+    mesh.colored_vertex(r.center(), color.gamma_multiply(value(inner)));
+    for i in 0..n as u32 {
+        mesh.add_triangle(centre, i, (i + 1) % n as u32);
+    }
+    mesh
+}
+
+/// The standard normal distribution's cumulative function (Abramowitz and Stegun 7.1.26, within 1.5e-7).
+fn normal_cdf(x: f32) -> f32 {
+    let z = x.abs() / std::f32::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.327_591_1 * z);
+    let poly = t * (0.254_829_6 + t * (-0.284_496_74 + t * (1.421_413_7 + t * (-1.453_152 + t * 1.061_405_4))));
+    let erf = 1.0 - poly * (-z * z).exp();
+    0.5 * (1.0 + if x >= 0.0 { erf } else { -erf })
 }
 
 /// A stroked arc with round caps. Angles in radians, 0 = 3 o'clock, positive = clockwise on screen.
@@ -388,6 +451,31 @@ pub fn ring(painter: &Painter, center: Pos2, radius: f32, width: f32, color: Col
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shadows_fall_off_smoothly_even_on_shapes_thinner_than_their_blur() {
+        let black = Color32::from_black_alpha(200);
+        for (rect, radius, blur) in [
+            (Rect::from_min_size(pos2(10.0, 10.0), vec2(120.0, 28.0)), 14.0, 40.0),
+            (Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 400.0)), 24.0, 48.0),
+            (Rect::from_min_size(pos2(5.0, 5.0), vec2(3.0, 3.0)), 0.0, 20.0),
+        ] {
+            let mesh = shadow_mesh(rect, radius, blur, black);
+            assert!(mesh.vertices.iter().all(|v| v.pos.is_finite() && rect.expand(blur + 0.01).contains(v.pos)));
+            assert!(mesh.vertices.iter().all(|v| v.color.a() <= 200));
+            assert!(mesh.indices.iter().all(|&i| (i as usize) < mesh.vertices.len()));
+            // Nothing at its outer edge; the middle darkest.
+            let outer = &mesh.vertices[(SHADOW_RINGS - 1) * 4 * (SHADOW_ARC + 1)..SHADOW_RINGS * 4 * (SHADOW_ARC + 1)];
+            assert!(outer.iter().all(|v| v.color.a() == 0));
+            let centre = mesh.vertices.last().unwrap().color.a();
+            assert!(mesh.vertices.iter().all(|v| v.color.a() <= centre));
+        }
+        // A large shape is fully dark inside, a thin one lighter (its blurred box).
+        assert_eq!(shadow_mesh(Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 400.0)), 24.0, 48.0, black).vertices.last().unwrap().color.a(), 200);
+        let thin = shadow_mesh(Rect::from_min_size(pos2(0.0, 0.0), vec2(120.0, 28.0)), 14.0, 40.0, black).vertices.last().unwrap().color.a();
+        assert!(thin > 60 && thin < 180, "{thin}");
+        assert!((normal_cdf(0.0) - 0.5).abs() < 1e-6 && (normal_cdf(1.96) - 0.975).abs() < 1e-3 && (normal_cdf(-1.96) - 0.025).abs() < 1e-3);
+    }
 
     #[test]
     fn outlines_with_meeting_corners_repeat_no_point() {

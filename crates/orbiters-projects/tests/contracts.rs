@@ -133,3 +133,21 @@ fn shared_registration_uses_temp_store_only() {
         assert!(project.path().join("ProjectSettings/ProjectVersion.txt").exists());
     });
 }
+
+#[test]
+fn fresh_install_has_builtin_templates_without_vcc() {
+    let temp = tempfile::tempdir().unwrap();
+    let templates = templates::builtins(&temp.path().join("cache")).unwrap();
+    assert_eq!(templates.len(), 3);
+    for t in &templates {
+        assert!(t.path.join("Assets").is_dir());
+        assert_eq!(
+            discovery::parse_version(&std::fs::read_to_string(t.path.join("ProjectSettings/ProjectVersion.txt")).unwrap()).as_deref(),
+            Some("2022.3.22f1")
+        );
+    }
+    let base = templates.iter().find(|t| t.name.contains("Base")).unwrap();
+    let manifest = std::fs::read_to_string(base.path.join("Packages/vpm-manifest.json")).unwrap();
+    assert_eq!(discovery::manifest_kind(&manifest), discovery::Kind::Vrchat);
+    assert_eq!(templates::builtins(&temp.path().join("cache")).unwrap().len(), 3);
+}

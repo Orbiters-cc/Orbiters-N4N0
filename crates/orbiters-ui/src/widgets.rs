@@ -97,8 +97,12 @@ pub fn activated(resp: &Response) -> bool {
         resp.ctx.data_mut(|d| d.insert_temp(key, true));
         true
     } else if resp.clicked() {
-        !resp.ctx.data_mut(|d| d.remove_temp::<bool>(key).unwrap_or(false))
+        let down = resp.ctx.data_mut(|d| d.remove_temp::<bool>(key).unwrap_or(false));
+        !down || !resp.ctx.input(|i| i.pointer.primary_released())
     } else {
+        if !resp.ctx.input(|i| i.pointer.primary_down()) {
+            resp.ctx.data_mut(|d| d.remove_temp::<bool>(key));
+        }
         false
     }
 }

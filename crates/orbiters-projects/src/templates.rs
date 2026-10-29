@@ -42,8 +42,44 @@ pub fn list(root: &Path) -> Vec<Template> {
             out.push(Template { name, path: p, unity, builtin });
         }
     }
+    if !out.iter().any(|t| t.builtin) {
+        out.extend(builtins(&crate::data_dir().join("unity-templates/alcom-v1.9.3")).unwrap_or_default());
+    }
     out.sort_by(|a, b| (!a.builtin, &a.name).cmp(&(!b.builtin, &b.name)));
     out
+}
+
+/// A fresh install has no VCC template directory. Bundle ALCOM's MIT-licensed modern template assets so these are
+/// available offline; VPM still downloads and resolves the SDK through its normal official repository.
+pub fn builtins(cache: &Path) -> anyhow::Result<Vec<Template>> {
+    static MATERIALIZE: Mutex<()> = Mutex::new(());
+    let _one = MATERIALIZE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut out = vec![];
+    for (id, files) in crate::builtin_templates::TEMPLATES {
+        let path = cache.join(id);
+        std::fs::create_dir_all(&path)?;
+        for (relative, content) in *files {
+            let p = path.join(relative);
+            if !p.is_file() {
+                std::fs::create_dir_all(p.parent().unwrap())?;
+                std::fs::write(&p, content)?;
+            }
+        }
+        out.push(Template {
+            name: if id.starts_with("avatars") { "VRChat Avatar Project" } else { "VRChat World Project" }.into(),
+            path,
+            unity: "2022.3.22f1".into(),
+            builtin: true,
+        });
+    }
+    let avatar = out.iter().find(|t| t.name == "VRChat Avatar Project").context("Bundled avatar template is missing")?;
+    let path = cache.join("base-2022.3.22f1");
+    if !path.join("ProjectSettings/ProjectVersion.txt").is_file() {
+        copy(&avatar.path, &path, &AtomicBool::new(false), &Arc::new(Mutex::default()))?;
+    }
+    crate::write_json(&path.join("Packages/vpm-manifest.json"), &serde_json::json!({"dependencies":{"com.vrchat.base":{"version":"3.x"}}}))?;
+    out.push(Template { name: "VRChat Base Project".into(), path, unity: "2022.3.22f1".into(), builtin: true });
+    Ok(out)
 }
 pub fn validate_name(name: &str) -> anyhow::Result<()> {
     let stem = name.split('.').next().unwrap_or_default().to_ascii_uppercase();
@@ -144,7 +180,9 @@ pub async fn create(
             let s = s
                 .lines()
                 .map(|l| {
-                    if l.trim_start().starts_with("productName:") {
+                    if l.trim_start().starts_with("productGUID:") {
+                        format!("  productGUID: {}", uuid::Uuid::new_v4().simple())
+                    } else if l.trim_start().starts_with("productName:") {
                         format!("  productName: {}", serde_json::to_string(name).unwrap())
                     } else {
                         l.to_string()

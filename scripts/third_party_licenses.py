@@ -31,6 +31,9 @@ PREFERRED = ["MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "ISC", "Zlib",
 # Subfolders whose matching files are the licenses of what a crate bundles: (folder, file name pattern).
 BUNDLED = [("fonts", r"(?i).*\.txt$"), ("opus", r"^COPYING$")]
 
+# Source assets embedded by our own crates are not Cargo dependencies, but their notices ship with the binaries.
+VENDORED = [("ALCOM project templates v1.9.3", "MIT", "crates/orbiters-projects/templates/LICENSE")]
+
 # How a license file's text is recognised.
 SIGNATURES = {
     "MIT": ["permission is hereby granted, free of charge"],
@@ -239,6 +242,10 @@ def main():
                 continue
             key = (license, normalized(text))
             groups.setdefault(key, (text, []))[1].append(crate)
+    for name, license, path in VENDORED:
+        with open(path, encoding="utf-8") as source:
+            text = source.read().strip(STRIP)
+        groups.setdefault((license, normalized(text)), (text, []))[1].append(name)
     for name, license, text in NATIVE:
         if text is None:
             standard[license].append(name)

@@ -112,9 +112,11 @@ fn repository() -> Repository {
             } else {
                 vec![]
             };
-            let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\n\r\n", body.len());
+            let header = format!("HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\n\r\n", body.len());
             let _ = stream.write_all(header.as_bytes());
             let _ = stream.write_all(&body);
+            let _ = stream.flush();
+            let _ = stream.shutdown(std::net::Shutdown::Write);
         }
     });
     Repository { url: format!("{base}/index.json"), stop, worker: Some(worker) }

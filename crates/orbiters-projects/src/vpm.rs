@@ -59,6 +59,7 @@ pub async fn registered(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
 }
 
 pub async fn register(root: &Path, path: &Path, add: bool) -> anyhow::Result<()> {
+    std::fs::create_dir_all(root)?;
     let io = DefaultEnvironmentIo::new(root.into());
     let _lock = io.new_mutex("Global\\Orbiters.Vpm.Settings".as_ref()).await?;
     let mut settings = Settings::load(&io).await?;

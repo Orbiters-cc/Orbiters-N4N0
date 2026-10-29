@@ -212,8 +212,16 @@ pub fn low_priority() {
 }
 
 /// Streams quick results before walking disks. No project/store mutation occurs here.
-pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, mut publish: impl FnMut(&Scan)) -> anyhow::Result<Scan> {
+pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl FnMut(&Scan)) -> anyhow::Result<Scan> {
     low_priority();
+    let mut notify = publish;
+    let mut publish = |scan: &Scan| {
+        // Keep useful results across a window close while a large disk is still being enumerated.
+        if !cancel.load(Ordering::Relaxed) {
+            let _ = crate::write_json(&crate::data_dir().join("unity-projects.json"), scan);
+        }
+        notify(scan);
+    };
     let shared = crate::runtime()?.block_on(crate::vpm::registered(&crate::vcc_dir()));
     let registered = match shared {
         Ok(p) => p,

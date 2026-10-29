@@ -77,6 +77,7 @@ well.
 | `crates/orbiters-call` | N4N0's calls, a worker process (`orbiters-call`): WebRTC voice (webrtc-rs, Opus) between two Orbiters - N4N0 apps, through Cloudflare Realtime TURN when needed (contracts `Docs/orb-calls.md`) |
 | `crates/orbiters-audio` | Microphones and a process's sound through WASAPI, for the capture worker and the voice worker |
 | `crates/orbiters-core` | Shared logic: settings, session bundles, keyframes, VRChat log, OSC/OSCQuery (this computer's VRChat, or a Quest's over the Wi-Fi), worker protocols; TLS, folders and the account's store per platform |
+| `crates/orbiters-projects` | Unity discovery, shared VCC/ALCOM project storage and VPM packages, avatar inventory and Toolkit setup requests ([Unity projects](docs/unity-projects.md)) |
 | `crates/orbiters-spout` | Spout2 receiver and test sender (Direct3D 11), protocol-compatible with the Spout2 SDK |
 | `crates/orbiters-setup` | The setup (`OrbitersSetup-<version>.exe`): installs the app for the person in `%LOCALAPPDATA%\Programs` (no administrator rights), updates it and uninstalls it, in the app's look |
 | `crates/orbiters-update` | Releases: the signed release file apps read, the setup's payload, the install record, downloading an update |

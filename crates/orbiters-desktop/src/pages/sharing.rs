@@ -4,7 +4,7 @@
 //! (a picker of chips), who it is shared with (chips with an ×), the explicit warning, and what a share is doing,
 //! did or could not do. Panels slide in under the actions; the window follows their height on the same spring.
 use super::{Cx, Job};
-use crate::controller::shares::{self as controller, Entry, Operation as Action, Outcome, Request};
+use crate::controller::shares::{self as controller, Entry, Operation as Action, Outcome, Request, Stage};
 use egui::{pos2, vec2, Align2, Color32, Id, Order, Rect, Sense, Ui, UiBuilder};
 use orbiters_core::{
     account::Server,
@@ -57,6 +57,13 @@ pub struct Dialog {
     fixture_busy: bool,
     fixture_active: bool,
     rollback: Option<Entry>,
+    /// A share sent and not answered yet: the friends (and Everyone) shown at once, marked on their way.
+    on_its_way: BTreeSet<String>,
+    public_on_its_way: bool,
+    /// Where the running share stands, as the tray last said.
+    stage: Stage,
+    /// The capture's upload files asked to be made while friends are chosen.
+    prepared_ahead: bool,
     request_public: bool,
     /// The picture shown whole over the window, its details folded away (a click on the picture).
     full: bool,
@@ -112,6 +119,10 @@ impl Dialog {
             fixture_busy: false,
             fixture_active: false,
             rollback: None,
+            on_its_way: BTreeSet::new(),
+            public_on_its_way: false,
+            stage: Stage::default(),
+            prepared_ahead: false,
             request_public: false,
             full: false,
             changed: false,
@@ -166,6 +177,9 @@ impl Dialog {
         self.error = None;
         self.last = None;
         self.rollback = None;
+        self.on_its_way.clear();
+        self.public_on_its_way = false;
+        self.prepared_ahead = false;
         self.request_public = false;
         self.selected.clear();
         self.message.clear();
@@ -210,7 +224,18 @@ impl Dialog {
         }
         if state == "progress" {
             self.fixture_busy = true;
-            self.last = Some(Action::Share(Share { public: true, ..Default::default() }));
+            let action = Action::Share(Share { public: true, ..Default::default() });
+            self.optimistic(&action);
+            self.last = Some(action);
+            self.stage = Stage::Preparing;
+        }
+        if state == "sending" {
+            self.fixture_busy = true;
+            let recipients = vec![shares::Recipient { vrchat_user_id: "usr_0".into(), display_name: "Alex".into() }];
+            let action = Action::Share(Share { recipients, ..Default::default() });
+            self.optimistic(&action);
+            self.last = Some(action);
+            self.stage = Stage::Sending { sent: 12_400_000, total: 31_600_000 };
         }
         if state == "picture" {
             self.full = true;
@@ -251,6 +276,8 @@ impl Dialog {
                 i.revoke(r);
             }
         }
+        self.optimistic(&action);
+        self.stage = Stage::default();
         let id = uuid::Uuid::new_v4().to_string();
         self.operation_id = Some(id.clone());
         let request = Request { id, server, entry, extra, operation: action };
@@ -258,6 +285,29 @@ impl Dialog {
             backend.capture_share(request);
         } else {
             self.pending = Some(request);
+        }
+    }
+
+    /// A share of the member's own item shows at once: the picker folds away, the friends and Everyone appear among who
+    /// sees it, marked on their way until the tray answers (a failure puts the saved entry back).
+    fn optimistic(&mut self, action: &Action) {
+        let Action::Share(s) = action else { return };
+        if !self.entry.mine() {
+            return;
+        }
+        self.rollback = Some(self.entry.clone());
+        self.picker = false;
+        let kind = if self.entry.is_picture() { shares::Kind::Picture } else { shares::Kind::Capture };
+        let item = self.entry.remote.get_or_insert_with(|| shares::Item { kind, mine: true, can_share: true, ..Default::default() });
+        if s.public && !item.public {
+            item.public = true;
+            self.public_on_its_way = true;
+        }
+        for r in &s.recipients {
+            if !item.grants.iter().any(|g| g.vrchat_user_id == r.vrchat_user_id) {
+                item.grants.push(shares::Grant { vrchat_user_id: r.vrchat_user_id.clone(), display_name: Some(r.display_name.clone()), ..Default::default() });
+                self.on_its_way.insert(r.vrchat_user_id.clone());
+            }
         }
     }
 
@@ -297,7 +347,10 @@ impl Dialog {
             self.friends = Job::default();
             self.pictures = crate::worlds::Pictures::with_backend(&ctx, Some(cx.ctl.clone()));
         }
-        if !self.fixture_active && self.picker && !self.friends_requested {
+        // Read as soon as the window opens on something the member can share, so that Share to … lists them at once
+        // (VRChat's friends come a hundred a request, a second apart).
+        let shareable = self.entry.ready && self.entry.remote.as_ref().is_none_or(|i| i.can_share && i.hidden.is_none());
+        if !self.fixture_active && (self.picker || shareable) && !self.friends_requested {
             self.friends_requested = true;
             let backend = cx.ctl.clone();
             self.friends = Job::spawn(&ctx, move || {
@@ -321,7 +374,18 @@ impl Dialog {
         if let Some(request) = self.pending.take() {
             cx.ctl.capture_share(request);
         }
-        let done = self.operation_id.as_ref().and_then(|id| cx.snap.capture_shares.iter().find(|j| &j.id == id)).and_then(|j| j.outcome.clone());
+        // Share to … on a capture not uploaded yet: its upload files are made while friends are chosen.
+        if !self.fixture_active && self.picker && !self.prepared_ahead && self.entry.ready && self.entry.remote.is_none() {
+            if let Some(controller::Local::Session(dir)) = &self.entry.local {
+                self.prepared_ahead = true;
+                cx.ctl.prepare_share(dir.clone());
+            }
+        }
+        let job = self.operation_id.as_ref().and_then(|id| cx.snap.capture_shares.iter().find(|j| &j.id == id));
+        if let Some(j) = job {
+            self.stage = j.stage;
+        }
+        let done = job.and_then(|j| j.outcome.clone());
         if let Some(done) = done {
             self.operation_id = None;
             self.rollback_or_settle(&ctx, cx, done);
@@ -360,10 +424,17 @@ impl Dialog {
                 self.changed = true;
                 self.picker = false;
                 self.rollback = None;
+                self.on_its_way.clear();
+                self.public_on_its_way = false;
                 self.notice = Some(notice);
             }
             Outcome::Shared(Shared::Request { .. }) => {
                 self.picker = false;
+                self.on_its_way.clear();
+                self.public_on_its_way = false;
+                if let Some(entry) = self.rollback.take() {
+                    self.entry = entry;
+                }
                 let from =
                     self.entry.remote.as_ref().and_then(|i| i.from.as_ref()).map(|p| p.name.clone()).unwrap_or_else(|| "the person who shared it".into());
                 self.notice = Some(format!("Request sent: {from} decides"));
@@ -401,6 +472,8 @@ impl Dialog {
                 if let Some(entry) = self.rollback.take() {
                     self.entry = entry;
                 }
+                self.on_its_way.clear();
+                self.public_on_its_way = false;
             }
         }
     }
@@ -462,7 +535,8 @@ impl Dialog {
             ui.set_min_size(catcher.size());
             let backdrop = ui.interact(catcher, wid.with("backdrop"), Sense::click());
             viewer::paint_backdrop(&ui.painter().with_clip_rect(window), window, &f);
-            if widgets::pressed(&backdrop) && !f.rect.contains(backdrop.interact_pointer_pos().unwrap_or_default()) && !busy {
+            // Also while a share runs: the tray carries it on, the card shows it going.
+            if widgets::pressed(&backdrop) && !f.rect.contains(backdrop.interact_pointer_pos().unwrap_or_default()) {
                 close = true;
             }
             let _ = ui.interact(f.rect, wid.with("surface"), Sense::click());
@@ -570,7 +644,7 @@ impl Dialog {
                 self.warning = None;
             } else if self.picker {
                 self.picker = false;
-            } else if !busy {
+            } else {
                 close = true;
             }
         }
@@ -594,16 +668,22 @@ impl Dialog {
         widgets::icon(&p, pos2(badge.left() + 17.0, badge.center().y), glyph, 14.0, color);
         widgets::text(&p, pos2(badge.left() + 29.0, badge.center().y), Align2::LEFT_CENTER, &t);
 
-        // A share running: a light running along the picture's bottom edge.
+        // A share running: a light running along the picture's bottom edge, or how much is sent while sending.
         let running = anim::toggle(ui.ctx(), Id::unique(("capture-window-busy", &self.entry.key)), busy, Spring::SOFT).clamp(0.0, 1.0);
         if running > 0.01 {
             let bar = Rect::from_min_max(pos2(picture.left(), picture.bottom() - 3.0), picture.max);
             let bp = p.with_clip_rect(bar.intersect(p.clip_rect()));
             bp.rect_filled(bar, 0.0, theme::alpha(theme::ACCENT, 0.18 * running));
-            let k = ((anim::time(ui.ctx()) * 0.8) % 1.0) as f32;
-            let w = bar.width() * 0.35;
-            let x = bar.left() - w + k * (bar.width() + w);
-            bp.rect_filled(Rect::from_min_size(pos2(x, bar.top()), vec2(w, 3.0)), theme::radius(1.5), theme::alpha(theme::ACCENT, running));
+            let sent = sent_part(self.stage).filter(|_| busy);
+            let shown = anim::spring(ui.ctx(), Id::unique(("capture-window-sent", &self.entry.key)), [sent.unwrap_or(0.0)], Spring::SOFT)[0].clamp(0.0, 1.0);
+            if sent.is_some() {
+                bp.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * shown, 3.0)), theme::radius(1.5), theme::alpha(theme::ACCENT, running));
+            } else {
+                let k = ((anim::time(ui.ctx()) * 0.8) % 1.0) as f32;
+                let w = bar.width() * 0.35;
+                let x = bar.left() - w + k * (bar.width() + w);
+                bp.rect_filled(Rect::from_min_size(pos2(x, bar.top()), vec2(w, 3.0)), theme::radius(1.5), theme::alpha(theme::ACCENT, running));
+            }
             if anim::is_live(ui.ctx()) {
                 ui.ctx().request_repaint();
             }
@@ -744,17 +824,23 @@ impl Dialog {
             let what = match &self.last {
                 Some(Action::Download) => "Downloading…".to_string(),
                 Some(Action::Unshare(_)) => "Updating who sees it…".to_string(),
-                Some(Action::Share(s)) if !mine => format!("Asking {}…", item.as_ref().and_then(|i| i.from.as_ref()).map_or("them", |p| p.name.as_str())),
-                Some(Action::Share(s)) if s.public => {
-                    if self.entry.is_picture() {
-                        "Sharing publicly…".to_string()
-                    } else {
-                        "Sharing publicly: preparing the 3D view for the web…".to_string()
-                    }
-                }
-                _ => "Sharing with your friends…".to_string(),
+                Some(Action::Share(_)) if !mine => format!("Asking {}…", item.as_ref().and_then(|i| i.from.as_ref()).map_or("them", |p| p.name.as_str())),
+                Some(Action::Share(s)) => match self.stage {
+                    Stage::Waiting => "Waiting for its other change to finish…".to_string(),
+                    Stage::Preparing => "Preparing the 3D view for sharing…".to_string(),
+                    Stage::Sending { sent, total } if sent > 0 && total > 0 => format!("Sending {} of {}…", megabytes(sent), megabytes(total)),
+                    Stage::Sending { total, .. } if total > 0 => format!("Sending {}…", megabytes(total)),
+                    Stage::Sending { .. } => "Sending…".to_string(),
+                    Stage::Starting | Stage::Sharing => format!("Sharing {}…", whom(s)),
+                    Stage::Items { done, total } => format!("Sharing {} · {done} of {total} done…", whom(s)),
+                },
+                _ => "Working…".to_string(),
             };
-            working(ui, &what);
+            working_part(ui, &what, sent_part(self.stage));
+            if matches!(self.last, Some(Action::Share(_))) && mine {
+                ui.add_space(6.0);
+                paragraph(ui, "You can close this window: it carries on.", 11.5, theme::FG_4, w);
+            }
         }
         let panel = self.panel();
         let key = (panel as u8, self.panel_key.1);
@@ -857,8 +943,12 @@ impl Dialog {
             Grant(String),
         }
         let mut chips: Vec<(C, Chip)> = Vec::new();
+        // On their way: no ×, a spinner beside them until the tray answers.
+        let mut coming: Vec<bool> = Vec::new();
         if item.public {
-            chips.push((C::Public, Chip::new("Everyone on Orbiters").icon(icons::GLOBE).tone(theme::ACCENT).removable(true).enabled(!busy)));
+            let on_way = self.public_on_its_way;
+            chips.push((C::Public, Chip::new("Everyone on Orbiters").icon(icons::GLOBE).tone(theme::ACCENT).removable(!on_way).enabled(!busy)));
+            coming.push(on_way);
         }
         let names: Vec<(String, String)> =
             item.grants.iter().map(|g| (g.vrchat_user_id.clone(), g.display_name.clone().unwrap_or_else(|| g.vrchat_user_id.clone()))).collect();
@@ -870,15 +960,26 @@ impl Dialog {
             })
             .collect();
         for ((id, name), tex) in names.iter().zip(&pictures) {
-            chips.push((C::Grant(id.clone()), Chip::new(name).person(tex.as_ref()).removable(true).enabled(!busy).id_salt(("grant", id))));
+            let on_way = self.on_its_way.contains(id);
+            chips.push((C::Grant(id.clone()), Chip::new(name).person(tex.as_ref()).removable(!on_way).enabled(!busy).id_salt(("grant", id))));
+            coming.push(on_way);
         }
         let all = Button::new("Unshare everything").icon(icons::EYE_SLASH).variant(Variant::Danger).size(Size::Sm).enabled(!busy).id_salt("unshare-all");
-        let mut widths: Vec<f32> = chips.iter().map(|(_, c)| c.width(ui)).collect();
-        widths.push(all.desired_width(ui));
+        const SPIN: f32 = 22.0;
+        let mut widths: Vec<f32> = chips.iter().zip(&coming).map(|((_, c), on_way)| c.width(ui) + if *on_way { SPIN } else { 0.0 }).collect();
+        // Nothing to take back while everyone listed is still on their way.
+        let any_shared = coming.iter().any(|on_way| !on_way);
+        if any_shared {
+            widths.push(all.desired_width(ui));
+        }
         let (at, h) = widgets::flow(&widths, w, widgets::CHIP_H, 8.0);
         let (area, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
         for (n, (what, chip)) in chips.into_iter().enumerate() {
-            let r = Rect::from_min_size(area.min + at[n], vec2(widths[n].min(w), widgets::CHIP_H));
+            let mut r = Rect::from_min_size(area.min + at[n], vec2(widths[n].min(w), widgets::CHIP_H));
+            if coming[n] {
+                r.max.x -= SPIN;
+                feedback::spinner(ui.painter(), pos2(r.right() + SPIN * 0.5 + 2.0, r.center().y), 5.5, 1.8, theme::ACCENT);
+            }
             let resp = chip.show_at(ui, r);
             if resp.removed {
                 *act = Some(match what {
@@ -887,10 +988,12 @@ impl Dialog {
                 });
             }
         }
-        let n = widths.len() - 1;
-        let r = Rect::from_min_size(area.min + at[n], vec2(widths[n].min(w), widgets::CHIP_H));
-        if pressed(all.show_at(ui, r)) {
-            *act = Some(Act::Unshare(Unshare { all: true, ..Default::default() }));
+        if any_shared {
+            let n = widths.len() - 1;
+            let r = Rect::from_min_size(area.min + at[n], vec2(widths[n].min(w), widgets::CHIP_H));
+            if pressed(all.show_at(ui, r)) {
+                *act = Some(Act::Unshare(Unshare { all: true, ..Default::default() }));
+            }
         }
     }
 
@@ -1176,12 +1279,55 @@ impl Act {
 
 /// A line of work going on: a spinner and what it does (the sharing window, the VRChat sign-in).
 pub(super) fn working(ui: &mut Ui, text: &str) {
+    working_part(ui, text, None);
+}
+
+/// [`working`], its frame filling up to `part` (0 to 1) of its width when how far it is is known.
+fn working_part(ui: &mut Ui, text: &str, part: Option<f32>) {
     let w = ui.available_width();
     let (r, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
     let p = ui.painter();
     widgets::frame(p, r, 14.0, theme::alpha(theme::ACCENT, 0.07));
+    if let Some(part) = part {
+        let id = ui.scope_id().with("working-part");
+        let k = anim::spring(ui.ctx(), id, [part], Spring::SOFT)[0].clamp(0.0, 1.0);
+        let filled = Rect::from_min_size(r.min, vec2(r.width() * k, r.height()));
+        p.with_clip_rect(filled.intersect(p.clip_rect())).rect_filled(r, theme::radius(14.0), theme::alpha(theme::ACCENT, 0.12));
+    }
     feedback::spinner(p, pos2(r.left() + 22.0, r.center().y), 7.0, 2.0, theme::ACCENT);
     widgets::text_truncated(p, pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(text, 12.5).weight(weight::MEDIUM), w - 56.0);
+}
+
+/// How far a share is: its files sent, or its items shared.
+fn sent_part(stage: Stage) -> Option<f32> {
+    match stage {
+        Stage::Sending { sent, total } if sent > 0 && total > 0 => Some((sent as f64 / total as f64).clamp(0.0, 1.0) as f32),
+        Stage::Items { done, total } if total > 0 => Some(done as f32 / total as f32),
+        _ => None,
+    }
+}
+
+/// "31.6 MB", "820 KB".
+fn megabytes(bytes: u64) -> String {
+    if bytes >= 1_000_000 {
+        format!("{:.1} MB", bytes as f64 / 1e6)
+    } else {
+        format!("{} KB", bytes.div_ceil(1000))
+    }
+}
+
+/// Who a share goes to: "with Alex", "with 3 friends", "publicly", "publicly and with 2 friends".
+fn whom(s: &Share) -> String {
+    let friends = match s.recipients.as_slice() {
+        [] => String::new(),
+        [one] => format!("with {}", one.display_name),
+        many => format!("with {} friends", many.len()),
+    };
+    match (s.public, friends.is_empty()) {
+        (true, true) => "publicly".into(),
+        (true, false) => format!("publicly and {friends}"),
+        _ => friends,
+    }
 }
 
 /// Wrapped text across `w`.

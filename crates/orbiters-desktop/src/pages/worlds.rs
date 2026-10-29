@@ -91,10 +91,15 @@ impl State {
     /// Opens the share window out of the first card with a 3D view, as Share to … (`public` false) or Share publicly
     /// would, on a fixture state (screenshots).
     pub fn stage_share_window(&mut self, ctx: &egui::Context, root: PathBuf, public: bool) {
+        self.stage_share_as(ctx, root, public, if public { "progress" } else { "friends" });
+    }
+
+    /// [`Self::stage_share_window`] on the fixture state `fixture` of the sharing window (`sending`: a friend on its way).
+    pub fn stage_share_as(&mut self, ctx: &egui::Context, root: PathBuf, public: bool, fixture: &'static str) {
         let Some(w) = self.worlds.as_ref().and_then(|l| l.iter().find(|w| w.reconstructed() > 0)).cloned() else { return };
         let paths = w.sessions.iter().find(|s| s.reconstruction.is_some()).map(|s| vec![s.dir.clone()]).unwrap_or_default();
         let origin = self.card_thumbs.get(&w.id).copied();
-        self.stage_share = Some(if public { "progress" } else { "friends" });
+        self.stage_share = Some(fixture);
         self.prepare_share(ctx, root, paths, public, Server::Development, origin.map(|o| (o, 20.0)));
     }
 

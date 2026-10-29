@@ -1454,6 +1454,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "gallery-next-mid",
         "world-share-window",
         "world-share-public",
+        "world-share-sending",
         "world-share-mid",
         "world-share-open",
         "world-share-detail",
@@ -1585,6 +1586,11 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         if matches!(sc.name, "world-share-window" | "world-share-public") && !share_staged && f >= 60 && app.worlds_mut().loaded() {
             share_staged = true;
             app.worlds_mut().stage_share_window(&ctx, sc.snapshot.settings.sessions_dir.clone(), sc.name == "world-share-public");
+        }
+        // Sent to a friend: shown at once among who sees it, the files on their way.
+        if sc.name == "world-share-sending" && !share_staged && f >= 60 && app.worlds_mut().loaded() {
+            share_staged = true;
+            app.worlds_mut().stage_share_as(&ctx, sc.snapshot.settings.sessions_dir.clone(), false, "sending");
         }
         if sc.name == "world-share-mid" && f == sc.frames - 4 {
             app.worlds_mut().stage_share_morph(&ctx, true);

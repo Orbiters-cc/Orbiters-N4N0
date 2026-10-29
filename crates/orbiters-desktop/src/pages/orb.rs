@@ -74,7 +74,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             super::block(ui, cx, 0, 72.0, |ui, rect| super::heading(ui, rect, "Companion", "N4N0", Some(&sub)));
 
             let talk_sub = assistant_line(orb, &snap.settings, &snap.account.state);
-            section(ui, cx, 1, icons::N4N0, "Talk to N4N0", Some(&talk_sub), |ui| {
+            let mut m = super::Masonry::new(ui, "orb");
+            m.add(1, |ui| section(ui, cx, 1, icons::N4N0, "Talk to N4N0", Some(&talk_sub), |ui| {
                 conversation(ui, orb);
                 ui.add_space(12.0);
                 let signed_in = matches!(snap.account.state, AccountState::SignedIn { .. } | AccountState::Offline { .. } | AccountState::Checking { .. });
@@ -133,10 +134,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         cx.ctl.orb(OrbCommand::NewConversation);
                     }
                 }
-            });
+            }));
 
             let avatar_sub = avatar_line(snap);
-            section(ui, cx, 2, icons::PERSON, "On your avatar", Some(&avatar_sub), |ui| {
+            m.add(2, |ui| section(ui, cx, 2, icons::PERSON, "On your avatar", Some(&avatar_sub), |ui| {
                 panel_preview(ui, orb);
                 ui.add_space(10.0);
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
@@ -218,7 +219,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply = true;
                     }
                 }
-            });
+            }));
 
             // N4N0's menu: fast walk, YouTube, calls, a 3D picture. (Sections enter in the order they stand on the page.)
             let menu_sub = if orb.screen {
@@ -226,7 +227,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             } else {
                 "Opens in the SteamVR overlay, in front of you"
             };
-            section(ui, cx, 3, icons::STACK, "N4N0's menu", Some(menu_sub), |ui| {
+            m.add(3, |ui| section(ui, cx, 3, icons::STACK, "N4N0's menu", Some(menu_sub), |ui| {
                 widgets::field(
                     ui,
                     "Controller button",
@@ -298,7 +299,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply |= widgets::segmented(ui, "orb-screen-size", &mut draft.orb.menu.screen_size, &options, true);
                     },
                 );
-            });
+            }));
 
             let calls = &orb.calls;
             let calls_sub = match (&calls.call, &calls.link) {
@@ -310,7 +311,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 (None, CallLink::NoAccount) => "Open VRChat, VRCX or VRCNext once so Orbiters knows your VRChat account".to_string(),
                 (None, CallLink::NotLinked { .. }) => "Link your VRChat account on Orbiters to be called".to_string(),
             };
-            section(ui, cx, 4, icons::BROADCAST, "Calls", Some(&calls_sub), |ui| {
+            m.add(4, |ui| section(ui, cx, 4, icons::BROADCAST, "Calls", Some(&calls_sub), |ui| {
                 widgets::field(
                     ui,
                     "Calls",
@@ -375,10 +376,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         });
                     }
                 }
-            });
+            }));
 
             let videos_sub = if orb.videos.is_empty() { "Ask N4N0 to “save this video” while a world plays one".to_string() } else { format!("{} saved", orb.videos.len()) };
-            section(ui, cx, 5, icons::FILM_STRIP, "Saved videos", Some(&videos_sub), |ui| {
+            m.add(5, |ui| section(ui, cx, 5, icons::FILM_STRIP, "Saved videos", Some(&videos_sub), |ui| {
                 if let Some(video) = &snap.vrchat.world.last_video {
                     widgets::field(ui, "Playing in this world", Some(&video.url), 150.0, |ui| {
                         if Button::new("Save it").icon(icons::DOWNLOAD_SIMPLE).size(Size::Sm).show(ui).clicked() {
@@ -414,7 +415,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     note(ui, "Saved videos stay on this computer. Copy a link and paste it in a world's video player.", theme::FG_3);
                     ui.add_space(8.0);
                 }
-            });
+            }));
 
             let voice = &orb.voice;
             // The last tenth of the progress is the unpacking.
@@ -432,7 +433,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             } else {
                 "Installed: they start with VRChat".to_string()
             };
-            section(ui, cx, 6, icons::MICROPHONE, "N4N0's ears", Some(&ears_sub), |ui| {
+            m.add(6, |ui| section(ui, cx, 6, icons::MICROPHONE, "N4N0's ears", Some(&ears_sub), |ui| {
                 if !voice.installed {
                     let desc = "Speech to text on this computer, in 25 languages (NVIDIA Parakeet, Silero VAD): about 490 MB to download. Nothing you say leaves it until it is a sentence for N4N0.";
                     widgets::field(ui, "Speech models", Some(desc), 280.0, |ui| {
@@ -499,9 +500,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 ui.add_space(4.0);
                 note(ui, "In VRChat: hold Talk in N4N0's menu, touch N4N0 with a hand, or start with “Nano” when the wake word is on.", theme::FG_3);
                 ui.add_space(8.0);
-            });
+            }));
 
-            section(ui, cx, 7, icons::SPARKLE, "Assistant", Some("N4N0's brain runs on Orbiters"), |ui| {
+            m.add(7, |ui| section(ui, cx, 7, icons::SPARKLE, "Assistant", Some("N4N0's brain runs on Orbiters"), |ui| {
                 widgets::field(ui, "N4N0", Some("The panel, the AFK message, carried and held parameters, saved videos."), 48.0, |ui| {
                     apply |= widgets::toggle(ui, "orb-enabled", &mut draft.orb.enabled);
                 });
@@ -522,9 +523,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         let _ = crate::controller::open_url(&format!("{}orb?tab=settings&section=orb", site.website()));
                     }
                 });
-            });
+            }));
 
-            section(ui, cx, 8, icons::CPU, "Footprint", Some("What Orbiters and VRChat use on this computer"), |ui| {
+            m.add(8, |ui| section(ui, cx, 8, icons::CPU, "Footprint", Some("What Orbiters and VRChat use on this computer"), |ui| {
                 if orb.resources.is_empty() {
                     note(ui, "Measured every few seconds while Orbiters runs.", theme::FG_3);
                     ui.add_space(8.0);
@@ -539,14 +540,14 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     let usage = format!("{:.0} % CPU · {:.0} MB", p.cpu_percent, p.memory_mb);
                     widgets::text(painter, row.right_center(), Align2::RIGHT_CENTER, &Txt::new(usage, 12.5).color(theme::FG_2).mono());
                 }
-            });
+            }));
 
             let prop = orb.prop_sync.is_some();
             let testing_sub = match orb.prop_sync {
                 Some(n) => format!("What everyone sees of your orb · {n} text slots"),
                 None => "Wear an avatar with the N4N0 prop in VRChat to test it".to_string(),
             };
-            section(ui, cx, 9, icons::FLASK, "Testing", Some(&testing_sub), |ui| {
+            m.add(9, |ui| section(ui, cx, 9, icons::FLASK, "Testing", Some(&testing_sub), |ui| {
                 widgets::field(
                     ui,
                     "States",
@@ -624,7 +625,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         cx.ctl.orb(OrbCommand::TestTouch);
                     }
                 });
-            });
+            }));
+            m.finish(ui);
         });
     });
     super::under_top(ui, cx, "orb", from, ui.max_rect().top() + cx.top + 8.0);

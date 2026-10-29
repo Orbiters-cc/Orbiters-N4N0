@@ -18,6 +18,9 @@ use std::time::{Duration, SystemTime};
 /// A row's thumbnail (YouTube's 16:9), and the row around it.
 const THUMB: egui::Vec2 = vec2(144.0, 81.0);
 const ROW_H: f32 = THUMB.y + 26.0;
+/// The narrowest a row gets beside another one (a list on a wide page), and the room between them.
+const ROW_MIN_W: f32 = 600.0;
+const ROW_GAP: f32 = 32.0;
 /// The chips above the videos.
 const CHIP_H: f32 = 32.0;
 /// How long a row's button says its link was copied.
@@ -697,13 +700,18 @@ fn content(ui: &mut Ui, cx: &Cx, state: &mut State, groups: &[(String, Vec<Row>)
         return empty_state(ui, cx, title, text, height * 0.6);
     }
     let pick_first = std::mem::take(&mut state.pick_first);
+    // The days side by side on wide pages.
+    let mut m = super::Masonry::new(ui, "videos-history");
     for (g, (name, rows)) in groups.iter().enumerate() {
         let sub = format!("{} video{}", rows.len(), plural(rows.len()));
-        super::section(ui, cx, 1 + g, icons::CLOCK, name, Some(&sub), |ui| {
-            ui.add_space(6.0);
-            video_rows(ui, state, rows, now, pick_first && g == 0, acts);
+        m.add(g, |ui| {
+            super::section(ui, cx, 1 + g, icons::CLOCK, name, Some(&sub), |ui| {
+                ui.add_space(6.0);
+                video_rows(ui, state, rows, now, pick_first && g == 0, acts);
+            })
         });
     }
+    m.finish(ui);
 }
 
 /// A list: its name with Rename and Delete (twice), its videos, the latest saved first.
@@ -711,7 +719,8 @@ fn list_view(ui: &mut Ui, cx: &Cx, state: &mut State, id: &str, rows: &[Row], no
     let Some(list) = state.bookmarks.as_ref().and_then(|b| b.list(id)).cloned() else { return };
     let pick_first = std::mem::take(&mut state.pick_first);
     let sub = if list.videos.is_empty() { "Empty for now" } else { "The latest saved first" };
-    super::section(ui, cx, 1, icons::BOOKMARK_SIMPLE, &list.name, Some(sub), |ui| {
+    // As wide as the page: its videos go side by side on wide ones.
+    super::section_up_to(ui, cx, f32::INFINITY, 1, icons::BOOKMARK_SIMPLE, &list.name, Some(sub), |ui| {
         // Rename and Delete in the card's heading, at its right.
         let header = Rect::from_min_size(ui.min_rect().min, vec2(ui.available_width(), 40.0));
         let confirming = state.confirm.is_some();
@@ -772,14 +781,16 @@ fn rename_row(ui: &mut Ui, state: &mut State, old: &str, acts: &mut Vec<Act>) {
 /// the first (the screenshot review).
 fn video_rows(ui: &mut Ui, state: &mut State, rows: &[Row], now: u64, pick_first: bool, acts: &mut Vec<Act>) {
     let copied = state.copied.as_ref().map(|(u, _)| u.clone());
-    let w = ui.available_width();
-    let (area, _) = ui.allocate_exact_size(vec2(w, rows.len() as f32 * ROW_H), Sense::hover());
+    // Side by side, newest first along each line, when the card is wide enough for rows of ROW_MIN_W.
+    let (cols, w) = orbiters_ui::layout::columns(ui.available_width(), ROW_MIN_W, ROW_GAP);
+    let cols = cols.min(rows.len().max(1));
+    let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), rows.len().div_ceil(cols) as f32 * ROW_H), Sense::hover());
     for (i, row) in rows.iter().enumerate() {
-        let r = Rect::from_min_size(pos2(area.left(), area.top() + i as f32 * ROW_H), vec2(w, ROW_H));
+        let r = Rect::from_min_size(pos2(area.left() + (i % cols) as f32 * (w + ROW_GAP), area.top() + (i / cols) as f32 * ROW_H), vec2(w, ROW_H));
         if !ui.is_rect_visible(r) {
             continue;
         }
-        if i > 0 {
+        if i >= cols {
             ui.painter().hline(r.x_range(), r.top(), egui::Stroke::new(1.0, theme::white(0.05)));
         }
         let texture = row.youtube.as_deref().and_then(|id| state.thumbs.get(id));

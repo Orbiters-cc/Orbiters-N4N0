@@ -109,10 +109,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             super::block(ui, cx, 0, 72.0, |ui, rect| super::heading(ui, rect, "Preferences", "Settings", None));
             let snap = cx.snap;
-            account(ui, cx, &mut state.confirm_sign_out);
-            vrchat_account(ui, cx, &mut state.vrchat);
+            let mut m = super::Masonry::new(ui, "settings");
+            m.add(1, |ui| account(ui, cx, &mut state.confirm_sign_out));
+            m.add(10, |ui| vrchat_account(ui, cx, &mut state.vrchat));
 
-            section(ui, cx, 2, icons::GAUGE, "Capture", Some("How frames become a session"), |ui| {
+            m.add(2, |ui| section(ui, cx, 2, icons::GAUGE, "Capture", Some("How frames become a session"), |ui| {
                 let kf = &mut draft.keyframes;
                 widgets::field(ui, "Keyframe distance", Some("A new lossless keyframe after the camera moves this far."), 284.0, |ui| {
                     apply |= widgets::slider(ui, "kf-distance", &mut kf.min_translation, 0.05..=2.0, 0.05, |v| format!("{v:.2} m"));
@@ -167,7 +168,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply |= widgets::segmented(ui, "while-playing", &mut draft.reconstruct_while_playing, &places, true);
                     },
                 );
-            });
+            }));
 
             let st = &snap.storage;
             let mut free_space = false;
@@ -177,7 +178,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 st.sessions,
                 st.free_bytes.map(|f| format!(" · {} free on the drive", format::bytes(f as f64))).unwrap_or_default()
             );
-            section(ui, cx, 3, icons::HARD_DRIVE, "Storage", Some(&storage_sub), |ui| {
+            m.add(3, |ui| section(ui, cx, 3, icons::HARD_DRIVE, "Storage", Some(&storage_sub), |ui| {
                 let used_gb = st.used_bytes as f64 / 1e9;
                 let limit = draft.storage_limit_gb;
                 let usage = if limit > 0.0 { (used_gb / limit).min(1.0) as f32 } else { 0.0 };
@@ -222,7 +223,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 if folder_field(ui, "Raw captures folder", Some("Where Mixer's capture simulator writes."), &draft.raw_captures_dir) {
                     state.picker = Some((Folder::Raw, pick(&ctx, &draft.raw_captures_dir)));
                 }
-            });
+            }));
             if free_space {
                 cx.go = Some(super::Go::FreeSpace);
             }
@@ -233,7 +234,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             } else {
                 osc.error.clone().unwrap_or_else(|| "Off".into())
             };
-            section(ui, cx, 4, icons::BROADCAST, "VRChat and OSC", Some(&osc_sub), |ui| {
+            m.add(4, |ui| section(ui, cx, 4, icons::BROADCAST, "VRChat and OSC", Some(&osc_sub), |ui| {
                 widgets::field(
                     ui,
                     "Action Menu control",
@@ -303,7 +304,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply |= widgets::toggle(ui, "world-performance", &mut draft.world_performance);
                     },
                 );
-            });
+            }));
 
             let vr = &snap.steamvr;
             let perf_sub = match (&vr.calibration, vr.running) {
@@ -312,7 +313,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 (None, true) => "SteamVR is running: calibrate in the Orbiters tab of its dashboard".into(),
                 (None, false) => "What a session records besides the frames".into(),
             };
-            section(ui, cx, 5, icons::PERSON_ARMS_SPREAD, "Performance", Some(&perf_sub), |ui| {
+            m.add(5, |ui| section(ui, cx, 5, icons::PERSON_ARMS_SPREAD, "Performance", Some(&perf_sub), |ui| {
                 widgets::field(
                     ui,
                     "Face and avatar parameters",
@@ -404,9 +405,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply |= widgets::slider(ui, "walk-strength", &mut draft.walk_boost.strength, 0.0..=1.0, 0.05, |v| format!("+{:.0} %", v * max));
                     });
                 }
-            });
+            }));
 
-            section(ui, cx, 6, icons::POWER, "Start", Some("Orbiters - N4N0 opening on its own, in the tray"), |ui| {
+            m.add(6, |ui| section(ui, cx, 6, icons::POWER, "Start", Some("Orbiters - N4N0 opening on its own, in the tray"), |ui| {
                 let mut windows = state.windows_start.unwrap_or(false);
                 widgets::field(ui, "Start with Windows", Some("Waits in the tray, ready when VRChat starts."), 48.0, |ui| {
                     if widgets::toggle(ui, "start-windows", &mut windows) && state.windows_job.is_none() {
@@ -428,9 +429,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         state.steamvr_job = Some((steamvr, Job::spawn(&ctx, move || crate::startup::set_start_with_steamvr(steamvr))));
                     }
                 });
-            });
+            }));
 
-            section(ui, cx, 7, icons::SPARKLE, "Interface", None, |ui| {
+            m.add(7, |ui| section(ui, cx, 7, icons::SPARKLE, "Interface", None, |ui| {
                 widgets::field(ui, "Reduce motion", Some("Calmer transitions and a still background."), 48.0, |ui| {
                     apply |= widgets::toggle(ui, "reduce-motion", &mut draft.reduce_motion);
                 });
@@ -469,11 +470,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply = true;
                     }
                 });
-            });
+            }));
 
             let mut want_log = false;
             let mut quit = false;
-            section(ui, cx, 8, icons::INFO, "About", None, |ui| {
+            m.add(8, |ui| section(ui, cx, 8, icons::INFO, "About", None, |ui| {
                 ui.add_space(8.0);
                 let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::hover());
                 let lr = Rect::from_min_size(pos2(row.left(), row.center().y - 21.0), orbiters_ui::n4n0_logo::size_for_width(48.0));
@@ -537,7 +538,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     });
                     ui.add_space(12.0);
                 }
-            });
+            }));
+            m.finish(ui);
             if want_log {
                 state.log_open = !state.log_open;
                 if state.log_open {

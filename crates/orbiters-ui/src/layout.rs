@@ -1,6 +1,6 @@
 //! Layout maths of the pages, apart from painting so that it can be tested: a side panel that sits beside the content
-//! on wide windows and slides over it on narrow ones, a toolbar that fits beside a heading or goes under it, and card
-//! grids.
+//! on wide windows and slides over it on narrow ones, a toolbar that fits beside a heading or goes under it, card
+//! grids, and columns of section cards on wide pages.
 
 /// Page widths (points, the sidebar excluded) from which a side panel sits beside the content instead of over it. The
 /// window's default size (1280 points, a 1048-point page) docks it.
@@ -47,6 +47,22 @@ pub fn split(width: f32, pad: f32, wanted: Option<f32>) -> Split {
 pub fn columns(width: f32, min: f32, gap: f32) -> (usize, f32) {
     let n = (((width + gap) / (min + gap)).floor() as usize).max(1);
     (n, ((width - gap * (n - 1) as f32) / n as f32).max(0.0))
+}
+
+/// The narrowest a column of section cards (Settings', N4N0's) gets beside another one.
+pub const SECTION_MIN: f32 = 600.0;
+/// The widest a section card gets: alone on a page, and side by side.
+pub const SECTION_ALONE_MAX: f32 = 1120.0;
+pub const SECTION_MAX: f32 = 980.0;
+/// The most columns of section cards.
+pub const SECTION_COLUMNS: usize = 3;
+
+/// How many columns of section cards a page's content `width` wide gets, `gap` apart, and how wide each is: one as wide
+/// as the page (up to [`SECTION_ALONE_MAX`]) until two of [`SECTION_MIN`] fit, then side by side.
+pub fn section_columns(width: f32, gap: f32) -> (usize, f32) {
+    let n = (((width + gap) / (SECTION_MIN + gap)).floor() as usize).clamp(1, SECTION_COLUMNS);
+    let w = ((width - gap * (n - 1) as f32) / n as f32).max(0.0);
+    (n, w.min(if n == 1 { SECTION_ALONE_MAX } else { SECTION_MAX }))
 }
 
 /// Widths for items that each want `wanted` points on a row `total` wide (`gap` between them): their wishes scaled to
@@ -134,6 +150,20 @@ mod tests {
         assert_eq!(columns(200.0, 250.0, 16.0), (1, 200.0));
         let (n, w) = columns(1124.0, 250.0, 16.0);
         assert!((n as f32 * w + (n - 1) as f32 * 16.0 - 1124.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn section_cards_go_side_by_side_on_wide_pages() {
+        // Pages (less their padding) of 1100, 1280, 1600, 1920, 2560 and 3440-point windows.
+        assert_eq!(section_columns(804.0, 24.0), (1, 804.0));
+        assert_eq!(section_columns(984.0, 24.0), (1, 984.0));
+        assert_eq!(section_columns(1304.0, 24.0), (2, 640.0));
+        assert_eq!(section_columns(1624.0, 24.0), (2, 800.0));
+        let (n, w) = section_columns(2264.0, 24.0);
+        assert!(n == 3 && (w - (2264.0 - 48.0) / 3.0).abs() < 0.01);
+        assert_eq!(section_columns(3144.0, 24.0), (3, SECTION_MAX));
+        // Alone, never wider than readable.
+        assert_eq!(section_columns(1200.0, 24.0), (1, SECTION_ALONE_MAX));
     }
 
     #[test]

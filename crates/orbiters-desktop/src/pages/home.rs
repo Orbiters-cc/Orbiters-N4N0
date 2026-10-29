@@ -6,7 +6,7 @@
 //! drawing is the window's (the States page is [`super::states`]). Cards and choices act on the pointer's press, buttons
 //! on its release with the press shown at once, and the menu shows a change before the service answers.
 
-use super::{block, section, Cx};
+use super::{block, row_columns, section, section_up_to, Cx};
 use crate::ipc::OrbCommand;
 use crate::menu_host::MenuHost;
 use crate::overlay::menu_ui;
@@ -27,6 +27,9 @@ use std::time::Duration;
 
 /// The page's width at most, as the Settings cards'.
 const MAX_W: f32 = 980.0;
+/// The narrowest a list's row gets beside another one (results, instances on a wide page), and the room between them.
+const ROW_MIN_W: f32 = 560.0;
+const ROW_GAP: f32 = 32.0;
 /// Home's feature cards, the room between them, and their insets (the Settings cards').
 const CARD_H: f32 = 128.0;
 const GAP: f32 = 16.0;
@@ -298,32 +301,41 @@ fn home(ui: &mut Ui, cx: &Cx, menu: &Menu, idle: &str, copied: Option<&str>, act
         }
     });
 
-    let w = ui.available_width().min(MAX_W);
+    let w = ui.available_width();
     let cols = home_columns(w);
     let card_w = (w - GAP * (cols - 1) as f32) / cols as f32;
+    let card_h = tile_height(card_w);
     // The features, then what N4N0 says in the rest of the last row (one place at least): the grid stays whole.
     let count = features().count();
     let cells = count + 1;
     let rows = cells.div_ceil(cols);
-    let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (CARD_H + GAP) - GAP), Sense::hover());
-    let cell = |i: usize| area.min + vec2((i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (CARD_H + GAP));
+    let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + GAP) - GAP), Sense::hover());
+    let cell = |i: usize| area.min + vec2((i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (card_h + GAP));
     for (i, tile) in features().enumerate() {
-        feature(ui, cx, i, tile, Rect::from_min_size(cell(i), vec2(card_w, CARD_H)), menu, copied, acts);
+        feature(ui, cx, i, tile, Rect::from_min_size(cell(i), vec2(card_w, card_h)), menu, copied, acts);
     }
     let span = cols - count % cols;
     let at = cell(count);
-    said(ui, cx, 1 + count, Rect::from_min_size(at, vec2(span as f32 * (card_w + GAP) - GAP, CARD_H)), menu);
+    said(ui, cx, 1 + count, Rect::from_min_size(at, vec2(span as f32 * (card_w + GAP) - GAP, card_h)), menu);
 }
 
-/// Home's columns at `width`: four on a wide window, three, two on a narrow one.
+/// The narrowest a Home tile gets before the row takes one fewer, the widest before it takes one more past six, and
+/// the most tiles on a row (two rows of six hold every feature and what N4N0 says).
+const TILE_MIN: f32 = 210.0;
+const TILE_MAX: f32 = 440.0;
+const MAX_COLUMNS: usize = 8;
+
+/// Home's columns at `width`: as many tiles of [`TILE_MIN`] as fit, two to six (four on the default window); past six,
+/// enough to keep tiles under [`TILE_MAX`].
 fn home_columns(width: f32) -> usize {
-    if width >= 900.0 {
-        4
-    } else if width >= 700.0 {
-        3
-    } else {
-        2
-    }
+    let fit = (((width + GAP) / (TILE_MIN + GAP)).floor() as usize).clamp(2, 6);
+    let wide = ((width + GAP) / (TILE_MAX + GAP)).ceil() as usize;
+    fit.max(wide).min(MAX_COLUMNS)
+}
+
+/// A tile's height at `width`: wider tiles on very wide windows grow a little taller, so they keep a card's shape.
+fn tile_height(width: f32) -> f32 {
+    CARD_H + ((width - 260.0) * 0.2).clamp(0.0, 40.0)
 }
 
 /// One of Home's features: its icon chip, its name and what it says now, with a switch for what turns on and off (fast
@@ -632,28 +644,31 @@ fn suggestions(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
 
 fn results(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<TextureId>, copied: Option<&str>, acts: &mut Vec<Act>) {
     let sub = layout::text(menu, Content::ResultsTitle);
-    section(ui, cx, 2, icons::YOUTUBE_LOGO, "Results", Some(&sub), |ui| {
+    // As wide as the page: the results go side by side on wide ones.
+    section_up_to(ui, cx, f32::INFINITY, 2, icons::YOUTUBE_LOGO, "Results", Some(&sub), |ui| {
         ui.add_space(4.0);
         if menu.loading() {
-            for i in 0..3 {
-                if i > 0 {
+            row_columns(ui, "orbiters-home-results", ROW_MIN_W, ROW_GAP, 3, |ui, _, first| {
+                if !first {
                     widgets::separator(ui);
                 }
                 placeholder_row(ui);
-            }
+            });
             return;
         }
-        for (i, video) in menu.page_results().iter().enumerate() {
-            if i > 0 {
+        let results = menu.page_results();
+        row_columns(ui, "orbiters-home-results", ROW_MIN_W, ROW_GAP, results.len(), |ui, i, first| {
+            if !first {
                 widgets::separator(ui);
             }
+            let video = &results[i];
             // After its Copy link, the row offers Drop (the avatar's screen shows the card in the world), and says it was
             // copied as long as it does.
             let drop = !layout::target_state(menu, Target::Drop(i as u8)).hidden;
             if let Some(target) = result_row(ui, i, video, picture(&video.id), drop || copied == Some(video.id.as_str()), drop) {
                 acts.push(Act::Press(target));
             }
-        }
+        });
         if menu.has_previous() || menu.has_next() {
             widgets::separator(ui);
             if let Some(target) = pager(ui, menu) {
@@ -862,124 +877,130 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
     };
     top(ui, cx, "Music", &sub, acts);
     let from = media.map(|m| m.app.as_str()).filter(|app| !app.is_empty()).map(|app| format!("From {app}"));
-    section(ui, cx, 1, icons::MUSIC_NOTES, "Now playing", from.as_deref(), |ui| {
-        ui.add_space(14.0);
-        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 108.0), Sense::hover());
-        let art = Rect::from_min_size(row.min, vec2(192.0, 108.0));
-        let controls_w = 40.0 + 10.0 + 48.0 + 10.0 + 40.0;
-        {
-            let p = ui.painter();
-            match media.and_then(|m| m.art.as_deref()).and_then(picture) {
-                Some(texture) => thumbnail(p, art, Some(texture), 12.0),
-                None => {
-                    thumbnail(p, art, None, 12.0);
-                    widgets::icon(p, art.center(), icons::MUSIC_NOTES, 30.0, theme::FG_4);
-                }
-            }
-            let x = art.right() + 20.0;
-            let text_w = (row.right() - x - if media.is_some() { controls_w + 24.0 } else { 0.0 }).max(80.0);
-            let lines = [
-                (Content::MediaTitle, 26.0, Txt::new("", 17.0).weight(weight::SEMIBOLD)),
-                (Content::MediaArtist, 52.0, Txt::new("", 13.0).color(theme::FG_2)),
-                (Content::MediaAlbum, 74.0, Txt::new("", 12.5).color(theme::FG_3)),
-            ];
-            for (content, dy, style) in lines {
-                let line = Txt { text: layout::text(menu, content), ..style };
-                widgets::text_truncated(p, pos2(x, row.top() + dy), Align2::LEFT_CENTER, &line, text_w);
-            }
-        }
-        if let Some(m) = media {
-            let (cy, mut x) = (row.center().y, row.right() - controls_w);
-            // Previous, or back to the start of what has nothing before it.
-            let previous = !layout::target_state(menu, Target::MediaPrevious).hidden;
-            if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_BACK, "Previous", previous) {
-                acts.push(Act::Press(Target::MediaPrevious));
-            }
-            x += 50.0;
-            let play = Button::new("")
-                .icon(if m.playing { icons::PAUSE } else { icons::PLAY })
-                .variant(Variant::Primary)
-                .size(Size::Lg)
-                .width(48.0)
-                .enabled(m.can_play_pause)
-                .hint(if m.playing { "Pause" } else { "Play" })
-                .id_salt("orbiters-home-play");
-            if play.show_at(ui, Rect::from_min_size(pos2(x, cy - 24.0), Vec2::splat(48.0))).clicked() {
-                acts.push(Act::Press(Target::MediaPlayPause));
-            }
-            x += 58.0;
-            if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_FORWARD, "Next", m.can_next) {
-                acts.push(Act::Press(Target::MediaNext));
-            }
-        }
-        if let Some(m) = media.filter(|m| m.duration.is_some_and(|d| d > 0)) {
-            ui.add_space(8.0);
-            timeline(ui, m, acts);
-        }
-        ui.add_space(14.0);
-        // The YouTube video a browser or YouTube's app plays, found on YouTube: its link copied, then dropped as a card,
-        // as a search result's.
-        if let Some((video, link)) = media.and_then(|m| Some((m.video.as_deref()?, m.link()?))) {
-            widgets::separator(ui);
-            let drop = !layout::target_state(menu, Target::DropPlaying).hidden;
-            let was_copied = drop || copied == Some(video);
-            let width = 124.0 + if drop { 8.0 + 96.0 } else { 0.0 };
-            let shown = link.strip_prefix("https://www.").unwrap_or(&link);
-            widgets::field(ui, "On YouTube", Some(shown), width, |ui| {
-                ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-                let (label, glyph) = if was_copied { ("Copied", icons::CHECK) } else { ("Copy link", icons::COPY) };
-                let copy = Button::new(label).icon(glyph).size(Size::Sm).width(124.0).id_salt("orbiters-home-copy-playing");
-                if copy.hint("Paste it in a world's video player").show(ui).clicked() {
-                    acts.push(Act::Press(Target::CopyPlaying));
-                }
-                if drop {
-                    let hint = "Drop it in the world as a card: whoever grabs it copies the link";
-                    let button = Button::new("Drop").icon(icons::HAND_DEPOSIT).size(Size::Sm).variant(Variant::Primary).width(96.0).hint(hint);
-                    if button.id_salt("orbiters-home-drop-playing").show(ui).clicked() {
-                        acts.push(Act::Press(Target::DropPlaying));
+    let mut m = super::Masonry::new(ui, "home-music");
+    m.add(1, |ui| {
+        section(ui, cx, 1, icons::MUSIC_NOTES, "Now playing", from.as_deref(), |ui| {
+            ui.add_space(14.0);
+            let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 108.0), Sense::hover());
+            let art = Rect::from_min_size(row.min, vec2(192.0, 108.0));
+            let controls_w = 40.0 + 10.0 + 48.0 + 10.0 + 40.0;
+            {
+                let p = ui.painter();
+                match media.and_then(|m| m.art.as_deref()).and_then(picture) {
+                    Some(texture) => thumbnail(p, art, Some(texture), 12.0),
+                    None => {
+                        thumbnail(p, art, None, 12.0);
+                        widgets::icon(p, art.center(), icons::MUSIC_NOTES, 30.0, theme::FG_4);
                     }
                 }
-            });
-        }
-        if let Some(volume) = menu.volume {
-            widgets::separator(ui);
-            widgets::field(ui, "Volume", Some("This computer's speakers."), 340.0, |ui| {
-                let mut percent = volume.percent as f32;
-                let format = |v: f32| if volume.muted { "Muted".to_string() } else { format!("{v:.0} %") };
-                if widgets::slider(ui, "orbiters-home-volume", &mut percent, 0.0..=100.0, 1.0, format) {
-                    acts.push(Act::Volume(percent.round() as u8));
+                let x = art.right() + 20.0;
+                let text_w = (row.right() - x - if media.is_some() { controls_w + 24.0 } else { 0.0 }).max(80.0);
+                let lines = [
+                    (Content::MediaTitle, 26.0, Txt::new("", 17.0).weight(weight::SEMIBOLD)),
+                    (Content::MediaArtist, 52.0, Txt::new("", 13.0).color(theme::FG_2)),
+                    (Content::MediaAlbum, 74.0, Txt::new("", 12.5).color(theme::FG_3)),
+                ];
+                for (content, dy, style) in lines {
+                    let line = Txt { text: layout::text(menu, content), ..style };
+                    widgets::text_truncated(p, pos2(x, row.top() + dy), Align2::LEFT_CENTER, &line, text_w);
                 }
-                ui.add_space(6.0);
-                let (glyph, label) = if volume.muted { (icons::SPEAKER_X, "Unmute") } else { (icons::SPEAKER_HIGH, "Mute") };
-                if IconButton::new(glyph, label).show(ui).clicked() {
-                    acts.push(Act::Press(Target::Mute));
+            }
+            if let Some(m) = media {
+                let (cy, mut x) = (row.center().y, row.right() - controls_w);
+                // Previous, or back to the start of what has nothing before it.
+                let previous = !layout::target_state(menu, Target::MediaPrevious).hidden;
+                if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_BACK, "Previous", previous) {
+                    acts.push(Act::Press(Target::MediaPrevious));
                 }
-            });
-        }
+                x += 50.0;
+                let play = Button::new("")
+                    .icon(if m.playing { icons::PAUSE } else { icons::PLAY })
+                    .variant(Variant::Primary)
+                    .size(Size::Lg)
+                    .width(48.0)
+                    .enabled(m.can_play_pause)
+                    .hint(if m.playing { "Pause" } else { "Play" })
+                    .id_salt("orbiters-home-play");
+                if play.show_at(ui, Rect::from_min_size(pos2(x, cy - 24.0), Vec2::splat(48.0))).clicked() {
+                    acts.push(Act::Press(Target::MediaPlayPause));
+                }
+                x += 58.0;
+                if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_FORWARD, "Next", m.can_next) {
+                    acts.push(Act::Press(Target::MediaNext));
+                }
+            }
+            if let Some(m) = media.filter(|m| m.duration.is_some_and(|d| d > 0)) {
+                ui.add_space(8.0);
+                timeline(ui, m, acts);
+            }
+            ui.add_space(14.0);
+            // The YouTube video a browser or YouTube's app plays, found on YouTube: its link copied, then dropped as a card,
+            // as a search result's.
+            if let Some((video, link)) = media.and_then(|m| Some((m.video.as_deref()?, m.link()?))) {
+                widgets::separator(ui);
+                let drop = !layout::target_state(menu, Target::DropPlaying).hidden;
+                let was_copied = drop || copied == Some(video);
+                let width = 124.0 + if drop { 8.0 + 96.0 } else { 0.0 };
+                let shown = link.strip_prefix("https://www.").unwrap_or(&link);
+                widgets::field(ui, "On YouTube", Some(shown), width, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                    let (label, glyph) = if was_copied { ("Copied", icons::CHECK) } else { ("Copy link", icons::COPY) };
+                    let copy = Button::new(label).icon(glyph).size(Size::Sm).width(124.0).id_salt("orbiters-home-copy-playing");
+                    if copy.hint("Paste it in a world's video player").show(ui).clicked() {
+                        acts.push(Act::Press(Target::CopyPlaying));
+                    }
+                    if drop {
+                        let hint = "Drop it in the world as a card: whoever grabs it copies the link";
+                        let button = Button::new("Drop").icon(icons::HAND_DEPOSIT).size(Size::Sm).variant(Variant::Primary).width(96.0).hint(hint);
+                        if button.id_salt("orbiters-home-drop-playing").show(ui).clicked() {
+                            acts.push(Act::Press(Target::DropPlaying));
+                        }
+                    }
+                });
+            }
+            if let Some(volume) = menu.volume {
+                widgets::separator(ui);
+                widgets::field(ui, "Volume", Some("This computer's speakers."), 340.0, |ui| {
+                    let mut percent = volume.percent as f32;
+                    let format = |v: f32| if volume.muted { "Muted".to_string() } else { format!("{v:.0} %") };
+                    if widgets::slider(ui, "orbiters-home-volume", &mut percent, 0.0..=100.0, 1.0, format) {
+                        acts.push(Act::Volume(percent.round() as u8));
+                    }
+                    ui.add_space(6.0);
+                    let (glyph, label) = if volume.muted { (icons::SPEAKER_X, "Unmute") } else { (icons::SPEAKER_HIGH, "Mute") };
+                    if IconButton::new(glyph, label).show(ui).clicked() {
+                        acts.push(Act::Press(Target::Mute));
+                    }
+                });
+            }
+        })
     });
-    card_out(ui, cx, 2, acts);
+    m.add(2, |ui| card_out(ui, cx, 2, acts));
     // What the world's video player plays (VRChat's log): watched here from where the world is, or saved.
     if let Some(video) = &menu.world_video {
         let title = video.title.clone().unwrap_or_else(|| video.url.clone());
-        section(ui, cx, 3, icons::MONITOR_PLAY, "In the world", Some("What the world's video player plays now"), |ui| {
-            widgets::field(ui, &title, Some(&video.url), 260.0, |ui| {
-                ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-                if Button::new("Save").icon(icons::FLOPPY_DISK).size(Size::Sm).show(ui).clicked() {
-                    acts.push(Act::Press(Target::SaveVideo));
-                }
-                if Button::new("Watch")
-                    .icon(icons::MONITOR_PLAY)
-                    .variant(Variant::Primary)
-                    .size(Size::Sm)
-                    .hint("Opens it in your browser, where the world's player is")
-                    .show(ui)
-                    .clicked()
-                {
-                    acts.push(Act::Press(Target::WatchVideo));
-                }
-            });
+        m.add(3, |ui| {
+            section(ui, cx, 3, icons::MONITOR_PLAY, "In the world", Some("What the world's video player plays now"), |ui| {
+                widgets::field(ui, &title, Some(&video.url), 260.0, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                    if Button::new("Save").icon(icons::FLOPPY_DISK).size(Size::Sm).show(ui).clicked() {
+                        acts.push(Act::Press(Target::SaveVideo));
+                    }
+                    if Button::new("Watch")
+                        .icon(icons::MONITOR_PLAY)
+                        .variant(Variant::Primary)
+                        .size(Size::Sm)
+                        .hint("Opens it in your browser, where the world's player is")
+                        .show(ui)
+                        .clicked()
+                    {
+                        acts.push(Act::Press(Target::WatchVideo));
+                    }
+                });
+            })
         });
     }
+    m.finish(ui);
 }
 
 fn light(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
@@ -1083,60 +1104,68 @@ fn qr(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
     top(ui, cx, "QR code scanner", "Point VRChat's stream camera at a QR code: its web link opens in your browser", acts);
     let scanner = &menu.qr;
     let note = layout::qr_note(scanner);
-    section(
-        ui,
-        cx,
-        1,
-        icons::QR_CODE,
-        "VRChat's stream camera",
-        Some("Read about three times a second while this page shows, for two minutes at most"),
-        |ui| {
-            use orbiters_orb::qr::QrPhase;
-            let tone = match scanner.phase {
-                QrPhase::Looking => Tone::Ok,
-                QrPhase::Starting => Tone::Info,
-                QrPhase::NoCamera => Tone::Warn,
-                QrPhase::Off | QrPhase::Stopped => Tone::Off,
-            };
-            let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::hover());
-            let p = ui.painter();
-            widgets::status_dot(p, pos2(row.left() + 5.0, row.top() + 20.0), tone, scanner.scanning());
-            let state = Txt::new(layout::qr_state(scanner), 15.0).weight(weight::SEMIBOLD);
-            widgets::text(p, pos2(row.left() + 20.0, row.top() + 20.0), Align2::LEFT_CENTER, &state);
-            let room = row.width() - 200.0;
-            widgets::text_truncated(p, pos2(row.left() + 20.0, row.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(&note, 12.5).color(theme::FG_3), room);
-            if !scanner.scanning() {
-                let button = Button::new("Scan again").icon(icons::QR_CODE).variant(Variant::Primary);
-                let bw = button.desired_width(ui);
-                if button.show_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.center().y - 18.0), vec2(bw, 36.0))).clicked() {
-                    acts.push(Act::Press(Target::QrAgain));
+    let mut m = super::Masonry::new(ui, "home-qr");
+    m.add(1, |ui| {
+        section(
+            ui,
+            cx,
+            1,
+            icons::QR_CODE,
+            "VRChat's stream camera",
+            Some("Read about three times a second while this page shows, for two minutes at most"),
+            |ui| {
+                use orbiters_orb::qr::QrPhase;
+                let tone = match scanner.phase {
+                    QrPhase::Looking => Tone::Ok,
+                    QrPhase::Starting => Tone::Info,
+                    QrPhase::NoCamera => Tone::Warn,
+                    QrPhase::Off | QrPhase::Stopped => Tone::Off,
+                };
+                let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::hover());
+                let p = ui.painter();
+                widgets::status_dot(p, pos2(row.left() + 5.0, row.top() + 20.0), tone, scanner.scanning());
+                let state = Txt::new(layout::qr_state(scanner), 15.0).weight(weight::SEMIBOLD);
+                widgets::text(p, pos2(row.left() + 20.0, row.top() + 20.0), Align2::LEFT_CENTER, &state);
+                let room = row.width() - 200.0;
+                widgets::text_truncated(p, pos2(row.left() + 20.0, row.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(&note, 12.5).color(theme::FG_3), room);
+                if !scanner.scanning() {
+                    let button = Button::new("Scan again").icon(icons::QR_CODE).variant(Variant::Primary);
+                    let bw = button.desired_width(ui);
+                    if button.show_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.center().y - 18.0), vec2(bw, 36.0))).clicked() {
+                        acts.push(Act::Press(Target::QrAgain));
+                    }
                 }
-            }
-        },
-    );
+            },
+        )
+    });
     let link = scanner.link.as_deref();
     let shown = link.map_or_else(|| "None yet".to_string(), |l| layout::short_link(l, 90));
     let policy = "Only http and https links open, each once while it stays before the camera";
     let notice = menu.notice.clone();
-    section(ui, cx, 2, icons::LINK_SIMPLE, "Last link opened", Some(notice.as_deref().unwrap_or(policy)), |ui| {
-        widgets::field(ui, &shown, None, 260.0, |ui| {
-            if Button::new("Open again").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).enabled(link.is_some()).show(ui).clicked() {
-                acts.push(Act::Press(Target::QrOpen));
-            }
-            ui.add_space(8.0);
-            if Button::new("Copy link").icon(icons::COPY).variant(Variant::Secondary).enabled(link.is_some()).show(ui).clicked() {
-                acts.push(Act::Press(Target::QrCopy));
-            }
-        });
+    m.add(2, |ui| {
+        section(ui, cx, 2, icons::LINK_SIMPLE, "Last link opened", Some(notice.as_deref().unwrap_or(policy)), |ui| {
+            widgets::field(ui, &shown, None, 260.0, |ui| {
+                if Button::new("Open again").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).enabled(link.is_some()).show(ui).clicked() {
+                    acts.push(Act::Press(Target::QrOpen));
+                }
+                ui.add_space(8.0);
+                if Button::new("Copy link").icon(icons::COPY).variant(Variant::Secondary).enabled(link.is_some()).show(ui).clicked() {
+                    acts.push(Act::Press(Target::QrCopy));
+                }
+            });
+        })
     });
-    note_card(
-        ui,
-        cx,
-        3,
-        icons::INFO,
-        "Turning the stream camera on",
-        "In VRChat, open the camera, choose Stream, then switch Spout Stream on in the camera's settings. Settings › Spout sender picks another sender.",
-    );
+    m.add(3, |ui| {
+        note_card(
+            ui,
+            cx,
+            3,
+            icons::INFO,
+            "Turning the stream camera on",
+            "In VRChat, open the camera, choose Stream, then switch Spout Stream on in the camera's settings. Settings › Spout sender picks another sender.",
+        )
+    });
+    m.finish(ui);
 }
 
 /// Previous instances: Orbiters' VRChat account invites the player back to one (Invite me), once it is their friend (Add
@@ -1146,7 +1175,7 @@ fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
     let mut index = 1;
     if let Some(account) = &menu.invite_account {
         let why = "VRChat lets Orbiters invite only its friends: in VRChat, Social, search the name, Add friend; then Try again";
-        section(ui, cx, index, icons::USER, "Add Orbiters as a friend", Some(why), |ui| {
+        section_up_to(ui, cx, f32::INFINITY, index, icons::USER, "Add Orbiters as a friend", Some(why), |ui| {
             let link = layout::short_link(&account.link, 70);
             widgets::field(ui, &account.name, Some(&link), 420.0, |ui| {
                 let again =
@@ -1170,10 +1199,12 @@ fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
         let text = if menu.instances_ready { "Worlds you join in VRChat show here, newest first." } else { "Reading VRChat's logs…" };
         return note_card(ui, cx, index, icons::GLOBE, "No instance yet", text);
     }
-    section(ui, cx, index, icons::GLOBE, "Instances you were in", Some("Orbiters' VRChat account invites you back: open the invite in VRChat"), |ui| {
+    let sub = "Orbiters' VRChat account invites you back: open the invite in VRChat";
+    // As wide as the page: the instances go side by side on wide ones.
+    section_up_to(ui, cx, f32::INFINITY, index, icons::GLOBE, "Instances you were in", Some(sub), |ui| {
         ui.add_space(4.0);
-        for i in 0..menu.page_instances().len() {
-            if i > 0 {
+        row_columns(ui, "orbiters-home-instances", ROW_MIN_W, ROW_GAP, menu.page_instances().len(), |ui, i, first| {
+            if !first {
                 widgets::separator(ui);
             }
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 60.0), Sense::hover());
@@ -1191,7 +1222,7 @@ fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
             if invite.show_at(ui, Rect::from_min_size(pos2(r.right() - invite_w, r.center().y - 16.0), vec2(invite_w, 32.0))).clicked() {
                 acts.push(Act::Press(Target::InviteMe(i as u8)));
             }
-        }
+        });
         if menu.has_previous() || menu.has_next() {
             if let Some(target) = pager(ui, menu) {
                 acts.push(Act::Press(target));

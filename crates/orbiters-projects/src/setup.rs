@@ -18,6 +18,8 @@ pub struct Request {
     pub id: String,
     pub created_utc: String,
     pub from: String,
+    /// The Orbiters API the items' asset ids belong to (`Server::api`); Unity refuses a request for another server.
+    pub server: String,
     pub avatar: Avatar,
     pub items: Vec<Item>,
     pub then: Vec<String>,
@@ -47,7 +49,7 @@ pub struct Installed {
     pub version: String,
 }
 
-pub fn request(avatar: Avatar, asset_id: u64, app_version: &str) -> anyhow::Result<Request> {
+pub fn request(avatar: Avatar, asset_id: u64, server: &str, app_version: &str) -> anyhow::Result<Request> {
     uuid::Uuid::parse_str(avatar.id.strip_prefix("avtr_").context("Only uploaded avatars can receive N4N0")?)?;
     if asset_id == 0 {
         bail!("N4N0 is not published in this environment yet.");
@@ -57,6 +59,7 @@ pub fn request(avatar: Avatar, asset_id: u64, app_version: &str) -> anyhow::Resu
         id: uuid::Uuid::new_v4().to_string(),
         created_utc: time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?,
         from: format!("Orbiters - N4N0 {app_version}"),
+        server: server.to_string(),
         avatar,
         items: vec![Item { kind: "gallery".into(), asset_id, version: None, name: "N4N0".into() }],
         then: vec!["save-scene".into(), "open-build-panel".into()],

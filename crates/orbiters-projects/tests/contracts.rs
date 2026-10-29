@@ -74,7 +74,7 @@ fn setup_request_matches_contract() {
         scene: "Assets/MasculineCanine/Canine.unity".into(),
         path: "MasculineCanine".into(),
     };
-    let mut r = setup::request(avatar, 30, "0.3.3").unwrap();
+    let mut r = setup::request(avatar, 30, "https://api.orbiters.cc/", "0.3.3").unwrap();
     r.id = "5f0c4d1e-8a8b-4d58-9a3a-2b7c1c4f0e11".into();
     r.created_utc = "2026-10-29T01:50:00Z".into();
     setup::write(temp.path(), &r).unwrap();
@@ -82,7 +82,7 @@ fn setup_request_matches_contract() {
     let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
     assert_eq!(
         v,
-        serde_json::json!({"schema":1,"id":"5f0c4d1e-8a8b-4d58-9a3a-2b7c1c4f0e11","createdUtc":"2026-10-29T01:50:00Z","from":"Orbiters - N4N0 0.3.3","avatar":{"id":"avtr_0bf7ea0b-0849-47d5-8a2b-b0a217aa676c","name":"MasculineCanine","scene":"Assets/MasculineCanine/Canine.unity","path":"MasculineCanine"},"items":[{"kind":"gallery","assetId":30,"version":null,"name":"N4N0"}],"then":["save-scene","open-build-panel"]})
+        serde_json::json!({"schema":1,"id":"5f0c4d1e-8a8b-4d58-9a3a-2b7c1c4f0e11","createdUtc":"2026-10-29T01:50:00Z","from":"Orbiters - N4N0 0.3.3","server":"https://api.orbiters.cc/","avatar":{"id":"avtr_0bf7ea0b-0849-47d5-8a2b-b0a217aa676c","name":"MasculineCanine","scene":"Assets/MasculineCanine/Canine.unity","path":"MasculineCanine"},"items":[{"kind":"gallery","assetId":30,"version":null,"name":"N4N0"}],"then":["save-scene","open-build-panel"]})
     );
     assert!(!p.with_extension("json.tmp").exists());
 }

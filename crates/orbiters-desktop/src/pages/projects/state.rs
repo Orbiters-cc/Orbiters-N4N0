@@ -361,7 +361,7 @@ impl State {
         self.task(ctx, if nano { "Installing My Avatar and preparing N4N0…" } else { "Installing My Avatar…" }, move || {
             orbiters_projects::runtime()?.block_on(vpm::install_my_avatar(&orbiters_projects::vcc_dir(), &project.path))?;
             let request = if nano {
-                let r = setup::request(avatar.clone(), server.n4n0_gallery_asset_id().unwrap(), env!("CARGO_PKG_VERSION"))?;
+                let r = setup::request(avatar.clone(), server.n4n0_gallery_asset_id().unwrap(), server.api(), env!("CARGO_PKG_VERSION"))?;
                 setup::write(&project.path, &r)?;
                 Some(r.id)
             } else {

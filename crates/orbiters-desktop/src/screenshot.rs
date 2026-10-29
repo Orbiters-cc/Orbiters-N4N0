@@ -1374,6 +1374,16 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "projects-crossfade",
         "projects-resize",
         "projects-resize-mid",
+        "projects-mixer",
+        "projects-mixer-installed",
+        "projects-mixer-adding",
+        "projects-mixer-open-mid",
+        "projects-mixer-open",
+        "projects-mixer-fold-mid",
+        "projects-new-covers",
+        "projects-new-novcc",
+        "projects-new-loading",
+        "projects-repos-novcc",
     ] {
         let capture = name.starts_with("projects-avatars") || matches!(name, "projects-choice" | "projects-ready" | "projects-capture");
         let mut snapshot = scenarios[0].snapshot.clone();
@@ -1388,7 +1398,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             snapshot,
             frames: if name == "projects-resize-mid" {
                 60
-            } else if name == "projects-crossfade" {
+            } else if matches!(name, "projects-crossfade" | "projects-new-loading") {
                 66
             } else if name.ends_with("-mid") {
                 67

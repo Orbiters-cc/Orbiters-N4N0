@@ -4,7 +4,7 @@ use orbiters_core::account::Server;
 use orbiters_projects::{
     avatars::Avatar,
     discovery::{self, Project, Scan},
-    network, setup, templates, vpm,
+    icons, network, setup, templates, vpm,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -44,6 +44,25 @@ pub(super) enum Outcome {
 }
 type ViewResult = Result<(vpm::View, Vec<templates::Template>, Vec<String>), String>;
 
+/// A package's icon, loaded: a picture that fills its tile (solid nearly everywhere) or a mark to frame, and a mark dark
+/// enough to need a light tile.
+#[derive(Clone)]
+pub(super) struct PackageIcon {
+    pub tex: TextureHandle,
+    pub fills: bool,
+    pub dark: bool,
+}
+impl PackageIcon {
+    pub fn load(ctx: &egui::Context, name: &str, image: &icons::Image) -> Self {
+        let pixels = ColorImage::from_rgba_unmultiplied([image.size[0] as usize, image.size[1] as usize], &image.rgba);
+        // Drawn at a third of their size or less: mipmaps keep them smooth.
+        let options = egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR };
+        Self { tex: ctx.load_texture(format!("package-icon-{name}"), pixels, options), fills: image.fills(), dark: image.lightness() < 0.3 }
+    }
+}
+/// Packages whose icons one batch looks for.
+const ICON_BATCH: usize = 12;
+
 pub struct State {
     pub(super) scan: Scan,
     pub(super) started: bool,
@@ -75,6 +94,17 @@ pub struct State {
     pub(super) thumb_ids: HashSet<String>,
     pub(super) thumbnail_environment: Option<crate::controller::vrchat_data::Scope>,
     pub(super) thumb_job: Job<Result<(HashMap<String, ColorImage>, Vec<String>), String>>,
+    /// Package icons by package name: those looked for (once each), the batch looking, and the packages whose rows
+    /// were drawn since the last look (only those are looked for).
+    pub(super) icons: HashMap<String, PackageIcon>,
+    pub(super) icons_asked: HashSet<String>,
+    pub(super) icon_job: Job<Vec<(String, Option<icons::Image>)>>,
+    pub(super) icons_wanted: Vec<String>,
+    /// Creator Companion's template covers by file, and their loading.
+    pub(super) banners: HashMap<PathBuf, TextureHandle>,
+    pub(super) banner_job: Job<Vec<(PathBuf, Option<ColorImage>)>>,
+    /// Mixer's card tells what Mixer adds.
+    pub(super) mixer_info: bool,
     pub(super) modal: Option<Modal>,
     /// The dialog's serial (a new one for each dialog opened) and what it grew out of.
     pub(super) modal_serial: u64,
@@ -117,8 +147,10 @@ pub struct State {
     pub(super) fixture_scanning: bool,
     pub(super) fixture_view_loading: bool,
     pub(super) fixture_action: Option<String>,
-    /// Screenshots: avatar pictures that arrive later (they fade in).
+    /// Screenshots: avatar pictures, package icons and template covers that arrive later (they fade in).
     pub(super) fixture_later: HashMap<String, TextureHandle>,
+    pub(super) fixture_icons_later: HashMap<String, PackageIcon>,
+    pub(super) fixture_banners_later: HashMap<PathBuf, TextureHandle>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -147,6 +179,13 @@ impl Default for State {
             thumb_ids: HashSet::new(),
             thumbnail_environment: None,
             thumb_job: Job::default(),
+            icons: HashMap::new(),
+            icons_asked: HashSet::new(),
+            icon_job: Job::default(),
+            icons_wanted: vec![],
+            banners: HashMap::new(),
+            banner_job: Job::default(),
+            mixer_info: false,
             modal: None,
             modal_serial: 0,
             modal_origin: Rect::NOTHING,
@@ -181,6 +220,8 @@ impl Default for State {
             fixture_view_loading: false,
             fixture_action: None,
             fixture_later: HashMap::new(),
+            fixture_icons_later: HashMap::new(),
+            fixture_banners_later: HashMap::new(),
         }
     }
 }
@@ -190,6 +231,11 @@ impl Drop for State {
         self.copy_cancel.store(true, Ordering::Relaxed);
     }
 }
+/// Mixer's package, from the Orbiters repository.
+pub(super) const MIXER: &str = "orbiters.mixer";
+/// Mixer's presentation on the website.
+pub(super) const MIXER_PAGE: &str = "https://orbiters.cc/mixer";
+
 pub(super) fn server(cx: &Cx) -> Server {
     if cx.snap.account.development {
         Server::Development
@@ -358,8 +404,19 @@ impl State {
                     self.view = view;
                     self.templates = templates;
                     self.commits = commits;
+                    self.load_banners(ctx);
                 }
                 Err(e) => self.error = Some(e),
+            }
+        }
+        self.load_icons(ctx);
+        if let Some(covers) = self.banner_job.take() {
+            let options = egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR };
+            for (file, image) in covers {
+                if let Some(image) = image {
+                    let tex = ctx.load_texture(format!("template-cover-{}", file.display()), image, options);
+                    self.banners.insert(file, tex);
+                }
             }
         }
         if let Some(c) = self.catalog_job.take() {
@@ -471,6 +528,63 @@ impl State {
         if let Some(Err(e)) = self.ack_job.take() {
             self.error = Some(format!("Setup result was shown but could not be removed: {e}"));
         }
+    }
+    /// Looks for the icons of the packages drawn since the last look that were never looked for, a batch at a time.
+    fn load_icons(&mut self, ctx: &egui::Context) {
+        let wanted = std::mem::take(&mut self.icons_wanted);
+        if !self.fixture && !self.icon_job.running() {
+            let mut batch: Vec<vpm::Package> = vec![];
+            for name in wanted {
+                if batch.len() < ICON_BATCH && !self.icons_asked.contains(&name) {
+                    if let Some(p) = self.view.packages.iter().find(|p| p.name == name) {
+                        self.icons_asked.insert(name);
+                        batch.push(p.clone());
+                    }
+                }
+            }
+            if !batch.is_empty() {
+                self.icon_job = Job::spawn(ctx, move || {
+                    let sources: Vec<icons::Sources> = batch.iter().map(icons::sources).collect();
+                    batch.into_iter().map(|p| p.name).zip(icons::resolve_all(&sources)).collect()
+                });
+            }
+        }
+        if let Some(found) = self.icon_job.take() {
+            for (name, image) in found {
+                if let Some(image) = image {
+                    let icon = PackageIcon::load(ctx, &name, &image);
+                    self.icons.insert(name, icon);
+                }
+            }
+        }
+    }
+    /// Decodes the covers of the templates listed that are not loaded yet.
+    fn load_banners(&mut self, ctx: &egui::Context) {
+        let files: HashSet<PathBuf> = self.templates.iter().filter_map(|t| t.banner.clone()).filter(|f| !self.banners.contains_key(f)).collect();
+        if files.is_empty() || self.banner_job.running() || self.fixture {
+            return;
+        }
+        self.banner_job = Job::spawn(ctx, move || {
+            files
+                .into_iter()
+                .map(|f| {
+                    let image = image::open(&f).ok().map(|i| {
+                        let i = i.to_rgba8();
+                        ColorImage::from_rgba_unmultiplied([i.width() as usize, i.height() as usize], &i)
+                    });
+                    (f, image)
+                })
+                .collect()
+        });
+    }
+    /// Adds Mixer to `project` from the Orbiters repository (added to the repositories first if needed).
+    pub(super) fn add_mixer(&mut self, ctx: &egui::Context, project: &Project) {
+        let path = project.path.clone();
+        self.busy_package = Some(MIXER.into());
+        self.task(ctx, "Adding Mixer…", move || {
+            orbiters_projects::runtime()?.block_on(vpm::install_orbiters(&orbiters_projects::vcc_dir(), &path, &[MIXER]))?;
+            Ok(Outcome::Changed("Mixer is in the project: open it in Unity to try it".into()))
+        });
     }
     pub(super) fn acknowledge_result(&mut self, ctx: &egui::Context) {
         if self.fixture {
@@ -631,11 +745,46 @@ impl State {
             ..Default::default()
         })
         .collect();
+        // Creator Companion's covers on the templates (stand-ins; `-covers` reads VCC's own files when it is installed,
+        // `-novcc` has none, as a computer without VCC).
+        let template = |name: &str, id: &str, unity: &str, builtin: bool| templates::Template {
+            name: name.into(),
+            unity: unity.into(),
+            builtin,
+            id: id.into(),
+            banner: Some(PathBuf::from(format!("covers/{id}.png"))),
+            ..Default::default()
+        };
         self.templates = vec![
-            templates::Template { name: "VRChat Avatar Project".into(), unity: "2022.3.22f1".into(), builtin: true, ..Default::default() },
-            templates::Template { name: "VRChat World Project".into(), unity: "2022.3.22f1".into(), builtin: true, ..Default::default() },
-            templates::Template { name: "Studio base".into(), unity: "".into(), builtin: false, ..Default::default() },
+            template("VRChat Avatar Project", "com.vrchat.template.avatar", "2022.3.22f1", true),
+            template("VRChat World Project", "com.vrchat.template.world", "2022.3.22f1", true),
+            template("Studio base", "com.studio.template.base", "", false),
         ];
+        let app = orbiters_projects::vcc_app_dir().filter(|_| name == "projects-new-covers");
+        for (i, t) in self.templates.iter_mut().enumerate() {
+            if name.ends_with("-novcc") {
+                t.banner = None;
+                continue;
+            }
+            let real = app.as_ref().and_then(|app| templates::banner(app, &t.id)).and_then(|f| image::open(f).ok()).map(|i| {
+                let i = i.to_rgba8();
+                ColorImage::from_rgba_unmultiplied([i.width() as usize, i.height() as usize], &i)
+            });
+            let cover = real.unwrap_or_else(|| stand_in_cover(i));
+            let options = egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR };
+            self.banners.insert(t.banner.clone().unwrap(), ctx.load_texture(format!("fixture-cover-{i}"), cover, options));
+        }
+        for (package, look) in [
+            ("com.vrchat.avatars", Look::Picture([30., 90., 200.])),
+            ("com.vrchat.base", Look::Picture([30., 90., 200.])),
+            ("orbiters.toolkit", Look::Wings),
+            ("orbiters.myavatar", Look::Wings),
+            (MIXER, Look::Wings),
+            ("com.vrcfury.vrcfury", Look::Mark([24., 24., 28.])),
+            ("com.poiyomi.toon", Look::Mark([255., 120., 190.])),
+        ] {
+            self.icons.insert(package.into(), stand_in_icon(ctx, package, look));
+        }
         self.new_location = "H:/Unity projects".into();
         self.new_name = "My new avatar".into();
         self.catalog.known = vec![
@@ -712,7 +861,38 @@ impl State {
                 };
             }
             "projects-search" => self.query = "avatar".into(),
-            "projects-crossfade" => self.fixture_later = std::mem::take(&mut self.thumbs),
+            "projects-crossfade" => {
+                self.fixture_later = std::mem::take(&mut self.thumbs);
+                self.fixture_icons_later = std::mem::take(&mut self.icons);
+                self.selected = Some(first.path.clone());
+                self.scroll_to_packages = true;
+            }
+            "projects-new-covers" | "projects-new-novcc" => self.modal = Some(Modal::New),
+            "projects-new-loading" => {
+                self.modal = Some(Modal::New);
+                self.fixture_banners_later = std::mem::take(&mut self.banners);
+            }
+            "projects-repos-novcc" => {
+                self.modal = Some(Modal::Repos);
+                self.view.repos.retain(|r| r.builtin);
+                self.view.repos.iter_mut().for_each(|r| r.enabled = true);
+            }
+            "projects-mixer" => {
+                self.selected = Some(first.path.clone());
+                self.mixer_info = true;
+            }
+            "projects-mixer-installed" => {
+                self.selected = Some(first.path.clone());
+                if let Some(p) = self.view.packages.iter_mut().find(|p| p.name == MIXER) {
+                    p.installed = Some("0.7.0".into());
+                }
+            }
+            "projects-mixer-adding" => {
+                self.selected = Some(first.path.clone());
+                self.busy_package = Some(MIXER.into());
+                self.fixture_action = Some("Adding Mixer…".into());
+            }
+            "projects-mixer-open-mid" | "projects-mixer-open" | "projects-mixer-fold-mid" => self.selected = Some(first.path.clone()),
             "projects-repos" => self.modal = Some(Modal::Repos),
             "projects-repos-loading" => {
                 self.modal = Some(Modal::Repos);
@@ -810,6 +990,16 @@ impl State {
     pub fn stage_frame(&mut self, name: &str, frame: u32) -> Option<Poke> {
         if name == "projects-crossfade" && frame == 60 {
             self.thumbs = std::mem::take(&mut self.fixture_later);
+            self.icons = std::mem::take(&mut self.fixture_icons_later);
+        }
+        if name == "projects-new-loading" && frame == 60 {
+            self.banners = std::mem::take(&mut self.fixture_banners_later);
+        }
+        // Mixer added: its card folds away.
+        if name == "projects-mixer-fold-mid" && frame == 60 {
+            if let Some(p) = self.view.packages.iter_mut().find(|p| p.name == MIXER) {
+                p.installed = Some("0.7.0".into());
+            }
         }
         let at = |key: &str| self.anchors.get(key).map(|r| r.center());
         match (name, frame) {
@@ -826,10 +1016,77 @@ impl State {
             ("projects-dropdown", 60) => at("version-0").map(Poke::Press),
             ("projects-menu", 60) => at("project-menu").map(Poke::Press),
             ("projects-setup-from-panel", 60) => at("add-n4n0-0").map(Poke::Press),
+            ("projects-mixer-open-mid" | "projects-mixer-open", 60) => at("mixer-info").map(Poke::Press),
             _ => None,
         }
     }
 }
+/// How a stand-in package icon looks (screenshots).
+#[derive(Clone, Copy)]
+enum Look {
+    /// A picture filling its tile: a gradient in this colour and a white speech bubble.
+    Picture([f32; 3]),
+    /// Orbiters' wings on a dark square, as orbiters.cc's icon.
+    Wings,
+    /// A diamond in this colour on nothing (a mark to frame).
+    Mark([f32; 3]),
+}
+
+fn stand_in_icon(ctx: &egui::Context, name: &str, look: Look) -> PackageIcon {
+    let n = 96usize;
+    let wings = orbiters_ui::n4n0_face::rasterize(64, 57, egui::Color32::WHITE);
+    let mut rgba = vec![0u8; n * n * 4];
+    for y in 0..n {
+        for x in 0..n {
+            let (fx, fy) = (x as f32 / n as f32, y as f32 / n as f32);
+            let c: [f32; 4] = match look {
+                Look::Picture(c) => {
+                    let bubble = (fx - 0.5).abs() < 0.3 && (fy - 0.47).abs() < 0.16 || ((fx - 0.4).abs() < 0.06 && fy > 0.6 && fy < 0.72);
+                    if bubble {
+                        [255.0, 255.0, 255.0, 255.0]
+                    } else {
+                        let k = 0.75 + 0.5 * (1.0 - fy);
+                        [c[0] * k, c[1] * k, c[2] * k, 255.0]
+                    }
+                }
+                Look::Wings => {
+                    let (wx, wy) = (x as i64 - 16, y as i64 - 20);
+                    let a = if (0..64).contains(&wx) && (0..57).contains(&wy) { wings.pixels[wy as usize * 64 + wx as usize].a() as f32 / 255.0 } else { 0.0 };
+                    let bg = [18.0, 19.0, 24.0];
+                    [bg[0] + (230.0 - bg[0]) * a, bg[1] + (230.0 - bg[1]) * a, bg[2] + (235.0 - bg[2]) * a, 255.0]
+                }
+                Look::Mark(c) => {
+                    let d = (fx - 0.5).abs() + (fy - 0.5).abs();
+                    let a = ((0.36 - d) * 60.0).clamp(0.0, 1.0) * if d < 0.16 { 0.0 } else { 1.0 };
+                    [c[0], c[1], c[2], 255.0 * a]
+                }
+            };
+            for k in 0..4 {
+                rgba[(y * n + x) * 4 + k] = c[k].clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    PackageIcon::load(ctx, name, &icons::Image { size: [n as u32, n as u32], rgba })
+}
+
+/// A stand-in template cover (screenshots): a 400 × 50 strip in the template's colour with soft lights.
+fn stand_in_cover(i: usize) -> ColorImage {
+    let (w, h) = (400usize, 50usize);
+    let base = [[40., 70., 170.], [110., 60., 170.], [30., 120., 130.]][i % 3];
+    let mut pixels = vec![0u8; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let (fx, fy) = (x as f32 / w as f32, y as f32 / h as f32);
+            let glow = (1.0 - ((fx - 0.75) * 3.0).powi(2) - ((fy - 0.4) * 1.6).powi(2)).max(0.0);
+            let k = 0.45 + 0.35 * fx + 0.6 * glow;
+            for c in 0..3 {
+                pixels[(y * w + x) * 3 + c] = (base[c] * k).clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    ColorImage::from_rgb([w, h], &pixels)
+}
+
 /// What a screenshot scenario does with the pointer on one frame.
 #[derive(Clone, Copy, Debug)]
 pub enum Poke {

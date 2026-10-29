@@ -21,7 +21,45 @@ suggestion request leaves manual repository management available and offers Retr
 
 The page lists every repository version, filters pre-releases on request, installs/upgrades/downgrades/removes with
 the upstream resolver and restores missing locked packages. Conflicting changes are refused before application.
-Unity is opened only with the editor version recorded by the project. A missing editor offers Unity Hub.
+Unity is opened only with the editor version recorded by the project (Unity Hub's editor lists, its default and
+secondary install folders, VCC's preferred editors, then the editors VCC or ALCOM recorded in `vcc.liteDb`). A missing
+editor offers Unity Hub, found through VCC's `pathToUnityHub`, then its installer's uninstall entry, then its usual
+folder.
+
+## Without Creator Companion
+
+Nothing on the page needs VCC, as with ALCOM. The VPM folder (`%LOCALAPPDATA%/VRChatCreatorCompanion`) starts empty;
+VPM creates what it needs in VCC's own format (`settings.json` and its vrc-get backup, `vcc.liteDb`, `Repos/`), so a
+VCC or ALCOM installed later lists the same projects and repositories. VRChat's official and curated repositories,
+never downloaded on a first start, are downloaded on the first look at the packages. The built-in templates come with
+the app (above). `ORBITERS_VCC_DIR` points the app at another VPM folder and `ORBITERS_VCC_APP_DIR` at another VCC
+installation (empty: none); tests use them with temporary folders (`tests/no_vcc.rs`; `cargo test -p
+orbiters-projects --test no_vcc -- --ignored` downloads VRChat's repository into one). Never point them at the
+person's real folders in tests.
+
+## Package icons
+
+Package rows show the package's own icon instead of a tinted tile once it is found (`orbiters_projects::icons`), in
+this order: the logo the creator set on Orbiters, for a package of a listing Orbiters hosts (its feed at
+`<website>vpm/<slug>/index.json`; the logos come from `GET /vpm/public`, kept an hour); else the icon of its author's
+website (`author.url` of its newest version's manifest, or of the installed `package.json`), else of its own
+(`siteUrl`). A website's icon is the largest its page declares (`link rel=icon`, `apple-touch-icon`, the web
+manifest's icons; Safari's mask icon and one-colour icons skipped), else `/favicon.ico`; PNG, JPEG, WebP, GIF, ICO and
+SVG are read. A GitHub address (`github.com/<owner>/…`) gives its owner's picture instead of GitHub's mark, and a
+GitHub Pages site without an icon its owner's picture too. Requests run on a worker, only for the rows drawn, twelve
+packages a batch and four at a time; pages are read up to 512 KB, images up to 2 MB. The answer (the icon at most
+128 px, or that there is none) is kept under `Orbiters/package-icons` for a week, a day when none was found; a site
+that fails later keeps the icon found before. A picture (solid on 86 % of it at least: an avatar, an app icon with
+its own rounded corners) fills its tile; a mark sits on a plate, light behind a dark mark. Icons fade in over the tile.
+`cargo run -p orbiters-projects --example icons -- 200 sheet.png` prints where each icon of the shared repositories'
+packages came from and draws them on one sheet.
+
+## Mixer
+
+While the selected project does not have `orbiters.mixer`, its panel has a Mixer card between Avatars and Packages:
+Add Mixer installs it from the Orbiters repository (added or turned back on first, as for My Avatar), and its info
+button opens what Mixer adds in place, with the link to https://orbiters.cc/mixer. The card grows in once the
+project's packages are known and folds away once Mixer is in.
 
 ## Discovery
 
@@ -45,7 +83,9 @@ forwarded to image hosts, and the desktop never calls VRChat's API for this page
 
 Installed VCC built-in templates (`VRCTemplates`) and user templates (`Templates`) are offered. If VCC has never been installed, modern Avatar,
 World and Base templates are available offline from the bundled MIT-licensed ALCOM assets; installing the SDK still
-uses VPM's official repository. Each newly created project gets its own product GUID. Creation copies the
+uses VPM's official repository. With VCC installed (its uninstall entry gives the folder), the template cards show the
+covers VCC shows (`WebApp/Dist/template-covers`: VRChat's templates have their own, any other one VCC's Custom cover),
+loaded on a worker and fading in; without VCC the cards keep their icon. Each newly created project gets its own product GUID. Creation copies the
 template into a new folder, restores packages and registers it. A custom template without ProjectVersion asks for
 the exact editor version. Duplication excludes Library, Temp, Logs, obj, UserSettings, node_modules and Git history;
 it shows file progress and can be cancelled during copying. An interrupted or failed copy stays on disk for review
@@ -54,7 +94,9 @@ unitypackage hooks are not interpreted; VCC-format user template folders are sup
 
 ## Adding N4N0
 
-Add My Avatar ensures the Orbiters repository and installs `orbiters.toolkit` and `orbiters.myavatar`. Add N4N0 also
+Add My Avatar ensures the Orbiters repository and installs `orbiters.toolkit` and `orbiters.myavatar`. Every "Add
+N4N0" control (the panel's buttons, Capture's N4N0 card, the avatar picker and its setup dialog) shows the N4N0 mark
+(`icons::N4N0_MARK`), not N4N0's face. Add N4N0 also
 writes the schema-1 request specified in `contracts/Docs/project-setup.md`, through `<uuid>.json.tmp` and rename.
 Toolkit owns confirmation, gallery installation, scene saving and the SDK panel. The desktop checks UnityLockfile,
 offers Open project, polls the result while the setup dialog is open, displays it and then consumes the result.
@@ -78,7 +120,11 @@ orbiters-desktop --screenshot <folder> --sessions <empty folder> --only projects
 ```
 
 Other deterministic offscreen states: `projects-detail`, `projects-packages`, `projects-repos`, `projects-new`,
-`projects-avatars`, `projects-choice`, `projects-setup`, `projects-ready`. These stand-ins never scan or mutate real
+`projects-avatars`, `projects-choice`, `projects-setup`, `projects-ready`, `projects-mixer` (its info open),
+`projects-mixer-open-mid`, `projects-mixer-fold-mid`, `projects-mixer-adding`, `projects-new-novcc` and
+`projects-repos-novcc` (a computer without VCC), `projects-new-loading` (covers fading in) and `projects-new-covers`
+(VCC's real covers when it is installed). Package icons in screenshots are stand-ins (pictures, light and dark marks,
+ReFit without one); `projects-crossfade` shows them fading in. These stand-ins never scan or mutate real
 projects, make HTTP requests or send setup requests. Unit fixtures cover version parsing, VRChat manifests, registry
 binary paths, scene/prefab avatars, skip rules, copying, setup JSON/results and a temporary VCC registration store.
 

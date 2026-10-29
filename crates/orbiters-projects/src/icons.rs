@@ -38,10 +38,11 @@ pub struct Image {
     pub rgba: Vec<u8>,
 }
 impl Image {
-    /// Opaque in its four corners: a picture that fills its tile (a logo, an avatar) rather than a mark to frame.
+    /// Solid nearly everywhere (an avatar, an app icon with its own rounded corners): a picture that fills its tile
+    /// rather than a mark to frame.
     pub fn fills(&self) -> bool {
-        let [w, h] = self.size.map(|v| v as usize);
-        [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)].iter().all(|&(x, y)| self.rgba[(y * w + x) * 4 + 3] > 230)
+        let solid = self.rgba.chunks_exact(4).filter(|p| p[3] > 200).count();
+        solid * 100 >= self.rgba.len() / 4 * 86
     }
     /// The mean lightness (0 to 1) of what it draws: a dark mark needs a light tile behind it.
     pub fn lightness(&self) -> f32 {

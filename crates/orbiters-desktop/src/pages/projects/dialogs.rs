@@ -30,14 +30,14 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         Modal::Repos => (icons::STACK, "Package repositories".to_string(), "Shared with VCC and ALCOM: what you add here, they list too".to_string(), 620.0),
         Modal::New => (glyph::FOLDER_PLUS, "New Unity project".into(), "From a VRChat template, or a copy of one of your projects".into(), 640.0),
         Modal::Avatars => {
-            (icons::N4N0, "Add N4N0 to your avatar".into(), "Pick the avatar you capture with: Unity asks you to confirm before anything changes".into(), 720.0)
+            (icons::N4N0_MARK, "Add N4N0 to your avatar".into(), "Pick the avatar you capture with: Unity asks you to confirm before anything changes".into(), 720.0)
         }
         Modal::ChooseProject(id) => {
             let name = state.copies(id).first().map(|(_, a)| a.name.clone()).unwrap_or_else(|| "This avatar".into());
-            (icons::N4N0, "Which copy gets N4N0?".into(), format!("{name} is saved in more than one project or scene"), 620.0)
+            (icons::N4N0_MARK, "Which copy gets N4N0?".into(), format!("{name} is saved in more than one project or scene"), 620.0)
         }
         Modal::Setup => (
-            if nano { icons::N4N0 } else { icons::PERSON },
+            if nano { icons::N4N0_MARK } else { icons::PERSON },
             if nano { "Add N4N0 to your avatar".into() } else { "Add My Avatar".into() },
             names.map(|(a, p)| format!("{a} in {p}")).unwrap_or_default(),
             580.0,
@@ -369,13 +369,18 @@ fn new_project(ui: &mut Ui, state: &mut State) {
         if state.templates.is_empty() {
             feedback::banner(ui, Id::unique("new-no-templates"), Tone::Info, "No VCC template was found in Templates or VRCTemplates.", false);
         }
+        // With Creator Companion installed, its covers head the cards (as in VCC); without, an icon tile.
+        let covers = state.templates.iter().any(|t| t.banner.is_some());
         let (cols, tw) = layout::columns(w, 220.0, 10.0);
+        let cover_h = ((tw - 12.0) / 8.0).round();
+        let card_h = if covers { 6.0 + cover_h + 52.0 } else { 72.0 };
         let rows = state.templates.len().div_ceil(cols);
-        let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * 82.0 - 10.0), Sense::hover());
+        let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + 10.0) - 10.0), Sense::hover());
         for (i, t) in state.templates.clone().iter().enumerate() {
-            let r = Rect::from_min_size(area.min + vec2((i % cols) as f32 * (tw + 10.0), (i / cols) as f32 * 82.0), vec2(tw, 72.0));
+            let r = Rect::from_min_size(area.min + vec2((i % cols) as f32 * (tw + 10.0), (i / cols) as f32 * (card_h + 10.0)), vec2(tw, card_h));
             let selected = state.template_index == i;
-            let (resp, _, sel) = selectable(ui, Id::unique(("template", &t.name)), r, 16.0, selected);
+            let id = Id::unique(("template", &t.name));
+            let (resp, hover, sel) = selectable(ui, id, r, 16.0, selected);
             let lower = t.name.to_lowercase();
             let (g, tint) = if lower.contains("world") {
                 (icons::GLOBE, theme::VIOLET)
@@ -385,22 +390,32 @@ fn new_project(ui: &mut Ui, state: &mut State) {
                 (icons::CUBE, theme::CYAN)
             };
             let pt = ui.painter();
-            art::tile(pt, Rect::from_min_size(pos2(r.left() + 14.0, r.center().y - 20.0), vec2(40.0, 40.0)), g, tint);
-            let x = r.left() + 66.0;
-            widgets::text_truncated(
-                pt,
-                pos2(x, r.center().y - 9.0),
-                Align2::LEFT_CENTER,
-                &Txt::new(&t.name, 13.5).weight(weight::MEDIUM),
-                r.right() - x - 30.0,
-            );
             let sub = match (t.unity.is_empty(), t.builtin) {
                 (false, true) => format!("Unity {} · VRChat's", t.unity),
                 (false, false) => format!("Unity {}", t.unity),
                 (true, _) => "Your template".into(),
             };
-            widgets::text_truncated(pt, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.5).color(theme::FG_3), r.right() - x - 30.0);
-            art::check(pt, pos2(r.right() - 16.0, r.top() + 16.0), sel);
+            if covers {
+                let cover = Rect::from_min_size(r.min + vec2(6.0, 6.0), vec2(tw - 12.0, cover_h));
+                template_cover(pt, state, t.banner.as_ref(), cover, id, hover, g, tint);
+                let x = r.left() + 14.0;
+                let tw = r.width() - 28.0;
+                widgets::text_truncated(pt, pos2(x, cover.bottom() + 17.0), Align2::LEFT_CENTER, &Txt::new(&t.name, 13.5).weight(weight::MEDIUM), tw);
+                widgets::text_truncated(pt, pos2(x, cover.bottom() + 35.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.5).color(theme::FG_3), tw);
+                art::check(pt, pos2(cover.right() - 13.0, cover.center().y), sel);
+            } else {
+                art::tile(pt, Rect::from_min_size(pos2(r.left() + 14.0, r.center().y - 20.0), vec2(40.0, 40.0)), g, tint);
+                let x = r.left() + 66.0;
+                widgets::text_truncated(
+                    pt,
+                    pos2(x, r.center().y - 9.0),
+                    Align2::LEFT_CENTER,
+                    &Txt::new(&t.name, 13.5).weight(weight::MEDIUM),
+                    r.right() - x - 30.0,
+                );
+                widgets::text_truncated(pt, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.5).color(theme::FG_3), r.right() - x - 30.0);
+                art::check(pt, pos2(r.right() - 16.0, r.top() + 16.0), sel);
+            }
             if widgets::activated(&resp) {
                 state.template_index = i;
             }
@@ -436,6 +451,26 @@ fn new_project(ui: &mut Ui, state: &mut State) {
         let (r, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
         widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.center().y), glyph::ARROW_RIGHT, 13.0, theme::FG_4);
         widgets::text_truncated(ui.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(target, 12.0).color(theme::FG_3), w - 22.0);
+    }
+}
+
+/// A template's cover from Creator Companion in `rect`: shimmering while it loads, then fading in (a little closer on
+/// hover); a template VCC has no cover for keeps a strip in its colour with its icon.
+#[allow(clippy::too_many_arguments)]
+fn template_cover(p: &egui::Painter, state: &State, file: Option<&PathBuf>, rect: Rect, id: Id, hover: f32, glyph: &str, tint: egui::Color32) {
+    let radii = [11.0, 11.0, 11.0, 11.0];
+    let tex = file.and_then(|f| state.banners.get(f));
+    let k = feedback::loaded(p.ctx(), id.with("cover"), tex.is_some());
+    if k < 1.0 {
+        if file.is_some() && state.banner_job.running() {
+            feedback::shimmer(p, rect, 11.0);
+        } else {
+            feedback::fill_corners(p, rect, radii, theme::alpha(tint, 0.12 * (1.0 - k)));
+            widgets::icon(p, rect.center(), glyph, (rect.height() * 0.5).clamp(14.0, 22.0), theme::alpha(tint, 1.0 - k));
+        }
+    }
+    if let Some(t) = tex {
+        feedback::cover(p, rect, radii, t, 1.0 + 0.04 * hover + 0.06 * (1.0 - k), k);
     }
 }
 
@@ -661,7 +696,7 @@ fn avatar_footer(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let copies = chosen.as_ref().map(|id| state.copies(id).len()).unwrap_or(0);
     let label = if copies > 1 { "Choose the copy" } else { "Add N4N0" };
     let b = Button::new(label)
-        .icon(if copies > 1 { glyph::ARROW_RIGHT } else { icons::N4N0 })
+        .icon(if copies > 1 { glyph::ARROW_RIGHT } else { icons::N4N0_MARK })
         .variant(Variant::Primary)
         .enabled(chosen.is_some() && !state.running())
         .id_salt("avatars-go");
@@ -724,7 +759,7 @@ fn project_choice(ui: &mut Ui, state: &mut State, avatar: &str) {
 fn choice_footer(ui: &mut Ui, cx: &mut Cx, state: &mut State, avatar: &str) {
     let ctx = ui.ctx().clone();
     let picked = state.copies(avatar).into_iter().find(|(p, a)| state.choice.as_ref().is_some_and(|(cp, cs)| cp == &p.path && cs == &a.scene));
-    let b = Button::new("Add N4N0 here").icon(icons::N4N0).variant(Variant::Primary).enabled(picked.is_some() && !state.running()).id_salt("choice-go");
+    let b = Button::new("Add N4N0 here").icon(icons::N4N0_MARK).variant(Variant::Primary).enabled(picked.is_some() && !state.running()).id_salt("choice-go");
     if widgets::activated(&b.show(ui)) {
         if let Some((p, a)) = picked {
             state.install(&ctx, p, a, true, server(cx), Rect::NOTHING);
@@ -795,7 +830,7 @@ fn setup_steps(ui: &mut Ui, state: &mut State) {
         ),
         Stage::Confirm => (
             Tone::Info,
-            Some(icons::N4N0),
+            Some(icons::N4N0_MARK),
             "Confirm in Unity",
             "Unity is open on this project: switch to it and accept adding N4N0 to the avatar. This page follows along.".to_string(),
         ),

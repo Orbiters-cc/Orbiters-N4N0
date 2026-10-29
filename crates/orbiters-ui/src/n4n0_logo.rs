@@ -80,12 +80,30 @@ pub fn rasterize(w: u32, h: u32, color: Color32) -> ColorImage {
 #[derive(Clone, Default)]
 struct Cache(Vec<(([u32; 2], [u8; 4]), TextureHandle)>);
 
-/// Sizes kept (the marks on screen at once); a size seen once is let go.
-const KEEP: usize = 6;
+/// Sizes kept (the marks on screen at once, icons in their colours included); a size seen once is let go.
+const KEEP: usize = 10;
 
 /// Paints the mark into `rect` in `color`.
 pub fn paint(painter: &Painter, rect: Rect, color: Color32) {
     draw(painter, rect, rect, color, Color32::WHITE);
+}
+
+/// How wide the mark is drawn for an icon of `size` (a Phosphor glyph's font size): as large as the glyphs look.
+pub const ICON_WIDTH: f32 = 0.84;
+
+/// Paints the mark as an icon of `size` (a Phosphor glyph's font size) centred on `center`, in `color` (its opacity
+/// through the tint, one texture per colour), on whole pixels so its cuts stay sharp at small sizes.
+pub fn glyph(painter: &Painter, center: egui::Pos2, size: f32, color: Color32) {
+    let [r, g, b, a] = color.to_srgba_unmultiplied();
+    if a == 0 {
+        return;
+    }
+    let ppp = painter.ctx().pixels_per_point();
+    let rect = Rect::from_center_size(center, size_for_width(size * ICON_WIDTH));
+    let px = vec2((rect.width() * ppp).round().max(1.0), (rect.height() * ppp).round().max(1.0));
+    let min = pos2((rect.min.x * ppp).round() / ppp, (rect.min.y * ppp).round() / ppp);
+    let shown = Rect::from_min_size(min, px / ppp);
+    draw(painter, shown, shown, Color32::from_rgb(r, g, b), Color32::WHITE.gamma_multiply(a as f32 / 255.0));
 }
 
 /// The mark rasterised at `raster`'s pixel size in `color`, drawn into `shown` through `tint` (its opacity, without

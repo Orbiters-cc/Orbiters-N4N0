@@ -534,7 +534,7 @@ pub fn capture_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
     if state.running() {
         feedback::spinner(p, tile.center(), 8.0, 2.0, c);
     } else {
-        widgets::icon(p, tile.center(), icons::N4N0, 18.0, c);
+        widgets::icon(p, tile.center(), icons::N4N0_MARK, 18.0, c);
     }
     let x = tile.right() + 12.0;
     let tw = r.right() - x - 12.0 - if trailing.is_some() { 26.0 } else { 0.0 };

@@ -1,10 +1,11 @@
 //! The selected project's panel: beside the cards on wide windows (its left edge drags to resize it; a double click
 //! gives it its own width back), a sheet sliding over them on narrow ones. A hero card (the project's avatars as its
-//! cover, where it is, opening it), then cards for its avatars (N4N0 and My Avatar for each), its packages (their
-//! versions in dropdowns), the packages it could add, and its last commits. Switching projects crossfades the cards.
+//! cover, where it is, opening it), then cards for its avatars (N4N0 and My Avatar for each), Mixer while the project
+//! does not have it, its packages (their own icons, versions in dropdowns), the packages it could add, and its last
+//! commits. Switching projects crossfades the cards.
 
 use super::art::{self, glyph};
-use super::state::{server, Outcome, State};
+use super::state::{server, Outcome, PackageIcon, State, MIXER, MIXER_PAGE};
 use crate::pages::{Cx, PAD_X};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui, UiBuilder};
 use orbiters_projects::{discovery::Project, vpm};
@@ -85,6 +86,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
                 super::ui::errors(ui, state, "panel");
             }
             avatars(ui, cx, state, &project);
+            mixer(ui, cx, state, &project);
             ctx.data_mut(|d| d.insert_temp(packages_y, ui.cursor().top() - top));
             packages(ui, state, &project);
             available(ui, state, &project);
@@ -362,7 +364,7 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                 }
                 widgets::text_truncated(p, pos2(x, thumb.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(&a.scene, 11.5).color(theme::FG_3), r.right() - x);
                 let enabled = project.registered && !state.running();
-                let nano = Button::new("Add N4N0").icon(icons::N4N0).size(Size::Sm).enabled(enabled).id_salt(("add-n4n0", &a.id, &a.scene));
+                let nano = Button::new("Add N4N0").icon(icons::N4N0_MARK).size(Size::Sm).enabled(enabled).id_salt(("add-n4n0", &a.id, &a.scene));
                 let nw = nano.desired_width(ui);
                 let nr = Rect::from_min_size(pos2(x, thumb.top() + 46.0), vec2(nw, 32.0));
                 state.anchors.insert(format!("add-n4n0-{i}"), nr);
@@ -387,13 +389,157 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
     );
 }
 
-/// A package's row: its tile, names, and on the right what `control` draws (given the rect left for it).
-fn package_row(ui: &mut Ui, name: &str, display: &str, control_w: f32, control: impl FnOnce(&mut Ui, Rect)) {
+/// Mixer, while the project does not have it: what it is in a line and Add Mixer; behind the info button (which turns
+/// into a close button) what it adds, opening in place, with its page on orbiters.cc. It grows in once the project's
+/// packages are known and folds away once Mixer is in.
+fn mixer(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
+    let ctx = ui.ctx().clone();
+    let known = !state.view_loading() || !state.view.packages.is_empty();
+    let installed = state.view.packages.iter().any(|p| p.name == MIXER && p.installed.is_some());
+    let show = known && !installed && !project.missing;
+    let k = anim::spring_from(&ctx, Id::unique(("mixer-card", &project.path)), [0.0], [if show { 1.0 } else { 0.0 }], Spring::SOFT)[0].clamp(0.0, 1.0);
+    if k < 0.005 {
+        return;
+    }
+    state.icons_wanted.push(MIXER.into());
+    let icon = state.icons.get(MIXER).cloned();
+    // Drawn whole, shown as far as it has grown: the card's height last frame, the panel's gap folding with it.
+    let height_id = Id::unique(("mixer-card-height", &project.path));
+    let full = ctx.data(|d| d.get_temp::<f32>(height_id)).unwrap_or(132.0);
+    let w = ui.available_width();
+    let top = ui.cursor().min;
+    let shown = Rect::from_min_size(top, vec2(w, full * k));
+    let mut cu = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(top, vec2(w, 100_000.0))).layout(egui::Layout::top_down(egui::Align::Min)).id_salt(("mixer", &project.path)));
+    cu.set_clip_rect(shown.expand2(vec2(4.0, 0.0)).intersect(ui.clip_rect()));
+    cu.multiply_opacity(k);
+    let busy = state.running();
+    let adding = state.busy_package.as_deref() == Some(MIXER) && busy;
+    let info_id = Id::unique("mixer-info");
+    let info_open = state.mixer_info;
+    let mut toggle_info = false;
+    let mut info_rect = Rect::NOTHING;
+    art::card_with(
+        &mut cu,
+        "mixer",
+        |p, t| art::package_icon(p, icon.as_ref(), t, MIXER),
+        "Mixer",
+        None,
+        |ui, slot| {
+            info_rect = Rect::from_min_size(pos2(slot.right() - 32.0, slot.center().y - 16.0), vec2(32.0, 32.0));
+            toggle_info = info_button(ui, info_id, info_rect, info_open);
+        },
+        |ui| {
+            let text = Txt::new("Sculpting, weight painting and mesh editing in the Unity Editor.", 12.5).color(theme::FG_3).line_height(19.0);
+            let g = ui.painter().layout_job(text.job(ui.available_width()));
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), g.size().y), Sense::hover());
+            ui.painter().galley(r.min, g, theme::FG_3);
+            let label = if adding { "Adding Mixer…" } else { "Add Mixer" };
+            let b = Button::new(label).icon(icons::PLUS).size(Size::Sm).enabled(project.registered && !busy).id_salt(("add-mixer", &project.path));
+            let bw = b.desired_width(ui);
+            let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
+            let br = Rect::from_min_size(row.min, vec2(bw, 32.0));
+            state.anchors.insert("add-mixer".into(), br);
+            let hint = if project.registered { "Installs Mixer from the Orbiters repository" } else { "Add the project to your list first" };
+            if widgets::activated(&b.show_at(ui, br).on_hover_text(hint)) {
+                state.add_mixer(&ctx, project);
+            }
+            if adding {
+                feedback::spinner(ui.painter(), pos2(br.right() + 18.0, br.center().y), 7.0, 2.0, theme::ACCENT);
+            }
+            mixer_info(ui, cx, info_id, info_open);
+        },
+    );
+    state.anchors.insert("mixer-info".into(), info_rect);
+    if toggle_info {
+        state.mixer_info = !state.mixer_info;
+    }
+    let h = cu.min_rect().height();
+    ctx.data_mut(|d| d.insert_temp(height_id, h));
+    // The panel's gap after the card folds with it.
+    ui.allocate_exact_size(vec2(w, (h * k - 10.0 * (1.0 - k)).max(0.0)), Sense::hover());
+}
+
+/// The round info button of Mixer's card; open, its "i" turns into a close mark on a green-tinted disc. True when
+/// pressed.
+fn info_button(ui: &mut Ui, id: Id, r: Rect, open: bool) -> bool {
+    let ctx = ui.ctx().clone();
+    let resp = ui.interact(r, id.with("button"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text(if open {
+        "Hide what Mixer adds"
+    } else {
+        "What Mixer adds"
+    });
+    let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SOFT);
+    let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
+    let o = anim::toggle(&ctx, id.with("open"), open, Spring::BOUNCY);
+    let p = ui.painter();
+    let c = r.center();
+    let radius = 16.0 * (1.0 - 0.06 * press);
+    let bg = theme::mix(theme::mix(theme::control(), theme::INK_750, hover), theme::alpha(theme::ACCENT, 0.16), o.clamp(0.0, 1.0));
+    p.circle_filled(c, radius, bg);
+    // The two glyphs cross: the "i" shrinks and fades as the close mark grows in, both turning a quarter.
+    let a = o.clamp(0.0, 1.0);
+    let fg = theme::mix(theme::mix(theme::FG_2, theme::FG, hover), theme::ACCENT, a);
+    if a < 0.99 {
+        widgets::icon(p, c, icons::INFO, 17.0 * (1.0 - 0.4 * a), theme::alpha(fg, 1.0 - a));
+    }
+    if a > 0.01 {
+        widgets::icon(p, c, icons::X, 14.0 * (0.6 + 0.4 * o.clamp(0.0, 1.2)), theme::alpha(fg, a));
+    }
+    widgets::activated(&resp)
+}
+
+/// What Mixer adds, opening in place under Add Mixer (its height springs open, the words come down into it), and the
+/// way to its page on orbiters.cc.
+fn mixer_info(ui: &mut Ui, cx: &mut Cx, id: Id, open: bool) {
+    let ctx = ui.ctx().clone();
+    let o = anim::toggle(&ctx, id.with("section"), open, Spring::SOFT);
+    if o < 0.005 {
+        return;
+    }
+    let w = ui.available_width();
+    let text = Txt::new(
+        "Mixer adds new features to the Unity Editor such as sculpting, weight painting, mesh editing and syncing with a \
+         Blender project, and improves the existing panels.",
+        13.0,
+    )
+    .color(theme::FG_2)
+    .line_height(20.0);
+    let g = ui.painter().layout_job(text.job(w - 32.0));
+    let full = 14.0 + g.size().y + 10.0 + 28.0 + 10.0;
+    let (area, _) = ui.allocate_exact_size(vec2(w, full * o.clamp(0.0, 1.0)), Sense::hover());
+    let well = Rect::from_min_size(area.min, vec2(w, full));
+    let mut iu = ui.new_child(UiBuilder::new().max_rect(well).id_salt("mixer-info-section"));
+    iu.set_clip_rect(area.intersect(ui.clip_rect()));
+    let p = iu.painter().clone();
+    widgets::frame(&p, well, 14.0, theme::white(0.035));
+    let a = o.clamp(0.0, 1.0);
+    let drop = 10.0 * (1.0 - a);
+    let mut tp = p.clone();
+    tp.multiply_opacity(a);
+    tp.galley(pos2(well.left() + 16.0, well.top() + 14.0 - drop), g, theme::FG_2);
+    // The page: an accent link that brightens on hover, its arrow nudging out.
+    let link = Txt::new("Mixer's presentation on orbiters.cc", 12.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
+    let lw = widgets::text_size(&iu, &link).x + 24.0;
+    let lr = Rect::from_min_size(pos2(well.left() + 10.0, well.bottom() - 10.0 - 28.0 - drop * 0.5), vec2(lw + 12.0, 28.0));
+    let resp = iu.interact(lr, id.with("link"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text(MIXER_PAGE);
+    let hover = anim::toggle(&ctx, id.with("link-hover"), resp.hovered(), Spring::SOFT);
+    tp.rect_filled(lr, theme::radius(14.0), theme::alpha(theme::ACCENT, 0.1 * hover));
+    widgets::text(&tp, pos2(lr.left() + 6.0, lr.center().y), Align2::LEFT_CENTER, &link);
+    widgets::icon(&tp, pos2(lr.right() - 14.0 + 2.0 * hover, lr.center().y - 2.0 * hover), icons::ARROW_SQUARE_OUT, 13.0, theme::ACCENT);
+    if widgets::activated(&resp) && a > 0.5 {
+        if let Err(e) = crate::controller::open_url(MIXER_PAGE) {
+            cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, format!("The page could not open: {e}"));
+        }
+    }
+}
+
+/// A package's row: its icon, names, and on the right what `control` draws (given the rect left for it).
+fn package_row(ui: &mut Ui, icon: Option<&PackageIcon>, name: &str, display: &str, control_w: f32, control: impl FnOnce(&mut Ui, Rect)) {
     let w = ui.available_width();
     let (r, _) = ui.allocate_exact_size(vec2(w, 48.0), Sense::hover());
     let p = ui.painter();
     let t = Rect::from_min_size(pos2(r.left(), r.center().y - 17.0), vec2(34.0, 34.0));
-    art::tile(p, t, glyph::PACKAGE, art::package_tint(name));
+    art::package_icon(p, icon, t, name);
     let x = t.right() + 12.0;
     let tw = r.right() - control_w - 10.0 - x;
     let title = Txt::new(display, 13.5).weight(weight::MEDIUM);
@@ -472,7 +618,9 @@ fn packages(ui: &mut Ui, state: &mut State, project: &Project) {
                 let current = pkg.installed.clone().unwrap_or_default();
                 let list = versions(pkg, state.prerelease);
                 let working = state.busy_package.as_deref() == Some(pkg.name.as_str());
-                package_row(ui, &pkg.name, &pkg.display_name, 108.0 + 8.0 + 32.0, |ui, c| {
+                state.icons_wanted.push(pkg.name.clone());
+                let icon = state.icons.get(&pkg.name).cloned();
+                package_row(ui, icon.as_ref(), &pkg.name, &pkg.display_name, 108.0 + 8.0 + 32.0, |ui, c| {
                     let dd = Rect::from_min_size(pos2(c.left(), c.center().y - 15.0), vec2(108.0, 30.0));
                     let rm = Rect::from_min_size(pos2(c.right() - 32.0, c.center().y - 16.0), vec2(32.0, 32.0));
                     if i == 0 {
@@ -549,7 +697,9 @@ fn available(ui: &mut Ui, state: &mut State, project: &Project) {
                 let id = Id::unique(("available-version", &project.path, &pkg.name));
                 let chosen = ctx.data(|d| d.get_temp::<String>(id)).filter(|v| vs.iter().any(|x| *x == v)).unwrap_or_else(|| vs[0].clone());
                 let working = state.busy_package.as_deref() == Some(pkg.name.as_str());
-                package_row(ui, &pkg.name, &pkg.display_name, 100.0 + 8.0 + 32.0, |ui, c| {
+                state.icons_wanted.push(pkg.name.clone());
+                let icon = state.icons.get(&pkg.name).cloned();
+                package_row(ui, icon.as_ref(), &pkg.name, &pkg.display_name, 100.0 + 8.0 + 32.0, |ui, c| {
                     let dd = Rect::from_min_size(pos2(c.left(), c.center().y - 15.0), vec2(100.0, 30.0));
                     let add = Rect::from_min_size(pos2(c.right() - 32.0, c.center().y - 16.0), vec2(32.0, 32.0));
                     let items: Vec<Item> = vs.iter().map(|v| if v.contains('-') { Item::new(v).detail("Pre-release") } else { Item::new(v) }).collect();

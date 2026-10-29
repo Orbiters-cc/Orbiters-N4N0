@@ -70,6 +70,9 @@ pub const MUSIC_NOTES: &str = "\u{E340}";
 /// N4N0's face (its logo, [`crate::n4n0_face`]), not a Phosphor glyph: [`crate::widgets::icon`] and
 /// [`crate::widgets::icon_fill`] draw it as a picture in the colour asked, wherever a glyph goes.
 pub const N4N0: &str = "\u{F0A40}";
+/// The N4N0 mark (N, 4, N and 0 in a square, [`crate::n4n0_logo`]), not a Phosphor glyph: drawn as [`N4N0`] is, for
+/// what puts N4N0 somewhere ("Add N4N0").
+pub const N4N0_MARK: &str = "\u{F0A41}";
 pub const PASSWORD: &str = "\u{E752}";
 pub const PATH: &str = "\u{E39C}";
 pub const PAPER_PLANE_TILT: &str = "\u{E398}";

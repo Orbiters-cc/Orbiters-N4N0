@@ -1,7 +1,7 @@
 //! What the Unity projects page and its dialogs draw alike: avatar pictures that fade in once loaded, a project's cover
-//! (its avatars as a collage), tinted icon tiles, selection rings and the panel's cards.
+//! (its avatars as a collage), tinted icon tiles, packages' own icons, selection rings and the panel's cards.
 
-use super::state::State;
+use super::state::{PackageIcon, State};
 use egui::{pos2, vec2, Align2, Color32, Id, Layout, Painter, Rect, Sense, Shape, Ui, UiBuilder};
 use orbiters_projects::{
     avatars::Avatar,
@@ -100,6 +100,35 @@ pub(super) fn tile(p: &Painter, rect: Rect, glyph: &str, tint: Color32) {
     widgets::icon(p, rect.center(), glyph, rect.height() * 0.47, tint);
 }
 
+/// A package's icon in `rect`: its tinted tile with the package glyph until the icon arrives, then the icon fading in
+/// over it: a picture fills the tile, a mark sits in it on a plate that shows it (light behind a dark mark).
+pub(super) fn package_icon(p: &Painter, icon: Option<&PackageIcon>, rect: Rect, name: &str) {
+    let k = feedback::loaded(p.ctx(), Id::unique(("package-icon", name)), icon.is_some());
+    let radius = rect.height() * 0.3;
+    let tint = package_tint(name);
+    let placeholder = theme::alpha(tint, 0.13);
+    let plate = match icon {
+        Some(i) if i.fills => Color32::TRANSPARENT,
+        Some(i) if i.dark => theme::white(0.88),
+        _ => theme::white(0.07),
+    };
+    feedback::fill_corners(p, rect, [radius; 4], theme::mix(placeholder, plate, k));
+    if k < 1.0 {
+        widgets::icon(p, rect.center(), glyph::PACKAGE, rect.height() * 0.47, theme::alpha(tint, 1.0 - k));
+    }
+    let Some(i) = icon else { return };
+    if i.fills {
+        feedback::cover(p, rect, [radius; 4], &i.tex, 1.0 + 0.1 * (1.0 - k), k);
+    } else {
+        // Contained, a little larger as it settles.
+        let room = rect.shrink(rect.height() * 0.18).size() * (0.86 + 0.14 * k);
+        let size = i.tex.size_vec2();
+        let scale = (room.x / size.x).min(room.y / size.y);
+        let r = Rect::from_center_size(rect.center(), size * scale);
+        p.image(i.tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE.gamma_multiply(k));
+    }
+}
+
 /// A package's tint, by who makes it.
 pub(super) fn package_tint(name: &str) -> Color32 {
     if name.starts_with("orbiters.") {
@@ -142,6 +171,19 @@ pub(super) fn caps(ui: &mut Ui, text: &str) {
 /// A card of the project panel: tinted icon tile, title and a count, an action slot on the right of the heading
 /// (`right` gets its rect), then the body; sized to what the body drew.
 pub(super) fn card(ui: &mut Ui, salt: &str, glyph: &str, title: &str, count: Option<String>, right: impl FnOnce(&mut Ui, Rect), body: impl FnOnce(&mut Ui)) {
+    card_with(ui, salt, |p, t| tile(p, t, glyph, theme::ACCENT), title, count, right, body);
+}
+
+/// [`card`] with its own tile: `tile` draws into the heading's 32-point square.
+pub(super) fn card_with(
+    ui: &mut Ui,
+    salt: &str,
+    tile: impl FnOnce(&Painter, Rect),
+    title: &str,
+    count: Option<String>,
+    right: impl FnOnce(&mut Ui, Rect),
+    body: impl FnOnce(&mut Ui),
+) {
     let width = ui.available_width();
     let top_left = ui.cursor().min;
     let bg = ui.painter().add(Shape::Noop);
@@ -150,7 +192,7 @@ pub(super) fn card(ui: &mut Ui, salt: &str, glyph: &str, title: &str, count: Opt
     child.spacing_mut().item_spacing = vec2(0.0, 8.0);
     let (head, _) = child.allocate_exact_size(vec2(inner.width(), 36.0), Sense::hover());
     let t = Rect::from_min_size(pos2(head.left(), head.center().y - 16.0), vec2(32.0, 32.0));
-    tile(child.painter(), t, glyph, theme::ACCENT);
+    tile(child.painter(), t);
     let tr = widgets::text(child.painter(), pos2(t.right() + 12.0, head.center().y), Align2::LEFT_CENTER, &Txt::new(title, 14.5).weight(weight::SEMIBOLD));
     if let Some(c) = count {
         widgets::pill_at(child.painter(), &child, pos2(tr.right() + 8.0, head.center().y), None, &c);

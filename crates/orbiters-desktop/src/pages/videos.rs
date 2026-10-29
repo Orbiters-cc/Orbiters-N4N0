@@ -1177,9 +1177,11 @@ mod tests {
         let top = bottom - (64.0 + 40.0 + 9.0 + 52.0);
         h.click(egui::pos2(right - 150.0, top + 82.0));
         assert!(Bookmarks::read(&file).0.lists[0].videos.is_empty(), "taken out");
-        // Escape closes the picker.
+        // Escape closes the picker: it shrinks back into its button, then is gone.
         h.frame(vec![Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
         h.frame(Vec::new());
+        assert!(h.state.picker.as_ref().is_some_and(|p| p.closing));
+        h.settle();
         assert!(h.state.picker.is_none());
         std::fs::remove_dir_all(dir).ok();
     }

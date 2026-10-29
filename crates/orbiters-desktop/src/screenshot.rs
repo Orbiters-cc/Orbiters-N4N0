@@ -1572,6 +1572,49 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             library: None,
         });
     }
+    // Events (the hero, the cards, the event's window and Invite me) and the communities' galleries in Photos & captures.
+    for (name, frames) in [
+        ("events", 140),
+        ("events-enter-mid", 10),
+        ("events-empty", 120),
+        ("events-error", 120),
+        ("events-search", 120),
+        ("events-open", 150),
+        ("events-open-mid", 66),
+        ("events-open-card", 150),
+        ("events-close-mid", 156),
+        ("events-loading", 150),
+        ("events-invite-busy", 150),
+        ("events-invite-listed", 150),
+        ("events-invite-friend", 150),
+        ("events-invite-group", 150),
+        ("events-invite-link", 150),
+        ("events-invite-sent", 150),
+        ("events-invite-orb", 150),
+        ("events-pictures", 150),
+        ("gallery-community", 140),
+        ("gallery-community-all", 140),
+        ("gallery-community-one", 140),
+        ("gallery-community-open", 150),
+        ("gallery-community-open-mid", 86),
+        ("gallery-community-event", 150),
+        ("gallery-community-event-mid", 86),
+    ] {
+        scenarios.push(Scenario {
+            name,
+            page: if name.starts_with("events") { Page::Events } else { Page::Sessions },
+            snapshot: scenarios[0].snapshot.clone(),
+            frames,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        });
+    }
     vrchat_login::append(&mut scenarios);
 
     // Home's music is the overlay's sample song, never what this computer plays.
@@ -1587,6 +1630,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             o != sc.name
                 && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))
                 && !(o == "sharing" && (sc.name.starts_with("gallery-") || sc.name.starts_with("world-share")))
+                && !(o == "events" && (sc.name.starts_with("events") || sc.name.starts_with("gallery-community")))
         }) {
             continue;
         }
@@ -1595,6 +1639,70 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         println!("{}", path.display());
     }
     Ok(())
+}
+
+/// Events and the communities' galleries on this frame of their scenario: the fixture staged, a window opened (out of
+/// the hero, a card, a gallery picture or an event gallery's card) on the member's invites the name says.
+fn stage_events(ctx: &egui::Context, app: &mut App, sc: &Scenario, f: u32) {
+    use crate::pages::events::Ask;
+    let dir = sc.snapshot.settings.sessions_dir.clone();
+    if sc.page == Page::Events {
+        if f == 0 {
+            app.events_mut().stage(sc.name, &dir);
+        }
+        let open_at = match sc.name {
+            "events-open-mid" => Some(sc.frames - 6),
+            n if n.starts_with("events-open")
+                || n.starts_with("events-invite")
+                || n == "events-loading"
+                || n == "events-close-mid"
+                || n == "events-pictures" =>
+            {
+                Some(60)
+            }
+            _ => None,
+        };
+        if open_at == Some(f) {
+            let friend = |is: bool| orbiters_core::community::Friend {
+                is_friend: Some(is),
+                accepting: false,
+                account: Some(orbiters_core::community::InviteAccount {
+                    name: Some("OrbitPhotoClub".into()),
+                    vrchat_id: Some("usr_c0ffee00-0000-4000-8000-000000000001".into()),
+                }),
+            };
+            let ask = match sc.name {
+                "events-invite-busy" => Ask::Busy("Signing you up…"),
+                "events-invite-listed" => Ask::Listed { friend: Some(friend(true)) },
+                "events-invite-friend" => Ask::Listed { friend: Some(friend(false)) },
+                "events-invite-group" => Ask::Group,
+                "events-invite-link" => Ask::Link,
+                "events-invite-sent" => Ask::Sent("Invite sent"),
+                "events-invite-orb" => Ask::Befriend { name: "Orbiters".into(), link: "https://vrchat.com/home/user/usr_orbiters".into() },
+                _ => Ask::Idle,
+            };
+            let n = usize::from(sc.name == "events-open-card");
+            app.events_mut().open_card(ctx, n, &[("main", ask)], sc.name == "events-loading", sc.name == "events-pictures");
+        }
+        if sc.name == "events-close-mid" && f + 6 == sc.frames {
+            app.events_mut().close_window();
+        }
+        return;
+    }
+    let gallery = app.sessions_mut().gallery_mut();
+    if f == 1 || f == 46 {
+        gallery.stage_community(sc.name, &dir);
+    }
+    let open_at = if sc.name.ends_with("-mid") { sc.frames - 6 } else { 80 };
+    if f == open_at {
+        if sc.name.starts_with("gallery-community-open") {
+            let shown = gallery.shown().to_vec();
+            gallery.community_mut().open_nth(ctx, 0, &shown);
+        }
+        if sc.name.starts_with("gallery-community-event") {
+            gallery.community_mut().open_event(ctx);
+        }
+    }
 }
 
 /// Frames past a scenario's shot, and how many of the last frames are written each.
@@ -1702,6 +1810,9 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
                 "gallery-copy-link" if f + 8 == sc.frames => gallery.stage_copied_link(&ctx),
                 _ => {}
             }
+        }
+        if sc.page == Page::Events || sc.name.starts_with("gallery-community") {
+            stage_events(&ctx, &mut app, sc, f);
         }
         // A world card's Share to … or Share publicly, the window growing out of the card (on made-up friends).
         if matches!(sc.name, "world-share-window" | "world-share-public") && !share_staged && f >= 60 && app.worlds_mut().loaded() {

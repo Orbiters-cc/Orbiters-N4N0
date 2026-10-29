@@ -29,14 +29,21 @@ pub enum Filter {
     #[default]
     All,
     Shared,
+    /// The galleries of the member's communities ([`super::community`]).
+    Communities,
 }
 impl Filter {
     fn value(self) -> &'static str {
         match self {
             Self::Mine => "mine",
-            Self::All => "all",
+            Self::All | Self::Communities => "all",
             Self::Shared => "shared",
         }
+    }
+
+    /// Whether the communities' pictures show.
+    fn communities(self) -> bool {
+        matches!(self, Self::All | Self::Communities)
     }
 }
 
@@ -90,6 +97,8 @@ pub struct State {
     fixture_locals: bool,
     /// The cards chosen, a rubber band and a drag out of the window.
     select: super::gallery_select::Selection,
+    /// The galleries of the member's communities and their windows.
+    community: super::community::State,
 }
 impl State {
     pub fn busy(&self) -> bool {
@@ -99,6 +108,26 @@ impl State {
             || self.feed_job.running()
             || self.pictures.as_ref().is_some_and(|p| p.loading())
             || self.dialog.as_ref().is_some_and(Dialog::loading)
+            || self.community.busy()
+    }
+
+    /// Screenshots: the communities' galleries from the fixture (`gallery-community…`), Communities chosen unless the
+    /// name ends in `-all`.
+    pub fn stage_community(&mut self, name: &str, sessions_dir: &std::path::Path) {
+        self.community.stage(name, sessions_dir);
+        if !name.ends_with("-all") {
+            self.filter = Filter::Communities;
+        }
+        self.shown_key = None;
+    }
+
+    pub fn community_mut(&mut self) -> &mut super::community::State {
+        &mut self.community
+    }
+
+    /// The entries the page shows (screenshots open their windows).
+    pub fn shown(&self) -> &[Entry] {
+        &self.shown
     }
     /// The fixture's local items: two of this computer's captures, as if taken in the feed's first instance.
     fn stage_locals(&mut self) {
@@ -335,8 +364,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             state.hash_job = Job::spawn(&ctx, move || crate::worlds::hashes(paths));
         }
     }
+    if state.community.poll(&ctx, cx, state.filter.communities()) {
+        state.shown_key = None;
+    }
     let requested = (state.filter, state.query.trim().to_string());
-    if !state.fixture && state.asked.as_ref() != Some(&requested) && now - state.query_changed > 0.3 {
+    if !state.fixture && state.filter != Filter::Communities && state.asked.as_ref() != Some(&requested) && now - state.query_changed > 0.3 {
         state.feed = Feed::default();
         state.shown_key = None;
         state.asked = Some(requested);
@@ -347,7 +379,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     }
     let head = Rect::from_min_size(pos2(page.left() + super::PAD_X, page.top() + cx.top + 8.0), vec2(page.width() - super::PAD_X * 2.0, 72.0));
     let narrow = head.width() < 690.0;
-    let controls = Rect::from_min_size(pos2(head.left(), head.bottom() + 14.0), vec2(head.width(), if narrow { 88.0 } else { 40.0 }));
+    // Communities: the galleries as chips under the filters.
+    let chips_h = if state.filter == Filter::Communities { 46.0 } else { 0.0 };
+    let controls = Rect::from_min_size(pos2(head.left(), head.bottom() + 14.0), vec2(head.width(), if narrow { 88.0 } else { 40.0 } + chips_h));
     let top = controls.bottom() + 20.0;
     let q = state.query.trim().to_lowercase();
     let shown_key = (state.filter, q.clone());
@@ -355,10 +389,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         std::mem::take(&mut state.shown)
     } else {
         state.shown_key = Some(shown_key);
-        let mut entries: Vec<Entry> =
-            state.locals.iter().filter(|_| state.filter != Filter::Shared).take(if state.fixture { 1 } else { usize::MAX }).cloned().collect();
+        let mut entries: Vec<Entry> = state
+            .locals
+            .iter()
+            .filter(|_| !matches!(state.filter, Filter::Shared | Filter::Communities))
+            .take(if state.fixture { 1 } else { usize::MAX })
+            .cloned()
+            .collect();
         for item in &state.feed.items {
-            if state.filter == Filter::Mine && !item.mine || state.filter == Filter::Shared && item.mine {
+            if state.filter == Filter::Mine && !item.mine || state.filter == Filter::Shared && item.mine || state.filter == Filter::Communities {
                 continue;
             }
             if let Some(e) = entries.iter_mut().find(|e| controller::matches_item(e, item)) {
@@ -379,6 +418,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             }
         }
         entries.retain(|e| e.world_name.to_lowercase().contains(&q));
+        if state.filter.communities() {
+            entries.extend(state.community.entries(&q));
+        }
         entries.sort_by_key(|e| std::cmp::Reverse(e.taken));
         entries
     };
@@ -388,12 +430,17 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let open_key = state.dialog.as_ref().filter(|d| state.from_card && d.hides_source()).map(|d| d.entry.key.clone());
     let window_key = state.dialog.as_ref().map(|d| d.entry.key.clone());
     let mut window_card: Option<sharing::Source> = None;
-    let loading = state.local_job.running() || (state.feed_job.running() && state.feed.items.is_empty());
+    let loading = if state.filter == Filter::Communities {
+        state.community.loading() && state.community.count() == 0
+    } else {
+        state.local_job.running() || (state.feed_job.running() && state.feed.items.is_empty())
+    };
     let from = orbiters_ui::blur::next_shape(ui);
     let mut gu = ui.new_child(UiBuilder::new().max_rect(page).id_salt("photos-captures-grid"));
     let mut clicked: Option<(Entry, Rect)> = None;
     let mut instance_clicked: Option<(Entry, Rect)> = None;
-    let modal = state.dialog.is_some() || state.instance.is_some();
+    let mut community_clicked: Option<(String, Rect)> = None;
+    let modal = state.dialog.is_some() || state.instance.is_some() || state.community.is_open();
     state.select.begin();
     let mut background = None;
     let selecting = state.select.any();
@@ -425,14 +472,20 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                 for indices in groups(&entries) {
                     let first = &entries[indices[0]];
                     let last = &entries[*indices.last().unwrap()];
-                    let (r, _) = ui.allocate_exact_size(vec2(width, 52.0), Sense::hover());
+                    let head_h = state.community.header_height(first).unwrap_or(52.0);
+                    let (r, _) = ui.allocate_exact_size(vec2(width, head_h), Sense::hover());
                     let (r, a) = super::entering(ui, cx, 1 + index.min(8), r);
                     let mut hu = ui.new_child(UiBuilder::new().max_rect(r).id_salt(("group-head", &first.key)));
                     hu.multiply_opacity(a);
-                    let (button, pressed) = group_header(&mut hu, first, last, indices.len());
-                    state.instance_buttons.insert(first.key.clone(), button);
-                    if pressed && !modal {
-                        instance_clicked = Some((first.clone(), button));
+                    if super::community::owns(&first.key) {
+                        let pictures = state.pictures.as_mut().expect("pictures");
+                        state.community.group_header(&mut hu, cx, pictures, first, last, indices.len(), !modal);
+                    } else {
+                        let (button, pressed) = group_header(&mut hu, first, last, indices.len());
+                        state.instance_buttons.insert(first.key.clone(), button);
+                        if pressed && !modal {
+                            instance_clicked = Some((first.clone(), button));
+                        }
                     }
                     ui.add_space(12.0);
                     let (cols, w) = orbiters_ui::layout::columns(width, CARD_MIN, 16.0);
@@ -445,6 +498,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                             Rect::from_min_size(pos2(area.left() + (n % cols) as f32 * (w + 16.0), area.top() + (n / cols) as f32 * (h + 16.0)), vec2(w, h));
                         index += 1;
                         if !ui.is_rect_visible(r) {
+                            continue;
+                        }
+                        if super::community::owns(&e.key) {
+                            let pictures = state.pictures.as_mut().expect("pictures");
+                            if let Some(thumb) = state.community.card(ui, cx, pictures, index, e, r, !modal) {
+                                community_clicked = Some((e.key.clone(), thumb));
+                            }
                             continue;
                         }
                         let tex = e.picture.as_ref().and_then(|p| state.pictures.as_mut()?.get(&ctx, p));
@@ -501,13 +561,37 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                     }
                     ui.add_space(32.0);
                 }
-                if state.feed.next.is_some() {
-                    let b =
-                        Button::new(if state.feed_job.running() { "Loading…" } else { "Show more" }).variant(Variant::Ghost).enabled(!state.feed_job.running());
+                let more_feed = state.filter != Filter::Communities && state.feed.next.is_some();
+                let more_community = state.filter.communities() && state.community.has_more();
+                if more_feed || more_community {
+                    let running = state.feed_job.running() || state.community.loading();
+                    let b = Button::new(if running { "Loading…" } else { "Show more" }).variant(Variant::Ghost).enabled(!running);
                     let bw = b.desired_width(ui);
                     let (r, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
                     if sharing::pressed(b.show_at(ui, Rect::from_center_size(r.center(), vec2(bw, 40.0)))) {
-                        state.fetch(&ctx, server, true);
+                        if more_feed {
+                            state.fetch(&ctx, server, true);
+                        }
+                        if more_community {
+                            state.community.more(&ctx, cx);
+                        }
+                    }
+                }
+                if let Some(error) = state.community.error().filter(|_| state.filter == Filter::Communities).map(str::to_owned) {
+                    ui.add_space(12.0);
+                    feedback::banner(
+                        ui,
+                        Id::unique("gallery-community-error"),
+                        Tone::Danger,
+                        &format!("Your communities' galleries could not be loaded: {error}"),
+                        false,
+                    );
+                    ui.add_space(8.0);
+                    let b = Button::new("Try again").icon(icons::ARROW_CLOCKWISE).size(Size::Sm).enabled(!state.community.loading());
+                    let bw = b.desired_width(ui);
+                    let (r, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
+                    if sharing::pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
+                        state.community.retry();
                     }
                 }
                 if let Some(error) = state.error.clone() {
@@ -539,12 +623,14 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         hu.multiply_opacity(head_a);
         let mine = state.locals.len();
         let shared = state.feed.items.iter().filter(|i| !i.mine).count();
+        let communities = state.community.count();
+        let from_communities = if communities > 0 { format!(" · {communities} from your communities") } else { String::new() };
         let sub = if loading {
             "Gathering your pictures and captures…".to_string()
         } else if narrow {
-            format!("{mine} on this computer · {shared} shared with you")
+            format!("{mine} on this computer · {shared} shared with you{from_communities}")
         } else {
-            format!("{mine} on this computer · {shared} shared with you · grouped by the instance they were taken in")
+            format!("{mine} on this computer · {shared} shared with you{from_communities} · grouped by where they were taken")
         };
         super::heading(&hu, head_r, "Library", "Photos & captures", Some(&sub));
     }
@@ -561,9 +647,22 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         &mut cu,
         "gallery-filter",
         &mut state.filter,
-        &[SegOption::new(Filter::All, "All"), SegOption::new(Filter::Mine, "Mine"), SegOption::new(Filter::Shared, "Shared with me")],
+        &[
+            SegOption::new(Filter::All, "All"),
+            SegOption::new(Filter::Mine, "Mine"),
+            SegOption::new(Filter::Shared, "Shared with me"),
+            SegOption::new(Filter::Communities, "Communities").hint("Pictures of your communities' galleries and their events"),
+        ],
         false,
     );
+    if state.filter == Filter::Communities {
+        let chips = Rect::from_min_size(pos2(controls.left(), controls.bottom() - widgets::CHIP_H), vec2(controls.width(), widgets::CHIP_H));
+        let before = state.community.chosen;
+        state.community.chips(ui, chips);
+        if state.community.chosen != before {
+            state.shown_key = None;
+        }
+    }
     if state.filter != before_filter {
         state.query_changed = now - 1.0;
     }
@@ -594,7 +693,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     }
     let mut su = ui.new_child(UiBuilder::new().max_rect(search).id_salt("gallery-search"));
     let before = state.query.clone();
-    widgets::search_field(&mut su, "gallery-search", &mut state.query, "Search worlds", search.width());
+    let hint = if state.filter == Filter::Communities { "Search galleries and people" } else { "Search worlds" };
+    widgets::search_field(&mut su, "gallery-search", &mut state.query, hint, search.width());
     if state.query != before {
         state.query_changed = now;
     }
@@ -668,6 +768,14 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             state.dialog = None;
         }
     }
+    if let Some((key, thumb)) = community_clicked {
+        let keys: Vec<String> = entries.iter().filter(|e| super::community::owns(&e.key)).map(|e| e.key.clone()).collect();
+        state.community.open(&ctx, &key, thumb, &keys);
+    }
+    {
+        let pictures = state.pictures.as_mut().expect("pictures");
+        state.community.show(ui, cx, pictures);
+    }
     if let Some((e, anchor)) = instance_clicked {
         state.serial += 1;
         state.instance = Some(Instance { entry: e.clone(), anchor, serial: state.serial, closing: false });
@@ -691,7 +799,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         }
     }
     instance_popover(&ctx, cx, state);
-    let modal = state.dialog.is_some() || state.instance.is_some();
+    let modal = state.dialog.is_some() || state.instance.is_some() || state.community.is_open();
     state.select.bar(ui, page, &entries, &mut state.pictures, modal);
     state.shown = entries;
     manage
@@ -902,6 +1010,11 @@ fn empty_state(ui: &mut Ui, cx: &Cx, filter: Filter, searching: bool, height: f3
     logo::paint(&p, lr, logo::Look::default());
     let (title, text) = if searching {
         ("No world matches", "Try another world name.")
+    } else if filter == Filter::Communities {
+        (
+            "Your communities' pictures belong here",
+            "Pictures posted in the galleries of the Discord servers you're in show up here, with the events they were taken at.",
+        )
     } else if filter == Filter::Shared {
         ("Nothing shared with you yet", "When friends share a picture or a 3D capture with you, it shows up here.")
     } else {

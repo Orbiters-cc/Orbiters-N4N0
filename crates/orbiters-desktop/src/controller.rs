@@ -67,13 +67,7 @@ const MAX_LATEST: usize = Latest::MOST;
 fn osc_samples<'a>(address: &'a str, values: &'a [OscValue], at_ns: u64, initial: bool) -> impl Iterator<Item = OscSample> + 'a {
     let several = values.len() > 1;
     values.iter().enumerate().filter_map(move |(i, value)| {
-        Some(OscSample {
-            at_ns,
-            address: address.to_string(),
-            index: if several { Some(u8::try_from(i).ok()?) } else { None },
-            value: value.clone(),
-            initial,
-        })
+        Some(OscSample { at_ns, address: address.to_string(), index: if several { Some(u8::try_from(i).ok()?) } else { None }, value: value.clone(), initial })
     })
 }
 
@@ -283,6 +277,7 @@ mod n4n0;
 mod performance;
 mod rig;
 mod scan;
+pub mod shares;
 pub mod update;
 mod videos;
 pub use account::open_url;
@@ -368,6 +363,7 @@ impl Controller {
             }
         });
         spawn_watchers(self.clone());
+        shares::spawn_presence(self.clone());
         self.start_account();
         self.start_orb();
         self.start_calls();
@@ -618,17 +614,28 @@ impl Controller {
                     changed
                 });
             }
-            WorkerEvent::Started { session_dir, source } => self.update(|s| {
-                // Stopping: a stop came before the worker started, and its Stop follows the Start.
-                if !matches!(s.capture.state, CaptureState::Importing | CaptureState::Stopping) {
-                    s.capture.state = CaptureState::Recording;
+            WorkerEvent::Started { session_dir, source } => {
+                // Worker events run off the UI thread. Save before publishing the new recording.
+                let mut content = orbiters_core::explicit::Content::parameters(
+                    self.osc_values.lock().unwrap().latest.keys().filter(|n| n.starts_with(PARAMETERS_PREFIX)).map(String::as_str),
+                );
+                let world = self.snapshot.lock().unwrap().vrchat.world.clone();
+                content.merge(&orbiters_core::explicit::local_avatar_labels(&world));
+                if let Err(e) = content.save(&session_dir) {
+                    self.notify(NoticeKind::Error, format!("Could not save capture content flags: {e}"));
                 }
-                s.capture.session_dir = Some(session_dir);
-                s.capture.source = Some(source);
-                s.capture.error = None;
-                s.capture.trail.clear();
-                s.capture.coverage = None;
-            }),
+                self.update(|s| {
+                    // Stopping: a stop came before the worker started, and its Stop follows the Start.
+                    if !matches!(s.capture.state, CaptureState::Importing | CaptureState::Stopping) {
+                        s.capture.state = CaptureState::Recording;
+                    }
+                    s.capture.session_dir = Some(session_dir);
+                    s.capture.source = Some(source);
+                    s.capture.error = None;
+                    s.capture.trail.clear();
+                    s.capture.coverage = None;
+                });
+            }
             // Published with the next stats (four times a second).
             WorkerEvent::Coverage(map) => self.snapshot.lock().unwrap().capture.coverage = Some(map),
             WorkerEvent::Stats(stats) => {
@@ -2045,11 +2052,7 @@ fn spawn_watchers(ctl: Shared) {
                     // VRChat sends avatar parameters only to the OSC services it found, and it finds one only from an
                     // answer it hears (the OSC service makes one when it starts and whenever a VRChat starts). Quiet a
                     // while with VRChat running: maybe it missed both, ask again (a VRChat that knows us ignores it).
-                    if running
-                        && !receiving
-                        && vrchat_since.is_some_and(|t| t.elapsed() > OSC_QUIET)
-                        && osc_asked.is_none_or(|t| t.elapsed() > OSC_QUIET)
-                    {
+                    if running && !receiving && vrchat_since.is_some_and(|t| t.elapsed() > OSC_QUIET) && osc_asked.is_none_or(|t| t.elapsed() > OSC_QUIET) {
                         osc_asked = Some(Instant::now());
                         ctl.osc_rediscover();
                     }

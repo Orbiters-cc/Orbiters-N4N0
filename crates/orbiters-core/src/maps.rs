@@ -131,6 +131,21 @@ pub struct Added {
     pub skipped: usize,
 }
 
+/// Identity returned by an upload, persisted before a subsequent grant request can fail.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Uploaded {
+    #[serde(rename = "type")]
+    pub kind: crate::shares::Kind,
+    pub id: u64,
+    pub visibility: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct UploadedPictures {
+    pub added: Vec<Uploaded>,
+    pub skipped: usize,
+}
+
 /// What a 3D preview sends: the web `.splat` and VRChat's splat trees for PC, Quest and the coarse first view.
 pub struct PreviewFiles {
     pub splat: Vec<u8>,
@@ -215,6 +230,11 @@ impl Api {
         Self::json(response)
     }
 
+    pub fn add_shared_pictures(&self, token: &str, world_id: &str, pictures: Vec<Part>, metadata: &serde_json::Value) -> anyhow::Result<UploadedPictures> {
+        let response = self.multipart(token, &format!("maps/worlds/{}/pictures", world_path(world_id)?), &metadata.to_string(), pictures, |_, _| {})?;
+        crate::shares::json(response)
+    }
+
     /// Adds a 3D preview with its sky map (a reconstruction's sky.png, when there is one), replacing this member's
     /// earlier one of the world: the web `.splat` and VRChat's splat trees (OrbitersContracts Docs/splat-tree.md).
     /// `metadata` holds the start view (`{"view":{"position":[…],"target":[…]}}`), quality and capture date.
@@ -226,7 +246,7 @@ impl Api {
         sky: Option<&Path>,
         metadata: &serde_json::Value,
         progress: impl FnMut(u64, u64) + Send + 'static,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Uploaded> {
         let world_id = world_path(world_id)?;
         let tree = |field: &'static str, name: &str, bytes: Vec<u8>| Part::bytes(field, format!("{world_id}-{name}.n4tree"), "application/octet-stream", bytes);
         let mut parts = vec![
@@ -239,7 +259,7 @@ impl Api {
             parts.push(Part::file("sky", "sky.png", "image/png", sky)?);
         }
         let response = self.multipart(token, &format!("maps/worlds/{world_id}/previews"), &metadata.to_string(), parts, progress)?;
-        Self::json::<serde_json::Value>(response).map(|_| ())
+        crate::shares::json(response)
     }
 
     /// A `multipart/form-data` POST with its JSON in a "metadata" field, reporting the bytes sent. The body is made as
@@ -254,6 +274,14 @@ impl Api {
     ) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
         let boundary = format!("----orbiters-{}", uuid::Uuid::new_v4().simple());
         let mut pieces = vec![Piece::bytes(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n"))];
+        // These are multipart fields in the sharing contract, alongside the existing metadata JSON.
+        let fields: serde_json::Value = serde_json::from_str(metadata)?;
+        for field in ["visibility", "explicit", "explicitReasons", "acknowledgeExplicit"] {
+            if let Some(value) = fields.get(field) {
+                let value = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+                pieces.push(Piece::bytes(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"\r\n\r\n{value}\r\n")));
+            }
+        }
         for p in parts {
             let name = p.name.replace(['"', '\r', '\n'], "_");
             let head = format!(

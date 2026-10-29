@@ -192,7 +192,7 @@ impl Controller {
                     }
                     None => false,
                 });
-                api.add_preview(&token, &world_id, files, sky.as_deref(), &metadata, c.progress(id))
+                api.add_preview(&token, &world_id, files, sky.as_deref(), &metadata, c.progress(id)).map(|_| ())
             }) {
                 Ok(()) => UploadState::Done { added: 1, skipped: 0 },
                 Err(e) => UploadState::Failed { message: e.to_string() },
@@ -206,7 +206,7 @@ impl Controller {
 /// A session's splats as a web `.splat` and as VRChat's splat trees (their merged boxes tuned on the GPU when there is
 /// one), its sky map (sky.png as trained, when training learnt one) and the upload's metadata: the start view
 /// (right-handed like the files: Unity's Z negated), the held-out quality and when the session was recorded.
-fn web_preview(session: &Path) -> anyhow::Result<(PreviewFiles, Option<PathBuf>, serde_json::Value)> {
+pub(super) fn web_preview(session: &Path) -> anyhow::Result<(PreviewFiles, Option<PathBuf>, serde_json::Value)> {
     let result = reconstruction::result_dir(session);
     let g = orbiters_reconstruct::ply::read(&result.join(reconstruction::PLY_FILE))?;
     let (views, start) = crate::views::recorded(session)?;

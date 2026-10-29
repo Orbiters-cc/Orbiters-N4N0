@@ -435,7 +435,16 @@ pub fn find_editor(version: &str) -> Option<PathBuf> {
             }
         }
     }
-    candidates.into_iter().find(|p| p.is_file())
+    if let Some(p) = candidates.iter().find(|p| p.is_file()) {
+        return Some(p.clone());
+    }
+    // Editors VCC or ALCOM found or were given (outside Unity Hub's lists).
+    crate::runtime().ok()?.block_on(async {
+        let io = vrc_get_vpm::io::DefaultEnvironmentIo::new(crate::vcc_dir().into());
+        let db = vrc_get_vpm::environment::VccDatabaseConnection::connect(&io).await.ok()?;
+        let wanted = vrc_get_vpm::version::UnityVersion::parse(version)?;
+        db.get_unity_installations().iter().filter(|u| u.version() == Some(wanted)).filter_map(|u| u.path().map(PathBuf::from)).find(|p| p.is_file())
+    })
 }
 fn editor_entries(v: &serde_json::Value, version: &str, out: &mut Vec<PathBuf>) {
     match v {

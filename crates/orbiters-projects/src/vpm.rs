@@ -1,7 +1,7 @@
 //! Uses ALCOM's VPM resolver and its shared VCC environment. Never hand-edit a VPM manifest.
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use vrc_get_vpm::environment::{self, PackageCollection, PackageInstaller, Settings, VccDatabaseConnection};
 use vrc_get_vpm::io::{DefaultEnvironmentIo, DefaultProjectIo};
@@ -22,6 +22,20 @@ pub struct Package {
     pub display_name: String,
     pub installed: Option<String>,
     pub versions: Vec<String>,
+    /// Where its icon comes from ([`crate::icons`]): the listing of its newest version (a listing Orbiters hosts has
+    /// the logos creators set) and the websites its manifest names, its author's (`author.url`) and its own
+    /// (`siteUrl`).
+    pub repository: Option<String>,
+    pub author_url: Option<String>,
+    pub site_url: Option<String>,
+}
+impl Package {
+    /// Fills the websites from a package manifest where none is known yet.
+    fn websites_from(&mut self, manifest: &serde_json::Value) {
+        let text = |v: &serde_json::Value| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(ToOwned::to_owned);
+        self.author_url = self.author_url.take().or_else(|| text(&manifest["author"]["url"]));
+        self.site_url = self.site_url.take().or_else(|| text(&manifest["siteUrl"]));
+    }
 }
 #[derive(Clone, Debug, Default)]
 pub struct View {
@@ -104,13 +118,20 @@ impl vrc_get_vpm::PackageCollection for EnabledCollection {
         self.find_packages(name).filter(|p| selector.satisfies(p.package_json())).max_by_key(|p| p.version())
     }
 }
+/// A repository never downloaded: VRChat's own on a computer without Creator Companion (or before its first start), a
+/// repository added while offline.
+fn missing_cache(root: &Path, settings: &Settings) -> bool {
+    let predefined = [(!settings.ignore_official_repository()).then_some("Repos/vrc-official.json"), (!settings.ignore_curated_repository()).then_some("Repos/vrc-curated.json")];
+    predefined.into_iter().flatten().any(|p| !root.join(p).is_file()) || settings.get_user_repos().iter().any(|r| !root.join(r.local_path()).is_file())
+}
 async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Settings, EnabledCollection)> {
     let io = DefaultEnvironmentIo::new(root.into());
     let settings = Settings::load(&io).await?;
     // Disabled repositories remain in VCC's settings; only the collection supplied to the resolver omits them.
     let hidden = hidden(root);
     let mut packages = PackageCollection::load_cache(&settings, &io).await?;
-    if refresh {
+    // Without a cache the repository's packages are unknown: download it, as ALCOM does on its first start.
+    if refresh || missing_cache(root, &settings) {
         packages = PackageCollection::load(&settings, &io, Some(&http()?)).await?;
         packages.update_cache(&io, &http()?).await;
     }
@@ -146,11 +167,23 @@ pub async fn view(root: &Path, project: Option<&Path>, refresh: bool) -> anyhow:
     // The iterator contains every version; sort with VPM's SemVer ordering before producing strings.
     let mut all: Vec<_> = collection.get_all_packages().collect();
     all.sort_by(|a, b| b.version().cmp(a.version()));
+    // Listings as their JSON (vrc-get's manifests leave out the author), read once each for the websites of the
+    // packages' newest versions.
+    let mut listings: HashMap<String, serde_json::Value> = HashMap::new();
     for p in all {
-        let row = packages.entry(p.name().into()).or_insert_with(|| Package {
-            name: p.name().into(),
-            display_name: p.package_json().display_name().unwrap_or(p.name()).into(),
-            ..Default::default()
+        let row = packages.entry(p.name().into()).or_insert_with(|| {
+            let mut row = Package {
+                name: p.name().into(),
+                display_name: p.package_json().display_name().unwrap_or(p.name()).into(),
+                repository: p.repo().and_then(|r| r.url()).map(ToString::to_string),
+                ..Default::default()
+            };
+            if let Some(r) = p.repo() {
+                let key = r.url().map(ToString::to_string).or_else(|| r.id().map(ToOwned::to_owned)).unwrap_or_default();
+                let listing = listings.entry(key).or_insert_with(|| serde_json::to_value(r.repo()).unwrap_or_default());
+                row.websites_from(&listing["packages"][p.name()]["versions"][p.version().to_string()]);
+            }
+            row
         });
         let v = p.version().to_string();
         if !row.versions.contains(&v) {
@@ -169,6 +202,7 @@ pub async fn view(root: &Path, project: Option<&Path>, refresh: bool) -> anyhow:
                             if let Some(n) = v["displayName"].as_str() {
                                 row.display_name = n.into();
                             }
+                            row.websites_from(&v);
                         }
                     }
                 }
@@ -265,7 +299,8 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
     project.save().await?;
     Ok(())
 }
-pub async fn install_my_avatar(root: &Path, path: &Path) -> anyhow::Result<()> {
+/// Installs the latest releases of `names` from the Orbiters repository, adding it (or turning it back on) first.
+pub async fn install_orbiters(root: &Path, path: &Path, names: &[&str]) -> anyhow::Result<()> {
     add_repo(root, ORBITERS_REPOSITORY, BTreeMap::new()).await?;
     // Ensure an existing disabled Orbiters repo is enabled before resolving its packages.
     let io = DefaultEnvironmentIo::new(root.into());
@@ -273,5 +308,8 @@ pub async fn install_my_avatar(root: &Path, path: &Path) -> anyhow::Result<()> {
     if let Some(id) = settings.get_user_repos().iter().find(|r| r.url().is_some_and(|u| u.as_str() == ORBITERS_REPOSITORY)).and_then(|r| r.id()) {
         set_enabled(root, id, true).await?;
     }
-    change(root, path, Change::Install { names: vec![("orbiters.toolkit".into(), None), ("orbiters.myavatar".into(), None)], prerelease: false }).await
+    change(root, path, Change::Install { names: names.iter().map(|n| (n.to_string(), None)).collect(), prerelease: false }).await
+}
+pub async fn install_my_avatar(root: &Path, path: &Path) -> anyhow::Result<()> {
+    install_orbiters(root, path, &["orbiters.toolkit", "orbiters.myavatar"]).await
 }

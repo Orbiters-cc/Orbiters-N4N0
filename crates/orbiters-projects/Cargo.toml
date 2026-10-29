@@ -12,12 +12,15 @@ dirs.workspace = true
 uuid.workspace = true
 time.workspace = true
 orbiters-core.workspace = true
-vrc-get-vpm = { version = "=0.0.17", features = ["experimental-project-management"] }
+vrc-get-vpm = { version = "=0.0.17", features = ["experimental-project-management", "experimental-unity-management"] }
 tokio = { version = "1", features = ["rt-multi-thread", "fs", "time", "io-util"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 indexmap = "2"
 url = "2"
 walkdir = "2"
+# Package icons (icons.rs): what websites serve, decoded and kept small.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "ico"] }
+resvg = { version = "0.49", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

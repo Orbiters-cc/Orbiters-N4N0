@@ -13,6 +13,12 @@ pub struct Template {
     pub path: PathBuf,
     pub unity: String,
     pub builtin: bool,
+    /// Its package name (com.vrchat.template.avatar…).
+    #[serde(default)]
+    pub id: String,
+    /// The cover Creator Companion shows for it, when VCC is installed.
+    #[serde(default)]
+    pub banner: Option<PathBuf>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Progress {
@@ -39,14 +45,33 @@ pub fn list(root: &Path) -> Vec<Template> {
                 .ok()
                 .and_then(|s| crate::discovery::parse_version(&s))
                 .unwrap_or_default();
-            out.push(Template { name, path: p, unity, builtin });
+            let id = v["name"].as_str().unwrap_or_default().to_string();
+            out.push(Template { name, path: p, unity, builtin, id, banner: None });
         }
     }
     if !out.iter().any(|t| t.builtin) {
         out.extend(builtins(&crate::data_dir().join("unity-templates/alcom-v1.9.3")).unwrap_or_default());
     }
+    if let Some(app) = crate::vcc_app_dir() {
+        for t in &mut out {
+            t.banner = banner(&app, &t.id);
+        }
+    }
     out.sort_by(|a, b| (!a.builtin, &a.name).cmp(&(!b.builtin, &b.name)));
     out
+}
+
+/// The cover Creator Companion (installed in `app`) shows on a template's card: VRChat's own templates have theirs,
+/// any other one VCC's "Custom" cover (as VCC does).
+pub fn banner(app: &Path, id: &str) -> Option<PathBuf> {
+    let file = match id {
+        "com.vrchat.template.avatar" => "template-avatar-2022.png",
+        "com.vrchat.template.world" => "template-world-2022.png",
+        "com.vrchat.template.avatar.2019" => "template-avatar.png",
+        "com.vrchat.template.world.2019" => "template-world-udon.png",
+        _ => "template-custom.png",
+    };
+    Some(app.join("WebApp/Dist/template-covers").join(file)).filter(|p| p.is_file())
 }
 
 /// A fresh install has no VCC template directory. Bundle ALCOM's MIT-licensed modern template assets so these are
@@ -65,11 +90,14 @@ pub fn builtins(cache: &Path) -> anyhow::Result<Vec<Template>> {
                 std::fs::write(&p, content)?;
             }
         }
+        let avatars = id.starts_with("avatars");
         out.push(Template {
-            name: if id.starts_with("avatars") { "VRChat Avatar Project" } else { "VRChat World Project" }.into(),
+            name: if avatars { "VRChat Avatar Project" } else { "VRChat World Project" }.into(),
             path,
             unity: "2022.3.22f1".into(),
             builtin: true,
+            id: if avatars { "com.vrchat.template.avatar" } else { "com.vrchat.template.world" }.into(),
+            banner: None,
         });
     }
     let avatar = out.iter().find(|t| t.name == "VRChat Avatar Project").context("Bundled avatar template is missing")?;
@@ -78,7 +106,7 @@ pub fn builtins(cache: &Path) -> anyhow::Result<Vec<Template>> {
         copy(&avatar.path, &path, &AtomicBool::new(false), &Arc::new(Mutex::default()))?;
     }
     crate::write_json(&path.join("Packages/vpm-manifest.json"), &serde_json::json!({"dependencies":{"com.vrchat.base":{"version":"3.x"}}}))?;
-    out.push(Template { name: "VRChat Base Project".into(), path, unity: "2022.3.22f1".into(), builtin: true });
+    out.push(Template { name: "VRChat Base Project".into(), path, unity: "2022.3.22f1".into(), builtin: true, id: "com.vrchat.template.base".into(), banner: None });
     Ok(out)
 }
 pub fn validate_name(name: &str) -> anyhow::Result<()> {

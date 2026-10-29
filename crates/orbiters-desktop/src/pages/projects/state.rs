@@ -628,6 +628,7 @@ impl State {
             display_name: d.into(),
             installed: v.map(Into::into),
             versions: versions.into_iter().map(Into::into).collect(),
+            ..Default::default()
         })
         .collect();
         self.templates = vec![
@@ -638,15 +639,25 @@ impl State {
         self.new_location = "H:/Unity projects".into();
         self.new_name = "My new avatar".into();
         self.catalog.known = vec![
-            network::Listing { name: "VRCFury".into(), url: "https://vcc.vrcfury.com".into(), description: "Avatar tools and setup helpers".into() },
+            network::Listing {
+                name: "VRCFury".into(),
+                url: "https://vcc.vrcfury.com".into(),
+                description: "Avatar tools and setup helpers".into(),
+                ..Default::default()
+            },
             network::Listing {
                 name: "Poiyomi".into(),
                 url: "https://poiyomi.github.io/vpm/index.json".into(),
                 description: "Poiyomi Toon and Pro shaders".into(),
+                ..Default::default()
             },
         ];
-        self.catalog.public =
-            vec![network::Listing { name: "Orbiters".into(), url: vpm::ORBITERS_REPOSITORY.into(), description: "My Avatar, Toolkit, Mixer and more".into() }];
+        self.catalog.public = vec![network::Listing {
+            name: "Orbiters".into(),
+            url: vpm::ORBITERS_REPOSITORY.into(),
+            description: "My Avatar, Toolkit, Mixer and more".into(),
+            ..Default::default()
+        }];
         let first = self.scan.projects[0].clone();
         let flow = |unity_open: bool, result: Option<(setup::Status, &str)>, packages_only: bool| Flow {
             project: first.clone(),

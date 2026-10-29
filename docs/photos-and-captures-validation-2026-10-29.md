@@ -110,8 +110,9 @@ Manifest controls tagged `nsfw` and matching final parameter names are also read
 evidence does not establish non-explicit content, and existing sessions are not retroactively classified.
 
 No known deviation remains from the updated sharing contract. Nullable instance/source keys are accepted while
-the server work lands. Historical instance liveness cannot be established from retained joins, so Open in VRChat
-is restricted to the member's currently running instance. A skipped upload without an identifiable returned Item
+the server work lands. Retained joins do not establish historical liveness; the integration follow-up now checks
+opened instance groups through the member's eligible VRChat session and offers Open in VRChat for explicit active
+results. Unknown results preserve the current-instance restriction. A skipped upload without an identifiable returned Item
 can still require a gallery refresh.
 
 Still unverified against a live development server: real upload and public replacement, private-file access and

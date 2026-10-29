@@ -92,3 +92,14 @@ discovery cache; it never installs into or modifies real projects.
 
 To see the implementation, use **Unity projects** immediately after Capture, or **Capture → Add to my avatar**.
 The coordinator must publish the development update before these appear in the installed application.
+
+## Session-routing integration
+
+Avatar thumbnails now travel through background `VrchatData` requests to `Controller::vrchat_source()`. Toolkit's
+local avatar PNG is decoded first and cannot be replaced by a remote result. With an eligible signed-in session,
+missing pictures use `source.avatar` then `source.image`; otherwise the existing Orbiters thumbnail endpoint and
+disk cache remain in use. Requests are limited to eight pictures per IPC reply, and the UI clears pictures and
+pending jobs on member/environment/session changes. Partial loading errors are visible in the page; Refresh retries
+them. No credentials are sent to the window or image hosts outside the existing routing boundary.
+
+See [integration validation](integration-validation-2026-10-29.md) for this follow-up's tests and visual evidence.

@@ -24,8 +24,11 @@ pub struct Dialog {
     pub extra: Vec<Entry>,
     pub picker: bool,
     pub warning: Option<String>,
-    friends: Job<Vec<Friend>>,
+    friends: Job<Result<Vec<Friend>, String>>,
+    friend_scope: Option<crate::controller::vrchat_data::Scope>,
+    friends_requested: bool,
     friends_list: Vec<Friend>,
+    friends_error: Option<String>,
     query: String,
     selected: BTreeSet<String>,
     message: String,
@@ -51,8 +54,11 @@ impl Dialog {
             extra: Vec::new(),
             picker,
             warning: None,
-            friends: Job::spawn(ctx, || orbiters_core::vrchat_accounts::friends(None)),
+            friends: Job::default(),
+            friend_scope: None,
+            friends_requested: false,
             friends_list: Vec::new(),
+            friends_error: None,
             query: String::new(),
             selected: BTreeSet::new(),
             message: String::new(),
@@ -77,7 +83,7 @@ impl Dialog {
     }
     pub fn fixture(&mut self, state: &str) {
         self.fixture_active = true;
-        if state == "friends" {
+        if state.starts_with("friends") {
             self.picker = true;
             self.friends = Job::default();
             self.friends_list = ["Alex", "Mika", "Robin", "Sora", "Taylor"]
@@ -88,6 +94,12 @@ impl Dialog {
             self.selected.insert("usr_0".into());
             self.selected.insert("usr_2".into());
             self.message = "A little moment from last night ✨".into();
+            if state == "friends-error" {
+                self.friends_list.clear();
+                self.selected.clear();
+                self.message.clear();
+                self.friends_error = Some("VRChat is busy. Please try again shortly.".into());
+            }
         }
         if state == "explicit" {
             self.warning = Some(shares::EXPLICIT_WARNING.into());
@@ -143,8 +155,35 @@ impl Dialog {
             }
         }
         let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
+        let scope = crate::controller::vrchat_data::Scope::of(cx.snap);
+        if !self.fixture_active && self.friend_scope.as_ref() != Some(&scope) {
+            self.friend_scope = Some(scope.clone());
+            self.friends_requested = false;
+            self.friends_list.clear();
+            self.selected.clear();
+            self.friends_error = None;
+            self.friends = Job::default();
+            self.pictures = crate::worlds::Pictures::with_backend(&ctx, Some(cx.ctl.clone()));
+        }
+        if !self.fixture_active && self.picker && !self.friends_requested {
+            self.friends_requested = true;
+            let backend = cx.ctl.clone();
+            self.friends = Job::spawn(&ctx, move || {
+                use crate::controller::vrchat_data::{Request, Response};
+                match backend.vrchat_data(scope, Request::Friends)? {
+                    Response::Friends(users) => Ok(users
+                        .into_iter()
+                        .map(|u| Friend { image: (!u.picture().is_empty()).then(|| u.picture().to_owned()), id: u.id, name: u.display_name })
+                        .collect()),
+                    _ => Err("Unexpected friends response.".into()),
+                }
+            });
+        }
         if let Some(f) = self.friends.take() {
-            self.friends_list = f;
+            match f {
+                Ok(f) => self.friends_list = f,
+                Err(e) => self.friends_error = Some(e),
+            }
         }
         self.backend = Some(cx.ctl.clone());
         if let Some(request) = self.pending.take() {
@@ -300,16 +339,31 @@ impl Dialog {
                                     }
                                     let (r, _) = ui.allocate_exact_size(vec2(30.0, 30.0), egui::Sense::hover());
                                     let tex = f.image.as_ref().and_then(|url| {
-                                        self.pictures.get(&ctx, &crate::worlds::Picture::Remote { world_id: f.id.clone(), url: url.clone(), large: false })
+                                        self.pictures.get(
+                                            &ctx,
+                                            &crate::worlds::Picture::Profile { scope: crate::controller::vrchat_data::Scope::of(cx.snap), url: url.clone() },
+                                        )
                                     });
                                     avatar(ui, r, tex.as_ref(), &f.name);
                                     ui.label(&f.name);
                                 });
                             }
                             if self.friends.running() {
-                                ui.label("Reading friends from VRCX / VRCNext…");
-                            } else if friends.is_empty() {
-                                ui.label("No cached VRChat friends. Open VRCX or VRCNext and let its friend list load.");
+                                ui.label("Loading VRChat friends…");
+                            } else if self.friends_error.is_none() && friends.is_empty() {
+                                ui.label(if cx.snap.vrchat_login.allowed && cx.snap.vrchat_login.user.is_some() {
+                                    "No VRChat friends are available."
+                                } else {
+                                    "No cached VRChat friends. Open VRCX or VRCNext and let its friend list load."
+                                });
+                            }
+                            if let Some(error) = &self.friends_error {
+                                ui.colored_label(theme::FG_3, error);
+                                ui.add_space(8.0);
+                                if pressed(Button::new("Retry loading friends").enabled(!busy).show(ui)) {
+                                    self.friends_requested = false;
+                                    self.friends_error = None;
+                                }
                             }
                         });
                         ui.add_space(8.0);

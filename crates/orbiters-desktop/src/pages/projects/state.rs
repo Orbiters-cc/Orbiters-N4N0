@@ -60,8 +60,8 @@ pub struct State {
     pub(super) catalog_job: Job<network::Catalog>,
     pub(super) thumbs: HashMap<String, TextureHandle>,
     pub(super) thumb_ids: HashSet<String>,
-    pub(super) thumbnail_environment: Option<(bool, Option<String>)>,
-    pub(super) thumb_job: Job<HashMap<String, ColorImage>>,
+    pub(super) thumbnail_environment: Option<crate::controller::vrchat_data::Scope>,
+    pub(super) thumb_job: Job<Result<(HashMap<String, ColorImage>, Vec<String>), String>>,
     pub(super) modal: Option<Modal>,
     pub(super) flow: Option<Flow>,
     pub(super) result_job: Job<Result<Option<setup::ResultFile>, String>>,
@@ -219,7 +219,7 @@ impl State {
         self.action = Job::spawn(ctx, move || f().map_err(|e| format!("{e:#}")));
     }
     pub(super) fn poll(&mut self, ctx: &egui::Context, cx: &mut Cx) {
-        let environment = (cx.snap.account.development, cx.snap.account.state.username().map(ToOwned::to_owned));
+        let environment = crate::controller::vrchat_data::Scope::of(cx.snap);
         if !self.fixture && self.thumbnail_environment.as_ref() != Some(&environment) {
             self.thumbnail_environment = Some(environment);
             self.thumb_ids.clear();
@@ -283,34 +283,45 @@ impl State {
             }
         }
         if !self.fixture && self.started && !self.thumb_job.running() {
-            let ids: HashSet<String> = self.scan.projects.iter().flat_map(|p| p.avatars.iter().map(|a| a.id.clone())).collect();
-            if ids != self.thumb_ids {
-                self.thumb_ids = ids.clone();
-                let server = server(cx);
+            let mut seen = HashSet::new();
+            let ids: Vec<String> = self
+                .scan
+                .projects
+                .iter()
+                .flat_map(|p| p.avatars.iter().map(|a| a.id.clone()))
+                .filter(|id| !self.thumb_ids.contains(id) && seen.insert(id.clone()))
+                .take(8)
+                .collect();
+            if !ids.is_empty() {
+                self.thumb_ids.extend(ids.iter().cloned());
+                let backend = cx.ctl.clone();
+                let scope = crate::controller::vrchat_data::Scope::of(cx.snap);
                 self.thumb_job = Job::spawn(ctx, move || {
-                    let mut paths = HashMap::new();
-                    for id in &ids {
-                        if let Some(p) = orbiters_projects::avatars::local_thumbnail(id) {
-                            paths.insert(id.clone(), p);
+                    use crate::controller::vrchat_data::{Request, Response};
+                    let mut images = HashMap::new();
+                    let mut errors = Vec::new();
+                    if let Response::Avatars { pictures, errors: failures } = backend.vrchat_data(scope, Request::Avatars { ids })? {
+                        errors.extend(failures);
+                        for (id, p) in pictures {
+                            images.insert(id, ColorImage::from_rgba_unmultiplied([p.width as usize, p.height as usize], &p.rgba));
                         }
                     }
-                    if let Ok(remote) = network::thumbnails(server, ids.into_iter().collect()) {
-                        paths.extend(remote.into_iter().map(|(id, t)| (id, t.path)));
-                    }
-                    paths
-                        .into_iter()
-                        .filter_map(|(id, p)| {
-                            let rgb = orbiters_orb::picture::rgb_any(&std::fs::read(p).ok()?).ok()?;
-                            let image = orbiters_orb::picture::letterbox(&rgb, 480, 360, [24, 24, 27]);
-                            Some((id, ColorImage::from_rgb([480, 360], &image.pixels)))
-                        })
-                        .collect()
+                    Ok((images, errors))
                 });
             }
         }
-        if let Some(images) = self.thumb_job.take() {
-            for (id, image) in images {
-                self.thumbs.insert(id.clone(), ctx.load_texture(format!("project-avatar-{id}"), image, egui::TextureOptions::LINEAR));
+        if let Some(result) = self.thumb_job.take() {
+            ctx.request_repaint(); // Publish this batch before requesting the next one.
+            match result {
+                Ok((images, errors)) => {
+                    for (id, image) in images {
+                        self.thumbs.insert(id.clone(), ctx.load_texture(format!("project-avatar-{id}"), image, egui::TextureOptions::LINEAR));
+                    }
+                    if !errors.is_empty() {
+                        self.error = Some(format!("{} avatar picture(s) could not load: {}. Refresh to retry.", errors.len(), errors[0]));
+                    }
+                }
+                Err(e) => self.error = Some(e),
             }
         }
         if !self.fixture && matches!(self.modal, Some(Modal::Setup)) && self.flow.as_ref().is_some_and(|f| f.request.is_some() && f.result.is_none()) {

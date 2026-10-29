@@ -244,6 +244,8 @@ impl Infos {
 /// A picture to show.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Picture {
+    /// A session-scoped profile image. Never persisted in the public world image cache.
+    Profile { scope: crate::controller::vrchat_data::Scope, url: String },
     /// A protected sharing-contract picture, fetched with the current environment's account on a loader thread.
     Capture { development: bool, id: u64, large: bool },
     /// A screenshot, at most `width` wide.
@@ -282,14 +284,21 @@ pub struct Pictures {
     done: Arc<Mutex<Vec<Loaded>>>,
     /// When the pictures were last trimmed to [`KEEP_BYTES`] (egui's clock).
     trimmed: f64,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Pictures {
     pub fn new(ctx: &egui::Context) -> Self {
+        Self::with_backend(ctx, None)
+    }
+    pub fn with_backend(ctx: &egui::Context, backend: Option<crate::backend::Ctl>) -> Self {
         let queue: Arc<(Mutex<Vec<Picture>>, std::sync::Condvar)> = Arc::default();
         let done: Arc<Mutex<Vec<Loaded>>> = Arc::default();
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         for i in 0..3 {
             let (queue, done, ctx) = (queue.clone(), done.clone(), ctx.clone());
+            let backend = backend.clone();
+            let stopped = stopped.clone();
             std::thread::Builder::new()
                 .name(format!("pictures-{i}"))
                 .spawn(move || {
@@ -299,19 +308,34 @@ impl Pictures {
                             let (lock, ready) = &*queue;
                             let mut q = lock.lock().unwrap();
                             while q.is_empty() {
+                                if stopped.load(std::sync::atomic::Ordering::Acquire) {
+                                    return;
+                                }
                                 q = ready.wait(q).unwrap();
+                            }
+                            if stopped.load(std::sync::atomic::Ordering::Acquire) {
+                                return;
                             }
                             q.pop()
                         };
                         let Some(picture) = next else { continue };
-                        let image = decode(&api, keep, &picture);
+                        let image = if let Picture::Profile { scope, url } = &picture {
+                            use crate::controller::vrchat_data::{Request, Response};
+                            backend
+                                .as_ref()
+                                .and_then(|b| b.vrchat_data(scope.clone(), Request::Image { url: url.clone() }).ok())
+                                .and_then(|r| if let Response::Image(bytes) = r { decode_image(&bytes) } else { None })
+                                .map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
+                        } else {
+                            decode(&api, keep, &picture)
+                        };
                         done.lock().unwrap().push((picture, image));
                         ctx.request_repaint();
                     }
                 })
                 .expect("picture loader");
         }
-        Self { slots: HashMap::new(), queue, done, trimmed: f64::NEG_INFINITY }
+        Self { slots: HashMap::new(), queue, done, trimmed: f64::NEG_INFINITY, stopped }
     }
 
     /// The picture as a texture once decoded; asks for it the first time (and again to bring it forward while it
@@ -400,6 +424,16 @@ impl Pictures {
     }
 }
 
+impl Drop for Pictures {
+    fn drop(&mut self) {
+        let (lock, ready) = &*self.queue;
+        let mut queue = lock.lock().unwrap();
+        queue.clear();
+        self.stopped.store(true, std::sync::atomic::Ordering::Release);
+        ready.notify_all();
+    }
+}
+
 /// Thumbnails are this wide (kept on disk).
 pub const THUMB_WIDTH: u32 = 480;
 
@@ -411,6 +445,7 @@ fn key(p: &Picture) -> u64 {
 
 fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
     match picture {
+        Picture::Profile { .. } => None, // Requires the service backend, handled by the loader.
         Picture::Capture { development, id, large } => {
             let server = if *development { Server::Development } else { Server::Production };
             let account = orbiters_core::account::read(server)?;

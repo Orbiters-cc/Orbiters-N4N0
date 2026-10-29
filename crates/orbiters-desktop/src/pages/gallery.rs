@@ -55,6 +55,11 @@ pub struct State {
     instance: Option<Entry>,
     fixture: bool,
     roster_job: Job<Vec<String>>,
+    instance_job: Job<Result<Option<bool>, String>>,
+    instance_scope: Option<crate::controller::vrchat_data::Scope>,
+    instance_checked: bool,
+    instance_alive: Option<bool>,
+    instance_error: Option<String>,
 }
 impl State {
     pub fn busy(&self) -> bool {
@@ -83,11 +88,17 @@ impl State {
         if name == "gallery-public" {
             self.feed.items[0].public = true;
         }
-        if name == "gallery-instance" {
+        if name.starts_with("gallery-instance") {
             let mut entry = controller::remote_entry(self.feed.items[0].clone());
             entry.instance = Some("12345~friends(usr_11111111-1111-1111-1111-111111111111)~region(eu)".into());
             entry.people = vec!["Alex".into(), "Mika".into(), "Robin".into()];
             self.instance = Some(entry);
+            self.instance_alive = match name {
+                "gallery-instance-live" => Some(true),
+                "gallery-instance-closed" => Some(false),
+                _ => None,
+            };
+            self.instance_error = (name == "gallery-instance-error").then(|| "VRChat is busy. Please try again shortly.".into());
         }
         if name == "gallery-empty" {
             self.query = "No matching world".into();
@@ -106,6 +117,7 @@ impl State {
             "gallery-public",
             "gallery-grantee",
             "gallery-friends",
+            "gallery-friends-error",
             "gallery-explicit",
             "gallery-error",
             "gallery-picture",
@@ -318,6 +330,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                             .show_at(ui, b),
                     ) {
                         state.instance = Some(first.clone());
+                        state.instance_checked = false;
+                        state.instance_alive = None;
+                        state.instance_error = None;
+                        state.instance_job = Job::default();
                         let location = first.instance.as_ref().map(|i| format!("{}:{i}", first.world_id));
                         let taken = first.taken;
                         state.roster_job =
@@ -494,6 +510,34 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         }
     }
     if let Some(e) = state.instance.clone() {
+        let scope = crate::controller::vrchat_data::Scope::of(cx.snap);
+        if !state.fixture && state.instance_scope.as_ref() != Some(&scope) {
+            state.instance_scope = Some(scope.clone());
+            state.instance_job = Job::default();
+            state.instance_checked = false;
+            state.instance_alive = None;
+            state.instance_error = None;
+        }
+        if !state.fixture && !state.instance_checked {
+            state.instance_checked = true;
+            if let Some(instance) = e.instance.clone() {
+                let backend = cx.ctl.clone();
+                let world = e.world_id.clone();
+                state.instance_job = Job::spawn(&ctx, move || {
+                    use crate::controller::vrchat_data::{Request, Response};
+                    match backend.vrchat_data(scope, Request::Instance { world, instance })? {
+                        Response::Instance(alive) => Ok(alive),
+                        _ => Err("Unexpected instance response.".into()),
+                    }
+                });
+            }
+        }
+        if let Some(result) = state.instance_job.take() {
+            match result {
+                Ok(alive) => state.instance_alive = alive,
+                Err(e) => state.instance_error = Some(e),
+            }
+        }
         let response = egui::Modal::new(Id::unique("capture-instance-info"))
             .frame(egui::Frame::NONE.fill(theme::INK_900).corner_radius(20).inner_margin(24))
             .show(&ctx, |ui| {
@@ -509,14 +553,28 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                 let people = if current { cx.snap.vrchat.world.players.values().cloned().collect::<Vec<_>>() } else { e.people.clone() };
                 ui.label(if people.is_empty() { "Who was there was not recorded".into() } else { people.join(", ") });
                 ui.add_space(16.0);
-                if current {
+                if join_available(current, state.instance_alive) && e.instance.is_some() {
                     let instance = e.instance.as_deref().unwrap();
                     let link = format!("https://vrchat.com/home/launch?worldId={}&instanceId={}", e.world_id, encode(instance));
                     if sharing::pressed(Button::new("Open in VRChat").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).show(ui)) {
                         let _ = crate::controller::open_url(&link);
                     }
                 } else {
-                    ui.label(egui::RichText::new("Open in VRChat is available only for your current instance.").color(theme::FG_3));
+                    let message = if state.instance_alive == Some(false) {
+                        "This instance is no longer active."
+                    } else if state.instance_job.running() {
+                        "Checking whether this instance is still active…"
+                    } else {
+                        "Open in VRChat is available only for your current instance."
+                    };
+                    ui.label(egui::RichText::new(message).color(theme::FG_3));
+                }
+                if let Some(error) = &state.instance_error {
+                    ui.colored_label(theme::FG_3, error);
+                    if sharing::pressed(Button::new("Retry").show(ui)) {
+                        state.instance_error = None;
+                        state.instance_checked = false;
+                    }
                 }
                 if Button::new("Done").show(ui).clicked() {
                     state.instance = None;
@@ -547,6 +605,9 @@ fn groups(entries: &[Entry]) -> Vec<Vec<usize>> {
 fn is_current(world: &WorldState, e: &Entry) -> bool {
     world.in_world && world.world_id.as_ref() == Some(&e.world_id) && e.instance.is_some() && world.instance == e.instance
 }
+fn join_available(current: bool, alive: Option<bool>) -> bool {
+    alive.unwrap_or(current)
+}
 fn instance_type(instance: &str) -> &str {
     if instance.contains("~private(") {
         if instance.contains("~canRequestInvite") {
@@ -571,6 +632,13 @@ fn encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn join_requires_live_confirmation_or_the_current_instance() {
+        assert!(!join_available(false, None));
+        assert!(join_available(true, None));
+        assert!(join_available(false, Some(true)));
+        assert!(!join_available(true, Some(false)));
+    }
     #[test]
     fn instance_groups_cross_midnight_but_never_worlds_or_unknown_days() {
         let entry = |world: &str, instance: Option<&str>, taken| {

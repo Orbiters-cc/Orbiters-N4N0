@@ -11,6 +11,9 @@ pub struct Source {
     log_account: Option<String>,
 }
 impl Source {
+    pub fn direct_available(&self) -> bool {
+        self.direct.as_ref().is_some_and(|c| c.lock().unwrap().signed_in())
+    }
     pub fn new(direct: Option<Arc<Mutex<Client>>>, orbiters: Option<(Api, String)>, log_account: Option<String>) -> Self {
         Self { direct, orbiters, log_account }
     }
@@ -47,13 +50,16 @@ impl Source {
         }))
     }
     pub fn friends(&self) -> anyhow::Result<Vec<User>> {
+        let local = || {
+            crate::vrchat_accounts::friends(self.log_account.as_deref())
+                .into_iter()
+                .map(|f| User { id: f.id, display_name: f.name, user_icon: f.image.unwrap_or_default(), ..Default::default() })
+                .collect::<Vec<_>>()
+        };
         if let Some(r) = self.direct(Client::friends) {
-            return r;
+            return r.map(|direct| merge_friends(direct, local()));
         }
-        Ok(crate::vrchat_accounts::friends(self.log_account.as_deref())
-            .into_iter()
-            .map(|f| User { id: f.id, display_name: f.name, user_icon: f.image.unwrap_or_default(), ..Default::default() })
-            .collect())
+        Ok(local())
     }
     pub fn user(&self, id: &str) -> anyhow::Result<Option<User>> {
         self.direct(|c| c.user(id)).transpose()
@@ -69,14 +75,29 @@ impl Source {
         if let Some(r) = self.direct(|c| c.image(url)) {
             return r;
         }
-        let (api, _) = self.orbiters.as_ref().ok_or_else(|| anyhow::anyhow!("Sign in to Orbiters to load this image."))?;
-        api.image(url)
+        match &self.orbiters {
+            Some((api, _)) => api.image(url),
+            None => Api::new(crate::account::Server::current()).image(url),
+        }
     }
+}
+
+fn merge_friends(direct: Vec<User>, local: Vec<User>) -> Vec<User> {
+    let mut seen = std::collections::HashSet::new();
+    let mut users: Vec<_> = direct.into_iter().chain(local).filter(|u| u.id.starts_with("usr_") && seen.insert(u.id.clone())).collect();
+    users.sort_by_cached_key(|u| u.display_name.to_lowercase());
+    users
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn personal_friends_win_over_local_duplicates() {
+        let user = |id: &str, name: &str| User { id: id.into(), display_name: name.into(), ..Default::default() };
+        let merged = merge_friends(vec![user("usr_a", "Fresh")], vec![user("usr_a", "Stale"), user("usr_b", "Other"), user("invalid", "Skip")]);
+        assert_eq!(merged.iter().map(|u| u.display_name.as_str()).collect::<Vec<_>>(), ["Fresh", "Other"]);
+    }
     #[test]
     fn orbiters_fallback_never_receives_vrchat_cookies() {
         use std::io::{Read, Write};

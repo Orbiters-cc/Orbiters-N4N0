@@ -57,9 +57,20 @@ rate limits and service errors are surfaced rather than adding load to the share
 out or losing eligibility also invalidates cached direct data. The UI's signed-in display is in
 `Snapshot::vrchat_login`; it never contains cookies or a password.
 
-The existing project pages, sharing pages, friend picker and instance links are intentionally left
-for their workstream owners to connect to this boundary. No server feature row, version, release,
-push or live VRChat sign-in is included in this local change.
+The Unity project thumbnails, sharing friends picker and instance-info dialog now use this boundary through
+read-only `VrchatData` IPC requests. Each request runs on a service worker and is answered only to its requesting
+window, with a correlation ID. Account, environment, eligibility or session changes discard pending results and
+clear the window's direct-data caches. Image loaders also call the service; cookies never leave it.
+
+Toolkit avatar files remain first. A signed-in personal session loads the remaining avatars and image bytes;
+without one, the existing batched Orbiters thumbnail cache/request path is retained. Personal friends are merged
+with the local VRCX/VRCNext list by `usr_` ID, with personal names and pictures preferred. Public local-cache pictures
+can still load without signing in to Orbiters. Direct service/rate-limit errors are shown with retry actions.
+
+Opening Instance info lazily checks that world/instance. The client caches explicit true/false and unknown results
+for 60 seconds (at most 256 entries); revocation prevents even cached reads. Explicitly active history instances
+offer Open in VRChat; explicitly inactive instances do not. Unknown or inaccessible instances retain the existing
+current-instance behavior. No server feature row, version, release, push or live VRChat sign-in is included here.
 
 ## Validation
 

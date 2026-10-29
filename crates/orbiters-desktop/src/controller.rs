@@ -269,7 +269,6 @@ fn calibration_info(stored: &StoredCalibration) -> CalibrationInfo {
 pub type Shared = Arc<Controller>;
 
 mod account;
-pub mod vrchat_login;
 mod burst;
 mod calls;
 mod cleanup;
@@ -282,6 +281,8 @@ mod scan;
 pub mod shares;
 pub mod update;
 mod videos;
+pub mod vrchat_data;
+pub mod vrchat_login;
 pub use account::open_url;
 
 impl Controller {

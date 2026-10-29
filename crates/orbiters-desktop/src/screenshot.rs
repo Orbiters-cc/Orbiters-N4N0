@@ -1364,12 +1364,16 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "gallery-public",
         "gallery-grantee",
         "gallery-friends",
+        "gallery-friends-error",
         "gallery-explicit",
         "gallery-error",
         "gallery-picture",
         "gallery-progress",
         "gallery-request",
         "gallery-instance",
+        "gallery-instance-live",
+        "gallery-instance-closed",
+        "gallery-instance-error",
         "gallery-empty",
         "gallery-requests",
         "gallery-requests-explicit",
@@ -1431,7 +1435,9 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
     let mut library_staged = false;
     backend.attach(&ctx);
     let mut app = App::offline(backend);
-    if sc.name == "vrchat-login-entering-password" { app.stage_vrchat_login(); }
+    if sc.name == "vrchat-login-entering-password" {
+        app.stage_vrchat_login();
+    }
     app.set_gpu(crate::gpu::Handles::of_offscreen(gpu));
     if !sc.splash {
         app.skip_splash();

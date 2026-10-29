@@ -9,8 +9,10 @@ Items are ordered newest first and grouped by world and recorded instance. A ses
 instance; pictures use the most recent retained VRChat join before their timestamp, only when it names the same
 world. Items without an instance are grouped by world/day and say that the instance was not recorded. Shared items use
 the server's `instanceId` when it is available. Instance info reads VRCX's recorded joins/leaves on a background
-thread for a historical roster when available. Open in VRChat appears only for the currently running VRChat
-instance: historical joins and the Previous instances list do not establish that an instance is still alive.
+thread for a historical roster when available. Opening Instance info also checks liveness through the member's
+eligible VRChat session on a worker. Explicitly active instances offer Open in VRChat; inactive ones do not.
+Unknown/inaccessible instances retain the current-instance-only behavior. Checks are cached for 60 seconds;
+errors stay in the dialog with Retry. Historical joins alone never establish liveness.
 
 Manage captures retains reconstruction, import, storage cleanup and the original detailed capture inspector.
 The main gallery opens an item dialog. Local reconstructed captures use the existing 3D viewer; downloaded `.splat`
@@ -22,7 +24,9 @@ thread. Existing picture loaders also accept PNG, JPEG and WebP remote profile p
 ## Sharing and revoking
 
 - Share publicly uploads an unuploaded item publicly, or shares an uploaded item with `public: true`.
-- Share to … opens a searchable VRChat friends picker, with cached names and pictures from VRCX/VRCNext, up to
+- Share to … opens a searchable VRChat friends picker. An eligible signed-in VRChat session supplies friends and
+  pictures through the service; these are merged with VRCX/VRCNext by user ID, preferring VRChat's data. Otherwise
+  the local cache supplies the list. Loading and retry errors stay in the picker. It allows up to
   50 recipients and a 280-character optional message. New uploads are private before their grants are made.
 - Recipients see who shared the item, Download / open and Request share. A request can name recipients and/or ask
   for public sharing. A 202 response is shown as a pending request, never as a successful publication.

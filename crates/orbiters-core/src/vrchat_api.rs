@@ -297,6 +297,7 @@ pub struct Client {
     pending_methods: Vec<TwoFactor>,
     avatars: HashMap<String, (Instant, Avatar)>,
     friends: Option<(Instant, Vec<User>)>,
+    instances: HashMap<(String, String), (Instant, Option<bool>)>,
     store: Option<PathBuf>,
 }
 impl Client {
@@ -321,6 +322,7 @@ impl Client {
             pending_methods: Vec::new(),
             avatars: HashMap::new(),
             friends: None,
+            instances: HashMap::new(),
             store: dirs::data_local_dir().map(|d| d.join("Orbiters/vrchat-session.bin")),
         }
     }
@@ -374,6 +376,7 @@ impl Client {
         self.pending_methods.clear();
         self.avatars.clear();
         self.friends = None;
+        self.instances.clear();
         if let Some(path) = &self.store {
             match std::fs::remove_file(path) {
                 Ok(()) => {}
@@ -467,6 +470,7 @@ impl Client {
                 self.user = None;
                 self.avatars.clear();
                 self.friends = None;
+                self.instances.clear();
                 self.pending_methods = methods.clone();
             }
         }
@@ -587,14 +591,23 @@ impl Client {
     /// None when access is denied: a hidden instance cannot be declared dead.
     pub fn instance_alive(&mut self, world: &str, instance: &str) -> Result<Option<bool>> {
         self.authenticated()?;
-        match self.get("instances", &format!("/instances/{}:{}", encode(world), encode(instance))) {
+        let key = (world.to_owned(), instance.to_owned());
+        if let Some((_, alive)) = self.instances.get(&key).filter(|(at, _)| at.elapsed() < Duration::from_secs(60)) {
+            return Ok(*alive);
+        }
+        let alive = match self.get("instances", &format!("/instances/{}:{}", encode(world), encode(instance))) {
             Ok(r) => {
                 let v: serde_json::Value = serde_json::from_slice(&r.body).map_err(|_| Error::InvalidResponse)?;
                 Ok(v.get("active").and_then(|v| v.as_bool()))
             }
             Err(Error::NotFound) => Ok(None),
             Err(e) => Err(e),
+        }?;
+        if self.instances.len() >= 256 {
+            self.instances.clear();
         }
+        self.instances.insert(key, (Instant::now(), alive));
+        Ok(alive)
     }
     /// Only VRChat-owned image hosts. Redirects to any other host are refused before credentials leave the process.
     pub fn image(&mut self, url: &str) -> Result<Vec<u8>> {
@@ -651,6 +664,23 @@ pub(crate) mod tests {
     }
     pub(crate) fn expired_session() -> Client {
         mock(vec![response(401, "", &[])]).0
+    }
+    #[test]
+    fn source_routes_avatar_image_and_instance_through_the_personal_session() {
+        let (c, seen) = mock(vec![
+            response(200, r#"{"id":"avtr_a","name":"Avatar","thumbnailImageUrl":"https://api.vrchat.cloud/image"}"#, &[]),
+            response(200, "pixels", &[]),
+            response(200, r#"{"active":true}"#, &[]),
+        ]);
+        let source = crate::vrchat_source::Source::new(Some(Arc::new(Mutex::new(c))), None, None);
+        assert!(source.direct_available());
+        let avatar = source.avatar("avtr_a").unwrap().unwrap();
+        assert_eq!(source.image(&avatar.thumbnail_image_url).unwrap(), b"pixels");
+        assert_eq!(source.instance_alive("wrld_a", "123").unwrap(), Some(true));
+        assert_eq!(source.instance_alive("wrld_a", "123").unwrap(), Some(true));
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert!(calls.iter().all(|r| r.cookie.contains("mock-session") && r.basic.is_none()));
     }
     #[test]
     fn basic_encodes_special_characters_before_base64() {
@@ -860,12 +890,17 @@ pub(crate) mod tests {
     }
     #[test]
     fn instances_do_not_confuse_hidden_or_unknown_with_closed() {
-        let (mut c, _) =
+        let (mut c, seen) =
             mock(vec![response(200, r#"{"active":true}"#, &[]), response(200, r#"{"active":false}"#, &[]), response(403, "", &[]), response(200, "null", &[])]);
         assert_eq!(c.instance_alive("wrld_a", "123"), Ok(Some(true)));
+        assert_eq!(c.instance_alive("wrld_a", "123"), Ok(Some(true)));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        c.instances.get_mut(&("wrld_a".into(), "123".into())).unwrap().0 -= Duration::from_secs(61);
         assert_eq!(c.instance_alive("wrld_a", "123"), Ok(Some(false)));
-        assert_eq!(c.instance_alive("wrld_a", "123"), Ok(None));
-        assert_eq!(c.instance_alive("wrld_a", "123"), Ok(None));
+        assert_eq!(c.instance_alive("wrld_a", "hidden"), Ok(None));
+        assert_eq!(c.instance_alive("wrld_a", "unknown"), Ok(None));
+        c.allowed.revoke();
+        assert_eq!(c.instance_alive("wrld_a", "123"), Err(Error::Disabled));
     }
     #[cfg(windows)]
     #[test]

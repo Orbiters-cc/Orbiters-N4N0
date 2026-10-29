@@ -270,6 +270,16 @@ impl Service {
             ToService::CancelSignIn => ctl.cancel_sign_in(),
             ToService::SignOut => report(ctl.sign_out()),
             ToService::VrchatLogin { command } => ctl.vrchat_command(command),
+            ToService::VrchatData { id, scope, request } => {
+                let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
+                if let Some(mailbox) = mailbox {
+                    let ctl = ctl.clone();
+                    std::thread::spawn(move || {
+                        let result = ctl.vrchat_data(scope, request);
+                        mailbox.post(ToClient::VrchatData { id, result });
+                    });
+                }
+            }
             ToService::StopReconstruction => {
                 ctl.stop_reconstruction();
             }

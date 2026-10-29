@@ -51,6 +51,10 @@ pub trait Backend: Send + Sync {
     fn cancel_sign_in(&self);
     fn sign_out(&self);
     fn vrchat_login(&self, _command: crate::controller::vrchat_login::Command) {}
+    /// Blocking read-only request. Call only from a page job or image loader.
+    fn vrchat_data(&self, _scope: controller::vrchat_data::Scope, _request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
+        Err("VRChat data is unavailable.".into())
+    }
     /// Asks for the worker's log; [`Backend::worker_log`] has it once it arrived.
     fn request_worker_log(&self);
     fn worker_log(&self) -> Option<Vec<String>>;
@@ -99,6 +103,9 @@ pub type Ctl = Arc<dyn Backend>;
 pub struct Remote(pub Arc<Client>);
 
 impl Backend for Remote {
+    fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
+        self.0.vrchat_data(scope, request)
+    }
     fn view(&self) -> Arc<Snapshot> {
         self.0.snapshot()
     }
@@ -295,6 +302,9 @@ impl Local {
 }
 
 impl Backend for Local {
+    fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
+        self.ctl.vrchat_data(scope, request)
+    }
     fn view(&self) -> Arc<Snapshot> {
         self.ctl.view()
     }

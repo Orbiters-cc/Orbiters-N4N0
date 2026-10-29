@@ -59,6 +59,36 @@ with animated width, label fades and separating halves. Its spring matches the w
 world's card chooses its newest reconstructed capture, or its pictures when it has no reconstructed capture;
 individual captures and selected pictures are also available from the world's detail.
 
+## Copy public link
+
+A 3D capture's window (Photos & captures and Visited worlds) has Copy public link beside Share publicly and Share to ….
+It copies `https://orbiters.cc/maps/<world>/captures/<id>` (`dev.orbiters.cc` with the development environment), the
+world's page opened on that capture, which Discord and other apps unfurl with the capture's picture and "3D capture,
+click to open" (contracts `Docs/capture-sharing.md`, Public page). A capture that is not public yet is shared publicly
+first by the same tray job as Share publicly (with the explicit warning; Share anyway still copies); a public capture
+uploaded without its picture gets it then (`Api::set_capture_picture`). Uploads send the picture with the capture
+(`capture_picture.rs`: the reconstruction's preview as JPEG). For items shared with you the button shows only when they
+are public. The link stops showing the capture once its owner shares another capture of that world publicly (one public
+capture per member and world).
+
+## Selecting and dragging out
+
+Ctrl-click, Shift-click, a card's corner check or a rubber band on the grid's empty space select cards; while some are
+selected a click adds or removes one, Ctrl+A selects every card shown, Esc clears, and a bar at the bottom shows them
+with Select all and Clear. Cards open on click (release), since a press may start a drag. Dragging a card, or any card
+of the selection, hands the files to the app it is dropped on through Windows' own drag and drop (`drag_out.rs`): the
+shell's data object for the files (what Explorer hands out), copy as the only allowed effect (VRChat's originals are never
+moved), a drag image of the stacked pictures with a count badge. A VRChat picture is its PNG; a 3D capture or recording
+is the PNG of its 3D view (its thumbnail before reconstruction), written once into `<cache>/dragged/<capture folder>.png`.
+Items that are only on Orbiters are left out. The drag starts from `App::raw_input_hook` once the frame with the lifted
+cards is on screen (Windows' loop is modal; the window does not repaint during it) and egui gets the button's release
+afterwards. A drop back on this window copies nothing.
+
+Checked: the ignored test `drag_out::win::tests::explorer_copies_what_is_dragged_out` drops the data object into
+Explorer's drop handler for a folder; screenshots `gallery-select`, `gallery-select-mid`, `gallery-drag-lift` (and
+`gallery-drag-image.png`), `gallery-copied`, `gallery-copy-link`, `gallery-copy-link-offer`. Real drags into other apps
+were not tried by hand.
+
 ## From N4N0's menu
 
 N4N0's menu on the avatar's screen (screen version 12) and in the SteamVR overlay shares 3D captures too (contracts

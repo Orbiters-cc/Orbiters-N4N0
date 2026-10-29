@@ -10,6 +10,7 @@ name = "orbiters-desktop"
 path = "src/main.rs"
 
 [dependencies]
+orbiters-projects = { workspace = true }
 orbiters-core = { workspace = true }
 orbiters-contracts = { workspace = true }
 orbiters-ui = { workspace = true }

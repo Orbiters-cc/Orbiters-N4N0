@@ -31,6 +31,8 @@ pub enum Server {
 
 /// Unity's EditorPrefs key for the switch (Toolkit's `OrbitersEnvironment`).
 const DEV_SWITCH: &str = "MCB_DevEnvironment";
+/// Fill this once the N4N0 gallery item is published on production. IDs are scoped to their server.
+pub const N4N0_PRODUCTION_GALLERY_ASSET_ID: Option<u64> = None;
 /// Toolkit's DPAPI entropy for the account file.
 const ENTROPY: &[u8] = b"Orbiters.Toolkit account";
 /// The client name Orbiters - N4N0 signs in as (the server's editor-link clients).
@@ -51,6 +53,13 @@ pub fn choose_server(server: Option<Server>) {
 }
 
 impl Server {
+    pub fn n4n0_gallery_asset_id(self) -> Option<u64> {
+        match self {
+            Server::Development => Some(30),
+            Server::Production => N4N0_PRODUCTION_GALLERY_ASSET_ID,
+        }
+    }
+
     /// The server the app chose ([`choose_server`]), else the one the Unity tools are set to (production when Unity
     /// never set it, or on other systems).
     pub fn current() -> Self {

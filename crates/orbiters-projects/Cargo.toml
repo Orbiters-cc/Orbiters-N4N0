@@ -1,0 +1,27 @@
+[package]
+name = "orbiters-projects"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+uuid.workspace = true
+time.workspace = true
+orbiters-core.workspace = true
+vrc-get-vpm = { version = "=0.0.17", features = ["experimental-project-management"] }
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "time", "io-util"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
+indexmap = "2"
+url = "2"
+walkdir = "2"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+[dev-dependencies]
+tempfile = "3"

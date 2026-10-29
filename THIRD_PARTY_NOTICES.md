@@ -14,6 +14,9 @@ every crate built into the programs, and of the native libraries next to them, a
 | AccessKit | MIT OR Apache-2.0 |
 | tray-icon, muda | MIT OR Apache-2.0 |
 | rfd | MIT |
+| vrc-get-vpm (ALCOM's VPM resolver), vrc-get-litedb (shared VCC project database) | MIT |
+| reqwest, hyper, tower, rustls (VPM downloads) | MIT OR Apache-2.0, MIT, MIT, Apache-2.0 OR ISC OR MIT |
+| walkdir, winreg (Unity project discovery) | MIT OR Unlicense, MIT |
 | tiny-skia | BSD-3-Clause |
 | png | MIT OR Apache-2.0 |
 | bytemuck | Zlib OR Apache-2.0 OR MIT |

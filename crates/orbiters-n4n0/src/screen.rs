@@ -1813,7 +1813,8 @@ pub(crate) fn tick(
     if s.pressed.is_some_and(|(_, at)| now.duration_since(at) > PRESS_SHOWN && !s.holding.iter().any(|h| *h) && !s.clicking) {
         s.pressed = None;
     }
-    if s.menu.open && listening {
+    // Listening, or watching the screen mirror's page (a video, nothing to press): the menu stays open.
+    if s.menu.open && (listening || s.menu.page == Page::Mirror) {
         s.last_activity = now;
     }
     if s.menu.open && now.duration_since(s.last_activity) > IDLE_CLOSE {

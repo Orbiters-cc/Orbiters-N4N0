@@ -259,7 +259,9 @@ pub enum Picture {
     /// Another picture a few pixels wide, to draw large and soft as its light (behind an event, its window).
     Glow(Box<Picture>),
     /// A picture of a community gallery on Orbiters: its preview, or the full picture when `large` (kept in memory).
-    Gallery { id: u64, url: String, large: bool },
+    /// `id` is its placement (0: a picture that is not a gallery's, such as an author's); an empty `url` or one that
+    /// does not load (Discord's links expire) is renewed by Orbiters with the member's credential.
+    Gallery { development: bool, id: u64, url: String, large: bool },
 }
 
 enum Slot {
@@ -498,8 +500,19 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
             let small = image::imageops::thumbnail(&full, tw, th);
             Some(ColorImage::from_rgba_premultiplied([small.width() as usize, small.height() as usize], small.as_raw()))
         }
-        Picture::Gallery { url, large, .. } => {
-            let bytes = api.image(url).ok()?;
+        Picture::Gallery { development, id, url, large } => {
+            let given = (!url.is_empty()).then(|| api.image(url).ok()).flatten();
+            let bytes = match given {
+                Some(b) => b,
+                None if *id != 0 => {
+                    let server = if *development { Server::Development } else { Server::Production };
+                    let account = orbiters_core::account::read(server)?;
+                    let renewed = Api::new(server).picture_source(&account.token, *id, !url.is_empty()).ok()?;
+                    let url = if *large { renewed.full_url.or(renewed.src) } else { renewed.src }?;
+                    api.image(&url).ok()?
+                }
+                None => return None,
+            };
             let image = image::load_from_memory(&bytes).ok()?.thumbnail(if *large { 2048 } else { 560 }, if *large { 4096 } else { 1120 }).to_rgba8();
             Some(ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw()))
         }

@@ -305,6 +305,15 @@ pub struct Picture {
     pub event: Option<Card>,
 }
 
+/// A picture's links renewed by Orbiters (`/galleries/images/:id/source`): Discord's links expire, and a picture whose
+/// link did lists without one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Source {
+    pub src: Option<String>,
+    pub full_url: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Pictures {
@@ -432,6 +441,16 @@ impl Api {
         let mut r = self.agent().get(&self.url(&path)).query("sort", "date").query("limit", limit.clamp(1, 48).to_string());
         if let Some(c) = cursor {
             r = r.query("cursor", c);
+        }
+        answer(self.signed(r, Some(token)).call()?)
+    }
+
+    /// A picture's links, renewed from Discord; `failed`: the link given before did not load (Orbiters then asks
+    /// Discord again even when its link looks fresh).
+    pub fn picture_source(&self, token: &str, id: u64, failed: bool) -> anyhow::Result<Source> {
+        let mut r = self.agent().get(&self.url(&format!("galleries/images/{id}/source")));
+        if failed {
+            r = r.query("failed", "1");
         }
         answer(self.signed(r, Some(token)).call()?)
     }

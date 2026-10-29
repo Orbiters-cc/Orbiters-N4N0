@@ -422,6 +422,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             entries.extend(state.community.entries(&q));
         }
         entries.sort_by_key(|e| std::cmp::Reverse(e.taken));
+        state.community.gather(&mut entries);
         entries
     };
 
@@ -469,7 +470,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                     }
                 }
                 let mut index = 0usize;
-                for indices in groups(&entries) {
+                for indices in groups(&entries, |e| state.community.whole(e)) {
                     let first = &entries[indices[0]];
                     let last = &entries[*indices.last().unwrap()];
                     let head_h = state.community.header_height(first).unwrap_or(52.0);
@@ -561,19 +562,26 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                     }
                     ui.add_space(32.0);
                 }
-                let more_feed = state.filter != Filter::Communities && state.feed.next.is_some();
-                let more_community = state.filter.communities() && state.community.has_more();
-                if more_feed || more_community {
-                    let running = state.feed_job.running() || state.community.loading();
-                    let b = Button::new(if running { "Loading…" } else { "Show more" }).variant(Variant::Ghost).enabled(!running);
-                    let bw = b.desired_width(ui);
-                    let (r, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
-                    if sharing::pressed(b.show_at(ui, Rect::from_center_size(r.center(), vec2(bw, 40.0)))) {
-                        if more_feed {
+                let more_feed = state.filter != Filter::Communities && state.feed.next.is_some() && state.error.is_none();
+                let more_community = state.filter.communities() && state.community.has_more() && state.community.error().is_none();
+                if (more_feed || more_community) && !entries.is_empty() {
+                    // Endless: the next page is asked for while the end is still a screen away, and a row of
+                    // shimmering cards holds the place its pictures arrive in (a failed page says so below, with
+                    // Try again, instead of asking again and again).
+                    let (cols, w) = orbiters_ui::layout::columns(width, CARD_MIN, 16.0);
+                    let h = w * 9.0 / 16.0 + CARD_BODY;
+                    let (r, _) = ui.allocate_exact_size(vec2(width, h), Sense::hover());
+                    if r.top() < ui.clip_rect().bottom() + ui.clip_rect().height() {
+                        if more_feed && !state.feed_job.running() {
                             state.fetch(&ctx, server, true);
                         }
-                        if more_community {
+                        if more_community && !state.community.loading() {
                             state.community.more(&ctx, cx);
+                        }
+                    }
+                    if ui.is_rect_visible(r) {
+                        for c in 0..cols {
+                            super::sessions::shimmer_card(ui, Rect::from_min_size(r.min + vec2(c as f32 * (w + 16.0), 0.0), vec2(w, h)));
                         }
                     }
                 }
@@ -788,7 +796,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         state.roster_job = Job::spawn(&ctx, move || location.map(|l| orbiters_core::vrchat_accounts::instance_people(&l, taken)).unwrap_or_default());
     }
     if state.stage_instance && state.instance.is_none() {
-        if let Some(first) = groups(&entries).first().map(|g| entries[g[0]].clone()) {
+        if let Some(first) = groups(&entries, |e| state.community.whole(e)).first().map(|g| entries[g[0]].clone()) {
             if let Some(anchor) = state.instance_buttons.get(&first.key).copied() {
                 let mut entry = first;
                 entry.instance = Some("12345~friends(usr_11111111-1111-1111-1111-111111111111)~region(eu)".into());
@@ -1205,12 +1213,13 @@ fn person_txt(name: &str) -> Txt {
     Txt::new(name, 12.5).weight(weight::MEDIUM).color(theme::FG_2)
 }
 
-fn groups(entries: &[Entry]) -> Vec<Vec<usize>> {
+/// Runs of pictures of one instance, or of one world (or gallery) and day; `whole` groups (an event's gallery) span days.
+fn groups(entries: &[Entry], whole: impl Fn(&Entry) -> bool) -> Vec<Vec<usize>> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for (i, e) in entries.iter().enumerate() {
         let same = groups.last().and_then(|g| g.first()).is_some_and(|j| {
             let a = &entries[*j];
-            a.world_id == e.world_id && a.instance == e.instance && (a.instance.is_some() || a.taken / 86400 == e.taken / 86400)
+            a.world_id == e.world_id && a.instance == e.instance && (a.instance.is_some() || a.taken / 86400 == e.taken / 86400 || whole(a))
         });
         if same {
             groups.last_mut().unwrap().push(i);
@@ -1293,7 +1302,8 @@ mod tests {
             entry("a", None, 172796),
             entry("a", None, 86399),
         ];
-        assert_eq!(groups(&entries), vec![vec![0, 1], vec![2], vec![3], vec![4], vec![5]]);
+        assert_eq!(groups(&entries, |_| false), vec![vec![0, 1], vec![2], vec![3], vec![4], vec![5]]);
+        assert_eq!(groups(&entries, |e| e.world_id == "a" && e.instance.is_none()), vec![vec![0, 1], vec![2], vec![3], vec![4, 5]]);
     }
     #[test]
     fn instances_read_as_number_kind_and_region() {

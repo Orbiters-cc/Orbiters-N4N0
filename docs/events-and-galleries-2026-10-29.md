@@ -50,7 +50,13 @@ inspiration as you can from the website".
   through the shown community pictures, the next sliding in): who posted it and when, Open on Orbiters
   (`/gallery?tab=gallery-<id>`) and the full picture, its gallery, the message, likes and replies, and Taken at <event>,
   which opens the event's window out of that line.
-- Search finds galleries, events, authors and words; Show more pages both feeds.
+- Search finds galleries, events, authors and words. The list is endless: the next page of both feeds is asked for
+  while the end is a screen away, a row of shimmering cards holding its place (a failed page says so, with Try again).
+- An event's gallery heads its pictures with its card once, as the website's event gallery: its pictures join its
+  newest one whatever the days or other galleries' pictures between them (2026-10-30; it headed each batch before).
+- Pictures load in production (2026-10-30): Discord's attachment links expire, so most pictures list with `src: null`;
+  the loader asks `GET /galleries/images/:id/source` (with `failed=1` when a given link did not load) for a renewed
+  link, as the website does. The server allows that route to the app's credential from server `c1ce110a`.
 
 ## Server (dev branch)
 

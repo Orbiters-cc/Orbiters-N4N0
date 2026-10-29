@@ -45,18 +45,20 @@ fn visibility(g: Option<&Gallery>) -> (&'static str, &'static str, Color32) {
     }
 }
 
-/// The picture to show for a gallery picture: Orbiters' preview (or full picture), or a stand-in for screenshots.
-pub(super) fn source(p: &community::Picture, large: bool, stand_ins: &[Picture]) -> Option<Picture> {
+/// The picture to show for a gallery picture: Orbiters' preview (or full picture), or a stand-in for screenshots. Most
+/// pictures list without a link (Discord's expired): the loader asks Orbiters for a renewed one.
+pub(super) fn source(p: &community::Picture, large: bool, development: bool, stand_ins: &[Picture]) -> Option<Picture> {
     if !stand_ins.is_empty() {
         let _ = large;
         return Some(stand_ins[(p.id as usize) % stand_ins.len()].clone());
     }
-    let url = if large { p.full_url.as_ref().or(p.src.as_ref()) } else { p.src.as_ref() }?;
-    url.starts_with("https://").then(|| Picture::Gallery { id: p.id, url: url.clone(), large })
+    let url = if large { p.full_url.as_ref().or(p.src.as_ref()) } else { p.src.as_ref() };
+    let url = url.filter(|u| u.starts_with("https://")).cloned().unwrap_or_default();
+    (p.id != 0).then_some(Picture::Gallery { development, id: p.id, url, large })
 }
 
 fn avatar_of(m: Option<&community::Member>) -> Option<Picture> {
-    m?.avatar_url().map(|url| Picture::Gallery { id: 0, url, large: false })
+    m?.avatar_url().map(|url| Picture::Gallery { development: false, id: 0, url, large: false })
 }
 
 #[derive(Default)]
@@ -126,10 +128,13 @@ impl State {
                 p.event = Some(Card { status: Some("published".into()), ..first.clone() });
             }
         }
-        // Posted over the last hours.
+        // Posted over the last hours, the event's last two after another gallery's (posted later, as a second batch):
+        // the event's card still heads them all once.
         let now = events::now();
+        let places = [0i64, 1, 2, 5, 6, 3, 4, 7, 8, 9];
         for (i, p) in feed.items.iter_mut().enumerate() {
-            p.posted_at = time::OffsetDateTime::from_unix_timestamp(now - 1500 - i as i64 * 1300)
+            let place = places.get(i).copied().unwrap_or(i as i64);
+            p.posted_at = time::OffsetDateTime::from_unix_timestamp(now - 1500 - place * 1300)
                 .ok()
                 .and_then(|t| t.format(&time::format_description::well_known::Rfc3339).ok());
         }
@@ -239,7 +244,7 @@ impl State {
                 remote: None,
                 content: Default::default(),
                 ready: true,
-                picture: source(p, false, &self.stand_ins),
+                picture: source(p, false, self.covers.development, &self.stand_ins),
             });
         }
         out
@@ -250,10 +255,45 @@ impl State {
         self.feed.items.iter().find(|p| p.id == id)
     }
 
+    /// The event a gallery belongs to: its own word for it, or its pictures'.
+    fn event_of(&self, gallery: u64) -> Option<&Card> {
+        self.gallery(gallery).and_then(|g| g.event.as_ref()).or_else(|| self.feed.items.iter().find(|p| p.gallery_id == gallery).and_then(|p| p.event.as_ref()))
+    }
+
+    /// An event's gallery shows as one group, whatever the days its pictures span.
+    pub fn whole(&self, e: &Entry) -> bool {
+        gallery_of(e).is_some_and(|g| self.event_of(g).is_some())
+    }
+
+    /// An event's gallery heads its pictures with the event's card once, as the website's event gallery: its pictures
+    /// join its newest one, out of the places other pictures' times put them in between.
+    pub fn gather(&self, entries: &mut Vec<Entry>) {
+        let mut events: HashMap<u64, Vec<Entry>> = HashMap::new();
+        let mut order: Vec<Result<Entry, u64>> = Vec::with_capacity(entries.len());
+        for e in entries.drain(..) {
+            match gallery_of(&e).filter(|g| self.event_of(*g).is_some()) {
+                Some(g) => {
+                    let list = events.entry(g).or_default();
+                    if list.is_empty() {
+                        order.push(Err(g));
+                    }
+                    list.push(e);
+                }
+                None => order.push(Ok(e)),
+            }
+        }
+        for slot in order {
+            match slot {
+                Ok(e) => entries.push(e),
+                Err(g) => entries.extend(events.remove(&g).unwrap_or_default()),
+            }
+        }
+    }
+
     /// The height of a group's heading when the group is a gallery's (an event's gallery heads with its card).
     pub fn header_height(&self, first: &Entry) -> Option<f32> {
         let g = gallery_of(first)?;
-        Some(if self.gallery(g).and_then(|g| g.event.as_ref()).is_some() { 116.0 } else { 52.0 })
+        Some(if self.event_of(g).is_some() { 116.0 } else { 52.0 })
     }
 
     /// A gallery group's heading: the gallery, whose it is, when and how many; an event's gallery heads with the
@@ -265,7 +305,7 @@ impl State {
         let g = self.gallery(gid).cloned();
         let span = span(first.taken, last.taken);
         let items = format!("{count} picture{}", if count == 1 { "" } else { "s" });
-        if let Some(event) = g.as_ref().and_then(|g| g.event.clone()) {
+        if let Some(event) = self.event_of(gid).cloned() {
             let card = Rect::from_min_size(r.min, vec2(r.width(), 100.0));
             let tex = self.covers.card(&event, CoverSize::Card).and_then(|p| pictures.get(ui.ctx(), &p));
             let shown = self.event.as_ref().filter(|w| w.id == event.id).map_or(1.0, |w| w.card_shown());
@@ -726,8 +766,9 @@ impl PictureWindow {
             pos2(page.left() + WINDOW_GUTTER, page.top() + cx.top + 12.0),
             pos2(page.right() - WINDOW_GUTTER, page.bottom() - WINDOW_GUTTER),
         );
-        let thumb = source(&p, false, &self.stand_ins).and_then(|s| pictures.get(&ctx, &s));
-        let large = source(&p, true, &self.stand_ins).and_then(|s| pictures.get(&ctx, &s));
+        let development = cx.snap.settings.development;
+        let thumb = source(&p, false, development, &self.stand_ins).and_then(|s| pictures.get(&ctx, &s));
+        let large = source(&p, true, development, &self.stand_ins).and_then(|s| pictures.get(&ctx, &s));
         let aspect = large.as_ref().or(thumb.as_ref()).map(|t| t.size_vec2().x / t.size_vec2().y.max(1.0)).unwrap_or(if p.height > 0 {
             p.width as f32 / p.height as f32
         } else {
@@ -999,4 +1040,24 @@ fn details(
         }
     }
     let _ = Tone::Ok;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_event_gallery_heads_its_pictures_once() {
+        let mut state = State::default();
+        let event = Card { id: "e1".into(), ..Default::default() };
+        let picture = |id, gallery_id, event: Option<Card>| community::Picture { id, gallery_id, event, ..Default::default() };
+        state.feed.items = vec![picture(1, 31, Some(event.clone())), picture(2, 12, None), picture(3, 31, Some(event.clone())), picture(4, 12, None)];
+        let mut entries = state.entries("");
+        let order = |e: &[Entry]| e.iter().map(|e| e.key.clone()).collect::<Vec<_>>();
+        state.gather(&mut entries);
+        assert_eq!(order(&entries), ["community:1", "community:3", "community:2", "community:4"]);
+        assert!(state.whole(&entries[0]) && !state.whole(&entries[2]));
+        assert_eq!(state.header_height(&entries[0]), Some(116.0));
+        assert_eq!(state.header_height(&entries[2]), Some(52.0));
+    }
 }

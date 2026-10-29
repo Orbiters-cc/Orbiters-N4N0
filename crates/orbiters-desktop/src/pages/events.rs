@@ -1124,7 +1124,7 @@ impl Window {
                 .icon_url
                 .as_ref()
                 .filter(|u| u.starts_with("https://"))
-                .and_then(|u| pictures.get(&ctx, &Picture::Gallery { id: 0, url: u.clone(), large: false }));
+                .and_then(|u| pictures.get(&ctx, &Picture::Gallery { development: false, id: 0, url: u.clone(), large: false }));
             widgets::avatar(&p, ar, icon.as_ref(), &h.name);
             widgets::text(&p, pos2(ar.right() + 12.0, ar.top() + 11.0), Align2::LEFT_CENTER, &Txt::caps("Hosted by"));
             widgets::text_truncated(
@@ -1362,7 +1362,7 @@ impl Window {
             for i in 0..n {
                 let pic = &self.pictures[i];
                 let tr = Rect::from_min_size(pos2(row.left() + i as f32 * (tw + gap), row.top()), vec2(tw, th));
-                let tex = super::community::source(pic, false, &self.stand_ins).and_then(|p| pictures.get(&ctx, &p));
+                let tex = super::community::source(pic, false, cx.snap.settings.development, &self.stand_ins).and_then(|p| pictures.get(&ctx, &p));
                 let resp = ui.interact(tr, wid.with(("picture", i)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
                 let hover = anim::toggle(&ctx, wid.with(("picture-hover", i)), resp.hovered(), Spring::SOFT);
                 let p = ui.painter();

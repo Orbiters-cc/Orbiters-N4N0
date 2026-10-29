@@ -449,7 +449,7 @@ fn tiles(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
             "Strip decoded",
             s.map(|_| if decoded > 99.95 { format!("{decoded:.0}%") } else { format!("{decoded:.1}%") }).unwrap_or_else(|| "–".into()),
             match s {
-                // Gone for a while: the camera may not see the avatar (the kit's "Near you" reach), and no keyframes come.
+                // Gone for a while: the camera may not see an avatar uploaded with an older N4N0, and no keyframes come.
                 Some(s) if s.strip_missing_s >= 2.0 => format!("none for {:.0} s: is your avatar in view?", s.strip_missing_s),
                 Some(s) => format!("{} unreadable", format::integer(s.strip_failed as f64)),
                 None => "pose strip in every frame".into(),

@@ -238,8 +238,8 @@ pub struct CaptureStats {
     #[serde(default)]
     pub extra_other_size: u64,
     /// Seconds since a frame's strip was last read, while frames keep coming and after it was read once (0 while it
-    /// is read): frames without it have no camera pose, so no keyframe. The capture kit's "Near you" reach draws it
-    /// only while the camera sees the avatar or is near it.
+    /// is read): frames without it have no camera pose, so no keyframe. An avatar uploaded with an older N4N0 (up to
+    /// 1.0.15) draws it only while the camera sees the avatar or is near it.
     pub strip_missing_s: f32,
     /// What went wrong that the recording goes on without (a microphone that could not be opened, files that could
     /// not be written), the latest of each kind. The strip's state is in `last_error`. The worker also sends each as
@@ -264,6 +264,12 @@ pub enum WorkerEvent {
         source: String,
     },
     Stats(CaptureStats),
+    /// The avatar's hips as the latest colour frame's skeleton band gave them (world position, and rotation x, y, z,
+    /// w), at most about 30 times a second: where N4N0's camera rig hangs from (contracts' `Docs/rig-frames.md`).
+    Hips {
+        position: [f32; 3],
+        rotation: [f32; 4],
+    },
     /// About once a second while recording: what the depth frames have seen so far.
     Coverage(CoverageMap),
     Stopped {

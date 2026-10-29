@@ -5,8 +5,9 @@
 //! looking at it (the person taking the picture) then turn in place looking straight up and down and fly 10 m forward,
 //! to each side and up and back; 8 s that add four circles around points 8 m away.
 //!
-//! N4N0's camera rig (contracts' Docs/rig-frames.md) follows the camera and is on for the whole flight
-//! (controller/rig.rs): about every other colour frame then carries six more views, one along each axis around it.
+//! N4N0's camera rig (contracts' Docs/rig-frames.md) follows the camera, from the avatar's hips, and is on for the
+//! whole flight (controller/rig.rs): about every other colour frame then carries six more views, one along each axis
+//! around it.
 
 use super::{NoticeKind, Shared};
 use crate::state::CaptureState;
@@ -185,17 +186,17 @@ pub fn path(start: [f32; 6], length: Photo3dLength, focus: f32, rate: u32) -> Ve
     poses
 }
 
-/// N4N0's camera rig's parameters for a camera pose: following it, where it stands (each axis over
-/// [`rig::REACH_M`]) and its heading (over [`rig::YAW_DEG`]), level. VRChat takes OSC floats from -1 to 1.
-pub fn rig_parameters(pose: &[f32; 6]) -> Vec<(String, Vec<rosc::OscType>)> {
-    let at = |v: f32| rosc::OscType::Float((v / rig::REACH_M).clamp(-1.0, 1.0));
-    let yaw = (pose[4] + 180.0).rem_euclid(360.0) - 180.0;
+/// N4N0's camera rig's parameters for a camera pose, with the avatar's hips at `hips`: following it, where it stands
+/// from the hips (each axis over [`rig::REACH_M`]) and its turn from them (over [`rig::YAW_DEG`]), level on upright
+/// hips (`rig::follow_values`). VRChat takes OSC floats from -1 to 1.
+pub fn rig_parameters(pose: &[f32; 6], hips: &super::rig::Hips) -> Vec<(String, Vec<rosc::OscType>)> {
+    let [x, y, z, yaw] = super::rig::values(pose, hips);
     [
         (rig::PARAMETER_FOLLOW, rosc::OscType::Bool(true)),
-        (rig::PARAMETER_X, at(pose[0])),
-        (rig::PARAMETER_Y, at(pose[1])),
-        (rig::PARAMETER_Z, at(pose[2])),
-        (rig::PARAMETER_YAW, rosc::OscType::Float(yaw / rig::YAW_DEG)),
+        (rig::PARAMETER_X, rosc::OscType::Float(x)),
+        (rig::PARAMETER_Y, rosc::OscType::Float(y)),
+        (rig::PARAMETER_Z, rosc::OscType::Float(z)),
+        (rig::PARAMETER_YAW, rosc::OscType::Float(yaw)),
     ]
     .into_iter()
     .map(|(name, value)| (format!("{PARAMETERS_PREFIX}{name}"), vec![value]))
@@ -389,26 +390,38 @@ mod tests {
     const POSE: [f32; 6] = [1.0, 1.5, 0.0, 10.0, 90.0, 0.0];
 
     #[test]
-    fn the_rig_follows_the_camera_within_vrchats_range() {
-        let values = |pose: [f32; 6]| -> Vec<f32> {
-            rig_parameters(&pose).into_iter().skip(1).map(|(_, v)| if let rosc::OscType::Float(f) = v[0] { f } else { panic!() }).collect()
+    fn the_rig_follows_the_camera_from_the_hips_within_vrchats_range() {
+        // Hips at the world's origin, upright, facing +Z: the values are the camera's world place.
+        let origin: super::super::rig::Hips = ([0.0; 3], [0.0, 0.0, 0.0, 1.0]);
+        let values = |pose: [f32; 6], hips: &super::super::rig::Hips| -> Vec<f32> {
+            rig_parameters(&pose, hips).into_iter().skip(1).map(|(_, v)| if let rosc::OscType::Float(f) = v[0] { f } else { panic!() }).collect()
         };
-        assert_eq!(rig_parameters(&POSE).iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>(), [
-            "/avatar/parameters/N4N0/Capture/Follow",
-            "/avatar/parameters/N4N0/Capture/RigX",
-            "/avatar/parameters/N4N0/Capture/RigY",
-            "/avatar/parameters/N4N0/Capture/RigZ",
-            "/avatar/parameters/N4N0/Capture/RigYaw"
-        ]);
-        assert_eq!(rig_parameters(&POSE)[0].1, vec![rosc::OscType::Bool(true)], "following the camera");
-        let v = values([2048.0, 1.5, -409.6, 10.0, 270.0, 0.0]);
+        assert_eq!(
+            rig_parameters(&POSE, &origin).iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>(),
+            [
+                "/avatar/parameters/N4N0/Capture/Follow",
+                "/avatar/parameters/N4N0/Capture/RigX",
+                "/avatar/parameters/N4N0/Capture/RigY",
+                "/avatar/parameters/N4N0/Capture/RigZ",
+                "/avatar/parameters/N4N0/Capture/RigYaw"
+            ]
+        );
+        assert_eq!(rig_parameters(&POSE, &origin)[0].1, vec![rosc::OscType::Bool(true)], "following the camera");
+        let v = values([2048.0, 1.5, -409.6, 10.0, 270.0, 0.0], &origin);
         assert_eq!(v[0], 0.5);
         assert!((v[1] * rig::REACH_M - 1.5).abs() < 1e-4 && (v[2] + 0.1).abs() < 1e-6);
         // 270° is -90°: half a turn left of straight ahead.
         assert!((v[3] + 0.5).abs() < 1e-6);
         // Beyond the reach: at its edge.
-        assert_eq!(values([9000.0, 0.0, -9000.0, 0.0, -540.0, 0.0])[..3], [1.0, 0.0, -1.0]);
-        assert!((values([0.0; 6])[3]).abs() < 1e-6);
+        assert_eq!(values([9000.0, 0.0, -9000.0, 0.0, -540.0, 0.0], &origin)[..3], [1.0, 0.0, -1.0]);
+        assert!((values([0.0; 6], &origin)[3]).abs() < 1e-6);
+        // Hips 15 m away, turned 90° (facing +X): the camera 2 m in front of them is 2 m along their +Z, heading 0.
+        let (s, c) = (45f32.to_radians().sin(), 45f32.to_radians().cos());
+        let hips = ([15.0, 1.0, 6.0], [0.0, s, 0.0, c]);
+        let v = values([17.0, 2.5, 6.0, 0.0, 90.0, 0.0], &hips);
+        let m = |k: usize| v[k] * rig::REACH_M;
+        assert!(m(0).abs() < 1e-3 && (m(1) - 1.5).abs() < 1e-3 && (m(2) - 2.0).abs() < 1e-3, "{v:?}");
+        assert!(v[3].abs() < 1e-5, "the hips' heading");
     }
 
     #[test]

@@ -664,6 +664,7 @@ impl Controller {
             }
             // Published with the next stats (four times a second).
             WorkerEvent::Coverage(map) => self.snapshot.lock().unwrap().capture.coverage = Some(map),
+            WorkerEvent::Hips { position, rotation } => self.rig_hips(position, rotation),
             WorkerEvent::Stats(stats) => {
                 let over_limit = {
                     let mut s = self.snapshot.lock().unwrap();

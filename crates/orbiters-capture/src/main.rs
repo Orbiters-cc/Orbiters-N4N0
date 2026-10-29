@@ -417,6 +417,7 @@ fn run_worker() -> anyhow::Result<()> {
     let mut paused = false;
     let mut last_stats = Instant::now();
     let mut last_coverage = Instant::now();
+    let mut last_hips = Instant::now();
     let listing = Arc::new(AtomicBool::new(false));
 
     loop {
@@ -523,6 +524,13 @@ fn run_worker() -> anyhow::Result<()> {
                     Some(Ok(Processed::SizeChanged { width, height })) => resized = Some((width, height)),
                     Some(Err(e)) => r.session.warn(Warning::Source, format!("A frame could not be read: {e:#}")),
                     _ => {}
+                }
+            }
+            // The hips as often as the app's rig follower looks (controller/rig.rs), the latest read.
+            if last_hips.elapsed() >= Duration::from_millis(30) {
+                if let Some((position, rotation)) = r.session.take_hips() {
+                    out.emit(&WorkerEvent::Hips { position, rotation });
+                    last_hips = Instant::now();
                 }
             }
             if last_stats.elapsed() >= Duration::from_millis(250) {

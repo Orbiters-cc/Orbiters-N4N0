@@ -8,7 +8,7 @@ use crate::backend::Ctl;
 use crate::ipc::UpdateAction;
 use crate::state::{AccountState, Snapshot, UpdateState};
 use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder};
-use orbiters_core::settings::{CoverageOverlay, ViewGpu, WhilePlaying, WindowGpu};
+use orbiters_core::settings::{CoverageOverlay, RigViews, ViewGpu, WhilePlaying, WindowGpu};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, SegOption, Size, Variant};
@@ -254,13 +254,19 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     },
                 );
                 widgets::separator(ui);
+                let every = [
+                    SegOption::new(RigViews::Off, "Off"),
+                    SegOption::new(RigViews::Every2s, "2 s"),
+                    SegOption::new(RigViews::Every3s, "3 s"),
+                    SegOption::new(RigViews::Every5s, "5 s"),
+                ];
                 widgets::field(
                     ui,
                     "Six more views while recording",
-                    Some("N4N0's camera rig turns on for a moment every few metres the camera goes: six more views around it (left, front, right, back, up, down), so the reconstruction sees what you forgot to film. VRChat draws the world six more times for those moments."),
-                    48.0,
+                    Some("This often, N4N0's camera rig takes six views around your camera (left, front, right, back, up, down) wherever it has not yet, so the reconstruction sees what you did not film. VRChat draws the world six more times for those moments; 3D pictures and scans take theirs all along."),
+                    300.0,
                     |ui| {
-                        apply |= widgets::toggle(ui, "rig-views", &mut draft.rig_views);
+                        apply |= widgets::segmented(ui, "rig-views", &mut draft.rig_views, &every, true);
                     },
                 );
                 widgets::separator(ui);

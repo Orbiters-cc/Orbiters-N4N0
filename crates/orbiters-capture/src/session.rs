@@ -488,6 +488,8 @@ pub struct CaptureSession {
     /// Records waiting for their files, in frame order.
     pending: VecDeque<Pending>,
     band: skeleton::Decoder,
+    /// The hips the last band gave (world position, rotation), until taken (`take_hips`).
+    hips: Option<([f32; 3], [f32; 4])>,
     areas: Option<Areas>,
     pub stats: CaptureStats,
     /// Session start on the shared clock: every stream's `time_ns` counts from here.
@@ -531,8 +533,9 @@ pub struct CaptureSession {
     /// Why the recording must stop (the disk is full).
     stop: Option<String>,
     /// When a frame's strip was last read and since when it has not been (after it was once), on the session clock;
-    /// the time without it, in stretches of at least [`STRIP_GAP_NS`]; the latest frame's time. With the capture kit's
-    /// "Near you" reach, the kit is not drawn while the camera sees neither the avatar nor its surroundings.
+    /// the time without it, in stretches of at least [`STRIP_GAP_NS`]; the latest frame's time. An avatar uploaded
+    /// with an older N4N0 (up to 1.0.15) draws its kit only while the camera sees the avatar or its surroundings; a
+    /// world's depth of field or motion blur can wipe the strip anywhere.
     strip_first_ns: Option<u64>,
     strip_seen_ns: Option<u64>,
     strip_lost_ns: Option<u64>,
@@ -671,6 +674,7 @@ impl CaptureSession {
             saver: Saver::spawn(),
             pending: VecDeque::new(),
             band: skeleton::Decoder::new(),
+            hips: None,
             areas: None,
             stats: CaptureStats::default(),
             epoch_ns,
@@ -776,7 +780,7 @@ impl CaptureSession {
         if gap >= STRIP_GAP_TOLD_NS && !told {
             self.warn(
                 Warning::Strip,
-                "No capture strip for a few seconds: no camera pose, so no keyframes. With the capture kit's \"Near you\" reach it is drawn only while the camera sees your avatar or is near it.".into(),
+                "No capture strip for a few seconds: no camera pose, so no keyframes. If your avatar was uploaded with an older N4N0, the strip is drawn only while the camera sees your avatar or is near it: update N4N0 in My Avatar and upload the avatar again.".into(),
             );
         }
     }
@@ -1252,10 +1256,20 @@ impl CaptureSession {
                 _ => return Ok(()),
             }
         };
+        // Bone 0 is the hips (HumanBodyBones.Hips).
+        if let Some(rotation) = pose.bones[0] {
+            self.hips = Some((pose.hips, rotation));
+        }
         if let Err(e) = self.skeleton.add(time_ns, &pose) {
             self.warn(Warning::Streams, format!("The skeleton band is not recorded: {e:#}"));
         }
         Ok(())
+    }
+
+    /// Where the avatar's hips were in the last frame whose skeleton band was read, once: the app hangs N4N0's camera
+    /// rig from them (contracts' `Docs/rig-frames.md`).
+    pub fn take_hips(&mut self) -> Option<([f32; 3], [f32; 4])> {
+        self.hips.take()
     }
 
     /// Takes what the threads finished: records get their files, or lose the flags of those that could not be
@@ -1481,7 +1495,7 @@ impl CaptureSession {
         // Long stretches without the strip leave parts of the walk without keyframes: how much, and why it happens.
         if strip_missing_ns >= 5_000_000_000 && strip_missing_ns * 10 >= strip_since_ns {
             warnings.push(format!(
-                "no camera pose for {:.0} s of {:.0} s: the capture strip was not seen, so those parts have no keyframes. With the capture kit's \"Near you\" reach it is drawn only while the camera sees your avatar or is near it: install it with \"Everywhere\" in Mixer to film anywhere",
+                "no camera pose for {:.0} s of {:.0} s: the capture strip was not seen, so those parts have no keyframes. An avatar uploaded with an older N4N0 draws it only while the camera sees the avatar or is near it: update N4N0 in My Avatar and upload the avatar again to film anywhere",
                 strip_missing_ns as f64 / 1e9,
                 strip_since_ns as f64 / 1e9
             ));
@@ -1847,8 +1861,9 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The strip lost while recording (a camera that no longer sees an avatar whose kit has the "Near you" reach): the
-    /// stats say for how long, a long stretch is told once, and the end of the session says how much had no pose.
+    /// The strip lost while recording (a camera that no longer sees an avatar uploaded with an older N4N0, a world's
+    /// depth of field): the stats say for how long, a long stretch is told once, and the end of the session says how
+    /// much had no pose.
     #[test]
     fn stretches_without_the_strip_are_told_and_counted() {
         let (root, mut session, _) = pattern_session("strip-gaps", 0);
@@ -1996,6 +2011,7 @@ mod tests {
         };
         let mut src = TestPatternSource::new(1280, 720, 30.0, 4, 60, false);
         let mut session = CaptureSession::start(&cmd, src.describe(), &src.folder_hint()).unwrap();
+        let mut hips = Vec::new();
         loop {
             let mut outcome = None;
             match src.next(std::time::Duration::from_millis(10), &mut |v| outcome = Some(session.process(v))) {
@@ -2004,7 +2020,11 @@ mod tests {
                 Ok(Next::Timeout) => {}
                 Err(e) => panic!("{e}"),
             }
+            hips.extend(session.take_hips());
         }
+        // Each band's hips, once, for N4N0's camera rig (the app hangs it from them).
+        assert_eq!(hips.len(), 45, "the colour frames' bands");
+        assert!(session.take_hips().is_none(), "taken");
         assert_eq!((session.stats.dropped, session.stats.depth_dropped), (0, 0), "a test pattern waits for the encoders");
         let finished = session.finish();
         assert!(finished.warnings.is_empty(), "{:?}", finished.warnings);
@@ -2030,6 +2050,8 @@ mod tests {
         assert_eq!(manifest.performance.skeleton_frames, 45);
         let frames = skeleton_frames::read(&std::fs::read(dir.join(orbiters_contracts::performance::SKELETON_FILE)).unwrap()).unwrap();
         assert_eq!(frames.len(), 45);
+        let last = frames.last().unwrap();
+        assert_eq!(hips.last().copied(), Some((last.hips, last.rotations[0].unwrap())), "the last band's");
         let colour: Vec<_> = records.iter().filter(|r| !r.has(record_flags::DEPTH)).collect();
         for (frame, record) in frames.iter().zip(&colour) {
             let want = TestPatternSource::skeleton(frame.game_time);

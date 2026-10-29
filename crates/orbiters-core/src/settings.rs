@@ -49,9 +49,10 @@ pub struct Settings {
     pub development: bool,
     /// SteamVR's tracking smoothed by Orbiters - N4N0's driver (its Tracking page).
     pub tracking: TrackingSettings,
-    /// While recording, N4N0's camera rig (contracts' `Docs/rig-frames.md`) turns on for a moment every few metres the
-    /// camera goes: six more views around it (left, front, right, back, up, down) for the reconstruction.
-    pub rig_views: bool,
+    /// While recording, N4N0's camera rig (contracts' `Docs/rig-frames.md`) turns on for a moment this often, wherever
+    /// the camera stands that it has not looked all around from yet: six more views around it (left, front, right,
+    /// back, up, down) for the reconstruction.
+    pub rig_views: RigViews,
     /// Where the SteamVR overlay shows what a recording has covered so far (the Capture page's camera path).
     pub coverage_overlay: CoverageOverlay,
     /// Experimental, VRC+: recordings also read VRChat's camera dolly's other streams (Spout `VRCSender2` to
@@ -153,6 +154,34 @@ pub enum Photo3dLength {
     #[default]
     Standard,
     Full,
+}
+
+/// How often N4N0's camera rig takes its six views during a recording (the app's own flights, 3D pictures and scans,
+/// leave it alone).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RigViews {
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "every_2s")]
+    Every2s,
+    #[default]
+    #[serde(rename = "every_3s")]
+    Every3s,
+    #[serde(rename = "every_5s")]
+    Every5s,
+}
+
+impl RigViews {
+    /// The shortest time between two of the rig's moments, `None` when it is off.
+    pub fn every(self) -> Option<std::time::Duration> {
+        let seconds = match self {
+            RigViews::Off => return None,
+            RigViews::Every2s => 2,
+            RigViews::Every3s => 3,
+            RigViews::Every5s => 5,
+        };
+        Some(std::time::Duration::from_secs(seconds))
+    }
 }
 
 /// Walk boost (the SteamVR overlay): while the stick VRChat walks with is pushed, the play space is dragged the same
@@ -431,7 +460,7 @@ impl Default for Settings {
             startup: StartupSettings::default(),
             development: false,
             tracking: TrackingSettings::default(),
-            rig_views: true,
+            rig_views: RigViews::default(),
             coverage_overlay: CoverageOverlay::default(),
             dolly_streams: false,
         }
@@ -565,7 +594,7 @@ mod tests {
         std::fs::write(&path, r#"{"storage_limit_gb": 3}"#).unwrap();
         let partial = Settings::load_from(&path);
         assert_eq!(partial.storage_limit_gb, 3.0);
-        assert!(partial.rig_views && partial.coverage_overlay == CoverageOverlay::LeftHand, "the rig's views and the coverage overlay on");
+        assert!(partial.rig_views == RigViews::Every3s && partial.coverage_overlay == CoverageOverlay::LeftHand, "the rig's views and the coverage overlay on");
         assert_eq!(partial.orb, OrbSettings::default(), "settings from before N4N0 get its defaults");
         assert_eq!(partial.window_gpu, WindowGpu::GraphicsCard, "the window draws on the graphics card unless chosen otherwise");
         assert_eq!(partial.view_gpu, ViewGpu::WhilePlaying, "its 3D view on the integrated GPU while VRChat runs unless chosen otherwise");

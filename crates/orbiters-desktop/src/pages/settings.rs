@@ -702,6 +702,8 @@ struct VrchatForm {
     password: String,
     code: String,
     method: Option<orbiters_core::vrchat_api::TwoFactor>,
+    /// The password shown as typed (its eye).
+    show_password: bool,
     pending: bool,
     pending_revision: u64,
     saw_busy: bool,
@@ -722,14 +724,8 @@ fn vrchat_pressed(response: egui::Response) -> bool {
     response.enabled() && (response.clicked() || (response.is_pointer_button_down_on() && response.ctx.input(|i| i.pointer.primary_pressed())))
 }
 
-fn vrchat_paragraph(ui: &mut Ui, text: &str, color: egui::Color32) {
-    let galley = ui.painter().layout_job(Txt::new(text, 12.0).color(color).job(ui.available_width()));
-    let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
-    ui.painter().galley(rect.min, galley, color);
-}
-
-/// The same flat well as widgets::text_field, with egui's password masking and no visible frame.
-fn vrchat_password(ui: &mut Ui, password: &mut String, width: f32) -> egui::Response {
+/// The same flat well as widgets::text_field, with egui's password masking and an eye that shows what was typed.
+fn vrchat_password(ui: &mut Ui, password: &mut String, width: f32, shown: &mut bool) -> egui::Response {
     let id = ui.scope_id().with("vrchat-password");
     let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
     ui.painter().rect_filled(rect, theme::radius(12.0), theme::INK_750);
@@ -737,11 +733,18 @@ fn vrchat_password(ui: &mut Ui, password: &mut String, width: f32) -> egui::Resp
     if ring > 0.01 {
         ui.painter().rect_stroke(rect, theme::radius(12.0), egui::Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.8 * ring)), egui::StrokeKind::Outside);
     }
+    let eye = Rect::from_center_size(pos2(rect.right() - 20.0, rect.center().y), vec2(28.0, 28.0));
+    let label = if *shown { "Hide the password" } else { "Show the password" };
+    if vrchat_pressed(
+        widgets::IconButton::new(if *shown { icons::EYE_SLASH } else { icons::KEY }, label).size(28.0, 14.0).id_salt("vrchat-eye").show_at(ui, eye),
+    ) {
+        *shown = !*shown;
+    }
     ui.put(
-        rect.shrink2(vec2(12.0, 0.0)),
+        Rect::from_min_max(pos2(rect.left() + 12.0, rect.top()), pos2(eye.left() - 4.0, rect.bottom())),
         egui::TextEdit::singleline(password)
             .id(id)
-            .password(true)
+            .password(!*shown)
             .frame(egui::Frame::NONE)
             .font(theme::font(13.0, weight::REGULAR))
             .text_color(theme::FG)
@@ -749,6 +752,87 @@ fn vrchat_password(ui: &mut Ui, password: &mut String, width: f32) -> egui::Resp
             .margin(egui::Margin::ZERO)
             .align(Align2::LEFT_CENTER),
     )
+}
+
+/// Six cells for a six-digit code (an authenticator's, an email's): digits only, each popping in as it is typed, the
+/// next cell ringed in green while the field has the keys.
+fn code_cells(ui: &mut Ui, code: &mut String) -> egui::Response {
+    let id = ui.scope_id().with("vrchat-code-cells");
+    let (cell, gap, h) = (44.0, 8.0, 50.0);
+    let w = 6.0 * cell + 5.0 * gap;
+    let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    // The text edit takes the keys (and clicks) over the cells; its own text, caret and selection stay unseen.
+    let resp = {
+        let mut eu = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("vrchat-code-edit"));
+        let v = eu.visuals_mut();
+        v.text_cursor.stroke = egui::Stroke::NONE;
+        v.selection.bg_fill = egui::Color32::TRANSPARENT;
+        v.selection.stroke = egui::Stroke::NONE;
+        eu.put(
+            rect,
+            egui::TextEdit::singleline(code)
+                .id(id)
+                .frame(egui::Frame::NONE)
+                .text_color(egui::Color32::TRANSPARENT)
+                .font(theme::font(13.0, weight::REGULAR))
+                .char_limit(6)
+                .margin(egui::Margin::ZERO)
+                .desired_width(w),
+        )
+    };
+    code.retain(|c| c.is_ascii_digit());
+    let ctx = ui.ctx().clone();
+    let focused = ui.memory(|m| m.has_focus(id));
+    let n = code.chars().count();
+    let p = ui.painter();
+    for i in 0..6 {
+        let r = Rect::from_min_size(pos2(rect.left() + i as f32 * (cell + gap), rect.top()), vec2(cell, h));
+        let next = focused && i == n.min(5);
+        let ring = anim::toggle(&ctx, id.with(("ring", i)), next, Spring::SNAPPY);
+        let filled = anim::toggle(&ctx, id.with(("filled", i)), i < n, Spring::SOFT);
+        p.rect_filled(r, theme::radius(12.0), theme::mix(theme::INK_750, theme::INK_700, filled));
+        if ring > 0.01 {
+            p.rect_stroke(r, theme::radius(12.0), egui::Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.85 * ring)), egui::StrokeKind::Outside);
+        }
+        if let Some(c) = code.chars().nth(i) {
+            let k = anim::spring_from(&ctx, id.with(("digit", i, c)), [0.55], [1.0], Spring::BOUNCY)[0];
+            widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new(c.to_string(), 22.0 * k.clamp(0.4, 1.3)).weight(weight::SEMIBOLD));
+        } else if next && anim::is_live(&ctx) {
+            // A caret that blinks where the next digit goes.
+            let t = anim::time(&ctx);
+            if (t * 1.6).fract() < 0.6 {
+                p.rect_filled(Rect::from_center_size(r.center(), vec2(2.0, 20.0)), theme::radius(1.0), theme::FG_2);
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(120));
+        }
+    }
+    resp.on_hover_cursor(egui::CursorIcon::Text)
+}
+
+/// The signed-in account: picture with a presence ring, name, how it is kept; Sign out on the right.
+fn vrchat_identity(ui: &mut Ui, name: &str, picture: Option<&egui::TextureHandle>, busy: bool) -> bool {
+    let w = ui.available_width();
+    let (row, _) = ui.allocate_exact_size(vec2(w, 72.0), Sense::hover());
+    let p = ui.painter().clone();
+    let a = Rect::from_center_size(pos2(row.left() + 28.0, row.center().y), vec2(52.0, 52.0));
+    p.circle_stroke(a.center(), 29.0, egui::Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.9)));
+    widgets::avatar(&p, a, picture, name);
+    let dot = a.center() + vec2(19.0, 19.0);
+    p.circle_filled(dot, 7.0, theme::surface_strong());
+    p.circle_filled(dot, 5.0, theme::ACCENT);
+    let x = a.right() + 18.0;
+    widgets::text_truncated(&p, pos2(x, row.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(name, 16.0).weight(weight::SEMIBOLD), w - 220.0);
+    widgets::icon(&p, pos2(x + 6.0, row.center().y + 12.0), icons::LOCK_SIMPLE, 12.0, theme::FG_3);
+    widgets::text_truncated(
+        &p,
+        pos2(x + 18.0, row.center().y + 12.0),
+        Align2::LEFT_CENTER,
+        &Txt::new("Connected · the session stays encrypted on this computer", 12.0).color(theme::FG_3),
+        w - 240.0,
+    );
+    let b = Button::new(if busy { "Signing out…" } else { "Sign out" }).icon(icons::SIGN_OUT).variant(Variant::Secondary).size(Size::Sm).enabled(!busy);
+    let bw = b.desired_width(ui);
+    vrchat_pressed(b.show_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.center().y - 16.0), vec2(bw, 32.0))))
 }
 
 fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
@@ -770,12 +854,13 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
     let subtitle = if let Some(user) = &status.user {
         format!("Signed in as {}", user.display_name)
     } else if !status.methods.is_empty() {
-        "One more step to sign in".into()
+        "Two-factor authentication: one more step".into()
     } else {
-        "Your own account, on this computer".into()
+        "Your own account, kept on this computer".into()
     };
     let mut command = None;
     section(ui, cx, 10, icons::USER_CIRCLE, "VRChat account", Some(&subtitle), |ui| {
+        ui.add_space(6.0);
         if let Some(user) = &status.user {
             if let Some(picture) = &status.picture {
                 if state.picture.as_ref().is_none_or(|(id, revision, _)| id != &user.id || *revision != status.revision) {
@@ -786,53 +871,38 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
             } else {
                 state.picture = None;
             }
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 14.0;
-                if let Some((_, _, texture)) = &state.picture {
-                    ui.add(egui::Image::new(texture).fit_to_exact_size(vec2(48.0, 48.0)).corner_radius(theme::radius(12.0)));
-                }
-                ui.vertical(|ui| {
-                    widgets::field(ui, &user.display_name, Some("Connected to VRChat. Your encrypted session stays on this computer."), 120.0, |ui| {
-                        if vrchat_pressed(
-                            Button::new(if busy { "Signing out…" } else { "Sign out" })
-                                .icon(icons::SIGN_OUT)
-                                .variant(Variant::Secondary)
-                                .size(Size::Sm)
-                                .enabled(!busy)
-                                .show(ui),
-                        ) {
-                            command = Some(Command::SignOut);
-                        }
-                    });
-                });
-            });
+            if vrchat_identity(ui, &user.display_name, state.picture.as_ref().map(|(_, _, t)| t), busy) {
+                command = Some(Command::SignOut);
+            }
         } else {
             state.picture = None;
-            vrchat_paragraph(ui, "Orbiters - N4N0 can talk to VRChat with your own account instead of Orbiters' shared one. Your password goes only to VRChat; the session stays on this computer.", theme::FG_3);
-            ui.add_space(12.0);
             ui.add_enabled_ui(!busy, |ui| {
                 if status.methods.is_empty() {
-                    widgets::field(ui, "Username", Some("Your VRChat login name, rather than your display name."), 300.0, |ui| {
-                        widgets::text_field(ui, "vrchat-username", &mut state.username, "VRChat username", 300.0, false);
+                    widgets::field(ui, "Username", Some("Your VRChat login name or email, not your display name."), 300.0, |ui| {
+                        widgets::text_field(ui, "vrchat-username", &mut state.username, "VRChat username or email", 300.0, false);
                     });
                     widgets::separator(ui);
                     let mut enter = false;
-                    widgets::field(ui, "Password", None, 300.0, |ui| {
-                        let response = vrchat_password(ui, &mut state.password, 300.0);
+                    widgets::field(ui, "Password", Some("Sent to VRChat only, never to Orbiters."), 300.0, |ui| {
+                        let response = vrchat_password(ui, &mut state.password, 300.0, &mut state.show_password);
                         enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     });
-                    ui.add_space(12.0);
+                    widgets::separator(ui);
+                    ui.add_space(14.0);
                     let ready = !state.username.trim().is_empty() && !state.password.is_empty();
-                    if (vrchat_pressed(
-                        Button::new(if busy { "Signing in…" } else { "Sign in to VRChat" })
-                            .icon(icons::SIGN_IN)
-                            .variant(Variant::Primary)
-                            .size(Size::Sm)
-                            .enabled(ready)
-                            .show(ui),
-                    ) || enter)
-                        && ready
-                    {
+                    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+                    let note = "Instead of Orbiters' shared account: friends, instances and pictures come from yours.";
+                    widgets::icon(ui.painter(), pos2(row.left() + 7.0, row.center().y), icons::SHIELD_CHECK, 14.0, theme::FG_3);
+                    widgets::text_truncated(
+                        ui.painter(),
+                        pos2(row.left() + 22.0, row.center().y),
+                        Align2::LEFT_CENTER,
+                        &Txt::new(note, 12.0).color(theme::FG_3),
+                        row.width() - 230.0,
+                    );
+                    let b = Button::new(if busy { "Signing in…" } else { "Sign in to VRChat" }).icon(icons::SIGN_IN).variant(Variant::Primary).enabled(ready);
+                    let bw = b.desired_width(ui);
+                    if (vrchat_pressed(b.show_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.top()), vec2(bw, 40.0)))) || enter) && ready {
                         command = Some(Command::SignIn { username: state.username.clone(), password: Secret(std::mem::take(&mut state.password)) });
                     }
                 } else {
@@ -849,7 +919,7 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
                                 SegOption::new(
                                     *m,
                                     match m {
-                                        TwoFactor::Totp => "Authenticator",
+                                        TwoFactor::Totp => "Authenticator app",
                                         TwoFactor::Email => "Email",
                                         TwoFactor::Recovery => "Recovery code",
                                     },
@@ -860,63 +930,63 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
                         if *method != before {
                             state.code.clear();
                         }
-                        ui.add_space(12.0);
+                        ui.add_space(6.0);
                     }
                     let hint = match method {
-                        TwoFactor::Totp => "Enter the code from your authenticator app.",
-                        TwoFactor::Email => "VRChat sent a code to your email. Check your inbox and spam folder.",
-                        TwoFactor::Recovery => "Enter one of the recovery codes saved when you enabled two-factor authentication.",
+                        TwoFactor::Totp => "The six digits your authenticator app shows for VRChat now.",
+                        TwoFactor::Email => "VRChat emailed you six digits: check your inbox and spam folder.",
+                        TwoFactor::Recovery => "One of the recovery codes you saved when you turned two-factor authentication on.",
                     };
                     let mut enter = false;
-                    widgets::field(ui, method.label(), Some(hint), 300.0, |ui| {
-                        let response = widgets::text_field(ui, "vrchat-factor-code", &mut state.code, "Code", 300.0, true);
+                    let six = *method != TwoFactor::Recovery;
+                    widgets::field(ui, method.label(), Some(hint), if six { 304.0 } else { 300.0 }, |ui| {
+                        let response = if six {
+                            code_cells(ui, &mut state.code)
+                        } else {
+                            widgets::text_field(ui, "vrchat-factor-code", &mut state.code, "xxxx-xxxx", 300.0, true)
+                        };
                         enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     });
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        let ready = !state.code.trim().is_empty();
-                        if (vrchat_pressed(
-                            Button::new(if busy { "Verifying…" } else { "Verify and sign in" })
-                                .variant(Variant::Primary)
-                                .size(Size::Sm)
-                                .enabled(ready)
-                                .show(ui),
-                        ) || enter)
-                            && ready
-                        {
-                            command = Some(Command::Verify { method: *method, code: Secret(std::mem::take(&mut state.code)) });
-                        }
-                        if vrchat_pressed(Button::new("Cancel").variant(Variant::Ghost).size(Size::Sm).show(ui)) {
-                            command = Some(Command::Cancel);
-                        }
-                    });
+                    widgets::separator(ui);
+                    ui.add_space(14.0);
+                    let ready = if six { state.code.chars().count() == 6 } else { !state.code.trim().is_empty() };
+                    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+                    let verify =
+                        Button::new(if busy { "Verifying…" } else { "Verify and sign in" }).icon(icons::SHIELD_CHECK).variant(Variant::Primary).enabled(ready);
+                    let cancel = Button::new("Cancel").variant(Variant::Ghost);
+                    let (vw, cw) = (verify.desired_width(ui), cancel.desired_width(ui));
+                    if (vrchat_pressed(verify.show_at(ui, Rect::from_min_size(pos2(row.right() - vw, row.top()), vec2(vw, 40.0)))) || enter) && ready {
+                        command = Some(Command::Verify { method: *method, code: Secret(std::mem::take(&mut state.code)) });
+                    }
+                    if vrchat_pressed(cancel.show_at(ui, Rect::from_min_size(pos2(row.right() - vw - 8.0 - cw, row.top()), vec2(cw, 40.0)))) {
+                        command = Some(Command::Cancel);
+                    }
                 }
             });
         }
         if busy {
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.spinner();
-                vrchat_paragraph(ui, "Waiting for VRChat…", theme::FG_3);
-            });
+            ui.add_space(12.0);
+            super::sharing::working(ui, "Waiting for VRChat…");
         }
         if let Some(error) = &status.error {
-            ui.add_space(10.0);
-            vrchat_paragraph(ui, error, theme::DANGER);
-            ui.add_space(6.0);
+            ui.add_space(12.0);
+            orbiters_ui::feedback::banner(ui, Id::unique(("vrchat-login-error", error)), widgets::Tone::Danger, error, false);
             let retry = match status.recovery {
-                Recovery::Resume => Some(("Retry saved session", Command::Resume)),
-                Recovery::RemoveSavedSession => Some(("Remove saved session", Command::SignOut)),
+                Recovery::Resume => Some(("Retry the saved session", icons::ARROW_CLOCKWISE, Command::Resume)),
+                Recovery::RemoveSavedSession => Some(("Remove the saved session", icons::TRASH, Command::SignOut)),
                 Recovery::None => None,
             };
-            if let Some((label, retry)) = retry {
-                if vrchat_pressed(Button::new(label).variant(Variant::Secondary).size(Size::Sm).enabled(!busy).show(ui)) {
+            if let Some((label, glyph, retry)) = retry {
+                ui.add_space(10.0);
+                let b = Button::new(label).icon(glyph).variant(Variant::Secondary).size(Size::Sm).enabled(!busy);
+                let bw = b.desired_width(ui);
+                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
+                if vrchat_pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
                     command = Some(retry);
                 }
             }
         }
+        ui.add_space(4.0);
     });
     if let Some(command) = command {
         state.pending = true;

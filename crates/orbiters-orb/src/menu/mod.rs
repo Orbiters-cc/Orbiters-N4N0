@@ -2841,7 +2841,7 @@ mod tests {
         // A capture flagged explicit warns before it is shared publicly, and shows its picture to its owner only.
         assert_eq!(menu.press(Target::SharePublic(0)), [Effect::Thumbnails(vec!["capture:C:/s/b".into()])]);
         assert_eq!(menu.page, Page::Explicit);
-        assert_eq!(text(&menu, Content::ExplicitWhy(0)), "Why: osc-parameter:NSFW/Toggle");
+        assert_eq!(text(&menu, Content::ExplicitWhy(0)), "Because of NSFW/Toggle");
         assert_eq!(text_for(&menu, Content::ExplicitWhy(0), true), "", "why is the owner's");
         let picture = &cached(ScreenPage::Explicit).pictures[0];
         assert_eq!(picture_key_for(&menu, picture, false).as_deref(), Some("capture:C:/s/b"));

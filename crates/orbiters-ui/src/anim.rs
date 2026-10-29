@@ -23,6 +23,9 @@ impl Spring {
     pub const SOFT: Self = Self { stiffness: 170.0, damping: 24.0, mass: 1.0 };
     /// Shape morphs (record glyph, session card to detail).
     pub const MORPH: Self = Self { stiffness: 300.0, damping: 26.0, mass: 0.9 };
+    /// A card growing into its window and back, and the window following its content (the website's
+    /// `expandSpring`): restrained, a few percent of overshoot.
+    pub const EXPAND: Self = Self { stiffness: 340.0, damping: 27.0, mass: 0.85 };
     /// Counting numbers.
     pub const NUMBER: Self = Self { stiffness: 120.0, damping: 22.0, mass: 0.6 };
     /// Slow colour washes (the background mood), critically damped.

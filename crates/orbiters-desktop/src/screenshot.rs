@@ -1434,6 +1434,16 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "gallery-requests-error",
         "gallery-requests-outgoing",
         "gallery-requests-denied",
+        "gallery-requests-empty",
+        "gallery-requests-opening",
+        "gallery-done",
+        "gallery-open",
+        "gallery-open-mid",
+        "gallery-close-mid",
+        "gallery-next",
+        "gallery-next-mid",
+        "world-share-window",
+        "world-share-public",
         "world-share-mid",
         "world-share-open",
         "world-share-detail",
@@ -1485,6 +1495,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
     ctl.set_snapshot(sc.snapshot.clone());
     let backend: Ctl = std::sync::Arc::new(Local::new(ctl.clone()));
     let mut world_opened = false;
+    let mut share_staged = false;
     let mut library_staged = false;
     // A press staged on the last frame, released on this one.
     let mut release: Option<Pos2> = None;
@@ -1545,6 +1556,25 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         }
         if sc.page == Page::Sessions && (f == 0 || f == 45) {
             app.sessions_mut().stage_gallery(&ctx, sc.name);
+        }
+        // A card growing into its window (a twelfth of a second in, or settled), the window landing back on its card,
+        // the requests window growing out of its button.
+        if sc.page == Page::Sessions {
+            let gallery = app.sessions_mut().gallery_mut();
+            match sc.name {
+                "gallery-open" | "gallery-close-mid" | "gallery-next" | "gallery-next-mid" if f == 70 => gallery.open_card(&ctx, 0),
+                "gallery-next" if f == 100 => gallery.step_window(1),
+                "gallery-next-mid" if f + 6 == sc.frames => gallery.step_window(1),
+                "gallery-open-mid" if f + 6 == sc.frames => gallery.open_card(&ctx, 0),
+                "gallery-close-mid" if f + 6 == sc.frames => gallery.close_window(),
+                "gallery-requests-opening" if f + 6 == sc.frames => gallery.open_requests(),
+                _ => {}
+            }
+        }
+        // A world card's Share to … or Share publicly, the window growing out of the card (on made-up friends).
+        if matches!(sc.name, "world-share-window" | "world-share-public") && !share_staged && f >= 60 && app.worlds_mut().loaded() {
+            share_staged = true;
+            app.worlds_mut().stage_share_window(&ctx, sc.snapshot.settings.sessions_dir.clone(), sc.name == "world-share-public");
         }
         if sc.name == "world-share-mid" && f == sc.frames - 4 {
             app.worlds_mut().stage_share_morph(&ctx, true);

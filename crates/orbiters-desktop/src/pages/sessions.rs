@@ -108,6 +108,10 @@ impl State {
     pub fn stage_gallery(&mut self, ctx: &egui::Context, name: &str) {
         self.gallery.stage(ctx, name);
     }
+    /// Photos & captures (screenshots open its windows).
+    pub fn gallery_mut(&mut self) -> &mut super::gallery::State {
+        &mut self.gallery
+    }
     /// Opens the detail of the first session as if its card was clicked (screenshots).
     pub fn open_first(&mut self, ctx: &egui::Context, origin: Rect) {
         if let Some(s) = self.sessions.as_ref().and_then(|l| l.first()) {
@@ -222,8 +226,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         return;
     }
     show_library(ui, cx, state);
-    let r = Rect::from_min_size(pos2(ui.max_rect().left() + 32.0, ui.max_rect().top() + cx.top + 2.0), vec2(140.0, 25.0));
-    if Button::new("Back to gallery").variant(Variant::Ghost).width(r.width()).show_at(ui, r).clicked() {
+    // Back to Photos & captures, where the heading's caption would be (as a world's page goes back to its list).
+    let back = Button::new("Photos & captures").icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(widgets::Size::Sm);
+    let r = Rect::from_min_size(pos2(ui.max_rect().left() + super::PAD_X - 14.0, ui.max_rect().top() + cx.top - 1.0), vec2(back.desired_width(ui), 30.0));
+    if back.id_salt("back-to-gallery").show_at(ui, r).clicked() {
         state.manage = false;
         state.detail = None;
         state.storage = None;
@@ -341,7 +347,8 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     {
         let mut hu = ui.new_child(UiBuilder::new().max_rect(head_r).id_salt("sessions-head"));
         hu.multiply_opacity(head_a);
-        super::heading(&hu, head_r, "Library", "Capture files", Some(&sub));
+        // No caption: the way back to Photos & captures stands there.
+        super::heading(&hu, head_r, "", "Capture files", Some(&sub));
     }
     {
         let mut su = ui.new_child(UiBuilder::new().max_rect(search_r).id_salt("sessions-search"));

@@ -47,6 +47,12 @@ pub struct State {
     sharing: Option<super::sharing::Dialog>,
     share_prepare: Job<Vec<crate::controller::shares::Entry>>,
     share_public: bool,
+    /// The picture the share window grows out of (a card's, a session row's) and its corner radius.
+    share_origin: Option<(Rect, f32)>,
+    /// Each card's picture as last drawn (by world id).
+    card_thumbs: HashMap<String, Rect>,
+    /// Screenshots: the share window opens on a fixture state (made-up friends, a share running), never a real share.
+    stage_share: Option<&'static str>,
     loaded: Option<(u64, PathBuf, u64)>,
     list: Job<Vec<VisitedWorld>>,
     worlds: Option<Vec<Arc<VisitedWorld>>>,
@@ -62,8 +68,9 @@ pub struct State {
 }
 
 impl State {
-    fn prepare_share(&mut self, ctx: &egui::Context, root: PathBuf, paths: Vec<PathBuf>, public: bool, server: Server) {
+    fn prepare_share(&mut self, ctx: &egui::Context, root: PathBuf, paths: Vec<PathBuf>, public: bool, server: Server, origin: Option<(Rect, f32)>) {
         self.share_public = public;
+        self.share_origin = origin;
         self.share_prepare = Job::spawn(ctx, move || {
             crate::controller::shares::local_entries(&root, server)
                 .into_iter()
@@ -81,6 +88,16 @@ impl State {
             ctx.data_mut(|d| d.insert_temp(Id::unique(("world-session-share", &s.dir)), true));
         }
     }
+    /// Opens the share window out of the first card with a 3D view, as Share to … (`public` false) or Share publicly
+    /// would, on a fixture state (screenshots).
+    pub fn stage_share_window(&mut self, ctx: &egui::Context, root: PathBuf, public: bool) {
+        let Some(w) = self.worlds.as_ref().and_then(|l| l.iter().find(|w| w.reconstructed() > 0)).cloned() else { return };
+        let paths = w.sessions.iter().find(|s| s.reconstruction.is_some()).map(|s| vec![s.dir.clone()]).unwrap_or_default();
+        let origin = self.card_thumbs.get(&w.id).copied();
+        self.stage_share = Some(if public { "progress" } else { "friends" });
+        self.prepare_share(ctx, root, paths, public, Server::Development, origin.map(|o| (o, 20.0)));
+    }
+
     pub fn stage_share_morph(&mut self, ctx: &egui::Context, progress: bool) {
         if let Some(w) = self.worlds.as_ref().and_then(|w| w.iter().find(|w| w.reconstructed() > 0 || !w.shots.is_empty())) {
             let id = Id::unique(("world-share", &w.id));
@@ -101,7 +118,7 @@ impl State {
 
     /// Whether something is still being read (the worlds, pictures): the screenshots wait for it.
     pub fn busy(&self) -> bool {
-        self.list.running() || self.pictures.as_ref().is_some_and(|p| p.loading())
+        self.list.running() || self.pictures.as_ref().is_some_and(|p| p.loading()) || self.share_prepare.running()
     }
 
     /// Opens a world as if its card was clicked (screenshots).
@@ -231,8 +248,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         if !entries.is_empty() {
             let first = entries.remove(0);
             let mut d = super::sharing::Dialog::new(&ctx, first, !state.share_public);
+            if let Some((origin, radius)) = state.share_origin.take() {
+                d = d.from(origin, radius);
+            }
             d.extra = entries;
-            if state.share_public {
+            if let Some(fixture) = state.stage_share.take() {
+                d.fixture(fixture);
+            } else if state.share_public {
                 d.public(&ctx, if cx.snap.settings.development { Server::Development } else { Server::Production });
             }
             state.sharing = Some(d);
@@ -270,7 +292,7 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
         _ => Vec::new(),
     };
     let mut clicked = None;
-    let mut share_clicked: Option<(Vec<PathBuf>, bool)> = None;
+    let mut share_clicked: Option<(Vec<PathBuf>, bool, Rect)> = None;
     let from = orbiters_ui::blur::next_shape(ui);
     let mut gu = ui.new_child(UiBuilder::new().max_rect(page).id_salt("worlds-grid"));
     gu.multiply_opacity(shown);
@@ -304,6 +326,7 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
                 let tex = cover(world, info.as_ref(), THUMB_WIDTH).and_then(|p| state.pictures.as_mut()?.get(&ctx, &p));
                 let open_here = state.open.as_ref().is_some_and(|o| o.id == world.id);
                 let shared = mine_of(&mine, &world.id).is_some_and(|m| m.preview.is_some() || !m.pictures.is_empty());
+                state.card_thumbs.insert(world.id.clone(), Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0)));
                 if let Some(cover_r) = world_card(ui, cx, i, world, r, tex.as_ref(), info.as_ref(), shared, if open_here { 0.0 } else { 1.0 }, interactive) {
                     clicked = Some((world.id.clone(), cover_r));
                 }
@@ -321,19 +344,20 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
                             .find(|s| s.reconstruction.is_some())
                             .map(|s| vec![s.dir.clone()])
                             .unwrap_or_else(|| world.shots.iter().map(|s| s.path.clone()).collect());
-                        share_clicked = Some((paths, public));
+                        share_clicked = Some((paths, public, Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0))));
                     }
                 }
             }
         });
     });
-    if let Some((paths, public)) = share_clicked {
+    if let Some((paths, public, origin)) = share_clicked {
         state.prepare_share(
             &ctx,
             cx.snap.settings.sessions_dir.clone(),
             paths,
             public,
             if cx.snap.settings.development { Server::Development } else { Server::Production },
+            Some((origin, 20.0)),
         );
     }
     super::under_top(&gu, cx, "worlds", from, grid_top);
@@ -572,7 +596,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     let mut view: Option<usize> = None;
     let mut select_new = false;
     let mut clear = false;
-    let mut share_preview: Option<(PathBuf, bool)> = None;
+    let mut share_preview: Option<(PathBuf, bool, Rect)> = None;
     let mut reconstruct: Option<PathBuf> = None;
     let selecting = !o.selected.is_empty();
 
@@ -700,8 +724,9 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                         continue;
                     }
                     let tex = state.pictures.as_mut().and_then(|p| if s.has_thumbnail { p.get(&ctx, &Picture::Session(s.dir.clone())) } else { None });
-                    match session_row(&mut cu, cx, r.translate(vec2(0.0, dy)), s, tex.as_ref(), &sharing) {
-                        Some(RowAction::Share(public)) => share_preview = Some((s.dir.clone(), public)),
+                    let row = r.translate(vec2(0.0, dy));
+                    match session_row(&mut cu, cx, row, s, tex.as_ref(), &sharing) {
+                        Some(RowAction::Share(public)) => share_preview = Some((s.dir.clone(), public, row_thumb(row))),
                         Some(RowAction::Reconstruct) => reconstruct = Some(s.dir.clone()),
                         Some(RowAction::Unqueue) => cx.ctl.unqueue_reconstruction(s.dir.clone()),
                         None => {}
@@ -797,8 +822,9 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         }
         cx.ctl.reconstruct(dir);
     }
-    if let Some((dir, public)) = share_preview {
+    if let Some((dir, public, origin)) = share_preview {
         state.share_public = public;
+        state.share_origin = Some((origin, 10.0));
         let root = cx.snap.settings.sessions_dir.clone();
         let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
         state.share_prepare = Job::spawn(&ctx, move || {
@@ -987,11 +1013,16 @@ enum RowAction {
     Unqueue,
 }
 
+/// Where a session row's thumbnail sits.
+fn row_thumb(rect: Rect) -> Rect {
+    Rect::from_min_size(pos2(rect.left() + 10.0, rect.top() + 10.0), vec2((rect.height() - 20.0) * 16.0 / 9.0, rect.height() - 20.0))
+}
+
 /// A session recorded in the world: its thumbnail, when, and what can be done with it.
 fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option<&TextureHandle>, sharing: &Sharing) -> Option<RowAction> {
     let p = ui.painter().clone();
     widgets::frame(&p, rect, 18.0, theme::surface());
-    let thumb = Rect::from_min_size(pos2(rect.left() + 10.0, rect.top() + 10.0), vec2((rect.height() - 20.0) * 16.0 / 9.0, rect.height() - 20.0));
+    let thumb = row_thumb(rect);
     thumb_shape(&p, thumb, theme::radius(10.0), tex, 1.0);
     let x = thumb.right() + 16.0;
     let title = super::local_time(&s.manifest.created_utc);

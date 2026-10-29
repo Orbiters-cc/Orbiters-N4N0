@@ -1,7 +1,11 @@
-//! One sharing surface used by Photos & captures and Visited worlds.
+//! One sharing surface for Photos & captures and Visited worlds: the website's picture window (its gallery and
+//! capture windows). It grows out of the card that opened it ([`orbiters_ui::viewer`]), the picture large and sized
+//! to its shape, the details and compact actions under it (beside tall pictures): share publicly, share to friends
+//! (a picker of chips), who it is shared with (chips with an ×), the explicit warning, and what a share is doing,
+//! did or could not do. Panels slide in under the actions; the window follows their height on the same spring.
 use super::{Cx, Job};
 use crate::controller::shares::{self as controller, Entry, Operation as Action, Outcome, Request};
-use egui::{pos2, vec2, Align2, Id, Rect, Ui, UiBuilder};
+use egui::{pos2, vec2, Align2, Color32, Id, Order, Rect, Sense, Ui, UiBuilder};
 use orbiters_core::{
     account::Server,
     shares::{self, Share, Shared, Unshare},
@@ -9,16 +13,28 @@ use orbiters_core::{
 };
 use orbiters_ui::{
     anim::{self, Spring},
-    icons,
-    theme::{self, Txt},
-    widgets::{self, Button, IconButton, Variant},
+    feedback, icons,
+    theme::{self, weight, Txt},
+    viewer::{self, Arrangement, Morph},
+    widgets::{self, Button, Chip, Size, Tone, Variant},
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Use the shared press activation, including the normal keyboard/accessibility click fallback.
 pub fn pressed(response: egui::Response) -> bool {
     response.enabled() && widgets::activated(&response)
 }
+
+/// Every opening gets springs of its own.
+static OPENED: AtomicU64 = AtomicU64::new(0);
+
+/// Friends the picker shows at once; the search finds the others.
+const FRIEND_ROWS: usize = 3;
+/// Space around the window inside the page.
+const GUTTER: f32 = 24.0;
+const PAD: f32 = 24.0;
+
 pub struct Dialog {
     pub entry: Entry,
     pub extra: Vec<Entry>,
@@ -42,11 +58,36 @@ pub struct Dialog {
     fixture_active: bool,
     rollback: Option<Entry>,
     request_public: bool,
-    large_picture: bool,
+    /// The picture shown whole over the window, its details folded away (a click on the picture).
+    full: bool,
     pub changed: bool,
     pictures: crate::worlds::Pictures,
     viewer: Option<super::splats::Viewer>,
+    /// Where it opens from (a card's picture) and that rect's corner radius; the middle of the page when not given.
+    origin: Option<(Rect, f32)>,
+    morph: Option<Morph>,
+    /// Details' heights measured at a width, for the next frame's layout.
+    measured: HashMap<u32, f32>,
+    /// The panel under the actions and the one before it (they slide past each other).
+    panel_key: (u8, u64),
+    /// Going to the next or previous item in the window: how many times, and which way (-1 or 1).
+    nav: (u64, f32),
+    /// The picture the window showed last, kept to slide away as another comes in.
+    last_picture: Option<egui::TextureHandle>,
+    previous: Option<egui::TextureHandle>,
+    /// Whether the window has items before and after this one (the gallery's arrows), and which one was asked.
+    pub neighbours: (bool, bool),
+    pub step: Option<i64>,
 }
+
+/// What sits under the actions.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    None,
+    Picker,
+    Warning,
+}
+
 impl Dialog {
     pub fn new(ctx: &egui::Context, entry: Entry, picker: bool) -> Self {
         Self {
@@ -72,21 +113,81 @@ impl Dialog {
             fixture_active: false,
             rollback: None,
             request_public: false,
-            large_picture: false,
+            full: false,
             changed: false,
             pictures: crate::worlds::Pictures::new(ctx),
             viewer: None,
+            origin: None,
+            morph: None,
+            measured: HashMap::new(),
+            panel_key: (0, 0),
+            nav: (0, 0.0),
+            last_picture: None,
+            previous: None,
+            neighbours: (false, false),
+            step: None,
         }
     }
+
+    /// Opens out of `origin` (a card's picture whose corners have `radius`), and closes back into it.
+    pub fn from(mut self, origin: Rect, radius: f32) -> Self {
+        self.origin = Some((origin, radius));
+        self
+    }
+
+    /// The card it closes into, once it shows another item (or the grid moved).
+    pub fn set_origin(&mut self, origin: Rect) {
+        if let Some(m) = self.morph.as_mut() {
+            m.set_origin(origin);
+        }
+        self.origin = self.origin.map(|(_, r)| (origin, r));
+    }
+
+    /// How far open it is (0 on its card, 1 open), as last drawn; the card it came from hides meanwhile.
+    pub fn progress(&self, ctx: &egui::Context) -> f32 {
+        self.morph.as_ref().map_or(0.0, |m| ctx.data(|d| d.get_temp::<f32>(m.id().with("shown"))).unwrap_or(0.0))
+    }
+
+    /// Starts closing back into its card ([`Dialog::show`] says when it is gone).
+    pub fn close(&mut self) {
+        match self.morph.as_mut() {
+            Some(m) => m.close(),
+            None => self.morph = Some(Morph::new(Id::NULL, Rect::NOTHING, 0.0)),
+        }
+    }
+
+    /// Shows `entry` in the open window instead, sliding in from the side it is on (`dir` 1: the next one).
+    pub fn navigate(&mut self, entry: Entry, dir: f32) {
+        self.previous = self.last_picture.take();
+        self.entry = entry;
+        self.picker = false;
+        self.warning = None;
+        self.notice = None;
+        self.error = None;
+        self.last = None;
+        self.rollback = None;
+        self.request_public = false;
+        self.selected.clear();
+        self.message.clear();
+        self.query.clear();
+        self.nav = (self.nav.0 + 1, dir);
+    }
+
+    /// Whether another item may take this one's place now (nothing running, nothing being typed or asked).
+    pub fn can_navigate(&self) -> bool {
+        self.operation_id.is_none() && self.warning.is_none() && !self.picker && self.morph.as_ref().is_some_and(|m| !m.is_closing())
+    }
+
     pub fn loading(&self) -> bool {
         self.pictures.loading()
     }
+
     pub fn fixture(&mut self, state: &str) {
         self.fixture_active = true;
         if state.starts_with("friends") {
             self.picker = true;
             self.friends = Job::default();
-            self.friends_list = ["Alex", "Mika", "Robin", "Sora", "Taylor"]
+            self.friends_list = ["Alex", "Mika", "Robin", "Sora", "Taylor", "Kasumi", "Juniper", "Lyra Nightfall", "Bob the Builder"]
                 .iter()
                 .enumerate()
                 .map(|(i, n)| Friend { id: format!("usr_{i}"), name: (*n).into(), image: None })
@@ -103,18 +204,29 @@ impl Dialog {
         }
         if state == "explicit" {
             self.warning = Some(shares::EXPLICIT_WARNING.into());
+            if self.entry.content.explicit_reasons.is_empty() {
+                self.entry.content.explicit_reasons = vec!["osc-parameter:NSFW/Toggle".into(), "avatar-label:sexually_explicit".into()];
+            }
         }
         if state == "progress" {
             self.fixture_busy = true;
+            self.last = Some(Action::Share(Share { public: true, ..Default::default() }));
         }
         if state == "picture" {
-            self.large_picture = true;
+            self.full = true;
         }
         if state == "error" {
             self.error = Some("Orbiters could not be reached. Your capture is still on this computer.".into());
             self.last = Some(Action::Share(Share { public: true, ..Default::default() }));
         }
+        if state == "done" {
+            self.notice = Some("Shared publicly: it is on Orbiters now.".into());
+            if let Some(item) = self.entry.remote.as_mut() {
+                item.public = true;
+            }
+        }
     }
+
     pub fn public(&mut self, ctx: &egui::Context, server: Server) {
         if self.entry.content.explicit || self.extra.iter().any(|e| e.content.explicit) {
             self.warning = Some(shares::EXPLICIT_WARNING.into());
@@ -122,6 +234,7 @@ impl Dialog {
             self.start(ctx, server, Action::Share(Share { public: true, ..Default::default() }));
         }
     }
+
     fn start(&mut self, _ctx: &egui::Context, server: Server, action: Action) {
         if self.operation_id.is_some() {
             return;
@@ -147,14 +260,33 @@ impl Dialog {
             self.pending = Some(request);
         }
     }
+
+    /// The picture the card showed (shown at once) and the full one (crossfading in once decoded).
+    fn pictures_of(&self, development: bool) -> (Option<crate::worlds::Picture>, Option<crate::worlds::Picture>) {
+        use crate::worlds::Picture;
+        let large = match (&self.entry.local, &self.entry.remote) {
+            (Some(controller::Local::Picture(path)), _) => Some(Picture::Shot { path: path.clone(), size: 0, width: 2048 }),
+            (None, Some(item)) if item.picture.is_some() && !self.fixture_active => Some(Picture::Capture { development, id: item.id, large: true }),
+            _ => None,
+        };
+        (self.entry.picture.clone(), large)
+    }
+
+    fn panel(&self) -> Panel {
+        if self.warning.is_some() {
+            Panel::Warning
+        } else if self.picker {
+            Panel::Picker
+        } else {
+            Panel::None
+        }
+    }
+
+    /// Handles what came back from the service; returns true when the window is gone.
     pub fn show(&mut self, ui: &mut Ui, cx: &mut Cx) -> bool {
         let ctx = ui.ctx().clone();
-        if !self.fixture_active && self.entry.local.is_none() {
-            if let Some(item) = self.entry.remote.as_ref().filter(|i| i.picture.is_some()) {
-                self.entry.picture = Some(crate::worlds::Picture::Capture { development: cx.snap.settings.development, id: item.id, large: true });
-            }
-        }
-        let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
+        let development = cx.snap.settings.development;
+        let server = if development { Server::Development } else { Server::Production };
         let scope = crate::controller::vrchat_data::Scope::of(cx.snap);
         if !self.fixture_active && self.friend_scope.as_ref() != Some(&scope) {
             self.friend_scope = Some(scope.clone());
@@ -192,372 +324,10 @@ impl Dialog {
         let done = self.operation_id.as_ref().and_then(|id| cx.snap.capture_shares.iter().find(|j| &j.id == id)).and_then(|j| j.outcome.clone());
         if let Some(done) = done {
             self.operation_id = None;
-            match done {
-                Outcome::Shared(Shared::Item { item }) | Outcome::Unshared(item) => {
-                    self.entry.remote = Some(item);
-                    self.changed = true;
-                    self.picker = false;
-                    self.notice = Some("Sharing updated".into());
-                }
-                Outcome::Shared(Shared::Request { .. }) => {
-                    self.picker = false;
-                    self.notice = Some("Share request sent to the person who shared this with you".into());
-                }
-                Outcome::Answered(request) => {
-                    self.notice = Some("Share request answered".into());
-                    if let Some(item) = request.item {
-                        self.entry.remote = Some(item);
-                        self.changed = true;
-                    }
-                }
-                Outcome::Downloaded(path) => {
-                    self.notice = Some(format!("Saved to {}", path.display()));
-                    if let Some(item) = self.entry.remote.as_ref().filter(|i| i.kind == shares::Kind::Capture) {
-                        if let Some(gpu) = cx.gpu {
-                            self.viewer = Some(super::splats::Viewer::open_shared(
-                                &ctx,
-                                gpu,
-                                &path,
-                                self.entry.world_name.clone(),
-                                &item.capture.as_ref().map(|c| c.view.clone()).unwrap_or_default(),
-                                super::splats::on_integrated(cx),
-                            ));
-                        }
-                    } else {
-                        let _ = crate::controller::open_path(&path);
-                    }
-                }
-                Outcome::Failed { message, explicit } => {
-                    if explicit {
-                        self.warning = Some(message);
-                    } else {
-                        self.error = Some(message);
-                    }
-                    if let Some(entry) = self.rollback.take() {
-                        self.entry = entry;
-                    }
-                }
-            }
+            self.rollback_or_settle(&ctx, cx, done);
         }
-        let mut close = false;
-        let busy = self.operation_id.is_some() || self.fixture_busy;
-        let modal = egui::Modal::new(Id::unique(("capture-sharing", &self.entry.key)))
-            .frame(egui::Frame::NONE.fill(theme::INK_900).corner_radius(24).inner_margin(24))
-            .show(&ctx, |ui| {
-                ui.set_width(880.0f32.min(ctx.content_rect().width() - 100.0));
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(&self.entry.world_name).size(23.0).strong());
-                        let date = super::local_time(&controller::iso(self.entry.taken));
-                        let sub = if self.extra.is_empty() { date } else { format!("{} pictures, {date}", self.extra.len() + 1) };
-                        ui.label(egui::RichText::new(sub).size(12.0).color(theme::FG_3));
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if IconButton::new(icons::X, "Close").show(ui).clicked() {
-                            close = true;
-                        }
-                    });
-                });
-                ui.add_space(20.0);
-                ui.columns(2, |cols| {
-                    let ui = &mut cols[0];
-                    let width = ui.available_width();
-                    let (r, response) = ui.allocate_exact_size(vec2(width, width * 0.72), egui::Sense::click());
-                    if self.entry.is_picture() && pressed(response) {
-                        self.large_picture = true;
-                    }
-                    let picture = match &self.entry.local {
-                        Some(controller::Local::Picture(path)) => Some(crate::worlds::Picture::Shot { path: path.clone(), size: 0, width: 2048 }),
-                        _ => self.entry.picture.clone(),
-                    };
-                    let tex = picture.as_ref().and_then(|p| self.pictures.get(&ctx, p));
-                    super::sessions::thumb_shape(ui.painter(), r, theme::radius(16.0), tex.as_ref(), 1.0);
-                    if self.entry.is_picture() {
-                        ui.add_space(10.0);
-                        if pressed(Button::new("View full size").icon(icons::ARROW_SQUARE_OUT).width(width).show(ui)) {
-                            self.large_picture = true;
-                        }
-                    }
-                    if !self.entry.is_picture() {
-                        ui.add_space(10.0);
-                        if let Some(controller::Local::Session(path)) = &self.entry.local {
-                            if pressed(Button::new("View in 3D").icon(icons::CUBE_FOCUS).width(width).enabled(self.entry.ready).show(ui)) {
-                                if let Some(gpu) = cx.gpu {
-                                    self.viewer =
-                                        Some(super::splats::Viewer::open(&ctx, gpu, path, self.entry.world_name.clone(), super::splats::on_integrated(cx)));
-                                }
-                            }
-                        }
-                    }
-                    if !self.entry.is_picture() && self.entry.local.is_none() {
-                        ui.add_space(10.0);
-                        if pressed(
-                            Button::new(if busy && matches!(self.last, Some(Action::Download)) { "Downloading..." } else { "View in 3D" })
-                                .icon(icons::CUBE_FOCUS)
-                                .enabled(!busy)
-                                .width(width)
-                                .show(ui),
-                        ) {
-                            self.start(&ctx, server, Action::Download);
-                        }
-                    }
-                    let ui = &mut cols[1];
-                    if busy {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::Spinner::new().size(14.0).color(theme::FG_2));
-                            ui.label(
-                                egui::RichText::new(match self.last {
-                                    Some(Action::Download) => "Downloading...",
-                                    Some(Action::Unshare(_)) => "Updating sharing...",
-                                    _ => "Sharing...",
-                                })
-                                .color(theme::FG_2),
-                            );
-                        });
-                        ui.add_space(8.0);
-                    }
-                    if self.picker {
-                        ui.add_space(4.0);
-                        ui.label(egui::RichText::new(if self.entry.mine() { "Share with friends" } else { "Request permission to share" }).size(18.0).strong());
-                        ui.add_space(10.0);
-                        widgets::search_field(ui, "friend-search", &mut self.query, "Search VRChat friends", ui.available_width());
-                        ui.add_space(8.0);
-                        let friends = self.friends_list.clone();
-                        let q = self.query.to_lowercase();
-                        egui::ScrollArea::vertical().id_salt("friend-picker").auto_shrink([false, false]).max_height(160.0).show(ui, |ui| {
-                            for f in friends.iter().filter(|f| f.name.to_lowercase().contains(&q)) {
-                                ui.horizontal(|ui| {
-                                    let mut chosen = self.selected.contains(&f.id);
-                                    if ui.checkbox(&mut chosen, "").changed() {
-                                        if chosen {
-                                            if self.selected.len() < 50 {
-                                                self.selected.insert(f.id.clone());
-                                            }
-                                        } else {
-                                            self.selected.remove(&f.id);
-                                        }
-                                    }
-                                    let (r, _) = ui.allocate_exact_size(vec2(30.0, 30.0), egui::Sense::hover());
-                                    let tex = f.image.as_ref().and_then(|url| {
-                                        self.pictures.get(
-                                            &ctx,
-                                            &crate::worlds::Picture::Profile { scope: crate::controller::vrchat_data::Scope::of(cx.snap), url: url.clone() },
-                                        )
-                                    });
-                                    avatar(ui, r, tex.as_ref(), &f.name);
-                                    ui.label(&f.name);
-                                });
-                            }
-                            if self.friends.running() {
-                                ui.label("Loading VRChat friends…");
-                            } else if self.friends_error.is_none() && friends.is_empty() {
-                                ui.label(if cx.snap.vrchat_login.allowed && cx.snap.vrchat_login.user.is_some() {
-                                    "No VRChat friends are available."
-                                } else {
-                                    "No cached VRChat friends. Open VRCX or VRCNext and let its friend list load."
-                                });
-                            }
-                            if let Some(error) = &self.friends_error {
-                                ui.colored_label(theme::FG_3, error);
-                                ui.add_space(8.0);
-                                if pressed(Button::new("Retry loading friends").enabled(!busy).show(ui)) {
-                                    self.friends_requested = false;
-                                    self.friends_error = None;
-                                }
-                            }
-                        });
-                        ui.add_space(8.0);
-                        if !self.entry.mine() {
-                            ui.checkbox(&mut self.request_public, "Request public sharing");
-                        }
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.message)
-                                .hint_text("Add a message (optional)")
-                                .char_limit(280)
-                                .desired_width(ui.available_width()),
-                        );
-                        ui.add_space(12.0);
-                        ui.horizontal(|ui| {
-                            if pressed(
-                                Button::new(&format!("{} · {} selected", if self.entry.mine() { "Share" } else { "Request share" }, self.selected.len()))
-                                    .variant(Variant::Primary)
-                                    .enabled(!busy && (!self.selected.is_empty() || self.request_public))
-                                    .show(ui),
-                            ) {
-                                let recipients = friends
-                                    .iter()
-                                    .filter(|f| self.selected.contains(&f.id))
-                                    .map(|f| shares::Recipient { vrchat_user_id: f.id.clone(), display_name: f.name.clone() })
-                                    .collect();
-                                self.start(
-                                    &ctx,
-                                    server,
-                                    Action::Share(Share { public: self.request_public, recipients, message: self.message.clone(), ..Default::default() }),
-                                );
-                            }
-                            if pressed(Button::new("Cancel").variant(Variant::Ghost).enabled(!busy).show(ui)) {
-                                self.picker = false;
-                            }
-                        });
-                    } else {
-                        ui.add_space(4.0);
-                        if let Some(from) = self.entry.remote.as_ref().and_then(|i| i.from.as_ref()) {
-                            ui.label(egui::RichText::new(format!("From {}", from.name)).color(theme::FG_2));
-                            ui.add_space(12.0);
-                        }
-                        let mine = self.entry.mine();
-                        let hidden = self.entry.remote.as_ref().is_some_and(|i| i.hidden.is_some());
-                        ui.label(egui::RichText::new(if mine { "Choose who can see this" } else { "Shared with you" }).size(17.0).strong());
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new(if mine {
-                                "Public captures appear on Orbiters. Sharing to friends keeps them private."
-                            } else {
-                                "You can open and download this item. Ask the person who shared it before sharing it further."
-                            })
-                            .size(12.5)
-                            .color(theme::FG_3),
-                        );
-                        ui.add_space(16.0);
-                        if hidden {
-                            ui.label("Hidden by a moderator. Sharing is unavailable.");
-                        }
-                        let enabled = !busy && self.entry.ready && !hidden && self.warning.is_none();
-                        if mine {
-                            let public = self.entry.remote.as_ref().is_some_and(|i| i.public);
-                            if pressed(
-                                Button::new(if busy {
-                                    "Updating…"
-                                } else if public {
-                                    "Unshare publicly"
-                                } else {
-                                    "Share publicly"
-                                })
-                                .icon(icons::GLOBE)
-                                .variant(if public || self.warning.is_some() { Variant::Secondary } else { Variant::Primary })
-                                .enabled(enabled)
-                                .width(ui.available_width())
-                                .show(ui),
-                            ) {
-                                if public {
-                                    self.start(&ctx, server, Action::Unshare(Unshare { public: true, ..Default::default() }));
-                                } else {
-                                    self.public(&ctx, server);
-                                }
-                            }
-                            ui.add_space(8.0);
-                            if pressed(Button::new("Share to …").icon(icons::USERS).enabled(enabled).width(ui.available_width()).show(ui)) {
-                                self.picker = true;
-                            }
-                        } else {
-                            if pressed(
-                                Button::new(if busy { "Sending request…" } else { "Request share" })
-                                    .icon(icons::CLOUD_ARROW_UP)
-                                    .variant(Variant::Primary)
-                                    .enabled(enabled)
-                                    .width(ui.available_width())
-                                    .show(ui),
-                            ) {
-                                self.picker = true;
-                            }
-                            ui.add_space(8.0);
-                            if pressed(Button::new("Download / open").icon(icons::DOWNLOAD_SIMPLE).enabled(!busy).width(ui.available_width()).show(ui)) {
-                                self.start(&ctx, server, Action::Download);
-                            }
-                        }
-                        let grants = self.entry.remote.as_ref().map(|i| i.grants.clone()).unwrap_or_default();
-                        if !grants.is_empty() {
-                            ui.add_space(18.0);
-                            ui.label(egui::RichText::new("SHARED WITH").size(10.0).color(theme::FG_4));
-                            egui::ScrollArea::vertical().id_salt("grants").max_height(120.0).show(ui, |ui| {
-                                for g in grants {
-                                    ui.horizontal(|ui| {
-                                        ui.label(g.display_name.as_deref().unwrap_or(&g.vrchat_user_id));
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if pressed(Button::new("Revoke").variant(Variant::Ghost).enabled(!busy).id_salt(g.id).show(ui)) {
-                                                self.start(
-                                                    &ctx,
-                                                    server,
-                                                    Action::Unshare(Unshare { recipients: vec![g.vrchat_user_id.clone()], ..Default::default() }),
-                                                );
-                                            }
-                                        });
-                                    });
-                                }
-                            });
-                        }
-                        if mine && self.entry.remote.as_ref().is_some_and(|i| i.public || !i.grants.is_empty()) {
-                            ui.add_space(10.0);
-                            if pressed(Button::new("Unshare everything").variant(Variant::Ghost).enabled(!busy).show(ui)) {
-                                self.start(&ctx, server, Action::Unshare(Unshare { all: true, ..Default::default() }));
-                            }
-                        }
-                    }
-                    if let Some(n) = &self.notice {
-                        ui.add_space(12.0);
-                        ui.label(egui::RichText::new(n).color(theme::FG_2));
-                    }
-                    if let Some(e) = &self.error {
-                        ui.add_space(12.0);
-                        ui.label(egui::RichText::new(e).color(egui::Color32::from_rgb(248, 150, 150)));
-                        if let Some(a) = self.last.clone() {
-                            if pressed(Button::new("Retry").enabled(!busy).show(ui)) {
-                                self.start(&ctx, server, a);
-                            }
-                        }
-                    }
-                });
 
-                if let Some(warning) = self.warning.clone() {
-                    ui.add_space(20.0);
-                    egui::Frame::NONE.fill(theme::surface()).corner_radius(14).inner_margin(16).show(ui, |ui| {
-                        ui.label(egui::RichText::new("Before you share publicly").strong());
-                        ui.add_space(8.0);
-                        ui.label(&warning);
-                        ui.add_space(12.0);
-                        ui.horizontal(|ui| {
-                            if pressed(Button::new("Share anyway").variant(Variant::Primary).enabled(!busy).show(ui)) {
-                                self.warning = None;
-                                let mut r = match &self.last {
-                                    Some(Action::Share(r)) => r.clone(),
-                                    _ => Share { public: true, ..Default::default() },
-                                };
-                                r.public = true;
-                                r.acknowledge_explicit = true;
-                                self.start(&ctx, server, Action::Share(r));
-                            }
-                            if pressed(Button::new("Cancel").variant(Variant::Ghost).show(ui)) {
-                                self.warning = None;
-                            }
-                        });
-                    });
-                }
-            });
-        if self.large_picture {
-            let response = egui::Modal::new(Id::unique("capture-full-picture"))
-                .frame(egui::Frame::NONE.fill(theme::INK_900).corner_radius(20).inner_margin(16))
-                .show(&ctx, |ui| {
-                    let size = vec2((ctx.content_rect().width() - 120.0).max(200.0), (ctx.content_rect().height() - 150.0).max(150.0));
-                    let (r, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                    let picture = match &self.entry.local {
-                        Some(controller::Local::Picture(path)) => Some(crate::worlds::Picture::Shot { path: path.clone(), size: 0, width: 2048 }),
-                        _ => self.entry.picture.clone(),
-                    };
-                    let texture = picture.as_ref().and_then(|p| self.pictures.get(&ctx, p));
-                    if let Some(t) = texture {
-                        let scale = (r.width() / t.size_vec2().x).min(r.height() / t.size_vec2().y);
-                        let image = Rect::from_center_size(r.center(), t.size_vec2() * scale);
-                        ui.painter().image(t.id(), image, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
-                    }
-                    if Button::new("Close picture").show(ui).clicked() {
-                        self.large_picture = false;
-                    }
-                });
-            if response.should_close() {
-                self.large_picture = false;
-            }
-            return false;
-        }
+        // The 3D view of the capture, over everything; the window waits under it.
         if let Some(v) = self.viewer.as_mut() {
             let rect = ui.max_rect();
             let mut open = true;
@@ -570,63 +340,930 @@ impl Dialog {
             }
             return false;
         }
-        close || (!busy && modal.should_close())
+        self.window(ui, cx, server)
     }
-}
-pub fn avatar(ui: &Ui, r: Rect, tex: Option<&egui::TextureHandle>, name: &str) {
-    ui.painter().rect_filled(r, theme::radius(r.width() * 0.5), theme::surface());
-    if let Some(t) = tex {
-        super::sessions::thumb_shape(ui.painter(), r, theme::radius(r.width() * 0.5), Some(t), 1.0);
-    } else {
-        widgets::text(ui.painter(), r.center(), Align2::CENTER_CENTER, &Txt::new(name.chars().next().unwrap_or('?').to_string(), 12.0).color(theme::FG_3));
+
+    fn rollback_or_settle(&mut self, ctx: &egui::Context, cx: &mut Cx, done: Outcome) {
+        match done {
+            Outcome::Shared(Shared::Item { item }) | Outcome::Unshared(item) => {
+                let was_public = self.entry.remote.as_ref().is_some_and(|i| i.public);
+                let notice = match &self.last {
+                    Some(Action::Share(s)) if s.public && !s.recipients.is_empty() => "Shared publicly and with your friends".to_string(),
+                    Some(Action::Share(s)) if s.public => "Shared publicly: it is on Orbiters now".to_string(),
+                    Some(Action::Share(s)) => format!("Shared with {} friend{}", s.recipients.len(), if s.recipients.len() == 1 { "" } else { "s" }),
+                    Some(Action::Unshare(u)) if u.all => "Not shared any more".to_string(),
+                    Some(Action::Unshare(u)) if u.public && was_public => "Not public any more".to_string(),
+                    Some(Action::Unshare(_)) => "Sharing updated".to_string(),
+                    _ => "Sharing updated".to_string(),
+                };
+                self.entry.remote = Some(item);
+                self.changed = true;
+                self.picker = false;
+                self.rollback = None;
+                self.notice = Some(notice);
+            }
+            Outcome::Shared(Shared::Request { .. }) => {
+                self.picker = false;
+                let from =
+                    self.entry.remote.as_ref().and_then(|i| i.from.as_ref()).map(|p| p.name.clone()).unwrap_or_else(|| "the person who shared it".into());
+                self.notice = Some(format!("Request sent: {from} decides"));
+            }
+            Outcome::Answered(request) => {
+                self.notice = Some("Share request answered".into());
+                if let Some(item) = request.item {
+                    self.entry.remote = Some(item);
+                    self.changed = true;
+                }
+            }
+            Outcome::Downloaded(path) => {
+                self.notice = Some(format!("Saved to {}", path.display()));
+                if let Some(item) = self.entry.remote.as_ref().filter(|i| i.kind == shares::Kind::Capture) {
+                    if let Some(gpu) = cx.gpu {
+                        self.viewer = Some(super::splats::Viewer::open_shared(
+                            ctx,
+                            gpu,
+                            &path,
+                            self.entry.world_name.clone(),
+                            &item.capture.as_ref().map(|c| c.view.clone()).unwrap_or_default(),
+                            super::splats::on_integrated(cx),
+                        ));
+                    }
+                } else {
+                    let _ = crate::controller::open_path(&path);
+                }
+            }
+            Outcome::Failed { message, explicit } => {
+                if explicit {
+                    self.warning = Some(message);
+                } else {
+                    self.error = Some(message);
+                }
+                if let Some(entry) = self.rollback.take() {
+                    self.entry = entry;
+                }
+            }
+        }
+    }
+
+    /// The window itself; true once it closed back into its card.
+    fn window(&mut self, ui: &mut Ui, cx: &mut Cx, server: Server) -> bool {
+        let ctx = ui.ctx().clone();
+        let page = ui.max_rect();
+        let area = Rect::from_min_max(pos2(page.left() + GUTTER, page.top() + cx.top + 12.0), pos2(page.right() - GUTTER, page.bottom() - GUTTER));
+        let busy = self.operation_id.is_some() || self.fixture_busy;
+        let (thumb, large) = self.pictures_of(cx.snap.settings.development);
+        let thumb_tex = thumb.as_ref().and_then(|p| self.pictures.get(&ctx, p));
+        let large_tex = large.as_ref().and_then(|p| self.pictures.get(&ctx, p));
+        let aspect = large_tex
+            .as_ref()
+            .or(thumb_tex.as_ref())
+            .map(|t| t.size_vec2().x / t.size_vec2().y.max(1.0))
+            .or_else(|| self.entry.remote.as_ref().and_then(|i| i.picture.as_ref()).filter(|p| p.height > 0).map(|p| p.width as f32 / p.height as f32))
+            .unwrap_or(16.0 / 9.0);
+        let measured = &self.measured;
+        let layout = viewer::picture_layout(area, aspect, |w| {
+            measured.get(&(w.round() as u32)).copied().unwrap_or(if w <= viewer::SIDE_W + 1.0 { 260.0 } else { 118.0 })
+        });
+        let full_rect = viewer::contain(area, aspect);
+        let full = anim::toggle(&ctx, Id::unique(("capture-window-full", &self.entry.key)), self.full, Spring::EXPAND);
+        let (target, picture_target) = if self.full { (full_rect, full_rect) } else { (layout.window, layout.picture) };
+        let origin = self.origin;
+        let morph = self.morph.get_or_insert_with(|| {
+            let serial = OPENED.fetch_add(1, Ordering::Relaxed);
+            let (origin, radius) = origin.unwrap_or((Rect::from_center_size(target.center(), target.size() * 0.92), viewer::RADIUS));
+            Morph::new(Id::unique(("capture-window", serial)), origin, radius)
+        });
+        if morph.id() == Id::NULL {
+            // Closed before it ever showed.
+            return true;
+        }
+        let f = morph.frame(&ctx, target);
+        let (wid, closing) = (morph.id(), morph.is_closing());
+        let picture = morph.part(&ctx, "picture", picture_target, &f);
+        ctx.data_mut(|d| d.insert_temp(wid.with("shown"), f.t));
+        if f.closed {
+            return true;
+        }
+        // Another item coming in from the side it is on, the one before leaving the other way.
+        let nav = if self.nav.0 == 0 { 1.0 } else { anim::spring_from(&ctx, wid.with(("nav", self.nav.0)), [0.0], [1.0], Spring::SOFT)[0] };
+        let slide = 28.0 * self.nav.1;
+        if nav >= 0.999 {
+            self.previous = None;
+        }
+        let details_alpha = f.content * (1.0 - full).clamp(0.0, 1.0) * nav.clamp(0.0, 1.0);
+
+        let window = ctx.content_rect();
+        let catcher = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
+        let mut close = false;
+        let mut toggle_full = false;
+        let mut act: Option<Act> = None;
+        // Opaque from its first frame (egui fades new areas in): it grows out of its card instead.
+        egui::Area::new(wid.with("area")).order(Order::Foreground).fixed_pos(catcher.min).fade_in(false).show(&ctx, |ui| {
+            ui.set_min_size(catcher.size());
+            let backdrop = ui.interact(catcher, wid.with("backdrop"), Sense::click());
+            viewer::paint_backdrop(&ui.painter().with_clip_rect(window), window, &f);
+            if widgets::pressed(&backdrop) && !f.rect.contains(backdrop.interact_pointer_pos().unwrap_or_default()) && !busy {
+                close = true;
+            }
+            let _ = ui.interact(f.rect, wid.with("surface"), Sense::click());
+            let p = ui.painter().clone();
+            viewer::paint_surface(&p, &f);
+
+            // The picture: the card's at once, the full one fading in over it once decoded.
+            let r = f.radius;
+            let radii = match (self.full, layout.arrangement) {
+                (true, _) => [r; 4],
+                (false, Arrangement::Under) => [r, r, r * full, r * full],
+                (false, Arrangement::Beside) => [r, r * full, r * full, r],
+            };
+            let pic_resp = ui.interact(picture, wid.with("picture"), if closing { Sense::hover() } else { Sense::click() });
+            let hover = anim::toggle(&ctx, wid.with("picture-hover"), pic_resp.hovered() && self.entry.is_picture(), Spring::SOFT);
+            let shown_large = feedback::loaded(&ctx, wid.with(("large", self.nav.0)), large_tex.is_some());
+            let k = nav.clamp(0.0, 1.0);
+            if let Some(prev) = self.previous.as_ref().filter(|_| k < 0.999) {
+                feedback::cover(&p, picture, radii, prev, 1.0, 1.0);
+            }
+            // The new one slides in over the one before, inside the picture's frame.
+            let np = p.with_clip_rect(picture.intersect(p.clip_rect()));
+            let at = picture.translate(vec2(slide * (1.0 - k), 0.0));
+            match (&thumb_tex, &large_tex) {
+                (Some(t), _) if shown_large < 0.99 => feedback::cover(&np, at, radii, t, 1.0 + 0.015 * hover, k),
+                (None, None) => {
+                    feedback::fill_corners(&np, at, radii, theme::alpha(theme::INK_750, k));
+                    let glyph = if self.entry.is_picture() { icons::IMAGES } else { icons::CUBE };
+                    widgets::icon(&np, at.center(), glyph, 40.0, theme::alpha(theme::FG_4, k));
+                }
+                _ => {}
+            }
+            if let Some(l) = &large_tex {
+                feedback::cover(&np, at, radii, l, 1.0 + 0.015 * hover, shown_large * k);
+            }
+            self.last_picture = large_tex.clone().filter(|_| shown_large > 0.99).or_else(|| thumb_tex.clone());
+            if self.entry.is_picture() && pressed(pic_resp.on_hover_cursor(egui::CursorIcon::ZoomIn)) {
+                toggle_full = true;
+            }
+            let mut cu = ui.new_child(UiBuilder::new().max_rect(f.rect).id_salt(wid.with("chrome")));
+            cu.set_clip_rect(f.rect.intersect(ui.clip_rect()));
+            cu.multiply_opacity(f.content);
+            if closing || f.content < 0.05 {
+                cu.disable();
+            }
+            self.picture_overlays(&mut cu, cx, picture, busy, full, &mut act);
+            if viewer::close_button(&mut cu, f.rect, "Close") {
+                close = true;
+            }
+            // The items before and after it, over the picture's sides.
+            let can = self.can_navigate() || self.fixture_active;
+            for (dir, glyph, label, x, there) in [
+                (-1i64, icons::CARET_LEFT, "Previous", picture.left() + 16.0 + 20.0, self.neighbours.0),
+                (1, icons::CARET_RIGHT, "Next", picture.right() - 16.0 - 20.0, self.neighbours.1),
+            ] {
+                if !there || full > 0.5 {
+                    continue;
+                }
+                let r = Rect::from_center_size(pos2(x, picture.center().y), vec2(40.0, 40.0));
+                let mut au = cu.new_child(UiBuilder::new().max_rect(r).id_salt(("capture-nav-button", dir)));
+                if !can {
+                    au.disable();
+                    au.multiply_opacity(0.4);
+                }
+                if pressed(widgets::IconButton::new(glyph, label).size(40.0, 18.0).backdrop(theme::black(0.5)).show_at(&mut au, r)) && can {
+                    self.step = Some(dir);
+                }
+            }
+
+            // Details, laid out at the window's final width, clipped by the window on its way.
+            if details_alpha > 0.01 || !self.full {
+                let d = match layout.arrangement {
+                    Arrangement::Under => Rect::from_min_size(pos2(f.rect.left(), picture.bottom()), vec2(layout.details.width(), 4000.0)),
+                    Arrangement::Beside => Rect::from_min_size(pos2(picture.right(), f.rect.top()), vec2(layout.details.width(), 4000.0)),
+                };
+                let d = d.translate(vec2(slide * 0.5 * (1.0 - nav.clamp(0.0, 1.0)), 0.0));
+                let mut du = ui.new_child(
+                    UiBuilder::new().max_rect(d.shrink2(vec2(PAD, 0.0))).layout(egui::Layout::top_down(egui::Align::Min)).id_salt(wid.with("details")),
+                );
+                du.set_clip_rect(f.rect.intersect(ui.clip_rect()));
+                du.multiply_opacity(details_alpha);
+                if closing || details_alpha < 0.5 {
+                    du.disable();
+                }
+                du.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                let dy = 10.0 * (1.0 - details_alpha);
+                du.add_space(if layout.arrangement == Arrangement::Beside { 64.0 } else { 20.0 } + dy);
+                self.details(&mut du, cx, busy, layout.arrangement, &mut act);
+                du.add_space(22.0);
+                let h = du.min_rect().height() - dy;
+                self.measured.insert(layout.details.width().round() as u32, h.ceil());
+            }
+        });
+
+        if toggle_full {
+            self.full = !self.full;
+        }
+        if let Some(a) = act {
+            self.act(&ctx, cx, server, a);
+        }
+        if !closing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.full {
+                self.full = false;
+            } else if self.warning.is_some() {
+                self.warning = None;
+            } else if self.picker {
+                self.picker = false;
+            } else if !busy {
+                close = true;
+            }
+        }
+        if close {
+            if let Some(m) = self.morph.as_mut() {
+                m.close();
+                self.full = false;
+            }
+        }
+        false
+    }
+
+    /// Over the picture: what it is (top left), its 3D view or folder (bottom right), a share's progress (bottom edge).
+    fn picture_overlays(&mut self, ui: &mut Ui, cx: &Cx, picture: Rect, busy: bool, full: f32, act: &mut Option<Act>) {
+        let p = ui.painter().clone();
+        let (glyph, label, color) = if self.entry.is_picture() { (icons::IMAGES, "Picture", theme::FG) } else { (icons::CUBE, "3D capture", theme::ACCENT) };
+        let t = Txt::new(label, 11.5).weight(weight::SEMIBOLD).color(theme::FG);
+        let tw = widgets::text_size(ui, &t).x;
+        let badge = Rect::from_min_size(picture.min + vec2(16.0, 16.0), vec2(tw + 38.0, 28.0));
+        p.rect_filled(badge, theme::radius(14.0), theme::black(0.55));
+        widgets::icon(&p, pos2(badge.left() + 17.0, badge.center().y), glyph, 14.0, color);
+        widgets::text(&p, pos2(badge.left() + 29.0, badge.center().y), Align2::LEFT_CENTER, &t);
+
+        // A share running: a light running along the picture's bottom edge.
+        let running = anim::toggle(ui.ctx(), Id::unique(("capture-window-busy", &self.entry.key)), busy, Spring::SOFT).clamp(0.0, 1.0);
+        if running > 0.01 {
+            let bar = Rect::from_min_max(pos2(picture.left(), picture.bottom() - 3.0), picture.max);
+            let bp = p.with_clip_rect(bar.intersect(p.clip_rect()));
+            bp.rect_filled(bar, 0.0, theme::alpha(theme::ACCENT, 0.18 * running));
+            let k = ((anim::time(ui.ctx()) * 0.8) % 1.0) as f32;
+            let w = bar.width() * 0.35;
+            let x = bar.left() - w + k * (bar.width() + w);
+            bp.rect_filled(Rect::from_min_size(pos2(x, bar.top()), vec2(w, 3.0)), theme::radius(1.5), theme::alpha(theme::ACCENT, running));
+            if anim::is_live(ui.ctx()) {
+                ui.ctx().request_repaint();
+            }
+        }
+
+        if full > 0.5 {
+            // Shown whole: the way back to its details.
+            let r = Rect::from_min_size(picture.max - vec2(16.0 + 32.0, 16.0 + 32.0), vec2(32.0, 32.0));
+            let mut fu = ui.new_child(UiBuilder::new().max_rect(r).id_salt("capture-window-unfull"));
+            fu.multiply_opacity(((full - 0.5) * 2.0).clamp(0.0, 1.0));
+            let resp = widgets::IconButton::new(icons::CORNERS_IN, "Back to its details").size(32.0, 15.0).backdrop(theme::black(0.5)).show_at(&mut fu, r);
+            if pressed(resp) {
+                *act = Some(Act::Full);
+            }
+            return;
+        }
+        let mut right = picture.right() - 16.0;
+        let bottom = picture.bottom() - 16.0;
+        if !self.entry.is_picture() {
+            let (label, enabled, hint) = match &self.entry.local {
+                Some(controller::Local::Session(_)) if !self.entry.ready => {
+                    ("View in 3D", false, Some("Reconstruct it first: the 3D view comes from its splats"))
+                }
+                Some(controller::Local::Session(_)) => ("View in 3D", cx.gpu.is_some(), None),
+                _ if busy && matches!(self.last, Some(Action::Download)) => ("Downloading…", false, None),
+                _ => ("View in 3D", !busy, None),
+            };
+            let mut b = Button::new(label).icon(icons::CUBE_FOCUS).variant(Variant::Glass).size(Size::Sm).enabled(enabled).id_salt("capture-window-3d");
+            if let Some(h) = hint {
+                b = b.hint(h);
+            }
+            let w = b.desired_width(ui);
+            let r = Rect::from_min_size(pos2(right - w, bottom - 32.0), vec2(w, 32.0));
+            if pressed(b.show_at(ui, r)) {
+                *act = Some(Act::View3d);
+            }
+            right = r.left() - 8.0;
+        }
+        if let Some(local) = &self.entry.local {
+            let r = Rect::from_min_size(pos2(right - 32.0, bottom - 32.0), vec2(32.0, 32.0));
+            let label = if matches!(local, controller::Local::Picture(_)) { "Show in its folder" } else { "Open its folder" };
+            let resp = widgets::IconButton::new(icons::FOLDER_OPEN, label).size(32.0, 15.0).backdrop(theme::black(0.5)).show_at(ui, r);
+            if pressed(resp) {
+                *act = Some(Act::Folder);
+            }
+            right = r.left() - 8.0;
+        }
+        if self.entry.is_picture() {
+            let r = Rect::from_min_size(pos2(right - 32.0, bottom - 32.0), vec2(32.0, 32.0));
+            let resp = widgets::IconButton::new(icons::CORNERS_OUT, "See it whole").size(32.0, 15.0).backdrop(theme::black(0.5)).show_at(ui, r);
+            if pressed(resp) {
+                *act = Some(Act::Full);
+            }
+        }
+    }
+
+    /// Title, when and who sees it, the actions, who it is shared with, then the panel and messages.
+    fn details(&mut self, ui: &mut Ui, cx: &Cx, busy: bool, arrangement: Arrangement, act: &mut Option<Act>) {
+        let ctx = ui.ctx().clone();
+        let w = ui.available_width();
+        let mine = self.entry.mine();
+        let item = self.entry.remote.clone();
+        let hidden = item.as_ref().is_some_and(|i| i.hidden.is_some());
+        let public = item.as_ref().is_some_and(|i| i.public);
+        let can_share = self.entry.ready && !hidden && self.warning.is_none();
+
+        // The actions this item has.
+        let mut actions: Vec<(Act, Button)> = Vec::new();
+        if mine {
+            if !self.entry.ready && matches!(self.entry.local, Some(controller::Local::Session(_))) {
+                let queued = matches!(&self.entry.local, Some(controller::Local::Session(d)) if cx.snap.reconstruct_queue.contains(d) || cx.snap.reconstruction.as_ref().is_some_and(|j| &j.session_dir == d));
+                actions.push((
+                    Act::Reconstruct,
+                    Button::new(if queued { "Reconstructing…" } else { "Reconstruct to share" })
+                        .icon(icons::MAGIC_WAND)
+                        .variant(Variant::Primary)
+                        .enabled(!queued),
+                ));
+            } else {
+                if !public {
+                    let label = if busy && matches!(&self.last, Some(Action::Share(s)) if s.public) { "Sharing…" } else { "Share publicly" };
+                    actions.push((Act::Public, Button::new(label).icon(icons::GLOBE).variant(Variant::Primary).enabled(can_share && !busy)));
+                }
+                actions.push((Act::ShareTo, Button::new("Share to …").icon(icons::USERS).variant(Variant::Secondary).enabled(can_share && !busy)));
+            }
+        } else {
+            let label = if busy && matches!(self.last, Some(Action::Share(_))) { "Asking…" } else { "Ask to share" };
+            actions.push((Act::ShareTo, Button::new(label).icon(icons::PAPER_PLANE_TILT).variant(Variant::Primary).enabled(can_share && !busy)));
+            if self.entry.is_picture() {
+                actions.push((Act::Download, Button::new("Download").icon(icons::DOWNLOAD_SIMPLE).enabled(!busy)));
+            }
+        }
+        let actions: Vec<(Act, Button)> = actions
+            .into_iter()
+            .map(|(a, b)| {
+                let tag = a.tag();
+                (a, b.size(Size::Sm).id_salt(("capture-window-act", tag)))
+            })
+            .collect();
+        let widths: Vec<f32> = actions.iter().map(|(_, b)| b.desired_width(ui)).collect();
+        let actions_w = widths.iter().sum::<f32>() + 8.0 * widths.len().saturating_sub(1) as f32;
+
+        // Title and its line; the actions beside it when they fit.
+        let title = Txt::new(&self.entry.world_name, 19.0).weight(weight::SEMIBOLD).tracking(-0.01);
+        let title_w = widgets::text_size(ui, &title).x;
+        let beside = arrangement == Arrangement::Under && title_w.min(320.0) + 24.0 + actions_w <= w;
+        let (head, _) = ui.allocate_exact_size(vec2(w, 48.0), Sense::hover());
+        let text_w = if beside { w - actions_w - 24.0 } else { w };
+        let p = ui.painter().clone();
+        widgets::text_truncated(&p, pos2(head.left(), head.top() + 12.0), Align2::LEFT_CENTER, &title, text_w);
+        self.subline(ui, pos2(head.left(), head.top() + 37.0), text_w, mine, item.as_ref());
+        let row = if beside {
+            Rect::from_min_size(pos2(head.right() - actions_w, head.top() + 8.0), vec2(actions_w, 32.0))
+        } else {
+            ui.add_space(14.0);
+            let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
+            Rect::from_min_size(r.min, vec2(actions_w.min(w), 32.0))
+        };
+        let mut x = row.left();
+        for ((a, b), bw) in actions.into_iter().zip(widths) {
+            if pressed(b.show_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(bw, 32.0)))) {
+                *act = Some(a);
+            }
+            x += bw + 8.0;
+        }
+
+        // Who sees it, each with an ×.
+        if mine && item.as_ref().is_some_and(|i| i.public || !i.grants.is_empty()) {
+            ui.add_space(16.0);
+            self.shared_with(ui, cx, busy, act);
+        }
+        if hidden {
+            ui.add_space(14.0);
+            feedback::banner(ui, Id::unique(("capture-hidden", &self.entry.key)), Tone::Warn, "Hidden by a moderator: it can no longer be shared.", false);
+        }
+        if busy {
+            ui.add_space(14.0);
+            let what = match &self.last {
+                Some(Action::Download) => "Downloading…".to_string(),
+                Some(Action::Unshare(_)) => "Updating who sees it…".to_string(),
+                Some(Action::Share(s)) if !mine => format!("Asking {}…", item.as_ref().and_then(|i| i.from.as_ref()).map_or("them", |p| p.name.as_str())),
+                Some(Action::Share(s)) if s.public => {
+                    if self.entry.is_picture() {
+                        "Sharing publicly…".to_string()
+                    } else {
+                        "Sharing publicly: preparing the 3D view for the web…".to_string()
+                    }
+                }
+                _ => "Sharing with your friends…".to_string(),
+            };
+            working(ui, &what);
+        }
+        let panel = self.panel();
+        let key = (panel as u8, self.panel_key.1);
+        if key.0 != self.panel_key.0 {
+            self.panel_key = (key.0, self.panel_key.1 + 1);
+        }
+        if panel != Panel::None {
+            ui.add_space(16.0);
+            let id = Id::unique(("capture-panel", &self.entry.key, self.panel_key.1));
+            let k = anim::spring_from(&ctx, id, [0.0], [1.0], Spring::SOFT)[0];
+            let start = ui.cursor().min;
+            let mut pu = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(Rect::from_min_size(start + vec2(16.0 * (1.0 - k), 0.0), vec2(w, 2000.0)))
+                    .layout(egui::Layout::top_down(egui::Align::Min))
+                    .id_salt(id),
+            );
+            pu.multiply_opacity(k.clamp(0.0, 1.0));
+            pu.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            match panel {
+                Panel::Warning => self.warning_panel(&mut pu, busy, act),
+                Panel::Picker => self.picker_panel(&mut pu, cx, busy, act),
+                Panel::None => {}
+            }
+            let h = pu.min_rect().height();
+            ui.allocate_exact_size(vec2(w, h), Sense::hover());
+        }
+        if let Some(n) = self.notice.clone() {
+            ui.add_space(14.0);
+            if feedback::banner(ui, Id::unique(("capture-notice", &self.entry.key, &n)), Tone::Ok, &n, true) {
+                self.notice = None;
+            }
+        }
+        if let Some(e) = self.error.clone() {
+            ui.add_space(14.0);
+            feedback::banner(ui, Id::unique(("capture-error", &self.entry.key, &e)), Tone::Danger, &e, false);
+            if self.last.is_some() {
+                ui.add_space(8.0);
+                let b = Button::new("Try again").icon(icons::ARROW_CLOCKWISE).size(Size::Sm).enabled(!busy).id_salt("capture-retry");
+                let bw = b.desired_width(ui);
+                let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
+                if pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
+                    *act = Some(Act::Retry);
+                }
+            }
+        }
+    }
+
+    /// "3D capture · 28 Oct 2026, 22:00 · ⊕ Public", or who shared it.
+    fn subline(&mut self, ui: &Ui, at: egui::Pos2, max_w: f32, mine: bool, item: Option<&shares::Item>) {
+        let p = ui.painter().clone();
+        let kind = if self.entry.is_picture() { "VRChat picture" } else { "3D capture" };
+        let date = super::local_time(&controller::iso(self.entry.taken));
+        let line = Txt::new(format!("{kind} · {date}"), 12.5).color(theme::FG_3);
+        let r = widgets::text_truncated(&p, at, Align2::LEFT_CENTER, &line, max_w);
+        let x = r.right() + 10.0;
+        let (glyph, label, color) = match item {
+            None => (icons::HARD_DRIVE, "Only on this computer".to_string(), theme::FG_3),
+            Some(i) if !mine => {
+                if let Some(from) = &i.from {
+                    let ar = Rect::from_center_size(pos2(x + 9.0, at.y), vec2(18.0, 18.0));
+                    let tex = from.avatar_url.as_ref().filter(|_| !self.fixture_active).and_then(|url| {
+                        self.pictures.get(ui.ctx(), &crate::worlds::Picture::Remote { world_id: format!("person-{}", from.id), url: url.clone(), large: false })
+                    });
+                    widgets::avatar(&p, ar, tex.as_ref(), &from.name);
+                    let t = Txt::new(format!("from {}", from.name), 12.5).weight(weight::MEDIUM).color(theme::FG_2);
+                    widgets::text_truncated(&p, pos2(ar.right() + 6.0, at.y), Align2::LEFT_CENTER, &t, (at.x + max_w - ar.right() - 6.0).max(10.0));
+                    return;
+                }
+                (icons::USERS, "Shared with you".to_string(), theme::FG_2)
+            }
+            // Who sees it is listed under the line (Shared with).
+            Some(i) if i.public || !i.grants.is_empty() => return,
+            Some(_) => (icons::LOCK_SIMPLE, "Only you".to_string(), theme::FG_3),
+        };
+        if x + 40.0 > at.x + max_w {
+            return;
+        }
+        widgets::icon(&p, pos2(x + 7.0, at.y), glyph, 13.0, color);
+        widgets::sliding_value(
+            ui,
+            Id::unique(("capture-visibility", &self.entry.key)),
+            pos2(x + 18.0, at.y),
+            Align2::LEFT_CENTER,
+            &label,
+            &Txt::new("", 12.5).weight(weight::MEDIUM).color(color),
+            (at.x + max_w - x - 18.0).max(10.0),
+        );
+    }
+
+    /// Public and each friend it is shared with, as chips whose × takes them back; then Unshare everything.
+    fn shared_with(&mut self, ui: &mut Ui, cx: &Cx, busy: bool, act: &mut Option<Act>) {
+        let w = ui.available_width();
+        let (cap, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
+        widgets::text(ui.painter(), pos2(cap.left(), cap.center().y), Align2::LEFT_CENTER, &Txt::caps("Shared with"));
+        ui.add_space(8.0);
+        let Some(item) = self.entry.remote.clone() else { return };
+        enum C {
+            Public,
+            Grant(String),
+        }
+        let mut chips: Vec<(C, Chip)> = Vec::new();
+        if item.public {
+            chips.push((C::Public, Chip::new("Everyone on Orbiters").icon(icons::GLOBE).tone(theme::ACCENT).removable(true).enabled(!busy)));
+        }
+        let names: Vec<(String, String)> =
+            item.grants.iter().map(|g| (g.vrchat_user_id.clone(), g.display_name.clone().unwrap_or_else(|| g.vrchat_user_id.clone()))).collect();
+        let pictures: Vec<Option<egui::TextureHandle>> = names
+            .iter()
+            .map(|(id, _)| {
+                let url = self.friends_list.iter().find(|f| &f.id == id).and_then(|f| f.image.clone())?;
+                self.pictures.get(ui.ctx(), &crate::worlds::Picture::Profile { scope: crate::controller::vrchat_data::Scope::of(cx.snap), url })
+            })
+            .collect();
+        for ((id, name), tex) in names.iter().zip(&pictures) {
+            chips.push((C::Grant(id.clone()), Chip::new(name).person(tex.as_ref()).removable(true).enabled(!busy).id_salt(("grant", id))));
+        }
+        let all = Button::new("Unshare everything").icon(icons::EYE_SLASH).variant(Variant::Danger).size(Size::Sm).enabled(!busy).id_salt("unshare-all");
+        let mut widths: Vec<f32> = chips.iter().map(|(_, c)| c.width(ui)).collect();
+        widths.push(all.desired_width(ui));
+        let (at, h) = widgets::flow(&widths, w, widgets::CHIP_H, 8.0);
+        let (area, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+        for (n, (what, chip)) in chips.into_iter().enumerate() {
+            let r = Rect::from_min_size(area.min + at[n], vec2(widths[n].min(w), widgets::CHIP_H));
+            let resp = chip.show_at(ui, r);
+            if resp.removed {
+                *act = Some(match what {
+                    C::Public => Act::Unshare(Unshare { public: true, ..Default::default() }),
+                    C::Grant(id) => Act::Unshare(Unshare { recipients: vec![id], ..Default::default() }),
+                });
+            }
+        }
+        let n = widths.len() - 1;
+        let r = Rect::from_min_size(area.min + at[n], vec2(widths[n].min(w), widgets::CHIP_H));
+        if pressed(all.show_at(ui, r)) {
+            *act = Some(Act::Unshare(Unshare { all: true, ..Default::default() }));
+        }
+    }
+
+    /// Going ahead with something flagged explicit, said plainly.
+    fn warning_panel(&mut self, ui: &mut Ui, busy: bool, act: &mut Option<Act>) {
+        let w = ui.available_width();
+        let warning = self.warning.clone().unwrap_or_default();
+        let reasons: Vec<String> = self.entry.content.explicit_reasons.iter().map(|r| orbiters_core::explicit::reason_label(r)).collect();
+        let inner = w - 32.0 - 52.0;
+        let title = Txt::new("Before you share publicly", 14.5).weight(weight::SEMIBOLD);
+        let body = ui.painter().layout_job(Txt::new(&warning, 12.5).color(theme::FG_2).line_height(19.0).job(inner));
+        let tags_w: Vec<f32> = reasons.iter().map(|r| widgets::text_size(ui, &Txt::new(r, 11.0).weight(weight::MEDIUM)).x + 16.0).collect();
+        let (tag_at, tags_h) = widgets::flow(&tags_w, inner, 22.0, 6.0);
+        let h = 18.0 + 20.0 + 6.0 + body.size().y + if tags_h > 0.0 { 12.0 + tags_h } else { 0.0 } + 16.0 + 32.0 + 18.0;
+        let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+        let p = ui.painter().clone();
+        widgets::frame(&p, rect, 18.0, theme::alpha(theme::WARN, 0.08));
+        let tile = Rect::from_min_size(rect.min + vec2(16.0, 18.0), vec2(36.0, 36.0));
+        p.rect_filled(tile, theme::radius(11.0), theme::alpha(theme::WARN, 0.14));
+        widgets::icon(&p, tile.center(), icons::SHIELD_WARNING, 18.0, theme::WARN);
+        let x = tile.right() + 16.0;
+        let mut y = rect.top() + 18.0;
+        widgets::text(&p, pos2(x, y + 10.0), Align2::LEFT_CENTER, &title);
+        y += 26.0;
+        let body_h = body.size().y;
+        p.galley(pos2(x, y), body, theme::FG_2);
+        y += body_h;
+        if tags_h > 0.0 {
+            y += 12.0;
+            for (r, (o, tw)) in reasons.iter().zip(tag_at.iter().zip(&tags_w)) {
+                let tr = Rect::from_min_size(pos2(x, y) + *o, vec2(*tw, 22.0));
+                p.rect_filled(tr, theme::radius(11.0), theme::white(0.06));
+                widgets::text(&p, tr.center(), Align2::CENTER_CENTER, &Txt::new(r, 11.0).weight(weight::MEDIUM).color(theme::FG_2));
+            }
+        }
+        let anyway = Button::new("Share anyway").icon(icons::GLOBE).variant(Variant::Warn).size(Size::Sm).enabled(!busy).id_salt("share-anyway");
+        let cancel = Button::new("Cancel").variant(Variant::Ghost).size(Size::Sm).id_salt("warning-cancel");
+        let (aw, cw) = (anyway.desired_width(ui), cancel.desired_width(ui));
+        let by = rect.bottom() - 18.0 - 32.0;
+        if pressed(anyway.show_at(ui, Rect::from_min_size(pos2(rect.right() - 16.0 - aw, by), vec2(aw, 32.0)))) {
+            *act = Some(Act::Anyway);
+        }
+        if pressed(cancel.show_at(ui, Rect::from_min_size(pos2(rect.right() - 16.0 - aw - 8.0 - cw, by), vec2(cw, 32.0)))) {
+            *act = Some(Act::CancelWarning);
+        }
+    }
+
+    /// Friends to share with (or to ask the sharer for): search, chips that toggle, a message, then send.
+    fn picker_panel(&mut self, ui: &mut Ui, cx: &Cx, busy: bool, act: &mut Option<Act>) {
+        let ctx = ui.ctx().clone();
+        let w = ui.available_width();
+        let mine = self.entry.mine();
+        let from = self.entry.remote.as_ref().and_then(|i| i.from.as_ref()).map(|p| p.name.clone()).unwrap_or_else(|| "the sharer".into());
+        let (title, sub) = if mine {
+            ("Share with friends".to_string(), "They find it in Photos & captures, under Shared with me.".to_string())
+        } else {
+            (format!("Ask {from} to share it"), format!("{from} decides who else may see it."))
+        };
+        let (head, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
+        let p = ui.painter().clone();
+        widgets::text(&p, pos2(head.left(), head.top() + 10.0), Align2::LEFT_CENTER, &Txt::new(title, 14.5).weight(weight::SEMIBOLD));
+        widgets::text_truncated(&p, pos2(head.left(), head.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::FG_3), w - 120.0);
+        let count = Txt::new(format!("{} of 50", self.selected.len()), 11.5).color(theme::FG_4);
+        if !self.selected.is_empty() {
+            widgets::text(&p, pos2(head.right(), head.top() + 10.0), Align2::RIGHT_CENTER, &count);
+        }
+        ui.add_space(10.0);
+        let search_w = w;
+        let mut su = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(ui.cursor().min, vec2(search_w, 40.0))).id_salt("friend-search-row"));
+        widgets::search_field(&mut su, "friend-search", &mut self.query, "Search your VRChat friends", search_w);
+        ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
+        ui.add_space(12.0);
+
+        let q = self.query.trim().to_lowercase();
+        let scope = crate::controller::vrchat_data::Scope::of(cx.snap);
+        if self.friends.running() && self.friends_list.is_empty() {
+            let (r, _) = ui.allocate_exact_size(vec2(w, widgets::CHIP_H * 2.0 + 8.0), Sense::hover());
+            let mut x = r.left();
+            for (i, cw) in [96.0, 120.0, 84.0, 110.0, 132.0, 92.0].iter().enumerate() {
+                let row = (i / 3) as f32;
+                if i % 3 == 0 {
+                    x = r.left();
+                }
+                feedback::shimmer(ui.painter(), Rect::from_min_size(pos2(x, r.top() + row * (widgets::CHIP_H + 8.0)), vec2(*cw, widgets::CHIP_H)), 16.0);
+                x += cw + 8.0;
+            }
+        } else if let Some(error) = self.friends_error.clone() {
+            feedback::banner(ui, Id::unique(("friends-error", &self.entry.key)), Tone::Danger, &error, false);
+            ui.add_space(8.0);
+            let b = Button::new("Load friends again").icon(icons::ARROW_CLOCKWISE).size(Size::Sm).enabled(!busy).id_salt("friends-retry");
+            let bw = b.desired_width(ui);
+            let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
+            if pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
+                self.friends_requested = false;
+                self.friends_error = None;
+            }
+        } else if self.friends_list.is_empty() {
+            let text = if cx.snap.vrchat_login.allowed && cx.snap.vrchat_login.user.is_some() {
+                "No VRChat friends to show yet."
+            } else {
+                "No VRChat friends known yet: sign in to VRChat in Settings, or let VRCX or VRCNext load your friend list."
+            };
+            paragraph(ui, text, 12.5, theme::FG_3, w);
+        } else {
+            let matches: Vec<Friend> = self.friends_list.iter().filter(|f| q.is_empty() || f.name.to_lowercase().contains(&q)).cloned().collect();
+            let pictures: Vec<Option<egui::TextureHandle>> = matches
+                .iter()
+                .map(|f| f.image.as_ref().and_then(|url| self.pictures.get(&ctx, &crate::worlds::Picture::Profile { scope: scope.clone(), url: url.clone() })))
+                .collect();
+            let chips: Vec<Chip> = matches
+                .iter()
+                .zip(&pictures)
+                .map(|(f, tex)| {
+                    let chosen = self.selected.contains(&f.id);
+                    Chip::new(&f.name).person(tex.as_ref()).selected(chosen).enabled(!busy && (chosen || self.selected.len() < 50)).id_salt(("friend", &f.id))
+                })
+                .collect();
+            let widths: Vec<f32> = chips.iter().map(|c| c.width(ui)).collect();
+            let (at, _) = widgets::flow(&widths, w, widgets::CHIP_H, 8.0);
+            let limit = (FRIEND_ROWS as f32 - 1.0) * (widgets::CHIP_H + 8.0);
+            let shown = at.iter().take_while(|o| o.y <= limit + 0.5).count();
+            let h = if shown == 0 { 0.0 } else { at[shown - 1].y + widgets::CHIP_H };
+            let (area, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+            let mut toggled = None;
+            for (n, chip) in chips.into_iter().enumerate().take(shown) {
+                if chip.show_at(ui, Rect::from_min_size(area.min + at[n], vec2(widths[n].min(w), widgets::CHIP_H))).pressed {
+                    toggled = Some(matches[n].id.clone());
+                }
+            }
+            if let Some(id) = toggled {
+                if !self.selected.remove(&id) {
+                    self.selected.insert(id);
+                }
+            }
+            if matches.is_empty() {
+                paragraph(ui, &format!("No friend called \"{}\".", self.query.trim()), 12.5, theme::FG_3, w);
+            } else if shown < matches.len() {
+                ui.add_space(8.0);
+                paragraph(ui, &format!("{} more: search to find them", matches.len() - shown), 11.5, theme::FG_4, w);
+            }
+        }
+        ui.add_space(12.0);
+        if !mine {
+            let public = Chip::new("Everyone on Orbiters too")
+                .icon(icons::GLOBE)
+                .tone(theme::ACCENT)
+                .selected(self.request_public)
+                .enabled(!busy)
+                .id_salt("request-public");
+            let cw = public.width(ui);
+            let (r, _) = ui.allocate_exact_size(vec2(w, widgets::CHIP_H), Sense::hover());
+            if public.show_at(ui, Rect::from_min_size(r.min, vec2(cw, widgets::CHIP_H))).pressed {
+                self.request_public = !self.request_public;
+            }
+            ui.add_space(12.0);
+        }
+        let mut mu = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(ui.cursor().min, vec2(w, 36.0))).id_salt("share-message-row"));
+        widgets::text_field(&mut mu, "share-message", &mut self.message, "Add a message (optional)", w, false);
+        if self.message.chars().count() > 280 {
+            self.message = self.message.chars().take(280).collect();
+        }
+        ui.allocate_exact_size(vec2(w, 36.0), Sense::hover());
+        ui.add_space(14.0);
+        let n = self.selected.len();
+        let label = if mine {
+            match n {
+                0 => "Share".to_string(),
+                1 => "Share with 1 friend".to_string(),
+                _ => format!("Share with {n} friends"),
+            }
+        } else if n == 0 && self.request_public {
+            "Ask to share publicly".to_string()
+        } else {
+            "Send request".to_string()
+        };
+        let send = Button::new(&label)
+            .icon(icons::PAPER_PLANE_TILT)
+            .variant(Variant::Primary)
+            .size(Size::Sm)
+            .enabled(!busy && (n > 0 || (!mine && self.request_public)))
+            .id_salt("share-send");
+        let cancel = Button::new("Cancel").variant(Variant::Ghost).size(Size::Sm).enabled(!busy).id_salt("share-cancel");
+        let (sw, cw) = (send.desired_width(ui), cancel.desired_width(ui));
+        let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
+        if pressed(send.show_at(ui, Rect::from_min_size(pos2(r.right() - sw, r.top()), vec2(sw, 32.0)))) {
+            *act = Some(Act::Send);
+        }
+        if pressed(cancel.show_at(ui, Rect::from_min_size(pos2(r.right() - sw - 8.0 - cw, r.top()), vec2(cw, 32.0)))) {
+            *act = Some(Act::CancelPicker);
+        }
+    }
+
+    fn act(&mut self, ctx: &egui::Context, cx: &mut Cx, server: Server, a: Act) {
+        match a {
+            Act::Public => self.public(ctx, server),
+            Act::ShareTo => self.picker = !self.picker,
+            Act::Download => self.start(ctx, server, Action::Download),
+            Act::View3d => match &self.entry.local {
+                Some(controller::Local::Session(path)) => {
+                    if let Some(gpu) = cx.gpu {
+                        self.viewer = Some(super::splats::Viewer::open(ctx, gpu, path, self.entry.world_name.clone(), super::splats::on_integrated(cx)));
+                    }
+                }
+                _ => self.start(ctx, server, Action::Download),
+            },
+            Act::Reconstruct => {
+                if let Some(controller::Local::Session(path)) = &self.entry.local {
+                    cx.ctl.reconstruct(path.clone());
+                    self.notice = Some("Reconstruction started: share it once its 3D view is ready".into());
+                }
+            }
+            Act::Folder => {
+                if let Some(local) = &self.entry.local {
+                    let dir = match local {
+                        controller::Local::Picture(p) => p.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| p.clone()),
+                        controller::Local::Session(d) => d.clone(),
+                    };
+                    let r = crate::controller::open_path(&dir);
+                    cx.run(ctx, r);
+                }
+            }
+            Act::Full => self.full = !self.full,
+            Act::Unshare(u) => self.start(ctx, server, Action::Unshare(u)),
+            Act::Send => {
+                let recipients = self
+                    .friends_list
+                    .iter()
+                    .filter(|f| self.selected.contains(&f.id))
+                    .map(|f| shares::Recipient { vrchat_user_id: f.id.clone(), display_name: f.name.clone() })
+                    .collect();
+                self.start(ctx, server, Action::Share(Share { public: self.request_public, recipients, message: self.message.clone(), ..Default::default() }));
+            }
+            Act::CancelPicker => self.picker = false,
+            Act::Anyway => {
+                self.warning = None;
+                let mut r = match &self.last {
+                    Some(Action::Share(r)) => r.clone(),
+                    _ => Share { public: true, ..Default::default() },
+                };
+                r.public = true;
+                r.acknowledge_explicit = true;
+                self.start(ctx, server, Action::Share(r));
+            }
+            Act::CancelWarning => self.warning = None,
+            Act::Retry => {
+                if let Some(a) = self.last.clone() {
+                    self.start(ctx, server, a);
+                }
+            }
+        }
     }
 }
 
-/// Spring width, cross-faded labels and separating halves, matching LoginProviderButton's 340/25/0.8 spring.
+/// What the window's controls asked for this frame.
+#[derive(Clone)]
+enum Act {
+    Public,
+    ShareTo,
+    Download,
+    View3d,
+    Reconstruct,
+    Folder,
+    Full,
+    Unshare(Unshare),
+    Send,
+    CancelPicker,
+    Anyway,
+    CancelWarning,
+    Retry,
+}
+
+impl Act {
+    fn tag(&self) -> u8 {
+        match self {
+            Act::Public => 0,
+            Act::ShareTo => 1,
+            Act::Download => 2,
+            Act::Reconstruct => 3,
+            _ => 9,
+        }
+    }
+}
+
+/// A line of work going on: a spinner and what it does (the sharing window, the VRChat sign-in).
+pub(super) fn working(ui: &mut Ui, text: &str) {
+    let w = ui.available_width();
+    let (r, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
+    let p = ui.painter();
+    widgets::frame(p, r, 14.0, theme::alpha(theme::ACCENT, 0.07));
+    feedback::spinner(p, pos2(r.left() + 22.0, r.center().y), 7.0, 2.0, theme::ACCENT);
+    widgets::text_truncated(p, pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(text, 12.5).weight(weight::MEDIUM), w - 56.0);
+}
+
+/// Wrapped text across `w`.
+fn paragraph(ui: &mut Ui, text: &str, size: f32, color: Color32, w: f32) {
+    let g = ui.painter().layout_job(Txt::new(text, size).color(color).line_height(size * 1.5).job(w));
+    let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y), Sense::hover());
+    ui.painter().galley(r.min, g, color);
+}
+
+/// The Share button that splits into Share publicly and Share to … (Visited worlds' cards and session rows). Its
+/// surface stretches to the left on a bouncy spring and parts in two, the left half turning Orbiters green, the
+/// labels crossfading; a press elsewhere or Escape folds it back. Returns `Some(true)` for Share publicly,
+/// `Some(false)` for Share to ….
 pub fn morph(ui: &mut Ui, id: Id, right: egui::Pos2, expanded_width: f32, enabled: bool) -> Option<bool> {
-    let mut expanded = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
-    let k =
-        anim::spring(ui.ctx(), id.with("split"), [if expanded { 1.0 } else { 0.0 }], Spring { stiffness: 340.0, damping: 25.0, mass: 0.8 })[0].clamp(0.0, 1.0);
-    let width = 96.0 + (expanded_width - 96.0) * k;
-    let r = Rect::from_min_size(pos2(right.x - width, right.y), vec2(width, 40.0));
-    if expanded
-        && ui.ctx().input(|i| i.key_pressed(egui::Key::Escape) || i.pointer.primary_pressed() && i.pointer.interact_pos().is_some_and(|p| !r.contains(p)))
+    let ctx = ui.ctx().clone();
+    let mut expanded = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let k = anim::spring(&ctx, id.with("split"), [if expanded { 1.0 } else { 0.0 }], Spring { stiffness: 340.0, damping: 22.0, mass: 0.8 })[0];
+    let kc = k.clamp(0.0, 1.0);
+    let share = Button::new("Share").icon(icons::CLOUD_ARROW_UP).variant(Variant::Secondary).enabled(enabled && !expanded).id_salt(id.with("share"));
+    let small_w = share.desired_width(ui);
+    let small = Rect::from_min_size(pos2(right.x - small_w, right.y), vec2(small_w, 40.0));
+    let full = Rect::from_min_size(pos2(right.x - expanded_width, right.y), vec2(expanded_width, 40.0));
+    if expanded && ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.pointer.primary_pressed() && i.pointer.interact_pos().is_some_and(|p| !full.contains(p)))
     {
         expanded = false;
     }
+    let gap = 8.0;
+    let half = (expanded_width - gap) * 0.5;
+    let a = viewer::lerp_rect(small, Rect::from_min_size(full.min, vec2(half, 40.0)), k);
+    let b = viewer::lerp_rect(small, Rect::from_min_size(pos2(full.left() + half + gap, full.top()), vec2(half, 40.0)), k);
     let mut result = None;
-    // The surfaces remain visible while the labels cross-fade; fading whole buttons made the middle disappear.
-    if k > 0.01 {
-        let gap = 8.0 * k;
-        let w = (width - gap) * 0.5;
-        let a = Rect::from_min_size(r.min, vec2(w, 40.0));
-        let b = Rect::from_min_size(pos2(a.right() + gap, r.top()), vec2(w, 40.0));
-        ui.painter().rect_filled(a, theme::radius(20.0), theme::mix(theme::INK_750, theme::ACCENT, k));
-        ui.painter().rect_filled(b, theme::radius(20.0), theme::INK_750);
-    }
-    if k < 0.98 {
-        let mut child = ui.new_child(UiBuilder::new().max_rect(r).id_salt(id));
-        child.multiply_opacity((1.0 - k * 3.0).clamp(0.0, 1.0));
-        if pressed(
-            Button::new("Share").icon(icons::CLOUD_ARROW_UP).enabled(enabled && !expanded).variant(Variant::Secondary).width(width).show_at(&mut child, r),
-        ) {
+    if kc < 0.01 {
+        if pressed(share.show_at(ui, small)) {
             expanded = true;
         }
-    }
-    if k > 0.01 {
-        let gap = 8.0 * k;
-        let w = (width - gap) * 0.5;
-        let mut child = ui.new_child(UiBuilder::new().max_rect(r).id_salt(id.with("halves")));
-        child.multiply_opacity(((k - 0.55) / 0.45).clamp(0.0, 1.0));
-        let a = Rect::from_min_size(r.min, vec2(w, 40.0));
-        let b = Rect::from_min_size(pos2(a.right() + gap, r.top()), vec2(w, 40.0));
-        if pressed(Button::new("Share publicly").variant(Variant::Primary).enabled(enabled && expanded).width(w).show_at(&mut child, a)) {
-            result = Some(true);
+    } else {
+        // The two halves: one surface at first, parting as they reach their places.
+        let public_label = "Share publicly";
+        let to_label = "Share to …";
+        let with_icons = Button::new(public_label).icon(icons::GLOBE).desired_width(ui) <= half;
+        let mut pa = Button::new(public_label).variant(Variant::Primary).enabled(enabled && expanded).width(half).id_salt(id.with("public"));
+        let mut pb = Button::new(to_label).variant(Variant::Secondary).enabled(enabled && expanded).width(half).id_salt(id.with("to"));
+        if with_icons {
+            pa = pa.icon(icons::GLOBE);
+            pb = pb.icon(icons::USERS);
         }
-        if pressed(Button::new("Share to …").enabled(enabled && expanded).width(w).show_at(&mut child, b)) {
-            result = Some(false);
+        if kc > 0.98 {
+            if pressed(pa.show_at(ui, a)) {
+                result = Some(true);
+            }
+            if pressed(pb.show_at(ui, b)) {
+                result = Some(false);
+            }
+        } else {
+            let p = ui.painter();
+            p.rect_filled(b, theme::radius(20.0), theme::control());
+            p.rect_filled(a, theme::radius(20.0), theme::mix(theme::control(), theme::ACCENT, kc));
+            // "Share" leaves, the halves' labels come in from where the button was.
+            let out = (1.0 - kc * 3.0).clamp(0.0, 1.0);
+            if out > 0.0 {
+                let mut lp = p.clone();
+                lp.multiply_opacity(out);
+                widgets::icon(&lp, pos2(small.left() + 18.0 + 7.5, small.center().y), icons::CLOUD_ARROW_UP, 15.0, theme::FG);
+                widgets::text(&lp, pos2(small.left() + 18.0 + 23.0, small.center().y), Align2::LEFT_CENTER, &Txt::new("Share", 13.5).weight(weight::MEDIUM));
+            }
+            let inn = ((kc - 0.45) / 0.55).clamp(0.0, 1.0);
+            if inn > 0.0 {
+                let mut lp = p.clone();
+                lp.multiply_opacity(inn);
+                for (r, label, glyph, fg) in [(a, public_label, icons::GLOBE, theme::ON_ACCENT), (b, to_label, icons::USERS, theme::FG)] {
+                    let t = Txt::new(label, 13.5).weight(weight::MEDIUM).color(fg);
+                    let tw = widgets::text_size(ui, &t).x + if with_icons { 23.0 } else { 0.0 };
+                    let x = r.center().x - tw * 0.5 + 10.0 * (1.0 - inn);
+                    if with_icons {
+                        widgets::icon(&lp, pos2(x + 7.5, r.center().y), glyph, 15.0, fg);
+                    }
+                    widgets::text(&lp, pos2(x + if with_icons { 23.0 } else { 0.0 }, r.center().y), Align2::LEFT_CENTER, &t);
+                }
+            }
+            let _ = ui.interact(full, id.with("moving"), Sense::click());
         }
     }
-    ui.ctx().data_mut(|d| d.insert_temp(id, expanded));
+    ctx.data_mut(|d| d.insert_temp(id, expanded));
     result
 }

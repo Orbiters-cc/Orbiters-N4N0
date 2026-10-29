@@ -8,6 +8,16 @@ pub struct Content {
     pub explicit: bool,
     pub explicit_reasons: Vec<String>,
 }
+/// A reason as people read it, without its source: "osc-parameter:NSFW/Toggle" → "NSFW/Toggle",
+/// "manifest-tag:nsfw:Clothes/Off" → "Clothes/Off", "avatar-label:sexually_explicit" → "sexually explicit".
+pub fn reason_label(reason: &str) -> String {
+    let value = match reason.split_once(':') {
+        Some(("manifest-tag", rest)) => rest.split_once(':').map_or(rest, |(_, path)| path),
+        Some((_, value)) => value,
+        None => reason,
+    };
+    value.replace('_', " ")
+}
 pub fn matches_parameter(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     ["nsfw", "nude", "naked", "sps", "dps", "tps", "penetrat", "orifice", "genital", "lewd"].iter().any(|s| lower.contains(s))
@@ -104,6 +114,13 @@ fn labels_in(db: &rusqlite::Connection, location: &str, players: &[String]) -> C
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reasons_read_without_their_source() {
+        assert_eq!(reason_label("osc-parameter:NSFW/Toggle"), "NSFW/Toggle");
+        assert_eq!(reason_label("manifest-tag:nsfw:Clothes/Off"), "Clothes/Off");
+        assert_eq!(reason_label("avatar-label:sexually_explicit"), "sexually explicit");
+        assert_eq!(reason_label("plain"), "plain");
+    }
     #[test]
     fn parameter_parts_case_and_reasons() {
         for n in ["NSFW/Toggle", "Clothes/NuDe", "Naked", "SPS/Enabled", "DpsOn", "TPS", "Penetration", "Orifice/1", "Genitals", "lewdness"] {

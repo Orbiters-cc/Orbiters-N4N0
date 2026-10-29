@@ -146,7 +146,19 @@ pub fn stroke_squircle(painter: &Painter, rect: Rect, radius: f32, stroke: egui:
 
 /// A texture (its `uv` part) in a rectangle with squircle corners, anti-aliased at the edge.
 pub fn squircle_texture(painter: &Painter, rect: Rect, radii: [f32; 4], texture: egui::TextureId, uv: Rect, tint: Color32) {
-    let points = squircle_points_corners(rect, radii);
+    texture_in(painter, &squircle_points_corners(rect, radii), rect, texture, uv, tint);
+}
+
+/// A texture (its `uv` part) in the circle inscribed in `rect` (people's pictures), anti-aliased at the edge.
+pub fn circle_texture(painter: &Painter, rect: Rect, texture: egui::TextureId, uv: Rect, tint: Color32) {
+    let (c, r) = (rect.center(), rect.width().min(rect.height()) * 0.5);
+    let steps = ((r * 1.2).ceil() as usize).clamp(16, 64);
+    let points: Vec<Pos2> = (0..steps).map(|i| c + Vec2::angled(std::f32::consts::TAU * i as f32 / steps as f32) * r).collect();
+    texture_in(painter, &points, rect, texture, uv, tint);
+}
+
+/// A texture (its `uv` part, spread over `rect`) inside a convex outline that runs clockwise on screen.
+fn texture_in(painter: &Painter, points: &[Pos2], rect: Rect, texture: egui::TextureId, uv: Rect, tint: Color32) {
     let n = points.len();
     if n < 3 {
         return;

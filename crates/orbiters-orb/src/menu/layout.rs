@@ -1236,7 +1236,7 @@ pub fn layout(page: ScreenPage) -> Layout {
             }
             // Up to how many there are (from 316).
             labels.push(Label { x: 104, y: 34, size: 32, text: Text::HistoryTitle, style: Style::Primary, bold: true, width: 196 });
-            slots.add(316, 40, 30, 24, Style::Primary, Content::HistoryTitle);
+            slots.add(316, 40, 30, 24, Style::Secondary, Content::HistoryTitle);
             slots.add(868, 40, 5, 24, Style::Secondary, Content::PageLabel).centered();
             for i in 0..CAPTURES_PER_PAGE as u8 {
                 let y = 96 + i as u16 * 92;
@@ -1254,12 +1254,13 @@ pub fn layout(page: ScreenPage) -> Layout {
                 elements.push(with(element(Target::Friend(i), Rect::new(32, 96 + i as u16 * 80, 960, 72), Look::Row), Some(Icon::User), None));
             }
             for i in 0..FRIENDS_PER_PAGE as u8 {
-                elements.push(with(element(Target::FriendMark(i), Rect::new(912, 104 + i as u16 * 80, 56, 56), Look::Chip), Some(Icon::Check), None));
+                // Chosen: a green check, as the desktop's chosen friends.
+                elements.push(with(element(Target::FriendMark(i), Rect::new(912, 104 + i as u16 * 80, 56, 56), Look::Accent), Some(Icon::Check), None));
             }
             elements.push(with(element(Target::FindFriend, Rect::new(32, 500, 280, 56), Look::KeyDark), Some(Icon::Search), Some(Text::FriendsFind)));
             elements.push(with(element(Target::SendShare, Rect::new(752, 500, 240, 56), Look::Accent), Some(Icon::Send), Some(Text::FriendsSend)));
             labels.push(Label { x: 104, y: 34, size: 32, text: Text::FriendsTitle, style: Style::Primary, bold: true, width: 400 });
-            slots.add(520, 40, 22, 24, Style::Primary, Content::FriendsTitle);
+            slots.add(520, 40, 22, 24, Style::Secondary, Content::FriendsTitle);
             slots.add(868, 40, 5, 24, Style::Secondary, Content::PageLabel).centered();
             for i in 0..FRIENDS_PER_PAGE as u8 {
                 slots.add(124, 96 + i as u16 * 80 + 20, 40, 28, Style::Primary, Content::ShareFriend(i));
@@ -1803,10 +1804,9 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
         Content::ExplicitWorld => menu.shared_capture().map(world_name).unwrap_or_default(),
         Content::ExplicitState => "Flagged explicit content".into(),
         Content::ExplicitWhy(i) => {
-            let why = match menu.shared_capture().map(|c| c.explicit_reasons.join(", ")) {
-                Some(reasons) if !reasons.is_empty() => format!("Why: {reasons}"),
-                _ => "Why: Orbiters flagged it when it was shared".into(),
-            };
+            let reasons: Vec<String> =
+                menu.shared_capture().map(|c| c.explicit_reasons.iter().map(|r| orbiters_core::explicit::reason_label(r)).collect()).unwrap_or_default();
+            let why = if reasons.is_empty() { "Orbiters flagged it when it was shared".to_string() } else { format!("Because of {}", reasons.join(", ")) };
             super::pieces(&why, EXPLICIT_WHY_COLUMNS).into_iter().nth(i as usize).unwrap_or_default()
         }
         Content::ExplicitLine(i) => super::pieces(crate::captures::EXPLICIT_WARNING, EXPLICIT_COLUMNS).into_iter().nth(i as usize).unwrap_or_default(),

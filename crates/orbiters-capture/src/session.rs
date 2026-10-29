@@ -280,14 +280,16 @@ fn encode(job: Picture, done: &ChanSender<Done>) {
     });
     let thumbnail_failed = job.thumbnail.as_ref().is_some_and(|(path, top)| {
         let row = job.width as usize * 4;
-        let mut rgba = job.data[(*top as usize * row).min(job.data.len())..].to_vec();
+        let bottom = bundle::capture_picture_rect(job.width, job.height).y1.max(*top + 1).min(job.height);
+        let mut rgba = job.data[(*top as usize * row).min(job.data.len())..bottom as usize * row].to_vec();
         if job.bgra {
             for px in rgba.as_chunks_mut::<4>().0 {
                 px.swap(0, 2);
             }
         }
         let (tw, th, small) = bundle::downscale(&rgba, job.width, (rgba.len() / row.max(1)) as u32, 480);
-        write_whole(path, &qoi::encode(&small, tw, th, 3)).is_err()
+        let bytes = qoi::encode(&small, tw, th, 3);
+        write_whole(path, &bytes).and_then(|()| write_whole(&path.with_file_name(bundle::PICTURE_THUMBNAIL_FILE), &bytes)).is_err()
     });
     let _ = done.send(Done::Picture { frame: job.frame, written, thumbnail_failed, buffer: job.data });
 }
@@ -1583,6 +1585,35 @@ fn session_calibrations(overlay: &[Calibration], detected: Vec<Calibration>, dev
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn encoded_picture_thumbnail_excludes_both_data_bands() {
+        let dir = std::env::temp_dir().join(format!("orbiters-encoded-thumb-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (width, height) = (1920, 1080);
+        let crop = bundle::capture_picture_rect(width, height);
+        let mut pixels = vec![255; width as usize * height as usize * 4];
+        for p in pixels[crop.y0 as usize * width as usize * 4..crop.y1 as usize * width as usize * 4].chunks_exact_mut(4) {
+            p.copy_from_slice(&[30, 60, 90, 255]); // BGRA input.
+        }
+        let (tx, rx) = bounded(1);
+        encode(
+            Picture {
+                frame: None,
+                path: dir.join("frame.qoi"),
+                data: pixels,
+                width,
+                height,
+                bgra: true,
+                thumbnail: Some((dir.join(bundle_files::THUMBNAIL_FILE), crop.y0)),
+            },
+            &tx,
+        );
+        assert!(matches!(rx.recv().unwrap(), Done::Picture { thumbnail_failed: false, written: Ok(_), .. }));
+        let (w, h, rgba) = bundle::read_thumbnail(&dir).unwrap();
+        assert_eq!((w, h), (480, 196));
+        assert!(rgba.chunks_exact(4).all(|p| p == [90, 60, 30, 255]));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     use crate::sources::{FrameSource, Next, TestPatternSource, Whole};
     use orbiters_contracts::manifest::{CaptureMode, ConsentInfo};
     use orbiters_contracts::performance::skeleton_frames;
@@ -1917,7 +1948,8 @@ mod tests {
         assert!(finished.warnings.is_empty(), "{:?}", finished.warnings);
         let records = bundle::read_records(&finished.dir).unwrap();
         // 24 frames: 6 depth frames (index % 4 == 3), 6 rig frames (the other odd ones), each with 5 current faces.
-        let rig_frames: Vec<_> = records.iter().filter(|r| strip::flags::kind(r.strip_flags) == strip::flags::KIND_RIG && strip::flags::face(r.strip_flags) == 0).collect();
+        let rig_frames: Vec<_> =
+            records.iter().filter(|r| strip::flags::kind(r.strip_flags) == strip::flags::KIND_RIG && strip::flags::face(r.strip_flags) == 0).collect();
         assert_eq!(rig_frames.len(), 6);
         assert_eq!((faces, late), (30, 6));
         assert_eq!(records.len(), 24 + 30);
@@ -1925,7 +1957,8 @@ mod tests {
         let layout = rig::RigLayout::new(1280, 720).unwrap();
         for frame in &rig_frames {
             assert!(!frame.has(record_flags::KEYFRAME) && !frame.has(record_flags::DEPTH));
-            let faces: Vec<_> = records.iter().skip_while(|r| r.frame_index <= frame.frame_index).take_while(|r| strip::flags::face(r.strip_flags) != 0).collect();
+            let faces: Vec<_> =
+                records.iter().skip_while(|r| r.frame_index <= frame.frame_index).take_while(|r| strip::flags::face(r.strip_flags) != 0).collect();
             assert_eq!(faces.iter().map(|r| strip::flags::face(r.strip_flags)).collect::<Vec<_>>(), vec![2, 5, 1, 6, 3]);
             for r in faces {
                 let face = strip::flags::face(r.strip_flags);

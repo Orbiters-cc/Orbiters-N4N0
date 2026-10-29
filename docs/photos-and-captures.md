@@ -21,6 +21,15 @@ larger view. Downloaded files are saved under `Documents/Orbiters/Shared capture
 picture/file requests carry the Orbiters credential to the capture file endpoint; thumbnails are decoded off the UI
 thread. Existing picture loaders also accept PNG, JPEG and WebP remote profile pictures.
 
+Session pictures exclude the capture strip and its reference patches at the top and the skeleton band's reserved
+rows at the bottom. Cropping uses the contracts' original-frame layouts before downscaling; cards and the modal keep
+their aspect-correct cover crop of the remaining scene. New captures write cropped thumbnails. Existing thumbnails
+are cropped lazily into `thumbnail-picture-v2.qoi`, using the manifest's original dimensions and recognizing the
+encoder's already-removed top strip. This also works after keeping only the 3D view, without original keyframes.
+The display cache is kept and counted with the 3D view. Original captured frame pixels are preserved for decoding
+and reconstruction. A missing/unreadable original frame size leaves an older thumbnail unchanged because its data
+regions cannot be positioned reliably.
+
 ## Sharing and revoking
 
 - Share publicly uploads an unuploaded item publicly, or shares an uploaded item with `public: true`.

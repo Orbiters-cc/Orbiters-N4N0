@@ -352,7 +352,8 @@ impl MenuOverlay {
             return clicked;
         }
         // The microphone breathes while N4N0 listens: about 20 pictures a second then, else only on changes.
-        let animating = self.host.menu.listening;
+        // A like or a label switched on pops for a moment too.
+        let animating = self.host.menu.listening || self.host.menu.popping().is_some();
         let due = self.last_paint.is_none_or(|t| t.elapsed() >= Duration::from_millis(if animating { 50 } else { 22 }));
         if (self.host.dirty || animating) && due {
             self.host.dirty = false;

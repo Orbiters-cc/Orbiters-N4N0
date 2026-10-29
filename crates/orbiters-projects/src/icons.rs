@@ -41,13 +41,13 @@ impl Image {
     /// Solid nearly everywhere (an avatar, an app icon with its own rounded corners): a picture that fills its tile
     /// rather than a mark to frame.
     pub fn fills(&self) -> bool {
-        let solid = self.rgba.chunks_exact(4).filter(|p| p[3] > 200).count();
+        let solid = self.rgba.as_chunks::<4>().0.iter().filter(|p| p[3] > 200).count();
         solid * 100 >= self.rgba.len() / 4 * 86
     }
     /// The mean lightness (0 to 1) of what it draws: a dark mark needs a light tile behind it.
     pub fn lightness(&self) -> f32 {
         let (mut sum, mut weight) = (0.0, 0.0);
-        for p in self.rgba.chunks_exact(4) {
+        for p in self.rgba.as_chunks::<4>().0 {
             let a = p[3] as f32 / 255.0;
             sum += a * (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0;
             weight += a;

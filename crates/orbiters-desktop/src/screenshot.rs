@@ -1403,6 +1403,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "projects-new-novcc",
         "projects-new-loading",
         "projects-repos-novcc",
+        "projects-icons-live",
     ] {
         let capture = name.starts_with("projects-avatars") || matches!(name, "projects-choice" | "projects-ready" | "projects-capture");
         let mut snapshot = scenarios[0].snapshot.clone();
@@ -1415,7 +1416,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             name,
             page: if capture { Page::Capture } else { Page::Projects },
             snapshot,
-            frames: if name == "projects-resize-mid" {
+            frames: if name == "projects-icons-live" {
+                // Real lookups: time for them to land.
+                600
+            } else if name == "projects-resize-mid" {
                 60
             } else if matches!(name, "projects-crossfade" | "projects-new-loading") {
                 66

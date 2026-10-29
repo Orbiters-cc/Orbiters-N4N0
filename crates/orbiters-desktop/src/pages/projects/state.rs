@@ -151,6 +151,8 @@ pub struct State {
     /// Screenshots: avatar pictures, package icons and template covers that arrive later (they fade in).
     pub(super) fixture_later: HashMap<String, TextureHandle>,
     pub(super) fixture_icons_later: HashMap<String, PackageIcon>,
+    /// Screenshots (`projects-icons-live`): the stand-in packages' icons looked for for real (cache, then network).
+    pub(super) fixture_live_icons: bool,
     pub(super) fixture_banners_later: HashMap<PathBuf, TextureHandle>,
 }
 impl Default for State {
@@ -223,6 +225,7 @@ impl Default for State {
             fixture_action: None,
             fixture_later: HashMap::new(),
             fixture_icons_later: HashMap::new(),
+            fixture_live_icons: false,
             fixture_banners_later: HashMap::new(),
         }
     }
@@ -534,7 +537,7 @@ impl State {
     /// Looks for the icons of the packages drawn since the last look that were never looked for, a batch at a time.
     fn load_icons(&mut self, ctx: &egui::Context) {
         let wanted = std::mem::take(&mut self.icons_wanted);
-        if !self.fixture && !self.icon_job.running() {
+        if (!self.fixture || self.fixture_live_icons) && !self.icon_job.running() {
             let mut batch: Vec<vpm::Package> = vec![];
             for name in wanted {
                 if batch.len() < ICON_BATCH && !self.icons_asked.contains(&name) {
@@ -873,6 +876,25 @@ impl State {
             "projects-new-loading" => {
                 self.modal = Some(Modal::New);
                 self.fixture_banners_later = std::mem::take(&mut self.banners);
+            }
+            "projects-icons-live" => {
+                // The packages' real listings and websites, their icons looked for as the page does.
+                self.selected = Some(first.path.clone());
+                self.scroll_to_packages = true;
+                self.icons.clear();
+                self.fixture_live_icons = true;
+                for p in &mut self.view.packages {
+                    let (repository, author, site) = match p.name.as_str() {
+                        n if n.starts_with("com.vrchat.") => (None, Some("https://github.com/vrchat/packages"), None),
+                        n if n.starts_with("orbiters.") => (Some(vpm::ORBITERS_REPOSITORY), Some("https://orbiters.cc"), None),
+                        "com.vrcfury.vrcfury" => (None, None, Some("https://vrcfury.com")),
+                        "com.poiyomi.toon" => (None, Some("https://github.com/poiyomi/PoiyomiToonShader"), None),
+                        _ => (None, None, None),
+                    };
+                    p.repository = repository.map(Into::into);
+                    p.author_url = author.map(Into::into);
+                    p.site_url = site.map(Into::into);
+                }
             }
             "projects-repos-novcc" => {
                 self.modal = Some(Modal::Repos);

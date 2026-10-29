@@ -124,7 +124,9 @@ Other deterministic offscreen states: `projects-detail`, `projects-packages`, `p
 `projects-mixer-open-mid`, `projects-mixer-fold-mid`, `projects-mixer-adding`, `projects-new-novcc` and
 `projects-repos-novcc` (a computer without VCC), `projects-new-loading` (covers fading in) and `projects-new-covers`
 (VCC's real covers when it is installed). Package icons in screenshots are stand-ins (pictures, light and dark marks,
-ReFit without one); `projects-crossfade` shows them fading in. These stand-ins never scan or mutate real
+ReFit without one); `projects-crossfade` shows them fading in. `projects-icons-live` (review only, not deterministic)
+gives the stand-in packages their real listings and websites and looks their icons up as the page does: the disk
+cache, then the network. These stand-ins never scan or mutate real
 projects, make HTTP requests or send setup requests. Unit fixtures cover version parsing, VRChat manifests, registry
 binary paths, scene/prefab avatars, skip rules, copying, setup JSON/results and a temporary VCC registration store.
 

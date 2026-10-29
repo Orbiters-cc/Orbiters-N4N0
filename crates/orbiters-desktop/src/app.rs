@@ -36,6 +36,7 @@ pub struct App {
     projects: pages::projects::State,
     sessions: pages::sessions::State,
     worlds: pages::worlds::State,
+    events: pages::events::State,
     videos: pages::videos::State,
     settings: pages::settings::State,
     orb: pages::orb::State,
@@ -79,6 +80,7 @@ impl App {
             projects: Default::default(),
             sessions: Default::default(),
             worlds: Default::default(),
+            events: Default::default(),
             videos: Default::default(),
             settings: Default::default(),
             orb: Default::default(),
@@ -126,6 +128,10 @@ impl App {
         &mut self.worlds
     }
 
+    pub fn events_mut(&mut self) -> &mut pages::events::State {
+        &mut self.events
+    }
+
     pub fn videos_mut(&mut self) -> &mut pages::videos::State {
         &mut self.videos
     }
@@ -147,6 +153,7 @@ impl App {
         match self.page {
             Page::Sessions => self.sessions.busy(),
             Page::Worlds => self.worlds.busy(),
+            Page::Events => self.events.busy(),
             Page::Videos => self.videos.busy(),
             Page::Projects => self.projects.busy(),
             _ => false,
@@ -331,6 +338,7 @@ impl App {
             (Page::Projects, "Unity projects", icons::CUBE),
             (Page::Sessions, "Photos & captures", icons::IMAGES),
             (Page::Worlds, "Visited worlds", icons::GLOBE),
+            (Page::Events, "Events", icons::CALENDAR_DOTS),
             (Page::Videos, "Videos", icons::FILM_STRIP),
             (Page::Settings, "Settings", icons::SLIDERS_HORIZONTAL),
         ];
@@ -501,6 +509,7 @@ impl App {
             Page::Orb => pages::orb::show(&mut child, &mut cx, &mut self.orb),
             Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions),
             Page::Worlds => pages::worlds::show(&mut child, &mut cx, &mut self.worlds),
+            Page::Events => pages::events::show(&mut child, &mut cx, &mut self.events),
             Page::Videos => pages::videos::show(&mut child, &mut cx, &mut self.videos),
             Page::Settings => pages::settings::show(&mut child, &mut cx, &mut self.settings),
         }

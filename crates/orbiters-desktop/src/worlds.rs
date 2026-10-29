@@ -254,6 +254,12 @@ pub enum Picture {
     Session(PathBuf),
     /// A world's picture on VRChat (as Orbiters lists it): its thumbnail, or the full picture when `large`.
     Remote { world_id: String, url: String, large: bool },
+    /// An event's cover on Orbiters, read with the account's credential when signed in (members-only covers need it).
+    EventCover { development: bool, id: String },
+    /// Another picture a few pixels wide, to draw large and soft as its light (behind an event, its window).
+    Glow(Box<Picture>),
+    /// A picture of a community gallery on Orbiters: its preview, or the full picture when `large` (kept in memory).
+    Gallery { id: u64, url: String, large: bool },
 }
 
 enum Slot {
@@ -465,6 +471,35 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
                 return None;
             }
             let bytes = r.into_body().with_config().limit(32 << 20).read_to_vec().ok()?;
+            let image = image::load_from_memory(&bytes).ok()?.thumbnail(if *large { 2048 } else { 560 }, if *large { 4096 } else { 1120 }).to_rgba8();
+            Some(ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw()))
+        }
+        Picture::EventCover { development, id } => {
+            let server = if *development { Server::Development } else { Server::Production };
+            let api = Api::new(server);
+            let mut request = api.agent().get(&api.event_banner_url(id).ok()?);
+            if let Some(account) = orbiters_core::account::read(server) {
+                request = request.header("Authorization", &format!("Bearer {}", account.token));
+            }
+            let r = request.call().ok()?;
+            if !r.status().is_success() {
+                return None;
+            }
+            let bytes = r.into_body().with_config().limit(16 << 20).read_to_vec().ok()?;
+            let image = image::load_from_memory(&bytes).ok()?.thumbnail(1600, 900).to_rgba8();
+            Some(ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw()))
+        }
+        Picture::Glow(inner) => {
+            let full = decode(api, keep, inner)?;
+            let [w, h] = full.size;
+            let rgba: Vec<u8> = full.pixels.iter().flat_map(|c| c.to_array()).collect();
+            let full = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
+            let (tw, th) = if w >= h { (16, (16 * h / w.max(1)).max(1) as u32) } else { ((16 * w / h.max(1)).max(1) as u32, 16) };
+            let small = image::imageops::thumbnail(&full, tw, th);
+            Some(ColorImage::from_rgba_premultiplied([small.width() as usize, small.height() as usize], small.as_raw()))
+        }
+        Picture::Gallery { url, large, .. } => {
+            let bytes = api.image(url).ok()?;
             let image = image::load_from_memory(&bytes).ok()?.thumbnail(if *large { 2048 } else { 560 }, if *large { 4096 } else { 1120 }).to_rgba8();
             Some(ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw()))
         }

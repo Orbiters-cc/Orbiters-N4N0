@@ -1,6 +1,8 @@
 //! The pages, plus what they share: the page context, background jobs and staggered entrances.
 
 pub mod capture;
+pub mod community;
+pub mod events;
 pub mod form;
 pub mod header;
 pub mod home;
@@ -37,6 +39,8 @@ pub enum Page {
     Orb,
     Sessions,
     Worlds,
+    /// Orbiters' events, soonest first, and their windows (Invite me).
+    Events,
     /// The videos the worlds played, and the bookmark lists.
     Videos,
     Settings,

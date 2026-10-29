@@ -123,6 +123,7 @@ pub struct Controller {
     avatar_changed_at: Mutex<Option<Instant>>,
     /// The Orbiters account's credential and a sign-in in progress (controller/account.rs).
     account_runtime: Mutex<account::AccountRuntime>,
+    vrchat_login: Mutex<vrchat_login::Runtime>,
     /// What this member added to the Map explorer, and the uploads' numbering (controller/maps.rs).
     maps_mine: Mutex<Option<MapsMine>>,
     upload_serial: AtomicU64,
@@ -268,6 +269,7 @@ fn calibration_info(stored: &StoredCalibration) -> CalibrationInfo {
 pub type Shared = Arc<Controller>;
 
 mod account;
+pub mod vrchat_login;
 mod burst;
 mod calls;
 mod cleanup;
@@ -310,6 +312,7 @@ impl Controller {
             avatar_before: Mutex::new(None),
             avatar_changed_at: Mutex::new(None),
             account_runtime: Mutex::new(account::AccountRuntime::default()),
+            vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
             maps_mine: Mutex::new(None),
             upload_serial: AtomicU64::new(0),
             n4n0: {
@@ -365,6 +368,7 @@ impl Controller {
         spawn_watchers(self.clone());
         shares::spawn_presence(self.clone());
         self.start_account();
+        self.start_vrchat_login();
         self.start_orb();
         self.start_calls();
         self.start_updates();
@@ -440,6 +444,12 @@ impl Controller {
         let s = {
             let mut s = self.snapshot.lock().unwrap();
             // Copied without its trail (up to 6000 points), which the interface gets thinned to 1500 at most.
+            if !matches!(s.account.state, crate::state::AccountState::SignedIn { .. })
+                || s.account.development != (orbiters_core::account::Server::current() == orbiters_core::account::Server::Development)
+            {
+                self.vrchat_login.lock().unwrap().suspend();
+                s.vrchat_login = vrchat_login::Status::default();
+            }
             let trail = std::mem::take(&mut s.capture.trail);
             let mut copy = s.clone();
             let step = trail.len().div_ceil(1500).max(1);

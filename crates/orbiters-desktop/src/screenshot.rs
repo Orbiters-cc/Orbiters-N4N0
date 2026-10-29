@@ -23,6 +23,8 @@ use orbiters_ui::{toast, widgets};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+mod vrchat_login;
+
 struct Scenario {
     name: &'static str,
     page: Page,
@@ -1354,6 +1356,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
 
 
+    vrchat_login::append(&mut scenarios);
+
     // Home's music is the overlay's sample song, never what this computer plays.
     crate::media::watcher().stand_in(crate::media::Reading {
         media: Some(crate::overlay::menu_pages::sample_media()),
@@ -1363,7 +1367,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     let mut gpu = Offscreen::new()?;
     for sc in scenarios {
-        if only.as_deref().is_some_and(|o| o != sc.name) {
+        if only.as_deref().is_some_and(|o| o != sc.name && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))) {
             continue;
         }
         let path = out.join(format!("{}.png", sc.name));
@@ -1383,6 +1387,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
     let mut library_staged = false;
     backend.attach(&ctx);
     let mut app = App::offline(backend);
+    if sc.name == "vrchat-login-entering-password" { app.stage_vrchat_login(); }
     app.set_gpu(crate::gpu::Handles::of_offscreen(gpu));
     if !sc.splash {
         app.skip_splash();

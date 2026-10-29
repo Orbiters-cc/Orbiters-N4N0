@@ -50,6 +50,7 @@ pub trait Backend: Send + Sync {
     fn reopen_sign_in(&self);
     fn cancel_sign_in(&self);
     fn sign_out(&self);
+    fn vrchat_login(&self, _command: crate::controller::vrchat_login::Command) {}
     /// Asks for the worker's log; [`Backend::worker_log`] has it once it arrived.
     fn request_worker_log(&self);
     fn worker_log(&self) -> Option<Vec<String>>;
@@ -188,6 +189,14 @@ impl Backend for Remote {
 
     fn sign_out(&self) {
         self.0.send(&ToService::SignOut);
+    }
+
+    fn vrchat_login(&self, command: crate::controller::vrchat_login::Command) {
+        self.0.update_local(|s| {
+            s.vrchat_login.busy = true;
+            s.vrchat_login.error = None;
+        });
+        self.0.send(&ToService::VrchatLogin { command });
     }
 
     fn request_worker_log(&self) {
@@ -377,6 +386,10 @@ impl Backend for Local {
 
     fn sign_out(&self) {
         self.report(self.ctl.sign_out());
+    }
+
+    fn vrchat_login(&self, command: crate::controller::vrchat_login::Command) {
+        self.ctl.vrchat_command(command);
     }
 
     fn request_worker_log(&self) {

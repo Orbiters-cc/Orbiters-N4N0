@@ -312,42 +312,13 @@ fn dev_switch() -> Option<bool> {
 
 #[cfg(windows)]
 mod protect {
-    use super::ENTROPY;
-    use windows::Win32::Foundation::{LocalFree, HLOCAL};
-    use windows::Win32::Security::Cryptography::{CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB};
-
-    fn blob(data: &[u8]) -> CRYPT_INTEGER_BLOB {
-        CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 }
-    }
-
-    fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
-        if out.pbData.is_null() {
-            return Vec::new();
-        }
-        // SAFETY: DPAPI allocated `cbData` bytes at `pbData` (not null, checked above) with LocalAlloc; they are copied,
-        // then freed once.
-        unsafe {
-            let bytes = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
-            let _ = LocalFree(Some(HLOCAL(out.pbData.cast())));
-            bytes
-        }
-    }
-
     pub fn protect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let mut out = CRYPT_INTEGER_BLOB::default();
-        // SAFETY: input blobs point at live slices for the duration of the call.
-        unsafe { CryptProtectData(&blob(data), None, Some(&blob(ENTROPY)), None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut out)? };
-        Ok(take(out))
+        crate::dpapi::crypt(data, super::ENTROPY, true)
     }
-
     pub fn unprotect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let mut out = CRYPT_INTEGER_BLOB::default();
-        // SAFETY: as above.
-        unsafe { CryptUnprotectData(&blob(data), None, Some(&blob(ENTROPY)), None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut out)? };
-        Ok(take(out))
+        crate::dpapi::crypt(data, super::ENTROPY, false)
     }
 }
-
 #[cfg(not(windows))]
 mod protect {
     pub fn protect(data: &[u8]) -> anyhow::Result<Vec<u8>> {

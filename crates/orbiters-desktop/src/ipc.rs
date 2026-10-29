@@ -106,6 +106,7 @@ pub enum ToService {
     ReopenSignIn,
     CancelSignIn,
     SignOut,
+    VrchatLogin { command: crate::controller::vrchat_login::Command },
     /// Shares pictures of a world on the Map explorer.
     UploadPictures {
         world_id: String,

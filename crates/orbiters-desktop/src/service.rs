@@ -269,6 +269,7 @@ impl Service {
             ToService::ReopenSignIn => report(ctl.reopen_sign_in()),
             ToService::CancelSignIn => ctl.cancel_sign_in(),
             ToService::SignOut => report(ctl.sign_out()),
+            ToService::VrchatLogin { command } => ctl.vrchat_command(command),
             ToService::StopReconstruction => {
                 ctl.stop_reconstruction();
             }

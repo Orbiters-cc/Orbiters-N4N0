@@ -5,7 +5,9 @@ pub mod bundle;
 pub mod call;
 pub mod cleanup;
 pub mod clock;
+mod dpapi;
 pub mod explicit;
+pub mod features;
 pub mod keyframes;
 pub mod maps;
 pub mod osc;
@@ -20,7 +22,9 @@ pub mod video_history;
 pub mod visited;
 pub mod voice;
 pub mod vrchat_accounts;
+pub mod vrchat_api;
 pub mod vrchat_log;
+pub mod vrchat_source;
 
 pub use orbiters_contracts as contracts;
 

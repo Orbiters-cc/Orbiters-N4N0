@@ -23,6 +23,7 @@ enum Folder {
 
 #[derive(Default)]
 pub struct State {
+    vrchat: VrchatForm,
     /// The Spout sender and the record parameter as typed, until saved.
     texts: Texts,
     log_open: bool,
@@ -44,6 +45,8 @@ impl State {
     /// Ends the mic test (leaving the page).
     pub fn stop_mic_test(&mut self) {
         self.mic = MicTest::default();
+        self.vrchat.password.clear();
+        self.vrchat.code.clear();
     }
 }
 
@@ -107,6 +110,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             super::block(ui, cx, 0, 72.0, |ui, rect| super::heading(ui, rect, "Preferences", "Settings", None));
             let snap = cx.snap;
             account(ui, cx, &mut state.confirm_sign_out);
+            vrchat_account(ui, cx, &mut state.vrchat);
 
             section(ui, cx, 2, icons::GAUGE, "Capture", Some("How frames become a session"), |ui| {
                 let kf = &mut draft.keyframes;
@@ -685,6 +689,238 @@ fn account(ui: &mut Ui, cx: &Cx, confirm_sign_out: &mut bool) {
     });
 }
 
+/// Secrets are transient UI state, never part of Settings or the snapshot.
+#[derive(Default)]
+struct VrchatForm {
+    username: String,
+    password: String,
+    code: String,
+    method: Option<orbiters_core::vrchat_api::TwoFactor>,
+    pending: bool,
+    pending_revision: u64,
+    saw_busy: bool,
+    picture: Option<(String, u64, egui::TextureHandle)>,
+}
+
+impl State {
+    /// Synthetic offline data for the screenshot runner; never uses the person's account or credential store.
+    pub(crate) fn stage_vrchat(&mut self, entering: bool) {
+        if entering {
+            self.vrchat.username = "DesktopTester".into();
+            self.vrchat.password = "screenshot-only".into();
+        }
+    }
+}
+
+fn vrchat_pressed(response: egui::Response) -> bool {
+    response.enabled() && (response.clicked() || (response.is_pointer_button_down_on() && response.ctx.input(|i| i.pointer.primary_pressed())))
+}
+
+fn vrchat_paragraph(ui: &mut Ui, text: &str, color: egui::Color32) {
+    let galley = ui.painter().layout_job(Txt::new(text, 12.0).color(color).job(ui.available_width()));
+    let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
+    ui.painter().galley(rect.min, galley, color);
+}
+
+/// The same flat well as widgets::text_field, with egui's password masking and no visible frame.
+fn vrchat_password(ui: &mut Ui, password: &mut String, width: f32) -> egui::Response {
+    let id = ui.scope_id().with("vrchat-password");
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
+    ui.painter().rect_filled(rect, theme::radius(12.0), theme::INK_750);
+    let ring = anim::toggle(ui.ctx(), id.with("ring"), ui.memory(|m| m.has_focus(id)), Spring::SNAPPY);
+    if ring > 0.01 {
+        ui.painter().rect_stroke(rect, theme::radius(12.0), egui::Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.8 * ring)), egui::StrokeKind::Outside);
+    }
+    ui.put(
+        rect.shrink2(vec2(12.0, 0.0)),
+        egui::TextEdit::singleline(password)
+            .id(id)
+            .password(true)
+            .frame(egui::Frame::NONE)
+            .font(theme::font(13.0, weight::REGULAR))
+            .text_color(theme::FG)
+            .hint_text(egui::RichText::new("VRChat password").color(theme::FG_4))
+            .margin(egui::Margin::ZERO)
+            .align(Align2::LEFT_CENTER),
+    )
+}
+
+fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
+    use crate::controller::vrchat_login::{Command, Recovery};
+    use orbiters_core::vrchat_api::{Secret, TwoFactor};
+    let status = &cx.snap.vrchat_login;
+    if !status.allowed || !matches!(cx.snap.account.state, AccountState::SignedIn { .. }) {
+        *state = VrchatForm::default();
+        return;
+    }
+    if status.busy {
+        state.saw_busy = true;
+    }
+    if (state.saw_busy && !status.busy) || (state.pending && state.pending_revision != status.revision) {
+        state.pending = false;
+        state.saw_busy = false;
+    }
+    let busy = status.busy || state.pending;
+    let subtitle = if let Some(user) = &status.user {
+        format!("Signed in as {}", user.display_name)
+    } else if !status.methods.is_empty() {
+        "One more step to sign in".into()
+    } else {
+        "Your own account, on this computer".into()
+    };
+    let mut command = None;
+    section(ui, cx, 10, icons::USER_CIRCLE, "VRChat account", Some(&subtitle), |ui| {
+        if let Some(user) = &status.user {
+            if let Some(picture) = &status.picture {
+                if state.picture.as_ref().is_none_or(|(id, revision, _)| id != &user.id || *revision != status.revision) {
+                    let image = egui::ColorImage::from_rgba_unmultiplied([picture.width as usize, picture.height as usize], &picture.rgba);
+                    let texture = ui.ctx().load_texture(format!("vrchat-account-{}", user.id), image, egui::TextureOptions::LINEAR);
+                    state.picture = Some((user.id.clone(), status.revision, texture));
+                }
+            } else {
+                state.picture = None;
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                if let Some((_, _, texture)) = &state.picture {
+                    ui.add(egui::Image::new(texture).fit_to_exact_size(vec2(48.0, 48.0)).corner_radius(theme::radius(12.0)));
+                }
+                ui.vertical(|ui| {
+                    widgets::field(ui, &user.display_name, Some("Connected to VRChat. Your encrypted session stays on this computer."), 120.0, |ui| {
+                        if vrchat_pressed(
+                            Button::new(if busy { "Signing out…" } else { "Sign out" })
+                                .icon(icons::SIGN_OUT)
+                                .variant(Variant::Secondary)
+                                .size(Size::Sm)
+                                .enabled(!busy)
+                                .show(ui),
+                        ) {
+                            command = Some(Command::SignOut);
+                        }
+                    });
+                });
+            });
+        } else {
+            state.picture = None;
+            vrchat_paragraph(ui, "Orbiters - N4N0 can talk to VRChat with your own account instead of Orbiters' shared one. Your password goes only to VRChat; the session stays on this computer.", theme::FG_3);
+            ui.add_space(12.0);
+            ui.add_enabled_ui(!busy, |ui| {
+                if status.methods.is_empty() {
+                    widgets::field(ui, "Username", Some("Your VRChat login name, rather than your display name."), 300.0, |ui| {
+                        widgets::text_field(ui, "vrchat-username", &mut state.username, "VRChat username", 300.0, false);
+                    });
+                    widgets::separator(ui);
+                    let mut enter = false;
+                    widgets::field(ui, "Password", None, 300.0, |ui| {
+                        let response = vrchat_password(ui, &mut state.password, 300.0);
+                        enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    });
+                    ui.add_space(12.0);
+                    let ready = !state.username.trim().is_empty() && !state.password.is_empty();
+                    if (vrchat_pressed(
+                        Button::new(if busy { "Signing in…" } else { "Sign in to VRChat" })
+                            .icon(icons::SIGN_IN)
+                            .variant(Variant::Primary)
+                            .size(Size::Sm)
+                            .enabled(ready)
+                            .show(ui),
+                    ) || enter)
+                        && ready
+                    {
+                        command = Some(Command::SignIn { username: state.username.clone(), password: Secret(std::mem::take(&mut state.password)) });
+                    }
+                } else {
+                    let method = state.method.get_or_insert(status.methods[0]);
+                    if !status.methods.contains(method) {
+                        *method = status.methods[0];
+                    }
+                    if status.methods.len() > 1 {
+                        let before = *method;
+                        let options: Vec<_> = status
+                            .methods
+                            .iter()
+                            .map(|m| {
+                                SegOption::new(
+                                    *m,
+                                    match m {
+                                        TwoFactor::Totp => "Authenticator",
+                                        TwoFactor::Email => "Email",
+                                        TwoFactor::Recovery => "Recovery code",
+                                    },
+                                )
+                            })
+                            .collect();
+                        widgets::segmented(ui, "vrchat-factor-method", method, &options, false);
+                        if *method != before {
+                            state.code.clear();
+                        }
+                        ui.add_space(12.0);
+                    }
+                    let hint = match method {
+                        TwoFactor::Totp => "Enter the code from your authenticator app.",
+                        TwoFactor::Email => "VRChat sent a code to your email. Check your inbox and spam folder.",
+                        TwoFactor::Recovery => "Enter one of the recovery codes saved when you enabled two-factor authentication.",
+                    };
+                    let mut enter = false;
+                    widgets::field(ui, method.label(), Some(hint), 300.0, |ui| {
+                        let response = widgets::text_field(ui, "vrchat-factor-code", &mut state.code, "Code", 300.0, true);
+                        enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    });
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let ready = !state.code.trim().is_empty();
+                        if (vrchat_pressed(
+                            Button::new(if busy { "Verifying…" } else { "Verify and sign in" })
+                                .variant(Variant::Primary)
+                                .size(Size::Sm)
+                                .enabled(ready)
+                                .show(ui),
+                        ) || enter)
+                            && ready
+                        {
+                            command = Some(Command::Verify { method: *method, code: Secret(std::mem::take(&mut state.code)) });
+                        }
+                        if vrchat_pressed(Button::new("Cancel").variant(Variant::Ghost).size(Size::Sm).show(ui)) {
+                            command = Some(Command::Cancel);
+                        }
+                    });
+                }
+            });
+        }
+        if busy {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.spinner();
+                vrchat_paragraph(ui, "Waiting for VRChat…", theme::FG_3);
+            });
+        }
+        if let Some(error) = &status.error {
+            ui.add_space(10.0);
+            vrchat_paragraph(ui, error, theme::DANGER);
+            ui.add_space(6.0);
+            let retry = match status.recovery {
+                Recovery::Resume => Some(("Retry saved session", Command::Resume)),
+                Recovery::RemoveSavedSession => Some(("Remove saved session", Command::SignOut)),
+                Recovery::None => None,
+            };
+            if let Some((label, retry)) = retry {
+                if vrchat_pressed(Button::new(label).variant(Variant::Secondary).size(Size::Sm).enabled(!busy).show(ui)) {
+                    command = Some(retry);
+                }
+            }
+        }
+    });
+    if let Some(command) = command {
+        state.pending = true;
+        state.pending_revision = status.revision;
+        state.saw_busy = false;
+        state.code.clear();
+        cx.ctl.vrchat_login(command);
+        orbiters_ui::anim::request_frame(ui.ctx());
+    }
+}
 /// Folder row: label, path, Change button. True when Change was clicked.
 fn folder_field(ui: &mut Ui, label: &str, description: Option<&str>, value: &std::path::Path) -> bool {
     let shown = value.display().to_string();

@@ -134,6 +134,10 @@ impl App {
         &mut self.projects
     }
 
+    pub(crate) fn stage_vrchat_login(&mut self) {
+        self.settings.stage_vrchat(true);
+    }
+
     pub fn toasts_mut(&mut self) -> &mut toast::Toasts {
         &mut self.toasts
     }

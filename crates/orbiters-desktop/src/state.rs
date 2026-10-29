@@ -374,6 +374,7 @@ pub struct Snapshot {
     pub reconstruct_queue: Vec<PathBuf>,
     #[serde(default)]
     pub account: AccountStatus,
+    pub vrchat_login: crate::controller::vrchat_login::Status,
     pub uploads: Vec<UploadStatus>,
     pub capture_shares: Vec<crate::controller::shares::ShareJob>,
     #[serde(default)]
@@ -417,6 +418,7 @@ impl Snapshot {
             reconstruction: None,
             reconstruct_queue: Vec::new(),
             account: AccountStatus::default(),
+            vrchat_login: Default::default(),
             uploads: Vec::new(),
             capture_shares: Vec::new(),
             orb: OrbStatus::default(),

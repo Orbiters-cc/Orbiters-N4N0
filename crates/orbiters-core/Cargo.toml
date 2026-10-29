@@ -20,6 +20,7 @@ if-addrs = "0.15"
 memchr = "2"
 socket2 = "0.6"
 sha2 = "0.10"
+base64 = "0.22"
 rusqlite = { version = "0.40", features = ["bundled"] }
 ureq = { version = "3", default-features = false, features = ["json", "gzip", "multipart"] }
 

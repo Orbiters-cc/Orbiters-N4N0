@@ -264,7 +264,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     ui,
                     "Six more views while recording",
                     Some("This often, N4N0's camera rig takes six views around your camera (left, front, right, back, up, down) wherever it has not yet, so the reconstruction sees what you did not film. VRChat draws the world six more times for those moments; 3D pictures and scans take theirs all along."),
-                    300.0,
+                    // As wide as its four small segments, so that the description keeps the row.
+                    180.0,
                     |ui| {
                         apply |= widgets::segmented(ui, "rig-views", &mut draft.rig_views, &every, true);
                     },
@@ -859,7 +860,7 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
         "Your own account, kept on this computer".into()
     };
     let mut command = None;
-    section(ui, cx, 10, icons::USER_CIRCLE, "VRChat account", Some(&subtitle), |ui| {
+    section(ui, cx, 10, icons::VIRTUAL_REALITY, "VRChat account", Some(&subtitle), |ui| {
         ui.add_space(6.0);
         if let Some(user) = &status.user {
             if let Some(picture) = &status.picture {

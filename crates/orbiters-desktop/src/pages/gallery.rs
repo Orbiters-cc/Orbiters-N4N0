@@ -350,7 +350,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                 let width = ui.available_width();
                 if entries.is_empty() {
                     if loading {
-                        let (cols, w) = orbiters_ui::layout::columns(width, 250.0, 16.0);
+                        let (cols, w) = orbiters_ui::layout::columns(width, CARD_MIN, 16.0);
                         let h = w * 9.0 / 16.0 + CARD_BODY;
                         let (area, _) = ui.allocate_exact_size(vec2(width, 56.0 + h), Sense::hover());
                         feedback::shimmer(ui.painter(), Rect::from_min_size(area.min + vec2(0.0, 6.0), vec2(220.0, 18.0)), 9.0);
@@ -376,7 +376,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                         instance_clicked = Some((first.clone(), button));
                     }
                     ui.add_space(12.0);
-                    let (cols, w) = orbiters_ui::layout::columns(width, 250.0, 16.0);
+                    let (cols, w) = orbiters_ui::layout::columns(width, CARD_MIN, 16.0);
                     let h = w * 9.0 / 16.0 + CARD_BODY;
                     let rows = indices.len().div_ceil(cols);
                     let (area, _) = ui.allocate_exact_size(vec2(width, rows as f32 * (h + 16.0) - 16.0), Sense::hover());
@@ -587,6 +587,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
 
 /// What a card's body takes under its picture.
 const CARD_BODY: f32 = 70.0;
+/// The narrowest card, as Visited worlds' (the same card): both pages get as many columns at every width.
+const CARD_MIN: f32 = 270.0;
 
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
@@ -939,7 +941,13 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
             y += 40.0;
         }
         let br = Rect::from_min_size(pos2(x, y), vec2(inner, 40.0));
-        let open = Button::new("Join in VRChat").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).enabled(join).width(inner).id_salt("instance-join");
+        // Green only while it can be joined: a closed or unknown instance keeps a quiet, disabled button.
+        let open = Button::new("Join in VRChat")
+            .icon(icons::ARROW_SQUARE_OUT)
+            .variant(if join { Variant::Primary } else { Variant::Secondary })
+            .enabled(join)
+            .width(inner)
+            .id_salt("instance-join");
         let open = if join { open } else { open.hint("Only an instance that is still open can be joined") };
         if sharing::pressed(open.show_at(ui, br)) {
             if let Some(instance) = &e.instance {

@@ -171,57 +171,52 @@ fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
     };
     let osc = &snap.osc;
     let storage = &snap.storage;
-    let chips =
-        [
-            (
-                icons::MONITOR_PLAY,
-                "VRChat",
-                if snap.vrchat.running {
-                    if world.in_world {
-                        "In a world".to_string()
-                    } else {
-                        "Running".into()
-                    }
+    let chips = [
+        (
+            icons::MONITOR_PLAY,
+            "VRChat",
+            if snap.vrchat.running {
+                if world.in_world {
+                    "In a world".to_string()
                 } else {
-                    "Not running".into()
-                },
-                if snap.vrchat.running { Tone::Ok } else { Tone::Off },
+                    "Running".into()
+                }
+            } else {
+                "Not running".into()
+            },
+            if snap.vrchat.running { Tone::Ok } else { Tone::Off },
+        ),
+        (
+            icons::BROADCAST,
+            "Spout source",
+            source.map(|s| format!("{} · {}×{}", s.name, s.width, s.height)).unwrap_or_else(|| "VRChat's camera: Stream mode, Spout Stream on".into()),
+            if source.is_some() { Tone::Ok } else { Tone::Warn },
+        ),
+        (
+            icons::SPARKLE,
+            "Action Menu",
+            osc.last_event
+                .clone()
+                .unwrap_or_else(|| if osc.listening { "N4N0 › Record".into() } else { osc.error.clone().unwrap_or_else(|| "OSC off".into()) }),
+            if osc.listening {
+                Tone::Ok
+            } else if osc.enabled {
+                Tone::Warn
+            } else {
+                Tone::Off
+            },
+        ),
+        (
+            icons::HARD_DRIVE,
+            "Storage",
+            format!(
+                "{} used{}",
+                format::bytes(storage.used_bytes as f64),
+                storage.free_bytes.map(|f| format!(" · {} free", format::bytes(f as f64))).unwrap_or_default()
             ),
-            (
-                icons::BROADCAST,
-                "Spout source",
-                source.map(|s| format!("{} · {}×{}", s.name, s.width, s.height)).unwrap_or_else(|| "VRChat's camera: Stream mode, Spout Stream on".into()),
-                if source.is_some() { Tone::Ok } else { Tone::Warn },
-            ),
-            (
-                icons::SPARKLE,
-                "Action Menu",
-                osc.last_event.clone().unwrap_or_else(|| {
-                    if osc.listening {
-                        "N4N0 › Record".into()
-                    } else {
-                        osc.error.clone().unwrap_or_else(|| "OSC off".into())
-                    }
-                }),
-                if osc.listening {
-                    Tone::Ok
-                } else if osc.enabled {
-                    Tone::Warn
-                } else {
-                    Tone::Off
-                },
-            ),
-            (
-                icons::HARD_DRIVE,
-                "Storage",
-                format!(
-                    "{} used{}",
-                    format::bytes(storage.used_bytes as f64),
-                    storage.free_bytes.map(|f| format!(" · {} free", format::bytes(f as f64))).unwrap_or_default()
-                ),
-                if storage.free_bytes.is_some_and(|f| f < 20_000_000_000) { Tone::Warn } else { Tone::Ok },
-            ),
-        ];
+            if storage.free_bytes.is_some_and(|f| f < 20_000_000_000) { Tone::Warn } else { Tone::Ok },
+        ),
+    ];
     // Each card as wide as its words want, the row filled; three then two on windows too narrow for that.
     let width = ui.available_width();
     let want = |label: &str, value: &str| {
@@ -235,8 +230,8 @@ fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
     let (rect, alpha) = entering(ui, cx, 1, rect);
     let mut cells = Vec::with_capacity(5);
     for (r, range) in rows.iter().enumerate() {
-        let widths =
-            if one_row { orbiters_ui::layout::share(&wanted[range.clone()], rect.width(), 12.0) } else { vec![(rect.width() - 24.0) / 3.0; range.len()] };
+        // Each row filled, as wide as its cards' words want (the second row's two cards included).
+        let widths = orbiters_ui::layout::share(&wanted[range.clone()], rect.width(), 12.0);
         let mut x = rect.left();
         for w in widths {
             cells.push(Rect::from_min_size(pos2(x, rect.top() + r as f32 * 74.0), vec2(w, 62.0)));

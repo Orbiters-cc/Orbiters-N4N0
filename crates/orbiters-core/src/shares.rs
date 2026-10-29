@@ -51,6 +51,9 @@ pub struct Capture {
     pub splat_count: u64,
     pub preview_url: String,
     pub sky_url: Option<String>,
+    /// Its picture (its 3D view) when the server has one (contracts `Docs/capture-sharing.md`, Capture picture).
+    #[serde(default)]
+    pub picture_url: Option<String>,
     pub view: serde_json::Value,
     pub vrchat_slot: Option<u32>,
 }

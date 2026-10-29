@@ -508,6 +508,7 @@ fn share_with(
             Local::Session(dir) => {
                 report(Stage::Preparing);
                 let (files, sky, view) = super::maps::web_preview(dir)?;
+                let picture = crate::capture_picture::jpeg(dir);
                 step("prepared", &mut at);
                 let bytes = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
                 metadata.as_object_mut().unwrap().extend(view.as_object().unwrap().clone());
@@ -515,7 +516,7 @@ fn share_with(
                 let (tx, rx) = std::sync::mpsc::channel();
                 std::thread::scope(|scope| {
                     let sending = scope.spawn(|| {
-                        api.add_preview(token, &entry.world_id, files, sky.as_deref(), &metadata, move |sent, total| {
+                        api.add_preview(token, &entry.world_id, files, sky.as_deref(), picture, &metadata, move |sent, total| {
                             let _ = tx.send((sent, total));
                         })
                     });
@@ -559,8 +560,21 @@ fn share_with(
     let shared = api.share_capture(token, kind, id, request);
     step("shared", &mut at);
     match shared {
-        Ok(result) => {
-            if let shares::Shared::Item { item } = &result {
+        Ok(mut result) => {
+            if let shares::Shared::Item { item } = &mut result {
+                // A public capture uploaded without its picture gets it now: its public page's link previews show it.
+                if let (true, Kind::Capture, true, Some(Local::Session(dir))) = (item.public, item.kind, item.mine, entry.local.as_ref()) {
+                    if item.capture.as_ref().is_some_and(|c| c.picture_url.is_none()) {
+                        match crate::capture_picture::jpeg(dir).map(|jpeg| api.set_capture_picture(token, item.id, jpeg)) {
+                            Some(Ok(with_picture)) => {
+                                *item = with_picture;
+                                step("gave it its picture", &mut at);
+                            }
+                            Some(Err(e)) => step(&format!("its picture failed ({e})"), &mut at),
+                            None => {}
+                        }
+                    }
+                }
                 save_record(records, entry, item)?;
             }
             Ok(result)

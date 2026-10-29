@@ -193,7 +193,7 @@ impl Controller {
                     }
                     None => false,
                 });
-                api.add_preview(&token, &world_id, files, sky.as_deref(), &metadata, c.progress(id)).map(|_| ())
+                api.add_preview(&token, &world_id, files, sky.as_deref(), crate::capture_picture::jpeg(&session), &metadata, c.progress(id)).map(|_| ())
             }) {
                 Ok(()) => UploadState::Done { added: 1, skipped: 0 },
                 Err(e) => UploadState::Failed { message: e.to_string() },
@@ -335,7 +335,7 @@ mod tests {
         let sent = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let s = sent.clone();
         let total = files.len();
-        api.add_preview(&env("ORBITERS_TEST_TOKEN"), &world, files, sky.as_deref(), &metadata, move |n, _| s.store(n, Ordering::Relaxed)).unwrap();
+        api.add_preview(&env("ORBITERS_TEST_TOKEN"), &world, files, sky.as_deref(), None, &metadata, move |n, _| s.store(n, Ordering::Relaxed)).unwrap();
         assert!(sent.load(Ordering::Relaxed) >= total);
         let page = api.world(&world).unwrap().unwrap();
         println!("previews {before} → {}", page.previews);
@@ -356,7 +356,7 @@ mod tests {
             let t = Instant::now();
             let (files, sky, metadata) = web_preview(Path::new(session)).unwrap();
             println!("{world}: {:.1} MB in {:.1} s, sky {}", files.len() as f64 / 1e6, t.elapsed().as_secs_f32(), sky.is_some());
-            api.add_preview(&account.token, world, files, sky.as_deref(), &metadata, |_, _| {}).unwrap();
+            api.add_preview(&account.token, world, files, sky.as_deref(), None, &metadata, |_, _| {}).unwrap();
             println!("{world}: shared");
         }
     }

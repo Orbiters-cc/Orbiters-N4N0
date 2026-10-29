@@ -80,6 +80,11 @@ pub struct Dialog {
     /// The capture's upload files asked to be made while friends are chosen.
     prepared_ahead: bool,
     request_public: bool,
+    /// Copy public link was pressed while the capture was not public (or had no picture on Orbiters yet): its link is
+    /// copied once the public share is done.
+    copy_after: bool,
+    /// When its public link was copied: the button says so for a moment, a ring leaving it.
+    copied_at: Option<f64>,
     /// The picture shown whole over the window, its details folded away (a click on the picture).
     full: bool,
     pub changed: bool,
@@ -142,6 +147,8 @@ impl Dialog {
             stage: Stage::default(),
             prepared_ahead: false,
             request_public: false,
+            copy_after: false,
+            copied_at: None,
             full: false,
             changed: false,
             pictures: crate::worlds::Pictures::new(ctx),
@@ -265,6 +272,11 @@ impl Dialog {
         }
         if state == "picture" {
             self.full = true;
+        }
+        if state == "copy-link" {
+            if let Some(item) = self.entry.remote.as_mut() {
+                item.public = true;
+            }
         }
         if state == "error" {
             self.error = Some("Orbiters could not be reached. Your capture is still on this computer.".into());
@@ -453,6 +465,10 @@ impl Dialog {
                 self.on_its_way.clear();
                 self.public_on_its_way = false;
                 self.notice = Some(notice);
+                if std::mem::take(&mut self.copy_after) {
+                    let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
+                    self.copy_link(ctx, server);
+                }
             }
             Outcome::Shared(Shared::Request { .. }) => {
                 self.picker = false;
@@ -490,6 +506,8 @@ impl Dialog {
                 }
             }
             Outcome::Failed { message, explicit } => {
+                // The explicit warning's Share anyway still copies the link.
+                self.copy_after &= explicit;
                 if explicit {
                     self.warning = Some(message);
                 } else {
@@ -817,12 +835,17 @@ impl Dialog {
                     actions.push((Act::Public, Button::new(label).icon(icons::GLOBE).variant(Variant::Primary).enabled(can_share && !busy)));
                 }
                 actions.push((Act::ShareTo, Button::new("Share to …").icon(icons::USERS).variant(Variant::Secondary).enabled(can_share && !busy)));
+                if !self.entry.is_picture() {
+                    actions.push((Act::CopyLink, self.copy_button(ui, busy, can_share)));
+                }
             }
         } else {
             let label = if busy && matches!(self.last, Some(Action::Share(_))) { "Asking…" } else { "Ask to share" };
             actions.push((Act::ShareTo, Button::new(label).icon(icons::PAPER_PLANE_TILT).variant(Variant::Primary).enabled(can_share && !busy)));
             if self.entry.is_picture() {
                 actions.push((Act::Download, Button::new("Download").icon(icons::DOWNLOAD_SIMPLE).enabled(!busy)));
+            } else if public && !hidden {
+                actions.push((Act::CopyLink, self.copy_button(ui, busy, true)));
             }
         }
         let actions: Vec<(Act, Button)> = actions
@@ -852,11 +875,31 @@ impl Dialog {
             Rect::from_min_size(r.min, vec2(actions_w.min(w), 32.0))
         };
         let mut x = row.left();
+        let mut copy_rect = None;
         for ((a, b), bw) in actions.into_iter().zip(widths) {
-            if pressed(b.show_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(bw, 32.0)))) {
+            let r = Rect::from_min_size(pos2(x, row.top()), vec2(bw, 32.0));
+            if matches!(a, Act::CopyLink) {
+                copy_rect = Some(r);
+            }
+            if pressed(b.show_at(ui, r)) {
                 *act = Some(a);
             }
             x += bw + 8.0;
+        }
+        // Copied: a ring of green leaves the button as it turns green.
+        if let (Some(r), Some(at)) = (copy_rect, self.copied_at) {
+            let k = ((anim::time(&ctx) - at) / 0.7) as f32;
+            if k < 1.0 {
+                let e = orbiters_ui::anim::ease::out_cubic(k.max(0.0));
+                let ring = r.expand(1.0 + 9.0 * e);
+                p.rect_stroke(
+                    ring,
+                    theme::radius(ring.height() * 0.5),
+                    egui::Stroke::new(2.0 * (1.0 - e), theme::alpha(theme::ACCENT, 0.85 * (1.0 - e))),
+                    egui::StrokeKind::Outside,
+                );
+                ctx.request_repaint();
+            }
         }
 
         // Who sees it, each with an ×.
@@ -1235,6 +1278,54 @@ impl Dialog {
         }
     }
 
+    /// Copy public link: what it says now (copied for a moment, making it public, or the offer) at one width for all three,
+    /// so the row never jumps.
+    fn copy_button(&self, ui: &Ui, busy: bool, enabled: bool) -> Button<'static> {
+        let now = anim::time(ui.ctx());
+        let copied = self.copied_at.is_some_and(|at| now - at < COPIED_FOR);
+        if let Some(at) = self.copied_at.filter(|_| copied) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((at + COPIED_FOR - now).max(0.0)));
+        }
+        let looks = [(icons::LINK_SIMPLE, "Copy public link"), (icons::LINK_SIMPLE, "Making it public…"), (icons::CHECK, "Link copied")];
+        let w = looks.iter().map(|(glyph, label)| Button::new(label).icon(glyph).size(Size::Sm).desired_width(ui)).fold(0.0, f32::max);
+        let (glyph, label) = looks[if copied {
+            2
+        } else if busy && self.copy_after {
+            1
+        } else {
+            0
+        }];
+        let public = self.entry.remote.as_ref().is_some_and(|i| i.public);
+        Button::new(label).icon(glyph).variant(if copied { Variant::Primary } else { Variant::Secondary }).enabled(copied || (enabled && !busy)).width(w).hint(
+            if public {
+                "Copies the address of its page on Orbiters: Discord and other apps show its picture with it"
+            } else {
+                "Shares it publicly on Orbiters, then copies the address of its page"
+            },
+        )
+    }
+
+    /// Its link was just copied (screenshots).
+    pub fn stage_copied(&mut self, ctx: &egui::Context) {
+        self.copied_at = Some(anim::time(ctx));
+        self.notice = Some("Public link copied: paste it in Discord or anywhere, its picture shows with it".into());
+    }
+
+    /// The capture's public page (contracts `Docs/capture-sharing.md`, Public page), once it is public.
+    fn public_link(&self, server: Server) -> Option<String> {
+        let item = self.entry.remote.as_ref().filter(|i| i.public && i.kind == shares::Kind::Capture)?;
+        let world = if item.world.id.is_empty() { &self.entry.world_id } else { &item.world.id };
+        Some(public_link(server, world, item.id))
+    }
+
+    fn copy_link(&mut self, ctx: &egui::Context, server: Server) {
+        if let Some(link) = self.public_link(server) {
+            ctx.copy_text(link);
+            self.copied_at = Some(anim::time(ctx));
+            self.notice = Some("Public link copied: paste it in Discord or anywhere, its picture shows with it".into());
+        }
+    }
+
     fn act(&mut self, ctx: &egui::Context, cx: &mut Cx, server: Server, a: Act) {
         match a {
             Act::Public => self.public(ctx, server),
@@ -1286,7 +1377,28 @@ impl Dialog {
                 r.acknowledge_explicit = true;
                 self.start(ctx, server, Action::Share(r));
             }
-            Act::CancelWarning => self.warning = None,
+            Act::CancelWarning => {
+                self.warning = None;
+                self.copy_after = false;
+            }
+            Act::CopyLink => {
+                // Copied at once when its page shows it with its picture; otherwise it is shared publicly (and given its
+                // picture) first, by the same job as Share publicly, with the same explicit warning.
+                let item = self.entry.remote.as_ref();
+                let pictured = item.and_then(|i| i.capture.as_ref()).is_some_and(|c| c.picture_url.is_some())
+                    || !self.entry.mine()
+                    || !matches!(self.entry.local, Some(controller::Local::Session(_)));
+                if item.is_some_and(|i| i.public) && pictured {
+                    self.copy_link(ctx, server);
+                } else {
+                    self.copy_after = true;
+                    if self.entry.mine() && item.is_some_and(|i| i.public) {
+                        self.start(ctx, server, Action::Share(Share { public: true, ..Default::default() }));
+                    } else {
+                        self.public(ctx, server);
+                    }
+                }
+            }
             Act::Retry => {
                 if let Some(a) = self.last.clone() {
                     self.start(ctx, server, a);
@@ -1294,6 +1406,14 @@ impl Dialog {
             }
         }
     }
+}
+
+/// How long Copy public link says the link was copied.
+const COPIED_FOR: f64 = 2.4;
+
+/// A public 3D capture's page on the website: its world's page opened on it, which crawlers preview with its picture.
+pub fn public_link(server: Server, world_id: &str, id: u64) -> String {
+    format!("{}maps/{world_id}/captures/{id}", server.website())
 }
 
 /// What the window's controls asked for this frame.
@@ -1312,6 +1432,7 @@ enum Act {
     Anyway,
     CancelWarning,
     Retry,
+    CopyLink,
 }
 
 impl Act {
@@ -1321,6 +1442,7 @@ impl Act {
             Act::ShareTo => 1,
             Act::Download => 2,
             Act::Reconstruct => 3,
+            Act::CopyLink => 4,
             _ => 9,
         }
     }

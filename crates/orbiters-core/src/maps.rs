@@ -245,6 +245,7 @@ impl Api {
         world_id: &str,
         files: PreviewFiles,
         sky: Option<&Path>,
+        picture: Option<Vec<u8>>,
         metadata: &serde_json::Value,
         progress: impl FnMut(u64, u64) + Send + 'static,
     ) -> anyhow::Result<Uploaded> {
@@ -258,8 +259,23 @@ impl Api {
         if let Some(sky) = sky {
             parts.push(Part::file("sky", "sky.png", "image/png", sky)?);
         }
+        // The capture's own 3D view (contracts Docs/capture-sharing.md, Capture picture): its link previews and cards.
+        if let Some(picture) = picture {
+            parts.push(Part::bytes("picture", format!("{world_id}-capture.jpg"), "image/jpeg", picture));
+        }
         let response = self.multipart(token, &format!("maps/worlds/{world_id}/previews"), &metadata.to_string(), parts, progress)?;
         crate::shares::json(response)
+    }
+
+    /// Gives a capture uploaded without one its picture (a JPEG of its 3D view), or a new one; answers its item.
+    pub fn set_capture_picture(&self, token: &str, id: u64, jpeg: Vec<u8>) -> anyhow::Result<crate::shares::Item> {
+        #[derive(serde::Deserialize)]
+        struct Answer {
+            item: crate::shares::Item,
+        }
+        let parts = vec![Part::bytes("picture", format!("capture-{id}.jpg"), "image/jpeg", jpeg)];
+        let response = self.multipart(token, &format!("captures/capture/{id}/picture"), "{}", parts, |_, _| {})?;
+        Ok(crate::shares::json::<Answer>(response)?.item)
     }
 
     /// A `multipart/form-data` POST with its JSON in a "metadata" field, reporting the bytes sent. The body is made as
@@ -405,6 +421,20 @@ impl Read for Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A capture uploaded without its picture gets one (contracts Docs/capture-sharing.md, Capture picture), against a
+    /// disposable Orbiters server: ORBITERS_TEST_API, ORBITERS_TEST_TOKEN, ORBITERS_TEST_CAPTURE (an id the token's
+    /// member owns) and ORBITERS_TEST_PICTURE (a JPEG).
+    #[test]
+    #[ignore = "needs a disposable Orbiters server"]
+    fn a_capture_gets_its_picture() {
+        let env = |k: &str| std::env::var(k).unwrap();
+        let api = crate::account::Api::at(&env("ORBITERS_TEST_API"));
+        let jpeg = std::fs::read(env("ORBITERS_TEST_PICTURE")).unwrap();
+        let item = api.set_capture_picture(&env("ORBITERS_TEST_TOKEN"), env("ORBITERS_TEST_CAPTURE").parse().unwrap(), jpeg).unwrap();
+        let capture = item.capture.unwrap();
+        assert_eq!(capture.picture_url.as_deref(), Some(format!("/captures/capture/{}/file?part=picture", item.id).as_str()));
+    }
 
     #[test]
     fn reads_a_world_page_and_what_a_member_added() {

@@ -9,6 +9,7 @@
 mod app;
 mod backend;
 mod bench;
+mod capture_picture;
 mod controller;
 mod coverage_window;
 mod device;

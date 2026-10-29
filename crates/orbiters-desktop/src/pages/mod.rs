@@ -5,6 +5,7 @@ pub mod form;
 pub mod home;
 pub mod mic;
 pub mod orb;
+pub mod projects;
 pub mod sessions;
 pub mod settings;
 pub mod splat_worker;
@@ -27,6 +28,7 @@ pub enum Page {
     /// N4N0's menu: what the app does, side by side.
     Home,
     Capture,
+    Projects,
     Orb,
     Sessions,
     Worlds,

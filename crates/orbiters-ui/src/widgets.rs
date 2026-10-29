@@ -90,6 +90,19 @@ pub fn pressed(resp: &Response) -> bool {
     down
 }
 
+/// Activate on pointer down, with keyboard/accessibility click fallback. Suppress the matching pointer-up click.
+pub fn activated(resp: &Response) -> bool {
+    let key = resp.id.with("activated-on-down");
+    if pressed(resp) {
+        resp.ctx.data_mut(|d| d.insert_temp(key, true));
+        true
+    } else if resp.clicked() {
+        !resp.ctx.data_mut(|d| d.remove_temp::<bool>(key).unwrap_or(false))
+    } else {
+        false
+    }
+}
+
 fn press_id() -> egui::Id {
     egui::Id::unique("orbiters-widget-press")
 }

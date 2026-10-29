@@ -33,6 +33,7 @@ pub struct App {
     toasts: toast::Toasts,
     home: pages::home::State,
     capture: pages::capture::State,
+    projects: pages::projects::State,
     sessions: pages::sessions::State,
     worlds: pages::worlds::State,
     videos: pages::videos::State,
@@ -75,6 +76,7 @@ impl App {
             toasts: toast::Toasts::default(),
             home: Default::default(),
             capture: Default::default(),
+            projects: Default::default(),
             sessions: Default::default(),
             worlds: Default::default(),
             videos: Default::default(),
@@ -128,6 +130,10 @@ impl App {
         &mut self.videos
     }
 
+    pub fn projects_mut(&mut self) -> &mut pages::projects::State {
+        &mut self.projects
+    }
+
     pub fn toasts_mut(&mut self) -> &mut toast::Toasts {
         &mut self.toasts
     }
@@ -138,6 +144,7 @@ impl App {
             Page::Sessions => self.sessions.busy(),
             Page::Worlds => self.worlds.busy(),
             Page::Videos => self.videos.busy(),
+            Page::Projects => self.projects.busy(),
             _ => false,
         }
     }
@@ -317,6 +324,7 @@ impl App {
             (Page::Home, "Home", icons::HOUSE),
             (Page::Orb, "N4N0", icons::N4N0),
             (Page::Capture, "Capture", icons::APERTURE),
+            (Page::Projects, "Unity projects", icons::CUBE),
             (Page::Sessions, "Sessions", icons::FOLDER_OPEN),
             (Page::Worlds, "Visited worlds", icons::GLOBE),
             (Page::Videos, "Videos", icons::FILM_STRIP),
@@ -484,7 +492,8 @@ impl App {
         };
         match self.page {
             Page::Home => pages::home::show(&mut child, &mut cx, &mut self.home),
-            Page::Capture => pages::capture::show(&mut child, &mut cx, &mut self.capture),
+            Page::Capture => pages::capture::show(&mut child, &mut cx, &mut self.capture, &mut self.projects),
+            Page::Projects => pages::projects::show(&mut child, &mut cx, &mut self.projects),
             Page::Orb => pages::orb::show(&mut child, &mut cx, &mut self.orb),
             Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions),
             Page::Worlds => pages::worlds::show(&mut child, &mut cx, &mut self.worlds),

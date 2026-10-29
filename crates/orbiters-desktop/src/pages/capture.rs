@@ -25,11 +25,12 @@ pub(super) const FLIGHT_HINTS: [&str; 3] = [
     "As 4 s, plus circles around four points 8 m away",
 ];
 
-pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
+pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State, projects: &mut super::projects::State) {
     let from = orbiters_ui::blur::next_shape(ui);
     egui::ScrollArea::vertical().id_salt("capture").auto_shrink([false, false]).scroll_bar_rect(super::below_bar(ui, cx)).show(ui, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 32 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
+            super::projects::capture_banner(ui, cx, projects);
             header(ui, cx);
             chips(ui, cx);
             grid(ui, cx);
@@ -39,6 +40,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
     });
     // Down to where the content starts (its top margin).
     super::under_top(ui, cx, "capture", from, ui.max_rect().top() + cx.top + 8.0);
+    super::projects::modals(ui, cx, projects);
 }
 
 fn rec_state(s: CaptureState) -> RecState {
@@ -168,56 +170,57 @@ fn chips(ui: &mut Ui, cx: &mut Cx) {
     };
     let osc = &snap.osc;
     let storage = &snap.storage;
-    let chips = [
-        (
-            icons::MONITOR_PLAY,
-            "VRChat",
-            if snap.vrchat.running {
-                if world.in_world {
-                    "In a world".to_string()
+    let chips =
+        [
+            (
+                icons::MONITOR_PLAY,
+                "VRChat",
+                if snap.vrchat.running {
+                    if world.in_world {
+                        "In a world".to_string()
+                    } else {
+                        "Running".into()
+                    }
                 } else {
-                    "Running".into()
-                }
-            } else {
-                "Not running".into()
-            },
-            if snap.vrchat.running { Tone::Ok } else { Tone::Off },
-        ),
-        (
-            icons::BROADCAST,
-            "Spout source",
-            source.map(|s| format!("{} · {}×{}", s.name, s.width, s.height)).unwrap_or_else(|| "VRChat's camera: Stream mode, Spout Stream on".into()),
-            if source.is_some() { Tone::Ok } else { Tone::Warn },
-        ),
-        (
-            icons::SPARKLE,
-            "Action Menu",
-            osc.last_event.clone().unwrap_or_else(|| {
-                if osc.listening {
-                    "N4N0 › Record".into()
-                } else {
-                    osc.error.clone().unwrap_or_else(|| "OSC off".into())
-                }
-            }),
-            if osc.listening {
-                Tone::Ok
-            } else if osc.enabled {
-                Tone::Warn
-            } else {
-                Tone::Off
-            },
-        ),
-        (
-            icons::HARD_DRIVE,
-            "Storage",
-            format!(
-                "{} used{}",
-                format::bytes(storage.used_bytes as f64),
-                storage.free_bytes.map(|f| format!(" · {} free", format::bytes(f as f64))).unwrap_or_default()
+                    "Not running".into()
+                },
+                if snap.vrchat.running { Tone::Ok } else { Tone::Off },
             ),
-            if storage.free_bytes.is_some_and(|f| f < 20_000_000_000) { Tone::Warn } else { Tone::Ok },
-        ),
-    ];
+            (
+                icons::BROADCAST,
+                "Spout source",
+                source.map(|s| format!("{} · {}×{}", s.name, s.width, s.height)).unwrap_or_else(|| "VRChat's camera: Stream mode, Spout Stream on".into()),
+                if source.is_some() { Tone::Ok } else { Tone::Warn },
+            ),
+            (
+                icons::SPARKLE,
+                "Action Menu",
+                osc.last_event.clone().unwrap_or_else(|| {
+                    if osc.listening {
+                        "N4N0 › Record".into()
+                    } else {
+                        osc.error.clone().unwrap_or_else(|| "OSC off".into())
+                    }
+                }),
+                if osc.listening {
+                    Tone::Ok
+                } else if osc.enabled {
+                    Tone::Warn
+                } else {
+                    Tone::Off
+                },
+            ),
+            (
+                icons::HARD_DRIVE,
+                "Storage",
+                format!(
+                    "{} used{}",
+                    format::bytes(storage.used_bytes as f64),
+                    storage.free_bytes.map(|f| format!(" · {} free", format::bytes(f as f64))).unwrap_or_default()
+                ),
+                if storage.free_bytes.is_some_and(|f| f < 20_000_000_000) { Tone::Warn } else { Tone::Ok },
+            ),
+        ];
     block(ui, cx, 1, 62.0, |ui, rect| {
         let w = (rect.width() - 36.0) / 4.0;
         for (i, (glyph, label, value, tone)) in chips.iter().enumerate() {
@@ -589,7 +592,13 @@ fn camera_path(ui: &mut Ui, cx: &mut Cx) {
         // be opened, files that could not be written), as the worker last said them.
         let warnings = s.map(|s| s.warnings.join(" · ")).filter(|w| !w.is_empty());
         if let Some((text, color)) = c.error.clone().map(|e| (e, theme::DANGER)).or_else(|| warnings.map(|w| (w, theme::WARN))) {
-            widgets::text_truncated(p, pos2(rect.right() - 20.0, rect.top() + 36.0), Align2::RIGHT_CENTER, &Txt::new(text, 12.0).color(color), rect.width() * 0.55);
+            widgets::text_truncated(
+                p,
+                pos2(rect.right() - 20.0, rect.top() + 36.0),
+                Align2::RIGHT_CENTER,
+                &Txt::new(text, 12.0).color(color),
+                rect.width() * 0.55,
+            );
         }
         let map = Rect::from_min_max(pos2(rect.left() + 16.0, rect.top() + 68.0), pos2(rect.right() - 16.0, rect.bottom() - 16.0));
         let coverage = c.coverage.as_ref().map(|m| trail::Coverage {

@@ -31,6 +31,7 @@ mod state;
 mod streams;
 mod tracking;
 mod tray;
+mod upload_prep;
 mod views;
 mod worlds;
 mod window;

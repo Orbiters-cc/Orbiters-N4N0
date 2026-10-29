@@ -209,8 +209,22 @@ impl Controller {
 pub(super) fn web_preview(session: &Path) -> anyhow::Result<(PreviewFiles, Option<PathBuf>, serde_json::Value)> {
     use orbiters_reconstruct::timing::PrepStage;
     let _total = PrepStage::new("total");
-    let stage = PrepStage::new("read result");
+    let _preparing = crate::upload_prep::PREPARING.lock().unwrap_or_else(|e| e.into_inner());
     let result = reconstruction::result_dir(session);
+    let key = crate::upload_prep::tree_key();
+    let stage = PrepStage::new("cache fingerprint");
+    let fingerprint = crate::upload_prep::Fingerprint::read(session, &result).ok();
+    drop(stage);
+    let stage = PrepStage::new("cache read");
+    let cached = fingerprint.as_ref().and_then(|fingerprint| crate::upload_prep::load(&result, fingerprint, key));
+    drop(stage);
+    if let Some((files, metadata)) = cached {
+        let stage = PrepStage::new("sky");
+        let sky = crate::upload_prep::sky(&result);
+        drop(stage);
+        return Ok((files, sky, metadata));
+    }
+    let stage = PrepStage::new("read result");
     let g = orbiters_reconstruct::ply::read(&result.join(reconstruction::PLY_FILE))?;
     drop(stage);
     let stage = PrepStage::new("start view");
@@ -237,7 +251,6 @@ pub(super) fn web_preview(session: &Path) -> anyhow::Result<(PreviewFiles, Optio
     }
     drop(stage);
     // Names this upload in its three trees, so a world can tell when a slot's files have been replaced.
-    let key = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u32) ^ web.count as u32;
     let trees = orbiters_reconstruct::tree_tune::vrchat_files(&g, &cameras, gpu.as_mut(), key, |_| {})?;
     if let Some(gpu) = &gpu {
         if let Some(p) = &gpu.profiler {
@@ -254,8 +267,19 @@ pub(super) fn web_preview(session: &Path) -> anyhow::Result<(PreviewFiles, Optio
         "capturedAt": recorded,
     });
     let stage = PrepStage::new("sky");
-    let sky = Some(result.join(reconstruction::SKY_FILE)).filter(|p| p.is_file());
+    let sky = crate::upload_prep::sky(&result);
     drop(stage);
+    // Never persist the untuned CPU fallback, or outputs whose sources changed while preparation was running.
+    // A full/read-only disk must not prevent the upload; the next share can prepare again.
+    if let Some(fingerprint) = fingerprint.as_ref().filter(|_| gpu.is_some()) {
+        let stage = PrepStage::new("cache write");
+        if crate::upload_prep::Fingerprint::read(session, &result).ok().as_ref() == Some(fingerprint) {
+            if let Err(e) = crate::upload_prep::save(&result, fingerprint, &files, &metadata) {
+                eprintln!("Could not cache upload preparation: {e:#}");
+            }
+        }
+        drop(stage);
+    }
     Ok((files, sky, metadata))
 }
 

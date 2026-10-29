@@ -32,6 +32,11 @@ regions cannot be positioned reliably.
 
 ## Sharing and revoking
 
+Preparing a 3D capture reuses its finished upload files on later shares and retries, including between Map explorer
+and Photos & captures. A changed reconstruction, recorded cameras or start-view metadata makes it prepare again.
+The local preparation cache lives with the reconstruction (up to about 70 MB per prepared capture); sharing still
+sends the same web preview and full-quality PC, Quest and coarse files.
+
 - Share publicly uploads an unuploaded item publicly, or shares an uploaded item with `public: true`.
 - Share to … opens a searchable VRChat friends picker. An eligible signed-in VRChat session supplies friends and
   pictures through the service; these are merged with VRCX/VRCNext by user ID, preferring VRChat's data. Otherwise

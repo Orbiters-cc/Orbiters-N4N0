@@ -24,6 +24,7 @@ orbiters-openvr = { workspace = true }
 orbiters-smooth = { path = "../orbiters-smooth" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 uuid = { workspace = true }
 anyhow = { workspace = true }
 time = { workspace = true }

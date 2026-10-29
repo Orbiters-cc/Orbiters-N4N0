@@ -3,9 +3,9 @@
 //! card shows it in place of its avatar pictures as soon as it loads (well under a second): the pictures give way to
 //! a dark studio, a ring runs out over the ground and the scene rises out of it behind a green edge while the camera
 //! swings round to the front. Dragging the card turns it (with inertia), a click grows it into a window over the page
-//! (the card's shared geometry) where it also zooms and pans; Escape or the × shrinks it back into the card. The file
-//! is looked at again every few seconds, so a save in Unity shows here by itself. A project without one says how to
-//! get it.
+//! (the card's shared geometry) where it also zooms and pans; Escape or the × shrinks it back into the card. The
+//! project's UserSettings folder is watched, so a save in Unity shows here as soon as Toolkit wrote it. A project
+//! without one says how to get it, and offers to add or update Orbiters Toolkit when it lacks one that writes them.
 
 use super::preview_gpu::{self, Pipelines, Scene, View};
 use super::state::{Outcome, State};
@@ -28,8 +28,12 @@ const REVEAL_S: f64 = 1.25;
 const SWING_S: f32 = 1.6;
 /// The avatar pictures giving way to the studio.
 const FADE_S: f64 = 0.28;
-/// How often the project's previews are looked at again (a save in Unity writes a new one).
-const RELIST_S: f64 = 3.0;
+/// How often the project's previews are looked at again besides the folder's watch (a save in Unity writes a new one;
+/// the watch sees it at once).
+const RELIST_S: f64 = 15.0;
+/// The first Orbiters Toolkit that writes previews.
+pub(super) const TOOLKIT_PREVIEWS: &str = "0.4.10";
+const TOOLKIT: &str = "orbiters.toolkit";
 /// The hint under the window's view goes after this long, or once the view was turned.
 const HINT_S: f64 = 5.0;
 
@@ -64,6 +68,9 @@ struct Current {
     camera: Option<Camera>,
     /// The person turned the view.
     touched: bool,
+    /// The project's UserSettings watched: `changed` is set when something there changed.
+    _watch: Option<file::Watch>,
+    changed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Current {
@@ -81,6 +88,8 @@ impl Current {
             shown_at: 0.0,
             camera: None,
             touched: false,
+            _watch: None,
+            changed: Arc::default(),
         }
     }
 
@@ -265,7 +274,15 @@ impl Previews {
                 c.entries = entries;
                 c.listed_at = now;
             }
-            if !c.listing.running() && now - c.listed_at > RELIST_S {
+            if c._watch.is_none() {
+                let (changed, ctx) = (c.changed.clone(), ctx.clone());
+                c._watch = Some(file::watch(project, move || {
+                    changed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    ctx.request_repaint();
+                }));
+            }
+            let changed = c.changed.swap(false, std::sync::atomic::Ordering::Relaxed);
+            if !c.listing.running() && (changed || now - c.listed_at > RELIST_S) {
                 c.listed_at = now;
                 c.listing = Job::spawn(ctx, move || file::list(&folder));
             }
@@ -396,9 +413,17 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
     let ctx = ui.ctx().clone();
     state.anchors.insert("preview-cover".into(), rect);
     state.preview.follow(&ctx, gpu, &project.path);
-    // Whether the project has Orbiters Toolkit, once its packages were read.
+    // The project's Orbiters Toolkit (none, too old to write previews, or one that does), once its packages were read,
+    // and the newest release the repositories offer.
     let read = !state.view_job.running() && !state.view.packages.is_empty();
-    let toolkit = read.then(|| state.view.packages.iter().any(|p| p.name == "orbiters.toolkit" && p.installed.is_some()));
+    let toolkit = read.then(|| state.view.packages.iter().find(|p| p.name == TOOLKIT).cloned()).map(|p| {
+        let installed = p.as_ref().and_then(|p| p.installed.clone());
+        let newest = p.as_ref().and_then(|p| p.versions.iter().filter(|v| !v.contains('-')).max_by_key(|v| version(v)).cloned());
+        (installed, newest.filter(|v| version(v) >= version(TOOLKIT_PREVIEWS)))
+    });
+    let updating = state.busy_package.as_deref() == Some(TOOLKIT) && state.running();
+    let can_act = project.registered && !state.running();
+    let mut act: Option<String> = None;
     let window_open = state.preview.window.is_some();
     let pv = &mut state.preview;
     let c = pv.current.as_mut().unwrap();
@@ -408,33 +433,88 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
         let note = if c.loading.running() {
             None
         } else if let Some(e) = &c.error {
-            Some((icons::WARNING, "3D preview unreadable", format!("Its file could not be read: {e}")))
+            Some((icons::WARNING, "3D preview unreadable", format!("Its file could not be read: {e}"), None))
         } else if c.listed_at > f64::NEG_INFINITY && c.entries.is_empty() {
-            Some(match toolkit {
-                Some(false) => (
-                    icons::CUBE,
-                    "No 3D preview",
-                    "Orbiters Toolkit draws the scene you save in Unity here. Add it below, then save the scene once.".to_string(),
+            Some(match &toolkit {
+                Some((None, newest)) => (
+                    icons::PLUS,
+                    if updating { "Adding Toolkit…" } else { "Add Toolkit for 3D" },
+                    format!(
+                        "Orbiters Toolkit draws the scene you save in Unity here.{}",
+                        if newest.is_some() {
+                            " Press to add it, then save the scene once."
+                        } else {
+                            " Add the Orbiters repository, then Orbiters Toolkit below."
+                        }
+                    ),
+                    newest.clone(),
                 ),
-                _ => (icons::CUBE, "3D after a save", "Open the project in Unity and save its scene: Orbiters Toolkit then shows it here in 3D.".to_string()),
+                Some((Some(v), newest)) if version(v) < version(TOOLKIT_PREVIEWS) => (
+                    super::art::glyph::ARROW_UP,
+                    if updating { "Updating Toolkit…" } else { "Update Toolkit for 3D" },
+                    format!(
+                        "Orbiters Toolkit {v} in this project does not draw 3D previews yet ({TOOLKIT_PREVIEWS} does).{}",
+                        match newest {
+                            Some(n) => format!(" Press to update it to {n}: with the project open in Unity, its scene shows here once the editor reloaded."),
+                            None => " Refresh the Orbiters repository to get the newer one.".into(),
+                        }
+                    ),
+                    newest.clone(),
+                ),
+                _ => (
+                    icons::CUBE,
+                    "3D after a save",
+                    "Save the scene in Unity (Ctrl+S): Orbiters Toolkit draws it and it shows here a moment later.".to_string(),
+                    None,
+                ),
             })
         } else {
             None
         };
-        if let Some((glyph, label, tip)) = note {
+        if let Some((glyph, label, tip, offer)) = note {
+            let actionable = offer.is_some() && can_act;
             let k = anim::spring_from(&ctx, id.with("note"), [0.0], [1.0], Spring::SOFT)[0].clamp(0.0, 1.0);
-            let txt = Txt::new(label, 11.5).weight(weight::MEDIUM).color(theme::alpha(theme::FG_2, k));
+            let txt = Txt::new(label, 11.5).weight(weight::MEDIUM);
             let w = widgets::text_size(ui, &txt).x + 36.0;
             let r = Rect::from_min_size(pos2(corner - w, rect.top() + 12.0), vec2(w, 24.0));
+            let resp = ui.interact(r, id.with("note-tip"), if actionable { Sense::click() } else { Sense::hover() });
+            let hover = anim::toggle(&ctx, id.with("note-hover"), actionable && resp.hovered(), Spring::SOFT);
+            let press = anim::toggle(&ctx, id.with("note-press"), actionable && resp.is_pointer_button_down_on(), Spring::SNAPPY);
+            let lit = if offer.is_some() { 1.0 } else { 0.0 };
+            let r = r.shrink(1.5 * press);
             let p = ui.painter();
-            p.rect_filled(r, theme::radius(12.0), theme::black(0.55 * k));
-            widgets::icon(p, pos2(r.left() + 15.0, r.center().y), glyph, 12.0, theme::alpha(theme::FG_3, k));
-            widgets::text(p, pos2(r.left() + 25.0, r.center().y), Align2::LEFT_CENTER, &txt);
-            ui.interact(r, id.with("note-tip"), Sense::hover()).on_hover_text(tip);
+            p.rect_filled(r, theme::radius(12.0), theme::mix(theme::black(0.55 * k), theme::alpha(theme::INK_900, 0.9 * k), lit));
+            if lit > 0.0 {
+                p.rect_filled(r, theme::radius(12.0), theme::alpha(theme::ACCENT, (0.14 + 0.1 * hover) * k));
+            }
+            let fg = theme::mix(theme::mix(theme::FG_2, theme::ACCENT, lit), theme::FG, hover * 0.4);
+            if updating && offer.is_some() {
+                feedback::spinner(p, pos2(r.left() + 15.0, r.center().y), 5.0, 1.6, theme::alpha(theme::ACCENT, k));
+            } else {
+                widgets::icon(
+                    p,
+                    pos2(r.left() + 15.0, r.center().y - 1.5 * hover * lit),
+                    glyph,
+                    12.0,
+                    theme::alpha(theme::mix(theme::FG_3, theme::ACCENT, lit), k),
+                );
+            }
+            widgets::text(p, pos2(r.left() + 25.0, r.center().y), Align2::LEFT_CENTER, &txt.color(theme::alpha(fg, k)));
+            let resp = if actionable { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
+            resp.clone().on_hover_text(tip);
+            if actionable && widgets::activated(&resp) {
+                act = offer;
+            }
         } else if c.loading.running() && c.scene.is_none() {
             let r = Rect::from_center_size(pos2(corner - 14.0, rect.top() + 24.0), vec2(28.0, 28.0));
             ui.painter().circle_filled(r.center(), 14.0, theme::black(0.5));
             feedback::spinner(ui.painter(), r.center(), 7.0, 2.0, theme::FG_2);
+        }
+        if let Some(v) = act {
+            let installed = toolkit.as_ref().and_then(|t| t.0.clone());
+            let label = if installed.is_some() { format!("Updating Orbiters Toolkit to {v}…") } else { format!("Adding Orbiters Toolkit {v}…") };
+            let change = orbiters_projects::vpm::Change::Install { names: vec![(TOOLKIT.into(), Some(v))], prerelease: false };
+            super::panel::package_action(state, &ctx, project, change, &label, TOOLKIT);
         }
         return;
     }
@@ -730,6 +810,15 @@ fn chrome(
 }
 
 /// 312400 → "312k", 1840000 → "1.8M".
+/// A version's numbers for comparing ("0.4.10" after "0.4.9"); a pre-release's suffix is left out.
+pub(super) fn version(v: &str) -> [u32; 3] {
+    let mut out = [0; 3];
+    for (o, part) in out.iter_mut().zip(v.split(['-', '+']).next().unwrap_or_default().split('.')) {
+        *o = part.parse().unwrap_or(0);
+    }
+    out
+}
+
 fn compact(n: u64) -> String {
     match n {
         0..1_000 => n.to_string(),
@@ -748,7 +837,7 @@ impl State {
         for old in ["stand-in.preview", "second.preview"] {
             let _ = std::fs::remove_file(folder.join(old));
         }
-        if !matches!(name, "projects-preview-none" | "projects-preview-no-toolkit") {
+        if !matches!(name, "projects-preview-none" | "projects-preview-no-toolkit" | "projects-preview-old-toolkit") {
             std::fs::create_dir_all(&folder).expect("stand-in folder");
             let bytes = match std::env::var_os("ORBITERS_PREVIEW_FILE") {
                 Some(p) => std::fs::read(p).expect("ORBITERS_PREVIEW_FILE"),
@@ -760,6 +849,13 @@ impl State {
             }
         }
         self.preview.fixture = Some(dir);
+        if name == "projects-preview-old-toolkit" {
+            // A world project's Toolkit before previews (Enzo's had 0.4.8), the repositories offering a newer one.
+            for p in self.view.packages.iter_mut().filter(|p| p.name == "orbiters.toolkit") {
+                p.installed = Some("0.4.8".into());
+                p.versions = vec!["0.4.10".into(), "0.4.9".into(), "0.4.8".into()];
+            }
+        }
         if name == "projects-preview-no-toolkit" {
             for p in self.view.packages.iter_mut().filter(|p| p.name == "orbiters.toolkit") {
                 p.installed = None;

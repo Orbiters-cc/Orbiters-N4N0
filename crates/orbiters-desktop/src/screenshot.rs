@@ -1439,6 +1439,13 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "projects-new-loading",
         "projects-repos-novcc",
         "projects-icons-live",
+        "projects-repos-crossfade",
+        "projects-repos-live",
+        "projects-commits",
+        "projects-commits-mid",
+        "projects-commits-open",
+        "projects-commits-narrow",
+        "projects-world",
     ] {
         let capture = name.starts_with("projects-avatars") || matches!(name, "projects-choice" | "projects-ready" | "projects-capture");
         let mut snapshot = scenarios[0].snapshot.clone();
@@ -1451,12 +1458,15 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             name,
             page: if capture { Page::Capture } else { Page::Projects },
             snapshot,
-            frames: if name == "projects-icons-live" {
+            frames: if matches!(name, "projects-icons-live" | "projects-repos-live") {
                 // Real lookups: time for them to land.
                 600
             } else if name == "projects-resize-mid" {
                 60
-            } else if matches!(name, "projects-crossfade" | "projects-new-loading") {
+            } else if name == "projects-commits-mid" {
+                // The rows coming in one after the other.
+                12
+            } else if matches!(name, "projects-crossfade" | "projects-new-loading" | "projects-repos-crossfade") {
                 66
             } else if name.ends_with("-mid") {
                 67
@@ -1489,6 +1499,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         ("projects-preview-sheet", 200),
         ("projects-preview-none", 90),
         ("projects-preview-no-toolkit", 90),
+        ("projects-preview-old-toolkit", 90),
     ] {
         let mut snapshot = scenarios[0].snapshot.clone();
         snapshot.account.development = true;

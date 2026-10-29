@@ -25,11 +25,16 @@ Docs/project-preview.md.
   stand on a floor of our own: a pool of light under them, the shadow, a contact shadow and the scene mirrored faintly
   in it, fading with height and towards the floor's edge into the background. Worlds have their own floors and get
   none.
-- **Live.** The project's previews are listed again every 3 s while it is shown, so a save in Unity shows here a few
-  seconds later (it rises again where the camera is). Switching back to the project shown just before is immediate.
-- **Without a preview** the avatar pictures stay and a quiet chip on the cover says why, with the full explanation on
-  hover: "3D after a save" (Orbiters Toolkit is in the project: save the scene once), "No 3D preview" (Toolkit is not
-  in it: add it below, then save), or "3D preview unreadable" with the reason. A spinner shows while it loads.
+- **Live.** The shown project's `UserSettings` folder is watched (Windows change notifications,
+  `orbiters_projects::preview::watch`), so a preview Toolkit writes shows as soon as it is on disk (it rises again
+  where the camera is); the previews are also listed again every 15 s. Switching back to the project shown just
+  before is immediate.
+- **Without a preview** the avatar pictures stay and a chip on the cover says why, with the full explanation on hover:
+  "3D after a save" (a Toolkit that writes previews is in the project: save the scene), "Update Toolkit for 3D" (its
+  Toolkit is older than 0.4.10, the first that writes them: a press updates it to the newest release the repositories
+  offer; an open editor then writes the open scene's preview once it reloaded), "Add Toolkit for 3D" (no Toolkit: a
+  press adds it), or "3D preview unreadable" with the reason. The two offers are green and show a spinner while the
+  package changes. A spinner shows while a preview loads.
 
 ## Why a snapshot written by Toolkit
 
@@ -98,7 +103,7 @@ $env:ORBITERS_PREVIEW_FILE = "<a .preview Toolkit wrote>"   # instead of the sta
 
 Scenarios: `projects-preview` (settled), `-reveal` (rising, 0.5 s in), `-swing` (1 s in), `-turned` (dragged),
 `-open-mid` (the window six frames into its morph), `-open`, `-scenes` (two scenes to switch between), `-sheet`
-(with `--width 1040`), `-none` and `-no-toolkit` (the notes). The stand-in is N4N0's black orb with white strokes over
+(with `--width 1040`), `-none`, `-no-toolkit` and `-old-toolkit` (the notes). The stand-in is N4N0's black orb with white strokes over
 a plinth, a green ring and two cubes, as an avatar scene.
 
 ## Not done or untested

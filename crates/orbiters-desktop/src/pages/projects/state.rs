@@ -4,7 +4,7 @@ use orbiters_core::account::Server;
 use orbiters_projects::{
     avatars::Avatar,
     discovery::{self, Project, Scan},
-    icons, network, setup, templates, vpm,
+    git, icons, network, setup, templates, vpm,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -42,7 +42,7 @@ pub(super) enum Outcome {
     Setup(Flow),
     Picked(Option<PathBuf>),
 }
-type ViewResult = Result<(vpm::View, Vec<templates::Template>, Vec<String>), String>;
+type ViewResult = Result<(vpm::View, Vec<templates::Template>, Option<git::Repo>), String>;
 
 /// A package's icon, loaded: a picture that fills its tile (solid nearly everywhere) or a mark to frame, and a mark dark
 /// enough to need a light tile.
@@ -75,6 +75,8 @@ pub struct State {
     /// The panel scrolls to its packages, or to Mixer's card, on its next frame (screenshots).
     pub(super) scroll_to_packages: bool,
     pub(super) scroll_to_mixer: bool,
+    /// The panel scrolls to its last card, the Git repository's (screenshots).
+    pub(super) scroll_to_commits: bool,
     /// The docked panel's width as the person dragged it.
     pub(super) panel_width: Option<f32>,
     /// The sliding panel (narrow windows) is closing.
@@ -87,7 +89,10 @@ pub struct State {
     pub(super) busy_package: Option<String>,
     pub(super) view: vpm::View,
     pub(super) view_job: Job<ViewResult>,
-    pub(super) commits: Vec<String>,
+    /// The selected project's Git repository (its branch, changes, last commits, remote page), when it is one.
+    pub(super) git: Option<git::Repo>,
+    /// Commits opened to their whole message.
+    pub(super) commit_open: HashSet<String>,
     pub(super) templates: Vec<templates::Template>,
     pub(super) catalog: network::Catalog,
     pub(super) catalog_job: Job<network::Catalog>,
@@ -101,6 +106,11 @@ pub struct State {
     pub(super) icons_asked: HashSet<String>,
     pub(super) icon_job: Job<Vec<(String, Option<icons::Image>)>>,
     pub(super) icons_wanted: Vec<String>,
+    /// Repositories' icons by listing URL, as packages' (their website's icon, or the logo Orbiters keeps).
+    pub(super) repo_icons: HashMap<String, PackageIcon>,
+    pub(super) repo_icons_asked: HashSet<String>,
+    pub(super) repo_icon_job: Job<Vec<(String, Option<icons::Image>)>>,
+    pub(super) repo_icons_wanted: Vec<String>,
     /// Creator Companion's template covers by file, and their loading.
     pub(super) banners: HashMap<PathBuf, TextureHandle>,
     pub(super) banner_job: Job<Vec<(PathBuf, Option<ColorImage>)>>,
@@ -156,6 +166,7 @@ pub struct State {
     /// Screenshots (`projects-icons-live`): the stand-in packages' icons looked for for real (cache, then network).
     pub(super) fixture_live_icons: bool,
     pub(super) fixture_banners_later: HashMap<PathBuf, TextureHandle>,
+    pub(super) fixture_repo_icons_later: HashMap<String, PackageIcon>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -170,6 +181,7 @@ impl Default for State {
             panel_serial: 0,
             scroll_to_packages: false,
             scroll_to_mixer: false,
+            scroll_to_commits: false,
             panel_width: None,
             panel_closing: false,
             all_proposals: false,
@@ -177,7 +189,8 @@ impl Default for State {
             busy_package: None,
             view: vpm::View::default(),
             view_job: Job::default(),
-            commits: vec![],
+            git: None,
+            commit_open: HashSet::new(),
             templates: vec![],
             catalog: network::Catalog::default(),
             catalog_job: Job::default(),
@@ -189,6 +202,10 @@ impl Default for State {
             icons_asked: HashSet::new(),
             icon_job: Job::default(),
             icons_wanted: vec![],
+            repo_icons: HashMap::new(),
+            repo_icons_asked: HashSet::new(),
+            repo_icon_job: Job::default(),
+            repo_icons_wanted: vec![],
             banners: HashMap::new(),
             banner_job: Job::default(),
             mixer_info: false,
@@ -230,6 +247,7 @@ impl Default for State {
             fixture_icons_later: HashMap::new(),
             fixture_live_icons: false,
             fixture_banners_later: HashMap::new(),
+            fixture_repo_icons_later: HashMap::new(),
         }
     }
 }
@@ -336,14 +354,8 @@ impl State {
         self.view_job = Job::spawn(ctx, move || {
             let root = orbiters_projects::vcc_dir();
             let view = orbiters_projects::runtime().and_then(|rt| rt.block_on(vpm::view(&root, path.as_deref(), refresh))).map_err(|e| format!("{e:#}"))?;
-            let commits = path
-                .as_ref()
-                .filter(|p| p.join(".git").exists())
-                .and_then(|p| orbiters_projects::hidden_command("git").arg("-C").arg(p).args(["log", "-4", "--format=%h\x1f%s\x1f%an\x1f%ar"]).output().ok())
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(ToOwned::to_owned).collect())
-                .unwrap_or_default();
-            Ok((view, templates::list(&root), commits))
+            let repo = path.as_deref().and_then(git::read);
+            Ok((view, templates::list(&root), repo))
         });
     }
     pub(super) fn open(&mut self, ctx: &egui::Context, path: PathBuf) {
@@ -360,7 +372,7 @@ impl State {
         self.scroll_to_packages = false;
         if !self.fixture {
             self.view.packages.clear();
-            self.commits.clear();
+            self.git = None;
         }
         self.load_view(ctx, false);
     }
@@ -405,19 +417,20 @@ impl State {
         }
         if let Some(result) = self.view_job.take() {
             match result {
-                Ok((view, templates, commits)) => {
+                Ok((view, templates, repo)) => {
                     if self.new_location.is_empty() {
                         self.new_location = view.default_path.display().to_string();
                     }
                     self.view = view;
                     self.templates = templates;
-                    self.commits = commits;
+                    self.git = repo;
                     self.load_banners(ctx);
                 }
                 Err(e) => self.error = Some(e),
             }
         }
         self.load_icons(ctx);
+        self.load_repo_icons(ctx);
         if let Some(covers) = self.banner_job.take() {
             let options = egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR };
             for (file, image) in covers {
@@ -476,7 +489,7 @@ impl State {
                 .scan
                 .projects
                 .iter()
-                .flat_map(|p| p.avatars.iter().map(|a| a.id.clone()))
+                .flat_map(|p| p.avatars.iter().chain(&p.worlds).map(|a| a.id.clone()))
                 .filter(|id| !self.thumb_ids.contains(id) && seen.insert(id.clone()))
                 .take(8)
                 .collect();
@@ -484,14 +497,34 @@ impl State {
                 self.thumb_ids.extend(ids.iter().cloned());
                 let backend = cx.ctl.clone();
                 let scope = crate::controller::vrchat_data::Scope::of(cx.snap);
+                // A world's own picture (My World's thumbnail) is read here; the others are asked for.
+                let local: HashMap<String, PathBuf> = self
+                    .scan
+                    .projects
+                    .iter()
+                    .flat_map(|p| &p.worlds)
+                    .filter(|w| ids.contains(&w.id))
+                    .filter_map(|w| Some((w.id.clone(), w.thumbnail.clone()?)))
+                    .collect();
                 self.thumb_job = Job::spawn(ctx, move || {
                     use crate::controller::vrchat_data::{Request, Response};
                     let mut images = HashMap::new();
                     let mut errors = Vec::new();
-                    if let Response::Avatars { pictures, errors: failures } = backend.vrchat_data(scope, Request::Avatars { ids })? {
-                        errors.extend(failures);
-                        for (id, p) in pictures {
-                            images.insert(id, ColorImage::from_rgba_unmultiplied([p.width as usize, p.height as usize], &p.rgba));
+                    for (id, file) in &local {
+                        if let Some(i) = image::open(file).ok().map(|i| i.thumbnail(640, 480).to_rgba8()) {
+                            images.insert(id.clone(), ColorImage::from_rgba_unmultiplied([i.width() as usize, i.height() as usize], &i));
+                        }
+                    }
+                    let (worlds, avatars): (Vec<String>, Vec<String>) =
+                        ids.into_iter().filter(|id| !images.contains_key(id)).partition(|id| id.starts_with("wrld_"));
+                    let requests =
+                        [(!avatars.is_empty()).then_some(Request::Avatars { ids: avatars }), (!worlds.is_empty()).then_some(Request::Worlds { ids: worlds })];
+                    for request in requests.into_iter().flatten() {
+                        if let Response::Avatars { pictures, errors: failures } = backend.vrchat_data(scope.clone(), request)? {
+                            errors.extend(failures);
+                            for (id, p) in pictures {
+                                images.insert(id, ColorImage::from_rgba_unmultiplied([p.width as usize, p.height as usize], &p.rgba));
+                            }
                         }
                     }
                     Ok((images, errors))
@@ -562,6 +595,44 @@ impl State {
                 if let Some(image) = image {
                     let icon = PackageIcon::load(ctx, &name, &image);
                     self.icons.insert(name, icon);
+                }
+            }
+        }
+    }
+    /// Looks for the icons of the repositories drawn since the last look (the dialog's rows and its suggestions), as
+    /// packages' icons are looked for.
+    fn load_repo_icons(&mut self, ctx: &egui::Context) {
+        let wanted = std::mem::take(&mut self.repo_icons_wanted);
+        if (!self.fixture || self.fixture_live_icons) && !self.repo_icon_job.running() {
+            let mut batch: Vec<(String, Vec<String>)> = vec![];
+            for url in wanted {
+                if batch.len() >= ICON_BATCH || !self.repo_icons_asked.insert(url.clone()) {
+                    continue;
+                }
+                // Its packages' authors' websites, the most common first.
+                let mut counts: HashMap<&String, usize> = HashMap::new();
+                for p in self.view.packages.iter().filter(|p| p.repository.as_deref() == Some(url.as_str())) {
+                    if let Some(a) = &p.author_url {
+                        *counts.entry(a).or_default() += 1;
+                    }
+                }
+                let mut authors: Vec<(&String, usize)> = counts.into_iter().collect();
+                authors.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+                let authors = authors.into_iter().take(2).map(|(a, _)| a.clone()).collect();
+                batch.push((url, authors));
+            }
+            if !batch.is_empty() {
+                self.repo_icon_job = Job::spawn(ctx, move || {
+                    let sources: Vec<icons::Sources> = batch.iter().map(|(url, authors)| icons::repository_sources(url, authors)).collect();
+                    batch.into_iter().map(|(url, _)| url).zip(icons::resolve_all(&sources)).collect()
+                });
+            }
+        }
+        if let Some(found) = self.repo_icon_job.take() {
+            for (url, image) in found {
+                if let Some(image) = image {
+                    let icon = PackageIcon::load(ctx, &format!("repo-{url}"), &image);
+                    self.repo_icons.insert(url, icon);
                 }
             }
         }
@@ -671,6 +742,7 @@ impl State {
                             name: names[k].into(),
                             scene: format!("Assets/{}/{}.unity", names[k], if a == 0 { "Avatar" } else { "Scenes/Main" }),
                             path: names[k].into(),
+                            ..Default::default()
                         }
                     })
                     .collect();
@@ -683,6 +755,7 @@ impl State {
                     registered: i < 3,
                     missing: false,
                     avatars,
+                    worlds: vec![],
                 }
             })
             .collect();
@@ -793,6 +866,14 @@ impl State {
         ] {
             self.icons.insert(package.into(), stand_in_icon(ctx, package, look));
         }
+        for (url, look) in [
+            ("https://packages.vrchat.com/official", Look::Picture([30., 90., 200.])),
+            (vpm::ORBITERS_REPOSITORY, Look::Wings),
+            ("https://vcc.vrcfury.com", Look::Mark([24., 24., 28.])),
+            ("https://poiyomi.github.io/vpm/index.json", Look::Mark([255., 120., 190.])),
+        ] {
+            self.repo_icons.insert(url.into(), stand_in_icon(ctx, &format!("repo-{url}"), look));
+        }
         self.new_location = "H:/Unity projects".into();
         self.new_name = "My new avatar".into();
         self.catalog.known = vec![
@@ -832,11 +913,69 @@ impl State {
             packages_only,
             acknowledged: true,
         };
-        self.commits = vec![
-            "8e21f0a\x1fSave avatar outfit\x1fEnzo\x1f2 hours ago".into(),
-            "620df02\x1fAdd expression menu\x1fEnzo\x1fyesterday".into(),
-            "1b9c4d3\x1fTexture pass on the hoodie\x1fEnzo\x1f3 days ago".into(),
-        ];
+        let now = discovery::now();
+        let commit = |short: &str, author: &str, ago: u64, subject: &str, body: &str| git::Commit {
+            hash: format!("{short}{}", "0".repeat(33)),
+            short: short.into(),
+            author: author.into(),
+            email: format!("{}@example.com", author.to_lowercase()),
+            time: now - ago,
+            subject: subject.into(),
+            body: body.into(),
+        };
+        self.git = Some(git::Repo {
+            branch: Some("main".into()),
+            upstream: Some("origin/main".into()),
+            ahead: 2,
+            behind: 0,
+            changes: 3,
+            commits: vec![
+                commit(
+                    "8e21f0a",
+                    "Enzo",
+                    2 * 3600,
+                    "Save MasculineCanine's outfit with the new hoodie and its expression menu",
+                    "The hoodie's materials moved to Poiyomi 9.2, its toggles to the expression menu.\nChecked in Build & Test.",
+                ),
+                commit("620df02", "Enzo", 26 * 3600, "Add the expression menu", ""),
+                commit("1b9c4d3", "Nova", 3 * 86400, "Texture pass on the hoodie", "Albedo and normal maps redone at 2K."),
+                commit("77aa310", "Enzo", 9 * 86400, "Import the base avatar", ""),
+            ],
+            web: Some("https://github.com/Orbiters-cc/my-avatars".into()),
+            host: Some("github.com".into()),
+        });
+        // The world project's own thumbnail (My World's), a stand-in.
+        if let Some(w) = self.scan.projects.iter_mut().find(|p| p.kind == discovery::Kind::Worlds) {
+            w.worlds = vec![Avatar { id: "wrld_00000000-0000-4000-8000-000000000001".into(), name: "Moonlight".into(), ..Default::default() }];
+            let (wd, ht) = (480usize, 360usize);
+            let mut pixels = vec![0u8; wd * ht * 3];
+            for y in 0..ht {
+                for x in 0..wd {
+                    let (fx, fy) = (x as f32 / wd as f32, y as f32 / ht as f32);
+                    let moon = ((fx - 0.72).powi(2) + (fy - 0.28).powi(2)).sqrt() < 0.09;
+                    let hill = fy > 0.68 + 0.08 * (fx * 6.0).sin() * (1.0 - fx);
+                    let sky = [20.0 + 60.0 * fy, 24.0 + 40.0 * fy, 60.0 + 90.0 * fy];
+                    let c = if moon {
+                        [235.0, 232.0, 210.0]
+                    } else if hill {
+                        [16.0, 22.0 + 30.0 * fy, 30.0]
+                    } else {
+                        sky
+                    };
+                    for k in 0..3 {
+                        pixels[(y * wd + x) * 3 + k] = c[k] as u8;
+                    }
+                }
+            }
+            self.thumbs
+                .insert(w.worlds[0].id.clone(), ctx.load_texture("fixture-world", ColorImage::from_rgb([wd, ht], &pixels), egui::TextureOptions::LINEAR));
+        }
+        // A project whose avatars have no picture but one (Enzo's MCB Test): the cover shows that one alone.
+        if let Some(p) = self.scan.projects.get_mut(5) {
+            for (k, a) in p.avatars.iter_mut().enumerate().skip(1) {
+                a.id = format!("avtr_00000000-0000-4000-8000-1000000000{k:02}");
+            }
+        }
         match name {
             "projects-detail" | "projects-packages" | "projects-narrow-detail" | "projects-dropdown" => {
                 self.selected = Some(first.path.clone());
@@ -851,7 +990,7 @@ impl State {
             "projects-panel-loading" => {
                 self.selected = Some(first.path.clone());
                 self.view.packages.clear();
-                self.commits.clear();
+                self.git = None;
                 self.fixture_view_loading = true;
             }
             "projects-error" => {
@@ -926,6 +1065,29 @@ impl State {
                 self.scroll_to_mixer = true;
             }
             "projects-repos" => self.modal = Some(Modal::Repos),
+            "projects-repos-crossfade" => {
+                self.modal = Some(Modal::Repos);
+                self.fixture_repo_icons_later = std::mem::take(&mut self.repo_icons);
+            }
+            "projects-repos-live" => {
+                // The repositories' real websites, their icons looked for as the dialog does.
+                self.modal = Some(Modal::Repos);
+                self.repo_icons.clear();
+                self.fixture_live_icons = true;
+            }
+            "projects-commits" | "projects-commits-mid" | "projects-commits-open" | "projects-commits-narrow" => {
+                self.selected = Some(first.path.clone());
+                self.scroll_to_commits = true;
+                if name == "projects-commits-open" {
+                    let hash = self.git.as_ref().map(|g| g.commits[0].hash.clone()).unwrap_or_default();
+                    self.commit_open.insert(hash);
+                }
+            }
+            "projects-world" => {
+                let world = self.scan.projects.iter().find(|p| p.kind == discovery::Kind::Worlds).map(|p| p.path.clone());
+                self.selected = world;
+                self.git = None;
+            }
             "projects-repos-loading" => {
                 self.modal = Some(Modal::Repos);
                 self.catalog = network::Catalog::default();
@@ -1023,6 +1185,9 @@ impl State {
         if name == "projects-crossfade" && frame == 60 {
             self.thumbs = std::mem::take(&mut self.fixture_later);
             self.icons = std::mem::take(&mut self.fixture_icons_later);
+        }
+        if name == "projects-repos-crossfade" && frame == 60 {
+            self.repo_icons = std::mem::take(&mut self.fixture_repo_icons_later);
         }
         if name == "projects-new-loading" && frame == 60 {
             self.banners = std::mem::take(&mut self.fixture_banners_later);

@@ -2,6 +2,7 @@
 pub mod avatars;
 mod builtin_templates;
 pub mod discovery;
+pub mod git;
 pub mod icons;
 pub mod network;
 pub mod preview;

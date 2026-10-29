@@ -46,6 +46,54 @@ fn prefab_override() {
     assert_eq!(avatars::in_project(temp.path(), &mut cache), a);
 }
 #[test]
+fn a_world_scene_gives_its_world_and_my_worlds_thumbnail() {
+    let temp = tempfile::tempdir().unwrap();
+    let assets = temp.path().join("Assets");
+    std::fs::create_dir_all(assets.join("Orbiters/MyWorld/Thumbnails/World")).unwrap();
+    let png = assets.join("Orbiters/MyWorld/Thumbnails/World/World thumbnail.png");
+    std::fs::write(&png, b"png").unwrap();
+    std::fs::write(
+        png.with_extension("png.meta"),
+        "fileFormatVersion: 2
+guid: 0123456789abcdef0123456789abcdef
+",
+    )
+    .unwrap();
+    let scene = "%YAML 1.1
+--- !u!1 &10
+GameObject:
+  m_Name: VRCWorld
+--- !u!4 &11
+Transform:
+  m_GameObject: {fileID: 10}
+  m_Father: {fileID: 0}
+--- !u!114 &12
+MonoBehaviour:
+  m_GameObject: {fileID: 10}
+  blueprintId: wrld_20495852-08c6-4632-9dba-f4320a155e80
+--- !u!114 &13
+MonoBehaviour:
+  m_GameObject: {fileID: 10}
+  thumbnail: {fileID: 2800000, guid: 0123456789abcdef0123456789abcdef, type: 3}
+  thumbnailCamera: {fileID: 0}
+--- !u!114 &14
+MonoBehaviour:
+  m_GameObject: {fileID: 10}
+  thumbnail: {fileID: 1969104925}
+";
+    std::fs::write(assets.join("World.unity"), scene).unwrap();
+    let mut cache = Default::default();
+    let found = avatars::in_project(temp.path(), &mut cache);
+    assert_eq!(found.len(), 1);
+    assert!(found[0].is_world());
+    assert_eq!(found[0].name, "VRCWorld");
+    assert_eq!(found[0].thumbnail.as_deref(), Some(png.as_path()));
+    // Without My World, the world alone.
+    std::fs::write(assets.join("World.unity"), scene.split("--- !u!114 &13").next().unwrap()).unwrap();
+    let found = avatars::in_project(temp.path(), &mut cache);
+    assert_eq!((found.len(), found[0].thumbnail.clone()), (1, None));
+}
+#[test]
 fn skip_rules() {
     for n in [
         "Windows",
@@ -73,6 +121,7 @@ fn setup_request_matches_contract() {
         name: "MasculineCanine".into(),
         scene: "Assets/MasculineCanine/Canine.unity".into(),
         path: "MasculineCanine".into(),
+        ..Default::default()
     };
     let mut r = setup::request(avatar, 30, "https://api.orbiters.cc/", "0.3.3").unwrap();
     r.id = "5f0c4d1e-8a8b-4d58-9a3a-2b7c1c4f0e11".into();

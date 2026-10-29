@@ -35,6 +35,13 @@ pub fn package_logo(listing: &str, package: &str) -> Option<String> {
     Some(format!("{}{}", server.api().trim_end_matches('/'), path))
 }
 
+/// The logo Orbiters keeps for the listing at `listing` (an absolute URL), when Orbiters hosts that listing.
+pub fn listing_logo(listing: &str) -> Option<String> {
+    let server = hosting_server(listing)?;
+    let path = public_listings(server).into_iter().find(|l| l.url == listing)?.logo?;
+    Some(format!("{}{}", server.api().trim_end_matches('/'), path))
+}
+
 fn public_listings(server: Server) -> Vec<Listing> {
     use std::sync::Mutex;
     // One look at a time, so a page asking for many packages fetches the directory once.

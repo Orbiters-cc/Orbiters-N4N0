@@ -501,6 +501,79 @@ pub fn f16_bits(v: f32) -> u16 {
     (h + ((mant >> 12) & 1)) as u16
 }
 
+/// Watches a project's previews: `changed` runs (on the watcher's thread) shortly after anything in the project's
+/// `UserSettings` changes (Toolkit replacing a preview, the folder first made), until the watch is dropped. Windows'
+/// change notifications; elsewhere nothing (the page also lists again now and then).
+pub struct Watch {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl Drop for Watch {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub fn watch(project: &Path, changed: impl Fn() + Send + 'static) -> Watch {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(windows)]
+    {
+        let (project, stop) = (project.to_path_buf(), stop.clone());
+        std::thread::Builder::new().name("project-preview-watch".into()).spawn(move || watch_loop(&project, &stop, changed)).ok();
+    }
+    #[cfg(not(windows))]
+    let _ = (project, changed);
+    Watch { stop }
+}
+
+#[cfg(windows)]
+fn watch_loop(project: &Path, stop: &std::sync::atomic::AtomicBool, changed: impl Fn()) {
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::sync::atomic::Ordering;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+    use windows::Win32::Storage::FileSystem::{
+        FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME,
+        FILE_NOTIFY_CHANGE_LAST_WRITE,
+    };
+    use windows::Win32::System::Threading::WaitForSingleObject;
+    let settings = project.join("UserSettings");
+    // UserSettings when it is there (all of it: the previews' folder may not be yet), else the project's own folder
+    // until it appears.
+    let open = |dir: &Path, subtree: bool| -> Option<HANDLE> {
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+        let filter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | if subtree { FILE_NOTIFY_CHANGE_LAST_WRITE } else { Default::default() };
+        unsafe { FindFirstChangeNotificationW(PCWSTR(wide.as_ptr()), subtree, filter) }.ok()
+    };
+    while !stop.load(Ordering::Relaxed) {
+        let inside = settings.is_dir();
+        let Some(handle) = open(if inside { &settings } else { project }, inside) else {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            continue;
+        };
+        while !stop.load(Ordering::Relaxed) {
+            if unsafe { WaitForSingleObject(handle, 400) } != WAIT_OBJECT_0 {
+                continue;
+            }
+            // A burst of changes (a file and its replacement) is one.
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            if unsafe { FindNextChangeNotification(handle) }.is_err() {
+                break;
+            }
+            if !inside {
+                if settings.is_dir() {
+                    changed();
+                    break;
+                }
+                continue;
+            }
+            changed();
+        }
+        unsafe {
+            let _ = FindCloseChangeNotification(handle);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,5 +670,23 @@ mod tests {
         assert_eq!(f16_bits(1.0 / 3.0), 0x3555);
         // Subnormal.
         assert_eq!(f16_bits(5.960_464_5e-8), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_new_preview_is_seen_at_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        // No UserSettings yet: its making is seen, then a preview written into it.
+        let _watch = watch(temp.path(), move || {
+            let _ = tx.send(());
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::create_dir_all(temp.path().join(FOLDER)).unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the folder made");
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        while rx.try_recv().is_ok() {}
+        std::fs::write(temp.path().join(FOLDER).join("a.preview"), b"x").unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the preview written");
     }
 }

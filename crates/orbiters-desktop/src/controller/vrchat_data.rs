@@ -25,10 +25,21 @@ impl Scope {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
-    Avatars { ids: Vec<String> },
+    Avatars {
+        ids: Vec<String>,
+    },
+    /// Worlds' thumbnails (at most 8), answered as [`Response::Avatars`].
+    Worlds {
+        ids: Vec<String>,
+    },
     Friends,
-    Instance { world: String, instance: String },
-    Image { url: String },
+    Instance {
+        world: String,
+        instance: String,
+    },
+    Image {
+        url: String,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
@@ -85,6 +96,53 @@ impl Controller {
                                 }
                             }
                             Err(e) => errors.push(e.to_string()),
+                        }
+                    }
+                    Response::Avatars { pictures, errors }
+                }
+                Request::Worlds { ids } => {
+                    anyhow::ensure!(ids.len() <= 8, "Too many world thumbnails requested.");
+                    // Kept a day: a world's thumbnail changes with its uploads.
+                    let cache = orbiters_projects::data_dir().join("world-thumbnails");
+                    let mut pictures = Vec::new();
+                    let mut errors = Vec::new();
+                    for id in ids {
+                        let file = cache.join(format!("{}.image", orbiters_projects::avatars::filename(&id)));
+                        let fresh =
+                            std::fs::metadata(&file).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() < 86400);
+                        if fresh {
+                            if let Some(p) = std::fs::read(&file).ok().and_then(|b| avatar_picture(&b)) {
+                                pictures.push((id, p));
+                                continue;
+                            }
+                        }
+                        let result = (|| -> anyhow::Result<_> {
+                            let Some(url) = source.world_thumbnail(&id)? else { return Ok(None) };
+                            let bytes = source.image(&url)?;
+                            let picture = avatar_picture(&bytes);
+                            if picture.is_some() {
+                                std::fs::create_dir_all(&cache)?;
+                                let tmp = file.with_extension("tmp");
+                                std::fs::write(&tmp, &bytes)?;
+                                std::fs::rename(tmp, &file)?;
+                            }
+                            Ok(picture)
+                        })();
+                        match result {
+                            Ok(Some(p)) => pictures.push((id, p)),
+                            // Not known (a private world without a VRChat sign-in): what was kept, however old.
+                            Ok(None) => {
+                                if let Some(p) = std::fs::read(&file).ok().and_then(|b| avatar_picture(&b)) {
+                                    pictures.push((id, p));
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(p) = std::fs::read(&file).ok().and_then(|b| avatar_picture(&b)) {
+                                    pictures.push((id, p));
+                                } else {
+                                    errors.push(format!("{id}: {e}"));
+                                }
+                            }
                         }
                     }
                     Response::Avatars { pictures, errors }

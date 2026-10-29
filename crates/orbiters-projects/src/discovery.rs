@@ -37,6 +37,9 @@ pub struct Project {
     pub registered: bool,
     pub missing: bool,
     pub avatars: Vec<Avatar>,
+    /// The worlds its scenes were uploaded as (`wrld_…` blueprint IDs), with My World's thumbnail when it keeps one.
+    #[serde(default)]
+    pub worlds: Vec<Avatar>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -129,6 +132,7 @@ pub fn describe(path: PathBuf, registered: bool, _scenes: &mut SceneCache) -> Pr
         modified,
         registered,
         avatars,
+        worlds: vec![],
     }
 }
 pub fn cached() -> Scan {
@@ -284,13 +288,13 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
     Ok(scan)
 }
 fn rebuild(scan: &mut Scan, found: &HashMap<String, PathBuf>, registered: &HashSet<String>) {
-    let old: HashMap<_, _> = scan.projects.iter().map(|p| (key(&p.path), p.avatars.clone())).collect();
+    let old: HashMap<_, _> = scan.projects.iter().map(|p| (key(&p.path), (p.avatars.clone(), p.worlds.clone()))).collect();
     scan.projects = found
         .iter()
         .filter(|(k, p)| registered.contains(*k) || is_project(p))
         .map(|(k, p)| {
             let mut project = describe(p.clone(), registered.contains(k), &mut scan.scenes);
-            project.avatars = old.get(k).cloned().unwrap_or_default();
+            (project.avatars, project.worlds) = old.get(k).cloned().unwrap_or_default();
             project
         })
         .collect();
@@ -302,13 +306,15 @@ fn enrich(scan: &mut Scan, cancel: &AtomicBool, enriched: &mut HashSet<String>, 
             return;
         }
         let p = &scan.projects[i];
-        if p.kind != Kind::Avatars || !enriched.insert(key(&p.path)) {
+        if !matches!(p.kind, Kind::Avatars | Kind::Worlds) || !enriched.insert(key(&p.path)) {
             continue;
         }
         let path = p.path.clone();
-        scan.status = format!("Reading avatars in {}", p.name);
+        scan.status = format!("Reading {} in {}", if p.kind == Kind::Worlds { "worlds" } else { "avatars" }, p.name);
         publish(scan);
-        scan.projects[i].avatars = avatars::in_project(&path, &mut scan.scenes);
+        let (worlds, avatars) = avatars::in_project(&path, &mut scan.scenes).into_iter().partition(Avatar::is_world);
+        scan.projects[i].avatars = avatars;
+        scan.projects[i].worlds = worlds;
         publish(scan);
     }
 }

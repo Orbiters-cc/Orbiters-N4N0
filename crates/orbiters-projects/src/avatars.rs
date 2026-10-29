@@ -1,5 +1,6 @@
-//! Unity text serialization reader. Supports direct components and prefab-instance overrides (the Canine scene
-//! stores its uploaded blueprint in an override). Never writes scenes or opens them in Unity.
+//! Unity text serialization reader: the uploaded avatars and worlds of a project's scenes (their PipelineManager
+//! blueprint IDs), and the world thumbnail My World keeps. Supports direct components and prefab-instance overrides
+//! (the Canine scene stores its uploaded blueprint in an override). Never writes scenes or opens them in Unity.
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -10,6 +11,15 @@ pub struct Avatar {
     pub name: String,
     pub scene: String,
     pub path: String,
+    /// A world's own picture on disk: the thumbnail My World keeps for the scene (`MyWorld.thumbnail`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<PathBuf>,
+}
+impl Avatar {
+    /// An uploaded world (`wrld_…`) rather than an avatar.
+    pub fn is_world(&self) -> bool {
+        self.id.starts_with("wrld_")
+    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CachedScene {
@@ -63,8 +73,9 @@ fn fileid(s: &str) -> String {
 fn guid(s: &str) -> Option<String> {
     Some(s.split("guid:").nth(1)?.trim().split([',', '}']).next()?.trim().into())
 }
+/// An avatar's or a world's blueprint ID.
 fn valid_id(s: &str) -> bool {
-    s.strip_prefix("avtr_").is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+    s.strip_prefix("avtr_").or_else(|| s.strip_prefix("wrld_")).is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
 }
 fn overrides(d: &Doc, property_name: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
@@ -139,9 +150,23 @@ impl Model {
                     return None;
                 }
                 let go = fileid(&value(d, "m_GameObject")?);
-                Some(Avatar { id, name: self.names.get(&go).cloned().unwrap_or_else(|| "Avatar".into()), scene: scene.into(), path: self.path(&go) })
+                Some(Avatar {
+                    id,
+                    name: self.names.get(&go).cloned().unwrap_or_else(|| "Avatar".into()),
+                    scene: scene.into(),
+                    path: self.path(&go),
+                    ..Default::default()
+                })
             })
             .collect()
+    }
+    /// The GUID of the picture My World's component keeps as the world's thumbnail (its `thumbnail` and
+    /// `thumbnailCamera` fields), if the scene has one.
+    fn world_thumbnail(&self) -> Option<String> {
+        self.docs
+            .iter()
+            .filter(|d| d.kind == 114 && d.lines.iter().any(|l| l.trim_start().starts_with("thumbnailCamera:")))
+            .find_map(|d| value(d, "thumbnail").and_then(|t| guid(&t)).filter(|g| g.len() == 32 && g.bytes().any(|b| b != b'0')))
     }
 }
 pub fn extract(text: &str, scene: &str) -> Vec<Avatar> {
@@ -155,6 +180,8 @@ pub fn in_project(project: &Path, cache: &mut SceneCache) -> Vec<Avatar> {
     let assets = project.join("Assets");
     let mut scenes = vec![];
     let mut prefabs = HashMap::new();
+    // Pictures' .meta files, read only when a scene names a My World thumbnail.
+    let mut pictures = vec![];
     for entry in walkdir::WalkDir::new(&assets)
         .follow_links(false)
         .into_iter()
@@ -171,6 +198,10 @@ pub fn in_project(project: &Path, cache: &mut SceneCache) -> Vec<Avatar> {
         if p.extension().is_some_and(|e| e == "unity") {
             scenes.push(p.to_path_buf());
         }
+        let lower = p.to_string_lossy().to_ascii_lowercase();
+        if [".png.meta", ".jpg.meta", ".jpeg.meta"].iter().any(|e| lower.ends_with(e)) {
+            pictures.push(p.to_path_buf());
+        }
         if p.to_string_lossy().ends_with(".prefab.meta") {
             if let Ok(s) = std::fs::read_to_string(p) {
                 if let Some(g) = s.lines().find_map(|l| l.strip_prefix("guid: ")) {
@@ -181,6 +212,7 @@ pub fn in_project(project: &Path, cache: &mut SceneCache) -> Vec<Avatar> {
     }
     let mut out = vec![];
     let mut prefab_models: HashMap<PathBuf, Option<Model>> = HashMap::new();
+    let mut picture_guids: Option<HashMap<String, PathBuf>> = None;
     for p in scenes {
         let Ok(meta) = std::fs::metadata(&p) else { continue };
         let modified = crate::discovery::fingerprint(&p);
@@ -199,6 +231,21 @@ pub fn in_project(project: &Path, cache: &mut SceneCache) -> Vec<Avatar> {
         let model = Model::new(&text);
         let mut avatars = model.direct(&scene);
         let mut dependencies = vec![];
+        let thumbnail = model.world_thumbnail().and_then(|g| {
+            let guids = picture_guids.get_or_insert_with(|| {
+                pictures
+                    .iter()
+                    .filter_map(|m| {
+                        let s = std::fs::read_to_string(m).ok()?;
+                        Some((s.lines().find_map(|l| l.strip_prefix("guid: "))?.trim().to_string(), m.with_extension("")))
+                    })
+                    .collect()
+            });
+            guids.get(&g).cloned()
+        });
+        if let Some(t) = &thumbnail {
+            dependencies.push((t.clone(), crate::discovery::fingerprint(t)));
+        }
         for d in model.docs.iter().filter(|d| d.kind == 1001) {
             let Some(source) = value(d, "m_SourcePrefab").and_then(|s| guid(&s)).and_then(|g| prefabs.get(&g)) else { continue };
             dependencies.push((source.clone(), crate::discovery::fingerprint(source)));
@@ -241,8 +288,11 @@ pub fn in_project(project: &Path, cache: &mut SceneCache) -> Vec<Avatar> {
                 if let Some(parent) = value(d, "m_TransformParent").map(|s| fileid(&s)).and_then(|t| model.transforms.get(&t)) {
                     hierarchy = format!("{}/{}", model.path(&parent.0), hierarchy);
                 }
-                avatars.push(Avatar { id, name, scene: scene.clone(), path: hierarchy });
+                avatars.push(Avatar { id, name, scene: scene.clone(), path: hierarchy, ..Default::default() });
             }
+        }
+        for a in avatars.iter_mut().filter(|a| a.is_world()) {
+            a.thumbnail = thumbnail.clone();
         }
         avatars.sort_by(|a, b| (&a.id, &a.path).cmp(&(&b.id, &b.path)));
         avatars.dedup();

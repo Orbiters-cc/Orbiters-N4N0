@@ -72,6 +72,29 @@ pub fn sources(package: &crate::vpm::Package) -> Sources {
     }
 }
 
+/// Where a package repository's icon can come from (blocking, as [`sources`]): the logo Orbiters keeps for a listing
+/// it hosts, else the website the listing is on (its host, then the domain that host belongs to: packages.vrchat.com,
+/// then vrchat.com), else `authors`, the websites of its packages' authors.
+pub fn repository_sources(listing: &str, authors: &[String]) -> Sources {
+    let mut sites = vec![];
+    if let Some(url) = site_url(listing) {
+        if let Some(host) = url.host_str() {
+            let scheme = url.scheme();
+            sites.push(format!("{scheme}://{host}/"));
+            let labels: Vec<&str> = host.split('.').collect();
+            if labels.len() > 2 && !host.ends_with(".github.io") && labels.iter().all(|l| !l.is_empty() && !l.bytes().all(|b| b.is_ascii_digit())) {
+                sites.push(format!("{scheme}://{}/", labels[labels.len() - 2..].join(".")));
+            }
+        }
+    }
+    for a in authors {
+        if !sites.contains(a) {
+            sites.push(a.clone());
+        }
+    }
+    Sources { logo: crate::network::listing_logo(listing), sites }
+}
+
 /// The icon of each entry of `list` (in its order): answers on disk first, the network for those out of date, four at
 /// a time. Entries with the same sources are looked up once.
 pub fn resolve_all(list: &[Sources]) -> Vec<Option<Image>> {
@@ -401,6 +424,14 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repositories_look_at_their_sites() {
+        let s = repository_sources("https://packages.vrchat.com/official?download", &["https://vrchat.com/".into(), "https://github.com/vrchat".into()]);
+        assert_eq!(s.sites, ["https://packages.vrchat.com/", "https://vrchat.com/", "https://github.com/vrchat"]);
+        assert_eq!(repository_sources("https://poiyomi.github.io/vpm/index.json", &[]).sites, ["https://poiyomi.github.io/"]);
+        assert_eq!(repository_sources("http://192.168.1.4:8080/index.json", &[]).sites.len(), 1);
+    }
 
     #[test]
     fn page_links_give_their_declared_sizes_and_the_manifest() {

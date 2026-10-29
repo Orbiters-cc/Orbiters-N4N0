@@ -133,7 +133,8 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         let p = ui.painter();
         widgets::frame(p, row, 14.0, theme::surface_soft());
         let t = Rect::from_min_size(pos2(row.left() + 12.0, row.center().y - 17.0), vec2(34.0, 34.0));
-        art::tile(p, t, icons::STACK, if r.enabled { theme::ACCENT } else { theme::FG_4 });
+        state.repo_icons_wanted.push(r.url.clone());
+        art::repo_icon(p, state.repo_icons.get(&r.url), t, &r.url, r.enabled);
         let x = t.right() + 12.0;
         let tw = row.right() - 12.0 - 48.0 - 12.0 - 90.0 - x;
         widgets::text_truncated(
@@ -265,7 +266,8 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         let p = ui.painter();
         widgets::frame(p, row, 14.0, theme::surface_soft());
         let t = Rect::from_min_size(pos2(row.left() + 12.0, row.center().y - 17.0), vec2(34.0, 34.0));
-        art::tile(p, t, glyph::PACKAGE, art::package_tint(&l.name.to_lowercase()));
+        state.repo_icons_wanted.push(l.url.clone());
+        art::repo_icon(p, state.repo_icons.get(&l.url), t, &l.url, true);
         let x = t.right() + 12.0;
         let added = state.view.repos.iter().any(|repo| repo.url.trim_end_matches('/') == l.url.trim_end_matches('/'));
         let b = Button::new(if added { "Added" } else { "Add" })

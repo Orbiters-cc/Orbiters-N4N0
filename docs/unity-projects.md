@@ -54,6 +54,38 @@ its own rounded corners) fills its tile; a mark sits on a plate, light behind a 
 `cargo run -p orbiters-projects --example icons -- 200 sheet.png` prints where each icon of the shared repositories'
 packages came from and draws them on one sheet.
 
+The Package repositories dialog shows each repository's icon the same way, fading in over its tile
+(`icons::repository_sources`): the logo Orbiters keeps for a listing it hosts (`GET /vpm/public`), else the icon of the
+website the listing is on (its host, then the domain the host belongs to: packages.vrchat.com, then vrchat.com; a
+GitHub Pages listing gives its owner's picture), else the website of its packages' authors (the most common
+`author.url` of its packages). A repository turned off shows it dimmed.
+
+## Covers and world thumbnails
+
+A project's cover is made of the pictures it has: avatars (and worlds) without one are left out of the collage (one
+picture fills the cover, two sit side by side, three as one large and two small, four or more in a square with how
+many more on the last), and a project without any picture shows its kind's icon. Pictures fade in over that
+placeholder. In the panel's avatar list, an avatar without a picture shows its initial on a tile of its own colour.
+
+World projects' scenes are read as avatar projects' are: a PipelineManager's `wrld_…` blueprint ID is the uploaded
+world (`Project.worlds`), and My World's component (its `thumbnail` and `thumbnailCamera` fields) names the world's
+thumbnail, a PNG or JPEG in the project read straight from disk. Without it, the world's VRChat thumbnail comes from
+VRChat when the app is signed in to VRChat (private worlds too), else from Orbiters' Map explorer
+(`GET /maps/worlds/<id>`, public worlds only), kept a day under `Orbiters/world-thumbnails` (and kept longer when
+neither can answer).
+
+## Git
+
+A project that is a Git repository has a card at the panel's end: chips for its branch, how it stands against its
+upstream (commits to push and to pull, or up to date) and the changes not committed yet (a pulsing amber dot), Open
+on GitHub (GitLab, or the remote's host) when it has a remote, and its last six commits on a timeline: the author's
+initial on their colour on the line (the latest ringed in green), the subject, who and when, and the hash in a pill
+that copies it. A press opens a commit to its whole message, its full hash and its date (the row's height springs
+open, the caret turns); the rows come in one after the other the first time. `orbiters_projects::git` reads it
+(`git status --porcelain=v2 --branch`, `git log`, `git remote`); a remote's address becomes its page in a browser
+(`git@host:owner/repo.git`, `ssh://…` and `https://user:token@host/…` give `https://host/owner/repo`, never
+credentials; local paths none).
+
 ## Mixer
 
 While the selected project does not have `orbiters.mixer`, its panel has a Mixer card between Avatars and Packages:
@@ -68,7 +100,8 @@ Unity Hub/Unity registry proposals and avatar results arrive progressively and a
 finishes, so closing the window does not lose them. A below-normal-priority worker scans
 fixed local disks at most once per hour, or on Refresh. It skips system/generated folders and reparse points, stops
 at project roots, and never changes scenes or project files. A volume with no directory progress for 60 seconds is
-interrupted and reported, retaining its discoveries; other volumes continue and Refresh retries it. Proposals sort by the newest Windows modification time
+interrupted and reported, retaining its discoveries; other volumes continue and Refresh retries it.
+Avatar and world projects' scenes are read (avatars for the first, worlds and My World's thumbnail for the second). Proposals sort by the newest Windows modification time
 of the root, Assets, VPM manifest or ProjectVersion file.
 
 Avatar inspection reads text `.unity` files and PipelineManager blueprint IDs, including prefab-instance overrides.
@@ -121,7 +154,10 @@ orbiters-desktop --screenshot <folder> --sessions <empty folder> --only projects
 
 Other deterministic offscreen states: `projects-detail`, `projects-packages`, `projects-repos`, `projects-new`,
 `projects-avatars`, `projects-choice`, `projects-setup`, `projects-ready`, `projects-mixer` (its info open),
-`projects-mixer-open-mid`, `projects-mixer-fold-mid`, `projects-mixer-adding`, `projects-new-novcc` and
+`projects-mixer-open-mid`, `projects-mixer-fold-mid`, `projects-mixer-adding`, `projects-commits` (the Git card),
+`projects-commits-open` (a commit opened), `projects-commits-mid` (its rows coming in), `projects-commits-narrow`
+(with `--width 1040`), `projects-world` (a world project with its thumbnail), `projects-repos-crossfade` (repository
+icons fading in), `projects-repos-live` (review only: the repositories' real icons, cache then network), `projects-new-novcc` and
 `projects-repos-novcc` (a computer without VCC), `projects-new-loading` (covers fading in) and `projects-new-covers`
 (VCC's real covers when it is installed). Package icons in screenshots are stand-ins (pictures, light and dark marks,
 ReFit without one); `projects-crossfade` shows them fading in. `projects-icons-live` (review only, not deterministic)

@@ -555,6 +555,14 @@ impl Client {
         self.avatars.insert(id.into(), (Instant::now(), a.clone()));
         Ok(a)
     }
+    /// A world's thumbnail address (its own uploads included, public or not).
+    pub fn world_thumbnail(&mut self, id: &str) -> Result<String> {
+        self.authenticated()?;
+        let r = self.get("worlds", &format!("/worlds/{}", encode(id)))?;
+        let v: serde_json::Value = serde_json::from_slice(&r.body).map_err(|_| Error::InvalidResponse)?;
+        let url = v["thumbnailImageUrl"].as_str().filter(|u| !u.is_empty()).or_else(|| v["imageUrl"].as_str()).unwrap_or_default();
+        Ok(url.to_string())
+    }
     pub fn friends(&mut self) -> Result<Vec<User>> {
         self.authenticated()?;
         if let Some((_, friends)) = self.friends.as_ref().filter(|(at, _)| at.elapsed() < Duration::from_secs(300)) {

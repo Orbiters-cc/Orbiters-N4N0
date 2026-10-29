@@ -49,6 +49,23 @@ impl Source {
             image_url: a["imageUrl"].as_str().unwrap_or_default().into(),
         }))
     }
+    /// A world's thumbnail address: VRChat's own answer when signed in (private worlds too), else Orbiters' Map explorer
+    /// (public worlds only). `None` when neither knows it.
+    pub fn world_thumbnail(&self, id: &str) -> anyhow::Result<Option<String>> {
+        if let Some(r) = self.direct(|c| c.world_thumbnail(id)) {
+            match r {
+                Ok(url) if !url.is_empty() => return Ok(Some(url)),
+                Err(e) if e.downcast_ref::<Error>() != Some(&Error::NotFound) => return Err(e),
+                _ => {}
+            }
+        }
+        let api = match &self.orbiters {
+            Some((api, _)) => api.clone(),
+            None => Api::new(crate::account::Server::current()),
+        };
+        let Some(page) = api.world(id)? else { return Ok(None) };
+        Ok(page.world.thumbnail_url.or(page.world.image_url).filter(|u| !u.is_empty()))
+    }
     pub fn friends(&self) -> anyhow::Result<Vec<User>> {
         let local = || {
             crate::vrchat_accounts::friends(self.log_account.as_deref())

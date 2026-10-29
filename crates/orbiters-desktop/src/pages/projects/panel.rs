@@ -1,8 +1,8 @@
 //! The selected project's panel: beside the cards on wide windows (its left edge drags to resize it; a double click
 //! gives it its own width back), a sheet sliding over them on narrow ones. A hero card (the project's avatars as its
 //! cover, where it is, opening it), then cards for its avatars (N4N0 and My Avatar for each), Mixer while the project
-//! does not have it, its packages (their own icons, versions in dropdowns), the packages it could add, and its last
-//! commits. Switching projects crossfades the cards.
+//! does not have it, its packages (their own icons, versions in dropdowns), the packages it could add, and its Git
+//! repository (branch, changes, remote page, last commits on a timeline). Switching projects crossfades the cards.
 
 use super::art::{self, glyph};
 use super::state::{server, Outcome, PackageIcon, State, MIXER, MIXER_PAGE};
@@ -67,13 +67,22 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
     pu.set_clip_rect(rect.shrink(2.0).intersect(ui.clip_rect()));
     let packages_y = Id::unique("project-panel-packages-y");
     let mixer_y = Id::unique("project-panel-mixer-y");
+    let commits_y = Id::unique("project-panel-commits-y");
     let bar = Rect::from_min_max(pos2(rect.right() - 13.0, rect.top() + 18.0), pos2(rect.right() - 3.0, rect.bottom() - 18.0));
     let mut scroll = egui::ScrollArea::vertical().id_salt(("project-panel-scroll", &project.path)).auto_shrink([false, false]).scroll_bar_rect(bar);
-    if state.scroll_to_packages || state.scroll_to_mixer {
-        if let Some(y) = ctx.data(|d| d.get_temp::<f32>(if state.scroll_to_mixer { mixer_y } else { packages_y })) {
+    if state.scroll_to_packages || state.scroll_to_mixer || state.scroll_to_commits {
+        let at = if state.scroll_to_commits {
+            commits_y
+        } else if state.scroll_to_mixer {
+            mixer_y
+        } else {
+            packages_y
+        };
+        if let Some(y) = ctx.data(|d| d.get_temp::<f32>(at)) {
             scroll = scroll.vertical_scroll_offset((y - 64.0).max(0.0));
             state.scroll_to_packages = false;
             state.scroll_to_mixer = false;
+            state.scroll_to_commits = false;
         }
     }
     let from = orbiters_ui::blur::next_shape(ui);
@@ -93,7 +102,8 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
             ctx.data_mut(|d| d.insert_temp(packages_y, ui.cursor().top() - top));
             packages(ui, state, &project);
             available(ui, state, &project);
-            commits(ui, state);
+            ctx.data_mut(|d| d.insert_temp(commits_y, ui.cursor().top() - top));
+            commits(ui, cx, state, &project);
             ui.add_space(8.0);
         });
     });
@@ -438,7 +448,9 @@ fn mixer(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
             toggle_info = info_button(ui, info_id, info_rect, info_open);
         },
         |ui| {
-            let text = Txt::new("Sculpting, weight painting and mesh editing in the Unity Editor.", 12.5).color(theme::FG_3).line_height(19.0);
+            let text = Txt::new("Improves Unity's UI and adds features including Git management, sculpting, weight painting, mesh editing and more.", 12.5)
+                .color(theme::FG_3)
+                .line_height(19.0);
             let g = ui.painter().layout_job(text.job(ui.available_width()));
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), g.size().y), Sense::hover());
             ui.painter().galley(r.min, g, theme::FG_3);
@@ -740,7 +752,7 @@ fn available(ui: &mut Ui, state: &mut State, project: &Project) {
     );
 }
 
-fn package_action(state: &mut State, ctx: &egui::Context, p: &Project, change: vpm::Change, label: &str, name: &str) {
+pub(super) fn package_action(state: &mut State, ctx: &egui::Context, p: &Project, change: vpm::Change, label: &str, name: &str) {
     let path = p.path.clone();
     state.busy_package = (!name.is_empty()).then(|| name.to_string());
     state.task(ctx, label, move || {
@@ -749,42 +761,236 @@ fn package_action(state: &mut State, ctx: &egui::Context, p: &Project, change: v
     });
 }
 
-/// The last commits, on a thread.
-fn commits(ui: &mut Ui, state: &State) {
-    let commits: Vec<Vec<String>> = state.commits.iter().map(|c| c.split('\x1f').map(str::to_string).collect::<Vec<_>>()).filter(|p| p.len() == 4).collect();
-    if commits.is_empty() {
+/// The project's Git repository: its branch, how it stands against its remote (ahead, behind, up to date), the changes
+/// not committed yet, the remote's page, and its last commits on a timeline. Each commit's author is a disc on the
+/// line; a press opens a commit to its whole message (its height springs open), its hash copies with a press.
+fn commits(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
+    let ctx = ui.ctx().clone();
+    let Some(repo) = state.git.clone() else { return };
+    if repo.commits.is_empty() && repo.branch.is_none() {
         return;
     }
+    // The rows come in one after the other the first time this repository's history shows.
+    let start_id = Id::unique(("commits-start", &project.path, repo.commits.first().map(|c| c.hash.clone())));
+    let now_t = anim::time(&ctx);
+    let start = ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(start_id, || now_t));
+    let mut open_remote = false;
     art::card(
         ui,
         "commits",
         glyph::GIT_COMMIT,
         "Recent commits",
         None,
-        |_, _| {},
+        |ui, slot| {
+            let Some(web) = &repo.web else { return };
+            let host = repo.host.as_deref().unwrap_or_default();
+            let (g, label) = match host {
+                "github.com" => (glyph::GITHUB, "GitHub".to_string()),
+                h if h.contains("gitlab") => (glyph::GITLAB, "GitLab".to_string()),
+                h => (icons::ARROW_SQUARE_OUT, h.trim_start_matches("www.").split('.').next().map(capitalised).unwrap_or_else(|| "Remote".into())),
+            };
+            let label = format!("Open on {label}");
+            let b = Button::new(&label).icon(g).variant(Variant::Ghost).size(Size::Sm).id_salt(("commits-remote", &project.path));
+            let bw = b.desired_width(ui).min(slot.width());
+            let r = Rect::from_min_size(pos2(slot.right() - bw, slot.center().y - 16.0), vec2(bw, 32.0));
+            state.anchors.insert("commits-remote".into(), r);
+            open_remote = widgets::activated(&b.show_at(ui, r).on_hover_text(web));
+        },
         |ui| {
-            let n = commits.len();
-            for (i, c) in commits.iter().enumerate() {
-                let w = ui.available_width();
-                let (r, _) = ui.allocate_exact_size(vec2(w, 46.0), Sense::hover());
-                let p = ui.painter();
-                let dot = pos2(r.left() + 8.0, r.top() + 14.0);
-                if i + 1 < n {
-                    p.line_segment([dot + vec2(0.0, 6.0), pos2(dot.x, r.bottom() + 8.0)], egui::Stroke::new(1.5, theme::white(0.08)));
+            git_status(ui, &repo);
+            let w = ui.available_width();
+            let now = orbiters_projects::discovery::now();
+            // The line runs behind the discs: drawn first, once the rows are placed.
+            let line = ui.painter().add(egui::Shape::Noop);
+            let mut discs: Vec<(egui::Pos2, f32)> = vec![];
+            let mut copy = None;
+            let mut toggle = None;
+            for (i, c) in repo.commits.iter().enumerate() {
+                let (a, rise) = widgets::entrance(ui, Id::unique(("commit-in", &project.path, &c.hash)), start, i);
+                let id = Id::unique(("commit", &project.path, &c.hash));
+                let open = state.commit_open.contains(&c.hash);
+                let o = anim::toggle(&ctx, id.with("open"), open, Spring::EXPAND).max(0.0);
+                // The whole message, wrapped, and the full hash with its date under it when open.
+                let text_w = w - 44.0 - 10.0;
+                let message = if c.body.is_empty() { c.subject.clone() } else { format!("{}\n\n{}", c.subject, c.body) };
+                let g = ui.painter().layout_job(Txt::new(&message, 12.5).color(theme::FG_2).line_height(19.0).job(text_w - 24.0));
+                let well_h = 12.0 + g.size().y + 10.0 + 18.0 + 12.0;
+                let row_h = 54.0 + (well_h + 6.0) * o.clamp(0.0, 1.0);
+                let (row, _) = ui.allocate_exact_size(vec2(w, row_h), Sense::hover());
+                let head = Rect::from_min_size(row.min, vec2(w, 54.0));
+                let resp = ui.interact(head, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+                let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SOFT);
+                let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
+                let mut p = ui.painter().clone();
+                p.multiply_opacity(a);
+                let dy = rise;
+                let back = Rect::from_min_max(pos2(row.left() - 6.0, row.top() + dy), pos2(row.right() + 6.0, row.bottom() + dy));
+                let fill = theme::white(0.035 * hover.max(o.clamp(0.0, 1.0)) + 0.02 * press);
+                if fill.a() > 0 {
+                    p.rect_filled(back, theme::radius(14.0), fill);
                 }
-                p.circle_filled(dot, 4.5, if i == 0 { theme::ACCENT } else { theme::INK_600 });
-                let x = r.left() + 26.0;
-                widgets::text_truncated(p, pos2(x, r.top() + 14.0), Align2::LEFT_CENTER, &Txt::new(&c[1], 13.0).weight(weight::MEDIUM), w - 26.0);
-                let hash = Txt::new(&c[0], 11.0).mono().color(theme::FG_2);
-                let hr = widgets::text(p, pos2(x, r.top() + 33.0), Align2::LEFT_CENTER, &hash);
-                widgets::text_truncated(
-                    p,
-                    pos2(hr.right() + 8.0, r.top() + 33.0),
-                    Align2::LEFT_CENTER,
-                    &Txt::new(format!("{} · {}", c[2], c[3]), 11.5).color(theme::FG_3),
-                    w - 26.0 - hr.width() - 8.0,
-                );
+                // The author's disc on the line; the latest commit's ringed in green.
+                let center = pos2(row.left() + 16.0, row.top() + 27.0 + dy);
+                discs.push((center, a));
+                let radius = 13.0 * (1.0 + 0.06 * hover - 0.05 * press);
+                p.circle_filled(center, radius + 3.0, theme::surface());
+                if i == 0 {
+                    let pulse = anim::since(&ctx, start + 0.25, 1.2) as f32;
+                    let e = orbiters_ui::anim::ease::out_cubic(pulse.clamp(0.0, 1.0));
+                    if pulse < 1.0 {
+                        p.circle_filled(center, radius + 3.0 + 9.0 * e, theme::alpha(theme::ACCENT, 0.3 * (1.0 - e)));
+                    }
+                    p.circle_stroke(center, radius + 2.0, egui::Stroke::new(1.6, theme::ACCENT));
+                }
+                widgets::avatar(&p, Rect::from_center_size(center, vec2(radius * 2.0, radius * 2.0)), None, &c.author);
+                let x = row.left() + 44.0;
+                let caret_w = 22.0;
+                let subject = Txt::new(&c.subject, 13.0).weight(weight::MEDIUM).color(theme::mix(theme::FG, theme::FG, hover));
+                widgets::text_truncated(&p, pos2(x, row.top() + 18.0 + dy), Align2::LEFT_CENTER, &subject, text_w - caret_w);
+                // Who and when, and the hash in a pill on the right that copies it.
+                let hash = Txt::new(&c.short, 11.0).mono().color(theme::FG_2);
+                let hw = widgets::text_size(ui, &hash).x + 14.0;
+                let hr = Rect::from_min_size(pos2(row.right() - hw, row.top() + 30.0 + dy), vec2(hw, 18.0));
+                let hresp = ui.interact(hr, id.with("hash"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Copy the commit's hash");
+                let hh = anim::toggle(&ctx, id.with("hash-hover"), hresp.hovered(), Spring::SOFT);
+                p.rect_filled(hr, theme::radius(9.0), theme::white(0.05 + 0.05 * hh));
+                widgets::text(&p, hr.center(), Align2::CENTER_CENTER, &hash);
+                if widgets::activated(&hresp) {
+                    copy = Some(c.hash.clone());
+                }
+                let when = format!("{} · {}", c.author, format::relative_time(c.time, now));
+                widgets::text_truncated(&p, pos2(x, row.top() + 39.0 + dy), Align2::LEFT_CENTER, &Txt::new(when, 11.5).color(theme::FG_3), hr.left() - x - 8.0);
+                // The caret turns as the commit opens.
+                let cc = pos2(row.right() - 9.0, row.top() + 18.0 + dy);
+                let turn = o.clamp(0.0, 1.0) * std::f32::consts::PI;
+                let rot = |v: egui::Vec2| vec2(v.x * turn.cos() - v.y * turn.sin(), v.x * turn.sin() + v.y * turn.cos());
+                let s = 3.4;
+                let cf = theme::alpha(theme::FG_3, 0.5 + 0.5 * hover.max(o.clamp(0.0, 1.0)));
+                p.line(vec![cc + rot(vec2(-s, -s * 0.5)), cc + rot(vec2(0.0, s * 0.5)), cc + rot(vec2(s, -s * 0.5))], egui::Stroke::new(1.5, cf));
+                if !c.subject.is_empty() && widgets::text_size(ui, &subject).x > text_w - caret_w && !open {
+                    resp.clone().on_hover_text(&c.subject);
+                }
+                if widgets::activated(&resp) && !hresp.hovered() {
+                    toggle = Some(c.hash.clone());
+                }
+                if o > 0.005 {
+                    let well = Rect::from_min_size(pos2(x - 4.0, row.top() + 54.0 + dy), vec2(text_w + 4.0, well_h));
+                    let mut wp = p.clone();
+                    wp.set_clip_rect(Rect::from_min_max(well.min, pos2(well.right(), row.bottom() + dy)).intersect(ui.clip_rect()));
+                    let k = o.clamp(0.0, 1.0);
+                    wp.multiply_opacity(k);
+                    wp.rect_filled(well, theme::radius(12.0), theme::white(0.035));
+                    let drop = 8.0 * (1.0 - k);
+                    wp.galley(pos2(well.left() + 12.0, well.top() + 12.0 - drop), g, theme::FG_2);
+                    let meta = format!("{} · {}", c.hash, date(c.time));
+                    widgets::text_truncated(
+                        &wp,
+                        pos2(well.left() + 12.0, well.bottom() - 12.0 - 9.0 - drop * 0.5),
+                        Align2::LEFT_CENTER,
+                        &Txt::new(meta, 10.5).mono().color(theme::FG_4),
+                        well.width() - 24.0,
+                    );
+                }
+            }
+            // The line between the discs, fading out under the last one (older history goes on).
+            let mut shapes = vec![];
+            for pair in discs.windows(2) {
+                let ((a, ka), (b, kb)) = (pair[0], pair[1]);
+                shapes.push(egui::Shape::line_segment([a, b], egui::Stroke::new(2.0, theme::white(0.09 * ka.min(kb)))));
+            }
+            if let Some(&(last, k)) = discs.last() {
+                if repo.commits.len() >= orbiters_projects::git::COMMITS {
+                    let n = 6;
+                    for s in 0..n {
+                        let (t0, t1) = (s as f32 / n as f32, (s + 1) as f32 / n as f32);
+                        shapes.push(egui::Shape::line_segment(
+                            [last + vec2(0.0, 22.0 * t0), last + vec2(0.0, 22.0 * t1)],
+                            egui::Stroke::new(2.0, theme::white(0.09 * k * (1.0 - t0))),
+                        ));
+                    }
+                }
+            }
+            ui.painter().set(line, egui::Shape::Vec(shapes));
+            if let Some(hash) = copy {
+                ctx.copy_text(hash);
+                cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Success, "Commit hash copied");
+            } else if let Some(hash) = toggle {
+                if !state.commit_open.remove(&hash) {
+                    state.commit_open.insert(hash);
+                }
             }
         },
     );
+    if open_remote {
+        if let Some(web) = &repo.web {
+            if let Err(e) = crate::controller::open_url(web) {
+                cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, format!("The page could not open: {e}"));
+            }
+        }
+    }
+}
+
+/// The repository's state in chips: its branch, how it stands against its upstream, and its changes not committed.
+fn git_status(ui: &mut Ui, repo: &orbiters_projects::git::Repo) {
+    let ctx = ui.ctx().clone();
+    // (glyph, label, colour, a pulsing dot)
+    let mut chips: Vec<(Option<&str>, String, Color32, bool)> = vec![];
+    chips.push((Some(glyph::GIT_BRANCH), repo.branch.clone().unwrap_or_else(|| "Detached".into()), theme::FG, false));
+    match &repo.upstream {
+        Some(up) if repo.ahead == 0 && repo.behind == 0 => chips.push((Some(icons::CHECK), format!("Up to date with {up}"), theme::FG_3, false)),
+        Some(_) => {
+            if repo.ahead > 0 {
+                chips.push((Some(glyph::ARROW_UP), format!("{} to push", repo.ahead), theme::ACCENT, false));
+            }
+            if repo.behind > 0 {
+                chips.push((Some(glyph::ARROW_DOWN), format!("{} to pull", repo.behind), theme::BLUE, false));
+            }
+        }
+        None => chips.push((None, "Not on a remote".into(), theme::FG_3, false)),
+    }
+    if repo.changes > 0 {
+        let n = repo.changes;
+        chips.push((None, format!("{n} uncommitted {}", if n == 1 { "change" } else { "changes" }), theme::WARN, true));
+    }
+    let style = |label: &str, c: Color32| Txt::new(label, 11.5).weight(weight::MEDIUM).color(c);
+    let widths: Vec<f32> =
+        chips.iter().map(|(g, l, c, dot)| widgets::text_size(ui, &style(l, *c)).x + 20.0 + if g.is_some() || *dot { 16.0 } else { 0.0 }).collect();
+    let w = ui.available_width();
+    let (places, h) = widgets::flow(&widths, w, 24.0, 6.0);
+    let (area, _) = ui.allocate_exact_size(vec2(w, h + 4.0), Sense::hover());
+    let p = ui.painter();
+    for (i, ((g, label, c, dot), (at, cw))) in chips.iter().zip(places.iter().zip(&widths)).enumerate() {
+        let k = anim::spring_from(&ctx, Id::unique(("git-chip", i, label)), [0.0], [1.0], Spring::BOUNCY)[0];
+        let r = Rect::from_min_size(area.min + *at, vec2(*cw, 24.0));
+        let r = Rect::from_center_size(r.center(), r.size() * (0.92 + 0.08 * k.clamp(0.0, 1.2)));
+        let a = k.clamp(0.0, 1.0);
+        let tinted = *c != theme::FG && *c != theme::FG_3;
+        p.rect_filled(r, theme::radius(12.0), if tinted { theme::alpha(*c, 0.13 * a) } else { theme::white(0.06 * a) });
+        let mut x = r.left() + 10.0;
+        if *dot {
+            let center = pos2(x + 5.0, r.center().y);
+            let t = anim::clock(&ctx, 30.0);
+            let e = orbiters_ui::anim::ease::out_cubic((t % 1.6 / 1.6) as f32);
+            p.circle_filled(center, 3.5 + 4.0 * e, theme::alpha(*c, 0.35 * (1.0 - e) * a));
+            p.circle_filled(center, 3.5, theme::alpha(*c, a));
+            x += 16.0;
+        } else if let Some(g) = g {
+            widgets::icon(p, pos2(x + 6.0, r.center().y), g, 12.0, theme::alpha(if *c == theme::FG { theme::FG_3 } else { *c }, a));
+            x += 16.0;
+        }
+        widgets::text(p, pos2(x, r.center().y), Align2::LEFT_CENTER, &style(label, theme::alpha(*c, a)));
+    }
+}
+
+/// A date as people read it ("29 Oct 2026, 14:02"), in local time when the system gives its offset.
+fn date(unix: u64) -> String {
+    let Ok(t) = time::OffsetDateTime::from_unix_timestamp(unix as i64) else { return String::new() };
+    let t = time::UtcOffset::current_local_offset().map(|o| t.to_offset(o)).unwrap_or(t);
+    let month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][t.month() as usize - 1];
+    format!("{} {month} {}, {:02}:{:02}", t.day(), t.year(), t.hour(), t.minute())
+}
+
+fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }

@@ -18,51 +18,79 @@ pub(super) mod glyph {
     pub const FOLDER_PLUS: &str = "\u{E258}";
     pub const TRASH_SIMPLE: &str = "\u{E4A8}";
     pub const ARROW_RIGHT: &str = "\u{E06C}";
+    pub const ARROW_UP: &str = "\u{E08E}";
+    pub const ARROW_DOWN: &str = "\u{E03E}";
+    pub const GIT_BRANCH: &str = "\u{E278}";
+    pub const GIT_DIFF: &str = "\u{E27C}";
+    pub const GITHUB: &str = "\u{E576}";
+    pub const GITLAB: &str = "\u{E694}";
 }
 
-/// An avatar's picture in `rect` (squircle corners `radii`, circular radii from the top-left clockwise): a quiet
-/// placeholder until it loads, then the picture fading in over it.
+/// An avatar's (or a world's) picture in `rect` (squircle corners `radii`, circular radii from the top-left
+/// clockwise): until it loads, or without one, its initial on a soft tile of its own colour; the picture fades in
+/// over it.
 pub(super) fn avatar(p: &Painter, state: &State, a: &Avatar, rect: Rect, radii: [f32; 4], zoom: f32) {
-    feedback::fill_corners(p, rect, radii, theme::INK_750);
+    picture(p, state, a, rect, radii, zoom, true);
+}
+
+/// [`avatar`]; without `initial`, the picture fades in over what is already there (a cover's own placeholder).
+fn picture(p: &Painter, state: &State, a: &Avatar, rect: Rect, radii: [f32; 4], zoom: f32, initial: bool) {
     let tex = state.thumbs.get(&a.id);
     let k = feedback::loaded(p.ctx(), Id::unique(("avatar-picture", &a.id)), tex.is_some());
-    if k < 1.0 {
-        widgets::icon(p, rect.center(), icons::PERSON_ARMS_SPREAD, (rect.height() * 0.32).clamp(14.0, 40.0), theme::alpha(theme::FG_4, 1.0 - k));
+    if k < 1.0 && initial {
+        let tint = widgets::name_color(&a.name);
+        feedback::fill_corners(p, rect, radii, theme::mix(theme::INK_750, tint, 0.16));
+        let shade = Rect::from_min_max(pos2(rect.left(), rect.center().y), rect.max);
+        paint::fill_gradient(
+            p,
+            &paint::rounded_rect_points_corners(shade, [0.0, 0.0, radii[2], radii[3]]),
+            &paint::Gradient::vertical(shade, &[(0.0, Color32::TRANSPARENT), (1.0, theme::alpha(tint, 0.1))]),
+        );
+        let initial = a.name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".into());
+        let size = (rect.height() * 0.4).clamp(13.0, 44.0);
+        widgets::text(p, rect.center(), Align2::CENTER_CENTER, &Txt::new(initial, size).weight(weight::SEMIBOLD).color(theme::alpha(tint, 0.85 * (1.0 - k))));
     }
     if let Some(t) = tex {
         feedback::cover(p, rect, radii, t, zoom * (1.0 + 0.04 * (1.0 - k)), k);
     }
 }
 
-/// A project's cover in `rect` (squircle corners `radii`): its avatars as a collage (one alone, two side by side, three
-/// as one large and two small, four or more in a square with how many more on the last), or a tile with its kind's
-/// icon when it has none.
+/// The avatars and worlds of `project` whose pictures are loaded, worlds first (a world project's own thumbnail).
+pub(super) fn pictured<'a>(state: &State, project: &'a Project) -> Vec<&'a Avatar> {
+    project.worlds.iter().chain(&project.avatars).filter(|a| state.thumbs.contains_key(&a.id)).collect()
+}
+
+/// A project's cover in `rect` (squircle corners `radii`): the pictures it has, as a collage (one alone, two side by
+/// side, three as one large and two small, four or more in a square with how many more on the last); avatars without
+/// a picture are left out. A project without any picture shows its kind's icon on a tile.
 pub(super) fn cover(p: &Painter, state: &State, project: &Project, rect: Rect, radii: [f32; 4], zoom: f32) {
-    let avatars = &project.avatars;
+    let pictures = pictured(state, project);
     let [tl, tr, br, bl] = radii;
     let gap = 2.0;
-    match avatars.len() {
-        0 => {
-            let (tint, glyph) = kind_look(project);
-            feedback::fill_corners(p, rect, radii, theme::mix(theme::INK_800, tint, 0.08));
-            let s = (rect.height() * 0.34).clamp(32.0, 64.0);
-            let tile = Rect::from_center_size(rect.center(), vec2(s, s));
-            p.rect_filled(tile, theme::radius(s * 0.3), theme::alpha(tint, 0.14));
-            widgets::icon(p, tile.center(), glyph, s * 0.46, tint);
-        }
-        1 => avatar(p, state, &avatars[0], rect, radii, zoom),
+    let settled = pictures.iter().all(|a| feedback::loaded(p.ctx(), Id::unique(("avatar-picture", &a.id)), true) >= 1.0);
+    if pictures.is_empty() || !settled {
+        let (tint, glyph) = kind_look(project);
+        feedback::fill_corners(p, rect, radii, theme::mix(theme::INK_800, tint, 0.08));
+        let s = (rect.height() * 0.34).clamp(20.0, 64.0);
+        let tile = Rect::from_center_size(rect.center(), vec2(s, s));
+        p.rect_filled(tile, theme::radius(s * 0.3), theme::alpha(tint, 0.14));
+        widgets::icon(p, tile.center(), glyph, s * 0.46, tint);
+    }
+    match pictures.len() {
+        0 => {}
+        1 => picture(p, state, pictures[0], rect, radii, zoom, false),
         2 => {
             let w = (rect.width() - gap) * 0.5;
-            avatar(p, state, &avatars[0], Rect::from_min_size(rect.min, vec2(w, rect.height())), [tl, 0.0, 0.0, bl], zoom);
-            avatar(p, state, &avatars[1], Rect::from_min_max(pos2(rect.right() - w, rect.top()), rect.max), [0.0, tr, br, 0.0], zoom);
+            picture(p, state, pictures[0], Rect::from_min_size(rect.min, vec2(w, rect.height())), [tl, 0.0, 0.0, bl], zoom, false);
+            picture(p, state, pictures[1], Rect::from_min_max(pos2(rect.right() - w, rect.top()), rect.max), [0.0, tr, br, 0.0], zoom, false);
         }
         3 => {
             let w = (rect.width() - gap) * 0.58;
             let h = (rect.height() - gap) * 0.5;
-            avatar(p, state, &avatars[0], Rect::from_min_size(rect.min, vec2(w, rect.height())), [tl, 0.0, 0.0, bl], zoom);
+            picture(p, state, pictures[0], Rect::from_min_size(rect.min, vec2(w, rect.height())), [tl, 0.0, 0.0, bl], zoom, false);
             let x = rect.left() + w + gap;
-            avatar(p, state, &avatars[1], Rect::from_min_max(pos2(x, rect.top()), pos2(rect.right(), rect.top() + h)), [0.0, tr, 0.0, 0.0], zoom);
-            avatar(p, state, &avatars[2], Rect::from_min_max(pos2(x, rect.bottom() - h), rect.max), [0.0, 0.0, br, 0.0], zoom);
+            picture(p, state, pictures[1], Rect::from_min_max(pos2(x, rect.top()), pos2(rect.right(), rect.top() + h)), [0.0, tr, 0.0, 0.0], zoom, false);
+            picture(p, state, pictures[2], Rect::from_min_max(pos2(x, rect.bottom() - h), rect.max), [0.0, 0.0, br, 0.0], zoom, false);
         }
         n => {
             let w = (rect.width() - gap) * 0.5;
@@ -73,13 +101,14 @@ pub(super) fn cover(p: &Painter, state: &State, project: &Project, rect: Rect, r
                 (Rect::from_min_size(pos2(rect.left(), rect.bottom() - h), vec2(w, h)), [0.0, 0.0, 0.0, bl]),
                 (Rect::from_min_size(pos2(rect.right() - w, rect.bottom() - h), vec2(w, h)), [0.0, 0.0, br, 0.0]),
             ];
-            for (a, (r, rr)) in avatars.iter().zip(cells) {
-                avatar(p, state, a, r, rr, zoom);
+            for (a, (r, rr)) in pictures.iter().zip(cells) {
+                picture(p, state, a, r, rr, zoom, false);
             }
             if n > 4 {
                 let (r, rr) = cells[3];
                 feedback::fill_corners(p, r, rr, theme::black(0.55));
-                widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new(format!("+{}", n - 3), 18.0).weight(weight::SEMIBOLD));
+                let size = (r.height() * 0.28).clamp(11.0, 18.0);
+                widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new(format!("+{}", n - 3), size).weight(weight::SEMIBOLD));
             }
         }
     }
@@ -103,9 +132,24 @@ pub(super) fn tile(p: &Painter, rect: Rect, glyph: &str, tint: Color32) {
 /// A package's icon in `rect`: its tinted tile with the package glyph until the icon arrives, then the icon fading in
 /// over it: a picture fills the tile, a mark sits in it on a plate that shows it (light behind a dark mark).
 pub(super) fn package_icon(p: &Painter, icon: Option<&PackageIcon>, rect: Rect, name: &str) {
-    let k = feedback::loaded(p.ctx(), Id::unique(("package-icon", name)), icon.is_some());
+    icon_tile(p, icon, rect, name, glyph::PACKAGE, package_tint(name), 1.0);
+}
+
+/// A package repository's icon in `rect` (its website's icon, or the logo Orbiters keeps for it): its tinted tile with
+/// the stack glyph until it arrives, then the icon fading in; a repository turned off shows it dimmed.
+pub(super) fn repo_icon(p: &Painter, icon: Option<&PackageIcon>, rect: Rect, url: &str, enabled: bool) {
+    let on = anim::toggle(p.ctx(), Id::unique(("repo-icon-on", url)), enabled, Spring::SOFT).clamp(0.0, 1.0);
+    icon_tile(p, icon, rect, url, icons::STACK, theme::mix(theme::FG_4, theme::ACCENT, on), 0.45 + 0.55 * on);
+}
+
+/// An icon on its tile: the tile tinted `tint` with `placeholder` until `icon` arrives, then the icon fading in over it
+/// (a picture fills the tile, a mark sits on a plate that shows it), at `opacity`.
+fn icon_tile(p: &Painter, icon: Option<&PackageIcon>, rect: Rect, key: &str, placeholder_glyph: &str, tint: Color32, opacity: f32) {
+    let mut p = p.clone();
+    p.multiply_opacity(opacity);
+    let p = &p;
+    let k = feedback::loaded(p.ctx(), Id::unique(("package-icon", key)), icon.is_some());
     let radius = rect.height() * 0.3;
-    let tint = package_tint(name);
     let placeholder = theme::alpha(tint, 0.13);
     let plate = match icon {
         Some(i) if i.fills => Color32::TRANSPARENT,
@@ -114,7 +158,7 @@ pub(super) fn package_icon(p: &Painter, icon: Option<&PackageIcon>, rect: Rect, 
     };
     feedback::fill_corners(p, rect, [radius; 4], theme::mix(placeholder, plate, k));
     if k < 1.0 {
-        widgets::icon(p, rect.center(), glyph::PACKAGE, rect.height() * 0.47, theme::alpha(tint, 1.0 - k));
+        widgets::icon(p, rect.center(), placeholder_glyph, rect.height() * 0.47, theme::alpha(tint, 1.0 - k));
     }
     let Some(i) = icon else { return };
     if i.fills {

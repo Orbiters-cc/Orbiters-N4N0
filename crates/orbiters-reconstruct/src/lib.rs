@@ -10,6 +10,7 @@ pub mod depthfix;
 pub mod gaussians;
 pub mod governor;
 pub mod gpu;
+pub mod ground;
 pub mod init;
 pub mod metrics;
 pub mod ply;

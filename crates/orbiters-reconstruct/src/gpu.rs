@@ -1901,6 +1901,22 @@ impl Gpu {
         Ok(if pipelined.is_some() { self.estimate(size).unwrap_or(0) } else { total })
     }
 
+    /// Follows VRChat on this graphics card (as crate::priority::govern last saw it, so only in a process that governs
+    /// itself): while it runs, SteamVR's frame timing paces the steps (crate::governor); once it closes, nothing does.
+    /// Some(true) when the governor just joined, Some(false) when it just left.
+    pub fn follow_vrchat(&mut self) -> Option<bool> {
+        let beside = crate::priority::vrchat() && !self.integrated;
+        if beside && self.governor.is_none() {
+            self.governor = crate::governor::Governor::connect();
+            self.governor.is_some().then_some(true)
+        } else if !beside && self.governor.is_some() {
+            self.governor = None;
+            Some(false)
+        } else {
+            None
+        }
+    }
+
     /// While governed: waits until VRChat's frames leave part `part` of a step its GPU time idle (a governor that saw
     /// SteamVR quit is dropped).
     fn pace_wait(&mut self, part: usize) {

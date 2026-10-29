@@ -77,6 +77,15 @@ pub struct Settings {
     /// VRChat Home and Palm Point.
     pub fade_unseen_every: u32,
     pub unseen_weight: f32,
+    /// Fading stops for the rest of the run once a round finds more Gaussians unseen than the round before, by over a
+    /// twentieth of the set, while the set did not grow between them (`false`: it never stops). Unseen counts that hold
+    /// or fall (VRChat Home: 356k, 357k, 348k, 335k, 320k of 834k) are redundant cover relocation reuses, and while the
+    /// set grows, so do its unseen copies (a 3D picture: 157k of 680k, then 278k of 868k, 320k of 1.0M); counts that
+    /// keep rising in a set of one size (Silent Dawn, a 78 s recording: 244k, 368k, 483k, … 680k of 888k) are
+    /// relocation's own copies faded again round after round, and the set never grows: on that recording fading to the
+    /// end cost 1.0 dB on held-out keyframes (the best 90 % of their pixels) and half the result's splats; stopping kept
+    /// the other captures' scores.
+    pub fade_until_rising: bool,
     /// Covers the sky shell where no view looked (crate::sky) once training ends. On the capture simulator's off-path
     /// views (Bench Plaza: other heights, sideways, looking up) it gained 8 dB looking up and 1.3–1.8 dB over all
     /// views of three captures, for about a thousand Gaussians. Backing every cell the shell does not cover whole, from
@@ -136,6 +145,7 @@ impl Default for Settings {
             relocate_until: 0.5,
             fade_unseen_every: 1000,
             unseen_weight: 0.02,
+            fade_until_rising: true,
             sky_fill: true,
             filter_3d: 0.0,
             cleanup: false,
@@ -214,6 +224,19 @@ pub fn extent(data: &Dataset) -> f32 {
     };
     spread.max(median).max(0.5)
 }
+
+/// The most Gaussians a session trains with, from its training views (keyframes and rig faces): a short capture keeps
+/// the million it always had, and longer ones get more, up to [`MOST_GAUSSIANS`]. Measured on held-out keyframes (the
+/// best 90 % of their pixels; the desktop repository's docs/capture-detail-2026-10-29.md): a 419-view recording gained
+/// 0.67 dB at two million and 1.02 dB at three, a 313-view 3D picture 0.61 dB at two and nothing more at three,
+/// VRChat Home's 137 views nothing (−0.1 to −0.2 dB, within its noise).
+pub fn budget_for(views: usize) -> usize {
+    (views * GAUSSIANS_PER_VIEW).clamp(FEWEST_GAUSSIANS, MOST_GAUSSIANS)
+}
+
+pub const GAUSSIANS_PER_VIEW: usize = 7_000;
+pub const FEWEST_GAUSSIANS: usize = 1_000_000;
+pub const MOST_GAUSSIANS: usize = 3_000_000;
 
 /// 100 steps per keyframe: VRChat Home trains as well at 75 to 150, and with relocation until half the run the Canine
 /// orbit scores higher at 100 than it did at 150. The rig's faces add none: on the plaza walk with rig frames, the
@@ -412,19 +435,17 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     // 20–30 ms of the CPU a round, with the GPU waiting.
     let mut pending_weights: Option<(u32, crate::gpu::PendingWeights)> = None;
     let mut pending_plan: Option<std::thread::JoinHandle<Relocation>> = None;
+    // What the last fading round found (unseen, of how many), and whether rounds still fade (Settings::fade_until_rising).
+    let mut last_round: Option<(usize, usize)> = None;
+    let mut fading = true;
     for it in 1..=iterations {
         feeding.follow();
         if it % 500 == 1 {
             // While VRChat runs on this GPU, SteamVR's frame timing paces the steps (crate::governor).
-            let beside = crate::priority::vrchat() && !gpu.integrated;
-            if beside && gpu.governor.is_none() {
-                gpu.governor = crate::governor::Governor::connect();
-                if gpu.governor.is_some() {
-                    eprintln!("it {it}: training between VRChat's frames (SteamVR's frame timing)");
-                }
-            } else if !beside && gpu.governor.is_some() {
-                gpu.governor = None;
-                eprintln!("it {it}: VRChat closed: training at full speed");
+            match gpu.follow_vrchat() {
+                Some(true) => eprintln!("it {it}: training between VRChat's frames (SteamVR's frame timing)"),
+                Some(false) => eprintln!("it {it}: VRChat closed: training at full speed"),
+                None => {}
             }
         }
         let progress = (it - 1) as f32 / iterations as f32;
@@ -497,7 +518,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                 gpu.step(camera, settings.background, Target::Color { rgba, scene_pixels: pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr))?
             }
         };
-        if fade_due(it, settings, relocate_until) {
+        if fading && fade_due(it, settings, relocate_until) {
             let _sync = crate::timing::on().then(|| dev.poll(wgpu::PollType::wait_indefinitely()));
             let fade_start = Instant::now();
             let _cpu = crate::priority::CpuWork::start();
@@ -510,8 +531,16 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             } else {
                 let faded = logit(1e-4).to_bits();
                 let adjust: Vec<[u32; 4]> = seen.iter().enumerate().filter(|(_, w)| **w < settings.unseen_weight).map(|(i, _)| [i as u32, faded, 0f32.to_bits(), 0]).collect();
-                eprintln!("it {it}: fading {} of {} Gaussians no training pixel sees", adjust.len(), seen.len());
-                gpu.apply_relocation(&Relocation { adjust, copies: Vec::new(), len: seen.len() })?;
+                let rising = last_round.is_some_and(|(unseen, of)| adjust.len() > unseen + of / 20 && seen.len() <= of);
+                if settings.fade_until_rising && rising {
+                    // Relocation's copies, unseen again: fading them once more would only keep the set from growing.
+                    eprintln!("it {it}: {} of {} Gaussians unseen, more than the last round in a set that did not grow: fading stops", adjust.len(), seen.len());
+                    fading = false;
+                } else {
+                    eprintln!("it {it}: fading {} of {} Gaussians no training pixel sees", adjust.len(), seen.len());
+                    last_round = Some((adjust.len(), seen.len()));
+                    gpu.apply_relocation(&Relocation { adjust, copies: Vec::new(), len: seen.len() })?;
+                }
             }
             let _sync = crate::timing::on().then(|| dev.poll(wgpu::PollType::wait_indefinitely()));
             crate::timing::add("4b fade", fade_start.elapsed());

@@ -178,6 +178,13 @@ fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, 
     let mut leaf_targets = LeafTargets::default();
     for (done, &depth) in depths.iter().enumerate() {
         let _depth_time = PrepStage::new(format!("tune {platform} depth {depth}"));
+        // Prepared in the background (a process that follows VRChat: crate::priority::govern), the steps wait for
+        // VRChat's frames as training's do.
+        match gpu.follow_vrchat() {
+            Some(true) => eprintln!("tree depth {depth}: tuning between VRChat's frames (SteamVR's frame timing)"),
+            Some(false) => eprintln!("tree depth {depth}: VRChat closed: tuning at full speed"),
+            None => {}
+        }
         let gpu_start = gpu.profiler.as_ref().map(|p| p.span.get().0);
         let tuned: Vec<usize> = (0..tree.nodes.len()).filter(|&i| !tree.nodes[i].leaf && tree.nodes[i].depth == depth).collect();
         // Each camera at the resolution where this depth's boxes are drawn: their median error about DRAWN_AT_PIXELS.

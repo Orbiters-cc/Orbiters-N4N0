@@ -35,6 +35,8 @@ struct Args {
     session: PathBuf,
     width: u32,
     settings: train::Settings,
+    /// `--budget`: the most Gaussians whatever the session (else train::budget_for picks it).
+    budget: Option<usize>,
     device: gpu::DeviceOptions,
 }
 
@@ -43,13 +45,14 @@ fn args() -> anyhow::Result<Args> {
     let mut session = None;
     let mut width = 1920;
     let mut settings = train::Settings::default();
+    let mut budget = None;
     let mut device = gpu::DeviceOptions::default();
     while let Some(a) = it.next() {
         let mut number = |name: &str| -> anyhow::Result<u64> { it.next().with_context(|| format!("{name} needs a value"))?.parse().with_context(|| format!("{name} takes a number")) };
         match a.as_str() {
             "--width" => width = number("--width")? as u32,
             "--iterations" => settings.iterations = number("--iterations")? as u32,
-            "--budget" => settings.budget = number("--budget")? as usize,
+            "--budget" => budget = Some(number("--budget")? as usize),
             "--robust" => settings.robust = it.next().context("--robust needs a value")?.parse().context("--robust takes a number (0–1)")?,
             // Lab A/Bs: the regularisers on every Gaussian every step (orbiters_reconstruct::train::Settings).
             "--regularise-unseen" => settings.regularise_unseen = true,
@@ -61,6 +64,12 @@ fn args() -> anyhow::Result<Args> {
             "--cleanup" => settings.cleanup = true,
             // The sky map's width (orbiters_reconstruct::sky::SkyMap; 0: the shell of discs).
             "--sky-map" => settings.sky_map = number("--sky-map")? as u32,
+            // Lab A/Bs of the set's size (orbiters_reconstruct::train::Settings): fading what no training pixel sees
+            // (every N steps, 0: never; at what blending weight) and the share of the steps relocation runs in.
+            "--fade-every" => settings.fade_unseen_every = number("--fade-every")? as u32,
+            "--unseen-weight" => settings.unseen_weight = it.next().context("--unseen-weight needs a value")?.parse().context("--unseen-weight takes a number")?,
+            "--relocate-until" => settings.relocate_until = it.next().context("--relocate-until needs a value")?.parse().context("--relocate-until takes a number (0–1)")?,
+            "--fade-to-the-end" => settings.fade_until_rising = false,
             "--gpu" => {
                 device.low_power = match it.next().as_deref() {
                     Some("integrated") => true,
@@ -72,7 +81,7 @@ fn args() -> anyhow::Result<Args> {
             _ => session = Some(PathBuf::from(a)),
         }
     }
-    Ok(Args { session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]")?, width, settings, device })
+    Ok(Args { session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]")?, width, settings, budget, device })
 }
 
 fn rgb8(img: &[[f32; 4]]) -> Vec<u8> {
@@ -104,7 +113,12 @@ fn run(args: Args) -> anyhow::Result<Report> {
     let mut gpu = device.join().map_err(|_| anyhow::anyhow!("the GPU device's thread panicked"))??;
     let dev = gpu.device.clone();
     let mut settings = args.settings.clone();
-    if orbiters_reconstruct::priority::vrchat() && !gpu.integrated {
+    // As many Gaussians as the session's views can tell apart (train::budget_for), within the graphics memory the GPU
+    // has free (beside VRChat, what it leaves).
+    let views = data.views.len() + data.faces.as_ref().map_or(0, |f| f.views.len());
+    settings.budget = args.budget.unwrap_or_else(|| train::budget_for(views));
+    eprintln!("budget: {} Gaussians for {views} views", settings.budget);
+    if !gpu.integrated {
         fit_memory(&gpu, &mut settings);
     }
     stage(Stage::Seeding, 0.0);
@@ -220,8 +234,8 @@ fn run(args: Args) -> anyhow::Result<Report> {
     Ok(report)
 }
 
-/// Lowers `settings.budget` until a run fits the graphics memory the GPU has free (beside VRChat), leaving 1 GB for
-/// VRChat's own growth (avatars loading in), but never under 200,000 Gaussians.
+/// Lowers `settings.budget` until a run fits the graphics memory the GPU has free (beside VRChat, what it leaves),
+/// leaving 1 GB for other programs' growth (VRChat's avatars loading in), but never under 200,000 Gaussians.
 fn fit_memory(gpu: &gpu::Gpu, settings: &mut train::Settings) {
     const LEFT: u64 = 1 << 30;
     const FEWEST: usize = 200_000;
@@ -233,7 +247,7 @@ fn fit_memory(gpu: &gpu::Gpu, settings: &mut train::Settings) {
     let fixed = gpu.training_memory(0);
     let fits = (settings.budget as f64 * free.saturating_sub(LEFT + fixed) as f64 / need.saturating_sub(fixed).max(1) as f64) as usize;
     let budget = fits.clamp(FEWEST.min(settings.budget), settings.budget);
-    eprintln!("graphics memory: {} MB free beside VRChat ({} MB needed): {budget} Gaussians instead of {}", free >> 20, need >> 20, settings.budget);
+    eprintln!("graphics memory: {} MB free ({} MB needed): {budget} Gaussians instead of {}", free >> 20, need >> 20, settings.budget);
     settings.budget = budget;
 }
 

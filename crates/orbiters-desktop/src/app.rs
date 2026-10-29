@@ -325,7 +325,7 @@ impl App {
             (Page::Orb, "N4N0", icons::N4N0),
             (Page::Capture, "Capture", icons::APERTURE),
             (Page::Projects, "Unity projects", icons::CUBE),
-            (Page::Sessions, "Sessions", icons::FOLDER_OPEN),
+            (Page::Sessions, "Photos & captures", icons::IMAGES),
             (Page::Worlds, "Visited worlds", icons::GLOBE),
             (Page::Videos, "Videos", icons::FILM_STRIP),
             (Page::Settings, "Settings", icons::SLIDERS_HORIZONTAL),

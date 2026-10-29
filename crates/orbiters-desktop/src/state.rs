@@ -375,6 +375,7 @@ pub struct Snapshot {
     #[serde(default)]
     pub account: AccountStatus,
     pub uploads: Vec<UploadStatus>,
+    pub capture_shares: Vec<crate::controller::shares::ShareJob>,
     #[serde(default)]
     pub orb: OrbStatus,
     #[serde(default)]
@@ -417,6 +418,7 @@ impl Snapshot {
             reconstruct_queue: Vec::new(),
             account: AccountStatus::default(),
             uploads: Vec::new(),
+            capture_shares: Vec::new(),
             orb: OrbStatus::default(),
             update: UpdateStatus::default(),
             cleanup: None,
@@ -436,7 +438,7 @@ impl Snapshot {
             Some("the reconstruction")
         } else if self.orb.calls.call.is_some() {
             Some("the call")
-        } else if self.uploads.iter().any(UploadStatus::running) {
+        } else if self.uploads.iter().any(UploadStatus::running) || self.capture_shares.iter().any(|j| j.outcome.is_none()) {
             Some("the upload")
         } else if self.orb.voice.downloading.is_some() {
             Some("the speech models' download")

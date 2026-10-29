@@ -281,6 +281,7 @@ impl Service {
             }
             ToService::UploadPictures { world_id, world_name, paths } => report(ctl.upload_pictures(world_id, world_name, paths)),
             ToService::UploadPreview { world_id, world_name, session } => report(ctl.upload_preview(world_id, world_name, session)),
+            ToService::CaptureShare { request } => ctl.capture_share(*request),
             ToService::Maps => ctl.refresh_maps(),
             ToService::Calibrated { calibration } => ctl.calibrated(*calibration),
             ToService::Frames { chunk } => ctl.frames(chunk),

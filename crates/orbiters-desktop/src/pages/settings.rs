@@ -211,7 +211,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     }
                 });
                 widgets::separator(ui);
-                if folder_field(ui, "Sessions folder", None, &draft.sessions_dir) {
+                if folder_field(ui, "Captures folder", None, &draft.sessions_dir) {
                     state.picker = Some((Folder::Sessions, pick(&ctx, &draft.sessions_dir)));
                 }
                 widgets::separator(ui);

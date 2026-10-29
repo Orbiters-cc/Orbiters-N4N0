@@ -17,28 +17,38 @@ pub(super) fn spawn_presence(ctl: super::Shared) {
         let mut last = None;
         let mut sent = std::time::Instant::now() - std::time::Duration::from_secs(300);
         let mut attempted = sent;
-        let mut failed=false;
+        let mut failed = false;
         while !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             let snapshot = ctl.view();
             let world = &snapshot.vrchat.world;
-            let location = world.world_id.as_ref().zip(world.instance.as_ref()).zip(world.local_player.as_ref())
+            let location = world
+                .world_id
+                .as_ref()
+                .zip(world.instance.as_ref())
+                .zip(world.local_player.as_ref())
                 .filter(|_| snapshot.vrchat.running && world.in_world)
-                .map(|((w,i),n)| (snapshot.settings.development,w.clone(),i.clone(),n.clone(),format!("{:?}",snapshot.account.state)));
+                .map(|((w, i), n)| (snapshot.settings.development, w.clone(), i.clone(), n.clone(), format!("{:?}", snapshot.account.state)));
             if let Some(ref location) = location {
                 if (last.as_ref() != Some(location) || sent.elapsed().as_secs() >= 300) && (!failed || attempted.elapsed().as_secs() >= 60) {
-                    attempted=std::time::Instant::now();
-                    failed=true;
-                    if let Some((api,token))=ctl.account_api() {
-                        if api.capture_presence(&token,&location.1,&location.2,&location.3).is_ok() {failed=false;last=Some(location.clone());sent=std::time::Instant::now();}
+                    attempted = std::time::Instant::now();
+                    failed = true;
+                    if let Some((api, token)) = ctl.account_api() {
+                        if api.capture_presence(&token, &location.1, &location.2, &location.3).is_ok() {
+                            failed = false;
+                            last = Some(location.clone());
+                            sent = std::time::Instant::now();
+                        }
                     }
                 }
-            } else {last=None;}
+            } else {
+                last = None;
+            }
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
     });
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Local {
     Session(PathBuf),
     Picture(PathBuf),
@@ -50,7 +60,7 @@ impl Local {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Entry {
     pub key: String,
     pub world_id: String,
@@ -62,8 +72,100 @@ pub struct Entry {
     pub remote: Option<Item>,
     pub content: Content,
     pub ready: bool,
+    #[serde(skip)]
     pub picture: Option<crate::worlds::Picture>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Operation {
+    Share(shares::Share),
+    Unshare(shares::Unshare),
+    Download,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Request {
+    pub id: String,
+    pub server: Server,
+    pub entry: Entry,
+    pub extra: Vec<Entry>,
+    pub operation: Operation,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Outcome {
+    Shared(shares::Shared),
+    Unshared(Item),
+    Downloaded(PathBuf),
+    Failed { message: String, explicit: bool },
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShareJob {
+    pub id: String,
+    pub key: String,
+    pub outcome: Option<Outcome>,
+}
+
+fn run_request(request: Request) -> anyhow::Result<Outcome> {
+    match request.operation {
+        Operation::Share(r) => {
+            let first = share(request.server, request.entry, r.clone())?;
+            for entry in request.extra {
+                share(request.server, entry, r.clone())?;
+            }
+            Ok(Outcome::Shared(first))
+        }
+        Operation::Unshare(r) => unshare(request.server, request.entry, r).map(Outcome::Unshared),
+        Operation::Download => download(request.server, request.entry.remote.ok_or_else(|| anyhow::anyhow!("No uploaded item"))?).map(Outcome::Downloaded),
+    }
+}
+impl super::Controller {
+    /// The tray owns each mutation until completion, even if the submitting window closes.
+    pub fn capture_share(self: &super::Shared, request: Request) {
+        self.capture_share_with(request, run_request);
+    }
+    fn capture_share_with(self: &super::Shared, request: Request, work: impl FnOnce(Request) -> anyhow::Result<Outcome> + Send + 'static) {
+        let accepted = self.update(|s| {
+            if s.capture_shares.iter().any(|j| j.id == request.id) {
+                return false;
+            }
+            s.capture_shares.push(ShareJob { id: request.id.clone(), key: request.entry.key.clone(), outcome: None });
+            true
+        });
+        if !accepted {
+            return;
+        }
+        let ctl = self.clone();
+        let id = request.id.clone();
+        std::thread::spawn(move || {
+            let outcome = work(request)
+                .unwrap_or_else(|e| Outcome::Failed { explicit: e.downcast_ref::<shares::ExplicitAcknowledgement>().is_some(), message: e.to_string() });
+            let (kind, message) = match &outcome {
+                Outcome::Failed { message, explicit: false } => (super::NoticeKind::Error, message.clone()),
+                Outcome::Failed { explicit: true, .. } => {
+                    (super::NoticeKind::Info, "Open Photos & captures to confirm sharing this explicit item publicly.".into())
+                }
+                Outcome::Shared(shares::Shared::Request { .. }) => (super::NoticeKind::Success, "Share request sent.".into()),
+                Outcome::Downloaded(p) => (super::NoticeKind::Success, format!("Saved {}", p.display())),
+                _ => (super::NoticeKind::Success, "Sharing updated.".into()),
+            };
+            ctl.update(|s| {
+                if let Some(j) = s.capture_shares.iter_mut().find(|j| j.id == id) {
+                    j.outcome = Some(outcome);
+                }
+                while s.capture_shares.len() > 32 {
+                    if let Some(i) = s.capture_shares.iter().position(|j| j.outcome.is_some()) {
+                        s.capture_shares.remove(i);
+                    } else {
+                        break;
+                    }
+                }
+            });
+            ctl.notify(kind, message);
+            ctl.bump_library();
+            ctl.refresh_maps();
+        });
+    }
+}
+
 impl Entry {
     pub fn mine(&self) -> bool {
         self.remote.as_ref().is_none_or(|i| i.mine)
@@ -280,5 +382,53 @@ mod tests {
         assert_eq!(instance_at(&h, "a", 15), Some("one".into()));
         assert_eq!(instance_at(&h, "a", 21), None);
         assert_eq!(instance_at(&h, "a", 9), None);
+    }
+    #[test]
+    fn tray_job_survives_a_dropped_window_snapshot_and_round_trips_ipc() {
+        let ctl = super::super::Controller::new(orbiters_core::settings::Settings::default());
+        let request = Request {
+            id: "fixture-job".into(),
+            server: Server::Development,
+            entry: remote_entry(Item::default()),
+            extra: Vec::new(),
+            operation: Operation::Share(shares::Share { public: true, ..Default::default() }),
+        };
+        let message = crate::ipc::ToService::CaptureShare { request: Box::new(request.clone()) };
+        let json = serde_json::to_string(&message).unwrap();
+        let parsed: crate::ipc::ToService = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, crate::ipc::ToService::CaptureShare { .. }));
+        let (tx, rx) = std::sync::mpsc::channel();
+        ctl.capture_share_with(request, move |_| {
+            rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+            Ok(Outcome::Shared(shares::Shared::Request { request: serde_json::json!({"id":5,"status":"pending"}) }))
+        });
+        let window = ctl.view();
+        assert_eq!(window.busy_with(), Some("the upload"));
+        drop(window);
+        tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while ctl.view().capture_shares[0].outcome.is_none() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let snapshot = ctl.view();
+        assert!(matches!(snapshot.capture_shares[0].outcome, Some(Outcome::Shared(shares::Shared::Request { .. }))));
+        assert!(snapshot.busy_with().is_none());
+        let encoded = serde_json::to_string(snapshot.as_ref()).unwrap();
+        let decoded: crate::state::Snapshot = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.capture_shares[0].id, "fixture-job");
+    }
+    #[test]
+    fn recording_start_saves_the_actual_osc_names_even_when_false() {
+        let dir = std::env::temp_dir().join(format!("orbiters-content-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctl = super::super::Controller::new(orbiters_core::settings::Settings::default());
+        ctl.osc_values.lock().unwrap().latest.record("/avatar/parameters/NSFW/Toggle".into(), vec![orbiters_core::osc::OscValue::Bool(false)], 0);
+        ctl.on_worker_event(orbiters_core::protocol::WorkerEvent::Started { session_dir: dir.clone(), source: "fixture".into() });
+        let content = Content::read(&dir);
+        assert!(content.explicit);
+        assert_eq!(content.explicit_reasons, ["osc-parameter:NSFW/Toggle"]);
+        assert!(dir.join(orbiters_core::explicit::FILE).is_file());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

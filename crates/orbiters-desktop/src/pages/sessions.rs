@@ -83,6 +83,8 @@ struct Import {
 
 #[derive(Default)]
 pub struct State {
+    gallery: super::gallery::State,
+    manage: bool,
     loaded: Option<(u64, PathBuf, u64)>,
     list: Job<Vec<SessionSummary>>,
     sessions: Option<Vec<SessionSummary>>,
@@ -103,6 +105,9 @@ pub struct State {
 }
 
 impl State {
+    pub fn stage_gallery(&mut self, ctx: &egui::Context, name: &str) {
+        self.gallery.stage(ctx, name);
+    }
     /// Opens the detail of the first session as if its card was clicked (screenshots).
     pub fn open_first(&mut self, ctx: &egui::Context, origin: Rect) {
         if let Some(s) = self.sessions.as_ref().and_then(|l| l.first()) {
@@ -126,7 +131,8 @@ impl State {
     /// Whether something is still being read (the list, pictures, what a clean-up would delete): the screenshots
     /// wait for it.
     pub fn busy(&self) -> bool {
-        self.list.running()
+        self.gallery.busy()
+            || self.list.running()
             || self.thumbs.values().any(|k| matches!(k.thumb, Thumb::Loading(_)))
             || self.detail.as_ref().and_then(|d| d.trim.as_ref()).is_some_and(TrimDialog::loading)
     }
@@ -206,6 +212,26 @@ fn now_secs() -> u64 {
 }
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
+    if state.sessions.is_none() && !state.list.running() {
+        let dir = cx.snap.settings.sessions_dir.clone();
+        state.list = Job::spawn(ui.ctx(), move || crate::worlds::sessions(&dir));
+    }
+    state.loaded();
+    if !state.manage && state.detail.is_none() && state.storage.is_none() && state.viewer.is_none() {
+        state.manage = super::gallery::show(ui, cx, &mut state.gallery);
+        return;
+    }
+    show_library(ui, cx, state);
+    let r = Rect::from_min_size(pos2(ui.max_rect().left() + 32.0, ui.max_rect().top() + cx.top + 2.0), vec2(140.0, 25.0));
+    if Button::new("Back to gallery").variant(Variant::Ghost).width(r.width()).show_at(ui, r).clicked() {
+        state.manage = false;
+        state.detail = None;
+        state.storage = None;
+        state.viewer = None;
+    }
+}
+
+fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let page = ui.max_rect();
 
@@ -315,7 +341,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     {
         let mut hu = ui.new_child(UiBuilder::new().max_rect(head_r).id_salt("sessions-head"));
         hu.multiply_opacity(head_a);
-        super::heading(&hu, head_r, "Library", "Sessions", Some(&sub));
+        super::heading(&hu, head_r, "Library", "Capture files", Some(&sub));
     }
     {
         let mut su = ui.new_child(UiBuilder::new().max_rect(search_r).id_salt("sessions-search"));
@@ -610,7 +636,8 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
         &shade,
         &Gradient::vertical(thumb, &[(0.0, Color32::TRANSPARENT), (0.55, theme::alpha(theme::INK_950, 0.1)), (1.0, theme::alpha(theme::INK_950, 0.9))]),
     );
-    let w = badge(&p, ui, pos2(thumb.left() + 12.0, thumb.top() + 12.0), &format::duration(s.manifest.stats.duration_s), theme::black(0.55), theme::FG_2, false);
+    let w =
+        badge(&p, ui, pos2(thumb.left() + 12.0, thumb.top() + 12.0), &format::duration(s.manifest.stats.duration_s), theme::black(0.55), theme::FG_2, false);
     let job = cx.snap.reconstruction.as_ref().filter(|j| j.session_dir == s.dir);
     let cleaning = cx.snap.cleanup.as_ref().is_some_and(|j| j.of(&s.dir).is_some());
     let splats = match job {
@@ -944,7 +971,14 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
                 splats_view(&cu, map, tex.as_ref(), session.reconstruction.as_ref(), job);
                 if session.reconstruction.is_some() && job.is_none() && cx.gpu.is_some() {
                     let r = Rect::from_min_size(pos2(map.left() + 10.0, map.top() + 12.0), vec2(124.0, 36.0));
-                    if Button::new("View in 3D").icon(icons::CUBE_FOCUS).variant(Variant::Glass).size(widgets::Size::Sm).width(r.width()).show_at(&mut cu, r).clicked() {
+                    if Button::new("View in 3D")
+                        .icon(icons::CUBE_FOCUS)
+                        .variant(Variant::Glass)
+                        .size(widgets::Size::Sm)
+                        .width(r.width())
+                        .show_at(&mut cu, r)
+                        .clicked()
+                    {
                         open_viewer = true;
                     }
                 }

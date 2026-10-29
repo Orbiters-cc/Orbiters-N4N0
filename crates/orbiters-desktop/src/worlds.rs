@@ -244,6 +244,8 @@ impl Infos {
 /// A picture to show.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Picture {
+    /// A protected sharing-contract picture, fetched with the current environment's account on a loader thread.
+    Capture { development: bool, id: u64, large: bool },
     /// A screenshot, at most `width` wide.
     Shot { path: PathBuf, size: u64, width: u32 },
     /// A session's thumbnail.
@@ -409,6 +411,19 @@ fn key(p: &Picture) -> u64 {
 
 fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
     match picture {
+        Picture::Capture { development, id, large } => {
+            let server = if *development { Server::Development } else { Server::Production };
+            let account = orbiters_core::account::read(server)?;
+            let api = Api::new(server);
+            let r =
+                api.agent().get(&api.url(&format!("captures/picture/{id}/file"))).header("Authorization", &format!("Bearer {}", account.token)).call().ok()?;
+            if !r.status().is_success() {
+                return None;
+            }
+            let bytes = r.into_body().with_config().limit(32 << 20).read_to_vec().ok()?;
+            let image = image::load_from_memory(&bytes).ok()?.thumbnail(if *large { 2048 } else { 560 }, if *large { 4096 } else { 1120 }).to_rgba8();
+            Some(ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw()))
+        }
         Picture::Session(dir) => {
             let (w, h, rgba) = bundle::read_thumbnail(dir)?;
             Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
@@ -432,7 +447,7 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
         Picture::Remote { world_id, url, large } => {
             let file = cache_dir().join("worlds").join(format!("{world_id}{}.png", if *large { "-large" } else { "" }));
             // One kept that cannot be read (cut short) is fetched again.
-            let kept = keep.then(|| std::fs::read(&file).ok()).flatten().and_then(|b| decode_png(&b));
+            let kept = keep.then(|| std::fs::read(&file).ok()).flatten().and_then(|b| decode_image(&b));
             let (w, h, rgba) = match kept {
                 Some(picture) => picture,
                 None => {
@@ -441,12 +456,18 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
                         let _ = std::fs::create_dir_all(file.parent()?);
                         let _ = orbiters_core::write_atomic(&file, &b);
                     }
-                    decode_png(&b)?
+                    decode_image(&b)?
                 }
             };
             Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
         }
     }
+}
+
+/// Remote thumbnails may be JPEG or WebP as well as PNG.
+fn decode_image(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let image = image::load_from_memory(bytes).ok()?.to_rgba8();
+    Some((image.width(), image.height(), image.into_raw()))
 }
 
 /// A PNG as RGBA.

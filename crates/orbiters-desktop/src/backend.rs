@@ -60,6 +60,7 @@ pub trait Backend: Send + Sync {
     /// Asks what this member added to the Map explorer; [`Backend::maps`] has it once it arrived.
     fn request_maps(&self);
     fn maps(&self) -> Option<MapsMine>;
+    fn capture_share(&self, _request: controller::shares::Request) {}
     /// A T-pose calibration taken in the overlay.
     fn calibrated(&self, calibration: Calibration);
     /// N4N0: a question, the Talk button, the panel, saved videos.
@@ -211,6 +212,10 @@ impl Backend for Remote {
 
     fn maps(&self) -> Option<MapsMine> {
         self.0.maps()
+    }
+
+    fn capture_share(&self, request: controller::shares::Request) {
+        self.0.send(&ToService::CaptureShare { request: Box::new(request) });
     }
 
     fn frames(&self, chunk: crate::state::FrameChunk) {
@@ -396,6 +401,10 @@ impl Backend for Local {
 
     fn maps(&self) -> Option<MapsMine> {
         self.ctl.maps()
+    }
+
+    fn capture_share(&self, request: controller::shares::Request) {
+        self.ctl.capture_share(request);
     }
 
     fn frames(&self, chunk: crate::state::FrameChunk) {

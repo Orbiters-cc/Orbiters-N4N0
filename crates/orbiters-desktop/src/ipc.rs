@@ -120,6 +120,9 @@ pub enum ToService {
     },
     /// Asks what this member added to the Map explorer (answered with `ToClient::Maps`).
     Maps,
+    CaptureShare {
+        request: Box<crate::controller::shares::Request>,
+    },
     /// A T-pose calibration taken in the overlay (`time_ns` is a shared-clock reading).
     Calibrated {
         calibration: Box<Calibration>,

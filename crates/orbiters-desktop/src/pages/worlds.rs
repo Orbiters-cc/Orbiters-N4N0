@@ -44,6 +44,9 @@ struct Open {
 
 #[derive(Default)]
 pub struct State {
+    sharing: Option<super::sharing::Dialog>,
+    share_prepare: Job<Vec<crate::controller::shares::Entry>>,
+    share_public: bool,
     loaded: Option<(u64, PathBuf, u64)>,
     list: Job<Vec<VisitedWorld>>,
     worlds: Option<Vec<Arc<VisitedWorld>>>,
@@ -59,6 +62,35 @@ pub struct State {
 }
 
 impl State {
+    fn prepare_share(&mut self, ctx: &egui::Context, root: PathBuf, paths: Vec<PathBuf>, public: bool, server: Server) {
+        self.share_public = public;
+        self.share_prepare = Job::spawn(ctx, move || {
+            crate::controller::shares::local_entries(&root, server)
+                .into_iter()
+                .filter(|e| e.local.as_ref().is_some_and(|l| paths.iter().any(|p| p == l.path())))
+                .collect()
+        });
+    }
+    pub fn stage_detail_share(&self, ctx: &egui::Context) {
+        if let Some(s) = self
+            .open
+            .as_ref()
+            .and_then(|o| self.worlds.as_ref()?.iter().find(|w| w.id == o.id))
+            .and_then(|w| w.sessions.iter().find(|s| s.reconstruction.is_some()))
+        {
+            ctx.data_mut(|d| d.insert_temp(Id::unique(("world-session-share", &s.dir)), true));
+        }
+    }
+    pub fn stage_share_morph(&mut self, ctx: &egui::Context, progress: bool) {
+        if let Some(w) = self.worlds.as_ref().and_then(|w| w.iter().find(|w| w.reconstructed() > 0 || !w.shots.is_empty())) {
+            let id = Id::unique(("world-share", &w.id));
+            ctx.data_mut(|d| d.insert_temp(id, true));
+            if progress {
+                let _ = orbiters_ui::anim::spring(ctx, id.with("split"), [0.0], Spring::MORPH);
+            }
+        }
+    }
+
     pub fn loaded(&mut self) -> bool {
         if let Some(list) = self.list.take() {
             self.worlds = Some(list.into_iter().map(Arc::new).collect());
@@ -195,6 +227,22 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if state.open.is_some() {
         detail(ui, cx, state, page);
     }
+    if let Some(mut entries) = state.share_prepare.take() {
+        if !entries.is_empty() {
+            let first = entries.remove(0);
+            let mut d = super::sharing::Dialog::new(&ctx, first, !state.share_public);
+            d.extra = entries;
+            if state.share_public {
+                d.public(&ctx, if cx.snap.settings.development { Server::Development } else { Server::Production });
+            }
+            state.sharing = Some(d);
+        }
+    }
+    if let Some(d) = state.sharing.as_mut() {
+        if d.show(ui, cx) {
+            state.sharing = None;
+        }
+    }
 }
 
 /// The grid of worlds and its heading; returns the world clicked and its card's picture.
@@ -222,6 +270,7 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
         _ => Vec::new(),
     };
     let mut clicked = None;
+    let mut share_clicked: Option<(Vec<PathBuf>, bool)> = None;
     let from = orbiters_ui::blur::next_shape(ui);
     let mut gu = ui.new_child(UiBuilder::new().max_rect(page).id_salt("worlds-grid"));
     gu.multiply_opacity(shown);
@@ -235,7 +284,7 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
             }
             let cols = (((w + 16.0) / (270.0 + 16.0)).floor() as usize).max(1);
             let card_w = (w - 16.0 * (cols - 1) as f32) / cols as f32;
-            let card_h = card_w * 9.0 / 16.0 + 96.0;
+            let card_h = card_w * 9.0 / 16.0 + 146.0;
             let count = if state.worlds.is_none() { 6 } else { filtered.len() };
             let rows = count.div_ceil(cols);
             let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + 16.0) - 16.0), Sense::hover());
@@ -258,9 +307,35 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
                 if let Some(cover_r) = world_card(ui, cx, i, world, r, tex.as_ref(), info.as_ref(), shared, if open_here { 0.0 } else { 1.0 }, interactive) {
                     clicked = Some((world.id.clone(), cover_r));
                 }
+                if !open_here && interactive && (world.reconstructed() > 0 || !world.shots.is_empty()) {
+                    if let Some(public) = super::sharing::morph(
+                        ui,
+                        Id::unique(("world-share", &world.id)),
+                        pos2(r.right() - 12.0, r.bottom() - 50.0),
+                        r.width() - 24.0,
+                        !state.share_prepare.running(),
+                    ) {
+                        let paths = world
+                            .sessions
+                            .iter()
+                            .find(|s| s.reconstruction.is_some())
+                            .map(|s| vec![s.dir.clone()])
+                            .unwrap_or_else(|| world.shots.iter().map(|s| s.path.clone()).collect());
+                        share_clicked = Some((paths, public));
+                    }
+                }
             }
         });
     });
+    if let Some((paths, public)) = share_clicked {
+        state.prepare_share(
+            &ctx,
+            cx.snap.settings.sessions_dir.clone(),
+            paths,
+            public,
+            if cx.snap.settings.development { Server::Development } else { Server::Production },
+        );
+    }
     super::under_top(&gu, cx, "worlds", from, grid_top);
 
     let sub = match &state.worlds {
@@ -320,7 +395,8 @@ fn world_card(
 ) -> Option<Rect> {
     let ctx = ui.ctx().clone();
     let id = Id::unique(("world-card", &w.id));
-    let resp = ui.interact(rect, id, if interactive { Sense::click() } else { Sense::hover() });
+    let body = Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - 52.0));
+    let resp = ui.interact(body, id, if interactive { Sense::click() } else { Sense::hover() });
     let resp = if interactive { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
     // Entrance: up and in, 35 ms apart.
     let delay = 0.05 + i.min(12) as f64 * 0.035;
@@ -496,7 +572,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     let mut view: Option<usize> = None;
     let mut select_new = false;
     let mut clear = false;
-    let mut share_preview: Option<PathBuf> = None;
+    let mut share_preview: Option<(PathBuf, bool)> = None;
     let mut reconstruct: Option<PathBuf> = None;
     let selecting = !o.selected.is_empty();
 
@@ -625,7 +701,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                     }
                     let tex = state.pictures.as_mut().and_then(|p| if s.has_thumbnail { p.get(&ctx, &Picture::Session(s.dir.clone())) } else { None });
                     match session_row(&mut cu, cx, r.translate(vec2(0.0, dy)), s, tex.as_ref(), &sharing) {
-                        Some(RowAction::Share) => share_preview = Some(s.dir.clone()),
+                        Some(RowAction::Share(public)) => share_preview = Some((s.dir.clone(), public)),
                         Some(RowAction::Reconstruct) => reconstruct = Some(s.dir.clone()),
                         Some(RowAction::Unqueue) => cx.ctl.unqueue_reconstruction(s.dir.clone()),
                         None => {}
@@ -717,20 +793,32 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     if let Some(dir) = reconstruct {
         // Waiting its turn: the service says so.
         if cx.snap.reconstruction.is_none() && !cx.snap.is_capturing() {
-            cx.toasts.push(&ctx, toast::Kind::Info, "Reconstruction started: follow it here or in Sessions.");
+            cx.toasts.push(&ctx, toast::Kind::Info, "Reconstruction started: follow it here or in Photos & captures.");
         }
         cx.ctl.reconstruct(dir);
     }
-    if let Some(dir) = share_preview {
-        cx.ctl.upload_preview(world.id.clone(), world.name.clone(), dir);
+    if let Some((dir, public)) = share_preview {
+        state.share_public = public;
+        let root = cx.snap.settings.sessions_dir.clone();
+        let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
+        state.share_prepare = Job::spawn(&ctx, move || {
+            crate::controller::shares::local_entries(&root, server).into_iter().filter(|e| e.local.as_ref().is_some_and(|l| l.path() == dir)).collect()
+        });
     }
 
     // The bar of the selection, over the page's bottom.
     let bar = action_bar(&ctx, o, &world, &sharing, page);
     if let Some(BarAction::Share) = bar {
         let paths: Vec<PathBuf> = o.selected.iter().cloned().collect();
-        cx.ctl.upload_pictures(world.id.clone(), world.name.clone(), paths);
-        o.handed = Some((anim::time(&ctx), std::mem::take(&mut o.selected)));
+        state.share_public = false;
+        let root = cx.snap.settings.sessions_dir.clone();
+        let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
+        state.share_prepare = Job::spawn(&ctx, move || {
+            crate::controller::shares::local_entries(&root, server)
+                .into_iter()
+                .filter(|e| e.local.as_ref().is_some_and(|l| paths.iter().any(|p| p == l.path())))
+                .collect()
+        });
     }
     if let Some(BarAction::SignIn) = bar {
         if cx.snap.account.state == crate::state::AccountState::SigningIn {
@@ -894,7 +982,7 @@ fn note(ui: &Ui, rect: Rect, glyph: &str, title: &str, text: &str) {
 }
 
 enum RowAction {
-    Share,
+    Share(bool),
     Reconstruct,
     Unqueue,
 }
@@ -936,7 +1024,7 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
     if upload.is_some_and(|u| matches!(u.state, UploadState::Done { .. })) {
         line.push_str(" · shared");
     }
-    let right_w = 196.0;
+    let right_w = 330.0;
     widgets::text_truncated(&p, pos2(x, rect.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::FG_3), rect.right() - x - right_w - 16.0);
     widgets::text_truncated(
         &p,
@@ -963,25 +1051,8 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
             return Some(RowAction::Unqueue);
         }
     } else if s.reconstruction.is_some() {
-        let replace = sharing.mine.is_some_and(|m| m.preview.is_some());
-        let mut button = Button::new(if replace { "Replace 3D preview" } else { "Share in 3D" })
-            .icon(icons::CLOUD_ARROW_UP)
-            .variant(if replace { Variant::Secondary } else { Variant::Primary })
-            .width(b.width());
-        let hint = if let Some(h) = sharing.blocked {
-            Some(h)
-        } else if !sharing.account {
-            Some("Sign in to Orbiters in Settings to share")
-        } else {
-            None
-        };
-        if let Some(h) = hint {
-            button = button.enabled(false).hint(h);
-        } else {
-            button = button.hint("Public on the Map explorer: everyone in the capture becomes visible to everyone");
-        }
-        if button.id_salt(salt).show_at(ui, b).clicked() {
-            return Some(RowAction::Share);
+        if let Some(public) = super::sharing::morph(ui, Id::unique(("world-session-share", &s.dir)), pos2(b.right(), b.top()), 304.0, sharing.account) {
+            return Some(RowAction::Share(public));
         }
     } else {
         let blocked = (st.depth_frames == 0).then_some("This session has no depth frames: record with the capture kit's depth frames on");

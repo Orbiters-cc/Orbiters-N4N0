@@ -14,13 +14,13 @@
 use super::splat_worker::{Request, Worker};
 use super::{Cx, Job};
 use crate::gpu::Handles;
+use crate::views::{self, View};
 use eframe::egui_wgpu::{self, wgpu};
 use egui::{pos2, vec2, Align2, Color32, Id, Rect, Sense, Ui, UiBuilder};
-use crate::views::{self, View};
 use orbiters_core::reconstruction;
 use orbiters_core::settings::ViewGpu;
-use orbiters_reconstruct::gaussians::Gaussians;
 use orbiters_reconstruct::camera::{normalize, Camera};
+use orbiters_reconstruct::gaussians::Gaussians;
 use orbiters_reconstruct::gpu::{Confidence, ConfidenceMode, FarField, FarMode, Gpu, Target};
 use orbiters_reconstruct::ply;
 use orbiters_reconstruct::sky::SkyMap;
@@ -166,9 +166,22 @@ pub struct Viewer {
 impl Viewer {
     /// Opens the 3D view of `session`, its splats on the integrated GPU with `integrated` ([`on_integrated`]).
     pub fn open(ctx: &egui::Context, gpu: &Handles, session: &Path, title: String, integrated: bool) -> Self {
+        Self::open_source(ctx, gpu, session, title, integrated, None)
+    }
+
+    pub fn open_shared(ctx: &egui::Context, gpu: &Handles, path: &Path, title: String, view: &serde_json::Value, integrated: bool) -> Self {
+        let vector = |key: &str| view.get(key).and_then(|v| serde_json::from_value::<[f32; 3]>(v.clone()).ok()).filter(|v| v.iter().all(|n| n.is_finite()));
+        let flip = |p: [f32; 3]| [p[0], p[1], -p[2]];
+        let position = flip(vector("position").unwrap_or([0.0, 1.6, 0.0]));
+        let target = flip(vector("target").unwrap_or([0.0, 1.6, -3.0]));
+        let forward = normalize([target[0] - position[0], target[1] - position[1], target[2] - position[2]]);
+        Self::open_source(ctx, gpu, path, title, integrated, Some(View { position, forward, fov_y: 60.0f32.to_radians() }))
+    }
+
+    fn open_source(ctx: &egui::Context, gpu: &Handles, session: &Path, title: String, integrated: bool, view: Option<View>) -> Self {
         let window = (gpu.device.clone(), gpu.queue.clone());
         let (w, dir, c) = (window.clone(), session.to_path_buf(), ctx.clone());
-        let loading = Job::spawn(ctx, move || load(&dir, &c, w, integrated).map_err(|e| format!("{e:#}")));
+        let loading = Job::spawn(ctx, move || load(&dir, &c, w, integrated, view).map_err(|e| format!("{e:#}")));
         Self {
             session: session.to_path_buf(),
             title,
@@ -315,7 +328,13 @@ impl Viewer {
         let title_w = (widgets::text_size(ui, &Txt::new(&self.title, 14.0).weight(weight::SEMIBOLD)).x + 40.0).min(bar.width() * 0.5);
         let title_r = Rect::from_min_size(bar.min, vec2(title_w, 44.0));
         chip(&p, title_r);
-        widgets::text_truncated(&p, pos2(title_r.left() + 20.0, title_r.center().y - 7.0), Align2::LEFT_CENTER, &Txt::new(&self.title, 14.0).weight(weight::SEMIBOLD), title_w - 40.0);
+        widgets::text_truncated(
+            &p,
+            pos2(title_r.left() + 20.0, title_r.center().y - 7.0),
+            Align2::LEFT_CENTER,
+            &Txt::new(&self.title, 14.0).weight(weight::SEMIBOLD),
+            title_w - 40.0,
+        );
         let sub = match &self.loaded {
             Some(l) => format!("{} splats", format::integer(l.splats as f64)),
             None => "3D view".into(),
@@ -340,7 +359,12 @@ impl Viewer {
                 let label_r = Rect::from_min_size(pos2(next_r.left() - label_w, bar.top() + 2.0), vec2(label_w, 40.0));
                 let prev_r = Rect::from_min_size(pos2(label_r.left() - step_w, bar.top() + 2.0), vec2(step_w, 40.0));
                 chip(&p, Rect::from_min_max(prev_r.min, next_r.max));
-                widgets::text(&p, label_r.center(), Align2::CENTER_CENTER, &Txt::new(format!("View {} of {}", self.view + 1, l.views.len()), 12.0).color(theme::FG_2));
+                widgets::text(
+                    &p,
+                    label_r.center(),
+                    Align2::CENTER_CENTER,
+                    &Txt::new(format!("View {} of {}", self.view + 1, l.views.len()), 12.0).color(theme::FG_2),
+                );
                 let mut step = 0i64;
                 if Button::new("‹").variant(Variant::Ghost).width(step_w).show_at(ui, prev_r).clicked() {
                     step = -1;
@@ -414,7 +438,12 @@ impl Viewer {
     /// The display controls in chips at the bottom right (above the hint where the first does not fit beside it): what
     /// poorly seen splats show as and how strongly, and above it, with `far`, the far field and its distance.
     fn controls(&mut self, ui: &mut Ui, p: &egui::Painter, rect: Rect, hint: Rect, far: bool) {
-        let unsure = [SegOption::new(Unsure::Shown, "Show"), SegOption::new(Unsure::Faded, "Fade"), SegOption::new(Unsure::Blurred, "Blur"), SegOption::new(Unsure::Hazed, "Haze")];
+        let unsure = [
+            SegOption::new(Unsure::Shown, "Show"),
+            SegOption::new(Unsure::Faded, "Fade"),
+            SegOption::new(Unsure::Blurred, "Blur"),
+            SegOption::new(Unsure::Hazed, "Haze"),
+        ];
         let percent = |v: f32| format!("{:.0} %", v * 100.0);
         let right = rect.right() - 16.0;
         // Beside the hint when the widest chip fits there.
@@ -480,6 +509,9 @@ fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_p
 
 /// Reads a session's splats and their sky map.
 fn read(dir: &Path) -> anyhow::Result<(Gaussians, Option<SkyMap>)> {
+    if dir.extension().is_some_and(|e| e == "splat") {
+        return Ok((orbiters_reconstruct::web::read_splat(&std::fs::read(dir)?)?, None));
+    }
     let result = reconstruction::result_dir(dir);
     let g = ply::read(&result.join(reconstruction::PLY_FILE))?;
     let sky_file = result.join(reconstruction::SKY_FILE);
@@ -508,9 +540,9 @@ fn source(ctx: &egui::Context, window: (wgpu::Device, wgpu::Queue), integrated: 
 
 /// Reads the splats, their sky map and the recorded views, and sets the renderer up on the integrated GPU (with
 /// `integrated`, else or when that fails on the window's device).
-fn load(dir: &Path, ctx: &egui::Context, window: (wgpu::Device, wgpu::Queue), integrated: bool) -> anyhow::Result<Loaded> {
+fn load(dir: &Path, ctx: &egui::Context, window: (wgpu::Device, wgpu::Queue), integrated: bool, view: Option<View>) -> anyhow::Result<Loaded> {
     let (g, sky) = read(dir)?;
-    let (views, start) = views::recorded(dir)?;
+    let (views, start) = if let Some(v) = view { (vec![v], 0) } else { views::recorded(dir)? };
     // Orbit around what that view looks at.
     let depth = views::depth_ahead(&g, &views[start]);
     let source = match integrated.then(|| source(ctx, window.clone(), true, &g, sky.as_ref())) {
@@ -575,10 +607,19 @@ impl Blit {
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -587,7 +628,11 @@ impl Blit {
                 },
             ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("splat blit"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("splat blit"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("splat blit"),
             layout: Some(&pipeline_layout),

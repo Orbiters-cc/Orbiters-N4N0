@@ -1,7 +1,8 @@
 //! The Map explorer in the tray service: what this member added (`/maps/mine`) and uploads, which keep going when the
 //! window closes. Pictures are sent as the original files (Orbiters recognises them by their hash and re-encodes them
-//! without their metadata); a 3D preview is the session's splats as a web `.splat` (orbiters_reconstruct::web),
-//! starting from the camera the desktop's 3D view opens on.
+//! without their metadata); a 3D preview is the session's splats as VRChat's splat trees (orbiters_reconstruct::tree),
+//! the PC one also the website's `.splat` (Orbiters makes it from its leaves), starting from the view the desktop's 3D
+//! view opens on.
 
 use super::{Controller, NoticeKind, Shared};
 use crate::ipc::ToClient;
@@ -203,10 +204,20 @@ impl Controller {
     }
 }
 
-/// A session's splats as a web `.splat` and as VRChat's splat trees (their merged boxes tuned on the GPU when there is
-/// one), its sky map (sky.png as trained, when training learnt one) and the upload's metadata: the start view
-/// (right-handed like the files: Unity's Z negated), the held-out quality and when the session was recorded.
+/// A session's splats as VRChat's splat trees (their merged boxes tuned on the GPU when there is one; Orbiters makes the
+/// website's `.splat` from the PC one's leaves), its sky map (sky.png as trained, when training learnt one) and the
+/// upload's metadata: the start view (right-handed like the files: Unity's Z negated) at the eye height of the person
+/// who captured, over the ground they stood on (its height and that eye height too: crate::views::eye_level), the
+/// held-out quality and when the session was recorded.
 pub(super) fn web_preview(session: &Path) -> anyhow::Result<(PreviewFiles, Option<PathBuf>, serde_json::Value)> {
+    // Prepared in the background since its reconstruction finished, or being prepared: that cache answers.
+    crate::upload_prep::claim(session);
+    prepare(session, orbiters_reconstruct::gpu::DeviceOptions::default())
+}
+
+/// [`web_preview`]'s work on a GPU opened with `device` (the background preparation's: low priority, maybe the
+/// integrated GPU: crate::upload_prep::run).
+pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions) -> anyhow::Result<(PreviewFiles, Option<PathBuf>, serde_json::Value)> {
     use orbiters_reconstruct::timing::PrepStage;
     let _total = PrepStage::new("total");
     let _preparing = crate::upload_prep::PREPARING.lock().unwrap_or_else(|e| e.into_inner());
@@ -229,21 +240,17 @@ pub(super) fn web_preview(session: &Path) -> anyhow::Result<(PreviewFiles, Optio
     drop(stage);
     let stage = PrepStage::new("start view");
     let (views, start) = crate::views::recorded(session)?;
-    let v = views[start];
+    let (v, ground) = crate::views::eye_level(session, &g, &views[start]);
     let depth = crate::views::depth_ahead(&g, &v);
     let target = [v.position[0] + v.forward[0] * depth, v.position[1] + v.forward[1] * depth, v.position[2] + v.forward[2] * depth];
     drop(stage);
-    let stage = PrepStage::new("web splat");
-    let web = orbiters_reconstruct::web::splat_file(&g, orbiters_reconstruct::web::DEFAULT_MAX, v.position);
-    drop(stage);
-    anyhow::ensure!(web.count >= 1000, "This reconstruction has too few splats to show the world.");
     let stage = PrepStage::new("session cameras");
     let cameras = orbiters_reconstruct::tree_tune::session_cameras(session)?;
     drop(stage);
     let stage = PrepStage::new("gpu setup");
     let mut gpu = orbiters_reconstruct::gpu::Gpu::with_options(orbiters_reconstruct::gpu::DeviceOptions {
         profile: std::env::var_os("ORBITERS_PREP_PROFILE").is_some(),
-        ..Default::default()
+        ..device
     })
     .ok();
     if std::env::var_os("ORBITERS_PREP_TIMING").is_some() {
@@ -257,12 +264,12 @@ pub(super) fn web_preview(session: &Path) -> anyhow::Result<(PreviewFiles, Optio
             eprintln!("upload preparation GPU span: {:?}; passes: {:?}", p.span.get(), p.totals.borrow());
         }
     }
-    let files = PreviewFiles { splat: web.bytes, vrchat_pc: trees.pc, vrchat_quest: trees.quest, vrchat_coarse: trees.coarse };
+    let files = PreviewFiles { vrchat_pc: trees.pc, vrchat_quest: trees.quest, vrchat_coarse: trees.coarse };
     let flip = |p: [f32; 3]| [p[0], p[1], -p[2]];
     let report = reconstruction::read_report(session);
     let recorded = bundle::read_manifest(session).map(|m| m.created_utc).ok();
     let metadata = serde_json::json!({
-        "view": { "position": flip(v.position), "target": flip(target) },
+        "view": { "position": flip(v.position), "target": flip(target), "floor": ground.floor, "eyeHeight": ground.eye_height },
         "quality": report.and_then(|r| r.psnr_held_out),
         "capturedAt": recorded,
     });
@@ -300,7 +307,7 @@ mod tests {
                 let out = PathBuf::from(out).join(index.to_string());
                 std::fs::create_dir_all(&out).unwrap();
                 for (name, bytes) in
-                    [("web.splat", &files.splat), ("pc.tree", &files.vrchat_pc), ("quest.tree", &files.vrchat_quest), ("coarse.tree", &files.vrchat_coarse)]
+                    [("pc.tree", &files.vrchat_pc), ("quest.tree", &files.vrchat_quest), ("coarse.tree", &files.vrchat_coarse)]
                 {
                     std::fs::write(out.join(name), bytes).unwrap();
                 }
@@ -321,7 +328,6 @@ mod tests {
         let t = Instant::now();
         let (files, sky, metadata) = web_preview(Path::new(&env("ORBITERS_TEST_SESSION"))).unwrap();
         println!("{:.1} MB web preview and VRChat trees in {:?}: {metadata}", files.len() as f64 / 1e6, t.elapsed());
-        assert_eq!(files.splat.len() % orbiters_reconstruct::web::SPLAT_BYTES, 0);
         assert_eq!(&files.vrchat_pc[..8], orbiters_reconstruct::tree::MAGIC);
         let view = &metadata["view"];
         assert_eq!(view["position"].as_array().unwrap().len(), 3);

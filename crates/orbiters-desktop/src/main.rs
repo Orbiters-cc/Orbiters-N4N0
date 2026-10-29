@@ -47,6 +47,7 @@ fn main() -> anyhow::Result<()> {
         Some("--overlay") => overlay::run(&args[1..]),
         Some("--orb-menu") => overlay::menu_pages::run(&args[1..]),
         Some("--orb-menu-strings") => overlay::menu_pages::run_strings(&args[1..]),
+        Some("--prepare-upload") => upload_prep::run(&args[1..]),
         #[cfg(windows)]
         Some("--eye-picture") => overlay::eye_picture::run(&args[1..]),
         Some("--quit") => {

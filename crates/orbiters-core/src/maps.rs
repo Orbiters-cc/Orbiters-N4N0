@@ -146,9 +146,9 @@ pub struct UploadedPictures {
     pub skipped: usize,
 }
 
-/// What a 3D preview sends: the web `.splat` and VRChat's splat trees for PC, Quest and the coarse first view.
+/// What a 3D preview sends: VRChat's splat trees for PC, Quest and the coarse first view (the server makes the website's
+/// `.splat` from the PC tree's leaves: OrbitersContracts Docs/capture-sharing.md).
 pub struct PreviewFiles {
-    pub splat: Vec<u8>,
     pub vrchat_pc: Vec<u8>,
     pub vrchat_quest: Vec<u8>,
     pub vrchat_coarse: Vec<u8>,
@@ -156,7 +156,7 @@ pub struct PreviewFiles {
 
 impl PreviewFiles {
     pub fn len(&self) -> u64 {
-        (self.splat.len() + self.vrchat_pc.len() + self.vrchat_quest.len() + self.vrchat_coarse.len()) as u64
+        (self.vrchat_pc.len() + self.vrchat_quest.len() + self.vrchat_coarse.len()) as u64
     }
 
     pub fn is_empty(&self) -> bool {
@@ -236,8 +236,9 @@ impl Api {
     }
 
     /// Adds a 3D preview with its sky map (a reconstruction's sky.png, when there is one), replacing this member's
-    /// earlier one of the world: the web `.splat` and VRChat's splat trees (OrbitersContracts Docs/splat-tree.md).
-    /// `metadata` holds the start view (`{"view":{"position":[…],"target":[…]}}`), quality and capture date.
+    /// earlier one of the world: VRChat's splat trees (OrbitersContracts Docs/splat-tree.md), the PC one also the
+    /// website's `.splat`. `metadata` holds the start view (`{"view":{"position":[…],"target":[…],"floor":…,
+    /// "eyeHeight":…}}`), quality and capture date.
     pub fn add_preview(
         &self,
         token: &str,
@@ -250,7 +251,6 @@ impl Api {
         let world_id = world_path(world_id)?;
         let tree = |field: &'static str, name: &str, bytes: Vec<u8>| Part::bytes(field, format!("{world_id}-{name}.n4tree"), "application/octet-stream", bytes);
         let mut parts = vec![
-            Part::bytes("splat", format!("{world_id}.splat"), "application/octet-stream", files.splat),
             tree("vrchatPc", "pc", files.vrchat_pc),
             tree("vrchatQuest", "quest", files.vrchat_quest),
             tree("vrchatCoarse", "coarse", files.vrchat_coarse),

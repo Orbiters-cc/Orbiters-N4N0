@@ -10,9 +10,13 @@ pub const SPLAT_BYTES: usize = 32;
 /// About 19 MB: what a phone on the website still loads and draws smoothly.
 pub const DEFAULT_MAX: usize = 600_000;
 
-/// A downloaded web preview, back in the renderer's Unity coordinates. Reject malformed or non-finite splats.
+/// A downloaded web preview (the server makes it from the PC tree's leaves: at most crate::tree_tune::PC_SPLATS), back in
+/// the renderer's Unity coordinates. Reject malformed or non-finite splats.
 pub fn read_splat(bytes: &[u8]) -> anyhow::Result<Gaussians> {
-    anyhow::ensure!(!bytes.is_empty() && bytes.len().is_multiple_of(SPLAT_BYTES) && bytes.len() / SPLAT_BYTES <= 2_000_000, "Invalid splat file");
+    anyhow::ensure!(
+        !bytes.is_empty() && bytes.len().is_multiple_of(SPLAT_BYTES) && bytes.len() / SPLAT_BYTES <= crate::tree_tune::PC_SPLATS,
+        "Invalid splat file"
+    );
     let mut g = Gaussians::default();
     for b in bytes.chunks_exact(SPLAT_BYTES) {
         let f = |i: usize| f32::from_le_bytes(b[i..i + 4].try_into().unwrap());

@@ -13,8 +13,9 @@ use orbiters_core::contracts::frame_record::record_flags;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Splats in the PC file at most (32 MB).
-pub const PC_SPLATS: usize = 1 << 20;
+/// Splats in the PC file at most (64 MB): with Quest's, the coarse one and a sky map, an upload stays under the
+/// Cloudflare limit of 100 MB in front of Orbiters (contracts' Docs/splat-tree.md).
+pub const PC_SPLATS: usize = 1 << 21;
 /// In the Quest file at most (16 MB): what a Quest decodes and sorts smoothly.
 pub const QUEST_SPLATS: usize = 1 << 19;
 /// In the coarse file at most (1.5 MB).

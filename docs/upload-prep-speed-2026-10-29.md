@@ -88,13 +88,12 @@ implemented. No training-quality setting was reduced.
 
 ## Background preparation decision
 
-Do not start speculative background GPU tuning in this change. The reconstruction
-worker explicitly asks for low GPU priority and `train` attaches the SteamVR
-governor; `web_preview` uses the default device without that pacing. The existing
-iGPU setting concerns the interactive 3D viewer. `docs/igpu-experiment.md` measured
-shared-memory contention from that iGPU too. Moving upload preparation to the
-reconstruction-completion hook without a scheduler and contention measurements
-would not establish that it leaves VRChat's frames unaffected.
+Not in this change: the reconstruction worker asks for low GPU priority and `train`
+attaches the SteamVR governor, while `web_preview` used the default device without
+that pacing. Built later the same day with that pacing and a scheduler, and measured:
+[capture-detail-2026-10-29.md](capture-detail-2026-10-29.md), section 3. The upload
+no longer carries a web `.splat` either (the server makes it from the PC tree), so
+the cache holds the three trees and their metadata.
 
 <!-- measured-results:start -->
 ## Final timings

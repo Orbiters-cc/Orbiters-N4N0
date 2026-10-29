@@ -30,7 +30,7 @@ Repositories:
 | J | My World: thumbnail creation (from My Avatar), Publish 3D captures (coverage gizmo, capture, share, "official previews"), per-platform display variants | My World + world + server | |
 | K | Signed installer through SignPath (free for open source) | desktop xtask + CI; needs Enzo's SignPath account | |
 | L | Moderation UI for ADMIN/MODERATOR (website + desktop) | server frontend | |
-| M | Fixes: reconstruction ground level, recording without the avatar in view, menu touch/pointer freezes and re-centring loop, lazier follow on the hips, more detail on PC, 4-view grid shots while recording | desktop + Toolkit | |
+| M | Fixes: reconstruction ground level, recording without the avatar in view, menu touch/pointer freezes and re-centring loop, lazier follow on the hips, more detail on PC, 4-view grid shots while recording | desktop + Toolkit | Ground level, more detail on PC and background upload preparation built 2026-10-29 (M2: [capture-detail-2026-10-29.md](capture-detail-2026-10-29.md); contracts 4c4b70f, server dev, world); untried in VRChat and through a live upload |
 
 ## Order
 

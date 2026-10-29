@@ -38,8 +38,10 @@ struct Loaded {
     source: Source,
     splats: usize,
     views: Vec<View>,
-    /// The view to start from and how far ahead its subject is.
+    /// The recorded view to start from, where the view opens (looking its way at eye height over the ground: the
+    /// recorded one itself for a shared capture, whose start view is already that) and how far ahead its subject is.
     start: usize,
+    opening: View,
     depth: f32,
     /// Whether the PLY says what the keyframes saw of its splats (what the confidence control needs), and whether any
     /// lies beyond the depth frames' reach (what the far field control needs).
@@ -175,7 +177,7 @@ impl Viewer {
         let position = flip(vector("position").unwrap_or([0.0, 1.6, 0.0]));
         let target = flip(vector("target").unwrap_or([0.0, 1.6, -3.0]));
         let forward = normalize([target[0] - position[0], target[1] - position[1], target[2] - position[2]]);
-        Self::open_source(ctx, gpu, path, title, integrated, Some(View { position, forward, fov_y: 60.0f32.to_radians() }))
+        Self::open_source(ctx, gpu, path, title, integrated, Some(View { position, forward, fov_y: 60.0f32.to_radians(), time_ns: None }))
     }
 
     fn open_source(ctx: &egui::Context, gpu: &Handles, session: &Path, title: String, integrated: bool, view: Option<View>) -> Self {
@@ -250,7 +252,7 @@ impl Viewer {
                 match result {
                     Ok(l) => {
                         self.view = l.start;
-                        self.orbit = l.views.get(l.start).map(|v| Orbit::from_view(v, l.depth));
+                        self.orbit = Some(Orbit::from_view(&l.opening, l.depth));
                         self.loaded = Some(l);
                     }
                     Err(e) => self.error = Some(e),
@@ -542,9 +544,11 @@ fn source(ctx: &egui::Context, window: (wgpu::Device, wgpu::Queue), integrated: 
 /// `integrated`, else or when that fails on the window's device).
 fn load(dir: &Path, ctx: &egui::Context, window: (wgpu::Device, wgpu::Queue), integrated: bool, view: Option<View>) -> anyhow::Result<Loaded> {
     let (g, sky) = read(dir)?;
+    let shared = view.is_some();
     let (views, start) = if let Some(v) = view { (vec![v], 0) } else { views::recorded(dir)? };
+    let opening = if shared { views[start] } else { views::eye_level(dir, &g, &views[start]).0 };
     // Orbit around what that view looks at.
-    let depth = views::depth_ahead(&g, &views[start]);
+    let depth = views::depth_ahead(&g, &opening);
     let source = match integrated.then(|| source(ctx, window.clone(), true, &g, sky.as_ref())) {
         Some(Ok(s)) => s,
         Some(Err(e)) => {
@@ -556,7 +560,7 @@ fn load(dir: &Path, ctx: &egui::Context, window: (wgpu::Device, wgpu::Queue), in
     let seen = g.seen.iter().any(|s| s.weight >= 0.0);
     let far = g.seen.iter().any(|s| s.beyond > 0.0);
     let horizon = sky.as_ref().map(SkyMap::horizon).or_else(|| orbiters_reconstruct::sky::horizon(&g)).unwrap_or(BACKGROUND);
-    Ok(Loaded { source, splats: g.len(), views, start, depth, seen, far, horizon })
+    Ok(Loaded { source, splats: g.len(), views, start, opening, depth, seen, far, horizon })
 }
 
 const BLIT: &str = r#"

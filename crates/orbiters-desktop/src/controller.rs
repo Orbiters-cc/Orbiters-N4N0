@@ -290,6 +290,7 @@ pub mod vrchat_data;
 pub mod vrchat_login;
 mod world_captures;
 pub use account::open_url;
+pub(crate) use maps::prepare as prepare_upload;
 
 impl Controller {
     pub fn new(settings: Settings) -> Shared {
@@ -807,6 +808,7 @@ impl Controller {
         // Training takes the whole GPU: the game and the recording come first; the run starts over once they are done
         // (stopped once the state says capturing, so the run's exit does not start it again).
         if !importing {
+            crate::upload_prep::pause();
             if let Some(dir) = self.running_reconstruction() {
                 self.stop_reconstruction();
                 self.change_queue(|q| q.push_front(dir));
@@ -1066,6 +1068,9 @@ impl Controller {
         }
         if in_use != Some(true) {
             return;
+        }
+        if self.held_for_vrchat() {
+            crate::upload_prep::pause();
         }
         let moved = {
             let mut guard = self.reconstruction.lock().unwrap();
@@ -1557,6 +1562,10 @@ impl Controller {
     /// graphics card (a minute or two there instead of an hour), and the ones held for VRChat start.
     fn vrchat_changed(self: &Shared, running: bool) {
         if running {
+            // Preparing uploads in the background goes on beside VRChat only while SteamVR's frame timing paces it.
+            if !self.snapshot.lock().unwrap().steamvr.running {
+                crate::upload_prep::pause();
+            }
             return;
         }
         let moved = {
@@ -1595,6 +1604,8 @@ impl Controller {
         if guard.is_some() {
             anyhow::bail!("A reconstruction is already running.");
         }
+        crate::upload_prep::forget(&dir);
+        crate::upload_prep::pause();
         let on_event = {
             let ctl = self.clone();
             move |e| ctl.on_reconstruct_event(e)
@@ -1670,7 +1681,10 @@ impl Controller {
             if self.is_capturing() || self.reconstruction.lock().unwrap().is_some() || self.held_for_vrchat() {
                 return;
             }
-            let Some(dir) = self.change_queue(VecDeque::pop_front) else { return };
+            let Some(dir) = self.change_queue(VecDeque::pop_front) else {
+                self.next_upload_prep();
+                return;
+            };
             match self.start_reconstruction(dir.clone()) {
                 Ok(()) => return,
                 Err(e) => {
@@ -1710,6 +1724,10 @@ impl Controller {
             }),
             ReconstructEvent::Done { report } => {
                 self.mark_reconstruction_told();
+                // Its upload files, prepared once nothing else runs: sharing it is then at once (crate::upload_prep).
+                if let Some(dir) = self.running_reconstruction() {
+                    crate::upload_prep::queue(dir);
+                }
                 let quality = report.psnr_held_out.map(|p| format!(", {p:.1} dB on views it never saw")).unwrap_or_default();
                 self.notify(
                     NoticeKind::Success,
@@ -1722,6 +1740,38 @@ impl Controller {
                 self.mark_reconstruction_told();
                 self.notify(NoticeKind::Error, format!("Reconstruction failed: {message}"));
             }
+        }
+    }
+
+    /// Prepares the next session waiting for its upload files in the background (crate::upload_prep), on the integrated
+    /// GPU while VRChat runs when reconstructions train there; its exit looks for the next work. Beside VRChat only while
+    /// SteamVR runs: its frame timing paces the steps (orbiters_reconstruct::governor). Without it, nothing does: the
+    /// preparation of a 970k-splat capture made 17 % of a stand-in game's 90 Hz frames late at low queue priority as at
+    /// normal priority (docs/capture-detail-2026-10-29.md), so it waits for VRChat to close (a share prepares at once).
+    fn next_upload_prep(self: &Shared) {
+        let (vrchat, steamvr) = {
+            let s = self.snapshot.lock().unwrap();
+            (s.vrchat.running, s.steamvr.running)
+        };
+        if vrchat && !steamvr {
+            return;
+        }
+        let integrated = self.settings().reconstruct_while_playing == WhilePlaying::IntegratedGpu && vrchat;
+        let log = self.clone();
+        let next = self.clone();
+        let started = crate::upload_prep::start_next(
+            integrated,
+            move |line| {
+                let mut log = log.worker_log.lock().unwrap();
+                log.push_back(format!("prepare upload: {line}"));
+                while log.len() > 400 {
+                    log.pop_front();
+                }
+            },
+            move || next.next_reconstruction(),
+        );
+        if let Err(e) = started {
+            eprintln!("could not start preparing an upload in the background: {e:#}");
         }
     }
 

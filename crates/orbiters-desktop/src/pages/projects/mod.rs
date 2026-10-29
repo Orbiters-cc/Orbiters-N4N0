@@ -2,6 +2,8 @@
 mod art;
 mod dialogs;
 mod panel;
+mod preview;
+mod preview_gpu;
 mod state;
 mod ui;
 pub use state::Poke;

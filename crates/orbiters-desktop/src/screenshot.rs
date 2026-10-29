@@ -1440,6 +1440,38 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             library: None,
         });
     }
+    // The selected project's 3D preview (a stand-in scene, or `ORBITERS_PREVIEW_FILE`, one Toolkit wrote): settled,
+    // rising out of the ground, the camera swinging round, turned by a drag, its window growing out of the card and
+    // open (with two scenes), a sheet's on narrow windows (`--width 1040`), and the notes of projects without one.
+    for (name, frames) in [
+        ("projects-preview", 200),
+        ("projects-preview-reveal", 30),
+        ("projects-preview-swing", 60),
+        ("projects-preview-turned", 120),
+        ("projects-preview-open-mid", 96),
+        ("projects-preview-open", 230),
+        ("projects-preview-scenes", 230),
+        ("projects-preview-sheet", 200),
+        ("projects-preview-none", 90),
+        ("projects-preview-no-toolkit", 90),
+    ] {
+        let mut snapshot = scenarios[0].snapshot.clone();
+        snapshot.account.development = true;
+        scenarios.push(Scenario {
+            name,
+            page: Page::Projects,
+            snapshot,
+            frames,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        });
+    }
 
     for name in [
         "gallery-mixed",
@@ -1564,6 +1596,9 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             if sc.name.starts_with("projects-") {
                 app.projects_mut().stage(&ctx, sc.name);
             }
+            if sc.name.starts_with("projects-preview") {
+                app.projects_mut().stage_preview(sc.name);
+            }
             if sc.page == Page::Videos {
                 stage_videos(&ctx, &mut app, sc.name);
             }
@@ -1574,7 +1609,8 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         }
         if sc.name.starts_with("projects-") && f > 0 {
             use crate::pages::projects::Poke;
-            match app.projects_mut().stage_frame(sc.name, f) {
+            let poke = app.projects_mut().stage_frame(sc.name, f);
+            match poke.or_else(|| app.projects_mut().stage_preview_frame(sc.name, f)) {
                 Some(Poke::Press(p)) => {
                     input.events.push(Event::PointerMoved(p));
                     input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });

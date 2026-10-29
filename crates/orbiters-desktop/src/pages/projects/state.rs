@@ -150,6 +150,8 @@ pub struct State {
     pub(super) fixture_action: Option<String>,
     /// Screenshots: avatar pictures, package icons and template covers that arrive later (they fade in).
     pub(super) fixture_later: HashMap<String, TextureHandle>,
+    /// The selected project's 3D preview and the window it grows into.
+    pub(super) preview: super::preview::Previews,
     pub(super) fixture_icons_later: HashMap<String, PackageIcon>,
     /// Screenshots (`projects-icons-live`): the stand-in packages' icons looked for for real (cache, then network).
     pub(super) fixture_live_icons: bool,
@@ -224,6 +226,7 @@ impl Default for State {
             fixture_view_loading: false,
             fixture_action: None,
             fixture_later: HashMap::new(),
+            preview: Default::default(),
             fixture_icons_later: HashMap::new(),
             fixture_live_icons: false,
             fixture_banners_later: HashMap::new(),

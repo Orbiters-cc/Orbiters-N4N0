@@ -203,6 +203,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     widgets::frame(&p, r, theme::CARD_RADIUS, theme::surface());
     let cover = Rect::from_min_size(r.min, vec2(w, cover_h));
     art::cover(&p, state, project, cover, [theme::CARD_RADIUS, theme::CARD_RADIUS, 0.0, 0.0], 1.0);
+    super::preview::cover(ui, cx, state, project, cover, [theme::CARD_RADIUS, theme::CARD_RADIUS, 0.0, 0.0], sheet);
     let shade = Rect::from_min_max(pos2(cover.left(), cover.top() + cover_h * 0.35), cover.max);
     paint::fill_gradient(
         &p,

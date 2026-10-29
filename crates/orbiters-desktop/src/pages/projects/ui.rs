@@ -133,6 +133,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         panel::show(ui, cx, state, page, placed.content_top, split, dock, panel_w);
     }
     activity(ui, state, Rect::from_min_max(pos2(page.left(), page.top()), pos2(gallery_right + PAD_X * (1.0 - dock), page.bottom())));
+    super::preview::window(ui, cx, state);
     modals(ui, cx, state);
 }
 

@@ -1,14 +1,18 @@
 //! A window that grows out of what was clicked (a card's picture, a button) and shrinks back into it, as the
 //! website's card previews do (CardPreviewDialog, its gallery and capture windows): the bounds move on one
 //! restrained spring ([`Spring::EXPAND`]) from the origin's rect to the window's, never an unequal scale of
-//! pictures or text; the surface is opaque all the way, the backdrop fades with the window, the content fades in
-//! once the window has most of its size and goes first when it closes. The window follows its own size (a panel
-//! opening in it, another picture's shape) on the same spring.
+//! pictures or text; the backdrop fades with the window, the content fades in once the window has most of its size
+//! and goes first when it closes. Closing is the opening backwards, then a landing ([`crate::morph`]): a window whose
+//! caller draws its card under it ([`Morph::riding`], [`crate::morph::ride`]) fades in over the card as it leaves it
+//! and out over it as it lands, and the card bounces; other windows are opaque from their first frame and fade out on
+//! their origin. The window follows its own size (a panel opening in it, another picture's shape) and its origin (the
+//! card moved) on the same spring.
 //!
 //! Picture windows are sized to their picture ([`picture_layout`]): wide pictures sit over their details, tall ones
 //! beside them, and a window whose details grow crops its picture rather than scroll.
 
 use crate::anim::{self, Spring};
+use crate::morph;
 use crate::theme;
 use crate::widgets::{self, IconButton};
 use crate::{icons, paint};
@@ -21,6 +25,7 @@ pub struct Morph {
     origin: Rect,
     origin_radius: f32,
     closing: bool,
+    riding: bool,
 }
 
 /// Where a [`Morph`] is this frame and how much of it shows.
@@ -36,7 +41,14 @@ pub struct Frame {
     pub content: f32,
     /// Opacity of the backdrop.
     pub backdrop: f32,
-    /// Back on its origin after closing: drop the window and show the origin again.
+    /// Opacity of the whole window: it fades over its origin in the last stretch of the way back (and, when its card
+    /// rides under it, out of it as it opens).
+    pub shape: f32,
+    /// Opacity of the card under it, for a caller that draws it ([`Morph::riding`]).
+    pub source: f32,
+    /// Scale of the card it landed on (its bounce), 1 otherwise.
+    pub landing: f32,
+    /// Landed and settled: drop the window (after drawing this frame) and show the origin again.
     pub closed: bool,
 }
 
@@ -47,7 +59,13 @@ impl Morph {
     /// A window opening from `origin`, whose corners have `origin_radius`. `id` must be new for each opening (the
     /// springs live under it).
     pub fn new(id: Id, origin: Rect, origin_radius: f32) -> Self {
-        Self { id, origin, origin_radius, closing: false }
+        Self { id, origin, origin_radius, closing: false, riding: false }
+    }
+
+    /// Whether the caller draws the window's card under it where [`Frame::source`] says (the window then fades in
+    /// over the card as it leaves it).
+    pub fn riding(&mut self, riding: bool) {
+        self.riding = riding;
     }
 
     pub fn id(&self) -> Id {
@@ -76,12 +94,26 @@ impl Morph {
         self.closing
     }
 
-    /// The window this frame, on its way to `target` (or back to its origin while closing).
+    /// The window this frame, on its way to `target` (or back to its origin while closing, then landing on it).
     pub fn frame(&self, ctx: &Context, target: Rect) -> Frame {
-        let t = anim::spring_from(ctx, self.id.with("t"), [0.0], [if self.closing { 0.0 } else { 1.0 }], Spring::EXPAND)[0];
+        let travel = morph::travel(ctx, self.id, !self.closing, Spring::EXPAND);
         let goal = rect_array(target);
         let sprung = anim::spring_from(ctx, self.id.with("target"), goal, goal, Spring::EXPAND);
-        frame_at(self.origin, self.origin_radius, array_rect(sprung), t, self.closing)
+        let origin = self.sprung_origin(ctx);
+        if travel.landed {
+            morph::land(ctx, origin, travel.landing);
+        }
+        let f = frame_at(origin, self.origin_radius, array_rect(sprung), travel.t, self.closing || self.riding);
+        Frame { landing: travel.landing, closed: travel.done, ..f }
+    }
+
+    /// The origin, following the card on the window's spring when it moves (another item's card, the grid scrolled).
+    fn sprung_origin(&self, ctx: &Context) -> Rect {
+        if !self.origin.is_finite() {
+            return self.origin;
+        }
+        let goal = rect_array(self.origin);
+        array_rect(anim::spring_from(ctx, self.id.with("origin"), goal, goal, Spring::EXPAND))
     }
 
     /// A part of the window (its picture) on the same way as the window `f`: from the origin to `target`, where it
@@ -89,12 +121,13 @@ impl Morph {
     pub fn part(&self, ctx: &Context, name: &str, target: Rect, f: &Frame) -> Rect {
         let goal = rect_array(target);
         let sprung = anim::spring_from(ctx, self.id.with(("part", name)), goal, goal, Spring::EXPAND);
-        lerp_rect(self.origin, array_rect(sprung), f.t)
+        lerp_rect(self.sprung_origin(ctx), array_rect(sprung), f.t)
     }
 }
 
-/// The window at progress `t` between `origin` and `target` (see [`Morph::frame`]).
-pub fn frame_at(origin: Rect, origin_radius: f32, target: Rect, t: f32, closing: bool) -> Frame {
+/// The window at progress `t` between `origin` and `target` (see [`Morph::frame`]); `fades`: it hands over to its
+/// origin near it ([`morph::shape_alpha`]) instead of staying opaque (a window opening from a card nobody draws).
+pub fn frame_at(origin: Rect, origin_radius: f32, target: Rect, t: f32, fades: bool) -> Frame {
     let k = t.clamp(0.0, 1.0);
     Frame {
         rect: lerp_rect(origin, target, t),
@@ -102,7 +135,10 @@ pub fn frame_at(origin: Rect, origin_radius: f32, target: Rect, t: f32, closing:
         radius: origin_radius + (RADIUS - origin_radius) * k,
         content: smoothstep(0.45, 0.9, t),
         backdrop: (t * 1.6).clamp(0.0, 1.0),
-        closed: closing && t < 0.01,
+        shape: if fades { morph::shape_alpha(t) } else { 1.0 },
+        source: morph::source_alpha(t),
+        landing: 1.0,
+        closed: false,
     }
 }
 
@@ -130,13 +166,13 @@ pub fn paint_backdrop(painter: &Painter, area: Rect, f: &Frame) {
     painter.rect_filled(area, 0.0, theme::alpha(theme::INK_950, 0.72 * f.backdrop));
 }
 
-/// The window's opaque surface and its shadow, which grows in as it opens.
+/// The window's surface and its shadow, which grows in as it opens (both as opaque as the window, [`Frame::shape`]).
 pub fn paint_surface(painter: &Painter, f: &Frame) {
     let k = f.t.clamp(0.0, 1.0);
     if k > 0.01 {
-        paint::shadow(painter, f.rect, f.radius, vec2(0.0, 24.0 * k), 48.0, -8.0, theme::black(0.5 * k));
+        paint::shadow(painter, f.rect, f.radius, vec2(0.0, 24.0 * k), 48.0, -8.0, theme::black(0.5 * k * f.shape));
     }
-    widgets::frame(painter, f.rect, f.radius, theme::surface_strong());
+    widgets::frame(painter, f.rect, f.radius, theme::surface_strong().gamma_multiply(f.shape));
 }
 
 /// The close button inset in the window's top-right corner: a touch-sized target on a dark round backdrop, so it
@@ -255,8 +291,11 @@ mod tests {
         // A bounce past 1 overshoots the target a little, the radius never past its own.
         let past = frame_at(origin, 20.0, target, 1.03, false);
         assert!(past.rect.width() > target.width() && past.radius == RADIUS);
-        assert!(!frame_at(origin, 20.0, target, 0.005, false).closed);
-        assert!(frame_at(origin, 20.0, target, 0.005, true).closed);
+        // Near its origin it hands over to it when it fades (closing, or its card drawn under it), else stays opaque.
+        assert_eq!(frame_at(origin, 20.0, target, 0.0, true).shape, 0.0);
+        assert_eq!(frame_at(origin, 20.0, target, 0.0, false).shape, 1.0);
+        assert_eq!(frame_at(origin, 20.0, target, 0.0, true).source, 1.0);
+        assert_eq!(frame_at(origin, 20.0, target, 0.6, true).source, 0.0);
     }
 
     #[test]

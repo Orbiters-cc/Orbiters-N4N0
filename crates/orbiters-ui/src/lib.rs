@@ -1,6 +1,7 @@
 //! Orbiters interface toolkit, shared by the desktop window and the VR overlay: the Orbiters look (theme, fonts,
 //! icons), springs, the glow background shader, the progressive blur under bars, painting helpers, widgets, the
-//! record button, the trail map, toasts, the window that grows out of a card ([`viewer`]), an offscreen GPU renderer
+//! record button, the trail map, toasts, the window that grows out of a card ([`viewer`]) and
+//! how such morphs land back on their source ([`morph`]), an offscreen GPU renderer
 //! (screenshots) and a CPU painter (the VR overlay).
 
 pub mod anim;
@@ -13,6 +14,7 @@ pub mod glow;
 pub mod icons;
 pub mod layout;
 pub mod logo;
+pub mod morph;
 pub mod n4n0_face;
 pub mod n4n0_logo;
 pub mod offscreen;

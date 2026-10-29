@@ -76,6 +76,9 @@ pub struct State {
     instance_error: Option<String>,
     /// Each card's picture as last drawn (by entry key): windows open out of it and close back into it.
     cards: HashMap<String, Rect>,
+    /// The open window came out of a card of the grid (it rides on the window's way and lands back there; a window
+    /// opened elsewhere, from a request, keeps to its own origin).
+    from_card: bool,
     /// Each group's Instance button as last drawn (by its first entry's key).
     instance_buttons: HashMap<String, Rect>,
     serial: u64,
@@ -174,6 +177,7 @@ impl State {
         let Some(e) = self.shown.get(n).cloned() else { return };
         let origin = self.cards.get(&e.key).copied().unwrap_or(Rect::from_min_size(pos2(264.0, 260.0), vec2(317.0, 178.0)));
         self.dialog = Some(Dialog::new(ctx, e, false).from(origin, 20.0));
+        self.from_card = true;
     }
 
     /// Starts closing the open window (screenshots).
@@ -193,6 +197,11 @@ impl State {
     /// Opens the requests window out of its button (screenshots).
     pub fn open_requests(&mut self) {
         self.requests.open = true;
+    }
+
+    /// Closes the requests window back into its button (screenshots).
+    pub fn close_requests(&mut self) {
+        self.requests.open = false;
     }
 
     fn fetch(&mut self, ctx: &egui::Context, server: Server, more: bool) {
@@ -332,8 +341,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         entries
     };
 
-    // The card the window came out of stays hidden until the window is back on it.
-    let open_key = state.dialog.as_ref().map(|d| (d.entry.key.clone(), card_opacity(d.progress(&ctx))));
+    // The card the window came out of is left out while the window draws it (riding under it as it leaves and lands)
+    // and covers it, until the window landed back on it.
+    let open_key = state.dialog.as_ref().filter(|d| state.from_card && d.hides_source()).map(|d| d.entry.key.clone());
+    let window_key = state.dialog.as_ref().map(|d| d.entry.key.clone());
+    let mut window_card: Option<sharing::Source> = None;
     let loading = state.local_job.running() || (state.feed_job.running() && state.feed.items.is_empty());
     let from = orbiters_ui::blur::next_shape(ui);
     let mut gu = ui.new_child(UiBuilder::new().max_rect(page).id_salt("photos-captures-grid"));
@@ -396,13 +408,25 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                             let url = from.avatar_url.clone()?;
                             state.pictures.as_mut()?.get(&ctx, &crate::worlds::Picture::Remote { world_id: format!("person-{}", from.id), url, large: false })
                         });
-                        let shown = open_key.as_ref().filter(|(k, _)| *k == e.key).map_or(1.0, |(_, o)| *o);
+                        let shown = if open_key.as_ref() == Some(&e.key) { 0.0 } else { 1.0 };
                         let sharing = cx.snap.capture_shares.iter().any(|j| j.key == e.key && j.outcome.is_none());
-                        let look = CardLook { tex: tex.as_ref(), from: from_tex.as_ref(), shown, interactive: !modal, sharing };
+                        let look = CardLook { tex: tex.as_ref(), from: from_tex.as_ref(), shown, interactive: !modal, sharing, riding: false };
                         if let Some(thumb) = card(ui, cx, index, e, r, &look) {
                             clicked = Some((e.clone(), thumb));
                         }
-                        state.cards.insert(e.key.clone(), Rect::from_min_size(r.min, vec2(w, w * 9.0 / 16.0)));
+                        let picture = Rect::from_min_size(r.min, vec2(w, w * 9.0 / 16.0));
+                        state.cards.insert(e.key.clone(), picture);
+                        if window_key.as_ref() == Some(&e.key) {
+                            let (e, tex, from_tex) = (e.clone(), tex.clone(), from_tex.clone());
+                            window_card = Some(sharing::Source {
+                                home: r,
+                                picture,
+                                paint: Box::new(move |ui, cx| {
+                                    let look = CardLook { tex: tex.as_ref(), from: from_tex.as_ref(), shown: 1.0, interactive: false, sharing, riding: true };
+                                    card(ui, cx, 0, &e, r, &look);
+                                }),
+                            });
+                        }
                     }
                     ui.add_space(32.0);
                 }
@@ -477,10 +501,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let requests_open = state.requests.open || state.requests.is_out();
     {
         let mut ru = ui.new_child(UiBuilder::new().max_rect(request_button.expand(10.0)).id_salt("requests-button"));
-        // The window grows out of the button: the button is away while it is.
-        if requests_open {
-            ru.multiply_opacity(0.0);
-        }
+        // The window grows out of the button: the button is away while it is, and back as the window lands on it.
+        ru.multiply_opacity(if state.requests.open && !state.requests.is_out() { 0.0 } else { state.requests.button_alpha(&ctx) });
         let resp = rb.width(rw).id_salt("requests-button").show_at(&mut ru, request_button);
         if pending > 0 {
             let k = anim::spring_from(&ctx, Id::unique(("requests-badge", pending)), [0.6], [1.0], Spring::BOUNCY)[0];
@@ -505,6 +527,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             d = d.from(o, 14.0);
         }
         state.dialog = Some(d);
+        state.from_card = false;
     }
     if let Some((e, thumb)) = clicked {
         let mut e = e;
@@ -514,6 +537,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             }
         }
         state.dialog = Some(Dialog::new(&ctx, e, false).from(thumb, 20.0));
+        state.from_card = true;
     }
     if let Some(d) = state.dialog.as_mut() {
         // The items before and after it in the gallery: arrows and ←/→ go through them.
@@ -535,8 +559,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                 d.navigate(next.clone(), step as f32);
             }
         }
-        if let Some(r) = state.cards.get(&d.entry.key) {
-            d.set_origin(*r);
+        // Its card where the grid drew it this frame (it follows a scroll, another item's card); off screen, it closes
+        // into the middle of the page.
+        if state.from_card {
+            match window_card.take().filter(|c| c.home.intersects(page)) {
+                Some(c) => {
+                    d.set_origin(c.picture);
+                    d.source = Some(c);
+                }
+                None => d.lose_origin(),
+            }
         }
         let close = d.show(ui, cx);
         if d.changed {
@@ -589,17 +621,6 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
 const CARD_BODY: f32 = 70.0;
 /// The narrowest card, as Visited worlds' (the same card): both pages get as many columns at every width.
 const CARD_MIN: f32 = 270.0;
-
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-/// The card under a window that grew out of it: hidden while the window is away, there again (under the still
-/// opaque window) as it lands back.
-fn card_opacity(progress: f32) -> f32 {
-    1.0 - smoothstep(0.04, 0.3, progress)
-}
 
 /// A group's heading: the world, when, what kind of instance and how many; the Instance button on the right.
 /// Returns that button's rect and whether it was pressed.
@@ -654,6 +675,8 @@ struct CardLook<'a> {
     interactive: bool,
     /// A share of it is running.
     sharing: bool,
+    /// Drawn by its window, riding under it: takes no input, its hover and press let go.
+    riding: bool,
 }
 
 /// One card, as Visited worlds' and Capture files': the picture with what it is and who sees it, then its kind,
@@ -661,8 +684,8 @@ struct CardLook<'a> {
 fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'_>) -> Option<Rect> {
     let ctx = ui.ctx().clone();
     let id = Id::unique(("gallery-card", &e.key));
-    let resp = ui.interact(rect, id, if look.interactive { Sense::click() } else { Sense::hover() });
-    let resp = if look.interactive { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
+    let resp = (!look.riding).then(|| ui.interact(rect, id, if look.interactive { Sense::click() } else { Sense::hover() }));
+    let resp = resp.map(|r| if look.interactive { r.on_hover_cursor(CursorIcon::PointingHand) } else { r });
     // Entrance: up and in, 35 ms apart.
     let delay = 0.08 + i.min(12) as f64 * 0.035;
     let elapsed = anim::time(&ctx) - cx.entered;
@@ -670,8 +693,8 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(delay - elapsed));
     }
     let enter = anim::spring_from(&ctx, id.with(("enter", cx.visit)), [0.0], [if elapsed >= delay { 1.0 } else { 0.0 }], Spring::SOFT)[0];
-    let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered() && look.interactive, Spring::SOFT);
-    let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on() && look.interactive, Spring::SNAPPY);
+    let hover = anim::toggle(&ctx, id.with("hover"), resp.as_ref().is_some_and(|r| r.hovered()) && look.interactive, Spring::SOFT);
+    let press = anim::toggle(&ctx, id.with("press"), resp.as_ref().is_some_and(|r| r.is_pointer_button_down_on()) && look.interactive, Spring::SNAPPY);
     let scale = (0.97 + 0.03 * enter) * (1.0 - 0.03 * press);
     let r = Rect::from_center_size(rect.center() + vec2(0.0, 20.0 * (1.0 - enter) - 4.0 * hover), rect.size() * scale);
     let mut p = ui.painter().clone();
@@ -774,7 +797,7 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         widgets::icon(&p, pos2(bx + 7.0, line_y), glyph, 13.0, color);
         widgets::text_truncated(&p, pos2(bx + 20.0, line_y), Align2::LEFT_CENTER, &Txt::new(label, 12.0).color(color), r.width() - 52.0);
     }
-    (look.interactive && sharing::pressed(resp)).then_some(thumb)
+    (look.interactive && resp.is_some_and(sharing::pressed)).then_some(thumb)
 }
 
 fn empty_state(ui: &mut Ui, cx: &Cx, filter: Filter, searching: bool, height: f32) {
@@ -841,12 +864,7 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
     }
     let Some(inst) = state.instance.as_ref() else { return };
     let id = Id::unique(("instance-popover", inst.serial));
-    let k = anim::spring_from(ctx, id.with("in"), [0.0], [if inst.closing { 0.0 } else { 1.0 }], Spring::BOUNCY)[0];
-    if inst.closing && k < 0.03 {
-        state.instance = None;
-        return;
-    }
-    let anchor = inst.anchor;
+    let (anchor, closing) = (inst.anchor, inst.closing);
     let current = cx.snap.vrchat.running && is_current(&cx.snap.vrchat.world, &e);
     let people = if current { cx.snap.vrchat.world.players.values().cloned().collect::<Vec<_>>() } else { e.people.clone() };
     let width = 380.0;
@@ -857,11 +875,13 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
     let join = join_available(current, state.instance_alive) && e.instance.is_some();
     let h = 20.0 + 44.0 + 16.0 + 14.0 + 10.0 + people_h.max(20.0) + 18.0 + 22.0 + 16.0 + 40.0 + 20.0 + if state.instance_error.is_some() { 40.0 } else { 0.0 };
     let base = Rect::from_min_size(pos2(anchor.right() - width, anchor.bottom() + 8.0), vec2(width, h));
-    // Grows from the button's corner.
-    let kk = k.clamp(0.0, 1.0);
-    let rect =
-        Rect::from_min_max(base.right_top() + (base.left_top() - base.right_top()) * (0.9 + 0.1 * k), base.right_top() + vec2(0.0, h * (0.92 + 0.08 * k)))
-            .translate(vec2(0.0, -8.0 * (1.0 - k)));
+    // Grows from the button's corner, and back into it.
+    let pop = orbiters_ui::popup::popover(ctx, id, anchor, base, !closing);
+    if pop.gone {
+        state.instance = None;
+        return;
+    }
+    let (rect, kk) = (pop.rect, pop.opacity);
     let mut close = false;
     let mut open_link = None;
     let mut retry = false;
@@ -1076,11 +1096,5 @@ mod tests {
         assert_eq!(instance_parts("12345~friends(usr_1)~region(eu)"), ("12345", "Friends", "eu"));
         assert_eq!(instance_parts("777~private(usr_1)~canRequestInvite~region(jp)"), ("777", "Invite+", "jp"));
         assert_eq!(instance_parts("42"), ("42", "Public", ""));
-    }
-    #[test]
-    fn the_card_hides_while_its_window_is_out_and_shows_as_it_lands() {
-        assert_eq!(card_opacity(0.0), 1.0);
-        assert_eq!(card_opacity(0.5), 0.0);
-        assert!(card_opacity(0.1) > 0.0 && card_opacity(0.1) < 1.0);
     }
 }

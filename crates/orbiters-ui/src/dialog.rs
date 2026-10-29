@@ -1,14 +1,17 @@
 //! A dialog that grows out of what opened it (a button, a card) into the middle of the window and shrinks back into it
 //! when it closes, its height following its content with a spring when that changes (another step of the same flow).
-//! The page under it dims and takes no clicks; a click there, Escape or its × closes it.
+//! The page under it dims and takes no clicks; a click there, Escape or its × closes it. Closing is the opening run
+//! backwards: the contents go first, the shape turns back into its origin's colour, fades out over it as it lands and
+//! the origin bounces ([`crate::morph`]; buttons from [`crate::widgets`] do on their own).
 //!
 //! The caller keeps the dialog while [`Response::closed`] is false: [`close`] (or the person) starts the closing
-//! morph, and `closed` comes once it ended. A new `id` (a serial) opens a new dialog.
+//! morph, and `closed` comes once it landed. [`reopen`] turns a closing dialog back from where it is (its button
+//! pressed again); a new `id` (a serial) opens a new dialog.
 
 use crate::anim::{self, Spring};
 use crate::theme::{self, weight, Txt};
 use crate::widgets;
-use crate::{icons, paint, popup};
+use crate::{icons, morph, paint, popup};
 use egui::{pos2, vec2, Align2, Id, Order, Rect, Sense, Ui, UiBuilder};
 
 /// Which part of the dialog the contents closure is asked for.
@@ -48,6 +51,17 @@ fn closing_id(id: Id) -> Id {
 /// Starts the closing morph of the dialog `id`.
 pub fn close(ctx: &egui::Context, id: Id) {
     ctx.data_mut(|d| d.insert_temp(closing_id(id), true));
+}
+
+/// Turns the closing dialog `id` back open from where its morph is.
+pub fn reopen(ctx: &egui::Context, id: Id) {
+    ctx.data_mut(|d| d.remove_temp::<bool>(closing_id(id)));
+}
+
+/// How much of what the dialog `id` grew out of shows: none while it is out, all of it from the hand-over on (it lands
+/// over its origin, which then bounces). A page that hides its button while the dialog is out shows it this much.
+pub fn source_alpha(ctx: &egui::Context, id: Id) -> f32 {
+    morph::source_alpha_by(ctx.data(|d| d.get_temp::<f32>(id.with("dialog-t"))).unwrap_or(0.0), morph::HANDOVER_LATE)
 }
 
 pub fn is_closing(ctx: &egui::Context, id: Id) -> bool {
@@ -106,10 +120,15 @@ impl<'a> Dialog<'a> {
     pub fn show(self, ctx: &egui::Context, mut contents: impl FnMut(&mut Ui, Part)) -> Response {
         let id = self.id;
         let closing = is_closing(ctx, id);
-        let t = anim::spring_from(ctx, id.with("t"), [0.0], [if closing { 0.0 } else { 1.0 }], Spring::MORPH)[0];
-        if closing && t < 0.02 {
+        let travel = morph::travel(ctx, id, !closing, Spring::MORPH);
+        let t = travel.t;
+        ctx.data_mut(|d| d.insert_temp(id.with("dialog-t"), t));
+        if travel.done {
             ctx.data_mut(|d| d.remove_temp::<bool>(closing_id(id)));
             return Response { closing: true, closed: true };
+        }
+        if travel.landed {
+            morph::land(ctx, self.origin, travel.landing);
         }
         let screen = ctx.content_rect();
         let width = self.width.min(screen.width() - 2.0 * MARGIN).max(280.0);
@@ -137,18 +156,22 @@ impl<'a> Dialog<'a> {
         let landed = (scale - 1.0).abs() < 0.002 && (shape.center() - fin.center()).length() < 0.25;
         let mut response = Response { closing, closed: false };
 
-        // Opaque from its first frame (egui fades new areas in): it grows out of its origin instead.
-        egui::Area::new(id.with("dialog-area")).order(Order::Foreground).fixed_pos(screen.min).fade_in(false).show(ctx, |ui| {
+        // Over its origin near it: fading in as it leaves, out as it lands (the origin then bounces), once it is nearly
+        // the origin's size.
+        let solid = morph::shape_alpha_by(t, morph::HANDOVER_LATE);
+        // egui fades new areas in: this one grows out of its origin instead. While it closes, the page under it takes
+        // presses again (its button reopens it).
+        egui::Area::new(id.with("dialog-area")).order(Order::Foreground).fixed_pos(screen.min).fade_in(false).interactable(!closing).show(ctx, |ui| {
             ui.set_min_size(screen.size());
             let scrim = ui.interact(screen, id.with("scrim"), Sense::click());
-            ui.painter().rect_filled(screen, 0.0, theme::black(0.55 * k));
+            ui.painter().rect_filled(screen, 0.0, theme::black(0.55 * morph::smoothstep(0.08, 0.5, t)));
             if !closing && !self.busy && widgets::pressed(&scrim) {
                 close(ctx, id);
             }
             let p = ui.painter();
-            paint::shadow(p, shape, radius, vec2(0.0, 18.0), 40.0, -10.0, theme::black(0.5 * k));
+            paint::shadow(p, shape, radius, vec2(0.0, 18.0), 40.0, -10.0, theme::black(0.5 * k * solid));
             // From the colour of what it grew out of to its own, early in the flight.
-            widgets::frame(p, shape, radius, theme::mix(self.origin_fill, theme::INK_850, (k * 1.7).clamp(0.0, 1.0)));
+            widgets::frame(p, shape, radius, theme::mix(self.origin_fill, theme::INK_850, (k * 1.7).clamp(0.0, 1.0)).gamma_multiply(solid));
             let _ = ui.interact(shape, id.with("shape"), Sense::click());
 
             // The contents are laid out where the dialog lands and drawn through the flight's transform (pictures and

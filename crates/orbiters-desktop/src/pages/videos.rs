@@ -153,6 +153,8 @@ struct Picker {
     anchor: Rect,
     serial: u64,
     name: String,
+    /// Shrinking back into its button (dropped once it landed).
+    closing: bool,
 }
 
 #[derive(Default)]
@@ -476,9 +478,13 @@ fn apply(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act, t: f64, 
         }
         Act::Pick(row, anchor) => {
             state.serial += 1;
-            state.picker = Some(Picker { row, anchor, serial: state.serial, name: String::new() });
+            state.picker = Some(Picker { row, anchor, serial: state.serial, name: String::new(), closing: false });
         }
-        Act::ClosePicker => state.picker = None,
+        Act::ClosePicker => {
+            if let Some(p) = state.picker.as_mut() {
+                p.closing = true;
+            }
+        }
         Act::Show(shown) => {
             if state.shown != shown {
                 state.shown = shown;
@@ -895,7 +901,6 @@ fn picker(ctx: &egui::Context, state: &mut State, acts: &mut Vec<Act>) {
         .map(|b| b.lists.iter().map(|l| (l.id.clone(), l.name.clone(), l.videos.len(), b.holds(&l.id, &p.row.url))).collect())
         .unwrap_or_default();
     let id = Id::unique(("videos-picker", p.serial));
-    let k = anim::spring_from(ctx, id.with("in"), [0.0], [1.0], Spring::BOUNCY)[0];
     let width = 300.0;
     let list_h = (lists.len() as f32 * 40.0).min(240.0);
     let h = 64.0 + list_h + if lists.is_empty() { 0.0 } else { 9.0 } + 52.0;
@@ -904,13 +909,21 @@ fn picker(ctx: &egui::Context, state: &mut State, acts: &mut Vec<Act>) {
     if base.bottom() > window.bottom() - 12.0 {
         base = base.translate(vec2(0.0, -(h + p.anchor.height() + 12.0)));
     }
-    let rect =
-        Rect::from_min_max(base.right_top() + (base.left_top() - base.right_top()) * (0.96 + 0.04 * k), base.right_top() + vec2(0.0, h * (0.96 + 0.04 * k)))
-            .translate(vec2(0.0, -8.0 * (1.0 - k)));
-    let area = egui::Area::new(id).order(Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
+    // Grows out of its button's corner, and back into it.
+    let closing = p.closing;
+    let pop = orbiters_ui::popup::popover(ctx, id, p.anchor, base, !closing);
+    if pop.gone {
+        state.picker = None;
+        return;
+    }
+    let rect = pop.rect;
+    let area = egui::Area::new(id).order(Order::Foreground).fixed_pos(rect.min).interactable(!closing).show(ctx, |ui| {
         ui.set_min_size(rect.size());
-        let mut painter = ui.painter().clone();
-        painter.multiply_opacity(k.clamp(0.0, 1.0));
+        ui.multiply_opacity(pop.opacity);
+        if closing {
+            ui.disable();
+        }
+        let painter = ui.painter().clone();
         widgets::panel(&painter, rect, 16.0);
         widgets::text(&painter, pos2(rect.left() + 18.0, rect.top() + 24.0), Align2::LEFT_CENTER, &Txt::new("Save in a list", 13.5).weight(weight::SEMIBOLD));
         let title = p.row.title.clone().unwrap_or_else(|| short_link(&p.row.url));

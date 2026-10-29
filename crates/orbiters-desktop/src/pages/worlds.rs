@@ -16,7 +16,7 @@ use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::paint::{self, Gradient};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, IconButton, Size, Variant};
-use orbiters_ui::{format, icons, logo, toast};
+use orbiters_ui::{format, icons, logo, morph, toast};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,6 +40,12 @@ struct Open {
     handed: Option<(f64, BTreeSet<PathBuf>)>,
     /// The picture shown large, by its index in the world's pictures.
     viewer: Option<usize>,
+    /// The large picture shrinks back into its tile (dropped once it landed there).
+    viewer_closing: bool,
+    /// Bumped on every opening of the large picture (its morph's springs).
+    viewer_serial: u64,
+    /// Each picture's tile as last drawn (by index): the large picture grows out of it and lands back on it.
+    tiles: HashMap<usize, Rect>,
 }
 
 #[derive(Default)]
@@ -51,6 +57,8 @@ pub struct State {
     share_origin: Option<(Rect, f32)>,
     /// Each card's picture as last drawn (by world id).
     card_thumbs: HashMap<String, Rect>,
+    /// Each card as last drawn (by world id): an open world's card rides its picture's flight near its place.
+    card_homes: HashMap<String, Rect>,
     /// Screenshots: the share window opens on a fixture state (made-up friends, a share running), never a real share.
     stage_share: Option<&'static str>,
     loaded: Option<(u64, PathBuf, u64)>,
@@ -126,8 +134,9 @@ impl State {
         self.list.running() || self.pictures.as_ref().is_some_and(|p| p.loading()) || self.share_prepare.running()
     }
 
-    /// Opens a world as if its card was clicked (screenshots).
+    /// Opens a world as if its card was clicked (screenshots): out of its card's picture when it was drawn.
     pub fn open_world(&mut self, ctx: &egui::Context, id: &str, origin: Rect) {
+        let origin = self.card_thumbs.get(id).copied().unwrap_or(origin);
         self.open(ctx, id.to_string(), origin);
     }
 
@@ -141,7 +150,21 @@ impl State {
     /// Shows a picture large (screenshots).
     pub fn view_picture(&mut self, index: usize) {
         if let Some(o) = self.open.as_mut() {
-            o.viewer = Some(index);
+            o.show_large(index);
+        }
+    }
+
+    /// Starts closing the open world's page back into its card (screenshots).
+    pub fn close_world(&mut self) {
+        if let Some(o) = self.open.as_mut() {
+            o.closing = true;
+        }
+    }
+
+    /// Starts closing the large picture back into its tile (screenshots).
+    pub fn close_picture(&mut self) {
+        if let Some(o) = self.open.as_mut() {
+            o.viewer_closing = true;
         }
     }
 
@@ -159,7 +182,19 @@ impl State {
             selected: BTreeSet::new(),
             handed: None,
             viewer: None,
+            viewer_closing: false,
+            viewer_serial: 0,
+            tiles: HashMap::new(),
         });
+    }
+}
+
+impl Open {
+    /// Shows picture `index` large, growing out of its tile.
+    fn show_large(&mut self, index: usize) {
+        self.viewer = Some(index);
+        self.viewer_closing = false;
+        self.viewer_serial += 1;
     }
 }
 
@@ -332,16 +367,21 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
                 let open_here = state.open.as_ref().is_some_and(|o| o.id == world.id);
                 let shared = mine_of(&mine, &world.id).is_some_and(|m| m.preview.is_some() || !m.pictures.is_empty());
                 state.card_thumbs.insert(world.id.clone(), Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0)));
+                state.card_homes.insert(world.id.clone(), r);
                 if let Some(cover_r) = world_card(ui, cx, i, world, r, tex.as_ref(), info.as_ref(), shared, if open_here { 0.0 } else { 1.0 }, interactive) {
                     clicked = Some((world.id.clone(), cover_r));
                 }
-                if !open_here && interactive && (world.reconstructed() > 0 || !world.shots.is_empty()) {
+                // Faded in once the grid takes presses again (after a world's page landed back on its card).
+                let pill = anim::toggle(&ctx, Id::unique(("world-share-shown", &world.id)), !open_here && interactive, Spring::SOFT);
+                if pill > 0.01 && (world.reconstructed() > 0 || !world.shots.is_empty()) {
+                    let mut pu = ui.new_child(UiBuilder::new().max_rect(r).id_salt(("world-share-pill", &world.id)));
+                    pu.multiply_opacity(pill);
                     if let Some(public) = super::sharing::morph(
-                        ui,
+                        &mut pu,
                         Id::unique(("world-share", &world.id)),
                         pos2(r.right() - 12.0, r.bottom() - 50.0),
                         r.width() - 24.0,
-                        !state.share_prepare.running(),
+                        !state.share_prepare.running() && interactive && !open_here,
                     ) {
                         let paths = world
                             .sessions
@@ -387,10 +427,17 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
         tu.multiply_opacity(head_a);
         super::heading(&tu, head_r, "VRChat", "Visited worlds", Some(&sub));
     }
-    if interactive {
-        let mut su = hu.new_child(UiBuilder::new().max_rect(search_r).id_salt("worlds-search"));
+    // The search and the folder fade back in once the grid takes presses again.
+    let actions = anim::toggle(&ctx, Id::unique("worlds-head-actions"), interactive, Spring::SOFT);
+    if actions > 0.01 {
+        let mut au = hu.new_child(UiBuilder::new().max_rect(page).id_salt("worlds-head-actions"));
+        au.multiply_opacity(actions);
+        if !interactive {
+            au.disable();
+        }
+        let mut su = au.new_child(UiBuilder::new().max_rect(search_r).id_salt("worlds-search"));
         widgets::search_field(&mut su, "worlds-search", &mut state.query, "Search worlds", 224.0);
-        if IconButton::new(icons::IMAGES, "Open VRChat's pictures folder").show_at(&mut hu, folder_r).clicked() {
+        if IconButton::new(icons::IMAGES, "Open VRChat's pictures folder").show_at(&mut au, folder_r).clicked() {
             if let Some(dir) = visited::screenshot_dirs().into_iter().next() {
                 let r = controller::open_path(&dir);
                 cx.run(&ctx, r);
@@ -436,7 +483,9 @@ fn world_card(
     let enter = anim::spring_from(&ctx, id.with(("enter", cx.visit)), [0.0], [if elapsed >= delay { 1.0 } else { 0.0 }], Spring::SOFT)[0];
     let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered() && interactive, Spring::SOFT);
     let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on() && interactive, Spring::SNAPPY);
-    let scale = (0.97 + 0.03 * enter) * (1.0 - 0.03 * press);
+    // A share window landing back on its picture bounces it.
+    let landing = morph::bounce(&ctx, Rect::from_min_size(rect.min, vec2(rect.width(), rect.width() * 9.0 / 16.0)));
+    let scale = (0.97 + 0.03 * enter) * (1.0 - 0.03 * press) * landing;
     let r = Rect::from_center_size(rect.center() + vec2(0.0, 20.0 * (1.0 - enter) - 4.0 * hover), rect.size() * scale);
     let mut p = ui.painter().clone();
     p.multiply_opacity(enter.clamp(0.0, 1.0) * shown);
@@ -558,15 +607,21 @@ impl Sharing<'_> {
 
 fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     let ctx = ui.ctx().clone();
+    // The world's card where the grid last drew it: the page's picture flies out of its picture and back.
+    let home = state.open.as_ref().and_then(|o| state.card_homes.get(&o.id)).copied();
     let Some(o) = state.open.as_mut() else { return };
+    if let Some(h) = home {
+        o.origin = Rect::from_min_size(h.min, vec2(h.width(), h.width() * 9.0 / 16.0));
+    }
     let Some(world) = state.worlds.as_ref().and_then(|l| l.iter().find(|w| w.id == o.id)).cloned() else {
         state.open = None;
         return;
     };
     let id = Id::unique(("world-page", o.serial));
-    let t = anim::spring_from(&ctx, id.with("flight"), [0.0], [if o.closing { 0.0 } else { 1.0 }], Spring::MORPH)[0];
+    let travel = morph::travel(&ctx, id.with("flight"), !o.closing, Spring::MORPH);
+    let t = travel.t;
     o.progress = t;
-    if o.closing && t < 0.02 {
+    if travel.done {
         state.open = None;
         if let Some(p) = state.pictures.as_mut() {
             p.forget_large();
@@ -644,7 +699,18 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                     ),
                     None => (None, None),
                 };
-                hero(ui, cx, &world, info.as_ref(), flight, small.as_ref(), large.as_ref(), t, content);
+                // Near its card, the card itself rides under the flying picture, which fades out over it as it lands
+                // (in as it leaves); landed, the card bounces.
+                if let Some(home) = home.filter(|_| morph::source_alpha(t) > 0.001) {
+                    let ride = morph::ride(home, o.origin, flight, travel.landing);
+                    let shared = sharing.mine.is_some_and(|m| m.preview.is_some() || !m.pictures.is_empty());
+                    let mut ru = ui.new_child(UiBuilder::new().max_rect(home).id_salt("riding-card"));
+                    ru.multiply_opacity(morph::source_alpha(t));
+                    ru.with_visual_transform(ride, |ru| world_card(ru, cx, 0, &world, home, small.as_ref(), info.as_ref(), shared, 1.0, false));
+                }
+                let mut hu = ui.new_child(UiBuilder::new().max_rect(ui.max_rect()).id_salt("hero"));
+                hu.multiply_opacity(morph::shape_alpha(t));
+                hero(&mut hu, cx, &world, info.as_ref(), flight, small.as_ref(), large.as_ref(), t, content);
                 ui.add_space(20.0);
 
                 let mut cu = ui.new_child(UiBuilder::new().max_rect(ui.available_rect_before_wrap()).id_salt("world-body"));
@@ -791,6 +857,11 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                             sending: handed || sharing.sending(&shot.path).is_some(),
                             selectable: sharing.blocked.is_none(),
                         };
+                        o.tiles.insert(i, r);
+                        // The large picture stands for its tile while it is out (it lands exactly on it).
+                        if o.viewer == Some(i) {
+                            continue;
+                        }
                         match picture_tile(&mut cu, r, shot, tex.as_ref(), look, i) {
                             Some(TileAction::Toggle) => toggle = Some(shot.path.clone()),
                             Some(TileAction::View) => view = Some(i),
@@ -818,7 +889,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         o.selected.clear();
     }
     if let Some(i) = view {
-        o.viewer = Some(i);
+        o.show_large(i);
     }
     if let Some(dir) = reconstruct {
         // Waiting its turn: the service says so.
@@ -1288,8 +1359,20 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
     }
     let index = index.min(count - 1);
     let shot = &world.shots[index];
-    let id = Id::unique(("picture-viewer", o.serial));
-    let k = anim::spring_from(ctx, id.with("in"), [0.0], [1.0], Spring::SNAPPY)[0];
+    let id = Id::unique(("picture-viewer", o.serial, o.viewer_serial));
+    // The picture flies out of its tile and back (exactly onto the tile's crop, which then bounces).
+    let closing = o.viewer_closing;
+    let travel = morph::travel(ctx, id, !closing, Spring::EXPAND);
+    if travel.done {
+        o.viewer = None;
+        if let Some(p) = state.pictures.as_mut() {
+            p.forget_large();
+        }
+        return;
+    }
+    let t = travel.t;
+    let k = orbiters_ui::viewer::smoothstep(0.5, 0.95, t);
+    let tile = o.tiles.get(&index).copied();
     let window = ctx.content_rect();
     let area = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
     let pictures = state.pictures.as_mut();
@@ -1304,29 +1387,42 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
     let mut close = false;
     let mut toggle = false;
     let selected = o.selected.contains(&shot.path);
-    egui::Area::new(id).order(Order::Foreground).fixed_pos(area.min).show(ctx, |ui| {
+    // While it closes, the page takes presses again.
+    egui::Area::new(id).order(Order::Foreground).fixed_pos(area.min).interactable(!closing).show(ctx, |ui| {
         let (_, backdrop) = ui.allocate_exact_size(area.size(), Sense::click());
         let p = ui.painter().clone();
-        p.rect_filled(area, 0.0, theme::alpha(theme::INK_950, 0.92 * k));
+        p.rect_filled(area, 0.0, theme::alpha(theme::INK_950, 0.92 * morph::smoothstep(0.05, 0.6, t)));
         let stage = area.shrink2(vec2(88.0, 72.0));
         let aspect = if shot.info.height > 0 { shot.info.width as f32 / shot.info.height as f32 } else { 16.0 / 9.0 };
         let (w, h) = if stage.width() / stage.height() > aspect { (stage.height() * aspect, stage.height()) } else { (stage.width(), stage.width() / aspect) };
-        let pic = Rect::from_center_size(stage.center(), vec2(w, h) * (0.96 + 0.04 * k));
+        let target = Rect::from_center_size(stage.center(), vec2(w, h));
+        // From its tile (or, scrolled away, a little smaller in the middle, fading), its crop opening to the whole picture.
+        let from = tile.map(|r| morph::scaled(r, travel.landing)).unwrap_or(Rect::from_center_size(target.center(), target.size() * 0.9));
+        let pic = orbiters_ui::viewer::lerp_rect(from, target, t);
         let mut pp = p.clone();
-        pp.multiply_opacity(k.clamp(0.0, 1.0));
+        pp.multiply_opacity(if tile.is_some() { 1.0 } else { morph::shape_alpha(t) });
+        let radius = theme::TILE_RADIUS + (16.0 - theme::TILE_RADIUS) * t.clamp(0.0, 1.0);
         match large.as_ref().or(small.as_ref()) {
-            Some(t) => {
-                paint::squircle_texture(&pp, pic, [theme::squircle(16.0); 4], t.id(), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE)
+            Some(tex) => {
+                let size = tex.size_vec2();
+                let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                let uv = orbiters_ui::viewer::lerp_rect(cover_uv(from, size.x / size.y.max(1.0), 1.0), whole, t.clamp(0.0, 1.0));
+                paint::squircle_texture(&pp, pic, [theme::squircle(radius); 4], tex.id(), uv, Color32::WHITE)
             }
-            None => widgets::frame(&pp, pic, 16.0, theme::surface_soft()),
+            None => widgets::frame(&pp, pic, radius, theme::surface_soft()),
         }
+        let mut pp = p.clone();
+        pp.multiply_opacity(k);
         if backdrop.clicked() && !pic.contains(backdrop.interact_pointer_pos().unwrap_or_default()) {
             close = true;
         }
         let caption = format!("{} · {}×{} · {} of {count}", super::local_time_unix(shot.info.taken), shot.info.width, shot.info.height, index + 1);
         widgets::text(&pp, pos2(pic.left(), pic.bottom() + 24.0), Align2::LEFT_CENTER, &Txt::new(caption, 12.5).color(theme::FG_2));
         let mut vu = ui.new_child(UiBuilder::new().max_rect(area).id_salt("viewer-actions"));
-        vu.multiply_opacity(k.clamp(0.0, 1.0));
+        vu.multiply_opacity(k);
+        if closing {
+            vu.disable();
+        }
         if count > 1 {
             for (s, glyph, label, x) in
                 [(-1, icons::CARET_LEFT, "Previous picture", area.left() + 24.0 + 22.0), (1, icons::CARET_RIGHT, "Next picture", area.right() - 24.0 - 22.0)]
@@ -1365,17 +1461,19 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
             }
         }
     });
-    ctx.input(|i| {
-        if i.key_pressed(egui::Key::ArrowLeft) {
-            step = -1;
-        }
-        if i.key_pressed(egui::Key::ArrowRight) {
-            step = 1;
-        }
-        if i.key_pressed(egui::Key::Escape) {
-            close = true;
-        }
-    });
+    if !closing {
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::ArrowLeft) {
+                step = -1;
+            }
+            if i.key_pressed(egui::Key::ArrowRight) {
+                step = 1;
+            }
+            if i.key_pressed(egui::Key::Escape) {
+                close = true;
+            }
+        });
+    }
     let Some(o) = state.open.as_mut() else { return };
     if toggle && !o.selected.remove(&shot.path) {
         o.selected.insert(shot.path.clone());
@@ -1384,9 +1482,6 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
         o.viewer = Some((index as i64 + step).rem_euclid(count as i64) as usize);
     }
     if close {
-        o.viewer = None;
-        if let Some(p) = state.pictures.as_mut() {
-            p.forget_large();
-        }
+        o.viewer_closing = true;
     }
 }

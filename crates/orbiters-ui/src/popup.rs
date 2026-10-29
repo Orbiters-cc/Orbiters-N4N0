@@ -1,11 +1,12 @@
 //! Lists that open from a control: a dropdown (a value picked among options, the version of a package) and a menu of
 //! actions (a "…" button). The list grows out of its control with a spring, takes the pointer on press like the other
-//! controls, and closes on a press elsewhere, on Escape or once something is picked; while it closes it shrinks back.
+//! controls, and closes on a press elsewhere, on Escape or once something is picked; while it closes it shrinks back
+//! into its control, which bounces as it lands ([`crate::morph`]).
 
 use crate::anim::{self, Spring};
-use crate::icons;
 use crate::theme::{self, weight, Txt};
 use crate::widgets::{self, icon, note_control, text, text_truncated};
+use crate::{icons, morph};
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Order, Rect, Sense, Ui};
 
 /// One row of a list.
@@ -62,6 +63,37 @@ pub fn any_open(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp::<u64>(Id::unique("orbiters-popup-open-pass"))).is_some_and(|p| p + 1 >= ctx.cumulative_pass_nr())
 }
 
+/// Where a popover (a panel under the button that opened it) is this frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Popover {
+    /// Its rect now.
+    pub rect: Rect,
+    /// How opaque it is.
+    pub opacity: f32,
+    /// Closed and landed back on its button: drop it.
+    pub gone: bool,
+}
+
+/// A popover sitting at `base` while `open`: it grows out of the corner nearest its `anchor` (the button that opened
+/// it) on a bouncy spring and, once closed, shrinks back into it the same way, fading, and the button bounces as it
+/// lands ([`morph`]). Keep it (drawing nothing clickable) until [`Popover::gone`]; opened again before, it turns back
+/// from where it is.
+pub fn popover(ctx: &egui::Context, id: Id, anchor: Rect, base: Rect, open: bool) -> Popover {
+    let travel = morph::travel(ctx, id.with("popover"), open, Spring::BOUNCY);
+    if travel.landed {
+        morph::land(ctx, anchor, travel.landing);
+    }
+    let k = travel.t;
+    let corner = pos2(
+        if (base.right() - anchor.center().x).abs() < (base.left() - anchor.center().x).abs() { base.right() } else { base.left() },
+        if base.top() >= anchor.center().y { base.top() } else { base.bottom() },
+    );
+    let s = 0.94 + 0.06 * k;
+    let towards = if corner.y == base.top() { -8.0 } else { 8.0 };
+    let rect = Rect::from_min_max(corner + (base.min - corner) * s, corner + (base.max - corner) * s).translate(vec2(0.0, towards * (1.0 - k)));
+    Popover { rect, opacity: k.clamp(0.0, 1.0), gone: travel.done }
+}
+
 /// A dropdown in `rect`: the chosen value and a caret on a neutral pill; pressed, the options open under it, the
 /// chosen one ticked. Returns the index picked this frame.
 pub fn dropdown(
@@ -84,7 +116,7 @@ pub fn dropdown(
     let hover = anim::toggle(&ctx, id.with("hover"), enabled && (resp.hovered() || open), Spring::SNAPPY);
     let press = anim::toggle(&ctx, id.with("press"), enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let flip = anim::toggle(&ctx, id.with("caret"), is_open(&ctx, id), Spring::BOUNCY);
-    let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.04 * press));
+    let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.04 * press) * morph::bounce(&ctx, rect));
     let mut p = ui.painter().clone();
     if !enabled {
         p.multiply_opacity(0.45);
@@ -115,7 +147,7 @@ pub fn menu_button(ui: &mut Ui, id_salt: impl egui::AsIdSalt, rect: Rect, glyph:
     let ctx = ui.ctx().clone();
     let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered() || open, Spring::SNAPPY);
     let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
-    let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.1 * press));
+    let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.1 * press) * morph::bounce(&ctx, rect));
     let p = ui.painter();
     p.circle_filled(r.center(), r.width() * 0.5, theme::mix(theme::control(), theme::INK_600, hover));
     icon(p, r.center(), glyph, 17.0, theme::mix(theme::FG_2, theme::FG, hover));
@@ -127,7 +159,11 @@ pub fn menu_button(ui: &mut Ui, id_salt: impl egui::AsIdSalt, rect: Rect, glyph:
 /// The list of the control `id` under (or over, near the window's bottom) `anchor`, while it is open or closing.
 fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected: Option<usize>, width: f32) -> Option<usize> {
     let open = is_open(ctx, id);
-    let k = anim::spring_from(ctx, id.with("list-k"), [0.0], [if open { 1.0 } else { 0.0 }], Spring::BOUNCY)[0];
+    let travel = morph::travel(ctx, id.with("list"), open, Spring::BOUNCY);
+    if travel.landed {
+        morph::land(ctx, anchor, travel.landing);
+    }
+    let k = travel.t;
     if !open && k < 0.02 {
         return None;
     }

@@ -299,7 +299,8 @@ impl<'a> Button<'a> {
         let ctx = ui.ctx();
         let hover = anim::toggle(ctx, resp.id.with("hover"), self.enabled && resp.hovered(), Spring::SNAPPY);
         let press = anim::toggle(ctx, resp.id.with("press"), self.enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
-        let scale = 1.0 - 0.04 * press;
+        // A dialog landing back on it bounces it.
+        let scale = (1.0 - 0.04 * press) * crate::morph::bounce(ctx, rect);
         let bg = Rect::from_center_size(rect.center(), rect.size() * scale);
         let mut painter = ui.painter().clone();
         if !self.enabled {
@@ -409,7 +410,7 @@ impl<'a> IconButton<'a> {
         let ctx = ui.ctx();
         let hover = anim::toggle(ctx, resp.id.with("hover"), resp.hovered(), Spring::SNAPPY);
         let press = anim::toggle(ctx, resp.id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
-        let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.12 * press));
+        let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.12 * press) * crate::morph::bounce(ctx, rect));
         let p = ui.painter();
         if let Some(c) = self.backdrop {
             p.circle_filled(r.center(), r.width() * 0.5, c);

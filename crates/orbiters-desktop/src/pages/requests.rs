@@ -46,6 +46,12 @@ impl State {
     pub fn is_out(&self) -> bool {
         self.window.is_some()
     }
+
+    /// How much of the Requests button shows: none while its window is out, all of it again as the window lands back
+    /// on it.
+    pub fn button_alpha(&self, ctx: &egui::Context) -> f32 {
+        self.window.map_or(1.0, |s| dialog::source_alpha(ctx, Self::id(s)))
+    }
     fn id(serial: u64) -> Id {
         Id::unique(("sharing-requests", serial))
     }

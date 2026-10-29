@@ -12,7 +12,7 @@ use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::paint::{self, Gradient};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, IconButton, SegOption, Variant};
-use orbiters_ui::{format, icons, logo, toast, trail};
+use orbiters_ui::{format, icons, logo, morph, toast, trail};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -61,23 +61,20 @@ enum View {
     Splats,
 }
 
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
 /// The card and the detail never blink at the swap: near the card, the card is fully drawn under the still opaque
-/// detail, which then fades out (closing) or in (opening) over it.
+/// detail, which then fades out (closing) or in (opening) over it; landed, the card bounces ([`morph`]).
 fn card_opacity(progress: f32) -> f32 {
-    1.0 - smoothstep(0.15, 0.4, progress)
+    morph::source_alpha(progress)
 }
 
 fn detail_opacity(progress: f32) -> f32 {
-    smoothstep(0.02, 0.15, progress)
+    morph::shape_alpha(progress)
 }
 
 struct Import {
     serial: u64,
+    /// Shrinking back into its button (dropped once it landed).
+    closing: bool,
     raws: Job<Vec<RawCaptureSummary>>,
 }
 
@@ -357,22 +354,28 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let space =
         Button::new(space_label).icon(icons::BROOM).width(space_w).id_salt("free-up-space").hint("What the captures and 3D pictures take, and freeing it");
     if space.show_at(ui, space_r).clicked() {
-        state.import = None;
-        if state.storage.is_some() {
-            state.storage = None;
-        } else {
-            state.serial += 1;
-            state.storage = Some(Popover::new(state.serial));
+        if let Some(i) = state.import.as_mut() {
+            i.closing = true;
+        }
+        // Pressed again: it closes, or opens again from where it is while it closes.
+        match state.storage.as_mut() {
+            Some(p) => p.closing = !p.closing,
+            None => {
+                state.serial += 1;
+                state.storage = Some(Popover::new(state.serial));
+            }
         }
     }
     if import_btn.show_at(ui, import_r).clicked() {
-        state.storage = None;
-        if state.import.is_some() {
-            state.import = None;
+        if let Some(p) = state.storage.as_mut() {
+            p.closing = true;
+        }
+        if let Some(i) = state.import.as_mut() {
+            i.closing = !i.closing;
         } else {
             state.serial += 1;
             let dir = cx.snap.settings.raw_captures_dir.clone();
-            state.import = Some(Import { serial: state.serial, raws: Job::spawn(&ctx, move || controller::list_raw_captures(&dir)) });
+            state.import = Some(Import { serial: state.serial, closing: false, raws: Job::spawn(&ctx, move || controller::list_raw_captures(&dir)) });
         }
     }
     if IconButton::new(icons::FOLDER_OPEN, "Open the captures folder").show_at(ui, folder_r).clicked() {
@@ -390,7 +393,8 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if let Some(popover) = state.storage.as_mut() {
         let overview = storage::overview(state.sessions.as_deref().unwrap_or_default(), cx.snap);
         match storage::popover(&ctx, cx.snap, popover, &overview, space_r) {
-            Some(PopoverAction::Close) => state.storage = None,
+            Some(PopoverAction::Close) => popover.closing = true,
+            Some(PopoverAction::Gone) => state.storage = None,
             Some(PopoverAction::CleanUp { trim, delete }) => state.clean_up(cx, trim, delete, now),
             None => {}
         }
@@ -628,7 +632,8 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
     let enter = anim::spring_from(&ctx, id.with(("enter", cx.visit)), [0.0], [if elapsed >= delay { 1.0 } else { 0.0 }], Spring::SOFT)[0];
     let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SOFT);
     let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
-    let scale = (0.97 + 0.03 * enter) * (1.0 - 0.03 * press);
+    // Its detail landing back on it bounces it.
+    let scale = (0.97 + 0.03 * enter) * (1.0 - 0.03 * press) * morph::bounce(&ctx, rect);
     let r = Rect::from_center_size(rect.center() + vec2(0.0, 20.0 * (1.0 - enter) - 4.0 * hover), rect.size() * scale);
     let mut p = ui.painter().clone();
     p.multiply_opacity(enter.clamp(0.0, 1.0) * shown);
@@ -732,24 +737,30 @@ fn empty_state(ui: &mut Ui, cx: &Cx, searching: bool, height: f32) {
 fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: Rect) {
     let Some(import) = state.import.as_mut() else { return };
     let id = Id::unique(("import-popover", import.serial));
-    let k = anim::spring_from(ctx, id.with("in"), [0.0], [1.0], Spring::BOUNCY)[0];
+    let closing = import.closing;
     let width = 420.0;
     let raws = import.raws.poll().cloned();
     let rows = raws.as_ref().map(|r| r.len().max(1)).unwrap_or(1);
     let list_h = (rows as f32 * 58.0).min(320.0);
     let h = 8.0 + 62.0 + list_h + 8.0;
     let base = Rect::from_min_size(pos2(anchor.right() - width, anchor.bottom() + 8.0), vec2(width, h));
-    // Grows from its top-right corner.
-    let rect =
-        Rect::from_min_max(base.right_top() + (base.left_top() - base.right_top()) * (0.96 + 0.04 * k), base.right_top() + vec2(0.0, h * (0.96 + 0.04 * k)))
-            .translate(vec2(0.0, -8.0 * (1.0 - k)));
+    // Grows from its top-right corner, and back into it.
+    let pop = orbiters_ui::popup::popover(ctx, id, anchor, base, !closing);
+    if pop.gone {
+        state.import = None;
+        return;
+    }
+    let rect = pop.rect;
     let busy = cx.snap.capture.state != crate::state::CaptureState::Idle;
     let mut close = false;
     let mut start: Option<RawCaptureSummary> = None;
-    let area = egui::Area::new(id).order(Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
+    let area = egui::Area::new(id).order(Order::Foreground).fixed_pos(rect.min).interactable(!closing).show(ctx, |ui| {
         ui.set_min_size(rect.size());
-        let mut p = ui.painter().clone();
-        p.multiply_opacity(k.clamp(0.0, 1.0));
+        ui.multiply_opacity(pop.opacity);
+        if closing {
+            ui.disable();
+        }
+        let p = ui.painter().clone();
         widgets::panel(&p, rect, 16.0);
         widgets::text(&p, pos2(rect.left() + 20.0, rect.top() + 26.0), Align2::LEFT_CENTER, &Txt::new("Raw captures", 13.5).weight(weight::SEMIBOLD));
         widgets::text_truncated(
@@ -824,7 +835,9 @@ fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: R
         close = true;
     }
     if close {
-        state.import = None;
+        if let Some(i) = state.import.as_mut() {
+            i.closing = true;
+        }
     }
 }
 
@@ -846,11 +859,15 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         None => None,
     };
     let id = Id::unique(("session-detail", d.serial));
-    let t = anim::spring_from(ctx, id.with("morph"), [0.0], [if d.closing { 0.0 } else { 1.0 }], Spring::MORPH)[0];
+    let travel = morph::travel(ctx, id.with("morph"), !d.closing, Spring::MORPH);
+    let t = travel.t;
     d.progress = t;
-    if d.closing && t < 0.02 {
+    if travel.done {
         state.detail = None;
         return;
+    }
+    if travel.landed {
+        morph::land(ctx, d.origin, travel.landing);
     }
     let k = t.clamp(0.0, 1.0);
     let target_w = (page.width() - 64.0).min(980.0);
@@ -877,12 +894,14 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
     // minimises and closes the window) closes the detail.
     let window = ctx.content_rect();
     let catcher = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
-    egui::Area::new(id).order(Order::Foreground).fixed_pos(catcher.min).show(ctx, |ui| {
+    // While it closes, the page takes presses again.
+    egui::Area::new(id).order(Order::Foreground).fixed_pos(catcher.min).interactable(!d.closing).show(ctx, |ui| {
         let (_, backdrop) = ui.allocate_exact_size(catcher.size(), Sense::click());
         if backdrop.clicked() && !rect.contains(backdrop.interact_pointer_pos().unwrap_or_default()) && !asking {
             close = true;
         }
-        ui.painter().with_clip_rect(window).rect_filled(window, 0.0, theme::alpha(theme::INK_950, 0.7 * k));
+        // Gone by the time the card shows under the detail.
+        ui.painter().with_clip_rect(window).rect_filled(window, 0.0, theme::alpha(theme::INK_950, 0.7 * morph::smoothstep(0.1, 0.6, k)));
         ui.multiply_opacity(detail_opacity(t));
         let p = ui.painter();
         widgets::panel(p, rect, radius);

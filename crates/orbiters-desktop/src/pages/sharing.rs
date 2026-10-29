@@ -13,7 +13,7 @@ use orbiters_core::{
 };
 use orbiters_ui::{
     anim::{self, Spring},
-    feedback, icons,
+    feedback, icons, morph,
     theme::{self, weight, Txt},
     viewer::{self, Arrangement, Morph},
     widgets::{self, Button, Chip, Size, Tone, Variant},
@@ -35,8 +35,23 @@ const FRIEND_ROWS: usize = 3;
 const GUTTER: f32 = 24.0;
 const PAD: f32 = 24.0;
 
+/// The card a window grew out of, drawn by its page's own code under the window while the window leaves it and lands
+/// back on it ([`morph::ride`]): where the card sits, its picture in it, and the card's drawing (laid out at `home`,
+/// taking no input).
+pub struct Source {
+    pub home: Rect,
+    pub picture: Rect,
+    pub paint: Box<dyn Fn(&mut Ui, &Cx)>,
+}
+
 pub struct Dialog {
     pub entry: Entry,
+    /// The card it came out of, when its page draws it under the window (set every frame; None when it scrolled away).
+    pub source: Option<Source>,
+    /// Its card is gone (scrolled away, removed): it closes into the middle of the page, fading.
+    lost: bool,
+    /// Landed back on its card on the last frame drawn: the page shows its card again.
+    finished: bool,
     pub extra: Vec<Entry>,
     pub picker: bool,
     pub warning: Option<String>,
@@ -99,6 +114,9 @@ impl Dialog {
     pub fn new(ctx: &egui::Context, entry: Entry, picker: bool) -> Self {
         Self {
             entry,
+            source: None,
+            lost: false,
+            finished: false,
             extra: Vec::new(),
             picker,
             warning: None,
@@ -152,11 +170,19 @@ impl Dialog {
             m.set_origin(origin);
         }
         self.origin = self.origin.map(|(_, r)| (origin, r));
+        self.lost = false;
     }
 
-    /// How far open it is (0 on its card, 1 open), as last drawn; the card it came from hides meanwhile.
-    pub fn progress(&self, ctx: &egui::Context) -> f32 {
-        self.morph.as_ref().map_or(0.0, |m| ctx.data(|d| d.get_temp::<f32>(m.id().with("shown"))).unwrap_or(0.0))
+    /// Its card has nowhere to be seen: it closes into the middle of the page instead, fading out.
+    pub fn lose_origin(&mut self) {
+        self.lost = true;
+        self.source = None;
+    }
+
+    /// Whether its card is under the window (the window draws it while it leaves and lands, [`Dialog::source`]): the
+    /// page leaves it out until the window landed back on it.
+    pub fn hides_source(&self) -> bool {
+        self.morph.as_ref().is_some_and(|m| m.id() != Id::NULL) && !self.finished
     }
 
     /// Starts closing back into its card ([`Dialog::show`] says when it is gone).
@@ -510,13 +536,15 @@ impl Dialog {
             // Closed before it ever showed.
             return true;
         }
+        if self.lost {
+            morph.set_origin(Rect::from_center_size(target.center(), target.size() * 0.92));
+        }
+        morph.riding(self.source.is_some());
         let f = morph.frame(&ctx, target);
         let (wid, closing) = (morph.id(), morph.is_closing());
         let picture = morph.part(&ctx, "picture", picture_target, &f);
-        ctx.data_mut(|d| d.insert_temp(wid.with("shown"), f.t));
-        if f.closed {
-            return true;
-        }
+        // Landed and settled: this frame still draws its card where it rests, the page draws it from the next one.
+        self.finished = f.closed;
         // Another item coming in from the side it is on, the one before leaving the other way.
         let nav = if self.nav.0 == 0 { 1.0 } else { anim::spring_from(&ctx, wid.with(("nav", self.nav.0)), [0.0], [1.0], Spring::SOFT)[0] };
         let slide = 28.0 * self.nav.1;
@@ -528,8 +556,10 @@ impl Dialog {
         let window = ctx.content_rect();
         let catcher = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
         let mut close = false;
+        let mut reopen = false;
         let mut toggle_full = false;
         let mut act: Option<Act> = None;
+        let source = self.source.take();
         // Opaque from its first frame (egui fades new areas in): it grows out of its card instead.
         egui::Area::new(wid.with("area")).order(Order::Foreground).fixed_pos(catcher.min).fade_in(false).show(&ctx, |ui| {
             ui.set_min_size(catcher.size());
@@ -539,9 +569,23 @@ impl Dialog {
             if widgets::pressed(&backdrop) && !f.rect.contains(backdrop.interact_pointer_pos().unwrap_or_default()) {
                 close = true;
             }
-            let _ = ui.interact(f.rect, wid.with("surface"), Sense::click());
+            // Its card, riding under it near the card's place: the window fades in over it as it leaves and out over
+            // it as it lands, then the card bounces.
+            if let Some(src) = source.as_ref().filter(|_| f.source > 0.001) {
+                let ride = morph::ride(src.home, src.picture, picture, f.landing);
+                let mut su = ui.new_child(UiBuilder::new().max_rect(src.home).id_salt(wid.with("source")));
+                su.set_clip_rect(ride.inverse() * window);
+                su.multiply_opacity(f.source);
+                su.with_visual_transform(ride, |su| (src.paint)(su, cx));
+            }
+            // Pressed again on its way back: it opens again from where it is.
+            if widgets::pressed(&ui.interact(f.rect, wid.with("surface"), Sense::click())) && closing {
+                reopen = true;
+            }
             let p = ui.painter().clone();
             viewer::paint_surface(&p, &f);
+            ui.multiply_opacity(f.shape);
+            let p = ui.painter().clone();
 
             // The picture: the card's at once, the full one fading in over it once decoded.
             let r = f.radius;
@@ -654,7 +698,12 @@ impl Dialog {
                 self.full = false;
             }
         }
-        false
+        if reopen && !f.closed {
+            if let Some(m) = self.morph.as_mut() {
+                m.reopen();
+            }
+        }
+        f.closed
     }
 
     /// Over the picture: what it is (top left), its 3D view or folder (bottom right), a share's progress (bottom edge).

@@ -1,11 +1,13 @@
 //! `orbiters-desktop --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]
-//! [--height <points>] [--width <points>]`
+//! [--height <points>] [--width <points>] [--extend <frames>] [--sequence <frames>]`
 //! renders the interface offscreen in several states and writes one PNG per state, for visual review without a
 //! window. The controller is not started: the snapshots are made up, the session library is real. `--only e2e`
 //! instead records a real test pattern through the worker, driven by synthetic clicks, with avatar parameters
 //! from a stand-in VRChat (OSC on the loopback interface, current values from its OSCQuery tree). The end-to-end
 //! runs click controls found by their labels where the last frame drew them, and wait on what the app shows or the
-//! controller says (each wait with a time limit), never on fixed coordinates or delays.
+//! controller says (each wait with a time limit), never on fixed coordinates or delays. `--extend` runs each scenario that
+//! many frames past its shot and `--sequence` writes its last frames too (`<name>-<frame>.png`), to check a motion frame
+//! by frame (a window closing back into its card).
 
 use crate::app::App;
 use crate::backend::{Ctl, Local};
@@ -80,6 +82,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut height = 820.0f32;
     let mut width = 1280.0f32;
     let mut only: Option<String> = None;
+    let mut frames = Frames::default();
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -89,6 +92,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "--only" => only = Some(it.next().context("--only <name>")?.clone()),
             "--height" => height = it.next().context("--height <points>")?.parse()?,
             "--width" => width = it.next().context("--width <points>")?.parse()?,
+            "--extend" => frames.extend = it.next().context("--extend <frames>")?.parse()?,
+            "--sequence" => frames.sequence = it.next().context("--sequence <frames>")?.parse()?,
             other => anyhow::bail!("unknown option {other}"),
         }
     }
@@ -1085,6 +1090,36 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             home: None,
             library: None,
         },
+        // The world's page flying back into its card (closed on frame 120; `--extend`/`--sequence` show it land).
+        Scenario {
+            name: "world-close",
+            page: Page::Worlds,
+            snapshot: signed_in.clone(),
+            frames: 140,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: Some(WorldShot { maps: Some(maps.clone()), ..Default::default() }),
+            home: None,
+            library: None,
+        },
+        // A picture shown large shrinking back into its tile (closed on frame 170).
+        Scenario {
+            name: "world-viewer-close",
+            page: Page::Worlds,
+            snapshot: signed_in.clone(),
+            frames: 200,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: Some(WorldShot { pictures: true, view: Some(1), maps: Some(maps.clone()), ..Default::default() }),
+            home: None,
+            library: None,
+        },
         // The card flying into the world's page, a sixth of a second in.
         Scenario {
             name: "world-flight",
@@ -1501,6 +1536,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "gallery-requests-denied",
         "gallery-requests-empty",
         "gallery-requests-opening",
+        "gallery-requests-close",
         "gallery-done",
         "gallery-open",
         "gallery-open-mid",
@@ -1548,13 +1584,20 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             continue;
         }
         let path = out.join(format!("{}.png", sc.name));
-        render(&mut gpu, &sc, scale, vec2(width, height), &path)?;
+        render(&mut gpu, &sc, scale, vec2(width, height), &path, frames)?;
         println!("{}", path.display());
     }
     Ok(())
 }
 
-fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std::path::Path) -> anyhow::Result<()> {
+/// Frames past a scenario's shot, and how many of the last frames are written each.
+#[derive(Clone, Copy, Default)]
+struct Frames {
+    extend: u32,
+    sequence: u32,
+}
+
+fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std::path::Path, run: Frames) -> anyhow::Result<()> {
     let ctx = egui::Context::default();
     orbiters_ui::install(&ctx);
     let ctl = Controller::new(sc.snapshot.settings.clone());
@@ -1574,7 +1617,8 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
     if !sc.splash {
         app.skip_splash();
     }
-    for f in 0..sc.frames {
+    let total = sc.frames + run.extend;
+    for f in 0..total {
         let t = f as f64 / 60.0;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(t), ..Default::default() };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(scale), focused: Some(true), ..Default::default() });
@@ -1638,6 +1682,8 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
                 "gallery-open-mid" if f + 6 == sc.frames => gallery.open_card(&ctx, 0),
                 "gallery-close-mid" if f + 6 == sc.frames => gallery.close_window(),
                 "gallery-requests-opening" if f + 6 == sc.frames => gallery.open_requests(),
+                "gallery-requests-close" if f == 60 => gallery.open_requests(),
+                "gallery-requests-close" if f == 120 => gallery.close_requests(),
                 _ => {}
             }
         }
@@ -1659,6 +1705,12 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         }
         if sc.name == "world-share-open" && f == 45 {
             app.worlds_mut().stage_share_morph(&ctx, false);
+        }
+        if sc.name == "world-close" && f == 120 {
+            app.worlds_mut().close_world();
+        }
+        if sc.name == "world-viewer-close" && f == 170 {
+            app.worlds_mut().close_picture();
         }
         // Home made its menu on the first frame.
         if let (Some(shot), 2) = (sc.home, f) {
@@ -1715,7 +1767,10 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             if sc.open_detail && !world_opened && f >= 45 && app.worlds_mut().loaded() {
                 world_opened = true;
                 let visited = crate::worlds::load(&sc.snapshot.settings.sessions_dir);
-                let pick = if ws.pictures {
+                let pick = if sc.name == "world-close" {
+                    // The first card: it is on screen to land back on.
+                    visited.first()
+                } else if ws.pictures {
                     visited.iter().max_by_key(|w| w.shots.len())
                 } else {
                     visited.iter().max_by_key(|w| (w.reconstructed(), w.sessions.len()))
@@ -1734,7 +1789,8 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
                 }
             }
         }
-        let capture = f + 1 == sc.frames;
+        let shot = f + 1 == sc.frames;
+        let capture = shot || f + run.sequence >= total;
         if capture {
             // What the page still reads (the list, pictures) lands before the shot: a slow disk makes the run
             // longer, not the picture emptier. The frames meanwhile stand at the same time.
@@ -1762,7 +1818,12 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             capture,
         )?;
         if let Some(image) = image {
-            save_png(path, &image)?;
+            if f + run.sequence >= total {
+                save_png(&path.with_file_name(format!("{}-{f:03}.png", sc.name)), &image)?;
+            }
+            if shot {
+                save_png(path, &image)?;
+            }
         }
         // Background jobs (session list, thumbnails) land between frames.
         std::thread::sleep(Duration::from_millis(3));

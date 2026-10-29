@@ -11,6 +11,7 @@ use crate::timing::PrepStage;
 use crate::tree::{self, Tree};
 use orbiters_core::contracts::frame_record::record_flags;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Splats in the PC file at most (32 MB).
 pub const PC_SPLATS: usize = 1 << 20;
@@ -85,21 +86,74 @@ pub fn vrchat_files(g: &Gaussians, cameras: &[Camera], gpu: Option<&mut Gpu>, ke
         }
     }
     let _time = PrepStage::new("tree serialize");
-    let quest = quest.unwrap_or_else(|| pc.clone());
-    let coarse = quest.top(COARSE_SPLATS);
+    let q = quest.as_ref().unwrap_or(&pc);
+    let coarse = q.top(COARSE_SPLATS);
     progress(1.0);
-    Ok(VrchatFiles {
-        splats: [pc.len(), quest.len(), coarse.len()],
-        pc: pc.file(key, 0),
-        quest: quest.file(key, 0),
-        coarse: coarse.file(key, tree::FLAG_COARSE),
-    })
+    let pc_bytes = pc.file(key, 0);
+    let quest_bytes = match &quest {
+        Some(q) => q.file(key, 0),
+        None => pc_bytes.clone(),
+    };
+    Ok(VrchatFiles { splats: [pc.len(), q.len(), coarse.len()], pc: pc_bytes, quest: quest_bytes, coarse: coarse.file(key, tree::FLAG_COARSE) })
 }
 
 /// A render as a keyframe's packed pixels (RGBA8, red in the low byte).
 fn packed(render: &[[f32; 4]]) -> Vec<u32> {
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
     render.iter().map(|p| byte(p[0]) | byte(p[1]) << 8 | byte(p[2]) << 16 | 255 << 24).collect()
+}
+
+/// A leaf render depends on the exact scaled camera, not the depth being tuned. Keep at most 64 MiB between
+/// depths; current targets retain their Arc when an older cache entry is evicted. Never share between trees:
+/// PC and Quest can have different leaves.
+#[derive(Default)]
+struct LeafTargets {
+    entries: std::collections::VecDeque<(Camera, Arc<[u32]>)>,
+    bytes: usize,
+}
+
+impl LeafTargets {
+    const MAX_BYTES: usize = 64 << 20;
+
+    fn get(&self, camera: &Camera) -> Option<Arc<[u32]>> {
+        self.entries.iter().find(|(c, _)| c == camera).map(|(_, pixels)| pixels.clone())
+    }
+
+    fn insert(&mut self, camera: Camera, pixels: Arc<[u32]>) {
+        let bytes = std::mem::size_of_val(pixels.as_ref());
+        if bytes > Self::MAX_BYTES {
+            return;
+        }
+        while self.bytes + bytes > Self::MAX_BYTES {
+            let (_, old) = self.entries.pop_front().expect("cache has bytes");
+            self.bytes -= std::mem::size_of_val(old.as_ref());
+        }
+        self.bytes += bytes;
+        self.entries.push_back((camera, pixels));
+    }
+}
+
+fn depth_views(tree: &Tree, cameras: &[Camera], tuned: &[usize]) -> Vec<Camera> {
+    cameras
+        .iter()
+        .filter_map(|c| {
+            let mut seen: Vec<f32> = tuned
+                .iter()
+                .filter_map(|&i| {
+                    let n = &tree.nodes[i];
+                    let p = c.to_camera(n.center);
+                    (p[2] > 0.1).then(|| n.error * c.fx / p[2])
+                })
+                .collect();
+            if seen.is_empty() {
+                return None;
+            }
+            let k = seen.len() / 2;
+            let median = *seen.select_nth_unstable_by(k, f32::total_cmp).1;
+            let factor = ((median / DRAWN_AT_PIXELS).ceil() as u32).clamp(1, (c.width / 48).max(1));
+            Some(c.scaled(factor))
+        })
+        .collect()
 }
 
 /// Tunes every depth of `tree`'s merged boxes against its leaves.
@@ -121,37 +175,31 @@ fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, 
     depths.sort_unstable();
     depths.dedup();
     let mut rng = fastrand::Rng::with_seed(1);
+    let mut leaf_targets = LeafTargets::default();
     for (done, &depth) in depths.iter().enumerate() {
         let _depth_time = PrepStage::new(format!("tune {platform} depth {depth}"));
         let gpu_start = gpu.profiler.as_ref().map(|p| p.span.get().0);
         let tuned: Vec<usize> = (0..tree.nodes.len()).filter(|&i| !tree.nodes[i].leaf && tree.nodes[i].depth == depth).collect();
         // Each camera at the resolution where this depth's boxes are drawn: their median error about DRAWN_AT_PIXELS.
-        let views: Vec<Camera> = cameras
-            .iter()
-            .filter_map(|c| {
-                let mut seen: Vec<f32> = tuned
-                    .iter()
-                    .filter_map(|&i| {
-                        let n = &tree.nodes[i];
-                        let p = c.to_camera(n.center);
-                        (p[2] > 0.1).then(|| n.error * c.fx / p[2])
-                    })
-                    .collect();
-                if seen.is_empty() {
-                    return None;
-                }
-                let k = seen.len() / 2;
-                let median = *seen.select_nth_unstable_by(k, f32::total_cmp).1;
-                let factor = ((median / DRAWN_AT_PIXELS).ceil() as u32).clamp(1, (c.width / 48).max(1));
-                Some(c.scaled(factor))
-            })
-            .collect();
+        let views = depth_views(tree, &cameras, &tuned);
         if views.is_empty() {
             continue;
         }
         let _target_time = PrepStage::new(format!("{platform} depth {depth} targets"));
-        gpu.upload(&leaves);
-        let targets: Vec<Vec<u32>> = views.iter().map(|v| Ok(packed(&crate::train::render(gpu, v, [0.0; 3])?))).collect::<anyhow::Result<_>>()?;
+        if views.iter().any(|v| leaf_targets.get(v).is_none()) {
+            gpu.upload(&leaves);
+        }
+        let targets: Vec<Arc<[u32]>> = views
+            .iter()
+            .map(|v| {
+                if let Some(pixels) = leaf_targets.get(v) {
+                    return Ok(pixels);
+                }
+                let pixels: Arc<[u32]> = packed(&crate::train::render(gpu, v, [0.0; 3])?).into();
+                leaf_targets.insert(*v, pixels.clone());
+                Ok(pixels)
+            })
+            .collect::<anyhow::Result<_>>()?;
         drop(_target_time);
         let cut = tree.select(|n| n.depth == depth || (n.leaf && n.depth < depth));
         // Where each tuned box's splats sit in the cut (it keeps the tree's box order).
@@ -209,4 +257,108 @@ fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, 
         progress((done + 1) as f32 / depths.len() as f32);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leaf_targets_only_reuse_the_exact_camera_and_resolution() {
+        let camera = Camera { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0; 3], fx: 2.0, fy: 2.0, cx: 1.0, cy: 1.0, width: 2, height: 2 };
+        let pixels: Arc<[u32]> = vec![1, 2, 3, 4].into();
+        let mut targets = LeafTargets::default();
+        targets.insert(camera, pixels.clone());
+        assert!(Arc::ptr_eq(&targets.get(&camera).unwrap(), &pixels));
+        assert!(targets.get(&Camera { width: 1, ..camera }).is_none());
+        assert!(targets.get(&Camera { t: [1.0, 0.0, 0.0], ..camera }).is_none());
+    }
+
+    /// Compare the actual serialized upload files, including colour/rotation quantization, on identical views.
+    /// ORBITERS_TEST_SESSION=<semicolon-separated sessions>, ORBITERS_PREP_BASE/FINAL=<saved numbered files>.
+    #[test]
+    #[ignore]
+    fn serialized_upload_quality() {
+        fn read(path: &Path) -> Tree {
+            let bytes = std::fs::read(path).unwrap();
+            let u = |at| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            let f = |at| f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            assert_eq!(&bytes[..8], tree::MAGIC);
+            assert_eq!(u(8), tree::VERSION);
+            let count = u(12) as usize;
+            let mut nodes: Vec<tree::Node> = Vec::new();
+            for i in 0..count {
+                let at = (i + 1) * 32;
+                let parent = (u(at + 20) != u32::MAX).then(|| u(at + 20));
+                let depth = parent.map_or(0, |p| nodes[p as usize].depth + 1);
+                nodes.push(tree::Node {
+                    center: [f(at), f(at + 4), -f(at + 8)],
+                    radius: f(at + 12),
+                    error: f(at + 16),
+                    parent,
+                    depth,
+                    start: u(at + 24),
+                    count: u(at + 28),
+                    leaf: true,
+                });
+                if let Some(parent) = parent {
+                    nodes[parent as usize].leaf = false;
+                }
+            }
+            Tree { nodes, splats: crate::web::read_splat(&bytes[(1 + count) * 32..]).unwrap() }
+        }
+        let base = std::path::PathBuf::from(std::env::var_os("ORBITERS_PREP_BASE").unwrap());
+        let final_dir = std::path::PathBuf::from(std::env::var_os("ORBITERS_PREP_FINAL").unwrap());
+        let mut gpu = Gpu::new().unwrap();
+        let mut failed = Vec::new();
+        for (index, session) in std::env::var("ORBITERS_TEST_SESSION").unwrap().split(';').enumerate() {
+            let cameras = session_cameras(Path::new(session)).unwrap();
+            let poses: Vec<_> = cameras.iter().map(|c| (c.position(), c.forward())).collect();
+            let cameras: Vec<_> = crate::dataset::spread(&poses, CAMERAS).into_iter().map(|i| cameras[i]).collect();
+            for platform in ["pc", "quest", "coarse"] {
+                let relative = format!("{index}/{platform}.tree");
+                let before = read(&base.join(&relative));
+                let after = read(&final_dir.join(&relative));
+                assert_eq!(before.nodes, after.nodes);
+                let reference = if platform == "coarse" { read(&base.join(format!("{index}/quest.tree"))) } else { before.clone() };
+                let leaves = reference.leaf_splats();
+                if platform != "coarse" {
+                    assert_eq!(leaves, after.leaf_splats());
+                }
+                let deepest = before.nodes.iter().map(|n| n.depth).max().unwrap();
+                for depth in 0..=deepest {
+                    let tuned: Vec<_> =
+                        before.nodes.iter().enumerate().filter_map(|(i, n)| (n.depth == depth && (!n.leaf || platform == "coarse")).then_some(i)).collect();
+                    if tuned.is_empty() {
+                        continue;
+                    }
+                    let views = depth_views(&reference, &cameras, &tuned);
+                    if views.is_empty() {
+                        continue;
+                    }
+                    let cuts = [&before, &after].map(|tree| tree.select(|n| n.depth == depth || (n.leaf && n.depth < depth)));
+                    let mut scores = [0.0f32; 2];
+                    for v in &views {
+                        gpu.upload(&leaves);
+                        let target = packed(&crate::train::render(&mut gpu, v, [0.0; 3]).unwrap());
+                        gpu.set_mask(v.width, v.height, &vec![1.0; (v.width * v.height) as usize]).unwrap();
+                        for (i, cut) in cuts.iter().enumerate() {
+                            // Reset estimates for each evaluated view, so none drops tile entries from an older camera.
+                            gpu.upload(cut);
+                            scores[i] += gpu.score(v, [0.0; 3], &target).unwrap() / views.len() as f32;
+                        }
+                    }
+                    let delta = scores[1] - scores[0];
+                    eprintln!(
+                        "file_quality {}",
+                        serde_json::json!({"session":index,"platform":platform,"depth":depth,"baseline_db":scores[0],"final_db":scores[1],"delta_db":delta})
+                    );
+                    if delta < -0.05 {
+                        failed.push((index, platform, depth, delta));
+                    }
+                }
+            }
+        }
+        assert!(failed.is_empty(), "serialized render quality regressions: {failed:?}");
+    }
 }

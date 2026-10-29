@@ -46,6 +46,46 @@ Initial baseline (unchanged algorithm with timing instrumentation):
 All times in seconds. Start-view/camera/metadata/sky work accounts for the remaining
 time. Detailed depth measurements and repeated/final runs follow below.
 
+## Changes and experiments
+
+1. Reuse the exact leaf render for the exact same scaled camera across tune depths,
+   separately for each tree (PC/Quest leaves can differ). This is a 64 MiB bounded
+   cache with shared pixel buffers. It skips leaf uploads when every target is
+   already present. Cameras, resolution, random-camera seed, learning rates and all
+   400 steps are unchanged. The pre-cache trial measured 5.208 / 11.085 / 23.055 s.
+2. When PC fits Quest, serialize PC once and clone the encoded bytes, rather than
+   clone all Gaussian arrays and encode the same tree again. This is included in
+   that trial; serialization fell from 0.027 / 0.066 s to approximately 0.018 /
+   0.035 s for the shared-tree sessions. Separate Quest serialization is unchanged.
+3. Persist the four prepared files and metadata in one checksummed, atomic cache
+   in the reconstruction folder, shared by both upload entry points. Its fingerprint
+   contains SHA-256 hashes of the PLY, frames, report and manifest. A source change,
+   malformed/partial archive or checksum mismatch triggers fresh preparation. A
+   fresh random key replaces bytes 20-23 in all three trees on every upload. Cache
+   hits use no GPU. Writes are optional: read-only/full disks and fingerprinting
+   errors leave preparation usable. CPU fallback output is not persisted. One
+   preparation mutex prevents two in-process callers from tuning the same capture
+   simultaneously. Sources are hashed again before committing the cache.
+
+The tuner measures floating-point, unquantized parameters before file encoding.
+Even the two unchanged baseline runs differed by up to 0.1252 dB at a high-PSNR
+depth; the target-reuse trial differed by up to 0.1820 dB. This is not silently
+declared below the 0.05 dB threshold. The added `serialized_upload_quality` ignored
+test instead also compares **the actual exported files** (including colour and
+rotation quantization) on identical recorded views against the same encoded leaves,
+resetting tile-count estimates for each evaluation view. All 88 evaluated cuts of
+the trial passed the 0.05 dB gate; worst changes by session were -0.01322, -0.04966
+and -0.00628 dB. Tree nodes and leaf splats were identical. Final cache-miss files
+are checked separately below. Cache hits are checked byte for byte, excluding the
+fresh upload key; their quality change is exactly zero.
+
+Considered but not implemented: fewer/lower-resolution views or early stopping
+would alter optimization and require a broader quality study. Existing PC/Quest
+sharing, coarse extraction, rayon tree work and GPU buffer/pipeline reuse were
+already present. Web encoding was only 0.011 / 0.048 / 0.371 s in the baseline;
+overlapping that work cannot remove the dominant training cost and was not
+implemented. No training-quality setting was reduced.
+
 ## Background preparation decision
 
 Do not start speculative background GPU tuning in this change. The reconstruction

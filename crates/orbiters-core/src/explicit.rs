@@ -12,6 +12,30 @@ pub fn matches_parameter(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     ["nsfw", "nude", "naked", "sps", "dps", "tps", "penetrat", "orifice", "genital", "lewd"].iter().any(|s| lower.contains(s))
 }
+
+/// Toolkit's final built parameter names and explicit menu tags for the avatar currently worn.
+pub fn manifest_content(avatar_id: Option<&str>) -> Content {
+    let Some(id) = avatar_id else { return Content::default() };
+    let file = crate::paths::avatars_dir().join(crate::contracts::avatar::file_name(id));
+    let Some(manifest) =
+        std::fs::read_to_string(file).ok().and_then(|s| crate::contracts::avatar::AvatarManifest::parse(&s).ok()).filter(|m| m.avatar_id == id)
+    else {
+        return Content::default();
+    };
+    from_manifest(&manifest)
+}
+fn from_manifest(manifest: &crate::contracts::avatar::AvatarManifest) -> Content {
+    let mut content = Content::parameters(manifest.parameters.iter().map(|p| p.name.as_str()));
+    for control in &manifest.controls {
+        if control.has(crate::contracts::avatar::Tag::Nsfw) {
+            content.explicit_reasons.push(format!("manifest-tag:nsfw:{}", control.path.join("/")));
+        }
+    }
+    content.explicit_reasons.sort();
+    content.explicit_reasons.dedup();
+    content.explicit = !content.explicit_reasons.is_empty();
+    content
+}
 impl Content {
     pub fn parameters<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
         let mut reasons: Vec<String> = names
@@ -96,5 +120,12 @@ mod tests {
         db.execute_batch("CREATE TABLE user_tracking(user_id TEXT,profile_location TEXT,profile_current_avatar_id TEXT); CREATE TABLE avatar_tracking(avatar_id TEXT,tags TEXT); INSERT INTO user_tracking VALUES('one','here','a'),('two','elsewhere','b'); INSERT INTO avatar_tracking VALUES('a','[\"content_sex\",\"author_lewd_name\"]'),('b','[\"content_sexually_explicit\"]');").unwrap();
         assert_eq!(labels_in(&db, "here", &["one".into()]).explicit_reasons, ["avatar-label:content_sex"]);
         assert!(!labels_in(&db, "here", &[]).explicit);
+    }
+    #[test]
+    fn manifest_tags_flag_controls_with_ordinary_parameter_names() {
+        let m=crate::contracts::avatar::AvatarManifest::parse(r#"{"format":"orbiters.avatar","version":1,"avatar_id":"avtr_fixture","parameters":[{"name":"NSFW/Toggle","type":"bool","default":0}],"controls":[{"path":["Body","Hidden toggle"],"type":"toggle","parameter":"VF12/Option","tags":["nsfw"]},{"path":["Clothes","Shirt"],"type":"toggle","parameter":"Shirt","tags":["clothing"]}]}"#).unwrap();
+        let content = from_manifest(&m);
+        assert_eq!(content.explicit_reasons, ["manifest-tag:nsfw:Body/Hidden toggle", "osc-parameter:NSFW/Toggle"]);
+        assert!(content.explicit);
     }
 }

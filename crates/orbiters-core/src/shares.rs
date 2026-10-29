@@ -72,6 +72,8 @@ pub struct Item {
     pub owner: Person,
     pub from: Option<Person>,
     pub taken_at: Option<String>,
+    pub instance_id: Option<String>,
+    pub source_key: Option<String>,
     pub created_at: String,
     pub public: bool,
     #[serde(default)]
@@ -131,7 +133,7 @@ impl Feed {
         self.next = page.next.filter(|n| Some(n) != self.next.as_ref());
     }
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Recipient {
     pub vrchat_user_id: String,
@@ -152,12 +154,56 @@ pub struct Unshare {
     pub recipients: Vec<String>,
     pub all: bool,
 }
-/// The contract does not define ShareRequest's fields. Preserve its JSON without inventing a schema.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RequestStatus {
+    #[default]
+    Pending,
+    Approved,
+    Denied,
+    Cancelled,
+}
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Member {
+    pub id: u64,
+    pub name: String,
+    pub avatar_url: Option<String>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareRequest {
+    pub id: u64,
+    #[serde(rename = "type")]
+    pub kind: Kind,
+    pub item_id: u64,
+    pub status: RequestStatus,
+    pub public: bool,
+    pub recipients: Vec<Recipient>,
+    pub message: String,
+    pub requester: Member,
+    pub approver: Member,
+    pub item: Option<Item>,
+    pub created_at: String,
+    pub answered_at: Option<String>,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Requests {
+    pub requests: Vec<ShareRequest>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestAnswer {
+    pub request: ShareRequest,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ItemAnswer {
+    pub item: Item,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Shared {
     Item { item: Item },
-    Request { request: serde_json::Value },
+    Request { request: ShareRequest },
 }
 #[derive(Clone, Debug, Default)]
 pub struct Query {
@@ -216,7 +262,25 @@ impl Api {
         json(r.call()?)
     }
     pub fn capture_item(&self, token: &str, kind: Kind, id: u64) -> anyhow::Result<Item> {
-        json(self.agent().get(&self.url(&path(kind, id))).header("Authorization", &format!("Bearer {token}")).call()?)
+        Ok(json::<ItemAnswer>(self.agent().get(&self.url(&path(kind, id))).header("Authorization", &format!("Bearer {token}")).call()?)?.item)
+    }
+    /// A duplicate picture upload may be skipped without returning its id. Resolve its real identity, including
+    /// older pages, instead of uploading again or matching dates/thumbnails.
+    pub fn capture_by_source_key(&self, token: &str, world_id: &str, kind: Kind, source_key: &str) -> anyhow::Result<Option<Item>> {
+        let mut query = Query { filter: "mine".into(), world_id: Some(world_id.into()), kind: Some(kind), limit: 50, ..Default::default() };
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let page = self.captures(token, &query)?;
+            if let Some(item) =
+                page.items.into_iter().find(|i| i.mine && i.world.id == world_id && i.kind == kind && i.source_key.as_deref() == Some(source_key))
+            {
+                return Ok(Some(item));
+            }
+            match page.next {
+                Some(next) if seen.insert(next.clone()) => query.cursor = Some(next),
+                _ => return Ok(None),
+            }
+        }
     }
     pub fn share_capture(&self, token: &str, kind: Kind, id: u64, share: &Share) -> anyhow::Result<Shared> {
         anyhow::ensure!(share.public || !share.recipients.is_empty(), "Choose someone to share with.");
@@ -249,7 +313,7 @@ impl Api {
         std::io::copy(&mut r.into_body().into_reader(), &mut file)?;
         Ok(())
     }
-    pub fn capture_requests(&self, token: &str, incoming: bool) -> anyhow::Result<serde_json::Value> {
+    pub fn capture_requests(&self, token: &str, incoming: bool) -> anyhow::Result<Requests> {
         json(
             self.agent()
                 .get(&self.url("captures/requests"))
@@ -258,13 +322,12 @@ impl Api {
                 .call()?,
         )
     }
-    pub fn answer_capture_request(&self, token: &str, id: u64, approve: bool) -> anyhow::Result<serde_json::Value> {
-        json(
-            self.agent()
-                .post(&self.url(&format!("captures/requests/{id}/{}", if approve { "approve" } else { "deny" })))
-                .header("Authorization", &format!("Bearer {token}"))
-                .send_empty()?,
-        )
+    pub fn answer_capture_request(&self, token: &str, id: u64, approve: bool, acknowledge_explicit: bool) -> anyhow::Result<RequestAnswer> {
+        let request = self
+            .agent()
+            .post(&self.url(&format!("captures/requests/{id}/{}", if approve { "approve" } else { "deny" })))
+            .header("Authorization", &format!("Bearer {token}"));
+        json(if approve { request.send_json(serde_json::json!({"acknowledgeExplicit":acknowledge_explicit}))? } else { request.send_empty()? })
     }
     pub fn moderate_capture(&self, token: &str, kind: Kind, id: u64, reason: Option<&str>) -> anyhow::Result<serde_json::Value> {
         json(
@@ -340,14 +403,35 @@ mod tests {
                     let head = String::from_utf8_lossy(&request[..end]);
                     let len =
                         head.lines().find_map(|l| l.to_lowercase().strip_prefix("content-length:").and_then(|s| s.trim().parse::<usize>().ok())).unwrap_or(0);
-                    if request.len() >= end + 4 + len {
+                    if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+                        let tail = &request[end + 4..];
+                        if tail == b"0\r\n\r\n" || tail.ends_with(b"\r\n0\r\n\r\n") {
+                            break;
+                        }
+                    } else if request.len() >= end + 4 + len {
                         break;
                     }
                 }
             }
             write!(stream, "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
                 .unwrap();
-            String::from_utf8(request).unwrap()
+            let raw = String::from_utf8(request).unwrap();
+            if let Some((head, body)) = raw.split_once("\r\n\r\n") {
+                if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+                    let mut rest = body;
+                    let mut decoded = String::new();
+                    while let Some((size, chunk)) = rest.split_once("\r\n") {
+                        let n = usize::from_str_radix(size.split(';').next().unwrap(), 16).unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        decoded.push_str(&chunk[..n]);
+                        rest = &chunk[n + 2..];
+                    }
+                    return format!("{head}\r\n\r\n{decoded}");
+                }
+            }
+            raw
         });
         (Api::at(&url), thread)
     }
@@ -362,7 +446,8 @@ mod tests {
     }
     #[test]
     fn a_grantee_gets_a_request_and_never_an_owned_item() {
-        let (api, request) = server(202, r#"{"request":{"id":5,"status":"pending"}}"#.into());
+        let requests: Requests = serde_json::from_str(include_str!("../tests/fixtures/capture-requests.json")).unwrap();
+        let (api, request) = server(202, serde_json::json!({"request":requests.requests[0]}).to_string());
         let result = api.share_capture("fixture", Kind::Capture, 123, &Share { public: true, ..Default::default() }).unwrap();
         assert!(matches!(result, Shared::Request { .. }));
         request.join().unwrap();
@@ -384,7 +469,7 @@ mod tests {
     #[test]
     fn private_upload_sends_contract_fields_and_returns_identity() {
         let (api, request) = server(200, r#"{"added":[{"type":"picture","id":42,"visibility":"private"}],"skipped":0}"#.into());
-        let metadata = serde_json::json!({"visibility":"private","explicit":true,"explicitReasons":["osc-parameter:NSFW"],"takenAt":["2026-10-28T21:00:00Z"]});
+        let metadata = serde_json::json!({"visibility":"private","explicit":true,"explicitReasons":["osc-parameter:NSFW"],"takenAt":["2026-10-28T21:00:00Z"],"instanceId":"12345~friends(usr_fixture)","sourceKey":"0123456789abcdef"});
         let result = api
             .add_shared_pictures(
                 "fixture",
@@ -395,9 +480,66 @@ mod tests {
             .unwrap();
         assert_eq!(result.added[0].id, 42);
         let request = request.join().unwrap();
-        for field in ["visibility", "explicit", "explicitReasons"] {
+        for field in ["visibility", "explicit", "explicitReasons", "instanceId", "sourceKey"] {
             assert!(request.contains(&format!("name=\"{field}\"")), "{field}");
         }
         assert!(request.contains("osc-parameter:NSFW"));
+    }
+    #[test]
+    fn single_item_is_wrapped_and_nullable_attribution_is_allowed() {
+        let feed: Feed = serde_json::from_str(include_str!("../tests/fixtures/captures.json")).unwrap();
+        let (api, request) = server(200, serde_json::json!({"item":feed.items[0]}).to_string());
+        let item = api.capture_item("fixture", Kind::Capture, 123).unwrap();
+        assert!(item.instance_id.is_some());
+        assert_eq!(item.source_key.as_deref(), Some("2026-10-28_21-00-00"));
+        request.join().unwrap();
+        let mut value = serde_json::to_value(&item).unwrap();
+        value.as_object_mut().unwrap().remove("instanceId");
+        value["sourceKey"] = serde_json::Value::Null;
+        let item: Item = serde_json::from_value(value).unwrap();
+        assert!(item.instance_id.is_none() && item.source_key.is_none());
+    }
+    #[test]
+    fn typed_incoming_requests_and_explicit_approval() {
+        let fixture = include_str!("../tests/fixtures/capture-requests.json");
+        let (api, request) = server(200, fixture.into());
+        let mut requests = api.capture_requests("fixture", true).unwrap();
+        assert_eq!(requests.requests[0].status, RequestStatus::Pending);
+        assert_eq!(requests.requests[0].recipients[0].display_name, "Robin");
+        assert!(request.join().unwrap().contains("box=incoming"));
+        let mut r = requests.requests.remove(0);
+        r.status = RequestStatus::Approved;
+        r.answered_at = Some("2026-10-29T01:00:00Z".into());
+        let (api, request) = server(200, serde_json::json!({"request":r}).to_string());
+        let answer = api.answer_capture_request("fixture", 12, true, true).unwrap();
+        assert_eq!(answer.request.status, RequestStatus::Approved);
+        let body = request.join().unwrap();
+        assert!(body.starts_with("POST /captures/requests/12/approve "));
+        let json: serde_json::Value = serde_json::from_str(body.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(json["acknowledgeExplicit"], true);
+        r.status = RequestStatus::Denied;
+        let (api, request) = server(200, serde_json::json!({"request":r}).to_string());
+        assert_eq!(api.answer_capture_request("fixture", 12, false, false).unwrap().request.status, RequestStatus::Denied);
+        let body = request.join().unwrap();
+        assert!(body.starts_with("POST /captures/requests/12/deny "));
+        assert!(!body.contains("acknowledgeExplicit"));
+        let (api, request) = server(409, serde_json::json!({"code":"explicit-acknowledgement","message":EXPLICIT_WARNING}).to_string());
+        let error = api.answer_capture_request("fixture", 12, true, false).unwrap_err();
+        assert!(error.downcast_ref::<ExplicitAcknowledgement>().is_some());
+        request.join().unwrap();
+        for status in [RequestStatus::Pending, RequestStatus::Approved, RequestStatus::Denied, RequestStatus::Cancelled] {
+            r.status = status;
+            let encoded = serde_json::to_value(&r).unwrap();
+            assert_eq!(serde_json::from_value::<ShareRequest>(encoded).unwrap().status, status);
+        }
+    }
+    #[test]
+    fn skipped_upload_identity_is_resolved_from_owned_source_keys() {
+        let fixture = include_str!("../tests/fixtures/captures.json");
+        let (api, request) = server(200, fixture.into());
+        let found = api.capture_by_source_key("fixture", "wrld_11111111-1111-1111-1111-111111111111", Kind::Capture, "2026-10-28_21-00-00").unwrap().unwrap();
+        assert_eq!(found.id, 123);
+        let request = request.join().unwrap();
+        assert!(request.contains("filter=mine") && request.contains("worldId=") && request.contains("kind=capture"));
     }
 }

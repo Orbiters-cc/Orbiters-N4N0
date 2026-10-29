@@ -276,8 +276,8 @@ impl Api {
         let mut pieces = vec![Piece::bytes(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n"))];
         // These are multipart fields in the sharing contract, alongside the existing metadata JSON.
         let fields: serde_json::Value = serde_json::from_str(metadata)?;
-        for field in ["visibility", "explicit", "explicitReasons", "acknowledgeExplicit"] {
-            if let Some(value) = fields.get(field) {
+        for field in ["visibility", "explicit", "explicitReasons", "acknowledgeExplicit", "instanceId", "sourceKey"] {
+            if let Some(value) = fields.get(field).filter(|v| !v.is_null()) {
                 let value = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
                 pieces.push(Piece::bytes(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"\r\n\r\n{value}\r\n")));
             }

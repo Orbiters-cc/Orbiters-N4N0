@@ -1355,7 +1355,47 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         });
     }
 
-
+    for name in [
+        "gallery-mixed",
+        "gallery-mine",
+        "gallery-shared",
+        "gallery-search",
+        "gallery-owner",
+        "gallery-public",
+        "gallery-grantee",
+        "gallery-friends",
+        "gallery-explicit",
+        "gallery-error",
+        "gallery-picture",
+        "gallery-progress",
+        "gallery-request",
+        "gallery-instance",
+        "gallery-empty",
+        "gallery-requests",
+        "gallery-requests-explicit",
+        "gallery-requests-approved",
+        "gallery-requests-error",
+        "gallery-requests-outgoing",
+        "gallery-requests-denied",
+        "world-share-mid",
+        "world-share-open",
+        "world-share-detail",
+    ] {
+        scenarios.push(Scenario {
+            name,
+            page: if name.starts_with("world-share") { Page::Worlds } else { Page::Sessions },
+            snapshot: scenarios[0].snapshot.clone(),
+            frames: 140,
+            splash: false,
+            open_detail: name == "world-share-detail",
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: if name == "world-share-detail" { Some(WorldShot::default()) } else { None },
+            home: None,
+            library: None,
+        });
+    }
     vrchat_login::append(&mut scenarios);
 
     // Home's music is the overlay's sample song, never what this computer plays.
@@ -1367,7 +1407,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     let mut gpu = Offscreen::new()?;
     for sc in scenarios {
-        if only.as_deref().is_some_and(|o| o != sc.name && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))) {
+        if only.as_deref().is_some_and(|o| {
+            o != sc.name
+                && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))
+                && !(o == "sharing" && (sc.name.starts_with("gallery-") || sc.name.starts_with("world-share")))
+        }) {
             continue;
         }
         let path = out.join(format!("{}.png", sc.name));
@@ -1417,6 +1461,18 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             if sc.page == Page::Videos {
                 stage_videos(&ctx, &mut app, sc.name);
             }
+        }
+        if sc.page == Page::Sessions && (f == 0 || f == 45) {
+            app.sessions_mut().stage_gallery(&ctx, sc.name);
+        }
+        if sc.name == "world-share-mid" && f == sc.frames - 4 {
+            app.worlds_mut().stage_share_morph(&ctx, true);
+        }
+        if sc.name == "world-share-detail" && f == 90 {
+            app.worlds_mut().stage_detail_share(&ctx);
+        }
+        if sc.name == "world-share-open" && f == 45 {
+            app.worlds_mut().stage_share_morph(&ctx, false);
         }
         // Home made its menu on the first frame.
         if let (Some(shot), 2) = (sc.home, f) {

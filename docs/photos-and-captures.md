@@ -7,8 +7,8 @@ cursor stops pagination. Results and filtered indices are retained between frame
 
 Items are ordered newest first and grouped by world and recorded instance. A session's manifest supplies its
 instance; pictures use the most recent retained VRChat join before their timestamp, only when it names the same
-world. Items without an instance are grouped by world/day and say that the instance was not recorded. Shared items
-currently have no instance field in the contract. Instance info reads VRCX's recorded joins/leaves on a background
+world. Items without an instance are grouped by world/day and say that the instance was not recorded. Shared items use
+the server's `instanceId` when it is available. Instance info reads VRCX's recorded joins/leaves on a background
 thread for a historical roster when available. Open in VRChat appears only for the currently running VRChat
 instance: historical joins and the Previous instances list do not establish that an instance is still alive.
 
@@ -26,6 +26,9 @@ thread. Existing picture loaders also accept PNG, JPEG and WebP remote profile p
   50 recipients and a 280-character optional message. New uploads are private before their grants are made.
 - Recipients see who shared the item, Download / open and Request share. A request can name recipients and/or ask
   for public sharing. A 202 response is shown as a pending request, never as a successful publication.
+- Requests opens incoming and outgoing share requests. Approvers can open the item, approve or deny; a public
+  request for an explicit item shows the warning before approval and sends `acknowledgeExplicit: true` only after
+  confirmation. Status changes appear immediately and roll back on failure, with inline Retry.
 - Owners can unshare publicly, revoke a person or unshare everything. Re-sharers see and can revoke the grants the
   server returns for them. Revocation is shown immediately; a failure restores the saved item and offers Retry.
 - Failures stay in the dialog, including in the picker. Busy actions disable immediately. A 409 with code
@@ -65,7 +68,9 @@ recording. It is an atomic JSON sidecar:
 The current worn avatar's known OSC parameter **names**, including parameters whose value is false, are matched
 case-insensitively for `nsfw`, `nude`, `naked`, `sps`, `dps`, `tps`, `penetrat`, `orifice`, `genital` and `lewd`.
 Reasons retain the original name without `/avatar/parameters/`. The app's existing OSC/OSCQuery path supplies these
-names and forgets the previous avatar's parameters on avatar change.
+names and forgets the previous avatar's parameters on avatar change. The worn avatar's Toolkit manifest is read
+through the existing avatar-manifest parser and canonical filename helper. Its final parameter names contribute
+the same signals; each control tagged `nsfw` adds `manifest-tag:nsfw:<labels joined by />`.
 
 VRCNext's database is opened read-only. `user_tracking.profile_current_avatar_id` joins `avatar_tracking.tags` only
 for users actually in the current VRChat log roster and whose cached `profile_location` exactly matches the
@@ -79,20 +84,25 @@ Both public and private uploads carry `explicit` and JSON `explicitReasons` mult
 and the existing metadata. An absent cache/OSC signal is unavailable evidence; it cannot prove that an item is safe.
 Existing recordings are not retroactively classified.
 
-## Contract assumptions and verification limits
+## Contract and verification limits
 
-The binding contract remains `contracts/Docs/capture-sharing.md`, unchanged by this workstream. It does not specify
-ShareRequest fields or the upload response envelope. The client preserves ShareRequest JSON as an opaque value,
-expects preview upload identity at the response root, and expects picture identities in `added: [{type,id,visibility}]`
-with a numeric `skipped`. The single-item route is read as a bare Item. These envelope assumptions must be checked
-against the development server before release. An already-skipped picture without a returned id raises an inline
-error asking for a gallery refresh; the client does not guess its identity. The contract also has no local source
-identity or instance on Item, so previously uploaded local files without an upload record may appear separately
-from their server copies, and shared-instance details cannot be reconstructed from that Item alone.
+The binding contract is `contracts/Docs/capture-sharing.md`, including the coordinator's `c9025c2` update. The
+single-item route is read as `{item}`; requests and answers have typed request/status/member/recipient structures.
+Uploads send `instanceId` when recorded and `sourceKey`: a capture's folder name or the picture's cached original
+SHA-256. Owner feed items are matched to local files by world, kind and sourceKey, with picture hashing queued off
+the UI thread only for worlds whose owned server pictures need matching. Missing/null attribution remains unknown
+until the server supplies it. Identity matching never relies on timestamps, display names or thumbnails.
 
-Unit fixtures cover contract JSON, requests, 409 warnings, multipart fields, cursor encoding/merging, revocation
-and instance association; the downloaded-splat test covers coordinates and malformed input. Offscreen screenshots
-use the checked-in JSON fixture and local thumbnail imagery. They do not establish real server permissions,
-upload/public replacement behavior, request approval, grant cascades, VRChat slot allocation, running capture
-evidence, live download/rendering or in-client behavior. No production uploads, version bumps, tags, pushes or
-releases are part of this implementation.
+Preview upload identity is read at the response root; picture identities are read from `added`, with numeric
+`skipped`. An already-skipped picture without a returned id is resolved through the world's owned feed pages by its exact
+sourceKey. If the server has not supplied that source identity yet, an inline error asks for a refresh; the client
+does not guess its identity. Local upload records also bind server ids directly to paths.
+
+Unit fixtures cover contract JSON, typed incoming/outgoing requests and approval/denial, 409 warnings, multipart
+fields, cursor encoding/merging, revocation, source identity and instance association. A controller test writes the
+actual content sidecar on a synthetic worker-start event, and another verifies that a tray job remains active after
+a window snapshot is dropped and that its result round-trips through IPC. The downloaded-splat test covers
+coordinates and malformed input. Offscreen screenshots use checked-in JSON fixtures and local thumbnail imagery.
+They do not establish real server permissions, upload/public replacement behavior, request approval, grant
+cascades, VRChat slot allocation, physical capture evidence, live download/rendering or in-client behavior.
+No production uploads, version bumps, tags, pushes or releases are part of this implementation.

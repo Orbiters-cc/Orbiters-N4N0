@@ -9,6 +9,7 @@ pub mod projects;
 pub mod sessions;
 pub mod gallery;
 pub mod sharing;
+pub mod requests;
 pub mod settings;
 pub mod splat_worker;
 pub mod splats;

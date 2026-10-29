@@ -36,6 +36,7 @@ pub struct Dialog {
     error: Option<String>,
     notice: Option<String>,
     fixture_busy: bool,
+    fixture_active: bool,
     rollback: Option<Entry>,
     request_public: bool,
     large_picture: bool,
@@ -62,6 +63,7 @@ impl Dialog {
             error: None,
             notice: None,
             fixture_busy: false,
+            fixture_active: false,
             rollback: None,
             request_public: false,
             large_picture: false,
@@ -74,6 +76,7 @@ impl Dialog {
         self.pictures.loading()
     }
     pub fn fixture(&mut self, state: &str) {
+        self.fixture_active = true;
         if state == "friends" {
             self.picker = true;
             self.friends = Job::default();
@@ -134,6 +137,11 @@ impl Dialog {
     }
     pub fn show(&mut self, ui: &mut Ui, cx: &mut Cx) -> bool {
         let ctx = ui.ctx().clone();
+        if !self.fixture_active && self.entry.local.is_none() {
+            if let Some(item) = self.entry.remote.as_ref().filter(|i| i.picture.is_some()) {
+                self.entry.picture = Some(crate::worlds::Picture::Capture { development: cx.snap.settings.development, id: item.id, large: true });
+            }
+        }
         let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
         if let Some(f) = self.friends.take() {
             self.friends_list = f;
@@ -155,6 +163,13 @@ impl Dialog {
                 Outcome::Shared(Shared::Request { .. }) => {
                     self.picker = false;
                     self.notice = Some("Share request sent to the person who shared this with you".into());
+                }
+                Outcome::Answered(request) => {
+                    self.notice = Some("Share request answered".into());
+                    if let Some(item) = request.item {
+                        self.entry.remote = Some(item);
+                        self.changed = true;
+                    }
                 }
                 Outcome::Downloaded(path) => {
                     self.notice = Some(format!("Saved to {}", path.display()));
@@ -195,7 +210,7 @@ impl Dialog {
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new(&self.entry.world_name).size(23.0).strong());
                         let date = super::local_time(&controller::iso(self.entry.taken));
-                        let sub = if self.extra.is_empty() { date } else { format!("{} pictures ? {date}", self.extra.len() + 1) };
+                        let sub = if self.extra.is_empty() { date } else { format!("{} pictures, {date}", self.extra.len() + 1) };
                         ui.label(egui::RichText::new(sub).size(12.0).color(theme::FG_3));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

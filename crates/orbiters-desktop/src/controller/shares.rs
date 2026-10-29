@@ -67,6 +67,7 @@ pub struct Entry {
     pub world_name: String,
     pub taken: u64,
     pub instance: Option<String>,
+    pub source_key: Option<String>,
     pub people: Vec<String>,
     pub local: Option<Local>,
     pub remote: Option<Item>,
@@ -81,6 +82,7 @@ pub enum Operation {
     Share(shares::Share),
     Unshare(shares::Unshare),
     Download,
+    Answer { id: u64, approve: bool, acknowledge_explicit: bool },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -95,6 +97,7 @@ pub enum Outcome {
     Shared(shares::Shared),
     Unshared(Item),
     Downloaded(PathBuf),
+    Answered(shares::ShareRequest),
     Failed { message: String, explicit: bool },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -114,6 +117,10 @@ fn run_request(request: Request) -> anyhow::Result<Outcome> {
             Ok(Outcome::Shared(first))
         }
         Operation::Unshare(r) => unshare(request.server, request.entry, r).map(Outcome::Unshared),
+        Operation::Answer { id, approve, acknowledge_explicit } => {
+            let (api, token) = api(request.server)?;
+            Ok(Outcome::Answered(api.answer_capture_request(&token, id, approve, acknowledge_explicit)?.request))
+        }
         Operation::Download => download(request.server, request.entry.remote.ok_or_else(|| anyhow::anyhow!("No uploaded item"))?).map(Outcome::Downloaded),
     }
 }
@@ -144,6 +151,7 @@ impl super::Controller {
                     (super::NoticeKind::Info, "Open Photos & captures to confirm sharing this explicit item publicly.".into())
                 }
                 Outcome::Shared(shares::Shared::Request { .. }) => (super::NoticeKind::Success, "Share request sent.".into()),
+                Outcome::Answered(_) => (super::NoticeKind::Success, "Share request answered.".into()),
                 Outcome::Downloaded(p) => (super::NoticeKind::Success, format!("Saved {}", p.display())),
                 _ => (super::NoticeKind::Success, "Sharing updated.".into()),
             };
@@ -174,6 +182,17 @@ impl Entry {
         matches!(self.local, Some(Local::Picture(_))) || self.remote.as_ref().is_some_and(|i| i.kind == Kind::Picture)
     }
 }
+
+/// Server ids win; an owner's source key also identifies a local file before it has an upload record.
+pub fn matches_item(entry: &Entry, item: &Item) -> bool {
+    if let Some(known) = entry.remote.as_ref() {
+        return known.key() == item.key();
+    }
+    item.mine
+        && entry.world_id == item.world.id
+        && entry.is_picture() == (item.kind == Kind::Picture)
+        && entry.source_key.as_ref().zip(item.source_key.as_ref()).is_some_and(|(a, b)| !a.is_empty() && a == b)
+}
 pub fn unix(date: &str) -> u64 {
     time::OffsetDateTime::parse(date, &time::format_description::well_known::Rfc3339).ok().and_then(|t| u64::try_from(t.unix_timestamp()).ok()).unwrap_or(0)
 }
@@ -200,6 +219,7 @@ pub fn local_entries(root: &Path, server: Server) -> Vec<Entry> {
                 world_name: w.name.clone(),
                 taken,
                 instance: s.manifest.world.as_ref().and_then(|w| w.instance.clone()).or_else(|| instance_at(&history, &w.id, taken)),
+                source_key: s.dir.file_name().map(|s| s.to_string_lossy().into_owned()),
                 people: Vec::new(),
                 local: Some(local),
                 remote,
@@ -223,6 +243,7 @@ pub fn local_entries(root: &Path, server: Server) -> Vec<Entry> {
                 world_name: w.name.clone(),
                 taken: shot.info.taken,
                 instance: instance_at(&history, &w.id, shot.info.taken),
+                source_key: shot.sha256.clone(),
                 people: Vec::new(),
                 local: Some(Local::Picture(shot.path.clone())),
                 remote,
@@ -249,7 +270,8 @@ pub fn remote_entry(item: Item) -> Entry {
         world_id: item.world.id.clone(),
         world_name: item.world.name.clone(),
         taken: unix(item.date()),
-        instance: None,
+        instance: item.instance_id.clone(),
+        source_key: item.source_key.clone(),
         people: Vec::new(),
         local: None,
         content: Content { explicit: item.explicit, explicit_reasons: item.explicit_reasons.clone() },
@@ -311,7 +333,19 @@ pub fn share(server: Server, entry: Entry, request: shares::Share) -> anyhow::Re
         item
     } else {
         anyhow::ensure!(!request.public || !entry.content.explicit || request.acknowledge_explicit, "{}", shares::EXPLICIT_WARNING);
+        let source_key = match entry.local.as_ref().ok_or_else(|| anyhow::anyhow!("No local file to upload"))? {
+            Local::Session(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()).ok_or_else(|| anyhow::anyhow!("No capture folder name"))?,
+            Local::Picture(p) => entry
+                .source_key
+                .clone()
+                .or_else(|| crate::worlds::hashes(vec![p.clone()]).remove(p))
+                .ok_or_else(|| anyhow::anyhow!("Could not fingerprint this picture"))?,
+        };
+        anyhow::ensure!(source_key.chars().count() <= 128, "The capture folder name is longer than the server's 128-character source key limit.");
         let mut metadata = serde_json::json!({"visibility":if request.public{"public"}else{"private"},"explicit":entry.content.explicit,"explicitReasons":entry.content.explicit_reasons,"acknowledgeExplicit":request.acknowledge_explicit,"takenAt":iso(entry.taken)});
+        metadata["sourceKey"] = serde_json::json!(source_key);
+        metadata["instanceId"] = serde_json::json!(entry.instance);
+
         let uploaded: Uploaded = match entry.local.as_ref().ok_or_else(|| anyhow::anyhow!("No local file to upload"))? {
             Local::Session(dir) => {
                 let (files, sky, view) = super::maps::web_preview(dir)?;
@@ -323,11 +357,15 @@ pub fn share(server: Server, entry: Entry, request: shares::Share) -> anyhow::Re
                 let part = Part::file("pictures", name.as_ref(), "image/png", path)?;
                 metadata["takenAt"] = serde_json::json!([iso(entry.taken)]);
                 let result = api.add_shared_pictures(&token, &entry.world_id, vec![part], &metadata)?;
-                result
-                    .added
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("The server skipped this picture without returning its capture id. Refresh the gallery to find it."))?
+                match result.added.into_iter().next() {
+                    Some(uploaded) => uploaded,
+                    None => {
+                        let item = api.capture_by_source_key(&token, &entry.world_id, Kind::Picture, &source_key)?.ok_or_else(|| {
+                            anyhow::anyhow!("The server skipped this picture, but its source identity is not available yet. Refresh the gallery and retry.")
+                        })?;
+                        Uploaded { kind: item.kind, id: item.id, visibility: if item.public { "public" } else { "private" }.into() }
+                    }
+                }
             }
         };
         let file = records_path(server)?;
@@ -400,7 +438,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         ctl.capture_share_with(request, move |_| {
             rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
-            Ok(Outcome::Shared(shares::Shared::Request { request: serde_json::json!({"id":5,"status":"pending"}) }))
+            Ok(Outcome::Shared(shares::Shared::Request { request: shares::ShareRequest { id: 5, ..Default::default() } }))
         });
         let window = ctl.view();
         assert_eq!(window.busy_with(), Some("the upload"));
@@ -430,5 +468,30 @@ mod tests {
         assert_eq!(content.explicit_reasons, ["osc-parameter:NSFW/Toggle"]);
         assert!(dir.join(orbiters_core::explicit::FILE).is_file());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn source_keys_match_only_owned_items_of_the_same_kind_and_world() {
+        let item = Item {
+            kind: Kind::Capture,
+            mine: true,
+            source_key: Some("recording-folder".into()),
+            world: shares::World { id: "world".into(), ..Default::default() },
+            ..Default::default()
+        };
+        let mut entry = remote_entry(item.clone());
+        entry.remote = None;
+        assert!(matches_item(&entry, &item));
+        let mut different = item.clone();
+        different.mine = false;
+        assert!(!matches_item(&entry, &different));
+        different = item.clone();
+        different.kind = Kind::Picture;
+        assert!(!matches_item(&entry, &different));
+        different = item.clone();
+        different.world.id = "other".into();
+        assert!(!matches_item(&entry, &different));
+        different = item;
+        different.source_key = None;
+        assert!(!matches_item(&entry, &different));
     }
 }

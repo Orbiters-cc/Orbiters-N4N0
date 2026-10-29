@@ -368,7 +368,7 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             state.import = Some(Import { serial: state.serial, raws: Job::spawn(&ctx, move || controller::list_raw_captures(&dir)) });
         }
     }
-    if IconButton::new(icons::FOLDER_OPEN, "Open the sessions folder").show_at(ui, folder_r).clicked() {
+    if IconButton::new(icons::FOLDER_OPEN, "Open the captures folder").show_at(ui, folder_r).clicked() {
         let r = controller::open_path(&cx.snap.settings.sessions_dir);
         cx.run(&ctx, r);
     }

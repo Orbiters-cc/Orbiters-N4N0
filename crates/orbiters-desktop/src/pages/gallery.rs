@@ -35,6 +35,9 @@ impl Filter {
 }
 #[derive(Default)]
 pub struct State {
+    requests: super::requests::State,
+    hash_job: Job<std::collections::HashMap<std::path::PathBuf, String>>,
+    hash_asked: std::collections::HashSet<std::path::PathBuf>,
     shown_key: Option<(Filter, String)>,
     shown: Vec<Entry>,
     key: Option<(u64, u64, std::path::PathBuf, bool, String)>,
@@ -55,12 +58,15 @@ pub struct State {
 }
 impl State {
     pub fn busy(&self) -> bool {
-        self.local_job.running()
+        self.requests.busy()
+            || self.hash_job.running()
+            || self.local_job.running()
             || self.feed_job.running()
             || self.pictures.as_ref().is_some_and(|p| p.loading())
             || self.dialog.as_ref().is_some_and(Dialog::loading)
     }
     pub fn stage(&mut self, ctx: &egui::Context, name: &str) {
+        self.requests.stage(name);
         self.shown_key = None;
         self.fixture = true;
         self.feed_job = Job::default();
@@ -70,7 +76,7 @@ impl State {
             for (n, e) in self.locals.iter_mut().enumerate() {
                 e.world_id = self.feed.items[0].world.id.clone();
                 e.world_name = self.feed.items[0].world.name.clone();
-                e.instance = None;
+                e.instance = self.feed.items[0].instance_id.clone();
                 e.taken = controller::unix("2026-10-28T21:30:00Z") - n as u64 * 300;
             }
         }
@@ -134,6 +140,7 @@ impl State {
 /// `true` opens the existing capture-management surface (reconstruction, storage, import).
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let ctx = ui.ctx().clone();
+    state.requests.poll(&ctx, cx);
     let page = ui.max_rect();
     let now = anim::time(&ctx);
     let development = cx.snap.settings.development;
@@ -146,9 +153,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         state.local_job = Job::spawn(&ctx, move || controller::local_entries(&dir, server));
         state.asked = None;
         if changed_account {
+            state.feed_job = Job::default();
+            state.hash_job = Job::default();
             state.feed = Feed::default();
+            state.shown_key = None;
+            for entry in &mut state.locals {
+                entry.remote = None;
+            }
             state.dialog = None;
             state.pictures = None;
+            state.hash_asked.clear();
         }
     }
     if state.pictures.is_none() {
@@ -167,6 +181,34 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             Err(e) => state.error = Some(e.to_string()),
         }
     }
+
+    if let Some(hashes) = state.hash_job.take() {
+        for entry in &mut state.locals {
+            if let Some(controller::Local::Picture(path)) = &entry.local {
+                if let Some(hash) = hashes.get(path) {
+                    entry.source_key = Some(hash.clone());
+                }
+            }
+        }
+        state.shown_key = None;
+    }
+    if !state.fixture && !state.hash_job.running() {
+        let worlds: std::collections::HashSet<_> =
+            state.feed.items.iter().filter(|i| i.mine && i.picture.is_some() && i.source_key.is_some()).map(|i| i.world.id.as_str()).collect();
+        let paths: Vec<_> = state
+            .locals
+            .iter()
+            .filter(|e| e.source_key.is_none() && worlds.contains(e.world_id.as_str()))
+            .filter_map(|e| match &e.local {
+                Some(controller::Local::Picture(p)) if !state.hash_asked.contains(p) => Some(p.clone()),
+                _ => None,
+            })
+            .collect();
+        if !paths.is_empty() {
+            state.hash_asked.extend(paths.iter().cloned());
+            state.hash_job = Job::spawn(&ctx, move || crate::worlds::hashes(paths));
+        }
+    }
     let requested = (state.filter, state.query.trim().to_string());
     if !state.fixture && state.asked.as_ref() != Some(&requested) && now - state.query_changed > 0.3 {
         state.feed = Feed::default();
@@ -178,7 +220,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         ctx.request_repaint_after(std::time::Duration::from_millis(320));
     }
     let head = Rect::from_min_size(pos2(page.left() + 32.0, page.top() + cx.top + 8.0), vec2(page.width() - 64.0, 72.0));
-    let controls = Rect::from_min_size(pos2(head.left(), head.bottom() + 12.0), vec2(head.width(), 40.0));
+    let narrow = head.width() < 690.0;
+    let controls = Rect::from_min_size(pos2(head.left(), head.bottom() + 12.0), vec2(head.width(), if narrow { 88.0 } else { 40.0 }));
     let top = controls.bottom() + 24.0;
     let q = state.query.trim().to_lowercase();
     let shown_key = (state.filter, q.clone());
@@ -192,8 +235,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             if state.filter == Filter::Mine && !item.mine || state.filter == Filter::Shared && item.mine {
                 continue;
             }
-            if let Some(e) = entries.iter_mut().find(|e| e.remote.as_ref().is_some_and(|i| i.key() == item.key())) {
+            if let Some(e) = entries.iter_mut().find(|e| controller::matches_item(e, item)) {
                 e.remote = Some(item.clone());
+                e.world_name = item.world.name.clone();
+                if e.instance.is_none() {
+                    e.instance = item.instance_id.clone();
+                }
             } else {
                 let mut e = controller::remote_entry(item.clone());
                 if item.picture.is_some() && !state.fixture {
@@ -372,7 +419,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             });
         });
     super::under_top(&gu, cx, "photos-captures", from, top);
-    super::heading(ui, head, "Library", "Photos & captures", Some("Your pictures, 3D captures and moments shared by friends"));
+    super::heading(
+        ui,
+        head,
+        "Library",
+        "Photos & captures",
+        Some(if narrow { "Pictures, captures and shared moments" } else { "Your pictures, 3D captures and moments shared by friends" }),
+    );
     let mut manage = false;
     let b = Rect::from_min_size(pos2(head.right() - 172.0, head.top() + 25.0), vec2(172.0, 40.0));
     if sharing::pressed(Button::new("Manage captures").icon(icons::FOLDER_OPEN).width(b.width()).show_at(ui, b)) {
@@ -386,12 +439,25 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         &[SegOption::new(Filter::Mine, "Mine"), SegOption::new(Filter::All, "All"), SegOption::new(Filter::Shared, "Shared with me")],
         true,
     );
-    let search = Rect::from_min_size(pos2(controls.right() - 280.0, controls.top()), vec2(280.0, 40.0));
+    let search = if narrow {
+        Rect::from_min_size(pos2(controls.left(), controls.top() + 48.0), vec2(controls.width(), 40.0))
+    } else {
+        Rect::from_min_size(pos2(controls.right() - 280.0, controls.top()), vec2(280.0, 40.0))
+    };
+    let request_button = Rect::from_min_size(pos2(if narrow { controls.right() - 150.0 } else { search.left() - 162.0 }, controls.top()), vec2(150.0, 40.0));
+    if sharing::pressed(
+        Button::new(&format!("Requests ({})", state.requests.pending())).icon(icons::CLOCK).width(request_button.width()).show_at(ui, request_button),
+    ) {
+        state.requests.open = true;
+    }
     let mut su = ui.new_child(UiBuilder::new().max_rect(search).id_salt("gallery-search"));
     let before = state.query.clone();
-    widgets::search_field(&mut su, "gallery-search", &mut state.query, "Search worlds", 280.0);
+    widgets::search_field(&mut su, "gallery-search", &mut state.query, "Search worlds", search.width());
     if state.query != before {
         state.query_changed = now;
+    }
+    if let Some(item) = state.requests.show(ui, cx) {
+        state.dialog = Some(Dialog::new(&ctx, controller::remote_entry(item), false));
     }
     if let Some(mut e) = clicked {
         if let Some(item) = e.remote.as_ref() {
@@ -500,4 +566,28 @@ fn instance_type(instance: &str) -> &str {
 }
 fn encode(value: &str) -> String {
     value.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn instance_groups_cross_midnight_but_never_worlds_or_unknown_days() {
+        let entry = |world: &str, instance: Option<&str>, taken| {
+            let mut e = controller::remote_entry(orbiters_core::shares::Item::default());
+            e.world_id = world.into();
+            e.instance = instance.map(str::to_owned);
+            e.taken = taken;
+            e
+        };
+        let entries = vec![
+            entry("a", Some("one"), 172805),
+            entry("a", Some("one"), 172799),
+            entry("a", Some("two"), 172798),
+            entry("b", Some("one"), 172797),
+            entry("a", None, 172796),
+            entry("a", None, 86399),
+        ];
+        assert_eq!(groups(&entries), vec![vec![0, 1], vec![2], vec![3], vec![4], vec![5]]);
+    }
 }

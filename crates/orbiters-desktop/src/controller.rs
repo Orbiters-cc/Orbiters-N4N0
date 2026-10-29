@@ -631,6 +631,12 @@ impl Controller {
                 );
                 let world = self.snapshot.lock().unwrap().vrchat.world.clone();
                 content.merge(&orbiters_core::explicit::local_avatar_labels(&world));
+                let avatar = match self.osc_values.lock().unwrap().latest.first(AVATAR_CHANGE) {
+                    Some(OscValue::Text(id)) => Some(id),
+                    _ => None,
+                }
+                .or_else(|| self.snapshot.lock().unwrap().orb.avatar_id.clone());
+                content.merge(&orbiters_core::explicit::manifest_content(avatar.as_deref()));
                 if let Err(e) = content.save(&session_dir) {
                     self.notify(NoticeKind::Error, format!("Could not save capture content flags: {e}"));
                 }

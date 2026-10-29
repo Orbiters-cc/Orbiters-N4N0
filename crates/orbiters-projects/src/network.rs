@@ -155,7 +155,12 @@ mod tests {
     fn listings_orbiters_hosts_are_told_by_their_address() {
         assert_eq!(hosting_server("https://orbiters.cc/vpm/orbiters/index.json"), Some(Server::Production));
         assert_eq!(hosting_server("https://dev.orbiters.cc/vpm/nova/index.json"), Some(Server::Development));
-        for other in ["https://vcc.vrcfury.com/", "https://orbiters.cc/vpm/index.json", "https://orbiters.cc/vpm/a/b/index.json", "https://orbiters.cc.evil.com/vpm/a/index.json"] {
+        for other in [
+            "https://vcc.vrcfury.com/",
+            "https://orbiters.cc/vpm/index.json",
+            "https://orbiters.cc/vpm/a/b/index.json",
+            "https://orbiters.cc.evil.com/vpm/a/index.json",
+        ] {
             assert_eq!(hosting_server(other), None, "{other}");
         }
     }

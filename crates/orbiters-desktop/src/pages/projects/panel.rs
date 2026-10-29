@@ -412,7 +412,12 @@ fn mixer(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
     let w = ui.available_width();
     let top = ui.cursor().min;
     let shown = Rect::from_min_size(top, vec2(w, full * k));
-    let mut cu = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(top, vec2(w, 100_000.0))).layout(egui::Layout::top_down(egui::Align::Min)).id_salt(("mixer", &project.path)));
+    let mut cu = ui.new_child(
+        UiBuilder::new()
+            .max_rect(Rect::from_min_size(top, vec2(w, 100_000.0)))
+            .layout(egui::Layout::top_down(egui::Align::Min))
+            .id_salt(("mixer", &project.path)),
+    );
     cu.set_clip_rect(shown.expand2(vec2(4.0, 0.0)).intersect(ui.clip_rect()));
     cu.multiply_opacity(k);
     let busy = state.running();

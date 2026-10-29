@@ -29,9 +29,12 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let (glyph, title, subtitle, width) = match &modal {
         Modal::Repos => (icons::STACK, "Package repositories".to_string(), "Shared with VCC and ALCOM: what you add here, they list too".to_string(), 620.0),
         Modal::New => (glyph::FOLDER_PLUS, "New Unity project".into(), "From a VRChat template, or a copy of one of your projects".into(), 640.0),
-        Modal::Avatars => {
-            (icons::N4N0_MARK, "Add N4N0 to your avatar".into(), "Pick the avatar you capture with: Unity asks you to confirm before anything changes".into(), 720.0)
-        }
+        Modal::Avatars => (
+            icons::N4N0_MARK,
+            "Add N4N0 to your avatar".into(),
+            "Pick the avatar you capture with: Unity asks you to confirm before anything changes".into(),
+            720.0,
+        ),
         Modal::ChooseProject(id) => {
             let name = state.copies(id).first().map(|(_, a)| a.name.clone()).unwrap_or_else(|| "This avatar".into());
             (icons::N4N0_MARK, "Which copy gets N4N0?".into(), format!("{name} is saved in more than one project or scene"), 620.0)

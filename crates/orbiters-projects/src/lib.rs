@@ -42,7 +42,8 @@ fn uninstall_entry(matches: impl Fn(&str, &str) -> bool) -> Option<(Option<PathB
     #[cfg(windows)]
     {
         use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
-        const UNINSTALL: [&str; 2] = [r"Software\Microsoft\Windows\CurrentVersion\Uninstall", r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"];
+        const UNINSTALL: [&str; 2] =
+            [r"Software\Microsoft\Windows\CurrentVersion\Uninstall", r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"];
         for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
             for path in UNINSTALL {
                 let Ok(root) = winreg::RegKey::predef(hive).open_subkey(path) else { continue };
@@ -52,7 +53,8 @@ fn uninstall_entry(matches: impl Fn(&str, &str) -> bool) -> Option<(Option<PathB
                     if matches(&key, &name) {
                         let value = |v: &str| entry.get_value::<String, _>(v).ok().map(|s| s.trim().trim_matches('"').to_string()).filter(|s| !s.is_empty());
                         // DisplayIcon is "path,index".
-                        let icon = value("DisplayIcon").map(|s| PathBuf::from(s.rsplit_once(',').filter(|(_, i)| i.parse::<i32>().is_ok()).map_or(s.as_str(), |(p, _)| p)));
+                        let icon = value("DisplayIcon")
+                            .map(|s| PathBuf::from(s.rsplit_once(',').filter(|(_, i)| i.parse::<i32>().is_ok()).map_or(s.as_str(), |(p, _)| p)));
                         return Some((value("InstallLocation").map(PathBuf::from), icon));
                     }
                 }
@@ -66,8 +68,9 @@ fn uninstall_entry(matches: impl Fn(&str, &str) -> bool) -> Option<(Option<PathB
 pub fn unity_hub() -> Option<PathBuf> {
     let settings: serde_json::Value = std::fs::read(vcc_dir().join("settings.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     let configured = settings["pathToUnityHub"].as_str().filter(|s| !s.is_empty()).map(PathBuf::from);
-    let installed = uninstall_entry(|key, name| key == "Unity Technologies - Hub" || name.starts_with("Unity Hub"))
-        .and_then(|(location, icon)| icon.filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))).or(location.map(|l| l.join("Unity Hub.exe"))));
+    let installed = uninstall_entry(|key, name| key == "Unity Technologies - Hub" || name.starts_with("Unity Hub")).and_then(|(location, icon)| {
+        icon.filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))).or(location.map(|l| l.join("Unity Hub.exe")))
+    });
     [configured, installed, Some(PathBuf::from(r"C:\Program Files\Unity Hub\Unity Hub.exe"))].into_iter().flatten().find(|p| p.is_file())
 }
 

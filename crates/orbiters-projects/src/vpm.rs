@@ -121,7 +121,10 @@ impl vrc_get_vpm::PackageCollection for EnabledCollection {
 /// VRChat's own repositories never downloaded: a computer without Creator Companion (or before its first start). A
 /// person's repositories are downloaded when added (a dead one must not hold every look at the packages).
 fn missing_cache(root: &Path, settings: &Settings) -> bool {
-    let predefined = [(!settings.ignore_official_repository()).then_some("Repos/vrc-official.json"), (!settings.ignore_curated_repository()).then_some("Repos/vrc-curated.json")];
+    let predefined = [
+        (!settings.ignore_official_repository()).then_some("Repos/vrc-official.json"),
+        (!settings.ignore_curated_repository()).then_some("Repos/vrc-curated.json"),
+    ];
     predefined.into_iter().flatten().any(|p| !root.join(p).is_file())
 }
 async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Settings, EnabledCollection)> {

@@ -166,7 +166,10 @@ where
         }
         // Nothing found where an icon was before (the site down for a moment): keep showing it, ask again tomorrow.
         None if png.is_file() => {
-            let _ = crate::write_json(&stem.with_extension("json"), &serde_json::json!({ "key": key, "checked": crate::discovery::now() - FOUND_FOR + MISSING_FOR, "found": true }));
+            let _ = crate::write_json(
+                &stem.with_extension("json"),
+                &serde_json::json!({ "key": key, "checked": crate::discovery::now() - FOUND_FOR + MISSING_FOR, "found": true }),
+            );
             return kept();
         }
         None => {}
@@ -378,7 +381,12 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
         let (w, h) = i.dimensions();
         let scale = SIDE as f32 / w.max(h) as f32;
         if scale < 1.0 {
-            image::imageops::resize(&i, ((w as f32 * scale).round() as u32).max(1), ((h as f32 * scale).round() as u32).max(1), image::imageops::FilterType::Lanczos3)
+            image::imageops::resize(
+                &i,
+                ((w as f32 * scale).round() as u32).max(1),
+                ((h as f32 * scale).round() as u32).max(1),
+                image::imageops::FilterType::Lanczos3,
+            )
         } else {
             i
         }

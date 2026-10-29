@@ -106,7 +106,14 @@ pub fn builtins(cache: &Path) -> anyhow::Result<Vec<Template>> {
         copy(&avatar.path, &path, &AtomicBool::new(false), &Arc::new(Mutex::default()))?;
     }
     crate::write_json(&path.join("Packages/vpm-manifest.json"), &serde_json::json!({"dependencies":{"com.vrchat.base":{"version":"3.x"}}}))?;
-    out.push(Template { name: "VRChat Base Project".into(), path, unity: "2022.3.22f1".into(), builtin: true, id: "com.vrchat.template.base".into(), banner: None });
+    out.push(Template {
+        name: "VRChat Base Project".into(),
+        path,
+        unity: "2022.3.22f1".into(),
+        builtin: true,
+        id: "com.vrchat.template.base".into(),
+        banner: None,
+    });
     Ok(out)
 }
 pub fn validate_name(name: &str) -> anyhow::Result<()> {

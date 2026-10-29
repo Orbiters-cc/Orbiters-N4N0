@@ -1414,12 +1414,13 @@ pub fn layout(page: ScreenPage) -> Layout {
             slots.add(32, 500, 76, 24, Style::Accent, Content::LabelsNote);
         }
         ScreenPage::Comments => {
-            // Three comments a page, each on its panel (Delete on the player's own), Write a comment under them.
+            // Three comments a page, each on its panel, Delete beside the player's own (on the page itself: the screen covers a
+            // hidden element with the page's colour), Write a comment under them.
             for i in 0..COMMENTS_PER_PAGE as u16 {
-                elements.push(element(Target::CommentCard(i as u8), Rect::new(32, 96 + i * 128, 960, 120), Look::Area));
+                elements.push(element(Target::CommentCard(i as u8), Rect::new(32, 96 + i * 128, 768, 120), Look::Area));
             }
             for i in 0..COMMENTS_PER_PAGE as u16 {
-                elements.push(with(element(Target::DeleteComment(i as u8), Rect::new(812, 128 + i * 128, 156, 56), Look::KeyDark), Some(Icon::Trash), Some(Text::FeedbackDelete)));
+                elements.push(with(element(Target::DeleteComment(i as u8), Rect::new(816, 128 + i * 128, 176, 56), Look::KeyDark), Some(Icon::Trash), Some(Text::FeedbackDelete)));
             }
             elements.push(with(element(Target::WriteComment, Rect::new(32, 488, 400, 64), Look::Accent), Some(Icon::Pencil), Some(Text::FeedbackWrite)));
             elements.push(round(Target::Back, 32, Icon::Back));

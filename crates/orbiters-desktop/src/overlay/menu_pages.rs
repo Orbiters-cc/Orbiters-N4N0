@@ -457,6 +457,7 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     // its comments, More with World feedback.
     let feedback = || {
         let mut m = share();
+        m.pages = Pages::Feedback;
         m.set_feedback(sample_feedback());
         m
     };

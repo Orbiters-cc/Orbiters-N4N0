@@ -3197,7 +3197,7 @@ mod tests {
         use layout::{target_state, ScreenPage};
         let w = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";
         let other = "wrld_9936b6ff-e523-4066-9e40-a333320ff5d3";
-        let mut menu = Menu { pages: Pages::ALL, ..Default::default() };
+        let mut menu = Menu { pages: Pages::Feedback, ..Default::default() };
         menu.open();
         menu.set_feedback(FeedbackView {
             signed_in: true,

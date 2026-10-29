@@ -72,8 +72,9 @@ pub struct State {
     pub(super) cancel: Arc<AtomicBool>,
     pub(super) selected: Option<PathBuf>,
     pub(super) panel_serial: u64,
-    /// The panel scrolls to its packages on its next frame (screenshots).
+    /// The panel scrolls to its packages, or to Mixer's card, on its next frame (screenshots).
     pub(super) scroll_to_packages: bool,
+    pub(super) scroll_to_mixer: bool,
     /// The docked panel's width as the person dragged it.
     pub(super) panel_width: Option<f32>,
     /// The sliding panel (narrow windows) is closing.
@@ -164,6 +165,7 @@ impl Default for State {
             selected: None,
             panel_serial: 0,
             scroll_to_packages: false,
+            scroll_to_mixer: false,
             panel_width: None,
             panel_closing: false,
             all_proposals: false,
@@ -879,6 +881,7 @@ impl State {
             }
             "projects-mixer" => {
                 self.selected = Some(first.path.clone());
+                self.scroll_to_mixer = true;
                 self.mixer_info = true;
             }
             "projects-mixer-installed" => {
@@ -889,10 +892,14 @@ impl State {
             }
             "projects-mixer-adding" => {
                 self.selected = Some(first.path.clone());
+                self.scroll_to_mixer = true;
                 self.busy_package = Some(MIXER.into());
                 self.fixture_action = Some("Adding Mixer…".into());
             }
-            "projects-mixer-open-mid" | "projects-mixer-open" | "projects-mixer-fold-mid" => self.selected = Some(first.path.clone()),
+            "projects-mixer-open-mid" | "projects-mixer-open" | "projects-mixer-fold-mid" => {
+                self.selected = Some(first.path.clone());
+                self.scroll_to_mixer = true;
+            }
             "projects-repos" => self.modal = Some(Modal::Repos),
             "projects-repos-loading" => {
                 self.modal = Some(Modal::Repos);

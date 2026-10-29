@@ -119,6 +119,8 @@ pub(super) fn package_icon(p: &Painter, icon: Option<&PackageIcon>, rect: Rect, 
     let Some(i) = icon else { return };
     if i.fills {
         feedback::cover(p, rect, [radius; 4], &i.tex, 1.0 + 0.1 * (1.0 - k), k);
+        // A hairline keeps a dark picture's edge on the dark cards.
+        paint::stroke_squircle(p, rect, theme::squircle(radius), egui::Stroke::new(1.0, theme::white(0.08 * k)));
     } else {
         // Contained, a little larger as it settles.
         let room = rect.shrink(rect.height() * 0.18).size() * (0.86 + 0.14 * k);

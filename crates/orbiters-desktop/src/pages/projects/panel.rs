@@ -66,12 +66,14 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
     let mut pu = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(rect.min + vec2(8.0, 8.0), rect.max - vec2(3.0, 8.0))).id_salt("project-panel"));
     pu.set_clip_rect(rect.shrink(2.0).intersect(ui.clip_rect()));
     let packages_y = Id::unique("project-panel-packages-y");
+    let mixer_y = Id::unique("project-panel-mixer-y");
     let bar = Rect::from_min_max(pos2(rect.right() - 13.0, rect.top() + 18.0), pos2(rect.right() - 3.0, rect.bottom() - 18.0));
     let mut scroll = egui::ScrollArea::vertical().id_salt(("project-panel-scroll", &project.path)).auto_shrink([false, false]).scroll_bar_rect(bar);
-    if state.scroll_to_packages {
-        if let Some(y) = ctx.data(|d| d.get_temp::<f32>(packages_y)) {
+    if state.scroll_to_packages || state.scroll_to_mixer {
+        if let Some(y) = ctx.data(|d| d.get_temp::<f32>(if state.scroll_to_mixer { mixer_y } else { packages_y })) {
             scroll = scroll.vertical_scroll_offset((y - 64.0).max(0.0));
             state.scroll_to_packages = false;
+            state.scroll_to_mixer = false;
         }
     }
     let from = orbiters_ui::blur::next_shape(ui);
@@ -86,6 +88,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
                 super::ui::errors(ui, state, "panel");
             }
             avatars(ui, cx, state, &project);
+            ctx.data_mut(|d| d.insert_temp(mixer_y, ui.cursor().top() - top));
             mixer(ui, cx, state, &project);
             ctx.data_mut(|d| d.insert_temp(packages_y, ui.cursor().top() - top));
             packages(ui, state, &project);

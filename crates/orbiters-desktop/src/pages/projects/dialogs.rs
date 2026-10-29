@@ -399,10 +399,10 @@ fn new_project(ui: &mut Ui, state: &mut State) {
                 let cover = Rect::from_min_size(r.min + vec2(6.0, 6.0), vec2(tw - 12.0, cover_h));
                 template_cover(pt, state, t.banner.as_ref(), cover, id, hover, g, tint);
                 let x = r.left() + 14.0;
-                let tw = r.width() - 28.0;
+                let tw = r.width() - 28.0 - 30.0;
                 widgets::text_truncated(pt, pos2(x, cover.bottom() + 17.0), Align2::LEFT_CENTER, &Txt::new(&t.name, 13.5).weight(weight::MEDIUM), tw);
                 widgets::text_truncated(pt, pos2(x, cover.bottom() + 35.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.5).color(theme::FG_3), tw);
-                art::check(pt, pos2(cover.right() - 13.0, cover.center().y), sel);
+                art::check(pt, pos2(r.right() - 24.0, cover.bottom() + 26.0), sel);
             } else {
                 art::tile(pt, Rect::from_min_size(pos2(r.left() + 14.0, r.center().y - 20.0), vec2(40.0, 40.0)), g, tint);
                 let x = r.left() + 66.0;

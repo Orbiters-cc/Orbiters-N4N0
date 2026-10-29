@@ -88,8 +88,8 @@ pub fn paint(painter: &Painter, rect: Rect, color: Color32) {
     draw(painter, rect, rect, color, Color32::WHITE);
 }
 
-/// How wide the mark is drawn for an icon of `size` (a Phosphor glyph's font size): as large as the glyphs look.
-pub const ICON_WIDTH: f32 = 0.84;
+/// How wide the mark is drawn for an icon of `size` (a Phosphor glyph's font size): the glyph's whole width, its cuts need it.
+pub const ICON_WIDTH: f32 = 1.0;
 
 /// Paints the mark as an icon of `size` (a Phosphor glyph's font size) centred on `center`, in `color` (its opacity
 /// through the tint, one texture per colour), on whole pixels so its cuts stay sharp at small sizes.

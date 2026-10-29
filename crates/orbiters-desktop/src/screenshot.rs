@@ -1543,6 +1543,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "gallery-close-mid",
         "gallery-next",
         "gallery-next-mid",
+        "gallery-select",
+        "gallery-select-mid",
+        "gallery-drag-lift",
+        "gallery-copied",
+        "gallery-copy-link",
+        "gallery-copy-link-offer",
         "world-share-window",
         "world-share-public",
         "world-share-sending",
@@ -1684,6 +1690,14 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
                 "gallery-requests-opening" if f + 6 == sc.frames => gallery.open_requests(),
                 "gallery-requests-close" if f == 60 => gallery.open_requests(),
                 "gallery-requests-close" if f == 120 => gallery.close_requests(),
+                // Cards chosen (the bar rising out of the bottom edge, or settled), lifted as a drag out starts (its drag
+                // image written beside the shot), the bar saying what a drag copied; Copy public link just pressed.
+                "gallery-select" | "gallery-drag-lift" if f == 70 => gallery.stage_select(3),
+                "gallery-select-mid" if f + 5 == sc.frames => gallery.stage_select(2),
+                "gallery-drag-lift" if f == 120 => gallery.stage_lift(Some(&path.with_file_name("gallery-drag-image.png"))),
+                "gallery-copied" if f == 70 => gallery.stage_select(2),
+                "gallery-copied" if f == 100 => gallery.stage_copied(&ctx, "Copied 2 pictures"),
+                "gallery-copy-link" if f + 8 == sc.frames => gallery.stage_copied_link(&ctx),
                 _ => {}
             }
         }

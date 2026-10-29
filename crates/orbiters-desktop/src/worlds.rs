@@ -434,6 +434,15 @@ impl Drop for Pictures {
     }
 }
 
+/// A picture on this computer (a screenshot, from its kept thumbnail, or a session's thumbnail) decoded on the calling
+/// thread, for the drag image of Photos & captures' cards; None for pictures from the network.
+pub fn decode_local(picture: &Picture) -> Option<ColorImage> {
+    match picture {
+        Picture::Shot { .. } | Picture::Session(_) => decode(&Api::new(Server::Production), true, picture),
+        _ => None,
+    }
+}
+
 /// Thumbnails are this wide (kept on disk).
 pub const THUMB_WIDTH: u32 = 480;
 

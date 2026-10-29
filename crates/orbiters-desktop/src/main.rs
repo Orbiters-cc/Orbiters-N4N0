@@ -13,6 +13,7 @@ mod capture_picture;
 mod controller;
 mod coverage_window;
 mod device;
+mod drag_out;
 mod gpu;
 mod ipc;
 mod keys;

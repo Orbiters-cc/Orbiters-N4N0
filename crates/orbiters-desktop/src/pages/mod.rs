@@ -9,6 +9,7 @@ pub mod orb;
 pub mod projects;
 pub mod sessions;
 pub mod gallery;
+mod gallery_select;
 pub mod sharing;
 pub mod requests;
 pub mod settings;

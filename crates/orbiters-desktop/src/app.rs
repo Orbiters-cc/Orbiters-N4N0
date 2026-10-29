@@ -649,6 +649,12 @@ impl eframe::App for App {
         self.draw(ui);
     }
 
+    /// A drag out of the window asked for in the last frame (Photos & captures' cards) runs here, once that frame is on
+    /// screen: Windows' drag loop is modal (`drag_out`).
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::drag_out::run_pending(ctx, raw_input);
+    }
+
     /// The window closes with Talk held: let go of it, or VRChat would stay muted and N4N0 go on listening.
     fn on_exit(&mut self) {
         self.orb.leave(&self.ctl);

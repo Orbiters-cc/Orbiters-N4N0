@@ -1,6 +1,8 @@
 //! Photos & captures: local pictures, captures and the authenticated shared feed in one date-ordered gallery, grouped
 //! by the instance they were taken in. Cards look like Visited worlds' and Capture files' and grow into the picture
-//! window ([`sharing::Dialog`]) that shares them; the instance a group was taken in opens in a popover.
+//! window ([`sharing::Dialog`]) that shares them; the instance a group was taken in opens in a popover. Cards are
+//! selected (Ctrl/Shift-click, their check, a rubber band) and dragged out of the window into other apps
+//! ([`super::gallery_select`]).
 use super::{
     sharing::{self, Dialog},
     Cx, Job,
@@ -86,6 +88,8 @@ pub struct State {
     stage_instance: bool,
     /// Screenshots of the gallery itself: this computer's items cut to the fixture's two.
     fixture_locals: bool,
+    /// The cards chosen, a rubber band and a drag out of the window.
+    select: super::gallery_select::Selection,
 }
 impl State {
     pub fn busy(&self) -> bool {
@@ -158,6 +162,8 @@ impl State {
             "gallery-progress",
             "gallery-request",
             "gallery-done",
+            "gallery-copy-link",
+            "gallery-copy-link-offer",
         ]
         .contains(&name)
         {
@@ -167,7 +173,11 @@ impl State {
                 entry.picture = Some(p);
             }
             let mut d = Dialog::new(ctx, entry, false);
-            d.fixture(if name == "gallery-request" { "friends" } else { name.trim_start_matches("gallery-") });
+            d.fixture(match name {
+                "gallery-request" => "friends",
+                "gallery-copy-link-offer" => "owner",
+                _ => name.trim_start_matches("gallery-"),
+            });
             self.dialog = Some(d);
         }
     }
@@ -191,6 +201,30 @@ impl State {
     pub fn step_window(&mut self, step: i64) {
         if let Some(d) = self.dialog.as_mut() {
             d.step = Some(step);
+        }
+    }
+
+    /// The first `n` cards selected (screenshots).
+    pub fn stage_select(&mut self, n: usize) {
+        let keys: Vec<String> = self.shown.iter().take(n).map(|e| e.key.clone()).collect();
+        self.select.stage(keys);
+    }
+
+    /// The selection lifted as a drag out of the window starts, and its drag image written to `image` (screenshots).
+    pub fn stage_lift(&mut self, image: Option<&std::path::Path>) {
+        let carried: Vec<Entry> = self.shown.iter().filter(|e| self.select.has(&e.key)).cloned().collect();
+        self.select.stage_carry(&carried, image);
+    }
+
+    /// What the last drag copied, said by the bar (screenshots).
+    pub fn stage_copied(&mut self, ctx: &egui::Context, text: &str) {
+        self.select.stage_said(ctx, text);
+    }
+
+    /// Copy public link was just pressed in the open window (screenshots).
+    pub fn stage_copied_link(&mut self, ctx: &egui::Context) {
+        if let Some(d) = self.dialog.as_mut() {
+            d.stage_copied(ctx);
         }
     }
 
@@ -352,11 +386,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let mut clicked: Option<(Entry, Rect)> = None;
     let mut instance_clicked: Option<(Entry, Rect)> = None;
     let modal = state.dialog.is_some() || state.instance.is_some();
+    state.select.begin();
+    let mut background = None;
+    let selecting = state.select.any();
     egui::ScrollArea::vertical()
         .id_salt("photos-captures")
         .auto_shrink([false, false])
         .scroll_bar_rect(Rect::from_min_max(pos2(page.left(), top), page.max))
         .show(&mut gu, |ui| {
+            // The grid's empty space starts a rubber band (cards and buttons drawn later are on top of it).
+            background = Some(ui.interact(ui.clip_rect(), Id::unique("photos-captures-band"), Sense::drag()));
             egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 40 }).show(ui, |ui| {
                 ui.add_space(top - page.top());
                 let width = ui.available_width();
@@ -410,10 +449,24 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                         });
                         let shown = if open_key.as_ref() == Some(&e.key) { 0.0 } else { 1.0 };
                         let sharing = cx.snap.capture_shares.iter().any(|j| j.key == e.key && j.outcome.is_none());
-                        let look = CardLook { tex: tex.as_ref(), from: from_tex.as_ref(), shown, interactive: !modal, sharing, riding: false };
-                        if let Some(thumb) = card(ui, cx, index, e, r, &look) {
-                            clicked = Some((e.clone(), thumb));
+                        let look = CardLook {
+                            tex: tex.as_ref(),
+                            from: from_tex.as_ref(),
+                            shown,
+                            interactive: !modal,
+                            sharing,
+                            riding: false,
+                            selected: state.select.has(&e.key),
+                            selecting,
+                            carried: state.select.carried(&e.key),
+                        };
+                        let (thumb, resp) = card(ui, cx, index, e, r, &look);
+                        if let Some(resp) = resp.filter(|_| !modal) {
+                            if let super::gallery_select::CardAct::Open = state.select.card(&resp, e, super::gallery_select::check_rect(thumb), &entries) {
+                                clicked = Some((e.clone(), thumb));
+                            }
                         }
+                        state.select.place(&e.key, r);
                         let picture = Rect::from_min_size(r.min, vec2(w, w * 9.0 / 16.0));
                         state.cards.insert(e.key.clone(), picture);
                         if window_key.as_ref() == Some(&e.key) {
@@ -422,8 +475,18 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                                 home: r,
                                 picture,
                                 paint: Box::new(move |ui, cx| {
-                                    let look = CardLook { tex: tex.as_ref(), from: from_tex.as_ref(), shown: 1.0, interactive: false, sharing, riding: true };
-                                    card(ui, cx, 0, &e, r, &look);
+                                    let look = CardLook {
+                                        tex: tex.as_ref(),
+                                        from: from_tex.as_ref(),
+                                        shown: 1.0,
+                                        interactive: false,
+                                        sharing,
+                                        riding: true,
+                                        selected: false,
+                                        selecting: false,
+                                        carried: false,
+                                    };
+                                    let _ = card(ui, cx, 0, &e, r, &look);
                                 }),
                             });
                         }
@@ -450,9 +513,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                         state.fetch(&ctx, server, false);
                     }
                 }
+                // The selection's bar floats over the bottom: the last row can scroll above it.
+                if selecting {
+                    ui.add_space(64.0);
+                }
             });
         });
     super::under_top(&gu, cx, "photos-captures", from, top);
+    if let Some(background) = &background {
+        state.select.update(ui, &entries, background, modal);
+    }
 
     // Heading and the bar over the grid (drawn after it: what scrolls up goes under them).
     let (head_r, head_a) = super::entering(ui, cx, 0, head);
@@ -613,6 +683,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         }
     }
     instance_popover(&ctx, cx, state);
+    let modal = state.dialog.is_some() || state.instance.is_some();
+    state.select.bar(ui, page, &entries, &mut state.pictures, modal);
     state.shown = entries;
     manage
 }
@@ -677,14 +749,20 @@ struct CardLook<'a> {
     sharing: bool,
     /// Drawn by its window, riding under it: takes no input, its hover and press let go.
     riding: bool,
+    /// Chosen in the selection; any card is (its check shows on every card).
+    selected: bool,
+    selecting: bool,
+    /// Being dragged out of the window: lifted (smaller, faded) until the drop.
+    carried: bool,
 }
 
 /// One card, as Visited worlds' and Capture files': the picture with what it is and who sees it, then its kind,
-/// time and who it is from. Returns its picture's rect when clicked.
-fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'_>) -> Option<Rect> {
+/// time and who it is from. Returns its picture's rect and, when it takes input, its response (a click opens or
+/// selects it, a drag takes it out of the window: [`super::gallery_select`]).
+fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'_>) -> (Rect, Option<egui::Response>) {
     let ctx = ui.ctx().clone();
     let id = Id::unique(("gallery-card", &e.key));
-    let resp = (!look.riding).then(|| ui.interact(rect, id, if look.interactive { Sense::click() } else { Sense::hover() }));
+    let resp = (!look.riding).then(|| ui.interact(rect, id, if look.interactive { Sense::click_and_drag() } else { Sense::hover() }));
     let resp = resp.map(|r| if look.interactive { r.on_hover_cursor(CursorIcon::PointingHand) } else { r });
     // Entrance: up and in, 35 ms apart.
     let delay = 0.08 + i.min(12) as f64 * 0.035;
@@ -695,10 +773,13 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
     let enter = anim::spring_from(&ctx, id.with(("enter", cx.visit)), [0.0], [if elapsed >= delay { 1.0 } else { 0.0 }], Spring::SOFT)[0];
     let hover = anim::toggle(&ctx, id.with("hover"), resp.as_ref().is_some_and(|r| r.hovered()) && look.interactive, Spring::SOFT);
     let press = anim::toggle(&ctx, id.with("press"), resp.as_ref().is_some_and(|r| r.is_pointer_button_down_on()) && look.interactive, Spring::SNAPPY);
-    let scale = (0.97 + 0.03 * enter) * (1.0 - 0.03 * press);
+    // Lifted while dragged out (it settles back with a bounce), a little inset while chosen.
+    let lift = anim::toggle(&ctx, id.with("lift"), look.carried, if look.carried { Spring::SNAPPY } else { Spring::BOUNCY });
+    let chosen = anim::toggle(&ctx, id.with("chosen"), look.selected, Spring::SNAPPY);
+    let scale = (0.97 + 0.03 * enter) * (1.0 - 0.03 * press) * (1.0 - 0.07 * lift) * (1.0 - 0.025 * chosen);
     let r = Rect::from_center_size(rect.center() + vec2(0.0, 20.0 * (1.0 - enter) - 4.0 * hover), rect.size() * scale);
     let mut p = ui.painter().clone();
-    p.multiply_opacity(enter.clamp(0.0, 1.0) * look.shown);
+    p.multiply_opacity(enter.clamp(0.0, 1.0) * look.shown * (1.0 - 0.6 * lift.clamp(0.0, 1.0)));
 
     widgets::frame(&p, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover));
     let thumb = Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0));
@@ -720,7 +801,9 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
     };
     let queued = matches!(&e.local, Some(controller::Local::Session(d)) if cx.snap.reconstruct_queue.contains(d));
     let (kind_label, kind_color) = if e.is_picture() { ("Picture", theme::FG_2) } else { ("3D", theme::ACCENT) };
-    let mut x = thumb.left() + 12.0;
+    // The check on its corner; the badges step aside for it.
+    let check = if look.riding { 0.0 } else { super::gallery_select::paint_card(&p, &ctx, &e.key, r, thumb, look.selected, look.selecting, hover) };
+    let mut x = thumb.left() + 12.0 + (super::gallery_select::CHECK + 6.0) * check;
     x += super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), kind_label, theme::black(0.55), kind_color, false) + 6.0;
     if let Some(j) = job {
         super::sessions::badge(
@@ -797,7 +880,7 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         widgets::icon(&p, pos2(bx + 7.0, line_y), glyph, 13.0, color);
         widgets::text_truncated(&p, pos2(bx + 20.0, line_y), Align2::LEFT_CENTER, &Txt::new(label, 12.0).color(color), r.width() - 52.0);
     }
-    (look.interactive && resp.is_some_and(sharing::pressed)).then_some(thumb)
+    (thumb, resp.filter(|_| look.interactive))
 }
 
 fn empty_state(ui: &mut Ui, cx: &Cx, filter: Filter, searching: bool, height: f32) {

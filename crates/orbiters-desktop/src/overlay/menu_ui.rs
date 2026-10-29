@@ -282,6 +282,10 @@ pub fn glyph(icon: Icon) -> &'static str {
         Icon::Chat => icons::CHAT_CIRCLE_TEXT,
         Icon::Pencil => icons::PENCIL_SIMPLE,
         Icon::Trash => icons::TRASH,
+        Icon::Mirror => icons::MONITOR_PLAY,
+        Icon::Aim => icons::CROSSHAIR,
+        Icon::Minus => icons::MINUS,
+        Icon::Stop => icons::POWER,
         // Drawn as the N4N0 mark (`orbiters_ui::n4n0_logo`), never as a glyph.
         Icon::Mark => icons::STACK,
     }
@@ -603,6 +607,33 @@ pub fn draw_chrome(p: &Painter, origin: Pos2, layout: &Layout, skin: &Skin) {
             art_placeholder(p, rect(pic.rect, origin), &skin.palette);
         }
     }
+    // The screen mirror's place, which its owner's screen covers with the camera's picture.
+    if layout.page == ScreenPage::Mirror {
+        for pic in &layout.pictures {
+            mirror_placeholder(p, rect(pic.rect, origin), skin);
+        }
+    }
+}
+
+/// The screen mirror's place before the camera's picture covers it (and for everyone but its owner): a dim screen in a
+/// thin frame, its corners marked as a viewfinder's, the monitor in the middle and what shows there.
+fn mirror_placeholder(p: &Painter, r: Rect, skin: &Skin) {
+    let pal = &skin.palette;
+    let radius = theme::radius(10.0);
+    p.rect_filled(r, radius, pal.raised);
+    p.rect_stroke(r.shrink(0.5), radius, Stroke::new(1.0, theme::alpha(pal.text, 0.08)), StrokeKind::Inside);
+    // A viewfinder's corners, in the accent.
+    let (inset, arm, stroke) = (22.0, 30.0, Stroke::new(3.0, theme::alpha(pal.accent, 0.7)));
+    let inner = r.shrink(inset);
+    for (corner, dx, dy) in [(inner.left_top(), 1.0, 1.0), (inner.right_top(), -1.0, 1.0), (inner.left_bottom(), 1.0, -1.0), (inner.right_bottom(), -1.0, -1.0)] {
+        p.line_segment([corner, corner + vec2(arm * dx, 0.0)], stroke);
+        p.line_segment([corner, corner + vec2(0.0, arm * dy)], stroke);
+    }
+    let middle = r.center() - vec2(0.0, 18.0);
+    p.circle_filled(middle, 46.0, theme::alpha(pal.accent, 0.10));
+    widgets::icon(p, middle, glyph(Icon::Mirror), 48.0, pal.accent);
+    let caption = fit(p, Txt::new(skin.text(Text::MirrorPlaceholder), 22.0).weight(weight::MEDIUM).color(pal.muted), r.width() - 2.0 * inset - 40.0);
+    widgets::text(p, pos2(r.center().x, middle.y + 70.0), Align2::CENTER_CENTER, &caption.txt);
 }
 
 /// Music without art: a note on the picture's place.
@@ -637,8 +668,8 @@ fn picture(p: &Painter, r: Rect, texture: Option<TextureId>, pal: &Palette) {
     }
 }
 
-/// The overlay seen from behind: N4N0's face (its logo, `orbiters_ui::n4n0_face`) over "N4N0 menu" and "look at the other
-/// side", as the avatar's screen shows its back. The menu is on the side its owner faces.
+/// The overlay seen from behind: Orbiters - N4N0's icon over "N4N0 menu" and "look at the other side", as the avatar's
+/// screen shows its back. The menu is on the side its owner faces.
 pub fn draw_back(p: &Painter, origin: Pos2, skin: &Skin) {
     let pal = &skin.palette;
     let card = Rect::from_min_size(origin, vec2(layout::WIDTH as f32, layout::HEIGHT as f32));
@@ -716,6 +747,8 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
                 None => picture(p, r, None, pal),
             },
             (None, Page::Music) => art_placeholder(p, r, pal),
+            // The overlay never has the camera's picture: its place as the page's picture shows it.
+            (None, Page::Mirror) => mirror_placeholder(p, r, view.skin),
             // The 3D picture page's last capture, before there is one (as the screen shows it).
             (None, Page::Photo) if menu.pages.share() => picture(p, r, None, pal),
             (None, _) => {}

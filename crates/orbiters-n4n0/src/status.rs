@@ -214,6 +214,9 @@ pub struct OrbStatus {
     /// How many of N4N0's controller input parameters (contracts `Docs/orb-input.md`) the worn avatar lists.
     #[serde(default)]
     pub input_params: u8,
+    /// The screen mirror as the overlay's menu shows it (from screen version 14: its card says why it is not there).
+    #[serde(default)]
+    pub mirror: orbiters_orb::mirror::MirrorView,
 }
 
 /// Tracking smoothing (the app's SteamVR driver), as the Tracking page shows it.

@@ -1607,6 +1607,11 @@ impl N4n0 {
                 Effect::Friends(on) => self.friends(on),
                 Effect::ShareCapture(ask) => self.share_capture(ask),
                 Effect::Feedback(ask) => self.feedback_ask(ask),
+                Effect::Mirror(ask) => {
+                    let mut rt = self.orb.lock().unwrap();
+                    rt.mirror.ask(ask, Instant::now());
+                    rt.wake();
+                }
                 Effect::CopyText { text } => {
                     if let Err(e) = self.device.clipboard.copy(&text) {
                         self.notify(NoticeKind::Error, e);

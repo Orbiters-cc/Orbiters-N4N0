@@ -88,10 +88,14 @@ pub enum ScreenPage {
     Comments = 36,
     /// More with room for eight cards, World feedback among them (from version 13).
     MoreFeedback = 37,
+    /// The screen mirror: the camera's picture, Aim, Zoom in, Zoom out, Stop (from version 14).
+    Mirror = 38,
+    /// More with seven cards, the screen mirror among them (from version 14).
+    MoreMirror = 39,
 }
 
 impl ScreenPage {
-    pub const ALL: [ScreenPage; 37] = [
+    pub const ALL: [ScreenPage; 39] = [
         ScreenPage::Home,
         ScreenPage::SearchQwerty,
         ScreenPage::SearchAzerty,
@@ -129,6 +133,8 @@ impl ScreenPage {
         ScreenPage::FeedbackLabels,
         ScreenPage::Comments,
         ScreenPage::MoreFeedback,
+        ScreenPage::Mirror,
+        ScreenPage::MoreMirror,
     ];
 
     /// The page picture's file stem and the overlay screenshot's name.
@@ -171,6 +177,8 @@ impl ScreenPage {
             ScreenPage::FeedbackLabels => "feedback-labels",
             ScreenPage::Comments => "comments",
             ScreenPage::MoreFeedback => "more-feedback",
+            ScreenPage::Mirror => "mirror",
+            ScreenPage::MoreMirror => "more-mirror",
         }
     }
 
@@ -181,7 +189,7 @@ impl ScreenPage {
             Pages::Six => ScreenPage::HomeSix,
             Pages::Seven => ScreenPage::HomeSeven,
             Pages::Ten | Pages::Timeline => ScreenPage::HomeTen,
-            Pages::Simple | Pages::Qr | Pages::Share | Pages::Feedback => ScreenPage::HomeQuiet,
+            Pages::Simple | Pages::Qr | Pages::Share | Pages::Feedback | Pages::Mirror => ScreenPage::HomeQuiet,
         }
     }
 
@@ -210,6 +218,9 @@ impl ScreenPage {
             Page::Feedback => ScreenPage::Feedback,
             Page::FeedbackLabels => ScreenPage::FeedbackLabels,
             Page::Comments => ScreenPage::Comments,
+            Page::Mirror if !menu.pages.mirror() => ScreenPage::home_of(menu),
+            Page::Mirror => ScreenPage::Mirror,
+            Page::More if menu.pages.mirror() => ScreenPage::MoreMirror,
             Page::More if menu.pages.feedback() => ScreenPage::MoreFeedback,
             Page::Photo if menu.pages.share() => ScreenPage::PhotoShare,
             Page::More if menu.pages.qr() => ScreenPage::MoreQr,
@@ -390,6 +401,11 @@ pub enum Icon {
     Pencil,
     /// Delete one's own comment.
     Trash,
+    /// The screen mirror's card, and on its page Aim, Zoom out and Stop (Zoom in is [`Icon::Plus`]).
+    Mirror,
+    Aim,
+    Minus,
+    Stop,
 }
 
 /// Home's features in their order (the first four as on the four-tile Home, the first six as on the six-tile one), each
@@ -442,6 +458,22 @@ pub const MORE_CARDS_FEEDBACK: [(Target, Icon, Text, Tint); 6] = [
     (Target::Suggest, Icon::Suggest, Text::HomeSuggest, Tint::Purple),
 ];
 
+/// More's cards from screen version 14: the screen mirror beside World feedback, suggest alone in the last row.
+pub const MORE_CARDS_MIRROR: [(Target, Icon, Text, Tint); 7] = [
+    (Target::Light, Icon::Lightbulb, Text::HomeLight, Tint::Amber),
+    (Target::Instances, Icon::Instances, Text::MoreInstances, Tint::Blue),
+    (Target::Tracking, Icon::Tracking, Text::MoreTracking, Tint::Indigo),
+    (Target::Qr, Icon::Qr, Text::MoreQr, Tint::Green),
+    (Target::WorldFeedback, Icon::Heart, Text::MoreFeedback, Tint::Pink),
+    (Target::Mirror, Icon::Mirror, Text::MoreMirror, Tint::Cyan),
+    (Target::Suggest, Icon::Suggest, Text::HomeSuggest, Tint::Purple),
+];
+
+/// The screen mirror's picture place (thumbnail 0's, 16:9; the screen draws the camera's picture there) and its note's
+/// cells.
+pub const MIRROR_PICTURE: Rect = Rect::new(32, 96, 640, 360);
+pub const MIRROR_NOTE_COLUMNS: usize = 92;
+
 /// The labels page's chips: each label of the list (contracts `Schemas/world-feedback-labels.json`) in its order, by
 /// its name's text.
 pub const LABEL_TEXTS: [Text; 18] = [
@@ -471,6 +503,7 @@ pub const NOTE_MORE: u8 = 9;
 pub const NOTE_INSTANCES: u8 = 10;
 pub const NOTE_QR: u8 = 11;
 pub const NOTE_FEEDBACK: u8 = 12;
+pub const NOTE_MIRROR: u8 = 13;
 
 /// The tile note of a feature's tile or card.
 pub fn note_of(target: Target) -> u8 {
@@ -479,6 +512,7 @@ pub fn note_of(target: Target) -> u8 {
         Target::Instances => NOTE_INSTANCES,
         Target::Qr => NOTE_QR,
         Target::WorldFeedback => NOTE_FEEDBACK,
+        Target::Mirror => NOTE_MIRROR,
         _ => HOME_TILES.iter().position(|t| t.0 == target).unwrap_or(0) as u8,
     }
 }
@@ -494,7 +528,7 @@ pub fn home_tiles(pages: Pages) -> &'static [(Target, Icon, Text, Tint)] {
         Pages::Four => &HOME_TILES[..4],
         Pages::Six => &HOME_TILES[..6],
         Pages::Seven => &HOME_TILES[..7],
-        Pages::Ten | Pages::Timeline | Pages::Simple | Pages::Qr | Pages::Share | Pages::Feedback => &HOME_TILES,
+        Pages::Ten | Pages::Timeline | Pages::Simple | Pages::Qr | Pages::Share | Pages::Feedback | Pages::Mirror => &HOME_TILES,
     }
 }
 
@@ -678,6 +712,9 @@ pub enum Content {
     CommentsTitle,
     CommentMeta(u8),
     CommentLine(u8),
+    /// The screen mirror: where the camera is (a countdown while it aims, the zoom once it stays), and a note.
+    MirrorState,
+    MirrorNote,
 }
 
 /// A line of changing text: `cols` cells of `size` pixels high and half as wide, from (`x`, `y`). On the screen, cell
@@ -1437,6 +1474,32 @@ pub fn layout(page: ScreenPage) -> Layout {
                 }
             }
         }
+        ScreenPage::MoreMirror => {
+            // As More with World feedback, the screen mirror's card beside it and suggest alone in the last row.
+            elements.push(round(Target::Back, 32, Icon::Back));
+            for (i, &(target, icon, title, tint)) in MORE_CARDS_MIRROR.iter().enumerate() {
+                let (x, y) = (32 + (i as u16 % 2) * 488, 96 + (i as u16 / 2) * 112);
+                let mut card = with(element(target, Rect::new(x, y, 472, 100), Look::Tile), Some(icon), Some(title));
+                card.tint = Some(tint);
+                elements.push(card);
+                slots.add(x + 116, y + 64, 27, 24, Style::Secondary, Content::TileNote(note_of(target)));
+            }
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::MoreTitle, style: Style::Primary, bold: true, width: 800 });
+            slots.add(672, 548, 40, 16, Style::Secondary, Content::Versions);
+        }
+        ScreenPage::Mirror => {
+            // The camera's picture large at the left (its owner's screen draws it there), the camera's buttons beside it,
+            // where it is and a note under it.
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(with(element(Target::MirrorAim, Rect::new(696, 96, 296, 76), Look::Accent), Some(Icon::Aim), Some(Text::MirrorAim)));
+            elements.push(with(element(Target::MirrorZoomIn, Rect::new(696, 188, 296, 64), Look::KeyDark), Some(Icon::Plus), Some(Text::MirrorZoomIn)));
+            elements.push(with(element(Target::MirrorZoomOut, Rect::new(696, 264, 296, 64), Look::KeyDark), Some(Icon::Minus), Some(Text::MirrorZoomOut)));
+            elements.push(with(element(Target::MirrorStop, Rect::new(696, 380, 296, 76), Look::Danger), Some(Icon::Stop), Some(Text::MirrorStop)));
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::MirrorTitle, style: Style::Primary, bold: true, width: 568 });
+            pictures.push(Picture { rect: MIRROR_PICTURE, result: 0 });
+            slots.add(32, 472, 46, 28, Style::Accent, Content::MirrorState);
+            slots.add(32, 516, MIRROR_NOTE_COLUMNS as u8, 20, Style::Secondary, Content::MirrorNote);
+        }
         ScreenPage::MoreFeedback => {
             // Two columns of four rows of wide cards (the last row left for more): the icon at the left, the title and
             // the note beside it.
@@ -1609,6 +1672,12 @@ fn tile_note(menu: &Menu, tile: u8) -> String {
         },
         NOTE_QR if menu.qr.scanning() => "Scanning…".into(),
         NOTE_QR => "Open a link from the camera".into(),
+        NOTE_MIRROR => match (menu.mirror.unavailable_note(), menu.mirror.phase) {
+            (Some(why), _) => why.into(),
+            (None, crate::mirror::Phase::Off) => "The world's screen, here".into(),
+            (None, crate::mirror::Phase::Aiming { .. }) => "Aiming…".into(),
+            (None, crate::mirror::Phase::Placed) => "Mirroring".into(),
+        },
         NOTE_FEEDBACK => match menu.feedback.subjects.first() {
             Some(s) if s.why == feedback::Why::Here && !s.name.is_empty() => s.name.clone(),
             _ => "Like, label, comment".into(),
@@ -2041,6 +2110,8 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
                 (0, Some(f)) if !f.loading && f.comments.is_empty() => "Be the first to say something".into(),
                 _ => String::new(),
             }),
+        Content::MirrorState => menu.mirror.state(),
+        Content::MirrorNote => menu.mirror.note().into(),
         Content::FeedbackNote | Content::LabelsNote => match (&menu.notice, menu.shown_feedback()) {
             (Some(notice), _) => notice.clone(),
             _ if menu.shown_subject().is_none() => String::new(),
@@ -2307,6 +2378,8 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::Like => menu.shown_feedback().is_some_and(|f| f.liked),
         Target::TopLabel(i) => menu.shown_feedback().is_some_and(|f| f.top().get(i as usize).is_some_and(|l| l.mine)),
         Target::LabelChip(i) => feedback::label_at(i as usize).is_some_and(|l| menu.shown_feedback().is_some_and(|f| f.has(&l.id))),
+        // The screen mirror's Aim while the camera follows the eyes.
+        Target::MirrorAim => matches!(menu.mirror.phase, crate::mirror::Phase::Aiming { .. }),
         _ => false,
     };
     let hidden = match target {
@@ -2371,6 +2444,10 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::SendShare => menu.chosen.is_empty(),
         // Feedback is given signed in.
         Target::Like | Target::TopLabel(_) | Target::LabelChip(_) | Target::WriteComment => !menu.feedback.signed_in,
+        // The screen mirror shows only on the avatar's screen, its zoom within its steps.
+        Target::Mirror => !menu.mirror.available(),
+        Target::MirrorZoomIn => !menu.mirror.can_zoom_in(),
+        Target::MirrorZoomOut => !menu.mirror.can_zoom_out(),
         _ => false,
     };
     State { on: on && !unavailable, hidden, unavailable }
@@ -2539,7 +2616,8 @@ mod tests {
         assert_eq!(Pages::of_screen(Some(11)), Pages::Qr);
         assert_eq!(Pages::of_screen(Some(12)), Pages::Share);
         assert_eq!(Pages::of_screen(Some(13)), Pages::Feedback);
-        assert_eq!(Pages::of_screen(Some(14)), Pages::Feedback);
+        assert_eq!(Pages::of_screen(Some(14)), Pages::Mirror);
+        assert_eq!(Pages::of_screen(Some(15)), Pages::Mirror);
         let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
         menu.open();
         assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSeven);

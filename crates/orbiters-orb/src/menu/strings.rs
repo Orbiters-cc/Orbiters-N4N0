@@ -215,6 +215,15 @@ texts! {
     LabelSleep = "label.sleep" => "Good for sleeping",
     LabelAvatars = "label.avatars" => "Avatars",
     LabelQuest = "label.quest" => "Quest friendly",
+    /// More's Screen mirror card and its page (from screen version 14): the title, the camera's buttons, the picture's
+    /// place before the camera's picture covers it.
+    MoreMirror = "more.mirror" => "Screen mirror",
+    MirrorTitle = "mirror.title" => "Screen mirror",
+    MirrorAim = "mirror.aim" => "Aim",
+    MirrorZoomIn = "mirror.zoomIn" => "Zoom in",
+    MirrorZoomOut = "mirror.zoomOut" => "Zoom out",
+    MirrorStop = "mirror.stop" => "Stop",
+    MirrorPlaceholder = "mirror.placeholder" => "The world's screen shows here",
     /// The retro look's own words: the plate on the frame's top line (the screen's version follows it), the memory plate
     /// at the bottom right, the caption under a big icon, a picture's place before it came.
     RetroSystem = "retro.system" => "N4N0·OS",

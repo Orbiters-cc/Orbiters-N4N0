@@ -7,6 +7,7 @@ pub mod context;
 pub mod controls;
 pub mod drops;
 pub mod feedback;
+pub mod mirror;
 pub mod invites;
 pub mod menu;
 pub mod picture;

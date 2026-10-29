@@ -499,7 +499,7 @@ pub fn draw_chrome(p: &Painter, origin: Pos2, layout: &Layout, skin: &Skin) {
     for e in &layout.elements {
         element(p, e, origin, skin.retro.ink(e.look), skin);
     }
-    if layout.page == ScreenPage::Music {
+    if layout.page == ScreenPage::Music || layout.page == ScreenPage::Mirror {
         for pic in &layout.pictures {
             no_picture(p, rect(pic.rect, origin), skin);
         }
@@ -582,7 +582,7 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
         let r = rect(pic.rect, origin);
         match (layout::picture_key(menu, pic).as_deref(), menu.page) {
             (Some(key), _) => picture(p, r, (view.picture)(key), skin),
-            (None, orbiters_orb::menu::Page::Music) => no_picture(p, r, skin),
+            (None, orbiters_orb::menu::Page::Music | orbiters_orb::menu::Page::Mirror) => no_picture(p, r, skin),
             (None, orbiters_orb::menu::Page::Photo) if menu.pages.share() => no_picture(p, r, skin),
             (None, _) => {}
         }

@@ -15,6 +15,7 @@ mod feedback;
 pub mod input;
 pub mod media;
 pub mod menu_host;
+mod mirror;
 pub mod platform;
 mod qr;
 mod runtime;

@@ -245,6 +245,7 @@ impl<P: Pictures> MenuHost<P> {
             (None, None) => self.suggestion_seen = Some(0),
             _ => {}
         }
+        changed |= set(&mut m.mirror, orb.mirror);
         if m.qr != orb.qr {
             m.qr = orb.qr.clone();
             changed = true;
@@ -490,6 +491,8 @@ impl<P: Pictures> MenuHost<P> {
                 Effect::Friends(on) => service.command(Command::Friends { on }),
                 Effect::ShareCapture(share) => service.command(Command::ShareCapture { share }),
                 Effect::Feedback(ask) => service.command(Command::Feedback { ask }),
+                // The overlay never shows the camera's picture: its card is greyed out there.
+                Effect::Mirror(_) => {}
                 Effect::Close => close = true,
             }
         }

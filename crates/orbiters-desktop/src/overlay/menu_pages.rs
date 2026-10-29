@@ -474,6 +474,22 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     let mut comments = world;
     comments.press(Target::Comments);
     out.push((ScreenPage::Comments, comments, hovered(ScreenPage::Comments, Target::DeleteComment(0)), None));
+    // Screens from version 14 (and the overlay): More with the screen mirror, and the mirror's page with a camera placed
+    // at a zoom (its picture's place as everyone but its owner sees it).
+    let mirror = || {
+        use orbiters_orb::mirror::{MirrorView, Phase, Reach};
+        let mut m = share();
+        m.set_feedback(sample_feedback());
+        m.mirror = MirrorView { phase: Phase::Placed, zoom: 4, reach: Reach::Screen };
+        m
+    };
+    let mut more = mirror();
+    more.press(Target::More);
+    out.push((ScreenPage::MoreMirror, more, hovered(ScreenPage::MoreMirror, Target::Mirror), None));
+    let mut page = mirror();
+    page.press(Target::More);
+    page.press(Target::Mirror);
+    out.push((ScreenPage::Mirror, page, hovered(ScreenPage::Mirror, Target::MirrorZoomIn), None));
     out
 }
 

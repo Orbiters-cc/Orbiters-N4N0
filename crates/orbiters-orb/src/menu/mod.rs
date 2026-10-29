@@ -92,6 +92,9 @@ pub enum Page {
     FeedbackLabels,
     /// The world's comments, three a page: Write a comment, Delete on the player's own.
     Comments,
+    /// The screen mirror (from screen version 14): the picture of a camera N4N0 leaves before a world's video screen,
+    /// Aim, Zoom in, Zoom out, Stop.
+    Mirror,
 }
 
 /// What the keyboard page ([`Page::Type`]) types.
@@ -220,18 +223,22 @@ pub enum Pages {
     Share,
     /// From version 13: World feedback (likes, labels, comments), its labels and comments, More with room for eight cards.
     Feedback,
+    /// From version 14: the screen mirror, and More with its card among seven.
+    Mirror,
 }
 
 impl Pages {
     /// Every page: the overlay's and the window's.
-    pub const ALL: Pages = Pages::Feedback;
+    pub const ALL: Pages = Pages::Mirror;
 
     /// The pages of a screen of `version` (`None`: a screen from before `N4N0/Screen/Version`).
     pub fn of_screen(version: Option<i32>) -> Pages {
         use orbiters_contracts::orb::{
-            SCREEN_FEEDBACK, SCREEN_MUSIC_LIGHT, SCREEN_QR, SCREEN_SHARE, SCREEN_SIMPLE, SCREEN_STATES_CARDS, SCREEN_TEN_TILES, SCREEN_TIMELINE,
+            SCREEN_FEEDBACK, SCREEN_MIRROR, SCREEN_MUSIC_LIGHT, SCREEN_QR, SCREEN_SHARE, SCREEN_SIMPLE, SCREEN_STATES_CARDS, SCREEN_TEN_TILES,
+            SCREEN_TIMELINE,
         };
         match version {
+            Some(v) if v >= SCREEN_MIRROR => Pages::Mirror,
             Some(v) if v >= SCREEN_FEEDBACK => Pages::Feedback,
             Some(v) if v >= SCREEN_SHARE => Pages::Share,
             Some(v) if v >= SCREEN_QR => Pages::Qr,
@@ -282,6 +289,11 @@ impl Pages {
     /// More has World feedback (with its labels and comments pages).
     pub fn feedback(self) -> bool {
         self >= Pages::Feedback
+    }
+
+    /// More has the screen mirror (and its page).
+    pub fn mirror(self) -> bool {
+        self >= Pages::Mirror
     }
 }
 
@@ -636,6 +648,12 @@ pub enum Target {
     /// Comments: a comment's card (nothing to press), and Delete on the player's own.
     CommentCard(u8),
     DeleteComment(u8),
+    /// More's Screen mirror (from screen version 14), and on its page: aim again, zoom in and out, stop.
+    Mirror,
+    MirrorAim,
+    MirrorZoomIn,
+    MirrorZoomOut,
+    MirrorStop,
 }
 
 /// The timeline segment a target is (the segment, or the place over it), for a drag along the timeline.
@@ -759,6 +777,9 @@ pub enum Effect {
     ShareCapture(ShareAsk),
     /// Read or send world feedback (`Docs/world-feedback.md`): the host answers with [`Menu::set_feedback`].
     Feedback(FeedbackAsk),
+    /// The screen mirror (contracts `Docs/orb.md`, Screen mirror): the host keeps the camera and shows it in
+    /// [`Menu::mirror`].
+    Mirror(crate::mirror::MirrorAsk),
     /// The menu closed.
     Close,
 }
@@ -888,6 +909,8 @@ pub struct Menu {
     /// World feedback as the host knows it, the world shown (an index of its subjects), the page of Comments shown (from
     /// 0), and the label waiting for its justification on the keyboard.
     pub feedback: FeedbackView,
+    /// The screen mirror as the host keeps it (from screen version 14).
+    pub mirror: crate::mirror::MirrorView,
     pub subject: usize,
     pub comment_page: usize,
     pub justifying: Option<String>,
@@ -1081,7 +1104,7 @@ impl Menu {
                     Page::FeedbackLabels | Page::Comments => Page::Feedback,
                     Page::Feedback if self.pages.simple() => Page::More,
                     // The simple Home's More holds these.
-                    Page::Light | Page::Tracking | Page::Suggest | Page::Instances | Page::Qr if self.pages.simple() => Page::More,
+                    Page::Light | Page::Tracking | Page::Suggest | Page::Instances | Page::Qr | Page::Mirror if self.pages.simple() => Page::More,
                     _ => Page::Home,
                 };
                 self.go(to);
@@ -1414,6 +1437,19 @@ impl Menu {
                 Vec::new()
             }
             Target::History | Target::FindFriend | Target::SendShare | Target::ShareAnyway | Target::CancelShare => Vec::new(),
+            // The screen mirror (from screen version 14), where the avatar's screen shows the menu and its N4N0 has it.
+            Target::Mirror if self.pages.mirror() && self.mirror.available() => {
+                self.go(Page::Mirror);
+                vec![Effect::Mirror(crate::mirror::MirrorAsk::Show)]
+            }
+            Target::MirrorAim => vec![Effect::Mirror(crate::mirror::MirrorAsk::Aim)],
+            Target::MirrorZoomIn if self.mirror.can_zoom_in() => vec![Effect::Mirror(crate::mirror::MirrorAsk::ZoomIn)],
+            Target::MirrorZoomOut if self.mirror.can_zoom_out() => vec![Effect::Mirror(crate::mirror::MirrorAsk::ZoomOut)],
+            Target::MirrorStop => {
+                self.go(Page::More);
+                vec![Effect::Mirror(crate::mirror::MirrorAsk::Stop)]
+            }
+            Target::Mirror | Target::MirrorZoomIn | Target::MirrorZoomOut => Vec::new(),
             // World feedback (from screen version 13).
             Target::WorldFeedback if self.pages.feedback() => {
                 self.subject = 0;
@@ -3191,6 +3227,47 @@ mod tests {
     /// World feedback (screen version 13): More's card opens the world's page, Like and the labels show at once and ask
     /// the host, AI world asks for its reason on the keyboard (enough words or it stays), a comment shows first while
     /// on its way, the player's own can be deleted, the worlds are stepped through; older screens have none of it.
+    #[test]
+    fn the_screen_mirror_opens_from_more_where_the_avatars_screen_shows_it() {
+        use crate::mirror::{MirrorAsk, MirrorView, Phase, Reach};
+        use layout::ScreenPage;
+        let mut menu = Menu { pages: Pages::ALL, ..Default::default() };
+        menu.open();
+        menu.press(Target::More);
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::MoreMirror);
+        // In the overlay, or on an avatar whose N4N0 has no mirror: greyed out, and pressing it does nothing.
+        for reach in [Reach::Overlay, Reach::NoMirror] {
+            menu.mirror = MirrorView { reach, ..Default::default() };
+            assert!(layout::target_state(&menu, Target::Mirror).unavailable);
+            assert!(menu.press(Target::Mirror).is_empty());
+            assert_eq!(menu.page, Page::More);
+        }
+        menu.mirror = MirrorView { reach: Reach::Screen, zoom: 0, phase: Phase::Off };
+        assert!(!layout::target_state(&menu, Target::Mirror).unavailable);
+        assert_eq!(menu.press(Target::Mirror), [Effect::Mirror(MirrorAsk::Show)]);
+        assert_eq!(ScreenPage::of(&menu), ScreenPage::Mirror);
+        assert!(layout::target_state(&menu, Target::MirrorZoomOut).unavailable, "already at its widest");
+        assert!(menu.press(Target::MirrorZoomOut).is_empty());
+        assert_eq!(menu.press(Target::MirrorZoomIn), [Effect::Mirror(MirrorAsk::ZoomIn)]);
+        menu.mirror.phase = Phase::Aiming { seconds: 2 };
+        assert!(layout::target_state(&menu, Target::MirrorAim).on, "Aim ringed while the camera follows the eyes");
+        assert_eq!(menu.press(Target::MirrorAim), [Effect::Mirror(MirrorAsk::Aim)]);
+        menu.press(Target::Back);
+        assert_eq!(menu.page, Page::More, "back to More, the camera left where it is");
+        menu.press(Target::Mirror);
+        assert_eq!(menu.press(Target::MirrorStop), [Effect::Mirror(MirrorAsk::Stop)]);
+        assert_eq!(menu.page, Page::More);
+        // A screen of version 13 has neither the card nor the page.
+        let mut old = Menu { pages: Pages::Feedback, ..Default::default() };
+        old.open();
+        old.mirror.reach = Reach::Screen;
+        old.press(Target::More);
+        assert_eq!(ScreenPage::of(&old), ScreenPage::MoreFeedback);
+        assert!(old.press(Target::Mirror).is_empty());
+        old.page = Page::Mirror;
+        assert_eq!(ScreenPage::of(&old), ScreenPage::home_of(&old));
+    }
+
     #[test]
     fn world_feedback_flows_through_the_menu() {
         use crate::feedback::{FeedbackView, LabelCount, Subject, Why, WorldFeedback};

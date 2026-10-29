@@ -222,6 +222,8 @@ pub(crate) struct OrbRuntime {
     pub(crate) video_titles: HashMap<String, Option<String>>,
     /// The controllers' touchpads and sticks the avatar's input parameters follow (input.rs).
     pub(crate) input: crate::input::InputRuntime,
+    /// The screen mirror's camera (mirror.rs).
+    pub(crate) mirror: crate::mirror::MirrorRuntime,
 }
 
 impl OrbRuntime {
@@ -248,6 +250,7 @@ impl OrbRuntime {
         self.avatar_name = None;
         self.params.clear();
         self.input.forget_avatar();
+        self.mirror.forget_avatar();
         self.controls = Controls::default();
         self.manifest = false;
         self.sender = None;
@@ -334,6 +337,7 @@ impl OrbRuntime {
         at(self.states.next_due());
         at(self.qr.next_due());
         at(self.input.next_due());
+        at(self.mirror.next_due(now));
         if vrchat && (self.avatar_id.is_none() || self.tree_unknown) {
             let every = if self.avatar_id.is_none() { Duration::from_secs(10) } else { TREE_RECHECK };
             at(Some(self.last_avatar_check.map_or(now, |t| t + every)));
@@ -413,6 +417,8 @@ impl OrbRuntime {
             feedback: self.feedback.clone(),
             friends: self.friends.clone(),
             input_params: crate::input::InputRuntime::used(&self.params) as u8,
+            // As the overlay's menu sees it: there, the camera's picture never shows.
+            mirror: self.mirror.view(Instant::now(), crate::mirror::reach(false, &self.params)),
         }
     }
 
@@ -782,9 +788,12 @@ impl N4n0 {
                 rt.pins_due = None;
                 out.extend(pin_messages(&settings.pins, &rt.params));
             }
-            // The controllers' touchpads and sticks last: the screen's steps above keep their bundles.
+            // The controllers' touchpads and sticks and the screen mirror last: the screen's steps above keep their bundles.
             let r = &mut *rt;
             out.extend(r.input.tick(now, settings.input, &r.params));
+            let shown = r.screen.available && r.screen.menu.open && r.screen.menu.page == orbiters_orb::menu::Page::Mirror;
+            out.extend(r.mirror.tick(now, shown, &r.params));
+            r.screen.menu.mirror = r.mirror.view(now, crate::mirror::reach(r.screen.available, &r.params));
             if rt.listening.is_some_and(|(_, since)| now.duration_since(since) > crate::voice::LISTEN_LIMIT) {
                 // The worker ends its own sentences sooner: it is stuck or gone. Whatever it says late goes nowhere.
                 rt.listening = None;
@@ -1253,6 +1262,7 @@ impl N4n0 {
         let (pins, enabled, text_step_ms) = self.with_settings(|s| (s.orb.pins.clone(), s.orb.enabled, s.orb.text_step_ms));
         controls.withhold(&CAPTURE_PARAMETERS);
         controls.withhold(&orbiters_contracts::orb::input::all().collect::<Vec<_>>());
+        controls.withhold(&orbiters_contracts::orb::mirror::ALL);
         let has_gogo = names.iter().any(|n| n.starts_with("Go/"));
         let mut out: Vec<Message> =
             carry.iter().filter(|(p, _)| names.contains(*p) && (p.as_str() != "VRCEmote" || has_gogo)).map(|(p, v)| (parameter(p), osc_arg(v))).collect();
@@ -1271,6 +1281,7 @@ impl N4n0 {
             }
             rt.params = names;
             rt.input.forget_avatar();
+            rt.mirror.forget_avatar();
             rt.size_sent = None;
             let capable = rt.params.contains(contract::card::OUT);
             rt.screen.set_card_capable(capable);

@@ -1938,7 +1938,7 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
         MenuPage::Qr => Target::Qr,
         MenuPage::Instances | MenuPage::AddFriend => Target::Instances,
         MenuPage::Feedback | MenuPage::FeedbackLabels | MenuPage::Comments => Target::WorldFeedback,
-        MenuPage::Card | MenuPage::More => return,
+        MenuPage::Card | MenuPage::More | MenuPage::Mirror => return,
     };
     host.press(open);
     if !samples {

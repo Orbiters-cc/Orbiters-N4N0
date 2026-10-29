@@ -145,6 +145,8 @@ impl ControllerRole {
 pub mod prop {
     pub const TRACKING_SYSTEM_NAME: i32 = 1000;
     pub const MODEL_NUMBER: i32 = 1001;
+    /// The headset's: from a vsync to its picture lighting the displays.
+    pub const SECONDS_FROM_VSYNC_TO_PHOTONS: i32 = 2001;
     pub const DISPLAY_FREQUENCY: i32 = 2002;
     pub const SERIAL_NUMBER: i32 = 1002;
     pub const MANUFACTURER_NAME: i32 = 1005;
@@ -467,6 +469,38 @@ impl Client {
         unsafe { entry::<F>(self.system, 12)(universe as i32, 0.0, out.as_mut_ptr(), MAX_DEVICES as u32) }
     }
 
+    /// Poses of all devices as SteamVR predicts them `seconds` from now (when a picture made now lights the displays).
+    pub fn predicted_poses(&self, universe: Universe, seconds: f32, out: &mut [Pose; MAX_DEVICES]) {
+        type F = unsafe extern "system" fn(i32, f32, *mut Pose, u32);
+        // SAFETY: IVRSystem_026 entry 12 is GetDeviceToAbsoluteTrackingPose.
+        unsafe { entry::<F>(self.system, 12)(universe as i32, seconds, out.as_mut_ptr(), MAX_DEVICES as u32) }
+    }
+
+    /// Where `eye` sits in the headset's space (half the lens distance to its side, any canting).
+    pub fn eye_to_head(&self, eye: compositor::Eye) -> Matrix34 {
+        type F = unsafe extern "system" fn(i32) -> Matrix34;
+        // SAFETY: entry 5 is GetEyeToHeadTransform (HmdMatrix34_t returned by value).
+        unsafe { entry::<F>(self.system, 5)(eye as i32) }
+    }
+
+    /// `eye`'s field of view as the tangents of its sides (left, right, top, bottom; top is negative, y pointing down).
+    pub fn projection_raw(&self, eye: compositor::Eye) -> [f32; 4] {
+        type F = unsafe extern "system" fn(i32, *mut f32, *mut f32, *mut f32, *mut f32);
+        let mut t = [0f32; 4];
+        let [l, r, top, b] = &mut t;
+        // SAFETY: entry 2 is GetProjectionRaw; the four out parameters are valid.
+        unsafe { entry::<F>(self.system, 2)(eye as i32, l, r, top, b) };
+        t
+    }
+
+    /// Seconds since the headset's last vsync, when SteamVR knows it.
+    pub fn time_since_vsync(&self) -> Option<f32> {
+        type F = unsafe extern "system" fn(*mut f32, *mut u64) -> bool;
+        let (mut seconds, mut frame) = (0f32, 0u64);
+        // SAFETY: entry 6 is GetTimeSinceLastVsync; both out parameters are valid.
+        unsafe { entry::<F>(self.system, 6)(&mut seconds, &mut frame) }.then_some(seconds)
+    }
+
     pub fn device_class(&self, device: u32) -> DeviceClass {
         type F = unsafe extern "system" fn(u32) -> i32;
         // SAFETY: entry 20 is GetTrackedDeviceClass.
@@ -611,6 +645,8 @@ pub struct Overlay<'a> {
 pub mod overlay_flag {
     pub const NO_DASHBOARD_TAB: i32 = 1 << 3;
     pub const SEND_VR_DISCRETE_SCROLL_EVENTS: i32 = 1 << 6;
+    /// The texture's left half goes to the left eye, its right half to the right one.
+    pub const SIDE_BY_SIDE_PARALLEL: i32 = 1 << 10;
     /// SteamVR's laser works on the overlay whenever it is shown, dashboard open or not (a menu in the play space).
     pub const MAKE_OVERLAYS_INTERACTIVE_IF_VISIBLE: i32 = 1 << 16;
     pub const SEND_VR_SMOOTH_SCROLL_EVENTS: i32 = 1 << 17;

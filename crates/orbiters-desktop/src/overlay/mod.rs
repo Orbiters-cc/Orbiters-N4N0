@@ -541,6 +541,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let coverage = coverage::CoverageOverlayPanel::new(&overlay)?;
     let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage };
     let mut frames = frames::FrameSampler::new(&steamvr);
+    // What of the touchpads and sticks goes to the avatar's input parameters.
+    let mut pads = orbiters_n4n0::input::Pacer::default();
 
     let mut poses = SteamVrPoses { client: &steamvr, described: HashMap::new() };
     let started = Instant::now();
@@ -696,6 +698,17 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                     backend.orb(OrbCommand::Trigger { right: hand == 1, down });
                 }
             }
+        }
+        // The touchpads and sticks reach the avatar's N4N0 input parameters (contracts `Docs/orb-input.md`), paced; turned
+        // off (or VRChat gone), they go back to rest once.
+        let pads_wanted = snap.settings.orb.enabled && snap.settings.orb.controller_input && snap.vrchat.running;
+        let paced = match (pads_wanted, input_read) {
+            (true, true) => actions.pads(&steamvr).and_then(|read| pads.step(Instant::now(), read)),
+            (true, false) => None,
+            (false, _) => pads.stop(),
+        };
+        if let Some(state) = paced {
+            backend.orb(OrbCommand::Input { pads: state });
         }
         let button = input_read && actions.menu_pressed(&steamvr);
         if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button) {

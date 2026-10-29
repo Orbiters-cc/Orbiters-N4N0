@@ -736,6 +736,25 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             home: None,
             library: None,
         },
+        // On your avatar: the panel, the menu, the AFK message, Keep my pose and Controller input (an avatar using four).
+        Scenario {
+            name: "orb-avatar",
+            page: Page::Orb,
+            snapshot: {
+                let mut s = orb_busy.clone();
+                s.orb.input_params = 4;
+                s
+            },
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 560.0,
+            world: None,
+            home: None,
+            library: None,
+        },
         Scenario {
             name: "orb-testing",
             page: Page::Orb,

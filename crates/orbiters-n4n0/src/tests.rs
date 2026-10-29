@@ -2040,3 +2040,43 @@ fn the_qr_code_scanner_opens_web_links_once_and_stops_with_its_page() {
     assert_eq!((phase(&host), host.view().qr.note), (QrPhase::Stopped, "The stream camera cannot be read".to_string()));
     n.shutdown();
 }
+
+/// VRChat's tree for the N4N0 avatar with some of N4N0's controller input parameters (contracts `Docs/orb-input.md`).
+fn input_tree(id: &str, inputs: &[&str]) -> serde_json::Value {
+    let mut tree = avatar_tree(id);
+    let parameters = tree["CONTENTS"]["parameters"]["CONTENTS"].as_object_mut().unwrap();
+    for name in inputs {
+        let kind = if contract::input::is_bool(name) { "F" } else { "f" };
+        let value = if kind == "F" { json!(false) } else { json!(0.0) };
+        parameters.insert(name.replace('/', "_"), json!({ "FULL_PATH": format!("{PARAMETERS_PREFIX}{name}"), "TYPE": kind, "VALUE": [value] }));
+    }
+    tree
+}
+
+#[test]
+fn the_controllers_touchpads_reach_only_the_input_parameters_the_avatar_has() {
+    use crate::input::{Pad, Pads};
+    let right = contract::input::TOUCHPAD[1];
+    let (t, n, vrchat) = started_on(input_tree("avtr_input", &[right[0], right[2], contract::input::STICK[0][3]]));
+    n.refresh_avatar(None, HashMap::new(), 0);
+    assert_eq!(t.view().input_params, 3);
+    assert_eq!(t.view().controls, 1, "the input parameters are never the assistant's");
+    received(&vrchat, Duration::from_millis(400));
+    let mut pads = Pads::default();
+    pads.touchpads[1] = Pad { x: 0.25, y: -0.5, touch: true, click: false, force: 0.0 };
+    pads.sticks[0].click = true;
+    n.command(Command::Input { pads });
+    let sent: Vec<Message> = received(&vrchat, Duration::from_millis(300)).into_iter().filter(|(a, _)| a.contains("/Touchpad/") || a.contains("/Stick/")).collect();
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert!(sent.contains(&(parameter(right[0]), OscType::Float(0.25))));
+    assert!(sent.contains(&(parameter(right[2]), OscType::Bool(true))));
+    assert!(sent.contains(&(parameter(contract::input::STICK[0][3]), OscType::Bool(true))));
+    // Turned off: back to rest, once.
+    t.settings.lock().unwrap().orb.controller_input = false;
+    n.wake();
+    let rest: Vec<Message> = received(&vrchat, Duration::from_millis(400)).into_iter().filter(|(a, _)| a.contains("/Touchpad/") || a.contains("/Stick/")).collect();
+    assert_eq!(rest.len(), 3, "{rest:?}");
+    assert!(rest.contains(&(parameter(right[0]), OscType::Float(0.0))));
+    assert!(rest.contains(&(parameter(right[2]), OscType::Bool(false))));
+    t.shutdown(&n);
+}

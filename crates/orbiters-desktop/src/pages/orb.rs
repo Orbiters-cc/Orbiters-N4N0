@@ -191,6 +191,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply = true;
                     }
                 });
+                widgets::separator(ui);
+                let input = input_line(orb);
+                widgets::field(ui, "Controller input", Some(&input), 48.0, |ui| {
+                    apply |= widgets::toggle(ui, "orb-controller-input", &mut draft.orb.controller_input);
+                });
                 if !draft.orb.pins.is_empty() {
                     widgets::separator(ui);
                     let mut remove = None;
@@ -642,6 +647,17 @@ fn heading_line(snap: &crate::state::Snapshot) -> String {
         (Some(a), None) => format!("“{a}” has no N4N0: add it from My Avatar's gallery"),
         (None, Some(_)) => "On your avatar".into(),
         (None, None) => "Your avatar has no N4N0: add it from My Avatar's gallery".into(),
+    }
+}
+
+/// What Controller input does, and what the worn avatar takes of it (contracts `Docs/orb-input.md`).
+fn input_line(orb: &OrbStatus) -> String {
+    let base = "Your touchpads and sticks reach avatars made to use N4N0's input parameters (Orbiters Toolkit's README tells creators how).";
+    match (orb.avatar_id.is_some(), orb.input_params) {
+        (false, _) => base.to_string(),
+        (true, 0) => format!("{base} This avatar uses none of them."),
+        (true, 1) => format!("{base} This avatar uses one."),
+        (true, n) => format!("{base} This avatar uses {n}."),
     }
 }
 

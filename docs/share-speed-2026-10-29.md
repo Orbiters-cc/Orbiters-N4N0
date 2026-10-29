@@ -11,13 +11,13 @@ below come from the dev database's rows (`files`, `MapPreviews`, `CaptureGrants`
 | When (UTC) | What | Took |
 | --- | --- | ---: |
 | before 18:28:21 | Share to … opened: VRChat's friends read (224 friends: a page of online friends, then the offline ones, 100 a request at VRChat's one request a second) | about 4 s (from the code and the friend count; not logged) |
-| until 18:28:21.279 | Upload files made: the session was reconstructed on 10-28, before background preparation existed, so the share made them itself (cache miss) | about 11-12 s (not logged; same-size sessions took 11.2 s at 200k splats and 23.4 s at 970k: [upload-prep-speed](upload-prep-speed-2026-10-29.md)) |
+| until 18:28:21.279 | Upload files made: the session was reconstructed on 10-28, before background preparation existed, so the share made them itself (cache miss) | not logged; the same session re-prepared tonight: 17.5 s (below) |
 | 18:28:21.641 | 31.6 MB sent over the loopback, the server made the web `.splat` and the two sky encodings | 0.36 s |
 | 18:28:21.6 - 27.9 | Six files stored in R2 **one after another**: `.splat` 11.4 MB 0.99 s, PC tree 15.1 MB 2.94 s, Quest tree 15.1 MB (the PC tree's very bytes: it fits Quest) 1.12 s, coarse 1.4 MB 0.38 s, sky WebP 0.32 s, sky JPEG 0.35 s | 6.1 s |
 | 18:28:27.743 | Capture row committed | |
 | 18:28:28.154 | Grant made: the app fetched the item it had just uploaded (GET), then asked for the share | 0.41 s |
 
-About 22 s from opening Share to … to done, 18 s of it after Send. All that time the window showed one spinner line
+About 28 s from opening Share to … to done, 24 s of it after Send. All that time the window showed one spinner line
 ("Sharing with your friends…"), the picker stayed open and greyed, the friend appeared only at the end, and the window
 refused to close (a press outside or Escape did nothing while busy).
 
@@ -34,6 +34,14 @@ Over Cloudflare in production the 31.6 MB upload comes on top (not measured here
   server encoded and stored a request's pictures one by one too (each picture's two files in a row).
 - After a share the app re-lists the computer's captures and refreshes Map explorer (`bump_library`, `refresh_maps`):
   in the background, after the dialog already has the answer, so not on the waiting path.
+
+## The preparation, re-timed
+
+A hard-linked copy of the session without its cache (`C:/Users/Enzo/orbiters-lab-share/silent`, removed afterwards),
+this morning's release timing harness (`upload_prep_timings`, `ORBITERS_PREP_TIMING=1`), RTX 4080, VRChat closed,
+other agents' builds running: a cache miss took **17.5 s** (GPU setup 3.9 s, PC tree tuning 12.1 s over 11 depths, the
+tree also Quest's; read, build and cache write 0.6 s) and made the very 31,637,856 bytes Enzo's share sent; the cache
+hit right after took **0.10 s** (0.36 s for the whole test process).
 
 ## R2 storage, one after another versus together
 
@@ -82,7 +90,7 @@ Desktop (`controller/shares.rs`, `pages/sharing.rs`, IPC):
 | Step | Before | After |
 | --- | ---: | ---: |
 | Friends shown in Share to … | about 4 s after pressing it | already read while the window was open (same 4 s, earlier); instant within VRChat's 5-minute cache |
-| Upload files | about 11-12 s after Send (cache miss) | started when Share to … opens: whatever is left of it when Send is pressed; 0.04-0.15 s when done |
+| Upload files | 17.5 s after Send (cache miss, re-timed) | started when Share to … opens: whatever is left of it when Send is pressed; 0.10 s once done |
 | Upload over the loopback + server encodes | 0.36 s | same |
 | Server storage | 6.1 s | 1.0-1.4 s (measured above) |
 | Grant | 0.41 s (with the extra GET) | one request |
@@ -92,7 +100,7 @@ Desktop (`controller/shares.rs`, `pages/sharing.rs`, IPC):
 
 - Not measured end to end after the change: a throwaway backend cannot store 3D captures without R2 (preview files go
   to storage only) and pointing it at the dev bucket would overwrite real dev files by id. `shares.log` will have the
-  next real share's steps. The preparation was not re-timed tonight: VRChat was running.
+  next real share's steps.
 - Only unit tests and screenshots: no real share through the window or through N4N0's menu after the change.
 - N4N0's menu (avatar screen, SteamVR overlay) gets the server's faster storage and the shorter request chain, but
   does not prepare ahead when its Share to … opens: that would run the GPU preparation in VR before the member asked

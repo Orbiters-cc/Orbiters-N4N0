@@ -11,6 +11,7 @@
 
 mod captures;
 mod command;
+pub mod input;
 pub mod media;
 pub mod menu_host;
 pub mod platform;

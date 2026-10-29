@@ -156,6 +156,11 @@ pub enum Command {
         right: bool,
         down: bool,
     },
+    /// Each hand's touchpad and thumbstick as the SteamVR overlay read them (contracts `Docs/orb-input.md`), paced by
+    /// [`crate::input::Pacer`]: the avatar's N4N0 input parameters follow them.
+    Input {
+        pads: crate::input::Pads,
+    },
 }
 
 #[cfg(test)]

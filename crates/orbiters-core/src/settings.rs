@@ -258,6 +258,9 @@ pub struct OrbSettings {
     pub direct_calls: bool,
     /// N4N0's menu (fast walk, YouTube, calls, a 3D picture): what opens it, the keyboard's letters.
     pub menu: MenuSettings,
+    /// The controllers' touchpads and sticks go to the avatar's N4N0 input parameters (contracts `Docs/orb-input.md`),
+    /// when it has them.
+    pub controller_input: bool,
 }
 
 /// What opens N4N0's menu: in the SteamVR overlay, or on the avatar's projected screen when the N4N0 prop has one (the
@@ -371,6 +374,7 @@ impl Default for OrbSettings {
             calls: false,
             direct_calls: false,
             menu: MenuSettings::default(),
+            controller_input: true,
         }
     }
 }

@@ -207,6 +207,9 @@ pub struct OrbStatus {
     pub captures: orbiters_orb::captures::CapturesView,
     #[serde(default)]
     pub friends: orbiters_orb::captures::Friends,
+    /// How many of N4N0's controller input parameters (contracts `Docs/orb-input.md`) the worn avatar lists.
+    #[serde(default)]
+    pub input_params: u8,
 }
 
 /// Tracking smoothing (the app's SteamVR driver), as the Tracking page shows it.

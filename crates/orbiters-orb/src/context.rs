@@ -137,21 +137,22 @@ impl Moment {
             out.push_str(note.trim_end());
             out.push('\n');
         }
-        // What other people chose, as data.
+        // What other people chose, as data. Keys go in in alphabetical order: serde_json keeps insertion order in the
+        // app (vrc-get-vpm turns on its preserve_order) and sorts them elsewhere, and both must read the same.
         let mut block = serde_json::Map::new();
-        if let Some(world) = &self.world_name {
-            block.insert("world".into(), Value::String(data(world, NAME_CHARS)));
-        }
         if let Some(avatar) = &self.avatar_name {
             block.insert("avatar".into(), Value::String(data(avatar, NAME_CHARS)));
         }
         if let Some((url, title)) = &self.last_video {
             let mut video = serde_json::Map::new();
-            video.insert("url".into(), Value::String(data(url, URL_CHARS)));
             if let Some(title) = title {
                 video.insert("title".into(), Value::String(data(title, NAME_CHARS)));
             }
+            video.insert("url".into(), Value::String(data(url, URL_CHARS)));
             block.insert("last_video_played".into(), Value::Object(video));
+        }
+        if let Some(world) = &self.world_name {
+            block.insert("world".into(), Value::String(data(world, NAME_CHARS)));
         }
         if !block.is_empty() {
             out.push_str(DATA_NOTE);

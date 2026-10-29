@@ -585,12 +585,15 @@ fn route(method: &str, target: &str, host: &str, in_world: bool) -> Result<(), (
     Ok(())
 }
 
-fn answer(ctl: &Shared, mut stream: TcpStream) -> std::io::Result<()> {
+fn answer(ctl: &Shared, stream: TcpStream) -> std::io::Result<()> {
+    respond(&ctl.world_feedback, stream, ctl.settings().development, ctl.feedback_api().is_some())
+}
+
+/// Answers one request on `stream` from what `runtime` knows, once it read the log to its end.
+fn respond(runtime: &std::sync::Mutex<WorldFeedbackRuntime>, mut stream: TcpStream, development: bool, signed_in: bool) -> std::io::Result<()> {
     let Some((method, target, host)) = request(&mut stream) else { return Ok(()) };
-    let development = ctl.settings().development;
-    let signed_in = ctl.feedback_api().is_some();
     let (status, body) = {
-        let mut rt = ctl.world_feedback.lock().unwrap();
+        let mut rt = runtime.lock().unwrap();
         // What the world logged before asking counts in this answer.
         rt.follow(development, signed_in);
         match route(&method, &target, &host, accepted(rt.joined.as_deref(), development)) {
@@ -659,6 +662,72 @@ mod tests {
         let again = contract::parse(r#"[N4N0-Feedback] {"v":1,"t":"hello","session":"00000001","seq":1}"#).unwrap();
         assert!(rt.line(again, false, true));
         assert_eq!((rt.world.seen, rt.world.selected.clone()), (1, None));
+    }
+
+    /// What the world logs is in the next answer of the local address, over a real socket and a log file in VRChat's
+    /// shape (`Docs/world-feedback.md`): the probe while in the N4N0 world, the subject, the like, the next line read
+    /// before answering, another host refused.
+    #[test]
+    fn the_world_reads_what_it_logged_through_the_local_address() {
+        let dir = std::env::temp_dir().join(format!("orbiters-feedback-log-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("output_log_2026-10-29_21-00-00.txt");
+        let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        let stamp = format!("{:04}.{:02}.{:02} {:02}:{:02}:{:02}", now.year(), now.month() as u8, now.day(), now.hour(), now.minute(), now.second());
+        let line = |message: &str| format!("{stamp} Debug      -  {message}\n");
+        let lines = [
+            line(&format!("[Behaviour] Joining {}:12345~region(eu)", contract::N4N0_WORLD)),
+            line(r#"[N4N0-Feedback] {"v":1,"t":"hello","session":"5f3a9c01","seq":1}"#),
+            line(&format!(
+                r#"[N4N0-Feedback] {{"v":1,"t":"select","session":"5f3a9c01","seq":2,"world":"{WORLD}","name":"Home","preview":1,"slot":2,"key":3}}"#
+            )),
+            line(&format!(r#"[N4N0-Feedback] {{"v":1,"t":"like","session":"5f3a9c01","seq":3,"world":"{WORLD}","on":true}}"#)),
+        ];
+        std::fs::write(&log, lines.concat()).unwrap();
+        let rt = std::sync::Mutex::new(WorldFeedbackRuntime {
+            log: LogWatcher::new(Some(dir.clone())),
+            queue: Queue::default(),
+            queue_path: dir.join("queue.json"),
+            ..Default::default()
+        });
+        let ask = |rt: &std::sync::Mutex<WorldFeedbackRuntime>, host: &str| -> (String, serde_json::Value) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let (stream, _) = listener.accept().unwrap();
+                    respond(rt, stream, false, true).unwrap();
+                });
+                let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                write!(client, "GET /n4n0/feedback/v1 HTTP/1.1\r\nHost: {host}\r\nUser-Agent: UnityPlayer\r\n\r\n").unwrap();
+                let mut text = String::new();
+                client.read_to_string(&mut text).unwrap();
+                let (head, body) = text.split_once("\r\n\r\n").unwrap();
+                (head.to_string(), serde_json::from_str(body).unwrap_or(serde_json::Value::Null))
+            })
+        };
+        let (head, json) = ask(&rt, "127.0.0.1:22541");
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        assert!(head.contains("Content-Type: application/json; charset=utf-8") && !head.contains("Access-Control"));
+        assert_eq!((json["n4n0"].as_u64(), json["seen"].as_u64(), json["signedIn"].as_bool()), (Some(1), Some(3), Some(true)));
+        assert_eq!(json["subject"]["world"], WORLD);
+        assert_eq!(
+            (json["subject"]["liked"].as_bool(), json["subject"]["likes"].as_u64(), json["subject"]["pending"].as_u64()),
+            (Some(true), Some(1), Some(1))
+        );
+        // A line written just before asking is in the answer.
+        let more = line(&format!(r#"[N4N0-Feedback] {{"v":1,"t":"label","session":"5f3a9c01","seq":4,"world":"{WORLD}","label":"pens","on":true}}"#));
+        std::fs::OpenOptions::new().append(true).open(&log).unwrap().write_all(more.as_bytes()).unwrap();
+        let (_, json) = ask(&rt, "localhost:22541");
+        assert_eq!(json["seen"].as_u64(), Some(4));
+        assert_eq!(json["subject"]["labels"][0]["id"], "pens");
+        let (head, _) = ask(&rt, "attacker.example:22541");
+        assert!(head.starts_with("HTTP/1.1 421"), "{head}");
+        // Elsewhere, nothing.
+        std::fs::OpenOptions::new().append(true).open(&log).unwrap().write_all(line(&format!("[Behaviour] Joining {WORLD}:1")).as_bytes()).unwrap();
+        let (head, _) = ask(&rt, "127.0.0.1:22541");
+        assert!(head.starts_with("HTTP/1.1 404"), "{head}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

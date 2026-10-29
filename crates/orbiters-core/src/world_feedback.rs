@@ -533,4 +533,47 @@ mod tests {
         assert!(matches!(failure(503, ""), Failure::Later(_)));
         assert!(client_id().len() >= 8 && client_id() != client_id());
     }
+
+    /// Against a disposable server: `ORBITERS_TEST_API=http://127.0.0.1:4230 ORBITERS_TEST_TOKEN=<a member's token>
+    /// cargo test -p orbiters-core world_feedback::tests::against_a_server -- --ignored`.
+    #[test]
+    #[ignore]
+    fn against_a_server() {
+        let api = Api::at(&std::env::var("ORBITERS_TEST_API").expect("ORBITERS_TEST_API"));
+        let token = std::env::var("ORBITERS_TEST_TOKEN").expect("ORBITERS_TEST_TOKEN");
+        let world = format!(
+            "wrld_{:08x}-0000-4000-8000-{:012x}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+        );
+        let anyone = Client { api: &api, token: None };
+        let member = Client { api: &api, token: Some(&token) };
+        let empty = anyone.read(&world).unwrap();
+        assert_eq!((empty.likes, empty.mine.clone()), (0, None));
+        let set = Set { liked: Some(true), labels: [("meetup".to_string(), true), ("mirror".to_string(), true)].into_iter().collect(), justification: None };
+        let view = member.set(&world, &set).unwrap();
+        assert_eq!(view.likes, 1);
+        assert_eq!(view.mine.as_ref().map(|m| m.liked), Some(true));
+        assert_eq!(view.labels.len(), 2);
+        let refused = member.set(
+            &world,
+            &Set { labels: [("ai-world".to_string(), true)].into_iter().collect(), justification: Some("too short".into()), ..Default::default() },
+        );
+        assert!(matches!(refused, Err(Failure::Refused { code: Some(Refusal::JustificationTooShort), .. })), "{refused:?}");
+        let id = client_id();
+        let first = member.comment(&world, "Great place for meetups!", &id).unwrap();
+        let again = member.comment(&world, "Great place for meetups!", &id);
+        // A retry inside the server's 20 s window is held back (429, tried later) or answers the same comment.
+        match again {
+            Ok(c) => assert_eq!(c.id, first.id),
+            Err(e) => assert!(matches!(e, Failure::Later(_)), "{e:?}"),
+        }
+        let read = member.read(&world).unwrap();
+        assert_eq!(read.comments.count, 1);
+        assert_eq!(read.mine.as_ref().map(|m| m.comment_ids.clone()), Some(vec![first.id]));
+        member.uncomment(first.id).unwrap();
+        member.uncomment(first.id).unwrap();
+        assert_eq!(anyone.read(&world).unwrap().comments.count, 0);
+        assert_eq!(Client { api: &api, token: Some("orbit-not-a-token") }.set(&world, &set), Err(Failure::SignedOut));
+    }
 }

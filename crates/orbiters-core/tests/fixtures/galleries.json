@@ -1,0 +1,99 @@
+{
+ "privateGalleries": [
+  {
+   "id": 44,
+   "name": "My pictures",
+   "isPublic": false,
+   "visibility": "private",
+   "layout": "masonry",
+   "creatorId": 2,
+   "owned": true,
+   "creator": {
+    "id": 2,
+    "username": "Enzo",
+    "discordId": null,
+    "avatar": null
+   },
+   "event": null,
+   "coverUrl": null
+  }
+ ],
+ "memberGalleries": [
+  {
+   "id": 31,
+   "name": "Midnight Photo Walk",
+   "isPublic": false,
+   "visibility": "members",
+   "layout": "masonry",
+   "creatorId": 7,
+   "owned": false,
+   "creator": {
+    "id": 7,
+    "username": "Orbit Photo Club",
+    "discordId": null,
+    "avatar": null
+   },
+   "event": {
+    "id": "5b2f6c1e-8d41-4c3a-9f0e-0a6b1c2d3e01",
+    "title": "Midnight Photo Walk",
+    "description": "A slow walk through Sunset Studio's rooftops with cameras out. Bring a lens, a pose and a friend: we stop at six spots the club scouted, and the best pictures land in the gallery.",
+    "startsAt": "2026-10-29T20:00:00.000Z",
+    "endsAt": "2026-10-29T22:00:00.000Z",
+    "category": "exploration",
+    "adultOnly": false,
+    "hasBanner": true,
+    "community": {
+     "name": "Orbit Photo Club",
+     "iconUrl": null
+    },
+    "discord": {
+     "name": "Orbit Hideout",
+     "iconUrl": null
+    },
+    "world": {
+     "name": "Sunset Studio",
+     "imageUrl": null
+    },
+    "steps": 2,
+    "status": "published"
+   },
+   "coverUrl": null
+  },
+  {
+   "id": 12,
+   "name": "Orbit Photo Club",
+   "isPublic": false,
+   "visibility": "members",
+   "layout": "masonry",
+   "creatorId": 7,
+   "owned": false,
+   "creator": {
+    "id": 7,
+    "username": "Orbit Photo Club",
+    "discordId": null,
+    "avatar": null
+   },
+   "event": null,
+   "coverUrl": null
+  }
+ ],
+ "publicGalleries": [
+  {
+   "id": 5,
+   "name": "Orbiters showcase",
+   "isPublic": true,
+   "visibility": "public",
+   "layout": "masonry",
+   "creatorId": 1,
+   "owned": false,
+   "creator": {
+    "id": 1,
+    "username": "Orbiters",
+    "discordId": null,
+    "avatar": null
+   },
+   "event": null,
+   "coverUrl": null
+  }
+ ]
+}

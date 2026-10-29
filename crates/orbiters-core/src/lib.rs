@@ -5,6 +5,7 @@ pub mod bundle;
 pub mod call;
 pub mod cleanup;
 pub mod clock;
+pub mod community;
 mod dpapi;
 pub mod explicit;
 pub mod features;

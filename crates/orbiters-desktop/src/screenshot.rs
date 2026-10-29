@@ -266,7 +266,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         s
     };
 
-    let scenarios = vec![
+    let mut scenarios = vec![
         Scenario {
             name: "home",
             page: Page::Home,
@@ -1321,6 +1321,39 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         },
     ];
 
+    for name in [
+        "projects-gallery",
+        "projects-detail",
+        "projects-packages",
+        "projects-repos",
+        "projects-new",
+        "projects-avatars",
+        "projects-choice",
+        "projects-setup",
+        "projects-ready",
+    ] {
+        let capture = matches!(name, "projects-avatars" | "projects-choice" | "projects-ready");
+        let mut snapshot = scenarios[0].snapshot.clone();
+        snapshot.orb.avatar_id = Some("avtr_00000000-0000-4000-8000-000000000000".into());
+        snapshot.orb.manifest = name == "projects-ready";
+        snapshot.orb.prop_sync = (name == "projects-ready").then_some(8);
+        scenarios.push(Scenario {
+            name,
+            page: if capture { Page::Capture } else { Page::Projects },
+            snapshot,
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        });
+    }
+
+
     // Home's music is the overlay's sample song, never what this computer plays.
     crate::media::watcher().stand_in(crate::media::Reading {
         media: Some(crate::overlay::menu_pages::sample_media()),
@@ -1373,6 +1406,9 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         }
         if f == 0 {
             app.set_page(sc.page, t);
+            if sc.name.starts_with("projects-") {
+                app.projects_mut().stage(&ctx, sc.name);
+            }
             if sc.page == Page::Videos {
                 stage_videos(&ctx, &mut app, sc.name);
             }

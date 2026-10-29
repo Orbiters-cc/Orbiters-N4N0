@@ -7,7 +7,8 @@ The installed application has not been updated; the coordinator owns the develop
 
 - `a362e9d` — Add shared Unity project discovery and VPM services.
 - `375cb23` — Add the Unity projects page and Capture avatar setup flow.
-- The validation commit adds this report, the usage document, screenshot scenarios and progressive-cache persistence.
+- `b6804f9` — Bundle fresh-install Unity templates and validate project workflows.
+- The follow-up validation commit adds the deterministic screenshot scenarios and embedded template license notice.
 
 New crate: `crates/orbiters-projects`. Its modules are `discovery`, `avatars`, `vpm`, `templates`, `builtin_templates`, `network`, `setup`
 and the shared helpers in `lib.rs`; `templates/` contains the pinned MIT-licensed fallback assets. It also has the read-only `examples/discover.rs`, contract tests and a real VPM

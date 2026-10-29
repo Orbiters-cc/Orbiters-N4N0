@@ -124,9 +124,9 @@ percentile frame 1–2 ms longer). For comparison, the window's 3D view orbiting
 stand-in 11.4 % (igpu-experiment.md). In VRChat the governor's back-off adds to this: batches stop while VRChat's
 frames come late.
 
-**Memory.** The splats (786 432 × the renderer's 64 bytes, its sort and image buffers), 12 shared face textures and 6
-face pictures (8.5 MB each at Balanced, 2 × 1032 × 1032 RGBA8) and two wide views: about 0.4 GB of graphics memory at
-Balanced while a capture shows, all freed when it is hidden (the render thread and its device end).
+**Memory.** 515 MB of graphics memory held by the process with a capture shown at Balanced (DXGI's local video memory
+of the offline check: the splats and the renderer's buffers, its sort included, twelve face textures, six face
+pictures and two wide views), all freed when it is hidden (the render thread and its device end).
 
 ## What it covers, and walking
 

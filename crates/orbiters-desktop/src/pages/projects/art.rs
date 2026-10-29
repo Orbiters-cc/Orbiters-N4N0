@@ -18,7 +18,6 @@ pub(super) mod glyph {
     pub const FOLDER_PLUS: &str = "\u{E258}";
     pub const TRASH_SIMPLE: &str = "\u{E4A8}";
     pub const ARROW_RIGHT: &str = "\u{E06C}";
-    pub const CIRCLE_DASHED: &str = "\u{E602}";
 }
 
 /// An avatar's picture in `rect` (squircle corners `radii`, circular radii from the top-left clockwise): a quiet

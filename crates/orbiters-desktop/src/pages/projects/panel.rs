@@ -67,11 +67,12 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
     let mut scroll = egui::ScrollArea::vertical().id_salt(("project-panel-scroll", &project.path)).auto_shrink([false, false]).scroll_bar_rect(bar);
     if state.scroll_to_packages {
         if let Some(y) = ctx.data(|d| d.get_temp::<f32>(packages_y)) {
-            scroll = scroll.vertical_scroll_offset(y - 8.0);
+            scroll = scroll.vertical_scroll_offset((y - 64.0).max(0.0));
             state.scroll_to_packages = false;
         }
     }
-    scroll.show(&mut pu, |ui| {
+    let from = orbiters_ui::blur::next_shape(ui);
+    let out = scroll.show(&mut pu, |ui| {
         ui.multiply_opacity(k.clamp(0.0, 1.0));
         ui.add_space(10.0 * (1.0 - k).max(0.0));
         ui.spacing_mut().item_spacing = vec2(0.0, 10.0);
@@ -87,6 +88,63 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
         commits(ui, state);
         ui.add_space(8.0);
     });
+    sticky_bar(ui, cx, state, &project, rect, from, out.state.offset().y);
+}
+
+/// Once the hero card scrolled away, the project's name and Open in Unity stay at the panel's top over the cards
+/// passing under it, blurred (the large title that becomes a bar).
+fn sticky_bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, rect: Rect, from: egui::layers::ShapeIdx, scrolled: f32) {
+    let ctx = ui.ctx().clone();
+    let w = rect.width() - 22.0;
+    let threshold = hero_height(w) - 52.0;
+    let k = anim::toggle(&ctx, Id::unique("project-panel-bar"), scrolled > threshold, Spring::SOFT).clamp(0.0, 1.0);
+    if k < 0.01 {
+        return;
+    }
+    let band = Rect::from_min_size(rect.min, vec2(rect.width(), 60.0));
+    let fill = match cx.gpu {
+        Some(gpu) => {
+            let look = orbiters_ui::blur::Look { blur: 14.0 * k, solid: 24.0, darken: 0.55 * k, fade: 0.0 };
+            orbiters_ui::blur::under(ui, Id::unique("project-panel-bar-blur"), &gpu.textures, from, band, look);
+            theme::alpha(theme::INK_900, 0.55 * k)
+        }
+        None => theme::alpha(theme::INK_900, 0.94 * k),
+    };
+    let p = ui.painter();
+    feedback::fill_corners(p, band, [24.0, 24.0, 0.0, 0.0], fill);
+    let _ = ui.interact(band, Id::unique("project-panel-bar-body"), Sense::click());
+    let dy = 8.0 * (1.0 - k);
+    let mut bu = ui.new_child(UiBuilder::new().max_rect(band).id_salt("project-panel-bar"));
+    bu.multiply_opacity(k);
+    let b = Button::new("Open in Unity")
+        .icon(icons::PLAY)
+        .variant(Variant::Primary)
+        .size(Size::Sm)
+        .enabled(project.registered && !project.missing && !state.running() && k > 0.5)
+        .id_salt("panel-bar-open");
+    let bw = b.desired_width(&bu);
+    let br = Rect::from_min_size(pos2(band.right() - 20.0 - bw, band.center().y - 16.0 + dy), vec2(bw, 32.0));
+    let thumb = Rect::from_min_size(pos2(band.left() + 18.0, band.center().y - 16.0 + dy), vec2(32.0, 32.0));
+    art::cover(bu.painter(), state, project, thumb, [9.0; 4], 1.0);
+    widgets::text_truncated(
+        bu.painter(),
+        pos2(thumb.right() + 10.0, band.center().y + dy),
+        Align2::LEFT_CENTER,
+        &Txt::new(&project.name, 15.0).weight(weight::SEMIBOLD),
+        br.left() - thumb.right() - 22.0,
+    );
+    if project.registered && widgets::activated(&b.show_at(&mut bu, br)) {
+        let p = project.clone();
+        state.task(&ctx, "Opening Unity…", move || {
+            orbiters_projects::open_project(&p)?;
+            Ok(Outcome::Changed("Project sent to Unity".into()))
+        });
+    }
+}
+
+/// The hero card's height in a panel `w` wide.
+fn hero_height(w: f32) -> f32 {
+    (w * 0.42).clamp(132.0, 190.0) + 14.0 + 20.0 + 10.0 + 22.0 + 16.0 + 40.0 + 16.0
 }
 
 /// The docked panel's left edge: a grip that shows on hover and drags the panel wider or narrower.
@@ -120,7 +178,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     let ctx = ui.ctx().clone();
     let w = ui.available_width();
     let cover_h = (w * 0.42).clamp(132.0, 190.0);
-    let h = cover_h + 14.0 + 20.0 + 10.0 + 22.0 + 16.0 + 40.0 + 16.0;
+    let h = hero_height(w);
     let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     let p = ui.painter().clone();
     widgets::frame(&p, r, theme::CARD_RADIUS, theme::surface());

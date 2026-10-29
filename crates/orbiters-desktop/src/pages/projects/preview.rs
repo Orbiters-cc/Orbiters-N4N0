@@ -213,8 +213,8 @@ fn home(h: &Header) -> Orbit {
         let c = b.center();
         let pivot = [c[0], ground + height * 0.5, c[2]];
         let wide = size[0].max(size[2]);
-        // Fits the height, and the width at a 4:3 view, with a sixth around.
-        let fit = (height * 1.25).max(wide * 1.2 * 0.75) * 0.5 / (fov * 0.5).tan();
+        // The height in seven tenths of the view (the width in a 4:3 one), room for the card's title below.
+        let fit = (height * 1.4).max(wide * 1.25 * 0.75) * 0.5 / (fov * 0.5).tan();
         return Orbit { pivot, yaw, pitch, distance: fit + wide * 0.5, fov };
     }
     if let Some(cam) = h.camera {
@@ -448,7 +448,7 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
     c.touched |= steer(&ctx, &resp, camera, rect, false);
     let dragging = resp.dragged();
     // Above the title and its shade.
-    let (view, moving) = frame_view(&ctx, c, dragging, 0.12);
+    let (view, moving) = frame_view(&ctx, c, dragging, 0.1);
     if moving {
         ctx.request_repaint();
     }

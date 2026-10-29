@@ -207,19 +207,43 @@ impl Controller {
 /// one), its sky map (sky.png as trained, when training learnt one) and the upload's metadata: the start view
 /// (right-handed like the files: Unity's Z negated), the held-out quality and when the session was recorded.
 pub(super) fn web_preview(session: &Path) -> anyhow::Result<(PreviewFiles, Option<PathBuf>, serde_json::Value)> {
+    use orbiters_reconstruct::timing::PrepStage;
+    let _total = PrepStage::new("total");
+    let stage = PrepStage::new("read result");
     let result = reconstruction::result_dir(session);
     let g = orbiters_reconstruct::ply::read(&result.join(reconstruction::PLY_FILE))?;
+    drop(stage);
+    let stage = PrepStage::new("start view");
     let (views, start) = crate::views::recorded(session)?;
     let v = views[start];
     let depth = crate::views::depth_ahead(&g, &v);
     let target = [v.position[0] + v.forward[0] * depth, v.position[1] + v.forward[1] * depth, v.position[2] + v.forward[2] * depth];
+    drop(stage);
+    let stage = PrepStage::new("web splat");
     let web = orbiters_reconstruct::web::splat_file(&g, orbiters_reconstruct::web::DEFAULT_MAX, v.position);
+    drop(stage);
     anyhow::ensure!(web.count >= 1000, "This reconstruction has too few splats to show the world.");
+    let stage = PrepStage::new("session cameras");
     let cameras = orbiters_reconstruct::tree_tune::session_cameras(session)?;
-    let mut gpu = orbiters_reconstruct::gpu::Gpu::new().ok();
+    drop(stage);
+    let stage = PrepStage::new("gpu setup");
+    let mut gpu = orbiters_reconstruct::gpu::Gpu::with_options(orbiters_reconstruct::gpu::DeviceOptions {
+        profile: std::env::var_os("ORBITERS_PREP_PROFILE").is_some(),
+        ..Default::default()
+    })
+    .ok();
+    if std::env::var_os("ORBITERS_PREP_TIMING").is_some() {
+        eprintln!("upload preparation adapter: {}", gpu.as_ref().map_or("CPU (untuned)", |g| g.adapter.as_str()));
+    }
+    drop(stage);
     // Names this upload in its three trees, so a world can tell when a slot's files have been replaced.
     let key = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u32) ^ web.count as u32;
     let trees = orbiters_reconstruct::tree_tune::vrchat_files(&g, &cameras, gpu.as_mut(), key, |_| {})?;
+    if let Some(gpu) = &gpu {
+        if let Some(p) = &gpu.profiler {
+            eprintln!("upload preparation GPU span: {:?}; passes: {:?}", p.span.get(), p.totals.borrow());
+        }
+    }
     let files = PreviewFiles { splat: web.bytes, vrchat_pc: trees.pc, vrchat_quest: trees.quest, vrchat_coarse: trees.coarse };
     let flip = |p: [f32; 3]| [p[0], p[1], -p[2]];
     let report = reconstruction::read_report(session);
@@ -229,13 +253,37 @@ pub(super) fn web_preview(session: &Path) -> anyhow::Result<(PreviewFiles, Optio
         "quality": report.and_then(|r| r.psnr_held_out),
         "capturedAt": recorded,
     });
+    let stage = PrepStage::new("sky");
     let sky = Some(result.join(reconstruction::SKY_FILE)).filter(|p| p.is_file());
+    drop(stage);
     Ok((files, sky, metadata))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Local preparation only; never contacts a server. Run in release mode, one GPU test at a time.
+    #[test]
+    #[ignore]
+    fn upload_prep_timings() {
+        let sessions = std::env::var("ORBITERS_TEST_SESSION").expect("ORBITERS_TEST_SESSION (semicolon-separated folders)");
+        for (index, session) in sessions.split(';').filter(|s| !s.is_empty()).enumerate() {
+            eprintln!("upload preparation session {index}: {session}");
+            let (files, sky, metadata) = web_preview(Path::new(session)).expect("prepare");
+            eprintln!("upload preparation bytes: {}; sky: {}; metadata: {metadata}", files.len(), sky.is_some());
+            if let Some(out) = std::env::var_os("ORBITERS_PREP_OUT") {
+                let out = PathBuf::from(out).join(index.to_string());
+                std::fs::create_dir_all(&out).unwrap();
+                for (name, bytes) in
+                    [("web.splat", &files.splat), ("pc.tree", &files.vrchat_pc), ("quest.tree", &files.vrchat_quest), ("coarse.tree", &files.vrchat_coarse)]
+                {
+                    std::fs::write(out.join(name), bytes).unwrap();
+                }
+                std::fs::write(out.join("metadata.json"), serde_json::to_vec_pretty(&metadata).unwrap()).unwrap();
+            }
+        }
+    }
 
     /// A reconstructed session shared in 3D on a disposable server: `ORBITERS_TEST_API=http://127.0.0.1:4230
     /// ORBITERS_TEST_TOKEN=orbit-… ORBITERS_TEST_WORLD=wrld_… ORBITERS_TEST_SESSION=<session folder>

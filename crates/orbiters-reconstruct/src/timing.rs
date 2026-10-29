@@ -7,6 +7,26 @@ use std::time::{Duration, Instant};
 
 static TOTALS: Mutex<BTreeMap<&'static str, (Duration, u32)>> = Mutex::new(BTreeMap::new());
 
+/// Upload preparation's wall-clock stages. Opt-in, without adding GPU waits to the measured work.
+pub struct PrepStage {
+    name: String,
+    start: Instant,
+}
+
+impl PrepStage {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into(), start: Instant::now() }
+    }
+}
+
+impl Drop for PrepStage {
+    fn drop(&mut self) {
+        if std::env::var_os("ORBITERS_PREP_TIMING").is_some() {
+            eprintln!("upload_prep {}", serde_json::json!({"stage": self.name, "seconds": self.start.elapsed().as_secs_f64()}));
+        }
+    }
+}
+
 pub fn on() -> bool {
     std::env::var_os("RECONSTRUCT_TIMING").is_some()
 }

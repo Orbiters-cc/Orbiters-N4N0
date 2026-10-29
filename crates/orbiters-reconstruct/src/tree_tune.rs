@@ -7,6 +7,7 @@
 use crate::camera::Camera;
 use crate::gaussians::Gaussians;
 use crate::gpu::{Gpu, LearningRates, Target};
+use crate::timing::PrepStage;
 use crate::tree::{self, Tree};
 use orbiters_core::contracts::frame_record::record_flags;
 use std::path::Path;
@@ -60,18 +61,30 @@ fn fitting(g: &Gaussians, max: usize) -> Tree {
 /// The three files of `g` (a reconstruction), named `key` (the upload they belong to). Without a GPU, the merged
 /// boxes stay as merged.
 pub fn vrchat_files(g: &Gaussians, cameras: &[Camera], gpu: Option<&mut Gpu>, key: u32, mut progress: impl FnMut(f32)) -> anyhow::Result<VrchatFiles> {
-    let mut pc = fitting(g, PC_SPLATS);
+    let mut pc = {
+        let _time = PrepStage::new("tree build pc");
+        fitting(g, PC_SPLATS)
+    };
     anyhow::ensure!(pc.leaf_splats().len() >= 1000, "This reconstruction has too few splats to show the world.");
     let same = pc.len() <= QUEST_SPLATS;
-    let mut quest = if same { None } else { Some(fitting(g, QUEST_SPLATS)) };
+    let mut quest = if same {
+        None
+    } else {
+        let _time = PrepStage::new("tree build quest");
+        Some(fitting(g, QUEST_SPLATS))
+    };
     progress(0.1);
     if let Some(gpu) = gpu {
         let share = if same { 0.85 } else { 0.55 };
-        tune(&mut pc, cameras, gpu, |p| progress(0.1 + share * p))?;
+        let _time = PrepStage::new("tune pc");
+        tune_for(&mut pc, cameras, gpu, "pc", |p| progress(0.1 + share * p))?;
+        drop(_time);
         if let Some(q) = quest.as_mut() {
-            tune(q, cameras, gpu, |p| progress(0.65 + 0.3 * p))?;
+            let _time = PrepStage::new("tune quest");
+            tune_for(q, cameras, gpu, "quest", |p| progress(0.65 + 0.3 * p))?;
         }
     }
+    let _time = PrepStage::new("tree serialize");
     let quest = quest.unwrap_or_else(|| pc.clone());
     let coarse = quest.top(COARSE_SPLATS);
     progress(1.0);
@@ -91,6 +104,10 @@ fn packed(render: &[[f32; 4]]) -> Vec<u32> {
 
 /// Tunes every depth of `tree`'s merged boxes against its leaves.
 pub fn tune(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, mut progress: impl FnMut(f32)) -> anyhow::Result<()> {
+    tune_for(tree, cameras, gpu, "tree", &mut progress)
+}
+
+fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, mut progress: impl FnMut(f32)) -> anyhow::Result<()> {
     if cameras.is_empty() {
         return Ok(());
     }
@@ -105,6 +122,8 @@ pub fn tune(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, mut progress: im
     depths.dedup();
     let mut rng = fastrand::Rng::with_seed(1);
     for (done, &depth) in depths.iter().enumerate() {
+        let _depth_time = PrepStage::new(format!("tune {platform} depth {depth}"));
+        let gpu_start = gpu.profiler.as_ref().map(|p| p.span.get().0);
         let tuned: Vec<usize> = (0..tree.nodes.len()).filter(|&i| !tree.nodes[i].leaf && tree.nodes[i].depth == depth).collect();
         // Each camera at the resolution where this depth's boxes are drawn: their median error about DRAWN_AT_PIXELS.
         let views: Vec<Camera> = cameras
@@ -130,8 +149,10 @@ pub fn tune(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, mut progress: im
         if views.is_empty() {
             continue;
         }
+        let _target_time = PrepStage::new(format!("{platform} depth {depth} targets"));
         gpu.upload(&leaves);
         let targets: Vec<Vec<u32>> = views.iter().map(|v| Ok(packed(&crate::train::render(gpu, v, [0.0; 3])?))).collect::<anyhow::Result<_>>()?;
+        drop(_target_time);
         let cut = tree.select(|n| n.depth == depth || (n.leaf && n.depth < depth));
         // Where each tuned box's splats sit in the cut (it keeps the tree's box order).
         let mut at = Vec::with_capacity(tuned.len());
@@ -152,6 +173,7 @@ pub fn tune(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, mut progress: im
                 / views.len() as f32)
         };
         let before = mean_score(gpu)?;
+        let _step_time = PrepStage::new(format!("{platform} depth {depth} steps"));
         for _ in 0..STEPS {
             let j = rng.usize(..views.len());
             let v = &views[j];
@@ -159,7 +181,14 @@ pub fn tune(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, mut progress: im
             gpu.step(v, [0.0; 3], target, Some(lr))?;
         }
         let after = mean_score(gpu)?;
-        eprintln!("tree depth {depth}: {} boxes, PSNR against the leaves {before:.2} → {after:.2} dB", tuned.len());
+        drop(_step_time);
+        eprintln!("tree depth {depth}: {} boxes, PSNR against the leaves {before:.6} → {after:.6} dB", tuned.len());
+        if std::env::var_os("ORBITERS_PREP_TIMING").is_some() {
+            eprintln!(
+                "upload_quality {}",
+                serde_json::json!({"platform":platform,"depth":depth,"boxes":tuned.len(),"before_db":before,"after_db":after,"retained_db":before.max(after),"views":views.len(),"gpu_ms":gpu_start.zip(gpu.profiler.as_ref()).map(|(start,p)|p.span.get().0-start)})
+            );
+        }
         // Boxes that already looked like their leaves can only lose to the noise of a few hundred steps.
         if after <= before {
             progress((done + 1) as f32 / depths.len() as f32);

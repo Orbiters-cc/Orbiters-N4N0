@@ -83,6 +83,9 @@ pub struct Item {
     pub explicit: bool,
     #[serde(default)]
     pub explicit_reasons: Vec<String>,
+    /// An official preview: a capture shared by the world's own VRChat author (contracts' Docs/capture-sharing.md).
+    #[serde(default)]
+    pub official: bool,
     pub hidden: Option<serde_json::Value>,
     pub capture: Option<Capture>,
     pub picture: Option<Picture>,

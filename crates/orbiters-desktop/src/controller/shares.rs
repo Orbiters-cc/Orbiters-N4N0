@@ -300,6 +300,10 @@ fn records_path(server: Server) -> anyhow::Result<PathBuf> {
     anyhow::ensure!(user.chars().all(|c| c.is_ascii_digit()), "Invalid account id");
     Ok(orbiters_core::paths::config_dir().join(format!("capture-uploads-{}-{user}.json", if server == Server::Development { "dev" } else { "prod" })))
 }
+/// What this account uploaded from this computer: each session's or picture's upload as the server last answered it.
+pub fn uploads(server: Server) -> Vec<(PathBuf, Item)> {
+    records_path(server).map(|p| read_records(&p)).unwrap_or_default().into_iter().filter_map(|r| r.item.map(|item| (r.path, item))).collect()
+}
 fn read_records(path: &Path) -> Vec<Record> {
     std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }

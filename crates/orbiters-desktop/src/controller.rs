@@ -135,6 +135,8 @@ pub struct Controller {
     performance: Mutex<performance::PerformanceRuntime>,
     /// A 3D picture under way (controller/burst.rs).
     burst: Mutex<burst::BurstRuntime>,
+    /// What My World asked for (controller/world_captures.rs).
+    world_captures: Mutex<world_captures::WorldCapturesRuntime>,
     /// A scan under way (controller/scan.rs).
     scan: Mutex<scan::ScanRuntime>,
     /// N4N0's camera rig while recording (controller/rig.rs).
@@ -286,6 +288,7 @@ pub mod update;
 mod videos;
 pub mod vrchat_data;
 pub mod vrchat_login;
+mod world_captures;
 pub use account::open_url;
 
 impl Controller {
@@ -326,6 +329,7 @@ impl Controller {
             menu_shares: Mutex::new(menu_shares::MenuShares::default()),
             performance: Mutex::new(performance::PerformanceRuntime::default()),
             burst: Mutex::new(burst::BurstRuntime::default()),
+            world_captures: Mutex::new(world_captures::WorldCapturesRuntime::default()),
             scan: Mutex::new(scan::ScanRuntime::default()),
             rig: Mutex::new(rig::RigRuntime::default()),
             calls: Mutex::new(calls::CallsRuntime::default()),
@@ -372,6 +376,7 @@ impl Controller {
         });
         spawn_watchers(self.clone());
         shares::spawn_presence(self.clone());
+        world_captures::spawn(self.clone());
         self.start_account();
         self.start_vrchat_login();
         self.start_orb();
@@ -718,6 +723,7 @@ impl Controller {
                     }
                 }
                 if !restarting {
+                    self.world_import_saved(session.clone());
                     self.burst_saved(session.clone());
                     self.scan_saved(session);
                     self.capture_ended();
@@ -783,7 +789,7 @@ impl Controller {
             mode: settings.capture_mode,
             quality: settings.storage_quality,
             keyframes: settings.keyframes.clone(),
-            world: if importing { None } else { self.current_world() },
+            world: if importing { raw_capture_world(&source) } else { self.current_world() },
             consent: ConsentInfo::default(),
             folder_name: None,
             performance: if importing { PerformanceSpec::default() } else { self.performance_spec(&settings) },
@@ -1774,6 +1780,15 @@ pub fn session_trail(dir: &Path) -> anyhow::Result<Vec<[f32; 3]>> {
         .collect();
     let step = points.len().div_ceil(2000).max(1);
     Ok(points.into_iter().step_by(step).collect())
+}
+
+/// The world a raw capture being imported shows, when its `capture.json` names one by id (contracts'
+/// Docs/raw-capture.md): its session is then one of that world.
+fn raw_capture_world(source: &SourceSpec) -> Option<orbiters_contracts::manifest::WorldInfo> {
+    let SourceSpec::RawSequence { path, .. } = source else { return None };
+    let text = std::fs::read_to_string(path.join(orbiters_contracts::raw_capture::RAW_FILE)).ok()?;
+    let meta: orbiters_contracts::raw_capture::RawCapture = serde_json::from_str(&text).ok()?;
+    meta.world.filter(|w| w.id.as_deref().is_some_and(|id| id.starts_with("wrld_")))
 }
 
 /// Raw captures in the raw captures folder, newest first.

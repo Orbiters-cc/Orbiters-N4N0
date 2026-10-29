@@ -60,10 +60,12 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
 
     // Switching projects: the cards fade and rise into the new one.
     let k = anim::spring_from(&ctx, Id::unique(("project-panel-content", state.switches)), [0.0], [1.0], Spring::SOFT)[0];
-    let mut pu = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(rect.min + vec2(8.0, 8.0), rect.max - vec2(14.0, 8.0))).id_salt("project-panel"));
+    // The scroll area reaches into the panel's right gutter, where egui puts its bar (a vertical bar sits at the
+    // area's own right edge; `scroll_bar_rect` only gives its height), and keeps the cards out of it by a margin.
+    let mut pu = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(rect.min + vec2(8.0, 8.0), rect.max - vec2(3.0, 8.0))).id_salt("project-panel"));
     pu.set_clip_rect(rect.shrink(2.0).intersect(ui.clip_rect()));
     let packages_y = Id::unique("project-panel-packages-y");
-    let bar = Rect::from_min_max(pos2(rect.right() - 13.0, rect.top() + 18.0), pos2(rect.right() - 1.0, rect.bottom() - 18.0));
+    let bar = Rect::from_min_max(pos2(rect.right() - 13.0, rect.top() + 18.0), pos2(rect.right() - 3.0, rect.bottom() - 18.0));
     let mut scroll = egui::ScrollArea::vertical().id_salt(("project-panel-scroll", &project.path)).auto_shrink([false, false]).scroll_bar_rect(bar);
     if state.scroll_to_packages {
         if let Some(y) = ctx.data(|d| d.get_temp::<f32>(packages_y)) {
@@ -73,27 +75,30 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
     }
     let from = orbiters_ui::blur::next_shape(ui);
     let out = scroll.show(&mut pu, |ui| {
-        ui.multiply_opacity(k.clamp(0.0, 1.0));
-        ui.add_space(10.0 * (1.0 - k).max(0.0));
-        ui.spacing_mut().item_spacing = vec2(0.0, 10.0);
-        let top = ui.cursor().top();
-        hero(ui, cx, state, &project, !split.docked);
-        if state.modal.is_none() {
-            super::ui::errors(ui, state, "panel");
-        }
-        avatars(ui, cx, state, &project);
-        ctx.data_mut(|d| d.insert_temp(packages_y, ui.cursor().top() - top));
-        packages(ui, state, &project);
-        available(ui, state, &project);
-        commits(ui, state);
-        ui.add_space(8.0);
+        egui::Frame::NONE.inner_margin(egui::Margin { right: 11, ..Default::default() }).show(ui, |ui| {
+            ui.multiply_opacity(k.clamp(0.0, 1.0));
+            ui.add_space(10.0 * (1.0 - k).max(0.0));
+            ui.spacing_mut().item_spacing = vec2(0.0, 10.0);
+            let top = ui.cursor().top();
+            hero(ui, cx, state, &project, !split.docked);
+            if state.modal.is_none() {
+                super::ui::errors(ui, state, "panel");
+            }
+            avatars(ui, cx, state, &project);
+            ctx.data_mut(|d| d.insert_temp(packages_y, ui.cursor().top() - top));
+            packages(ui, state, &project);
+            available(ui, state, &project);
+            commits(ui, state);
+            ui.add_space(8.0);
+        });
     });
-    sticky_bar(ui, cx, state, &project, rect, from, out.state.offset().y);
+    sticky_bar(ui, cx, state, &project, rect, from, out.state.offset().y, !split.docked);
 }
 
 /// Once the hero card scrolled away, the project's name and Open in Unity stay at the panel's top over the cards
-/// passing under it, blurred (the large title that becomes a bar).
-fn sticky_bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, rect: Rect, from: egui::layers::ShapeIdx, scrolled: f32) {
+/// passing under it, blurred (the large title that becomes a bar). A sheet keeps its × there too.
+#[allow(clippy::too_many_arguments)]
+fn sticky_bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, rect: Rect, from: egui::layers::ShapeIdx, scrolled: f32, sheet: bool) {
     let ctx = ui.ctx().clone();
     let w = rect.width() - 22.0;
     let threshold = hero_height(w) - 52.0;
@@ -123,7 +128,16 @@ fn sticky_bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, re
         .enabled(project.registered && !project.missing && !state.running() && k > 0.5)
         .id_salt("panel-bar-open");
     let bw = b.desired_width(&bu);
-    let br = Rect::from_min_size(pos2(band.right() - 20.0 - bw, band.center().y - 16.0 + dy), vec2(bw, 32.0));
+    let mut right = band.right() - 20.0;
+    if sheet {
+        let close = Rect::from_center_size(pos2(right - 16.0, band.center().y + dy), vec2(32.0, 32.0));
+        let pressed = widgets::activated(&IconButton::new(icons::X, "Close").size(32.0, 15.0).id_salt("panel-bar-close").show_at(&mut bu, close));
+        if pressed && k > 0.5 {
+            state.panel_closing = true;
+        }
+        right = close.left() - 8.0;
+    }
+    let br = Rect::from_min_size(pos2(right - bw, band.center().y - 16.0 + dy), vec2(bw, 32.0));
     let thumb = Rect::from_min_size(pos2(band.left() + 18.0, band.center().y - 16.0 + dy), vec2(32.0, 32.0));
     art::cover(bu.painter(), state, project, thumb, [9.0; 4], 1.0);
     widgets::text_truncated(
@@ -382,8 +396,15 @@ fn package_row(ui: &mut Ui, name: &str, display: &str, control_w: f32, control: 
     art::tile(p, t, glyph::PACKAGE, art::package_tint(name));
     let x = t.right() + 12.0;
     let tw = r.right() - control_w - 10.0 - x;
-    widgets::text_truncated(p, pos2(x, r.center().y - 8.0), Align2::LEFT_CENTER, &Txt::new(display, 13.5).weight(weight::MEDIUM), tw);
+    let title = Txt::new(display, 13.5).weight(weight::MEDIUM);
+    widgets::text_truncated(p, pos2(x, r.center().y - 8.0), Align2::LEFT_CENTER, &title, tw);
     widgets::text_truncated(p, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(name, 11.0).color(theme::FG_3), tw);
+    // A name cut short (narrow panels) shows whole on hover.
+    if widgets::text_size(ui, &title).x > tw {
+        let _ = ui
+            .interact(Rect::from_min_max(pos2(x, r.top()), pos2(x + tw, r.bottom())), Id::unique(("package-name", name)), Sense::hover())
+            .on_hover_text(display);
+    }
     let c = Rect::from_min_max(pos2(r.right() - control_w, r.top()), r.max);
     control(ui, c);
 }

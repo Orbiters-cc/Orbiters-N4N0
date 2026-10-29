@@ -6,7 +6,7 @@
 //! Its colours come from a theme's palette ([`RetroPalette`]: the retro base theme gives the phosphor's own), its texts
 //! from the skin's strings, fitted to their places as in Orbiters' own look.
 
-use super::menu_ui::{fit, glyph, Place, Skin, View, FACE_ASPECT};
+use super::menu_ui::{fit, glyph, Place, Skin, View};
 use egui::epaint::{PathShape, PathStroke};
 use egui::{pos2, vec2, Align2, Color32, ColorImage, Painter, Pos2, Rect, Shape, Stroke, TextureId};
 use orbiters_orb::menu::layout::{self, Align, Element, Icon, Label, Layout, Look, ScreenPage, Style, Tint};
@@ -596,10 +596,10 @@ pub fn draw_back(p: &Painter, origin: Pos2, skin: &Skin) {
     frame(p, origin, None, skin);
     let card = Rect::from_min_size(origin, vec2(layout::WIDTH as f32, layout::HEIGHT as f32));
     let c = card.center();
-    // N4N0's face (its logo) in brackets.
-    let face = c - vec2(0.0, 92.0);
-    orbiters_ui::n4n0_face::paint(p, Rect::from_center_size(face, vec2(58.0, 58.0 * FACE_ASPECT)), pal.line);
-    brackets(p, Rect::from_center_size(face, vec2(84.0, 84.0)), 12.0, Stroke::new(1.5, pal.dim));
+    // The N4N0 mark (Orbiters - N4N0's icon) in brackets, in the phosphor's own light.
+    let mark = c - vec2(0.0, 96.0);
+    orbiters_ui::n4n0_logo::paint(p, Rect::from_center_size(mark, orbiters_ui::n4n0_logo::size_for_width(72.0)), pal.line);
+    brackets(p, Rect::from_center_size(mark, vec2(104.0, 98.0)), 12.0, Stroke::new(1.5, pal.dim));
     let title = fit(p, mono(format!("// {} //", skin.text(Text::BackTitle)), BACK_TITLE.size, pal.text), BACK_TITLE.room);
     widgets::text(p, pos2(c.x, c.y + 2.0), Align2::CENTER_CENTER, &title.txt);
     let hint = fit(p, mono(format!("> {}_", skin.text(Text::BackHint)), BACK_HINT.size, pal.text2), BACK_HINT.room);

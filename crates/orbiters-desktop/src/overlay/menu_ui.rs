@@ -400,8 +400,6 @@ pub fn label_place(label: &Label) -> Place {
 }
 
 /// The back's title and hint: centred, clear of the card's sides.
-/// N4N0's face's height for its width (its view box's).
-pub const FACE_ASPECT: f32 = orbiters_ui::n4n0_face::VIEW.y / orbiters_ui::n4n0_face::VIEW.x;
 pub const BACK_PLACES: [(Text, Place); 2] =
     [(Text::BackTitle, Place { room: layout::WIDTH as f32 - 96.0, size: 52.0 }), (Text::BackHint, Place { room: layout::WIDTH as f32 - 96.0, size: 28.0 })];
 
@@ -630,14 +628,34 @@ pub fn draw_back(p: &Painter, origin: Pos2, skin: &Skin) {
     let card = Rect::from_min_size(origin, vec2(layout::WIDTH as f32, layout::HEIGHT as f32));
     p.rect_filled(card, theme::radius(layout::CARD_RADIUS as f32), pal.card);
     let centre = card.center().x;
-    let face = pos2(centre, card.center().y - 86.0);
-    p.circle_filled(face, 46.0, theme::alpha(pal.accent, 0.12));
-    orbiters_ui::n4n0_face::paint(p, Rect::from_center_size(face, vec2(64.0, 64.0 * FACE_ASPECT)), pal.accent);
+    // Orbiters - N4N0's icon, as on the computer: the N4N0 mark on its night square, in the square's blue glow.
+    let icon = Rect::from_center_size(pos2(centre, card.center().y - 66.0), vec2(BACK_ICON, BACK_ICON));
+    let glow = egui::epaint::Shadow { offset: [0, 10], blur: 56, spread: 2, color: theme::alpha(theme::BLUE, 0.34) };
+    p.add(glow.as_shape(icon.shrink(BACK_ICON * 0.06), theme::radius(BACK_ICON * 0.2)));
+    app_icon(p, icon);
     let [(title_text, title), (hint_text, hint)] = BACK_PLACES;
     let title = fit(p, Txt::new(skin.text(title_text), title.size).weight(weight::SEMIBOLD).color(pal.text), title.room);
-    widgets::text(p, pos2(centre, card.center().y + 6.0), Align2::CENTER_CENTER, &title.txt);
+    widgets::text(p, pos2(centre, card.center().y + 54.0), Align2::CENTER_CENTER, &title.txt);
     let hint = fit(p, Txt::new(skin.text(hint_text), hint.size).weight(weight::REGULAR).color(pal.muted), hint.room);
-    widgets::text(p, pos2(centre, card.center().y + 62.0), Align2::CENTER_CENTER, &hint.txt);
+    widgets::text(p, pos2(centre, card.center().y + 106.0), Align2::CENTER_CENTER, &hint.txt);
+}
+
+/// The side of Orbiters - N4N0's icon on the back.
+const BACK_ICON: f32 = 132.0;
+
+/// Orbiters - N4N0's icon (`orbiters_ui::n4n0_logo::icon`, the app's own) into `rect`, rasterised at its pixel size once.
+pub fn app_icon(p: &Painter, rect: Rect) {
+    let ctx = p.ctx();
+    let size = (rect.width().max(rect.height()) * ctx.pixels_per_point()).round().clamp(16.0, 1024.0) as u32;
+    let id = egui::Id::new(("n4n0-app-icon", size));
+    let texture = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)).unwrap_or_else(|| {
+        let pixmap = orbiters_ui::n4n0_logo::icon(size);
+        let image = egui::ColorImage::from_rgba_premultiplied([size as usize, size as usize], pixmap.data());
+        let texture = ctx.load_texture(format!("n4n0-app-icon-{size}"), image, egui::TextureOptions::LINEAR);
+        ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
+        texture
+    });
+    p.image(texture.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
 }
 
 /// The whole page as the overlay shows it.

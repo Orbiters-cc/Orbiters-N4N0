@@ -914,7 +914,12 @@ pub struct Menu {
     pub subject: usize,
     pub comment_page: usize,
     pub justifying: Option<String>,
+    /// What was just switched on (Like, a label) and when: the overlay makes it pop for [`POP`].
+    pub popped: Option<(Target, Instant)>,
 }
+
+/// How long the overlay shows a like or a label switched on popping.
+pub const POP: Duration = Duration::from_millis(700);
 
 /// How long a state saved here shows before the host's list has it.
 const SAVE_SHOWN: Duration = Duration::from_secs(5);
@@ -1462,6 +1467,7 @@ impl Menu {
                     let on = !entry.liked;
                     entry.set_like(on);
                     self.notice = None;
+                    self.popped = on.then(|| (Target::Like, Instant::now()));
                     vec![Effect::Feedback(FeedbackAsk::Like { world, on })]
                 }
                 Some(_) => self.sign_in_first(),
@@ -1469,15 +1475,21 @@ impl Menu {
             },
             Target::TopLabel(i) => {
                 let id = self.shown_feedback().and_then(|f| f.top().get(i as usize).map(|l| l.id.clone()));
-                match id {
+                let effects = match id {
                     Some(id) => self.toggle_label(&id),
                     None => Vec::new(),
-                }
+                };
+                self.pop_if_on(target, &effects);
+                effects
             }
-            Target::LabelChip(i) => match crate::feedback::label_at(i as usize) {
-                Some(label) => self.toggle_label(&label.id.clone()),
-                None => Vec::new(),
-            },
+            Target::LabelChip(i) => {
+                let effects = match crate::feedback::label_at(i as usize) {
+                    Some(label) => self.toggle_label(&label.id.clone()),
+                    None => Vec::new(),
+                };
+                self.pop_if_on(target, &effects);
+                effects
+            }
             Target::Labels if self.shown_world().is_some() => {
                 self.go(Page::FeedbackLabels);
                 Vec::new()
@@ -2161,6 +2173,18 @@ impl Menu {
         }
     }
 
+    /// `target` pops when what it asked switched something on.
+    fn pop_if_on(&mut self, target: Target, effects: &[Effect]) {
+        if effects.iter().any(|e| matches!(e, Effect::Feedback(FeedbackAsk::Label { on: true, .. }))) {
+            self.popped = Some((target, Instant::now()));
+        }
+    }
+
+    /// What pops now, and for how long it has (the overlay draws it while this is `Some`).
+    pub fn popping(&self) -> Option<(Target, Duration)> {
+        self.popped.and_then(|(target, at)| Some((target, at.elapsed())).filter(|(_, t)| *t < POP))
+    }
+
     fn sign_in_first(&mut self) -> Vec<Effect> {
         self.notice = Some("Sign in to Orbiters - N4N0 to give feedback".into());
         Vec::new()
@@ -2201,6 +2225,9 @@ impl Menu {
                 entry.justification = Some(text.clone());
                 self.justifying = None;
                 self.go(Page::FeedbackLabels);
+                if let Some(i) = crate::feedback::label_index(&id) {
+                    self.popped = Some((Target::LabelChip(i), Instant::now()));
+                }
                 self.notice = Some(format!("{} given, with your reason", label.name("en")));
                 vec![Effect::Feedback(FeedbackAsk::Label { world, label: id, on: true, text: Some(text) })]
             }

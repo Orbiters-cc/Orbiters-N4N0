@@ -183,6 +183,11 @@ pub fn label_at(i: usize) -> Option<&'static Label> {
     contract::labels().get(i)
 }
 
+/// Where the label `id` is in the list (its chip on the labels page).
+pub fn label_index(id: &str) -> Option<u8> {
+    contract::labels().iter().position(|l| l.id == id).map(|i| i as u8)
+}
+
 /// What a world's line under its name says: why it is there.
 pub fn why_text(why: Why, now: u64) -> String {
     match why {

@@ -734,6 +734,12 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
         } else if state.on {
             p.rect_stroke(r.shrink(1.0), radius, Stroke::new(3.0, pal.accent), StrokeKind::Inside);
         }
+        // World feedback: a liked world's heart is filled, and what was just switched on pops.
+        if state.on && e.target == orbiters_orb::menu::Target::Like {
+            liked(p, r, menu.popping().filter(|(t, _)| *t == orbiters_orb::menu::Target::Like).map(|(_, d)| d.as_secs_f32()), pal);
+        } else if let Some((_, t)) = menu.popping().filter(|(t, _)| *t == e.target && state.on) {
+            ring_pop(p, r, radius, t.as_secs_f32(), pal);
+        }
     }
     for s in &layout.slots {
         slot(p, s, &layout::slot_text(menu, s), origin, pal);
@@ -754,6 +760,39 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
             (None, _) => {}
         }
     }
+}
+
+/// A liked world's Like card: its heart filled; just liked (`t` seconds ago), the heart bounces out of the icon tile,
+/// a ring spreads from it and small hearts fly off (the overlay alone: the avatar's screen keeps its picture).
+fn liked(p: &Painter, r: Rect, t: Option<f32>, pal: &Palette) {
+    let pink = pal.tint(Tint::Pink);
+    let center = pos2(r.min.x + 60.0, r.center().y);
+    let scale = t.map_or(1.0, |t| 1.0 + 0.55 * (-7.0 * t).exp() * (16.0 * t).sin());
+    widgets::icon_fill(p, center, icons::HEART, 40.0 * scale, pink);
+    let Some(t) = t else { return };
+    let ring = (t / 0.5).min(1.0);
+    if ring < 1.0 {
+        let ease = 1.0 - (1.0 - ring).powi(3);
+        p.circle_stroke(center, 28.0 + 54.0 * ease, Stroke::new(3.0 * (1.0 - ring), theme::alpha(pink, 0.8 * (1.0 - ring))));
+    }
+    let fly = (t / 0.6).min(1.0);
+    let ease = 1.0 - (1.0 - fly).powi(2);
+    for k in 0..8 {
+        let angle = std::f32::consts::TAU * (k as f32 + 0.25) / 8.0;
+        let at = center + vec2(angle.cos(), angle.sin()) * (26.0 + 58.0 * ease);
+        let alpha = (1.0 - fly * fly).max(0.0);
+        widgets::icon_fill(p, at, icons::HEART, 13.0 * (1.0 - 0.45 * fly), theme::alpha(if k % 2 == 0 { pink } else { pal.accent }, alpha));
+    }
+}
+
+/// A label just given: its ring spreads past the chip and fades (`t` seconds ago).
+fn ring_pop(p: &Painter, r: Rect, radius: egui::CornerRadius, t: f32, pal: &Palette) {
+    let k = (t / 0.45).min(1.0);
+    if k >= 1.0 {
+        return;
+    }
+    let grow = 12.0 * (1.0 - (1.0 - k).powi(3));
+    p.rect_stroke(r.expand(grow), radius, Stroke::new(3.0 * (1.0 - k), theme::alpha(pal.accent, 0.9 * (1.0 - k))), StrokeKind::Outside);
 }
 
 /// An average character of Orbiters' font, in ems (Segoe UI's lower-case letters with a capital now and then).

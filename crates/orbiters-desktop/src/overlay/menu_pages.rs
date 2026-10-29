@@ -814,6 +814,16 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             std::fs::write(out.join(format!("bank-{}-128.bin", page.name())), &bank[..screen::bank_bytes(128)])?;
         }
     }
+    // The overlay's world feedback popping (the screen keeps its picture): a like and a label just given, a few frames
+    // in, for review only.
+    for (target, ms) in [(Target::Like, 90u64), (Target::Like, 200), (Target::Like, 420), (Target::TopLabel(3), 120)] {
+        let mut menu = samples().into_iter().find(|s| s.0 == ScreenPage::Feedback).map(|s| s.1).expect("the feedback sample");
+        menu.popped = Some((target, std::time::Instant::now() - std::time::Duration::from_millis(ms)));
+        let none = |_: &str| -> Option<TextureId> { None };
+        let rgba = paint(&mut canvas, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover: None, pressed: None, picture: &none, time: 0.4, skin }));
+        let name = if target == Target::Like { format!("menu-feedback-like-{ms}ms.png") } else { format!("menu-feedback-label-{ms}ms.png") };
+        write_png(&out.join(&name), WIDTH, HEIGHT, &unpremultiply(&rgba))?;
+    }
     Ok(())
 }
 

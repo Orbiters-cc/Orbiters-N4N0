@@ -31,8 +31,8 @@ pub enum Server {
 
 /// Unity's EditorPrefs key for the switch (Toolkit's `OrbitersEnvironment`).
 const DEV_SWITCH: &str = "MCB_DevEnvironment";
-/// Fill this once the N4N0 gallery item is published on production. IDs are scoped to their server.
-pub const N4N0_PRODUCTION_GALLERY_ASSET_ID: Option<u64> = None;
+/// The N4N0 gallery item on production (published 2026-10-29 as 1.0.17). IDs are scoped to their server.
+pub const N4N0_PRODUCTION_GALLERY_ASSET_ID: Option<u64> = Some(29);
 /// Toolkit's DPAPI entropy for the account file.
 const ENTROPY: &[u8] = b"Orbiters.Toolkit account";
 /// The client name Orbiters - N4N0 signs in as (the server's editor-link clients).

@@ -1537,6 +1537,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "gallery-requests-empty",
         "gallery-requests-opening",
         "gallery-requests-close",
+        "gallery-instance-close",
         "gallery-done",
         "gallery-open",
         "gallery-open-mid",
@@ -1690,6 +1691,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
                 "gallery-requests-opening" if f + 6 == sc.frames => gallery.open_requests(),
                 "gallery-requests-close" if f == 60 => gallery.open_requests(),
                 "gallery-requests-close" if f == 120 => gallery.close_requests(),
+                "gallery-instance-close" if f == 120 => gallery.close_instance(),
                 // Cards chosen (the bar rising out of the bottom edge, or settled), lifted as a drag out starts (its drag
                 // image written beside the shot), the bar saying what a drag copied; Copy public link just pressed.
                 "gallery-select" | "gallery-drag-lift" if f == 70 => gallery.stage_select(3),

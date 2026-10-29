@@ -233,6 +233,14 @@ impl State {
         self.requests.open = true;
     }
 
+    /// Closes the instance popover back into its button (screenshots).
+    pub fn close_instance(&mut self) {
+        self.stage_instance = false;
+        if let Some(i) = self.instance.as_mut() {
+            i.closing = true;
+        }
+    }
+
     /// Closes the requests window back into its button (screenshots).
     pub fn close_requests(&mut self) {
         self.requests.open = false;

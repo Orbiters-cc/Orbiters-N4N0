@@ -4,15 +4,19 @@
 
 pub mod anim;
 pub mod blur;
+pub mod dialog;
+pub mod feedback;
 pub mod fonts;
 pub mod format;
 pub mod glow;
 pub mod icons;
+pub mod layout;
 pub mod logo;
 pub mod n4n0_face;
 pub mod n4n0_logo;
 pub mod offscreen;
 pub mod paint;
+pub mod popup;
 pub mod record;
 pub mod software;
 pub mod theme;

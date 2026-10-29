@@ -2,6 +2,7 @@
 
 pub mod capture;
 pub mod form;
+pub mod header;
 pub mod home;
 pub mod mic;
 pub mod orb;

@@ -177,20 +177,28 @@ pub fn extract(text: &str, scene: &str) -> Vec<Avatar> {
 }
 
 pub fn in_project(project: &Path, cache: &mut SceneCache) -> Vec<Avatar> {
+    in_project_checked(project, cache).0
+}
+
+/// Also reports incomplete reads, so discovery can retain the previous list during transient I/O failures.
+pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec<Avatar>, bool) {
+    let mut complete = true;
     let assets = project.join("Assets");
     let mut scenes = vec![];
     let mut prefabs = HashMap::new();
     // Pictures' .meta files, read only when a scene names a My World thumbnail.
     let mut pictures = vec![];
-    for entry in walkdir::WalkDir::new(&assets)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            !crate::discovery::skip_dir(&e.file_name().to_string_lossy())
-                && (!e.file_type().is_dir() || !e.metadata().ok().is_some_and(|m| crate::discovery::is_link(&m)))
-        })
-        .flatten()
-    {
+    for entry in walkdir::WalkDir::new(&assets).follow_links(false).into_iter().filter_entry(|e| {
+        !crate::discovery::skip_dir(&e.file_name().to_string_lossy())
+            && (!e.file_type().is_dir() || !e.metadata().ok().is_some_and(|m| crate::discovery::is_link(&m)))
+    }) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                complete = false;
+                continue;
+            }
+        };
         let p = entry.path();
         if !entry.file_type().is_file() {
             continue;
@@ -207,6 +215,8 @@ pub fn in_project(project: &Path, cache: &mut SceneCache) -> Vec<Avatar> {
                 if let Some(g) = s.lines().find_map(|l| l.strip_prefix("guid: ")) {
                     prefabs.insert(g.to_string(), p.with_extension(""));
                 }
+            } else {
+                complete = false;
             }
         }
     }
@@ -214,7 +224,10 @@ pub fn in_project(project: &Path, cache: &mut SceneCache) -> Vec<Avatar> {
     let mut prefab_models: HashMap<PathBuf, Option<Model>> = HashMap::new();
     let mut picture_guids: Option<HashMap<String, PathBuf>> = None;
     for p in scenes {
-        let Ok(meta) = std::fs::metadata(&p) else { continue };
+        let Ok(meta) = std::fs::metadata(&p) else {
+            complete = false;
+            continue;
+        };
         let modified = crate::discovery::fingerprint(&p);
         if let Some(c) = cache
             .get(&p)
@@ -223,7 +236,10 @@ pub fn in_project(project: &Path, cache: &mut SceneCache) -> Vec<Avatar> {
             out.extend(c.avatars.clone());
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&p) else { continue };
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            complete = false;
+            continue;
+        };
         if !text.starts_with("%YAML") {
             continue;
         }
@@ -250,7 +266,13 @@ pub fn in_project(project: &Path, cache: &mut SceneCache) -> Vec<Avatar> {
             let Some(source) = value(d, "m_SourcePrefab").and_then(|s| guid(&s)).and_then(|g| prefabs.get(&g)) else { continue };
             dependencies.push((source.clone(), crate::discovery::fingerprint(source)));
             let prefab = prefab_models.entry(source.clone()).or_insert_with(|| {
-                let s = std::fs::read_to_string(source).ok()?;
+                let s = match std::fs::read_to_string(source) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        complete = false;
+                        return None;
+                    }
+                };
                 (s.starts_with("%YAML") && s.contains("blueprintId")).then(|| Model::new(&s))
             });
             let Some(prefab) = prefab.as_ref() else { continue };
@@ -296,10 +318,12 @@ pub fn in_project(project: &Path, cache: &mut SceneCache) -> Vec<Avatar> {
         }
         avatars.sort_by(|a, b| (&a.id, &a.path).cmp(&(&b.id, &b.path)));
         avatars.dedup();
-        cache.insert(p, CachedScene { modified, len: meta.len(), avatars: avatars.clone(), dependencies });
+        if complete {
+            cache.insert(p, CachedScene { modified, len: meta.len(), avatars: avatars.clone(), dependencies });
+        }
         out.extend(avatars);
     }
-    out
+    (out, complete)
 }
 
 /// Shared manifest/thumbnail filename contract, including Build & Test names.
@@ -326,4 +350,19 @@ pub fn filename(id: &str) -> String {
 pub fn local_thumbnail(id: &str) -> Option<PathBuf> {
     let p = crate::data_dir().join("Avatars").join(format!("{}.png", filename(id)));
     p.is_file().then_some(p)
+}
+
+#[cfg(test)]
+mod read_completeness_tests {
+    use super::*;
+
+    #[test]
+    fn missing_assets_is_not_a_successful_empty_scan() {
+        let dir = std::env::temp_dir().join(format!("orbiters-read-check-{}", std::process::id()));
+        let mut cache = SceneCache::default();
+        assert!(!in_project_checked(&dir, &mut cache).1);
+        std::fs::create_dir_all(dir.join("Assets")).unwrap();
+        assert!(in_project_checked(&dir, &mut cache).1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

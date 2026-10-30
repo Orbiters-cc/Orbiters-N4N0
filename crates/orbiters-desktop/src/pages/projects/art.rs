@@ -36,7 +36,12 @@ pub(super) fn avatar(p: &Painter, state: &State, a: &Avatar, rect: Rect, radii: 
 /// [`avatar`]; without `initial`, the picture fades in over what is already there (a cover's own placeholder).
 fn picture(p: &Painter, state: &State, a: &Avatar, rect: Rect, radii: [f32; 4], zoom: f32, initial: bool) {
     let tex = state.thumbs.get(&a.id);
-    let k = feedback::loaded(p.ctx(), Id::unique(("avatar-picture", &a.id)), tex.is_some());
+    // This computer's copy shows at once; only a picture that arrives fades in.
+    let k = if tex.is_some() && state.thumb_instant.contains(&a.id) {
+        1.0
+    } else {
+        feedback::loaded(p.ctx(), Id::unique(("avatar-picture", &a.id)), tex.is_some())
+    };
     if k < 1.0 && initial {
         let tint = widgets::name_color(&a.name);
         feedback::fill_corners(p, rect, radii, theme::mix(theme::INK_750, tint, 0.16));
@@ -76,7 +81,8 @@ pub(super) fn cover(p: &Painter, state: &State, project: &Project, rect: Rect, r
     let pictures = pictured(state, project);
     let [tl, tr, br, bl] = radii;
     let gap = 2.0;
-    let settled = pictures.iter().all(|a| feedback::loaded(p.ctx(), Id::unique(("avatar-picture", &a.id)), true) >= 1.0);
+    let settled =
+        pictures.iter().all(|a| state.thumb_instant.contains(&a.id) || feedback::loaded(p.ctx(), Id::unique(("avatar-picture", &a.id)), true) >= 1.0);
     if pictures.is_empty() || !settled {
         let (tint, glyph) = kind_look(project);
         feedback::fill_corners(p, rect, radii, theme::mix(theme::INK_800, tint, 0.08));

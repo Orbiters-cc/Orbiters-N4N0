@@ -312,7 +312,12 @@ fn enrich(scan: &mut Scan, cancel: &AtomicBool, enriched: &mut HashSet<String>, 
         let path = p.path.clone();
         scan.status = format!("Reading {} in {}", if p.kind == Kind::Worlds { "worlds" } else { "avatars" }, p.name);
         publish(scan);
-        let (worlds, avatars) = avatars::in_project(&path, &mut scan.scenes).into_iter().partition(Avatar::is_world);
+        let (items, complete) = avatars::in_project_checked(&path, &mut scan.scenes);
+        // A readable Assets root does not guarantee its subfolders, scenes or prefabs were readable.
+        if !complete {
+            continue;
+        }
+        let (worlds, avatars): (Vec<Avatar>, Vec<Avatar>) = items.into_iter().partition(Avatar::is_world);
         scan.projects[i].avatars = avatars;
         scan.projects[i].worlds = worlds;
         publish(scan);

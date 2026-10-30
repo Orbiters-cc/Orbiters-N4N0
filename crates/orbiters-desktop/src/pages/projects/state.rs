@@ -84,6 +84,9 @@ impl PackageIcon {
 /// Packages whose icons one batch looks for.
 const ICON_BATCH: usize = 12;
 
+/// A batch of pictures asked for: the different ones with their sums, the ids whose picture was the same, the errors.
+pub(super) type ThumbBatch = (HashMap<String, (ColorImage, u64)>, Vec<String>, Vec<String>, HashMap<String, u64>);
+
 pub struct State {
     pub(super) scan: Scan,
     pub(super) started: bool,
@@ -127,9 +130,17 @@ pub struct State {
     pub(super) thumb_swaps: u64,
     /// The pictures kept on this computer by the last window, being read ([`thumb_cache::preload`]).
     pub(super) thumb_preload: Option<mpsc::Receiver<Vec<thumb_cache::Cached>>>,
+    /// Pictures asked for (or not to ask for) in this window.
     pub(super) thumb_ids: HashSet<String>,
+    pub(super) thumb_versions: Arc<Mutex<HashMap<String, u64>>>,
+    thumb_preload_waited: bool,
+    /// Pictures checked less than [`thumb_cache::FRESH`] ago: never asked for again meanwhile, whatever the account,
+    /// VRChat session or update (only Refresh asks for them).
+    pub(super) thumb_fresh: HashSet<String>,
+    /// Pictures shown from this computer's copy: drawn at once, without the fade of a picture arriving.
+    pub(super) thumb_instant: HashSet<String>,
     pub(super) thumbnail_environment: Option<crate::controller::vrchat_data::Scope>,
-    pub(super) thumb_job: Job<Result<(HashMap<String, (ColorImage, u64)>, Vec<String>), String>>,
+    pub(super) thumb_job: Job<Result<ThumbBatch, String>>,
     /// Package icons by package name: those looked for (once each), the batch looking, and the packages whose rows
     /// were drawn since the last look (only those are looked for).
     pub(super) icons: HashMap<String, PackageIcon>,
@@ -271,6 +282,10 @@ impl Default for State {
             // Read at the window's start, so that the page's first visit shows them; never in unit tests.
             thumb_preload: (!cfg!(test)).then(thumb_cache::preload),
             thumb_ids: HashSet::new(),
+            thumb_versions: Arc::default(),
+            thumb_preload_waited: false,
+            thumb_fresh: HashSet::new(),
+            thumb_instant: HashSet::new(),
             thumbnail_environment: None,
             thumb_job: Job::default(),
             icons: HashMap::new(),
@@ -433,9 +448,16 @@ impl State {
         let (tx, rx) = mpsc::channel();
         self.scan_rx = Some(rx);
         let ctx = ctx.clone();
+        // The window's first look shows the projects the last one knew at once (a small file), so their covers are
+        // there on the first frame; the scan then goes on from them.
+        if self.scan.projects.is_empty() {
+            self.scan = discovery::cached();
+        }
+        // A revisit must not replace live discoveries with an older (or temporarily unreadable) disk snapshot.
+        let retained = (!self.scan.projects.is_empty()).then(|| self.scan.clone());
         std::thread::spawn(move || {
             let _ = tx.send(ScanEvent::Hidden(hidden::load()));
-            let scan = discovery::cached();
+            let scan = retained.unwrap_or_else(discovery::cached);
             let _ = tx.send(ScanEvent::Update(scan.clone()));
             ctx.request_repaint();
             let result = discovery::discover(scan, force, &cancel, |s| {
@@ -498,9 +520,11 @@ impl State {
         let environment = crate::controller::vrchat_data::Scope::of(cx.snap);
         // Another account or VRChat session: every picture is asked for again, the ones shown staying until their
         // replacements arrive (a sign-in must not blank the page's covers first).
+        // Only pictures not checked lately are asked for again (one missing for the account before is asked for).
         if !self.fixture && self.thumbnail_environment.as_ref() != Some(&environment) {
             self.thumbnail_environment = Some(environment);
-            self.thumb_ids.clear();
+            let fresh = &self.thumb_fresh;
+            self.thumb_ids.retain(|id| fresh.contains(id));
             self.thumb_job = Job::default();
         }
         if let Some(rx) = &self.scan_rx {
@@ -599,16 +623,9 @@ impl State {
                 self.reveal = None;
             }
         }
-        if !self.fixture && self.started && !self.thumb_job.running() {
-            let mut seen = HashSet::new();
-            let ids: Vec<String> = self
-                .scan
-                .projects
-                .iter()
-                .flat_map(|p| p.avatars.iter().chain(&p.worlds).map(|a| a.id.clone()))
-                .filter(|id| !self.thumb_ids.contains(id) && seen.insert(id.clone()))
-                .take(8)
-                .collect();
+        // Not before this computer's copies are in: those checked lately are never asked for.
+        if !self.fixture && self.started && !self.thumb_job.running() && self.thumb_preload.is_none() {
+            let ids = self.pending_thumbnails();
             if !ids.is_empty() {
                 self.thumb_ids.extend(ids.iter().cloned());
                 let backend = cx.ctl.clone();
@@ -624,6 +641,8 @@ impl State {
                     .collect();
                 // What is shown already: a picture that is the same is neither kept again nor shown again.
                 let known: HashMap<String, u64> = ids.iter().filter_map(|id| Some((id.clone(), *self.thumb_sums.get(id)?))).collect();
+                let versions = self.thumb_versions.clone();
+                let requested_versions = versions.lock().unwrap().clone();
                 self.thumb_job = Job::spawn(ctx, move || {
                     use crate::controller::vrchat_data::{Request, Response};
                     let mut images = HashMap::new();
@@ -645,32 +664,33 @@ impl State {
                             }
                         }
                     }
+                    // Hold through disk writes: an upload cannot be overwritten by an older response.
+                    let current = versions.lock().unwrap();
+                    let mut same = Vec::new();
                     let images = images
                         .into_iter()
                         .filter_map(|(id, image): (String, ColorImage)| {
+                            if current.get(&id) != requested_versions.get(&id) {
+                                return None;
+                            }
                             let sum = thumb_cache::sum(&image);
                             if known.get(&id) == Some(&sum) {
+                                thumb_cache::touch(&id, sum);
+                                same.push(id);
                                 return None;
                             }
                             thumb_cache::save(&id, sum, &image);
                             Some((id, (image, sum)))
                         })
                         .collect();
-                    Ok((images, errors))
+                    Ok((images, same, errors, requested_versions))
                 });
             }
         }
         if let Some(result) = self.thumb_job.take() {
             ctx.request_repaint(); // Publish this batch before requesting the next one.
             match result {
-                Ok((images, errors)) => {
-                    for (id, (image, sum)) in images {
-                        self.set_thumb(ctx, id, image, sum);
-                    }
-                    if !errors.is_empty() {
-                        self.error = Some(format!("{} avatar picture(s) could not load: {}. Refresh to retry.", errors.len(), errors[0]));
-                    }
-                }
+                Ok(batch) => self.apply_thumb_batch(ctx, batch),
                 Err(e) => self.error = Some(e),
             }
         }
@@ -700,6 +720,34 @@ impl State {
         }
         self.poll_panel(ctx, cx);
     }
+    fn apply_thumb_batch(&mut self, ctx: &egui::Context, batch: ThumbBatch) {
+        let (images, same, errors, requested_versions) = batch;
+        let current = self.thumb_versions.lock().unwrap().clone();
+        self.thumb_fresh.extend(same.into_iter().filter(|id| current.get(id) == requested_versions.get(id)));
+        for (id, (image, sum)) in images {
+            if current.get(&id) != requested_versions.get(&id) {
+                continue;
+            }
+            self.thumb_fresh.insert(id.clone());
+            self.set_thumb(ctx, id, image, sum);
+        }
+        if !errors.is_empty() {
+            self.error = Some(format!("{} avatar picture(s) could not load: {}. Refresh to retry.", errors.len(), errors[0]));
+        }
+    }
+    fn pending_thumbnails(&self) -> Vec<String> {
+        if self.thumb_preload.is_some() {
+            return Vec::new();
+        }
+        let mut seen = HashSet::new();
+        self.scan
+            .projects
+            .iter()
+            .flat_map(|p| p.avatars.iter().chain(&p.worlds).map(|a| a.id.clone()))
+            .filter(|id| !self.thumb_ids.contains(id) && seen.insert(id.clone()))
+            .take(8)
+            .collect()
+    }
     /// Shows `image` (its sum `sum`) as the picture of `id`. Nothing changes when it is the picture shown already; a
     /// different one fades in over the one before ([`art::avatar`](super::art)), which stays drawn meanwhile.
     pub(super) fn set_thumb(&mut self, ctx: &egui::Context, id: String, image: ColorImage, sum: u64) {
@@ -727,15 +775,31 @@ impl State {
     /// The pictures the last window kept, once read (those the page has meanwhile stay), and the fades that ended.
     fn poll_thumbs(&mut self, ctx: &egui::Context) {
         if let Some(rx) = &self.thumb_preload {
-            match rx.try_recv() {
+            // The page's first visit waits for them (read on every core: a few tens of milliseconds) rather than
+            // drawing empty covers that fill in after.
+            let kept = if self.started && !self.thumb_preload_waited {
+                self.thumb_preload_waited = true;
+                rx.recv_timeout(Duration::from_secs(3)).map_err(|e| match e {
+                    mpsc::RecvTimeoutError::Timeout => mpsc::TryRecvError::Empty,
+                    mpsc::RecvTimeoutError::Disconnected => mpsc::TryRecvError::Disconnected,
+                })
+            } else {
+                rx.try_recv()
+            };
+            match kept {
                 Ok(kept) => {
                     self.thumb_preload = None;
                     if !self.fixture {
                         for c in kept {
+                            if c.fresh {
+                                self.thumb_fresh.insert(c.id.clone());
+                                self.thumb_ids.insert(c.id.clone());
+                            }
                             if !self.thumbs.contains_key(&c.id) {
                                 let tex = ctx.load_texture(format!("project-avatar-{}", c.id), c.image, egui::TextureOptions::LINEAR);
                                 self.thumbs.insert(c.id.clone(), tex);
-                                self.thumb_sums.insert(c.id, c.sum);
+                                self.thumb_sums.insert(c.id.clone(), c.sum);
+                                self.thumb_instant.insert(c.id);
                             }
                         }
                     }
@@ -1520,7 +1584,13 @@ impl State {
                         Some("MasculineCanine".into()),
                         now - 3 * 3600,
                     ),
-                    blender::Link::new(PathBuf::from("H:/Blender/Hoodie outfit.blend"), blender::Tool::Mixer, Some("Assets/MasculineCanine/Avatar.unity".into()), None, now - 2 * 86400),
+                    blender::Link::new(
+                        PathBuf::from("H:/Blender/Hoodie outfit.blend"),
+                        blender::Tool::Mixer,
+                        Some("Assets/MasculineCanine/Avatar.unity".into()),
+                        None,
+                        now - 2 * 86400,
+                    ),
                 ],
                 _ => vec![blender::Link::new(
                     at("Assets/Orbiters/Mixer/Blender/0b4e0f0e2c8d4a51b6f0a4c7d1e2f3a4/blend~/Moonlight.blend"),
@@ -1571,7 +1641,12 @@ impl State {
                 self.links = links("My avatars");
                 self.links_of = Some(first.clone());
             }
-            "projects-worlds" | "projects-worlds-sharing" | "projects-worlds-done" | "projects-worlds-failed" | "projects-worlds-new" | "projects-worlds-signed-out"
+            "projects-worlds"
+            | "projects-worlds-sharing"
+            | "projects-worlds-done"
+            | "projects-worlds-failed"
+            | "projects-worlds-new"
+            | "projects-worlds-signed-out"
             | "projects-worlds-capture-menu" => {
                 self.selected = world.clone();
                 self.git = None;
@@ -1758,4 +1833,66 @@ pub enum Poke {
     Hover(egui::Pos2),
     /// A right press there (a context menu), released on the next frame.
     Context(egui::Pos2),
+}
+
+#[cfg(test)]
+mod thumbnail_tests {
+    use super::*;
+
+    #[test]
+    fn projects_upload_rejects_an_older_refresh_result() {
+        let mut state = State::default();
+        let ctx = egui::Context::default();
+        let id = "avtr_upload".to_string();
+        let new = ColorImage::new([2, 2], vec![egui::Color32::GREEN; 4]);
+        state.thumb_versions.lock().unwrap().insert(id.clone(), 1);
+        state.set_thumb(&ctx, id.clone(), new, 123);
+        let texture = state.thumbs[&id].id();
+        let old = ColorImage::new([2, 2], vec![egui::Color32::RED; 4]);
+        state.apply_thumb_batch(&ctx, (HashMap::from([(id.clone(), (old, 456))]), vec![], vec![], HashMap::new()));
+        assert_eq!(state.thumbs[&id].id(), texture);
+        assert_eq!(state.thumb_sums[&id], 123);
+    }
+
+    #[test]
+    fn projects_preload_timeout_is_only_waited_once() {
+        let mut state = State::default();
+        state.started = true;
+        state.thumb_preload_waited = true;
+        let (_tx, rx) = mpsc::channel();
+        state.thumb_preload = Some(rx);
+        let start = Instant::now();
+        state.poll_thumbs(&egui::Context::default());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(state.thumb_preload.is_some());
+    }
+
+    #[test]
+    fn projects_window_cache_is_present_before_requests_and_unchanged_keeps_texture() {
+        let dir = std::env::temp_dir().join(format!("orbiters-projects-state-{}", std::process::id()));
+        let id = "avtr_cache_test".to_string();
+        let image = ColorImage::new([8, 8], vec![egui::Color32::RED; 64]);
+        let sum = thumb_cache::sum(&image);
+        thumb_cache::save_in(&dir, &id, sum, &image).unwrap();
+        let mut state = State::default();
+        state.started = true;
+        state.scan.projects.push(Project { avatars: vec![Avatar { id: id.clone(), ..Default::default() }], ..Default::default() });
+        let (tx, rx) = mpsc::channel();
+        state.thumb_preload = Some(rx);
+        assert!(state.pending_thumbnails().is_empty(), "no requests while preload runs");
+        tx.send(thumb_cache::load_in(&dir)).unwrap();
+        let ctx = egui::Context::default();
+        state.poll_thumbs(&ctx);
+        assert!(state.thumbs.contains_key(&id), "present on first poll");
+        assert!(state.thumb_instant.contains(&id));
+        assert!(state.pending_thumbnails().is_empty(), "fresh IDs must never reach the request job");
+        let fresh = &state.thumb_fresh;
+        state.thumb_ids.retain(|id| fresh.contains(id));
+        assert!(state.pending_thumbnails().is_empty(), "scope change retains fresh IDs");
+        let texture = state.thumbs[&id].id();
+        state.set_thumb(&ctx, id.clone(), image, sum);
+        assert_eq!(texture, state.thumbs[&id].id());
+        assert!(state.thumb_before.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

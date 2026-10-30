@@ -291,6 +291,9 @@ pub struct Picture {
     /// Its placement in its gallery (the id the website's picture links use).
     pub id: u64,
     pub gallery_id: u64,
+    /// Set for a picture of an asset's showcase gallery (`/assets/:id/showcase-images`) instead of a community's: its
+    /// links are renewed at `/assets/<asset_id>/showcase-images/<id>/source`.
+    pub asset_id: u64,
     /// A preview (at most 640 pixels for Discord's pictures) and the full picture.
     pub src: Option<String>,
     pub full_url: Option<String>,
@@ -343,7 +346,7 @@ impl Pictures {
 }
 
 /// The answer as `T`, or what the events routes said ([`Refused`], with the server's code).
-fn answer<T: serde::de::DeserializeOwned>(response: ureq::http::Response<ureq::Body>) -> anyhow::Result<T> {
+pub(crate) fn answer<T: serde::de::DeserializeOwned>(response: ureq::http::Response<ureq::Body>) -> anyhow::Result<T> {
     let status = response.status().as_u16();
     let text = response.into_body().with_config().limit(8 << 20).read_to_string().unwrap_or_default();
     if (200..300).contains(&status) {
@@ -446,9 +449,11 @@ impl Api {
     }
 
     /// A picture's links, renewed from Discord; `failed`: the link given before did not load (Orbiters then asks
-    /// Discord again even when its link looks fresh).
-    pub fn picture_source(&self, token: &str, id: u64, failed: bool) -> anyhow::Result<Source> {
-        let mut r = self.agent().get(&self.url(&format!("galleries/images/{id}/source")));
+    /// Discord again even when its link looks fresh). `asset`: the asset whose showcase it is in (0: a community
+    /// gallery's).
+    pub fn picture_source(&self, token: &str, asset: u64, id: u64, failed: bool) -> anyhow::Result<Source> {
+        let path = if asset == 0 { format!("galleries/images/{id}/source") } else { format!("assets/{asset}/showcase-images/{id}/source") };
+        let mut r = self.agent().get(&self.url(&path));
         if failed {
             r = r.query("failed", "1");
         }

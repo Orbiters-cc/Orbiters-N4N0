@@ -80,11 +80,15 @@ pub enum Response {
 pub const OWNED_BATCH: usize = 16;
 pub type Result = std::result::Result<Response, String>;
 
+// Cache refreshes and upload publication share the same lock, including their temporary files.
+static PICTURE_CACHE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl Controller {
     pub fn vrchat_data(&self, scope: Scope, request: Request) -> Result {
         if scope != Scope::of(&self.view()) {
             return Err("The account changed. Please try again.".into());
         }
+        let _pictures = matches!(&request, Request::Avatars { .. } | Request::Worlds { .. }).then(|| PICTURE_CACHE.lock().unwrap_or_else(|e| e.into_inner()));
         let source = self.vrchat_source();
         let result = (|| -> anyhow::Result<Response> {
             Ok(match request {
@@ -104,11 +108,17 @@ impl Controller {
                     }
                     if source.direct_available() {
                         for id in missing {
-                            let result = (|| -> anyhow::Result<_> {
+                            let file = orbiters_projects::data_dir()
+                                .join("avatar-thumbnails/direct")
+                                .join(format!("{}.image", orbiters_projects::avatars::filename(&id)));
+                            let result = cached_avatar_picture(&file, || {
                                 let Some(a) = source.avatar(&id)? else { return Ok(None) };
                                 let url = if a.thumbnail_image_url.is_empty() { &a.image_url } else { &a.thumbnail_image_url };
-                                Ok(avatar_picture(&source.image(url)?))
-                            })();
+                                if url.is_empty() {
+                                    return Ok(None);
+                                }
+                                Ok(Some(source.image(url)?))
+                            });
                             match result {
                                 Ok(Some(p)) => pictures.push((id, p)),
                                 Ok(None) => {}
@@ -138,41 +148,17 @@ impl Controller {
                     let mut errors = Vec::new();
                     for id in ids {
                         let file = cache.join(format!("{}.image", orbiters_projects::avatars::filename(&id)));
-                        let fresh =
-                            std::fs::metadata(&file).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() < 86400);
-                        if fresh {
-                            if let Some(p) = std::fs::read(&file).ok().and_then(|b| avatar_picture(&b)) {
-                                pictures.push((id, p));
-                                continue;
-                            }
-                        }
-                        let result = (|| -> anyhow::Result<_> {
+                        let result = cached_avatar_picture(&file, || {
                             let Some(url) = source.world_thumbnail(&id)? else { return Ok(None) };
-                            let bytes = source.image(&url)?;
-                            let picture = avatar_picture(&bytes);
-                            if picture.is_some() {
-                                std::fs::create_dir_all(&cache)?;
-                                let tmp = file.with_extension("tmp");
-                                std::fs::write(&tmp, &bytes)?;
-                                std::fs::rename(tmp, &file)?;
+                            if url.is_empty() {
+                                return Ok(None);
                             }
-                            Ok(picture)
-                        })();
+                            Ok(Some(source.image(&url)?))
+                        });
                         match result {
                             Ok(Some(p)) => pictures.push((id, p)),
-                            // Not known (a private world without a VRChat sign-in): what was kept, however old.
-                            Ok(None) => {
-                                if let Some(p) = std::fs::read(&file).ok().and_then(|b| avatar_picture(&b)) {
-                                    pictures.push((id, p));
-                                }
-                            }
-                            Err(e) => {
-                                if let Some(p) = std::fs::read(&file).ok().and_then(|b| avatar_picture(&b)) {
-                                    pictures.push((id, p));
-                                } else {
-                                    errors.push(format!("{id}: {e}"));
-                                }
-                            }
+                            Ok(None) => {}
+                            Err(e) => errors.push(format!("{id}: {e}")),
                         }
                     }
                     Response::Avatars { pictures, errors }
@@ -349,11 +335,12 @@ pub(crate) fn fit_picture(bytes: &[u8]) -> anyhow::Result<image::RgbImage> {
 /// avatar's Toolkit picture and Orbiters' cached thumbnails of it, each only where one was kept, and a world's cached
 /// thumbnail.
 fn keep_picture(data: &Path, id: &str, png: &[u8]) {
+    let _guard = PICTURE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let name = orbiters_projects::avatars::filename(id);
     let files: Vec<PathBuf> = match Kind::of(id) {
         Some(Kind::Avatar) => std::iter::once(data.join("Avatars").join(format!("{name}.png")))
-            .chain(["production", "development"].map(|server| data.join("avatar-thumbnails").join(server).join(format!("{name}.image"))))
-            .filter(|f| f.is_file())
+            .chain(["production", "development", "direct"].map(|server| data.join("avatar-thumbnails").join(server).join(format!("{name}.image"))))
+            .filter(|f| f.is_file() || f.parent().is_some_and(|p| p.ends_with("direct")))
             .collect(),
         Some(Kind::World) => vec![data.join("world-thumbnails").join(format!("{name}.image"))],
         None => vec![],
@@ -364,7 +351,55 @@ fn keep_picture(data: &Path, id: &str, png: &[u8]) {
             file.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&tmp, png)).and_then(|()| std::fs::rename(&tmp, &file));
         if written.is_err() {
             let _ = std::fs::remove_file(&tmp);
+        } else {
+            let _ = std::fs::remove_file(file.with_extension("missing"));
         }
+    }
+}
+
+/// Share avatar and world fetches across callers, windows and sessions. Serialize the check/fetch/write
+/// so concurrent IPC requests cannot both miss the same cache entry. A failed refresh retains the old picture.
+fn cached_avatar_picture(file: &Path, fetch: impl FnOnce() -> anyhow::Result<Option<Vec<u8>>>) -> anyhow::Result<Option<super::vrchat_login::Picture>> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let kept = std::fs::read(file).ok().and_then(|b| avatar_picture(&b));
+    let fresh = std::fs::metadata(file).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() < 86400);
+    if fresh && kept.is_some() {
+        return Ok(kept);
+    }
+    // An avatar VRChat had no picture for (or refused) is not asked for again before a day has passed.
+    let missing = file.with_extension("missing");
+    let missed = std::fs::metadata(&missing).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() < 86400);
+    if missed && kept.is_none() {
+        return Ok(None);
+    }
+    let miss = || {
+        if let Some(parent) = missing.parent() {
+            let _ = std::fs::create_dir_all(parent).and_then(|()| std::fs::write(&missing, b""));
+        }
+    };
+    match fetch() {
+        Ok(Some(bytes)) => {
+            if let Some(picture) = avatar_picture(&bytes) {
+                if let Some(parent) = file.parent() {
+                    let tmp = file.with_extension("tmp");
+                    let _ = std::fs::create_dir_all(parent).and_then(|()| std::fs::write(&tmp, &bytes)).and_then(|()| std::fs::rename(tmp, file));
+                }
+                let _ = std::fs::remove_file(&missing);
+                Ok(Some(picture))
+            } else {
+                Ok(kept)
+            }
+        }
+        Ok(None) => {
+            if kept.is_none() {
+                miss();
+            }
+            Ok(kept)
+        }
+        Err(_) if kept.is_some() => Ok(kept),
+        // A failure (network, rate limit) is not remembered: the window does not ask again before its next start.
+        Err(e) => Err(e),
     }
 }
 
@@ -378,6 +413,51 @@ fn avatar_picture(bytes: &[u8]) -> Option<super::vrchat_login::Picture> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn projects_direct_avatar_cache_avoids_fetch_and_refreshes_expired_entries() {
+        let dir = std::env::temp_dir().join(format!("orbiters-direct-avatar-test-{}", std::process::id()));
+        let file = dir.join("avtr_test.image");
+        let input = image::RgbImage::from_pixel(4, 2, image::Rgb([200, 80, 40]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(input).write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let fetch = || {
+            calls.set(calls.get() + 1);
+            Ok(Some(bytes.get_ref().clone()))
+        };
+        assert!(cached_avatar_picture(&file, fetch).unwrap().is_some());
+        assert!(cached_avatar_picture(&file, fetch).unwrap().is_some());
+        assert_eq!(calls.get(), 1);
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(172800)).unwrap();
+        assert!(cached_avatar_picture(&file, fetch).unwrap().is_some());
+        assert_eq!(calls.get(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn projects_missing_picture_expires_and_errors_are_not_cached() {
+        let dir = std::env::temp_dir().join(format!("orbiters-missing-{}", uuid::Uuid::new_v4()));
+        let file = dir.join("avtr_a.image");
+        assert!(cached_avatar_picture(&file, || Ok(None)).unwrap().is_none());
+        assert!(file.with_extension("missing").is_file());
+        assert!(!file.exists());
+        assert!(!file.with_extension("tmp").exists());
+        assert!(cached_avatar_picture(&file, || panic!("negative cache missed")).unwrap().is_none());
+        std::fs::File::options()
+            .write(true)
+            .open(file.with_extension("missing"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(172800))
+            .unwrap();
+        assert!(cached_avatar_picture(&file, || anyhow::bail!("offline")).is_err());
+        let png = encoded(image::RgbaImage::from_pixel(4, 3, image::Rgba([1, 2, 3, 255])));
+        assert!(cached_avatar_picture(&file, || Ok(Some(png))).unwrap().is_some());
+        assert!(!file.with_extension("missing").exists());
+        let other = dir.join("avtr_b.image");
+        assert!(cached_avatar_picture(&other, || anyhow::bail!("rate limited")).is_err());
+        assert!(!other.with_extension("missing").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn projects_avatar_pictures_keep_the_source_aspect_ratio() {
         let input = image::RgbImage::from_pixel(4, 2, image::Rgb([200, 80, 40]));
@@ -511,8 +591,8 @@ mod tests {
         std::fs::write(&toolkit, b"old").unwrap();
         keep_picture(&data, "avtr_a", b"new");
         assert_eq!(std::fs::read(&toolkit).unwrap(), b"new");
-        // No copy of the thumbnails was kept: none is made.
-        assert!(!data.join("avatar-thumbnails").exists());
+        // Direct fetches must see the upload even when no previous picture existed.
+        assert_eq!(std::fs::read(data.join("avatar-thumbnails/direct/avtr_a.image")).unwrap(), b"new");
         keep_picture(&data, "avtr_other", b"new");
         assert!(!data.join("Avatars").join("avtr_other.png").exists());
         keep_picture(&data, "wrld_b", b"world");

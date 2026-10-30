@@ -1124,7 +1124,7 @@ impl Window {
                 .icon_url
                 .as_ref()
                 .filter(|u| u.starts_with("https://"))
-                .and_then(|u| pictures.get(&ctx, &Picture::Gallery { development: false, id: 0, url: u.clone(), large: false }));
+                .and_then(|u| pictures.get(&ctx, &Picture::Gallery { development: false, asset: 0, id: 0, url: u.clone(), large: false }));
             widgets::avatar(&p, ar, icon.as_ref(), &h.name);
             widgets::text(&p, pos2(ar.right() + 12.0, ar.top() + 11.0), Align2::LEFT_CENTER, &Txt::caps("Hosted by"));
             widgets::text_truncated(

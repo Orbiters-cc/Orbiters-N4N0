@@ -139,6 +139,11 @@ pub struct State {
 }
 impl State {
     pub fn stage_folders(&mut self) { self.folders.stage(); }
+    /// The folders' fixture with the popover closed, for a scenario that opens it with a click.
+    pub fn stage_folders_closed(&mut self) { self.folders.stage_closed(); }
+    /// Where Manage folders was drawn, and whether its popover is open.
+    pub fn folders_button(&self) -> Option<Rect> { self.folders.button() }
+    pub fn folders_open(&self) -> bool { self.folders.is_open() }
 
     pub fn busy(&self) -> bool {
         self.requests.busy()
@@ -867,7 +872,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     if sharing::pressed(mb.show_at(ui, b)) {
         manage = true;
     }
-    state.folders.show(ui, cx, Rect::from_min_size(pos2(b.left() - 110.0, b.top()), vec2(100.0, 40.0)));
+    let fw = Button::new(folders::LABEL).icon(icons::FOLDER_OPEN).desired_width(ui);
+    state.folders.show(ui, cx, Rect::from_min_size(pos2(b.left() - 10.0 - fw, b.top()), vec2(fw, 40.0)));
     let mut cu = ui.new_child(UiBuilder::new().max_rect(controls).id_salt("gallery-controls"));
     let before_filter = state.filter;
     widgets::segmented(

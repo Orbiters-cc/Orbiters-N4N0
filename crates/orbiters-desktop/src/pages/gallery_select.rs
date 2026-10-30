@@ -779,8 +779,9 @@ const DIGITS: [[&str; 7]; 10] = [
 pub enum Remote {
     /// A picture shared with the member or by them: the sharing contract's file, whole.
     Shared { server: Server, id: u64 },
-    /// A community gallery's picture: its full picture, its link renewed by Orbiters (Discord's links expire).
-    Gallery { server: Server, id: u64, url: String },
+    /// A community gallery's picture or an asset showcase's (`asset`, else 0): its full picture, its link renewed by
+    /// Orbiters (Discord's links expire).
+    Gallery { server: Server, asset: u64, id: u64, url: String },
     /// A public picture (an asset's, a shared 3D capture's picture).
     Link(String),
 }
@@ -801,7 +802,7 @@ pub fn remote(e: &Entry, development: bool) -> Option<Remote> {
         };
     }
     match e.picture.as_ref()? {
-        crate::worlds::Picture::Gallery { id, url, .. } if *id != 0 => Some(Remote::Gallery { server, id: *id, url: url.clone() }),
+        crate::worlds::Picture::Gallery { asset, id, url, .. } if *id != 0 => Some(Remote::Gallery { server, asset: *asset, id: *id, url: url.clone() }),
         crate::worlds::Picture::Gallery { url, .. } | crate::worlds::Picture::Remote { url, .. } if url.starts_with("https://") => Some(Remote::Link(url.clone())),
         _ => None,
     }
@@ -937,10 +938,10 @@ fn fetch(from: &Remote, stem: &Path) -> anyhow::Result<PathBuf> {
             let _ = std::fs::remove_file(&part);
             bytes?
         }
-        Remote::Gallery { server, id, url } => {
+        Remote::Gallery { server, asset, id, url } => {
             let account = orbiters_core::account::read(*server).ok_or_else(|| anyhow::anyhow!("Sign in to Orbiters in Settings first."))?;
             let api = Api::new(*server);
-            let renewed = api.picture_source(&account.token, *id, false).ok().unwrap_or_default();
+            let renewed = api.picture_source(&account.token, *asset, *id, false).ok().unwrap_or_default();
             let links: Vec<String> = [renewed.full_url, renewed.src, Some(url.clone())].into_iter().flatten().filter(|u| u.starts_with("https://")).collect();
             let mut last = anyhow::anyhow!("Orbiters has no link for this picture");
             let mut got = None;
@@ -1033,9 +1034,9 @@ mod tests {
     #[test]
     fn pictures_from_orbiters_are_fetched_from_where_they_are() {
         use crate::worlds::Picture;
-        let gallery = remote_entry("community:345", Some(Picture::Gallery { development: false, id: 345, url: String::new(), large: false }), None);
-        assert_eq!(remote(&gallery, false), Some(Remote::Gallery { server: Server::Production, id: 345, url: String::new() }));
-        let asset = Picture::Gallery { development: false, id: 0, url: "https://api.orbiters.cc/creator-tools/media/9".into(), large: false };
+        let gallery = remote_entry("community:345", Some(Picture::Gallery { development: false, asset: 0, id: 345, url: String::new(), large: false }), None);
+        assert_eq!(remote(&gallery, false), Some(Remote::Gallery { server: Server::Production, asset: 0, id: 345, url: String::new() }));
+        let asset = Picture::Gallery { development: false, asset: 0, id: 0, url: "https://api.orbiters.cc/creator-tools/media/9".into(), large: false };
         let asset = remote_entry("asset:7:0", Some(asset), None);
         assert_eq!(remote(&asset, true), Some(Remote::Link("https://api.orbiters.cc/creator-tools/media/9".into())));
         let item = orbiters_core::shares::Item { kind: Kind::Picture, id: 12, ..Default::default() };
@@ -1047,7 +1048,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(remote(&remote_entry("capture:3", None, Some(capture)), false), Some(Remote::Link("https://cdn.orbiters.cc/t.webp".into())));
-        let nothing = remote_entry("community:0", Some(Picture::Gallery { development: false, id: 0, url: String::new(), large: false }), None);
+        let nothing = remote_entry("community:0", Some(Picture::Gallery { development: false, asset: 0, id: 0, url: String::new(), large: false }), None);
         assert_eq!(remote(&nothing, false), None);
         assert_eq!(remote(&entry("a", true), false), None, "what is on this computer is handed out as it is");
         // Kept under a name the app it lands in shows.
@@ -1068,8 +1069,8 @@ mod tests {
         std::fs::write(&fetched, b"webp").unwrap();
         let mut here = entry("here", true);
         here.local = Some(Local::Picture(local.clone()));
-        let gallery = remote_entry("community:345", Some(Picture::Gallery { development: false, id: 345, url: String::new(), large: false }), None);
-        let asset = Picture::Gallery { development: false, id: 0, url: "https://api.orbiters.cc/creator-tools/media/9".into(), large: false };
+        let gallery = remote_entry("community:345", Some(Picture::Gallery { development: false, asset: 0, id: 345, url: String::new(), large: false }), None);
+        let asset = Picture::Gallery { development: false, asset: 0, id: 0, url: "https://api.orbiters.cc/creator-tools/media/9".into(), large: false };
         let asset = remote_entry("asset:7:0", Some(asset), None);
         let order = vec![here.clone(), gallery.clone(), asset.clone()];
         let ctx = egui::Context::default();

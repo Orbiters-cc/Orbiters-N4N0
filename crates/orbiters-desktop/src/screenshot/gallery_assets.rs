@@ -1,7 +1,8 @@
 //! Photos & captures' My assets, the cards' menus and remote pictures selected and dragged, on the gallery's fixture
-//! (the member's assets made up in `pages::gallery::assets`, this computer's pictures standing in for theirs).
+//! (the member's assets and their showcase galleries made up in `pages::gallery::assets`, this computer's pictures
+//! standing in for the Discord rooms' pictures).
 //!
-//! `gallery-assets` (My assets: one group for each asset), `gallery-assets-all` (All, the assets among the rest),
+//! `gallery-assets` (My assets: one group for each asset's showcase), `gallery-assets-all` (All, the assets among the rest),
 //! `gallery-assets-open` (an asset's picture in the picture window), `gallery-menu` (a local picture's menu),
 //! `gallery-menu-asset` (an asset picture's menu), `gallery-select-remote` (three asset pictures selected and lifted, the
 //! drag waiting for two of them from Orbiters).

@@ -185,36 +185,42 @@ clipboard copy were not tried by hand; real fetches of shared and community pict
 
 ## My assets (2026-10-30)
 
-A fifth filter, **My assets**, shows the pictures of the Orbiters assets the member made or holds a licence to, one
-group for each asset (its name, a pill with its kind and Made by you / Yours on Orbiters, how many pictures and when it
-was updated, Open on Orbiters to `/assets/<id>`, `/commissions/assets/<id>` for a commission listing); All shows them
-among the rest. Search finds an asset by name or kind. Cards are the gallery's own (the layouts, selection, dragging
-out, Copy, their menu); a picture opens in the community picture window (its look and motion, ←/→ through the assets'
-pictures shown) with the asset's name, kind and page (`pages/gallery_assets.rs`, `orbiters_core::assets`).
+A fifth filter, **My assets**, shows the **showcase galleries** of the Orbiters assets the member has (made, bought,
+licensed): on an asset's page (`https://orbiters.cc/assets/7`, the website's `AssetGallerySection` /
+`AssetShowcaseGallery`) the gallery of pictures from the Discord rooms its creator chose. Not the assets' own pictures
+(their thumbnails, product gallery or store previews): Enzo, on 0.3.4-dev.4, "I don't want to see the asset
+thumbnails". One group for each asset that has showcase pictures (its name, a pill with its kind and Made by you /
+Yours on Orbiters, how many showcase pictures and when the latest was posted, Open on Orbiters to `/assets/<id>#gallery`,
+`/commissions/assets/<id>` for a commission listing), its pictures in its page's order (`sort=relevant`), the group at
+its newest picture's time; All shows them among the rest. Search finds an asset by name or kind, a picture by who
+posted it or its words. Cards are the gallery's own (the layouts, selection, dragging out, Copy, their menu, Edit); a
+picture opens in the community picture window (who posted it, its words, ←/→ through the showcase pictures shown) with
+the asset's name and page (`pages/gallery_assets.rs`, `orbiters_core::assets`).
 
-What the app's credential reaches on the server (backend, 2026-10-30; `authUtils.js` `TOOL_ROUTES`):
+Server routes (backend `dev`, 2026-10-30; `utils/authUtils.js` `TOOL_ROUTES`):
 
-- `GET /creator/assets` (tool route): every asset the member made, with `product.galleryFileIds` (the page's gallery,
-  each `GET /creator-tools/media/<id>`), `previews` (store pictures for synced listings) and `thumbnail`.
-- `GET /mcb/assets` (tool route): the AVATAR assets the member holds an enabled licence to; their pictures come from
-  their public page, `GET /assets/:id`, read as a visitor (that route does not read the app's credential): published
-  listings only, an unpublished one shows its thumbnail alone.
-- An asset's pictures are its gallery, else its previews (https only, or a path on the API), else its thumbnail, as the
-  website's `assetPictures` (`AssetHeroMedia.jsx`). They carry no time of their own: the asset's `updatedAt` places them.
+- `GET /assets/library` (new, read only, tool route): the assets the member made, holds an enabled licence to, or
+  reaches through a supporter tier or a Discord role (`services/assets/memberLibrary.js`; unlike the website's
+  `GET /assets` it writes no licence rows and grants no roles). `{ assets: [{ id, name, type, how: made|licensed,
+  commissionListing, createdAt, updatedAt }] }`.
+- `GET /assets/:id/showcase-images` and `/:placementId/source` (existing, now tool routes): the showcase as the page
+  shows it to the member (its owner sees every picture, others the rooms open to their whole server) and a picture's
+  renewed Discord link. Hiding a picture (`PATCH …/hide`) stays the website's.
+- A server without these (production until the backend is deployed): the library answers an error, so the app falls
+  back on `GET /creator/assets` and `GET /mcb/assets` for which assets; showcases answering 401 to every asset show
+  "Orbiters does not let this app read your assets' showcases yet." with Try again.
 
-Missing on the server for the rest (said here rather than guessed): the website's library of everything the member
-bought or can use (`GET /assets`, JWT only, with side effects: licence rows and Discord role grants) has no read-only
-counterpart for the app, so bought accessories, clothing, textures, products and anything reached through a tier or a
-role are not listed; `GET /creator-tools/media/:id` is not a tool route, so the pictures of an unpublished asset (even
-the member's own) answer 404 to the app; an asset's community pictures (`GET /assets/:id/showcase-images` and its
-`/source`) are JWT only. A read-only `GET /assets/library` behind `requireAuth` added to `TOOL_ROUTES`, plus
-`/creator-tools/media/[0-9]+` and `/assets/[0-9]+/showcase-images(/[0-9]+/source)?` there, would cover all three. The
-development environment's media links are plain http (127.0.0.1:4100), which the picture loader refuses.
+A showcase picture carries its asset (`community::Picture::asset_id`, `worlds::Picture::Gallery { asset }`,
+`gallery_select::Remote::Gallery { asset }`, `editor::files::Remote::asset`): its expired Discord link is renewed at
+`/assets/<asset>/showcase-images/<id>/source` when shown, dragged out, downloaded or edited. At most 120 pictures per
+asset (two pages of 60), six assets read at once.
 
-Checked: `orbiters_core::assets::tests` (gallery, previews, thumbnail, commission pages, made and licensed merged once,
-an unreadable page), `gallery::assets::tests::each_asset_is_a_group_of_its_pictures`; screenshots `gallery-assets`,
-`gallery-assets-all`, `gallery-assets-open`. An unstaged screenshot run against production listed the member's real
-assets (an accessory with its picture), the only live check.
+Checked: `orbiters_core::assets::tests` (the library's and a showcase page's JSON, groups by newest picture, a hidden
+asset's 404, every showcase refused, the fallback merge), `gallery::assets::tests::each_asset_is_a_group_of_its_showcase_pictures`
+(no asset thumbnails or media links, renewal at the asset's route); backend `test/memberLibrary.test.js` (made,
+licences, tier and role access, read only, hidden listings; both routes with the tool credential through the mounted
+routers, hide refused) and `test/authUtils.test.js`. Screenshots `gallery-assets`, `gallery-assets-all`,
+`gallery-assets-open` use the fixture (showcase pictures by made-up members, this computer's pictures standing in).
 
 ## The cards' menus (2026-10-30)
 
@@ -321,7 +327,10 @@ No production uploads, version bumps, tags, pushes or releases are part of this 
 
 ## Additional picture folders and archive thumbnails (2026-10-30)
 
-Photos & captures has a **Folders** button beside Manage captures. Add folder opens the native directory picker;
+Photos & captures has a **Manage folders** button beside Manage captures (it was Folders until 0.3.4-dev.4; its
+popover closed on the very click that opened it: the button acted on the release, and that release also counted as a
+click outside the popover, so it opened and closed on one frame. It now opens on the press like the page's other
+buttons, and a click on its own button is never "outside"; it shrinks back into the button when closed.) Add folder opens the native directory picker;
 Remove removes only that source. `Settings.picture_folders` persists the additional absolute paths. VRChat's configured
 output and default Pictures/VRChat folder remain included. The popover checks availability on a worker and marks
 unavailable folders Offline. A disconnected drive retains its known pictures and cached thumbnails; deleting a
@@ -369,7 +378,12 @@ Verification: `cargo check -p orbiters-desktop --tests`; `cargo test -p orbiters
 1 ignored); `cargo test -p orbiters-desktop worlds::` (37 passed, 1 benchmark ignored, including existing overlay
 world tests). Fixtures cover deep/overlapping roots, saved-index reload, offline retention, deletion/removal,
 VRCX world/instance, same-size modification-time cache invalidation, corrupt cache data and cross-folder layers.
-`gallery-folders` is an offscreen screenshot scenario with an available default folder and offline archive,
+`pages::gallery::folders::tests::the_click_that_opens_it_leaves_it_open_and_add_folder_saves_the_picked_one` opens it
+with a real press and release, checks it stays open, presses Add folder (the picker, faked, runs on another thread
+than the UI's) and checks the folder is saved once, then a click outside closes it and the button toggles it.
+`gallery-folders-click` opens it in a screenshot the same way (and panics if it closed). The list of folders is
+checked again as soon as the settings' folders change (`visited::screenshot_dirs_with`, the snapshot's folders, not
+the file the tray saves a moment later). `gallery-folders` is an offscreen screenshot scenario with an available default folder and offline archive,
 rendered and inspected at widths 1280 and 900 after `cargo build -p orbiters-desktop`. The settings round-trip test
 also passes with an extra archive folder.
 Native-picker interaction and physical drive reconnection remain unverified. These changes are local; the lead owns

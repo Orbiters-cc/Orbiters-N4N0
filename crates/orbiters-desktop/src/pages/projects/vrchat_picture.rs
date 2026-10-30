@@ -121,6 +121,10 @@ pub(super) fn poll(ctx: &egui::Context, cx: &Cx, state: &mut State) {
                 if let Some((path, _)) = p.sent.remove(&u.id) {
                     if u.outcome == Some(Ok(())) {
                         let id = u.id.clone();
+                        // Invalidate both queued results and disk writes from pre-upload requests.
+                        *state.thumb_versions.lock().unwrap().entry(id.clone()).or_default() += 1;
+                        state.thumb_ids.insert(id.clone());
+                        state.thumb_fresh.insert(id.clone());
                         p.shown = Job::spawn(ctx, move || {
                             let image = picture(&path)?;
                             let sum = super::thumb_cache::sum(&image);

@@ -1874,7 +1874,11 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             }
             // The layouts and a multi-layer picture, on made-up pictures.
             gallery_layouts::stage(&ctx, gallery, sc.name, f);
-            gallery_folders::stage(gallery, sc.name, f);
+            if let Some(p) = gallery_folders::stage(gallery, sc.name, f, total) {
+                input.events.push(Event::PointerMoved(p));
+                input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+                release = Some(p);
+            }
             gallery_assets::stage(&ctx, gallery, sc.name, f, &sc.snapshot.settings.sessions_dir);
         }
         // The photo editor over a picture window, its preview made before each frame.

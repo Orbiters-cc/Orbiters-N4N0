@@ -124,7 +124,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         Some("refresh") if !state.scanning() => {
             state.refresh(&ctx, true);
             state.load_view(&ctx, true);
+            // Asked for: every picture is checked again, kept or not.
             state.thumb_ids.clear();
+            state.thumb_fresh.clear();
         }
         Some("repos") => {
             state.open_modal(&ctx, Modal::Repos, state.anchor("repos"));
@@ -288,7 +290,8 @@ fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) 
     let ctx = ui.ctx().clone();
     let id = Id::unique(("project-card", &p.path));
     let resp = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-    let enter = entrance(&ctx, cx, id, i);
+    // A retained cover must be visible on the first frame, including a new window.
+    let enter = if !art::pictured(state, p).is_empty() { 1.0 } else { entrance(&ctx, cx, id, i) };
     let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SOFT);
     let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let selected = state.selected.as_ref() == Some(&p.path) && !state.panel_closing;

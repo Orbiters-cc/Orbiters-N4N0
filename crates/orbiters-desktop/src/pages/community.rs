@@ -55,11 +55,11 @@ pub(super) fn source(p: &community::Picture, large: bool, development: bool, sta
     let url = if large { p.full_url.as_ref().or(p.src.as_ref()) } else { p.src.as_ref() };
     let url = url.filter(|u| u.starts_with("https://")).cloned().unwrap_or_default();
     // An asset's picture (id 0) loads from its link alone.
-    (p.id != 0 || !url.is_empty()).then_some(Picture::Gallery { development, id: p.id, url, large })
+    (p.id != 0 || !url.is_empty()).then_some(Picture::Gallery { development, asset: p.asset_id, id: p.id, url, large })
 }
 
 fn avatar_of(m: Option<&community::Member>) -> Option<Picture> {
-    m?.avatar_url().map(|url| Picture::Gallery { development: false, id: 0, url, large: false })
+    m?.avatar_url().map(|url| Picture::Gallery { development: false, asset: 0, id: 0, url, large: false })
 }
 
 #[derive(Default)]

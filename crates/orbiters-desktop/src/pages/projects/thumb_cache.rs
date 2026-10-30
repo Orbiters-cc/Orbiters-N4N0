@@ -1,7 +1,8 @@
 //! The avatars' and worlds' pictures the page showed, kept on this computer (`%LOCALAPPDATA%/Orbiters/project-pictures`)
 //! as the window drew them, so that the next window shows them at once instead of asking the tray service for each
 //! again: a JPEG per item, named after the item and the sum of the picture it was made from (`<id>.<sum>.jpg`). The
-//! page still asks for every picture once a window; one whose sum is the same changes nothing, a different one
+//! page asks the tray service (and through it VRChat or Orbiters) only for the pictures it does not keep, or keeps from
+//! more than [`FRESH`] ago: one whose sum is the same is only marked fresh again (its file touched), a different one
 //! replaces it (and its file). Read and written on workers only.
 
 use egui::ColorImage;
@@ -11,12 +12,17 @@ use std::time::{Duration, SystemTime};
 /// Files kept at most (the newest), and how long one not written again is kept.
 const MAX_FILES: usize = 600;
 const MAX_AGE: Duration = Duration::from_secs(120 * 86_400);
+/// A picture checked this recently is shown as kept, without asking anyone again (VRChat's API is not asked for the
+/// same thumbnails at every window, sign-in or update).
+pub(super) const FRESH: Duration = Duration::from_secs(86_400);
 
 /// A picture read back: its item, the sum of the picture it was made from and the picture.
 pub(super) struct Cached {
     pub id: String,
     pub sum: u64,
     pub image: ColorImage,
+    /// Checked less than [`FRESH`] ago.
+    pub fresh: bool,
 }
 
 pub(super) fn dir() -> PathBuf {
@@ -87,6 +93,20 @@ pub(super) fn save(id: &str, sum: u64, image: &ColorImage) {
     let _ = save_in(&dir(), id, sum, image);
 }
 
+/// The picture of `id` (sum `sum`) was asked for again and is the same: fresh for another [`FRESH`].
+pub(super) fn touch_in(dir: &Path, id: &str, sum: u64) {
+    if safe(id) {
+        let file = dir.join(format!("{id}.{sum:016x}.jpg"));
+        if let Ok(f) = std::fs::File::options().write(true).open(&file) {
+            let _ = f.set_modified(SystemTime::now());
+        }
+    }
+}
+
+pub(super) fn touch(id: &str, sum: u64) {
+    touch_in(&dir(), id, sum);
+}
+
 /// The pictures kept in `dir`, the newest first; old ones (and those past the newest [`MAX_FILES`]) are removed.
 pub(super) fn load_in(dir: &Path) -> Vec<Cached> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
@@ -105,20 +125,39 @@ pub(super) fn load_in(dir: &Path) -> Vec<Cached> {
         })
         .collect();
     files.sort_by(|a, b| b.0.cmp(&a.0));
-    let mut out = Vec::new();
+    let mut wanted = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for (n, (modified, path, id, sum)) in files.into_iter().enumerate() {
-        if n >= MAX_FILES || now.duration_since(modified).unwrap_or_default() > MAX_AGE || out.iter().any(|c: &Cached| c.id == id) {
+        let age = now.duration_since(modified).unwrap_or_default();
+        if n >= MAX_FILES || age > MAX_AGE || !seen.insert(id.clone()) {
             let _ = std::fs::remove_file(&path);
             continue;
         }
-        let Some(rgb) = image::open(&path).ok().map(|i| i.to_rgb8()) else {
-            let _ = std::fs::remove_file(&path);
-            continue;
-        };
-        let image = ColorImage::from_rgb([rgb.width() as usize, rgb.height() as usize], rgb.as_raw());
-        out.push(Cached { id, sum, image });
+        wanted.push((path, id, sum, age < FRESH));
     }
-    out
+    // Decoded on every core: the page's first visit waits for them rather than drawing empty covers.
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    let chunk = wanted.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = wanted
+            .chunks(chunk)
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter()
+                        .filter_map(|(path, id, sum, fresh)| {
+                            let Some(rgb) = image::open(path).ok().map(|i| i.to_rgb8()) else {
+                                let _ = std::fs::remove_file(path);
+                                return None;
+                            };
+                            let image = ColorImage::from_rgb([rgb.width() as usize, rgb.height() as usize], rgb.as_raw());
+                            Some(Cached { id: id.clone(), sum: *sum, image, fresh: *fresh })
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().unwrap_or_default()).collect()
+    })
 }
 
 /// Starts reading the pictures kept, on a worker (at the window's start: they are there by the page's first visit).
@@ -155,6 +194,12 @@ mod tests {
         std::fs::write(dir.join("garbage.jpg"), b"x").unwrap();
         std::fs::write(dir.join("avtr_x.0123456789abcdef.jpg"), b"broken").unwrap();
         assert_eq!(load_in(&dir).len(), 1);
+        assert!(load_in(&dir)[0].fresh, "just written: fresh");
+        let file = dir.join(format!("{id}.{:016x}.jpg", sum(&b)));
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(SystemTime::now() - FRESH * 2).unwrap();
+        assert!(!load_in(&dir)[0].fresh, "checked two days ago: asked for again");
+        touch_in(&dir, id, sum(&b));
+        assert!(load_in(&dir)[0].fresh, "the same picture again: fresh again");
         assert!(!dir.join("avtr_x.0123456789abcdef.jpg").exists(), "a broken file is removed");
         let _ = std::fs::remove_dir_all(&dir);
     }

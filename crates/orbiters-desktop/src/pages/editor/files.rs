@@ -34,8 +34,8 @@ pub enum RemoteKind {
     /// A picture shared through Photos & captures (`/captures/picture/:id/file`).
     #[default]
     Shared,
-    /// A picture of a community's or an event's gallery (its full picture's link renewed by
-    /// `/galleries/images/:id/source`).
+    /// A picture of a community's or an event's gallery, or of an asset's showcase (its full picture's link renewed by
+    /// `/galleries/images/:id/source`, `/assets/:asset/showcase-images/:id/source`).
     Gallery,
     /// A public picture by its link alone (an asset's on Orbiters).
     Link,
@@ -47,6 +47,9 @@ pub enum RemoteKind {
 pub struct Remote {
     pub kind: RemoteKind,
     pub id: u64,
+    /// The asset whose showcase a [`RemoteKind::Gallery`] picture is in (0: a community gallery's).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub asset: u64,
     /// On the development environment's server.
     pub development: bool,
     pub world_id: Option<String>,
@@ -58,6 +61,10 @@ pub struct Remote {
     /// Its link: a [`RemoteKind::Link`]'s picture, a gallery picture's link as listed (tried when Orbiters renews none).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub url: String,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Remote {
@@ -255,7 +262,7 @@ pub fn fetch(source: &Source) -> anyhow::Result<()> {
         RemoteKind::Shared => api.capture_file(&token, orbiters_core::shares::Kind::Picture, r.id, &temp),
         RemoteKind::Gallery => {
             let get = |failed: bool| -> anyhow::Result<Vec<u8>> {
-                let links = api.picture_source(&token, r.id, failed)?;
+                let links = api.picture_source(&token, r.asset, r.id, failed)?;
                 let url = links.full_url.or(links.src).filter(|u| u.starts_with("https://")).ok_or_else(|| anyhow::anyhow!("Orbiters has no link to this picture"))?;
                 get_link(&api, &url)
             };
@@ -569,6 +576,7 @@ mod tests {
     fn a_picture_of_orbiters_is_downloaded_once_and_its_copy_goes_among_vrchat_s() {
         let r = Remote {
             kind: RemoteKind::Gallery,
+            asset: 0,
             id: 42,
             development: true,
             world_id: Some("wrld_1".into()),

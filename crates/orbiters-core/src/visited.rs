@@ -421,6 +421,12 @@ fn modified(path: &Path) -> u64 {
 
 /// Where VRChat saves pictures: its `picture_output_folder` setting, else `Pictures/VRChat`.
 pub fn screenshot_dirs() -> Vec<PathBuf> {
+    screenshot_dirs_with(&crate::settings::Settings::load().picture_folders)
+}
+
+/// [`screenshot_dirs`] with `extra` as the member's added folders (the settings as a window has them, before the
+/// tray saved them).
+pub fn screenshot_dirs_with(extra: &[PathBuf]) -> Vec<PathBuf> {
     let mut found = Vec::new();
     if let Some(log) = crate::paths::vrchat_log_dir() {
         let custom = std::fs::read_to_string(log.join("config.json"))
@@ -436,7 +442,7 @@ pub fn screenshot_dirs() -> Vec<PathBuf> {
             found.push(p);
         }
     }
-    for path in crate::settings::Settings::load().picture_folders {
+    for path in extra.iter().cloned() {
         if path.is_absolute() && !found.iter().any(|p| p.to_string_lossy().eq_ignore_ascii_case(&path.to_string_lossy())) {
             found.push(path);
         }

@@ -36,6 +36,8 @@ pub(super) enum Modal {
 /// place (on a worker, when they change).
 #[derive(Default)]
 pub(super) struct Dup {
+    pub measured: Option<(bool, Result<u64, String>)>,
+    pub measure: Job<(bool, Result<u64, String>)>,
     pub name: String,
     pub location: String,
     pub library: bool,
@@ -611,6 +613,7 @@ impl State {
                     self.error = Some(e);
                     self.pending = None;
                     self.load_view(ctx, false);
+                    self.refresh(ctx, false);
                 }
             }
         }

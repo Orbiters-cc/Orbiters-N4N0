@@ -172,14 +172,13 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
     if parent.starts_with(&source) {
         bail!("Create the copy outside the source project.");
     }
-    std::fs::create_dir(destination).context("The destination already exists or cannot be created; choose a new project name.")?;
+    anyhow::ensure!(!destination.exists(), "The destination already exists; choose a new project name.");
     let mut files = vec![];
     for entry in walkdir::WalkDir::new(&source)
-        .follow_links(false)
+        .follow_links(true)
         .into_iter()
         .filter_entry(|e| {
             !excluded(&e.file_name().to_string_lossy(), e.depth(), e.file_type().is_dir(), keep)
-                && !e.metadata().ok().is_some_and(|m| crate::discovery::is_link(&m))
         })
     {
         if cancel.load(Ordering::Relaxed) {
@@ -190,6 +189,7 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
             files.push(e.path().to_path_buf());
         }
     }
+    std::fs::create_dir(destination).context("The destination already exists or cannot be created; choose a new project name.")?;
     progress.lock().unwrap().total = files.len();
     for (i, p) in files.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
@@ -265,7 +265,11 @@ async fn make(
         bail!("Choose an absolute destination folder.");
     }
     let destination = parent.join(name);
+    let required = duplication_bytes(source, copy.unwrap_or_default())?;
+    let free = crate::size::free_space(parent).context("Cannot check available disk space. Choose an accessible destination.")?;
+    anyhow::ensure!(free >= required, "Not enough disk space: free at least {} more bytes before duplicating.", required.saturating_sub(free));
     copy_keeping(source, &destination, copy.unwrap_or_default(), cancel, progress)?;
+    if copy.is_some() { copy_local_packages(source, &destination, cancel, progress)?; }
     let version = destination.join("ProjectSettings/ProjectVersion.txt");
     if !version.is_file() {
         if vrc_get_vpm::version::UnityVersion::parse(unity).is_none() {
@@ -284,11 +288,90 @@ async fn make(
     if cancel.load(Ordering::Relaxed) {
         bail!("Cancelled before resolving. The folder was kept and was not registered.");
     }
-    progress.lock().unwrap().phase = "Resolving packages".into();
-    crate::vpm::change(root, &destination, crate::vpm::Change::Resolve).await.context("The copy was kept, but package resolution failed")?;
+    // Register the completed copy before any optional restoration: a retained project must remain discoverable.
     progress.lock().unwrap().phase = "Registering project".into();
-    crate::vpm::register(root, &destination, true).await?;
+    crate::vpm::register(root, &destination, true).await
+        .with_context(|| format!("The copy is at {}, but registration failed", destination.display()))?;
+    // Duplication preserves installed package contents and exact locked versions, including packages whose
+    // repositories are no longer available. Resolution is needed only for genuinely missing packages/templates.
+    if copy.is_none() || !installed_dependencies_complete(&destination)? {
+        progress.lock().unwrap().phase = "Restoring missing packages".into();
+        crate::vpm::change(root, &destination, crate::vpm::Change::Resolve).await
+            .with_context(|| format!("The copy is listed at {}, but missing packages could not be restored", destination.display()))?;
+    }
     Ok(destination)
+}
+
+/// Fresh copy estimate using the same exclusions and link traversal as the copier, including local packages.
+pub fn duplication_bytes(source: &Path, keep: Keep) -> anyhow::Result<u64> {
+    fn bytes(path: &Path, keep: Keep) -> anyhow::Result<u64> {
+        let mut total = 0u64;
+        for e in walkdir::WalkDir::new(path).follow_links(true).into_iter()
+            .filter_entry(|e| !excluded(&e.file_name().to_string_lossy(), e.depth(), e.file_type().is_dir(), keep)) {
+            let e = e?;
+            if e.file_type().is_file() { total = total.saturating_add(e.metadata()?.len()); }
+        }
+        Ok(total)
+    }
+    let mut total = bytes(source, keep)?;
+    let manifest = source.join("Packages/manifest.json");
+    if manifest.is_file() {
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(manifest)?)?;
+        for (name, value) in manifest["dependencies"].as_object().into_iter().flatten() {
+            if let Some(local) = value.as_str().and_then(|s| s.strip_prefix("file:")) {
+                let path = source.join("Packages").join(local).canonicalize()?;
+                if !source.join("Packages").join(name).exists() { total = total.saturating_add(bytes(&path, Keep::default())?); }
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Materialize external UPM folder dependencies so a moved duplicate does not depend on its source location.
+fn copy_local_packages(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
+    let path = destination.join("Packages/manifest.json");
+    if !path.is_file() { return Ok(()); }
+    let mut manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let mut changed = false;
+    if let Some(dependencies) = manifest["dependencies"].as_object_mut() {
+        for (name, value) in dependencies {
+            let Some(local) = value.as_str().and_then(|s| s.strip_prefix("file:")) else { continue };
+            anyhow::ensure!(!name.contains(['/', '\\']) && name != "..", "Invalid package name: {name}");
+            let origin = source.join("Packages").join(local).canonicalize()
+                .with_context(|| format!("Required local package {name} is unavailable"))?;
+            let target = destination.join("Packages").join(name);
+            if origin.is_dir() {
+                if !target.exists() { copy_keeping(&origin, &target, Keep::default(), cancel, progress)?; }
+                *value = serde_json::Value::String(format!("file:{name}"));
+            } else {
+                let filename = format!("{name}.tgz");
+                std::fs::copy(origin, destination.join("Packages").join(&filename))?;
+                *value = serde_json::Value::String(format!("file:{filename}"));
+            }
+            changed = true;
+        }
+    }
+    if changed { crate::write_json(&path, &manifest)?; }
+    Ok(())
+}
+
+/// Check every locked dependency, including transitive dependencies, against the copied package metadata.
+fn installed_dependencies_complete(project: &Path) -> anyhow::Result<bool> {
+    let path = project.join("Packages/vpm-manifest.json");
+    if !path.exists() { return Ok(true); }
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    let locked = manifest["locked"].as_object();
+    if let Some(dependencies) = manifest["dependencies"].as_object() {
+        if dependencies.keys().any(|name| !locked.is_some_and(|l| l.contains_key(name))) { return Ok(false); }
+    }
+    for (name, package) in locked.into_iter().flatten() {
+        anyhow::ensure!(!name.contains(['/', '\\']) && name != "..", "Invalid package name: {name}");
+        let installed = project.join("Packages").join(name).join("package.json");
+        let Ok(bytes) = std::fs::read(installed) else { return Ok(false) };
+        let installed: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if installed["name"].as_str() != Some(name) || installed["version"] != package["version"] { return Ok(false); }
+    }
+    Ok(true)
 }
 
 /// A project's `ProjectSettings.asset` (text) for a new project named `name`: a product GUID of its own, and its
@@ -326,6 +409,46 @@ fn unquote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_local_dependencies_are_counted_and_materialized() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        let external = temp.path().join("External");
+        std::fs::create_dir_all(source.join("Packages")).unwrap();
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("payload.bin"), vec![42u8; 4096]).unwrap();
+        crate::write_json(&source.join("Packages/manifest.json"), &serde_json::json!({"dependencies":{"external.package":"file:../../External"}})).unwrap();
+        let manifest_bytes = std::fs::metadata(source.join("Packages/manifest.json")).unwrap().len();
+        assert_eq!(duplication_bytes(&source, Keep::default()).unwrap(), manifest_bytes + 4096);
+        let destination = temp.path().join("Copy");
+        let progress = Arc::new(Mutex::default());
+        copy(&source, &destination, &AtomicBool::new(false), &progress).unwrap();
+        copy_local_packages(&source, &destination, &AtomicBool::new(false), &progress).unwrap();
+        assert_eq!(std::fs::read(destination.join("Packages/external.package/payload.bin")).unwrap(), vec![42u8; 4096]);
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(destination.join("Packages/manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["dependencies"]["external.package"], "file:external.package");
+    }
+
+    #[test]
+    fn duplicate_preserves_unlisted_dependencies_and_registers_offline() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        let packages = source.join("Packages");
+        std::fs::create_dir_all(packages.join("private.package")).unwrap();
+        std::fs::create_dir_all(source.join("ProjectSettings")).unwrap();
+        std::fs::write(source.join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1\n").unwrap();
+        crate::write_json(&packages.join("private.package/package.json"), &serde_json::json!({"name":"private.package","version":"1.2.3"})).unwrap();
+        crate::write_json(&packages.join("vpm-manifest.json"), &serde_json::json!({"dependencies":{"private.package":{"version":"1.2.3"}},"locked":{"private.package":{"version":"1.2.3","dependencies":{}}}})).unwrap();
+        let root = temp.path().join("vcc");
+        std::fs::create_dir_all(&root).unwrap();
+        let rt = crate::runtime().unwrap();
+        let copy = rt.block_on(duplicate(&root, &source, temp.path(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default()))).unwrap();
+        assert!(installed_dependencies_complete(&copy).unwrap());
+        assert!(rt.block_on(crate::vpm::registered(&root)).unwrap().iter().any(|p| p.canonicalize().unwrap() == copy.canonicalize().unwrap()));
+        std::fs::remove_file(copy.join("Packages/private.package/package.json")).unwrap();
+        assert!(!installed_dependencies_complete(&copy).unwrap());
+    }
 
     #[test]
     fn a_copy_leaves_out_what_unity_makes_again() {

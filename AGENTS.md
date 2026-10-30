@@ -13,3 +13,16 @@
   mistake. A folder of programs (`target\release`, `.orbiters-build`) is never "the build to try". The report links the
   GitHub release and names the version. Never ask him to confirm rights statements or publishing of his own assets:
   he owns all of it, and asking for a build/deploy is the approval.
+- Project duplication must produce a usable independent copy, including installed dependencies and their exact
+  versions, without asking whether dependencies should be included. Preserve working packages even when their
+  repositories are unavailable; do not unnecessarily re-resolve or upgrade them. Audit local package references
+  and links so the copy does not silently lose required files. Library is a regenerable cache, not a dependency.
+- A retained project must be visible and actionable in the project gallery, including after restoration errors.
+  Register completed copies before fallible restoration, refresh the gallery on failure, and report the exact
+  destination and remaining problem. Never claim a copy is ready unless its required dependencies are present.
+- Validate the complete user workflow, including failure/recovery and gallery visibility, rather than treating
+  a successful filesystem operation as a completed feature. Add regression coverage for these outcomes.
+- Duplication must measure required bytes including external dependencies, check destination free space, and keep
+  Duplicate disabled until the check succeeds. Explain insufficient space and recheck immediately before copying.
+- Progressive galleries must preserve the visible item and its scroll position as content arrives. Do not animate
+  layout dimensions with springs or let background insertion move the user's viewport unexpectedly.

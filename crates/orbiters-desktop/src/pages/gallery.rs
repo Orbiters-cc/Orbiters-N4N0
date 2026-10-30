@@ -132,6 +132,11 @@ pub struct State {
     layout_saved: Option<GalleryLayout>,
     /// The shape of each picture the listing gave no size for, once its thumbnail is decoded (by entry key).
     aspects: HashMap<String, f32>,
+    scroll_anchor: Option<(String, f32)>,
+    scroll_offset: f32,
+    layout_width: f32,
+    local_dirty: bool,
+    layout_positions: HashMap<String, f32>,
     /// Screenshots: made-up local pictures added to this computer's (several shapes, a multi-layer picture).
     fixture_extra: Vec<Entry>,
     /// The photo editor on a picture from Orbiters (Edit in a card's menu), over the page while it is open.
@@ -400,6 +405,14 @@ impl State {
         self.requests.open = false;
     }
 
+    fn observe_context(&mut self, key: (u64, u64, std::path::PathBuf, bool, String, u64)) {
+        if self.key.as_ref().is_none_or(|k| k.1 != key.1 || k.3 != key.3 || k.4 != key.4) {
+            self.asked = None;
+        }
+        self.local_dirty = false;
+        self.key = Some(key);
+    }
+
     fn fetch(&mut self, ctx: &egui::Context, server: Server, more: bool) {
         let q = Query {
             filter: self.filter.value().into(),
@@ -418,7 +431,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let ctx = ui.ctx().clone();
     if !state.fixture {
         let (listing_changed, _images_changed) = state.folders.tick(ui, cx);
-        if listing_changed { state.key = None; }
+        if listing_changed { state.local_dirty = true; }
         // Progressive discoveries keep existing decoded pictures visible.
     }
     state.requests.poll(&ctx, cx);
@@ -443,13 +456,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         format!("{:?}", cx.snap.account.state),
         crate::pages::editor::saved(),
     );
-    if state.key.as_ref() != Some(&key) && !state.local_job.running() {
+    if (state.local_dirty || state.key.as_ref() != Some(&key)) && !state.local_job.running() {
         let changed_account = state.key.as_ref().is_some_and(|k| k.3 != key.3 || k.4 != key.4);
-        state.key = Some(key);
+        state.observe_context(key);
         let dir = cx.snap.settings.sessions_dir.clone();
         let folders = cx.snap.settings.picture_folders.clone();
         state.local_job = Job::spawn(&ctx, move || controller::local_entries_with_folders(&dir, server, &folders));
-        state.asked = None;
         if changed_account {
             state.feed_job = Job::default();
             state.hash_job = Job::default();
@@ -621,8 +633,25 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     state.select.begin(development);
     let mut background = None;
     let selecting = state.select.any();
-    egui::ScrollArea::vertical()
-        .id_salt("photos-captures")
+    // Preserve the visible picture when progressive batches insert or reshape content above it.
+    // Use the same layout calculation as rendering; compensate only for layout changes, leaving wheel input intact.
+    let mut positions = HashMap::new();
+    if state.layout_width > 0.0 {
+        let mut y = top - page.top();
+        let spacing = ui.spacing().item_spacing.y;
+        for indices in groups(&entries, |e| state.community.whole(e) || assets::owns(&e.key)) {
+            y += state.community.header_height(&entries[indices[0]]).unwrap_or(52.0) + spacing + 12.0;
+            let aspects: Vec<_> = if tiles { indices.iter().map(|i| aspect(&ctx, &state.aspects, &entries[*i])).collect() } else { vec![0.0; indices.len()] };
+            let (cells, height) = arrangement::arrange(layout, &aspects, state.layout_width, CARD_MIN, CARD_BODY);
+            for (cell, i) in cells.iter().zip(&indices) { positions.insert(entries[*i].key.clone(), y + cell.top()); }
+            y += height + spacing + 32.0;
+        }
+    }
+    let mut scroll = egui::ScrollArea::vertical().id_salt("photos-captures");
+    if let Some(offset) = anchored_scroll_offset(state.scroll_offset, state.scroll_anchor.as_ref().map(|(key, _)| key.as_str()), &state.layout_positions, &positions) {
+        scroll = scroll.vertical_scroll_offset(offset);
+    }
+    let output = scroll
         .auto_shrink([false, false])
         .scroll_bar_rect(Rect::from_min_max(pos2(page.left(), top), page.max))
         .show(&mut gu, |ui| {
@@ -631,6 +660,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 40 }).show(ui, |ui| {
                 ui.add_space(top - page.top());
                 let width = ui.available_width();
+                state.layout_width = width;
                 if entries.is_empty() {
                     if loading {
                         let (cells, h) = shimmer_cells(layout, width, 2);
@@ -837,6 +867,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                 }
             });
         });
+    state.scroll_offset = output.state.clamped_offset().y;
+    let visible_top = state.scroll_offset + top - page.top();
+    state.scroll_anchor = positions.iter().filter(|(_, y)| **y >= visible_top)
+        .min_by(|a, b| a.1.total_cmp(b.1)).map(|(key, y)| (key.clone(), *y));
+    state.layout_positions = positions;
     super::under_top(&gu, cx, "photos-captures", from, top);
     if let Some(background) = &background {
         state.select.update(ui, &entries, background, modal);
@@ -1295,14 +1330,21 @@ fn picture_radius(layout: GalleryLayout) -> f32 {
     }
 }
 
-/// A picture's shape (width over height): its size from the listing, else its thumbnail's once decoded, springing
-/// there from the stand-in (cards below it move with it instead of jumping).
-fn aspect(ctx: &egui::Context, known: &HashMap<String, f32>, e: &Entry) -> f32 {
+/// Keep the anchor at its screen coordinate, while leaving normal scrolling and the top of the feed alone.
+fn anchored_scroll_offset(offset: f32, anchor: Option<&str>, before: &HashMap<String, f32>, after: &HashMap<String, f32>) -> Option<f32> {
+    if offset <= 1.0 { return None; }
+    let key = anchor?;
+    let delta = after.get(key)? - before.get(key)?;
+    (delta.abs() > 0.1).then_some((offset + delta).max(0.0))
+}
+
+/// A picture's shape from metadata or its decoded thumbnail. Layout never uses an oscillating spring.
+fn aspect(_ctx: &egui::Context, known: &HashMap<String, f32>, e: &Entry) -> f32 {
     if let Some([w, h]) = e.size.filter(|s| s[0] > 0 && s[1] > 0) {
         return w as f32 / h as f32;
     }
     let target = known.get(&e.key).copied().unwrap_or(arrangement::STAND_IN);
-    anim::spring(ctx, Id::unique(("gallery-aspect", &e.key)), [target], Spring::SOFT)[0]
+    target
 }
 
 /// Keeps the shape of a picture the listing gave no size for, once its thumbnail is decoded.
@@ -1871,6 +1913,37 @@ fn encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn progressive_layout_keeps_the_visible_picture_at_the_same_screen_position() {
+        let before = HashMap::from([("visible".into(), 900.0)]);
+        let after = HashMap::from([("new".into(), 50.0), ("visible".into(), 1240.0)]);
+        let offset = anchored_scroll_offset(850.0, Some("visible"), &before, &after).unwrap();
+        assert_eq!(after["visible"] - offset, before["visible"] - 850.0);
+        assert!(anchored_scroll_offset(0.0, Some("visible"), &before, &after).is_none());
+        assert!(anchored_scroll_offset(850.0, Some("visible"), &before, &before).is_none());
+        assert!(anchored_scroll_offset(850.0, Some("removed"), &before, &after).is_none());
+    }
+
+    #[test]
+    fn scan_batches_do_not_retry_the_remote_feed_or_clear_its_error() {
+        let mut state = State::default();
+        let mut key = (0, 1, std::path::PathBuf::from("captures"), false, "signed-in".into(), 0);
+        state.observe_context(key.clone());
+        state.asked = Some((Filter::All, String::new()));
+        state.error = Some("Too many attempts".into());
+        for batch in 1..100 {
+            state.local_dirty = true;
+            key.0 = batch;
+            key.5 = batch;
+            state.observe_context(key.clone());
+            assert!(state.asked.is_some(), "local discoveries must not cause a remote request");
+            assert!(state.error.is_some(), "a scan must not retry a rate limited feed");
+        }
+        key.4 = "other-account".into();
+        state.observe_context(key);
+        assert!(state.asked.is_none(), "a different account needs its own feed");
+    }
+
     #[test]
     fn join_requires_live_confirmation_or_the_current_instance() {
         assert!(!join_available(false, None));

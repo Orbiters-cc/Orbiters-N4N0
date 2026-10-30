@@ -48,12 +48,17 @@ fn problem(state: &State, project: &Project) -> Option<String> {
     if *exists {
         return Some(format!("{} has a folder named {name} already: choose another name.", d.location.trim()));
     }
-    let need = needed(state, project)?;
-    free.filter(|f| *f < need).map(|f| format!("The copy needs about {}, and that disk has {} left.", format::bytes(need as f64), format::bytes(f as f64)))
+    if let Some((_, Err(error))) = &d.measured { return Some(error.clone()); }
+    let Some(need) = needed(state, project) else { return Some("Checking required disk space?".into()); };
+    if free.is_none() { return Some("Cannot check free space. Choose an accessible destination.".into()); }
+    free.filter(|f| *f < need).map(|f| format!("The copy needs about {}, and that disk has {} left. Free some space or choose another disk.", format::bytes(need as f64), format::bytes(f as f64)))
 }
 
 /// About what the copy takes, once the project was measured.
 fn needed(state: &State, project: &Project) -> Option<u64> {
+    if !state.fixture {
+        return state.dup.measured.as_ref().filter(|(library, _)| *library == state.dup.library).and_then(|(_, size)| size.as_ref().ok()).copied();
+    }
     let s = state.sizes.get(&project.path)?;
     Some(if state.dup.library { s.total } else { s.without_library() })
 }
@@ -66,6 +71,12 @@ pub(super) fn body(ui: &mut Ui, state: &mut State, path: &Path) {
         return;
     };
     state.want_size(&ctx, &project.path);
+    if let Some(measured) = state.dup.measure.take() { state.dup.measured = Some(measured); }
+    if !state.fixture && !state.dup.measure.running() && state.dup.measured.as_ref().is_none_or(|(library, _)| *library != state.dup.library) {
+        let source = project.path.clone();
+        let library = state.dup.library;
+        state.dup.measure = Job::spawn(&ctx, move || (library, templates::duplication_bytes(&source, templates::Keep { library }).map_err(|e| e.to_string())));
+    }
     if let Some(Some(dir)) = state.dup.pick.take() {
         state.dup.location = dir.display().to_string();
     }
@@ -158,7 +169,7 @@ pub(super) fn body(ui: &mut Ui, state: &mut State, path: &Path) {
              IDs in the scenes' Pipeline Manager first."
         ),
     );
-    note(ui, "Temp, Logs, UserSettings and Git history stay behind. Its packages are restored, and VCC and ALCOM list the copy too.");
+    note(ui, "Temp, Logs, UserSettings and Git history stay behind. Installed dependencies are included automatically, and VCC and ALCOM list the copy too.");
 }
 
 pub(super) fn footer(ui: &mut Ui, state: &mut State, path: &Path) {

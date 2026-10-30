@@ -666,7 +666,7 @@ impl ScreenRuntime {
         self.hover = None;
     }
 
-    /// The eyes or the gaze point near the screen (`N4N0/Screen/Eye0` …, `N4N0/Screen/Gaze0` …): kept only while looking
+    /// The eyes or the gaze point near the screen (`N4N0/Screen/Eye0` â€¦, `N4N0/Screen/Gaze0` â€¦): kept only while looking
     /// points (in VR the fingers do). Whether `name` is one.
     pub fn gaze_value(&mut self, name: &str, value: f32) -> bool {
         let (values, rest) = if let Some(rest) = name.strip_prefix(screen::local::EYE_PREFIX) {
@@ -742,12 +742,24 @@ impl ScreenRuntime {
     /// The fingers at a step: each hand's receivers (and its trigger) when they changed, else how long they went unseen,
     /// then everyone else's fingertips (version 7). Hovered where they point, pressed by the trigger or a touch.
     fn point_and_touch(&mut self, now: Instant, effects: &mut Vec<Effect>) {
+        if !self.menu.open {
+            self.touch = [Touch::default(); 2];
+            self.rays = [Ray::default(); 2];
+            self.others_touch = Touch::default();
+            self.holding = [false; 3];
+            self.dragging[..3].fill(None);
+            self.touched = [false; 2];
+            self.pulled = [false; 2];
+            self.others_touched = false;
+            return;
+        }
         for hand in 0..3 {
-            let touched =
-                if hand < 2 { std::mem::take(&mut self.touched[hand]) | std::mem::take(&mut self.pulled[hand]) } else { std::mem::take(&mut self.others_touched) };
-            if !self.menu.open {
-                continue;
-            }
+            if !self.menu.open { break; }
+            let touched = if hand < 2 {
+                std::mem::take(&mut self.touched[hand]) | std::mem::take(&mut self.pulled[hand])
+            } else {
+                std::mem::take(&mut self.others_touched)
+            };
             let gesture = match (hand, self.pointing, touched) {
                 (2, false, _) => None,
                 (2, true, true) => Some(self.others_touch.update(self.others, touch::RADIUS, now)),
@@ -791,6 +803,7 @@ impl ScreenRuntime {
                     }
                 }
                 Some(Gesture::Hover { x, y }) => {
+                    self.holding[hand] = false;
                     self.dragging[hand] = None;
                     self.hover = layout::hit_pointable(layout, &self.menu, x, y).map(|(i, _)| i);
                 }
@@ -814,7 +827,7 @@ impl ScreenRuntime {
         }
     }
 
-    /// The point along an index finger near the screen: one of its four receivers (`N4N0/Screen/Aim/L0` …).
+    /// The point along an index finger near the screen: one of its four receivers (`N4N0/Screen/Aim/L0` â€¦).
     pub fn aim_point(&mut self, name: &str, value: f32) -> bool {
         let Some(rest) = name.strip_prefix(screen::local::AIM_PREFIX) else { return false };
         let mut chars = rest.chars();
@@ -830,7 +843,7 @@ impl ScreenRuntime {
         true
     }
 
-    /// Someone else's index fingertip near the screen: one of its four receivers (`N4N0/Screen/Others0` …).
+    /// Someone else's index fingertip near the screen: one of its four receivers (`N4N0/Screen/Others0` â€¦).
     pub fn others_point(&mut self, name: &str, value: f32) -> bool {
         let Some(rest) = name.strip_prefix(screen::local::OTHERS_PREFIX) else { return false };
         if let Some(i) = rest.parse::<usize>().ok().filter(|i| *i < 4) {
@@ -840,7 +853,7 @@ impl ScreenRuntime {
         true
     }
 
-    /// The owner's index finger near the screen: one of the eight touch points (`N4N0/Screen/Touch/L0` …).
+    /// The owner's index finger near the screen: one of the eight touch points (`N4N0/Screen/Touch/L0` â€¦).
     pub fn touch_point(&mut self, name: &str, value: f32) -> bool {
         let Some(rest) = name.strip_prefix(screen::local::TOUCH_PREFIX) else { return false };
         let mut chars = rest.chars();
@@ -2084,6 +2097,29 @@ mod tests {
         s.trigger(false, true);
         s.point_and_touch(ms(40), &mut Vec::new());
         assert_eq!(s.menu.page, Page::Search);
+        s.trigger(true, false);
+        s.point_and_touch(ms(60), &mut Vec::new());
+        assert!(!s.holding[1], "released while still pointing at the submenu: no held press remains");
+        let back = Frame::layout(&s.menu).elements.iter().find(|e| e.target == menu::Target::Back).unwrap().rect;
+        point(&mut s, true, [0.2, -0.15, -0.45], on_screen(back.x as f32 + back.w as f32 / 2.0, back.y as f32 + back.h as f32 / 2.0));
+        s.point_and_touch(ms(80), &mut Vec::new());
+        s.trigger(true, true);
+        s.point_and_touch(ms(100), &mut Vec::new());
+        assert_eq!(s.menu.page, Page::Home, "the next pull works in the submenu");
+        assert_eq!(s.presses, 2);
+        s.menu.close();
+        s.point_and_touch(ms(120), &mut Vec::new());
+        assert_eq!(s.holding, [false; 3], "closing during a press releases the input session");
+        s.menu.open();
+        point(&mut s, true, [0.2, -0.15, -0.45], on_screen(x, y));
+        s.point_and_touch(ms(140), &mut Vec::new());
+        assert_eq!(s.presses, 2, "a trigger still held when reopening does not click through");
+        s.trigger(true, false);
+        s.point_and_touch(ms(160), &mut Vec::new());
+        s.trigger(true, true);
+        s.point_and_touch(ms(180), &mut Vec::new());
+        assert_eq!(s.menu.page, Page::Search);
+        assert_eq!(s.presses, 3);
     }
 
     #[test]
@@ -2342,7 +2378,7 @@ mod tests {
             sent.extend(super::tick(&mut rt, start + Duration::from_millis(step * 25), &CallsStatus::default(), false, None, &media, &mut Followups::default()));
         }
         assert!(sent.contains(&full::local_send(true)), "the bridge on");
-        // Each chunk's first value: slot + 8 × salt (contracts Docs/orb-picture.md, local chunks).
+        // Each chunk's first value: slot + 8 Ã— salt (contracts Docs/orb-picture.md, local chunks).
         let first = crate::runtime::parameter(&params::picture_value(0));
         let firsts: Vec<f32> = sent.iter().filter(|(a, _)| *a == first).filter_map(|(_, v)| if let rosc::OscType::Float(f) = v { Some(*f) } else { None }).collect();
         let slots: std::collections::BTreeSet<i32> = firsts.iter().map(|f| ((f * 127.0).round() as i32).rem_euclid(256) & 7).collect();

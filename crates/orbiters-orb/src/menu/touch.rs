@@ -104,62 +104,81 @@ fn looked_at(eyes: Option<[f64; 3]>, gaze: [f64; 3]) -> Option<(f32, f32)> {
     Some(on_page(c[0] + (gaze[0] - c[0]) * t, c[1] + (gaze[1] - c[1]) * t))
 }
 
-/// A contact's centre in the screen's space from the four proximities (0 to 1) of receivers of `radius`, fitted from
-/// `start`, or `None` when one is out of reach or they do not agree.
+/// A contact's centre from four surface distances. Subtracting the squared distance equations makes the centre
+/// linear in the unknown sender radius; substituting it back gives a quadratic. Unlike an iterative fit, this also
+/// finds hands beside the screen where the initial guess's Jacobian is singular or converges to the wrong root.
+/// `start` selects the nearer solution if both satisfy the physical radius and residual limits.
 fn point(proximity: [f32; 4], radius: f64, start: [f64; 3]) -> Option<[f64; 3]> {
     if proximity.iter().any(|&p| !(p > 0.0 && p <= 1.0)) {
         return None;
     }
     // Distance from each receiver's centre to the contact's surface.
-    let d: Vec<f64> = proximity.iter().map(|&p| radius * (1.0 - p as f64)).collect();
-    // Unknowns: the contact's centre (x, y, z) and its radius r: |f − c_i| = d_i + r. Gauss–Newton from `start`.
-    let mut u = [start[0], start[1], start[2], 0.01];
-    for _ in 0..30 {
-        let mut jtj = [[0.0f64; 4]; 4];
-        let mut jtr = [0.0f64; 4];
-        for (c, &di) in RECEIVERS.iter().zip(&d) {
-            let delta = [u[0] - c[0], u[1] - c[1], u[2] - c[2]];
-            let length = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt().max(1e-9);
-            let residual = length - di - u[3];
-            let row = [delta[0] / length, delta[1] / length, delta[2] / length, -1.0];
-            for a in 0..4 {
-                jtr[a] += row[a] * residual;
-                for b in 0..4 {
-                    jtj[a][b] += row[a] * row[b];
-                }
+    let d = proximity.map(|p| radius * (1.0 - p as f64));
+    let dot = |a: [f64; 3], b: [f64; 3]| (0..3).map(|i| a[i] * b[i]).sum::<f64>();
+    let c0 = RECEIVERS[0];
+    let matrix = [1, 2, 3].map(|i| [0, 1, 2].map(|axis| RECEIVERS[i][axis] - c0[axis]));
+    let base = solve(matrix, [1, 2, 3].map(|i| (dot(RECEIVERS[i], RECEIVERS[i]) - dot(c0, c0) - d[i] * d[i] + d[0] * d[0]) * 0.5))?;
+    let slope = solve(matrix, [1, 2, 3].map(|i| d[0] - d[i]))?;
+    let offset = [0, 1, 2].map(|i| base[i] - c0[i]);
+    let a = dot(slope, slope) - 1.0;
+    let b = 2.0 * (dot(offset, slope) - d[0]);
+    let c = dot(offset, offset) - d[0] * d[0];
+    let radii = if a.abs() < 1e-12 {
+        if b.abs() < 1e-12 {
+            return None;
+        }
+        [-c / b; 2]
+    } else {
+        let discriminant = b * b - 4.0 * a * c;
+        if discriminant < 0.0 {
+            return None;
+        }
+        // This form avoids subtracting nearly equal numbers for the small (physical) radius.
+        let q = -0.5 * (b + discriminant.sqrt().copysign(b));
+        if q == 0.0 {
+            [-b / (2.0 * a); 2]
+        } else {
+            [q / a, c / q]
+        }
+    };
+    radii
+        .into_iter()
+        .filter_map(|r| {
+            if !(-0.01..0.06).contains(&r) {
+                return None;
             }
-        }
-        let step = solve(jtj, jtr)?;
-        for a in 0..4 {
-            u[a] -= step[a];
-        }
-        if step.iter().map(|s| s.abs()).fold(0.0, f64::max) < 1e-7 {
-            break;
-        }
-    }
-    // The four distances must agree (two hands on one set of receivers do not).
-    let worst = RECEIVERS
-        .iter()
-        .zip(&d)
-        .map(|(c, &di)| (((u[0] - c[0]).powi(2) + (u[1] - c[1]).powi(2) + (u[2] - c[2]).powi(2)).sqrt() - di - u[3]).abs())
-        .fold(0.0, f64::max);
-    if !worst.is_finite() || worst > 0.01 || !(-0.01..0.06).contains(&u[3]) {
-        return None;
-    }
-    Some([u[0], u[1], u[2]])
+            let p = [0, 1, 2].map(|i| base[i] + slope[i] * r);
+            if p.iter().any(|v| !v.is_finite()) {
+                return None;
+            }
+            // Keep the existing consistency check: mixed readings must not invent a finger.
+            let worst = RECEIVERS
+                .iter()
+                .zip(d)
+                .map(|(receiver, distance)| {
+                    let delta = [0, 1, 2].map(|i| p[i] - receiver[i]);
+                    (dot(delta, delta).sqrt() - distance - r).abs()
+                })
+                .fold(0.0, f64::max);
+            (worst <= 0.01).then_some(p)
+        })
+        .min_by(|p, q| {
+            let distance = |p: &[f64; 3]| (0..3).map(|i| (p[i] - start[i]).powi(2)).sum::<f64>();
+            distance(p).total_cmp(&distance(q))
+        })
 }
 
-/// `a × x = b` for a 4 × 4 system (Gaussian elimination with pivoting).
-fn solve(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> Option<[f64; 4]> {
-    for col in 0..4 {
-        let pivot = (col..4).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
+/// `a × x = b` (Gaussian elimination with pivoting).
+fn solve<const N: usize>(mut a: [[f64; N]; N], mut b: [f64; N]) -> Option<[f64; N]> {
+    for col in 0..N {
+        let pivot = (col..N).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
         if a[pivot][col].abs() < 1e-12 {
             return None;
         }
         a.swap(col, pivot);
         b.swap(col, pivot);
         let pivot_row = a[col];
-        for row in col + 1..4 {
+        for row in col + 1..N {
             let f = a[row][col] / pivot_row[col];
             for (value, p) in a[row][col..].iter_mut().zip(&pivot_row[col..]) {
                 *value -= f * p;
@@ -167,9 +186,9 @@ fn solve(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> Option<[f64; 4]> {
             b[row] -= f * b[col];
         }
     }
-    let mut x = [0.0; 4];
-    for row in (0..4).rev() {
-        let sum: f64 = (row + 1..4).map(|k| a[row][k] * x[k]).sum();
+    let mut x = [0.0; N];
+    for row in (0..N).rev() {
+        let sum: f64 = (row + 1..N).map(|k| a[row][k] * x[k]).sum();
         x[row] = (b[row] - sum) / a[row][row];
     }
     Some(x)
@@ -202,6 +221,8 @@ pub struct Ray {
     /// The trigger at the last reading, and whether that reading pointed at the screen.
     trigger: bool,
     over: bool,
+    /// A pull during an incomplete reading waits for a valid aim, at most LOST_GRACE.
+    pending_pull: bool,
     /// Since when the ray is not found.
     lost_since: Option<Instant>,
 }
@@ -209,9 +230,14 @@ pub struct Ray {
 impl Ray {
     /// The hand's reading at `now`: where it points (`None`: not found) and whether its trigger is pulled.
     pub fn update(&mut self, aim: Option<(f32, f32)>, trigger: bool, now: Instant) -> Gesture {
+        if self.lost_since.is_some_and(|since| now.duration_since(since) >= LOST_GRACE) {
+            *self = Ray { trigger: self.trigger, ..Ray::default() };
+        }
         let pulled = trigger && !self.trigger && self.over;
         self.trigger = trigger;
+        self.pending_pull = trigger && (self.pending_pull || pulled);
         let Some((x, y)) = aim else { return self.unfound(now) };
+        let pulled = std::mem::take(&mut self.pending_pull);
         self.lost_since = None;
         self.at = Some((x, y));
         if self.pressing {
@@ -247,7 +273,6 @@ impl Ray {
             *self = Ray { lost_since: Some(since), trigger: self.trigger, ..Ray::default() };
             return Gesture::Away;
         }
-        self.over = false;
         match self.at {
             Some((x, y)) if self.pressing && self.trigger => Gesture::Hold { x, y },
             Some((x, y)) if !self.pressing => Gesture::Hover { x, y },
@@ -568,6 +593,55 @@ mod tests {
         assert_eq!(ray.update(None, false, ms(70)), Gesture::Hover { x: 5.0, y: 500.0 });
         assert_eq!(ray.tick(ms(70) + LOST_GRACE), Some(Gesture::Away));
         assert_eq!(ray.tick(ms(70) + LOST_GRACE * 2), None);
+    }
+
+    #[test]
+    fn pointing_keeps_working_as_the_hand_moves_around_the_screen() {
+        for x in [-0.6, -0.3, 0.0, 0.3, 0.6] {
+            for y in [-0.5, -0.2, 0.0, 0.2, 0.5] {
+                for z in [-1.0, -0.6, -0.3, -0.1] {
+                    let tip = [x, y, z];
+                    for target in [[0.0, 0.0, 0.0], [-0.2, 0.11, 0.0], [0.2, -0.11, 0.0]] {
+                        let delta: [f64; 3] = [0, 1, 2].map(|i| target[i] - tip[i]);
+                        let length = delta.iter().map(|v| v * v).sum::<f64>().sqrt();
+                        let aim = [0, 1, 2].map(|i| tip[i] + delta[i] / length * orb::AIM_DISTANCE);
+                        let found = aimed(read_far(tip, orb::POINT_RADIUS, REACH), read_far(aim, orb::POINT_RADIUS, REACH))
+                            .unwrap_or_else(|| panic!("lost {tip:?} pointing at {target:?}"));
+                        assert!(near(found, on_page(target[0], target[1])), "{tip:?} at {target:?}: {found:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_trigger_pull_survives_a_brief_incomplete_contact_reading() {
+        let now = Instant::now();
+        let mut ray = Ray::default();
+        ray.update(Some((300.0, 200.0)), false, now);
+        ray.update(None, false, now + Duration::from_millis(10));
+        let press = ray.update(None, true, now + Duration::from_millis(20));
+        let recovered = ray.update(Some((302.0, 200.0)), true, now + Duration::from_millis(30));
+        assert!(matches!(press, Gesture::Press { .. }) || matches!(recovered, Gesture::Press { .. }), "a short reading gap swallowed the click");
+        assert!(!matches!(press, Gesture::Press { .. }) || !matches!(recovered, Gesture::Press { .. }), "one pull cannot click twice");
+    }
+
+    #[test]
+    fn a_pending_pull_is_cancelled_on_release_loss_or_leaving_the_page() {
+        for scenario in 0..3 {
+            let now = Instant::now();
+            let mut ray = Ray::default();
+            ray.update(Some((300.0, 200.0)), false, now);
+            ray.update(None, true, now + Duration::from_millis(10));
+            let recovered = match scenario {
+                0 => ray.update(Some((300.0, 200.0)), false, now + Duration::from_millis(20)),
+                1 => ray.update(Some((300.0, 200.0)), true, now + LOST_GRACE * 2),
+                _ => ray.update(Some((-10.0, 200.0)), true, now + Duration::from_millis(20)),
+            };
+            assert!(!matches!(recovered, Gesture::Press { .. } | Gesture::Hold { .. }));
+            let still_held = ray.update(Some((300.0, 200.0)), scenario != 0, now + LOST_GRACE * 3);
+            assert!(!matches!(still_held, Gesture::Press { .. } | Gesture::Hold { .. }));
+        }
     }
 
     #[test]

@@ -183,8 +183,8 @@ pub fn load(sessions_dir: &Path) -> Vec<VisitedWorld> {
 }
 
 /// Photos & captures can show the cached listing while an archive is being checked, including pictures with no world.
-pub fn load_gallery(sessions_dir: &Path) -> Vec<VisitedWorld> {
-    from_index(sessions_dir, picture_index(&visited::shot_index_file()), true)
+pub fn load_gallery(sessions_dir: &Path, folders: &[PathBuf]) -> Vec<VisitedWorld> {
+    from_index(sessions_dir, picture_index(&visited::shot_index_file(), visited::screenshot_dirs_with(folders)), true)
 }
 
 fn from_index(sessions_dir: &Path, index: visited::ShotIndex, unplaced: bool) -> Vec<VisitedWorld> {
@@ -249,18 +249,25 @@ pub fn picture_revision() -> u64 {
 }
 static PICTURE_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn picture_index(file: &Path) -> visited::ShotIndex {
+static LIVE_PICTURES: Mutex<Option<visited::ShotIndex>> = Mutex::new(None);
+
+fn picture_index(file: &Path, dirs: Vec<PathBuf>) -> visited::ShotIndex {
     static SCANNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let index = visited::ShotIndex::load(file);
+    let index = LIVE_PICTURES.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        .unwrap_or_else(|| visited::ShotIndex::load(file));
     picture_cache::set_index(&index);
     if !SCANNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
         let file = file.to_path_buf();
         std::thread::spawn(move || {
             let _one = shot_index_lock();
             let mut current = visited::ShotIndex::load(&file);
-            if current.refresh(&visited::screenshot_dirs()) {
-                let _ = current.save(&file);
+            let publish = |index: &visited::ShotIndex| {
+                *LIVE_PICTURES.lock().unwrap_or_else(|e| e.into_inner()) = Some(index.clone());
                 PICTURE_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
+            };
+            if current.refresh_progress(&dirs, publish) {
+                let _ = current.save(&file);
+                publish(&current);
             }
             SCANNING.store(false, std::sync::atomic::Ordering::Release);
         });

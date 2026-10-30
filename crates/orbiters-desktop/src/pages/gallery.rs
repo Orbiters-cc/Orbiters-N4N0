@@ -417,9 +417,9 @@ impl State {
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let ctx = ui.ctx().clone();
     if !state.fixture {
-        let (listing_changed, images_changed) = state.folders.tick(ui, cx);
+        let (listing_changed, _images_changed) = state.folders.tick(ui, cx);
         if listing_changed { state.key = None; }
-        if images_changed { state.pictures = None; }
+        // Progressive discoveries keep existing decoded pictures visible.
     }
     state.requests.poll(&ctx, cx);
     let page = ui.max_rect();
@@ -443,11 +443,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         format!("{:?}", cx.snap.account.state),
         crate::pages::editor::saved(),
     );
-    if state.key.as_ref() != Some(&key) {
+    if state.key.as_ref() != Some(&key) && !state.local_job.running() {
         let changed_account = state.key.as_ref().is_some_and(|k| k.3 != key.3 || k.4 != key.4);
         state.key = Some(key);
         let dir = cx.snap.settings.sessions_dir.clone();
-        state.local_job = Job::spawn(&ctx, move || controller::local_entries(&dir, server));
+        let folders = cx.snap.settings.picture_folders.clone();
+        state.local_job = Job::spawn(&ctx, move || controller::local_entries_with_folders(&dir, server, &folders));
         state.asked = None;
         if changed_account {
             state.feed_job = Job::default();

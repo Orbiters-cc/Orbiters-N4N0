@@ -508,6 +508,13 @@ impl ShotIndex {
     /// Walks `dirs` (VRChat sorts pictures in month folders) and reads the new or changed PNGs; returns whether the
     /// index changed.
     pub fn refresh(&mut self, dirs: &[PathBuf]) -> bool {
+        self.refresh_progress(dirs, |_| {})
+    }
+
+    /// Publishes discoveries during traversal; pruning happens only after every folder was checked.
+    pub fn refresh_progress(&mut self, dirs: &[PathBuf], mut publish: impl FnMut(&Self)) -> bool {
+        let mut published = false;
+        let mut last_publish = std::time::Instant::now();
         let mut seen = std::collections::BTreeSet::new();
         let mut changed = false;
         let mut unavailable = Vec::new();
@@ -516,14 +523,21 @@ impl ShotIndex {
         while let Some((dir, depth)) = stack.pop() {
             if !walked.insert(dir.clone()) { continue; }
             let Ok(entries) = std::fs::read_dir(&dir) else { unavailable.push(dir); continue };
-            for result in entries {
-                let Ok(e) = result else { unavailable.push(dir.clone()); continue };
+            let mut entries: Vec<_> = entries.filter_map(|result| match result {
+                Ok(e) => Some(e),
+                Err(_) => { unavailable.push(dir.clone()); None }
+            }).collect();
+            // VRChat names months and pictures chronologically. Read newest pictures first;
+            // push directories oldest first so the traversal stack visits the newest next.
+            entries.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
+            let mut children = Vec::new();
+            for e in entries {
                 let Ok(meta) = e.metadata() else { unavailable.push(e.path()); continue };
                 if e.file_type().is_ok_and(|t| t.is_symlink()) { continue; }
                 let path = e.path();
                 if meta.is_dir() {
                     if depth < 64 {
-                        stack.push((path, depth + 1));
+                        children.push((path, depth + 1));
                     } else { unavailable.push(path); }
                     continue;
                 }
@@ -539,8 +553,14 @@ impl ShotIndex {
                 if let Some(info) = read_shot(&path) {
                     self.files.insert(path, ShotEntry { size, modified, info, sha256: None });
                     changed = true;
+                    if !published || last_publish.elapsed() >= std::time::Duration::from_millis(100) {
+                        publish(self);
+                        published = true;
+                        last_publish = std::time::Instant::now();
+                    }
                 }
             }
+            stack.extend(children.into_iter().rev());
         }
         let before = self.files.len();
         self.files.retain(|p, _| seen.contains(p) || (dirs.iter().any(|d| p.starts_with(d)) && unavailable.iter().any(|d| p.starts_with(d))));
@@ -719,6 +739,56 @@ mod tests {
         index.refresh(&screenshot_dirs());
         let shots = index.shots();
         println!("{} screenshots with a world in {:?} ({:?})", shots.len(), t.elapsed(), screenshot_dirs());
+    }
+
+    #[test]
+    fn progressive_scan_publishes_newest_month_before_older_pictures() {
+        let root = std::env::temp_dir().join(format!("orbiters-progress-{}", std::process::id()));
+        let old = root.join("2024-01");
+        let new = root.join("2026-10");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let newest = new.join("VRChat_2026-10-26_01-14-29.026_3840x2160.png");
+        let older = old.join("VRChat_2024-01-23_20-59-16.428_3840x2160.png");
+        for path in [&newest, &older] {
+            std::fs::write(path, b"\x89PNG\r\n\x1a\n").unwrap();
+        }
+        let mut index = ShotIndex::default();
+        let mut first = None;
+        assert!(index.refresh_progress(&[root.clone()], |partial| {
+            if first.is_none() { first = Some(partial.every_shot()); }
+        }));
+        let first = first.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].path, newest);
+        assert_eq!(index.every_shot().len(), 2);
+        std::fs::remove_file(newest).unwrap();
+        std::fs::remove_file(older).unwrap();
+        std::fs::remove_dir(new).unwrap();
+        std::fs::remove_dir(old).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "reads the real archive without changing it"]
+    fn archive_streams_before_scan_finishes() {
+        let root = PathBuf::from("I:/VRChat pics");
+        assert!(root.is_dir());
+        let start = std::time::Instant::now();
+        let mut index = ShotIndex::default();
+        let mut first = None;
+        let mut batches = 0;
+        index.refresh_progress(&[root], |partial| {
+            batches += 1;
+            if first.is_none() {
+                first = Some(start.elapsed());
+                println!("First picture at {:?}: {:?}", first.unwrap(), partial.every_shot()[0].path);
+                assert_eq!(partial.every_shot().len(), 1);
+            }
+        });
+        println!("{} pictures, {} batches, completed in {:?}", index.every_shot().len(), batches, start.elapsed());
+        assert!(index.every_shot().len() > 1);
+        assert!(batches > 1);
     }
 
     const A: &str = "wrld_99123966-6b37-4b5b-9f3c-0a1b2c3d4e5f";

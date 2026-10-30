@@ -67,7 +67,7 @@ impl State {
             self.scanned = now;
         }
         self.take_picked(cx);
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         (changed, images_changed)
     }
 

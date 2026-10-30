@@ -339,7 +339,10 @@ pub fn instance_at(history: &visited::History, world: &str, taken: u64) -> Optio
     history.instances.iter().filter(|i| i.at <= taken).max_by_key(|i| i.at).filter(|i| i.world_id == world).map(|i| i.instance.clone())
 }
 pub fn local_entries(root: &Path, server: Server) -> Vec<Entry> {
-    let worlds = crate::worlds::load_gallery(root);
+    local_entries_with_folders(root, server, &orbiters_core::settings::Settings::load().picture_folders)
+}
+pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBuf]) -> Vec<Entry> {
+    let worlds = crate::worlds::load_gallery(root, folders);
     let history = visited::History::load(&visited::history_file());
     let records = records_path(server).ok().map(|p| read_records(&p)).unwrap_or_default();
     let mut entries = Vec::new();

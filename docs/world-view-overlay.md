@@ -1,4 +1,7 @@
-# 3D worlds in the SteamVR overlay (2026-10-29)
+# 3D worlds in the SteamVR overlay
+
+The [2026-10-30 latency investigation and results](overlay-latency-results-2026-10-30.md) supersede the original
+scheduling policy and add repeated measurements, an independent Opus review, and remaining headset checks.
 
 **What it does.** N4N0's menu in the play space (the SteamVR overlay) has a pill under it, "3D worlds". It opens a
 panel in the menu's place: a search field (the panel's own keyboard, or the computer's keyboard as the menu's search
@@ -36,9 +39,9 @@ the scene. Options looked at:
 texture side by side (`VROverlayFlags_SideBySide_Parallel`: the left half to the left eye, the right half to the right
 one). Each half holds the capture projected from that eye's position onto the face's plane (an off-axis pinhole camera
 through the face, `stereo.rs` `Cube::camera`). Such a picture is right for every direction the eye looks from that
-position: SteamVR's compositor draws the quads with the latest head pose every frame, so turning the head is exact at
-90 Hz whatever rate the pictures are made at, and a late picture never moves the world with the head. Only moving the
-eyes needs new pictures (parallax), and a picture made from a slightly old place is only slightly wrong.
+position: SteamVR's compositor draws the quads with the latest head pose every frame. Rotation about a fixed eye
+position is corrected independently of the picture update rate. A real head turn also moves the eyes about the neck
+and head, so it still needs fresh parallax pictures; a stale eye position can look like lag despite stable quads.
 
 **The cube.** Six faces 1.5 m from its centre (the eyes may stand anywhere inside: the projections stay exact), each
 1024 + 2 × 4 texels a side per eye (Balanced; Light 768, Sharp 1440), overlapping their neighbours by 8 texels so
@@ -52,8 +55,10 @@ eye**: the eye's own field of view (`GetProjectionRaw`, `GetEyeToHeadTransform`,
 lights the displays: `GetTimeSinceLastVsync`, `Prop_SecondsFromVsyncToPhotons_Float` and the batch's own time) widened
 6° each side, then **resamples** it into the faces it covers (`resample.wgsl`: a homography per face and eye, exact as
 both are projections from the same eye; texels it does not cover keep what they had). A new cube's faces, and now and
-then a face out of view, are drawn whole instead. A batch goes once an eye moved 2.5 mm or the head turned 4°, at
-most 20 / 30 / 45 a second (Light / Balanced / Sharp): a still head costs nothing.
+then a face out of view, are drawn whole instead. A batch normally goes once an eye moved 2.5 mm, lowered to 1 mm
+during motion; quiet tracking has a 3 mm fallback and a stop gets a settling picture. Turning 4° also requests an
+update. The caps remain 20 / 30 / 45 a second (Light / Balanced / Sharp). After reveal and stale-face maintenance,
+a stationary view needs no continuous rendering.
 
 **Handing pictures to SteamVR without leaving the GPU.** The splats draw on a wgpu device (D3D12) on the headset's
 adapter (`GetDXGIOutputInfo` → LUID). Each face texture is a shared D3D12 resource (simultaneous access, so it is back
@@ -62,9 +67,17 @@ SteamVR with `SetOverlayTexture` (the D3D11 path every overlay of the app uses).
 turn; before writing one, the GPU waits on a shared fence the D3D11 side signals after handing textures over
 (`interop.rs`).
 
-**VRChat first.** Before each batch the overlay reads SteamVR's last frame timings: after a frame dropped or
-reprojected for the GPU, no batch for 50 ms, then twice as long each time up to 2 s (the training governor's rule,
-`orbiters_reconstruct::governor::verdict`); parallax then lags, VRChat keeps its frames.
+**Sharing the GPU.** An overlay-specific pacer observes new scene frame timings, including while a batch is in
+flight. A dropped or GPU-late frame overlapping an overlay job can increase its interval once per job. Each
+500 ms without another escalation removes a level. The overload interval is capped at 250 ms for affordable
+jobs; a separate 40% render-wall-cost ceiling can require longer intervals for expensive batches. Unlike the
+reconstruction governor, persistent scene lateness cannot indefinitely prevent the first cube or all updates.
+Temporal overlap is a conservative heuristic, not proof that the overlay caused the late scene frame.
+
+Ready pictures are published during short service slices and after menu/dashboard painting on the existing overlay
+thread. Nominal quality caps remain 20/30/45 Hz. Prediction separates wide, face and cube readiness, chooses a
+display boundary after estimated completion, and adds a bounded quarter of the picture's lifetime during stable
+motion. Both calibrated eyes keep their own frusta but share an image-buffer size. See the results for limits.
 
 **The reveal.** The capture appears from its start view outward over 0.9 s, as the world's reveal does: its splats are
 ordered by distance from the start eye and each batch draws those within a radius growing on a log scale; the
@@ -93,7 +106,7 @@ looks another way than the eye); a wide batch is drawn looking the eye's way and
 
 **Cost of a batch** (median of 12, the head turning 3° between batches; the wide view's size per eye):
 
-| Quality | Faces (per eye) | Wide view | Batches a second at most | A batch on the GPU |
+| Quality | Faces (per eye) | Wide view | Batches a second at most | Batch wall time, including GPU waits |
 |---|---|---|---|---|
 | Light | 776 × 776 | 1.15 Mpx | 20 | 5.7 ms |
 | Balanced | 1032 × 1032 | 2.05 Mpx | 30 | 6.4 ms |

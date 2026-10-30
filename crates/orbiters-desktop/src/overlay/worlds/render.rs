@@ -3,7 +3,7 @@
 //! ([`super::stereo::Cube::camera`]), each picture copied into its half of the face's side-by-side texture.
 
 use super::catalog::Capture;
-use super::stereo::{Cube, PlayCamera, Placement, V3};
+use super::stereo::{Cube, Placement, PlayCamera, V3};
 use anyhow::{anyhow, Context as _};
 use eframe::wgpu;
 use orbiters_reconstruct::gpu::{block_on, Gpu, Target};
@@ -20,8 +20,10 @@ pub fn device(luid: Option<u64>) -> anyhow::Result<(wgpu::Adapter, wgpu::Device,
     let adapters = block_on(instance.enumerate_adapters(backends));
     let adapter = match luid {
         Some(luid) => adapters.into_iter().find(|a| adapter_luid(a) == Some(luid)).context("the headset's GPU is not among wgpu's adapters")?,
-        None => block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }))
-            .map_err(|e| anyhow!("no GPU adapter: {e}"))?,
+        None => {
+            block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }))
+                .map_err(|e| anyhow!("no GPU adapter: {e}"))?
+        }
     };
     let desc = wgpu::DeviceDescriptor {
         label: Some("3d-worlds"),
@@ -65,6 +67,7 @@ pub struct FaceRenderer {
     resample: Resample,
     background: [f32; 3],
     total: usize,
+    overflows_seen: u32,
 }
 
 /// The compute pass that writes a wide view's pixels into a face's texels it covers (a homography per face and eye),
@@ -83,7 +86,8 @@ const RESAMPLE_WGSL: &str = include_str!("resample.wgsl");
 
 impl Resample {
     fn new(device: &wgpu::Device) -> Self {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("3d-worlds resample"), source: wgpu::ShaderSource::Wgsl(RESAMPLE_WGSL.into()) });
+        let module = device
+            .create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("3d-worlds resample"), source: wgpu::ShaderSource::Wgsl(RESAMPLE_WGSL.into()) });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("3d-worlds resample"),
             layout: None,
@@ -112,19 +116,14 @@ impl FaceRenderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let gpu = Gpu::renderer(device.clone(), queue.clone());
         let resample = Resample::new(&device);
-        Self { device, queue, gpu, scratch: None, masters: Vec::new(), wide: [None, None], resample, background: BACKGROUND, total: 0 }
+        Self { device, queue, gpu, scratch: None, masters: Vec::new(), wide: [None, None], resample, background: BACKGROUND, total: 0, overflows_seen: 0 }
     }
 
     /// Uploads `capture`'s splats and sky map (the first ones drawn at most later: [`FaceRenderer::render`]'s count).
     pub fn load(&mut self, capture: &Capture) -> anyhow::Result<()> {
         self.gpu.upload(&capture.gaussians);
         self.gpu.set_sky(capture.sky.as_ref().map(|s| (s.width, s.rgb.as_slice())))?;
-        self.background = capture
-            .sky
-            .as_ref()
-            .map(|s| s.horizon())
-            .or_else(|| orbiters_reconstruct::sky::horizon(&capture.gaussians))
-            .unwrap_or(BACKGROUND);
+        self.background = capture.sky.as_ref().map(|s| s.horizon()).or_else(|| orbiters_reconstruct::sky::horizon(&capture.gaussians)).unwrap_or(BACKGROUND);
         self.total = capture.gaussians.len();
         Ok(())
     }
@@ -149,7 +148,16 @@ impl FaceRenderer {
 
     /// Draws face `face` of `cube` for the eye at `eye` (`eye_index` 0 left, 1 right) into its half of `target` (a
     /// texture twice the cube's width across), the first `count` splats only.
-    pub fn render(&mut self, cube: &Cube, placement: &Placement, eye: V3, eye_index: usize, face: usize, count: usize, target: &wgpu::Texture) -> anyhow::Result<()> {
+    pub fn render(
+        &mut self,
+        cube: &Cube,
+        placement: &Placement,
+        eye: V3,
+        eye_index: usize,
+        face: usize,
+        count: usize,
+        target: &wgpu::Texture,
+    ) -> anyhow::Result<()> {
         let width = cube.width();
         let camera = cube.camera(face, eye, placement);
         self.gpu.count = count.min(self.total);
@@ -164,7 +172,12 @@ impl FaceRenderer {
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::TexelCopyTextureInfo { texture: target, mip_level: 0, origin: wgpu::Origin3d { x: eye_index as u32 * width, y: 0, z: 0 }, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: target,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: eye_index as u32 * width, y: 0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
             wgpu::Extent3d { width, height: width, depth_or_array_layers: 1 },
         );
         self.queue.submit([enc.finish()]);
@@ -248,7 +261,11 @@ impl FaceRenderer {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &self.resample.uniforms, offset, size: wgpu::BufferSize::new(64) }),
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.resample.uniforms,
+                            offset,
+                            size: wgpu::BufferSize::new(64),
+                        }),
                     },
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(wide_view) },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.resample.sampler) },
@@ -274,7 +291,12 @@ impl FaceRenderer {
     /// renderer's sort was short for it): those faces are drawn again.
     pub fn finish(&mut self) -> anyhow::Result<bool> {
         self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("waiting for the GPU: {e}"))?;
-        Ok(self.gpu.needs_redraw())
+        let redraw = self.gpu.needs_redraw();
+        // A later eye can consume and clear the renderer's redraw flag for an earlier eye. The monotonic counter
+        // still remembers that the stereo batch lost entries, so the complete batch is refreshed.
+        let overflowed = self.gpu.overflows != self.overflows_seen;
+        self.overflows_seen = self.gpu.overflows;
+        Ok(redraw || overflowed)
     }
 
     /// Draws the eye's own view (as a headset would show it), into an RGBA8 picture: the reference the cube's

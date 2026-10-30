@@ -315,6 +315,26 @@ pub struct PlayCamera {
 }
 
 impl PlayCamera {
+    /// Two calibrated eyes with their own frusta but one buffer size. A one-pixel difference must not recreate the
+    /// renderer's image buffers and bindings twice every stereo batch. Equal-sized eyes are unchanged exactly.
+    pub fn wide_pair(views: &[Matrix34; 2], tangents: [[f32; 4]; 2], margin: f32, per_tan: f32, max: u32) -> [Self; 2] {
+        let mut cameras = [0, 1].map(|e| Self::wide(&views[e], tangents[e], margin, per_tan, max));
+        let width = cameras[0].width.max(cameras[1].width);
+        let height = cameras[0].height.max(cameras[1].height);
+        for c in &mut cameras {
+            if c.width != width || c.height != height {
+                let (sx, sy) = (width as f32 / c.width as f32, height as f32 / c.height as f32);
+                c.fx *= sx;
+                c.fy *= sy;
+                c.cx = (c.cx + 0.5) * sx - 0.5;
+                c.cy = (c.cy + 0.5) * sy - 0.5;
+                c.width = width;
+                c.height = height;
+            }
+        }
+        cameras
+    }
+
     /// An eye's wide view: its field of view `tangents` widened by `margin` radians each side, `per_tan` pixels per unit
     /// of tangent (the faces' density at their centres matches `pixels / 2`), at most `max` pixels across.
     pub fn wide(view: &Matrix34, tangents: [f32; 4], margin: f32, per_tan: f32, max: u32) -> Self {
@@ -359,7 +379,10 @@ impl Cube {
         let (right, down) = (face.right(), scale(face.up, -1.0));
         let w = self.width() as f32;
         let step = 2.0 * self.extent() / w;
-        let corner = add(add(sub(add(self.center, scale(face.normal, self.half)), wide.eye), scale(right, self.extent() * (1.0 / w - 1.0))), scale(down, self.extent() * (1.0 / w - 1.0)));
+        let corner = add(
+            add(sub(add(self.center, scale(face.normal, self.half)), wide.eye), scale(right, self.extent() * (1.0 / w - 1.0))),
+            scale(down, self.extent() * (1.0 / w - 1.0)),
+        );
         // Direction from the eye = A · (x, y, 1); camera coordinates = rows · A; pixels = K · that.
         let a = [scale(right, step), scale(down, step), corner];
         let k = [[wide.fx, 0.0, wide.cx], [0.0, wide.fy, wide.cy], [0.0, 0.0, 1.0]];
@@ -433,6 +456,27 @@ pub fn reveal_radius(elapsed: f32, seconds: f32, farthest: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn common_eye_size_preserves_both_frusta_and_identical_symmetric_cameras() {
+        let views = [Matrix34::IDENTITY; 2];
+        let t = [[-1.39, 1.24, -1.47, 1.45], [-1.24, 1.39, -1.47, 1.45]];
+        let old = [0, 1].map(|e| PlayCamera::wide(&views[e], t[e], 0.105, 409.6, 3072));
+        assert_eq!(PlayCamera::wide_pair(&views, t, 0.105, 409.6, 3072), old);
+        let unequal = [t[0], [-1.239, 1.401, -1.471, 1.455]];
+        let separate = [0, 1].map(|e| PlayCamera::wide(&views[e], unequal[e], 0.105, 409.6, 3072));
+        let common = PlayCamera::wide_pair(&views, unequal, 0.105, 409.6, 3072);
+        assert_eq!((common[0].width, common[0].height), (common[1].width, common[1].height));
+        for e in 0..2 {
+            for p in [[0.0, 0.0, -2.0], [0.8, -0.7, -1.0]] {
+                let a = separate[e].project(p).unwrap();
+                let b = common[e].project(p).unwrap();
+                for (axis, old_size, new_size) in [(0, separate[e].width, common[e].width), (1, separate[e].height, common[e].height)] {
+                    assert!(((a[axis] + 0.5) / old_size as f32 - (b[axis] + 0.5) / new_size as f32).abs() < 1e-6);
+                }
+            }
+        }
+    }
 
     fn close(a: V3, b: V3, tol: f32) -> bool {
         (0..3).all(|i| (a[i] - b[i]).abs() <= tol)

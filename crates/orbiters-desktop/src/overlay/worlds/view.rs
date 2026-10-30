@@ -4,14 +4,14 @@
 //!
 //! Cost: a new cube draws its six faces for both eyes once. After that a batch draws one wide view per eye (its field of
 //! view and [`WIDE_MARGIN`] around it, at [`WIDE_DENSITY`] of the faces' density) and resamples it into the faces it
-//! covers: two views of the splats a batch, whatever the faces seen. A batch goes only once an eye moved [`MOVED_M`] or
-//! the head turned [`TURNED`] since the last one, at most [`Quality::rate`] a second, one at a time on the GPU: a still
-//! head costs nothing. When SteamVR says VRChat's last frames came late for the GPU (dropped, or reprojected), batches
-//! stop for a while, 50 ms then twice as long each time up to 2 s (`orbiters_reconstruct::governor`, as training
-//! beside VRChat does): parallax lags, VRChat keeps its frames. Now and then a face out of view is drawn again whole,
-//! should the head turn to it faster than the batches follow.
+//! covers: two views of the splats a batch, whatever the faces seen. Motion admits work up to [`Quality::rate`],
+//! with one batch in flight. The overlay-specific pacer slows after late scene frames overlapping its own work,
+//! while keeping progress possible under persistent scene lateness. A wall-cost duty ceiling also bounds expensive
+//! batches. Small movement is more responsive during motion; quiet tracking does not continuously redraw. Only
+//! while still and without overload, a stale face out of view is drawn again whole for a later turn.
 
 use super::catalog::Capture;
+use super::pacing::{Kind, Pacer};
 use super::render::FaceRenderer;
 use super::stereo::{self, Cube, Placement, PlayCamera, V3};
 use orbiters_openvr::{self as vr, compositor::Eye, overlay_flag, Pose, Universe, MAX_DEVICES};
@@ -102,6 +102,14 @@ pub enum Work {
 }
 
 impl Work {
+    pub fn kind(&self) -> Kind {
+        match self {
+            Work::Wide { .. } => Kind::Wide,
+            Work::Faces(faces) if faces.len() == 6 => Kind::Cube,
+            _ => Kind::Face,
+        }
+    }
+
     pub fn faces(&self) -> &[(usize, usize)] {
         match self {
             Work::Faces(f) | Work::Wide { faces: f, .. } => f,
@@ -158,9 +166,21 @@ enum Answer {
     #[cfg(windows)]
     Textures(super::interop::Handles),
     Loaded,
-    Rendered { id: u64, cube_index: usize, work: Work, eyes: [V3; 2], count: usize, ms: f64, redraw: bool },
+    Rendered {
+        id: u64,
+        cube_index: usize,
+        work: Work,
+        eyes: [V3; 2],
+        count: usize,
+        ms: f64,
+        ready: Instant,
+        redraw: bool,
+    },
     /// Not drawn (asked for textures of another size).
-    Skipped { id: u64, cube_index: usize },
+    Skipped {
+        id: u64,
+        cube_index: usize,
+    },
     Failed(String),
 }
 
@@ -221,7 +241,16 @@ impl Thread {
                             draw(&mut renderer, &job, &targets)
                         });
                         let redraw = drawn?;
-                        let _ = answers.send(Answer::Rendered { id: job.id, cube_index: job.cube_index, work: job.work, eyes: job.eyes, count: job.count, ms, redraw });
+                        let _ = answers.send(Answer::Rendered {
+                            id: job.id,
+                            cube_index: job.cube_index,
+                            work: job.work,
+                            eyes: job.eyes,
+                            count: job.count,
+                            ms,
+                            ready: Instant::now(),
+                            redraw,
+                        });
                     }
                     #[cfg(not(windows))]
                     let _ = answers.send(Answer::Skipped { id: job.id, cube_index: job.cube_index });
@@ -277,10 +306,18 @@ pub struct View {
     last_wide: Option<([V3; 2], V3, usize)>,
     in_flight: Option<u64>,
     next_id: u64,
-    last_job: Option<Instant>,
     asked_at: Option<Instant>,
-    /// Seconds a batch takes, from asking to its answer (smoothed): how far ahead the eyes are predicted.
-    batch_s: f32,
+    pacer: Pacer,
+    trace: super::diagnostics::Trace,
+    timing_read: Option<Instant>,
+    refresh_hz: f32,
+    photons: f32,
+    /// Current-pose velocities, not derivatives of predicted positions (tracking jitter must not trigger work).
+    motion: Option<(Instant, V3, V3)>,
+    steady_since: Option<Instant>,
+    moving: bool,
+    still: bool,
+    settling: bool,
     wait: u64,
     alpha: f32,
     pub see_through: bool,
@@ -289,15 +326,11 @@ pub struct View {
     eyes_read: Option<Instant>,
     eye_to_head: [vr::Matrix34; 2],
     tangents: [[f32; 4]; 2],
-    /// VRChat's frames came late: no batch before this, and the next back-off's length; the newest late frame answered.
-    held_until: Option<Instant>,
-    backoff: Duration,
-    answered: u32,
     /// Back-offs so far (the panel's numbers).
     pub backoffs: u32,
     /// What went wrong last, for the panel.
     pub error: Option<String>,
-    /// Batches drawn and the GPU's time a batch (smoothed), for the panel's numbers.
+    /// Batches drawn and render wall time per batch (smoothed), for the panel's numbers.
     pub batches: u64,
     pub batch_ms: f32,
 }
@@ -324,9 +357,17 @@ impl View {
             last_wide: None,
             in_flight: None,
             next_id: 1,
-            last_job: None,
             asked_at: None,
-            batch_s: 0.012,
+            pacer: Pacer::default(),
+            trace: super::diagnostics::Trace::default(),
+            timing_read: None,
+            refresh_hz: 90.0,
+            photons: 0.011,
+            motion: None,
+            steady_since: None,
+            moving: false,
+            still: true,
+            settling: false,
             wait: 0,
             alpha: 0.0,
             see_through: false,
@@ -335,9 +376,6 @@ impl View {
             eyes_read: None,
             eye_to_head: [vr::Matrix34::IDENTITY; 2],
             tangents: [[-1.2, 1.2, -1.2, 1.2]; 2],
-            held_until: None,
-            backoff: Duration::ZERO,
-            answered: 0,
             backoffs: 0,
             error: None,
             batches: 0,
@@ -364,6 +402,7 @@ impl View {
         if self.thread.is_some() {
             return;
         }
+        self.trace.start();
         let Some(luid) = steamvr.dxgi_adapter_index().and_then(super::interop::luid_of_index) else {
             self.error = Some("SteamVR did not say which graphics card the headset uses.".into());
             return;
@@ -383,6 +422,14 @@ impl View {
     /// Shows `capture`, its start view over where the head stands now (play space).
     pub fn show(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, capture: Arc<Capture>) {
         self.error = None;
+        self.pacer = Pacer::default();
+        self.motion = None;
+        self.steady_since = None;
+        self.moving = false;
+        self.still = true;
+        self.settling = false;
+        self.timing_read = None;
+        self.trace.begin();
         self.warm_up(steamvr);
         let Some(thread) = &self.thread else { return };
         if self.handles.is_none() {
@@ -417,6 +464,7 @@ impl View {
     /// Fades the capture out, then lets go of it (and of the GPU's memory).
     pub fn hide(&mut self) {
         if self.active() {
+            self.trace.flush(Instant::now(), &self.pacer, true);
             self.phase = Phase::Leaving { since: Instant::now() };
         }
     }
@@ -457,7 +505,8 @@ impl View {
         let mut out = [[0; 6]; 2];
         for (c, cube) in out.iter_mut().enumerate() {
             for (f, h) in cube.iter_mut().enumerate() {
-                *h = overlay.create(&format!("{}.{c}.{f}", self.key), "3D world").map_err(|code| format!("a 3D world overlay: SteamVR overlay error {code}"))?;
+                *h =
+                    overlay.create(&format!("{}.{c}.{f}", self.key), "3D world").map_err(|code| format!("a 3D world overlay: SteamVR overlay error {code}"))?;
                 let _ = overlay.set_flag(*h, overlay_flag::SIDE_BY_SIDE_PARALLEL, true);
                 // Under N4N0's menu (10) and the pill.
                 let _ = overlay.set_sort_order(*h, 0);
@@ -475,6 +524,7 @@ impl View {
     }
 
     pub fn destroy(&mut self, overlay: &vr::Overlay) {
+        self.trace.flush(Instant::now(), &self.pacer, true);
         if let Some(handles) = self.handles.take() {
             for h in handles.iter().flatten() {
                 let _ = overlay.destroy(*h);
@@ -485,6 +535,9 @@ impl View {
 
     /// One turn of the overlay's loop.
     pub fn update(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client) {
+        if self.active() {
+            self.observe(steamvr, Instant::now());
+        }
         self.answers(overlay);
         let now = Instant::now();
         match self.phase {
@@ -521,10 +574,8 @@ impl View {
         if !self.loaded || self.width == 0 {
             return;
         }
-        if self.in_flight.is_some() || self.last_job.is_some_and(|t| t.elapsed().as_secs_f32() < 1.0 / self.quality.rate()) {
-            return;
-        }
-        if !self.vrchat_on_time(steamvr, now) {
+        self.pacer.configure(now, self.quality.rate());
+        if self.in_flight.is_some() || !self.pacer.due(now) {
             return;
         }
         if self.eyes_read.is_none_or(|t| t.elapsed() > Duration::from_secs(2)) {
@@ -533,12 +584,49 @@ impl View {
                 self.eye_to_head[i] = steamvr.eye_to_head(eye);
                 self.tangents[i] = steamvr.projection_raw(eye);
             }
+            self.refresh_hz = steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| hz.is_finite() && *hz > 1.0).unwrap_or(90.0);
+            self.photons = steamvr.float_property(0, vr::prop::SECONDS_FROM_VSYNC_TO_PHOTONS).unwrap_or(0.011);
+            self.trace.headset = serde_json::json!({
+                "model": steamvr.string_property(0, vr::prop::MODEL_NUMBER),
+                "driver": steamvr.string_property(0, vr::prop::TRACKING_SYSTEM_NAME),
+                "refresh_hz": self.refresh_hz, "vsync_to_photons_s": self.photons,
+                "tangents": self.tangents, "quality": self.quality.label()
+            });
         }
-        let head = head_pose(steamvr, self.ahead(steamvr));
+        let current = tracked_head(steamvr, 0.0);
+        if !current.pose_is_valid {
+            // Keep the last good world. A transient tracking loss must not construct a cube at a fictitious origin.
+            return;
+        }
+        self.read_motion(now, &current);
+        let current_eyes = self.eye_to_head.map(|eye| stereo::position(&stereo::compose(&current.device_to_absolute, &eye)));
+        let kind = if self.cubes[self.active].is_none_or(|c| c.width() != self.width || current_eyes.iter().any(|e| !c.holds(*e, REACH_M))) {
+            Kind::Cube
+        } else {
+            Kind::Wide
+        };
+        let steady = self.moving && self.steady_since.is_some_and(|t| now.saturating_duration_since(t) >= Duration::from_millis(100));
+        let horizon = self.pacer.horizon(kind, self.refresh_hz, steamvr.time_since_vsync().unwrap_or(0.0), self.photons, steady);
+        let predicted = tracked_head(steamvr, horizon);
+        if !predicted.pose_is_valid {
+            return;
+        }
+        let head = predicted.device_to_absolute;
         let views = [stereo::compose(&head, &self.eye_to_head[0]), stereo::compose(&head, &self.eye_to_head[1])];
-        if let Some(job) = self.plan(overlay, &head, &views, now) {
+        if let Some(mut job) = self.plan(overlay, &head, &views, now) {
+            let horizon = if job.work.kind() == Kind::Face {
+                let h = self.pacer.horizon(Kind::Face, self.refresh_hz, steamvr.time_since_vsync().unwrap_or(0.0), self.photons, false);
+                let pose = tracked_head(steamvr, h);
+                if pose.pose_is_valid {
+                    job.eyes = self.eye_to_head.map(|eye| stereo::position(&stereo::compose(&pose.device_to_absolute, &eye)));
+                }
+                h
+            } else {
+                horizon
+            };
             self.in_flight = Some(job.id);
-            self.last_job = Some(now);
+            self.pacer.admitted(now, job.id);
+            self.trace.admitted(now, horizon);
             self.asked_at = Some(now);
             if let Some(thread) = &self.thread {
                 let _ = thread.tx.send(Ask::Render(job));
@@ -546,29 +634,60 @@ impl View {
         }
     }
 
-    /// Whether VRChat's last frames leave room for a batch: after a frame SteamVR dropped or reprojected for the GPU,
-    /// none for a while (see the module).
-    fn vrchat_on_time(&mut self, steamvr: &vr::Client, now: Instant) -> bool {
-        if self.held_until.is_some_and(|t| now < t) {
-            return false;
+    /// Service slices publish ready textures on the existing overlay thread, without waiting for input/UI painting.
+    pub fn publish(&mut self, overlay: &vr::Overlay) {
+        self.answers(overlay);
+    }
+
+    pub fn input_turn(&mut self, now: Instant) {
+        if self.active() {
+            self.trace.turn(now);
         }
-        let Ok(compositor) = steamvr.compositor() else { return true };
-        let mut timings = [vr::compositor::FrameTiming::default(); 4];
-        let n = compositor.frame_timings(&mut timings);
-        let frame_ms = steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0).map_or(11.1, |hz| 1000.0 / hz);
-        match orbiters_reconstruct::governor::verdict(&timings[..n], frame_ms, 0.0, self.answered) {
-            orbiters_reconstruct::governor::Verdict::BackOff(newest) => {
-                self.answered = newest;
-                self.backoff = (self.backoff * 2).clamp(Duration::from_millis(50), Duration::from_secs(2));
-                self.backoffs += 1;
-                self.held_until = Some(now + self.backoff);
-                false
-            }
-            _ => {
-                self.backoff /= 2;
-                true
-            }
+    }
+
+    pub fn wake_after(&self, now: Instant) -> Option<Duration> {
+        if !self.active() || !self.loaded {
+            return None;
         }
+        if self.in_flight.is_some() {
+            Some(Duration::from_millis(1))
+        } else {
+            self.pacer.wake_after(now)
+        }
+    }
+
+    fn observe(&mut self, steamvr: &vr::Client, now: Instant) {
+        if self.timing_read.is_some_and(|t| now.saturating_duration_since(t) < Duration::from_millis(5)) {
+            return;
+        }
+        self.timing_read = Some(now);
+        let mut timings = [vr::compositor::FrameTiming::default(); 16];
+        let (n, protect) = match steamvr.compositor() {
+            Ok(c) => (c.frame_timings(&mut timings), c.scene_focus_process() != 0 && !c.is_scene_loading()),
+            Err(_) => (0, false),
+        };
+        self.pacer.observe(now, &timings[..n], protect);
+        self.backoffs = self.pacer.attributed.min(u32::MAX as u64) as u32;
+        self.trace.flush(now, &self.pacer, false);
+    }
+
+    fn read_motion(&mut self, now: Instant, pose: &Pose) {
+        let speed = stereo::length(pose.velocity);
+        let angular = stereo::length(pose.angular_velocity);
+        let stable = self.motion.is_some_and(|(at, linear, turn)| {
+            let dt = now.saturating_duration_since(at).as_secs_f32().max(0.001);
+            stereo::length(stereo::sub(linear, pose.velocity)) / dt < 1.0 && stereo::length(stereo::sub(turn, pose.angular_velocity)) / dt < 3.0
+        });
+        let still = speed < 0.001 && angular < 0.5f32.to_radians();
+        self.settling |= !self.still && still;
+        self.still = still;
+        self.moving = speed > 0.02 || angular > 10f32.to_radians();
+        if stable && self.moving {
+            self.steady_since.get_or_insert(now);
+        } else {
+            self.steady_since = None;
+        }
+        self.motion = Some((now, pose.velocity, pose.angular_velocity));
     }
 
     fn alpha_scale(&self) -> f32 {
@@ -591,15 +710,6 @@ impl View {
         }
     }
 
-    /// Seconds from now until a batch asked now lights the displays: the batch, then the next vsync and the headset's
-    /// own delay.
-    fn ahead(&self, steamvr: &vr::Client) -> f32 {
-        let frame = steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0).map_or(1.0 / 90.0, |hz| 1.0 / hz);
-        let since = steamvr.time_since_vsync().unwrap_or(0.0).clamp(0.0, frame);
-        let photons = steamvr.float_property(0, vr::prop::SECONDS_FROM_VSYNC_TO_PHOTONS).unwrap_or(0.011).clamp(0.0, 0.05);
-        (self.batch_s + (frame - since) + photons).clamp(0.0, 0.1)
-    }
-
     /// The next batch: a new cube's six faces when the eyes left the active one; else, once the eyes moved or the head
     /// turned, the wide views; else now and then a face out of view drawn whole.
     fn plan(&mut self, overlay: &vr::Overlay, head: &vr::Matrix34, views: &[vr::Matrix34; 2], now: Instant) -> Option<Job> {
@@ -607,7 +717,9 @@ impl View {
         let placement = self.placement?;
         let eyes = [stereo::position(&views[0]), stereo::position(&views[1])];
         let count = match self.phase {
-            Phase::Shown { since } if since.elapsed() < REVEAL => capture.within(stereo::reveal_radius(since.elapsed().as_secs_f32(), REVEAL.as_secs_f32(), capture.farthest())),
+            Phase::Shown { since } if since.elapsed() < REVEAL => {
+                capture.within(stereo::reveal_radius(since.elapsed().as_secs_f32(), REVEAL.as_secs_f32(), capture.farthest()))
+            }
             Phase::Loading => capture.within(0.0),
             _ => capture.gaussians.len(),
         };
@@ -641,23 +753,24 @@ impl View {
             None => true,
             Some((from, look, drawn)) => {
                 drawn != count
-                    || (0..2).any(|e| stereo::length(stereo::sub(eyes[e], from[e])) > MOVED_M)
+                    || (0..2).any(|e| super::pacing::translation_due(stereo::length(stereo::sub(eyes[e], from[e])), self.moving, self.still, self.settling))
                     || stereo::dot(look, looking).clamp(-1.0, 1.0).acos() > TURNED
             }
         };
         if due {
             let per_tan = self.quality.wide_per_tan();
-            let cameras = [0, 1].map(|e| PlayCamera::wide(&views[e], self.tangents[e], WIDE_MARGIN, per_tan, WIDE_MAX));
+            let cameras = PlayCamera::wide_pair(views, self.tangents, WIDE_MARGIN, per_tan, WIDE_MAX);
             let faces: Vec<(usize, usize)> = (0..6).filter(|&f| cameras.iter().any(|c| cube.face_in(f, c))).map(|f| (f, 1 - self.shown_slot[f])).collect();
             if faces.is_empty() {
                 return None;
             }
             self.last_wide = Some((eyes, looking, count));
+            self.settling = false;
             self.next_id += 1;
             return Some(Job { id, cube, cube_index: self.active, placement, eyes, work: Work::Wide { cameras, faces }, count, wait: self.wait });
         }
         // Now and then a face out of view, drawn whole from where the eyes are now.
-        if self.last_unseen.is_some_and(|t| now.duration_since(t) < UNSEEN_EVERY) {
+        if !self.still || self.pacer.level != 0 || self.last_unseen.is_some_and(|t| now.duration_since(t) < UNSEEN_EVERY) {
             return None;
         }
         let mut seen = [false; 6];
@@ -675,7 +788,16 @@ impl View {
                 self.unseen_turn = f + 1;
                 self.last_unseen = Some(now);
                 self.next_id += 1;
-                return Some(Job { id, cube, cube_index: self.active, placement, eyes, work: Work::Faces(vec![(f, 1 - self.shown_slot[f])]), count, wait: self.wait });
+                return Some(Job {
+                    id,
+                    cube,
+                    cube_index: self.active,
+                    placement,
+                    eyes,
+                    work: Work::Faces(vec![(f, 1 - self.shown_slot[f])]),
+                    count,
+                    wait: self.wait,
+                });
             }
         }
         self.last_unseen = Some(now);
@@ -706,18 +828,20 @@ impl View {
                     }
                 }
                 Answer::Loaded => self.loaded = true,
-                Answer::Rendered { id, cube_index, work, eyes, count, ms, redraw } => {
+                Answer::Rendered { id, cube_index, work, eyes, count, ms, ready, redraw } => {
                     if self.in_flight == Some(id) {
                         self.in_flight = None;
                     }
                     if let Some(asked) = self.asked_at.take() {
-                        self.batch_s = 0.8 * self.batch_s + 0.2 * asked.elapsed().as_secs_f32().min(0.1);
+                        self.pacer.completed(id, work.kind(), ready.saturating_duration_since(asked));
                     }
                     if matches!(work, Work::Wide { .. }) {
                         self.batches += 1;
                         self.batch_ms = if self.batch_ms == 0.0 { ms as f32 } else { 0.8 * self.batch_ms + 0.2 * ms as f32 };
                     }
+                    let submit = Instant::now();
                     self.handed(overlay, cube_index, work.faces(), eyes, count);
+                    self.trace.rendered(work.kind(), ms, submit.saturating_duration_since(ready), submit.elapsed());
                     if redraw {
                         // A picture left splats out: drawn again whole by the next batch.
                         self.last_wide = None;
@@ -794,11 +918,16 @@ impl View {
 
 /// The headset's pose `seconds` ahead (standing play space), or a standing head at the origin when it is not tracked.
 pub fn head_pose(steamvr: &vr::Client, seconds: f32) -> vr::Matrix34 {
-    let mut poses = [Pose::default(); MAX_DEVICES];
-    steamvr.predicted_poses(Universe::Standing, seconds, &mut poses);
-    if poses[0].pose_is_valid {
-        poses[0].device_to_absolute
+    let pose = tracked_head(steamvr, seconds);
+    if pose.pose_is_valid {
+        pose.device_to_absolute
     } else {
         vr::Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.6], [0.0, 0.0, 1.0, 0.0]] }
     }
+}
+
+fn tracked_head(steamvr: &vr::Client, seconds: f32) -> Pose {
+    let mut poses = [Pose::default(); MAX_DEVICES];
+    steamvr.predicted_poses(Universe::Standing, seconds, &mut poses);
+    poses[0]
 }

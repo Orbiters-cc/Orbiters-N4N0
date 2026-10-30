@@ -8,12 +8,15 @@
 //! VRChat, sharpness) is a press on the pill away.
 
 pub mod catalog;
+mod diagnostics;
 #[cfg(windows)]
 pub mod interop;
 pub mod panel;
+pub mod pacing;
 pub mod render;
 pub mod shots;
 pub mod stereo;
+pub mod timing_lab;
 pub mod view;
 
 use super::{Canvas, Presenter};

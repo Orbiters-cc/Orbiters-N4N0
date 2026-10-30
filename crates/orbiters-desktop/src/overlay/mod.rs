@@ -564,6 +564,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let frame_ms = steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0).map_or(11, |hz| (1000.0 / hz).ceil() as u32).clamp(4, 50);
     loop {
         let turn = Instant::now();
+        t.menu.worlds.view.input_turn(turn);
         if client.should_close() {
             return Ok(Ended::Closed);
         }
@@ -715,6 +716,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button) {
             sounds.click();
         }
+        t.menu.worlds.view.publish(&overlay);
         if !shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, &snap)) {
             shown = Some(snap.clone());
             next_frame = Some(next_frame.map_or(Instant::now(), |f| f.min(Instant::now())));
@@ -759,15 +761,26 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         } else if !visible {
             while_hidden(&mut events);
         }
+        t.menu.worlds.view.publish(&overlay);
         if t.walk.moving() {
             // Walk boost moves the play space once per frame the compositor shows: unsynchronised steps judder.
             if overlay.wait_frame_sync(frame_ms).is_err() {
                 std::thread::sleep(TURN.saturating_sub(turn.elapsed()));
             }
             std::thread::sleep(SHORTEST_TURN.saturating_sub(turn.elapsed()));
+            t.menu.worlds.view.update(&overlay, &steamvr);
         } else {
-            // The rest of a turn costs little when nothing shows.
-            std::thread::sleep(TURN.saturating_sub(turn.elapsed()));
+            // Keep input at its existing cadence. Only displayed 3D content gets short, high-resolution service
+            // slices: a completed texture need not wait through the rest of this turn. No tick-based channel waits.
+            let end = turn + TURN;
+            while Instant::now() < end {
+                let now = Instant::now();
+                let left = end.saturating_duration_since(now);
+                std::thread::sleep(worlds::pacing::service_slice(left, t.menu.worlds.view.wake_after(now)));
+                if t.menu.worlds.view.active() {
+                    t.menu.worlds.view.update(&overlay, &steamvr);
+                }
+            }
         }
     }
 }

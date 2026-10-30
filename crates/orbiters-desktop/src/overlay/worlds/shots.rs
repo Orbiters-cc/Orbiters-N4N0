@@ -39,6 +39,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let sky = args.iter().position(|a| a == "--sky").and_then(|i| args.get(i + 1)).map(PathBuf::from);
     let start = args.iter().position(|a| a == "--view").and_then(|i| args.get(i + 1)).map(|v| parse_view(v)).transpose()?;
     let capture = load(&file, sky.as_deref(), start)?;
+    let independent = args.iter().any(|a| a == "--independent-eye-sizes");
+    let tangents = if args.iter().any(|a| a == "--asymmetric") { [LEFT_TANGENTS, [-1.239, 1.401, -1.471, 1.455]] } else { [LEFT_TANGENTS, right_tangents()] };
     eprintln!("{} splats", capture.gaussians.len());
     if let Some(seconds) = args.iter().position(|a| a == "--load").and_then(|i| args.get(i + 1)).map(|s| s.parse::<f64>()).transpose()? {
         let quality = match args.iter().position(|a| a == "--quality").and_then(|i| args.get(i + 1)).map(String::as_str) {
@@ -46,7 +48,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             Some("sharp") => Quality::High,
             _ => Quality::Balanced,
         };
-        return load_run(&out, &capture, seconds, args.iter().any(|a| a == "--still"), quality);
+        let feedback = args.iter().position(|a| a == "--timing-feed").and_then(|i| args.get(i + 1)).map(Path::new);
+        return load_run(&out, &capture, seconds, args.iter().any(|a| a == "--still"), quality, tangents, independent, feedback);
     }
     let (adapter, device, queue) = render::device(None)?;
     eprintln!("on {}", adapter.get_info().name);
@@ -81,7 +84,6 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
 
     let mut psnr = serde_json::Map::new();
-    let tangents = [LEFT_TANGENTS, right_tangents()];
     let (w, h) = EYE_PIXELS;
     let mut both = [Vec::new(), Vec::new()];
     for e in 0..2 {
@@ -132,7 +134,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     // The cube first, drawn whole from where the person stood (as the overlay does for a new cube).
     let whole = Job { id: 1, cube, cube_index: 0, placement, eyes, work: Work::Faces((0..6).map(|f| (f, 0)).collect()), count, wait: 0 };
     view::draw(&mut renderer, &whole, &target_refs)?;
-    let cameras = [0, 1].map(|e| PlayCamera::wide(&moved_views[e], tangents[e], WIDE_MARGIN, Quality::Balanced.wide_per_tan(), 3072));
+    let cameras = wide_cameras(&moved_views, tangents, Quality::Balanced, independent);
     let covered: Vec<(usize, usize)> = (0..6).filter(|&f| cameras.iter().any(|c| cube.face_in(f, c))).map(|f| (f, 1)).collect();
     let batch = Job { id: 2, cube, cube_index: 0, placement, eyes: new_eyes, work: Work::Wide { cameras, faces: covered.clone() }, count, wait: 0 };
     view::draw(&mut renderer, &batch, &target_refs)?;
@@ -202,7 +204,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let mut pixels = 0;
         for round in 0..13 {
             let turned = [0, 1].map(|e| turn(&views[e], (round as f32 * 3.0).to_radians(), 0.0));
-            let cameras = [0, 1].map(|e| PlayCamera::wide(&turned[e], tangents[e], WIDE_MARGIN, quality.wide_per_tan(), 3072));
+            let cameras = wide_cameras(&turned, tangents, quality, independent);
             pixels = cameras[0].width * cameras[0].height;
             let faces: Vec<(usize, usize)> = (0..6).filter(|&f| cameras.iter().any(|c| cube.face_in(f, c))).map(|f| (f, round % 2)).collect();
             let job = Job { id: round as u64, cube, cube_index: 0, placement, eyes, work: Work::Wide { cameras, faces }, count, wait: 0 };
@@ -219,6 +221,33 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         );
     }
     report.insert("wide_batch".into(), serde_json::Value::Object(batches));
+
+    // Time the visible update immediately after a maintenance face (not just consecutive wide views). Keep the
+    // face itself outside this measurement: it exposes the buffer/binding churn paid at motion onset.
+    let mut switched = Vec::new();
+    let mut steady = Vec::new();
+    for round in 0..24 {
+        renderer.render_master(&cube, &placement, eyes[0], 0, 2, count)?;
+        renderer.render_master(&cube, &placement, eyes[1], 1, 2, count)?;
+        renderer.finish()?;
+        for times in [&mut switched, &mut steady] {
+            let (drawn, ms) = render::timed(|| view::draw(&mut renderer, &batch, &target_refs));
+            drawn?;
+            if round >= 4 {
+                times.push(ms);
+            }
+        }
+    }
+    switched.sort_by(f64::total_cmp);
+    steady.sort_by(f64::total_cmp);
+    report.insert(
+        "maintenance_return".into(),
+        json!({
+            "wide_after_face_wall_ms_p50": round2(switched[switched.len()/2]),
+            "steady_wide_wall_ms_p50": round2(steady[steady.len()/2]),
+            "independent_eye_sizes": independent, "tangents": tangents
+        }),
+    );
 
     // What a view's time follows: its splats (one eye, the ahead face), and a whole eye's view drawn directly.
     let mut scaling = serde_json::Map::new();
@@ -249,7 +278,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     // The faces an eye sees with the turn margin, looking ahead, sideways, up and down.
     let mut seen = serde_json::Map::new();
-    for (name, yaw, pitch) in [("ahead", 0f32, 0f32), ("ahead-level-30-right", -30.0, 0.0), ("corner-45", 45.0, 0.0), ("up-60", 0.0, 60.0), ("down-50", 0.0, -50.0)] {
+    for (name, yaw, pitch) in
+        [("ahead", 0f32, 0f32), ("ahead-level-30-right", -30.0, 0.0), ("corner-45", 45.0, 0.0), ("up-60", 0.0, 60.0), ("down-50", 0.0, -50.0)]
+    {
         let v = turn(&views[0], yaw.to_radians(), pitch.to_radians());
         let s = cube.faces_seen(&v, LEFT_TANGENTS, super::view::TURN_MARGIN);
         let s0 = cube.faces_seen(&v, LEFT_TANGENTS, 0.0);
@@ -306,16 +337,25 @@ fn shared_check(
 
 /// `--load <seconds> [--still]`: the overlay's batches for that long, as a person would make them in the headset (the
 /// head turning ±35° and swaying ±4 cm, about one cycle every four seconds; `--still`: a head that does not move), at
-/// most the quality's rate a second, each when the eyes moved or the head turned enough. Run beside a stand-in game
+/// most the quality's rate a second, using production motion gates and wall-cost admission (no compositor feedback).
+/// Run beside a stand-in game
 /// (orbiters-reconstruct's `framegame` example) to see what the overlay costs a game on the same GPU. Writes
-/// `load.json`: batches drawn, their GPU time, the share of the time the GPU spent on them.
-fn load_run(out: &Path, capture: &Capture, seconds: f64, still: bool, quality: Quality) -> anyhow::Result<()> {
+/// `load.json`: batches drawn, render wall time (including CPU, queueing and GPU waits), and its elapsed-time share.
+fn load_run(
+    out: &Path,
+    capture: &Capture,
+    seconds: f64,
+    still: bool,
+    quality: Quality,
+    tangents: [[f32; 4]; 2],
+    independent: bool,
+    feedback: Option<&Path>,
+) -> anyhow::Result<()> {
     let (_, device, queue) = render::device(None)?;
     let mut renderer = FaceRenderer::new(device.clone(), queue.clone());
     renderer.load(capture)?;
     let head0 = Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.62], [0.0, 0.0, 1.0, 0.0]] };
     let placement = Placement::at(&capture.view, &head0);
-    let tangents = [LEFT_TANGENTS, right_tangents()];
     let views0 = eye_views(&head0);
     let eyes0 = [stereo::position(&views0[0]), stereo::position(&views0[1])];
     let pixels = quality.pixels();
@@ -323,36 +363,62 @@ fn load_run(out: &Path, capture: &Capture, seconds: f64, still: bool, quality: Q
     let targets: Vec<eframe::wgpu::Texture> = (0..12).map(|_| render::face_texture(&device, cube.width())).collect();
     let target_refs: Vec<&eframe::wgpu::Texture> = targets.iter().collect();
     let count = capture.gaussians.len();
-    view::draw(&mut renderer, &Job { id: 0, cube, cube_index: 0, placement, eyes: eyes0, work: Work::Faces((0..6).map(|f| (f, 0)).collect()), count, wait: 0 }, &target_refs)?;
+    view::draw(
+        &mut renderer,
+        &Job { id: 0, cube, cube_index: 0, placement, eyes: eyes0, work: Work::Faces((0..6).map(|f| (f, 0)).collect()), count, wait: 0 },
+        &target_refs,
+    )?;
     let start = std::time::Instant::now();
     let (mut batches, mut busy, mut last) = (0u64, 0f64, None::<([V3; 2], V3)>);
     let mut times = Vec::new();
-    let mut next = std::time::Instant::now();
+    let mut pacer = super::pacing::Pacer::default();
+    let mut feed = feedback.map(TimingFeed::new).transpose()?;
+    let mut was_still = true;
+    let mut settling = false;
     while start.elapsed().as_secs_f64() < seconds {
         let now = std::time::Instant::now();
-        if now < next {
-            std::thread::sleep(next - now);
+        if let Some(feed) = &mut feed {
+            feed.observe(&mut pacer)?;
         }
-        next = std::time::Instant::now() + std::time::Duration::from_secs_f32(1.0 / quality.rate());
+        pacer.configure(now, quality.rate());
+        if let Some(wait) = pacer.wake_after(now) {
+            std::thread::sleep(wait);
+        }
         let t = start.elapsed().as_secs_f32();
-        let (yaw, sway) = if still { (0.0, 0.0) } else { ((t * std::f32::consts::TAU / 4.0).sin() * 35f32.to_radians(), (t * std::f32::consts::TAU / 3.3).sin() * 0.04) };
+        let (yaw, sway) =
+            if still { (0.0, 0.0) } else { ((t * std::f32::consts::TAU / 4.0).sin() * 35f32.to_radians(), (t * std::f32::consts::TAU / 3.3).sin() * 0.04) };
         let mut head = turn(&head0, yaw, 0.0);
         head.m[0][3] += sway;
         let views = eye_views(&head);
         let eyes = [stereo::position(&views[0]), stereo::position(&views[1])];
         let looking = stereo::scale(stereo::axis(&head, 2), -1.0);
+        let speed = if still { 0.0 } else { (t * std::f32::consts::TAU / 3.3).cos().abs() * 0.04 * std::f32::consts::TAU / 3.3 };
+        let angular = if still { 0.0 } else { (t * std::f32::consts::TAU / 4.0).cos().abs() * 35f32.to_radians() * std::f32::consts::TAU / 4.0 };
+        let moving = speed > 0.02 || angular > 10f32.to_radians();
+        let quiet = speed < 0.001 && angular < 0.5f32.to_radians();
+        settling |= !was_still && quiet;
+        was_still = quiet;
         let due = last.is_none_or(|(from, look)| {
-            (0..2).any(|e| stereo::length(stereo::sub(eyes[e], from[e])) > view::MOVED_M) || stereo::dot(look, looking).clamp(-1.0, 1.0).acos() > view::TURNED
+            (0..2).any(|e| super::pacing::translation_due(stereo::length(stereo::sub(eyes[e], from[e])), moving, quiet, settling))
+                || stereo::dot(look, looking).clamp(-1.0, 1.0).acos() > view::TURNED
         });
         if !due {
+            std::thread::sleep(std::time::Duration::from_millis(11));
             continue;
         }
+        settling = false;
         last = Some((eyes, looking));
-        let cameras = [0, 1].map(|e| PlayCamera::wide(&views[e], tangents[e], WIDE_MARGIN, quality.wide_per_tan(), 3072));
+        let cameras = wide_cameras(&views, tangents, quality, independent);
         let faces: Vec<(usize, usize)> = (0..6).filter(|&f| cameras.iter().any(|c| cube.face_in(f, c))).map(|f| (f, (batches % 2) as usize)).collect();
         let job = Job { id: batches, cube, cube_index: 0, placement, eyes, work: Work::Wide { cameras, faces }, count, wait: 0 };
+        let asked = std::time::Instant::now();
+        pacer.admitted(asked, batches);
         let (drawn, ms) = render::timed(|| view::draw(&mut renderer, &job, &target_refs));
         drawn?;
+        if let Some(feed) = &mut feed {
+            feed.observe(&mut pacer)?;
+        }
+        pacer.completed(batches, super::pacing::Kind::Wide, asked.elapsed());
         batches += 1;
         busy += ms;
         times.push(ms);
@@ -367,11 +433,58 @@ fn load_run(out: &Path, capture: &Capture, seconds: f64, still: bool, quality: Q
         "batches_per_second": round2(batches as f64 / elapsed),
         "batch_ms_median": times.get(times.len() / 2).copied().map(round2),
         "batch_ms_p95": times.get(times.len() * 95 / 100).copied().map(round2),
-        "gpu_busy_share": round2(busy / 1000.0 / elapsed),
+        "render_wall_share": round2(busy / 1000.0 / elapsed),
+        "synthetic_timing_feed": feedback.is_some(), "pacer_level": pacer.level, "late_attributed": pacer.attributed,
+        "pacer_interval_ms": round2(pacer.interval.as_secs_f64() * 1000.0),
+        "measurement": "real GPU, production motion/duty gates; synchronous renderer, optional synthetic 90 Hz feedback, no SteamVR submission",
     });
     std::fs::write(out.join("load.json"), serde_json::to_string_pretty(&report)?)?;
     eprintln!("{report}");
     Ok(())
+}
+
+/// Experiment-only tail of gpu-lab's 90 Hz deadline CSV. No filesystem access is added to the production pacer.
+struct TimingFeed {
+    file: std::fs::File,
+    tail: String,
+    frames: Vec<orbiters_openvr::compositor::FrameTiming>,
+    index: u32,
+}
+
+impl TimingFeed {
+    fn new(path: &Path) -> anyhow::Result<Self> {
+        Ok(Self { file: std::fs::File::open(path).context("open gpu-lab timing feed")?, tail: String::new(), frames: Vec::new(), index: 0 })
+    }
+
+    fn observe(&mut self, pacer: &mut super::pacing::Pacer) -> anyhow::Result<()> {
+        use std::io::Read;
+        self.file.read_to_string(&mut self.tail)?;
+        if let Some(end) = self.tail.rfind('\n') {
+            for line in self.tail[..end].lines() {
+                if let Some(ready) = line.split(',').nth(3).and_then(|s| s.parse::<f64>().ok()) {
+                    self.index = self.index.wrapping_add(1);
+                    self.frames.push(orbiters_openvr::compositor::FrameTiming {
+                        frame_index: self.index,
+                        num_dropped_frames: u32::from(ready > 1000.0 / 90.0),
+                        ..Default::default()
+                    });
+                }
+            }
+            self.tail.drain(..=end);
+            let excess = self.frames.len().saturating_sub(64);
+            self.frames.drain(..excess);
+        }
+        pacer.observe(std::time::Instant::now(), &self.frames, true);
+        Ok(())
+    }
+}
+
+fn wide_cameras(views: &[Matrix34; 2], tangents: [[f32; 4]; 2], quality: Quality, independent: bool) -> [PlayCamera; 2] {
+    if independent {
+        [0, 1].map(|e| PlayCamera::wide(&views[e], tangents[e], WIDE_MARGIN, quality.wide_per_tan(), 3072))
+    } else {
+        PlayCamera::wide_pair(views, tangents, WIDE_MARGIN, quality.wide_per_tan(), 3072)
+    }
 }
 
 fn round2(v: f64) -> f64 {
@@ -402,7 +515,19 @@ fn turn(view: &Matrix34, yaw: f32, pitch: f32) -> Matrix34 {
     let (sp, cp) = pitch.sin_cos();
     let yaw_m = Matrix34 { m: [[cy, 0.0, sy, 0.0], [0.0, 1.0, 0.0, 0.0], [-sy, 0.0, cy, 0.0]] };
     let pitch_m = Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, cp, -sp, 0.0], [0.0, sp, cp, 0.0]] };
-    let mut rotated = stereo::compose(&stereo::compose(&yaw_m, &Matrix34 { m: [[view.m[0][0], view.m[0][1], view.m[0][2], 0.0], [view.m[1][0], view.m[1][1], view.m[1][2], 0.0], [view.m[2][0], view.m[2][1], view.m[2][2], 0.0]] }), &pitch_m);
+    let mut rotated = stereo::compose(
+        &stereo::compose(
+            &yaw_m,
+            &Matrix34 {
+                m: [
+                    [view.m[0][0], view.m[0][1], view.m[0][2], 0.0],
+                    [view.m[1][0], view.m[1][1], view.m[1][2], 0.0],
+                    [view.m[2][0], view.m[2][1], view.m[2][2], 0.0],
+                ],
+            },
+        ),
+        &pitch_m,
+    );
     for i in 0..3 {
         rotated.m[i][3] = view.m[i][3];
     }

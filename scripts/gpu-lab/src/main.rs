@@ -436,6 +436,8 @@ fn load(args: &[String]) -> anyhow::Result<()> {
     };
     let iterations: u32 = opt(args, "--work").unwrap_or("64").parse()?;
     let paced: Option<f64> = opt(args, "--paced").map(str::parse).transpose()?;
+    let feedback = args.iter().any(|s| s == "--feedback");
+    anyhow::ensure!(!feedback || paced.is_some(), "--feedback requires --paced <hz>");
     let mut out = match opt(args, "--out") {
         Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
         None => None,
@@ -526,6 +528,7 @@ fn load(args: &[String]) -> anyhow::Result<()> {
     let interval = paced.map(|hz| Duration::from_secs_f64(1.0 / hz));
     let mut due = Instant::now();
     while start.elapsed().as_secs_f64() < seconds {
+        let scheduled = due;
         if let Some(interval) = interval {
             let now = Instant::now();
             if due > now {
@@ -577,7 +580,15 @@ fn load(args: &[String]) -> anyhow::Result<()> {
             gpu_ms.push(g);
             wall_ms.push(wall);
             if let Some(f) = out.as_mut() {
-                writeln!(f, "{:.4},{g:.4},{wall:.4}", start.elapsed().as_secs_f64())?;
+                // End-to-end ready time from this frame's intended start, including CPU scheduling and GPU queue
+                // waits. Compare it with the paced interval; wall-to-wall gaps alone are not deadline misses.
+                if feedback {
+                    let ready_ms = (now - scheduled).as_secs_f64() * 1e3;
+                    writeln!(f, "{:.4},{g:.4},{wall:.4},{ready_ms:.4}", start.elapsed().as_secs_f64())?;
+                    f.flush()?;
+                } else {
+                    writeln!(f, "{:.4},{g:.4},{wall:.4}", start.elapsed().as_secs_f64())?;
+                }
             }
         }
         second.1 += 1;

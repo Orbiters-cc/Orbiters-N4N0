@@ -49,6 +49,7 @@ fn main() -> anyhow::Result<()> {
         Some("--overlay") => overlay::run(&args[1..]),
         Some("--orb-menu") => overlay::menu_pages::run(&args[1..]),
         Some("--world-view") => overlay::worlds::shots::run(&args[1..]),
+        Some("--world-timing") => overlay::worlds::timing_lab::run(&args[1..]),
         Some("--orb-menu-strings") => overlay::menu_pages::run_strings(&args[1..]),
         Some("--prepare-upload") => upload_prep::run(&args[1..]),
         #[cfg(windows)]

@@ -26,3 +26,7 @@
   Duplicate disabled until the check succeeds. Explain insufficient space and recheck immediately before copying.
 - Progressive galleries must preserve the visible item and its scroll position as content arrives. Do not animate
   layout dimensions with springs or let background insertion move the user's viewport unexpectedly.
+- Unity storage repair must match log errors to the affected project, account for import workspace beyond copy
+  size, and hold the Unity project lock before changing cache paths. Preserve Assets, Packages, ProjectSettings
+  and exact dependency versions. Copy and verify cache contents before switching locations; retain the original
+  on failures and test rollback. Do not close other Unity projects or delete unrelated caches to recover space.

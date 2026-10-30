@@ -10,6 +10,7 @@ pub mod network;
 pub mod preview;
 pub mod setup;
 pub mod size;
+pub mod storage;
 pub mod templates;
 pub mod vpm;
 
@@ -126,6 +127,7 @@ pub fn unity_open(path: &Path) -> bool {
 pub fn open_project(project: &discovery::Project) -> anyhow::Result<()> {
     let editor = discovery::find_editor(&project.unity)
         .ok_or_else(|| anyhow::anyhow!("Unity {} is not installed. Open Unity Hub to install this version.", project.unity))?;
+    storage::prepare(&project.path)?;
     hidden_command(editor).arg("-projectPath").arg(&project.path).spawn()?;
     Ok(())
 }

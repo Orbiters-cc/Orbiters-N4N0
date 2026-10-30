@@ -95,6 +95,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
             ui.spacing_mut().item_spacing = vec2(0.0, 10.0);
             let top = ui.cursor().top();
             hero(ui, cx, state, &project, !split.docked);
+            storage_health(ui, state, &project);
             if state.modal.is_none() {
                 super::ui::errors(ui, state, "panel");
             }
@@ -1059,4 +1060,38 @@ fn date(unix: u64) -> String {
 fn capitalised(s: &str) -> String {
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
+/// Check logs and disk capacity off the UI thread, including editors opened outside Orbiters.
+fn storage_health(ui: &mut Ui, state: &mut State, project: &Project) {
+    if state.fixture { return; }
+    let ctx = ui.ctx().clone();
+    if let Some(result) = state.storage_job.take() { state.storage_health = Some(result); }
+    let stale = state.storage_health.as_ref().is_none_or(|(p, _)| p != &project.path)
+        || state.storage_checked.is_none_or(|t| t.elapsed().as_secs() >= 3);
+    if stale && !state.storage_job.running() {
+        state.storage_checked = Some(std::time::Instant::now());
+        let path = project.path.clone();
+        state.storage_job = crate::pages::Job::spawn(&ctx, move || {
+            let health = orbiters_projects::storage::inspect(&path);
+            (path, health)
+        });
+    }
+    ctx.request_repaint_after(std::time::Duration::from_secs(1));
+    let Some((_, health)) = state.storage_health.as_ref().filter(|(p, _)| p == &project.path) else { return; };
+    if !health.needs_repair() { return; }
+    ui.heading(if health.disk_error { "Unity could not finish importing" } else { "Unity needs more disk space" });
+    let available = health.free.map(|n| format::bytes(n as f64)).unwrap_or_else(|| "Unknown".into());
+    ui.label(format!("{available} available. Orbiters can move this project's generated Library cache to a local disk with room, keeping the project at its current location."));
+    let open = health.open;
+    if open { ui.weak("Quit this project's Unity window first, then repair and reopen it here."); }
+    let button = Button::new("Repair storage and open Unity").variant(Variant::Primary).enabled(!open && !state.running());
+    if widgets::activated(&button.show(ui)) {
+        let project = project.clone();
+        state.task(&ctx, "Repairing Unity storage?", move || {
+            let moved = orbiters_projects::storage::prepare(&project.path)?;
+            orbiters_projects::open_project(&project)?;
+            Ok(Outcome::Said(moved.map(|p| format!("Unity cache moved to {}. Opening the project.", p.display())).unwrap_or_else(|| "Storage checked. Opening Unity.".into())))
+        });
+    }
 }

@@ -15,14 +15,14 @@ const BLENDER: egui::Color32 = egui::Color32::from_rgb(234, 118, 0);
 
 /// The rows of `target`'s Blender files (none without any), `indent` points in from the left.
 pub(super) fn rows(ui: &mut Ui, state: &mut State, target: &Avatar, indent: f32) {
-    let links: Vec<blender::Link> = blender::linked(&state.links, target).into_iter().cloned().collect();
+    let links = links(state, target);
     if links.is_empty() {
         return;
     }
     let ctx = ui.ctx().clone();
     let width = ui.available_width();
     // Indented only where the names keep room enough.
-    let button_w = Button::new("Open in Blender").icon(icons::ARROW_SQUARE_OUT).size(Size::Sm).desired_width(ui);
+    let button_w = Button::new("Open in Blender").icon(icons::BLENDER).size(Size::Sm).desired_width(ui);
     let indent = if width - indent - 48.0 - button_w < 180.0 { 0.0 } else { indent };
     let (head, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
     widgets::text(ui.painter(), pos2(head.left() + indent, head.center().y + 2.0), Align2::LEFT_CENTER, &Txt::caps("Blender files"));
@@ -31,9 +31,9 @@ pub(super) fn rows(ui: &mut Ui, state: &mut State, target: &Avatar, indent: f32)
         let (row, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
         let row = Rect::from_min_max(pos2(row.left() + indent, row.top()), row.max);
         let tile = Rect::from_min_size(pos2(row.left(), row.center().y - 15.0), vec2(30.0, 30.0));
-        art::tile(ui.painter(), tile, icons::CUBE, BLENDER);
+        art::tile(ui.painter(), tile, icons::BLENDER, BLENDER);
         let b = Button::new("Open in Blender")
-            .icon(icons::ARROW_SQUARE_OUT)
+            .icon(icons::BLENDER)
             .variant(Variant::Ghost)
             .size(Size::Sm)
             .enabled(!state.running())
@@ -53,11 +53,22 @@ pub(super) fn rows(ui: &mut Ui, state: &mut State, target: &Avatar, indent: f32)
             .on_hover_text(l.blend.display().to_string());
         state.anchors.insert(format!("open-blend-{k}"), br);
         if widgets::activated(&b.show_at(ui, br)) {
-            let blend = l.blend.clone();
-            state.task(&ctx, "Opening Blender…", move || {
-                let by = blender::open(&blend)?;
-                Ok(Outcome::Said(format!("{name} opened in {by}")))
-            });
+            open(&ctx, state, l);
         }
     }
+}
+
+/// The Blender files linked to `target`, newest first.
+pub(super) fn links(state: &State, target: &Avatar) -> Vec<blender::Link> {
+    blender::linked(&state.links, target).into_iter().cloned().collect()
+}
+
+/// Opens `link`'s file in Blender (on a worker; a toast says in which).
+pub(super) fn open(ctx: &egui::Context, state: &mut State, link: &blender::Link) {
+    let blend = link.blend.clone();
+    let name = blend.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    state.task(ctx, "Opening Blender…", move || {
+        let by = blender::open(&blend)?;
+        Ok(Outcome::Said(format!("{name} opened in {by}")))
+    });
 }

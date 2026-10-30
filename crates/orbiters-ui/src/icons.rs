@@ -16,6 +16,9 @@ pub const ARROW_U_UP_LEFT: &str = "\u{E08A}";
 pub const ARROW_U_UP_RIGHT: &str = "\u{E08C}";
 pub const BACKSPACE: &str = "\u{E0AE}";
 pub const BELL: &str = "\u{E0CE}";
+/// Blender's logo ([`crate::blender_logo`]), not a Phosphor glyph: drawn as [`N4N0_MARK`] is, for what opens
+/// Blender.
+pub const BLENDER: &str = "\u{F0A42}";
 pub const BOOKMARK_SIMPLE: &str = "\u{E0EA}";
 pub const BOOKMARKS_SIMPLE: &str = "\u{E5F0}";
 pub const BROADCAST: &str = "\u{E0F2}";

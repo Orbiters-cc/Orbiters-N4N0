@@ -39,12 +39,15 @@ pub struct State {
     /// The start with SteamVR as switched, until the settings say so, and SteamVR being told meanwhile.
     steamvr_shown: Option<bool>,
     steamvr_job: Option<(bool, Job<Result<bool, String>>)>,
+    /// "When SteamVR starts": Windows' sound devices in VR.
+    vr_audio: super::vr_audio::State,
 }
 
 impl State {
     /// Ends the mic test (leaving the page).
     pub fn stop_mic_test(&mut self) {
         self.mic = MicTest::default();
+        self.vr_audio.stop();
         self.vrchat.password.clear();
         self.vrchat.code.clear();
     }
@@ -377,7 +380,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(
                     ui,
                     "Orbiters watch",
-                    Some("The N4N0 mark on a wrist in VR, shown as you turn the wrist to look at it. Point at it with the other hand and pull the trigger once: the Orbiters panel floats before you, used with your controllers' lasers while VRChat keeps them. Grab its handle to move it."),
+                    Some("The N4N0 mark on a wrist in VR, shown as you turn the wrist to look at it. Point at it with the other hand and pull the trigger once: N4N0's menu opens before you (or on your avatar's N4N0 screen), used with your controllers' lasers while VRChat keeps them; pull again to close it. Grip it to move it. The Orbiters panel floats beside you from the SteamVR tab's Float button."),
                     48.0,
                     |ui| {
                         apply |= widgets::toggle(ui, "floating-watch", &mut draft.floating.watch);
@@ -448,6 +451,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     }
                 });
             }));
+            m.add(9, |ui| apply |= super::vr_audio::show(ui, cx, 9, &mut state.vr_audio, &mut draft.vr_audio));
 
             m.add(7, |ui| section(ui, cx, 7, icons::SPARKLE, "Interface", None, |ui| {
                 widgets::field(ui, "Reduce motion", Some("Calmer transitions and a still background."), 48.0, |ui| {

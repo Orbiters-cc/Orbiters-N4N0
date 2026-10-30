@@ -290,6 +290,7 @@ pub mod update;
 mod videos;
 pub mod vrchat_data;
 pub mod vrchat_login;
+pub mod vr_audio;
 mod world_captures;
 mod world_feedback;
 pub use account::open_url;

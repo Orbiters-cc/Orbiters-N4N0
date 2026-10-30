@@ -497,6 +497,9 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     })?;
     let svc = service.clone();
     std::thread::Builder::new().name("smoothing".into()).spawn(move || svc.follow_tracking())?;
+    // Windows' default sound devices while SteamVR runs (Settings, "When SteamVR starts").
+    let ctl = service.ctl.clone();
+    std::thread::Builder::new().name("vr-audio".into()).spawn(move || controller::vr_audio::run(ctl))?;
     // In desktop mode, a recording's coverage in a corner of the screen (in VR the SteamVR overlay shows it).
     crate::coverage_window::start(service.ctl.clone());
 

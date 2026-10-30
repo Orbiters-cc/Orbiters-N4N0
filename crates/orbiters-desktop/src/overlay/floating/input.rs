@@ -1,14 +1,15 @@
-//! Who points at what this turn: each hand's laser on the floating panel, its bar or the watch; the panel's pointer and
-//! its press; a grab and where the held panel goes. Poses and buttons in, what to do out, so that it is tested without
-//! SteamVR.
+//! Who points at what this turn: each hand's laser on the floating panel, N4N0's menu (and what hangs under it), the
+//! panel's bar or the watch; each surface's pointer and its press; a grab and where the held panel or menu goes. Poses
+//! and buttons in, what to do out, so that it is tested without SteamVR.
 //!
-//! Only the laser on the panel moves its pointer: a hand pointing elsewhere (at VRChat) presses nothing here, and the
-//! trigger goes to VRChat as always. A press keeps its hand's laser on the panel's plane until the trigger is let go
-//! (a slider dragged past the panel's edge, the Talk button held), and holds the pointer where it pressed until the
-//! laser has gone [`STEADY_M`] from there: pulling a trigger shakes the hand. The panel is grabbed as N4N0's screen is,
-//! by its handle (a hand within [`HANDLE_REACH_M`] of it gripping), or from afar with a grip while the laser is on the
-//! panel or its bar, or with the trigger on the handle; held, it rides the hand from where it was taken, turned
-//! towards the eyes ([`space::carry`]); let go, it stays.
+//! Only a laser on a surface moves its pointer: a hand pointing elsewhere (at VRChat) presses nothing here, and the
+//! trigger goes to VRChat as always. A press keeps its hand's laser on its surface's plane until the trigger is let go
+//! (a slider dragged past the panel's edge, the Talk button held, the music's timeline), and holds the pointer where it
+//! pressed until the laser has gone [`STEADY_M`] from there: pulling a trigger shakes the hand. The panel and the menu
+//! are grabbed as N4N0's screen is: by a grip with the hand at them (the panel's handle within [`HANDLE_REACH_M`], or
+//! their face within [`GRAB_REACH_M`]), from afar with a grip while the laser is on them (or on what hangs under them),
+//! or with the trigger on the panel's handle; held, it rides the hand from where it was taken, turned towards the eyes
+//! ([`space::carry`]); let go, it stays.
 
 use super::space::{self, Hit, Quad, V3};
 use orbiters_openvr::Matrix34;
@@ -22,10 +23,26 @@ pub struct HandIn {
     pub grab: bool,
 }
 
+/// The surfaces a laser points and presses on: the floating panel, N4N0's menu, and what hangs under the menu (the
+/// 3D worlds' pill or bar).
+pub const SURFACES: usize = 4;
+pub const PANEL: usize = 0;
+pub const MENU: usize = 1;
+/// What a grip moves: the panel or the menu (a surface's [`Surface::carries`]).
+pub const CARRIED: usize = 2;
+
+/// A surface to point at: where it is, and what a grip on it moves ([`PANEL`] or [`MENU`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Surface {
+    pub quad: Quad,
+    pub carries: usize,
+}
+
 /// What the lasers can point at this turn.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Targets {
-    pub panel: Option<Quad>,
+    pub surfaces: [Option<Surface>; SURFACES],
+    /// The panel's bar (its buttons; a grip on it moves the panel).
     pub bar: Option<Quad>,
     /// The bar's handle: its part of the bar (u0, v0, u1, v1) and its middle in the play space.
     pub handle: Option<([f32; 4], V3)>,
@@ -33,36 +50,48 @@ pub struct Targets {
     pub watch: Option<(usize, Quad)>,
 }
 
+impl Targets {
+    /// Where `carried` (the panel or the menu) is: its own surface.
+    fn carried(&self, carried: usize) -> Option<Quad> {
+        let own = if carried == PANEL { PANEL } else { MENU };
+        self.surfaces[own].map(|s| s.quad)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
-    Panel,
+    Surface(usize),
     Bar,
     Watch,
 }
 
 /// A hand this near the handle takes it with its grip, as N4N0's screen's handle is taken.
 pub const HANDLE_REACH_M: f32 = 0.12;
+/// A hand this near a surface (its face, or past its edge) takes what it moves with its grip.
+pub const GRAB_REACH_M: f32 = 0.08;
 /// A fingertip this near the watch is on it.
 pub const WATCH_TOUCH_M: f32 = 0.035;
 /// The watch is round and small: a laser this far past its edge is still on it.
 const WATCH_MARGIN_M: f32 = 0.012;
-/// A press holds the pointer where it pressed until the laser has gone this far from there on the panel.
+/// A press holds the pointer where it pressed until the laser has gone this far from there on the surface.
 pub const STEADY_M: f32 = 0.008;
 
-/// The panel held: by which hand, taken with its trigger (on the handle) or its grip, the carry frame then and the
-/// panel's place then.
+/// The panel or the menu held: by which hand, which, taken with its trigger (on the handle) or its grip, the carry
+/// frame then and its place then.
 #[derive(Clone, Copy, Debug)]
 struct Hold {
     hand: usize,
+    carried: usize,
     by_trigger: bool,
     carry: Matrix34,
     taken: Matrix34,
 }
 
-/// The panel's button held: by which hand, where it pressed, and whether the pointer still stays there.
+/// A surface's button held: by which hand, on which, where it pressed, and whether the pointer still stays there.
 #[derive(Clone, Copy, Debug)]
 struct Press {
     hand: usize,
+    surface: usize,
     uv: [f32; 2],
     point: V3,
     steady: bool,
@@ -73,12 +102,12 @@ pub struct Interaction {
     /// Each hand's trigger and grip as they were last turn (taken as held when unknown: a pull is seen go down).
     trigger: [bool; 2],
     grab: [bool; 2],
-    /// The hand the panel's pointer follows.
-    active: Option<usize>,
+    /// The hand each surface's pointer follows.
+    active: [Option<usize>; SURFACES],
     press: Option<Press>,
     hold: Option<Hold>,
-    /// The pointer was on the panel last turn.
-    pointing: bool,
+    /// Each surface's pointer was on it last turn.
+    pointing: [bool; SURFACES],
 }
 
 /// What this turn does.
@@ -86,42 +115,42 @@ pub struct Interaction {
 pub struct Outcome {
     /// Each hand's laser: what it is on and where (none: hidden).
     pub lasers: [Option<(Target, Hit)>; 2],
-    /// The panel's pointer (u, v), none while no laser is on the panel.
-    pub pointer: Option<[f32; 2]>,
-    /// The panel's button went down (`true`) or up (`false`): at the pointer, or where it last was.
-    pub button: Option<bool>,
-    /// The pointer left the panel.
-    pub gone: bool,
+    /// Each surface's pointer (u, v), none while no laser is on it.
+    pub pointer: [Option<[f32; 2]>; SURFACES],
+    /// A surface's button went down (`true`) or up (`false`): at its pointer, or where it last was.
+    pub button: [Option<bool>; SURFACES],
+    /// The pointer left the surface.
+    pub gone: [bool; SURFACES],
     /// A laser on the bar (u, v), and a trigger pulled there.
     pub bar_hover: Option<[f32; 2]>,
     pub bar_press: Option<[f32; 2]>,
     /// A laser or a fingertip on the watch, and a trigger pulled there.
     pub watch_hover: bool,
     pub watch_press: bool,
-    /// Where the held panel is now; it was let go this turn (where it last was is to keep).
-    pub moved: Option<Matrix34>,
-    pub released: bool,
-    /// The hand holding the panel.
+    /// Where the held panel or menu is now; it was let go this turn (where it last was is to keep).
+    pub moved: [Option<Matrix34>; CARRIED],
+    pub released: [bool; CARRIED],
+    /// The hand holding the panel or the menu.
     pub holding: Option<usize>,
 }
 
 impl Default for Interaction {
     fn default() -> Self {
-        Self { trigger: [true; 2], grab: [true; 2], active: None, press: None, hold: None, pointing: false }
+        Self { trigger: [true; 2], grab: [true; 2], active: [None; SURFACES], press: None, hold: None, pointing: [false; SURFACES] }
     }
 }
 
 impl Interaction {
-    /// The hand holding the panel.
+    /// The hand holding the panel or the menu.
     pub fn holding(&self) -> Option<usize> {
         self.hold.map(|h| h.hand)
     }
 
-    /// Everything let go (the dashboard took the controllers, nothing to point at). Returns whether the panel's button
+    /// Everything let go (the dashboard took the controllers, nothing to point at). Returns the surface whose button
     /// was held (its end is the caller's to send). The buttons are then taken as held: one held meanwhile presses
     /// nothing when there is something to point at again, only a new pull does.
-    pub fn reset(&mut self) -> bool {
-        let pressed = self.press.is_some();
+    pub fn reset(&mut self) -> Option<usize> {
+        let pressed = self.press.map(|p| p.surface);
         *self = Self::default();
         pressed
     }
@@ -134,27 +163,27 @@ impl Interaction {
         let pulled = |i: usize| trigger[i] && !was_trigger[i];
         let gripped = |i: usize| grab[i] && !was_grab[i];
 
-        // The held panel follows its hand, until that hand lets go (or is lost, or the panel closed).
+        // The held panel or menu follows its hand, until that hand lets go (or is lost, or it closed).
         if let Some(hold) = self.hold {
             let holds = if hold.by_trigger { trigger[hold.hand] } else { grab[hold.hand] };
-            match hands[hold.hand].filter(|_| holds && targets.panel.is_some()) {
-                Some(h) => out.moved = Some(space::carried(&space::carry(space::position(&h.grip), head), &hold.carry, &hold.taken)),
+            match hands[hold.hand].filter(|_| holds && targets.carried(hold.carried).is_some()) {
+                Some(h) => out.moved[hold.carried] = Some(space::carried(&space::carry(space::position(&h.grip), head), &hold.carry, &hold.taken)),
                 None => {
                     self.hold = None;
-                    out.released = true;
+                    out.released[hold.carried] = true;
                 }
             }
         }
 
-        // Where each laser is: the nearest of what it meets; a press keeps its laser on the panel's plane.
+        // Where each laser is: the nearest of what it meets; a press keeps its laser on its surface's plane.
         for (i, hand) in hands.iter().enumerate() {
             let Some(h) = hand else { continue };
             if self.hold.is_some_and(|hold| hold.hand == i) {
                 continue;
             }
             let (o, d) = space::ray(&h.tip);
-            if self.press.is_some_and(|p| p.hand == i) {
-                out.lasers[i] = targets.panel.and_then(|q| q.plane_hit(o, d)).map(|hit| (Target::Panel, hit));
+            if let Some(p) = self.press.filter(|p| p.hand == i) {
+                out.lasers[i] = targets.surfaces[p.surface].and_then(|s| s.quad.plane_hit(o, d)).map(|hit| (Target::Surface(p.surface), hit));
                 continue;
             }
             let mut best: Option<(Target, Hit)> = None;
@@ -165,7 +194,9 @@ impl Interaction {
                     }
                 }
             };
-            consider(Target::Panel, targets.panel.and_then(|q| q.hit(o, d, 0.0)));
+            for (s, surface) in targets.surfaces.iter().enumerate() {
+                consider(Target::Surface(s), surface.and_then(|q| q.quad.hit(o, d, 0.0)));
+            }
             consider(Target::Bar, targets.bar.and_then(|q| q.hit(o, d, 0.0)));
             if let Some((_, watch)) = targets.watch.filter(|(on, _)| *on != i) {
                 let (at, gap) = watch.nearest(o);
@@ -178,72 +209,84 @@ impl Interaction {
             out.lasers[i] = best;
         }
 
-        // A grip on the panel or its bar, or at the handle, takes the panel (from the other hand, too).
-        for i in 0..2 {
-            let (Some(h), Some(panel)) = (hands[i], targets.panel) else { continue };
+        // A grip with the laser on a surface (or the panel's bar), at the panel's handle or at a surface takes what it
+        // moves (from the other hand, too).
+        for (i, hand) in hands.iter().enumerate() {
+            let Some(h) = *hand else { continue };
             if !gripped(i) || self.press.is_some_and(|p| p.hand == i) {
                 continue;
             }
-            let on = matches!(out.lasers[i], Some((Target::Panel | Target::Bar, _)));
-            let near = targets.handle.is_some_and(|(_, at)| space::length(space::sub(space::position(&h.grip), at)) < HANDLE_REACH_M);
-            if on || near {
-                let at = out.moved.unwrap_or(panel.transform);
-                self.take(&mut out, i, false, &h, head, at);
+            let hand = space::position(&h.grip);
+            let carried = match out.lasers[i] {
+                Some((Target::Surface(s), _)) => targets.surfaces[s].map(|s| s.carries),
+                Some((Target::Bar, _)) => Some(PANEL),
+                _ => None,
+            }
+            .or_else(|| targets.handle.filter(|(_, at)| space::length(space::sub(hand, *at)) < HANDLE_REACH_M).map(|_| PANEL))
+            .or_else(|| targets.surfaces.iter().flatten().find(|s| s.quad.nearest(hand).1 < GRAB_REACH_M).map(|s| s.carries));
+            let at = carried.and_then(|c| Some((c, out.moved[c].or(targets.carried(c).map(|q| q.transform))?)));
+            if let Some((carried, at)) = at {
+                self.take(&mut out, i, carried, false, &h, head, at);
             }
         }
 
-        // A trigger pulled: on the watch, a bar's button (the handle takes the panel), the panel's button.
-        for i in 0..2 {
-            let Some(h) = hands[i] else { continue };
+        // A trigger pulled: on the watch, a bar's button (the handle takes the panel), a surface's button.
+        for (i, hand) in hands.iter().enumerate() {
+            let Some(h) = *hand else { continue };
             if !pulled(i) || self.hold.is_some_and(|hold| hold.hand == i) {
                 continue;
             }
             match out.lasers[i] {
                 Some((Target::Watch, _)) => out.watch_press = true,
-                Some((Target::Bar, hit)) => match (targets.handle, targets.panel) {
+                Some((Target::Bar, hit)) => match (targets.handle, targets.carried(PANEL)) {
                     (Some((r, _)), Some(panel)) if (r[0]..=r[2]).contains(&hit.uv[0]) && (r[1]..=r[3]).contains(&hit.uv[1]) => {
-                        let at = out.moved.unwrap_or(panel.transform);
-                        self.take(&mut out, i, true, &h, head, at);
+                        let at = out.moved[PANEL].unwrap_or(panel.transform);
+                        self.take(&mut out, i, PANEL, true, &h, head, at);
                     }
                     _ => out.bar_press = Some(hit.uv),
                 },
-                Some((Target::Panel, hit)) if self.press.is_none() => {
-                    self.active = Some(i);
-                    self.press = Some(Press { hand: i, uv: hit.uv, point: hit.point, steady: true });
-                    out.button = Some(true);
+                Some((Target::Surface(s), hit)) if self.press.is_none() => {
+                    self.active[s] = Some(i);
+                    self.press = Some(Press { hand: i, surface: s, uv: hit.uv, point: hit.point, steady: true });
+                    out.button[s] = Some(true);
                 }
                 _ => {}
             }
         }
 
-        // The pointer: the pressing hand's, else the hand it followed while that one stays on the panel, else whichever
-        // is on it (the right first).
-        let on_panel = |i: usize| matches!(out.lasers[i], Some((Target::Panel, _)));
-        self.active = match self.press {
-            Some(p) => Some(p.hand),
-            None => self.active.filter(|&i| on_panel(i)).or_else(|| [1, 0].into_iter().find(|&i| on_panel(i))),
-        };
-        if let Some((_, hit)) = self.active.and_then(|i| out.lasers[i]) {
-            out.pointer = Some(hit.uv);
-            if let Some(p) = self.press.as_mut().filter(|p| p.steady) {
-                if space::length(space::sub(hit.point, p.point)) < STEADY_M {
-                    out.pointer = Some(p.uv);
-                } else {
-                    p.steady = false;
+        // Each surface's pointer: the pressing hand's, else the hand it followed while that one stays on it, else
+        // whichever is on it (the right first).
+        let on = |i: usize, s: usize| matches!(out.lasers[i], Some((Target::Surface(t), _)) if t == s);
+        for s in 0..SURFACES {
+            self.active[s] = match self.press.filter(|p| p.surface == s) {
+                Some(p) => Some(p.hand),
+                None => self.active[s].filter(|&i| on(i, s)).or_else(|| [1, 0].into_iter().find(|&i| on(i, s))),
+            };
+            if let Some((_, hit)) = self.active[s].and_then(|i| out.lasers[i]) {
+                out.pointer[s] = Some(hit.uv);
+                if let Some(p) = self.press.as_mut().filter(|p| p.surface == s && p.steady) {
+                    if space::length(space::sub(hit.point, p.point)) < STEADY_M {
+                        out.pointer[s] = Some(p.uv);
+                    } else {
+                        p.steady = false;
+                    }
                 }
             }
         }
-        // The press ends as its trigger is let go (or its hand is lost).
+        // The press ends as its trigger is let go (or its hand is lost, or its surface went).
         if let Some(p) = self.press {
-            if !trigger[p.hand] || targets.panel.is_none() {
+            if !trigger[p.hand] || targets.surfaces[p.surface].is_none() {
                 self.press = None;
-                out.button = Some(false);
+                out.button[p.surface] = Some(false);
             }
         }
-        out.gone = self.pointing && out.pointer.is_none();
-        self.pointing = out.pointer.is_some();
+        for s in 0..SURFACES {
+            out.gone[s] = self.pointing[s] && out.pointer[s].is_none();
+            self.pointing[s] = out.pointer[s].is_some();
+        }
 
-        let hover = |t: Target| self.active.into_iter().chain([1, 0]).find_map(|i| out.lasers[i].filter(|(on, _)| *on == t)).map(|(_, hit)| hit.uv);
+        let first = self.active[PANEL];
+        let hover = |t: Target| first.into_iter().chain([1, 0]).find_map(|i| out.lasers[i].filter(|(on, _)| *on == t)).map(|(_, hit)| hit.uv);
         out.bar_hover = hover(Target::Bar);
         out.watch_hover = hover(Target::Watch).is_some();
         out.holding = self.holding();
@@ -252,13 +295,20 @@ impl Interaction {
         out
     }
 
-    /// Hand `i` takes the panel where it is (`at`), with its trigger or its grip.
-    fn take(&mut self, out: &mut Outcome, i: usize, by_trigger: bool, h: &HandIn, head: &Matrix34, at: Matrix34) {
-        self.hold = Some(Hold { hand: i, by_trigger, carry: space::carry(space::position(&h.grip), head), taken: at });
+    /// Hand `i` takes the panel or the menu (`carried`) where it is (`at`), with its trigger or its grip.
+    #[allow(clippy::too_many_arguments)]
+    fn take(&mut self, out: &mut Outcome, i: usize, carried: usize, by_trigger: bool, h: &HandIn, head: &Matrix34, at: Matrix34) {
+        if let Some(was) = self.hold.filter(|hold| hold.carried != carried) {
+            // The other hand held the other one: it stays where it was.
+            out.released[was.carried] = true;
+        }
+        self.hold = Some(Hold { hand: i, carried, by_trigger, carry: space::carry(space::position(&h.grip), head), taken: at });
         out.lasers[i] = None;
-        out.moved = Some(at);
-        if self.active == Some(i) {
-            self.active = None;
+        out.moved[carried] = Some(at);
+        for active in &mut self.active {
+            if *active == Some(i) {
+                *active = None;
+            }
         }
     }
 }
@@ -278,7 +328,7 @@ mod tests {
     fn targets(panel: Matrix34) -> Targets {
         let bar = space::offset(&panel, [0.0, -(PANEL_H / 2.0 + 0.035), 0.0]);
         Targets {
-            panel: Some(Quad { transform: panel, width: PANEL_W, height: PANEL_H }),
+            surfaces: [Some(Surface { quad: Quad { transform: panel, width: PANEL_W, height: PANEL_H }, carries: PANEL }), None, None, None],
             bar: Some(Quad { transform: bar, width: 0.3, height: 0.045 }),
             handle: Some(([0.3, 0.0, 0.7, 1.0], position(&bar))),
             watch: None,
@@ -300,26 +350,26 @@ mod tests {
         let right_hand = [0.2, 1.2, -0.2];
         // Pointing at its middle: the pointer there, the right hand's laser shown, nothing pressed.
         let out = i.step(&head(), [None, Some(hand(right_hand, middle, false, false))], &t);
-        let uv = out.pointer.unwrap();
+        let uv = out.pointer[PANEL].unwrap();
         assert!((uv[0] - 0.5).abs() < 0.01 && (uv[1] - 0.5).abs() < 0.01, "{uv:?}");
-        assert!(matches!(out.lasers[1], Some((Target::Panel, _))) && out.lasers[0].is_none() && out.button.is_none());
+        assert!(matches!(out.lasers[1], Some((Target::Surface(PANEL), _))) && out.lasers[0].is_none() && out.button[PANEL].is_none());
         // The trigger pulled there: down.
         let out = i.step(&head(), [None, Some(hand(right_hand, middle, true, false))], &t);
-        assert_eq!(out.button, Some(true));
+        assert_eq!(out.button[PANEL], Some(true));
         // Let go: up, a click.
         let out = i.step(&head(), [None, Some(hand(right_hand, middle, false, false))], &t);
-        assert_eq!(out.button, Some(false));
+        assert_eq!(out.button[PANEL], Some(false));
         // Pointing at VRChat, away from the panel: the trigger presses nothing here and no laser shows.
         let away = [3.0, 1.0, 1.0];
         let out = i.step(&head(), [None, Some(hand(right_hand, away, false, false))], &t);
-        assert!(out.gone && out.pointer.is_none() && out.lasers[1].is_none());
+        assert!(out.gone[PANEL] && out.pointer[PANEL].is_none() && out.lasers[1].is_none());
         for trigger in [true, false, true] {
             let out = i.step(&head(), [None, Some(hand(right_hand, away, trigger, false))], &t);
-            assert!(out.button.is_none() && out.pointer.is_none() && !out.gone);
+            assert!(out.button[PANEL].is_none() && out.pointer[PANEL].is_none() && !out.gone[PANEL]);
         }
         // Coming back with the trigger still held clicks nothing (only a pull on it does).
         let out = i.step(&head(), [None, Some(hand(right_hand, middle, true, false))], &t);
-        assert!(out.pointer.is_some() && out.button.is_none());
+        assert!(out.pointer[PANEL].is_some() && out.button[PANEL].is_none());
     }
 
     #[test]
@@ -330,22 +380,22 @@ mod tests {
         let at = [0.1, 1.2, -0.1];
         let middle = position(&panel);
         i.step(&head(), [None, Some(hand(at, middle, false, false))], &t);
-        let down = i.step(&head(), [None, Some(hand(at, middle, true, false))], &t).pointer.unwrap();
+        let down = i.step(&head(), [None, Some(hand(at, middle, true, false))], &t).pointer[PANEL].unwrap();
         // The pull shakes the laser 4 mm: the pointer stays where it pressed.
         let shaken = i.step(&head(), [None, Some(hand(at, space::add(middle, [0.004, 0.0, 0.0]), true, false))], &t);
-        assert_eq!(shaken.pointer, Some(down));
+        assert_eq!(shaken.pointer[PANEL], Some(down));
         // Dragged on, past the panel's right edge: the pointer follows, past 1.
         let past = i.step(&head(), [None, Some(hand(at, space::add(middle, [0.6, 0.0, 0.0]), true, false))], &t);
-        assert!(past.pointer.unwrap()[0] > 1.0 && matches!(past.lasers[1], Some((Target::Panel, _))), "{past:?}");
+        assert!(past.pointer[PANEL].unwrap()[0] > 1.0 && matches!(past.lasers[1], Some((Target::Surface(PANEL), _))), "{past:?}");
         // Back near where it pressed: it follows now (no longer held still).
         let back = i.step(&head(), [None, Some(hand(at, space::add(middle, [0.004, 0.0, 0.0]), true, false))], &t);
-        assert_ne!(back.pointer, Some(down));
+        assert_ne!(back.pointer[PANEL], Some(down));
         // Let go out there: up, then the pointer is gone with the laser.
         i.step(&head(), [None, Some(hand(at, space::add(middle, [0.6, 0.0, 0.0]), true, false))], &t);
         let up = i.step(&head(), [None, Some(hand(at, space::add(middle, [0.6, 0.0, 0.0]), false, false))], &t);
-        assert_eq!(up.button, Some(false));
+        assert_eq!(up.button[PANEL], Some(false));
         let after = i.step(&head(), [None, Some(hand(at, space::add(middle, [0.6, 0.0, 0.0]), false, false))], &t);
-        assert!(after.gone && after.lasers[1].is_none());
+        assert!(after.gone[PANEL] && after.lasers[1].is_none());
     }
 
     #[test]
@@ -357,14 +407,14 @@ mod tests {
         let (at, middle) = ([0.1, 1.2, -0.1], position(&panel));
         let mut i = Interaction::default();
         let out = i.step(&head(), [None, Some(hand(at, middle, true, true))], &t);
-        assert!(out.button.is_none() && out.holding.is_none() && out.pointer.is_some());
+        assert!(out.button[PANEL].is_none() && out.holding.is_none() && out.pointer[PANEL].is_some());
         i.step(&head(), [None, Some(hand(at, middle, true, true))], &t);
         // After a reset (SteamVR's dashboard came and went) as well.
         i.step(&head(), [None, Some(hand(at, middle, false, false))], &t);
         i.reset();
-        assert!(i.step(&head(), [None, Some(hand(at, middle, true, false))], &t).button.is_none());
+        assert!(i.step(&head(), [None, Some(hand(at, middle, true, false))], &t).button[PANEL].is_none());
         i.step(&head(), [None, Some(hand(at, middle, false, false))], &t);
-        assert_eq!(i.step(&head(), [None, Some(hand(at, middle, true, false))], &t).button, Some(true), "a new pull");
+        assert_eq!(i.step(&head(), [None, Some(hand(at, middle, true, false))], &t).button[PANEL], Some(true), "a new pull");
     }
 
     #[test]
@@ -374,15 +424,15 @@ mod tests {
         let mut i = Interaction::default();
         let (at, middle) = ([0.1, 1.2, -0.1], position(&panel));
         i.step(&head(), [None, Some(hand(at, middle, false, false))], &t);
-        assert_eq!(i.step(&head(), [None, Some(hand(at, middle, true, false))], &t).button, Some(true));
+        assert_eq!(i.step(&head(), [None, Some(hand(at, middle, true, false))], &t).button[PANEL], Some(true));
         let out = i.step(&head(), [None, None], &t);
-        assert_eq!(out.button, Some(false));
-        assert!(out.gone);
+        assert_eq!(out.button[PANEL], Some(false));
+        assert!(out.gone[PANEL]);
         // And reset with a press held says so.
         i.step(&head(), [None, Some(hand(at, middle, false, false))], &t);
         i.step(&head(), [None, Some(hand(at, middle, true, false))], &t);
-        assert!(i.reset());
-        assert!(!i.reset());
+        assert_eq!(i.reset(), Some(PANEL));
+        assert_eq!(i.reset(), None);
     }
 
     #[test]
@@ -395,17 +445,17 @@ mod tests {
         let right_spot = space::apply(&panel, [0.2, -0.1, 0.0]);
         let (l, r) = ([-0.2, 1.2, -0.1], [0.2, 1.2, -0.1]);
         // The left hand points first: it has the pointer; the right one joining does not take it.
-        let a = i.step(&head(), [Some(hand(l, left_spot, false, false)), None], &t).pointer.unwrap();
+        let a = i.step(&head(), [Some(hand(l, left_spot, false, false)), None], &t).pointer[PANEL].unwrap();
         let b = i.step(&head(), [Some(hand(l, left_spot, false, false)), Some(hand(r, right_spot, false, false))], &t);
-        assert_eq!(b.pointer, Some(a));
+        assert_eq!(b.pointer[PANEL], Some(a));
         assert!(b.lasers[0].is_some() && b.lasers[1].is_some(), "both lasers show");
         // The right one pulls its trigger: it takes the pointer and presses where it points.
         let c = i.step(&head(), [Some(hand(l, left_spot, false, false)), Some(hand(r, right_spot, true, false))], &t);
-        assert_eq!(c.button, Some(true));
-        assert!(c.pointer.unwrap()[0] > 0.6, "{c:?}");
+        assert_eq!(c.button[PANEL], Some(true));
+        assert!(c.pointer[PANEL].unwrap()[0] > 0.6, "{c:?}");
         // The left one pulls meanwhile: nothing (one press at a time).
         let d = i.step(&head(), [Some(hand(l, middle, true, false)), Some(hand(r, right_spot, true, false))], &t);
-        assert!(d.button.is_none() && d.pointer.unwrap()[0] > 0.6);
+        assert!(d.button[PANEL].is_none() && d.pointer[PANEL].unwrap()[0] > 0.6);
     }
 
     #[test]
@@ -420,15 +470,15 @@ mod tests {
         let out = i.step(&head(), [Some(hand(at, [0.0, 0.0, -3.0], false, true)), None], &t);
         assert_eq!(out.holding, Some(0));
         assert!(out.lasers[0].is_none());
-        assert!(space::near(&out.moved.unwrap(), &panel, 1e-4, 1e-5), "taken where it is");
+        assert!(space::near(&out.moved[PANEL].unwrap(), &panel, 1e-4, 1e-5), "taken where it is");
         // The hand moves 20 cm left and 10 cm up: the panel goes along.
         let moved_hand = space::add(at, [-0.2, 0.1, 0.0]);
         let out = i.step(&head(), [Some(hand(moved_hand, [0.0, 0.0, -3.0], false, true)), None], &t);
-        let now = out.moved.unwrap();
+        let now = out.moved[PANEL].unwrap();
         assert!(position(&now)[0] < -0.15 && position(&now)[1] > position(&panel)[1] + 0.08, "{:?}", position(&now));
         // Let go: released there (the caller keeps that place); nothing more moves it.
         let out = i.step(&head(), [Some(hand(moved_hand, [0.0, 0.0, -3.0], false, false)), None], &t);
-        assert!(out.released && out.moved.is_none() && out.holding.is_none());
+        assert!(out.released[PANEL] && out.moved[PANEL].is_none() && out.holding.is_none());
         // Far from the handle and pointing elsewhere, a grip takes nothing.
         let far = [0.6, 1.0, 0.3];
         i.step(&head(), [Some(hand(far, [3.0, 1.0, 0.0], false, false)), None], &t);
@@ -450,9 +500,9 @@ mod tests {
         i.step(&head(), [None, Some(hand(at, handle, false, false))], &t);
         let out = i.step(&head(), [None, Some(hand(at, handle, true, false))], &t);
         assert_eq!(out.holding, Some(1));
-        assert!(out.bar_press.is_none() && out.button.is_none());
+        assert!(out.bar_press.is_none() && out.button[PANEL].is_none());
         assert_eq!(i.step(&head(), [None, Some(hand(at, handle, true, false))], &t).holding, Some(1));
-        assert!(i.step(&head(), [None, Some(hand(at, handle, false, false))], &t).released);
+        assert!(i.step(&head(), [None, Some(hand(at, handle, false, false))], &t).released[PANEL]);
         // The trigger on the bar beside the handle: a button.
         let mut i = Interaction::default();
         let bar = t.bar.unwrap();
@@ -490,5 +540,82 @@ mod tests {
         i.step(&head(), [None, Some(miss(false))], &t);
         let out = i.step(&head(), [None, Some(miss(true))], &t);
         assert!(!out.watch_hover && !out.watch_press);
+    }
+
+    /// The panel to the left and N4N0's menu ahead, with the 3D worlds' pill under the menu.
+    fn with_menu() -> (Targets, Matrix34, Matrix34) {
+        let panel = space::facing([-0.9, 1.4, -0.6], [0.0, 1.6, 0.0], [0.0, 1.0, 0.0]).unwrap();
+        let menu = before_eyes(&head(), 0.8, 0.24);
+        let mut t = targets(panel);
+        t.surfaces[MENU] = Some(Surface { quad: Quad { transform: menu, width: 0.9, height: 0.5 }, carries: MENU });
+        let pill = space::offset(&menu, [0.0, -0.3, 0.0]);
+        t.surfaces[2] = Some(Surface { quad: Quad { transform: pill, width: 0.2, height: 0.05 }, carries: MENU });
+        (t, panel, menu)
+    }
+
+    #[test]
+    fn the_menu_points_and_presses_beside_the_panel() {
+        let (t, panel, menu) = with_menu();
+        let mut i = Interaction::default();
+        let at = [0.15, 1.2, -0.1];
+        let middle = position(&menu);
+        let out = i.step(&head(), [None, Some(hand(at, middle, false, false))], &t);
+        assert!(matches!(out.lasers[1], Some((Target::Surface(MENU), _))) && out.pointer[PANEL].is_none());
+        let uv = out.pointer[MENU].unwrap();
+        assert!((uv[0] - 0.5).abs() < 0.01 && (uv[1] - 0.5).abs() < 0.01, "{uv:?}");
+        assert_eq!(i.step(&head(), [None, Some(hand(at, middle, true, false))], &t).button, [None, Some(true), None, None]);
+        // Dragged onto the panel while pressed: the press stays on the menu's plane.
+        let dragged = i.step(&head(), [None, Some(hand(at, position(&panel), true, false))], &t);
+        assert!(matches!(dragged.lasers[1], Some((Target::Surface(MENU), _))) && dragged.pointer[PANEL].is_none());
+        let up = i.step(&head(), [None, Some(hand(at, position(&panel), false, false))], &t);
+        assert_eq!(up.button[MENU], Some(false));
+        // Let go, the laser is on the panel now: the menu's pointer leaves, the panel's comes.
+        let on_panel = i.step(&head(), [None, Some(hand(at, position(&panel), false, false))], &t);
+        assert!(on_panel.gone[MENU] && on_panel.pointer[PANEL].is_some() && on_panel.pointer[MENU].is_none());
+        // The pill under the menu is a surface of its own.
+        let pill = position(&t.surfaces[2].unwrap().quad.transform);
+        let out = i.step(&head(), [None, Some(hand(at, pill, false, false))], &t);
+        assert!(out.pointer[2].is_some() && out.pointer[MENU].is_none());
+        assert_eq!(i.step(&head(), [None, Some(hand(at, pill, true, false))], &t).button[2], Some(true));
+    }
+
+    #[test]
+    fn the_menu_is_grabbed_from_afar_by_its_pill_or_at_hand_and_stays() {
+        let (t, panel, menu) = with_menu();
+        let at = [0.15, 1.2, -0.1];
+        // A grip with the laser on it: the menu rides the hand, the panel stays.
+        let mut i = Interaction::default();
+        i.step(&head(), [None, Some(hand(at, position(&menu), false, false))], &t);
+        let out = i.step(&head(), [None, Some(hand(at, position(&menu), false, true))], &t);
+        assert_eq!((out.holding, out.moved[PANEL]), (Some(1), None));
+        assert!(space::near(&out.moved[MENU].unwrap(), &menu, 1e-4, 1e-5), "taken where it is");
+        let moved = i.step(&head(), [None, Some(hand(space::add(at, [0.3, 0.0, 0.0]), position(&menu), false, true))], &t).moved[MENU].unwrap();
+        assert!(position(&moved)[0] > position(&menu)[0] + 0.2, "{:?}", position(&moved));
+        assert!(space::dot(space::axis(&moved, 2), space::sub(position(&head()), position(&moved))) > 0.0, "turned toward the eyes");
+        let out = i.step(&head(), [None, Some(hand(space::add(at, [0.3, 0.0, 0.0]), position(&menu), false, false))], &t);
+        assert!(out.released[MENU] && !out.released[PANEL] && out.moved == [None, None]);
+        // A grip with the laser on the pill takes the menu too, where the menu is.
+        let mut i = Interaction::default();
+        let pill = position(&t.surfaces[2].unwrap().quad.transform);
+        i.step(&head(), [None, Some(hand(at, pill, false, false))], &t);
+        assert!(space::near(&i.step(&head(), [None, Some(hand(at, pill, false, true))], &t).moved[MENU].unwrap(), &menu, 1e-4, 1e-5));
+        // A hand at its edge (5 cm off it), pointing away, takes it with a grip; 20 cm away it takes nothing.
+        let mut i = Interaction::default();
+        let near = space::apply(&menu, [0.47, 0.0, 0.03]);
+        i.step(&head(), [Some(hand(near, [0.0, 5.0, 0.0], false, false)), None], &t);
+        assert_eq!(i.step(&head(), [Some(hand(near, [0.0, 5.0, 0.0], false, true)), None], &t).holding, Some(0));
+        let mut i = Interaction::default();
+        let far = space::apply(&menu, [0.0, 0.0, 0.2]);
+        i.step(&head(), [Some(hand(far, [0.0, 5.0, 0.0], false, false)), None], &t);
+        assert!(i.step(&head(), [Some(hand(far, [0.0, 5.0, 0.0], false, true)), None], &t).holding.is_none());
+        // The menu gone while held (closed): let go.
+        let mut i = Interaction::default();
+        i.step(&head(), [None, Some(hand(at, position(&menu), false, false))], &t);
+        i.step(&head(), [None, Some(hand(at, position(&menu), false, true))], &t);
+        let mut closed = t;
+        closed.surfaces[MENU] = None;
+        closed.surfaces[2] = None;
+        assert!(i.step(&head(), [None, Some(hand(at, position(&menu), false, true))], &closed).released[MENU]);
+        let _ = panel;
     }
 }

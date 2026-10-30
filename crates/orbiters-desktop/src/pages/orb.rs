@@ -231,7 +231,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(
                     ui,
                     "Controller button",
-                    Some("SteamVR's \"Open N4N0's menu\" binding for Orbiters: a double press of the left stick, unless you change it in SteamVR's controller settings."),
+                    Some("SteamVR's \"Open N4N0's menu\" binding for Orbiters: two quick taps on the left thumbrest or trackpad (a double press of X on controllers with neither), unless you change it in SteamVR's controller settings. The watch on your wrist opens it too."),
                     48.0,
                     |ui| {
                         apply |= widgets::toggle(ui, "orb-menu-button", &mut draft.orb.menu.button);

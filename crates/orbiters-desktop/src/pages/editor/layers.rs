@@ -50,7 +50,11 @@ pub(super) fn show(ed: &mut Editor, ui: &mut Ui, rect: Rect, title: &str) {
         crop_row(ed, ui);
         if ed.doc.sources.is_empty() {
             stack_rows(ed, ui, None, 0.0);
-            picture_row(ui, "The picture", icons::IMAGE, "Never changed: saving makes a copy");
+            if ed.live.is_some() {
+                picture_row(ui, "The 3D view", icons::CUBE, "Drawn live as you move around");
+            } else {
+                picture_row(ui, "The picture", icons::IMAGE, "Never changed: saving makes a copy");
+            }
         } else {
             group_row(ui, "Whole picture", icons::IMAGES, &format!("{} over all its layers", count(ed.doc.layers.len())));
             stack_rows(ed, ui, None, 0.0);
@@ -218,6 +222,9 @@ fn crop_row(ed: &mut Editor, ui: &mut Ui) {
     }
     if g.straighten != 0.0 {
         parts.push(format!("straightened {:.1}°", g.straighten));
+    }
+    if g.vertical != 0.0 || g.horizontal != 0.0 {
+        parts.push("perspective".to_string());
     }
     if g.crop != orbiters_ui::photo::Crop::FULL {
         parts.push(if g.aspect == orbiters_ui::photo::Aspect::Free { "cropped".into() } else { format!("cropped {}", g.aspect.name()) });

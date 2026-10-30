@@ -7,6 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod audio_devices;
 mod backend;
 mod bench;
 mod capture_picture;
@@ -43,7 +44,17 @@ fn main() -> anyhow::Result<()> {
     orbiters_core::panic_log::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("--screenshot") => screenshot::run(&args[1..]),
+        Some("--screenshot") => {
+            // On a thread of its own: its table of scenarios and a page's frames outgrow the main thread's 1 MB stack in
+            // debug builds (screenshot::run alone takes some 700 KB there).
+            let args = args[1..].to_vec();
+            std::thread::Builder::new()
+                .name("screenshots".into())
+                .stack_size(16 << 20)
+                .spawn(move || screenshot::run(&args))
+                .map_err(anyhow::Error::from)
+                .and_then(|t| t.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the screenshots stopped on a panic"))))
+        }
         Some("--gpu-bench") => bench::run(&args[1..]),
         Some("--window") => window::run(&args[1..]),
         Some("--overlay") => overlay::run(&args[1..]),

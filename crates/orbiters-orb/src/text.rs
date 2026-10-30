@@ -198,7 +198,15 @@ pub struct TextSender {
     /// while OSC is down. Sending those blocks whole at every page puts such a panel right again at the next page.
     force: u64,
     fresh: bool,
+    /// The page on display goes out at the phases' pace until it is whole (a list the owner asked for and picks from:
+    /// they see it at once, everyone else as the resends that follow reach them), then at the steps' again.
+    quick: bool,
+    /// Until when something else (N4N0's screen) last took the channel.
+    held_until: Option<Instant>,
 }
+
+/// Between a block's pointer and the next block of a quick page ([`TextSender::show_quick`]).
+pub const QUICK_STEP: Duration = PHASE_GAP;
 
 impl TextSender {
     /// A sender for a prop with `sync` text sync values (4, 8 or 16), one step every `step`.
@@ -221,6 +229,8 @@ impl TextSender {
             pointer: None,
             force: 0,
             fresh: false,
+            quick: false,
+            held_until: None,
         }
     }
 
@@ -235,12 +245,28 @@ impl TextSender {
     /// Shows `text` from the next step on, replacing what was shown or waiting; blank text hides the panel.
     pub fn show(&mut self, text: &str) {
         self.sticky = false;
+        self.quick = false;
         self.load(text);
+    }
+
+    /// Shows `text` as [`TextSender::show`] does, its blocks [`QUICK_STEP`] apart until it is whole: a short list the
+    /// owner opened and picks from (N4N0's Call menu), seen at once by them (their avatar's parameters apply as they
+    /// come). Remote viewers may miss blocks that go faster than [`orb::MIN_STEP_MS`]; the resends while it is up
+    /// bring them, a step at a time.
+    pub fn show_quick(&mut self, text: &str) {
+        self.sticky = false;
+        self.load(text);
+        self.quick = true;
+        // The first block goes now, not at the end of the step under way (unless N4N0's screen has the channel).
+        if self.phase.is_none() {
+            self.next_step = self.held_until.filter(|t| *t > Instant::now());
+        }
     }
 
     /// Shows `text` and keeps its last page up until something replaces or hides it.
     pub fn show_sticky(&mut self, text: &str) {
         self.sticky = true;
+        self.quick = false;
         self.load(text);
     }
 
@@ -328,6 +354,7 @@ impl TextSender {
     /// Something else uses the text channel until `at` (N4N0's screen takes its turns): no step before then, and the
     /// pointer is no longer known (the next block moves it to 0 first). A block between its phases starts again later.
     pub fn hold_until(&mut self, at: Instant) {
+        self.held_until = Some(at);
         self.next_step = Some(self.next_step.map_or(at, |t| t.max(at)));
         self.phase = None;
         self.pointer = None;
@@ -367,7 +394,7 @@ impl TextSender {
         }
         let out = self.step_messages(now);
         if !out.is_empty() {
-            self.next_step = Some(now + self.step);
+            self.next_step = Some(now + if self.quick { QUICK_STEP } else { self.step });
         }
         out
     }
@@ -393,12 +420,14 @@ impl TextSender {
                 let n = self.sync;
                 self.sent[block * n..(block + 1) * n].copy_from_slice(&cells);
                 self.force &= !(1u64 << block);
-                self.next_step = Some(now + self.step);
-                // Complete once its last block went: its reading time starts now.
+                self.next_step = Some(now + if self.quick { QUICK_STEP } else { self.step });
+                // Complete once its last block went: its reading time starts now (and a quick page goes on at the
+                // steps' pace, its resends for whoever missed a block).
                 if let Some(page) = self.current {
                     let whole = (0..orb::pointer_count(n)).all(|b| page[b * n..(b + 1) * n] == self.sent[b * n..(b + 1) * n]);
                     if self.complete_at.is_none() && self.force == 0 && whole {
                         self.complete_at = Some(now);
+                        self.quick = false;
                     }
                 }
                 vec![self.set_pointer(block as i32 + 1)]
@@ -560,6 +589,49 @@ mod tests {
             t += TICK;
         }
         (t, visible)
+    }
+
+    #[test]
+    fn a_quick_page_is_whole_at_once_then_goes_on_at_the_steps_pace() {
+        // N4N0's Call menu: what it says with nobody to call, and four friends with the second one picked.
+        let list = "  Kasumi
+> Lyra Nightfall
+  Bob the Builder
+  Ana";
+        for text in ["No friend online", list] {
+            let whole = |quick: bool| {
+                let mut sender = TextSender::new(8, STEP);
+                let mut panel = PanelModel::new([0; TEXT_LENGTH]);
+                let start = Instant::now();
+                if quick {
+                    sender.show_quick(text);
+                } else {
+                    sender.show(text);
+                }
+                let want = orb::pages(text)[0];
+                // Asked every 10 ms, as the orb thread wakes for the sender's next phase.
+                let mut t = start;
+                while panel.cells != want {
+                    let mut out = sender.tick(t);
+                    out.reverse();
+                    panel.apply(8, &out);
+                    t += Duration::from_millis(10);
+                    assert!(t < start + Duration::from_secs(20), "{text:?} never whole");
+                }
+                (t - start, sender)
+            };
+            let (slow, _) = whole(false);
+            let (fast, sender) = whole(true);
+            eprintln!("{text:?}: whole after {} ms, quick {} ms", slow.as_millis(), fast.as_millis());
+            let blocks = orb::pages(text)[0].chunks(8).filter(|b| b.iter().any(|&g| g != 0)).count() as u32;
+            // The clear, the first block's values and pointer, then for each other block: the step, the pointer to 0,
+            // its values, its pointer.
+            let most = QUICK_STEP + PHASE_GAP + (QUICK_STEP + 2 * PHASE_GAP) * (blocks - 1) + Duration::from_millis(20);
+            assert!(fast <= most, "{text:?}: {fast:?} for {blocks} blocks");
+            assert!(fast * 5 < slow * 3, "{text:?}: {fast:?} against {slow:?}");
+            // Whole, it resends at the steps' pace again (for whoever missed a block).
+            assert!(!sender.quick);
+        }
     }
 
     fn first_row(cells: &Page) -> String {

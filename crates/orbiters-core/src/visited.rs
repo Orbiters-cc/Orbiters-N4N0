@@ -293,6 +293,9 @@ fn local_unix(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -
 /// What a VRChat screenshot says about itself.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ShotInfo {
+    /// The instance recorded in the picture metadata, when present.
+    #[serde(default)]
+    pub instance: Option<String>,
     pub world_id: Option<String>,
     pub world_name: Option<String>,
     /// Unix seconds: the XMP creation date, else the time in the file name, else the file's.
@@ -311,6 +314,7 @@ pub fn read_shot(path: &Path) -> Option<ShotInfo> {
     }
     let mut info = ShotInfo::default();
     let mut xmp = None;
+    let mut vrcx = None;
     loop {
         let mut head = [0u8; 8];
         if f.read_exact(&mut head).is_err() {
@@ -331,6 +335,9 @@ pub fn read_shot(path: &Path) -> Option<ShotInfo> {
             if let Some(text) = itxt(&data, "XML:com.adobe.xmp") {
                 xmp = Some(text);
             }
+            if let Some(text) = itxt(&data, "Description") {
+                vrcx = serde_json::from_str::<serde_json::Value>(&text).ok();
+            }
         } else if kind == b"IEND" {
             break;
         } else {
@@ -341,6 +348,13 @@ pub fn read_shot(path: &Path) -> Option<ShotInfo> {
         info.world_id = xml_value(x, "vrc:WorldID").filter(|id| id.starts_with("wrld_"));
         info.world_name = xml_value(x, "vrc:WorldDisplayName").filter(|n| !n.is_empty());
         info.taken = xml_value(x, "xmp:CreateDate").and_then(|d| iso_unix(&d)).unwrap_or(0);
+    }
+    if let Some(world) = vrcx.as_ref().filter(|v| v["application"] == "VRCX").and_then(|v| v.get("world")) {
+        if let Some(id) = world["id"].as_str().filter(|id| id.starts_with("wrld_")) {
+            info.world_id = Some(id.to_owned());
+            info.world_name = world["name"].as_str().map(str::to_owned).or(info.world_name);
+            info.instance = world["instanceId"].as_str().filter(|s| !s.is_empty()).map(|s| s.strip_prefix(&format!("{id}:")).unwrap_or(s).to_owned());
+        }
     }
     if info.taken == 0 {
         info.taken = path.file_name().and_then(|n| name_time(&n.to_string_lossy())).unwrap_or_else(|| modified(path));
@@ -413,13 +427,18 @@ pub fn screenshot_dirs() -> Vec<PathBuf> {
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .and_then(|v| v.get("picture_output_folder")?.as_str().map(PathBuf::from));
-        if let Some(c) = custom.filter(|c| c.is_dir()) {
+        if let Some(c) = custom {
             found.push(c);
         }
     }
-    if let Some(p) = dirs::picture_dir().map(|p| p.join("VRChat")).filter(|p| p.is_dir()) {
+    if let Some(p) = dirs::picture_dir().map(|p| p.join("VRChat")) {
         if !found.contains(&p) {
             found.push(p);
+        }
+    }
+    for path in crate::settings::Settings::load().picture_folders {
+        if path.is_absolute() && !found.iter().any(|p| p.to_string_lossy().eq_ignore_ascii_case(&path.to_string_lossy())) {
+            found.push(path);
         }
     }
     found
@@ -485,23 +504,28 @@ impl ShotIndex {
     pub fn refresh(&mut self, dirs: &[PathBuf]) -> bool {
         let mut seen = std::collections::BTreeSet::new();
         let mut changed = false;
+        let mut unavailable = Vec::new();
+        let mut walked = std::collections::BTreeSet::new();
         let mut stack: Vec<(PathBuf, usize)> = dirs.iter().map(|d| (d.clone(), 0)).collect();
         while let Some((dir, depth)) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-            for e in entries.flatten() {
-                let Ok(meta) = e.metadata() else { continue };
+            if !walked.insert(dir.clone()) { continue; }
+            let Ok(entries) = std::fs::read_dir(&dir) else { unavailable.push(dir); continue };
+            for result in entries {
+                let Ok(e) = result else { unavailable.push(dir.clone()); continue };
+                let Ok(meta) = e.metadata() else { unavailable.push(e.path()); continue };
+                if e.file_type().is_ok_and(|t| t.is_symlink()) { continue; }
                 let path = e.path();
                 if meta.is_dir() {
-                    if depth < 3 {
+                    if depth < 64 {
                         stack.push((path, depth + 1));
-                    }
+                    } else { unavailable.push(path); }
                     continue;
                 }
                 if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("png")) {
                     continue;
                 }
                 let size = meta.len();
-                let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+                let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64);
                 seen.insert(path.clone());
                 if self.files.get(&path).is_some_and(|f| f.size == size && f.modified == modified) {
                     continue;
@@ -513,8 +537,13 @@ impl ShotIndex {
             }
         }
         let before = self.files.len();
-        self.files.retain(|p, _| seen.contains(p));
+        self.files.retain(|p, _| seen.contains(p) || (dirs.iter().any(|d| p.starts_with(d)) && unavailable.iter().any(|d| p.starts_with(d))));
         changed | (self.files.len() != before)
+    }
+
+    /// File identities already checked by the folder scan, so thumbnail readers need not wake an archive drive.
+    pub fn fingerprints(&self) -> impl Iterator<Item = (&Path, u64, u64)> {
+        self.files.iter().map(|(path, e)| (path.as_path(), e.size, e.modified))
     }
 
     /// Every screenshot with a world, newest first.
@@ -575,7 +604,9 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
 mod tests {
     use super::*;
 
-    fn png_with_xmp(xmp: &str) -> Vec<u8> {
+    fn png_with_xmp(xmp: &str) -> Vec<u8> { png_with_text("XML:com.adobe.xmp", xmp) }
+
+    fn png_with_text(keyword: &str, xmp: &str) -> Vec<u8> {
         fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
             out.extend_from_slice(&(data.len() as u32).to_be_bytes());
             out.extend_from_slice(kind);
@@ -589,11 +620,53 @@ mod tests {
         ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
         chunk(&mut out, b"IHDR", &ihdr);
         chunk(&mut out, b"IDAT", &[0u8; 64]);
-        let mut itxt = b"XML:com.adobe.xmp\0\0\0\0\0".to_vec();
+        let mut itxt = keyword.as_bytes().to_vec();
+        itxt.extend_from_slice(&[0; 5]);
         itxt.extend_from_slice(xmp.as_bytes());
         chunk(&mut out, b"iTXt", &itxt);
         chunk(&mut out, b"IEND", &[]);
         out
+    }
+
+    #[test]
+    fn vrcx_metadata_keeps_world_and_instance() {
+        let file = std::env::temp_dir().join(format!("orbiters-vrcx-metadata-{}.png", std::process::id()));
+        std::fs::write(&file, png_with_text("Description", r#"{"application":"VRCX","world":{"id":"wrld_test","name":"A world","instanceId":"wrld_test:123~region(eu)"}}"#)).unwrap();
+        let info = read_shot(&file).unwrap();
+        assert_eq!(info.world_id.as_deref(), Some("wrld_test"));
+        assert_eq!(info.world_name.as_deref(), Some("A world"));
+        assert_eq!(info.instance.as_deref(), Some("123~region(eu)"));
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn folder_index_retains_offline_but_removes_deleted_and_removed_sources() {
+        let root = std::env::temp_dir().join(format!("orbiters-picture-index-{}", std::process::id()));
+        let folder = root.join("online");
+        let nested = folder.join("1/2/3/4/5");
+        std::fs::create_dir_all(&nested).unwrap();
+        let png = nested.join("picture.png");
+        std::fs::write(&png, png_with_xmp("<vrc:WorldID>wrld_test</vrc:WorldID>")).unwrap();
+        let mut index = ShotIndex::default();
+        assert!(index.refresh(&[folder.clone(), nested.clone()]));
+        assert_eq!(index.every_shot().len(), 1);
+        assert!(!index.refresh(&[folder.clone()]));
+        let file = root.join("index.json");
+        index.save(&file).unwrap();
+        let mut index = ShotIndex::load(&file);
+        let parked = root.join("offline");
+        std::fs::rename(&folder, &parked).unwrap();
+        assert!(!index.refresh(&[folder.clone()]));
+        assert_eq!(index.every_shot().len(), 1);
+        std::fs::rename(&parked, &folder).unwrap();
+        std::fs::remove_file(&png).unwrap();
+        assert!(index.refresh(&[folder.clone()]));
+        assert!(index.every_shot().is_empty());
+        std::fs::write(&png, png_with_xmp("")).unwrap();
+        index.refresh(&[folder]);
+        assert!(index.refresh(&[]));
+        assert!(index.every_shot().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

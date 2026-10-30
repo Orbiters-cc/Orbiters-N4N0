@@ -121,6 +121,12 @@ impl State {
         }
     }
 
+    /// Screenshots: where the first card shown was drawn.
+    pub fn first_card(&self) -> Option<Rect> {
+        let (_, shown) = self.shown.as_ref()?;
+        let world = self.worlds.as_ref()?.get(*shown.first()?)?;
+        self.card_homes.get(&world.id).copied()
+    }
     pub fn loaded(&mut self) -> bool {
         if let Some(list) = self.list.take() {
             self.worlds = Some(list.into_iter().map(Arc::new).collect());
@@ -333,6 +339,7 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
     };
     let mut clicked = None;
     let mut share_clicked: Option<(Vec<PathBuf>, bool, Rect)> = None;
+    let mut menu_picked: Option<(CardAct, Arc<VisitedWorld>)> = None;
     let from = orbiters_ui::blur::next_shape(ui);
     let mut gu = ui.new_child(UiBuilder::new().max_rect(page).id_salt("worlds-grid"));
     gu.multiply_opacity(shown);
@@ -368,8 +375,21 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
                 let shared = mine_of(&mine, &world.id).is_some_and(|m| m.preview.is_some() || !m.pictures.is_empty());
                 state.card_thumbs.insert(world.id.clone(), Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0)));
                 state.card_homes.insert(world.id.clone(), r);
-                if let Some(cover_r) = world_card(ui, cx, i, world, r, tex.as_ref(), info.as_ref(), shared, if open_here { 0.0 } else { 1.0 }, interactive) {
+                let (pressed, resp) = world_card(ui, cx, i, world, r, tex.as_ref(), info.as_ref(), shared, if open_here { 0.0 } else { 1.0 }, interactive);
+                if let Some(cover_r) = pressed {
                     clicked = Some((world.id.clone(), cover_r));
+                }
+                // A right press: what the world offers.
+                let sharable = (world.reconstructed() > 0 || !world.shots.is_empty()) && !state.share_prepare.running();
+                let acts = if interactive && !open_here { card_acts(world, sharable) } else { Vec::new() };
+                let items: Vec<orbiters_ui::popup::Item> = acts.iter().map(|(i, _)| *i).collect();
+                if let Some(k) = orbiters_ui::popup::context_menu(ui, &resp, "world-card", &items) {
+                    let thumb = Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0));
+                    match acts[k].1 {
+                        CardAct::Open => clicked = Some((world.id.clone(), thumb)),
+                        CardAct::Share(public) => share_clicked = Some((share_paths(world), public, thumb)),
+                        act => menu_picked = Some((act, world.clone())),
+                    }
                 }
                 // Faded in once the grid takes presses again (after a world's page landed back on its card).
                 let pill = anim::toggle(&ctx, Id::unique(("world-share-shown", &world.id)), !open_here && interactive, Spring::SOFT);
@@ -383,18 +403,15 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
                         r.width() - 24.0,
                         !state.share_prepare.running() && interactive && !open_here,
                     ) {
-                        let paths = world
-                            .sessions
-                            .iter()
-                            .find(|s| s.reconstruction.is_some())
-                            .map(|s| vec![s.dir.clone()])
-                            .unwrap_or_else(|| world.shots.iter().map(|s| s.path.clone()).collect());
-                        share_clicked = Some((paths, public, Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0))));
+                        share_clicked = Some((share_paths(world), public, Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0))));
                     }
                 }
             }
         });
     });
+    if let Some((act, world)) = menu_picked {
+        card_act(&ctx, cx, act, &world);
+    }
     if let Some((paths, public, origin)) = share_clicked {
         state.prepare_share(
             &ctx,
@@ -447,6 +464,80 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
     clicked
 }
 
+/// What a card's share offers: its first 3D capture, else its pictures.
+fn share_paths(world: &VisitedWorld) -> Vec<PathBuf> {
+    world
+        .sessions
+        .iter()
+        .find(|s| s.reconstruction.is_some())
+        .map(|s| vec![s.dir.clone()])
+        .unwrap_or_else(|| world.shots.iter().map(|s| s.path.clone()).collect())
+}
+
+/// What a card's right-click menu does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CardAct {
+    /// The world's page (as a press on the card).
+    Open,
+    OpenVrchat,
+    /// VRChat's page that launches the world.
+    Launch,
+    CopyId,
+    CopyLink,
+    /// Share to … (`false`) or Share publicly, as the card's share pill.
+    Share(bool),
+    /// The folder of its newest picture.
+    Pictures,
+}
+
+/// The right-click menu of `world`'s card; `sharable`: it has a 3D capture or pictures and no share is being prepared.
+fn card_acts(world: &VisitedWorld, sharable: bool) -> Vec<(orbiters_ui::popup::Item<'static>, CardAct)> {
+    use orbiters_ui::popup::Item;
+    let mut acts = vec![
+        (Item::new("Open the world's page").icon(icons::ARROW_RIGHT), CardAct::Open),
+        (Item::new("Open on VRChat").icon(icons::ARROW_SQUARE_OUT), CardAct::OpenVrchat),
+        (Item::new("Launch in VRChat").icon(icons::PLAY), CardAct::Launch),
+        (Item::new("Copy the world's ID").icon(icons::COPY), CardAct::CopyId),
+        (Item::new("Copy its VRChat link").icon(icons::LINK_SIMPLE), CardAct::CopyLink),
+    ];
+    if sharable {
+        acts.push((Item::new("Share to…").icon(icons::PAPER_PLANE_TILT), CardAct::Share(false)));
+        acts.push((Item::new("Share publicly").icon(icons::GLOBE), CardAct::Share(true)));
+    }
+    if !world.shots.is_empty() {
+        acts.push((Item::new("Show its pictures in Explorer").icon(icons::FOLDER_OPEN), CardAct::Pictures));
+    }
+    acts
+}
+
+fn card_act(ctx: &egui::Context, cx: &mut Cx, act: CardAct, world: &VisitedWorld) {
+    match act {
+        CardAct::OpenVrchat => {
+            let r = controller::open_url(&vrchat_url(&world.id));
+            cx.run(ctx, r);
+        }
+        CardAct::Launch => {
+            let r = controller::open_url(&format!("https://vrchat.com/home/launch?worldId={}", world.id));
+            cx.run(ctx, r);
+        }
+        CardAct::CopyId => {
+            ctx.copy_text(world.id.clone());
+            cx.toasts.push(ctx, toast::Kind::Success, "World ID copied");
+        }
+        CardAct::CopyLink => {
+            ctx.copy_text(vrchat_url(&world.id));
+            cx.toasts.push(ctx, toast::Kind::Success, "Link copied");
+        }
+        CardAct::Pictures => {
+            if let Some(dir) = world.shots.first().and_then(|s| s.path.parent()) {
+                let r = controller::open_path(dir);
+                cx.run(ctx, r);
+            }
+        }
+        CardAct::Open | CardAct::Share(_) => {}
+    }
+}
+
 fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""
@@ -455,7 +546,7 @@ fn plural(n: usize) -> &'static str {
     }
 }
 
-/// One card; returns its picture's rect when clicked.
+/// One card; returns its picture's rect when clicked, and its response (its right-click menu).
 #[allow(clippy::too_many_arguments)]
 fn world_card(
     ui: &mut Ui,
@@ -468,7 +559,7 @@ fn world_card(
     shared: bool,
     shown: f32,
     interactive: bool,
-) -> Option<Rect> {
+) -> (Option<Rect>, egui::Response) {
     let ctx = ui.ctx().clone();
     let id = Id::unique(("world-card", &w.id));
     let body = Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - 52.0));
@@ -549,7 +640,7 @@ fn world_card(
         }
         px += pw + 6.0;
     }
-    resp.clicked().then_some(thumb)
+    (resp.clicked().then_some(thumb), resp)
 }
 
 fn empty_state(ui: &mut Ui, cx: &Cx, searching: bool, height: f32) {

@@ -56,24 +56,59 @@ pub struct Settings {
     /// Where the SteamVR overlay shows what a recording has covered so far (the Capture page's camera path).
     pub coverage_overlay: CoverageOverlay,
     /// The floating Orbiters panel in the play space (the SteamVR tab's interface without SteamVR's dashboard, so
-    /// VRChat keeps the controllers) and the watch on a wrist that opens it.
+    /// VRChat keeps the controllers) and the watch on a wrist that opens N4N0's menu.
     pub floating: FloatingSettings,
     /// Experimental, VRC+: recordings also read VRChat's camera dolly's other streams (Spout `VRCSender2` to
     /// `VRCSender4`), and a 3D picture flies four cameras with the dolly (multi-stream) instead of moving the camera
     /// alone. The person sets the dolly's Streaming to Multi once in VRChat.
     pub dolly_streams: bool,
-    /// How Photos & captures lays its pictures out.
-    pub gallery_layout: GalleryLayout,
+    /// How Photos & captures lays its pictures out (Rows unless chosen otherwise). Saved as `photos_layout` from
+    /// 0.3.4-dev.4: up to then `gallery_layout` held Masonry for everyone (its default), and that key is left behind
+    /// unread, so every gallery starts in Rows until the person picks another layout again.
+    pub photos_layout: GalleryLayout,
+    /// Additional picture folders, including archives on removable drives.
+    pub picture_folders: Vec<PathBuf>,
+    /// Windows' default sound output and input while SteamVR runs (`docs/vr-audio-devices.md`).
+    pub vr_audio: VrAudioSettings,
+}
+
+/// The sound devices Windows uses by default while SteamVR runs: set for all three of Windows' roles (console,
+/// multimedia, communications) when SteamVR starts, and again over its first seconds, as Virtual Desktop and SteamVR
+/// set their own; the ones before put back when it closes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VrAudioSettings {
+    /// The output (a render endpoint); `None`: left as it is.
+    pub output: Option<AudioEndpoint>,
+    /// The input (a capture endpoint); `None`: left as it is.
+    pub input: Option<AudioEndpoint>,
+    /// Put back the devices Windows had before when SteamVR closes.
+    pub restore: bool,
+}
+
+impl Default for VrAudioSettings {
+    fn default() -> Self {
+        Self { output: None, input: None, restore: true }
+    }
+}
+
+/// A Windows sound device: its endpoint id, and its name, which finds it again when the id changed (a driver
+/// installed again gives its devices new ids).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioEndpoint {
+    pub id: String,
+    pub name: String,
 }
 
 /// How Photos & captures lays its pictures out (its layout picker; each group of an instance laid out alone).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GalleryLayout {
-    /// Columns of pictures each as tall as its shape, as the website's galleries (the default).
-    #[default]
+    /// Columns of pictures each as tall as its shape, as the website's galleries.
     Masonry,
-    /// Rows of one height filling the width, each picture as wide as its shape.
+    /// Rows of one height filling the width, each picture as wide as its shape (the default).
+    #[default]
     Rows,
     /// The same card for every item, its picture cropped to 16:9, with what it is and who sees it under it.
     Grid,
@@ -93,8 +128,8 @@ pub enum CoverageOverlay {
 
 /// The floating Orbiters panel (the SteamVR overlay): the dashboard tab's interface on a panel in the play space, used
 /// with the controllers' own lasers instead of SteamVR's dashboard, so VRChat keeps its controls meanwhile; moved by
-/// its handle as N4N0's screen is. The watch, a round Orbiters mark on a wrist, opens and closes it with one press of
-/// the other hand's trigger.
+/// its handle as N4N0's screen is; opened by the tab's Float button. The watch, a round Orbiters mark on a wrist, opens
+/// and closes N4N0's menu with one press of the other hand's trigger.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FloatingSettings {
@@ -315,8 +350,8 @@ pub struct OrbSettings {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MenuSettings {
-    /// The SteamVR controller binding "Open N4N0's menu" (by default a double press of the left stick, changed in
-    /// SteamVR's controller settings for Orbiters).
+    /// The SteamVR controller binding "Open N4N0's menu" (by default two quick taps on the left thumbrest or trackpad,
+    /// or a double press of X on controllers with neither; changed in SteamVR's controller settings for Orbiters).
     pub button: bool,
     /// Saying the wake word on its own ("Nano!", N4N0 said aloud) while the wake word is on.
     pub wake_word: bool,
@@ -515,7 +550,9 @@ impl Default for Settings {
             coverage_overlay: CoverageOverlay::default(),
             floating: FloatingSettings::default(),
             dolly_streams: false,
-            gallery_layout: GalleryLayout::default(),
+            photos_layout: GalleryLayout::default(),
+            picture_folders: Vec::new(),
+            vr_audio: VrAudioSettings::default(),
         }
     }
 }
@@ -641,7 +678,7 @@ mod tests {
     fn round_trip_and_defaults() {
         let dir = std::env::temp_dir().join(format!("orbiters-settings-{}", std::process::id()));
         let path = dir.join("settings.json");
-        let s = Settings { storage_limit_gb: 12.5, capture_mode: CaptureMode::LiveRefine, ..Default::default() };
+        let s = Settings { picture_folders: vec![PathBuf::from("I:/VRChat pics")], storage_limit_gb: 12.5, capture_mode: CaptureMode::LiveRefine, ..Default::default() };
         s.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(&path), s);
         std::fs::write(&path, r#"{"storage_limit_gb": 3}"#).unwrap();
@@ -702,6 +739,23 @@ mod tests {
         assert_eq!((patched.walk_boost.strength, patched.reduce_motion, patched.orb.afk_message.as_str()), (0.8, mine.reduce_motion, "Back soon"));
         // Nothing changed: an empty patch.
         assert_eq!(base.diff(&base), serde_json::json!({}));
+    }
+
+    #[test]
+    fn photos_and_captures_start_in_rows_whatever_was_saved_before() {
+        // 0.3.4-dev.3 saved its default, Masonry, for everyone: that key is left behind.
+        let (old, dropped) = crate::json_lenient::<Settings>(r#"{"gallery_layout": "masonry", "storage_limit_gb": 3}"#);
+        assert!(dropped.is_empty());
+        assert_eq!((old.photos_layout, old.storage_limit_gb), (GalleryLayout::Rows, 3.0));
+        assert_eq!(Settings::default().photos_layout, GalleryLayout::Rows);
+        // Masonry picked again after the change stays, saved under the new key only.
+        let (picked, left_out) = old.patched(&serde_json::json!({ "photos_layout": "masonry" }));
+        assert!(left_out.is_empty());
+        assert_eq!(picked.photos_layout, GalleryLayout::Masonry);
+        let saved = serde_json::to_value(&picked).unwrap();
+        assert_eq!(saved["photos_layout"], "masonry");
+        assert!(saved.get("gallery_layout").is_none());
+        assert_eq!(crate::json_lenient::<Settings>(&saved.to_string()).0.photos_layout, GalleryLayout::Masonry);
     }
 
     #[test]

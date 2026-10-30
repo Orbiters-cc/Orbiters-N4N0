@@ -48,6 +48,20 @@ pub fn take_outcome() -> Option<Outcome> {
     LAST.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
+/// Puts these files on the clipboard as Explorer's Copy does (the same shell data object as a drag): pasted in a
+/// folder, Discord or a browser, they are copied there. On the window's thread.
+pub fn copy_files(files: &[PathBuf]) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        win::copy(files)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = files;
+        Err("Copying files is for Windows".into())
+    }
+}
+
 /// Runs the drag asked for, if any (modal: returns once dropped or cancelled), then gives egui the button's release.
 pub fn run_pending(ctx: &egui::Context, raw: &mut egui::RawInput) {
     let Some(drag) = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
@@ -82,7 +96,7 @@ mod win {
     };
     use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
-    use windows::Win32::System::Ole::{IDropSource, OleInitialize, DROPEFFECT_COPY};
+    use windows::Win32::System::Ole::{IDropSource, OleFlushClipboard, OleInitialize, OleSetClipboard, DROPEFFECT_COPY};
     use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetCapture, VK_LBUTTON, VK_RBUTTON};
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
@@ -124,6 +138,19 @@ mod win {
                 None => Outcome::Failed,
             };
             (outcome, inside(hwnd, pixels_per_point))
+        }
+    }
+
+    /// The files on the clipboard, rendered there at once (they stay pasteable after this app quits).
+    pub fn copy(files: &[std::path::PathBuf]) -> Result<(), String> {
+        // SAFETY: OLE calls on the window's thread (an OLE apartment, as for a drag); the data object is the clipboard's
+        // once set, and flushing renders it into the clipboard's own memory.
+        unsafe {
+            let _ = OleInitialize(None);
+            let data = offer(&Drag { files: files.to_vec(), image: None }).ok_or("These files could not be offered")?;
+            OleSetClipboard(&data).map_err(|e| format!("The clipboard is busy: {e}"))?;
+            let _ = OleFlushClipboard();
+            Ok(())
         }
     }
 

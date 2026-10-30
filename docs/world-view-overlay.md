@@ -5,9 +5,11 @@ scheduling policy and add repeated measurements, an independent Opus review, and
 
 **What it does.** N4N0's menu in the play space (the SteamVR overlay) has a pill under it, "3D worlds". It opens a
 panel in the menu's place: a search field (the panel's own keyboard, or the computer's keyboard as the menu's search
-takes it) over the worlds members captured and shared, as cards with each world's thumbnail, likes, labels and frame
-rate, ordered newest, most liked or smoothest first and kept to the labels picked. Pressing a card downloads that
-capture and shows it around you: its ground on your play space's floor, its start view where you stand, facing the way
+takes it) over VRChat's worlds in general (see [Every VRChat world](#every-vrchat-world)), the ones members captured
+and shared badged 3D, as cards with each world's thumbnail, likes, labels and frame rate (or the people in it now),
+ordered as listed, most liked or smoothest first and kept to the labels picked (and to the 3D captures). Pressing a
+world without a capture opens its page (Invite me or Launch VRChat, Open on VRChat). Pressing a capture's card
+downloads that capture and shows it around you: its ground on your play space's floor, its start view where you stand, facing the way
 you face, appearing from there outward. Its page has what Orbiters knows of the world and its feedback, given there as
 in the VRChat world and on the website (Like, labels, comments). The capture's controls are on a bar of their own under
 the menu or the panel, whatever page shows, while a capture shows or loads: the capture (its page a press away), See
@@ -24,7 +26,7 @@ and in the world. Feedback belongs to the **world** (`wrld_…`), so a world's c
 
 | Feature | Map explorer (orbiters.cc/maps) | Viewer world | Overlay before | Overlay now |
 |---|---|---|---|---|
-| Search | VRChat's world search (Orbiters' known worlds when VRChat fails), a pasted world id or link | name, author or sharer containing the text | as the world | as the world |
+| Search | VRChat's world search (Orbiters' known worlds when VRChat fails), a pasted world id or link | name, author or sharer containing the text | as the world | every VRChat world (the member's VRChat session, else the Map explorer's search), the captures matching the name, author or sharer first; browsing: 3D captures, Popular, Active now, Favorites, Visited |
 | Order | Smoothest first (share of the refresh rate, then fps) | as listed (newest) | as listed | Newest, Most liked, Smoothest |
 | Filters | none | none | none | labels (all those picked; how many worlds have each), shared by the world's author |
 | Card | cover, 3D badge, picture count, fps badge, name, author, capacity | thumbnail, name, by author, 3D by sharer, Official | thumbnail, name, author, splats, Official seal | + likes, fps badge (smooth/fair/heavy as the website colours it), the two labels given most |
@@ -40,7 +42,69 @@ and in the world. Feedback belongs to the **world** (`wrld_…`), so a world's c
 | The world's other captures | a tab per sharer | up to 3 buttons | each its own card | "N more captures" steps through them (showing each) |
 | Capture controls | – | Quality (with automatic), Debug | Hide, Recenter, See VRChat, sharpness on the capture's page once shown | on the bar, whatever page, while it shows or loads |
 | Capture details: share, download `.splat`, report the preview | signed in | – | none | not in the overlay (the website) |
-| Open in VRChat | vrchat.com link | portal | none | not in the overlay (an overlay cannot drop a portal) |
+| Open in VRChat | vrchat.com link | portal | none | a world without a capture: Invite me (an invite to oneself, signed in to VRChat) or Launch VRChat, and Open on VRChat (vrchat.com in the computer's browser); a portal cannot be dropped from an overlay |
+
+## Every VRChat world
+
+Enzo, after trying it in VR (2026-10-30): the search should list VRChat's worlds in general, not only those with a 3D
+capture, especially when searching, with the member's own VRChat account when possible. Code:
+`overlay/worlds/finder.rs` (lists, merge, join links), `panel.rs` (sections, cards, a world's page), `mod.rs` (asks,
+debounce), orbiters-core `vrchat_api.rs` / `vrchat_source.rs` / `maps.rs` (requests), `controller/vrchat_data.rs`
+(the gate).
+
+**What the panel lists.** While nothing is typed, a row of sections: **3D captures** (Orbiters' listing, as before),
+**Popular** (VRChat's popular worlds; "Featured" without a VRChat session: Orbiters' recently captured or pictured
+worlds), **Active now** and **Favorites** (VRChat only: signed out of VRChat, the panel says where to sign in and asks
+nothing), **Visited** (the worlds VRChat's logs saw on this computer, `visited-worlds.json` the tray service keeps, the
+latest first, at most 240). Typing two characters and pausing 400 ms (Done: at once) searches every world; the row then
+has **3D only** and says who answers ("from your VRChat account" or "from Orbiters"). One character still filters what
+shows. A world of any list that Orbiters has captures of is listed as its captures, each its own card with the 3D badge
+(the list's thumbnail and people kept with them): pressing it shows it as before. In a search, the captures whose name,
+author or sharer match come first, then VRChat's answer in its order, a world listed once. Sort (now a chip that steps
+Newest / "Best match" / "Top" / "Latest" as listed, Most liked, Smoothest), labels, Shared by its author and **Has a 3D
+capture** (the filter page) apply to whatever is listed: likes and labels come from the captures' listing, else
+`GET /maps/vrchat/feedback` (every world given feedback lately, read with the listing), else the world's feedback once
+its page asked for it; frame rates from the world's Map explorer page or Orbiters' search answer.
+
+**Requests.** A page is 24 worlds, one more asked to know whether another follows; the next page is asked as the
+results near the end of what was read (at most 20 pages). Pages are asked one at a time on a thread of their own (the
+one asked meanwhile waits, the latest only), kept five minutes (an error 20 s; Try again lets it go at once) and let go
+when the account, the environment or the VRChat session changes.
+
+| List | Signed in to VRChat (the member's session, in the tray service) | Otherwise (Orbiters, public, no credential) |
+|---|---|---|
+| Search | `GET /worlds?search=…&sort=relevance&releaseStatus=public&n=25&offset=…` | `GET /maps/search?q=…&page=…` (the website's VRChat search, Orbiters' known worlds when VRChat cannot be asked) |
+| Popular | `GET /worlds?sort=popularity&order=descending&releaseStatus=public&n=25&offset=…` | `GET /maps/featured?page=…` |
+| Active now | `GET /worlds/active?n=25&offset=…` | not asked |
+| Favorites | `GET /worlds/favorites?n=25&offset=…` | not asked |
+| Visited | local history | local history |
+
+The overlay asks the tray service (`ToService::VrchatData`, `Request::WorldList { list, page }`, answered
+`Response::Worlds`); the service checks the request (a search of at least two characters, at most page 20) and its
+scope, then `vrchat_source::Source::worlds` uses the personal session (`vrchat_api::Client::find_worlds`: the "worlds"
+request family, one a second with the world lookups, 429 backing off for the whole client; pages kept five minutes, the
+favorites one minute, at most 64, forgotten on sign-out) or falls back to Orbiters' Map explorer
+(`Api::find_worlds`). VRChat's `LimitedWorld` gives name, author, thumbnail, capacity, people now, visits, favorites
+and tags, not the description: a world's page reads it, its frame rate and its pictures from its Map explorer page when
+the page opens (`GET /maps/worlds/:id`, cached three days), so cards of a list cost no request to Orbiters but their
+thumbnails (VRChat's pictures over https, loaded and kept by world as before, no credential). Visited worlds have no
+picture in the history: their cards read their Map explorer page.
+
+**A world without a capture.** Its page has its picture, author, numbers, people in it now, description, author tags,
+frame rate, Orbiters' likes, labels, comments and pictures (given as for a capture), and in the capture's Show place:
+**Invite me** when signed in to VRChat (`Request::InviteSelf` → `POST /invite/myself/to/{world}:{instance}`, the
+"invites" family; the one thing sent besides a picture upload, refused unless the instance is a public one this
+builds: five digits and `~region(us|use|eu|jp)`, the region of the instance the player is in, else `us`), VRChat
+showing the invite in the game; otherwise **Launch VRChat** (`vrchat://launch?ref=orbiters.cc&id=<world>:<instance>`,
+opened with Windows' handler for `vrchat://`). **Open on VRChat** opens `https://vrchat.com/home/world/<id>` in the
+computer's browser (also on a capture's page whose world has no other capture). What happened is said on the page.
+The world's page stays open while the lists change under it.
+
+Offline review: `--screenshot <out> --only worlds-overlay` adds `panel-search.png`, `panel-search-3d-only.png`,
+`panel-search-orbiters.png`, `panel-search-failed.png`, `panel-typing-search.png`, `panel-typing-searching.png`,
+`panel-browse-popular.png`, `panel-browse-active.png`, `panel-browse-visited.png`,
+`panel-browse-favorites-signed-out.png`, `panel-world.png` (Launch VRChat) and `panel-world-invite.png`; the earlier
+captures' shots show the 3D captures section.
 
 **Giving feedback.** The panel sends what the member gives as N4N0's menus do: `OrbCommand::Feedback` with the
 contract's `FeedbackAsk` to the tray service, whose queue (`controller/world_feedback.rs`, kept on disk, coalesced,
@@ -241,4 +305,8 @@ otherwise the faces would be half as high and the cube would gape), the shared t
 `SetOverlayTexture` with a D3D11 texture opened from a D3D12 resource), the panel's laser input, the pill and the bar
 (its place under the menu, its laser input), feedback given from the panel against the live server, the
 computer's keyboard reaching the panel, the predicted poses' timing, how the cube looks with VRChat behind it at 55 %,
-and what the batches cost VRChat's own frames (the governor's back-off included).
+and what the batches cost VRChat's own frames (the governor's back-off included). The world search ran against mocked
+VRChat answers and a loopback Orbiters only: VRChat's real answers to the list requests (their order, `occupants`,
+paging past 24), the invite to oneself to a public instance nobody is in yet (VRCX builds such locations the same way;
+VRChat may refuse one it has not made), and `vrchat://launch` while VRChat runs (it may ask to switch, or start another
+VRChat) need a signed-in VRChat account and a headset.

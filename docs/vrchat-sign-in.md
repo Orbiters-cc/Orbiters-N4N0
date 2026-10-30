@@ -48,9 +48,11 @@ commands/status, not data-request IPC for the other pages.
 | Unity project avatar thumbnails | `source.avatar(avatar_id)` | `Result<Option<Avatar>>`; personal VRChat session when allowed and signed in, otherwise Orbiters `GET /vrchat/avatars/thumbnails?ids=...`. Preserve Toolkit thumbnails as the first choice. |
 | Avatar/profile image bytes | `source.image(url)` | `Result<Vec<u8>>`; isolated VRChat download when signed in, otherwise the existing Orbiters `Api::image` downloader, without VRChat cookies. |
 | Photos & captures friends picker | `source.friends()` | `Result<Vec<User>>`; paged, cached personal friends or the existing read-only VRCX/VRCNext data. Use `id`, `display_name` and `picture()`. |
-| Instance links | `source.instance_alive(world_id, instance_id)` | `Result<Option<bool>>`; `Some(true/false)` only when VRChat explicitly reports `active`. `None` means unverified or inaccessible, not closed. Preserve the existing link behavior. |
+| Instance links | `source.instance_alive(world_id, instance_id)` | `Result<Option<bool>>`; `Some(true)` for the instance VRChat answers (its `active` when given), `Some(false)` when it reports it closed (`closedAt`, `hardClose`, `active: false`) or no longer knows it (404 "Instance not found", or `null`). `None` means inaccessible (403), not closed. |
 | Profile lookup | `source.user(user_id)` | `Result<Option<User>>`; direct lookup when available; no substitute profile otherwise. |
 | Current VRChat user | `source.current_user()` | `Result<Option<User>>`; refreshes the direct session. |
+| Overlay world search | `source.worlds(list, page)` | `Result<FoundWorlds>`; a page of a search, popular, active or favorite worlds through the personal session (kept five minutes), else Orbiters' public `GET /maps/search` / `/maps/featured` (Active and Favorites need the session). `Request::WorldList` (docs/world-view-overlay.md). |
+| Join a world from the overlay | `source.invite_self(world, instance)` | `Result<()>`; an invite to oneself to a public instance, personal session only (`Request::InviteSelf`, checked to be a public instance first). |
 
 Callers should use a fresh source for each operation. Direct 401 or feature revocation falls back;
 rate limits and service errors are surfaced rather than adding load to the shared account. Signing
@@ -67,7 +69,12 @@ without one, the existing batched Orbiters thumbnail cache/request path is retai
 with the local VRCX/VRCNext list by `usr_` ID, with personal names and pictures preferred. Public local-cache pictures
 can still load without signing in to Orbiters. Direct service/rate-limit errors are shown with retry actions.
 
-Opening Instance info lazily checks that world/instance. The client caches explicit true/false and unknown results
+Opening Instance info lazily checks that world/instance. The location goes in the path as VRChat's log writes it
+(`/instances/wrld_…:25332~hidden(usr_…)~region(eu)~nonce(…)`, `vrchat_api::path_segment`): VRChat's firewall refuses
+its `( ) , :` percent-encoded with 400 `{"error":{"message":"\"malformed url\"","waf_code":26497}}`, which was shown as
+"VRChat returned an unexpected answer" (0.3.4-dev.3). An error status a request does not expect is now
+`Error::Refused(status, VRChat's message)` ("VRChat refused the request (HTTP 400: malformed url)."), the whole of it on
+hover in the popover; a closed or unknown instance shows "Not open any more". The client caches explicit true/false and unknown results
 for 60 seconds (at most 256 entries); revocation prevents even cached reads. Explicitly active history instances
 offer Open in VRChat; explicitly inactive instances do not. Unknown or inaccessible instances retain the existing
 current-instance behavior. No server feature row, version, release, push or live VRChat sign-in is included here.

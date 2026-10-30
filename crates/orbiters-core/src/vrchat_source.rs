@@ -89,6 +89,26 @@ impl Source {
         let Some(page) = api.world(id)? else { return Ok(None) };
         Ok(page.world.thumbnail_url.or(page.world.image_url).filter(|u| !u.is_empty()))
     }
+    /// A page of a world list: VRChat's own answer through the personal session when signed in, else Orbiters' public
+    /// Map explorer (a search, the featured worlds; the lists only VRChat has say to sign in).
+    pub fn worlds(&self, list: &crate::maps::WorldList, page: usize) -> anyhow::Result<crate::maps::FoundWorlds> {
+        use crate::maps::{FoundBy, FoundWorlds};
+        if let Some(r) = self.direct(|c| c.find_worlds(list, page)) {
+            return r.map(|(items, more)| FoundWorlds { items, more, source: FoundBy::Vrchat });
+        }
+        let api = match &self.orbiters {
+            Some((api, _)) => api.clone(),
+            None => Api::new(crate::account::Server::current()),
+        };
+        api.find_worlds(list, page)
+    }
+    /// An invite to oneself to `world`'s instance `instance`, shown in VRChat. Needs the personal session.
+    pub fn invite_self(&self, world: &str, instance: &str) -> anyhow::Result<()> {
+        match self.direct(|c| c.invite_self(world, instance)) {
+            Some(r) => r,
+            None => anyhow::bail!("Sign in to VRChat in Orbiters - N4N0's Settings to be invited."),
+        }
+    }
     pub fn friends(&self) -> anyhow::Result<Vec<User>> {
         let local = || {
             crate::vrchat_accounts::friends(self.log_account.as_deref())
@@ -137,6 +157,40 @@ mod tests {
         let user = |id: &str, name: &str| User { id: id.into(), display_name: name.into(), ..Default::default() };
         let merged = merge_friends(vec![user("usr_a", "Fresh")], vec![user("usr_a", "Stale"), user("usr_b", "Other"), user("invalid", "Skip")]);
         assert_eq!(merged.iter().map(|u| u.display_name.as_str()).collect::<Vec<_>>(), ["Fresh", "Other"]);
+    }
+    #[test]
+    fn world_search_without_a_session_asks_orbiters_map_explorer() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = Api::at(&format!("http://{}", listener.local_addr().unwrap()));
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut data = [0; 4096];
+            let n = s.read(&mut data).unwrap();
+            let request = String::from_utf8_lossy(&data[..n]).to_string();
+            assert!(request.starts_with("GET /maps/search?q=black%20cat&page=1 "), "{request}");
+            assert!(!request.to_ascii_lowercase().contains("cookie:"));
+            let body = r#"{"items":[{"worldId":"wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd","name":"The Black Cat","authorName":"spooky",
+                "thumbnailUrl":"https://api.vrchat.cloud/x/256","capacity":40,"tags":["chill"],"preview":{"id":3},"pictures":4,
+                "performance":{"fps":71.6,"fps_low":40,"ratio":0.8}},{"name":"no id"}],"hasMore":true,"source":"vrchat"}"#;
+            write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        // An expired personal session falls back too.
+        let direct = crate::vrchat_api::tests::expired_session();
+        let source = Source::new(Some(Arc::new(Mutex::new(direct))), Some((api, "orbit-test".into())), None);
+        let found = source.worlds(&crate::maps::WorldList::Search("black cat".into()), 1).unwrap();
+        server.join().unwrap();
+        assert_eq!(found.source, crate::maps::FoundBy::Orbiters);
+        assert!(found.more);
+        assert_eq!(found.items.len(), 1, "an item without its id is left out");
+        let w = &found.items[0];
+        assert!(w.preview);
+        assert_eq!((w.pictures, w.world.capacity, w.world.performance.as_ref().map(|p| p.fps)), (4, Some(40), Some(72)));
+        // The lists only VRChat has need its session; no request is sent.
+        let offline = Source::new(None, Some((Api::at("http://127.0.0.1:9"), "t".into())), None);
+        assert!(offline.worlds(&crate::maps::WorldList::Favorites, 0).unwrap_err().to_string().contains("Sign in to VRChat"));
+        assert!(offline.invite_self("wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd", "1").is_err());
     }
     #[test]
     fn orbiters_fallback_never_receives_vrchat_cookies() {

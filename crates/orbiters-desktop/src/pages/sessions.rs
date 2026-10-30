@@ -423,6 +423,11 @@ impl State {
         self.viewer.as_ref().is_some_and(|v| v.loaded())
     }
 
+    /// The 3D view open (screenshots stage Edit in 3D in it).
+    pub fn viewer_mut(&mut self) -> Option<&mut super::splats::Viewer> {
+        self.viewer.as_mut()
+    }
+
     /// The session whose detail is open (screenshots).
     pub fn open_dir(&self) -> Option<PathBuf> {
         self.detail.as_ref().map(|d| d.dir.clone())

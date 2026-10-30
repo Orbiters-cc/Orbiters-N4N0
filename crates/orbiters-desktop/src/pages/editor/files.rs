@@ -4,19 +4,88 @@
 //! The copy is `<name> (edited).png` in the original's folder (`(edited 2)` and so on when taken), with the original's
 //! XMP packet (VRChat's world, its name and when it was taken), so Photos & captures lists it with the original's
 //! world and instance. The edit is `<copy's name>.orbiters-edit.json` beside it. The original is never written.
+//!
+//! A picture of Orbiters (shared with the member, or of a community's or an event's gallery, [`Remote`]) is
+//! downloaded at its full size into the app's cache first ([`fetch`]); its copy goes into VRChat's pictures folder,
+//! in the month it was taken, with its world and time as VRChat writes them, so Photos & captures lists it there.
 
 use orbiters_ui::photo::{Edit, Rgba8, SourceStack};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// The picture edited: a file, or a VRChat multi-layer picture (its own file, VRChat's composite, and its layers).
+/// The picture edited: a file, or a VRChat multi-layer picture (its own file, VRChat's composite, and its layers), or a
+/// picture of Orbiters downloaded to its file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Source {
     pub picture: PathBuf,
     /// VRChat's layers, back to front ("Environment", "Player", "UI"); empty for a plain picture.
     #[serde(default)]
     pub layers: Vec<SourceLayer>,
+    /// A picture of Orbiters: `picture` is where it is downloaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<Remote>,
+}
+
+/// Where a picture of Orbiters comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RemoteKind {
+    /// A picture shared through Photos & captures (`/captures/picture/:id/file`).
+    #[default]
+    Shared,
+    /// A picture of a community's or an event's gallery (its full picture's link renewed by
+    /// `/galleries/images/:id/source`).
+    Gallery,
+    /// A public picture by its link alone (an asset's on Orbiters).
+    Link,
+}
+
+/// A picture of Orbiters to edit, and what its copy says: its world and when it was taken.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Remote {
+    pub kind: RemoteKind,
+    pub id: u64,
+    /// On the development environment's server.
+    pub development: bool,
+    pub world_id: Option<String>,
+    pub world_name: Option<String>,
+    /// Unix seconds (0: unknown, now when saved).
+    pub taken: i64,
+    /// What its copy is called, before " (edited).png".
+    pub name: String,
+    /// Its link: a [`RemoteKind::Link`]'s picture, a gallery picture's link as listed (tried when Orbiters renews none).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub url: String,
+}
+
+impl Remote {
+    /// Where it is downloaded (the app's cache).
+    pub fn file(&self) -> PathBuf {
+        let server = if self.development { "dev" } else { "prod" };
+        let name = match self.kind {
+            RemoteKind::Shared => format!("shared-{server}-{}", self.id),
+            RemoteKind::Gallery => format!("gallery-{server}-{}", self.id),
+            RemoteKind::Link => {
+                // Its link, hashed (a link is the picture's only name).
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                self.url.hash(&mut h);
+                format!("link-{:016x}", h.finish())
+            }
+        };
+        orbiters_core::paths::cache_dir().join("editor-pictures").join(format!("{name}.img"))
+    }
+
+    fn taken(&self) -> time::OffsetDateTime {
+        time::OffsetDateTime::from_unix_timestamp(self.taken).ok().filter(|_| self.taken > 0).unwrap_or_else(time::OffsetDateTime::now_utc)
+    }
+
+    /// The XMP chunk its copy carries: its world and when it was taken, as VRChat writes them.
+    pub fn xmp(&self) -> Vec<u8> {
+        xmp_for(self.world_id.as_deref().filter(|id| id.starts_with("wrld_")), self.world_name.as_deref().filter(|n| !n.is_empty()), self.taken())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,13 +96,38 @@ pub struct SourceLayer {
 
 impl Source {
     pub fn picture(path: impl Into<PathBuf>) -> Self {
-        Self { picture: path.into(), layers: Vec::new() }
+        Self { picture: path.into(), layers: Vec::new(), remote: None }
+    }
+
+    /// A picture of Orbiters, downloaded to edit ([`fetch`]).
+    pub fn remote(remote: Remote) -> Self {
+        Self { picture: remote.file(), layers: Vec::new(), remote: Some(remote) }
+    }
+
+    /// Where a new copy of it goes: beside the original, or for a picture of Orbiters in VRChat's pictures folder in
+    /// the month it was taken.
+    pub fn copy_path(&self) -> PathBuf {
+        let Some(r) = &self.remote else { return copy_path(&self.picture) };
+        let taken = r.taken();
+        let dir = pictures_folder().join(format!("{:04}-{:02}", taken.year(), taken.month() as u8));
+        let name: String = r.name.chars().map(|c| if c.is_alphanumeric() || " -_.,'()&".contains(c) { c } else { ' ' }).collect();
+        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        let name: String = if name.is_empty() { format!("Orbiters picture {}", r.id) } else { name.chars().take(80).collect() };
+        copy_path(&dir.join(format!("{name}.png")))
+    }
+
+    /// What its copy carries: a picture of Orbiters' world and time, else the original's XMP chunk.
+    pub fn xmp(&self) -> Option<Vec<u8>> {
+        match &self.remote {
+            Some(r) => Some(r.xmp()),
+            None => xmp_chunk(&self.picture).or_else(|| self.files().first().and_then(|f| xmp_chunk(f))),
+        }
     }
 
     /// A multi-layer picture of `picture` (VRChat's composite, or its bottom layer when that is gone) and its `layers`
     /// back to front ([`crate::controller::shares::Entry::layers`]).
     pub fn with_layers(picture: impl Into<PathBuf>, layers: impl IntoIterator<Item = (String, PathBuf)>) -> Self {
-        Self { picture: picture.into(), layers: layers.into_iter().map(|(name, path)| SourceLayer { name, path }).collect() }
+        Self { picture: picture.into(), layers: layers.into_iter().map(|(name, path)| SourceLayer { name, path }).collect(), remote: None }
     }
 
     /// The files stacked, back to front, each with its own effects: VRChat's layers when it has its world among them
@@ -76,14 +170,41 @@ pub struct Saved {
     pub version: u32,
     pub source: Source,
     pub edit: Edit,
+    /// For a picture edited in a 3D capture's view (Edit in 3D, [`super::super::splats`]): where the camera was, so
+    /// that editing it again in 3D returns there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<View3d>,
 }
 
 pub const FORMAT: &str = "orbiters-photo-edit";
 
 impl Saved {
     pub fn new(source: Source, edit: Edit) -> Self {
-        Self { format: FORMAT.into(), version: 1, source, edit }
+        Self { format: FORMAT.into(), version: 1, source, edit, view: None }
     }
+}
+
+/// The view of a 3D capture a picture was made of: the capture, the orbiting camera (its pivot, turn, tilt and
+/// distance, its vertical field of view; its eye and where it looks, for other readers), the picture's size and how
+/// the view showed what was poorly seen or far away.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct View3d {
+    pub capture: PathBuf,
+    pub pivot: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub distance: f32,
+    pub fov_y: f32,
+    pub position: [f32; 3],
+    pub forward: [f32; 3],
+    pub size: [u32; 2],
+    /// "shown", "faded", "blurred" or "hazed", and how strongly.
+    pub poorly_seen: String,
+    pub amount: f32,
+    /// "shown", "fog" or "crop", and from how far (metres).
+    pub far: String,
+    pub far_distance: f32,
 }
 
 /// Where the edit of the copy `png` is kept.
@@ -107,6 +228,69 @@ pub fn copy_path(original: &Path) -> PathBuf {
         .map(|n| dir.join(if n == 1 { format!("{stem} (edited).png") } else { format!("{stem} (edited {n}).png") }))
         .find(|p| !p.exists() && !sidecar(p).exists())
         .expect("a free name")
+}
+
+/// Downloads a picture of Orbiters at its full size to [`Source::picture`] when it is not there yet (nothing to do for
+/// a picture on this computer): a shared picture's file, or a gallery picture's full picture by a link Orbiters renews
+/// (Discord's expire), asked again as failed when the first does not load.
+pub fn fetch(source: &Source) -> anyhow::Result<()> {
+    let Some(r) = &source.remote else { return Ok(()) };
+    if source.picture.is_file() {
+        return Ok(());
+    }
+    use orbiters_core::account::{Api, Server};
+    let server = if r.development { Server::Development } else { Server::Production };
+    // A public link needs no account.
+    let token = match orbiters_core::account::read(server) {
+        Some(a) => a.token,
+        None if r.kind == RemoteKind::Link => String::new(),
+        None => anyhow::bail!("Sign in to Orbiters in Settings to edit its pictures"),
+    };
+    let api = Api::new(server);
+    if let Some(dir) = source.picture.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let temp = source.picture.with_extension("download");
+    let result = match r.kind {
+        RemoteKind::Shared => api.capture_file(&token, orbiters_core::shares::Kind::Picture, r.id, &temp),
+        RemoteKind::Gallery => {
+            let get = |failed: bool| -> anyhow::Result<Vec<u8>> {
+                let links = api.picture_source(&token, r.id, failed)?;
+                let url = links.full_url.or(links.src).filter(|u| u.starts_with("https://")).ok_or_else(|| anyhow::anyhow!("Orbiters has no link to this picture"))?;
+                get_link(&api, &url)
+            };
+            get(false).or_else(|_| get(true)).or_else(|e| if r.url.starts_with("https://") { get_link(&api, &r.url) } else { Err(e) }).and_then(|bytes| Ok(std::fs::write(&temp, bytes)?))
+        }
+        RemoteKind::Link => get_link(&api, &r.url).and_then(|bytes| Ok(std::fs::write(&temp, bytes)?)),
+    };
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+    std::fs::rename(&temp, &source.picture)?;
+    Ok(())
+}
+
+/// A picture's bytes from an `https` link (up to 96 MB).
+fn get_link(api: &orbiters_core::account::Api, url: &str) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(url.starts_with("https://"), "not an https link");
+    let response = api.agent().get(url).config().https_only(true).build().call()?;
+    anyhow::ensure!(response.status().is_success(), "the picture's link answered {}", response.status());
+    Ok(response.into_body().with_config().limit(96 << 20).read_to_vec()?)
+}
+
+/// A picture of Orbiters already fetched elsewhere (`from`: Photos & captures fetches what is dragged or copied) put
+/// where the editor downloads it, so it is not downloaded again.
+pub fn seed(source: &Source, from: &Path) {
+    if source.remote.is_some() && !source.picture.is_file() && from.is_file() {
+        if let Some(dir) = source.picture.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let temp = source.picture.with_extension("seeding");
+        if std::fs::copy(from, &temp).is_ok() {
+            let _ = std::fs::rename(&temp, &source.picture);
+        }
+    }
 }
 
 /// A picture file as RGBA8 (PNG, JPEG, WebP).
@@ -331,6 +515,99 @@ mod tests {
         // Its original gone, a copy is no longer reopened as an edit.
         std::fs::remove_file(&original).unwrap();
         assert_eq!(reopen(&first), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn edits_saved_by_the_first_version_open_with_their_crop_and_shape() {
+        use orbiters_ui::photo::Aspect;
+        // As the first version wrote it: no perspective, no picture of Orbiters, the shapes by their first names.
+        let json = r#"{
+          "format": "orbiters-photo-edit", "version": 1,
+          "source": {"picture": "C:/Pictures/VRChat/VRChat_2026-10-29_21-04-11.532_3840x2160.png", "layers": []},
+          "edit": {
+            "geometry": {"turns": 1, "flip_h": false, "flip_v": true, "straighten": -4.5,
+                         "crop": {"x": 0.1, "y": 0.2, "w": 0.5, "h": 0.4}, "aspect": "portrait"},
+            "sources": [],
+            "layers": [{"id": 1, "visible": true, "opacity": 1.0, "mask": {"shape": "everywhere"},
+                        "effect": {"type": "light", "exposure": 0.5, "brightness": 0.0, "contrast": 0.0,
+                                   "highlights": 0.0, "shadows": 0.0, "black_point": 0.0}}],
+            "next_id": 2
+          }
+        }"#;
+        let saved: Saved = serde_json::from_str(json).unwrap();
+        let g = &saved.edit.geometry;
+        assert_eq!((g.turns, g.flip_v, g.straighten, g.aspect), (1, true, -4.5, Aspect::Portrait));
+        assert_eq!((g.vertical, g.horizontal), (0.0, 0.0), "no tilt");
+        assert_eq!(g.aspect.name(), "4:5");
+        assert!(saved.source.remote.is_none());
+        // The first version's shapes keep their names and their ratios.
+        let wide = 16.0 / 9.0;
+        for (name, ratio) in [("free", None), ("original", Some(wide)), ("square", Some(1.0)), ("portrait", Some(0.8)), ("classic", Some(1.5)), ("wide", Some(wide)), ("story", Some(9.0 / 16.0))] {
+            let a: Aspect = serde_json::from_value(serde_json::Value::String(name.into())).unwrap();
+            assert_eq!(a.ratio(wide), ratio, "{name}");
+            assert_eq!(serde_json::to_value(a).unwrap(), name);
+        }
+        // Written again: as it was, the new fields beside the old (a picture on this computer has no "remote").
+        let back = serde_json::to_value(&saved).unwrap();
+        assert_eq!(back["edit"]["geometry"]["aspect"], "portrait");
+        assert_eq!(back["edit"]["geometry"]["vertical"], 0.0);
+        assert!(back["source"].get("remote").is_none());
+        assert_eq!(serde_json::from_value::<Saved>(back).unwrap(), saved);
+        // The new shapes and the tilts round trip.
+        let mut edit = saved.edit.clone();
+        edit.geometry.aspect = Aspect::R7x5;
+        edit.geometry.vertical = 12.5;
+        edit.geometry.horizontal = -3.0;
+        let again = Saved::new(saved.source.clone(), edit);
+        let json = serde_json::to_string(&again).unwrap();
+        assert!(json.contains("\"aspect\":\"7:5\""), "{json}");
+        assert_eq!(serde_json::from_str::<Saved>(&json).unwrap(), again);
+    }
+
+    #[test]
+    fn a_picture_of_orbiters_is_downloaded_once_and_its_copy_goes_among_vrchat_s() {
+        let r = Remote {
+            kind: RemoteKind::Gallery,
+            id: 42,
+            development: true,
+            world_id: Some("wrld_1".into()),
+            world_name: Some("Rooftop".into()),
+            taken: 1_792_348_661,
+            name: "Saturday night: by Alex/<x>".into(),
+            url: String::new(),
+        };
+        let s = Source::remote(r.clone());
+        assert!(s.picture.ends_with("editor-pictures/gallery-dev-42.img"), "{}", s.picture.display());
+        assert_eq!(s.files(), [s.picture.clone()]);
+        // In VRChat's pictures, the month it was taken, named after it (what a file name cannot hold left out).
+        let copy = s.copy_path();
+        let taken = time::OffsetDateTime::from_unix_timestamp(r.taken).unwrap();
+        assert_eq!(copy.file_name().unwrap(), "Saturday night by Alex x (edited).png");
+        assert_eq!(copy.parent().unwrap().file_name().unwrap().to_string_lossy(), format!("{:04}-{:02}", taken.year(), taken.month() as u8));
+        // Its XMP says its world and when it was taken; the source round trips through the edit's JSON.
+        let xmp = s.xmp().unwrap();
+        let text = String::from_utf8_lossy(&xmp);
+        assert!(text.contains("<vrc:WorldID>wrld_1</vrc:WorldID>") && text.contains("Rooftop") && text.contains("2026-"), "{text}");
+        let saved = Saved::new(s.clone(), Edit::default());
+        assert_eq!(serde_json::from_str::<Saved>(&serde_json::to_string(&saved).unwrap()).unwrap(), saved);
+        // Already downloaded: nothing is asked of Orbiters.
+        let dir = temp("remote");
+        let there = Source { picture: dir.join("gallery-dev-42.img"), ..s.clone() };
+        write_png(&there.picture, &Rgba8::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]), None).unwrap();
+        fetch(&there).unwrap();
+        assert_eq!(load(&there.picture).unwrap().width, 2);
+        // Fetched elsewhere already (a drag out of Photos & captures): put in place, not downloaded again.
+        let seeded = Source { picture: dir.join("seeded.img"), ..s.clone() };
+        seed(&seeded, &there.picture);
+        assert_eq!(load(&seeded.picture).unwrap().width, 2);
+        // An asset's picture by its link alone: named after the link, one file per link.
+        let link = |url: &str| Source::remote(Remote { kind: RemoteKind::Link, url: url.into(), ..Default::default() }).picture;
+        assert_ne!(link("https://orbiters.cc/a.webp"), link("https://orbiters.cc/b.webp"));
+        assert!(link("https://orbiters.cc/a.webp").file_name().unwrap().to_string_lossy().starts_with("link-"));
+                // A shared picture with no name nor world is named by its id.
+        let plain = Source::remote(Remote { kind: RemoteKind::Shared, id: 7, ..Default::default() });
+        assert!(plain.copy_path().file_name().unwrap().to_string_lossy().starts_with("Orbiters picture 7 (edited"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

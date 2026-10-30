@@ -4,6 +4,8 @@
 //! for a few days); and pictures, decoded off the interface thread by a few loaders, with small thumbnails kept on
 //! disk so a library of 4K screenshots opens at once the second time.
 
+mod picture_cache;
+
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use orbiters_contracts::qoi;
 use orbiters_core::account::{Api, Server};
@@ -117,20 +119,20 @@ pub fn shot_name(file: &str) -> Option<(&str, Option<&str>)> {
 }
 
 /// The files of each multi-layer picture as one shot and its layers (back to front), the other pictures as they are,
-/// in the order given. A picture's files are those of one folder that share its name; the shot is the picture itself,
+/// in the order given. A picture's files share its timestamp and size across the configured folders; the shot is the picture itself,
 /// else (deleted) its bottom layer, and it takes the world any of them has (VRChat may write it in one only). A layer
 /// alone is a shot of its own whose one layer is itself, so that it shows as a layer still.
 pub fn group_layers(shots: Vec<Shot>) -> Vec<(Shot, Vec<Layer>)> {
     // Each picture's files: the picture, and its layers by name.
     let mut sets: Vec<(Option<Shot>, Vec<(Layer, Shot)>)> = Vec::new();
-    let mut at: HashMap<(PathBuf, String), usize> = HashMap::new();
+    let mut at: HashMap<String, usize> = HashMap::new();
     for shot in shots {
         let file = shot.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let Some((base, layer)) = shot_name(&file) else {
             sets.push((Some(shot), Vec::new()));
             continue;
         };
-        let key = (shot.path.parent().map(Path::to_path_buf).unwrap_or_default(), base.to_ascii_lowercase());
+        let key = base.to_ascii_lowercase();
         let layer = layer.map(str::to_owned);
         let i = *at.entry(key).or_insert_with(|| {
             sets.push((None, Vec::new()));
@@ -154,6 +156,7 @@ pub fn group_layers(shots: Vec<Shot>) -> Vec<(Shot, Vec<Layer>)> {
             if let Some(w) = world.filter(|_| face.info.world_id.is_none()) {
                 face.info.world_id = w.world_id;
                 face.info.world_name = w.world_name;
+                face.info.instance = w.instance;
             }
             Some((face, layers.into_iter().map(|(l, _)| l).collect()))
         })
@@ -168,16 +171,24 @@ impl VisitedWorld {
 
 /// Every world visited, pictured or recorded, the latest first.
 pub fn load(sessions_dir: &Path) -> Vec<VisitedWorld> {
-    let history = visited::History::load(&visited::history_file());
-    let index_file = visited::shot_index_file();
+    let file = visited::shot_index_file();
     let index = {
         let _one = shot_index_lock();
-        let mut index = visited::ShotIndex::load(&index_file);
-        if index.refresh(&visited::screenshot_dirs()) {
-            let _ = index.save(&index_file);
-        }
+        let mut index = visited::ShotIndex::load(&file);
+        if index.refresh(&visited::screenshot_dirs()) { let _ = index.save(&file); }
         index
     };
+    picture_cache::set_index(&index);
+    from_index(sessions_dir, index, false)
+}
+
+/// Photos & captures can show the cached listing while an archive is being checked, including pictures with no world.
+pub fn load_gallery(sessions_dir: &Path) -> Vec<VisitedWorld> {
+    from_index(sessions_dir, picture_index(&visited::shot_index_file()), true)
+}
+
+fn from_index(sessions_dir: &Path, index: visited::ShotIndex, unplaced: bool) -> Vec<VisitedWorld> {
+    let history = visited::History::load(&visited::history_file());
     let mut worlds: BTreeMap<String, VisitedWorld> = BTreeMap::new();
     fn entry<'a>(worlds: &'a mut BTreeMap<String, VisitedWorld>, id: &str) -> &'a mut VisitedWorld {
         worlds.entry(id.to_string()).or_insert_with(|| VisitedWorld {
@@ -199,7 +210,8 @@ pub fn load(sessions_dir: &Path) -> Vec<VisitedWorld> {
         }
     }
     for (shot, layers) in group_layers(index.every_shot()) {
-        let Some(id) = shot.info.world_id.clone() else { continue };
+        if shot.info.world_id.is_none() && !unplaced { continue; }
+        let id = shot.info.world_id.clone().unwrap_or_default();
         let w = entry(&mut worlds, &id);
         w.last = w.last.max(shot.info.taken);
         if w.name.is_empty() {
@@ -224,11 +236,36 @@ pub fn load(sessions_dir: &Path) -> Vec<VisitedWorld> {
     for w in &mut out {
         w.sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
         if w.name.is_empty() {
-            w.name = "Unnamed world".into();
+            w.name = if w.id.is_empty() { "Pictures without a world" } else { "Unnamed world" }.into();
         }
     }
     out.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.name.cmp(&b.name)));
     out
+}
+
+/// Changes when the background folder scan finishes. Pages may keep showing their cached listing meanwhile.
+pub fn picture_revision() -> u64 {
+    PICTURE_REVISION.load(std::sync::atomic::Ordering::Acquire)
+}
+static PICTURE_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn picture_index(file: &Path) -> visited::ShotIndex {
+    static SCANNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let index = visited::ShotIndex::load(file);
+    picture_cache::set_index(&index);
+    if !SCANNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        let file = file.to_path_buf();
+        std::thread::spawn(move || {
+            let _one = shot_index_lock();
+            let mut current = visited::ShotIndex::load(&file);
+            if current.refresh(&visited::screenshot_dirs()) {
+                let _ = current.save(&file);
+                PICTURE_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
+            }
+            SCANNING.store(false, std::sync::atomic::Ordering::Release);
+        });
+    }
+    index
 }
 
 /// The SHA-256 of each screenshot (computed once, then kept in the index): Orbiters knows the pictures this member
@@ -574,7 +611,7 @@ pub fn decode_local(picture: &Picture) -> Option<ColorImage> {
 }
 
 /// Thumbnails are this wide (kept on disk).
-pub const THUMB_WIDTH: u32 = 480;
+pub const THUMB_WIDTH: u32 = 560;
 
 fn key(p: &Picture) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -643,37 +680,26 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
             Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
         }
         Picture::Shot { path, width, .. } => {
-            let cached = (*width <= THUMB_WIDTH).then(|| cache_dir().join("thumbs").join(format!("{:016x}.qoi", key(picture))));
-            // A thumbnail is at most THUMB_WIDTH wide (and, a picture standing up, four times as tall): a file saying it
-            // is bigger is not one, and is made again rather than given its memory.
-            let most = u64::from(THUMB_WIDTH) * u64::from(THUMB_WIDTH) * 4;
-            if let Some((h, rgba)) = cached.as_ref().and_then(|c| std::fs::read(c).ok()).and_then(|d| qoi::decode_rgba_max(&d, most).ok()) {
+            if let Some((h, rgba)) = picture_cache::read(picture, path, *width) {
                 return Some(ColorImage::from_rgba_unmultiplied([h.width as usize, h.height as usize], &rgba));
             }
+            let before = picture_cache::stamp(path);
             let (w, h, rgba) = decode_png(&std::fs::read(path).ok()?)?;
             let (tw, th, rgb) = bundle::downscale(&rgba, w, h, *width);
-            if let Some(c) = cached {
-                let _ = std::fs::create_dir_all(c.parent()?);
-                let _ = orbiters_core::write_atomic(&c, &qoi::encode(&rgb, tw, th, 3));
-            }
+            picture_cache::write(picture, path, *width, before, &qoi::encode(&rgb, tw, th, 3));
             Some(ColorImage::from_rgb([tw as usize, th as usize], &rgb))
         }
         Picture::Layer { path, width } => {
-            // Kept small as a screenshot's thumbnail is, with its alpha (premultiplied, as decoded).
-            let cached = (*width <= THUMB_WIDTH).then(|| cache_dir().join("thumbs").join(format!("{:016x}.qoi", key(picture))));
-            let most = u64::from(THUMB_WIDTH) * u64::from(THUMB_WIDTH) * 4;
-            if let Some((h, rgba)) = cached.as_ref().and_then(|c| std::fs::read(c).ok()).and_then(|d| qoi::decode_rgba_max(&d, most).ok()) {
+            if let Some((h, rgba)) = picture_cache::read(picture, path, *width) {
                 return Some(ColorImage::from_rgba_premultiplied([h.width as usize, h.height as usize], &rgba));
             }
+            let before = picture_cache::stamp(path);
             let (w, h, rgba) = decode_png(&std::fs::read(path).ok()?)?;
             let (tw, th, rgba) = downscale_premultiplied(&rgba, w, h, *width);
             if tw == 0 {
                 return None;
             }
-            if let Some(c) = cached {
-                let _ = std::fs::create_dir_all(c.parent()?);
-                let _ = orbiters_core::write_atomic(&c, &qoi::encode(&rgba, tw, th, 4));
-            }
+            picture_cache::write(picture, path, *width, before, &qoi::encode(&rgba, tw, th, 4));
             Some(ColorImage::from_rgba_premultiplied([tw as usize, th as usize], &rgba))
         }
         Picture::Remote { world_id, url, large } => {
@@ -761,6 +787,7 @@ mod tests {
 
     fn shot(path: &str, world: Option<&str>, taken: u64) -> Shot {
         let info = visited::ShotInfo {
+            instance: None,
             world_id: world.map(str::to_owned),
             world_name: world.map(|w| format!("{w} name")),
             taken,
@@ -775,6 +802,30 @@ mod tests {
             .iter()
             .map(|(s, l)| (s.path.file_name().unwrap().to_string_lossy().into_owned(), l.iter().map(|l| l.name.clone()).collect()))
             .collect()
+    }
+
+    /// Set ORBITERS_PICTURE_BENCH to a disposable folder containing representative PNGs.
+    #[test]
+    #[ignore]
+    fn picture_folder_benchmark() {
+        let root = PathBuf::from(std::env::var("ORBITERS_PICTURE_BENCH").expect("benchmark folder"));
+        let mut index = visited::ShotIndex::default();
+        let start = std::time::Instant::now();
+        index.refresh(&[root.clone()]);
+        println!("listing: {:?}, {} pictures", start.elapsed(), index.every_shot().len());
+        let saved = root.join("benchmark-index.json");
+        index.save(&saved).unwrap();
+        let start = std::time::Instant::now();
+        let index = visited::ShotIndex::load(&saved);
+        picture_cache::set_index(&index);
+        println!("cached listing: {:?}", start.elapsed());
+        let pictures: Vec<_> = index.every_shot().into_iter().take(8)
+            .map(|s| Picture::Shot { path: s.path, size: s.size, width: 560 }).collect();
+        for pass in 0..2 {
+            let start = std::time::Instant::now();
+            for p in &pictures { assert!(decode_local(p).is_some()); }
+            println!("thumbnails pass {pass}: {:?} for {}", start.elapsed(), pictures.len());
+        }
     }
 
     #[test]
@@ -843,13 +894,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_same_time_in_the_same_folder_groups() {
+    fn the_same_time_and_size_groups_across_archive_folders() {
         let shots = vec![
             // Another millisecond, another picture.
             shot("C:/P/VRChat_2026-10-29_21-04-11.533_1920x1080.png", Some("wrld_a"), 5),
             shot("C:/P/VRChat_2026-10-29_21-04-11.532_1920x1080.png", Some("wrld_a"), 5),
             shot("C:/P/VRChat_2026-10-29_21-04-11.532_1920x1080_Player.png", None, 5),
-            // The same name in another month's folder (copied there) is not this picture's.
+            // Layers moved to another archive folder still belong to the picture.
             shot("C:/Q/VRChat_2026-10-29_21-04-11.532_1920x1080_UI.png", None, 5),
             // Another size is another shot.
             shot("C:/P/VRChat_2026-10-29_21-04-11.532_3840x2160_UI.png", None, 5),
@@ -862,8 +913,7 @@ mod tests {
             names(&grouped),
             vec![
                 ("VRChat_2026-10-29_21-04-11.533_1920x1080.png".to_string(), vec![]),
-                ("VRChat_2026-10-29_21-04-11.532_1920x1080.png".into(), vec!["Player".into()]),
-                ("VRChat_2026-10-29_21-04-11.532_1920x1080_UI.png".into(), vec!["UI".into()]),
+                ("VRChat_2026-10-29_21-04-11.532_1920x1080.png".into(), vec!["Player".into(), "UI".into()]),
                 ("VRChat_2026-10-29_21-04-11.532_3840x2160_UI.png".into(), vec!["UI".into()]),
                 ("VRChat_2026-10-29_21-04-11.532_1920x1080_wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd.png".into(), vec![]),
                 ("holiday.png".into(), vec![]),

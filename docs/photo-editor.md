@@ -7,8 +7,16 @@ picture from its 3D view (Save this view) and edited the same way. The original 
 ## Where it opens
 
 - **Picture window** (`pages/sharing.rs`): Edit beside Share publicly / Share to … for a picture on this computer
-  (`editor::source_of(entry)`; captures and items only on Orbiters have none). For a VRChat multi-layer picture it opens
-  on the picture with its layers (`Entry::layers()`), whichever layer the window shows.
+  (`editor::source_of(entry)`; captures have none). For a VRChat multi-layer picture it opens on the picture with its
+  layers (`Entry::layers()`), whichever layer the window shows. A picture only on Orbiters (shared with the member, or
+  theirs from another computer) has Edit too, beside Download: see [Pictures of Orbiters](#pictures-of-orbiters).
+- **Gallery picture window** (`pages/community.rs`, a community's or an event's gallery in Photos & captures,
+  Communities and an event's window, and an asset's pictures of My assets): Edit over the picture's bottom right, the
+  editor over the whole window (`editor::gallery_source`; an asset's picture by its link).
+- **A card's menu** in Photos & captures (a right press): Edit for a picture on this computer (its window, then the
+  editor) and for every picture from Orbiters (shared, a gallery's, an asset's: the editor at once, over the page; a
+  picture already fetched for a drag or a copy, `Selection::fetched`, is put in place instead of downloaded again,
+  `files::seed`). Not for a 3D capture's picture.
 - **3D view** (`pages/splats.rs`): Save this view (camera icon, beside the title) renders the current angle at 2560
   pixels on its long side (at least the view's size) with the poorly seen / far away settings shown, by a renderer of
   its own on the window's device (`still()`: the view on screen carries on; the splats are read again), and writes
@@ -16,7 +24,8 @@ picture from its 3D view (Save this view) and edited the same way. The original 
   under the month of the capture, with an XMP packet as VRChat writes one (the capture's world id and name, its
   creation time), so Photos & captures lists it with that world and instance. A shutter flash, then "Saved in Photos &
   captures" with **Edit** (the editor over the 3D view) and Show in its folder. `ORBITERS_EDITOR_PICTURES` sends the
-  pictures elsewhere (screenshots).
+  pictures elsewhere (screenshots). **Edit in 3D** beside it edits the view live while moving around ([Editing in
+  3D](#editing-in-3d)).
 
 ## The editor (`pages/editor/`)
 
@@ -30,8 +39,18 @@ picture from its 3D view (Save this view) and edited the same way. The original 
   stack (a new text says the world's name).
 - **Controls** (right): opacity, the kind's own controls, then Where (Everywhere, Circle, Band, inverted or not, with
   radius / width, softness and angle). Move up / down, Duplicate and Remove in its header.
-- **Canvas**: the preview as large as fits, over a checkerboard where it is transparent; crop handles; the vignette's,
-  the aberration's and a mask's centre (and a circle mask's edge) dragged; texts dragged and chosen by a press on them.
+- **Canvas**: the preview as large as fits, over a checkerboard where it is transparent; the vignette's, the
+  aberration's and a mask's centre (and a circle mask's edge) dragged; texts dragged and chosen by a press on them.
+  Crop and rotate turns the canvas into the iPhone's crop ([below](#crop-and-rotate-editorcroprs)).
+- **Colour and tone sliders** (`editor/widgets.rs`, `Look`): each track is drawn as what it does, left to right, with
+  a small icon in its colour beside its name and a knob showing the colour it is on: exposure and brightness dark to
+  light (±/sun), contrast a grey parting into black above and white below (half circle), highlights the light tones
+  (dim sun), shadows the dark tones (moon), black point a faded black to a deep one (a black dot), temperature blue to
+  amber (thermometer, its colour following the value), tint green to magenta (drop), saturation and vibrance grey to two
+  vivid hues (half drop, sparkle), hue the hues red turns to (rainbow, in the hue chosen), the vignette's amount
+  lighter edges to dark (aperture), aberration grey to red above and blue below, the comic's ink lines light to black.
+  The curves draw the tones in and out along their sides, black to the channel's colour. Opacity, sizes, softness and
+  angles keep the accent fill.
 - Keys: Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y, Delete, Escape (closes the add list, then the selection, then the editor).
   Undo keeps one step per drag or per pause in typing (200 steps).
 
@@ -57,10 +76,59 @@ notices in `THIRD_PARTY_NOTICES.md` and `THIRD_PARTY_LICENSES.md`); the computer
 and the user's font folders, read once off the interface thread, those with Latin letters), each name drawn in its
 font in a searchable list. Letters a font lacks are left out (no fallback), kerning is not applied.
 
-Crop and rotate: quarter turns and flips, then straighten (±45°) about the middle, then the crop, kept inside the
-straightened picture (`geometry::fit`: shrunk about its middle, keeping its shape, so straightening back gives the crop
-asked again). Shapes: Free, Original, 1:1, 4:5, 3:2, 16:9, 9:16 (the largest of that shape; the handles keep it). While
-Crop and rotate is chosen the canvas shows the straightened picture whole with the crop over it, without the layers.
+Crop and rotate (`photo::geometry`): quarter turns and flips, then the perspective tilts, then straighten (±45°) about
+the middle, then the crop, kept inside the tilted and straightened picture (`geometry::fit_warp`: shrunk about its
+middle, keeping its shape, so undoing the tilt and the straightening gives the crop asked again). The tilts (Vertical
+and Horizontal, ±45°, `Geometry::vertical` / `horizontal`) are a homography (`geometry::Warp`): the picture's plane
+turned in depth about its middle line in front of a camera 0.75 of its long side away (`FOCAL`, about a 67° view) and
+seen again from that camera, `[[f·cosφ, f·sinφ·sinθ, 0], [0, f·cosθ, 0], [−sinφ, cosφ·sinθ, f]]` about the middle
+(θ vertical: positive brings the top nearer and wider; φ horizontal: positive brings the right side nearer and taller).
+The middle stays put; walls leaning together towards a point d above the middle stand upright at sin θ = f / d (for a
+camera turned up by α, sin θ = tan α). Its inverse (the adjugate) samples the source; a frame point beyond the tilted
+picture's horizon shows nothing. The picture's outline in the frame is convex, so its four corners say whether a crop
+fits. Shapes (`Aspect`): Freeform, Original, Square and the iPhone's 9:16, 4:5, 5:7, 3:4, 3:5, 2:3 standing, or lying
+(16:9, 5:4, 7:5, 4:3, 5:3, 3:2, the original turned); the largest of that shape, the handles keep it.
+
+AUTO (`photo::level`): the picture is looked at 480 pixels on its long side; Sobel gradients (those leaning at most 25° from
+level or upright, stronger than a tenth of the 95th percentile's: a picture's lit windows must not hide its walls) vote in a Hough accumulator (quarter degrees by pixels from the middle)
+for the lines within 3° of their gradient; its peaks (a sixth of the short side long, the highest within 2° and 3
+pixels, refined between angle steps by a parabola) are the lines, upright ones weighing 0.75 of level ones (a building
+from below leans its walls together); a histogram of their leans spread over a degree finds the one most of their
+length agrees on, and the mean of the lines within a degree of it is the tilt (at least a fifth of the length must
+agree, else nothing is found). Straightening by its opposite levels the picture (the other way when flipped once).
+
+### Crop and rotate (`editor/crop.rs`)
+
+As the iPhone's Photos crops, over the canvas:
+
+- **Top**: Cancel (the geometry as it was when the crop opened) and Reset (shown while the crop is not the picture as
+  taken), Done on the right (lit only once something changed; Escape is Done too). Between them: flip across, rotate
+  a quarter to the left, **AUTO** (a pill, filled with the accent while the straightening is the one found; pressed
+  again it goes back to level; dim when no lines were found, its tooltip says by how much), the shapes, and **…**
+  (rotate right, flip upside down, copy this crop, paste the crop copied, undo every change of the crop). Turns and
+  flips keep what shows: the crop, its shape, the flips and the tilts turn with the picture; a flip mirrors the crop,
+  the straightening and the tilt across it.
+- **The picture** under a white frame with thick corners just outside it and marks at the middle of its sides, the rest
+  dimmed (darker at rest, lighter while it moves); thirds while it is dragged, a ninth grid while it is straightened.
+  The frame's corners and edges resize it as far as the picture goes (across first, then down): the view holds still
+  under the pointer, then springs to the crop centred and as large as fits. A drag inside moves the picture under the
+  frame (the crop stays where it is on screen); the wheel or a pinch zooms the picture about the pointer, the frame
+  holding still. The view is a spring of its own (`View`: held, snapped or animated) towards `target(area, crop)`; the
+  preview is asked at the zoomed frame's size in half steps of two.
+- **The dials**: Straighten, Vertical, Horizontal, round: the chosen one shows its value (rounded) in a ring that fills
+  with it (clockwise for positive, a full turn at 45), the others their icon (a level line, a frame leaning together
+  upwards, to the left), accent while not zero. A press on the chosen one sets it to zero, the next puts it back. Under
+  them its name and a **ruler** of degrees (8 points each, longer every 5, a dot over 0) scrubbed left and right: it
+  coasts when let go at the speed it had (slowing by e^−4.5t), holds at zero for 1.2° of travel as it passes (the
+  middle mark ticks), stops there when coasting slowly, double press for zero. Changes while it coasts are one step of
+  undo.
+- **The shapes** (the shapes button): portrait or landscape, then Original, Freeform, Square, 9:16, 4:5, 5:7, 3:4, 3:5,
+  2:3 (or their landscape forms) in place of the dials.
+- The right panel has the same: orientation and shapes, Straighten / Vertical / Horizontal sliders, the quarter turns
+  and flips, Reset and the copy's size.
+
+The parts are functions of the frame's place and the geometry (`target`, `View::follow`, `overlay_input`, then the
+picture, then `draw_overlay`): Edit in 3D crops its live view with them (its view drawn in the slot left for it).
 
 VRChat multi-layer pictures (`Entry::layers()`: `…_Environment.png`, `…_Player.png`, `…_UI.png` beside the picture):
 each layer is a stack of its own, stacked back to front before the whole picture's layers. With the world among them,
@@ -80,6 +148,57 @@ crop: light 85 ms, colour 77, curves 115, vignette 63, aberration 107, comic 220
 directional 1461; all eleven at once 2.9 s; their 1400×788 preview 196 ms
 (`cargo test -p orbiters-ui photo::render::tests::a_4k_picture -- --ignored --nocapture`).
 
+## Editing in 3D
+
+**Edit in 3D** (beside Save this view in a capture's 3D view, `pages/splats/edit3d.rs`) opens the editor over the
+live 3D view: the layers and controls as for a picture, and on the canvas the view still drawn and steered as in the
+3D view (drag to orbit, right-drag to pan, scroll to zoom, WASD and QE to fly, double-click for the recorded view). A
+press on a handle (a vignette's or aberration's centre, a mask, a text) moves the handle; anywhere else it moves the
+camera. Every layer of the stack applies to each frame: light, colour, curves, vignette, chromatic aberration, comic,
+the three blurs, text, masks and opacity, and crop and rotate (straighten and the perspective dials included; Crop and
+rotate shows the whole frame with the crop editor over the live view). Sizes and places are shares of the picture, so
+the layers stay where they are on it while the camera moves. Leaving (back, Escape) keeps the layers for the next
+time; the eye at the top shows the view without them while held.
+
+- **The picture**: the view's shape when the mode opened, 2560 pixels on its long side when saved (`STILL_LONG`, at
+  least the view's size). On the canvas the splats are drawn at the canvas's pixels of the picture shown (more of the
+  view when cropped, up to the full size); on the integrated GPU a moving camera draws fewer pixels as the 3D view does.
+- **On the GPU** (`orbiters_ui::photo::gpu`, `gpu.wgsl`): each layer is one compute pass or a few over half-float
+  textures in linear light with premultiplied alpha, ported from the CPU passes with the same maths: the light and curve
+  tables (1025 entries), the white balance, hue matrix and vibrance, the vignette's and aberration's formulas, the
+  comic's tones, dots and ink lines (its softened luma blurred like the CPU's), the gaussian's exact kernel up to σ 3
+  and Kovesi's three box blurs beyond, the lens's disc from running sums along the rows (one thread a row) with its
+  antialiased ends and bokeh weights, the directional blur's taps, the mask and opacity mix; texts are drawn on the CPU
+  as for a picture (kept until the text or the picture's height changes) and laid over. Crop, turns, flips,
+  straightening and perspective are one homography through the frame's corners (`Geometry::source_point`), sampled
+  bilinearly in linear light as `geometry::transform` does. A frame of the view is drawn through the whole stack; with
+  the camera still, a slider redoes the layer being changed and those over it from the picture kept before it, and
+  nothing is done while nothing changes. The paint callback draws the splats as the 3D view does (or takes the
+  integrated GPU's frame), runs the stack on the window's device and blends its picture over the canvas.
+- **Save picture** renders the current angle at full size (as Save this view does, the poorly seen and far away
+  settings shown), saves it as `Orbiters 3D view <date time>.png` with the capture's world in its XMP, puts the layers
+  on it on the GPU and writes the edited copy beside it, `… (edited).png`, with the edit in its
+  `.orbiters-edit.json` and the camera under `view` (the capture, the orbit's pivot, turn, tilt, distance and field of
+  view, the eye and where it looks, the picture's size, how poorly seen and far splats showed). Each save is a picture
+  of its own. **Save this view** (in the top bar) still writes the view without the layers.
+- **Back to 3D**: the editor opened on such a copy (from Photos & captures, or Edit after saving a view) has **Edit in
+  3D** in its top bar while the capture is there: it opens the capture's 3D view where the camera was, with the
+  display settings it had, in Edit in 3D with the copy's layers and crop.
+- **Looks** (the sparkle button left of Save, in both editors, `editor/looks.rs`): the layers kept under a name ("Look
+  1"…, in `looks.json` in the settings folder; the crop is the picture's own and is not kept), applied over the layers
+  of another picture or of the 3D view, removed from the same list.
+
+Matching the CPU (`cargo test -p orbiters-ui photo::gpu`): each kind of layer and its variants (every light slider, a
+faded black, a hue turn, grey, curves per channel, a moved lighter vignette, strong aberration, comic with dots and
+without ink, the box path of the gaussian, the lens with bokeh and small, directional, glow and shadow texts), alone,
+whole and faded through a circle or an inverted band, on an opaque picture and one with a transparent corner, drawn on
+the GPU and by `render::Renderer`: at most 1 of 255 apart everywhere but the comic, whose tone steps and ink threshold
+fall the other way on 0.01 % of the pixels (0.3 % with its dots). The geometry (quarter turns, flips, straightening,
+two perspective tilts, crops) and the stages without layers are at most 8 apart on a few edge pixels (mean under 0.3).
+A live stack redoes only the layer changed and draws what a fresh run draws, byte for byte. Timed with
+`cargo test -p orbiters-ui photo::gpu::tests::a_view_sized -- --ignored --nocapture` on a 1600×900 picture, each layer
+including its submission and read back: 0.5 to 1.7 ms; the twelve at once 4.6 ms.
+
 ## Files (`editor/files.rs`)
 
 - The copy: `<name> (edited).png` in the original's folder (`(edited 2)`… when taken), RGB when opaque, RGBA otherwise,
@@ -88,11 +207,36 @@ directional 1461; all eleven at once 2.9 s; their 1400×788 preview 196 ms
 - The edit: `<copy's name>.orbiters-edit.json` beside it: `{"format": "orbiters-photo-edit", "version": 1, "source":
   {"picture", "layers": [{"name", "path"}]}, "edit": {...}}`. Every field has a default, so older and newer edits open.
   Opening a copy whose edit and original are there edits it again from the original; Save then replaces that copy.
+  A copy saved in Edit in 3D has `"view"` too (the capture and its camera): Edit in 3D goes back there.
 - `editor::saved()` counts saves; Photos & captures lists its pictures again when it changes.
+- Geometry fields added since the first version (`vertical`, `horizontal`, the new shapes' names, `"source":
+  {"remote"}`) have defaults; the first version's shapes keep their names (`"portrait"` is 4:5, `"classic"` 3:2,
+  `"wide"` 16:9, `"story"` 9:16). An edit with a new shape does not open in the first version (its copy opens as a
+  picture there).
+
+### Pictures of Orbiters
+
+A picture shared with the member (Photos & captures' Shared with me, or theirs only on Orbiters), a picture of a
+community's or an event's gallery and an asset's picture are edited as a copy of their full picture (`files::Remote`, `Source::remote`):
+
+- **Download** (`files::fetch`, on the editor's loading job, "Downloading the picture at its full size…"): a shared
+  picture's file (`/captures/picture/:id/file`, the member's credential), a gallery picture's full picture by the link
+  `/galleries/images/:id/source` renews (asked again with `failed` when the first does not load; Discord's links
+  expire; the link listed when Orbiters renews none), an asset's picture by its public link (`RemoteKind::Link`, no
+  account needed), up to 96 MB, into `<cache>/editor-pictures/<shared|gallery>-<dev|prod>-<id>.img` or
+  `link-<hash of the link>.img` (once: opened again, it is read from there). Where a card of Photos & captures is
+  fetched from is the gallery's own rule (`gallery_select::remote`), so the editor fetches what a drag would. The
+  server is the one the app is on. The canvas keeps a middle press (`autoscroll::keep_middle`).
+- **Save a copy** writes into VRChat's pictures folder (as Save this view does), in the month it was taken, named
+  after it (`<event or world> by <who> (edited).png`), with an XMP packet as VRChat writes one: the world (the shared
+  item's, the gallery event's world) and when it was taken (the item's time, the gallery picture's posting time, else
+  the event's start). Photos & captures lists it at once (`saved()`) with that world, in the instance the member was in
+  then when VRChat's logs say so, else by world and day. Its edit beside it points at the download: opened again, it
+  edits again from it.
 
 ## Checked
 
-- Unit tests (`cargo test -p orbiters-ui photo`, 31; `cargo test -p orbiters-desktop editor`, 7): sRGB tables and the
+- Unit tests (`cargo test -p orbiters-ui photo`, 43 with the GPU's; `cargo test -p orbiters-desktop editor`, 16): sRGB tables and the
   RGBA8 round trip, box downscale; exposure, black point, tone curves monotone at every extreme, brightness/contrast,
   curves through their points, colour; gaussian kernels, box widths, blur light kept and spread by σ, the lens disc and
   bokeh, directional only along its line; vignette around a moved centre, aberration offsets, comic tone steps, dot
@@ -101,18 +245,56 @@ directional 1461; all eleven at once 2.9 s; their 1400×788 preview 196 ms
   faded and masked layers, the multi-layer stack order, the kept preview equal to a fresh render; the JSON round trip
   (it found a clash between the effect's tag and the blur's `kind`), multi-layer stacking rules, copy names, XMP carried
   over, reopening; crop handle drags; undo; a whole save (size, edit, original untouched, XMP).
+- The crop (`photo::geometry`, `photo::level`, `editor::crop`, `editor::files`): the tilts are homographies about the
+  middle (identity untilted, the middle kept, there and back, lines kept straight), a vertical tilt's verticals meet f /
+  tan θ below the middle and a horizontal one's horizontals f / tan φ to the left, walls leaning towards a point d
+  above stand upright at sin θ = f / d; a tilted crop is the largest inside (1 % more is not), its pixels the source's
+  under the warp, the corners beyond a tilt empty; the presets standing and lying in the iPhone's order, each the
+  largest of its shape; AUTO finds a tilted horizon (5°, −3.5°, 12°, 0°, −20°, within 0.3°), walls leaning 4°, a −2°
+  horizon among walls leaning together, nothing in a soft blob nor a 40° diagonal, and its straightening levels the
+  line; handles and the picture moved under the crop stop at the picture's edge, zoom keeps the point under the
+  pointer, the view centres the crop as large as fits, four turns or two flips give the geometry back and a turned
+  flipped picture shows the same corner, AUTO the other way when flipped; an edit as the first version saved it opens
+  with its shape and no tilt and writes back the same, new shapes and tilts round trip; a picture of Orbiters' cache
+  file, copy name and month folder, XMP and JSON, and its save (world, name and time read back by the gallery's
+  reader, reopened from the download).
 - Screenshots (`orbiters-desktop --screenshot <dir> --only editor --width 1440 --height 900`, with
   `ORBITERS_EDITOR_PICTURE` for the stand-in): `editor-window` (Edit in the picture window), `editor-plain` /
   `editor-open` (before), `editor-light`, `-color`, `-curves`, `-vignette`, `-aberration`, `-comic`, `-blur-gaussian`,
   `-blur-lens` (sharp circle), `-blur-directional` (band), `-text`, `-text-glow`, `-crop`, `-cropped`, `-layers` (the
-  add grid), `-multilayer` (world blurred and dimmed, people in the comic look, a title over both).
+  add grid), `-multilayer` (world blurred and dimmed, people in the comic look, a title over both); the crop:
+  `editor-crop` (4:5, straightened 6°), `-crop-auto` (the skyline drawn here turned 4°, AUTO lit, levelled at −3.8°),
+  `-crop-vertical` (+14°), `-crop-horizontal` (−12°, straightened 2.5°), `-crop-shapes` (landscape, 4:3),
+  `-crop-zoomed` (a square zoomed off the middle); `editor-remote` (a gallery picture, its download standing in);
+  `gallery-community-open` has Edit over the gallery picture.
   `--only editor-3d --sessions <dir>` saves a view of the first reconstructed capture and opens the editor on it
   (`editor-3d-saved`, `editor-3d-edit`).
+- Edit in 3D: `cargo test -p orbiters-ui photo::gpu` (the GPU against the CPU, above), `cargo test -p orbiters-desktop
+  editor` (a copy saved in 3D asks for its view again, a live editor asks its host to save, looks kept by name and put
+  over another edit) and `splats` (the view in the edit's JSON). `--only editor-3d-live --sessions <dir>`: the 3D view
+  with its Edit in 3D button (`edit3d-view`), the mode opened (`edit3d-open`), light, colour, aberration, vignette and a
+  glowing title over the live view at one angle and the camera turned (`edit3d-angle-1`, `edit3d-angle-2`), crop and
+  rotate over it (`edit3d-crop`), the comic look with a lens blur outside a circle (`edit3d-comic`), the Looks menu
+  (`edit3d-looks`) and Save picture done (`edit3d-saved`; the view, its edited copy and the edit with the camera are
+  written into `<out>/editor-pictures`).
 
 ## Not done or simplified
 
+- Edit in 3D: one source (VRChat's multi-layer stacks are for pictures); the curves draw no histogram over the live view;
+  the canvas has no zoom; the view's shape is the one it had when the mode opened (a window resized later fits it
+  letterboxed). The comic's tones and the GPU's half floats differ from the CPU's on a few pixels (see above), so a
+  copy saved in 3D and opened again in the picture editor (which renders from the view on the CPU) can differ there.
+
 - Pointer flows (dragging handles, rows and curve points, typing) were checked by staged states, the crop drag math and
-  undo by tests, not by hand. No zoom on the canvas.
+  undo by tests, not by hand. No zoom on the canvas outside the crop. The crop's handle drags, pan, wheel zoom, the
+  ruler's scrub, coasting and notch, the "…" menu and a real download of a shared or gallery picture were not tried by
+  hand (staged states and tests only).
+- The crop does not wait a moment before re-centring after a handle is let go, as the iPhone does; there is no haptic
+  tick (the ruler's middle mark flashes). AUTO straightens only (no automatic perspective), and on a picture without
+  long straight lines it finds nothing. The tilts are about the picture's middle lines (a virtual camera 0.75 of the
+  long side away), not the camera's own lens.
+- A copy of a picture of Orbiters carries its world and time, not its instance: Photos & captures puts it in the
+  instance VRChat's logs had the member in then, else by world and day.
 - Masks are a circle or a band per layer (no brushes). Shadows and highlights are global tone curves, not Lightroom's
   local ones. Text has no kerning, no font fallback for missing letters, no rotation.
 - A text's colour is one of twelve swatches (no free picker).

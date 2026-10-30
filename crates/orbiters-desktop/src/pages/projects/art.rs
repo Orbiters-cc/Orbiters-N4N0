@@ -28,7 +28,7 @@ pub(super) mod glyph {
 
 /// An avatar's (or a world's) picture in `rect` (squircle corners `radii`, circular radii from the top-left
 /// clockwise): until it loads, or without one, its initial on a soft tile of its own colour; the picture fades in
-/// over it.
+/// over it, and a different picture later over the one before.
 pub(super) fn avatar(p: &Painter, state: &State, a: &Avatar, rect: Rect, radii: [f32; 4], zoom: f32) {
     picture(p, state, a, rect, radii, zoom, true);
 }
@@ -51,7 +51,16 @@ fn picture(p: &Painter, state: &State, a: &Avatar, rect: Rect, radii: [f32; 4], 
         widgets::text(p, rect.center(), Align2::CENTER_CENTER, &Txt::new(initial, size).weight(weight::SEMIBOLD).color(theme::alpha(tint, 0.85 * (1.0 - k))));
     }
     if let Some(t) = tex {
-        feedback::cover(p, rect, radii, t, zoom * (1.0 + 0.04 * (1.0 - k)), k);
+        let zoom = zoom * (1.0 + 0.04 * (1.0 - k));
+        // A different picture in place of the one shown: it fades in over that one, which stays until it is covered.
+        match state.thumb_before.get(&a.id) {
+            Some((before, serial)) => {
+                let x = State::thumb_swap(p.ctx(), &a.id, *serial).clamp(0.0, 1.0);
+                feedback::cover(p, rect, radii, before, zoom, k);
+                feedback::cover(p, rect, radii, t, zoom, k * x);
+            }
+            None => feedback::cover(p, rect, radii, t, zoom, k),
+        }
     }
 }
 

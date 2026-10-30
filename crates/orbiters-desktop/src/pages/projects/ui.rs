@@ -4,6 +4,7 @@
 //! opened them ([`super::dialogs`]).
 
 use super::art;
+use super::menus;
 use super::panel;
 use super::state::{server, Modal, Outcome, State};
 use crate::pages::header::{Action, Header};
@@ -15,7 +16,7 @@ use orbiters_ui::layout::{self, PANE_GAP};
 use orbiters_ui::paint::{self, Gradient};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Tone, Variant};
-use orbiters_ui::{feedback, format, icons, logo};
+use orbiters_ui::{feedback, format, icons, logo, popup};
 use std::sync::atomic::Ordering;
 
 pub use super::dialogs::modals;
@@ -240,7 +241,7 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         ui.add_space(32.0);
         section_title(ui, "Found on this computer", Some(proposals_n), Some("Add one to manage its avatars and packages here, in VCC and in ALCOM."));
         ui.add_space(10.0);
-        found(ui, state, &proposals);
+        found(ui, cx, state, &proposals);
     }
 }
 
@@ -252,6 +253,7 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[Project]) {
     let rows = projects.len().div_ceil(cols);
     let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + GAP) - GAP), Sense::hover());
     let mut opened = None;
+    let mut picked = None;
     for (i, p) in projects.iter().enumerate() {
         // Each card springs to its place (in the grid's own coordinates, so scrolling never animates): when the panel
         // takes room or gives it back, the cards reflow instead of jumping.
@@ -262,17 +264,27 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[Project]) {
         if !ui.is_rect_visible(r.expand(12.0)) {
             continue;
         }
-        if card(ui, cx, state, i, p, r) {
+        let resp = card(ui, cx, state, i, p, r);
+        if widgets::activated(&resp) {
             opened = Some(p.path.clone());
+        }
+        // A right press: what the project offers (`menus`).
+        let acts = menus::project_items(state, p, true);
+        let items: Vec<popup::Item> = acts.iter().map(|(i, _)| *i).collect();
+        if let Some(k) = popup::context_menu(ui, &resp, "project-card", &items) {
+            picked = Some((p.clone(), acts[k].1, r));
         }
     }
     if let Some(path) = opened {
         state.open(&ctx, path);
     }
+    if let Some((p, act, r)) = picked {
+        menus::project_act(&ctx, cx, state, &p, act, r, false);
+    }
 }
 
-/// One project's card; true when pressed.
-fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) -> bool {
+/// One project's card; its response (pressed: opened; a right press: its menu).
+fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) -> egui::Response {
     let ctx = ui.ctx().clone();
     let id = Id::unique(("project-card", &p.path));
     let resp = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
@@ -343,18 +355,23 @@ fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) 
         let w = widgets::pill_at(&pt, ui, pos2(px, py), g, &label);
         px += w + 6.0;
     }
-    widgets::activated(&resp)
+    resp
 }
 
-/// A card's entrance: up and in, 35 ms apart, once per visit (a card that appears later, a project just added, comes
-/// in as it appears).
+/// A card's entrance: up and in, 35 ms apart, the first time the window shows it (a card that appears later, a project
+/// just added, comes in as it appears). Coming back to the page, the cards and their pictures are there already: they
+/// never leave and come in again.
 fn entrance(ctx: &egui::Context, cx: &Cx, id: Id, i: usize) -> f32 {
     let delay = 0.05 + i.min(12) as f64 * 0.035;
     let elapsed = anim::time(ctx) - cx.entered;
-    if elapsed < delay {
+    let key = id.with("enter");
+    let seen = ctx.data(|d| d.get_temp::<bool>(key.with("seen")).is_some());
+    if !seen && elapsed < delay {
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(delay - elapsed));
+        return 0.0;
     }
-    anim::spring_from(ctx, id.with(("enter", cx.visit)), [0.0], [if elapsed >= delay { 1.0 } else { 0.0 }], Spring::SOFT)[0]
+    ctx.data_mut(|d| d.insert_temp(key.with("seen"), true));
+    anim::spring_from(ctx, key, [0.0], [1.0], Spring::SOFT)[0]
 }
 
 /// A small label on a picture, its left (or with `right` its right) edge at `at`.
@@ -444,7 +461,7 @@ fn quiet_empty(ui: &mut Ui, cx: &Cx, title: &str, text: &str) {
 }
 
 /// Projects found on the computer that are not in the list yet: compact rows, the first few until "Show all".
-fn found(ui: &mut Ui, state: &mut State, list: &[Project]) {
+fn found(ui: &mut Ui, cx: &mut Cx, state: &mut State, list: &[Project]) {
     let ctx = ui.ctx().clone();
     let w = ui.available_width();
     let (cols, row_w) = layout::columns(w, 300.0, 12.0);
@@ -454,6 +471,7 @@ fn found(ui: &mut Ui, state: &mut State, list: &[Project]) {
     let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (row_h + 12.0) - 12.0), Sense::hover());
     let mut open = None;
     let mut add = None;
+    let mut picked = None;
     for (i, p) in list.iter().take(shown).enumerate() {
         let target = [(i % cols) as f32 * (row_w + 12.0), (i / cols) as f32 * (row_h + 12.0), row_w];
         let [x, y, rw] = anim::spring(&ctx, Id::unique(("found-slot", &p.path)), target, Spring::SOFT);
@@ -461,11 +479,20 @@ fn found(ui: &mut Ui, state: &mut State, list: &[Project]) {
         if !ui.is_rect_visible(r.expand(8.0)) {
             continue;
         }
-        match found_row(ui, state, p, r) {
+        let (pressed, resp) = found_row(ui, state, p, r);
+        match pressed {
             Some(true) => add = Some(p.path.clone()),
             Some(false) => open = Some(p.path.clone()),
             None => {}
         }
+        let acts = menus::project_items(state, p, true);
+        let items: Vec<popup::Item> = acts.iter().map(|(i, _)| *i).collect();
+        if let Some(k) = popup::context_menu(ui, &resp, "found-row", &items) {
+            picked = Some((p.clone(), acts[k].1, r));
+        }
+    }
+    if let Some((p, act, r)) = picked {
+        menus::project_act(&ctx, cx, state, &p, act, r, false);
     }
     if let Some(path) = add {
         state.task(&ctx, "Adding the project…", move || {
@@ -491,8 +518,9 @@ fn found(ui: &mut Ui, state: &mut State, list: &[Project]) {
     }
 }
 
-/// One project found on the computer: `Some(true)` when Add was pressed, `Some(false)` when the row was.
-fn found_row(ui: &mut Ui, state: &State, p: &Project, rect: Rect) -> Option<bool> {
+/// One project found on the computer: `Some(true)` when Add was pressed, `Some(false)` when the row was; and the row's
+/// response (its right-click menu).
+fn found_row(ui: &mut Ui, state: &State, p: &Project, rect: Rect) -> (Option<bool>, egui::Response) {
     let ctx = ui.ctx().clone();
     let id = Id::unique(("found-row", &p.path));
     let resp = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
@@ -525,9 +553,9 @@ fn found_row(ui: &mut Ui, state: &State, p: &Project, rect: Rect) -> Option<bool
     widgets::text_truncated(pt, pos2(x, r.center().y + 18.0), Align2::LEFT_CENTER, &Txt::new(meta, 11.5).color(theme::FG_4), tw);
     let br = Rect::from_min_size(pos2(r.right() - 14.0 - aw, r.center().y - 16.0), vec2(aw, 32.0));
     if widgets::activated(&add_b.show_at(ui, br)) {
-        return Some(true);
+        return (Some(true), resp);
     }
-    widgets::activated(&resp).then_some(false)
+    (widgets::activated(&resp).then_some(false), resp)
 }
 
 /// The capsule over the bottom of the cards while an action runs (unless a dialog shows it), with a project copy's

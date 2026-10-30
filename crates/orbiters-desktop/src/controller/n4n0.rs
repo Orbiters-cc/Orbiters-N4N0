@@ -285,6 +285,11 @@ impl Controller {
         self.n4n0.say(text);
     }
 
+    /// The panel shows `text` at once for the owner ([`orbiters_n4n0::runtime::N4n0::say_quick`]).
+    pub(super) fn orb_say_quick(&self, text: &str) {
+        self.n4n0.say_quick(text);
+    }
+
     /// CPU and memory of Orbiters' processes and VRChat's (the N4N0 page's footprint).
     fn orb_resources(&self, system: &mut sysinfo::System) {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};

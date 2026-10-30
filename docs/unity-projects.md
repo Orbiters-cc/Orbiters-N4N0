@@ -68,6 +68,15 @@ picture fills the cover, two sit side by side, three as one large and two small,
 many more on the last), and a project without any picture shows its kind's icon. Pictures fade in over that
 placeholder. In the panel's avatar list, an avatar without a picture shows its initial on a tile of its own colour.
 
+Pictures are never taken away while their avatar or world is in the project. The window keeps each picture it showed in
+`%LOCALAPPDATA%/Orbiters/project-pictures` (`thumb_cache.rs`: a JPEG per item named `<id>.<sum>.jpg`, the sum being
+FNV-1a over the decoded picture; at most 600 files, 120 days), read on a worker when the window starts, so a new window
+(the window process ends when it is closed) shows them at once instead of asking the tray service for each. Every
+picture is still asked for once a window and when the VRChat account or session changes: one whose sum is the one shown
+changes nothing, a different one fades in over the one before (`State::set_thumb`, `thumb_before`). The cards come in
+the first time a window shows them only; coming back to the page, they are there already. `projects-revisit
+--sequence 60` shows the page left for Settings, entered again, then every picture asked for again with one changed.
+
 World projects' scenes are read as avatar projects' are: a PipelineManager's `wrld_…` blueprint ID is the uploaded
 world (`Project.worlds`), and My World's component (its `thumbnail` and `thumbnailCamera` fields) names the world's
 thumbnail, a PNG or JPEG in the project read straight from disk. Without it, the world's VRChat thumbnail comes from
@@ -160,6 +169,15 @@ header and the sections' pills, and the choice of the project the docked panel s
 pressed again. Hiding the project shown moves the panel on (a sheet slides away). VCC and ALCOM keep listing them;
 nothing in the projects changes.
 
+## Right-click menus
+
+A right press on a project card or on a project found on the computer opens its menu (`menus.rs`, through
+`orbiters_ui::popup::context_menu`): Open in Unity (Add to my projects for a found one), Open the folder, Copy the
+folder's path, Duplicate…, Hide or Show this project and Remove from the list, the actions the panel's "…" menu shares.
+A right press on an avatar's or a world's row in the panel: Open on VRChat, Copy its ID, Change the picture on VRChat…
+(the signed-in VRChat account's own, as its thumbnail's hover), Add N4N0 and Install My Avatar only (an avatar of a
+listed project) and Open in Blender for each linked .blend. Screenshots: `projects-card-menu`, `projects-avatar-menu`.
+
 ## Avatars and worlds on VRChat
 
 Each avatar row has Open on VRChat (`https://vrchat.com/home/avatar/<avtr_id>`, `controller::open_url`) at its top
@@ -187,7 +205,9 @@ how many pictures were added (and how many were there already), the 3D capture n
 ## Blender files
 
 Avatars' and worlds' rows list the .blend files Orbiters' Blender tools linked them to, each with the tool, when it was
-saved, its path on hover and **Open in Blender** (`blend.rs`, `orbiters_projects::blender`). The links are read from
+saved, its path on hover and **Open in Blender** (`blend.rs`, `orbiters_projects::blender`), which shows Blender's
+logo (`icons::BLENDER`, `orbiters_ui::blender_logo`: the logo's SVG outlines in one colour, as Blender's logo guidelines
+allow for linking to Blender), as each file's tile does. The links are read from
 the project when it is opened and after each scan (small files only):
 
 - Mixer: `Assets/Orbiters/Mixer/Link/<scene GUID>.asset` (`blendPath`, written by "Open scene in Blender") and the

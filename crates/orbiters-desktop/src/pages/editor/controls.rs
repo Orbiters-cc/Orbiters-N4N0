@@ -98,7 +98,11 @@ fn paragraph(ui: &mut Ui, text: &str) {
 }
 
 fn nothing(ed: &mut Editor, ui: &mut Ui) {
-    header(ui, icons::SLIDERS_HORIZONTAL, theme::ACCENT, "Edit a copy", "The picture itself is never changed: saving writes a copy beside it, with its edit, which opens again here.");
+    if ed.live.is_some() {
+        header(ui, icons::SLIDERS_HORIZONTAL, theme::ACCENT, "Edit in 3D", "The layers go on every frame while you move around. Save picture writes this view and its edited copy, which opens again here.");
+    } else {
+        header(ui, icons::SLIDERS_HORIZONTAL, theme::ACCENT, "Edit a copy", "The picture itself is never changed: saving writes a copy beside it, with its edit, which opens again here.");
+    }
     let size = ed.loaded.as_ref().map(|l| format!("{} × {} pixels", l.full.0, l.full.1)).unwrap_or_else(|| "Reading the picture…".into());
     paragraph(ui, &size);
     if !ed.doc.sources.is_empty() {
@@ -123,46 +127,56 @@ fn nothing(ed: &mut Editor, ui: &mut Ui) {
 }
 
 fn crop(ed: &mut Editor, ui: &mut Ui) {
-    header(ui, icons::CROP, theme::ACCENT, "Crop and rotate", "Drag the corners or the edges on the picture, or inside to move the crop. Straightening keeps the crop inside the picture.");
+    header(
+        ui,
+        icons::CROP,
+        theme::ACCENT,
+        "Crop and rotate",
+        "Drag the frame's corners or edges, or the picture under it; the wheel zooms. The dials under the picture straighten it and set its perspective upright; AUTO levels it by its own lines.",
+    );
     let full = ed.loaded.as_ref().map_or((16, 9), |l| l.full);
     let g = &mut ed.doc.geometry;
     let (tw, th) = photo::geometry::turned_size(full.0, full.1, g.turns);
+    let (tw, th) = (tw as f32, th as f32);
+    let original = tw / th.max(1.0);
     w::label(ui, "Shape");
-    let widths: Vec<f32> = Aspect::ALL.iter().map(|a| Chip::new(a.name()).selected(g.aspect == *a).width(ui)).collect();
-    let (pos, h) = widgets::flow(&widths, ui.available_width(), widgets::CHIP_H, 8.0);
-    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
-    for ((a, p), cw) in Aspect::ALL.iter().zip(pos).zip(widths) {
-        let cr = Rect::from_min_size(r.min + p, vec2(cw, widgets::CHIP_H));
-        if Chip::new(a.name()).selected(g.aspect == *a).id_salt(("aspect", a.name())).show_at(ui, cr).pressed {
-            g.aspect = *a;
-            // The largest crop of that shape (the original's after a quarter turn is its turned shape).
-            if let Some(ratio) = a.ratio(tw as f32 / th.max(1) as f32) {
-                g.crop = photo::geometry::with_ratio(photo::Crop::FULL, ratio, tw as f32, th as f32);
-            }
-        }
+    let mut landscape = super::crop::landscape(&ed.crop, g, original);
+    let options = [SegOption::new(false, "Portrait"), SegOption::new(true, "Landscape")];
+    if widgets::segmented(ui, "crop-orientation", &mut landscape, &options, true) {
+        super::crop::set_landscape(&mut ed.crop, g, landscape, tw, th);
     }
     ui.add_space(10.0);
-    w::slider(ui, "straighten", "Straighten", &mut g.straighten, -45.0..=45.0, 0.0, |v| format!("{v:.1}°"));
+    let list: Vec<Aspect> = Aspect::PRESETS.iter().map(|a| a.oriented(landscape, original)).collect();
+    let widths: Vec<f32> = list.iter().map(|a| Chip::new(a.name()).selected(g.aspect.preset() == a.preset()).width(ui)).collect();
+    let (pos, h) = widgets::flow(&widths, ui.available_width(), widgets::CHIP_H, 8.0);
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
+    for ((a, p), cw) in list.iter().zip(pos).zip(widths) {
+        let cr = Rect::from_min_size(r.min + p, vec2(cw, widgets::CHIP_H));
+        if Chip::new(a.name()).selected(g.aspect.preset() == a.preset()).id_salt(("aspect", a.name())).show_at(ui, cr).pressed {
+            super::crop::set_aspect(g, *a, tw, th);
+        }
+    }
+    w::label(ui, "Straighten and perspective");
+    for dial in super::crop::Dial::ALL {
+        if w::slider(ui, ("crop-dial", dial.name()), dial.name(), dial.value_mut(g), -45.0..=45.0, 0.0, |v| format!("{v:+.1}°")) {
+            ed.crop.dial = dial;
+        }
+    }
     ui.add_space(6.0);
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
     let buttons = [
-        (icons::ARROW_ARC_LEFT, "Turn left"),
-        (icons::ARROW_ARC_RIGHT, "Turn right"),
+        (icons::ARROW_ARC_LEFT, "Rotate a quarter to the left"),
+        (icons::ARROW_ARC_RIGHT, "Rotate a quarter to the right"),
         (icons::FLIP_HORIZONTAL, "Flip across"),
-        (icons::FLIP_VERTICAL, "Flip down"),
+        (icons::FLIP_VERTICAL, "Flip upside down"),
     ];
     for (i, (glyph, label)) in buttons.iter().enumerate() {
         let r = Rect::from_min_size(pos2(row.left() + i as f32 * 48.0, row.top()), vec2(40.0, 40.0));
         if widgets::activated(&IconButton::new(glyph, label).size(40.0, 18.0).backdrop(theme::white(0.05)).show_at(ui, r)) {
             match i {
-                0 | 1 => {
-                    g.turns = (g.turns + if i == 0 { 3 } else { 1 }) % 4;
-                    // The crop turns with the picture.
-                    let c = g.crop;
-                    g.crop = if i == 1 { photo::Crop { x: 1.0 - c.y - c.h, y: c.x, w: c.h, h: c.w } } else { photo::Crop { x: c.y, y: 1.0 - c.x - c.w, w: c.h, h: c.w } };
-                }
-                2 => g.flip_h = !g.flip_h,
-                _ => g.flip_v = !g.flip_v,
+                0 | 1 => super::crop::turn(g, i == 0),
+                2 => super::crop::flip(g, true),
+                _ => super::crop::flip(g, false),
             }
         }
     }
@@ -238,21 +252,21 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
     match &mut l.effect {
         Effect::Light(v) => {
             w::label(ui, "Light");
-            w::slider(ui, ("exposure", lid), "Exposure", &mut v.exposure, -4.0..=4.0, 0.0, |v| format!("{v:+.2} EV"));
-            w::slider(ui, ("brightness", lid), "Brightness", &mut v.brightness, -1.0..=1.0, 0.0, w::signed);
-            w::slider(ui, ("contrast", lid), "Contrast", &mut v.contrast, -1.0..=1.0, 0.0, w::signed);
-            w::slider(ui, ("highlights", lid), "Highlights", &mut v.highlights, -1.0..=1.0, 0.0, w::signed);
-            w::slider(ui, ("shadows", lid), "Shadows", &mut v.shadows, -1.0..=1.0, 0.0, w::signed);
-            w::slider(ui, ("black", lid), "Black point", &mut v.black_point, -0.25..=0.5, 0.0, w::signed);
+            w::slider_look(ui, ("exposure", lid), "Exposure", &mut v.exposure, -4.0..=4.0, 0.0, |v| format!("{v:+.2} EV"), w::Look::Exposure);
+            w::slider_look(ui, ("brightness", lid), "Brightness", &mut v.brightness, -1.0..=1.0, 0.0, w::signed, w::Look::Brightness);
+            w::slider_look(ui, ("contrast", lid), "Contrast", &mut v.contrast, -1.0..=1.0, 0.0, w::signed, w::Look::Contrast);
+            w::slider_look(ui, ("highlights", lid), "Highlights", &mut v.highlights, -1.0..=1.0, 0.0, w::signed, w::Look::Highlights);
+            w::slider_look(ui, ("shadows", lid), "Shadows", &mut v.shadows, -1.0..=1.0, 0.0, w::signed, w::Look::Shadows);
+            w::slider_look(ui, ("black", lid), "Black point", &mut v.black_point, -0.25..=0.5, 0.0, w::signed, w::Look::BlackPoint);
         }
         Effect::Color(v) => {
             w::label(ui, "White balance");
-            w::slider(ui, ("temperature", lid), "Temperature", &mut v.temperature, -1.0..=1.0, 0.0, w::signed);
-            w::slider(ui, ("tint", lid), "Tint", &mut v.tint, -1.0..=1.0, 0.0, w::signed);
+            w::slider_look(ui, ("temperature", lid), "Temperature", &mut v.temperature, -1.0..=1.0, 0.0, w::signed, w::Look::Temperature);
+            w::slider_look(ui, ("tint", lid), "Tint", &mut v.tint, -1.0..=1.0, 0.0, w::signed, w::Look::Tint);
             w::label(ui, "Colour");
-            w::slider(ui, ("saturation", lid), "Saturation", &mut v.saturation, -1.0..=1.0, 0.0, w::signed);
-            w::slider(ui, ("vibrance", lid), "Vibrance", &mut v.vibrance, -1.0..=1.0, 0.0, w::signed);
-            w::slider(ui, ("hue", lid), "Hue", &mut v.hue, -180.0..=180.0, 0.0, |v| format!("{v:+.0}°"));
+            w::slider_look(ui, ("saturation", lid), "Saturation", &mut v.saturation, -1.0..=1.0, 0.0, w::signed, w::Look::Saturation);
+            w::slider_look(ui, ("vibrance", lid), "Vibrance", &mut v.vibrance, -1.0..=1.0, 0.0, w::signed, w::Look::Vibrance);
+            w::slider_look(ui, ("hue", lid), "Hue", &mut v.hue, -180.0..=180.0, 0.0, |v| format!("{v:+.0}°"), w::Look::Hue);
         }
         Effect::Curves(c) => {
             ui.add_space(8.0);
@@ -278,7 +292,7 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
         }
         Effect::Vignette(v) => {
             w::label(ui, "Vignette");
-            w::slider(ui, ("amount", lid), "Amount", &mut v.amount, -1.0..=1.0, 0.6, w::signed);
+            w::slider_look(ui, ("amount", lid), "Amount", &mut v.amount, -1.0..=1.0, 0.6, w::signed, w::Look::Vignette);
             w::slider(ui, ("size", lid), "Size", &mut v.size, 0.3..=2.0, 1.0, w::percent);
             w::slider(ui, ("feather", lid), "Softness", &mut v.feather, 0.0..=1.0, 0.5, w::percent);
             ui.add_space(4.0);
@@ -287,7 +301,7 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
         }
         Effect::Aberration(a) => {
             w::label(ui, "Chromatic aberration");
-            w::slider(ui, ("amount", lid), "Amount", &mut a.amount, 0.0..=3.0, 1.0, |v| format!("{v:.2}"));
+            w::slider_look(ui, ("amount", lid), "Amount", &mut a.amount, 0.0..=3.0, 1.0, |v| format!("{v:.2}"), w::Look::Aberration);
             paragraph(ui, "Red and blue part away from the centre, more towards the edges. Drag the centre on the picture.");
             center_button(ui, ("ab-centre", lid), &mut a.center);
         }
@@ -297,7 +311,7 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
             if w::slider(ui, ("tones", lid), "Tones", &mut tones, photo::Comic::MIN_TONES as f32..=photo::Comic::MAX_TONES as f32, 4.0, |v| format!("{}", v.round() as u32)) {
                 c.tones = tones.round() as u32;
             }
-            w::slider(ui, ("ink", lid), "Ink lines", &mut c.ink, 0.0..=1.0, 0.6, w::percent);
+            w::slider_look(ui, ("ink", lid), "Ink lines", &mut c.ink, 0.0..=1.0, 0.6, w::percent, w::Look::Ink);
             w::switch(ui, ("dots", lid), "Print dots", &mut c.dots);
             if c.dots {
                 w::slider(ui, ("dot-size", lid), "Dot size", &mut c.dot_size, 0.0..=1.0, 0.3, w::percent);
@@ -512,6 +526,27 @@ fn curve_editor(ui: &mut Ui, id: Id, points: &mut Vec<[f32; 2]>, color: Color32,
         p.hline(box_.x_range(), box_.top() + box_.height() * t, egui::Stroke::new(1.0, theme::white(0.05)));
     }
     p.line_segment([to_screen([0.0, 0.0]), to_screen([1.0, 1.0])], egui::Stroke::new(1.0, theme::white(0.12)));
+    // The tones in and out along its sides, black to the channel's colour.
+    let ramp = |r: Rect, across: bool| {
+        let mut mesh = egui::Mesh::default();
+        let (a, b) = (Color32::BLACK, color);
+        if across {
+            mesh.colored_vertex(r.left_top(), a);
+            mesh.colored_vertex(r.left_bottom(), a);
+            mesh.colored_vertex(r.right_top(), b);
+            mesh.colored_vertex(r.right_bottom(), b);
+        } else {
+            mesh.colored_vertex(r.left_bottom(), a);
+            mesh.colored_vertex(r.right_bottom(), a);
+            mesh.colored_vertex(r.left_top(), b);
+            mesh.colored_vertex(r.right_top(), b);
+        }
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(1, 2, 3);
+        p.add(egui::Shape::mesh(mesh));
+    };
+    ramp(Rect::from_min_max(pos2(box_.left(), box_.bottom() + 3.0), pos2(box_.right(), box_.bottom() + 7.0)), true);
+    ramp(Rect::from_min_max(pos2(box_.left() - 7.0, box_.top()), pos2(box_.left() - 3.0, box_.bottom())), false);
     // Dragging a point: which one.
     let drag_id = id.with("dragging");
     let mut dragging: Option<usize> = ui.data(|d| d.get_temp(drag_id)).flatten();

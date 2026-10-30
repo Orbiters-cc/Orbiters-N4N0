@@ -55,6 +55,8 @@ pub enum Error {
     Upload,
     /// VRChat did not finish checking an upload in time.
     Processing,
+    /// VRChat answered with an error status the request does not expect, with its message when it gave one.
+    Refused(u16, String),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -71,6 +73,8 @@ impl std::fmt::Display for Error {
             Self::NotYours => f.write_str("Only the VRChat account that uploaded it can change its picture."),
             Self::Upload => f.write_str("VRChat's storage did not accept the picture. Try again shortly."),
             Self::Processing => f.write_str("VRChat is still processing the picture. Try again in a minute."),
+            Self::Refused(status, message) if message.is_empty() => write!(f, "VRChat refused the request (HTTP {status}). Try again shortly."),
+            Self::Refused(status, message) => write!(f, "VRChat refused the request (HTTP {status}: {message})."),
         }
     }
 }
@@ -259,6 +263,99 @@ fn parse_login(body: &[u8]) -> Result<Login> {
 pub fn basic_header(username: &str, password: &str) -> String {
     format!("Basic {}", STANDARD.encode(format!("{}:{}", encode(username), encode(password))))
 }
+/// A path segment as VRChat's firewall takes it: RFC 3986's path characters stay as they are (an instance's `~`, `(`,
+/// `)`, `,` and `:`, which VRChat refuses percent-encoded with 400 "malformed url"), anything else is percent-encoded.
+pub(crate) fn path_segment(value: &str) -> String {
+    let mut out = String::new();
+    for b in value.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~!$&'()*+,;=:@".contains(&b) {
+            out.push(b as char)
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// VRChat's message in an error answer (`{"error":{"message":"\"malformed url\"","status_code":400}}`), short and
+/// without its quotes and the one-dot leader it ends some with.
+fn error_message(body: &[u8]) -> String {
+    let v: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    let m = v["error"]["message"].as_str().or(v["error"].as_str()).unwrap_or_default();
+    let m = m.trim().trim_matches('"').trim_end_matches(['\u{2024}', '.']).trim();
+    m.chars().take(120).collect()
+}
+
+/// Whether VRChat's answer for an instance says it is open: closed when it has closed (`closedAt`, `hardClose`) or
+/// says so (`active`), or when it is `null` (VRChat's answer for an instance it does not know); open when it is the
+/// instance (`active` is optional, true by default).
+fn instance_open(v: &serde_json::Value) -> Option<bool> {
+    if v.is_null() {
+        return Some(false);
+    }
+    if !v.is_object() {
+        return None;
+    }
+    if v["closedAt"].as_str().is_some_and(|c| !c.is_empty()) || v["hardClose"] == true {
+        return Some(false);
+    }
+    v["active"].as_bool().or_else(|| (v["id"].is_string() || v["instanceId"].is_string()).then_some(true))
+}
+
+/// The API path of a page of a world list, one more world asked than a page holds (its being there says another page
+/// follows): `GET /worlds?search=…&sort=relevance`, `/worlds?sort=popularity&order=descending`, `/worlds/active`,
+/// `/worlds/favorites` (public worlds only but for the account's own favorites).
+pub fn world_list_path(list: &crate::maps::WorldList, page: usize) -> String {
+    use crate::maps::{WorldList, FOUND_PAGE, FOUND_PAGES};
+    let (n, offset) = (FOUND_PAGE + 1, page.min(FOUND_PAGES) * FOUND_PAGE);
+    match list {
+        WorldList::Search(q) => {
+            let q: String = q.trim().chars().take(crate::maps::SEARCH_MAX).collect();
+            format!("/worlds?search={}&sort=relevance&releaseStatus=public&n={n}&offset={offset}", encode(&q))
+        }
+        WorldList::Popular => format!("/worlds?sort=popularity&order=descending&releaseStatus=public&n={n}&offset={offset}"),
+        WorldList::Active => format!("/worlds/active?n={n}&offset={offset}"),
+        WorldList::Favorites => format!("/worlds/favorites?n={n}&offset={offset}"),
+    }
+}
+
+/// VRChat's `LimitedWorld` list as the Map explorer's worlds (pictures over https only: they are shown, fetched without
+/// any credential, by the public picture loader), at most a page, and whether it held more. A world shaped otherwise is
+/// left out, never the list.
+fn parse_world_list(body: &[u8]) -> Result<(Vec<crate::maps::FoundWorld>, bool)> {
+    let list: Vec<serde_json::Value> = serde_json::from_slice(body).map_err(|_| Error::InvalidResponse)?;
+    let more = list.len() > crate::maps::FOUND_PAGE;
+    let text = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let whole = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_u64());
+    let picture = |v: &serde_json::Value, k: &str| text(v, k).filter(|u| u.starts_with("https://"));
+    let worlds = list
+        .iter()
+        .filter_map(|v| {
+            let id = text(v, "id").filter(|id| crate::vrchat_log::is_world_id(id))?;
+            let world = crate::maps::World {
+                name: text(v, "name").unwrap_or_else(|| id.clone()),
+                author_name: text(v, "authorName"),
+                description: text(v, "description"),
+                image_url: picture(v, "imageUrl"),
+                thumbnail_url: picture(v, "thumbnailImageUrl").or_else(|| picture(v, "imageUrl")),
+                capacity: whole(v, "capacity").map(|n| n.min(u32::MAX as u64) as u32),
+                visits: whole(v, "visits"),
+                favorites: whole(v, "favorites"),
+                tags: v
+                    .get("tags")
+                    .and_then(|t| t.as_array())
+                    .map(|t| t.iter().filter_map(|t| t.as_str().map(str::to_string)).take(64).collect())
+                    .unwrap_or_default(),
+                performance: None,
+                world_id: id,
+            };
+            Some(crate::maps::FoundWorld { world, occupants: whole(v, "occupants").map(|n| n.min(u32::MAX as u64) as u32), pictures: 0, preview: false })
+        })
+        .take(crate::maps::FOUND_PAGE)
+        .collect();
+    Ok((worlds, more))
+}
+
 pub(crate) fn encode(value: &str) -> String {
     let mut out = String::new();
     for b in value.bytes() {
@@ -381,6 +478,8 @@ pub struct Client {
     worlds: HashMap<String, (Instant, World)>,
     friends: Option<(Instant, Vec<User>)>,
     instances: HashMap<(String, String), (Instant, Option<bool>)>,
+    /// Pages of world lists (searches, popular, favorites) by their path: what they found and whether more follow.
+    world_lists: HashMap<String, (Instant, Vec<crate::maps::FoundWorld>, bool)>,
     store: Option<PathBuf>,
 }
 impl Client {
@@ -407,6 +506,7 @@ impl Client {
             worlds: HashMap::new(),
             friends: None,
             instances: HashMap::new(),
+            world_lists: HashMap::new(),
             store: dirs::data_local_dir().map(|d| d.join("Orbiters/vrchat-session.bin")),
         }
     }
@@ -462,6 +562,7 @@ impl Client {
         self.worlds.clear();
         self.friends = None;
         self.instances.clear();
+        self.world_lists.clear();
         if let Some(path) = &self.store {
             match std::fs::remove_file(path) {
                 Ok(()) => {}
@@ -501,6 +602,18 @@ impl Client {
         Error::RateLimited(delay)
     }
     fn request(&mut self, family: &'static str, method: &'static str, url: String, basic: Option<String>, body: Option<String>) -> Result<Response> {
+        self.request_accepting(family, method, url, basic, body, &[])
+    }
+    /// [`Self::request`], an answer with a status of `accept` returned as it is (a request that tells those apart).
+    fn request_accepting(
+        &mut self,
+        family: &'static str,
+        method: &'static str,
+        url: String,
+        basic: Option<String>,
+        body: Option<String>,
+        accept: &[u16],
+    ) -> Result<Response> {
         self.pace(family)?;
         let verifying = family == "auth" && url.contains("/twofactorauth/") && url.ends_with("/verify");
         let session_host = url.starts_with("https://api.vrchat.cloud/") || url.starts_with("https://files.vrchat.cloud/");
@@ -519,6 +632,9 @@ impl Client {
             self.forget()?;
             return Err(Error::Unauthorized);
         }
+        if accept.contains(&response.status) {
+            return Ok(response);
+        }
         match response.status {
             400 if verifying => Err(Error::WrongCode),
             401 if !session_host => Err(Error::NotFound),
@@ -534,7 +650,7 @@ impl Client {
                 }
                 Ok(response)
             }
-            _ => Err(Error::InvalidResponse),
+            status => Err(Error::Refused(status, error_message(&response.body))),
         }
     }
     fn get(&mut self, family: &'static str, path: &str) -> Result<Response> {
@@ -557,6 +673,7 @@ impl Client {
                 self.worlds.clear();
                 self.friends = None;
                 self.instances.clear();
+                self.world_lists.clear();
                 self.pending_methods = methods.clone();
             }
         }
@@ -720,18 +837,21 @@ impl Client {
         let r = self.get("users", &format!("/users/{}", encode(id)))?;
         serde_json::from_slice(&r.body).map_err(|_| Error::InvalidResponse)
     }
-    /// None when access is denied: a hidden instance cannot be declared dead.
+    /// Whether the instance (`25332~hidden(usr_…)~region(eu)~nonce(…)`, as VRChat's log names it) is still open:
+    /// `Some(false)` when VRChat no longer knows it (404 "Instance not found", or the `null` it answers an unknown
+    /// instance with) or reports it closed, `None` when access is denied: a hidden instance cannot be declared dead.
     pub fn instance_alive(&mut self, world: &str, instance: &str) -> Result<Option<bool>> {
         self.authenticated()?;
         let key = (world.to_owned(), instance.to_owned());
         if let Some((_, alive)) = self.instances.get(&key).filter(|(at, _)| at.elapsed() < Duration::from_secs(60)) {
             return Ok(*alive);
         }
-        let alive = match self.get("instances", &format!("/instances/{}:{}", encode(world), encode(instance))) {
-            Ok(r) => {
-                let v: serde_json::Value = serde_json::from_slice(&r.body).map_err(|_| Error::InvalidResponse)?;
-                Ok(v.get("active").and_then(|v| v.as_bool()))
-            }
+        // The location goes as VRChat writes it: percent-encoded, the `( )` of its parts are refused (400).
+        let url = format!("{BASE}/instances/{}:{}", path_segment(world), path_segment(instance));
+        let alive = match self.request_accepting("instances", "GET", url, None, None, &[404]) {
+            Ok(r) if r.status == 404 => Ok(Some(false)),
+            Ok(r) if (300..400).contains(&r.status) => Err(Error::Refused(r.status, String::new())),
+            Ok(r) => serde_json::from_slice(&r.body).map(|v| instance_open(&v)).map_err(|_| Error::InvalidResponse),
             Err(Error::NotFound) => Ok(None),
             Err(e) => Err(e),
         }?;
@@ -740,6 +860,30 @@ impl Client {
         }
         self.instances.insert(key, (Instant::now(), alive));
         Ok(alive)
+    }
+    /// A page of a world list ([`world_list_path`]) and whether another follows, read as VRChat's `LimitedWorld`s. Kept
+    /// five minutes (the favorites one): typing a search again, or paging back, asks nothing.
+    pub fn find_worlds(&mut self, list: &crate::maps::WorldList, page: usize) -> Result<(Vec<crate::maps::FoundWorld>, bool)> {
+        self.authenticated()?;
+        let path = world_list_path(list, page);
+        let keep = if *list == crate::maps::WorldList::Favorites { Duration::from_secs(60) } else { Duration::from_secs(300) };
+        if let Some((_, worlds, more)) = self.world_lists.get(&path).filter(|(at, ..)| at.elapsed() < keep) {
+            return Ok((worlds.clone(), *more));
+        }
+        let r = self.get("worlds", &path)?;
+        let (worlds, more) = parse_world_list(&r.body)?;
+        if self.world_lists.len() >= 64 {
+            self.world_lists.clear();
+        }
+        self.world_lists.insert(path, (Instant::now(), worlds.clone(), more));
+        Ok((worlds, more))
+    }
+    /// Sends the signed-in account an invite to `world`'s instance `instance` (`48213~region(eu)`: a public one, made
+    /// when someone joins it), which VRChat shows in the game: the one way to join from outside it while it runs.
+    pub fn invite_self(&mut self, world: &str, instance: &str) -> Result<()> {
+        self.authenticated()?;
+        let url = format!("{BASE}/invite/myself/to/{}:{}", path_segment(world), path_segment(instance));
+        self.request("invites", "POST", url, None, Some("{}".into())).map(drop)
     }
     /// Only VRChat-owned image hosts. Redirects to any other host are refused before credentials leave the process.
     pub fn image(&mut self, url: &str) -> Result<Vec<u8>> {
@@ -1227,6 +1371,56 @@ pub(crate) mod tests {
         mock(vec![response(401, "", &[])]).0
     }
     #[test]
+    fn world_lists_are_asked_a_page_at_a_time_and_kept() {
+        use crate::maps::WorldList;
+        assert_eq!(
+            world_list_path(&WorldList::Search("  black cat & co ".into()), 1),
+            "/worlds?search=black%20cat%20%26%20co&sort=relevance&releaseStatus=public&n=25&offset=24"
+        );
+        assert_eq!(world_list_path(&WorldList::Popular, 0), "/worlds?sort=popularity&order=descending&releaseStatus=public&n=25&offset=0");
+        assert_eq!(world_list_path(&WorldList::Active, 2), "/worlds/active?n=25&offset=48");
+        assert_eq!(world_list_path(&WorldList::Favorites, 999), "/worlds/favorites?n=25&offset=480", "paging stops at 20 pages");
+        let long = "x".repeat(300);
+        assert!(world_list_path(&WorldList::Search(long), 0).contains(&format!("search={}&", "x".repeat(100))));
+        let id = |i: usize| format!("wrld_{:08x}-0000-4000-8000-000000000000", i);
+        let page: Vec<serde_json::Value> = (0..25)
+            .map(|i| {
+                serde_json::json!({"id": id(i), "name": format!("World {i}"), "authorName": "Mei", "capacity": 32, "occupants": 4,
+                "favorites": 120, "visits": 9988, "thumbnailImageUrl": "https://api.vrchat.cloud/api/1/image/file_a/1/256",
+                "imageUrl": "http://insecure/x", "tags": ["author_tag_chill", "system_approved"]})
+            })
+            .chain([serde_json::json!({"id": "not a world", "name": "skip"})])
+            .collect();
+        let (mut c, seen) = mock(vec![response(200, &serde_json::to_string(&page).unwrap(), &[]), response(200, "[]", &[])]);
+        let (worlds, more) = c.find_worlds(&WorldList::Search("cat".into()), 0).unwrap();
+        assert!(more, "25 asked, 25 worlds: another page follows");
+        assert_eq!(worlds.len(), 24);
+        let w = &worlds[0];
+        assert_eq!((w.world.world_id.as_str(), w.world.name.as_str(), w.world.author_name.as_deref()), (id(0).as_str(), "World 0", Some("Mei")));
+        assert_eq!((w.world.capacity, w.occupants, w.world.favorites, w.world.visits), (Some(32), Some(4), Some(120), Some(9988)));
+        assert_eq!(w.world.image_url, None, "plain http is not shown");
+        assert_eq!(w.world.tags, ["author_tag_chill", "system_approved"]);
+        // Asked again: kept, nothing sent; another page is another request.
+        assert_eq!(c.find_worlds(&WorldList::Search("cat".into()), 0).unwrap().0.len(), 24);
+        assert_eq!(c.find_worlds(&WorldList::Search("cat".into()), 1).unwrap(), (vec![], false));
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|r| r.method == "GET" && r.cookie.contains("mock-session")));
+        assert!(calls[1].url.ends_with("offset=24"));
+        drop(calls);
+        // Signing out forgets them.
+        c.forget().unwrap();
+        assert_eq!(c.find_worlds(&WorldList::Popular, 0), Err(Error::Unauthorized));
+    }
+    #[test]
+    fn an_invite_to_oneself_names_the_instance_as_vrchat_writes_it() {
+        let (mut c, seen) = mock(vec![response(200, r#"{"id":"not_a"}"#, &[])]);
+        c.invite_self("wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd", "48213~region(eu)").unwrap();
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls[0].method, "POST");
+        assert_eq!(calls[0].url, format!("{BASE}/invite/myself/to/wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd:48213~region(eu)"));
+    }
+    #[test]
     fn source_routes_avatar_image_and_instance_through_the_personal_session() {
         let (c, seen) = mock(vec![
             response(200, r#"{"id":"avtr_a","name":"Avatar","thumbnailImageUrl":"https://api.vrchat.cloud/image"}"#, &[]),
@@ -1459,9 +1653,39 @@ pub(crate) mod tests {
         c.instances.get_mut(&("wrld_a".into(), "123".into())).unwrap().0 -= Duration::from_secs(61);
         assert_eq!(c.instance_alive("wrld_a", "123"), Ok(Some(false)));
         assert_eq!(c.instance_alive("wrld_a", "hidden"), Ok(None));
-        assert_eq!(c.instance_alive("wrld_a", "unknown"), Ok(None));
+        // VRChat answers `null` for an instance it does not know: not open any more.
+        assert_eq!(c.instance_alive("wrld_a", "unknown"), Ok(Some(false)));
         c.allowed.revoke();
         assert_eq!(c.instance_alive("wrld_a", "123"), Err(Error::Disabled));
+    }
+    #[test]
+    fn instances_are_asked_for_as_vrchat_writes_them() {
+        let instance = "25332~hidden(usr_c1644b5b-3ca4-45b4-97c6-a2a0de70d469)~region(eu)~nonce(9f0e1d2c-3b4a-5968-7766-554433221100)";
+        let (mut c, seen) = mock(vec![response(404, r#"{"error":{"message":"Instance not found․","status_code":404}}"#, &[])]);
+        // A closed instance VRChat no longer knows is not open any more, rather than an error.
+        assert_eq!(c.instance_alive("wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b", instance), Ok(Some(false)));
+        assert_eq!(seen.lock().unwrap()[0].url, format!("{BASE}/instances/wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b:{instance}"));
+        assert_eq!(path_segment("a b/c?d#e%f"), "a%20b%2Fc%3Fd%23e%25f");
+    }
+    #[test]
+    fn instance_answers_open_closed_or_say_why_not() {
+        let (mut c, _) = mock(vec![
+            response(200, r#"{"id":"wrld_a:1","instanceId":"1","n_users":3}"#, &[]),
+            response(200, r#"{"id":"wrld_a:2","active":true,"closedAt":"2026-10-30T10:00:00.000Z"}"#, &[]),
+            response(200, r#"{"id":"wrld_a:3","hardClose":true}"#, &[]),
+            response(400, r#"{"error":{"message":"\"malformed url\"","status_code":400,"waf_code":26497}}"#, &[]),
+            response(200, "<html>", &[]),
+            response(302, "", &[]),
+        ]);
+        assert_eq!(c.instance_alive("wrld_a", "1"), Ok(Some(true)), "`active` is optional and true by default");
+        assert_eq!(c.instance_alive("wrld_a", "2"), Ok(Some(false)));
+        assert_eq!(c.instance_alive("wrld_a", "3"), Ok(Some(false)));
+        let refused = c.instance_alive("wrld_a", "4").unwrap_err();
+        assert_eq!(refused, Error::Refused(400, "malformed url".into()));
+        assert_eq!(refused.to_string(), "VRChat refused the request (HTTP 400: malformed url).");
+        assert_eq!(c.instance_alive("wrld_a", "5"), Err(Error::InvalidResponse));
+        assert_eq!(c.instance_alive("wrld_a", "6"), Err(Error::Refused(302, String::new())));
+        assert!(!c.instances.contains_key(&("wrld_a".into(), "4".into())), "errors are not cached");
     }
     #[cfg(windows)]
     #[test]

@@ -25,9 +25,12 @@ const MAX_FILE: u64 = 72 << 20;
 /// The listing is read again after this long, when the panel opens.
 const LISTING_FOR: Duration = Duration::from_secs(60);
 
-/// A 3D capture of a world, as the listing gives it.
+/// A world the panel lists: a 3D capture of it, as the listing gives it, or (`capture` false) a VRChat world without one
+/// shown, as a search or one of VRChat's lists found it ([`Entry::world`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
+    /// A 3D capture (its listing id, slot and files): shown around the person. Otherwise a world's page only.
+    pub capture: bool,
     /// The VRChat slot its files are published at (production's storage), when it holds one.
     pub slot: Option<u32>,
     /// Names the upload: its files carry the same.
@@ -59,8 +62,32 @@ pub struct Entry {
     pub only_for: Option<Vec<String>>,
     /// The world's feedback for everyone, as the listing gives it (the server's, at most 30 s old then).
     pub feedback: Aggregate,
+    /// Its picture on VRChat, when the list that found it said (a capture's comes with its world's page).
+    pub thumbnail: Option<String>,
+    /// VRChat's tags of it, when the list said.
+    pub tags: Vec<String>,
+    /// People in it now, when VRChat said.
+    pub occupants: Option<u32>,
+    /// How smoothly VRChat runs there, when Orbiters' answer said.
+    pub performance: Option<orbiters_core::maps::WorldPerformance>,
+    /// Orbiters has a 3D preview of it (the Map explorer's answer), though not one the overlay lists.
+    pub preview: bool,
+    /// Unix seconds of the person's latest visit, and how many visits (the Visited list).
+    pub visited: Option<(u64, usize)>,
+    /// The search (lower case) that found it: it stays a result of that search whatever its name.
+    pub found_by: Option<String>,
     /// Lower-case text a search looks in: the world, its author and the sharer.
     search: String,
+}
+
+/// Ids of worlds without a capture have this bit (the listing's ids are a database's, far under it).
+pub const WORLD_BIT: u64 = 1 << 63;
+
+/// The id of the world `world_id` as an entry without a capture: stable, never a capture's.
+pub fn world_entry_id(world_id: &str) -> u64 {
+    // FNV-1a: the same id in every run (the panel keeps a selection by it).
+    let hash = world_id.to_ascii_lowercase().bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
+    WORLD_BIT | (hash >> 1)
 }
 
 /// A world's likes, labels (highest count first, then the list's order) and comments for everyone, with its newest
@@ -80,10 +107,47 @@ impl Aggregate {
 }
 
 impl Entry {
-    /// Whether `query` (any case) is in its world's name, its author's or its sharer's.
+    /// A world without a capture the overlay lists, as a list found it (`found_by`: the search that did), with what
+    /// Orbiters says of it for everyone (`feedback`).
+    pub fn world(found: &orbiters_core::maps::FoundWorld, found_by: Option<&str>, feedback: Aggregate) -> Self {
+        let w = &found.world;
+        let search = format!("{}\n{}", w.name, w.author_name.as_deref().unwrap_or("")).to_lowercase();
+        Self {
+            capture: false,
+            slot: None,
+            key: 0,
+            id: world_entry_id(&w.world_id),
+            world_id: w.world_id.clone(),
+            name: w.name.clone(),
+            author: w.author_name.clone(),
+            description: w.description.clone().unwrap_or_default(),
+            uploader: None,
+            splats: 0,
+            view: StartView { position: [0.0, 1.6, 0.0], target: [0.0, 1.6, -1.0], floor: None, eye_height: None },
+            sky: false,
+            official: false,
+            captured_at: None,
+            capacity: w.capacity.filter(|c| *c > 0),
+            visits: w.visits,
+            favorites: w.favorites,
+            pictures: found.pictures.min(u32::MAX as usize) as u32,
+            only_for: None,
+            feedback,
+            thumbnail: w.thumbnail_url.clone().or_else(|| w.image_url.clone()),
+            tags: w.tags.clone(),
+            occupants: found.occupants,
+            performance: w.performance.clone().filter(|p| p.fps > 0),
+            preview: found.preview,
+            visited: None,
+            found_by: found_by.map(|q| q.trim().to_lowercase()),
+            search,
+        }
+    }
+
+    /// Whether `query` (any case) is in its world's name, its author's or its sharer's, or found it.
     pub fn matches(&self, query: &str) -> bool {
         let q = query.trim().to_lowercase();
-        q.is_empty() || self.search.contains(&q)
+        q.is_empty() || self.search.contains(&q) || self.found_by.as_deref() == Some(q.as_str())
     }
 
     /// Whether the player whose VRChat name is `me` may see it: everyone, or one of those it is shared with.
@@ -188,6 +252,7 @@ pub fn parse(json: &str) -> anyhow::Result<Vec<Entry>> {
             let search = format!("{}\n{}\n{}", r.name, r.author.as_deref().unwrap_or(""), r.uploader.as_deref().unwrap_or("")).to_lowercase();
             let feedback = feedback.get(&r.world_id.to_ascii_lowercase()).cloned().unwrap_or_default();
             Some(Entry {
+                capture: true,
                 slot: r.slot,
                 key: r.key as u32,
                 id: r.id,
@@ -207,10 +272,29 @@ pub fn parse(json: &str) -> anyhow::Result<Vec<Entry>> {
                 pictures: count(r.pictures).map_or(0, |n| n.min(u32::MAX as u64) as u32),
                 only_for: r.shared.then(|| r.only_for.unwrap_or_default()),
                 feedback,
+                thumbnail: None,
+                tags: Vec::new(),
+                occupants: None,
+                performance: None,
+                preview: true,
+                visited: None,
+                found_by: None,
                 search,
             })
         })
         .collect())
+}
+
+/// Orbiters' feedback for everyone on the worlds given some lately (`GET /maps/vrchat/feedback`: `{ feedback: { world:
+/// { likes, labels, comments, recent } } }`), by world id in lower case: a world without a capture shows it too.
+pub fn parse_feedback(json: &str) -> anyhow::Result<HashMap<String, Aggregate>> {
+    #[derive(Deserialize)]
+    struct All {
+        #[serde(default)]
+        feedback: HashMap<String, serde_json::Value>,
+    }
+    let all: All = serde_json::from_str(json)?;
+    Ok(all.feedback.iter().filter(|(_, v)| v.is_object()).map(|(world, v)| (world.to_ascii_lowercase(), aggregate(v))).collect())
 }
 
 /// Where the listing and the files come from: the app's server (or `ORBITERS_PUBLIC_API`, as the window's public reads),
@@ -249,6 +333,15 @@ impl Source {
         let text = response.into_body().with_config().limit(16 << 20).read_to_string()?;
         anyhow::ensure!((200..300).contains(&status), "Orbiters answered {status}");
         parse(&text)
+    }
+
+    /// Orbiters' feedback for everyone on the worlds given some lately ([`parse_feedback`]).
+    pub fn all_feedback(&self) -> anyhow::Result<HashMap<String, Aggregate>> {
+        let response = self.api.agent().get(&self.api.url("maps/vrchat/feedback")).call()?;
+        let status = response.status().as_u16();
+        let text = response.into_body().with_config().limit(8 << 20).read_to_string()?;
+        anyhow::ensure!((200..300).contains(&status), "Orbiters answered {status}");
+        parse_feedback(&text)
     }
 
     /// Downloads `entry`'s splats and sky map, `progress` counting bytes (and their total once known).
@@ -468,6 +561,8 @@ pub struct Catalog {
 #[derive(Default)]
 struct Listed {
     entries: Vec<Entry>,
+    /// Every world's feedback for everyone Orbiters gave (kept from the last answer when it fails).
+    feedback: HashMap<String, Aggregate>,
     error: Option<String>,
     fetching: bool,
     fetched: Option<Instant>,
@@ -486,7 +581,11 @@ impl Catalog {
         let (state, source) = (self.state.clone(), source.clone());
         let _ = std::thread::Builder::new().name("3d-worlds-listing".into()).spawn(move || {
             let answer = source.listing();
+            let feedback = source.all_feedback().map_err(|e| eprintln!("3D worlds: worlds' feedback: {e:#}")).ok();
             let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(feedback) = feedback {
+                s.feedback = feedback;
+            }
             s.fetching = false;
             s.version += 1;
             match answer {
@@ -512,10 +611,16 @@ impl Catalog {
         (s.fetching, s.error.clone())
     }
 
-    /// The world of the capture listed as `id`.
-    pub fn world_of(&self, id: u64) -> Option<String> {
+    /// A world's feedback for everyone as Orbiters last gave it: its capture's listing's, else the one of every world.
+    pub fn feedback(&self, world_id: &str) -> Aggregate {
         let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        s.entries.iter().find(|e| e.id == id).map(|e| e.world_id.clone())
+        let key = world_id.to_ascii_lowercase();
+        s.entries
+            .iter()
+            .find(|e| e.world_id.eq_ignore_ascii_case(world_id))
+            .map(|e| e.feedback.clone())
+            .or_else(|| s.feedback.get(&key).cloned())
+            .unwrap_or_default()
     }
 }
 

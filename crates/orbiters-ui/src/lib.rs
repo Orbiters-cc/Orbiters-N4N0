@@ -5,6 +5,8 @@
 //! (screenshots), a CPU painter (the VR overlay) and the photo editor's pixels ([`photo`]).
 
 pub mod anim;
+pub mod autoscroll;
+pub mod blender_logo;
 pub mod blur;
 pub mod dialog;
 pub mod feedback;

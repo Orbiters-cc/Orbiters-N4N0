@@ -278,8 +278,12 @@ impl Entry {
     pub fn mine(&self) -> bool {
         self.remote.as_ref().is_none_or(|i| i.mine)
     }
+    /// A picture (not a 3D capture or recording): a VRChat picture, a shared one, or a gallery's on Orbiters (a
+    /// community's `community:…`, an asset's `asset:…`: neither on this computer nor in the sharing feed).
     pub fn is_picture(&self) -> bool {
-        matches!(self.local, Some(Local::Picture(_))) || self.remote.as_ref().is_some_and(|i| i.kind == Kind::Picture)
+        matches!(self.local, Some(Local::Picture(_)))
+            || self.remote.as_ref().is_some_and(|i| i.kind == Kind::Picture)
+            || self.local.is_none() && self.remote.is_none() && (self.key.starts_with("community:") || self.key.starts_with("asset:"))
     }
 
     /// A VRChat multi-layer picture's layers ([`Layer`]: each file, VRChat's name for it, its size), back to front, the
@@ -335,7 +339,7 @@ pub fn instance_at(history: &visited::History, world: &str, taken: u64) -> Optio
     history.instances.iter().filter(|i| i.at <= taken).max_by_key(|i| i.at).filter(|i| i.world_id == world).map(|i| i.instance.clone())
 }
 pub fn local_entries(root: &Path, server: Server) -> Vec<Entry> {
-    let worlds = crate::worlds::load(root);
+    let worlds = crate::worlds::load_gallery(root);
     let history = visited::History::load(&visited::history_file());
     let records = records_path(server).ok().map(|p| read_records(&p)).unwrap_or_default();
     let mut entries = Vec::new();
@@ -385,7 +389,7 @@ pub fn local_entries(root: &Path, server: Server) -> Vec<Entry> {
                 world_id: w.id.clone(),
                 world_name: w.name.clone(),
                 taken: shot.info.taken,
-                instance: instance_at(&history, &w.id, shot.info.taken),
+                instance: shot.info.instance.clone().or_else(|| instance_at(&history, &w.id, shot.info.taken)),
                 source_key: shot.sha256.clone(),
                 people: Vec::new(),
                 local: Some(Local::Picture(shot.path.clone())),

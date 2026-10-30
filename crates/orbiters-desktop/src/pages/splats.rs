@@ -11,6 +11,8 @@
 //! VRChat runs ([`orbiters_core::settings::ViewGpu`], [`super::splat_worker`]); they move between the two GPUs while
 //! the view is open, once loaded on the other.
 
+mod edit3d;
+
 use super::splat_worker::{Request, Worker};
 use super::{Cx, Job};
 use crate::gpu::Handles;
@@ -96,6 +98,8 @@ struct Renderer {
     /// Frames left to ask whether the last one left splats out: it did not wait for the GPU's count, which comes back
     /// a frame or two later ([`Gpu::needs_redraw`]), and such a frame is drawn again.
     checks: u8,
+    /// Frames drawn into the target (Edit in 3D puts each new one through its layers).
+    drawn: u64,
 }
 
 /// How many frames after a render its count is waited for.
@@ -170,6 +174,8 @@ pub struct Viewer {
     saved: Option<PathBuf>,
     still_error: Option<String>,
     editor: Option<super::editor::Editor>,
+    /// Edit in 3D ([`edit3d`]).
+    edit3d: edit3d::State,
 }
 
 /// The long side of a view saved as a picture (at least the view's own size).
@@ -216,6 +222,7 @@ impl Viewer {
             saved: None,
             still_error: None,
             editor: None,
+            edit3d: edit3d::State::default(),
         }
     }
 
@@ -265,6 +272,11 @@ impl Viewer {
         // The photo editor on the view saved, over the 3D view (which draws nothing meanwhile).
         if let Some(e) = self.editor.as_mut() {
             if e.show(ui, rect) {
+                // A copy saved in Edit in 3D of this capture, asked back there.
+                if let Some((view, edit)) = e.take_3d().filter(|(v, _)| v.capture == self.session) {
+                    self.editor = None;
+                    self.edit3d.reopen(view, edit);
+                }
                 return true;
             }
             self.editor = None;
@@ -293,6 +305,9 @@ impl Viewer {
             }
         }
         self.place(&ctx, integrated);
+        if let Some(open) = edit3d::show(self, ui, rect) {
+            return open;
+        }
         let p = ui.painter().with_clip_rect(rect);
         p.rect_filled(rect, 0.0, Color32::from_rgb(9, 9, 11));
         let id = Id::unique(("splat-viewer", &self.session));
@@ -504,6 +519,8 @@ fn within(w: u32, h: u32, pixels: u32) -> (u32, u32) {
 /// Mouse and keyboard to the orbit.
 fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_px: u32) {
     let ctx = ui.ctx();
+    // Its middle drag pans: the wheel button's scrolling (`orbiters_ui::autoscroll`) does not start here.
+    orbiters_ui::autoscroll::keep_middle(ctx, resp.rect);
     let delta = resp.drag_delta();
     if resp.dragged_by(egui::PointerButton::Primary) {
         orbit.yaw += delta.x * 0.006;
@@ -584,6 +601,16 @@ impl Viewer {
                 self.still_error = None;
             }
         }
+        // Edit in 3D beside it.
+        let e = Button::new("Edit in 3D")
+            .icon(icons::SLIDERS_HORIZONTAL)
+            .variant(Variant::Glass)
+            .hint("Edits this view with the photo editor's layers while you keep moving around in 3D")
+            .id_salt("splat-edit-3d");
+        let ew = e.desired_width(ui);
+        if e.show_at(ui, Rect::from_min_size(pos2(save_r.right() + 10.0, save_r.top()), vec2(ew, 40.0))).clicked() {
+            self.enter_edit(&ctx, rect);
+        }
         // Saved: where, and Edit right after.
         let (text, tone) = match (&self.saved, &self.still_error) {
             (Some(_), _) => ("Saved in Photos & captures", theme::ACCENT),
@@ -631,6 +658,11 @@ impl Viewer {
 /// renderer of its own on the window's device, so that the view on screen carries on; saved as a picture of the
 /// capture's world ([`super::editor::files::save_view`]).
 fn still(dir: &Path, window: (wgpu::Device, wgpu::Queue), camera: Camera, confidence: Confidence, far: FarField) -> anyhow::Result<PathBuf> {
+    super::editor::files::save_view(dir, &shoot(dir, window, camera, confidence, far)?)
+}
+
+/// `camera`'s view of the splats of `dir` as [`still`] draws it: RGBA8, encoded sRGB, opaque.
+fn shoot(dir: &Path, window: (wgpu::Device, wgpu::Queue), camera: Camera, confidence: Confidence, far: FarField) -> anyhow::Result<orbiters_ui::photo::Rgba8> {
     let (g, sky) = read(dir)?;
     let mut gpu = Gpu::renderer(window.0, window.1);
     gpu.upload(&g);
@@ -651,7 +683,7 @@ fn still(dir: &Path, window: (wgpu::Device, wgpu::Queue), camera: Camera, confid
     }
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     let rgba: Vec<u8> = image.iter().flat_map(|p| [byte(p[0]), byte(p[1]), byte(p[2]), 255]).collect();
-    super::editor::files::save_view(dir, &orbiters_ui::photo::Rgba8::new(camera.width, camera.height, rgba))
+    Ok(orbiters_ui::photo::Rgba8::new(camera.width, camera.height, rgba))
 }
 
 /// Reads a session's splats and their sky map.
@@ -682,7 +714,7 @@ fn source(ctx: &egui::Context, window: (wgpu::Device, wgpu::Queue), integrated: 
         return Ok(Source::Integrated(Worker::start(ctx, gpu, device, queue)));
     }
     let gpu = renderer(window.0, window.1)?;
-    Ok(Source::Window(Arc::new(Mutex::new(Renderer { gpu, target: None, last: None, error: None, checks: 0 }))))
+    Ok(Source::Window(Arc::new(Mutex::new(Renderer { gpu, target: None, last: None, error: None, checks: 0, drawn: 0 }))))
 }
 
 /// Reads the splats, their sky map and the recorded views, and sets the renderer up on the integrated GPU (with
@@ -892,6 +924,7 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
                     r.gpu.present(&view);
                     r.error = None;
                     r.checks = REDRAW_CHECKS;
+                    r.drawn += 1;
                 }
                 Err(e) => r.error = Some(format!("{e:#}")),
             }

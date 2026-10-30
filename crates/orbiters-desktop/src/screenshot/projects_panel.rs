@@ -25,6 +25,9 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
         "projects-hidden-shown",
         "projects-hidden-press",
         "projects-header-blur",
+        "projects-revisit",
+        "projects-card-menu",
+        "projects-avatar-menu",
     ] {
         let mut snapshot = base.clone();
         snapshot.account.development = true;
@@ -34,7 +37,14 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
             name,
             page: Page::Projects,
             snapshot,
-            frames: if name.ends_with("-menu") || name.ends_with("-press") { 100 } else { 90 },
+            frames: if name.ends_with("-menu") || name.ends_with("-press") {
+                100
+            } else if name == "projects-revisit" {
+                // Left, entered again, then every picture asked for again and Nova's replaced (`--sequence 60`).
+                120
+            } else {
+                90
+            },
             splash: false,
             open_detail: false,
             toasts: vec![],

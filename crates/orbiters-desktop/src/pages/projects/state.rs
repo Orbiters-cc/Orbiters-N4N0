@@ -1,3 +1,4 @@
+use super::thumb_cache;
 use crate::pages::{Cx, Job};
 use egui::{ColorImage, Id, Rect, TextureHandle};
 use orbiters_core::account::Server;
@@ -117,9 +118,18 @@ pub struct State {
     pub(super) catalog: network::Catalog,
     pub(super) catalog_job: Job<network::Catalog>,
     pub(super) thumbs: HashMap<String, TextureHandle>,
+    /// The sum ([`thumb_cache::sum`]) of the picture each texture shows: a picture asked for again changes nothing
+    /// when it is the same.
+    pub(super) thumb_sums: HashMap<String, u64>,
+    /// A picture replaced by a different one: the one before, drawn under the new one while that fades in (the
+    /// serial names the fade).
+    pub(super) thumb_before: HashMap<String, (TextureHandle, u64)>,
+    pub(super) thumb_swaps: u64,
+    /// The pictures kept on this computer by the last window, being read ([`thumb_cache::preload`]).
+    pub(super) thumb_preload: Option<mpsc::Receiver<Vec<thumb_cache::Cached>>>,
     pub(super) thumb_ids: HashSet<String>,
     pub(super) thumbnail_environment: Option<crate::controller::vrchat_data::Scope>,
-    pub(super) thumb_job: Job<Result<(HashMap<String, ColorImage>, Vec<String>), String>>,
+    pub(super) thumb_job: Job<Result<(HashMap<String, (ColorImage, u64)>, Vec<String>), String>>,
     /// Package icons by package name: those looked for (once each), the batch looking, and the packages whose rows
     /// were drawn since the last look (only those are looked for).
     pub(super) icons: HashMap<String, PackageIcon>,
@@ -187,6 +197,8 @@ pub struct State {
     pub(super) fixture_live_icons: bool,
     pub(super) fixture_banners_later: HashMap<PathBuf, TextureHandle>,
     pub(super) fixture_repo_icons_later: HashMap<String, PackageIcon>,
+    /// Screenshots (`projects-revisit`): the pictures asked for again after the page's second visit, the same but one.
+    pub(super) fixture_arrivals: Vec<(String, TextureHandle, u64)>,
     /// Projects hidden from the lists ([`hidden`], by [`discovery::key`] of their folder), how many changes were made
     /// to it here (each save numbered; a list read later than one never replaces it), and whether the lists show them
     /// anyway, dimmed and marked.
@@ -253,6 +265,11 @@ impl Default for State {
             catalog: network::Catalog::default(),
             catalog_job: Job::default(),
             thumbs: HashMap::new(),
+            thumb_sums: HashMap::new(),
+            thumb_before: HashMap::new(),
+            thumb_swaps: 0,
+            // Read at the window's start, so that the page's first visit shows them; never in unit tests.
+            thumb_preload: (!cfg!(test)).then(thumb_cache::preload),
             thumb_ids: HashSet::new(),
             thumbnail_environment: None,
             thumb_job: Job::default(),
@@ -306,6 +323,7 @@ impl Default for State {
             fixture_live_icons: false,
             fixture_banners_later: HashMap::new(),
             fixture_repo_icons_later: HashMap::new(),
+            fixture_arrivals: vec![],
             hidden: BTreeSet::new(),
             hidden_changes: 0,
             show_hidden: false,
@@ -476,6 +494,7 @@ impl State {
         self.action = Job::spawn(ctx, move || f().map_err(|e| format!("{e:#}")));
     }
     pub(super) fn poll(&mut self, ctx: &egui::Context, cx: &mut Cx) {
+        self.poll_thumbs(ctx);
         let environment = crate::controller::vrchat_data::Scope::of(cx.snap);
         // Another account or VRChat session: every picture is asked for again, the ones shown staying until their
         // replacements arrive (a sign-in must not blank the page's covers first).
@@ -603,6 +622,8 @@ impl State {
                     .filter(|w| ids.contains(&w.id))
                     .filter_map(|w| Some((w.id.clone(), w.thumbnail.clone()?)))
                     .collect();
+                // What is shown already: a picture that is the same is neither kept again nor shown again.
+                let known: HashMap<String, u64> = ids.iter().filter_map(|id| Some((id.clone(), *self.thumb_sums.get(id)?))).collect();
                 self.thumb_job = Job::spawn(ctx, move || {
                     use crate::controller::vrchat_data::{Request, Response};
                     let mut images = HashMap::new();
@@ -624,6 +645,17 @@ impl State {
                             }
                         }
                     }
+                    let images = images
+                        .into_iter()
+                        .filter_map(|(id, image): (String, ColorImage)| {
+                            let sum = thumb_cache::sum(&image);
+                            if known.get(&id) == Some(&sum) {
+                                return None;
+                            }
+                            thumb_cache::save(&id, sum, &image);
+                            Some((id, (image, sum)))
+                        })
+                        .collect();
                     Ok((images, errors))
                 });
             }
@@ -632,8 +664,8 @@ impl State {
             ctx.request_repaint(); // Publish this batch before requesting the next one.
             match result {
                 Ok((images, errors)) => {
-                    for (id, image) in images {
-                        self.thumbs.insert(id.clone(), ctx.load_texture(format!("project-avatar-{id}"), image, egui::TextureOptions::LINEAR));
+                    for (id, (image, sum)) in images {
+                        self.set_thumb(ctx, id, image, sum);
                     }
                     if !errors.is_empty() {
                         self.error = Some(format!("{} avatar picture(s) could not load: {}. Refresh to retry.", errors.len(), errors[0]));
@@ -667,6 +699,52 @@ impl State {
             self.error = Some(format!("Setup result was shown but could not be removed: {e}"));
         }
         self.poll_panel(ctx, cx);
+    }
+    /// Shows `image` (its sum `sum`) as the picture of `id`. Nothing changes when it is the picture shown already; a
+    /// different one fades in over the one before ([`art::avatar`](super::art)), which stays drawn meanwhile.
+    pub(super) fn set_thumb(&mut self, ctx: &egui::Context, id: String, image: ColorImage, sum: u64) {
+        if self.thumb_sums.get(&id) == Some(&sum) && self.thumbs.contains_key(&id) {
+            return;
+        }
+        let tex = ctx.load_texture(format!("project-avatar-{id}"), image, egui::TextureOptions::LINEAR);
+        self.put_thumb(id, tex, sum);
+    }
+    /// [`Self::set_thumb`] with the texture made.
+    pub(super) fn put_thumb(&mut self, id: String, tex: TextureHandle, sum: u64) {
+        if self.thumb_sums.get(&id) == Some(&sum) && self.thumbs.contains_key(&id) {
+            return;
+        }
+        self.thumb_sums.insert(id.clone(), sum);
+        if let Some(before) = self.thumbs.insert(id.clone(), tex) {
+            self.thumb_swaps += 1;
+            self.thumb_before.insert(id, (before, self.thumb_swaps));
+        }
+    }
+    /// How far the picture of `id` has faded in over the one before (1: no picture before, or done).
+    pub(super) fn thumb_swap(ctx: &egui::Context, id: &str, serial: u64) -> f32 {
+        orbiters_ui::anim::spring_from(ctx, Id::unique(("project-picture-swap", id, serial)), [0.0], [1.0], orbiters_ui::anim::Spring::SOFT)[0]
+    }
+    /// The pictures the last window kept, once read (those the page has meanwhile stay), and the fades that ended.
+    fn poll_thumbs(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.thumb_preload {
+            match rx.try_recv() {
+                Ok(kept) => {
+                    self.thumb_preload = None;
+                    if !self.fixture {
+                        for c in kept {
+                            if !self.thumbs.contains_key(&c.id) {
+                                let tex = ctx.load_texture(format!("project-avatar-{}", c.id), c.image, egui::TextureOptions::LINEAR);
+                                self.thumbs.insert(c.id.clone(), tex);
+                                self.thumb_sums.insert(c.id, c.sum);
+                            }
+                        }
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(30)),
+                Err(mpsc::TryRecvError::Disconnected) => self.thumb_preload = None,
+            }
+        }
+        self.thumb_before.retain(|id, (_, serial)| Self::thumb_swap(ctx, id, *serial) < 1.0);
     }
     /// The panel's own jobs: projects' sizes, the Blender links, the worlds' captures and pictures, files picked to
     /// add to a world, and the Duplicate dialog's check.
@@ -1001,10 +1079,23 @@ impl State {
                     }
                 }
             }
-            self.thumbs.insert(
-                format!("avtr_00000000-0000-4000-8000-{:012}", i),
-                ctx.load_texture(*n, ColorImage::from_rgb([w, h], &pixels), egui::TextureOptions::LINEAR),
-            );
+            let id = format!("avtr_00000000-0000-4000-8000-{:012}", i);
+            let image = ColorImage::from_rgb([w, h], &pixels);
+            let sum = thumb_cache::sum(&image);
+            let tex = ctx.load_texture(*n, image, egui::TextureOptions::LINEAR);
+            if name == "projects-revisit" {
+                // Asked for again: the same picture, but Nova's, changed on VRChat meanwhile (its colours turned).
+                if i == 2 {
+                    let turned: Vec<u8> = pixels.chunks_exact(3).flat_map(|c| [c[2], c[0], c[1]]).collect();
+                    let image = ColorImage::from_rgb([w, h], &turned);
+                    let sum = thumb_cache::sum(&image);
+                    self.fixture_arrivals.push((id.clone(), ctx.load_texture("Nova changed", image, egui::TextureOptions::LINEAR), sum));
+                } else {
+                    self.fixture_arrivals.push((id.clone(), tex.clone(), sum));
+                }
+            }
+            self.thumb_sums.insert(id.clone(), sum);
+            self.thumbs.insert(id, tex);
         }
         self.view.repos = vec![
             vpm::Repository {
@@ -1224,6 +1315,7 @@ impl State {
                 };
             }
             "projects-search" => self.query = "avatar".into(),
+            "projects-avatar-menu" => self.selected = Some(first.path.clone()),
             "projects-crossfade" => {
                 self.fixture_later = std::mem::take(&mut self.thumbs);
                 self.fixture_icons_later = std::mem::take(&mut self.icons);
@@ -1533,6 +1625,21 @@ impl State {
     /// Screenshots: what the person does at `frame` of the scenario `name` (a press on a control where it was drawn,
     /// the pointer over a card), for states reached through the interface and frames in the middle of their motion.
     pub fn stage_frame(&mut self, name: &str, frame: u32) -> Option<Poke> {
+        // The page left (frame 50) and entered again (62, the harness), then what a new VRChat session does (80): the
+        // scan's list again and every picture asked for again, as `poll` takes them.
+        // Right-click menus: a project card's, a found project's, an avatar's row.
+        match (name, frame) {
+            ("projects-card-menu", 40) => return self.anchors.get("card-1").map(|r| Poke::Context(r.center())),
+            ("projects-avatar-menu", 50) => return self.anchors.get("vrchat-picture-0").map(|r| Poke::Context(r.center() + egui::vec2(220.0, 0.0))),
+            _ => {}
+        }
+        if name == "projects-revisit" && frame == 80 {
+            self.scan = self.scan.clone();
+            self.thumb_ids.clear();
+            for (id, tex, sum) in std::mem::take(&mut self.fixture_arrivals) {
+                self.put_thumb(id, tex, sum);
+            }
+        }
         if name == "projects-crossfade" && frame == 60 {
             self.thumbs = std::mem::take(&mut self.fixture_later);
             self.icons = std::mem::take(&mut self.fixture_icons_later);
@@ -1649,4 +1756,6 @@ pub enum Poke {
     Hold(egui::Pos2),
     /// Over it.
     Hover(egui::Pos2),
+    /// A right press there (a context menu), released on the next frame.
+    Context(egui::Pos2),
 }

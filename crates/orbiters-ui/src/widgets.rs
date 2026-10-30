@@ -45,13 +45,17 @@ pub fn note_control(ctx: &egui::Context, label: &str, rect: Rect, enabled: bool)
     });
 }
 
-/// Paints a Phosphor glyph centred on `center` (or N4N0's face, [`icons::N4N0`], or its mark, [`icons::N4N0_MARK`]).
+/// Paints a Phosphor glyph centred on `center` (or N4N0's face, [`icons::N4N0`], its mark, [`icons::N4N0_MARK`], or
+/// Blender's logo, [`icons::BLENDER`]).
 pub fn icon(painter: &Painter, center: Pos2, glyph: &str, size: f32, color: Color32) {
     if glyph == icons::N4N0 {
         return crate::n4n0_face::icon(painter, center, size, color);
     }
     if glyph == icons::N4N0_MARK {
         return crate::n4n0_logo::glyph(painter, center, size, color);
+    }
+    if glyph == icons::BLENDER {
+        return crate::blender_logo::glyph(painter, center, size, color);
     }
     painter.text(center, Align2::CENTER_CENTER, glyph, FontId::new(size, fonts::icons()), color);
 }
@@ -63,6 +67,9 @@ pub fn icon_fill(painter: &Painter, center: Pos2, glyph: &str, size: f32, color:
     }
     if glyph == icons::N4N0_MARK {
         return crate::n4n0_logo::glyph(painter, center, size, color);
+    }
+    if glyph == icons::BLENDER {
+        return crate::blender_logo::glyph(painter, center, size, color);
     }
     painter.text(center, Align2::CENTER_CENTER, glyph, FontId::new(size, fonts::icons_fill()), color);
 }

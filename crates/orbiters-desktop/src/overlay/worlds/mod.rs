@@ -1,7 +1,9 @@
-//! 3D worlds in the play space: search the worlds members captured and shared on Orbiters (the listing the VRChat world
-//! "N4N0 - 3D picture viewer" shows) from N4N0's menu overlay, and see one around you in SteamVR, placed as that
-//! world places it (its ground on your floor, its start view where you stand, facing your way) and drawn from the same
-//! files (docs/world-view-overlay.md).
+//! 3D worlds in the play space: search VRChat's worlds from N4N0's menu overlay (every world: the member's own VRChat
+//! session when signed in, else Orbiters' Map explorer; VRChat's lists, the worlds visited: [`finder`]), those members
+//! captured and shared on Orbiters (the listing the VRChat world "N4N0 - 3D picture viewer" shows) badged 3D, and see
+//! one of those around you in SteamVR, placed as that world places it (its ground on your floor, its start view where
+//! you stand, facing your way) and drawn from the same files (docs/world-view-overlay.md). A world without a capture
+//! has its page: Invite me (an invite to oneself in VRChat) or Launch VRChat, and Open on VRChat.
 //!
 //! A pill under N4N0's menu ("3D worlds") opens the panel ([`panel`]) in the menu's place; the menu's Back comes back
 //! to it. Once a capture shows or loads, a bar takes the pill's place, under the menu or the panel whatever page shows:
@@ -15,6 +17,7 @@
 pub mod cache;
 pub mod catalog;
 mod diagnostics;
+pub mod finder;
 #[cfg(windows)]
 pub mod interop;
 pub mod panel;
@@ -27,14 +30,16 @@ pub mod view;
 
 use super::{Canvas, Presenter};
 use crate::backend::Ctl;
+use crate::controller::vrchat_data::{Request as DataRequest, Response as DataResponse, Scope};
 use crate::ipc::OrbCommand;
 use crate::state::Snapshot;
 use catalog::{Capture, Catalog, Entry, Progress, Source};
 use egui::TextureId;
+use orbiters_core::maps::WorldList;
 use orbiters_openvr::{self as vr, overlay_flag, Matrix34};
 use orbiters_orb::feedback::{CommentRow, FeedbackAsk, FeedbackView};
 use orbiters_orb::menu::KeyboardLayout;
-use panel::{Action, Data, Facts, Panel, Status, Target, BAR_PX, CHIP_PX};
+use panel::{Action, Data, Facts, ListStatus, Panel, Section, Status, Target, BAR_PX, CHIP_PX};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc};
@@ -52,6 +57,16 @@ const ASK_AGAIN: Duration = Duration::from_secs(120);
 const FACTS_EVERY: Duration = Duration::from_millis(250);
 /// The bar's loading ring turns at this rate.
 const BAR_EVERY: Duration = Duration::from_millis(33);
+/// A search is asked once the typing paused this long (Done asks at once).
+const TYPING_PAUSE: Duration = Duration::from_millis(400);
+
+/// The world list the panel shows: the 3D captures, the worlds visited, or a list VRChat (or Orbiters) answers.
+#[derive(Clone, Debug, PartialEq)]
+enum Shown {
+    Captures,
+    Visited,
+    List(WorldList),
+}
 
 /// A capture on its way: its listing id and files, the download's progress, the answer.
 struct Download {
@@ -83,7 +98,8 @@ pub struct Worlds {
     chip_hover: bool,
     chip_pressed: bool,
     chip_drawn: Option<(bool, bool)>,
-    chip_placed: Option<[f32; 3]>,
+    /// Where the pill was put (under the menu as it was then).
+    chip_placed: Option<Matrix34>,
     bar: vr::OverlayHandle,
     bar_canvas: Canvas,
     bar_shown: bool,
@@ -91,7 +107,7 @@ pub struct Worlds {
     bar_pressed: Option<Target>,
     bar_drawn: Option<BarLook>,
     bar_painted: Option<Instant>,
-    bar_placed: Option<[f32; 3]>,
+    bar_placed: Option<Matrix34>,
     /// The bar asked for the capture's page while the panel was closed: the host opens it.
     open_asked: bool,
     /// What the computer's keys asked, done on the next turn.
@@ -110,6 +126,25 @@ pub struct Worlds {
     me: Option<String>,
     infos: crate::worlds::Infos,
     pictures: crate::worlds::Pictures,
+    /// VRChat's worlds in general: lists' pages read lately, the worlds visited.
+    finder: finder::Finder,
+    visited: finder::Visited,
+    /// What the finder and the panel showed last (a change paints again).
+    found_seen: (u64, u64),
+    /// The tray service (VRChat's requests go through it), the account and session they are made for, signed in to
+    /// VRChat, and VRChat's region of the instance the player is in (new instances go there).
+    backend: Option<Ctl>,
+    scope: Option<Scope>,
+    vrchat: bool,
+    region: &'static str,
+    /// What was typed and when it last changed, what is searched (the typing paused, or Done), Done pressed.
+    typed: (String, Instant),
+    searched: String,
+    search_now: bool,
+    /// The world whose page shows, kept while the lists change under it.
+    picked: Option<Entry>,
+    /// What a Join or an Open on VRChat said, from its thread.
+    said: (mpsc::Sender<String>, mpsc::Receiver<String>),
     ctx: egui::Context,
     epoch: Instant,
     keys_seen: Option<u32>,
@@ -121,12 +156,11 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-fn interactive(overlay: &vr::Overlay, handle: vr::OverlayHandle, width_m: f32, px: [u32; 2]) {
+/// The pill's or the bar's overlay, `width_m` wide. No SteamVR input method: its laser mouse would take VRChat's input
+/// while they show. The controllers' own lasers send them the same mouse events instead, in `px` (`Overlay::inject_event`,
+/// from `overlay::floating`; [`Worlds::pointables`] says where they are).
+fn interactive(overlay: &vr::Overlay, handle: vr::OverlayHandle, width_m: f32) {
     let _ = overlay.set_width_in_meters(handle, width_m);
-    let _ = overlay.set_mouse_input(handle);
-    let _ = overlay.set_mouse_scale(handle, px[0] as f32, px[1] as f32);
-    let _ = overlay.set_flag(handle, overlay_flag::MAKE_OVERLAYS_INTERACTIVE_IF_VISIBLE, true);
-    let _ = overlay.set_flag(handle, overlay_flag::ENABLE_CLICK_STABILIZATION, true);
     let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);
     let _ = overlay.set_sort_order(handle, 10);
 }
@@ -146,9 +180,9 @@ impl Worlds {
     /// The pill's and the bar's overlays; the panel draws on the menu's canvas, whose context `ctx` is.
     pub fn new(overlay: &vr::Overlay, key: &str, ctx: egui::Context) -> anyhow::Result<Self> {
         let chip = overlay.create(&format!("{key}.worlds-chip"), "N4N0's 3D worlds").map_err(|c| anyhow::anyhow!("3D worlds pill: SteamVR overlay error {c}"))?;
-        interactive(overlay, chip, CHIP_WIDTH_M, CHIP_PX);
+        interactive(overlay, chip, CHIP_WIDTH_M);
         let bar = overlay.create(&format!("{key}.worlds-bar"), "N4N0's 3D world controls").map_err(|c| anyhow::anyhow!("3D worlds bar: SteamVR overlay error {c}"))?;
-        interactive(overlay, bar, BAR_WIDTH_M, BAR_PX);
+        interactive(overlay, bar, BAR_WIDTH_M);
         Ok(Self {
             open: false,
             panel: Panel::default(),
@@ -185,11 +219,38 @@ impl Worlds {
             me: None,
             infos: crate::worlds::Infos::new(&ctx),
             pictures: crate::worlds::Pictures::new(&ctx),
+            finder: finder::Finder::default(),
+            visited: finder::Visited::default(),
+            found_seen: (0, 0),
+            backend: None,
+            scope: None,
+            vrchat: false,
+            region: "us",
+            typed: (String::new(), Instant::now()),
+            searched: String::new(),
+            search_now: false,
+            picked: None,
+            said: mpsc::channel(),
             ctx,
             epoch: Instant::now(),
             keys_seen: None,
             last_paint: None,
         })
+    }
+
+    /// The pill and the bar while they show, for the controllers' lasers: each overlay, where it is and its pixels
+    /// (their mouse events count in those, from the bottom left).
+    pub fn pointables(&self) -> Vec<super::floating::Pointable> {
+        use super::floating::{space::Quad, Pointable};
+        let mut out = Vec::new();
+        for (shown, handle, placed, width, px) in
+            [(self.chip_shown, self.chip, self.chip_placed, CHIP_WIDTH_M, CHIP_PX), (self.bar_shown, self.bar, self.bar_placed, BAR_WIDTH_M, BAR_PX)]
+        {
+            if let Some(transform) = placed.filter(|_| shown) {
+                out.push(Pointable { handle, quad: Quad { transform, width, height: width * px[1] as f32 / px[0] as f32 }, px });
+            }
+        }
+        out
     }
 
     pub fn destroy(&mut self, overlay: &vr::Overlay) {
@@ -203,9 +264,136 @@ impl Worlds {
     }
 
     /// The listing's captures this player may see.
-    fn entries(&self) -> Vec<Entry> {
+    fn captures(&self) -> Vec<Entry> {
         let (entries, ..) = self.catalog.snapshot();
         entries.into_iter().filter(|e| e.for_player(self.me.as_deref())).collect()
+    }
+
+    /// The list shown: a search once two characters are typed and the typing paused, else what is browsed.
+    fn shown(&self) -> Shown {
+        let q = self.searched.trim();
+        if q.chars().count() >= 2 {
+            return Shown::List(WorldList::Search(q.to_lowercase()));
+        }
+        match self.panel.section {
+            Section::Captures => Shown::Captures,
+            Section::Visited => Shown::Visited,
+            s => s.list().map_or(Shown::Captures, Shown::List),
+        }
+    }
+
+    /// What the panel lists: the list shown, its worlds that have captures as their captures ([`finder::merge`]).
+    fn entries(&self) -> Vec<Entry> {
+        let captures = self.captures();
+        let feedback = |w: &str| self.catalog.feedback(w);
+        match self.shown() {
+            Shown::Captures => captures,
+            Shown::Visited => {
+                let (worlds, ..) = self.visited.worlds();
+                let found = finder::visited_found(&worlds);
+                let items: Vec<_> = found.iter().map(|(f, ..)| f.clone()).collect();
+                let when: HashMap<String, (u64, usize)> = found.iter().map(|(f, last, n)| (f.world.world_id.to_ascii_lowercase(), (*last, *n))).collect();
+                let mut out = finder::merge(&captures, &[], &items, None, &feedback);
+                for e in &mut out {
+                    e.visited = when.get(&e.world_id.to_ascii_lowercase()).copied();
+                }
+                out
+            }
+            Shown::List(list) => {
+                let listed = self.finder.list(&list);
+                let (found_by, first): (Option<&str>, Vec<&Entry>) = match &list {
+                    WorldList::Search(q) => (Some(q.as_str()), captures.iter().filter(|e| e.matches(q)).collect()),
+                    _ => (None, Vec::new()),
+                };
+                finder::merge(&captures, &first, &listed.items, found_by, &feedback)
+            }
+        }
+    }
+
+    /// The world whose page shows when the list shown does not have it: the one kept, or the capture around the person
+    /// (its page opened from the bar).
+    fn picked(&self) -> Option<&Entry> {
+        let selected = self.panel.selected?;
+        self.picked.as_ref().filter(|e| e.id == selected).or(self.current.as_ref().filter(|e| e.id == selected))
+    }
+
+    /// Keeps the world whose page shows, whatever list shows next.
+    fn keep_picked(&mut self, entries: &[Entry]) {
+        match self.panel.selected {
+            Some(id) => {
+                if let Some(e) = entries.iter().find(|e| e.id == id) {
+                    self.picked = Some(e.clone());
+                }
+            }
+            None => self.picked = None,
+        }
+    }
+
+    /// The list shown, as the panel tells it.
+    fn list_status(&self) -> ListStatus {
+        let shown = self.shown();
+        let mut s = match &shown {
+            Shown::Captures => ListStatus::default(),
+            Shown::Visited => ListStatus { loading: self.visited.state().0, ..Default::default() },
+            Shown::List(list) => {
+                let read = self.finder.status(list);
+                let waiting = read.pages == 0 && read.error.is_none() && self.askable(list);
+                ListStatus { loading: read.loading || waiting, more: read.more, error: read.error, source: read.source, ..Default::default() }
+            }
+        };
+        s.vrchat = self.vrchat;
+        s.searching = matches!(shown, Shown::List(WorldList::Search(_)));
+        s
+    }
+
+    /// Whether `list` can be asked for now: the lists only VRChat has need its session.
+    fn askable(&self, list: &WorldList) -> bool {
+        self.vrchat || !matches!(list, WorldList::Active | WorldList::Favorites)
+    }
+
+    /// The typing paused (or Done): what is searched; the list shown asked for, its next page once the results
+    /// near its end. Done on the turn, its requests on a thread of their own ([`finder::Finder`]).
+    fn find(&mut self) {
+        let typed = self.panel.query.trim().to_string();
+        if typed != self.typed.0 {
+            self.typed = (typed.clone(), Instant::now());
+        }
+        if typed.is_empty() {
+            self.searched.clear();
+        } else if self.searched != typed && (self.search_now || self.typed.1.elapsed() >= TYPING_PAUSE) {
+            self.searched = typed;
+            self.panel.dirty = true;
+        }
+        self.search_now = false;
+        if !self.open {
+            return;
+        }
+        match self.shown() {
+            Shown::Captures => {}
+            Shown::Visited => self.visited.refresh(),
+            Shown::List(list) => {
+                if !self.askable(&list) {
+                    return;
+                }
+                let read = self.finder.status(&list);
+                let shown_to = (self.panel.results_page + 2) * panel::PER_PAGE;
+                let page = if read.pages == 0 {
+                    0
+                } else if read.more && shown_to >= self.finder.count(&list) {
+                    read.pages
+                } else {
+                    return;
+                };
+                let (backend, scope, ask) = (self.backend.clone(), self.scope.clone(), list.clone());
+                self.finder.ask(&list, page, move || {
+                    let (Some(backend), Some(scope)) = (backend, scope) else { return Err("The app's service is not there.".into()) };
+                    match backend.vrchat_data(scope, DataRequest::WorldList { list: ask, page })? {
+                        DataResponse::Worlds(found) => Ok(found),
+                        _ => Err("The app's service answered something else.".into()),
+                    }
+                });
+            }
+        }
     }
 
     /// What the panel shows of the capture view.
@@ -218,6 +406,7 @@ impl Worlds {
             error: self.error.clone().or_else(|| self.view.error.clone()),
             fetching,
             listing_error,
+            list: self.list_status(),
             ..Default::default()
         };
         if let Some(d) = &self.download {
@@ -282,10 +471,35 @@ impl Worlds {
             self.me = me;
             self.panel.dirty = true;
         }
+        // VRChat's requests go through the service, for this account and session: another one, other answers.
+        if self.backend.is_none() {
+            self.backend = Some(backend.clone());
+        }
+        let scope = Scope::of(snap);
+        if self.scope.as_ref() != Some(&scope) {
+            if self.scope.is_some() {
+                self.finder.clear();
+            }
+            self.scope = Some(scope);
+            self.vrchat = snap.vrchat_login.allowed && snap.vrchat_login.user.is_some();
+            self.panel.dirty = true;
+        }
+        self.region = finder::region(snap.vrchat.world.instance.as_deref());
+        while let Ok(said) = self.said.1.try_recv() {
+            let time = self.time();
+            self.panel.say(said, time);
+            self.panel.dirty = true;
+        }
         let deferred = std::mem::take(&mut self.deferred);
         if !deferred.is_empty() {
             let entries = self.entries();
             self.act(deferred, &entries, overlay, steamvr);
+        }
+        self.find();
+        let seen = (self.finder.version(), self.visited.state().1);
+        if seen != self.found_seen {
+            self.found_seen = seen;
+            self.panel.dirty = true;
         }
         self.finish_download(overlay, steamvr);
         self.view.update(overlay, steamvr);
@@ -341,11 +555,10 @@ impl Worlds {
             }
             return (false, clicked);
         }
-        let at = menu_at.expect("checked above");
-        let origin = stereo::position(at);
-        if self.chip_placed != Some(origin) {
-            let _ = overlay.set_transform_absolute(self.chip, &under_menu(at, CHIP_WIDTH_M * CHIP_PX[1] as f32 / CHIP_PX[0] as f32));
-            self.chip_placed = Some(origin);
+        let at = under_menu(menu_at.expect("checked above"), CHIP_WIDTH_M * CHIP_PX[1] as f32 / CHIP_PX[0] as f32);
+        if self.chip_placed != Some(at) {
+            let _ = overlay.set_transform_absolute(self.chip, &at);
+            self.chip_placed = Some(at);
         }
         let look = (self.chip_hover, self.chip_pressed);
         if self.chip_drawn != Some(look) || !self.chip_shown {
@@ -409,11 +622,10 @@ impl Worlds {
             }
             return (opened, clicked);
         }
-        let at = menu_at.expect("checked above");
-        let origin = stereo::position(at);
-        if self.bar_placed != Some(origin) {
-            let _ = overlay.set_transform_absolute(self.bar, &under_menu(at, BAR_WIDTH_M * BAR_PX[1] as f32 / BAR_PX[0] as f32));
-            self.bar_placed = Some(origin);
+        let at = under_menu(menu_at.expect("checked above"), BAR_WIDTH_M * BAR_PX[1] as f32 / BAR_PX[0] as f32);
+        if self.bar_placed != Some(at) {
+            let _ = overlay.set_transform_absolute(self.bar, &at);
+            self.bar_placed = Some(at);
         }
         let status = self.status();
         let loading = !status.shown && status.error.is_none();
@@ -459,7 +671,7 @@ impl Worlds {
             return;
         }
         self.asked = Some((id, Instant::now()));
-        let world = self.catalog.world_of(id);
+        let world = self.entries().into_iter().find(|e| e.id == id).or_else(|| self.picked().cloned()).map(|e| e.world_id);
         if let Some(world) = world.filter(|w| orbiters_contracts::world_feedback::is_world_id(w)) {
             self.outbox.push(FeedbackAsk::Show { world: panel::world_key(&world) });
         }
@@ -500,7 +712,8 @@ impl Worlds {
         let time = self.time();
         let height = panel::HEIGHT;
         let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
-        let data = |feedback, facts| Data { entries: &entries, status: &status, feedback, facts, thumb: &no_thumb, picture: &no_picture, now: unix_now() };
+        let picked = self.picked().cloned();
+        let data = |feedback, facts| Data { entries: &entries, picked: picked.as_ref(), status: &status, feedback, facts, thumb: &no_thumb, picture: &no_picture, now: unix_now() };
         match e.event_type {
             vr::event::MOUSE_MOVE => {
                 let (x, y, _) = e.mouse();
@@ -518,6 +731,7 @@ impl Worlds {
                 // The press shows at once; what it does follows.
                 self.panel.pressed = Some(target);
                 let actions = self.panel.press(target, &d, time);
+                self.keep_picked(&entries);
                 self.act(actions, &entries, overlay, steamvr);
                 true
             }
@@ -545,9 +759,19 @@ impl Worlds {
         let status = self.status();
         let time = self.time();
         let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
+        let picked = self.picked().cloned();
         for (n, key) in keys {
             if n.wrapping_sub(seen) as i32 > 0 {
-                let d = Data { entries: &entries, status: &status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: unix_now() };
+                let d = Data {
+                    entries: &entries,
+                    picked: picked.as_ref(),
+                    status: &status,
+                    feedback: &self.feedback,
+                    facts: &self.facts,
+                    thumb: &no_thumb,
+                    picture: &no_picture,
+                    now: unix_now(),
+                };
                 let actions = self.panel.key(key, &d, time);
                 self.deferred.extend(actions);
             }
@@ -561,7 +785,9 @@ impl Worlds {
         for action in actions {
             match action {
                 Action::Show(id) => {
-                    let Some(entry) = entries.iter().find(|e| e.id == id).cloned() else { continue };
+                    let Some(entry) = entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)).filter(|e| e.capture).cloned() else {
+                        continue;
+                    };
                     self.error = None;
                     self.view.error = None;
                     let key = cache::Key::of(&entry);
@@ -594,7 +820,23 @@ impl Worlds {
                 Action::SeeThrough(on) => self.view.see_through = on,
                 Action::Quality(q) => self.view.set_quality(q),
                 Action::Leave => self.open = false,
-                Action::Refresh => self.catalog.refresh(&self.source),
+                Action::Refresh => {
+                    self.catalog.refresh(&self.source);
+                    self.finder.retry();
+                }
+                Action::Search => self.search_now = true,
+                Action::Join(world) => self.join(world),
+                Action::OpenWeb(world) => {
+                    let Some(link) = finder::web_link(&world) else { continue };
+                    let tx = self.said.0.clone();
+                    let _ = std::thread::Builder::new().name("3d-worlds-web".into()).spawn(move || {
+                        let said = match crate::controller::open_url(&link) {
+                            Ok(()) => "Its page opened in the computer's browser".to_string(),
+                            Err(e) => format!("The browser did not open: {e}"),
+                        };
+                        let _ = tx.send(said);
+                    });
+                }
                 Action::Feedback(ask) => {
                     self.apply(&ask);
                     self.outbox.push(ask);
@@ -610,6 +852,36 @@ impl Worlds {
             }
         }
         self.panel.dirty = true;
+    }
+
+    /// Joins `world` in a new public instance in the region the player is in: an invite to oneself, which VRChat shows
+    /// in the game, when signed in to VRChat in the app; else VRChat's launcher with the world (VRChat running, it may
+    /// ask to switch). What happened is said on the world's page.
+    fn join(&mut self, world: String) {
+        let instance = finder::new_instance(self.region, uuid::Uuid::new_v4().as_u128() as u64);
+        let tx = self.said.0.clone();
+        let time = self.time();
+        if self.vrchat {
+            let (Some(backend), Some(scope)) = (self.backend.clone(), self.scope.clone()) else { return };
+            self.panel.say("Sending you an invite…", time);
+            let _ = std::thread::Builder::new().name("3d-worlds-invite".into()).spawn(move || {
+                let said = match backend.vrchat_data(scope, DataRequest::InviteSelf { world, instance }) {
+                    Ok(_) => "Invite sent: accept it in VRChat's notifications".to_string(),
+                    Err(e) => format!("The invite could not be sent: {e}"),
+                };
+                let _ = tx.send(said);
+            });
+        } else {
+            let Some(link) = finder::launch_link(&world, &instance) else { return };
+            self.panel.say("Opening VRChat's launcher…", time);
+            let _ = std::thread::Builder::new().name("3d-worlds-launch".into()).spawn(move || {
+                let said = match finder::open_launch(&link) {
+                    Ok(()) => "VRChat's launcher has it: sign in to VRChat in the app to be invited instead".to_string(),
+                    Err(e) => format!("{e}"),
+                };
+                let _ = tx.send(said);
+            });
+        }
     }
 
     /// The panel's own ask, shown at once (the app's answer replaces it).
@@ -653,23 +925,34 @@ impl Worlds {
         self.last_paint = Some(Instant::now());
         let entries = self.entries();
         let status = self.status();
-        // The worlds' pages the panel shows (all of them to order by frame rate).
+        // The worlds' pages the panel shows (the captures' all, to order by frame rate; a list's worlds come with theirs).
         self.facts_pending = false;
         if self.panel.sort == panel::Sort::Smooth {
-            for e in &entries {
+            for e in entries.iter().filter(|e| e.capture) {
                 self.facts_for(&e.world_id);
             }
         }
         let visible = self.visible(&entries, &status);
-        for (_, world) in &visible {
-            self.facts_for(world);
+        for v in &visible {
+            if v.page {
+                self.facts_for(&v.world);
+            }
         }
         let thumbs = self.thumbnails(&visible);
         let pictures = self.world_pictures(&entries);
         let time = self.time();
         let thumb = |e: &Entry| -> Option<TextureId> { thumbs.get(&e.id).copied() };
         let picture = |id: u64, large: bool| -> Option<TextureId> { pictures.get(&(id, large)).copied() };
-        let d = Data { entries: &entries, status: &status, feedback: &self.feedback, facts: &self.facts, thumb: &thumb, picture: &picture, now: unix_now() };
+        let d = Data {
+            entries: &entries,
+            picked: self.picked(),
+            status: &status,
+            feedback: &self.feedback,
+            facts: &self.facts,
+            thumb: &thumb,
+            picture: &picture,
+            now: unix_now(),
+        };
         let panel = &self.panel;
         canvas.paint(time, |p| panel.draw(p, &d, time));
     }
@@ -691,28 +974,33 @@ impl Worlds {
         }
     }
 
-    /// The captures whose pictures the panel shows now: (listing id, world id).
-    fn visible(&self, entries: &[Entry], status: &Status) -> Vec<(u64, String)> {
+    /// The worlds whose pictures the panel shows now.
+    fn visible(&self, entries: &[Entry], status: &Status) -> Vec<Visible> {
         let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
-        let d = Data { entries, status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: 0 };
-        let shown: Vec<&Entry> = match self.panel.page {
-            panel::Page::Typing => self.panel.results(&d).into_iter().take(panel::PER_ROW).collect(),
-            panel::Page::Browse => self.panel.results(&d).into_iter().skip(self.panel.results_page * panel::PER_PAGE).take(panel::PER_PAGE).collect(),
-            panel::Page::Filter => Vec::new(),
-            _ => self.panel.entry(&d).into_iter().collect(),
+        let d = Data { entries, picked: self.picked(), status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: 0 };
+        let (shown, cards): (Vec<&Entry>, bool) = match self.panel.page {
+            panel::Page::Typing => (self.panel.results(&d).into_iter().take(panel::PER_ROW).collect(), true),
+            panel::Page::Browse => (self.panel.results(&d).into_iter().skip(self.panel.results_page * panel::PER_PAGE).take(panel::PER_PAGE).collect(), true),
+            panel::Page::Filter => (Vec::new(), true),
+            _ => (self.panel.entry(&d).into_iter().collect(), false),
         };
-        shown.into_iter().map(|e| (e.id, e.world_id.clone())).collect()
+        // A card of a list's world has what its list said; its page, or a capture's card, reads the world's page on
+        // the Map explorer (Orbiters reads VRChat for it: asked only as needed).
+        shown
+            .into_iter()
+            .map(|e| Visible { id: e.id, world: e.world_id.clone(), thumbnail: e.thumbnail.clone(), page: !cards || e.capture || e.thumbnail.is_none() })
+            .collect()
     }
 
-    /// The thumbnails of the captures the panel shows now (their world's picture on VRChat, through the window's
-    /// cache of world pages and pictures).
-    fn thumbnails(&mut self, visible: &[(u64, String)]) -> HashMap<u64, TextureId> {
+    /// The thumbnails of the worlds the panel shows now (their picture on VRChat, through the window's cache of world
+    /// pages and pictures).
+    fn thumbnails(&mut self, visible: &[Visible]) -> HashMap<u64, TextureId> {
         let mut out = HashMap::new();
-        for (id, world) in visible {
-            let Some(url) = self.facts.get(world).and_then(|f| f.thumbnail.clone()) else { continue };
-            let picture = crate::worlds::Picture::Remote { world_id: world.clone(), url, large: false };
+        for v in visible {
+            let Some(url) = v.thumbnail.clone().or_else(|| self.facts.get(&v.world).and_then(|f| f.thumbnail.clone())) else { continue };
+            let picture = crate::worlds::Picture::Remote { world_id: v.world.clone(), url, large: false };
             if let Some(t) = self.pictures.get(&self.ctx, &picture) {
-                out.insert(*id, t.id());
+                out.insert(v.id, t.id());
             }
         }
         out
@@ -724,7 +1012,9 @@ impl Worlds {
         if self.panel.page != panel::Page::Pictures {
             return out;
         }
-        let Some(e) = self.panel.selected.and_then(|id| entries.iter().find(|e| e.id == id)) else { return out };
+        let Some(e) = self.panel.selected.and_then(|id| entries.iter().find(|e| e.id == id).or(self.picked())) else {
+            return out;
+        };
         let Some(f) = self.facts.get(&e.world_id) else { return out };
         let first = self.panel.pictures_page * panel::PICTURES_PER_PAGE;
         let mut wanted: Vec<(&orbiters_core::maps::WorldPicture, bool)> =
@@ -748,6 +1038,14 @@ impl Worlds {
         }
         out
     }
+}
+
+/// A world whose picture the panel shows: its list's thumbnail, and whether its page on the Map explorer is read.
+struct Visible {
+    id: u64,
+    world: String,
+    thumbnail: Option<String>,
+    page: bool,
 }
 
 /// A download's error in a line the panel can show.

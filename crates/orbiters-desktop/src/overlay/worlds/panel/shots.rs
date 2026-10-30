@@ -1,4 +1,5 @@
-//! The panel's pages and the capture's bar with stand-in captures, for the offline review (`--world-view <out>
+//! The panel's pages and the capture's bar with stand-in captures and VRChat worlds (a search, VRChat's lists, the
+//! worlds visited, a world without a capture), for the offline review (`--world-view <out>
 //! --panel-only`, `--screenshot <out> --only worlds-overlay`): `panel-<page>.png`, `bar-<state>.png`, and
 //! `with-bar-<page>.png` (the panel with the bar under it, as they hang in the play space).
 
@@ -45,6 +46,35 @@ fn stand_ins() -> anyhow::Result<Vec<Entry>> {
     super::super::catalog::parse(&json.to_string())
 }
 
+/// A real-looking world id for stand-in world `i` (Open on VRChat needs one).
+fn world_id(i: u32) -> String {
+    format!("wrld_{i:08x}-5a1e-4000-8000-{i:012x}")
+}
+
+/// VRChat's answer to a search or a list, as stand-ins: name, author, people now, capacity, visits, favorites, and
+/// `Some(i)` for the stand-in capture's world it is (`wrld_stand_in_<i>`).
+fn stand_in_worlds(names: &[(&str, &str, u32, Option<usize>)]) -> Vec<orbiters_core::maps::FoundWorld> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, (name, author, occupants, capture))| orbiters_core::maps::FoundWorld {
+            world: orbiters_core::maps::World {
+                world_id: capture.map_or_else(|| world_id(i as u32 + 1), |c| format!("wrld_stand_in_{c}")),
+                name: name.to_string(),
+                author_name: Some(author.to_string()),
+                capacity: Some(16 + (i as u32 % 4) * 16),
+                visits: Some(12_000 + i as u64 * 48_211),
+                favorites: Some(800 + i as u64 * 2_310),
+                tags: vec!["author_tag_rooftop".into(), "author_tag_city_lights".into(), "system_approved".into()],
+                thumbnail_url: Some(format!("https://api.vrchat.cloud/stand-in/{i}")),
+                ..Default::default()
+            },
+            occupants: Some(*occupants),
+            ..Default::default()
+        })
+        .collect()
+}
+
 /// The worlds' pages on the Map explorer: frame rates, tags, pictures.
 fn stand_in_facts(entries: &[Entry]) -> HashMap<String, Facts> {
     let perf = |fps: u32, low: u32, ratio: f32| WorldPerformance { fps, fps_low: low, ratio, minutes: 640, members: 9, by_crowd: Vec::new() };
@@ -69,7 +99,7 @@ fn stand_in_facts(entries: &[Entry]) -> HashMap<String, Facts> {
             })
             .collect();
         let tags = if i == 0 { vec!["home".into(), "hangout".into(), "mirror".into(), "official".into()] } else { Vec::new() };
-        out.entry(e.world_id.clone()).or_insert(Facts { thumbnail: None, performance, tags, pictures, picture_count: e.pictures as usize });
+        out.entry(e.world_id.clone()).or_insert(Facts { thumbnail: None, performance, tags, pictures, picture_count: e.pictures as usize, ..Default::default() });
     }
     out
 }
@@ -127,12 +157,18 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
         .flat_map(|f| f.pictures.iter())
         .map(|w| (w.id, gradient(canvas.ctx(), &format!("picture-{}", w.id), (w.id as f32 * 0.071).fract(), 192, 108)))
         .collect();
-    let thumb = |e: &Entry| -> Option<TextureId> { entries.iter().position(|x| x.id == e.id).filter(|i| *i != 3).map(|i| thumbs[i].id()) };
+    let world_thumbs: Vec<egui::TextureHandle> = (0..8).map(|i| gradient(canvas.ctx(), &format!("stand-in-world-{i}"), (i as f32 * 0.191 + 0.05).fract(), 320, 180)).collect();
+    let thumb = |e: &Entry| -> Option<TextureId> {
+        match entries.iter().position(|x| x.id == e.id) {
+            Some(i) => (i != 3).then(|| thumbs[i].id()),
+            None => Some(world_thumbs[e.name.len() % world_thumbs.len()].id()),
+        }
+    };
     let picture = |id: u64, _large: bool| -> Option<TextureId> { pictures.get(&id).map(|t| t.id()) };
     let feedback = stand_in_feedback(true);
     let now = 1_793_310_000u64;
     let mut paint = |name: &str, entries: &[Entry], panel: &Panel, status: &Status, feedback: &FeedbackView, time: f64| -> anyhow::Result<Vec<u8>> {
-        let d = Data { entries, status, feedback, facts: &facts, thumb: &thumb, picture: &picture, now };
+        let d = Data { entries, picked: None, status, feedback, facts: &facts, thumb: &thumb, picture: &picture, now };
         // Twice: textures load on the first frame.
         for _ in 0..2 {
             canvas.paint(time, |p| panel.draw(p, &d, time));
@@ -142,24 +178,26 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
         Ok(rgba)
     };
     let idle = Status::default();
-    let mut panel = Panel { dirty: true, ..Default::default() };
+    // The 3D captures, as the panel listed them before it searched every world.
+    let base = Panel { section: Section::Captures, ..Default::default() };
+    let mut panel = Panel { dirty: true, ..base.clone() };
     paint("browse", &entries, &panel, &idle, &feedback, 5.0)?;
     panel.hover = Some(Target::Card(1));
     paint("browse-hover", &entries, &panel, &idle, &feedback, 5.0)?;
     panel.hover = None;
     paint("browse-appearing", &entries, &panel, &idle, &feedback, 0.12)?;
-    let liked = Panel { sort: Sort::Liked, labels: vec!["nature".into()], ..Default::default() };
+    let liked = Panel { sort: Sort::Liked, labels: vec!["nature".into()], ..base.clone() };
     paint("browse-liked-nature", &entries, &liked, &idle, &feedback, 5.0)?;
-    let smooth = Panel { sort: Sort::Smooth, ..Default::default() };
+    let smooth = Panel { sort: Sort::Smooth, ..base.clone() };
     paint("browse-smoothest", &entries, &smooth, &idle, &feedback, 5.0)?;
-    let filter = Panel { page: Page::Filter, labels: vec!["nature".into(), "chill".into()], hover: Some(Target::FilterLabel(1)), ..Default::default() };
+    let filter = Panel { page: Page::Filter, labels: vec!["nature".into(), "chill".into()], hover: Some(Target::FilterLabel(1)), ..base.clone() };
     paint("filter", &entries, &filter, &idle, &feedback, 5.0)?;
-    let mut typing = Panel { page: Page::Typing, query: "ho".into(), ..Default::default() };
+    let mut typing = Panel { page: Page::Typing, query: "ho".into(), ..base.clone() };
     typing.pressed = Some(Target::Key('m'));
     paint("typing", &entries, &typing, &idle, &feedback, 5.2)?;
-    let none = Panel { page: Page::Typing, query: "zzz".into(), ..Default::default() };
+    let none = Panel { page: Page::Typing, query: "zzz".into(), ..base.clone() };
     paint("typing-none", &entries, &none, &idle, &feedback, 5.2)?;
-    let detail = Panel { page: Page::Detail, selected: Some(10), ..Default::default() };
+    let detail = Panel { page: Page::Detail, selected: Some(10), ..base.clone() };
     let downloading = Status { current: Some(10), download: Some(0.42), stage: Some("Downloading 13.8 of 32.9 MB".into()), ..Default::default() };
     paint("loading", &entries, &detail, &downloading, &feedback, 5.0)?;
     let shown = Status { current: Some(10), shown: true, stats: Some("786k splats · 6.4 ms a batch · 1024 px".into()), ..Default::default() };
@@ -171,30 +209,86 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     let signed_out = Panel { note: Some((contract::Refusal::SignIn.text().into(), 4.0)), ..detail.clone() };
     paint("shown-signed-out", &entries, &signed_out, &shown, &stand_in_feedback(false), 5.0)?;
     // The card growing into the page, a third of the way and nearly there.
-    let mut morph = Panel { page: Page::Browse, ..Default::default() };
+    let mut morph = Panel { page: Page::Browse, ..base.clone() };
     {
-        let d = Data { entries: &entries, status: &idle, feedback: &feedback, facts: &facts, thumb: &thumb, picture: &picture, now };
+        let d = Data { entries: &entries, picked: None, status: &idle, feedback: &feedback, facts: &facts, thumb: &thumb, picture: &picture, now };
         morph.press(Target::Card(1), &d, 10.0);
     }
     paint("morph-1", &entries, &morph, &downloading, &feedback, 10.0 + MORPH * 0.33)?;
     paint("morph-2", &entries, &morph, &Status { current: Some(11), download: Some(0.1), stage: Some("Downloading 3.3 of 33.1 MB".into()), ..Default::default() }, &feedback, 10.0 + MORPH * 0.8)?;
     let failed = Status { listing_error: Some("Orbiters could not be reached (timed out)".into()), ..Default::default() };
-    paint("offline", &[], &Panel::default(), &failed, &FeedbackView::default(), 5.0)?;
-    let not_current = Panel { page: Page::Detail, selected: Some(12), ..Default::default() };
+    paint("offline", &[], &base, &failed, &FeedbackView::default(), 5.0)?;
+    let not_current = Panel { page: Page::Detail, selected: Some(12), ..base.clone() };
     paint("detail", &entries, &not_current, &shown, &feedback, 5.0)?;
-    let labels = Panel { page: Page::Labels, selected: Some(10), hover: Some(Target::Label(2)), ..Default::default() };
+    let labels = Panel { page: Page::Labels, selected: Some(10), hover: Some(Target::Label(2)), ..base.clone() };
     paint("labels", &entries, &labels, &shown, &feedback, 5.0)?;
-    let reason = Panel { page: Page::Compose(Compose::Reason), selected: Some(10), draft: "The thumbnail and the textures look generated".into(), ..Default::default() };
+    let reason = Panel { page: Page::Compose(Compose::Reason), selected: Some(10), draft: "The thumbnail and the textures look generated".into(), ..base.clone() };
     paint("reason", &entries, &reason, &shown, &feedback, 5.2)?;
-    let comments = Panel { page: Page::Comments, selected: Some(10), confirm: Some((381, 4.0)), ..Default::default() };
+    let comments = Panel { page: Page::Comments, selected: Some(10), confirm: Some((381, 4.0)), ..base.clone() };
     paint("comments", &entries, &comments, &shown, &feedback, 5.0)?;
-    let comment = Panel { page: Page::Compose(Compose::Comment), selected: Some(10), draft: "Lovely at sunset, ".into(), ..Default::default() };
+    let comment = Panel { page: Page::Compose(Compose::Comment), selected: Some(10), draft: "Lovely at sunset, ".into(), ..base.clone() };
     paint("comment", &entries, &comment, &shown, &feedback, 5.2)?;
-    let pictures_page = Panel { page: Page::Pictures, selected: Some(10), hover: Some(Target::Picture(1)), ..Default::default() };
+    let pictures_page = Panel { page: Page::Pictures, selected: Some(10), hover: Some(Target::Picture(1)), ..base.clone() };
     paint("pictures", &entries, &pictures_page, &shown, &feedback, 5.0)?;
-    let picture_open = Panel { page: Page::Pictures, selected: Some(10), picture: Some(2), ..Default::default() };
+    let picture_open = Panel { page: Page::Pictures, selected: Some(10), picture: Some(2), ..base.clone() };
     paint("picture", &entries, &picture_open, &shown, &feedback, 5.0)?;
-    let browse_shown = paint("browse-shown", &entries, &Panel::default(), &shown, &feedback, 5.0)?;
+    let browse_shown = paint("browse-shown", &entries, &base, &shown, &feedback, 5.0)?;
+    // Every world: a search (VRChat's answer, the captures it found badged 3D and first), VRChat's lists, the worlds
+    // visited, a world without a capture and its page.
+    let cat = stand_in_worlds(&[
+        ("The Black Cat", "spookyghostboo", 214, Some(5)),
+        ("Cat Café ~ Neko no Mori", "Hinata", 38, None),
+        ("Black Cat Bar", "Velvet", 12, None),
+        ("Catacombs of Ash", "Morrow", 6, None),
+        ("Cat's Cradle", "Pom", 0, None),
+        ("Neko Island", "Yuzu", 91, None),
+    ]);
+    let no_feedback = |_: &str| super::super::catalog::Aggregate::default();
+    let first: Vec<&Entry> = entries.iter().filter(|e| e.matches("cat")).collect();
+    let found = super::super::finder::merge(&entries, &first, &cat, Some("cat"), &no_feedback);
+    let vrchat = |source| ListStatus { searching: true, vrchat: source == FoundBy::Vrchat, source: Some(source), more: true, ..Default::default() };
+    let searched = Status { list: vrchat(FoundBy::Vrchat), ..Default::default() };
+    let search = Panel { query: "cat".into(), ..Default::default() };
+    paint("search", &found, &search, &searched, &feedback, 5.0)?;
+    let only = Panel { has_3d: true, ..search.clone() };
+    paint("search-3d-only", &found, &only, &searched, &feedback, 5.0)?;
+    let public = Status { list: ListStatus { vrchat: false, ..vrchat(FoundBy::Orbiters) }, ..Default::default() };
+    paint("search-orbiters", &found, &search, &public, &feedback, 5.0)?;
+    let typing_search = Panel { page: Page::Typing, query: "cat".into(), ..Default::default() };
+    paint("typing-search", &found, &typing_search, &searched, &feedback, 5.2)?;
+    let asking = Status { list: ListStatus { loading: true, more: false, source: None, ..vrchat(FoundBy::Vrchat) }, ..Default::default() };
+    paint("typing-searching", &[], &Panel { query: "midnight r".into(), ..typing_search.clone() }, &asking, &feedback, 5.2)?;
+    let popular_worlds = stand_in_worlds(&[
+        ("Murder 4", "Jar", 1802, None),
+        ("Just B Club", "Rei", 690, None),
+        ("VRChat Home", "vrchat", 412, Some(0)),
+        ("Midnight Rooftop", "Kiyo", 312, None),
+        ("Cozy Cabin", "Mei", 77, None),
+        ("Japan Shrine", "Kuroneko", 64, Some(6)),
+    ]);
+    let popular = super::super::finder::merge(&entries, &[], &popular_worlds, None, &no_feedback);
+    let listed = Status { list: ListStatus { vrchat: true, source: Some(FoundBy::Vrchat), more: true, ..Default::default() }, ..Default::default() };
+    paint("browse-popular", &popular, &Panel::default(), &listed, &feedback, 5.0)?;
+    paint("browse-active", &popular, &Panel { section: Section::Active, hover: Some(Target::Card(1)), ..Default::default() }, &listed, &feedback, 5.0)?;
+    let signed_out = Status { list: ListStatus { vrchat: false, ..Default::default() }, ..Default::default() };
+    paint("browse-favorites-signed-out", &[], &Panel { section: Section::Favorites, ..Default::default() }, &signed_out, &feedback, 5.0)?;
+    let mut visited = super::super::finder::merge(&entries, &[], &popular_worlds[2..], None, &no_feedback);
+    for (i, e) in visited.iter_mut().enumerate() {
+        e.visited = Some((now - 3_600 * (i as u64 * 7 + 2), 1 + i * 3));
+    }
+    paint("browse-visited", &visited, &Panel { section: Section::Visited, ..Default::default() }, &listed, &feedback, 5.0)?;
+    let failed_list = Status { list: ListStatus { vrchat: true, error: Some("VRChat asks to wait 20 s before searching again".into()), ..vrchat(FoundBy::Vrchat) }, ..Default::default() };
+    paint("search-failed", &[], &search, &failed_list, &feedback, 5.0)?;
+    // A world without a capture: its page, with Launch VRChat (signed out of VRChat) or Invite me.
+    let rooftop = popular.iter().find(|e| e.name == "Midnight Rooftop").cloned().expect("stand-in");
+    let mut rooftop = rooftop;
+    rooftop.description = "A rooftop over a city that never sleeps: neon, rain, a jukebox and a view over the bay. Best at night with friends.".into();
+    rooftop.feedback = super::super::catalog::Aggregate { likes: 23, labels: vec![("chill".into(), 6), ("music".into(), 4), ("photo-spot".into(), 2)], comments: 0, recent: Vec::new() };
+    let rooftop_list = [rooftop.clone()];
+    let page = Panel { page: Page::Detail, selected: Some(rooftop.id), ..Default::default() };
+    paint("world", &rooftop_list, &page, &signed_out, &stand_in_feedback(true), 5.0)?;
+    let invited = Panel { note: Some(("Invite sent: accept it in VRChat's notifications".into(), 4.5)), hover: Some(Target::Join), ..page.clone() };
+    paint("world-invite", &rooftop_list, &invited, &listed, &stand_in_feedback(true), 5.0)?;
     // The chip under N4N0's menu (no capture).
     let mut chip_canvas = Canvas::new(CHIP_PX[0], CHIP_PX[1]);
     for (name, hover) in [("chip", false), ("chip-hover", true)] {

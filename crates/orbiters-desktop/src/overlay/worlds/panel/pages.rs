@@ -14,6 +14,7 @@ fn filter_label_rect(i: usize) -> Rect {
 }
 
 const OFFICIAL: Rect = Rect { min: Pos2 { x: 32.0, y: 100.0 }, max: Pos2 { x: 336.0, y: 150.0 } };
+const HAS_3D: Rect = Rect { min: Pos2 { x: 360.0, y: 100.0 }, max: Pos2 { x: 664.0, y: 150.0 } };
 const HEADER_LEFT: Rect = Rect { min: Pos2 { x: 744.0, y: 24.0 }, max: Pos2 { x: 864.0, y: 80.0 } };
 const HEADER_RIGHT: Rect = Rect { min: Pos2 { x: 872.0, y: 24.0 }, max: Pos2 { x: 992.0, y: 80.0 } };
 const WRITE: Rect = Rect { min: Pos2 { x: 744.0, y: 24.0 }, max: Pos2 { x: 992.0, y: 80.0 } };
@@ -60,6 +61,7 @@ impl Panel {
                 }
                 out.push((Target::Done, HEADER_RIGHT));
                 out.push((Target::FilterOfficial, OFFICIAL));
+                out.push((Target::Has3d, HAS_3D));
                 for i in 0..contract::labels().len() {
                     out.push((Target::FilterLabel(i as u8), filter_label_rect(i)));
                 }
@@ -134,6 +136,10 @@ impl Panel {
                             let n = d.entries.iter().filter(|e| e.official).count() as u32;
                             label_chip(p, *rect, "Shared by its author", Some(n), self.official, h, pr, shown);
                         }
+                        Target::Has3d => {
+                            let n = d.entries.iter().filter(|e| e.capture).count() as u32;
+                            label_chip(p, *rect, "Has a 3D capture", Some(n), self.has_3d, h, pr, shown);
+                        }
                         Target::FilterLabel(i) => {
                             let Some(l) = contract::labels().get(i as usize) else { continue };
                             // How many listed worlds have it.
@@ -143,14 +149,14 @@ impl Panel {
                         _ => {}
                     }
                 }
-                text(p, pos2(352.0, 125.0), Align2::LEFT_CENTER, Txt::new("Every label picked: worlds members gave them all", 15.0).color(fade(theme::FG_3, shown)));
+                text(p, pos2(32.0, 538.0), Align2::LEFT_CENTER, Txt::new("Every label picked: worlds members gave them all", 15.0).color(fade(theme::FG_3, shown)));
                 let n = self.results(d).len();
                 let line = match n {
                     0 => "No world matches".to_string(),
                     1 => "1 world matches".to_string(),
                     n => format!("{n} worlds match"),
                 };
-                text(p, pos2(512.0, 548.0), Align2::CENTER_CENTER, Txt::new(line, 16.0).color(fade(theme::FG_3, shown)));
+                text(p, pos2(992.0, 538.0), Align2::RIGHT_CENTER, Txt::new(line, 16.0).color(fade(theme::FG_3, shown)));
             }
             Page::Labels => {
                 self.title(p, "Labels", name, 990.0, shown);

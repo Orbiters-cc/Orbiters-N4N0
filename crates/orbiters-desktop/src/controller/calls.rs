@@ -557,7 +557,8 @@ fn not_linked(e: &anyhow::Error) -> bool {
 /// The panel's text for the call menu: four contacts around the chosen one, `>` before it.
 pub fn menu_text(contacts: &[CallContact], picked: usize) -> String {
     if contacts.is_empty() {
-        return "No friend to call right now. They need Orbiters and N4N0 on.".into();
+        // Two blocks of the panel (eight cells each on most props): whole within a tenth of a second.
+        return "No friend online".into();
     }
     let picked = picked.min(contacts.len() - 1);
     let first = (picked / PAGE) * PAGE;
@@ -1268,7 +1269,8 @@ impl super::Controller {
             (rt.menu_open, menu_text(&rt.contacts, rt.picked))
         };
         if open {
-            self.orb_say(&text);
+            // The owner opened it to pick from: it shows at once (Docs/orb-calls.md, Call menu).
+            self.orb_say_quick(&text);
         } else {
             self.orb_command(crate::ipc::OrbCommand::HidePanel);
         }
@@ -1289,7 +1291,7 @@ impl super::Controller {
             }
         };
         if let Some(text) = text {
-            self.orb_say(&text);
+            self.orb_say_quick(&text);
         }
         self.calls_publish(|_| {});
     }

@@ -1,12 +1,15 @@
 //! The 3D worlds panel, drawn on N4N0's menu overlay in its place (same size and look as the menu's pages): a search
-//! field over the captures as cards (thumbnail, world, author, likes, labels, how smoothly VRChat runs there), ordered
-//! newest, most liked or smoothest first and kept to the labels the person picks, the panel's own keyboard while
-//! typing, and a capture's page once chosen: the card grows into it, then it says how the download goes, what Orbiters
-//! knows of the world (its VRChat numbers, tags, frame rate, pictures, other captures) and its feedback, given here as
-//! in the VRChat world and on the website (contracts `Docs/world-feedback.md`): Like, labels (AI world with its
-//! reason), comments. Pressing a card shows that capture around the person. The capture's controls (Hide, Recenter,
-//! See VRChat, how sharp) are not on its page: they are on a bar of their own under the panel ([`bar`]), there
-//! whatever the page while a capture shows or loads.
+//! field over VRChat's worlds in general as cards (thumbnail, world, author, likes, labels, how smoothly VRChat runs
+//! there), those members captured in 3D badged: a search (every VRChat world), or what is browsed meanwhile (the 3D
+//! captures, VRChat's popular and active worlds, the member's favorites, the worlds visited: [`super::finder`]),
+//! ordered as listed, most liked or smoothest first and kept to the labels the person picks (and to the 3D captures),
+//! the panel's own keyboard while typing, and a world's page once chosen: the card grows into it, then it says what
+//! Orbiters and VRChat know of the world (its VRChat numbers, tags, frame rate, pictures, other captures) and its
+//! feedback, given here as in the VRChat world and on the website (contracts `Docs/world-feedback.md`): Like, labels
+//! (AI world with its reason), comments. Pressing a capture's card shows that capture around the person, and the
+//! download goes on its page; a world without a capture has Invite me (or Launch VRChat) and Open on VRChat there
+//! instead. The capture's controls (Hide, Recenter, See VRChat, how sharp) are not on its page: they are on a bar of
+//! their own under the panel ([`bar`]), there whatever the page while a capture shows or loads.
 
 mod bar;
 mod pages;
@@ -16,11 +19,12 @@ pub use bar::{bar_hit, bar_press, draw_bar, BAR_PX};
 pub use shots::shots;
 
 use super::catalog::Entry;
+pub use super::finder::Section;
 use super::view::Quality;
 use egui::epaint::RectShape;
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, Painter, Pos2, Rect, Stroke, StrokeKind, TextureId};
 use orbiters_contracts::world_feedback as contract;
-use orbiters_core::maps::{WorldPage, WorldPerformance, WorldPicture};
+use orbiters_core::maps::{FoundBy, WorldPage, WorldPerformance, WorldPicture};
 use orbiters_orb::feedback::{CommentRow, FeedbackAsk, FeedbackView, LabelCount, WorldFeedback};
 use orbiters_orb::menu::KeyboardLayout;
 use orbiters_ui::theme::{self, weight, Txt};
@@ -62,13 +66,28 @@ pub enum Sort {
 }
 
 impl Sort {
-    pub const ALL: [Sort; 3] = [Sort::Newest, Sort::Liked, Sort::Smooth];
-
     pub fn label(self) -> &'static str {
         match self {
             Sort::Newest => "Newest",
             Sort::Liked => "Most liked",
             Sort::Smooth => "Smoothest",
+        }
+    }
+
+    /// The next one, round (the browse page's order chip steps through them).
+    pub fn next(self) -> Sort {
+        match self {
+            Sort::Newest => Sort::Liked,
+            Sort::Liked => Sort::Smooth,
+            Sort::Smooth => Sort::Newest,
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Sort::Newest => icons::CLOCK,
+            Sort::Liked => icons::HEART,
+            Sort::Smooth => icons::GAUGE,
         }
     }
 }
@@ -126,6 +145,10 @@ pub enum Target {
     /// A label of the list (its place in it) on the filter page.
     FilterLabel(u8),
     FilterOfficial,
+    /// Only the worlds with a 3D capture.
+    Has3d,
+    /// A list to browse.
+    Section(Section),
     ClearFilters,
     Like,
     Labels,
@@ -142,6 +165,10 @@ pub enum Target {
     Other,
     /// The bar's capture: its page.
     Open,
+    /// A world without a capture: an invite to oneself in VRChat (signed in to VRChat), else VRChat launched there.
+    Join,
+    /// The world's page on vrchat.com.
+    OpenWeb,
 }
 
 /// What a press asks of the overlay.
@@ -161,6 +188,12 @@ pub enum Action {
     Feedback(FeedbackAsk),
     /// The panel, on the capture's page.
     Open,
+    /// Search what is typed now (Done), without waiting for the typing to pause.
+    Search,
+    /// A world (its id) in VRChat: an invite to oneself when signed in to VRChat, else VRChat's launcher.
+    Join(String),
+    /// A world's page on vrchat.com (its id), in the computer's browser.
+    OpenWeb(String),
 }
 
 /// How the capture view goes, as the panel shows it.
@@ -182,6 +215,25 @@ pub struct Status {
     pub listing_error: Option<String>,
     /// A line of numbers for the curious (splats, the GPU's time a face).
     pub stats: Option<String>,
+    /// The world list shown (a search, a section).
+    pub list: ListStatus,
+}
+
+/// How the world list shown goes ([`super::finder`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ListStatus {
+    /// A page is on its way.
+    pub loading: bool,
+    /// Another page follows the ones read.
+    pub more: bool,
+    /// Why a page could not be read.
+    pub error: Option<String>,
+    /// Who answered.
+    pub source: Option<FoundBy>,
+    /// Signed in to VRChat in the app (its own session answers; Favorites and Active need it).
+    pub vrchat: bool,
+    /// A search of every world applies (two characters typed and the typing paused).
+    pub searching: bool,
 }
 
 /// What the panel shows of a world's page on the Map explorer.
@@ -195,30 +247,42 @@ pub struct Facts {
     /// The first of the members' pictures of it, and how many there are.
     pub pictures: Vec<WorldPicture>,
     pub picture_count: usize,
+    /// The world's author, description and numbers on VRChat (a world the list knew by its name only: a visited one).
+    pub author: Option<String>,
+    pub description: Option<String>,
+    pub capacity: Option<u32>,
+    pub visits: Option<u64>,
+    pub favorites: Option<u64>,
+}
+
+/// The tags a world's author gave it, readable: VRChat's own (system_, admin_, feature_, content_…) left out.
+pub fn author_tags(tags: &[String]) -> Vec<String> {
+    tags.iter()
+        .filter_map(|t| match t.strip_prefix("author_tag_") {
+            Some(t) => Some(t),
+            None if ["system_", "admin_", "feature_", "content_", "debug_", "author_"].iter().any(|p| t.starts_with(p)) => None,
+            None => Some(t.as_str()),
+        })
+        .map(|t| t.replace('_', " ").trim().to_string())
+        .filter(|t| !t.is_empty())
+        .take(12)
+        .collect()
 }
 
 impl Facts {
     pub fn of(page: &WorldPage) -> Self {
         let w = &page.world;
-        // VRChat's own tags (system_, admin_, feature_, content_…) are not the author's.
-        let tags = w
-            .tags
-            .iter()
-            .filter_map(|t| match t.strip_prefix("author_tag_") {
-                Some(t) => Some(t),
-                None if ["system_", "admin_", "feature_", "content_", "debug_", "author_"].iter().any(|p| t.starts_with(p)) => None,
-                None => Some(t.as_str()),
-            })
-            .map(|t| t.replace('_', " ").trim().to_string())
-            .filter(|t| !t.is_empty())
-            .take(12)
-            .collect();
         Self {
             thumbnail: w.thumbnail_url.clone().or_else(|| w.image_url.clone()),
             performance: w.performance.clone().filter(|p| p.fps > 0),
-            tags,
+            tags: author_tags(&w.tags),
             pictures: page.pictures.clone(),
             picture_count: page.picture_count.max(page.pictures.len()),
+            author: w.author_name.clone().filter(|a| !a.trim().is_empty()),
+            description: w.description.clone().filter(|d| !d.trim().is_empty()),
+            capacity: w.capacity.filter(|c| *c > 0),
+            visits: w.visits,
+            favorites: w.favorites,
         }
     }
 }
@@ -226,6 +290,8 @@ impl Facts {
 /// What the panel draws from besides its own state: the listing, the capture view, the worlds' feedback and pages.
 pub struct Data<'a> {
     pub entries: &'a [Entry],
+    /// The world whose page shows, when the list shown no longer has it (another section, another search).
+    pub picked: Option<&'a Entry>,
     pub status: &'a Status,
     /// The worlds' feedback as the app knows it (the member's own part included, the panel's presses applied).
     pub feedback: &'a FeedbackView,
@@ -301,14 +367,27 @@ impl<'a> Data<'a> {
         }
     }
 
+    /// How smoothly VRChat runs there, when members measured it (its page's, else the list's).
+    pub fn performance(&self, e: &'a Entry) -> Option<&'a WorldPerformance> {
+        self.facts_of(e).and_then(|f| f.performance.as_ref()).or(e.performance.as_ref())
+    }
+
     /// Its frame rate's (share of the refresh rate, frames a second), when members measured it.
-    fn smoothness(&self, e: &Entry) -> Option<(f32, u32)> {
-        self.facts_of(e).and_then(|f| f.performance.as_ref()).map(|p| (p.ratio, p.fps))
+    fn smoothness(&self, e: &'a Entry) -> Option<(f32, u32)> {
+        self.performance(e).map(|p| (p.ratio, p.fps))
+    }
+
+    /// Its author: the list's, else its page's.
+    pub fn author(&self, e: &'a Entry) -> Option<&'a str> {
+        e.author.as_deref().or_else(|| self.facts_of(e).and_then(|f| f.author.as_deref()))
     }
 
     /// The other captures of `e`'s world, in the listing's order.
     pub fn others(&self, e: &Entry) -> Vec<&'a Entry> {
-        self.entries.iter().filter(|o| o.id != e.id && o.world_id.eq_ignore_ascii_case(&e.world_id)).collect()
+        if !e.capture {
+            return Vec::new();
+        }
+        self.entries.iter().filter(|o| o.capture && o.id != e.id && o.world_id.eq_ignore_ascii_case(&e.world_id)).collect()
     }
 }
 
@@ -341,9 +420,13 @@ pub struct Panel {
     pub selected: Option<u64>,
     pub layout: KeyboardLayout,
     pub sort: Sort,
-    /// The labels the results are kept to (all of them), and the captures shared by the world's own author only.
+    /// What is browsed while nothing is typed.
+    pub section: Section,
+    /// The labels the results are kept to (all of them), the captures shared by the world's own author only, and the
+    /// worlds with a 3D capture only.
     pub labels: Vec<String>,
     pub official: bool,
+    pub has_3d: bool,
     /// What a compose page typed.
     pub draft: String,
     pub comments_page: usize,
@@ -396,12 +479,16 @@ fn top_label_rect(k: usize) -> Rect {
     Rect::from_min_size(pos2(608.0 + (k % 3) as f32 * 131.0, 378.0 + (k / 3) as f32 * 38.0), vec2(122.0, 30.0))
 }
 
-/// The browse page's second row: the order, the labels the results are kept to.
-fn sort_rect(i: usize) -> Rect {
-    Rect::from_min_size(pos2(32.0 + i as f32 * 128.0, 96.0), vec2(128.0, 40.0))
+/// The browse page's second row: what is browsed (searching: 3D only), the order, the labels the results are kept to.
+const SECTION_W: [f32; 5] = [118.0, 90.0, 106.0, 98.0, 86.0];
+fn section_rect(i: usize) -> Rect {
+    let x = 32.0 + SECTION_W[..i].iter().sum::<f32>();
+    Rect::from_min_size(pos2(x, 96.0), vec2(SECTION_W[i], 40.0))
 }
-const FILTER: Rect = Rect { min: Pos2 { x: 428.0, y: 96.0 }, max: Pos2 { x: 668.0, y: 136.0 } };
-const CLEAR: Rect = Rect { min: Pos2 { x: 676.0, y: 96.0 }, max: Pos2 { x: 784.0, y: 136.0 } };
+const ONLY_3D: Rect = Rect { min: Pos2 { x: 32.0, y: 96.0 }, max: Pos2 { x: 164.0, y: 136.0 } };
+const SORT: Rect = Rect { min: Pos2 { x: 542.0, y: 96.0 }, max: Pos2 { x: 692.0, y: 136.0 } };
+const FILTER: Rect = Rect { min: Pos2 { x: 700.0, y: 96.0 }, max: Pos2 { x: 944.0, y: 136.0 } };
+const CLEAR: Rect = Rect { min: Pos2 { x: 952.0, y: 96.0 }, max: Pos2 { x: 992.0, y: 136.0 } };
 
 impl Panel {
     /// The results for the search typed so far, kept to the labels picked, in the order chosen.
@@ -409,7 +496,9 @@ impl Panel {
         let mut out: Vec<&'a Entry> = d
             .entries
             .iter()
-            .filter(|e| e.matches(&self.query) && (!self.official || e.official) && self.labels.iter().all(|l| d.label_count(e, l) > 0))
+            .filter(|e| {
+                e.matches(&self.query) && (!self.official || e.official) && (!self.has_3d || e.capture) && self.labels.iter().all(|l| d.label_count(e, l) > 0)
+            })
             .collect();
         match self.sort {
             Sort::Newest => {}
@@ -425,11 +514,49 @@ impl Panel {
     }
 
     fn filtered(&self) -> bool {
-        self.official || !self.labels.is_empty()
+        self.official || self.has_3d || !self.labels.is_empty()
     }
 
-    fn pages(&self, n: usize) -> usize {
-        n.div_ceil(PER_PAGE).max(1)
+    /// Pages of `n` results: one more while the list has more to read (its next page is read once there).
+    fn pages(&self, d: &Data, n: usize) -> usize {
+        n.div_ceil(PER_PAGE).max(1) + usize::from(d.status.list.more && n > 0)
+    }
+
+    /// A search of every world shows (else what is browsed).
+    fn searching(&self, d: &Data) -> bool {
+        d.status.list.searching && !self.query.trim().is_empty()
+    }
+
+    /// The results are on their way.
+    fn loading(&self, d: &Data) -> bool {
+        if self.searching(d) || self.section != Section::Captures {
+            d.status.list.loading
+        } else {
+            d.entries.is_empty() && d.status.listing_error.is_none()
+        }
+    }
+
+    /// Why the results could not be read: a title and a line.
+    fn failure<'d>(&self, d: &'d Data) -> Option<(&'static str, &'d str)> {
+        if self.searching(d) || self.section != Section::Captures {
+            let title = if d.status.list.source == Some(FoundBy::Vrchat) { "VRChat could not be asked" } else { "The worlds could not be read" };
+            d.status.list.error.as_deref().map(|e| (title, e))
+        } else {
+            d.status.listing_error.as_deref().filter(|_| d.entries.is_empty()).map(|e| ("Orbiters could not be reached", e))
+        }
+    }
+
+    /// The order's name where it applies: as listed is a search's best match, VRChat's lists' top.
+    fn sort_label(&self, d: &Data) -> &'static str {
+        match self.sort {
+            Sort::Newest if self.searching(d) => "Best match",
+            Sort::Newest => match self.section {
+                Section::Captures => "Newest",
+                Section::Visited => "Latest",
+                Section::Popular | Section::Active | Section::Favorites => "Top",
+            },
+            s => s.label(),
+        }
     }
 
     fn go(&mut self, page: Page, time: f64) {
@@ -440,12 +567,13 @@ impl Panel {
         self.dirty = true;
     }
 
-    /// The capture whose page shows.
+    /// The world whose page shows.
     pub fn entry<'a>(&self, d: &Data<'a>) -> Option<&'a Entry> {
-        self.selected.and_then(|id| d.entries.iter().find(|e| e.id == id))
+        let id = self.selected?;
+        d.entries.iter().find(|e| e.id == id).or(d.picked.filter(|e| e.id == id))
     }
 
-    fn say(&mut self, note: impl Into<String>, time: f64) {
+    pub fn say(&mut self, note: impl Into<String>, time: f64) {
         self.note = Some((note.into(), time));
     }
 
@@ -479,6 +607,7 @@ impl Panel {
             || self.morph.is_some_and(|m| time - m.at < MORPH + 0.3)
             || status.stage.is_some()
             || status.fetching
+            || status.list.loading
             || matches!(self.page, Page::Typing | Page::Compose(_))
             || self.confirm.is_some_and(|(_, at)| time - at < CONFIRM_FOR + 0.1)
             || self.note.as_ref().is_some_and(|(_, at)| time - at < NOTE_FOR + 0.1)
@@ -491,14 +620,19 @@ impl Panel {
             Page::Browse => {
                 let results = self.results(d);
                 out.push((Target::Field, field_rect()));
-                let pages = self.pages(results.len());
+                let pages = self.pages(d, results.len());
                 if pages > 1 {
                     out.push((Target::Previous, Rect::from_center_size(pos2(900.0, 52.0), vec2(56.0, 56.0))));
                     out.push((Target::Next, Rect::from_center_size(pos2(964.0, 52.0), vec2(56.0, 56.0))));
                 }
-                for (i, s) in Sort::ALL.into_iter().enumerate() {
-                    out.push((Target::Sort(s), sort_rect(i)));
+                if self.searching(d) {
+                    out.push((Target::Has3d, ONLY_3D));
+                } else {
+                    for (i, s) in Section::ALL.into_iter().enumerate() {
+                        out.push((Target::Section(s), section_rect(i)));
+                    }
                 }
+                out.push((Target::Sort(self.sort.next()), SORT));
                 out.push((Target::Filter, FILTER));
                 if self.filtered() {
                     out.push((Target::ClearFilters, CLEAR));
@@ -507,7 +641,7 @@ impl Panel {
                 for (i, _) in results.iter().enumerate().skip(first).take(PER_PAGE) {
                     out.push((Target::Card(i), card_rect(i - first)));
                 }
-                if d.entries.is_empty() && d.status.listing_error.is_some() {
+                if results.is_empty() && self.failure(d).is_some() {
                     out.push((Target::Retry, Rect::from_center_size(pos2(512.0, 420.0), vec2(200.0, 56.0))));
                 }
             }
@@ -522,7 +656,9 @@ impl Panel {
             Page::Detail => {
                 let Some(e) = self.entry(d) else { return out };
                 let current = d.status.current == Some(e.id) && (d.status.shown || d.status.stage.is_some());
-                if !current {
+                if !e.capture {
+                    out.push((Target::Join, SHOW));
+                } else if !current {
                     out.push((Target::Show, SHOW));
                 }
                 out.push((Target::Like, LIKE));
@@ -541,6 +677,8 @@ impl Panel {
                 }
                 if !d.others(e).is_empty() {
                     out.push((Target::Other, OTHER));
+                } else if super::finder::web_link(&e.world_id).is_some() {
+                    out.push((Target::OpenWeb, OTHER));
                 }
             }
             Page::Filter | Page::Labels | Page::Comments | Page::Compose(_) | Page::Pictures => self.page_targets(d, &mut out),
@@ -617,7 +755,7 @@ impl Panel {
                 _ => {
                     self.results_page = 0;
                     self.go(Page::Browse, time);
-                    Vec::new()
+                    vec![Action::Search]
                 }
             },
             Target::Key(c) => {
@@ -644,7 +782,7 @@ impl Panel {
                         let n = self.entry(d).and_then(|e| d.facts_of(e)).map_or(0, |f| f.pictures.len());
                         self.pictures_page = step(self.pictures_page, n.div_ceil(PICTURES_PER_PAGE).max(1));
                     }
-                    _ => self.results_page = step(self.results_page, self.pages(self.results(d).len())),
+                    _ => self.results_page = step(self.results_page, self.pages(d, self.results(d).len())),
                 }
                 self.page_at = time;
                 Vec::new()
@@ -659,13 +797,30 @@ impl Panel {
                 self.morph = Some(Morph { from, at: time });
                 self.select(entry.id);
                 self.go(Page::Detail, time);
-                if status.current == Some(entry.id) && (status.shown || status.stage.is_some()) {
+                // A world without a capture: its page only.
+                if !entry.capture || status.current == Some(entry.id) && (status.shown || status.stage.is_some()) {
                     Vec::new()
                 } else {
                     vec![Action::Show(entry.id)]
                 }
             }
-            Target::Show => self.selected.map(Action::Show).into_iter().collect(),
+            Target::Show => self.entry(d).filter(|e| e.capture).map(|e| Action::Show(e.id)).into_iter().collect(),
+            Target::Join => self.entry(d).map(|e| Action::Join(e.world_id.clone())).into_iter().collect(),
+            Target::OpenWeb => self.entry(d).map(|e| Action::OpenWeb(e.world_id.clone())).into_iter().collect(),
+            Target::Has3d => {
+                self.has_3d = !self.has_3d;
+                self.results_page = 0;
+                self.page_at = time;
+                Vec::new()
+            }
+            Target::Section(s) => {
+                if self.section != s {
+                    self.section = s;
+                    self.results_page = 0;
+                    self.page_at = time;
+                }
+                Vec::new()
+            }
             Target::Hide => vec![Action::Hide],
             Target::Recenter => vec![Action::Recenter],
             Target::SeeThrough => vec![Action::SeeThrough(!status.see_through)],
@@ -701,6 +856,7 @@ impl Panel {
             Target::ClearFilters => {
                 self.labels.clear();
                 self.official = false;
+                self.has_3d = false;
                 self.results_page = 0;
                 self.page_at = time;
                 Vec::new()
@@ -893,7 +1049,7 @@ impl Panel {
             Page::Browse => self.browse(p, d, &targets, time, shown),
             Page::Typing => {
                 let results = self.results(d);
-                field(p, &self.query, "Search 3D worlds", true, state(Target::Field), time, 1.0);
+                field(p, &self.query, "Search VRChat worlds", true, state(Target::Field), time, 1.0);
                 let (h, pr) = state(Target::Done);
                 pill_button(p, Rect::from_min_size(pos2(824.0, 24.0), vec2(168.0, 56.0)), Some(icons::MAGNIFYING_GLASS), "Done", theme::ACCENT, theme::ON_ACCENT, h, pr, 1.0);
                 for (t, rect) in &targets {
@@ -903,7 +1059,15 @@ impl Panel {
                     }
                 }
                 if results.is_empty() {
-                    let msg = if d.entries.is_empty() { "Loading the 3D worlds…" } else { "No 3D world matches" };
+                    let msg = if self.loading(d) {
+                        "Searching…"
+                    } else if let Some((title, _)) = self.failure(d) {
+                        title
+                    } else if self.query.trim().chars().count() < 2 {
+                        "Type a world's name"
+                    } else {
+                        "No world matches"
+                    };
                     text(p, pos2(512.0, 162.0), Align2::CENTER_CENTER, Txt::new(msg, 19.0).color(fade(theme::FG_3, shown)));
                 }
                 self.keyboard(p, &targets, shown);
@@ -929,44 +1093,73 @@ impl Panel {
     fn browse(&self, p: &Painter, d: &Data, targets: &[(Target, Rect)], time: f64, shown: f32) {
         let state = |t: Target| (self.hover == Some(t), self.pressed == Some(t));
         let results = self.results(d);
-        field(p, &self.query, "Search 3D worlds", false, state(Target::Field), time, 1.0);
-        let pages = self.pages(results.len());
+        field(p, &self.query, "Search VRChat worlds", false, state(Target::Field), time, 1.0);
+        // How many, at the field's end (while what is typed leaves room).
+        if self.query.chars().count() <= 28 && !results.is_empty() {
+            let more = if d.status.list.more { "+" } else { "" };
+            let count = if results.len() == 1 { "1 world".to_string() } else { format!("{}{more} worlds", results.len()) };
+            text(p, pos2(field_rect().max.x - 28.0, field_rect().center().y), Align2::RIGHT_CENTER, Txt::new(count, 16.0).color(theme::FG_4));
+        }
+        let pages = self.pages(d, results.len());
         let current = self.results_page.min(pages - 1);
         if pages > 1 {
             let (h, pr) = state(Target::Previous);
             round_button(p, pos2(900.0, 52.0), icons::CARET_LEFT, h, pr, 1.0);
             let (h, pr) = state(Target::Next);
             round_button(p, pos2(964.0, 52.0), icons::CARET_RIGHT, h, pr, 1.0);
-            text(p, pos2(860.0, 52.0), Align2::RIGHT_CENTER, Txt::new(format!("{}/{}", current + 1, pages), 17.0).color(theme::FG_3));
+            let of = if d.status.list.more { format!("{}/{}+", current + 1, pages - 1) } else { format!("{}/{}", current + 1, pages) };
+            text(p, pos2(860.0, 52.0), Align2::RIGHT_CENTER, Txt::new(of, 17.0).color(theme::FG_3));
         }
-        // The order, the labels kept to, how many.
-        let track = Rect::from_min_max(sort_rect(0).min, sort_rect(Sort::ALL.len() - 1).max);
-        p.rect_filled(track, CornerRadius::same(20), SURFACE);
-        for (i, s) in Sort::ALL.into_iter().enumerate() {
-            let (h, pr) = state(Target::Sort(s));
-            segment(p, sort_rect(i), s.label(), self.sort == s, h, pr, 1.0);
+        // What is browsed (searching: every world, 3D only), the order, the labels kept to.
+        if self.searching(d) {
+            let (h, pr) = state(Target::Has3d);
+            let (bg, fg) = if self.has_3d { (theme::alpha(theme::ACCENT, 0.18), theme::ACCENT) } else { (if h { RAISED } else { SURFACE }, theme::FG_2) };
+            chip_button(p, ONLY_3D, icons::CUBE, "3D only", bg, fg, pr, 1.0);
+            let from = match d.status.list.source {
+                Some(FoundBy::Vrchat) => "Every VRChat world, from your VRChat account",
+                Some(FoundBy::Orbiters) => "Every public VRChat world, from Orbiters",
+                None => "Every VRChat world",
+            };
+            text_cut(p, pos2(ONLY_3D.max.x + 14.0, 106.0), SORT.min.x - ONLY_3D.max.x - 24.0, Txt::new(from, 15.0).color(theme::FG_3));
+        } else {
+            let track = Rect::from_min_max(section_rect(0).min, section_rect(Section::ALL.len() - 1).max);
+            p.rect_filled(track, CornerRadius::same(20), SURFACE);
+            for (i, s) in Section::ALL.into_iter().enumerate() {
+                let (h, pr) = state(Target::Section(s));
+                segment(p, section_rect(i), s.label(d.status.list.vrchat), self.section == s, h, pr, 1.0);
+            }
         }
+        let (h, pr) = state(Target::Sort(self.sort.next()));
+        let (bg, fg) = if self.sort != Sort::Newest { (theme::alpha(theme::ACCENT, 0.18), theme::ACCENT) } else { (if h { RAISED } else { SURFACE }, theme::FG_2) };
+        chip_button(p, SORT, self.sort.icon(), self.sort_label(d), bg, fg, pr, 1.0);
         let (h, pr) = state(Target::Filter);
         let filter_label = if self.filtered() {
             let mut names: Vec<&str> = self.labels.iter().map(|l| label_name(l)).collect();
             if self.official {
                 names.insert(0, "By its author");
             }
-            names.join(" · ")
+            if self.has_3d && !self.searching(d) {
+                names.insert(0, "3D only");
+            }
+            if names.is_empty() {
+                "Filter by label".to_string()
+            } else {
+                names.join(" · ")
+            }
         } else {
             "Filter by label".to_string()
         };
-        let (bg, fg) = if self.filtered() { (theme::alpha(theme::ACCENT, 0.18), theme::ACCENT) } else { (if h { RAISED } else { SURFACE }, theme::FG_2) };
+        let lit = !self.labels.is_empty() || self.official || self.has_3d && !self.searching(d);
+        let (bg, fg) = if lit { (theme::alpha(theme::ACCENT, 0.18), theme::ACCENT) } else { (if h { RAISED } else { SURFACE }, theme::FG_2) };
         chip_button(p, FILTER, icons::TAG, &filter_label, bg, fg, pr, 1.0);
         if self.filtered() {
             let (h, pr) = state(Target::ClearFilters);
-            chip_button(p, CLEAR, icons::X, "Clear", if h { RAISED } else { SURFACE }, theme::FG_2, pr, 1.0);
+            p.circle_filled(CLEAR.center(), if pr { 18.0 } else { 20.0 }, if h { RAISED } else { SURFACE });
+            widgets::icon(p, CLEAR.center(), icons::X, 18.0, theme::FG_2);
         }
-        let count = match results.len() {
-            1 => "1 world".to_string(),
-            n => format!("{n} worlds"),
-        };
-        text(p, pos2(992.0, 116.0), Align2::RIGHT_CENTER, Txt::new(count, 16.0).color(theme::FG_3));
+        if !results.is_empty() && current * PER_PAGE >= results.len() {
+            text(p, pos2(512.0, 330.0), Align2::CENTER_CENTER, Txt::new("Finding more worlds…", 19.0).color(fade(theme::FG_3, shown)));
+        }
         for (t, rect) in targets {
             if let Target::Card(i) = *t {
                 let slot = i - current * PER_PAGE;
@@ -982,27 +1175,44 @@ impl Panel {
     }
 
     fn empty(&self, p: &Painter, d: &Data, shown: f32, retry: (bool, bool)) {
-        let (icon, title, line) = if let Some(e) = d.status.listing_error.as_ref().filter(|_| d.entries.is_empty()) {
-            (icons::WARNING, "Orbiters could not be reached", e.as_str())
-        } else if d.entries.is_empty() {
-            (icons::GLOBE, "Finding 3D worlds…", "The worlds members captured and shared")
+        let searching = self.searching(d);
+        let (icon, title, line) = if let Some((title, line)) = self.failure(d) {
+            (icons::WARNING, title, line)
+        } else if !searching && self.section.needs_vrchat() && !d.status.list.vrchat {
+            (icons::SIGN_IN, "Sign in to VRChat to see these", "On the computer: Orbiters - N4N0, Settings, VRChat account")
+        } else if self.loading(d) {
+            let line = match (searching, self.section) {
+                (true, _) => "Every VRChat world whose name matches",
+                (false, Section::Captures) => "The worlds members captured and shared",
+                (false, Section::Visited) => "The worlds you visited in VRChat",
+                (false, _) => "From VRChat",
+            };
+            (icons::GLOBE, "Finding worlds…", line)
+        } else if self.has_3d && self.labels.is_empty() && !self.official {
+            (icons::CUBE, "No 3D capture among these worlds", "Turn 3D only off to see them all")
         } else if self.filtered() {
-            (icons::TAG, "No 3D world has these labels", "Clear the filter, or pick other labels")
+            (icons::TAG, "No world has these labels", "Clear the filter, or pick other labels")
+        } else if !searching && self.section == Section::Visited {
+            (icons::CLOCK, "No world visited yet", "The worlds you visit in VRChat show here")
+        } else if !searching && self.section == Section::Favorites {
+            (icons::STAR, "No favorite world yet", "Favorite worlds in VRChat to find them here")
+        } else if self.query.trim().chars().count() < 2 && !self.query.trim().is_empty() {
+            (icons::MAGNIFYING_GLASS, "Type a little more", "Two letters search every VRChat world")
         } else {
-            (icons::MAGNIFYING_GLASS, "No 3D world matches", "Try a world's name, its author or who shared it")
+            (icons::MAGNIFYING_GLASS, "No world matches", "Try another name, or a 3D capture's author or sharer")
         };
         widgets::icon(p, pos2(512.0, 270.0), icon, 44.0, fade(theme::FG_4, shown));
         text(p, pos2(512.0, 326.0), Align2::CENTER_CENTER, Txt::new(title, 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
         let line: String = line.chars().take(80).collect();
         text(p, pos2(512.0, 360.0), Align2::CENTER_CENTER, Txt::new(line, 17.0).color(fade(theme::FG_3, shown)));
-        if d.status.listing_error.is_some() && d.entries.is_empty() {
+        if self.failure(d).is_some() {
             pill_button(p, Rect::from_center_size(pos2(512.0, 420.0), vec2(200.0, 56.0)), Some(icons::ARROW_CLOCKWISE), "Try again", RAISED, theme::FG, retry.0, retry.1, shown);
         }
     }
 
     fn detail(&self, p: &Painter, d: &Data, time: f64, targets: &[(Target, Rect)]) {
         let Some(entry) = self.entry(d) else {
-            text(p, pos2(512.0, 288.0), Align2::CENTER_CENTER, Txt::new("This 3D world is no longer listed", 22.0).color(theme::FG_3));
+            text(p, pos2(512.0, 288.0), Align2::CENTER_CENTER, Txt::new("This world is no longer listed", 22.0).color(theme::FG_3));
             return;
         };
         let status = d.status;
@@ -1039,8 +1249,16 @@ impl Panel {
                 p.rect_filled(track, CornerRadius::same(2), fade(theme::white(0.12), rest));
                 p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * f, 5.0)), CornerRadius::same(2), fade(theme::ACCENT, rest));
             }
-        } else {
+        } else if entry.capture {
             text(p, pos2(hero.min.x + 24.0, foot.center().y), Align2::LEFT_CENTER, Txt::new("Its start view where you stand", 15.0).color(fade(theme::FG_2, rest)));
+        } else {
+            let line = match (entry.occupants.filter(|n| *n > 0), entry.preview) {
+                (Some(1), _) => "1 person in it now".to_string(),
+                (Some(n), _) => format!("{} people in it now", short_count(n as u64)),
+                (None, true) => "Its 3D preview is on orbiters.cc".to_string(),
+                (None, false) => "No 3D capture of it yet".to_string(),
+            };
+            text_cut(p, pos2(hero.min.x + 24.0, foot.center().y - 10.0), SHOW.min.x - hero.min.x - 36.0, Txt::new(line, 15.0).color(fade(theme::FG_2, rest)));
         }
         // The world's name on the header row, beside Back; the rest in the column beside the picture.
         let title = Txt::new(entry.name.clone(), 28.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest));
@@ -1049,32 +1267,42 @@ impl Panel {
         let facts = d.facts_of(entry);
         let x = 608.0;
         let mut y = 100.0 + slide;
-        if let Some(author) = &entry.author {
+        if let Some(author) = d.author(entry) {
             text_cut(p, pos2(x, y), 384.0, Txt::new(format!("by {author}"), 19.0).weight(weight::MEDIUM).color(fade(theme::FG_2, rest)));
             y += 30.0;
         }
-        let mut meta = vec![format!("{} splats", short_count(entry.splats as u64))];
-        if entry.sky {
-            meta.push("sky".into());
-        }
-        if !entry.official {
-            if let Some(u) = &entry.uploader {
-                meta.push(format!("3D by {u}"));
+        let mut meta = Vec::new();
+        if entry.capture {
+            meta.push(format!("{} splats", short_count(entry.splats as u64)));
+            if entry.sky {
+                meta.push("sky".into());
+            }
+            if !entry.official {
+                if let Some(u) = &entry.uploader {
+                    meta.push(format!("3D by {u}"));
+                }
+            }
+            if let Some(date) = entry.captured_at.as_deref().and_then(short_date) {
+                meta.push(date);
+            }
+        } else if let Some((last, visits)) = entry.visited {
+            meta.push(if visits == 1 { "Visited once".to_string() } else { format!("Visited {visits} times") });
+            if last > 0 {
+                meta.push(format!("last {}", orbiters_orb::feedback::ago(d.now.saturating_sub(last))));
             }
         }
-        if let Some(date) = entry.captured_at.as_deref().and_then(short_date) {
-            meta.push(date);
+        if !meta.is_empty() {
+            text_cut(p, pos2(x, y), 384.0, Txt::new(meta.join(" · "), 16.0).color(fade(theme::FG_3, rest)));
+            y += 26.0;
         }
-        text_cut(p, pos2(x, y), 384.0, Txt::new(meta.join(" · "), 16.0).color(fade(theme::FG_3, rest)));
-        y += 26.0;
         let mut numbers = Vec::new();
-        if let Some(c) = entry.capacity.filter(|c| *c > 0) {
+        if let Some(c) = entry.capacity.or(facts.and_then(|f| f.capacity)).filter(|c| *c > 0) {
             numbers.push(format!("{c} people"));
         }
-        if let Some(v) = entry.visits {
+        if let Some(v) = entry.visits.or(facts.and_then(|f| f.visits)) {
             numbers.push(format!("{} visits", short_count(v)));
         }
-        if let Some(f) = entry.favorites {
+        if let Some(f) = entry.favorites.or(facts.and_then(|f| f.favorites)) {
             numbers.push(format!("{} favorites", short_count(f)));
         }
         if !numbers.is_empty() {
@@ -1086,20 +1314,21 @@ impl Panel {
         if entry.official {
             cx += chip(p, pos2(cx, y), icons::SEAL_CHECK, "By its author", theme::ACCENT, rest) + 8.0;
         }
-        if let Some(perf) = facts.and_then(|f| f.performance.as_ref()) {
+        if let Some(perf) = d.performance(entry) {
             let (word, tint) = verdict(perf);
             cx += chip(p, pos2(cx, y), icons::GAUGE, &format!("{} fps · {word}", perf.fps), tint, rest) + 10.0;
             let detail = format!("slowest {} · {:.0}% of refresh", perf.fps_low, perf.ratio * 100.0);
             text_cut(p, pos2(cx, y + 6.0), (992.0 - cx).max(0.0), Txt::new(detail, 14.0).color(fade(theme::FG_4, rest)));
         }
-        if entry.official || facts.is_some_and(|f| f.performance.is_some()) {
+        if entry.official || d.performance(entry).is_some() {
             y += 40.0;
         }
         // As much of the world's description as fits above the feedback.
         let room = 300.0 + slide - y;
-        if !entry.description.trim().is_empty() && room > 22.0 {
+        let description = if entry.description.trim().is_empty() { facts.and_then(|f| f.description.as_deref()).unwrap_or("") } else { entry.description.as_str() };
+        if !description.trim().is_empty() && room > 22.0 {
             let lines = (room / 22.0).floor().max(1.0) as usize;
-            let mut job = Txt::new(entry.description.split_whitespace().collect::<Vec<_>>().join(" "), 15.0).color(fade(theme::FG_3, rest)).line_height(22.0).job(384.0);
+            let mut job = Txt::new(description.split_whitespace().collect::<Vec<_>>().join(" "), 15.0).color(fade(theme::FG_3, rest)).line_height(22.0).job(384.0);
             job.wrap.max_rows = lines;
             p.galley(pos2(x, y), p.layout_job(job), theme::FG_3);
         }
@@ -1133,6 +1362,11 @@ impl Panel {
                     text(p, pos2(r.min.x + 32.0, r.center().y), Align2::LEFT_CENTER, Txt::new("Labels", 15.0).weight(weight::MEDIUM).color(fade(theme::FG_2, rest)));
                 }
                 Target::Show => pill_button(p, on(*rect), Some(icons::CUBE), "Show around me", theme::ACCENT, theme::ON_ACCENT, h, pr, rest),
+                Target::Join => {
+                    let (glyph, label) = if status.list.vrchat { (icons::ENVELOPE_SIMPLE, "Invite me") } else { (icons::PLAY, "Launch VRChat") };
+                    pill_button(p, on(*rect), Some(glyph), label, theme::ACCENT, theme::ON_ACCENT, h, pr, rest);
+                }
+                Target::OpenWeb => icon_button(p, on(*rect), icons::ARROW_SQUARE_OUT, false, "Open on VRChat", RAISED, theme::FG, h, pr, rest),
                 Target::Pictures => {
                     let n = facts.map_or(entry.pictures as usize, |f| f.picture_count.max(entry.pictures as usize));
                     icon_button(p, on(*rect), icons::IMAGES, false, &format!("Pictures · {n}"), RAISED, theme::FG, h, pr, rest);
@@ -1146,9 +1380,13 @@ impl Panel {
             }
         }
         // Under the picture: the author's tags, the newest comment.
-        if let Some(f) = facts {
+        let tags = match facts.filter(|f| !f.tags.is_empty()) {
+            Some(f) => f.tags.clone(),
+            None => author_tags(&entry.tags),
+        };
+        {
             let mut tx = 32.0;
-            for tag in &f.tags {
+            for tag in &tags {
                 let txt = Txt::new(tag.clone(), 14.0).color(fade(theme::FG_3, rest));
                 let galley = p.layout_job(txt.job(f32::INFINITY));
                 let w = galley.size().x + 24.0;
@@ -1480,6 +1718,14 @@ fn card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, pressed: 
         let chip = Rect::from_min_size(thumb.min + vec2(12.0, 12.0), vec2(galley.size().x + 22.0, 26.0));
         p.rect_filled(chip, CornerRadius::same(13), fade(tint, alpha));
         p.galley(pos2(chip.min.x + 11.0, chip.center().y - galley.size().y / 2.0), galley, theme::ON_ACCENT);
+    } else if entry.capture {
+        // A 3D capture: shown around the person from here.
+        let txt = Txt::new("3D", 14.0).weight(weight::SEMIBOLD).color(fade(theme::ON_ACCENT, alpha));
+        let galley = p.layout_job(txt.job(f32::INFINITY));
+        let chip = Rect::from_min_size(thumb.min + vec2(12.0, 12.0), vec2(galley.size().x + 44.0, 26.0));
+        p.rect_filled(chip, CornerRadius::same(13), fade(theme::ACCENT, alpha));
+        widgets::icon(p, pos2(chip.min.x + 16.0, chip.center().y), icons::CUBE, 15.0, fade(theme::ON_ACCENT, alpha));
+        p.galley(pos2(chip.min.x + 30.0, chip.center().y - galley.size().y / 2.0), galley, theme::ON_ACCENT);
     }
     if entry.official {
         widgets::icon(p, pos2(thumb.max.x - 22.0, thumb.min.y + 24.0), icons::SEAL_CHECK, 22.0, fade(theme::ACCENT, alpha));
@@ -1490,17 +1736,24 @@ fn card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, pressed: 
         let liked = d.feedback.world(&world_key(&entry.world_id)).is_some_and(|w| w.liked);
         badge(p, pos2(thumb.min.x + 10.0, thumb.max.y - 34.0), false, icons::HEART, true, &short_count(likes as u64), if liked { theme::REC } else { theme::FG_2 }, alpha);
     }
-    if let Some(perf) = d.facts_of(entry).and_then(|f| f.performance.as_ref()) {
+    if let Some(perf) = d.performance(entry) {
         let (_, tint) = verdict(perf);
         badge(p, pos2(thumb.max.x - 10.0, thumb.max.y - 34.0), true, icons::GAUGE, false, &format!("{} fps", perf.fps), tint, alpha);
+    } else if let Some(n) = entry.occupants.filter(|n| *n > 0) {
+        badge(p, pos2(thumb.max.x - 10.0, thumb.max.y - 34.0), true, icons::USERS, false, &short_count(n as u64), theme::FG_2, alpha);
     }
     text_cut(p, pos2(rect.min.x + 16.0, rect.min.y + CARD_THUMB + 9.0), rect.width() - 32.0, Txt::new(entry.name.clone(), 19.0).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)));
     // Its author, and the labels people gave its world most.
-    let mut meta: Vec<String> = entry.author.iter().cloned().collect();
+    let mut meta: Vec<String> = d.author(entry).map(str::to_string).into_iter().collect();
     let wf = d.world_feedback(entry);
     meta.extend(wf.top().iter().take(2).map(|l| label_name(&l.id).to_string()));
     if meta.is_empty() {
-        meta.push(format!("{} splats", short_count(entry.splats as u64)));
+        meta.push(match entry.visited {
+            _ if entry.capture => format!("{} splats", short_count(entry.splats as u64)),
+            Some((_, 1)) => "Visited once".to_string(),
+            Some((_, n)) => format!("Visited {n} times"),
+            None => "No 3D capture yet".to_string(),
+        });
     }
     text_cut(p, pos2(rect.min.x + 16.0, rect.min.y + CARD_THUMB + 36.0), rect.width() - 32.0, Txt::new(meta.join(" · "), 15.0).color(fade(theme::FG_3, alpha)));
 }
@@ -1517,15 +1770,23 @@ fn compact_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, p
     let mut name = Txt::new(entry.name.clone(), 17.0).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)).job(width);
     name.wrap.max_rows = 2;
     p.galley(pos2(x, rect.min.y + 14.0), p.layout_job(name), theme::FG);
-    if let Some(a) = &entry.author {
-        text_cut(p, pos2(x, rect.min.y + 62.0), width, Txt::new(a.clone(), 15.0).color(fade(theme::FG_3, alpha)));
+    if let Some(a) = d.author(entry) {
+        text_cut(p, pos2(x, rect.min.y + 62.0), width, Txt::new(a.to_string(), 15.0).color(fade(theme::FG_3, alpha)));
     }
     if status.current == Some(entry.id) {
         p.circle_filled(pos2(x + 6.0, rect.min.y + 88.0), 5.0, fade(if status.shown { theme::ACCENT } else { theme::WARN }, alpha));
         text(p, pos2(x + 18.0, rect.min.y + 88.0), Align2::LEFT_CENTER, Txt::new(if status.shown { "Around you" } else { "Loading" }, 14.0).color(fade(theme::FG_2, alpha)));
-    } else if d.likes(entry) > 0 {
-        widgets::icon_fill(p, pos2(x + 7.0, rect.min.y + 88.0), icons::HEART, 14.0, fade(theme::FG_3, alpha));
-        text(p, pos2(x + 20.0, rect.min.y + 88.0), Align2::LEFT_CENTER, Txt::new(short_count(d.likes(entry) as u64), 14.0).color(fade(theme::FG_3, alpha)));
+    } else {
+        let mut at = x;
+        if entry.capture {
+            widgets::icon(p, pos2(at + 7.0, rect.min.y + 88.0), icons::CUBE, 15.0, fade(theme::ACCENT, alpha));
+            text(p, pos2(at + 20.0, rect.min.y + 88.0), Align2::LEFT_CENTER, Txt::new("3D", 14.0).weight(weight::SEMIBOLD).color(fade(theme::ACCENT, alpha)));
+            at += 50.0;
+        }
+        if d.likes(entry) > 0 {
+            widgets::icon_fill(p, pos2(at + 7.0, rect.min.y + 88.0), icons::HEART, 14.0, fade(theme::FG_3, alpha));
+            text(p, pos2(at + 20.0, rect.min.y + 88.0), Align2::LEFT_CENTER, Txt::new(short_count(d.likes(entry) as u64), 14.0).color(fade(theme::FG_3, alpha)));
+        }
     }
 }
 
@@ -1592,7 +1853,7 @@ mod tests {
     const HOME: &str = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";
 
     fn data<'a>(entries: &'a [Entry], status: &'a Status, feedback: &'a FeedbackView, facts: &'a HashMap<String, Facts>) -> Data<'a> {
-        Data { entries, status, feedback, facts, thumb: &|_| None, picture: &|_, _| None, now: 0 }
+        Data { entries, picked: None, status, feedback, facts, thumb: &|_| None, picture: &|_, _| None, now: 0 }
     }
 
     fn read_home(liked: bool, mine: &[&str]) -> FeedbackView {
@@ -1693,6 +1954,59 @@ mod tests {
             panel.press(Target::DeleteComment(12), &d, 9.0 + CONFIRM_FOR + 2.0),
             [Action::Feedback(FeedbackAsk::Uncomment { world: HOME.into(), comment: 12 })]
         );
+    }
+
+    #[test]
+    fn a_world_without_a_capture_opens_its_page_to_join_it() {
+        let captures = super::super::catalog::parse(LISTING).unwrap();
+        let cat = "wrld_00000000-0000-4000-8000-00000000ca70";
+        let found = [orbiters_core::maps::FoundWorld {
+            world: orbiters_core::maps::World { world_id: cat.into(), name: "Black Cat Bar".into(), ..Default::default() },
+            occupants: Some(12),
+            ..Default::default()
+        }];
+        let first: Vec<&Entry> = captures.iter().filter(|e| e.matches("ho")).collect();
+        let entries = super::super::finder::merge(&captures, &first, &found, Some("ho"), &|_| Default::default());
+        assert_eq!(entries.iter().map(|e| e.id).collect::<Vec<_>>()[..2], [1, 4], "the search's captures first, both of Home");
+        let world = entries.last().unwrap().clone();
+        let (feedback, facts) = (FeedbackView::default(), HashMap::new());
+        let searched = Status { list: ListStatus { searching: true, more: true, ..Default::default() }, ..Default::default() };
+        let d = data(&entries, &searched, &feedback, &facts);
+        let mut panel = Panel { query: "ho".into(), ..Default::default() };
+        // Searching: 3D only instead of the sections, and a page more while the list has more.
+        let targets: Vec<Target> = panel.targets(&d).into_iter().map(|(t, _)| t).collect();
+        assert!(targets.contains(&Target::Has3d) && !targets.contains(&Target::Section(Section::Popular)));
+        assert!(targets.contains(&Target::Next), "3 results and more to read: two pages");
+        assert_eq!(panel.results(&d).len(), 3, "found by the search, whatever its name");
+        panel.press(Target::Has3d, &d, 1.0);
+        assert!(panel.results(&d).iter().all(|e| e.capture));
+        panel.press(Target::Has3d, &d, 1.0);
+        // Its card opens its page, nothing to show around the person.
+        let i = panel.results(&d).iter().position(|e| e.id == world.id).unwrap();
+        assert!(panel.press(Target::Card(i), &d, 2.0).is_empty());
+        assert_eq!((panel.page, panel.selected), (Page::Detail, Some(world.id)));
+        let targets: Vec<Target> = panel.targets(&d).into_iter().map(|(t, _)| t).collect();
+        assert!(targets.contains(&Target::Join) && targets.contains(&Target::OpenWeb) && !targets.contains(&Target::Show), "{targets:?}");
+        assert!(targets.contains(&Target::Like), "its feedback is given as a capture's");
+        assert_eq!(panel.press(Target::Join, &d, 3.0), [Action::Join(cat.into())]);
+        assert_eq!(panel.press(Target::OpenWeb, &d, 3.0), [Action::OpenWeb(cat.into())]);
+        assert!(panel.press(Target::Show, &d, 3.0).is_empty());
+        // Another list shows: its page stays, kept by the host.
+        let elsewhere = data(&captures, &searched, &feedback, &facts);
+        assert!(panel.entry(&elsewhere).is_none());
+        let kept = Data { picked: Some(&world), ..data(&captures, &searched, &feedback, &facts) };
+        assert_eq!(panel.entry(&kept).map(|e| e.id), Some(world.id));
+        // Not searching: the sections; Done searches at once.
+        let browsing = Status::default();
+        let mut panel = Panel { page: Page::Typing, ..Default::default() };
+        let d = data(&captures, &browsing, &feedback, &facts);
+        assert_eq!(panel.press(Target::Done, &d, 4.0), [Action::Search]);
+        let targets: Vec<Target> = panel.targets(&d).into_iter().map(|(t, _)| t).collect();
+        assert!(Section::ALL.iter().all(|s| targets.contains(&Target::Section(*s))) && !targets.contains(&Target::Has3d));
+        panel.results_page = 1;
+        panel.press(Target::Section(Section::Visited), &d, 5.0);
+        assert_eq!((panel.section, panel.results_page), (Section::Visited, 0));
+        assert!(targets.contains(&Target::Sort(Sort::Liked)), "the order chip steps to the next order");
     }
 
     #[test]

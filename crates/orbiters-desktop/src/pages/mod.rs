@@ -23,6 +23,7 @@ pub mod splats;
 pub mod states;
 pub mod storage;
 pub mod videos;
+pub mod vr_audio;
 pub mod worlds;
 
 use crate::backend::Ctl;

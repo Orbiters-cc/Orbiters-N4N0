@@ -447,6 +447,15 @@ impl OrbRuntime {
         }
         self.wake();
     }
+
+    /// Shows `text` on the panel at the phases' pace until it is whole ([`TextSender::show_quick`]).
+    pub(crate) fn show_quick(&mut self, text: &str) {
+        self.afk_showing = false;
+        if let Some(sender) = self.sender.as_mut() {
+            sender.show_quick(text);
+        }
+        self.wake();
+    }
 }
 
 /// What a tick of the orb thread reads of the settings, taken in place rather than as a copy of them all.
@@ -932,6 +941,12 @@ impl N4n0 {
     /// Shows `text` on the panel (nothing without the prop).
     pub fn say(&self, text: &str) {
         self.orb.lock().unwrap().show(text);
+    }
+
+    /// Shows a short list the owner opened and picks from on the panel, its blocks as fast as the owner's avatar takes
+    /// them (N4N0's Call menu).
+    pub fn say_quick(&self, text: &str) {
+        self.orb.lock().unwrap().show_quick(text);
     }
 
     pub(crate) fn add_line(&self, who: OrbWho, text: impl Into<String>) {

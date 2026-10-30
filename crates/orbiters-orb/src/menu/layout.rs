@@ -1795,7 +1795,10 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
         Content::PageLabel => match menu.page {
             // "+": YouTube has more than the pages fetched so far.
             Page::Results => format!("{}/{}{}", menu.result_page + 1, menu.result_pages(), if menu.more_available() { "+" } else { "" }),
-            Page::Call => format!("{}/{}", menu.contact_page + 1, menu.contacts.len().div_ceil(CONTACTS_PER_PAGE).max(1)),
+            // One page of friends (or none) says nothing: on the avatar's screen it would cost a block of its own, and
+            // the page would show whole a step later.
+            Page::Call if menu.contacts.len() <= CONTACTS_PER_PAGE => String::new(),
+            Page::Call => format!("{}/{}", menu.contact_page + 1, menu.contacts.len().div_ceil(CONTACTS_PER_PAGE)),
             Page::States => format!("{}/{}", menu.state_page + 1, menu.states.len().div_ceil(STATES_PER_PAGE).max(1)),
             Page::Instances => format!("{}/{}", menu.instance_page + 1, menu.instances.len().div_ceil(INSTANCES_PER_PAGE).max(1)),
             Page::History => format!("{}/{}", menu.capture_page + 1, menu.captures.history.len().div_ceil(CAPTURES_PER_PAGE).max(1)),
@@ -1858,7 +1861,8 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
                 menu.call_note.clone()
             } else {
                 match menu.contacts.len() {
-                    0 => "No friend can take a call now".into(),
+                    // Short: on the avatar's screen it goes with the page's header and one more block.
+                    0 => "No friend online".into(),
                     1 => "Call a friend · 1 online".into(),
                     n => format!("Call a friend · {n} online"),
                 }

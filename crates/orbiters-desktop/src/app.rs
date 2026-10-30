@@ -656,12 +656,15 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
+        orbiters_ui::autoscroll::paint(ui.ctx());
     }
 
     /// A drag out of the window asked for in the last frame (Photos & captures' cards) runs here, once that frame is on
     /// screen: Windows' drag loop is modal (`drag_out`).
+    /// Then the mouse wheel's button scrolls what is under it, as in browsers (`orbiters_ui::autoscroll`).
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         crate::drag_out::run_pending(ctx, raw_input);
+        orbiters_ui::autoscroll::raw_input(ctx, raw_input);
     }
 
     /// The window closes with Talk held: let go of it, or VRChat would stay muted and N4N0 go on listening.

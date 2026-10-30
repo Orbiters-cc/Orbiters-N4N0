@@ -1,24 +1,30 @@
-//! Photos & captures' selection and dragging out. Ctrl-click, Shift-click, the check on a card's corner or a rubber
-//! band select cards (a green ring and check, the badges stepping aside); while some are selected a click adds or
-//! removes one, Ctrl+A selects every card shown and Escape lets go. A bar at the bottom says how many, shows them, and
-//! offers Select all and Clear.
+//! Photos & captures' selection, dragging out and copying. Ctrl-click, Shift-click, the check on a card's corner or a
+//! rubber band select cards (a green ring and check, the badges stepping aside); while some are selected a click adds
+//! or removes one, Ctrl+A selects every card shown, Ctrl+C copies them and Escape lets go. A bar at the bottom says how
+//! many, shows them, and offers Select all and Clear.
 //!
 //! Dragging a card, or any card of the selection, out of the window hands their files to the app it is dropped on
 //! ([`crate::drag_out`], as Explorer would): a VRChat picture is its PNG, a 3D capture or recording the picture of its 3D
-//! view (`capture_picture`, its thumbnail before it is reconstructed). Items only on Orbiters are not on this computer and
-//! are left out. The cards lift (smaller, faded) as the drag starts and settle back once it ended; the bar says what was
-//! copied.
+//! view (`capture_picture`, its thumbnail before it is reconstructed). A picture only on Orbiters (shared with the
+//! member or by them, a community's, an asset's) is fetched first, whole, into `<cache>/dragged/orbiters` ([`Fetches`]):
+//! from the press on its card, as it is selected (the first [`PREFETCH`]), or once the drag starts; the lifted cards
+//! wait for what is still coming (the bar counts it) and Windows gets the drag once everything is there, if the button
+//! is still down. A copy (Ctrl+C, a card's menu) puts the same files on the clipboard, after the same wait. The cards
+//! lift (smaller, faded) as the drag starts and settle back once it ended; the bar says what was copied.
 use crate::controller::shares::{Entry, Local};
 use crate::drag_out::{self, Outcome};
 use egui::{pos2, vec2, Align2, Id, Order, Pos2, Rect, Response, Sense, Stroke, Ui};
+use orbiters_core::account::{Api, Server};
+use orbiters_core::shares::Kind;
 use orbiters_ui::{
     anim::{self, ease, Spring},
-    icons, paint,
+    feedback, icons, paint,
     theme::{self, weight, Txt},
     widgets::{self, Button, Size, Variant},
 };
-use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// How long the cards lift before Windows' drag starts (its loop is modal: the window shows what it drew last).
 const LIFT: f64 = 0.09;
@@ -26,6 +32,8 @@ const LIFT: f64 = 0.09;
 const SAID_FOR: f64 = 2.6;
 /// The check on a card's corner.
 pub const CHECK: f32 = 24.0;
+/// Pictures from Orbiters fetched as they are selected (more wait for a drag or a copy of them).
+pub const PREFETCH: usize = 30;
 
 #[derive(Default)]
 pub struct Selection {
@@ -40,14 +48,37 @@ pub struct Selection {
     carried: Vec<String>,
     lifted_at: f64,
     started: bool,
+    /// What the drag handed out (the keys whose files went).
+    handed: Vec<String>,
+    /// The lifted drag waits for this many pictures still coming from Orbiters (of so many).
+    waiting: Option<(usize, usize)>,
+    /// A copy asked for, waiting for its pictures from Orbiters.
+    copying: Option<Vec<String>>,
     /// What the last drag copied, and when.
     said: Option<(String, f64)>,
+    /// Pictures from Orbiters fetched to hand out, and those already asked for as they were selected.
+    fetches: Fetches,
+    prefetched: BTreeSet<String>,
+    prefetching: usize,
+    /// The development environment (where pictures from Orbiters come from).
+    development: bool,
 }
 
 /// What a press on a card asked for.
 pub enum CardAct {
     None,
     Open,
+}
+
+/// How a card shows its part in the selection (the cards of other pages, community and asset pictures, paint it with
+/// [`paint_card`] as the gallery's own).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Marks {
+    pub selected: bool,
+    /// Any card is selected: every card shows its check.
+    pub selecting: bool,
+    /// Lifted by a drag out of the window.
+    pub carried: bool,
 }
 
 impl Selection {
@@ -60,14 +91,34 @@ impl Selection {
     pub fn carried(&self, key: &str) -> bool {
         self.carried.iter().any(|k| k == key)
     }
+    pub fn marks(&self, key: &str) -> Marks {
+        Marks { selected: self.has(key), selecting: self.any(), carried: self.carried(key) }
+    }
     pub fn clear(&mut self) {
         self.keys.clear();
         self.anchor = None;
     }
 
+    /// Adds a card to the selection, or takes it out (a card's menu).
+    pub fn toggle(&mut self, key: &str) {
+        if !self.keys.remove(key) {
+            self.keys.insert(key.to_owned());
+        }
+        self.anchor = Some(key.to_owned());
+    }
+
+    /// The file a picture from Orbiters was fetched to, once it was (for the photo editor's copy of an Orbiters picture).
+    pub fn fetched(&self, key: &str) -> Option<PathBuf> {
+        match self.fetches.state(key) {
+            Some(Fetch::Ready(p)) => Some(p),
+            _ => None,
+        }
+    }
+
     /// Before the grid draws: last frame's cards become the band's targets.
-    pub fn begin(&mut self) {
+    pub fn begin(&mut self, development: bool) {
         self.last_rects = std::mem::take(&mut self.rects);
+        self.development = development;
     }
 
     /// A card as drawn this frame.
@@ -76,9 +127,13 @@ impl Selection {
     }
 
     /// A card's response this frame: opens it, changes the selection, or starts dragging it (with the selection when
-    /// it is part of it). `order` is every card shown, in order (Shift selects the run between two).
+    /// it is part of it). `order` is every card shown, in order (Shift selects the run between two). A press on a
+    /// picture from Orbiters starts fetching it (a drag may follow).
     pub fn card(&mut self, resp: &Response, e: &Entry, check: Rect, order: &[Entry]) -> CardAct {
         let ctx = resp.ctx.clone();
+        if resp.is_pointer_button_down_on() && e.local.is_none() && self.fetches.state(&e.key).is_none() {
+            self.want(&ctx, e, false);
+        }
         if resp.drag_started_by(egui::PointerButton::Primary) && self.carried.is_empty() {
             self.lift(&ctx, e, order);
             return CardAct::None;
@@ -97,10 +152,7 @@ impl Selection {
             return CardAct::None;
         }
         if m.command || on_check || self.any() {
-            if !self.keys.remove(&e.key) {
-                self.keys.insert(e.key.clone());
-            }
-            self.anchor = Some(e.key.clone());
+            self.toggle(&e.key);
             return CardAct::None;
         }
         self.anchor = Some(e.key.clone());
@@ -118,34 +170,88 @@ impl Selection {
         self.started = true;
         if let Some(path) = image {
             let refs: Vec<&Entry> = entries.iter().collect();
-            if let Some(i) = drag_image(&refs) {
+            if let Some(i) = drag_image(&refs, &self.fetches) {
                 let _ = image::save_buffer(path, &i.rgba, i.width, i.height, image::ExtendedColorType::Rgba8);
             }
         }
     }
 
+    /// Screenshots: these cards lifted, the drag waiting for `waiting` of them still coming from Orbiters.
+    pub fn stage_wait(&mut self, keys: Vec<String>, waiting: usize) {
+        self.waiting = Some((waiting, keys.len()));
+        self.carried = keys;
+        self.started = false;
+        self.lifted_at = f64::INFINITY;
+    }
+
     /// Screenshots: the bar says this, as after a drag.
     pub fn stage_said(&mut self, ctx: &egui::Context, text: &str) {
         self.carried.clear();
+        self.say(ctx, text);
+    }
+
+    /// The bar says this for a moment (what a card's menu did).
+    pub fn say(&mut self, ctx: &egui::Context, text: &str) {
         self.said = Some((text.into(), anim::time(ctx)));
     }
 
-    /// The drag picks up the card, or the whole selection when the card is in it.
+    /// Fetches a picture from Orbiters to hand out (again after it failed when `retry`).
+    fn want(&self, ctx: &egui::Context, e: &Entry, retry: bool) {
+        if let Some(from) = remote(e, self.development) {
+            self.fetches.want(ctx, &e.key, from, stem(e), retry);
+        }
+    }
+
+    /// The drag picks up the card, or the whole selection when the card is in it; what is only on Orbiters starts
+    /// coming.
     fn lift(&mut self, ctx: &egui::Context, e: &Entry, order: &[Entry]) {
         let keys: Vec<String> =
             if self.keys.contains(&e.key) { order.iter().filter(|o| self.keys.contains(&o.key)).map(|o| o.key.clone()).collect() } else { vec![e.key.clone()] };
         let entries: Vec<&Entry> = keys.iter().filter_map(|k| order.iter().find(|o| &o.key == k)).collect();
-        if !entries.iter().any(|e| e.local.is_some()) {
-            self.said = Some(("Only what is on this computer can be dragged out".into(), anim::time(ctx)));
+        if !entries.iter().any(|e| e.local.is_some() || remote(e, self.development).is_some()) {
+            self.said = Some(("These can't be dragged out".into(), anim::time(ctx)));
             return;
+        }
+        for e in entries.iter().filter(|e| e.local.is_none()) {
+            self.want(ctx, e, true);
         }
         self.carried = keys;
         self.lifted_at = anim::time(ctx);
         self.started = false;
+        self.waiting = None;
     }
 
-    /// Every frame after the grid: keyboard, the rubber band, the lifted drag's start and end. `area` is where cards
-    /// are (the band starts on the grid's empty space, `background`).
+    /// Copies these cards' files to the clipboard (those from Orbiters once fetched): Ctrl+C, a card's Copy.
+    pub fn copy(&mut self, ctx: &egui::Context, keys: Vec<String>, order: &[Entry]) {
+        for e in order.iter().filter(|e| e.local.is_none() && keys.contains(&e.key)) {
+            self.want(ctx, e, true);
+        }
+        self.copying = Some(keys);
+    }
+
+    /// Copies these files to the clipboard now (a multi-layer picture with its layers), saying so on the bar.
+    pub fn copy_paths(&mut self, ctx: &egui::Context, files: &[PathBuf], what: &str) {
+        let said = match drag_out::copy_files(files) {
+            Ok(()) => format!("Copied {what} to the clipboard"),
+            Err(e) => e,
+        };
+        self.say(ctx, &said);
+    }
+
+    /// Whether a card has a file to hand out (on this computer, or fetched from Orbiters).
+    pub fn can_hand_out(&self, e: &Entry) -> bool {
+        e.local.is_some() || remote(e, self.development).is_some()
+    }
+
+    /// What saving a picture from Orbiters runs on a worker ([`download`]), when it can be fetched.
+    pub fn download_job(&self, e: &Entry) -> Option<impl FnOnce() -> anyhow::Result<PathBuf> + Send + 'static> {
+        let from = remote(e, self.development)?;
+        let stem = stem(e);
+        Some(move || download(&from, &stem))
+    }
+
+    /// Every frame after the grid: keyboard, the rubber band, the lifted drag's start and end, a copy waiting for its
+    /// pictures. The band starts on the grid's empty space (`background`).
     pub fn update(&mut self, ui: &Ui, order: &[Entry], background: &Response, modal: bool) {
         let ctx = ui.ctx().clone();
         let now = anim::time(&ctx);
@@ -157,10 +263,30 @@ impl Selection {
             if self.any() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                 self.clear();
             }
+            // Ctrl+C reaches egui as a copy (egui-winit's clipboard shortcut), not as a key.
+            if self.any() && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy))) {
+                let keys = order.iter().filter(|e| self.keys.contains(&e.key)).map(|e| e.key.clone()).collect();
+                self.copy(&ctx, keys, order);
+            }
         }
         // Gone from the page (another filter, a search): no longer selected.
         if self.any() {
             self.keys.retain(|k| order.iter().any(|e| &e.key == k));
+        }
+        // What is selected from Orbiters starts coming (the first few: a drag or a copy asks for the rest).
+        if self.keys.iter().any(|k| !self.prefetched.contains(k)) {
+            let new: Vec<&Entry> = order.iter().filter(|e| self.keys.contains(&e.key) && !self.prefetched.contains(&e.key)).collect();
+            for e in new {
+                if e.local.is_none() && self.prefetching < PREFETCH {
+                    self.want(&ctx, e, false);
+                    self.prefetching += 1;
+                }
+                self.prefetched.insert(e.key.clone());
+            }
+        }
+        if !self.any() {
+            self.prefetched.clear();
+            self.prefetching = 0;
         }
 
         // The rubber band, from the grid's empty space.
@@ -188,38 +314,94 @@ impl Selection {
             }
         }
 
-        // The lifted cards go to Windows once they have lifted on screen, if the button is still down.
-        if !self.carried.is_empty() && !self.started {
+        // The lifted cards go to Windows once they have lifted on screen and what comes from Orbiters is there, if the
+        // button is still down.
+        if !self.carried.is_empty() && !self.started && self.lifted_at.is_finite() {
             if !ctx.input(|i| i.pointer.primary_down()) {
+                if self.waiting.is_some_and(|(n, _)| n > 0) {
+                    self.said = Some(("Still getting them from Orbiters: drag them again in a moment".into(), now));
+                }
                 self.carried.clear();
+                self.waiting = None;
             } else if now - self.lifted_at >= LIFT {
                 let entries: Vec<&Entry> = self.carried.iter().filter_map(|k| order.iter().find(|o| &o.key == k)).collect();
-                let files = files(&entries);
-                if files.is_empty() {
+                let gathered = self.gather(&entries);
+                if gathered.waiting > 0 {
+                    self.waiting = Some((gathered.waiting, entries.len()));
+                    ctx.request_repaint_after(std::time::Duration::from_millis(120));
+                } else if gathered.files.is_empty() {
+                    self.said = Some((nothing_came(&gathered), now));
                     self.carried.clear();
+                    self.waiting = None;
                 } else {
-                    let with_files: Vec<&Entry> = entries.into_iter().filter(|e| e.local.is_some()).collect();
-                    drag_out::start(drag_out::Drag { image: drag_image(&with_files), files });
+                    let with_files: Vec<&Entry> = entries.into_iter().filter(|e| gathered.keys.contains(&e.key)).collect();
+                    drag_out::start(drag_out::Drag { image: drag_image(&with_files, &self.fetches), files: gathered.files });
+                    self.handed = gathered.keys;
                     self.started = true;
+                    self.waiting = None;
                 }
             } else {
                 ctx.request_repaint();
             }
         }
         if let Some(outcome) = drag_out::take_outcome() {
-            let n = self.carried.iter().filter(|k| order.iter().any(|o| &o.key == *k && o.local.is_some())).count();
             if outcome == Outcome::Copied {
-                self.said = Some((copied(n, order, &self.carried), now));
+                self.said = Some((copied(order, &self.handed), now));
             } else if outcome == Outcome::Failed {
                 self.said = Some(("Windows could not start the drag".into(), now));
             }
             self.carried.clear();
             self.started = false;
         }
+
+        // A copy, once what it waits for came.
+        if let Some(keys) = self.copying.clone() {
+            let entries: Vec<&Entry> = keys.iter().filter_map(|k| order.iter().find(|o| &o.key == k)).collect();
+            let gathered = self.gather(&entries);
+            if gathered.waiting > 0 {
+                ctx.request_repaint_after(std::time::Duration::from_millis(120));
+            } else {
+                self.copying = None;
+                let said = if gathered.files.is_empty() {
+                    nothing_came(&gathered)
+                } else {
+                    match drag_out::copy_files(&gathered.files) {
+                        Ok(()) => format!("{} to the clipboard", copied(order, &gathered.keys)),
+                        Err(e) => e,
+                    }
+                };
+                self.said = Some((said, now));
+            }
+        }
     }
 
-    /// The bar at the bottom: how many are selected, them in a little stack, the hint, Select all and Clear; after a
-    /// drag, what it copied.
+    /// The files of these cards that can be handed out now, and how many are still coming or failed.
+    fn gather(&self, entries: &[&Entry]) -> Gathered {
+        let mut g = Gathered::default();
+        for e in entries {
+            if e.local.is_some() {
+                if let Some(f) = files(&[e]).pop() {
+                    g.files.push(f);
+                    g.keys.push(e.key.clone());
+                }
+                continue;
+            }
+            match self.fetches.state(&e.key) {
+                Some(Fetch::Ready(p)) => {
+                    g.files.push(p);
+                    g.keys.push(e.key.clone());
+                }
+                Some(Fetch::Waiting) => g.waiting += 1,
+                Some(Fetch::Failed(why)) => g.failed = Some(why),
+                None if remote(e, self.development).is_some() => g.waiting += 1,
+                None => {}
+            }
+        }
+        g
+    }
+
+    /// The bar at the bottom: how many are selected, them in a little stack, the hint, Select all and Clear; while a
+    /// drag or a copy waits for pictures from Orbiters, how many are coming; after it, what it copied.
     pub fn bar(&mut self, ui: &mut Ui, page: Rect, order: &[Entry], pictures: &mut Option<crate::worlds::Pictures>, hidden: bool) {
         let ctx = ui.ctx().clone();
         let now = anim::time(&ctx);
@@ -229,6 +411,14 @@ impl Selection {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(SAID_FOR - (now - at)));
             }
         }
+        // A drag or a copy waiting for pictures from Orbiters says so, with a spinner.
+        let coming = match (self.waiting, &self.copying) {
+            (Some((1, 1)), _) => Some("Getting it from Orbiters…".to_string()),
+            (Some((n, total)), _) if n > 0 => Some(format!("Getting {n} of {total} from Orbiters…")),
+            (_, Some(_)) => Some("Getting them from Orbiters to copy…".to_string()),
+            _ => None,
+        };
+        let said = coming.clone().or(said);
         let shown = !hidden && (self.any() || said.is_some());
         let k = anim::toggle(&ctx, Id::unique("gallery-select-bar"), shown, Spring::BOUNCY);
         if k < 0.01 {
@@ -245,7 +435,7 @@ impl Selection {
         let hint_w = if narrow && said.is_none() { 0.0 } else { widgets::text_size(ui, &hint).x };
         let all_w = if self.any() && n < order.len() { all.desired_width(ui) } else { 0.0 };
         let stack_w = if thumbs > 0 { 34.0 + 10.0 * (thumbs - 1) as f32 + 12.0 } else { 0.0 };
-        let icon_w = if said.is_some() && !self.any() { 26.0 } else { 0.0 };
+        let icon_w = if coming.is_some() || said.is_some() && !self.any() { 26.0 } else { 0.0 };
         let inner = stack_w
             + icon_w
             + count_w
@@ -283,7 +473,10 @@ impl Selection {
                 }
                 x += stack_w;
             }
-            if icon_w > 0.0 {
+            if icon_w > 0.0 && coming.is_some() {
+                feedback::spinner(&p, pos2(x + 9.0, cy), 6.5, 2.0, theme::ACCENT);
+                x += icon_w;
+            } else if icon_w > 0.0 {
                 widgets::icon(&p, pos2(x + 9.0, cy), icons::CHECK, 16.0, theme::ACCENT);
                 x += icon_w;
             }
@@ -354,11 +547,30 @@ pub fn check_rect(thumb: Rect) -> Rect {
     Rect::from_min_size(thumb.min + vec2(12.0, 12.0), vec2(CHECK, CHECK))
 }
 
-/// "Copied 3 pictures", "Copied a 3D capture's picture", "Copied 2 pictures and a 3D capture".
-fn copied(n: usize, order: &[Entry], carried: &[String]) -> String {
-    let entries: Vec<&Entry> = carried.iter().filter_map(|k| order.iter().find(|o| &o.key == k)).filter(|e| e.local.is_some()).collect();
-    let pictures = entries.iter().filter(|e| matches!(e.local, Some(Local::Picture(_)))).count();
-    let captures = n.saturating_sub(pictures);
+/// What a drag or a copy could hand out of some cards now.
+#[derive(Default)]
+struct Gathered {
+    files: Vec<PathBuf>,
+    keys: Vec<String>,
+    /// Still coming from Orbiters.
+    waiting: usize,
+    /// Why the last one that could not be fetched was not.
+    failed: Option<String>,
+}
+
+/// What the bar says when nothing could be handed out.
+fn nothing_came(g: &Gathered) -> String {
+    match &g.failed {
+        Some(why) => format!("These could not be fetched from Orbiters: {why}"),
+        None => "These can't be dragged out".into(),
+    }
+}
+
+/// "Copied 3 pictures", "Copied a 3D capture", "Copied 2 pictures and a 3D capture": what was handed out (`handed`).
+fn copied(order: &[Entry], handed: &[String]) -> String {
+    let entries: Vec<&Entry> = handed.iter().filter_map(|k| order.iter().find(|o| &o.key == k)).collect();
+    let pictures = entries.iter().filter(|e| e.is_picture()).count();
+    let captures = entries.len().saturating_sub(pictures);
     let part = |count: usize, one: &str, many: &str| match count {
         0 => None,
         1 => Some(one.to_string()),
@@ -385,13 +597,19 @@ fn files(entries: &[&Entry]) -> Vec<PathBuf> {
 }
 
 /// The drag image: the first three as a fanned stack of rounded pictures with a soft shadow, the count on a green
-/// badge when there are several.
-fn drag_image(entries: &[&Entry]) -> Option<drag_out::Image> {
+/// badge when there are several. A picture from Orbiters is the small copy made as it was fetched.
+fn drag_image(entries: &[&Entry], fetches: &Fetches) -> Option<drag_out::Image> {
     let pictures: Vec<image::RgbaImage> = entries
         .iter()
         .take(3)
-        .filter_map(|e| crate::worlds::decode_local(e.picture.as_ref()?))
-        .filter_map(|c| image::RgbaImage::from_raw(c.size[0] as u32, c.size[1] as u32, c.as_raw().to_vec()))
+        .filter_map(|e| {
+            let local = e
+                .picture
+                .as_ref()
+                .and_then(crate::worlds::decode_local)
+                .and_then(|c| image::RgbaImage::from_raw(c.size[0] as u32, c.size[1] as u32, c.as_raw().to_vec()));
+            local.or_else(|| fetches.small(&e.key))
+        })
         .collect();
     let front = pictures.first()?;
     let n = entries.len();
@@ -553,6 +771,227 @@ const DIGITS: [[&str; 7]; 10] = [
     [".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.."],
 ];
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Pictures from Orbiters, fetched to hand out.
+
+/// Where a picture that is only on Orbiters comes from.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Remote {
+    /// A picture shared with the member or by them: the sharing contract's file, whole.
+    Shared { server: Server, id: u64 },
+    /// A community gallery's picture: its full picture, its link renewed by Orbiters (Discord's links expire).
+    Gallery { server: Server, id: u64, url: String },
+    /// A public picture (an asset's, a shared 3D capture's picture).
+    Link(String),
+}
+
+/// Where a card that is not on this computer is fetched from, if it can be.
+pub fn remote(e: &Entry, development: bool) -> Option<Remote> {
+    if e.local.is_some() {
+        return None;
+    }
+    let server = if development { Server::Development } else { Server::Production };
+    if let Some(item) = &e.remote {
+        return match item.kind {
+            Kind::Picture => Some(Remote::Shared { server, id: item.id }),
+            Kind::Capture => {
+                let p = item.picture.as_ref()?;
+                [&p.url, &p.thumbnail_url].into_iter().find(|u| u.starts_with("https://")).map(|u| Remote::Link(u.clone()))
+            }
+        };
+    }
+    match e.picture.as_ref()? {
+        crate::worlds::Picture::Gallery { id, url, .. } if *id != 0 => Some(Remote::Gallery { server, id: *id, url: url.clone() }),
+        crate::worlds::Picture::Gallery { url, .. } | crate::worlds::Picture::Remote { url, .. } if url.starts_with("https://") => Some(Remote::Link(url.clone())),
+        _ => None,
+    }
+}
+
+/// The file a fetched picture is kept as, without its extension (the picture's own decides it):
+/// `<cache>/dragged/orbiters/Midnight Rooftop 2026-10-28 21-30-00 picture-12`, what the app it lands in shows.
+fn stem(e: &Entry) -> PathBuf {
+    let when = crate::controller::shares::iso(e.taken).replace('T', " ").replace(':', "-").trim_end_matches('Z').to_string();
+    let name = format!("{} {} {}", e.world_name.trim(), when, e.key.replace(':', "-"));
+    orbiters_core::paths::cache_dir().join("dragged").join("orbiters").join(file_name(&name))
+}
+
+/// A name Windows takes for a file: no reserved characters, no trailing dots or spaces, at most 120 characters.
+fn file_name(name: &str) -> String {
+    let clean: String = name.chars().map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).take(120).collect();
+    let clean = clean.trim_end_matches(['.', ' ']).trim_start().to_string();
+    if clean.is_empty() {
+        "Orbiters picture".into()
+    } else {
+        clean
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Fetch {
+    Waiting,
+    Ready(PathBuf),
+    Failed(String),
+}
+
+/// Pictures from Orbiters fetched by up to [`WORKERS`] threads, oldest asked first; each kept with a small copy for the
+/// drag image.
+#[derive(Default)]
+pub struct Fetches {
+    inner: Arc<Mutex<FetchInner>>,
+}
+
+#[derive(Default)]
+struct FetchInner {
+    states: HashMap<String, Fetch>,
+    small: HashMap<String, image::RgbaImage>,
+    queue: VecDeque<(String, Remote, PathBuf)>,
+    workers: usize,
+}
+
+const WORKERS: usize = 3;
+const EXTENSIONS: [&str; 5] = ["png", "jpg", "webp", "gif", "avif"];
+
+impl Fetches {
+    fn lock(&self) -> std::sync::MutexGuard<'_, FetchInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn state(&self, key: &str) -> Option<Fetch> {
+        self.lock().states.get(key).cloned()
+    }
+
+    fn small(&self, key: &str) -> Option<image::RgbaImage> {
+        self.lock().small.get(key).cloned()
+    }
+
+    /// Fetches `from` into `stem` (a file kept from before is taken as it is); a failed one again with `retry`.
+    fn want(&self, ctx: &egui::Context, key: &str, from: Remote, stem: PathBuf, retry: bool) {
+        let mut inner = self.lock();
+        match inner.states.get(key) {
+            Some(Fetch::Failed(_)) if retry => {}
+            Some(_) => return,
+            None => {}
+        }
+        inner.states.insert(key.to_owned(), Fetch::Waiting);
+        inner.queue.push_back((key.to_owned(), from, stem));
+        if inner.workers < WORKERS {
+            inner.workers += 1;
+            let (shared, ctx) = (self.inner.clone(), ctx.clone());
+            std::thread::spawn(move || work(&shared, &ctx));
+        }
+    }
+
+    /// Tests: this picture as if fetched to `path`.
+    #[cfg(test)]
+    fn stage(&self, key: &str, path: PathBuf) {
+        self.lock().states.insert(key.to_owned(), Fetch::Ready(path));
+    }
+}
+
+/// A fetching thread: takes what is asked until nothing is left.
+fn work(shared: &Arc<Mutex<FetchInner>>, ctx: &egui::Context) {
+    loop {
+        let job = {
+            let mut inner = shared.lock().unwrap_or_else(|e| e.into_inner());
+            match inner.queue.pop_front() {
+                Some(job) => job,
+                None => {
+                    inner.workers -= 1;
+                    return;
+                }
+            }
+        };
+        let (key, from, stem) = job;
+        let (state, small) = match kept(&stem).map(Ok).unwrap_or_else(|| fetch(&from, &stem)) {
+            Ok(path) => {
+                let small = image::open(&path).ok().map(|i| i.thumbnail(336, 336).to_rgba8());
+                (Fetch::Ready(path), small)
+            }
+            Err(e) => (Fetch::Failed(e.to_string()), None),
+        };
+        let mut inner = shared.lock().unwrap_or_else(|e| e.into_inner());
+        inner.states.insert(key.clone(), state);
+        if let Some(s) = small {
+            inner.small.insert(key, s);
+        }
+        drop(inner);
+        ctx.request_repaint();
+    }
+}
+
+/// The picture fetched before (from another drag, another run), if it is there whole.
+fn kept(stem: &Path) -> Option<PathBuf> {
+    EXTENSIONS.iter().map(|x| with_ext(stem, x)).find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() > 0))
+}
+
+/// Fetches a picture into `stem` with the extension its bytes say (written whole, then renamed).
+fn fetch(from: &Remote, stem: &Path) -> anyhow::Result<PathBuf> {
+    let dir = stem.parent().ok_or_else(|| anyhow::anyhow!("no folder"))?;
+    std::fs::create_dir_all(dir)?;
+    let part = with_ext(stem, "part");
+    let bytes = match from {
+        Remote::Shared { server, id } => {
+            let (api, token) = crate::controller::shares::api(*server)?;
+            let result = api.capture_file(&token, Kind::Picture, *id, &part);
+            let bytes = result.and_then(|_| Ok(std::fs::read(&part)?));
+            let _ = std::fs::remove_file(&part);
+            bytes?
+        }
+        Remote::Gallery { server, id, url } => {
+            let account = orbiters_core::account::read(*server).ok_or_else(|| anyhow::anyhow!("Sign in to Orbiters in Settings first."))?;
+            let api = Api::new(*server);
+            let renewed = api.picture_source(&account.token, *id, false).ok().unwrap_or_default();
+            let links: Vec<String> = [renewed.full_url, renewed.src, Some(url.clone())].into_iter().flatten().filter(|u| u.starts_with("https://")).collect();
+            let mut last = anyhow::anyhow!("Orbiters has no link for this picture");
+            let mut got = None;
+            for link in links {
+                match api.image(&link) {
+                    Ok(b) => {
+                        got = Some(b);
+                        break;
+                    }
+                    Err(e) => last = e,
+                }
+            }
+            got.ok_or(last)?
+        }
+        Remote::Link(url) => Api::new(Server::Production).image(url)?,
+    };
+    let format = image::guess_format(&bytes).map_err(|_| anyhow::anyhow!("Orbiters did not send a picture"))?;
+    let ext = format.extensions_str().first().copied().unwrap_or("png");
+    let ext = if ext == "jpeg" { "jpg" } else { ext };
+    let out = with_ext(stem, ext);
+    orbiters_core::write_atomic(&out, &bytes)?;
+    Ok(out)
+}
+
+/// Saves a picture from Orbiters (the one fetched before, else fetched now) in `Documents/Orbiters/Downloaded
+/// pictures`, under its own name (another number when that one is taken). The saved file.
+pub fn download(from: &Remote, stem: &Path) -> anyhow::Result<PathBuf> {
+    let got = match kept(stem) {
+        Some(p) => p,
+        None => fetch(from, stem)?,
+    };
+    let dir = orbiters_core::paths::documents_root().join("Downloaded pictures");
+    std::fs::create_dir_all(&dir)?;
+    let name = got.file_name().ok_or_else(|| anyhow::anyhow!("no name"))?.to_string_lossy().into_owned();
+    let (base, ext) = name.rsplit_once('.').unwrap_or((name.as_str(), "png"));
+    let out = (1..1000)
+        .map(|n| dir.join(if n == 1 { format!("{base}.{ext}") } else { format!("{base} ({n}).{ext}") }))
+        .find(|p| !p.exists())
+        .ok_or_else(|| anyhow::anyhow!("too many copies already"))?;
+    std::fs::copy(&got, &out)?;
+    Ok(out)
+}
+
+/// `stem` with `.ext` after it (a world's name may hold dots of its own).
+fn with_ext(stem: &Path, ext: &str) -> PathBuf {
+    let mut s = stem.as_os_str().to_owned();
+    s.push(".");
+    s.push(ext);
+    PathBuf::from(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,10 +1007,97 @@ mod tests {
     fn what_a_drag_copied_reads_naturally() {
         let order = vec![entry("a", true), entry("b", true), entry("c", false)];
         let keys = |ks: &[&str]| ks.iter().map(|k| k.to_string()).collect::<Vec<_>>();
-        assert_eq!(copied(1, &order, &keys(&["a"])), "Copied a picture");
-        assert_eq!(copied(2, &order, &keys(&["a", "b"])), "Copied 2 pictures");
-        assert_eq!(copied(1, &order, &keys(&["c"])), "Copied a 3D capture");
-        assert_eq!(copied(3, &order, &keys(&["a", "b", "c"])), "Copied 2 pictures and a 3D capture");
+        assert_eq!(copied(&order, &keys(&["a"])), "Copied a picture");
+        assert_eq!(copied(&order, &keys(&["a", "b"])), "Copied 2 pictures");
+        assert_eq!(copied(&order, &keys(&["c"])), "Copied a 3D capture");
+        assert_eq!(copied(&order, &keys(&["a", "b", "c"])), "Copied 2 pictures and a 3D capture");
+        // A picture from Orbiters counts as a picture.
+        let mut shared = entry("picture:4", true);
+        shared.local = None;
+        shared.remote = Some(orbiters_core::shares::Item { kind: Kind::Picture, id: 4, ..Default::default() });
+        assert_eq!(copied(&[shared], &keys(&["picture:4"])), "Copied a picture");
+    }
+
+    /// A card that is only on Orbiters: a community's picture, an asset's, one shared with the member, a shared 3D
+    /// capture.
+    fn remote_entry(key: &str, picture: Option<crate::worlds::Picture>, item: Option<orbiters_core::shares::Item>) -> Entry {
+        let mut e = entry(key, true);
+        e.local = None;
+        e.picture = picture;
+        e.remote = item;
+        e.world_name = "Midnight Rooftop".into();
+        e.taken = crate::controller::shares::unix("2026-10-28T21:30:00Z");
+        e
+    }
+
+    #[test]
+    fn pictures_from_orbiters_are_fetched_from_where_they_are() {
+        use crate::worlds::Picture;
+        let gallery = remote_entry("community:345", Some(Picture::Gallery { development: false, id: 345, url: String::new(), large: false }), None);
+        assert_eq!(remote(&gallery, false), Some(Remote::Gallery { server: Server::Production, id: 345, url: String::new() }));
+        let asset = Picture::Gallery { development: false, id: 0, url: "https://api.orbiters.cc/creator-tools/media/9".into(), large: false };
+        let asset = remote_entry("asset:7:0", Some(asset), None);
+        assert_eq!(remote(&asset, true), Some(Remote::Link("https://api.orbiters.cc/creator-tools/media/9".into())));
+        let item = orbiters_core::shares::Item { kind: Kind::Picture, id: 12, ..Default::default() };
+        assert_eq!(remote(&remote_entry("picture:12", None, Some(item)), true), Some(Remote::Shared { server: Server::Development, id: 12 }));
+        let capture = orbiters_core::shares::Item {
+            kind: Kind::Capture,
+            id: 3,
+            picture: Some(orbiters_core::shares::Picture { url: String::new(), thumbnail_url: "https://cdn.orbiters.cc/t.webp".into(), width: 0, height: 0 }),
+            ..Default::default()
+        };
+        assert_eq!(remote(&remote_entry("capture:3", None, Some(capture)), false), Some(Remote::Link("https://cdn.orbiters.cc/t.webp".into())));
+        let nothing = remote_entry("community:0", Some(Picture::Gallery { development: false, id: 0, url: String::new(), large: false }), None);
+        assert_eq!(remote(&nothing, false), None);
+        assert_eq!(remote(&entry("a", true), false), None, "what is on this computer is handed out as it is");
+        // Kept under a name the app it lands in shows.
+        let name = stem(&gallery).file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name, "Midnight Rooftop 2026-10-28 21-30-00 community-345");
+        assert_eq!(file_name("A/B: \"C\"? . "), "A_B_ _C__");
+        assert_eq!(with_ext(Path::new("dir/Mr. Smith picture-1"), "webp"), PathBuf::from("dir/Mr. Smith picture-1.webp"));
+    }
+
+    #[test]
+    fn remote_cards_are_selected_and_dragged_with_the_local_ones() {
+        use crate::worlds::Picture;
+        let dir = std::env::temp_dir().join(format!("orbiters-select-remote-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let local = dir.join("VRChat_2026-10-28_21-30-00.000_1920x1080.png");
+        let fetched = dir.join("Midnight Rooftop 2026-10-28 21-30-00 community-345.webp");
+        std::fs::write(&local, b"png").unwrap();
+        std::fs::write(&fetched, b"webp").unwrap();
+        let mut here = entry("here", true);
+        here.local = Some(Local::Picture(local.clone()));
+        let gallery = remote_entry("community:345", Some(Picture::Gallery { development: false, id: 345, url: String::new(), large: false }), None);
+        let asset = Picture::Gallery { development: false, id: 0, url: "https://api.orbiters.cc/creator-tools/media/9".into(), large: false };
+        let asset = remote_entry("asset:7:0", Some(asset), None);
+        let order = vec![here.clone(), gallery.clone(), asset.clone()];
+        let ctx = egui::Context::default();
+        let mut sel = Selection::default();
+        // The community's picture is already fetched; the asset's is still coming.
+        sel.fetches.stage(&gallery.key, fetched.clone());
+        sel.fetches.lock().states.insert(asset.key.clone(), Fetch::Waiting);
+        sel.stage(vec![here.key.clone(), gallery.key.clone(), asset.key.clone()]);
+        sel.lift(&ctx, &gallery, &order);
+        assert_eq!(sel.carried, ["here", "community:345", "asset:7:0"], "the whole selection, in the page's order");
+        let entries: Vec<&Entry> = order.iter().collect();
+        let g = sel.gather(&entries);
+        assert_eq!((g.files.clone(), g.waiting), (vec![local.clone(), fetched.clone()], 1), "the drag waits for the asset's picture");
+        // It came: everything goes.
+        sel.fetches.stage(&asset.key, fetched.clone());
+        let g = sel.gather(&entries);
+        assert_eq!((g.files.len(), g.waiting, g.keys.len()), (3, 0, 3));
+        // One that failed is left out, and the bar says why when nothing else is there.
+        sel.fetches.lock().states.insert(asset.key.clone(), Fetch::Failed("Orbiters answered 404.".into()));
+        let g = sel.gather(&[&asset]);
+        assert!(g.files.is_empty());
+        assert_eq!(nothing_came(&g), "These could not be fetched from Orbiters: Orbiters answered 404.");
+        // A card alone, outside the selection, goes alone.
+        sel.carried.clear();
+        sel.lift(&ctx, &remote_entry("community:9", None, None), &order);
+        assert!(sel.carried.is_empty(), "nothing to hand out of a card without a picture");
+        assert_eq!(sel.fetched(&gallery.key), Some(fetched));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

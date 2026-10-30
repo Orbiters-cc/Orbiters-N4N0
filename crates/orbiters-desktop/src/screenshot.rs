@@ -27,9 +27,12 @@ use std::time::{Duration, Instant};
 
 mod floating;
 mod gallery_layouts;
+mod gallery_folders;
+mod gallery_assets;
 mod projects_panel;
 mod editor;
 mod vrchat_login;
+mod vr_audio;
 mod worlds_overlay;
 
 struct Scenario {
@@ -112,6 +115,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("editor-3d") {
         return editor::three_d(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("editor-3d-live") {
+        return editor::three_d_live(&mut Offscreen::new()?, &out, &settings, scale);
     }
     if only.as_deref() == Some("e2e-cleanup") {
         return e2e_cleanup(&mut Offscreen::new()?, &out, &settings, scale);
@@ -1581,10 +1587,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "world-share-mid",
         "world-share-open",
         "world-share-detail",
+        "world-card-menu",
     ] {
         scenarios.push(Scenario {
             name,
-            page: if name.starts_with("world-share") { Page::Worlds } else { Page::Sessions },
+            page: if name.starts_with("world-") { Page::Worlds } else { Page::Sessions },
             snapshot: scenarios[0].snapshot.clone(),
             frames: 140,
             splash: false,
@@ -1644,7 +1651,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     editor::append(&mut scenarios);
     projects_panel::append(&mut scenarios);
     gallery_layouts::append(&mut scenarios);
+    gallery_folders::append(&mut scenarios);
+    gallery_assets::append(&mut scenarios);
     floating::append(&mut scenarios);
+    vr_audio::append(&mut scenarios);
 
     // Home's music is the overlay's sample song, never what this computer plays.
     crate::media::watcher().stand_in(crate::media::Reading {
@@ -1751,8 +1761,9 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
     let mut world_opened = false;
     let mut share_staged = false;
     let mut library_staged = false;
-    // A press staged on the last frame, released on this one.
+    // A press staged on the last frame, released on this one (with its button).
     let mut release: Option<Pos2> = None;
+    let mut release_button = egui::PointerButton::Primary;
     backend.attach(&ctx);
     let mut app = App::offline(backend);
     if sc.name == "vrchat-login-entering-password" {
@@ -1794,7 +1805,8 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         }
         // What the person does on this frame of a Unity projects scenario: a press where a control was drawn.
         if let Some(p) = release.take() {
-            input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+            input.events.push(Event::PointerButton { pos: p, button: release_button, pressed: false, modifiers: egui::Modifiers::NONE });
+            release_button = egui::PointerButton::Primary;
         }
         if sc.name.starts_with("projects-") && f > 0 {
             use crate::pages::projects::Poke;
@@ -1810,8 +1822,28 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
                     input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
                 }
                 Some(Poke::Hover(p)) => input.events.push(Event::PointerMoved(p)),
+                Some(Poke::Context(p)) => {
+                    input.events.push(Event::PointerMoved(p));
+                    input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
+                    release = Some(p);
+                    release_button = egui::PointerButton::Secondary;
+                }
                 None => {}
             }
+        }
+        // A Visited worlds card's right-click menu.
+        if sc.name == "world-card-menu" && f == 70 {
+            if let Some(r) = app.worlds_mut().first_card() {
+                let p = r.center();
+                input.events.push(Event::PointerMoved(p));
+                input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
+                release = Some(p);
+                release_button = egui::PointerButton::Secondary;
+            }
+        }
+        // Unity projects left for Settings and entered again (its pictures must stay drawn).
+        if sc.name == "projects-revisit" && (f == 50 || f == 62) {
+            app.set_page(if f == 50 { Page::Settings } else { Page::Projects }, t);
         }
         if sc.page == Page::Sessions && (f == 0 || f == 45) {
             app.sessions_mut().stage_gallery(&ctx, sc.name);
@@ -1842,6 +1874,8 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             }
             // The layouts and a multi-layer picture, on made-up pictures.
             gallery_layouts::stage(&ctx, gallery, sc.name, f);
+            gallery_folders::stage(gallery, sc.name, f);
+            gallery_assets::stage(&ctx, gallery, sc.name, f, &sc.snapshot.settings.sessions_dir);
         }
         // The photo editor over a picture window, its preview made before each frame.
         if sc.name.starts_with("editor-") {

@@ -487,6 +487,11 @@ impl Dialog {
             if !open {
                 self.editor = None;
             }
+            // Edit in 3D on a copy made there: its capture's 3D view where it was, with its layers.
+            if let (Some((view, edit)), Some(gpu)) = (self.editor.as_mut().and_then(|e| e.take_3d()), cx.gpu) {
+                self.editor = None;
+                self.viewer = Some(super::splats::Viewer::open_edit(&ctx, gpu, view, edit, self.entry.world_name.clone(), super::splats::on_integrated(cx)));
+            }
             return false;
         }
         // The 3D view of the capture, over everything; the window waits under it.
@@ -919,6 +924,10 @@ impl Dialog {
             actions.push((Act::ShareTo, Button::new(label).icon(icons::PAPER_PLANE_TILT).variant(Variant::Primary).enabled(can_share && !busy)));
             if self.entry.is_picture() {
                 actions.push((Act::Download, Button::new("Download").icon(icons::DOWNLOAD_SIMPLE).enabled(!busy)));
+                // A copy of it edited (downloaded at its full size), saved among this computer's pictures.
+                if super::editor::source_of(&self.entry).is_some() {
+                    actions.push((Act::Edit, Button::new("Edit").icon(icons::SLIDERS_HORIZONTAL).variant(Variant::Secondary)));
+                }
             } else if public && !hidden {
                 actions.push((Act::CopyLink, self.copy_button(ui, busy, true)));
             }

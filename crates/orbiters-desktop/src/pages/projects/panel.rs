@@ -322,59 +322,13 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     }
     let menu_r = round(0);
     state.anchors.insert("project-menu".into(), menu_r);
-    #[derive(Clone, Copy)]
-    enum Act {
-        CopyPath,
-        Duplicate,
-        Hide,
-        Remove,
-    }
-    let hidden = state.is_hidden(&project.path);
-    let mut acts = vec![(Item::new("Copy the folder's path").icon(icons::COPY), Act::CopyPath)];
-    if !project.missing {
-        acts.push((Item::new("Duplicate…").icon(icons::COPY_SIMPLE), Act::Duplicate));
-    }
-    acts.push((if hidden { Item::new("Show this project").icon(EYE) } else { Item::new("Hide this project").icon(icons::EYE_SLASH) }, Act::Hide));
-    if project.registered {
-        acts.push((Item::new("Remove from the list").icon(glyph::TRASH_SIMPLE).danger(), Act::Remove));
-    }
+    // The actions the cards' right-click menus have too (`menus`).
+    let acts = super::menus::project_items(state, project, false);
     let items: Vec<Item> = acts.iter().map(|(i, _)| *i).collect();
-    match popup::menu_button(ui, "project-menu", menu_r, icons::DOTS_THREE, "More", &items).map(|k| acts[k].1) {
-        Some(Act::CopyPath) => {
-            ctx.copy_text(project.path.display().to_string());
-            cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Success, "Path copied");
-        }
-        Some(Act::Duplicate) if !busy => super::duplicate::open(&ctx, state, project, menu_r),
-        Some(Act::Hide) => {
-            state.set_hidden(&project.path, !hidden);
-            if hidden {
-                cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Success, format!("{} is listed again", project.name));
-            } else {
-                cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Info, format!("{} is hidden: Hidden, above the cards, shows it again", project.name));
-                // Gone from the list: the panel moves on (a sheet slides away).
-                if !state.show_hidden {
-                    if sheet {
-                        state.panel_closing = true;
-                    } else {
-                        state.selected = None;
-                    }
-                }
-            }
-        }
-        Some(Act::Remove) if !busy => {
-            let path = project.path.clone();
-            state.selected = None;
-            state.task(&ctx, "Removing from the list…", move || {
-                orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &path, false))?;
-                Ok(Outcome::Changed("Removed from the shared project list. Its files stay.".into()))
-            });
-        }
-        _ => {}
+    if let Some(act) = popup::menu_button(ui, "project-menu", menu_r, icons::DOTS_THREE, "More", &items).map(|k| acts[k].1) {
+        super::menus::project_act(&ctx, cx, state, project, act, menu_r, sheet);
     }
 }
-
-/// Phosphor's eye, which the shared icon list does not have.
-const EYE: &str = "\u{E220}";
 
 /// How much the project takes on disk, its left-centre at `at` (no further right than `right`): what Library takes of
 /// it too when there is room (with all of it on hover), and "Measuring…" until the first answer.
@@ -506,6 +460,10 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                 }
                 // Under the avatar's words, beside its picture's column.
                 super::blend::rows(ui, state, a, thumb.width() + 14.0);
+                // A right press anywhere on the row: what it offers.
+                let whole = Rect::from_min_max(r.min, pos2(r.right(), ui.min_rect().bottom().max(r.bottom())));
+                let row = ui.interact(whole, Id::unique(("avatar-row", &a.id, &a.scene)), Sense::hover());
+                super::menus::row_menu(ui, cx, state, project, a, &row);
             }
         },
     );

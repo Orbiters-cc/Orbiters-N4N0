@@ -52,6 +52,19 @@ pub enum Request {
     Owned {
         ids: Vec<String>,
     },
+    /// A page of a world list (the overlay's world search), answered as [`Response::Worlds`]: VRChat's through the
+    /// personal session, else Orbiters' public Map explorer.
+    WorldList {
+        list: orbiters_core::maps::WorldList,
+        page: usize,
+    },
+    /// An invite to oneself to a public instance of a world (`instance`: `48213~region(eu)`), which VRChat shows in the
+    /// game, answered as [`Response::Invited`]. Besides a picture, the one thing sent that is not a read: it needs the
+    /// personal session and goes nowhere else.
+    InviteSelf {
+        world: String,
+        instance: String,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
@@ -60,6 +73,8 @@ pub enum Response {
     Instance(Option<bool>),
     Image(Vec<u8>),
     Owned(Vec<String>),
+    Worlds(orbiters_core::maps::FoundWorlds),
+    Invited,
 }
 /// IDs one [`Request::Owned`] may ask about (VRChat's answers are kept a day, so a page asks once).
 pub const OWNED_BATCH: usize = 16;
@@ -169,6 +184,18 @@ impl Controller {
                     anyhow::ensure!(ids.len() <= OWNED_BATCH, "Too many avatars and worlds asked about.");
                     Response::Owned(source.owned(&ids)?)
                 }
+                Request::WorldList { list, page } => {
+                    anyhow::ensure!(page <= orbiters_core::maps::FOUND_PAGES, "That page of worlds is too far.");
+                    if let orbiters_core::maps::WorldList::Search(q) = &list {
+                        anyhow::ensure!(q.trim().chars().count() >= 2, "Type at least two characters.");
+                    }
+                    Response::Worlds(source.worlds(&list, page)?)
+                }
+                Request::InviteSelf { world, instance } => {
+                    anyhow::ensure!(orbiters_core::vrchat_log::is_world_id(&world) && public_instance(&instance), "Not a public instance of a world.");
+                    source.invite_self(&world, &instance)?;
+                    Response::Invited
+                }
             })
         })()
         .map_err(|e| e.to_string());
@@ -177,6 +204,13 @@ impl Controller {
         }
         result
     }
+}
+
+/// A public instance as an invite to oneself names it: a number of at most five digits, and VRChat's region.
+pub fn public_instance(instance: &str) -> bool {
+    let (number, region) = instance.split_once('~').unwrap_or((instance, ""));
+    let region_ok = region.is_empty() || ["us", "use", "eu", "jp"].iter().any(|r| region == format!("region({r})"));
+    (1..=5).contains(&number.len()) && number.bytes().all(|c| c.is_ascii_digit()) && region_ok
 }
 
 /// The largest picture file a page may pick.
@@ -388,6 +422,25 @@ mod tests {
         );
         let many = (0..=OWNED_BATCH).map(|i| format!("avtr_{i}")).collect();
         assert!(c.vrchat_data(scope, Request::Owned { ids: many }).unwrap_err().contains("Too many"));
+    }
+    #[test]
+    fn world_lists_and_invites_are_checked_before_any_request() {
+        use orbiters_core::maps::WorldList;
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let scope = Scope::of(&c.view());
+        let ask = |request| c.vrchat_data(scope.clone(), request).unwrap_err();
+        assert!(ask(Request::WorldList { list: WorldList::Search(" a ".into()), page: 0 }).contains("two characters"));
+        assert!(ask(Request::WorldList { list: WorldList::Popular, page: 21 }).contains("too far"));
+        // Without a personal session: the lists only VRChat has say to sign in, and nothing is sent.
+        assert!(ask(Request::WorldList { list: WorldList::Favorites, page: 0 }).contains("Sign in to VRChat"));
+        let home = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";
+        assert!(ask(Request::InviteSelf { world: home.into(), instance: "48213~region(eu)".into() }).contains("Sign in to VRChat"));
+        for bad in ["48213~private(usr_x)", "123456", "", "1~region(mars)", "12a"] {
+            assert!(!public_instance(bad), "{bad}");
+            assert!(ask(Request::InviteSelf { world: home.into(), instance: bad.into() }).contains("Not a public instance"));
+        }
+        assert!(public_instance("7") && public_instance("48213~region(use)"));
+        assert!(ask(Request::InviteSelf { world: "wrld_../x".into(), instance: "1".into() }).contains("Not a public instance"));
     }
     fn encoded(picture: image::RgbaImage) -> Vec<u8> {
         let mut bytes = std::io::Cursor::new(Vec::new());

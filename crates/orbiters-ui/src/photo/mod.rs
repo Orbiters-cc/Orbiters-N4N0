@@ -13,6 +13,8 @@ pub mod blur;
 pub mod edit;
 pub mod effects;
 pub mod geometry;
+pub mod gpu;
+pub mod level;
 pub mod render;
 pub mod text;
 pub mod tone;

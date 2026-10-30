@@ -54,7 +54,8 @@ pub(super) fn source(p: &community::Picture, large: bool, development: bool, sta
     }
     let url = if large { p.full_url.as_ref().or(p.src.as_ref()) } else { p.src.as_ref() };
     let url = url.filter(|u| u.starts_with("https://")).cloned().unwrap_or_default();
-    (p.id != 0).then_some(Picture::Gallery { development, id: p.id, url, large })
+    // An asset's picture (id 0) loads from its link alone.
+    (p.id != 0 || !url.is_empty()).then_some(Picture::Gallery { development, id: p.id, url, large })
 }
 
 fn avatar_of(m: Option<&community::Member>) -> Option<Picture> {
@@ -361,15 +362,28 @@ impl State {
 
     /// One picture's card, as the gallery's: the picture with its gallery's audience and its likes, who posted it and
     /// when, then its words or its gallery; with `tile` (the gallery's masonry and rows) the picture alone in its
-    /// shape, who posted it over its bottom. Returns its picture's rect when pressed.
+    /// shape, who posted it over its bottom. Its part in the selection (`marks`) as the gallery's cards show theirs.
+    /// Returns its picture's rect and its response (a click opens or selects it, a drag takes it out of the window:
+    /// [`super::gallery_select`]), None for a picture no longer listed.
     #[allow(clippy::too_many_arguments)]
-    pub fn card(&mut self, ui: &mut Ui, cx: &Cx, pictures: &mut Pictures, i: usize, e: &Entry, rect: Rect, interactive: bool, tile: bool) -> Option<Rect> {
+    pub fn card(
+        &mut self,
+        ui: &mut Ui,
+        cx: &Cx,
+        pictures: &mut Pictures,
+        i: usize,
+        e: &Entry,
+        rect: Rect,
+        interactive: bool,
+        tile: bool,
+        marks: super::gallery_select::Marks,
+    ) -> Option<(Rect, egui::Response)> {
         let ctx = ui.ctx().clone();
         let p = self.picture(&e.key)?.clone();
         let tex = e.picture.as_ref().and_then(|pic| pictures.get(&ctx, pic));
         let author_tex = if self.fixture { None } else { avatar_of(p.author.as_ref()).and_then(|a| pictures.get(&ctx, &a)) };
         let id = Id::unique(("community-card", &e.key));
-        let resp = ui.interact(rect, id, if interactive { Sense::click() } else { Sense::hover() });
+        let resp = ui.interact(rect, id, if interactive { Sense::click_and_drag() } else { Sense::hover() });
         let resp = if interactive { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
         let delay = 0.08 + i.min(12) as f64 * 0.035;
         let elapsed = anim::time(&ctx) - cx.entered;
@@ -381,11 +395,14 @@ impl State {
         let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on() && interactive, Spring::SNAPPY);
         let thumb0 = if tile { rect } else { Rect::from_min_size(rect.min, vec2(rect.width(), rect.width() * 9.0 / 16.0)) };
         let landing = morph::bounce(&ctx, thumb0);
-        let scale = (0.97 + 0.03 * enter) * (1.0 - 0.03 * press) * landing;
+        // Lifted while dragged out, a little inset while chosen (as the gallery's cards).
+        let lift = anim::toggle(&ctx, id.with("lift"), marks.carried, if marks.carried { Spring::SNAPPY } else { Spring::BOUNCY });
+        let chosen = anim::toggle(&ctx, id.with("chosen"), marks.selected, Spring::SNAPPY);
+        let scale = (0.97 + 0.03 * enter) * (1.0 - 0.03 * press) * landing * (1.0 - 0.07 * lift) * (1.0 - 0.025 * chosen);
         let r = Rect::from_center_size(rect.center() + vec2(0.0, 20.0 * (1.0 - enter) - 4.0 * hover), rect.size() * scale);
-        let shown = self.window.as_ref().filter(|w| w.key() == e.key).map_or(1.0, PictureWindow::card_shown);
+        let shown = self.card_shown(&e.key);
         let mut pa = ui.painter().clone();
-        pa.multiply_opacity(enter.clamp(0.0, 1.0) * shown);
+        pa.multiply_opacity(enter.clamp(0.0, 1.0) * shown * (1.0 - 0.6 * lift.clamp(0.0, 1.0)));
         let (thumb, corners) = if tile {
             (r, [super::gallery::TILE_RADIUS; 4])
         } else {
@@ -415,7 +432,10 @@ impl State {
         );
         let g = self.gallery(p.gallery_id);
         let (_, label, color) = visibility(g);
-        let mut x = thumb.left() + 12.0;
+        // The check on its corner; the badge steps aside for it.
+        let radius = if tile { super::gallery::TILE_RADIUS } else { theme::CARD_RADIUS };
+        let check = super::gallery_select::paint_card(&pa, &ctx, &e.key, r, thumb, radius, marks.selected, marks.selecting, hover);
+        let mut x = thumb.left() + 12.0 + (super::gallery_select::CHECK + 6.0) * check;
         x += super::sessions::badge(
             &pa,
             ui,
@@ -444,7 +464,7 @@ impl State {
             widgets::avatar(&pa, Rect::from_center_size(pos2(pill.left() + 11.0, pill.center().y), vec2(18.0, 18.0)), author_tex.as_ref(), &name);
             widgets::text_truncated(&pa, pos2(pill.left() + 25.0, pill.center().y), Align2::LEFT_CENTER, &t, w - 32.0);
             self.cards.insert(e.key.clone(), thumb0);
-            return (interactive && sharing::pressed(resp)).then_some(thumb);
+            return Some((thumb, resp));
         }
         // Who posted it and when, then its words (or its gallery).
         let bx = r.left() + 16.0;
@@ -482,7 +502,27 @@ impl State {
             }
         }
         self.cards.insert(e.key.clone(), thumb0);
-        (interactive && sharing::pressed(resp)).then_some(thumb)
+        Some((thumb, resp))
+    }
+
+    /// How much of a card shows while its picture's window is open over it (0) or lands back in it.
+    pub fn card_shown(&self, key: &str) -> f32 {
+        self.window.as_ref().filter(|w| w.key() == key).map_or(1.0, PictureWindow::card_shown)
+    }
+
+    /// Where another page's card drew its picture (the window opened out of it closes back into it).
+    pub fn note_card(&mut self, key: &str, rect: Rect) {
+        self.cards.insert(key.to_owned(), rect);
+    }
+
+    /// Opens a picture window on pictures that are not a community's (an asset's: `about` says whose each is), the
+    /// `index`th out of `origin` (screenshots: `stand_ins` for their pictures).
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_pictures(&mut self, ctx: &egui::Context, list: Vec<community::Picture>, about: Vec<About>, index: usize, origin: Rect, stand_ins: Vec<Picture>) {
+        let mut w = PictureWindow::open(ctx, list, index, origin, None, None);
+        w.about = about;
+        w.stand_ins = stand_ins;
+        self.window = Some(w);
     }
 
     /// The gallery chips (Communities): all of them, then each gallery with its audience or its event.
@@ -698,6 +738,16 @@ fn event_card(ui: &mut Ui, e: &Card, rect: Rect, tex: Option<&TextureHandle>, li
 
 static OPENED: AtomicU64 = AtomicU64::new(0);
 
+/// Whose a picture of the window is when it is not a community's (an asset's, in My assets): its card's key, the
+/// asset's name, what it is to the member ("Avatar · Bought on Orbiters"), its page on the website.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct About {
+    pub key: String,
+    pub title: String,
+    pub line: String,
+    pub site: String,
+}
+
 /// A gallery picture in the capture window's look: grown out of its card (shared geometry on the window's spring),
 /// sized to the picture (wide ones over their details, tall ones beside), ←/→ to the gallery's other pictures. Its
 /// details: who posted it and when, the gallery, its words, its likes and replies, and the event it was taken at.
@@ -720,6 +770,10 @@ pub struct PictureWindow {
     progress: f32,
     /// Another window is over it (the event it was taken at): Escape, arrows and presses are that window's.
     pub covered: bool,
+    /// Whose each picture is, when they are not a community's (in the list's order; empty for a community's).
+    about: Vec<About>,
+    /// The photo editor on a copy of the picture (downloaded at its full size), over the window while it is open.
+    editor: Option<super::editor::Editor>,
 }
 
 const WINDOW_PAD: f32 = 24.0;
@@ -742,6 +796,8 @@ impl PictureWindow {
             stand_ins: Vec::new(),
             progress: 0.0,
             covered: false,
+            about: Vec::new(),
+            editor: None,
         }
     }
 
@@ -752,6 +808,9 @@ impl PictureWindow {
     }
 
     pub fn key(&self) -> String {
+        if let Some(a) = self.about.get(self.index) {
+            return a.key.clone();
+        }
         self.list.get(self.index).map(|p| format!("{KEY}{}", p.id)).unwrap_or_default()
     }
 
@@ -786,6 +845,20 @@ impl PictureWindow {
             pos2(page.right() - WINDOW_GUTTER, page.bottom() - WINDOW_GUTTER),
         );
         let development = cx.snap.settings.development;
+        // The photo editor, over the whole window under its title bar; the window waits under it.
+        if let Some(e) = self.editor.as_mut() {
+            let window = ctx.content_rect();
+            let rect = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
+            let mut open = true;
+            egui::Area::new(Id::unique("community-editor")).order(Order::Foreground).fixed_pos(rect.min).show(&ctx, |ui| {
+                ui.set_min_size(rect.size());
+                open = e.show(ui, rect);
+            });
+            if !open {
+                self.editor = None;
+            }
+            return false;
+        }
         let thumb = source(&p, false, development, &self.stand_ins).and_then(|s| pictures.get(&ctx, &s));
         let large = source(&p, true, development, &self.stand_ins).and_then(|s| pictures.get(&ctx, &s));
         let aspect = large.as_ref().or(thumb.as_ref()).map(|t| t.size_vec2().x / t.size_vec2().y.max(1.0)).unwrap_or(if p.height > 0 {
@@ -812,6 +885,7 @@ impl PictureWindow {
         let catcher = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
         let mut close = false;
         let mut reopen = false;
+        let mut edit = false;
         let mut step = 0i64;
         let mut open_url: Option<String> = None;
         let gallery = self.galleries.get(&p.gallery_id).cloned();
@@ -862,8 +936,12 @@ impl PictureWindow {
                 cu.disable();
             }
             // What it is, over the picture.
-            let (vg, vl, vc) = visibility(gallery.as_ref());
-            let label = gallery.as_ref().map(|g| g.name.clone()).unwrap_or_else(|| "Community gallery".into());
+            let about = self.about.get(self.index);
+            let (vg, vl, vc) = if about.is_some() { (icons::TAG, "", theme::ACCENT) } else { visibility(gallery.as_ref()) };
+            let label = match about {
+                Some(a) => a.title.clone(),
+                None => gallery.as_ref().map(|g| g.name.clone()).unwrap_or_else(|| "Community gallery".into()),
+            };
             let t = Txt::new(&label, 11.5).weight(weight::SEMIBOLD).color(theme::FG);
             let tw = widgets::text_size(&cu, &t).x.min(picture.width() - 120.0);
             let badge = Rect::from_min_size(picture.min + vec2(16.0, 16.0), vec2(tw + 38.0, 28.0));
@@ -874,6 +952,16 @@ impl PictureWindow {
             let _ = vl;
             if viewer::close_button(&mut cu, f.rect, "Close") {
                 close = true;
+            }
+            // Edit a copy of a gallery's picture, or of an asset's by its link.
+            let linked = [&p.full_url, &p.src].into_iter().flatten().any(|u| u.starts_with("https://"));
+            if p.id != 0 || linked {
+                let b = widgets::Button::new("Edit").icon(icons::SLIDERS_HORIZONTAL).size(widgets::Size::Sm).variant(widgets::Variant::Glass).id_salt(wid.with("edit"));
+                let bw = b.desired_width(&cu);
+                let br = Rect::from_min_size(pos2(picture.right() - 16.0 - bw, picture.bottom() - 16.0 - 32.0), vec2(bw, 32.0));
+                if sharing::pressed(b.show_at(&mut cu, br)) {
+                    edit = true;
+                }
             }
             for (dir, glyph, label, x, there) in [
                 (-1i64, icons::CARET_LEFT, "Previous", picture.left() + 16.0 + 20.0, self.index > 0),
@@ -906,7 +994,8 @@ impl PictureWindow {
             let dy = 10.0 * (1.0 - alpha);
             du.add_space(if layout.arrangement == Arrangement::Beside { 64.0 } else { 18.0 } + dy);
             let top = du.cursor().top();
-            details(&mut du, wid, &p, gallery.as_ref(), event.as_ref(), pictures, &self.stand_ins, development, &mut open_url, &mut self.event_pressed);
+            let about = self.about.get(self.index).cloned();
+            details(&mut du, wid, &p, gallery.as_ref(), event.as_ref(), about.as_ref(), pictures, &self.stand_ins, development, &mut open_url, &mut self.event_pressed);
             du.add_space(22.0);
             let h = du.cursor().top() - top + if layout.arrangement == Arrangement::Beside { 64.0 } else { 18.0 };
             self.measured.insert(layout.details.width().round() as u32, h.ceil());
@@ -914,6 +1003,23 @@ impl PictureWindow {
         if let Some(url) = open_url {
             let r = crate::controller::open_url(&url);
             cx.run(&ctx, r);
+        }
+        if edit && !closing {
+            let about = self.about.get(self.index);
+            let title = about.map(|a| a.title.clone()).or_else(|| event.as_ref().map(|e| e.title.clone())).or_else(|| gallery.as_ref().map(|g| g.name.clone())).unwrap_or_default();
+            let mut source = super::editor::gallery_source(&p, event.as_ref(), development);
+            if let (Some(a), Some(r)) = (about, source.remote.as_mut()) {
+                // An asset's picture: named after the asset.
+                r.name = a.title.clone();
+            }
+            // Screenshots: the stand-in picture in place of the download.
+            if let Some(Picture::Shot { path, .. }) = self.stand_ins.get((p.id as usize) % self.stand_ins.len().max(1)) {
+                if !source.picture.exists() {
+                    let _ = std::fs::create_dir_all(source.picture.parent().unwrap_or(std::path::Path::new(".")));
+                    let _ = std::fs::copy(path, &source.picture);
+                }
+            }
+            self.editor = Some(super::editor::Editor::open(&ctx, source, title));
         }
         let typing = ctx.memory(|m| m.focused().is_some());
         if !closing && !typing && !self.covered && self.event_pressed.is_none() {
@@ -944,7 +1050,8 @@ impl PictureWindow {
 }
 
 /// The picture's details: who posted it and when (with Open on Orbiters and the full picture), its gallery, its words,
-/// its likes and replies, and the event it was taken at.
+/// its likes and replies, and the event it was taken at. An asset's picture (`about`): the asset, what it is to the
+/// member, and its page.
 #[allow(clippy::too_many_arguments)]
 fn details(
     ui: &mut Ui,
@@ -952,6 +1059,7 @@ fn details(
     p: &community::Picture,
     gallery: Option<&Gallery>,
     event: Option<&Card>,
+    about: Option<&About>,
     pictures: &mut Pictures,
     stand_ins: &[Picture],
     development: bool,
@@ -964,11 +1072,22 @@ fn details(
     // Who and when, the actions on the right.
     let (row, _) = ui.allocate_exact_size(vec2(w, 44.0), Sense::hover());
     let pa = ui.painter().clone();
-    let name = p.author.as_ref().map(|a| a.username.clone()).unwrap_or_else(|| "Someone".into());
+    let name = match about {
+        Some(a) => a.title.clone(),
+        None => p.author.as_ref().map(|a| a.username.clone()).unwrap_or_else(|| "Someone".into()),
+    };
     let face = if stand_ins.is_empty() { avatar_of(p.author.as_ref()).and_then(|a| pictures.get(&ctx, &a)) } else { None };
     let ar = Rect::from_min_size(pos2(row.left(), row.top() + 4.0), vec2(36.0, 36.0));
-    widgets::avatar(&pa, ar, face.as_ref(), &name);
-    let site = format!("{}gallery?tab=gallery-{}", server.website(), p.gallery_id);
+    if about.is_some() {
+        pa.rect_filled(ar, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.13));
+        widgets::icon(&pa, ar.center(), icons::TAG, 17.0, theme::ACCENT);
+    } else {
+        widgets::avatar(&pa, ar, face.as_ref(), &name);
+    }
+    let site = match about {
+        Some(a) => a.site.clone(),
+        None => format!("{}gallery?tab=gallery-{}", server.website(), p.gallery_id),
+    };
     let mut bx = row.right();
     for (glyph, label, url) in [
         (icons::ARROW_SQUARE_OUT, "Open on Orbiters", Some(site)),
@@ -983,8 +1102,14 @@ fn details(
     }
     let room = bx - ar.right() - 16.0;
     widgets::text_truncated(&pa, pos2(ar.right() + 12.0, ar.top() + 9.0), Align2::LEFT_CENTER, &Txt::new(&name, 15.0).weight(weight::SEMIBOLD), room);
-    let posted = p.posted_at.as_deref().map(super::local_time).map(|t| format!("Posted {t}")).unwrap_or_default();
+    let posted = match about {
+        Some(a) => a.line.clone(),
+        None => p.posted_at.as_deref().map(super::local_time).map(|t| format!("Posted {t}")).unwrap_or_default(),
+    };
     widgets::text_truncated(&pa, pos2(ar.right() + 12.0, ar.top() + 28.0), Align2::LEFT_CENTER, &Txt::new(posted, 12.0).color(theme::FG_3), room);
+    if about.is_some() {
+        return;
+    }
     // The gallery.
     ui.add_space(12.0);
     let (grow, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());

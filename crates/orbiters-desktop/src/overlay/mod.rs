@@ -52,8 +52,9 @@ pub const EXIT_STEAMVR_GONE: i32 = 0x5354;
 const STEAMVR_GONE_AFTER: Duration = Duration::from_secs(5);
 /// The tab's pictures: at most 45 a second, whatever asks for them (the laser moving, the service's news).
 const MIN_FRAME: Duration = Duration::from_millis(22);
-/// A turn of the loop while nothing moves the play space: every turn reads the controllers, as the binding that opens
-/// N4N0's menu (a double press by default) is true for a moment only and SteamVR keeps no press between two reads.
+/// A turn of the loop while nothing moves the play space: every turn reads the controllers, as a binding that opens
+/// N4N0's menu (a double press) is true for a moment only and SteamVR keeps no press between two reads, and the taps
+/// that open it by default are timed from these reads.
 const TURN: Duration = Duration::from_millis(11);
 /// A turn waiting on the compositor is at least this long, should the wait come back at once.
 const SHORTEST_TURN: Duration = Duration::from_millis(3);
@@ -726,15 +727,38 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             backend.orb(OrbCommand::Input { pads: state });
         }
         let button = input_read && actions.menu_pressed(&steamvr);
-        if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button) {
-            sounds.click();
-        }
-        // The floating panel and the watch, used with the controllers' own lasers beside VRChat (overlay/floating).
+        // The floating panel, the watch and N4N0's menu, used with the controllers' own lasers beside VRChat
+        // (overlay/floating): first, so that the menu reads this turn's laser events, and the watch opens it now.
+        let mut watch = false;
         if let Some(floating) = t.floating.as_mut() {
-            let cx = floating::Cx { overlay: &overlay, steamvr: &steamvr, presenter: &mut presenter, snap: &snap, backend: &backend, actions: &actions, input_read, dashboard };
-            if floating.update(cx, &mut t.state, &mut poses) {
+            let pointables = t.menu.pointables();
+            let menu_open = t.menu.host.menu.open || (snap.orb.screen && snap.orb.screen_open);
+            let cx = floating::Cx {
+                overlay: &overlay,
+                steamvr: &steamvr,
+                presenter: &mut presenter,
+                snap: &snap,
+                backend: &backend,
+                actions: &actions,
+                input_read,
+                dashboard,
+                menu: &pointables,
+                menu_open,
+            };
+            let turn = floating.update(cx, &mut t.state, &mut poses);
+            if turn.clicked {
                 sounds.click();
             }
+            watch = turn.toggle_menu;
+            if turn.menu_moved.is_some() || turn.menu_released {
+                let mut head = [Pose::default(); MAX_DEVICES];
+                steamvr.poses(vr::Universe::Standing, &mut head);
+                let head = head[0].pose_is_valid.then_some(head[0].device_to_absolute);
+                t.menu.carry(&overlay, turn.menu_moved, turn.menu_released, head.as_ref());
+            }
+        }
+        if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button, watch) {
+            sounds.click();
         }
         t.menu.worlds.view.publish(&overlay);
         if !shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, &snap)) {

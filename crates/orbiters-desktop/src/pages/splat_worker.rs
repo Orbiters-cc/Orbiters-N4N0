@@ -49,6 +49,20 @@ struct Shown {
     size: (u32, u32),
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
+    /// Frames shown in it.
+    frames: u64,
+}
+
+/// The texture showing the last frame, for what draws over it (Edit in 3D's layers, `splats/edit3d.rs`).
+#[derive(Clone)]
+pub struct Latest(Arc<Mutex<Option<Shown>>>);
+
+impl Latest {
+    /// The texture, its size and how many frames it has shown.
+    pub fn get(&self) -> Option<(wgpu::TextureView, (u32, u32), u64)> {
+        let s = self.0.lock().ok()?;
+        s.as_ref().map(|s| (s.texture.create_view(&Default::default()), s.size, s.frames))
+    }
 }
 
 pub struct Worker {
@@ -84,6 +98,11 @@ impl Worker {
     /// The paint callback that shows the last frame.
     pub fn callback(&self) -> impl egui_wgpu::CallbackTrait {
         FrameCallback { shared: self.shared.clone(), shown: self.shown.clone() }
+    }
+
+    /// Where the callback shows the last frame.
+    pub fn shown(&self) -> Latest {
+        Latest(self.shown.clone())
     }
 }
 
@@ -260,9 +279,10 @@ impl egui_wgpu::CallbackTrait for FrameCallback {
                 view_formats: &[],
             });
             let bind_group = blit.bind_group(device, &texture.create_view(&Default::default()));
-            *shown = Some(Shown { size: frame.size, texture, bind_group });
+            *shown = Some(Shown { size: frame.size, texture, bind_group, frames: 0 });
         }
-        let s = shown.as_ref().expect("made above");
+        let s = shown.as_mut().expect("made above");
+        s.frames += 1;
         queue.write_texture(
             s.texture.as_image_copy(),
             &frame.pixels,

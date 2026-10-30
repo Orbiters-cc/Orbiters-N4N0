@@ -1075,4 +1075,36 @@ mod tests {
         everyone.park();
         assert!(matches!(everyone.step(&want), Send::Pointer(_)));
     }
+
+    #[test]
+    #[ignore = "a measure, run by hand: cargo test -p orbiters-orb steps_to_show_a_page -- --ignored --nocapture"]
+    fn steps_to_show_a_page() {
+        use crate::menu::Contact;
+        let pages: [(&str, Target, bool, usize); 5] =
+            [("Call, not ready", Target::Call, false, 0), ("Call, none online", Target::Call, true, 0), ("Call, 4 friends", Target::Call, true, 4), ("Light", Target::Light, true, 0), ("3D picture", Target::Photo, true, 0)];
+        for (name, target, ready, friends) in pages {
+            let mut menu = Menu::default();
+            menu.open();
+            let contacts = (0..friends).map(|i| Contact { id: format!("u{i}"), name: format!("Friend number {i}") }).collect();
+            menu.set_contacts(contacts, ready, if ready { "" } else { "Link this VRChat account on Orbiters to call" });
+            let mut audience = Audience::new(LOCAL_VALUES, 128);
+            let home = Frame::new(&menu, None, None, Flags::default(), 128, &|_| None).bank;
+            while !audience.settled(&home) {
+                audience.step(&home);
+            }
+            menu.press(target);
+            let want = Frame::new(&menu, None, None, Flags::default(), 128, &|_| None).bank;
+            let (mut memory, mut pointer, mut values) = ([0u8; BANK], None, Vec::new());
+            let (mut header, mut steps) = (None, 0);
+            while !audience.settled(&want) {
+                let send = audience.step(&want);
+                write(&mut memory, &mut pointer, &mut values, LOCAL_VALUES, &send);
+                steps += 1;
+                if header.is_none() && memory[PAGE] == want[PAGE] {
+                    header = Some(steps);
+                }
+            }
+            eprintln!("{name}: the page after {header:?} steps, all of it after {steps} (at 28 to 40 ms a step)");
+        }
+    }
 }

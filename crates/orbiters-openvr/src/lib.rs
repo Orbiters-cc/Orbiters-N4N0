@@ -225,6 +225,14 @@ impl Default for Event {
 }
 
 impl Event {
+    /// A mouse event as SteamVR's laser sends one (`MOUSE_MOVE`, `MOUSE_BUTTON_DOWN`, `MOUSE_BUTTON_UP`,
+    /// `FOCUS_LEAVE`): `VREvent_Mouse_t` x, y (mouse scale units, origin bottom left) and button (1: left), for an
+    /// overlay this process points at with lasers of its own ([`Overlay::inject_event`]).
+    pub fn mouse_event(event_type: u32, x: f32, y: f32, button: u32) -> Self {
+        let data = [x.to_bits() as u64 | (y.to_bits() as u64) << 32, button as u64, 0, 0, 0, 0];
+        Self { event_type, device: 0, age_seconds: 0.0, data }
+    }
+
     /// `VREvent_Mouse_t`: x, y (overlay mouse scale units, origin bottom left), button (1 left, 2 right, 4 middle).
     pub fn mouse(&self) -> (f32, f32, u32) {
         let w = self.words();
@@ -621,7 +629,7 @@ impl Client {
     // ------------------------------------------------------------------------------------------------ IVROverlay
 
     pub fn overlay(&self) -> Option<Overlay<'_>> {
-        self.overlay.map(|table| Overlay { table, _client: self })
+        self.overlay.map(|table| Overlay { table, _client: self, injected: Default::default() })
     }
 }
 
@@ -639,6 +647,9 @@ pub type OverlayHandle = u64;
 pub struct Overlay<'a> {
     table: *const usize,
     _client: &'a Client,
+    /// Events this process made for its own overlays (its own lasers' mouse), handed out by [`Overlay::poll_event`]
+    /// before SteamVR's.
+    injected: std::cell::RefCell<std::collections::VecDeque<(OverlayHandle, Event)>>,
 }
 
 /// `VROverlayFlags` used here (bit masks).
@@ -740,11 +751,24 @@ impl Overlay<'_> {
         overlay_result(unsafe { entry::<F>(self.table, 47)(timeout_ms) })
     }
 
+    /// The next event for `handle`: first those [`Overlay::inject_event`] queued for it, then SteamVR's.
     pub fn poll_event(&self, handle: OverlayHandle) -> Option<Event> {
+        {
+            let mut injected = self.injected.borrow_mut();
+            if let Some(i) = injected.iter().position(|(h, _)| *h == handle) {
+                return injected.remove(i).map(|(_, e)| e);
+            }
+        }
         type F = unsafe extern "system" fn(u64, *mut Event, u32) -> bool;
         let mut e = Event::default();
         // SAFETY: entry 48 is PollNextOverlayEvent.
         unsafe { entry::<F>(self.table, 48)(handle, &mut e, std::mem::size_of::<Event>() as u32) }.then_some(e)
+    }
+
+    /// Queues `event` for `handle`, as SteamVR's laser would send it: the overlays this process points at with its own
+    /// lasers (no SteamVR input method, so SteamVR never takes the controllers for them) read the same events.
+    pub fn inject_event(&self, handle: OverlayHandle, event: Event) {
+        self.injected.borrow_mut().push_back((handle, event));
     }
 
     /// Laser-pointer mouse input (`VROverlayInputMethod_Mouse`).
@@ -877,6 +901,10 @@ mod tests {
         e.data[0] = (0.25f32.to_bits() as u64) | ((0.75f32.to_bits() as u64) << 32);
         e.data[1] = 1;
         assert_eq!(e.mouse(), (0.25, 0.75, 1));
+        // One made for an overlay this process points at reads back as SteamVR's would.
+        let made = Event::mouse_event(event::MOUSE_BUTTON_DOWN, 512.5, 3.0, 1);
+        assert_eq!((made.event_type, made.mouse()), (event::MOUSE_BUTTON_DOWN, (512.5, 3.0, 1)));
+        assert_eq!(made.data, Event { data: [(512.5f32.to_bits() as u64) | ((3.0f32.to_bits() as u64) << 32), 1, 0, 0, 0, 0], ..Default::default() }.data);
     }
 
     #[test]

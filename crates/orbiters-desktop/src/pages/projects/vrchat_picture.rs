@@ -44,8 +44,9 @@ pub(super) struct Pictures {
     sent: HashMap<String, (PathBuf, Instant)>,
     /// The service's last outcome taken (its upload's serial); none before the first look.
     handled: Option<u64>,
-    /// The new picture, read from the file picked once VRChat has it, for its thumbnail.
-    shown: Job<Option<(String, ColorImage)>>,
+    /// The new picture, read from the file picked once VRChat has it, for its thumbnail (with its sum, kept for the
+    /// next window).
+    shown: Job<Option<(String, ColorImage, u64)>>,
 }
 
 /// VRChat sign-in is allowed and signed in: pictures can be changed.
@@ -120,7 +121,12 @@ pub(super) fn poll(ctx: &egui::Context, cx: &Cx, state: &mut State) {
                 if let Some((path, _)) = p.sent.remove(&u.id) {
                     if u.outcome == Some(Ok(())) {
                         let id = u.id.clone();
-                        p.shown = Job::spawn(ctx, move || picture(&path).map(|image| (id, image)));
+                        p.shown = Job::spawn(ctx, move || {
+                            let image = picture(&path)?;
+                            let sum = super::thumb_cache::sum(&image);
+                            super::thumb_cache::save(&id, sum, &image);
+                            Some((id, image, sum))
+                        });
                     }
                 }
             }
@@ -131,8 +137,8 @@ pub(super) fn poll(ctx: &egui::Context, cx: &Cx, state: &mut State) {
     if !p.sent.is_empty() {
         ctx.request_repaint_after(Duration::from_millis(250));
     }
-    if let Some(Some((id, image))) = p.shown.take() {
-        state.thumbs.insert(id.clone(), ctx.load_texture(format!("project-avatar-{id}"), image, egui::TextureOptions::LINEAR));
+    if let Some(Some((id, image, sum))) = p.shown.take() {
+        state.set_thumb(ctx, id, image, sum);
     }
 }
 
@@ -190,18 +196,34 @@ pub(super) fn thumbnail(ui: &mut Ui, cx: &Cx, state: &mut State, a: &Avatar, rec
         return;
     }
     let resp = resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Change the picture on VRChat");
-    if widgets::activated(&resp) && !state.fixture {
-        let p = &mut state.vrchat_pictures;
-        let (item, name, backend, scope) = (a.id.clone(), a.name.clone(), cx.ctl.clone(), Scope::of(cx.snap));
-        p.picking = Some(item.clone());
-        p.pick = Job::spawn(&ctx, move || {
-            let path = rfd::FileDialog::new().set_title(format!("A new picture for {name} on VRChat")).add_filter("Pictures", &EXTENSIONS).pick_file();
-            if let Some(path) = &path {
-                backend.vrchat_picture(scope, item.clone(), path.clone());
-            }
-            (item, path)
-        });
+    if widgets::activated(&resp) {
+        change(&ctx, cx, state, a);
     }
+}
+
+/// Whether the picture of `id` can be changed now: the signed-in VRChat account's own, nothing else uploading or being
+/// picked (the rows' right-click menus offer it then).
+pub(super) fn can_change(cx: &Cx, state: &State, id: &str) -> bool {
+    let p = &state.vrchat_pictures;
+    let running = cx.snap.vrchat_login.upload.as_ref().is_some_and(|u| u.running());
+    signed_in(cx) && p.owned.contains(id) && !running && p.picking.is_none() && p.sent.is_empty()
+}
+
+/// Opens Windows' file dialog (on a worker) for the new picture of `a`, which the service then uploads.
+pub(super) fn change(ctx: &egui::Context, cx: &Cx, state: &mut State, a: &Avatar) {
+    if state.fixture {
+        return;
+    }
+    let p = &mut state.vrchat_pictures;
+    let (item, name, backend, scope) = (a.id.clone(), a.name.clone(), cx.ctl.clone(), Scope::of(cx.snap));
+    p.picking = Some(item.clone());
+    p.pick = Job::spawn(ctx, move || {
+        let path = rfd::FileDialog::new().set_title(format!("A new picture for {name} on VRChat")).add_filter("Pictures", &EXTENSIONS).pick_file();
+        if let Some(path) = &path {
+            backend.vrchat_picture(scope, item.clone(), path.clone());
+        }
+        (item, path)
+    });
 }
 
 /// Over an uploading thumbnail: it dims, and a ring fills with how far the upload is (`None`: starting, a spinner).

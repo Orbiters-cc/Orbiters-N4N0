@@ -344,6 +344,10 @@ impl Previews {
 /// Moves `camera` with the pointer over `resp`: a drag turns it (a flick keeps it spinning a moment), with `free` the
 /// wheel or a pinch zooms, a right or middle drag pans; a double click frames the scene again.
 fn steer(ctx: &egui::Context, resp: &egui::Response, camera: &mut Camera, rect: Rect, free: bool) -> bool {
+    if free {
+        // Its middle drag pans: the wheel button's scrolling (`autoscroll`) does not start here.
+        orbiters_ui::autoscroll::keep_middle(ctx, resp.rect);
+    }
     let (dt, now) = ctx.input(|i| (i.stable_dt.clamp(1.0 / 240.0, 0.05), i.time));
     let mut touched = false;
     let d = resp.drag_delta();

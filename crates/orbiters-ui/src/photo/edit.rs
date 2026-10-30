@@ -490,8 +490,9 @@ impl Text {
     pub const MAX_SIZE: f32 = 0.45;
 }
 
-/// How the picture is cropped and turned: quarter turns and flips first, then straightened by a small angle about its
-/// middle, then cropped (the crop is kept inside the straightened picture, [`super::geometry`]).
+//// How the picture is cropped and turned: quarter turns and flips first, then tilted in perspective about its middle
+/// lines (vertical and horizontal keystone), then straightened by a small angle about its middle, then cropped (the crop
+/// is kept inside the tilted and straightened picture, [`super::geometry`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Geometry {
@@ -501,7 +502,13 @@ pub struct Geometry {
     pub flip_v: bool,
     /// Degrees clockwise, -45 to 45.
     pub straighten: f32,
-    /// In shares of the turned picture, as asked: the crop drawn is this, shrunk to fit the straightened picture.
+    /// Degrees, -45 to 45: the picture turned in depth about its horizontal middle line (positive: its top nearer and
+    /// wider), straightening lines that lean together upwards, as a building shot from below.
+    pub vertical: f32,
+    /// Degrees, -45 to 45: turned about its vertical middle line (positive: its right side nearer and taller).
+    pub horizontal: f32,
+    /// In shares of the turned picture, as asked: the crop drawn is this, shrunk to fit the tilted and straightened
+    /// picture.
     pub crop: Crop,
     /// The shape the crop keeps while it is dragged.
     pub aspect: Aspect,
@@ -509,13 +516,16 @@ pub struct Geometry {
 
 impl Default for Geometry {
     fn default() -> Self {
-        Self { turns: 0, flip_h: false, flip_v: false, straighten: 0.0, crop: Crop::FULL, aspect: Aspect::Free }
+        Self { turns: 0, flip_h: false, flip_v: false, straighten: 0.0, vertical: 0.0, horizontal: 0.0, crop: Crop::FULL, aspect: Aspect::Free }
     }
 }
 
 impl Geometry {
+    /// The most straightening and perspective tilt, in degrees either way.
+    pub const MAX_ANGLE: f32 = 45.0;
+
     pub fn is_identity(&self) -> bool {
-        self.turns.is_multiple_of(4) && !self.flip_h && !self.flip_v && self.straighten == 0.0 && self.crop == Crop::FULL
+        self.turns.is_multiple_of(4) && !self.flip_h && !self.flip_v && self.straighten == 0.0 && self.vertical == 0.0 && self.horizontal == 0.0 && self.crop == Crop::FULL
     }
 }
 
@@ -542,8 +552,10 @@ impl Crop {
     }
 }
 
-/// Crop shapes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Crop shapes: free, the picture's own, square, and the presets of the iPhone's Photos, standing (portrait) or lying
+/// (landscape). Saved by name: those of the first version as they were ("portrait" is 4:5, "classic" 3:2, "wide" 16:9,
+/// "story" 9:16), the others as their ratio ("5:7", "7:5"…).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Aspect {
     #[default]
@@ -559,33 +571,133 @@ pub enum Aspect {
     Wide,
     /// 9:16, a phone's story.
     Story,
+    /// The picture's own shape turned a quarter (a lying picture's, standing).
+    OriginalTurned,
+    #[serde(rename = "5:7")]
+    R5x7,
+    #[serde(rename = "3:4")]
+    R3x4,
+    #[serde(rename = "3:5")]
+    R3x5,
+    #[serde(rename = "2:3")]
+    R2x3,
+    #[serde(rename = "5:4")]
+    R5x4,
+    #[serde(rename = "7:5")]
+    R7x5,
+    #[serde(rename = "4:3")]
+    R4x3,
+    #[serde(rename = "5:3")]
+    R5x3,
 }
 
 impl Aspect {
-    pub const ALL: [Aspect; 7] = [Aspect::Free, Aspect::Original, Aspect::Square, Aspect::Portrait, Aspect::Classic, Aspect::Wide, Aspect::Story];
+    pub const ALL: [Aspect; 16] = [
+        Aspect::Free,
+        Aspect::Original,
+        Aspect::Square,
+        Aspect::Portrait,
+        Aspect::Classic,
+        Aspect::Wide,
+        Aspect::Story,
+        Aspect::OriginalTurned,
+        Aspect::R5x7,
+        Aspect::R3x4,
+        Aspect::R3x5,
+        Aspect::R2x3,
+        Aspect::R5x4,
+        Aspect::R7x5,
+        Aspect::R4x3,
+        Aspect::R5x3,
+    ];
+
+    /// The presets as the iPhone's Photos lists them (each in its standing form; [`Aspect::oriented`] lays it down).
+    pub const PRESETS: [Aspect; 9] =
+        [Aspect::Original, Aspect::Free, Aspect::Square, Aspect::Story, Aspect::Portrait, Aspect::R5x7, Aspect::R3x4, Aspect::R3x5, Aspect::R2x3];
 
     pub fn name(self) -> &'static str {
         match self {
-            Aspect::Free => "Free",
-            Aspect::Original => "Original",
-            Aspect::Square => "1:1",
+            Aspect::Free => "Freeform",
+            Aspect::Original | Aspect::OriginalTurned => "Original",
+            Aspect::Square => "Square",
             Aspect::Portrait => "4:5",
             Aspect::Classic => "3:2",
             Aspect::Wide => "16:9",
             Aspect::Story => "9:16",
+            Aspect::R5x7 => "5:7",
+            Aspect::R3x4 => "3:4",
+            Aspect::R3x5 => "3:5",
+            Aspect::R2x3 => "2:3",
+            Aspect::R5x4 => "5:4",
+            Aspect::R7x5 => "7:5",
+            Aspect::R4x3 => "4:3",
+            Aspect::R5x3 => "5:3",
         }
     }
 
     /// Width over height, for a picture whose own is `original`; None when free.
     pub fn ratio(self, original: f32) -> Option<f32> {
+        Some(match self {
+            Aspect::Free => return None,
+            Aspect::Original => original,
+            Aspect::OriginalTurned => 1.0 / original.max(1e-6),
+            Aspect::Square => 1.0,
+            Aspect::Portrait => 4.0 / 5.0,
+            Aspect::Classic => 3.0 / 2.0,
+            Aspect::Wide => 16.0 / 9.0,
+            Aspect::Story => 9.0 / 16.0,
+            Aspect::R5x7 => 5.0 / 7.0,
+            Aspect::R3x4 => 3.0 / 4.0,
+            Aspect::R3x5 => 3.0 / 5.0,
+            Aspect::R2x3 => 2.0 / 3.0,
+            Aspect::R5x4 => 5.0 / 4.0,
+            Aspect::R7x5 => 7.0 / 5.0,
+            Aspect::R4x3 => 4.0 / 3.0,
+            Aspect::R5x3 => 5.0 / 3.0,
+        })
+    }
+
+    /// The same shape turned a quarter (4:5 and 5:4, the original and the original turned); free and square stay.
+    pub fn turned(self) -> Aspect {
         match self {
-            Aspect::Free => None,
-            Aspect::Original => Some(original),
-            Aspect::Square => Some(1.0),
-            Aspect::Portrait => Some(4.0 / 5.0),
-            Aspect::Classic => Some(3.0 / 2.0),
-            Aspect::Wide => Some(16.0 / 9.0),
-            Aspect::Story => Some(9.0 / 16.0),
+            Aspect::Free | Aspect::Square => self,
+            Aspect::Original => Aspect::OriginalTurned,
+            Aspect::OriginalTurned => Aspect::Original,
+            Aspect::Portrait => Aspect::R5x4,
+            Aspect::R5x4 => Aspect::Portrait,
+            Aspect::Classic => Aspect::R2x3,
+            Aspect::R2x3 => Aspect::Classic,
+            Aspect::Wide => Aspect::Story,
+            Aspect::Story => Aspect::Wide,
+            Aspect::R5x7 => Aspect::R7x5,
+            Aspect::R7x5 => Aspect::R5x7,
+            Aspect::R3x4 => Aspect::R4x3,
+            Aspect::R4x3 => Aspect::R3x4,
+            Aspect::R3x5 => Aspect::R5x3,
+            Aspect::R5x3 => Aspect::R3x5,
+        }
+    }
+
+    /// Whether it lies (wider than tall) for a picture whose own shape is `original`; None for free and square.
+    pub fn landscape(self, original: f32) -> Option<bool> {
+        let r = self.ratio(original)?;
+        (self != Aspect::Square && (r - 1.0).abs() > 1e-4).then_some(r > 1.0)
+    }
+
+    /// This preset standing or lying, for a picture of shape `original` (free and square stay as they are).
+    pub fn oriented(self, landscape: bool, original: f32) -> Aspect {
+        match self.landscape(original) {
+            Some(l) if l != landscape => self.turned(),
+            _ => self,
+        }
+    }
+
+    /// The preset of [`Aspect::PRESETS`] it is a form of.
+    pub fn preset(self) -> Aspect {
+        if Aspect::PRESETS.contains(&self) {
+            self
+        } else {
+            self.turned()
         }
     }
 }

@@ -384,6 +384,9 @@ pub struct Snapshot {
     /// Space being freed in the library.
     #[serde(default)]
     pub cleanup: Option<CleanupJob>,
+    /// What "When SteamVR starts" last did to Windows' sound devices (Settings).
+    #[serde(default)]
+    pub vr_audio: crate::controller::vr_audio::Status,
 }
 
 impl Snapshot {
@@ -424,6 +427,7 @@ impl Snapshot {
             orb: OrbStatus::default(),
             update: UpdateStatus::default(),
             cleanup: None,
+            vr_audio: Default::default(),
         }
     }
 

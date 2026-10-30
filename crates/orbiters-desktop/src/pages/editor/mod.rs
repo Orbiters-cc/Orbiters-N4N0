@@ -10,8 +10,10 @@
 
 mod canvas;
 mod controls;
+mod crop;
 pub mod files;
 mod layers;
+mod looks;
 mod preview;
 mod widgets;
 
@@ -39,11 +41,61 @@ pub fn saved() -> u64 {
     SAVED.load(Ordering::Relaxed)
 }
 
-/// The picture of a Photos & captures entry, with VRChat's layers when it is a multi-layer picture; None for a capture
-/// or an item only on Orbiters.
+/// The picture of a Photos & captures entry, with VRChat's layers when it is a multi-layer picture, or a picture on
+/// Orbiters only (shared with the member, or theirs from another computer), downloaded to edit; None for a capture.
 pub fn source_of(entry: &crate::controller::shares::Entry) -> Option<Source> {
-    let Some(crate::controller::shares::Local::Picture(path)) = &entry.local else { return None };
-    Some(Source::with_layers(path.clone(), entry.layers().iter().map(|l| (l.name.clone(), l.path.clone()))))
+    use crate::controller::shares::Local;
+    match &entry.local {
+        Some(Local::Picture(path)) => Some(Source::with_layers(path.clone(), entry.layers().iter().map(|l| (l.name.clone(), l.path.clone())))),
+        Some(Local::Session(_)) => None,
+        None => {
+            // A 3D capture's picture is its preview, not a picture to edit.
+            if entry.remote.as_ref().is_some_and(|i| i.kind != orbiters_core::shares::Kind::Picture) {
+                return None;
+            }
+            // Fetched as Photos & captures fetches what is dragged out of it: a shared picture's file, a gallery
+            // picture's renewed link, an asset's public link.
+            let (kind, id, development, url) = match super::gallery_select::remote(entry, development())? {
+                super::gallery_select::Remote::Shared { server, id } => (files::RemoteKind::Shared, id, server == orbiters_core::account::Server::Development, String::new()),
+                super::gallery_select::Remote::Gallery { server, id, url } => (files::RemoteKind::Gallery, id, server == orbiters_core::account::Server::Development, url),
+                super::gallery_select::Remote::Link(url) => (files::RemoteKind::Link, 0, development(), url),
+            };
+            let by = entry.remote.as_ref().map(|i| (i.from.as_ref().unwrap_or(&i.owner).name.clone(), i.mine)).filter(|(n, mine)| !n.is_empty() && !mine).map(|(n, _)| n);
+            let world = (!entry.world_name.is_empty()).then(|| entry.world_name.clone());
+            let name = [world.clone(), by.map(|b| format!("by {b}"))].into_iter().flatten().collect::<Vec<_>>().join(" ");
+            Some(Source::remote(files::Remote {
+                kind,
+                id,
+                development,
+                world_id: entry.world_id.starts_with("wrld_").then(|| entry.world_id.clone()),
+                world_name: world,
+                taken: entry.taken as i64,
+                name,
+                url,
+            }))
+        }
+    }
+}
+
+/// A picture of a community's or an event's gallery (`event`: the event it was taken at, with its world), downloaded
+/// to edit; `development`: listed by the development environment's server.
+pub fn gallery_source(p: &orbiters_core::community::Picture, event: Option<&orbiters_core::community::Card>, development: bool) -> Source {
+    use time::format_description::well_known::Rfc3339;
+    let world = event.and_then(|e| e.world.clone()).unwrap_or_default();
+    let when = p.posted_at.as_deref().or(event.and_then(|e| e.starts_at.as_deref()));
+    let taken = when.and_then(|t| time::OffsetDateTime::parse(t, &Rfc3339).ok()).map_or(0, |t| t.unix_timestamp());
+    let by = p.author.as_ref().map(|a| a.username.clone()).filter(|n| !n.is_empty());
+    let place = event.map(|e| e.title.clone()).filter(|t| !t.is_empty()).or_else(|| world.name.clone());
+    let name = [place, by.map(|b| format!("by {b}"))].into_iter().flatten().collect::<Vec<_>>().join(" ");
+    // An asset's picture (no gallery id) by its link alone.
+    let url = p.full_url.clone().or(p.src.clone()).filter(|u| u.starts_with("https://")).unwrap_or_default();
+    let kind = if p.id == 0 { files::RemoteKind::Link } else { files::RemoteKind::Gallery };
+    Source::remote(files::Remote { kind, id: p.id, development, world_id: world.id, world_name: world.name, taken, name, url })
+}
+
+/// Whether the app is on the development environment (what a shared picture's id is of).
+fn development() -> bool {
+    orbiters_core::settings::Settings::load().development
 }
 
 const TOP_H: f32 = 64.0;
@@ -77,6 +129,36 @@ struct Saving {
     job: Job<Result<PathBuf, String>>,
     /// Thousandths done.
     progress: Arc<AtomicU32>,
+}
+
+/// The editor over a picture that is drawn live by its host instead of read from a file: the 3D view's, Edit in 3D
+/// ([`super::splats`]). The canvas leaves the picture's place for the host to fill and hands it the pointer where no
+/// handle takes it (the camera moves with it); saving is asked of the host.
+pub struct Live {
+    /// Where the canvas left the picture's place this frame.
+    pub slot: Option<Slot>,
+    /// The canvas's pointer where no handle took it.
+    pub free: Option<egui::Response>,
+    /// What the top bar asked for.
+    pub asked: Option<LiveAsk>,
+}
+
+/// The picture's place on the canvas: a shape to set ([`egui::Painter::set`]) on its layer, within its clip, the
+/// rectangle the picture fills and what it shows.
+pub struct Slot {
+    pub layer: egui::LayerId,
+    pub clip: Rect,
+    pub shape: egui::layers::ShapeIdx,
+    pub frame: Rect,
+    pub stage: Stage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveAsk {
+    /// The picture with its layers, at full size, into the gallery.
+    Picture,
+    /// The view without them (Save this view).
+    View,
 }
 
 /// Undo and redo: the edit as it was before each change. A change is one while a pointer is down (a slider or a handle
@@ -157,41 +239,67 @@ pub struct Editor {
     notice: Option<(String, Option<PathBuf>)>,
     fonts: controls::Fonts,
     canvas: canvas::State,
+    /// Crop and rotate's tools, view and dials.
+    crop: crop::State,
     rows: layers::State,
     /// The pressed eye: the original shown while it is held.
     comparing: bool,
     closing: Option<f64>,
     /// Close was asked with changes not saved: asked again, they are dropped.
     confirm_close: bool,
+    /// Drawn live by its host (Edit in 3D).
+    live: Option<Live>,
+    /// The 3D view the copy opened was made of, and whether editing it there again was asked.
+    view3d: Option<files::View3d>,
+    to_3d: bool,
 }
 
 impl Editor {
     /// Edits `source` (an edited copy opens its edit, from its original), titled `title` (its world).
     pub fn open(ctx: &egui::Context, source: Source, title: impl Into<String>) -> Self {
-        let (source, doc, target) = match files::reopen(&source.picture) {
+        let (source, doc, target, view3d) = match files::reopen(&source.picture) {
             Some(saved) => {
                 let copy = source.picture.clone();
-                (saved.source, saved.edit, Some(copy))
+                (saved.source, saved.edit, Some(copy), saved.view)
             }
             None => {
                 let edit = source.new_edit();
-                (source, edit, None)
+                (source, edit, None, None)
             }
         };
         let files = source.files();
         let c = ctx.clone();
-        let loading = Job::spawn(ctx, move || load(&files).inspect(|_| c.request_repaint()));
+        let fetch = source.clone();
+        let loading = Job::spawn(ctx, move || {
+            // A picture of Orbiters is downloaded first.
+            files::fetch(&fetch).map_err(|e| format!("The picture could not be downloaded: {e:#}"))?;
+            load(&files).inspect(|_| c.request_repaint())
+        });
+        let mut e = Self::with(source, title.into(), doc, target, Some(loading));
+        e.view3d = view3d.filter(|v| v.capture.exists());
+        e
+    }
+
+    /// Edits `doc` over a picture of `full` pixels that its host draws ([`Live`]): Edit in 3D.
+    pub fn live(title: impl Into<String>, full: (u32, u32), doc: Edit) -> Self {
+        let mut e = Self::with(Source::picture("3D view"), title.into(), doc, None, None);
+        e.loaded = Some(Loaded { inputs: Arc::new(Vec::new()), full });
+        e.live = Some(Live { slot: None, free: None, asked: None });
+        e
+    }
+
+    fn with(source: Source, title: String, doc: Edit, target: Option<PathBuf>, loading: Option<Job<Result<Loaded, String>>>) -> Self {
         let serial = OPENED.fetch_add(1, Ordering::Relaxed);
         Self {
             id: Id::unique(("photo-editor", serial)),
-            title: title.into(),
+            title,
             target: target.clone(),
             saved_doc: target.is_some().then(|| doc.clone()),
             history: History::new(&doc),
             selected: Selected::Nothing,
             channel: Channel::Rgb,
             adding: false,
-            loading: Some(loading),
+            loading,
             loaded: None,
             error: None,
             preview: None,
@@ -202,13 +310,45 @@ impl Editor {
             notice: None,
             fonts: controls::Fonts::default(),
             canvas: canvas::State::default(),
+            crop: crop::State::default(),
             rows: layers::State::default(),
             comparing: false,
             closing: None,
             confirm_close: false,
+            live: None,
+            view3d: None,
+            to_3d: false,
             source,
             doc,
         }
+    }
+
+    /// What its host draws and is asked for ([`Editor::live`]).
+    pub fn live_mut(&mut self) -> Option<&mut Live> {
+        self.live.as_mut()
+    }
+
+    /// The edit as it is.
+    pub fn edit(&self) -> &Edit {
+        &self.doc
+    }
+
+    /// Saving the host started for [`LiveAsk`]: its progress shows on Save, its result under the canvas.
+    pub fn start_saving(&mut self, job: Job<Result<PathBuf, String>>, progress: Arc<AtomicU32>) {
+        self.saving = Some(Saving { job, progress });
+        self.notice = None;
+    }
+
+    pub fn saving(&self) -> bool {
+        self.saving.is_some()
+    }
+
+    /// Editing in its 3D view again was asked (a copy saved from Edit in 3D): the view and the edit, once.
+    pub fn take_3d(&mut self) -> Option<(files::View3d, Edit)> {
+        if !std::mem::take(&mut self.to_3d) {
+            return None;
+        }
+        self.view3d.clone().map(|v| (v, self.doc.clone()))
     }
 
     /// The edit as it is (screenshots stage one).
@@ -226,6 +366,13 @@ impl Editor {
         self.adding = true;
     }
 
+    /// Crop and rotate with the dial named `dial` chosen, its shapes shown or not, and the picture levelled by AUTO
+    /// (once the picture is read: screenshots).
+    pub(crate) fn stage_crop(&mut self, dial: &str, shapes: bool, auto: bool) {
+        self.selected = Selected::Crop;
+        crop::stage(self, dial, shapes, auto);
+    }
+
     /// Waits, at most `seconds`, until the picture is read and the preview asked last is made and shown (screenshots
     /// shoot the edit as staged).
     pub fn wait(&mut self, ctx: &egui::Context, seconds: f64) {
@@ -240,6 +387,10 @@ impl Editor {
     }
 
     fn dirty(&self) -> bool {
+        // A live picture's edit stays with its host when the editor closes.
+        if self.live.is_some() {
+            return false;
+        }
         match &self.saved_doc {
             Some(s) => *s != self.doc,
             None => !self.doc.is_identity(),
@@ -281,10 +432,18 @@ impl Editor {
             if let Some(r) = s.job.take() {
                 self.saving = None;
                 match r {
+                    Ok(path) if self.live.is_some() => {
+                        // Each save of a live picture is a picture of its own.
+                        SAVED.fetch_add(1, Ordering::Relaxed);
+                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        self.notice = Some((format!("Saved as “{name}”: it shows in Photos & captures."), Some(path)));
+                        self.error = None;
+                    }
                     Ok(path) => {
                         SAVED.fetch_add(1, Ordering::Relaxed);
                         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        self.notice = Some((format!("Saved as “{name}” beside the original: it shows in Photos & captures."), Some(path.clone())));
+                        let place = if self.source.remote.is_some() { "in your VRChat pictures" } else { "beside the original" };
+                        self.notice = Some((format!("Saved as “{name}” {place}: it shows in Photos & captures."), Some(path.clone())));
                         self.target = Some(path);
                         self.saved_doc = Some(self.doc.clone());
                         self.error = None;
@@ -313,7 +472,11 @@ impl Editor {
         if self.saving.is_some() || self.loaded.is_none() {
             return;
         }
-        let target = self.target.clone().unwrap_or_else(|| files::copy_path(&self.source.picture));
+        if let Some(live) = self.live.as_mut() {
+            live.asked = Some(LiveAsk::Picture);
+            return;
+        }
+        let target = self.target.clone().unwrap_or_else(|| self.source.copy_path());
         let progress = Arc::new(AtomicU32::new(0));
         let (p, edit, source) = (progress.clone(), self.doc.clone(), self.source.clone());
         let job = Job::spawn(ctx, move || save(&source, &edit, &target, &p).map(|_| target).map_err(|e| format!("{e:#}")));
@@ -361,9 +524,12 @@ impl Editor {
         layers::show(self, &mut ui, left, &title);
         controls::show(self, &mut ui, right);
         canvas::show(self, &mut ui, canvas);
+        if self.selected != Selected::Crop {
+            self.crop.leave();
+        }
         self.keys(&ctx);
 
-        let holding = ctx.input(|i| i.pointer.any_down()) || ctx.memory(|m| m.focused().is_some());
+        let holding = ctx.input(|i| i.pointer.any_down()) || ctx.memory(|m| m.focused().is_some()) || self.crop.moving();
         self.history.settle(&self.doc, holding, now);
         self.ask(&ctx, canvas);
         true
@@ -375,10 +541,18 @@ impl Editor {
         let (Some(loaded), Some(preview)) = (self.loaded.as_ref(), self.preview.as_mut()) else { return };
         let ppp = ctx.pixels_per_point();
         let full = render::full_size(&self.doc, loaded.full, stage);
-        // At most a pixel of the scaled picture a pixel of the canvas.
+        // At most a pixel of the scaled picture a pixel of the canvas; the crop's picture as large as it shows zoomed
+        // in, in steps (a zoom does not ask for a new picture every frame).
         let proxy = loaded.inputs.first().map_or(1.0, |p| p.width as f32 / loaded.full.0.max(1) as f32);
-        let max_w = ((canvas.width() * ppp) as u32).min((full.0 as f32 * proxy).ceil() as u32).max(16);
-        let max_h = ((canvas.height() * ppp) as u32).min((full.1 as f32 * proxy).ceil() as u32).max(16);
+        let shown = match (stage, self.crop.shown_size()) {
+            (Stage::Uncropped, Some(s)) => {
+                let k = (s.x / canvas.width().max(1.0)).max(s.y / canvas.height().max(1.0)).max(1.0);
+                canvas.size() * 2f32.powf((k.log2() * 2.0).ceil() / 2.0)
+            }
+            _ => canvas.size(),
+        };
+        let max_w = ((shown.x * ppp) as u32).min((full.0 as f32 * proxy).ceil() as u32).max(16);
+        let max_h = ((shown.y * ppp) as u32).min((full.1 as f32 * proxy).ceil() as u32).max(16);
         let size = render::fit_size(full, max_w, max_h);
         preview.ask(Ask { edit: self.doc.clone(), stage, size });
     }
@@ -423,9 +597,20 @@ impl Editor {
             self.close(&ctx);
         }
         let x = back.right() + 14.0;
-        orbiters_ui::widgets::text(&p, pos2(x, mid - 10.0), Align2::LEFT_CENTER, &Txt::caps(if self.target.is_some() { "Edited copy" } else { "Edit a copy" }));
-        let name = self.source.picture.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let title = if self.title.is_empty() { name.clone() } else { format!("{} · {name}", self.title) };
+        let caps = if self.live.is_some() {
+            "Edit in 3D"
+        } else if self.target.is_some() {
+            "Edited copy"
+        } else {
+            "Edit a copy"
+        };
+        orbiters_ui::widgets::text(&p, pos2(x, mid - 10.0), Align2::LEFT_CENTER, &Txt::caps(caps));
+        let name = match &self.source.remote {
+            // A picture of Orbiters: its name, not its download's.
+            Some(r) if !r.name.is_empty() => r.name.clone(),
+            _ => self.source.picture.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        };
+        let title = if self.title.is_empty() || name.starts_with(&self.title) { name.clone() } else { format!("{} · {name}", self.title) };
         orbiters_ui::widgets::text_truncated(&p, pos2(x, mid + 9.0), Align2::LEFT_CENTER, &Txt::new(title, 15.0).weight(weight::SEMIBOLD), bar.width() * 0.34);
 
         // Undo, redo and compare in the middle.
@@ -455,10 +640,11 @@ impl Editor {
         let saving = self.saving.as_ref().map(|s| s.progress.load(Ordering::Relaxed) as f32 / 1000.0);
         let label = match saving {
             Some(k) => format!("Saving {:.0} %", k * 100.0),
+            None if self.live.is_some() => "Save picture".to_string(),
             None if self.target.is_some() => "Save".to_string(),
             None => "Save a copy".to_string(),
         };
-        let enabled = self.loaded.is_some() && saving.is_none() && self.dirty();
+        let enabled = self.loaded.is_some() && saving.is_none() && (self.dirty() || self.live.is_some());
         let b = Button::new(&label).icon(icons::FLOPPY_DISK).variant(Variant::Primary).enabled(enabled).id_salt("editor-save");
         let w = b.desired_width(ui).max(132.0);
         let r = Rect::from_min_size(pos2(bar.right() - GAP - w, mid - 20.0), vec2(w, 40.0));
@@ -470,8 +656,8 @@ impl Editor {
             p.rect_filled(track, 1.0, theme::black(0.25));
             p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * k, track.height())), 1.0, theme::ON_ACCENT);
         }
-        // What happened, beside it.
-        let msg_right = r.left() - 12.0;
+        // Looks, Save this view (live) or Edit in 3D (a copy made there), left of it.
+        let msg_right = self.more_buttons(ui, r) - 12.0;
         let msg = if self.confirm_close && self.closing.is_none() {
             Some(("Not saved: close again to leave without saving", theme::WARN))
         } else if self.error.is_some() {
@@ -483,6 +669,35 @@ impl Editor {
             orbiters_ui::widgets::text_truncated(&p, pos2(msg_right, mid), Align2::RIGHT_CENTER, &Txt::new(m, 12.5).color(color), (msg_right - c.x - 90.0).max(40.0));
         }
         p.hline(bar.x_range(), bar.bottom() - 0.5, egui::Stroke::new(1.0, theme::white(0.05)));
+    }
+
+    /// The buttons left of Save (`save`): Looks, then Save this view for a live picture or Edit in 3D for a copy saved
+    /// from one. Returns where they start.
+    fn more_buttons(&mut self, ui: &mut Ui, save: Rect) -> f32 {
+        let mut left = save.left() - 10.0;
+        let busy = self.saving.is_some();
+        if self.live.is_some() {
+            let b = Button::new("Save this view").icon(icons::CAMERA).variant(Variant::Glass).enabled(!busy).hint("Saves the view as it is, without the layers").id_salt("editor-3d-view");
+            let w = b.desired_width(ui);
+            let r = Rect::from_min_size(pos2(left - w, save.top()), vec2(w, save.height()));
+            if super::sharing::pressed(b.show_at(ui, r)) && !busy {
+                if let Some(live) = self.live.as_mut() {
+                    live.asked = Some(LiveAsk::View);
+                }
+            }
+            left = r.left() - 10.0;
+        } else if self.view3d.is_some() {
+            let b = Button::new("Edit in 3D").icon(icons::CUBE).variant(Variant::Glass).hint("Opens its capture's 3D view where it was made, with these layers").id_salt("editor-to-3d");
+            let w = b.desired_width(ui);
+            let r = Rect::from_min_size(pos2(left - w, save.top()), vec2(w, save.height()));
+            if super::sharing::pressed(b.show_at(ui, r)) {
+                self.to_3d = true;
+            }
+            left = r.left() - 10.0;
+        }
+        let r = Rect::from_min_size(pos2(left - 40.0, save.center().y - 20.0), vec2(40.0, 40.0));
+        looks::menu(self, ui, r);
+        r.left()
     }
 
     /// The selected layer (of whichever stack).
@@ -556,7 +771,11 @@ fn save(source: &Source, edit: &Edit, target: &std::path::Path, progress: &Atomi
     let rgba = img.to_rgba8();
     drop(img);
     progress.store(920, Ordering::Relaxed);
-    let xmp = files::xmp_chunk(&source.picture).or_else(|| files.first().and_then(|f| files::xmp_chunk(f)));
+    let xmp = source.xmp();
+    // A picture of Orbiters' copy goes into a month's folder that may not be there yet.
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     files::write_png(target, &rgba, xmp.as_deref())?;
     files::write_sidecar(target, &files::Saved::new(source.clone(), edit.clone()))?;
     progress.store(1000, Ordering::Relaxed);
@@ -628,6 +847,42 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_saved_in_3d_asks_for_its_view_again_and_a_live_editor_asks_its_host_to_save() {
+        let dir = std::env::temp_dir().join(format!("orbiters-editor-3d-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let capture = dir.join("Silent Dawn");
+        std::fs::create_dir_all(&capture).unwrap();
+        let original = dir.join("Orbiters 3D view 2026-10-30 12-00-00.png");
+        let px = Rgba8::new(4, 2, vec![90; 32]);
+        files::write_png(&original, &px, None).unwrap();
+        let copy = files::copy_path(&original);
+        files::write_png(&copy, &px, None).unwrap();
+        let view = files::View3d { capture: capture.clone(), yaw: 0.5, distance: 3.0, fov_y: 1.0, size: [4, 2], ..Default::default() };
+        let mut edit = Edit::default();
+        let l = edit.layer(Effect::Light(Light { exposure: 0.5, ..Default::default() }));
+        edit.layers.push(l);
+        files::write_sidecar(&copy, &files::Saved { view: Some(view.clone()), ..files::Saved::new(Source::picture(&original), edit.clone()) }).unwrap();
+        let ctx = egui::Context::default();
+        let mut e = Editor::open(&ctx, Source::picture(&copy), "Silent Dawn");
+        assert_eq!(e.take_3d(), None, "not asked");
+        e.to_3d = true;
+        assert_eq!(e.take_3d(), Some((view, edit.clone())));
+        assert_eq!(e.take_3d(), None, "once");
+        // Its capture gone, there is no 3D view to go back to.
+        std::fs::remove_dir_all(&capture).unwrap();
+        let mut e = Editor::open(&ctx, Source::picture(&copy), "Silent Dawn");
+        e.to_3d = true;
+        assert!(e.take_3d().is_none());
+        // Live, saving is asked of the host, and closing keeps nothing to confirm (the host keeps the layers).
+        let mut live = Editor::live("Silent Dawn", (2560, 1440), edit);
+        assert!(!live.dirty());
+        live.save(&ctx);
+        assert_eq!(live.live_mut().and_then(|l| l.asked), Some(LiveAsk::Picture));
+        assert!(live.saving.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn undo_steps_back_through_each_change_once_settled() {
         let mut doc = Edit::default();
         let mut h = History::new(&doc);
@@ -655,5 +910,53 @@ mod tests {
         doc.layers.clear();
         h.settle(&doc, false, 3.0);
         assert!(h.future.is_empty());
+    }
+
+    #[test]
+    fn a_picture_of_orbiters_saves_with_its_world_and_time() {
+        let dir = std::env::temp_dir().join(format!("orbiters-editor-remote-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Downloaded (a JPEG or a WebP from Discord has no VRChat XMP): the copy says what Orbiters said of it.
+        let downloaded = dir.join("gallery-prod-9.img");
+        files::write_png(&downloaded, &Rgba8::new(8, 4, vec![200; 8 * 4 * 4]), None).unwrap();
+        let remote = files::Remote { kind: files::RemoteKind::Gallery, id: 9, world_id: Some("wrld_9".into()), world_name: Some("Lobby".into()), taken: 1_792_000_000, name: "Lobby".into(), ..Default::default() };
+        let source = Source { picture: downloaded.clone(), layers: Vec::new(), remote: Some(remote) };
+        let mut edit = source.new_edit();
+        edit.geometry.vertical = 10.0;
+        let target = dir.join("2026-10").join("Lobby (edited).png");
+        save(&source, &edit, &target, &AtomicU32::new(0)).unwrap();
+        let info = orbiters_core::visited::read_shot(&target).unwrap();
+        assert_eq!((info.world_id.as_deref(), info.world_name.as_deref(), info.taken), (Some("wrld_9"), Some("Lobby"), 1_792_000_000));
+        // Opened again, the copy edits again from the download.
+        assert_eq!(files::reopen(&target).map(|s| (s.source, s.edit)), Some((source, edit)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pictures_from_orbiters_are_edited_from_where_photos_and_captures_fetches_them() {
+        let feed: orbiters_core::shares::Feed = serde_json::from_str(include_str!("../../../../orbiters-core/tests/fixtures/captures.json")).unwrap();
+        let base = crate::controller::shares::remote_entry(feed.items.into_iter().next().unwrap());
+        let only = |picture: crate::worlds::Picture| {
+            let mut e = base.clone();
+            e.remote = None;
+            e.local = None;
+            e.picture = Some(picture);
+            e
+        };
+        // A community gallery's picture: renewed by its id, its listed link kept.
+        let g = source_of(&only(crate::worlds::Picture::Gallery { development: false, id: 31, url: "https://cdn.example/x.png".into(), large: false })).unwrap();
+        let r = g.remote.unwrap();
+        assert_eq!((r.kind, r.id, r.url.as_str()), (files::RemoteKind::Gallery, 31, "https://cdn.example/x.png"));
+        // An asset's picture: its link alone.
+        let a = source_of(&only(crate::worlds::Picture::Gallery { development: false, id: 0, url: "https://orbiters.cc/asset.webp".into(), large: false })).unwrap();
+        assert_eq!(a.remote.map(|r| (r.kind, r.url)), Some((files::RemoteKind::Link, "https://orbiters.cc/asset.webp".to_string())));
+        // A 3D capture's picture is no picture to edit.
+        let mut capture = base.clone();
+        capture.local = None;
+        if let Some(item) = capture.remote.as_mut() {
+            item.kind = orbiters_core::shares::Kind::Capture;
+        }
+        assert!(source_of(&capture).is_none());
     }
 }

@@ -3,8 +3,14 @@
 //! window ([`sharing::Dialog`]) that shares them; the instance a group was taken in opens in a popover. Cards are
 //! selected (Ctrl/Shift-click, their check, a rubber band) and dragged out of the window into other apps
 //! ([`super::gallery_select`]). Each group is laid out as the picker over the gallery says ([`super::gallery_layout`]:
-//! the website's masonry by default, rows, or the grid of cards), pictures keeping their shape in the first two; a
-//! VRChat multi-layer picture is one card ([`super::gallery_layers`]).
+//! rows by default, the website's masonry, or the grid of cards), pictures keeping their shape in the first two; a
+//! VRChat multi-layer picture is one card ([`super::gallery_layers`]). The member's Orbiters assets' pictures join in
+//! (My assets, [`assets`]); every card has a menu of what can be done with it (a right press, [`card_menu`]).
+#[path = "gallery_folders.rs"]
+mod folders;
+#[path = "gallery_assets.rs"]
+mod assets;
+
 use super::{
     gallery_layout as arrangement,
     sharing::{self, Dialog},
@@ -35,12 +41,14 @@ pub enum Filter {
     Shared,
     /// The galleries of the member's communities ([`super::community`]).
     Communities,
+    /// The pictures of the Orbiters assets the member made or holds a licence to ([`assets`]).
+    Assets,
 }
 impl Filter {
     fn value(self) -> &'static str {
         match self {
             Self::Mine => "mine",
-            Self::All | Self::Communities => "all",
+            Self::All | Self::Communities | Self::Assets => "all",
             Self::Shared => "shared",
         }
     }
@@ -48,6 +56,16 @@ impl Filter {
     /// Whether the communities' pictures show.
     fn communities(self) -> bool {
         matches!(self, Self::All | Self::Communities)
+    }
+
+    /// Whether the assets' pictures show.
+    fn assets(self) -> bool {
+        matches!(self, Self::All | Self::Assets)
+    }
+
+    /// Whether this computer's items and the sharing feed show (neither Communities nor My assets alone).
+    fn own(self) -> bool {
+        !matches!(self, Self::Communities | Self::Assets)
     }
 }
 
@@ -62,6 +80,7 @@ struct Instance {
 
 #[derive(Default)]
 pub struct State {
+    folders: folders::State,
     requests: super::requests::State,
     hash_job: Job<std::collections::HashMap<std::path::PathBuf, String>>,
     hash_asked: std::collections::HashSet<std::path::PathBuf>,
@@ -101,9 +120,13 @@ pub struct State {
     fixture_locals: bool,
     /// The cards chosen, a rubber band and a drag out of the window.
     select: super::gallery_select::Selection,
-    /// The galleries of the member's communities and their windows.
+    /// The galleries of the member's communities and their windows (an asset's picture opens in their window too).
     community: super::community::State,
-    /// How the groups are laid out: chosen here at once, saved in the settings (`gallery_layout`), followed when the
+    /// The member's Orbiters assets and their pictures.
+    assets: assets::State,
+    /// A picture from Orbiters saved from a card's menu (Download).
+    download_job: Job<anyhow::Result<std::path::PathBuf>>,
+    /// How the groups are laid out: chosen here at once, saved in the settings (`photos_layout`), followed when the
     /// settings change elsewhere.
     layout: GalleryLayout,
     layout_saved: Option<GalleryLayout>,
@@ -111,8 +134,12 @@ pub struct State {
     aspects: HashMap<String, f32>,
     /// Screenshots: made-up local pictures added to this computer's (several shapes, a multi-layer picture).
     fixture_extra: Vec<Entry>,
+    /// The photo editor on a picture from Orbiters (Edit in a card's menu), over the page while it is open.
+    editor: Option<super::editor::Editor>,
 }
 impl State {
+    pub fn stage_folders(&mut self) { self.folders.stage(); }
+
     pub fn busy(&self) -> bool {
         self.requests.busy()
             || self.hash_job.running()
@@ -121,6 +148,48 @@ impl State {
             || self.pictures.as_ref().is_some_and(|p| p.loading())
             || self.dialog.as_ref().is_some_and(Dialog::loading)
             || self.community.busy()
+            || self.assets.busy()
+            || self.download_job.running()
+    }
+
+    /// Screenshots: the member's assets from the fixture (`gallery-assets…`), My assets chosen unless the name ends in
+    /// `-all`.
+    pub fn stage_assets(&mut self, name: &str, sessions_dir: &std::path::Path) {
+        self.assets.stage(sessions_dir);
+        if !name.ends_with("-all") {
+            self.filter = Filter::Assets;
+        }
+        self.shown_key = None;
+    }
+
+    /// Screenshots: the open asset picture window (the community picture window), the `n`th asset picture's.
+    pub fn open_asset(&mut self, ctx: &egui::Context, n: usize) {
+        let keys: Vec<String> = self.shown.iter().filter(|e| assets::owns(&e.key)).map(|e| e.key.clone()).collect();
+        let Some(key) = keys.get(n).cloned() else { return };
+        let origin = self.cards.get(&key).copied().unwrap_or(Rect::from_min_size(pos2(300.0, 300.0), vec2(320.0, 180.0)));
+        if let Some((list, about, index, stand_ins)) = self.assets.window(&keys, &key, false) {
+            self.community.open_pictures(ctx, list, about, index, origin, stand_ins);
+        }
+    }
+
+    /// Screenshots: a card's menu opened as a right press on the `n`th card would (at its middle).
+    pub fn stage_menu(&mut self, ctx: &egui::Context, n: usize) {
+        if let Some(e) = self.shown.get(n) {
+            let id = Id::unique(("gallery-card", &e.key));
+            let at = self.cards.get(&e.key).map_or(pos2(400.0, 400.0), |r| r.center());
+            // As `popup::context_menu` keeps an open menu: its point and its open flag.
+            let menu = id.with(("context-menu", "card-menu"));
+            ctx.data_mut(|d| {
+                d.insert_temp(menu.with("at"), at);
+                d.insert_temp(menu.with("popup-open"), true);
+            });
+        }
+    }
+
+    /// Screenshots: the first `n` cards lifted, the drag waiting for `waiting` of them from Orbiters.
+    pub fn stage_wait(&mut self, n: usize, waiting: usize) {
+        let keys: Vec<String> = self.shown.iter().take(n).map(|e| e.key.clone()).collect();
+        self.select.stage_wait(keys, waiting);
     }
 
     /// Screenshots: the communities' galleries from the fixture (`gallery-community…`), Communities chosen unless the
@@ -342,13 +411,18 @@ impl State {
 /// `true` opens the existing capture-management surface (reconstruction, storage, import).
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let ctx = ui.ctx().clone();
+    if !state.fixture {
+        let (listing_changed, images_changed) = state.folders.tick(ui, cx);
+        if listing_changed { state.key = None; }
+        if images_changed { state.pictures = None; }
+    }
     state.requests.poll(&ctx, cx);
     let page = ui.max_rect();
     let now = anim::time(&ctx);
     let development = cx.snap.settings.development;
     let server = if development { Server::Development } else { Server::Production };
     // The layout the settings keep, unless it was just chosen here (the tray saves it a moment later).
-    let saved = cx.snap.settings.gallery_layout;
+    let saved = cx.snap.settings.photos_layout;
     if !state.fixture && state.layout_saved != Some(saved) {
         state.layout_saved = Some(saved);
         state.layout = saved;
@@ -431,11 +505,25 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             state.hash_job = Job::spawn(&ctx, move || crate::worlds::hashes(paths));
         }
     }
-    if state.community.poll(&ctx, cx, state.filter.communities()) {
+    // Screenshots read Orbiters' galleries and assets only from their fixtures (staged on their own).
+    if state.community.poll(&ctx, cx, state.filter.communities() && !state.fixture) {
         state.shown_key = None;
     }
+    if state.assets.poll(&ctx, cx, state.filter.assets() && !state.fixture) {
+        state.shown_key = None;
+    }
+    if let Some(r) = state.download_job.take() {
+        match r {
+            Ok(path) => {
+                state.select.say(&ctx, "Saved in Documents › Orbiters › Downloaded pictures");
+                let result = super::editor::files::reveal(&path);
+                cx.run(&ctx, result);
+            }
+            Err(e) => state.select.say(&ctx, &format!("The picture could not be saved: {e}")),
+        }
+    }
     let requested = (state.filter, state.query.trim().to_string());
-    if !state.fixture && state.filter != Filter::Communities && state.asked.as_ref() != Some(&requested) && now - state.query_changed > 0.3 {
+    if !state.fixture && state.filter.own() && state.asked.as_ref() != Some(&requested) && now - state.query_changed > 0.3 {
         state.feed = Feed::default();
         state.shown_key = None;
         state.asked = Some(requested);
@@ -462,7 +550,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         let mut entries: Vec<Entry> = state
             .locals
             .iter()
-            .filter(|_| !matches!(state.filter, Filter::Shared | Filter::Communities))
+            .filter(|_| state.filter.own() && state.filter != Filter::Shared)
             // Screenshots: one of this computer's, and the made-up pictures.
             .enumerate()
             .filter(|(n, e)| !state.fixture || *n == 0 || state.fixture_extra.iter().any(|x| x.key == e.key))
@@ -470,7 +558,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             .cloned()
             .collect();
         for item in &state.feed.items {
-            if state.filter == Filter::Mine && !item.mine || state.filter == Filter::Shared && item.mine || state.filter == Filter::Communities {
+            if state.filter == Filter::Mine && !item.mine || state.filter == Filter::Shared && item.mine || !state.filter.own() {
                 continue;
             }
             if let Some(e) = entries.iter_mut().find(|e| controller::matches_item(e, item)) {
@@ -494,6 +582,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         if state.filter.communities() {
             entries.extend(state.community.entries(&q));
         }
+        if state.filter.assets() {
+            entries.extend(state.assets.entries(&q, development));
+        }
         entries.sort_by_key(|e| std::cmp::Reverse(e.taken));
         state.community.gather(&mut entries);
         entries
@@ -507,6 +598,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let mut window_card: Option<sharing::Source> = None;
     let loading = if state.filter == Filter::Communities {
         state.community.loading() && state.community.count() == 0
+    } else if state.filter == Filter::Assets {
+        state.assets.loading() && state.assets.count() == 0
     } else {
         state.local_job.running() || (state.feed_job.running() && state.feed.items.is_empty())
     };
@@ -515,8 +608,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let mut clicked: Option<(Entry, Rect)> = None;
     let mut instance_clicked: Option<(Entry, Rect)> = None;
     let mut community_clicked: Option<(String, Rect)> = None;
+    let mut asset_clicked: Option<(String, Rect)> = None;
+    // (By key: an entry held in the grid's frame costs the main thread's stack.)
+    let mut menu_picked: Option<(String, Rect, Menu)> = None;
     let modal = state.dialog.is_some() || state.instance.is_some() || state.community.is_open();
-    state.select.begin();
+    state.select.begin(development);
     let mut background = None;
     let selecting = state.select.any();
     egui::ScrollArea::vertical()
@@ -543,7 +639,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                     }
                 }
                 let mut index = 0usize;
-                for indices in groups(&entries, |e| state.community.whole(e)) {
+                for indices in groups(&entries, |e| state.community.whole(e) || assets::owns(&e.key)) {
                     let first = &entries[indices[0]];
                     let last = &entries[*indices.last().unwrap()];
                     let head_h = state.community.header_height(first).unwrap_or(52.0);
@@ -554,6 +650,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                     if super::community::owns(&first.key) {
                         let pictures = state.pictures.as_mut().expect("pictures");
                         state.community.group_header(&mut hu, cx, pictures, first, last, indices.len(), !modal);
+                    } else if assets::owns(&first.key) {
+                        state.assets.group_header(&mut hu, cx, first, indices.len());
                     } else {
                         let (button, pressed) = group_header(&mut hu, first, last, indices.len());
                         state.instance_buttons.insert(first.key.clone(), button);
@@ -579,9 +677,19 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                             if e.size.is_none() {
                                 learn_aspect(&ctx, &mut state.aspects, e, pictures);
                             }
-                            if let Some(thumb) = state.community.card(ui, cx, pictures, index, e, r, !modal, tiles) {
-                                community_clicked = Some((e.key.clone(), thumb));
+                            let marks = state.select.marks(&e.key);
+                            if let Some((thumb, resp)) = state.community.card(ui, cx, pictures, index, e, r, !modal, tiles, marks) {
+                                if !modal {
+                                    if let super::gallery_select::CardAct::Open = state.select.card(&resp, e, super::gallery_select::check_rect(thumb), &entries) {
+                                        community_clicked = Some((e.key.clone(), thumb));
+                                    }
+                                    if let Some(m) = card_menu(ui, &resp, e, &state.select, cx) {
+                                        menu_picked = Some((e.key.clone(), thumb, m));
+                                    }
+                                }
+                                state.cards.insert(e.key.clone(), thumb);
                             }
+                            state.select.place(&e.key, r);
                             continue;
                         }
                         let tex = e.picture.as_ref().and_then(|p| state.pictures.as_mut()?.get(&ctx, p));
@@ -595,7 +703,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                             let url = from.avatar_url.clone()?;
                             state.pictures.as_mut()?.get(&ctx, &crate::worlds::Picture::Remote { world_id: format!("person-{}", from.id), url, large: false })
                         });
-                        let shown = if open_key.as_ref() == Some(&e.key) { 0.0 } else { 1.0 };
+                        let shown = if open_key.as_ref() == Some(&e.key) { 0.0 } else { state.community.card_shown(&e.key) };
+                        let about = if assets::owns(&e.key) { state.assets.labels(e) } else { None };
                         let sharing = cx.snap.capture_shares.iter().any(|j| j.key == e.key && j.outcome.is_none());
                         let look = CardLook {
                             tex: tex.as_ref(),
@@ -608,18 +717,29 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                             selecting,
                             carried: state.select.carried(&e.key),
                             tile: tiles,
+                            about: about.clone(),
                         };
                         let (thumb, resp) = card(ui, cx, index, e, r, &look);
                         if let Some(resp) = resp.filter(|_| !modal) {
                             if let super::gallery_select::CardAct::Open = state.select.card(&resp, e, super::gallery_select::check_rect(thumb), &entries) {
-                                clicked = Some((e.clone(), thumb));
+                                if assets::owns(&e.key) {
+                                    asset_clicked = Some((e.key.clone(), thumb));
+                                } else {
+                                    clicked = Some((e.clone(), thumb));
+                                }
                             }
+                            if let Some(m) = card_menu(ui, &resp, e, &state.select, cx) {
+                                menu_picked = Some((e.key.clone(), thumb, m));
+                            }
+                        }
+                        if assets::owns(&e.key) {
+                            state.community.note_card(&e.key, if tiles { r } else { Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0)) });
                         }
                         state.select.place(&e.key, r);
                         let picture = if tiles { r } else { Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0)) };
                         state.cards.insert(e.key.clone(), picture);
                         if window_key.as_ref() == Some(&e.key) {
-                            let (e, tex, from_tex) = (e.clone(), tex.clone(), from_tex.clone());
+                            let (e, tex, from_tex, about) = (e.clone(), tex.clone(), from_tex.clone(), about.clone());
                             window_card = Some(sharing::Source {
                                 home: r,
                                 picture,
@@ -635,6 +755,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                                         selecting: false,
                                         carried: false,
                                         tile: tiles,
+                                        about: about.clone(),
                                     };
                                     let _ = card(ui, cx, 0, &e, r, &look);
                                 }),
@@ -643,7 +764,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                     }
                     ui.add_space(32.0);
                 }
-                let more_feed = state.filter != Filter::Communities && state.feed.next.is_some() && state.error.is_none();
+                let more_feed = state.filter.own() && state.feed.next.is_some() && state.error.is_none();
                 let more_community = state.filter.communities() && state.community.has_more() && state.community.error().is_none();
                 if (more_feed || more_community) && !entries.is_empty() {
                     // Endless: the next page is asked for while the end is still a screen away, and a row of
@@ -682,6 +803,17 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                         state.community.retry();
                     }
                 }
+                if let Some(error) = state.assets.error().filter(|_| state.filter == Filter::Assets).map(str::to_owned) {
+                    ui.add_space(12.0);
+                    feedback::banner(ui, Id::unique("gallery-assets-error"), Tone::Danger, &format!("Your assets could not be loaded: {error}"), false);
+                    ui.add_space(8.0);
+                    let b = Button::new("Try again").icon(icons::ARROW_CLOCKWISE).size(Size::Sm).enabled(!state.assets.loading()).id_salt("gallery-assets-retry");
+                    let bw = b.desired_width(ui);
+                    let (r, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
+                    if sharing::pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
+                        state.assets.retry();
+                    }
+                }
                 if let Some(error) = state.error.clone() {
                     ui.add_space(12.0);
                     feedback::banner(ui, Id::unique("gallery-feed-error"), Tone::Danger, &format!("Shared moments could not be loaded: {error}"), false);
@@ -712,7 +844,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         let mine = state.locals.len();
         let shared = state.feed.items.iter().filter(|i| !i.mine).count();
         let communities = state.community.count();
-        let from_communities = if communities > 0 { format!(" · {communities} from your communities") } else { String::new() };
+        let assets = state.assets.count();
+        let from_communities = match (communities, assets) {
+            (0, 0) => String::new(),
+            (c, 0) => format!(" · {c} from your communities"),
+            (0, a) => format!(" · {a} of your assets"),
+            (c, a) => format!(" · {c} from your communities · {a} of your assets"),
+        };
         let sub = if loading {
             "Gathering your pictures and captures…".to_string()
         } else if narrow {
@@ -729,6 +867,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     if sharing::pressed(mb.show_at(ui, b)) {
         manage = true;
     }
+    state.folders.show(ui, cx, Rect::from_min_size(pos2(b.left() - 110.0, b.top()), vec2(100.0, 40.0)));
     let mut cu = ui.new_child(UiBuilder::new().max_rect(controls).id_salt("gallery-controls"));
     let before_filter = state.filter;
     widgets::segmented(
@@ -740,6 +879,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             SegOption::new(Filter::Mine, "Mine"),
             SegOption::new(Filter::Shared, "Shared with me"),
             SegOption::new(Filter::Communities, "Communities").hint("Pictures of your communities' galleries and their events"),
+            SegOption::new(Filter::Assets, "My assets").hint("Pictures of the avatars and other assets you made or own on Orbiters"),
         ],
         false,
     );
@@ -773,7 +913,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     {
         let mut pu = ui.new_child(UiBuilder::new().max_rect(picker).id_salt("gallery-layout"));
         if arrangement::picker(&mut pu, picker, &mut state.layout) && !state.fixture {
-            cx.ctl.patch_settings(serde_json::json!({ "gallery_layout": state.layout }));
+            cx.ctl.patch_settings(serde_json::json!({ "photos_layout": state.layout }));
         }
     }
     let requests_open = state.requests.open || state.requests.is_out();
@@ -794,7 +934,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     }
     let mut su = ui.new_child(UiBuilder::new().max_rect(search).id_salt("gallery-search"));
     let before = state.query.clone();
-    let hint = if state.filter == Filter::Communities { "Search galleries and people" } else { "Search worlds" };
+    let hint = match state.filter {
+        Filter::Communities => "Search galleries and people",
+        Filter::Assets => "Search your assets",
+        _ => "Search worlds",
+    };
     widgets::search_field(&mut su, "gallery-search", &mut state.query, hint, search.width());
     if state.query != before {
         state.query_changed = now;
@@ -808,6 +952,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         state.dialog = Some(d);
         state.from_card = false;
     }
+    if let Some((e, thumb, m)) = menu_picked.and_then(|(k, t, m)| Some((entries.iter().find(|e| e.key == k)?.clone(), t, m))) {
+        let mut opened = Opened { clicked: &mut clicked, community: &mut community_clicked, asset: &mut asset_clicked, instance: &mut instance_clicked };
+        act_menu(&ctx, cx, state, &entries, e, thumb, m, &mut opened);
+    }
     if let Some((e, thumb)) = clicked {
         let mut e = e;
         if let Some(item) = e.remote.as_ref() {
@@ -819,9 +967,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         state.from_card = true;
     }
     if let Some(d) = state.dialog.as_mut() {
-        // The items before and after it in the gallery: arrows and ←/→ go through them.
-        let at = entries.iter().position(|e| e.key == d.layers.card_key(&d.entry));
-        d.neighbours = (at.is_some_and(|i| i > 0), at.is_some_and(|i| i + 1 < entries.len()));
+        // The items before and after it in the gallery: arrows and ←/→ go through them (not through the communities' and
+        // the assets' pictures, which have a window of their own).
+        let own: Vec<&Entry> = entries.iter().filter(|e| !super::community::owns(&e.key) && !assets::owns(&e.key)).collect();
+        let at = own.iter().position(|e| e.key == d.layers.card_key(&d.entry));
+        d.neighbours = (at.is_some_and(|i| i > 0), at.is_some_and(|i| i + 1 < own.len()));
         let typing = ctx.memory(|m| m.focused().is_some());
         let key = ctx.input(|i| {
             if i.key_pressed(egui::Key::ArrowLeft) {
@@ -834,8 +984,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         });
         let step = d.step.take().or((key != 0 && !typing && d.can_navigate()).then_some(key));
         if let (Some(step), Some(i)) = (step, at) {
-            if let Some(next) = usize::try_from(i as i64 + step).ok().and_then(|j| entries.get(j)) {
-                d.navigate(next.clone(), step as f32);
+            if let Some(next) = usize::try_from(i as i64 + step).ok().and_then(|j| own.get(j)) {
+                d.navigate((*next).clone(), step as f32);
             }
         }
         // Its card where the grid drew it this frame (it follows a scroll, another item's card); off screen, it closes
@@ -867,6 +1017,25 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         }
         if close {
             state.dialog = None;
+        }
+    }
+    // The photo editor on a picture from Orbiters, over the whole window under its title bar.
+    if let Some(e) = state.editor.as_mut() {
+        let window = ctx.content_rect();
+        let rect = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
+        let mut open = true;
+        egui::Area::new(egui::Id::unique("gallery-remote-editor")).order(egui::Order::Foreground).fixed_pos(rect.min).show(&ctx, |ui| {
+            ui.set_min_size(rect.size());
+            open = e.show(ui, rect);
+        });
+        if !open {
+            state.editor = None;
+        }
+    }
+    if let Some((key, thumb)) = asset_clicked {
+        let keys: Vec<String> = entries.iter().filter(|e| assets::owns(&e.key)).map(|e| e.key.clone()).collect();
+        if let Some((list, about, index, stand_ins)) = state.assets.window(&keys, &key, development) {
+            state.community.open_pictures(&ctx, list, about, index, thumb, stand_ins);
         }
     }
     if let Some((key, thumb)) = community_clicked {
@@ -904,6 +1073,203 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     state.select.bar(ui, page, &entries, &mut state.pictures, modal);
     state.shown = entries;
     manage
+}
+
+/// What a card's menu does: the actions of the item's window, the selection and the group, at hand on its card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Menu {
+    Open,
+    Edit,
+    SharePublicly,
+    ShareTo,
+    CopyLink,
+    Copy,
+    CopyLayers,
+    Folder,
+    Reconstruct,
+    Download,
+    OnOrbiters,
+    Instance,
+    World,
+    Select,
+}
+
+/// A card's menu (a right press on it): what can be done with this item. A picture on this computer: Open, Edit, Share
+/// publicly, Share to …, Copy (with its layers for a multi-layer picture), Show in folder; a 3D capture: Reconstruct
+/// or the shares, Copy public link once public, Copy its picture, Open its folder; what is on Orbiters only: Ask to share
+/// or the owner's shares, Copy, Download, Open on Orbiters; then the group's Instance… and World on VRChat, and Select
+/// (or Deselect). With the card in a selection of several, Copy copies the selection. The picked action, once.
+fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_select::Selection, cx: &Cx) -> Option<Menu> {
+    let mut acts: Vec<(Menu, String, &'static str)> = vec![(Menu::Open, "Open".into(), icons::ARROWS_OUT)];
+    let item = e.remote.as_ref();
+    let public = item.is_some_and(|i| i.public);
+    let several = select.has(&e.key) && select.keys.len() > 1;
+    let copy = |what: &str| if several { format!("Copy the {} selected", select.keys.len()) } else { what.to_string() };
+    let mine_shares = |acts: &mut Vec<(Menu, String, &'static str)>| {
+        if e.ready && item.is_none_or(|i| i.can_share && i.hidden.is_none()) {
+            if !public {
+                acts.push((Menu::SharePublicly, "Share publicly".into(), icons::GLOBE));
+            }
+            acts.push((Menu::ShareTo, "Share to …".into(), icons::USERS));
+        }
+    };
+    match &e.local {
+        Some(controller::Local::Picture(_)) => {
+            if super::editor::source_of(e).is_some() {
+                acts.push((Menu::Edit, "Edit".into(), icons::SLIDERS_HORIZONTAL));
+            }
+            mine_shares(&mut acts);
+            acts.push((Menu::Copy, copy("Copy"), icons::COPY));
+            if !e.layers().is_empty() && !several {
+                acts.push((Menu::CopyLayers, "Copy with its layers".into(), icons::STACK));
+            }
+            acts.push((Menu::Folder, "Show in folder".into(), icons::FOLDER_OPEN));
+        }
+        Some(controller::Local::Session(dir)) => {
+            let busy = cx.snap.reconstruct_queue.contains(dir) || cx.snap.reconstruction.as_ref().is_some_and(|j| &j.session_dir == dir);
+            if !e.ready && !busy {
+                acts.push((Menu::Reconstruct, "Reconstruct".into(), icons::MAGIC_WAND));
+            }
+            mine_shares(&mut acts);
+            if public {
+                acts.push((Menu::CopyLink, "Copy public link".into(), icons::LINK_SIMPLE));
+            }
+            acts.push((Menu::Copy, copy("Copy its picture"), icons::COPY));
+            acts.push((Menu::Folder, "Open its folder".into(), icons::FOLDER_OPEN));
+        }
+        None => {
+            match item {
+                Some(i) if i.mine => mine_shares(&mut acts),
+                Some(i) if i.can_share && i.hidden.is_none() => acts.push((Menu::ShareTo, "Ask to share".into(), icons::PAPER_PLANE_TILT)),
+                _ => {}
+            }
+            let capture = item.is_some_and(|i| i.kind == orbiters_core::shares::Kind::Capture);
+            if capture && public {
+                acts.push((Menu::CopyLink, "Copy public link".into(), icons::LINK_SIMPLE));
+            }
+            // A copy of a picture from Orbiters edited (its full picture fetched), saved among this computer's.
+            if !capture && super::editor::source_of(e).is_some() {
+                acts.push((Menu::Edit, "Edit".into(), icons::SLIDERS_HORIZONTAL));
+            }
+            if select.can_hand_out(e) {
+                acts.push((Menu::Copy, copy(if capture { "Copy its picture" } else { "Copy" }), icons::COPY));
+                if !capture {
+                    acts.push((Menu::Download, "Download".into(), icons::DOWNLOAD_SIMPLE));
+                }
+            }
+            if super::community::owns(&e.key) || assets::owns(&e.key) || capture && public {
+                acts.push((Menu::OnOrbiters, "Open on Orbiters".into(), icons::ARROW_SQUARE_OUT));
+            }
+        }
+    }
+    if e.instance.is_some() && !super::community::owns(&e.key) && !assets::owns(&e.key) {
+        acts.push((Menu::Instance, "Instance…".into(), icons::INFO));
+    }
+    if e.world_id.starts_with("wrld_") {
+        acts.push((Menu::World, "World on VRChat".into(), icons::GLOBE_HEMISPHERE_WEST));
+    }
+    let selected = select.has(&e.key);
+    acts.push((Menu::Select, if selected { "Deselect" } else { "Select" }.into(), if selected { icons::X_CIRCLE } else { icons::CHECK_CIRCLE }));
+    let items: Vec<orbiters_ui::popup::Item<'_>> = acts.iter().map(|(_, label, glyph)| orbiters_ui::popup::Item::new(label).icon(glyph)).collect();
+    orbiters_ui::popup::context_menu(ui, resp, "card-menu", &items).map(|i| acts[i].0)
+}
+
+/// Where a card's menu opens what it opens (as a press on the card would, the instance popover from the card).
+struct Opened<'a> {
+    clicked: &'a mut Option<(Entry, Rect)>,
+    community: &'a mut Option<(String, Rect)>,
+    asset: &'a mut Option<(String, Rect)>,
+    instance: &'a mut Option<(Entry, Rect)>,
+}
+
+/// Does what a card's menu picked (`thumb`: its picture, where windows grow out of).
+#[allow(clippy::too_many_arguments)]
+fn act_menu(ctx: &egui::Context, cx: &mut Cx, state: &mut State, entries: &[Entry], e: Entry, thumb: Rect, m: Menu, opened: &mut Opened<'_>) {
+    let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
+    match m {
+        Menu::Open if super::community::owns(&e.key) => *opened.community = Some((e.key.clone(), thumb)),
+        Menu::Open if assets::owns(&e.key) => *opened.asset = Some((e.key.clone(), thumb)),
+        Menu::Open => *opened.clicked = Some((e, thumb)),
+        // A picture from Orbiters: the editor at once (what was already fetched for a drag or a copy is not fetched again).
+        Menu::Edit if e.local.is_none() => {
+            if let Some(source) = super::editor::source_of(&e) {
+                if let Some(fetched) = state.select.fetched(&e.key) {
+                    super::editor::files::seed(&source, &fetched);
+                }
+                state.editor = Some(super::editor::Editor::open(ctx, source, e.world_name.clone()));
+            }
+        }
+        // The item's window out of its card, then what was picked in it (one window built: it is large on the stack).
+        Menu::Edit | Menu::SharePublicly | Menu::ShareTo => {
+            state.from_card = true;
+            let radius = picture_radius(state.layout);
+            let d = state.dialog.insert(Dialog::new(ctx, e, m == Menu::ShareTo).from(thumb, radius));
+            match m {
+                Menu::Edit => d.edit(ctx),
+                Menu::SharePublicly => d.public(ctx, server),
+                _ => {}
+            }
+        }
+        Menu::CopyLink => {
+            if let Some(item) = e.remote.as_ref().filter(|i| i.public) {
+                let world = if item.world.id.is_empty() { &e.world_id } else { &item.world.id };
+                ctx.copy_text(sharing::public_link(server, world, item.id));
+                state.select.say(ctx, "Public link copied: paste it in Discord or anywhere, its picture shows with it");
+            }
+        }
+        Menu::Copy => {
+            let keys: Vec<String> =
+                if state.select.has(&e.key) { entries.iter().filter(|o| state.select.has(&o.key)).map(|o| o.key.clone()).collect() } else { vec![e.key.clone()] };
+            state.select.copy(ctx, keys, entries);
+        }
+        Menu::CopyLayers => {
+            let mut files: Vec<std::path::PathBuf> = Vec::new();
+            if let Some(controller::Local::Picture(p)) = e.local.as_ref().filter(|_| e.has_composite()) {
+                files.push(p.clone());
+            }
+            files.extend(e.layers().iter().map(|l| l.path.clone()));
+            state.select.copy_paths(ctx, &files, "the picture and its layers");
+        }
+        Menu::Folder => {
+            let result = match &e.local {
+                Some(controller::Local::Picture(p)) => super::editor::files::reveal(p),
+                Some(controller::Local::Session(d)) => crate::controller::open_path(d),
+                None => Ok(()),
+            };
+            cx.run(ctx, result);
+        }
+        Menu::Reconstruct => {
+            if let Some(controller::Local::Session(dir)) = &e.local {
+                cx.ctl.reconstruct(dir.clone());
+                state.select.say(ctx, "Reconstruction started: share it once its 3D view is ready");
+            }
+        }
+        Menu::Download => {
+            if let Some(job) = state.select.download_job(&e) {
+                state.download_job = Job::spawn(ctx, job);
+                state.select.say(ctx, "Saving it from Orbiters…");
+            }
+        }
+        Menu::OnOrbiters => {
+            let link = if super::community::owns(&e.key) {
+                e.world_id.strip_prefix("gallery:").map(|g| format!("{}gallery?tab=gallery-{g}", server.website()))
+            } else if assets::owns(&e.key) {
+                state.assets.page(&e.key, server)
+            } else {
+                e.remote.as_ref().filter(|i| i.public).map(|i| sharing::public_link(server, if i.world.id.is_empty() { &e.world_id } else { &i.world.id }, i.id))
+            };
+            if let Some(link) = link {
+                let result = crate::controller::open_url(&link);
+                cx.run(ctx, result);
+            }
+        }
+        Menu::Instance => *opened.instance = Some((e, thumb)),
+        Menu::World => {
+            let result = crate::controller::open_url(&format!("https://vrchat.com/home/world/{}", e.world_id));
+            cx.run(ctx, result);
+        }
+        Menu::Select => state.select.toggle(&e.key),
+    }
 }
 
 /// What a card's body takes under its picture.
@@ -1024,6 +1390,8 @@ struct CardLook<'a> {
     carried: bool,
     /// The picture alone, its shape kept (masonry, rows): what it is on it, its time on hover; else the grid's card.
     tile: bool,
+    /// An asset's picture: what it is ("Avatar picture") and what the asset is to the member ("Made by you").
+    about: Option<(String, String)>,
 }
 
 /// One card, as Visited worlds' and Capture files': the picture with what it is and who sees it, then its kind,
@@ -1144,7 +1512,9 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
 
     // Kind and time, then who sees it or who it is from.
     let bx = r.left() + 16.0;
-    let title = if e.is_picture() {
+    let title = if let Some((kind, _)) = &look.about {
+        kind.as_str()
+    } else if e.is_picture() {
         "VRChat picture"
     } else if e.ready {
         "3D capture"
@@ -1177,6 +1547,7 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
             Some(i) if i.public => (icons::GLOBE, "Public on Orbiters".to_string(), theme::OK),
             Some(i) if !i.grants.is_empty() => (icons::USERS, format!("Shared with {}", i.grants.len()), theme::FG_2),
             Some(_) => (icons::LOCK_SIMPLE, "Only you".to_string(), theme::FG_3),
+            None if look.about.is_some() => (icons::TAG, look.about.as_ref().map(|a| a.1.clone()).unwrap_or_default(), theme::ACCENT),
             None if !e.ready && !e.is_picture() => (icons::MAGIC_WAND, "Reconstruct it to share it".to_string(), theme::FG_3),
             None => (icons::HARD_DRIVE, "On this computer".to_string(), theme::FG_3),
         };
@@ -1226,6 +1597,11 @@ fn empty_state(ui: &mut Ui, cx: &Cx, filter: Filter, searching: bool, height: f3
     logo::paint(&p, lr, logo::Look::default());
     let (title, text) = if searching {
         ("No world matches", "Try another world name.")
+    } else if filter == Filter::Assets {
+        (
+            "Your assets' pictures belong here",
+            "The pictures of the avatars and other assets you made or own on Orbiters show up here, one group for each.",
+        )
     } else if filter == Filter::Communities {
         (
             "Your communities' pictures belong here",
@@ -1356,7 +1732,7 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
         } else if state.instance_alive == Some(true) {
             (Tone::Ok, "Still open: you can join it again")
         } else if state.instance_alive == Some(false) {
-            (Tone::Off, "This instance has closed")
+            (Tone::Off, "Not open any more")
         } else if state.instance_job.running() {
             (Tone::Info, "Checking whether it is still open…")
         } else if e.instance.is_none() {
@@ -1373,6 +1749,8 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
         y += 22.0 + 16.0;
         if let Some(err) = &state.instance_error {
             widgets::text_truncated(&p, pos2(x, y + 10.0), Align2::LEFT_CENTER, &Txt::new(err, 12.0).color(theme::DANGER), inner - 110.0);
+            // The whole of a long answer on hover.
+            ui.interact(Rect::from_min_size(pos2(x, y), vec2(inner - 110.0, 20.0)), Id::unique("instance-error"), Sense::hover()).on_hover_text(err);
             let b = Button::new("Try again").size(Size::Sm).id_salt("instance-retry");
             let bw = b.desired_width(ui);
             if sharing::pressed(b.show_at(ui, Rect::from_min_size(pos2(rect.right() - 20.0 - bw, y - 6.0), vec2(bw, 32.0)))) {

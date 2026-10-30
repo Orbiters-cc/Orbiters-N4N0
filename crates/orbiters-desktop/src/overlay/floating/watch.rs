@@ -1,7 +1,9 @@
 //! The watch: the N4N0 mark on a wrist, as XSOverlay's wrist button. It rides its controller (SteamVR moves it with the
 //! hand at the headset's rate), fades in as the wrist turns to the eyes and out otherwise ([`space::watch_shown`]), and
-//! one pull of the other hand's trigger on it (its laser, or its fingertip) opens the floating panel before the eyes,
-//! or closes it. Its ring is the accent while the panel is open. It paints again only when that or its hover changes.
+//! one pull of the other hand's trigger on it (its laser, or its fingertip) opens N4N0's menu, or closes it, as the
+//! controller binding does (in the play space, or on the avatar's screen when it has one; the floating panel opens from
+//! the dashboard tab's Float button). Its ring is the accent while the menu is open. It paints again only when that or
+//! its hover changes.
 
 use super::space::{self, Follow, Quad};
 use crate::overlay::{Canvas, Presenter};
@@ -70,7 +72,7 @@ impl Watch {
         (self.fade.value >= PRESSABLE).then_some(Quad { transform, width: WIDTH_M, height: WIDTH_M })
     }
 
-    /// Its picture for `hover` (a laser or a fingertip on it) and `open` (the panel is), painted when that changed.
+    /// Its picture for `hover` (a laser or a fingertip on it) and `open` (N4N0's menu is), painted when that changed.
     pub(in crate::overlay) fn paint(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, hover: bool, open: bool) {
         if !self.visible || self.drawn == Some((hover, open)) {
             return;
@@ -100,7 +102,7 @@ impl Watch {
     }
 }
 
-/// The watch's face: the N4N0 mark on ink in a ring, the accent while the panel is open, lighter under a laser.
+/// The watch's face: the N4N0 mark on ink in a ring, the accent while N4N0's menu is open, lighter under a laser.
 pub fn paint(p: &egui::Painter, hover: bool, open: bool) {
     let c = PX as f32 / 2.0;
     let centre = pos2(c, c);

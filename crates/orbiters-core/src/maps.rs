@@ -247,6 +247,89 @@ pub fn world_page_url(server: crate::account::Server, world_id: &str) -> String 
     format!("{}/maps/{}", server.website().trim_end_matches('/'), world_id)
 }
 
+/// A list of VRChat worlds the overlay's world search shows: a search, or one of VRChat's own lists.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WorldList {
+    /// Worlds whose name matches (trimmed, at most [`SEARCH_MAX`] characters).
+    Search(String),
+    /// VRChat's popular worlds (Orbiters' featured worlds without a VRChat session).
+    Popular,
+    /// The worlds with the most people in them now (VRChat only).
+    Active,
+    /// The signed-in VRChat account's favorite worlds (VRChat only).
+    Favorites,
+}
+
+/// Worlds a page of a [`WorldList`] holds, as the Map explorer pages them.
+pub const FOUND_PAGE: usize = 24;
+/// Pages of a list read at most (VRChat answers deep offsets slowly, and nobody pages that far in a headset).
+pub const FOUND_PAGES: usize = 20;
+/// Characters a search sends at most (the Map explorer keeps 100).
+pub const SEARCH_MAX: usize = 100;
+
+/// Who answered a [`WorldList`]: VRChat through the member's own session, or Orbiters' public Map explorer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FoundBy {
+    Vrchat,
+    #[default]
+    Orbiters,
+}
+
+/// A world of a [`WorldList`], with what Orbiters knows of it when Orbiters answered (VRChat's answer knows none).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FoundWorld {
+    pub world: World,
+    /// People in it now, when VRChat said.
+    #[serde(default)]
+    pub occupants: Option<u32>,
+    /// Members' pictures of it on Orbiters.
+    #[serde(default)]
+    pub pictures: usize,
+    /// Orbiters has a 3D preview of it.
+    #[serde(default)]
+    pub preview: bool,
+}
+
+/// A page of a [`WorldList`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FoundWorlds {
+    pub items: Vec<FoundWorld>,
+    /// Another page follows.
+    pub more: bool,
+    pub source: FoundBy,
+}
+
+/// The Map explorer's path for a page of `list` (`maps/search?q=…&page=…`, `maps/featured?page=…`); `None` for the
+/// lists only VRChat has (a member's favorites, the active worlds).
+pub fn found_path(list: &WorldList, page: usize) -> Option<String> {
+    let page = page.min(FOUND_PAGES);
+    match list {
+        WorldList::Search(q) => {
+            let q: String = q.trim().chars().take(SEARCH_MAX).collect();
+            Some(format!("maps/search?q={}&page={page}", crate::vrchat_api::encode(&q)))
+        }
+        WorldList::Popular => Some(format!("maps/featured?page={page}")),
+        WorldList::Active | WorldList::Favorites => None,
+    }
+}
+
+/// A Map explorer answer (`{ items: [world + { preview, pictures, performance }], hasMore, source }`): each item read on
+/// its own, one shaped otherwise left out, never the page.
+pub fn parse_found(json: &str) -> anyhow::Result<FoundWorlds> {
+    let v: serde_json::Value = serde_json::from_str(json)?;
+    let items = v.get("items").and_then(|i| i.as_array()).ok_or_else(|| anyhow::anyhow!("not a list of worlds"))?;
+    let items = items
+        .iter()
+        .filter_map(|item| {
+            let world: World = serde_json::from_value(item.clone()).ok()?;
+            crate::vrchat_log::is_world_id(&world.world_id).then_some(())?;
+            let pictures = item.get("pictures").and_then(|p| p.as_f64()).filter(|n| n.is_finite() && *n >= 0.0).map_or(0, |n| n as usize);
+            Some(FoundWorld { world, occupants: None, pictures, preview: item.get("preview").is_some_and(|p| p.is_object()) })
+        })
+        .collect();
+    Ok(FoundWorlds { items, more: v.get("hasMore").and_then(|m| m.as_bool()).unwrap_or(false), source: FoundBy::Orbiters })
+}
+
 impl Api {
     /// A world's page; `None` when Orbiters does not list it (not public on VRChat). A server without the Map
     /// explorer (its 404 is not Orbiters' JSON error) is an error, not an unlisted world.
@@ -259,6 +342,25 @@ impl Api {
             return Ok(None);
         }
         Ok(Some(Self::json(response)?))
+    }
+
+    /// A page of `list` from the Map explorer (public, no credential: VRChat's search through the website's account, or
+    /// the worlds Orbiters knows while VRChat cannot be asked). The lists only VRChat has are an error saying so.
+    pub fn find_worlds(&self, list: &WorldList, page: usize) -> anyhow::Result<FoundWorlds> {
+        let Some(path) = found_path(list, page) else {
+            anyhow::bail!(match list {
+                WorldList::Favorites => "Sign in to VRChat in Orbiters - N4N0's Settings to see your favorite worlds.",
+                _ => "Sign in to VRChat in Orbiters - N4N0's Settings to see the worlds people are in now.",
+            })
+        };
+        let response = self.agent().get(&self.url(&path)).call()?;
+        let status = response.status().as_u16();
+        let text = response.into_body().with_config().limit(4 << 20).read_to_string()?;
+        if !(200..300).contains(&status) {
+            let message = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v.get("error")?.as_str().map(str::to_string));
+            return Err(ApiError { status, message: message.unwrap_or_default() }.into());
+        }
+        parse_found(&text)
     }
 
     /// What this member added, per world.
@@ -521,6 +623,22 @@ mod tests {
         let perf: WorldPerformance =
             serde_json::from_str(r#"{"fps":71.6,"fps_low":40,"ratio":0.8,"minutes":12.0,"members":3,"by_crowd":[{"players":"1-4","fps":80.4}]}"#).unwrap();
         assert_eq!((perf.fps, perf.fps_low, perf.minutes, perf.by_crowd[0].fps), (72, 40, 12, 80));
+    }
+
+    #[test]
+    fn world_lists_go_to_the_map_explorer_where_it_has_them() {
+        assert_eq!(found_path(&WorldList::Search(" Palm Point ".into()), 2).as_deref(), Some("maps/search?q=Palm%20Point&page=2"));
+        assert_eq!(found_path(&WorldList::Popular, 99).as_deref(), Some("maps/featured?page=20"));
+        assert_eq!(found_path(&WorldList::Favorites, 0), None);
+        assert_eq!(found_path(&WorldList::Active, 0), None);
+        let found = parse_found(
+            r#"{"items":[{"worldId":"wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b","name":"Palm Point","pictures":2.0,"preview":null},
+            {"worldId":"wrld_../x","name":"bad"},{"worldId":"wrld_4cf554b4-430c-4f8f-b53e-1f294eed230c"}],"hasMore":false}"#,
+        )
+        .unwrap();
+        assert_eq!(found.items.len(), 1);
+        assert_eq!((found.items[0].pictures, found.items[0].preview, found.more), (2, false, false));
+        assert!(parse_found(r#"{"error":"Type at least two characters."}"#).is_err());
     }
 
     #[test]

@@ -21,8 +21,9 @@ the window's N4N0 page turns it off for a tool without AI. You talk to it by hol
 Talk button in the window or the SteamVR tab, or by starting a sentence with "Nano" (N4N0 said aloud); speech is transcribed on this
 computer and only the sentences meant for N4N0 go to the assistant.
 
-Calling N4N0 also opens **N4N0's menu**: the SteamVR binding "Open N4N0's menu" (a double press of the left stick unless
-you change it in SteamVR's controller settings), the wake word on its own, or a hand on N4N0. It has fast walk (walk
+Calling N4N0 also opens **N4N0's menu**: the SteamVR binding "Open N4N0's menu" (two quick taps on the left thumbrest or
+trackpad, or a double press of X on controllers with neither, unless you change it in SteamVR's controller settings), the
+watch on a wrist, the wake word on its own, or a hand on N4N0. It has fast walk (walk
 boost on or off), YouTube (a keyboard with YouTube's suggestions as you type, five results a page with their thumbnail,
 channel and duration, and "Copy link" to paste in a world's video player; a sentence you say on the search page is what
 it searches), calls, a 3D picture with a timer, the music that plays, N4N0's light and the avatar's states. A copied link

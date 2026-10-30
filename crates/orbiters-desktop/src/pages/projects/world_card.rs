@@ -175,6 +175,10 @@ fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, w: &Avata
     }
     add(ui, cx, state, w, &name, here.as_ref(), mine, i);
     super::blend::rows(ui, state, w, 0.0);
+    // A right press anywhere on the world's part of the card: what it offers.
+    let whole = Rect::from_min_max(r.min, pos2(r.right(), ui.min_rect().bottom().max(r.bottom())));
+    let row = ui.interact(whole, Id::unique(("world-row", &w.id, &w.scene)), Sense::hover());
+    super::menus::row_menu(ui, cx, state, project, w, &row);
 }
 
 /// Where an upload of the world stands, to show under the ways to add to it.

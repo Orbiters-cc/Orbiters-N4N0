@@ -2,8 +2,8 @@
 //! folder (this computer's own are not needed): pictures of several shapes beside this computer's captures, and one
 //! picture with its Environment, Player and UI layers as VRChat names them.
 //!
-//! `gallery-masonry` (the default; `-hover` with the pointer on a picture, `-scrolled` down to the items shared with you),
-//! `gallery-rows`, `gallery-grid`; `gallery-layers-window` (the multi-layer picture's
+//! `gallery-masonry` (`-hover` with the pointer on a picture, `-scrolled` down to the items shared with you),
+//! `gallery-rows` (the default), `gallery-grid`; `gallery-layers-window` (the multi-layer picture's
 //! window, its strip of layers), `gallery-layer-chosen` (the Player layer alone over the checkerboard), `gallery-layers-stack`
 //! (the Player and UI layers stacked, the world hidden).
 use super::{Page, Scenario};

@@ -13,7 +13,7 @@ use orbiters_ui::photo::{self, Aspect, Blur, BlurKind, Color, Comic, Crop, Curve
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const NAMES: [&str; 18] = [
+const NAMES: [&str; 24] = [
     "editor-window",
     "editor-plain",
     "editor-open",
@@ -30,6 +30,12 @@ const NAMES: [&str; 18] = [
     "editor-text-glow",
     "editor-crop",
     "editor-cropped",
+    "editor-crop-auto",
+    "editor-crop-vertical",
+    "editor-crop-horizontal",
+    "editor-crop-shapes",
+    "editor-crop-zoomed",
+    "editor-remote",
     "editor-layers",
     "editor-multilayer",
 ];
@@ -154,8 +160,13 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32) {
             gallery.dialog = Some(d);
             return;
         }
-        let source = if name == "editor-multilayer" { multi_layer().clone() } else { Source::picture(stand_in().clone()) };
-        let mut e = Editor::open(ctx, source, "Midnight Rooftop");
+        let source = match name {
+            "editor-multilayer" => multi_layer().clone(),
+            "editor-remote" => remote(),
+            "editor-crop-auto" => Source::picture(tilted()),
+            _ => Source::picture(stand_in().clone()),
+        };
+        let mut e = Editor::open(ctx, source, if name == "editor-remote" { "Saturday Social" } else { "Midnight Rooftop" });
         staged(&mut e, name);
         *d.editor_slot() = Some(e);
         gallery.dialog = Some(d);
@@ -164,8 +175,53 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32) {
     if f > 2 {
         if let Some(e) = gallery.dialog.as_mut().and_then(|d| d.editor_slot().as_mut()) {
             e.wait(ctx, 30.0);
+            // The crop's states, once the picture is read (AUTO looks at it).
+            if f == 3 {
+                match name {
+                    "editor-crop-auto" => e.stage_crop("Straighten", false, true),
+                    "editor-crop-vertical" => e.stage_crop("Vertical", false, false),
+                    "editor-crop-horizontal" => e.stage_crop("Horizontal", false, false),
+                    "editor-crop-shapes" => e.stage_crop("Straighten", true, false),
+                    "editor-crop-zoomed" => e.stage_crop("Straighten", false, false),
+                    _ => {}
+                }
+            }
         }
     }
+}
+
+/// The skyline drawn here, turned 4 degrees (its edges lean): what AUTO levels.
+fn tilted() -> PathBuf {
+    let path = std::env::temp_dir().join("orbiters-editor-tilted.png");
+    if let Ok(p) = files::load(&drawn()) {
+        let g = photo::Geometry { straighten: 4.0, ..Default::default() };
+        let crop = g.effective_crop(p.width, p.height);
+        let (w, h) = g.output_size(p.width, p.height);
+        let img = photo::geometry::transform(&p, &g, crop, w, h).to_rgba8();
+        let _ = files::write_png(&path, &img, None);
+    }
+    path
+}
+
+/// A picture of a community's gallery to edit, its download standing in from the stand-in picture (the app's cache).
+fn remote() -> Source {
+    let picture = orbiters_core::community::Picture {
+        id: 990_001,
+        posted_at: Some("2026-10-24T21:40:00Z".into()),
+        author: Some(orbiters_core::community::Member { username: "Alex".into(), ..Default::default() }),
+        ..Default::default()
+    };
+    let event = orbiters_core::community::Card {
+        title: "Saturday Social".into(),
+        world: Some(orbiters_core::community::World { id: Some("wrld_4cf554b4-430c-4f8f-b53e-1f294eb230b0".into()), name: Some("The Black Cat".into()), image_url: None }),
+        ..Default::default()
+    };
+    let source = crate::pages::editor::gallery_source(&picture, Some(&event), false);
+    if let Some(dir) = source.picture.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::copy(stand_in(), &source.picture);
+    source
 }
 
 fn staged(e: &mut Editor, name: &str) {
@@ -220,6 +276,26 @@ fn staged(e: &mut Editor, name: &str) {
             "editor-text-glow" => {
                 add(doc, Effect::Text(Text { value: "N4N0".into(), font: "Monoton".into(), center: [0.5, 0.3], size: 0.2, color: [72, 230, 255], style: TextStyle::Glow }));
                 select = Some(add(doc, Effect::Text(Text { value: "after hours\nwith the crew".into(), center: [0.5, 0.78], size: 0.07, style: TextStyle::Shadow, ..Default::default() })));
+            }
+            "editor-crop-vertical" => {
+                // A building shot from below: its walls stood upright.
+                doc.geometry.vertical = 14.0;
+            }
+            "editor-crop-horizontal" => {
+                doc.geometry.horizontal = -12.0;
+                doc.geometry.straighten = 2.5;
+            }
+            "editor-crop-shapes" => {
+                doc.geometry.aspect = Aspect::R4x3;
+                doc.geometry.crop = photo::geometry::with_ratio(Crop::FULL, 4.0 / 3.0, 16.0, 9.0);
+            }
+            "editor-crop-zoomed" => {
+                // The picture zoomed under a square crop, off its middle.
+                doc.geometry.aspect = Aspect::Square;
+                doc.geometry.crop = Crop { x: 0.52, y: 0.18, w: 0.3 * 9.0 / 16.0, h: 0.3 };
+            }
+            "editor-remote" => {
+                select = Some(add(doc, Effect::Color(Color { temperature: 0.35, tint: -0.1, saturation: 0.3, vibrance: 0.2, hue: 12.0 })));
             }
             "editor-crop" | "editor-cropped" => {
                 doc.geometry.straighten = 6.0;
@@ -305,4 +381,122 @@ pub(super) fn three_d(gpu: &mut orbiters_ui::offscreen::Offscreen, out: &Path, s
     run.wait(5.0)?;
     run.shoot(out, "editor-3d-edit")?;
     Ok(())
+}
+
+/// `--only editor-3d-live`: Edit in 3D on the first reconstructed capture of `--sessions`: the mode opened, a stack of
+/// layers over the live view at two angles of the camera (the layers stay on the picture while it turns), crop and
+/// rotate over it, the comic look with a lens blur masked to a circle, then Save picture (the view and its edited copy
+/// with the edit and the camera written into `target/tmp/editor-pictures`). Shots: `edit3d-view` (the 3D view and its
+/// Edit in 3D button), `edit3d-open`, `edit3d-angle-1`, `edit3d-angle-2`, `edit3d-crop`, `edit3d-comic`, `edit3d-looks`
+/// (the Looks menu), `edit3d-saved`.
+pub(super) fn three_d_live(gpu: &mut orbiters_ui::offscreen::Offscreen, out: &Path, settings: &orbiters_core::settings::Settings, scale: f32) -> anyhow::Result<()> {
+    use super::{controller, idle_snapshot, Controller, Ctl, Local, Run};
+    let pictures = out.join("editor-pictures");
+    std::fs::create_dir_all(&pictures)?;
+    std::env::set_var("ORBITERS_EDITOR_PICTURES", &pictures);
+    std::env::set_var("ORBITERS_EDITOR_LOOKS", out);
+    let ctl = Controller::new(settings.clone());
+    let sessions = controller::list_sessions(&settings.sessions_dir);
+    ctl.set_snapshot(idle_snapshot(settings, &sessions));
+    let backend: Ctl = std::sync::Arc::new(Local::new(ctl));
+    let handles = crate::gpu::Handles::of_offscreen(gpu);
+    let mut run = Run::new(gpu, backend, scale);
+    run.app.set_gpu(handles.clone());
+    let t = run.time();
+    run.app.set_page(Page::Sessions, t);
+    run.until("the session list", 30.0, |run| run.app.sessions_mut().loaded())?;
+    let ctx = run.ctx.clone();
+    run.app.sessions_mut().open_first(&ctx, egui::Rect::from_min_size(egui::pos2(264.0, 160.0), egui::vec2(300.0, 265.0)));
+    anyhow::ensure!(run.app.sessions_mut().open_dir().is_some(), "no session in {}", settings.sessions_dir.display());
+    run.wait(1.0)?;
+    run.app.sessions_mut().open_viewer(&ctx, &handles, false);
+    run.until("the 3D view's splats", 120.0, |run| run.app.sessions_mut().viewer_loaded())?;
+    run.wait(0.6)?;
+    run.shoot(out, "edit3d-view")?;
+    run.click("Edit in 3D", 20.0)?;
+    run.until("Edit in 3D", 20.0, |run| run.app.sessions_mut().viewer_mut().is_some_and(|v| v.editing()))?;
+    run.wait(1.5)?;
+    run.shoot(out, "edit3d-open")?;
+    let stage = |run: &mut Run, f: &dyn Fn(&mut Editor)| {
+        if let Some(e) = run.app.sessions_mut().viewer_mut().and_then(|v| v.editing_mut()) {
+            f(e);
+        }
+    };
+    stage(&mut run, &|e: &mut Editor| {
+        let doc = e.edit_mut();
+        for effect in [
+            Effect::Light(Light { exposure: 0.35, contrast: 0.35, shadows: 0.3, ..Default::default() }),
+            Effect::Color(Color { temperature: 0.45, saturation: 0.25, vibrance: 0.3, ..Default::default() }),
+            Effect::Aberration(photo::Aberration { amount: 1.6, center: [0.5, 0.5] }),
+            Effect::Vignette(Vignette { amount: 0.75, size: 0.9, feather: 0.6, center: [0.5, 0.5] }),
+            Effect::Text(Text { value: "Orbiters 3D".into(), center: [0.5, 0.86], size: 0.1, style: TextStyle::Glow, color: [120, 200, 255], ..Default::default() }),
+        ] {
+            let l = doc.layer(effect);
+            doc.layers.push(l);
+        }
+    });
+    if let Some(e) = run.app.sessions_mut().viewer_mut().and_then(|v| v.editing_mut()) {
+        let vignette = e.edit_mut().layers[3].id;
+        e.select(Selected::Layer(None, vignette));
+    }
+    run.wait(1.5)?;
+    run.shoot(out, "edit3d-angle-1")?;
+    if let Some(v) = run.app.sessions_mut().viewer_mut() {
+        v.turn(0.7, -0.12);
+    }
+    run.wait(1.5)?;
+    run.shoot(out, "edit3d-angle-2")?;
+    stage(&mut run, &|e: &mut Editor| {
+        let g = &mut e.edit_mut().geometry;
+        g.straighten = 6.0;
+        g.crop = Crop { x: 0.12, y: 0.08, w: 0.7, h: 0.8 };
+        e.select(Selected::Crop);
+    });
+    run.wait(1.2)?;
+    run.shoot(out, "edit3d-crop")?;
+    stage(&mut run, &|e: &mut Editor| {
+        let doc = e.edit_mut();
+        doc.layers.retain(|l| !matches!(l.effect, Effect::Aberration(_)));
+        let comic = doc.layer(Effect::Comic(Comic { tones: 5, dots: true, dot_size: 0.25, ink: 0.7 }));
+        let mut lens = doc.layer(Effect::Blur(Blur { kind: BlurKind::Lens, radius: 0.02, bokeh: 0.8, ..Default::default() }));
+        lens.mask = Mask::Radial { center: [0.5, 0.45], radius: 0.22, feather: 0.12, invert: true };
+        let at = doc.layers.len() - 1;
+        doc.layers.insert(at, lens);
+        doc.layers.insert(at, comic);
+        e.select(Selected::Nothing);
+    });
+    if let Some(v) = run.app.sessions_mut().viewer_mut() {
+        v.turn(-0.35, 0.05);
+    }
+    run.wait(1.5)?;
+    run.shoot(out, "edit3d-comic")?;
+    run.click("Looks", 10.0)?;
+    run.wait(0.6)?;
+    run.shoot(out, "edit3d-looks")?;
+    run.click("Looks", 10.0)?;
+    run.wait(0.4)?;
+    let before = crate::pages::editor::saved();
+    run.click("Save picture", 10.0)?;
+    run.until("the picture saved", 120.0, |_| crate::pages::editor::saved() > before)?;
+    run.wait(0.8)?;
+    run.shoot(out, "edit3d-saved")?;
+    // What was written: the view, its edited copy and the edit with the camera.
+    for e in walk(&pictures) {
+        println!("{}", e.display());
+    }
+    Ok(())
+}
+
+/// Every file under `dir`.
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
 }

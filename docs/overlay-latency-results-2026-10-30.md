@@ -165,6 +165,8 @@ The 6,000-sample bounded sinusoidal displacement fixture admits no translation u
 set; this isolates the gate, not the full tracked-velocity classifier. Real tracking noise and velocity estimates
 still need a headset session. Cube costs do not change the wide cost estimate. The 40% wall-cost interval uses the
 wide-job estimate; full cube replacements remain non-preemptible and are not an aggregate GPU-occupancy guarantee.
+Prediction crossing the cube boundary is checked before planning mutates the cube transforms: even when the current
+eye still fits, a replacement triggered by its predicted position uses the longer cube readiness estimate.
 
 The review's exact frame-lock gate was deliberately replaced by the nominal-deadline policy described above.
 The full P-core-load/idle-CPU gate, actual `SetOverlayTexture` latency, compositor-start distribution, prediction

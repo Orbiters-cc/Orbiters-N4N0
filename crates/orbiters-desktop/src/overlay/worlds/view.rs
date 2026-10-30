@@ -606,10 +606,20 @@ impl View {
             Kind::Wide
         };
         let steady = self.moving && self.steady_since.is_some_and(|t| now.saturating_duration_since(t) >= Duration::from_millis(100));
-        let horizon = self.pacer.horizon(kind, self.refresh_hz, steamvr.time_since_vsync().unwrap_or(0.0), self.photons, steady);
-        let predicted = tracked_head(steamvr, horizon);
+        let mut horizon = self.pacer.horizon(kind, self.refresh_hz, steamvr.time_since_vsync().unwrap_or(0.0), self.photons, steady);
+        let mut predicted = tracked_head(steamvr, horizon);
         if !predicted.pose_is_valid {
             return;
+        }
+        // Prediction can cross the cube's boundary before the unpredicted head does. Select the full-cube
+        // horizon before planning mutates transforms/slots; that job takes much longer than a wide refresh.
+        let predicted_eyes = self.eye_to_head.map(|eye| stereo::position(&stereo::compose(&predicted.device_to_absolute, &eye)));
+        if kind == Kind::Wide && self.cubes[self.active].is_some_and(|c| predicted_eyes.iter().any(|e| !c.holds(*e, REACH_M))) {
+            horizon = self.pacer.horizon(Kind::Cube, self.refresh_hz, steamvr.time_since_vsync().unwrap_or(0.0), self.photons, steady);
+            predicted = tracked_head(steamvr, horizon);
+            if !predicted.pose_is_valid {
+                return;
+            }
         }
         let head = predicted.device_to_absolute;
         let views = [stereo::compose(&head, &self.eye_to_head[0]), stereo::compose(&head, &self.eye_to_head[1])];

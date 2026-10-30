@@ -3,9 +3,10 @@
 The **Unity projects** page, immediately after Capture, manages the VCC/ALCOM project list and VPM packages without
 requiring Creator Companion to run. **Capture → Add to my avatar** uses the same project and avatar inventory.
 
-`crates/orbiters-projects` owns discovery, Unity text-scene inspection, VPM operations, templates, thumbnails and the
-setup-request contract. The desktop's `pages/projects` holds the window's background jobs and their snapshots. Disk
-walks, file dialogs, Git, package resolution, copies, thumbnail decoding and HTTP requests run off the egui thread.
+`crates/orbiters-projects` owns discovery, Unity text-scene inspection, VPM operations, templates, thumbnails, the
+setup-request contract, projects' sizes (`size`), the hidden list (`hidden`) and Blender links (`blender`). The
+desktop's `pages/projects` holds the window's background jobs and their snapshots. Disk walks, file dialogs, Git,
+package resolution, copies, thumbnail decoding and HTTP requests run off the egui thread.
 
 ## Shared storage
 
@@ -120,10 +121,91 @@ uses VPM's official repository. With VCC installed (its uninstall entry gives th
 covers VCC shows (`WebApp/Dist/template-covers`: VRChat's templates have their own, any other one VCC's Custom cover),
 loaded on a worker and fading in; without VCC the cards keep their icon. Each newly created project gets its own product GUID. Creation copies the
 template into a new folder, restores packages and registers it. A custom template without ProjectVersion asks for
-the exact editor version. Duplication excludes Library, Temp, Logs, obj, UserSettings, node_modules and Git history;
-it shows file progress and can be cancelled during copying. An interrupted or failed copy stays on disk for review
-and is not registered. Existing destination folders are never overwritten. ALCOM's custom template descriptors and
-unitypackage hooks are not interpreted; VCC-format user template folders are supported.
+the exact editor version. A copy (`templates::copy_keeping`) leaves out what Unity or the IDE make again at the
+project's top (Library unless asked for, Temp, Logs, obj, `.vs`, the `.csproj` and `.sln` files), UserSettings, and Git
+history and `node_modules` wherever they are; an asset folder named Library or Temp deeper in is copied. It shows file
+progress and can be cancelled during copying. An interrupted or failed copy stays on disk for review and is not
+registered. Existing destination folders are never overwritten. A new project gets a product GUID of its own; a
+template's `productName` becomes the project's name, a copy's when it was the copied project's folder name (the editor
+keeps a project's PlayerPrefs under it), else it stays (`templates::retarget`). ALCOM's custom template descriptors
+and unitypackage hooks are not interpreted; VCC-format user template folders are supported. A created or copied
+project closes its dialog and opens in the panel once the scan lists it.
+
+The panel's "…" menu has **Duplicate…** (`duplicate.rs`, `templates::duplicate`): the copy's name ("<name> copy" to
+begin with; refused when not a valid folder name or when that folder exists), its location (the project's own folder
+to begin with), Copy Library too (off: Unity imports everything again on the first opening; on: it opens at once, for
+what Library takes, said with its size), about how much the copy takes against the room left on that disk (Duplicate
+is refused when it does not fit), and a note that the copy's scenes keep their blueprint IDs, so uploads from it update
+the same avatars and worlds unless the IDs are detached in the Pipeline Manager. The copy's progress shows in the
+dialog with Stop copying; then its packages are restored, it is registered in the list VCC and ALCOM share and it opens
+in the panel.
+
+## Size on disk
+
+The hero card's pills end with how much the project takes on disk, and what Library takes of it when there is room
+(the file count and the whole sentence on hover); "Measuring…" with a spinner until the first answer. `size::measure`
+walks the folder on a below-normal-priority worker (never through links or reparse points), one project at a time; the
+answer is kept in `%LOCALAPPDATA%/Orbiters/project-sizes.json` with the project's stamp (the latest modification time
+of its folder, Assets, Packages, ProjectSettings, Library and the VPM manifest). A project is looked up once per visit
+of the page; it is walked again only when its stamp changed or its answer is a day old, the size known before showing
+meanwhile. `size::free_space` gives the Duplicate dialog the room left on the destination's disk.
+
+## Hidden projects
+
+The "…" menu's **Hide this project** (Show this project once hidden) keeps the project's folder in
+`%LOCALAPPDATA%/Orbiters/hidden-projects.json` (`hidden`, by `discovery::key`; saved on a worker, a save started
+earlier never landing over a later one). Hidden projects leave the cards and Found on this computer, the counts in the
+header and the sections' pills, and the choice of the project the docked panel shows first. A chip at the right of
+"Your projects", **Hidden · n**, shows them again, dimmed and marked Hidden (a found one says so in its line), until
+pressed again. Hiding the project shown moves the panel on (a sheet slides away). VCC and ALCOM keep listing them;
+nothing in the projects changes.
+
+## Avatars and worlds on VRChat
+
+Each avatar row has Open on VRChat (`https://vrchat.com/home/avatar/<avtr_id>`, `controller::open_url`) at its top
+right. A world project (its SDK, or worlds and no avatars in its scenes) has a **Worlds** card in place of the Avatars
+card (`world_card.rs`): each world with its picture (16:9, `art::avatar`), its name (VRChat's from its log when this
+computer visited it, else the scene object's unless it is the SDK's `VRCWorld`, else the project's), its scene, what
+this member already has on Orbiters' Map explorer (`ctl.maps()`, asked for once a visit: a 3D preview, how many
+pictures, or Not on Orbiters yet; a shimmer until Orbiters answers) and Open on VRChat
+(`https://vrchat.com/home/world/<wrld_id>`). Under it a well says that what is added shows on orbiters.cc's Maps page
+and in the VRChat world Orbiters 3D pictures viewer (it reads the same server's `/maps/vrchat/*` routes), with:
+
+- **Share my 3D capture** (a dropdown, Share a 3D capture, when several): the sessions of the library recorded in that
+  world and reconstructed (`crate::worlds::load`, read once per visit and library change), through
+  `ctl.upload_preview`; its splats become the world's 3D preview on Orbiters, in place of this member's earlier one.
+  Without one the button says on hover how to make one.
+- **VRChat pictures**: a multi-file dialog (PNG, JPEG, WebP) opening in the folder of the newest picture taken in that
+  world, else VRChat's pictures folder (`visited::screenshot_dirs`); **From this computer**: the same, in Pictures.
+  Both go through `ctl.upload_pictures`. Dialogs run on a worker.
+- Signed out of Orbiters: Sign in to Orbiters to add (Finish in your browser while it waits).
+
+The world's latest upload shows under them, from the snapshot's uploads as on the Visited worlds page: Sending to
+Orbiters… (handed to the tray service, until it lists it), Preparing the 3D capture…, Sharing … · n % with a bar, then
+how many pictures were added (and how many were there already), the 3D capture now the world's preview, or why not.
+
+## Blender files
+
+Avatars' and worlds' rows list the .blend files Orbiters' Blender tools linked them to, each with the tool, when it was
+saved, its path on hover and **Open in Blender** (`blend.rs`, `orbiters_projects::blender`). The links are read from
+the project when it is opened and after each scan (small files only):
+
+- Mixer: `Assets/Orbiters/Mixer/Link/<scene GUID>.asset` (`blendPath`, written by "Open scene in Blender") and the
+  .blend files in `Assets/Orbiters/Mixer/Blender/<scene GUID>/blend~/`. The scene's GUID is matched with the `.meta` of
+  the avatars' and worlds' scenes; a Mixer link goes to every avatar or world of its scene.
+- MCB before 1.12.11 (it now goes through Mixer): `Library/MCB/BlenderSync/<session>/session.json`
+  (`customBaseGlobalId`'s scene GUID, `blenderProjectAbsolutePath`, else `blenderProjectUnityPath`) and, for a .blend
+  picked by hand, the session's `blender_heartbeat.json` (`blendFile`); and the .blend files MCB made,
+  `Assets/MCB/blenderProjects/<avatar root>_<12 hex>[_n]/(blend~/)<avatar root>.blend`. A link that names an avatar
+  root goes to the avatar of that name (MCB's folder-safe spelling too); one that does not, to the avatars of its scene.
+
+Each .blend is listed once, newest first, only if it exists; `.blend1` backups are left out. Open in Blender looks for
+Blender where .blend files open (`HKEY_CLASSES_ROOT\.blend`'s ProgID `shell\open\command`), Steam's (each library of
+`libraryfolders.vdf`, `steamapps/common/Blender`) and `Program Files\Blender Foundation\Blender *`, each's version
+being the newest version folder beside its program. It starts the newest that has Mixer's or MCB's add-on in Blender's
+user settings (`%APPDATA%/Blender Foundation/Blender/<version>/scripts/addons` or `extensions/*`), else the newest,
+else the associated one (the association alone can be an old Blender that would not open a newer file), with the
+file and its folder as working directory; without any, the shell opens the file.
 
 ## Adding N4N0
 
@@ -156,7 +238,13 @@ Other deterministic offscreen states: `projects-detail`, `projects-packages`, `p
 `projects-avatars`, `projects-choice`, `projects-setup`, `projects-ready`, `projects-mixer` (its info open),
 `projects-mixer-open-mid`, `projects-mixer-fold-mid`, `projects-mixer-adding`, `projects-commits` (the Git card),
 `projects-commits-open` (a commit opened), `projects-commits-mid` (its rows coming in), `projects-commits-narrow`
-(with `--width 1040`), `projects-world` (a world project with its thumbnail), `projects-repos-crossfade` (repository
+(with `--width 1040`), `projects-world` (a world project with its thumbnail and its Worlds card before Orbiters
+answered), the panel's additions in `screenshot/projects_panel.rs`: `projects-size` and `-size-measuring`,
+`-avatars-links` (Open on VRChat and Blender files), `-worlds` (what Orbiters has, three captures, a Blender file),
+`-worlds-new`, `-worlds-sharing`, `-worlds-done`, `-worlds-failed`, `-worlds-signed-out`, `-worlds-capture-menu`
+(the captures' list open), `-duplicate`, `-duplicate-taken`, `-duplicate-library`, `-duplicate-copying`, `-hidden`,
+`-hidden-shown`, `-hidden-press` (the chip pressed) and `-header-blur` (the cards under the header's blur); the
+Worlds card shows whole with `--height 1300`. `projects-repos-crossfade` (repository
 icons fading in), `projects-repos-live` (review only: the repositories' real icons, cache then network), `projects-new-novcc` and
 `projects-repos-novcc` (a computer without VCC), `projects-new-loading` (covers fading in) and `projects-new-covers`
 (VCC's real covers when it is installed). Package icons in screenshots are stand-ins (pictures, light and dark marks,

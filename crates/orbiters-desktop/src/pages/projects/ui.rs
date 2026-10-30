@@ -41,6 +41,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     state.ensure(&ctx);
     if state.visit != cx.visit {
         state.visit = cx.visit;
+        // Sizes are looked up again (measured again only if the projects changed).
+        state.sizes_asked.clear();
         if state.scan_rx.is_none() {
             state.refresh(&ctx, false);
         }
@@ -49,9 +51,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let page = ui.max_rect();
 
     // Short, so that the toolbar keeps to the title's row on narrow windows (what the computer has besides is counted
-    // in its own section).
-    let registered = state.scan.projects.iter().filter(|p| p.registered).count();
-    let avatars: usize = state.scan.projects.iter().filter(|p| p.registered).map(|p| p.avatars.len()).sum();
+    // in its own section). Hidden projects are not counted.
+    let listed = |p: &&Project| p.registered && !state.is_hidden(&p.path);
+    let registered = state.scan.projects.iter().filter(listed).count();
+    let avatars: usize = state.scan.projects.iter().filter(listed).map(|p| p.avatars.len()).sum();
     let sub = if state.scanning() && state.scan.projects.is_empty() {
         "Looking for Unity projects…".to_string()
     } else if state.scanning() {
@@ -79,9 +82,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if state.selected.as_ref().is_some_and(|s| !state.scan.projects.iter().any(|p| &p.path == s)) && state.reveal.is_none() && !state.fixture {
         state.selected = None;
     }
-    // Wide windows always show a project: the most recent one until another is picked.
+    // Wide windows always show a project: the most recent one (not hidden) until another is picked.
     if split.docked && (state.selected.is_none() || state.panel_closing) {
-        if let Some(p) = state.scan.projects.iter().filter(|p| p.registered).max_by_key(|p| p.modified) {
+        if let Some(p) = state.scan.projects.iter().filter(|p| p.registered && !state.is_hidden(&p.path)).max_by_key(|p| p.modified) {
             let path = p.path.clone();
             state.open(&ctx, path);
         }
@@ -97,14 +100,20 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let gallery_rect = Rect::from_min_max(page.min, pos2(gallery_right + edge, page.bottom()));
     let mut gu = ui.new_child(UiBuilder::new().max_rect(gallery_rect).id_salt("projects-gallery"));
     let bar = Rect::from_min_max(pos2(gallery_rect.left(), placed.content_top), gallery_rect.max);
-    egui::ScrollArea::vertical().id_salt("unity-projects").auto_shrink([false, false]).scroll_bar_rect(bar).show(&mut gu, |ui| {
+    let mut scroll = egui::ScrollArea::vertical().id_salt("unity-projects").auto_shrink([false, false]).scroll_bar_rect(bar);
+    if let Some(y) = state.scroll_gallery {
+        scroll = scroll.vertical_scroll_offset(y);
+    }
+    scroll.show(&mut gu, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: PAD_X as i8, right: edge.round() as i8, top: 0, bottom: 104 }).show(ui, |ui| {
             ui.add_space(placed.content_top - page.top());
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             gallery(ui, cx, state);
         });
     });
-    pages::under_top(&gu, cx, "unity-projects", from, placed.band_bottom);
+    // Across the whole page, not the cards' width only: the docked panel starts lower, and the cards blurred under the
+    // header would otherwise stop at a hard edge above the gap between them and the panel.
+    pages::under_top(ui, cx, "unity-projects", from, placed.band_bottom);
 
     let pressed = header.show(ui, cx, &placed, Some(&mut state.query));
     for (a, r) in header.actions.iter().zip(&placed.actions) {
@@ -159,7 +168,8 @@ pub(super) fn errors(ui: &mut Ui, state: &mut State, salt: &str) {
     }
 }
 
-fn section_title(ui: &mut Ui, title: &str, count: Option<usize>, sub: Option<&str>) {
+/// A section's title row (its count in a pill, a line under it); returns the row.
+fn section_title(ui: &mut Ui, title: &str, count: Option<usize>, sub: Option<&str>) -> Rect {
     let h = if sub.is_some() { 52.0 } else { 34.0 };
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
     let p = ui.painter();
@@ -169,6 +179,22 @@ fn section_title(ui: &mut Ui, title: &str, count: Option<usize>, sub: Option<&st
     }
     if let Some(s) = sub {
         widgets::text_truncated(p, pos2(r.left(), r.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(s, 12.5).color(theme::FG_3), r.width());
+    }
+    r
+}
+
+/// The chip at the right of the projects' title that shows the hidden projects too (with how many), or not.
+fn hidden_filter(ui: &mut Ui, state: &mut State, row: Rect, n: usize) {
+    let label = format!("Hidden · {n}");
+    let chip = widgets::Chip::new(&label).icon(icons::EYE_SLASH).selected(state.show_hidden).id_salt("projects-hidden-filter");
+    let w = chip.width(ui);
+    let r = Rect::from_min_size(pos2(row.right() - w, row.top() + 12.0 - widgets::CHIP_H * 0.5), vec2(w, widgets::CHIP_H));
+    state.anchors.insert("hidden-filter".into(), r);
+    let out = chip.show_at(ui, r);
+    let pressed = out.pressed;
+    let _ = out.response.on_hover_text(if state.show_hidden { "Leave the hidden projects out" } else { "Show the projects you hid, dimmed" });
+    if pressed {
+        state.show_hidden = !state.show_hidden;
     }
 }
 
@@ -182,18 +208,28 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     let q = state.query.trim().to_lowercase();
     let matches = |p: &&Project| q.is_empty() || p.name.to_lowercase().contains(&q) || p.path.to_string_lossy().to_lowercase().contains(&q);
-    let mut registered: Vec<Project> = state.scan.projects.iter().filter(|p| p.registered).filter(matches).cloned().collect();
+    // Hidden projects only when asked for (dimmed and marked then).
+    let hidden_n = state.scan.projects.iter().filter(|p| state.is_hidden(&p.path)).count();
+    let shown = |p: &&Project| state.show_hidden || !state.is_hidden(&p.path);
+    let mut registered: Vec<Project> = state.scan.projects.iter().filter(|p| p.registered).filter(matches).filter(shown).cloned().collect();
     registered.sort_by_key(|p| std::cmp::Reverse(p.modified));
-    let mut proposals: Vec<Project> = state.scan.projects.iter().filter(|p| !p.registered).filter(matches).cloned().collect();
+    let mut proposals: Vec<Project> = state.scan.projects.iter().filter(|p| !p.registered).filter(matches).filter(shown).cloned().collect();
     proposals.sort_by_key(|p| std::cmp::Reverse(p.modified));
+    let counted = |list: &[Project]| list.iter().filter(|p| !state.is_hidden(&p.path)).count();
+    let (registered_n, proposals_n) = (counted(&registered), counted(&proposals));
 
-    section_title(ui, "Your projects", (!registered.is_empty()).then_some(registered.len()), None);
+    let title = section_title(ui, "Your projects", (registered_n > 0).then_some(registered_n), None);
+    if hidden_n > 0 || state.show_hidden {
+        hidden_filter(ui, state, title, hidden_n);
+    }
     ui.add_space(6.0);
     if registered.is_empty() {
         if state.scanning() {
             skeletons(ui, 3);
         } else if !q.is_empty() {
             quiet_empty(ui, cx, "No project matches", "Try another name, or clear the search.");
+        } else if state.scan.projects.iter().any(|p| p.registered) {
+            quiet_empty(ui, cx, "Your projects are hidden", "Hidden, above the cards, shows them again.");
         } else {
             empty(ui, cx, state);
         }
@@ -202,7 +238,7 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     if !proposals.is_empty() {
         ui.add_space(32.0);
-        section_title(ui, "Found on this computer", Some(proposals.len()), Some("Add one to manage its avatars and packages here, in VCC and in ALCOM."));
+        section_title(ui, "Found on this computer", Some(proposals_n), Some("Add one to manage its avatars and packages here, in VCC and in ALCOM."));
         ui.add_space(10.0);
         found(ui, state, &proposals);
     }
@@ -248,6 +284,12 @@ fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) 
     let r = Rect::from_center_size(rect.center() + vec2(0.0, 18.0 * (1.0 - enter) - 3.0 * hover), rect.size() * scale);
     let mut pt = ui.painter().clone();
     pt.multiply_opacity(enter.clamp(0.0, 1.0));
+    // A hidden project, shown on request: dimmed (brighter on hover) and marked.
+    let hidden = state.is_hidden(&p.path);
+    let dim = anim::toggle(&ctx, id.with("hidden"), hidden, Spring::SOFT).clamp(0.0, 1.0);
+    if dim > 0.0 {
+        pt.multiply_opacity(1.0 - dim * (0.5 - 0.25 * hover.clamp(0.0, 1.0)));
+    }
     let sel = art::selection(&pt, id.with("selected"), r, theme::CARD_RADIUS, selected);
     widgets::frame(&pt, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover.max(sel * 0.6)));
     let cover = Rect::from_min_size(r.min, vec2(r.width(), (r.width() * 0.5625).round()));
@@ -272,6 +314,8 @@ fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) 
             theme::DANGER,
             true,
         );
+    } else if hidden {
+        badge(&pt, ui, pos2(cover.right() - 12.0, cover.top() + 12.0), Some(icons::EYE_SLASH), "Hidden", theme::black(0.6), theme::FG_2, true);
     }
     let x = r.left() + 16.0;
     widgets::text_truncated(&pt, pos2(x, cover.bottom() + 22.0), Align2::LEFT_CENTER, &Txt::new(&p.name, 15.0).weight(weight::SEMIBOLD), r.width() - 32.0);
@@ -456,7 +500,12 @@ fn found_row(ui: &mut Ui, state: &State, p: &Project, rect: Rect) -> Option<bool
     let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let selected = state.selected.as_ref() == Some(&p.path) && !state.panel_closing;
     let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.02 * press));
-    let pt = ui.painter();
+    let mut dimmed = ui.painter().clone();
+    let hidden = state.is_hidden(&p.path);
+    if hidden {
+        dimmed.multiply_opacity(0.5 + 0.25 * hover.clamp(0.0, 1.0));
+    }
+    let pt = &dimmed;
     let sel = art::selection(pt, id.with("selected"), r, 16.0, selected);
     widgets::frame(pt, r, 16.0, theme::mix(theme::alpha(theme::INK_850, 0.6), theme::INK_800, hover.max(sel * 0.6)));
     let thumb = Rect::from_min_size(pos2(r.left() + 10.0, r.center().y - 28.0), vec2(56.0, 56.0));
@@ -472,6 +521,7 @@ fn found_row(ui: &mut Ui, state: &State, p: &Project, rect: Rect) -> Option<bool
     } else {
         format!("Unity {} · {}", p.unity, plural(p.avatars.len(), "avatar", "avatars"))
     };
+    let meta = if hidden { format!("Hidden · {meta}") } else { meta };
     widgets::text_truncated(pt, pos2(x, r.center().y + 18.0), Align2::LEFT_CENTER, &Txt::new(meta, 11.5).color(theme::FG_4), tw);
     let br = Rect::from_min_size(pos2(r.right() - 14.0 - aw, r.center().y - 16.0), vec2(aw, 32.0));
     if widgets::activated(&add_b.show_at(ui, br)) {
@@ -483,7 +533,7 @@ fn found_row(ui: &mut Ui, state: &State, p: &Project, rect: Rect) -> Option<bool
 /// The capsule over the bottom of the cards while an action runs (unless a dialog shows it), with a project copy's
 /// progress and its Cancel.
 fn activity(ui: &mut Ui, state: &mut State, area: Rect) {
-    let shown_in_dialog = matches!(state.modal, Some(Modal::New | Modal::Setup | Modal::Repos));
+    let shown_in_dialog = matches!(state.modal, Some(Modal::New | Modal::Setup | Modal::Repos | Modal::Duplicate(_)));
     let label = state.acting().map(str::to_string).filter(|_| !shown_in_dialog);
     let p = state.copy_progress.lock().unwrap().clone();
     let copying = p.total > 0 && label.is_some();

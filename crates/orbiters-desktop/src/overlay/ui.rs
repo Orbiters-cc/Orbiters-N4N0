@@ -31,10 +31,21 @@ pub enum Page {
     Walk,
 }
 
+/// Where the interface shows: the tab in SteamVR's dashboard, or the floating panel in the play space
+/// ([`super::floating`]), beside which VRChat keeps its controls.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Surface {
+    #[default]
+    Dashboard,
+    Floating,
+}
+
 #[derive(Default)]
 pub struct OverlayUi {
     pub calibrator: Calibrator,
     pub page: Page,
+    /// The tab's Float button was pressed: the floating panel opens before the eyes.
+    float: bool,
     /// The Talk button is held.
     talking: bool,
     /// "Hear yourself": the microphone played in the headset.
@@ -77,9 +88,29 @@ impl OverlayUi {
         }
     }
 
+    /// The tab's Float button was pressed since the last call.
+    pub fn take_float(&mut self) -> bool {
+        std::mem::take(&mut self.float)
+    }
+
+    /// The interface in the dashboard's tab.
     pub fn show(&mut self, ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, poses: &mut dyn Poses) {
+        self.show_in(ui, snap, ctl, poses, Surface::Dashboard);
+    }
+
+    /// The interface on `surface`: the same on both but for the tab's Float button, which opens the floating panel
+    /// (VRChat keeps its controls while that shows; the dashboard takes them).
+    pub fn show_in(&mut self, ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, poses: &mut dyn Poses, surface: Surface) {
         let rect = Rect::from_min_size(pos2(0.0, 0.0), SIZE);
-        header(ui, snap, rect);
+        let pill = header(ui, snap, rect);
+        if surface == Surface::Dashboard {
+            let float = Button::new("Float").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Ghost).size(Size::Sm).id_salt("overlay-float");
+            let w = float.desired_width(ui);
+            let at = Rect::from_min_size(pos2(pill.left() - 10.0 - w, pill.center().y - 16.0), vec2(w, 32.0));
+            if float.hint("In the play space beside VRChat, which keeps your controllers").show_at(ui, at).clicked() {
+                self.float = true;
+            }
+        }
         // Capture or N4N0, in the middle of the header.
         let mut page = self.page;
         // The control's width: its labels with their padding, and the track's.
@@ -505,7 +536,8 @@ pub fn backdrop(ui: &Ui) {
     p.rect_filled(rect, 0.0, theme::INK_950);
 }
 
-fn header(ui: &mut Ui, snap: &Snapshot, rect: Rect) {
+/// The header; returns where its state pill is (the Float button goes left of it).
+fn header(ui: &mut Ui, snap: &Snapshot, rect: Rect) -> Rect {
     let p = ui.painter().clone();
     let recording = matches!(snap.capture.state, CaptureState::Recording | CaptureState::Paused);
     let mark = Rect::from_min_size(pos2(28.0, 26.0), n4n0_logo::size_for_width(44.0));
@@ -539,6 +571,7 @@ fn header(ui: &mut Ui, snap: &Snapshot, rect: Rect) {
     if let Some(et) = et {
         widgets::text(&p, pos2(tr.right() + 10.0, r.center().y), Align2::LEFT_CENTER, &et);
     }
+    r
 }
 
 fn rec_state(s: CaptureState) -> RecState {

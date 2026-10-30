@@ -82,10 +82,62 @@ pub struct WorldPage {
     pub previews: usize,
     #[serde(default)]
     pub picture_count: usize,
+    /// The first page of the members' pictures of it (newest first, 48 at most).
+    #[serde(default, deserialize_with = "pictures")]
+    pub pictures: Vec<WorldPicture>,
 }
 
+/// The server's list as its length, or the number a kept copy wrote (the page's `previews` is written as a count: read
+/// strictly as a list, a kept page never read back).
 fn count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
-    Ok(Vec::<serde::de::IgnoredAny>::deserialize(d)?.len())
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Array(items) => items.len(),
+        serde_json::Value::Number(n) => n.as_u64().map_or(0, |n| n as usize),
+        _ => 0,
+    })
+}
+
+/// A member's picture of a world on the Map explorer. Its addresses may be relative to the API.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldPicture {
+    pub id: u64,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    /// RFC 3339.
+    #[serde(default)]
+    pub taken_at: Option<String>,
+    /// Who shared it.
+    #[serde(default)]
+    pub by: Option<String>,
+}
+
+/// The page's pictures, each read on its own: one the server shapes otherwise is left out, never the page. Reads the
+/// server's (`uploader: { name }`) and the kept copy's (`by`).
+fn pictures<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<WorldPicture>, D::Error> {
+    let raw = Option::<Vec<serde_json::Value>>::deserialize(d)?.unwrap_or_default();
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| {
+            let text = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+            let whole = |k: &str| v.get(k).and_then(|x| x.as_u64()).and_then(|n| u32::try_from(n).ok());
+            Some(WorldPicture {
+                id: v.get("id")?.as_u64()?,
+                url: text("url"),
+                thumbnail_url: text("thumbnailUrl"),
+                width: whole("width"),
+                height: whole("height"),
+                taken_at: text("takenAt"),
+                by: text("by").or_else(|| v.get("uploader").and_then(|u| u.get("name")).and_then(|n| n.as_str()).map(str::to_string)),
+            })
+        })
+        .collect())
 }
 
 /// What this member added to one world.
@@ -445,6 +497,17 @@ mod tests {
         .unwrap();
         assert_eq!(page.world.name, "Palm Point");
         assert_eq!((page.previews, page.picture_count), (2, 7));
+        // Its pictures, each on its own: one without an id is left out, the page still read; the kept copy reads back.
+        let page: WorldPage = serde_json::from_str(
+            r#"{"world":{"worldId":"wrld_a","name":"Palm Point"},"pictureCount":2,"pictures":[
+                {"id":41,"url":"https://files.orbiters.cc/p/41.jpg","thumbnailUrl":"/files/serve/41?thumbnail=true","width":1920,"height":1080,
+                 "takenAt":"2026-10-18T18:37:41.000Z","uploader":{"id":3,"name":"Kana"}},{"url":"no id"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(page.pictures.len(), 1);
+        assert_eq!((page.pictures[0].id, page.pictures[0].by.as_deref(), page.pictures[0].width), (41, Some("Kana"), Some(1920)));
+        let kept: WorldPage = serde_json::from_str(&serde_json::to_string(&page).unwrap()).unwrap();
+        assert_eq!(kept, page);
         let mine: Mine = serde_json::from_str(
             r#"{"worlds":[{"worldId":"wrld_a","preview":{"id":3,"url":"/files/serve/9","splats":600000,"createdAt":"2026-10-20T20:00:00.000Z"},
                "pictures":[{"id":4,"url":"/files/serve/10","sourceHash":"ab12"}]}]}"#,

@@ -280,6 +280,9 @@ impl Service {
                     });
                 }
             }
+            // Only the window picks picture files; the upload runs on a thread of its own.
+            ToService::VrchatPicture { scope, id, path } if role == Role::Window => ctl.vrchat_picture(scope, id, path),
+            ToService::VrchatPicture { .. } => {}
             ToService::StopReconstruction => {
                 ctl.stop_reconstruction();
             }

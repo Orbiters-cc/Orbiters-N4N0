@@ -25,7 +25,12 @@ use orbiters_ui::{toast, widgets};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+mod floating;
+mod gallery_layouts;
+mod projects_panel;
+mod editor;
 mod vrchat_login;
+mod worlds_overlay;
 
 struct Scenario {
     name: &'static str,
@@ -105,6 +110,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     if only.as_deref() == Some("splats-3d") {
         return splats_3d(&mut Offscreen::new()?, &out, &settings, scale);
     }
+    if only.as_deref() == Some("editor-3d") {
+        return editor::three_d(&mut Offscreen::new()?, &out, &settings, scale);
+    }
     if only.as_deref() == Some("e2e-cleanup") {
         return e2e_cleanup(&mut Offscreen::new()?, &out, &settings, scale);
     }
@@ -113,6 +121,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("overlay") {
         return overlay_shots(&out, &settings);
+    }
+    if only.as_deref() == Some("floating") {
+        return floating::shots(&out, &settings);
+    }
+    if only.as_deref() == Some("worlds-overlay") {
+        return worlds_overlay::shots(&out);
     }
 
     let sessions = controller::list_sessions(&settings.sessions_dir);
@@ -1627,6 +1641,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         });
     }
     vrchat_login::append(&mut scenarios);
+    editor::append(&mut scenarios);
+    projects_panel::append(&mut scenarios);
+    gallery_layouts::append(&mut scenarios);
+    floating::append(&mut scenarios);
 
     // Home's music is the overlay's sample song, never what this computer plays.
     crate::media::watcher().stand_in(crate::media::Reading {
@@ -1640,6 +1658,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         if only.as_deref().is_some_and(|o| {
             o != sc.name
                 && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))
+                && !(o == "editor" && sc.name.starts_with("editor-"))
                 && !(o == "sharing" && (sc.name.starts_with("gallery-") || sc.name.starts_with("world-share")))
                 && !(o == "events" && (sc.name.starts_with("events") || sc.name.starts_with("gallery-community")))
         }) {
@@ -1821,6 +1840,12 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
                 "gallery-copy-link" if f + 8 == sc.frames => gallery.stage_copied_link(&ctx),
                 _ => {}
             }
+            // The layouts and a multi-layer picture, on made-up pictures.
+            gallery_layouts::stage(&ctx, gallery, sc.name, f);
+        }
+        // The photo editor over a picture window, its preview made before each frame.
+        if sc.name.starts_with("editor-") {
+            editor::stage(&ctx, &mut app, sc.name, f);
         }
         if sc.page == Page::Events || sc.name.starts_with("gallery-community") {
             stage_events(&ctx, &mut app, sc, f);

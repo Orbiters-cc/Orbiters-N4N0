@@ -193,7 +193,7 @@ impl MenuOverlay {
         // 3D worlds: the capture around the person and its download whether the menu shows or not, the pill under the
         // menu while it shows its front (not over its keyboard).
         let menu_at = self.placed.filter(|_| self.host.menu.open && self.shown && !self.behind && !self.host.menu.shows_keyboard());
-        let (open_worlds, pressed) = self.worlds.update(overlay, steamvr, presenter, snap, menu_at.as_ref());
+        let (open_worlds, pressed) = self.worlds.update(overlay, steamvr, presenter, snap, backend, menu_at.as_ref());
         clicked |= pressed;
         if open_worlds {
             self.worlds.open_panel(self.host.menu.layout);

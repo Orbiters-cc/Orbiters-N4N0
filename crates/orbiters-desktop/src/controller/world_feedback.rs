@@ -22,6 +22,9 @@ const LOG_EVERY: Duration = Duration::from_millis(250);
 /// A world shown somewhere is read again from Orbiters after this long, for as long as it is wanted.
 const READ_AGAIN: Duration = Duration::from_secs(30);
 const WANTED_FOR: Duration = Duration::from_secs(300);
+/// Worlds a menu asked about lately (the overlay's 3D worlds panel shows any capture's world) whose feedback the menus
+/// get besides their subjects' (for [`WANTED_FOR`]).
+const ASKED_MAX: usize = 6;
 /// Previous instances are read again from their file after this long.
 const INSTANCES_EVERY: Duration = Duration::from_secs(10);
 /// What the answer gives the member's own comments as their author (the world says "You").
@@ -54,6 +57,8 @@ pub(super) struct WorldFeedbackRuntime {
     queue_path: PathBuf,
     /// The last error of a menu's action, by world.
     menu_errors: HashMap<String, String>,
+    /// Worlds a menu asked about (read, liked, labelled, commented), newest first, since when.
+    asked: Vec<(String, Instant)>,
     instances: (Vec<orbiters_orb::menu::InstanceRow>, Option<Instant>),
     /// Why the local address cannot be served (another program has the port).
     pub(super) port_note: Option<String>,
@@ -73,6 +78,7 @@ impl Default for WorldFeedbackRuntime {
             queue: Queue::load(&queue_path, now_ms()),
             queue_path,
             menu_errors: HashMap::new(),
+            asked: Vec::new(),
             instances: (Vec::new(), None),
             port_note: None,
             sent: None,
@@ -212,7 +218,7 @@ impl WorldFeedbackRuntime {
             self.instances = (orbiters_orb::invites::read_rows(), Some(Instant::now()));
         }
         let mut subjects: Vec<Subject> = Vec::new();
-        let mut add = |subjects: &mut Vec<Subject>, world: &str, name: &str, why: Why| {
+        let add = |subjects: &mut Vec<Subject>, world: &str, name: &str, why: Why| {
             let world = world.to_ascii_lowercase();
             if subjects.len() < SUBJECTS_MAX && contract::is_world_id(&world) && !subjects.iter().any(|s| s.world == world) {
                 subjects.push(Subject { world, name: name.to_string(), why });
@@ -228,35 +234,53 @@ impl WorldFeedbackRuntime {
             let world = row.location.split(':').next().unwrap_or_default();
             add(&mut subjects, world, &row.world, Why::Instance { at: row.at });
         }
-        let worlds = subjects
-            .iter()
-            .map(|s| {
-                let seen = self.seen(&s.world);
-                WorldFeedback {
-                    world: s.world.clone(),
-                    loading: seen.loading,
-                    likes: seen.likes,
-                    liked: seen.liked,
-                    labels: seen.labels.iter().map(|(id, count, mine)| LabelCount { id: id.clone(), count: *count, mine: *mine }).collect(),
-                    justification: seen.justification.clone(),
-                    comments: seen
-                        .comments
-                        .iter()
-                        .map(|(id, by, text, at, mine)| CommentRow {
-                            id: *id,
-                            by: by.clone(),
-                            text: text.clone(),
-                            at: at.as_deref().map_or(now_ms() / 1000, rfc3339_seconds),
-                            mine: *mine,
-                        })
-                        .collect(),
-                    comment_count: seen.comment_count,
-                    pending: seen.pending,
-                    error: self.menu_errors.get(&s.world).cloned(),
-                }
-            })
-            .collect();
+        // The subjects', then those a menu asked about lately that are not among them.
+        self.asked.retain(|(_, at)| at.elapsed() < WANTED_FOR);
+        let mut shown: Vec<&str> = subjects.iter().map(|s| s.world.as_str()).collect();
+        for (world, _) in &self.asked {
+            if !shown.contains(&world.as_str()) {
+                shown.push(world);
+            }
+        }
+        let worlds = shown.into_iter().map(|w| self.feedback_of(w)).collect();
         FeedbackView { signed_in, subjects, worlds }
+    }
+
+    /// What the menus show of a world's feedback.
+    fn feedback_of(&self, world: &str) -> WorldFeedback {
+        let seen = self.seen(world);
+        WorldFeedback {
+            world: world.to_string(),
+            loading: seen.loading,
+            likes: seen.likes,
+            liked: seen.liked,
+            labels: seen.labels.iter().map(|(id, count, mine)| LabelCount { id: id.clone(), count: *count, mine: *mine }).collect(),
+            justification: seen.justification.clone(),
+            comments: seen
+                .comments
+                .iter()
+                .map(|(id, by, text, at, mine)| CommentRow {
+                    id: *id,
+                    by: by.clone(),
+                    text: text.clone(),
+                    at: at.as_deref().map_or(now_ms() / 1000, rfc3339_seconds),
+                    mine: *mine,
+                })
+                .collect(),
+            comment_count: seen.comment_count,
+            pending: seen.pending,
+            error: self.menu_errors.get(world).cloned(),
+        }
+    }
+
+    /// A menu asked about `world` (lowercase): its feedback goes to the menus for a while, whatever their subjects.
+    fn asked(&mut self, world: &str) {
+        if !contract::is_world_id(world) {
+            return;
+        }
+        self.asked.retain(|(w, _)| w != world);
+        self.asked.insert(0, (world.to_string(), Instant::now()));
+        self.asked.truncate(ASKED_MAX);
     }
 
     /// The next thing to do with Orbiters: an action due, else a wanted world not read lately.
@@ -448,12 +472,15 @@ impl super::Controller {
             let mut rt = self.world_feedback.lock().unwrap();
             match menu_action(&ask) {
                 Some((world, action)) => {
+                    let world = world.to_ascii_lowercase();
                     rt.menu_errors.remove(&world);
-                    rt.push(&world.to_ascii_lowercase(), action);
+                    rt.asked(&world);
+                    rt.push(&world, action);
                 }
                 None => {
                     if let FeedbackAsk::Show { world } = &ask {
                         let world = world.to_ascii_lowercase();
+                        rt.asked(&world);
                         rt.wanted.insert(world.clone(), Instant::now());
                         // Read now rather than when it was last read.
                         if let Some(k) = rt.known.get_mut(&world) {
@@ -728,6 +755,35 @@ mod tests {
         let (head, _) = ask(&rt, "127.0.0.1:22541");
         assert!(head.starts_with("HTTP/1.1 404"), "{head}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The overlay's 3D worlds panel shows any capture's world: what it asks about comes back with the subjects'.
+    #[test]
+    fn a_world_a_menu_asked_about_comes_with_the_subjects() {
+        let mut rt = WorldFeedbackRuntime {
+            queue: Queue::default(),
+            queue_path: std::env::temp_dir().join(format!("orbiters-feedback-asked-{}.json", std::process::id())),
+            instances: (Vec::new(), Some(Instant::now())),
+            ..Default::default()
+        };
+        rt.asked("not a world");
+        assert!(rt.view(None, true).worlds.is_empty());
+        rt.asked(WORLD);
+        rt.push(WORLD, Action::Set(Set { liked: Some(true), ..Default::default() }));
+        let view = rt.view(None, true);
+        assert!(view.subjects.is_empty(), "asked, not a subject");
+        assert_eq!(view.worlds.iter().map(|w| (w.world.as_str(), w.liked, w.likes, w.pending)).collect::<Vec<_>>(), [(WORLD, true, 1, 1)]);
+        // The world the player is in and asked about: once.
+        let view = rt.view(Some((WORLD.to_uppercase().replace("WRLD", "wrld"), "Home".into())), true);
+        assert_eq!((view.subjects.len(), view.worlds.len()), (1, 1));
+        // The newest few only.
+        for i in 0..ASKED_MAX + 2 {
+            rt.asked(&format!("wrld_4432ea9b-729c-46e3-8eaf-{i:012x}"));
+        }
+        let view = rt.view(None, true);
+        assert_eq!(view.worlds.len(), ASKED_MAX);
+        assert_eq!(view.worlds[0].world, format!("wrld_4432ea9b-729c-46e3-8eaf-{:012x}", ASKED_MAX + 1));
+        let _ = std::fs::remove_file(&rt.queue_path);
     }
 
     #[test]

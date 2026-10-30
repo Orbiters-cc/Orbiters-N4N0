@@ -90,6 +90,8 @@ pub struct Dialog {
     pub changed: bool,
     pictures: crate::worlds::Pictures,
     viewer: Option<super::splats::Viewer>,
+    /// The photo editor on a copy of the picture ([`super::editor`]), over the page while it is open.
+    editor: Option<super::editor::Editor>,
     /// Where it opens from (a card's picture) and that rect's corner radius; the middle of the page when not given.
     origin: Option<(Rect, f32)>,
     morph: Option<Morph>,
@@ -105,6 +107,8 @@ pub struct Dialog {
     /// Whether the window has items before and after this one (the gallery's arrows), and which one was asked.
     pub neighbours: (bool, bool),
     pub step: Option<i64>,
+    /// A multi-layer picture's layers: which one the window is about, how they are shown ([`super::gallery_layers`]).
+    pub layers: super::gallery_layers::LayerView,
 }
 
 /// What sits under the actions.
@@ -153,6 +157,7 @@ impl Dialog {
             changed: false,
             pictures: crate::worlds::Pictures::new(ctx),
             viewer: None,
+            editor: None,
             origin: None,
             morph: None,
             measured: HashMap::new(),
@@ -162,6 +167,7 @@ impl Dialog {
             previous: None,
             neighbours: (false, false),
             step: None,
+            layers: Default::default(),
         }
     }
 
@@ -220,9 +226,47 @@ impl Dialog {
         self.nav = (self.nav.0 + 1, dir);
     }
 
+    /// Shows one of a multi-layer picture's layers instead, or the picture again ([`super::gallery_layers::LayerView`]):
+    /// the window is about that file now (its sharing, its folder), over the same picture; what was being chosen for
+    /// the other one is let go.
+    fn show_layer(&mut self, entry: Entry) {
+        self.entry = entry;
+        self.picker = false;
+        self.warning = None;
+        self.notice = None;
+        self.error = None;
+        self.last = None;
+        self.rollback = None;
+        self.on_its_way.clear();
+        self.public_on_its_way = false;
+        self.request_public = false;
+        self.selected.clear();
+    }
+
+    /// Chooses one of a multi-layer picture's layers (None: the picture), as its strip does (screenshots).
+    pub fn choose_layer(&mut self, choice: Option<usize>) {
+        if let Some(entry) = self.layers.choose(&self.entry, choice) {
+            self.show_layer(entry);
+        }
+    }
+
     /// Whether another item may take this one's place now (nothing running, nothing being typed or asked).
     pub fn can_navigate(&self) -> bool {
         self.operation_id.is_none() && self.warning.is_none() && !self.picker && self.morph.as_ref().is_some_and(|m| !m.is_closing())
+    }
+
+    /// Opens the photo editor on a copy of this picture (a multi-layer picture with a stack of effects for each of its
+    /// layers, whichever layer the window shows).
+    pub fn edit(&mut self, ctx: &egui::Context) {
+        let entry = self.layers.layered(&self.entry);
+        if let Some(source) = super::editor::source_of(entry) {
+            self.editor = Some(super::editor::Editor::open(ctx, source, entry.world_name.clone()));
+        }
+    }
+
+    /// The photo editor, open while it is there (screenshots stage it).
+    pub fn editor_slot(&mut self) -> &mut Option<super::editor::Editor> {
+        &mut self.editor
     }
 
     pub fn loading(&self) -> bool {
@@ -352,12 +396,14 @@ impl Dialog {
     /// The picture the card showed (shown at once) and the full one (crossfading in once decoded).
     fn pictures_of(&self, development: bool) -> (Option<crate::worlds::Picture>, Option<crate::worlds::Picture>) {
         use crate::worlds::Picture;
-        let large = match (&self.entry.local, &self.entry.remote) {
+        // A layer chosen: the picture under its stack stays the multi-layer picture's.
+        let entry = self.layers.layered(&self.entry);
+        let large = match (&entry.local, &entry.remote) {
             (Some(controller::Local::Picture(path)), _) => Some(Picture::Shot { path: path.clone(), size: 0, width: 2048 }),
             (None, Some(item)) if item.picture.is_some() && !self.fixture_active => Some(Picture::Capture { development, id: item.id, large: true }),
             _ => None,
         };
-        (self.entry.picture.clone(), large)
+        (entry.picture.clone(), large)
     }
 
     fn panel(&self) -> Panel {
@@ -429,6 +475,20 @@ impl Dialog {
             self.rollback_or_settle(&ctx, cx, done);
         }
 
+        // The photo editor on a copy of the picture, over the whole window under its title bar; the window waits under it.
+        if let Some(e) = self.editor.as_mut() {
+            let window = ctx.content_rect();
+            let rect = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
+            let mut open = true;
+            egui::Area::new(Id::unique("gallery-editor")).order(Order::Foreground).fixed_pos(rect.min).show(&ctx, |ui| {
+                ui.set_min_size(rect.size());
+                open = e.show(ui, rect);
+            });
+            if !open {
+                self.editor = None;
+            }
+            return false;
+        }
         // The 3D view of the capture, over everything; the window waits under it.
         if let Some(v) = self.viewer.as_mut() {
             let rect = ui.max_rect();
@@ -635,6 +695,8 @@ impl Dialog {
                 feedback::cover(&np, at, radii, l, 1.0 + 0.015 * hover, shown_large * k);
             }
             self.last_picture = large_tex.clone().filter(|_| shown_large > 0.99).or_else(|| thumb_tex.clone());
+            // A multi-layer picture's layers, stacked over a checkerboard, when they are shown instead of it.
+            self.layers.paint(&np, at, radii, k, &mut self.pictures, &self.entry);
             if self.entry.is_picture() && pressed(pic_resp.on_hover_cursor(egui::CursorIcon::ZoomIn)) {
                 toggle_full = true;
             }
@@ -728,6 +790,12 @@ impl Dialog {
     fn picture_overlays(&mut self, ui: &mut Ui, cx: &Cx, picture: Rect, busy: bool, full: f32, act: &mut Option<Act>) {
         let p = ui.painter().clone();
         let (glyph, label, color) = if self.entry.is_picture() { (icons::IMAGES, "Picture", theme::FG) } else { (icons::CUBE, "3D capture", theme::ACCENT) };
+        // A multi-layer picture's chosen layer says which.
+        let layer = self.layers.chosen_name().map(|n| format!("{n} layer"));
+        let (glyph, label) = match &layer {
+            Some(l) => (icons::STACK, l.as_str()),
+            None => (glyph, label),
+        };
         let t = Txt::new(label, 11.5).weight(weight::SEMIBOLD).color(theme::FG);
         let tw = widgets::text_size(ui, &t).x;
         let badge = Rect::from_min_size(picture.min + vec2(16.0, 16.0), vec2(tw + 38.0, 28.0));
@@ -766,6 +834,10 @@ impl Dialog {
                 *act = Some(Act::Full);
             }
             return;
+        }
+        // A multi-layer picture's layers, bottom left: the one chosen is what the window shares.
+        if let Some(entry) = self.layers.strip(ui, picture, picture.width() - 32.0 - 96.0, &self.entry, &mut self.pictures, !busy) {
+            self.show_layer(entry);
         }
         let mut right = picture.right() - 16.0;
         let bottom = picture.bottom() - 16.0;
@@ -837,6 +909,9 @@ impl Dialog {
                 actions.push((Act::ShareTo, Button::new("Share to …").icon(icons::USERS).variant(Variant::Secondary).enabled(can_share && !busy)));
                 if !self.entry.is_picture() {
                     actions.push((Act::CopyLink, self.copy_button(ui, busy, can_share)));
+                }
+                if super::editor::source_of(self.layers.layered(&self.entry)).is_some() {
+                    actions.push((Act::Edit, Button::new("Edit").icon(icons::SLIDERS_HORIZONTAL).variant(Variant::Secondary)));
                 }
             }
         } else {
@@ -1356,6 +1431,7 @@ impl Dialog {
                 }
             }
             Act::Full => self.full = !self.full,
+            Act::Edit => self.edit(ctx),
             Act::Unshare(u) => self.start(ctx, server, Action::Unshare(u)),
             Act::Send => {
                 let recipients = self
@@ -1433,6 +1509,7 @@ enum Act {
     CancelWarning,
     Retry,
     CopyLink,
+    Edit,
 }
 
 impl Act {
@@ -1443,6 +1520,7 @@ impl Act {
             Act::Download => 2,
             Act::Reconstruct => 3,
             Act::CopyLink => 4,
+            Act::Edit => 5,
             _ => 9,
         }
     }

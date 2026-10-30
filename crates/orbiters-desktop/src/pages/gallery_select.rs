@@ -321,16 +321,20 @@ impl Selection {
 }
 
 /// What a card shows of the selection: the ring around it, how far it shrank, the check on its corner (visible on
-/// hover, while selecting, and filled when chosen).
-pub fn paint_card(p: &egui::Painter, ctx: &egui::Context, key: &str, card: Rect, thumb: Rect, selected: bool, show_check: bool, hover: f32) -> f32 {
+/// hover, while selecting, and filled when chosen). `radius` is the card's corners'; a picture that is the whole card
+/// (the tile layouts) is tinted to all its corners.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_card(p: &egui::Painter, ctx: &egui::Context, key: &str, card: Rect, thumb: Rect, radius: f32, selected: bool, show_check: bool, hover: f32) -> f32 {
     let id = Id::unique(("gallery-select", key));
     let s = anim::toggle(ctx, id.with("on"), selected, Spring::SNAPPY);
     let pop = anim::toggle(ctx, id.with("pop"), selected, Spring::BOUNCY);
     let vis = anim::toggle(ctx, id.with("check"), show_check || selected || hover > 0.5, Spring::SOFT);
     if s > 0.01 {
         let ring = card.expand(3.0);
-        paint::stroke_squircle(p, ring, theme::squircle(theme::CARD_RADIUS + 3.0), Stroke::new(2.5, theme::alpha(theme::ACCENT, s)));
-        p.rect_filled(thumb, egui::CornerRadius { nw: 20, ne: 20, sw: 0, se: 0 }, theme::alpha(theme::ACCENT, 0.1 * s));
+        paint::stroke_squircle(p, ring, theme::squircle(radius + 3.0), Stroke::new(2.5, theme::alpha(theme::ACCENT, s)));
+        let whole = thumb.bottom() >= card.bottom() - 0.5;
+        let corners = [radius, radius, if whole { radius } else { 0.0 }, if whole { radius } else { 0.0 }];
+        orbiters_ui::feedback::fill_corners(p, thumb, corners, theme::alpha(theme::ACCENT, 0.1 * s));
     }
     if vis > 0.01 {
         let c = pos2(thumb.left() + 12.0 + CHECK * 0.5, thumb.top() + 12.0 + CHECK * 0.5);

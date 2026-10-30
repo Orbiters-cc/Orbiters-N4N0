@@ -1,7 +1,7 @@
 //! The single routing boundary for VRChat data. Call on background threads.
 //! A direct session's cookies are private to `vrchat_api`; the fallback sees only the Orbiters bearer credential.
 use crate::account::Api;
-use crate::vrchat_api::{Avatar, Client, Error, User};
+use crate::vrchat_api::{Avatar, Client, Error, Replaced, Step, User};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -47,7 +47,30 @@ impl Source {
             name: a["name"].as_str().unwrap_or_default().into(),
             thumbnail_image_url: a["thumbnailUrl"].as_str().unwrap_or_default().into(),
             image_url: a["imageUrl"].as_str().unwrap_or_default().into(),
+            ..Default::default()
         }))
+    }
+    /// The avatars and worlds among `ids` the signed-in VRChat account uploaded (VRChat's answers kept a day). None
+    /// without a personal session: Orbiters' fallback cannot tell.
+    pub fn owned(&self, ids: &[String]) -> anyhow::Result<Vec<String>> {
+        let mut owned = Vec::new();
+        for id in ids {
+            match self.direct(|c| c.owns(id)) {
+                None => return Ok(Vec::new()),
+                Some(Ok(true)) => owned.push(id.clone()),
+                Some(Ok(false)) => {}
+                Some(Err(e)) => return Err(e),
+            }
+        }
+        Ok(owned)
+    }
+    /// Replaces the picture of an avatar or world the signed-in VRChat account uploaded
+    /// ([`crate::vrchat_api::replace_image`]). A change has no fallback: it needs the personal session.
+    pub fn replace_image(&self, id: &str, png: &[u8], progress: impl FnMut(Step)) -> anyhow::Result<Replaced> {
+        let Some(client) = self.direct.as_ref().filter(|c| c.lock().unwrap().signed_in()) else {
+            anyhow::bail!("Sign in to VRChat in Settings to change pictures.")
+        };
+        Ok(crate::vrchat_api::replace_image(client, id, png, progress)?)
     }
     /// A world's thumbnail address: VRChat's own answer when signed in (private worlds too), else Orbiters' Map explorer
     /// (public worlds only). `None` when neither knows it.

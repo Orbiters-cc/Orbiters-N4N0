@@ -796,6 +796,14 @@ impl Overlay<'_> {
         overlay_result(unsafe { entry::<F>(self.table, 16)(handle, alpha) })
     }
 
+    /// How wide a texel is against its height (1: square). The overlay's height is its width × the texture's height
+    /// over its width, divided by this: a picture of a fixed size stretched to any length (a laser's beam).
+    pub fn set_texel_aspect(&self, handle: OverlayHandle, aspect: f32) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64, f32) -> i32;
+        // SAFETY: entry 18 is SetOverlayTexelAspect (openvr_capi.h: after SetOverlayAlpha 16, GetOverlayAlpha 17).
+        overlay_result(unsafe { entry::<F>(self.table, 18)(handle, aspect) })
+    }
+
     /// Uploads RGBA pixels (top row first). SteamVR copies them; it flickers when called every frame.
     pub fn set_raw(&self, handle: OverlayHandle, rgba: &[u8], width: u32, height: u32) -> Result<(), i32> {
         type F = unsafe extern "system" fn(u64, *mut c_void, u32, u32, u32) -> i32;

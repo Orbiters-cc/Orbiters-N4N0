@@ -55,10 +55,28 @@ pub struct Settings {
     pub rig_views: RigViews,
     /// Where the SteamVR overlay shows what a recording has covered so far (the Capture page's camera path).
     pub coverage_overlay: CoverageOverlay,
+    /// The floating Orbiters panel in the play space (the SteamVR tab's interface without SteamVR's dashboard, so
+    /// VRChat keeps the controllers) and the watch on a wrist that opens it.
+    pub floating: FloatingSettings,
     /// Experimental, VRC+: recordings also read VRChat's camera dolly's other streams (Spout `VRCSender2` to
     /// `VRCSender4`), and a 3D picture flies four cameras with the dolly (multi-stream) instead of moving the camera
     /// alone. The person sets the dolly's Streaming to Multi once in VRChat.
     pub dolly_streams: bool,
+    /// How Photos & captures lays its pictures out.
+    pub gallery_layout: GalleryLayout,
+}
+
+/// How Photos & captures lays its pictures out (its layout picker; each group of an instance laid out alone).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GalleryLayout {
+    /// Columns of pictures each as tall as its shape, as the website's galleries (the default).
+    #[default]
+    Masonry,
+    /// Rows of one height filling the width, each picture as wide as its shape.
+    Rows,
+    /// The same card for every item, its picture cropped to 16:9, with what it is and who sees it under it.
+    Grid,
 }
 
 /// Where the SteamVR overlay shows a recording's coverage (the Capture page's camera path and its hints): above a
@@ -71,6 +89,35 @@ pub enum CoverageOverlay {
     #[default]
     LeftHand,
     RightHand,
+}
+
+/// The floating Orbiters panel (the SteamVR overlay): the dashboard tab's interface on a panel in the play space, used
+/// with the controllers' own lasers instead of SteamVR's dashboard, so VRChat keeps its controls meanwhile; moved by
+/// its handle as N4N0's screen is. The watch, a round Orbiters mark on a wrist, opens and closes it with one press of
+/// the other hand's trigger.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FloatingSettings {
+    /// The watch shows on a wrist (it fades in as the wrist turns to the eyes).
+    pub watch: bool,
+    /// The wrist it is on.
+    pub watch_hand: Hand,
+    /// Where the panel was last left in the play space (SteamVR's standing universe): its centre and turn, a 3 × 4
+    /// row-major matrix (its +Z towards the viewer). None: it opens before the eyes.
+    pub placement: Option<[[f32; 4]; 3]>,
+    /// The panel's width in metres, one of [`FloatingSettings::WIDTHS`].
+    pub width_m: f32,
+}
+
+impl FloatingSettings {
+    /// The panel's widths, its bar's smaller and larger steps through them.
+    pub const WIDTHS: [f32; 5] = [0.5, 0.65, 0.8, 1.0, 1.25];
+}
+
+impl Default for FloatingSettings {
+    fn default() -> Self {
+        Self { watch: true, watch_hand: Hand::Left, placement: None, width_m: 0.8 }
+    }
 }
 
 /// Tracking smoothing (Orbiters - N4N0's SteamVR driver): on or off, and each kind of device's strength as an index of
@@ -466,7 +513,9 @@ impl Default for Settings {
             tracking: TrackingSettings::default(),
             rig_views: RigViews::default(),
             coverage_overlay: CoverageOverlay::default(),
+            floating: FloatingSettings::default(),
             dolly_streams: false,
+            gallery_layout: GalleryLayout::default(),
         }
     }
 }
@@ -600,6 +649,8 @@ mod tests {
         assert_eq!(partial.storage_limit_gb, 3.0);
         assert!(partial.rig_views == RigViews::Every3s && partial.coverage_overlay == CoverageOverlay::LeftHand, "the rig's views and the coverage overlay on");
         assert_eq!(partial.orb, OrbSettings::default(), "settings from before N4N0 get its defaults");
+        assert!(partial.floating.watch && partial.floating.watch_hand == Hand::Left && partial.floating.placement.is_none(), "the watch on the left wrist");
+        assert!(FloatingSettings::WIDTHS.contains(&partial.floating.width_m));
         assert_eq!(partial.window_gpu, WindowGpu::GraphicsCard, "the window draws on the graphics card unless chosen otherwise");
         assert_eq!(partial.view_gpu, ViewGpu::WhilePlaying, "its 3D view on the integrated GPU while VRChat runs unless chosen otherwise");
         std::fs::remove_dir_all(dir).ok();

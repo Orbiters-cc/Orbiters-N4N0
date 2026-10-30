@@ -1,14 +1,18 @@
 //! The 3D captures of worlds the overlay can show: the listing the VRChat world viewer reads (Orbiters'
 //! `GET /maps/vrchat/previews`, contracts `Docs/splat-tree.md`), searched like its menu does (world, author or sharer
-//! containing what is typed), and a capture's files: the slot's PC tree and sky map at the public storage addresses the
-//! world loads (production), or the API's web `.splat` and sky map of the preview elsewhere (a development server
-//! publishes its slots to storage the app has no address for).
+//! containing what is typed), with each world's VRChat numbers and its feedback for everyone (likes, labels, comments:
+//! contracts `Docs/world-feedback.md`, For VRChat worlds), a capture shared with some players only listed for them, and
+//! a capture's files: the slot's PC tree and sky map at the public storage addresses the world loads (production), or
+//! the API's web `.splat` and sky map of the preview elsewhere (a development server publishes its slots to storage the
+//! app has no address for).
 
+use super::cache::{Disk, Validators};
 use super::stereo::{self, StartView};
 use orbiters_core::account::{Api, Server};
 use orbiters_reconstruct::gaussians::Gaussians;
 use orbiters_reconstruct::sky::SkyMap;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -42,8 +46,37 @@ pub struct Entry {
     pub sky: bool,
     /// Shared by the world's own author.
     pub official: bool,
+    /// When it was captured (RFC 3339).
+    pub captured_at: Option<String>,
+    /// The world's numbers on VRChat.
+    pub capacity: Option<u32>,
+    pub visits: Option<u64>,
+    pub favorites: Option<u64>,
+    /// Members' pictures of the world on Orbiters.
+    pub pictures: u32,
+    /// Shared with some players only (their VRChat names): the listing is public, so the viewer keeps it to them, as
+    /// the world does.
+    pub only_for: Option<Vec<String>>,
+    /// The world's feedback for everyone, as the listing gives it (the server's, at most 30 s old then).
+    pub feedback: Aggregate,
     /// Lower-case text a search looks in: the world, its author and the sharer.
     search: String,
+}
+
+/// A world's likes, labels (highest count first, then the list's order) and comments for everyone, with its newest
+/// comments: (by, text, RFC 3339).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Aggregate {
+    pub likes: u32,
+    pub labels: Vec<(String, u32)>,
+    pub comments: u32,
+    pub recent: Vec<(String, String, Option<String>)>,
+}
+
+impl Aggregate {
+    pub fn label(&self, id: &str) -> u32 {
+        self.labels.iter().find(|l| l.0 == id).map_or(0, |l| l.1)
+    }
 }
 
 impl Entry {
@@ -52,11 +85,22 @@ impl Entry {
         let q = query.trim().to_lowercase();
         q.is_empty() || self.search.contains(&q)
     }
+
+    /// Whether the player whose VRChat name is `me` may see it: everyone, or one of those it is shared with.
+    pub fn for_player(&self, me: Option<&str>) -> bool {
+        match &self.only_for {
+            None => true,
+            Some(names) => me.is_some_and(|me| names.iter().any(|n| n.trim().eq_ignore_ascii_case(me.trim()))),
+        }
+    }
 }
 
 #[derive(Deserialize)]
 struct Listing {
     previews: Vec<RawEntry>,
+    /// Read world by world: one shaped otherwise is left out, never the listing.
+    #[serde(default)]
+    feedback: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +122,20 @@ struct RawEntry {
     sky: bool,
     #[serde(default)]
     official: bool,
+    #[serde(default)]
+    captured_at: Option<String>,
+    #[serde(default)]
+    capacity: Option<f64>,
+    #[serde(default)]
+    visits: Option<f64>,
+    #[serde(default)]
+    favorites: Option<f64>,
+    #[serde(default)]
+    pictures: Option<f64>,
+    #[serde(default)]
+    shared: bool,
+    #[serde(default, rename = "for")]
+    only_for: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -94,15 +152,41 @@ struct RawView {
     eye_height: Option<f32>,
 }
 
+/// A world's feedback in the listing (`{ likes, labels: { id: count }, comments, recent: [{ by, text, at }] }`).
+fn aggregate(v: &serde_json::Value) -> Aggregate {
+    let whole = |v: Option<&serde_json::Value>| count(v.and_then(|n| n.as_f64())).map_or(0, |n| n.min(u32::MAX as u64) as u32);
+    let order = |id: &str| orbiters_contracts::world_feedback::labels().iter().position(|l| l.id == id).unwrap_or(usize::MAX);
+    let mut labels: Vec<(String, u32)> = v
+        .get("labels")
+        .and_then(|l| l.as_object())
+        .map(|m| m.iter().map(|(id, n)| (id.clone(), whole(Some(n)))).filter(|l| l.1 > 0).collect())
+        .unwrap_or_default();
+    labels.sort_by(|a, b| b.1.cmp(&a.1).then(order(&a.0).cmp(&order(&b.0))));
+    let text = |c: &serde_json::Value, k: &str| c.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let recent = v
+        .get("recent")
+        .and_then(|r| r.as_array())
+        .map(|r| r.iter().filter_map(|c| Some((text(c, "by").unwrap_or_default(), text(c, "text")?, text(c, "at")))).collect())
+        .unwrap_or_default();
+    Aggregate { likes: whole(v.get("likes")), labels, comments: whole(v.get("comments")), recent }
+}
+
+/// A count the server may send as a decimal, or not at all.
+fn count(n: Option<f64>) -> Option<u64> {
+    n.filter(|n| n.is_finite() && *n >= 0.0).map(|n| n.round() as u64)
+}
+
 /// The listing's entries that have a start view (newest first, as listed).
 pub fn parse(json: &str) -> anyhow::Result<Vec<Entry>> {
     let listing: Listing = serde_json::from_str(json)?;
+    let feedback: HashMap<String, Aggregate> = listing.feedback.iter().map(|(world, v)| (world.to_ascii_lowercase(), aggregate(v))).collect();
     Ok(listing
         .previews
         .into_iter()
         .filter_map(|r| {
             let (position, target) = (r.view.position?, r.view.target?);
             let search = format!("{}\n{}\n{}", r.name, r.author.as_deref().unwrap_or(""), r.uploader.as_deref().unwrap_or("")).to_lowercase();
+            let feedback = feedback.get(&r.world_id.to_ascii_lowercase()).cloned().unwrap_or_default();
             Some(Entry {
                 slot: r.slot,
                 key: r.key as u32,
@@ -116,6 +200,13 @@ pub fn parse(json: &str) -> anyhow::Result<Vec<Entry>> {
                 view: StartView { position, target, floor: r.view.floor, eye_height: r.view.eye_height },
                 sky: r.sky,
                 official: r.official,
+                captured_at: r.captured_at,
+                capacity: count(r.capacity).map(|n| n.min(u32::MAX as u64) as u32),
+                visits: count(r.visits),
+                favorites: count(r.favorites),
+                pictures: count(r.pictures).map_or(0, |n| n.min(u32::MAX as u64) as u32),
+                only_for: r.shared.then(|| r.only_for.unwrap_or_default()),
+                feedback,
                 search,
             })
         })
@@ -123,21 +214,32 @@ pub fn parse(json: &str) -> anyhow::Result<Vec<Entry>> {
 }
 
 /// Where the listing and the files come from: the app's server (or `ORBITERS_PUBLIC_API`, as the window's public reads),
-/// and production's public storage when that is the server.
+/// and production's public storage when that is the server; the files downloaded kept on disk ([`super::cache`]).
 #[derive(Clone)]
 pub struct Source {
     api: Api,
     files: Option<String>,
+    disk: Option<Arc<Disk>>,
 }
 
 impl Source {
     pub fn current() -> Self {
+        let disk = Some(Arc::new(Disk::in_cache()));
         match std::env::var("ORBITERS_PUBLIC_API") {
-            Ok(base) if !base.is_empty() => Self { api: Api::at(&base), files: None },
+            Ok(base) if !base.is_empty() => Self { api: Api::at(&base), files: None, disk },
             _ => {
                 let server = Server::current();
-                Self { api: Api::new(server), files: (server == Server::Production).then(|| PUBLIC_FILES.to_string()) }
+                Self { api: Api::new(server), files: (server == Server::Production).then(|| PUBLIC_FILES.to_string()), disk }
             }
+        }
+    }
+
+    /// An address the API gave, relative to it or whole.
+    pub fn absolute(&self, url: &str) -> String {
+        if url.starts_with("https://") || url.starts_with("http://") {
+            url.to_string()
+        } else {
+            self.api.url(url)
         }
     }
 
@@ -150,20 +252,28 @@ impl Source {
     }
 
     /// Downloads `entry`'s splats and sky map, `progress` counting bytes (and their total once known).
+    /// Downloads `entry`'s splats and sky map (or takes the files kept on disk), `progress` counting bytes (and their
+    /// total once known).
     pub fn download(&self, entry: &Entry, progress: &Progress) -> anyhow::Result<Capture> {
+        let key = super::cache::Key::of(entry);
         let (g, sky) = match (&self.files, entry.slot) {
             (Some(files), Some(slot)) => {
-                let tree = self.fetch(&format!("{files}public/vrchat/slots/{slot}/pc"), progress)?;
-                let g = tree_leaves(&tree, entry.key)?;
+                let name = key.file("pc");
+                let tree = self.fetch_kept(&format!("{files}public/vrchat/slots/{slot}/pc"), &name, progress)?;
+                let g = tree_leaves(&tree, entry.key).inspect_err(|_| self.forget(&name))?;
                 drop(tree);
-                let sky = entry.sky.then(|| self.fetch(&format!("{files}public/vrchat/slots/{slot}/sky.jpg"), &Progress::default()).ok()).flatten();
+                let sky = entry.sky.then(|| self.fetch_kept(&format!("{files}public/vrchat/slots/{slot}/sky.jpg"), &key.file("sky"), &Progress::default()).ok()).flatten();
                 (g, sky)
             }
             _ => {
-                let bytes = self.fetch(&self.api.url(&format!("maps/previews/{}/splat", entry.id)), progress)?;
-                let g = orbiters_reconstruct::web::read_splat(&bytes)?;
+                let name = key.file("splat");
+                let bytes = self.fetch_kept(&self.api.url(&format!("maps/previews/{}/splat", entry.id)), &name, progress)?;
+                let g = orbiters_reconstruct::web::read_splat(&bytes).inspect_err(|_| self.forget(&name))?;
                 drop(bytes);
-                let sky = entry.sky.then(|| self.fetch(&self.api.url(&format!("maps/previews/{}/sky.jpg", entry.id)), &Progress::default()).ok()).flatten();
+                let sky = entry
+                    .sky
+                    .then(|| self.fetch_kept(&self.api.url(&format!("maps/previews/{}/sky.jpg", entry.id)), &key.file("sky"), &Progress::default()).ok())
+                    .flatten();
                 (g, sky)
             }
         };
@@ -172,10 +282,71 @@ impl Source {
         Ok(Capture::new(g, sky, entry.view))
     }
 
-    fn fetch(&self, url: &str, progress: &Progress) -> anyhow::Result<Vec<u8>> {
-        let response = self.api.agent().get(url).call()?;
+    fn forget(&self, name: &str) {
+        if let Some(disk) = &self.disk {
+            disk.remove(name);
+        }
+    }
+
+    /// The file at `url`: the one kept on disk as `name` when it is still the storage's (asked when the storage said
+    /// how, a `304` sending nothing; trusted otherwise, its name being its upload's), else downloaded and kept.
+    fn fetch_kept(&self, url: &str, name: &str, progress: &Progress) -> anyhow::Result<Vec<u8>> {
+        let Some(disk) = self.disk.as_deref() else { return self.fetch(url, None, progress).map(|(b, _)| b.unwrap_or_default()) };
+        let kept = disk.read(name).filter(|(_, v)| v.url == url);
+        let whole = |bytes: &[u8]| {
+            progress.total.store(bytes.len() as u64, Ordering::Relaxed);
+            progress.read.store(bytes.len() as u64, Ordering::Relaxed);
+        };
+        if let Some((bytes, validators)) = &kept {
+            if !validators.askable() {
+                disk.touch(name);
+                whole(bytes);
+                return Ok(bytes.clone());
+            }
+        }
+        match self.fetch(url, kept.as_ref().map(|(_, v)| v), progress) {
+            Ok((None, _)) => {
+                // Not modified.
+                let (bytes, _) = kept.expect("asked with what was kept");
+                disk.touch(name);
+                whole(&bytes);
+                Ok(bytes)
+            }
+            Ok((Some(bytes), validators)) => {
+                disk.write(name, &bytes, &validators);
+                Ok(bytes)
+            }
+            // Unreachable: what was kept is the listing's upload all the same.
+            Err(e) => match kept {
+                Some((bytes, _)) if !format!("{e:#}").contains("answered 4") => {
+                    disk.touch(name);
+                    whole(&bytes);
+                    Ok(bytes)
+                }
+                _ => Err(e),
+            },
+        }
+    }
+
+    /// Downloads `url` (`None` when `kept` is still what the storage has), with what the storage said of it.
+    fn fetch(&self, url: &str, kept: Option<&Validators>, progress: &Progress) -> anyhow::Result<(Option<Vec<u8>>, Validators)> {
+        let mut request = self.api.agent().get(url);
+        if let Some(v) = kept {
+            if let Some(etag) = &v.etag {
+                request = request.header("If-None-Match", etag);
+            }
+            if let Some(date) = &v.last_modified {
+                request = request.header("If-Modified-Since", date);
+            }
+        }
+        let response = request.call()?;
         let status = response.status().as_u16();
+        if status == 304 && kept.is_some() {
+            return Ok((None, kept.cloned().unwrap_or_default()));
+        }
         anyhow::ensure!((200..300).contains(&status), "{url} answered {status}");
+        let header = |k: &str| response.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let validators = Validators { url: url.to_string(), etag: header("etag"), last_modified: header("last-modified") };
         let total = response.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
         if let Some(total) = total {
             anyhow::ensure!(total <= MAX_FILE, "{url} is {total} bytes");
@@ -192,7 +363,7 @@ impl Source {
             out.extend_from_slice(&buf[..n]);
             progress.read.store(out.len() as u64, Ordering::Relaxed);
         }
-        Ok(out)
+        Ok((Some(out), validators))
     }
 }
 
@@ -334,6 +505,18 @@ impl Catalog {
         let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         (s.entries.clone(), s.fetching, s.error.clone(), s.version)
     }
+
+    /// Whether a read is under way, and the last error (without copying the entries).
+    pub fn state(&self) -> (bool, Option<String>) {
+        let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        (s.fetching, s.error.clone())
+    }
+
+    /// The world of the capture listed as `id`.
+    pub fn world_of(&self, id: u64) -> Option<String> {
+        let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        s.entries.iter().find(|e| e.id == id).map(|e| e.world_id.clone())
+    }
 }
 
 #[cfg(test)]
@@ -347,7 +530,9 @@ mod tests {
         {"slot":null,"key":5,"id":9,"worldId":"wrld_dawn","name":"Silent Dawn","author":"Mei","uploader":"someone",
          "splats":{},"view":{"position":[1,2,3],"target":[1,2,4],"floor":-4.33,"eyeHeight":1.66},"sky":true},
         {"slot":3,"key":6,"id":10,"worldId":"wrld_x","name":"No view","author":null,"uploader":null,"view":{"position":null,"target":null}}
-    ]}"#;
+    ],"feedback":{"WRLD_HOME":{"likes":41,"labels":{"mirror":9,"meetup":12,"pens":9,"gone":0},"comments":7,
+        "recent":[{"by":"Kana","text":"The mirror room is perfect for photos.","at":"2026-10-29T21:04:00Z"},{"text":"no author"},{"by":"x"}]},
+        "wrld_dawn":"not an object"}}"#;
 
     #[test]
     fn the_listing_keeps_entries_with_a_start_view() {
@@ -361,6 +546,27 @@ mod tests {
         assert_eq!(entries[1].view.floor, Some(-4.33));
         assert_eq!(entries[1].view.eye_height, Some(1.66));
         assert!(entries[1].sky);
+    }
+
+    #[test]
+    fn the_listing_gives_each_world_its_numbers_and_feedback() {
+        let entries = parse(LISTING).unwrap();
+        let home = &entries[0].feedback;
+        assert_eq!((home.likes, home.comments), (41, 7));
+        assert_eq!(home.labels, [("meetup".to_string(), 12), ("mirror".to_string(), 9), ("pens".to_string(), 9)], "highest first, then the list's order");
+        assert_eq!(home.label("mirror"), 9);
+        assert_eq!(home.recent.len(), 2, "a comment without its text is left out");
+        assert_eq!(home.recent[1].0, "");
+        assert_eq!(entries[1].feedback, Aggregate::default(), "feedback shaped otherwise: none, the listing still read");
+        let json = r#"{"previews":[{"slot":1,"key":1,"id":1,"worldId":"wrld_a","name":"A","author":null,"uploader":null,
+            "view":{"position":[0,1,0],"target":[0,1,1]},"capturedAt":"2026-10-12T20:00:00Z","capacity":32,"visits":12345.0,"favorites":-1,
+            "pictures":4,"shared":true,"for":["Mei"," Kana "]}]}"#;
+        let a = &parse(json).unwrap()[0];
+        assert_eq!((a.capacity, a.visits, a.favorites, a.pictures), (Some(32), Some(12345), None, 4));
+        assert_eq!(a.captured_at.as_deref(), Some("2026-10-12T20:00:00Z"));
+        assert!(a.for_player(Some("kana")) && a.for_player(Some("Mei")));
+        assert!(!a.for_player(Some("someone")) && !a.for_player(None), "shared with others: not listed for this player");
+        assert!(entries[0].for_player(None), "public: everyone");
     }
 
     #[test]

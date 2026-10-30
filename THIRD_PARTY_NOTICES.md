@@ -35,7 +35,7 @@ every crate built into the programs, and of the native libraries next to them, a
 | sha2 (RustCrypto) | MIT OR Apache-2.0 |
 | socket2 | MIT OR Apache-2.0 |
 | if-addrs | MIT OR BSD-3-Clause |
-| rayon, fastrand (the reconstruction) | MIT OR Apache-2.0, Apache-2.0 OR MIT |
+| rayon, fastrand (the reconstruction; rayon also the photo editor) | MIT OR Apache-2.0, Apache-2.0 OR MIT |
 | zune-jpeg, zune-core (N4N0's thumbnails) | MIT OR Apache-2.0 OR Zlib |
 | rosc | MIT OR Apache-2.0 |
 | mdns-sd | Apache-2.0 OR MIT |
@@ -74,6 +74,8 @@ every crate built into the programs, and of the native libraries next to them, a
 | Phosphor Icons 2.1 (regular and fill), embedded; files from the egui-phosphor crate (MIT OR Apache-2.0) | MIT, see `crates/orbiters-ui/assets/Phosphor-LICENSE.txt` |
 | egui's fallback fonts (epaint_default_fonts): Ubuntu Light, Hack, Noto Emoji, emoji-icon-font | Ubuntu Font Licence 1.0, MIT / Bitstream Vera, SIL Open Font License 1.1, MIT |
 | Segoe UI Variable, Segoe UI, Cascadia Mono, Consolas (Windows) or the system's sans fonts (Linux) | Read from the system at run time, not distributed |
+| The photo editor's text fonts, embedded: Inter ExtraBold (The Inter Project Authors), and the Toolkit photoshoot's set from My Avatar: Bonbon (Cyreal), Creepster (Font Diner), Diplomata (The Diplomata Project Authors), JetBrains Mono (The JetBrains Mono Project Authors), Matemasie (The Matemasie-Font Project Authors), Monoton (Vernon Adams), Pirata One (Rodrigo Fuenzalida, Nicolas Massi), Plaster (Sorkin Type Co) | SIL Open Font License 1.1, see `crates/orbiters-ui/assets/fonts/<family>/OFL.txt` |
+| Fonts installed on the computer, offered to the photo editor's text | Read from the system when used, not distributed |
 
 ## Protocols and formats implemented from their specifications
 

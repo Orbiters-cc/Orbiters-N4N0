@@ -299,6 +299,8 @@ fn session_entry(s: &SessionSummary, world: &str, world_name: &str, remote: Opti
         content: Content::read(&s.dir),
         ready: s.reconstruction.is_some(),
         picture: None,
+        size: None,
+        layers: Vec::new(),
     }
 }
 

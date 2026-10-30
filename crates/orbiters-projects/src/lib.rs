@@ -1,12 +1,15 @@
 //! Unity discovery and VPM operations. Call on workers, never from an egui frame.
 pub mod avatars;
+pub mod blender;
 mod builtin_templates;
 pub mod discovery;
 pub mod git;
+pub mod hidden;
 pub mod icons;
 pub mod network;
 pub mod preview;
 pub mod setup;
+pub mod size;
 pub mod templates;
 pub mod vpm;
 

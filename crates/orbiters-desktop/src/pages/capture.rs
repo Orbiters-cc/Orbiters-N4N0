@@ -409,11 +409,14 @@ fn consent_overlay(ui: &mut Ui, cx: &mut Cx, card: Rect) {
     let p = ui.painter();
     widgets::frame(p, card, theme::CARD_RADIUS, theme::alpha(theme::INK_950, 0.78 * k.clamp(0.0, 1.0)));
     let w = (card.width() - 48.0).min(420.0);
-    let bullets = [
+    let mut bullets = vec![
         "Capture your own worlds, or worlds whose creators agreed, and keep the results private.",
         "Other players are left out: hide them in the Stream camera (Remote Players off).",
-        "Orbiters - N4N0 never asks for your VRChat login and only reads VRChat's local log, OSC and Spout.",
     ];
+    // With VRChat sign-in open to the member, the app can hold their VRChat session: the promise would not hold.
+    if !cx.snap.vrchat_login.allowed {
+        bullets.push("Orbiters - N4N0 never asks for your VRChat login and only reads VRChat's local log, OSC and Spout.");
+    }
     let galleys: Vec<_> = bullets.iter().map(|b| p.layout_job(Txt::new(*b, 13.0).color(theme::FG_2).line_height(20.0).job(w - 48.0 - 16.0))).collect();
     let text_h: f32 = galleys.iter().map(|g| g.size().y + 8.0).sum();
     let h = 24.0 + 36.0 + 16.0 + text_h + 12.0 + 40.0 + 24.0;

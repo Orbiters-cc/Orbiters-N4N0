@@ -163,7 +163,17 @@ pub struct Viewer {
     /// again until the other is asked for).
     moving: Option<(bool, Job<Result<Source, String>>)>,
     refused: Option<bool>,
+    /// Save this view: the picture of the view being made (and when it was asked, for the shutter's flash), the one
+    /// saved, why it could not be, and the photo editor opened on it.
+    still: Option<Job<Result<PathBuf, String>>>,
+    flashed: f64,
+    saved: Option<PathBuf>,
+    still_error: Option<String>,
+    editor: Option<super::editor::Editor>,
 }
+
+/// The long side of a view saved as a picture (at least the view's own size).
+const STILL_LONG: f32 = 2560.0;
 
 impl Viewer {
     /// Opens the 3D view of `session`, its splats on the integrated GPU with `integrated` ([`on_integrated`]).
@@ -201,6 +211,11 @@ impl Viewer {
             window,
             moving: None,
             refused: None,
+            still: None,
+            flashed: f64::NEG_INFINITY,
+            saved: None,
+            still_error: None,
+            editor: None,
         }
     }
 
@@ -247,6 +262,23 @@ impl Viewer {
     /// false once closed.
     pub fn show(&mut self, ui: &mut Ui, rect: Rect, integrated: bool) -> bool {
         let ctx = ui.ctx().clone();
+        // The photo editor on the view saved, over the 3D view (which draws nothing meanwhile).
+        if let Some(e) = self.editor.as_mut() {
+            if e.show(ui, rect) {
+                return true;
+            }
+            self.editor = None;
+        }
+        if let Some(r) = self.still.as_mut().and_then(|j| j.take()) {
+            self.still = None;
+            match r {
+                Ok(path) => {
+                    self.saved = Some(path);
+                    self.still_error = None;
+                }
+                Err(e) => self.still_error = Some(e),
+            }
+        }
         if let Some(job) = self.loading.as_mut() {
             if let Some(result) = job.take() {
                 match result {
@@ -342,6 +374,7 @@ impl Viewer {
             None => "3D view".into(),
         };
         widgets::text(&p, pos2(title_r.left() + 20.0, title_r.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.0).color(theme::FG_3));
+        self.save_view(ui, &p, rect, title_r);
         let close_r = Rect::from_min_size(pos2(bar.right() - 44.0, bar.top()), vec2(44.0, 44.0));
         if IconButton::new(icons::X, "Close the 3D view").size(44.0, 18.0).backdrop(theme::black(0.55)).show_at(ui, close_r).clicked() {
             open = false;
@@ -507,6 +540,118 @@ fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_p
     for (p, m) in orbit.pivot.iter_mut().zip(moved) {
         *p += m;
     }
+}
+
+impl Viewer {
+    /// Save this view beside the title, then what became of it under the bar (Edit, Show in its folder).
+    fn save_view(&mut self, ui: &mut Ui, p: &egui::Painter, rect: Rect, title_r: Rect) {
+        let ctx = ui.ctx().clone();
+        let now = ctx.input(|i| i.time);
+        // The shutter.
+        let flash = ((now - self.flashed) / 0.35) as f32;
+        if (0.0..1.0).contains(&flash) {
+            p.rect_filled(rect, 0.0, theme::white(0.3 * (1.0 - flash)));
+            ctx.request_repaint();
+        }
+        let Some(l) = self.loaded.as_ref() else { return };
+        let saving = self.still.is_some();
+        let b = Button::new(if saving { "Saving the view…" } else { "Save this view" })
+            .icon(icons::CAMERA)
+            .variant(Variant::Glass)
+            .enabled(!saving)
+            .hint("Saves the picture of this view in Photos & captures, larger than on screen, to edit or share")
+            .id_salt("splat-save-view");
+        let bw = b.desired_width(ui);
+        let save_r = Rect::from_min_size(pos2(title_r.right() + 10.0, title_r.top() + 2.0), vec2(bw, 40.0));
+        if b.show_at(ui, save_r).clicked() && !saving {
+            if let Some(orbit) = self.orbit {
+                let ppp = ctx.pixels_per_point();
+                let (vw, vh) = ((rect.width() * ppp).max(16.0), (rect.height() * ppp).max(16.0));
+                let k = (STILL_LONG / vw.max(vh)).max(1.0);
+                let camera = orbit.camera((vw * k).round() as u32, (vh * k).round() as u32);
+                let mode = match self.unsure {
+                    Unsure::Shown => None,
+                    Unsure::Faded => Some(ConfidenceMode::Fade),
+                    Unsure::Blurred => Some(ConfidenceMode::Blur),
+                    Unsure::Hazed => Some(ConfidenceMode::Haze),
+                };
+                let confidence = mode.map(|mode| Confidence { amount: self.amount, mode }).unwrap_or_default();
+                let far = FarField { mode: self.far, distance: self.far_distance, horizon: l.horizon };
+                let (dir, window) = (self.session.clone(), self.window.clone());
+                self.still = Some(Job::spawn(&ctx, move || still(&dir, window, camera, confidence, far).map_err(|e| format!("{e:#}"))));
+                self.flashed = now;
+                self.saved = None;
+                self.still_error = None;
+            }
+        }
+        // Saved: where, and Edit right after.
+        let (text, tone) = match (&self.saved, &self.still_error) {
+            (Some(_), _) => ("Saved in Photos & captures", theme::ACCENT),
+            (None, Some(_)) => ("This view could not be saved", theme::DANGER),
+            _ => return,
+        };
+        let t = Txt::new(text, 13.0).color(theme::FG);
+        let tw = widgets::text_size(ui, &t).x;
+        let saved = self.saved.clone();
+        let small = orbiters_ui::widgets::Size::Sm;
+        let edit = Button::new("Edit").icon(icons::SLIDERS_HORIZONTAL).variant(Variant::Primary).size(small).id_salt("splat-saved-edit");
+        let folder = Button::new("").icon(icons::FOLDER_OPEN).variant(Variant::Ghost).size(small).hint("Show it in its folder").id_salt("splat-saved-folder");
+        let (ew, fw) = (edit.desired_width(ui), folder.desired_width(ui));
+        let buttons = if saved.is_some() { 12.0 + ew + 4.0 + fw } else { 0.0 };
+        let w = 42.0 + tw + buttons + 8.0 + 30.0 + 8.0;
+        let chip_r = Rect::from_center_size(pos2(rect.center().x, title_r.bottom() + 16.0 + 22.0), vec2(w, 44.0));
+        p.rect_filled(chip_r, theme::radius(22.0), theme::black(0.72));
+        widgets::icon(p, pos2(chip_r.left() + 26.0, chip_r.center().y), if saved.is_some() { icons::CHECK_CIRCLE } else { icons::WARNING }, 16.0, tone);
+        let mut x = chip_r.left() + 42.0;
+        widgets::text(p, pos2(x, chip_r.center().y), Align2::LEFT_CENTER, &t);
+        x += tw + 12.0;
+        if let Some(path) = saved {
+            if edit.show_at(ui, Rect::from_min_size(pos2(x, chip_r.center().y - 16.0), vec2(ew, 32.0))).clicked() {
+                self.editor = Some(super::editor::Editor::open(&ctx, super::editor::Source::picture(path.clone()), self.title.clone()));
+            }
+            x += ew + 4.0;
+            if folder.show_at(ui, Rect::from_min_size(pos2(x, chip_r.center().y - 16.0), vec2(fw, 32.0))).clicked() {
+                if let Err(e) = super::editor::files::reveal(&path) {
+                    self.still_error = Some(e.to_string());
+                }
+            }
+        }
+        let close = Rect::from_center_size(pos2(chip_r.right() - 24.0, chip_r.center().y), vec2(28.0, 28.0));
+        if IconButton::new(icons::X, "Dismiss").size(28.0, 14.0).id_salt("splat-saved-dismiss").show_at(ui, close).clicked() {
+            self.saved = None;
+            self.still_error = None;
+        }
+        if let Some(e) = &self.still_error {
+            widgets::text_truncated(p, pos2(chip_r.center().x, chip_r.bottom() + 14.0), Align2::CENTER_CENTER, &Txt::new(e, 12.0).color(theme::DANGER), rect.width() * 0.6);
+        }
+    }
+}
+
+/// `camera`'s view of the splats of `dir` (at the camera's size, as `confidence` and `far` show them), drawn by a
+/// renderer of its own on the window's device, so that the view on screen carries on; saved as a picture of the
+/// capture's world ([`super::editor::files::save_view`]).
+fn still(dir: &Path, window: (wgpu::Device, wgpu::Queue), camera: Camera, confidence: Confidence, far: FarField) -> anyhow::Result<PathBuf> {
+    let (g, sky) = read(dir)?;
+    let mut gpu = Gpu::renderer(window.0, window.1);
+    gpu.upload(&g);
+    if let Some(map) = &sky {
+        gpu.set_sky(Some((map.width, &map.rgb)))?;
+    }
+    drop(g);
+    gpu.confidence = confidence;
+    gpu.far = far;
+    // Drawn again while the GPU's count says the frame left splats out.
+    let mut image = Vec::new();
+    for _ in 0..=REDRAW_CHECKS {
+        gpu.step(&camera, BACKGROUND, Target::None, None)?;
+        image = gpu.read_image()?;
+        if !gpu.needs_redraw() {
+            break;
+        }
+    }
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    let rgba: Vec<u8> = image.iter().flat_map(|p| [byte(p[0]), byte(p[1]), byte(p[2]), 255]).collect();
+    super::editor::files::save_view(dir, &orbiters_ui::photo::Rgba8::new(camera.width, camera.height, rgba))
 }
 
 /// Reads a session's splats and their sky map.

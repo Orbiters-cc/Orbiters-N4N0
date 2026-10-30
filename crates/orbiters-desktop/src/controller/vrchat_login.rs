@@ -19,6 +19,25 @@ pub struct Status {
     pub recovery: Recovery,
     /// Downloaded with the isolated VRChat session. The UI never loads a protected image through Orbiters.
     pub picture: Option<Picture>,
+    /// The avatar's or world's picture being replaced on VRChat (one at a time), then how that ended.
+    #[serde(default)]
+    pub upload: Option<PictureUpload>,
+}
+/// A picture replaced on VRChat (`Controller::vrchat_picture`): its step while it runs, then its outcome.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct PictureUpload {
+    /// Different for each upload the service ran, so a page takes each outcome once.
+    pub serial: u64,
+    /// The avatar's or world's ID.
+    pub id: String,
+    pub step: Option<orbiters_core::vrchat_api::Step>,
+    /// Once it ended: done, or what went wrong.
+    pub outcome: Option<Result<(), String>>,
+}
+impl PictureUpload {
+    pub fn running(&self) -> bool {
+        self.outcome.is_none()
+    }
 }
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub enum Recovery {

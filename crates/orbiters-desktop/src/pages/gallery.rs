@@ -2,8 +2,11 @@
 //! by the instance they were taken in. Cards look like Visited worlds' and Capture files' and grow into the picture
 //! window ([`sharing::Dialog`]) that shares them; the instance a group was taken in opens in a popover. Cards are
 //! selected (Ctrl/Shift-click, their check, a rubber band) and dragged out of the window into other apps
-//! ([`super::gallery_select`]).
+//! ([`super::gallery_select`]). Each group is laid out as the picker over the gallery says ([`super::gallery_layout`]:
+//! the website's masonry by default, rows, or the grid of cards), pictures keeping their shape in the first two; a
+//! VRChat multi-layer picture is one card ([`super::gallery_layers`]).
 use super::{
+    gallery_layout as arrangement,
     sharing::{self, Dialog},
     Cx, Job,
 };
@@ -11,6 +14,7 @@ use crate::controller::shares::{self as controller, Entry};
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, CursorIcon, Id, Order, Rect, Sense, TextureHandle, Ui, UiBuilder};
 use orbiters_core::{
     account::Server,
+    settings::GalleryLayout,
     shares::{Feed, Query},
     vrchat_log::WorldState,
 };
@@ -63,7 +67,7 @@ pub struct State {
     hash_asked: std::collections::HashSet<std::path::PathBuf>,
     shown_key: Option<(Filter, String)>,
     shown: Vec<Entry>,
-    key: Option<(u64, u64, std::path::PathBuf, bool, String)>,
+    key: Option<(u64, u64, std::path::PathBuf, bool, String, u64)>,
     local_job: Job<Vec<Entry>>,
     locals: Vec<Entry>,
     feed: Feed,
@@ -99,6 +103,14 @@ pub struct State {
     select: super::gallery_select::Selection,
     /// The galleries of the member's communities and their windows.
     community: super::community::State,
+    /// How the groups are laid out: chosen here at once, saved in the settings (`gallery_layout`), followed when the
+    /// settings change elsewhere.
+    layout: GalleryLayout,
+    layout_saved: Option<GalleryLayout>,
+    /// The shape of each picture the listing gave no size for, once its thumbnail is decoded (by entry key).
+    aspects: HashMap<String, f32>,
+    /// Screenshots: made-up local pictures added to this computer's (several shapes, a multi-layer picture).
+    fixture_extra: Vec<Entry>,
 }
 impl State {
     pub fn busy(&self) -> bool {
@@ -141,7 +153,39 @@ impl State {
             e.instance = self.feed.items[0].instance_id.clone();
             e.taken = controller::unix("2026-10-28T21:30:00Z") - n as u64 * 300;
         }
+        self.locals.extend(self.fixture_extra.iter().cloned());
         self.shown_key = None;
+    }
+
+    /// Screenshots: made-up local pictures beside this computer's (written by the screenshot code), as if taken in the
+    /// feed's first instance.
+    pub fn stage_extra(&mut self, mut entries: Vec<Entry>) {
+        if let Some(first) = self.feed.items.first() {
+            for e in &mut entries {
+                e.world_id = first.world.id.clone();
+                e.world_name = first.world.name.clone();
+                e.instance = first.instance_id.clone();
+            }
+        }
+        self.fixture_extra = entries;
+        self.fixture_locals = true;
+        self.stage_locals();
+    }
+
+    /// Screenshots: the groups laid out so.
+    pub fn stage_layout(&mut self, layout: GalleryLayout) {
+        self.layout = layout;
+    }
+
+    /// Screenshots: in the open window, a multi-layer picture's layer chosen (None: the picture), then these layers'
+    /// eyes pressed.
+    pub fn stage_layer(&mut self, choice: Option<usize>, eyes: &[usize]) {
+        if let Some(d) = self.dialog.as_mut() {
+            d.choose_layer(choice);
+            for i in eyes {
+                d.layers.toggle(*i);
+            }
+        }
     }
 
     pub fn stage(&mut self, ctx: &egui::Context, name: &str) {
@@ -215,8 +259,15 @@ impl State {
     pub fn open_card(&mut self, ctx: &egui::Context, n: usize) {
         let Some(e) = self.shown.get(n).cloned() else { return };
         let origin = self.cards.get(&e.key).copied().unwrap_or(Rect::from_min_size(pos2(264.0, 260.0), vec2(317.0, 178.0)));
-        self.dialog = Some(Dialog::new(ctx, e, false).from(origin, 20.0));
+        self.dialog = Some(Dialog::new(ctx, e, false).from(origin, picture_radius(self.layout)));
         self.from_card = true;
+    }
+
+    /// Opens the window of the card with this key, as if it was clicked (screenshots).
+    pub fn open_key(&mut self, ctx: &egui::Context, key: &str) {
+        if let Some(n) = self.shown.iter().position(|e| e.key == key) {
+            self.open_card(ctx, n);
+        }
     }
 
     /// Starts closing the open window (screenshots).
@@ -296,7 +347,23 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let now = anim::time(&ctx);
     let development = cx.snap.settings.development;
     let server = if development { Server::Development } else { Server::Production };
-    let key = (cx.ctl.library_version(), cx.visit, cx.snap.settings.sessions_dir.clone(), development, format!("{:?}", cx.snap.account.state));
+    // The layout the settings keep, unless it was just chosen here (the tray saves it a moment later).
+    let saved = cx.snap.settings.gallery_layout;
+    if !state.fixture && state.layout_saved != Some(saved) {
+        state.layout_saved = Some(saved);
+        state.layout = saved;
+    }
+    let layout = state.layout;
+    let tiles = arrangement::tiles(layout);
+    // The editor's saves too: a copy saved beside its original shows at once.
+    let key = (
+        cx.ctl.library_version(),
+        cx.visit,
+        cx.snap.settings.sessions_dir.clone(),
+        development,
+        format!("{:?}", cx.snap.account.state),
+        crate::pages::editor::saved(),
+    );
     if state.key.as_ref() != Some(&key) {
         let changed_account = state.key.as_ref().is_some_and(|k| k.3 != key.3 || k.4 != key.4);
         state.key = Some(key);
@@ -379,9 +446,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     }
     let head = Rect::from_min_size(pos2(page.left() + super::PAD_X, page.top() + cx.top + 8.0), vec2(page.width() - super::PAD_X * 2.0, 72.0));
     let narrow = head.width() < 690.0;
+    // The filters on one line, the layout, Requests and the search on the right; narrower, the layout and the search
+    // go under them.
+    let stacked = head.width() < 920.0;
     // Communities: the galleries as chips under the filters.
     let chips_h = if state.filter == Filter::Communities { 46.0 } else { 0.0 };
-    let controls = Rect::from_min_size(pos2(head.left(), head.bottom() + 14.0), vec2(head.width(), if narrow { 88.0 } else { 40.0 } + chips_h));
+    let controls = Rect::from_min_size(pos2(head.left(), head.bottom() + 14.0), vec2(head.width(), if stacked { 88.0 } else { 40.0 } + chips_h));
     let top = controls.bottom() + 20.0;
     let q = state.query.trim().to_lowercase();
     let shown_key = (state.filter, q.clone());
@@ -393,7 +463,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             .locals
             .iter()
             .filter(|_| !matches!(state.filter, Filter::Shared | Filter::Communities))
-            .take(if state.fixture { 1 } else { usize::MAX })
+            // Screenshots: one of this computer's, and the made-up pictures.
+            .enumerate()
+            .filter(|(n, e)| !state.fixture || *n == 0 || state.fixture_extra.iter().any(|x| x.key == e.key))
+            .map(|(_, e)| e)
             .cloned()
             .collect();
         for item in &state.feed.items {
@@ -428,8 +501,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
 
     // The card the window came out of is left out while the window draws it (riding under it as it leaves and lands)
     // and covers it, until the window landed back on it.
-    let open_key = state.dialog.as_ref().filter(|d| state.from_card && d.hides_source()).map(|d| d.entry.key.clone());
-    let window_key = state.dialog.as_ref().map(|d| d.entry.key.clone());
+    // (A multi-layer picture's window showing one of its layers still belongs to the picture's card.)
+    let open_key = state.dialog.as_ref().filter(|d| state.from_card && d.hides_source()).map(|d| d.layers.card_key(&d.entry).to_owned());
+    let window_key = state.dialog.as_ref().map(|d| d.layers.card_key(&d.entry).to_owned());
     let mut window_card: Option<sharing::Source> = None;
     let loading = if state.filter == Filter::Communities {
         state.community.loading() && state.community.count() == 0
@@ -457,13 +531,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                 let width = ui.available_width();
                 if entries.is_empty() {
                     if loading {
-                        let (cols, w) = orbiters_ui::layout::columns(width, CARD_MIN, 16.0);
-                        let h = w * 9.0 / 16.0 + CARD_BODY;
+                        let (cells, h) = shimmer_cells(layout, width, 2);
                         let (area, _) = ui.allocate_exact_size(vec2(width, 56.0 + h), Sense::hover());
                         feedback::shimmer(ui.painter(), Rect::from_min_size(area.min + vec2(0.0, 6.0), vec2(220.0, 18.0)), 9.0);
                         feedback::shimmer(ui.painter(), Rect::from_min_size(area.min + vec2(0.0, 32.0), vec2(160.0, 12.0)), 6.0);
-                        for c in 0..cols {
-                            super::sessions::shimmer_card(ui, Rect::from_min_size(area.min + vec2(c as f32 * (w + 16.0), 56.0), vec2(w, h)));
+                        for c in cells {
+                            super::sessions::shimmer_card(ui, c.translate(area.min.to_vec2() + vec2(0.0, 56.0)));
                         }
                     } else {
                         empty_state(ui, cx, state.filter, !q.is_empty(), (page.bottom() - top) * 0.6);
@@ -489,26 +562,32 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                         }
                     }
                     ui.add_space(12.0);
-                    let (cols, w) = orbiters_ui::layout::columns(width, CARD_MIN, 16.0);
-                    let h = w * 9.0 / 16.0 + CARD_BODY;
-                    let rows = indices.len().div_ceil(cols);
-                    let (area, _) = ui.allocate_exact_size(vec2(width, rows as f32 * (h + 16.0) - 16.0), Sense::hover());
+                    // Each picture as its shape says (the grid's cards are all one).
+                    let aspects: Vec<f32> =
+                        if tiles { indices.iter().map(|i| aspect(&ctx, &state.aspects, &entries[*i])).collect() } else { vec![0.0; indices.len()] };
+                    let (cells, height) = arrangement::arrange(layout, &aspects, width, CARD_MIN, CARD_BODY);
+                    let (area, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
                     for (n, i) in indices.iter().enumerate() {
                         let e = &entries[*i];
-                        let r =
-                            Rect::from_min_size(pos2(area.left() + (n % cols) as f32 * (w + 16.0), area.top() + (n / cols) as f32 * (h + 16.0)), vec2(w, h));
+                        let r = cells[n].translate(area.min.to_vec2());
                         index += 1;
                         if !ui.is_rect_visible(r) {
                             continue;
                         }
                         if super::community::owns(&e.key) {
                             let pictures = state.pictures.as_mut().expect("pictures");
-                            if let Some(thumb) = state.community.card(ui, cx, pictures, index, e, r, !modal) {
+                            if e.size.is_none() {
+                                learn_aspect(&ctx, &mut state.aspects, e, pictures);
+                            }
+                            if let Some(thumb) = state.community.card(ui, cx, pictures, index, e, r, !modal, tiles) {
                                 community_clicked = Some((e.key.clone(), thumb));
                             }
                             continue;
                         }
                         let tex = e.picture.as_ref().and_then(|p| state.pictures.as_mut()?.get(&ctx, p));
+                        if let (None, Some(t)) = (e.size, tex.as_ref()) {
+                            state.aspects.insert(e.key.clone(), t.size_vec2().x / t.size_vec2().y.max(1.0));
+                        }
                         let from_tex = e.remote.as_ref().and_then(|i| i.from.as_ref()).and_then(|from| {
                             if state.fixture {
                                 return None;
@@ -528,6 +607,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                             selected: state.select.has(&e.key),
                             selecting,
                             carried: state.select.carried(&e.key),
+                            tile: tiles,
                         };
                         let (thumb, resp) = card(ui, cx, index, e, r, &look);
                         if let Some(resp) = resp.filter(|_| !modal) {
@@ -536,7 +616,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                             }
                         }
                         state.select.place(&e.key, r);
-                        let picture = Rect::from_min_size(r.min, vec2(w, w * 9.0 / 16.0));
+                        let picture = if tiles { r } else { Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0)) };
                         state.cards.insert(e.key.clone(), picture);
                         if window_key.as_ref() == Some(&e.key) {
                             let (e, tex, from_tex) = (e.clone(), tex.clone(), from_tex.clone());
@@ -554,6 +634,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                                         selected: false,
                                         selecting: false,
                                         carried: false,
+                                        tile: tiles,
                                     };
                                     let _ = card(ui, cx, 0, &e, r, &look);
                                 }),
@@ -568,8 +649,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                     // Endless: the next page is asked for while the end is still a screen away, and a row of
                     // shimmering cards holds the place its pictures arrive in (a failed page says so below, with
                     // Try again, instead of asking again and again).
-                    let (cols, w) = orbiters_ui::layout::columns(width, CARD_MIN, 16.0);
-                    let h = w * 9.0 / 16.0 + CARD_BODY;
+                    let (cells, h) = shimmer_cells(layout, width, 1);
                     let (r, _) = ui.allocate_exact_size(vec2(width, h), Sense::hover());
                     if r.top() < ui.clip_rect().bottom() + ui.clip_rect().height() {
                         if more_feed && !state.feed_job.running() {
@@ -580,8 +660,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                         }
                     }
                     if ui.is_rect_visible(r) {
-                        for c in 0..cols {
-                            super::sessions::shimmer_card(ui, Rect::from_min_size(r.min + vec2(c as f32 * (w + 16.0), 0.0), vec2(w, h)));
+                        for c in cells {
+                            super::sessions::shimmer_card(ui, c.translate(r.min.to_vec2()));
                         }
                     }
                 }
@@ -674,15 +754,28 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     if state.filter != before_filter {
         state.query_changed = now - 1.0;
     }
-    let search = if narrow {
-        Rect::from_min_size(pos2(controls.left(), controls.top() + 48.0), vec2(controls.width(), 40.0))
+    let picker_w = arrangement::PICKER_W;
+    let search = if stacked {
+        Rect::from_min_size(pos2(controls.left() + picker_w + 12.0, controls.top() + 48.0), vec2(controls.width() - picker_w - 12.0, 40.0))
     } else {
         Rect::from_min_size(pos2(controls.right() - 260.0, controls.top()), vec2(260.0, 40.0))
     };
     let pending = state.requests.pending();
     let rb = Button::new("Requests").icon(icons::TRAY).hint("People asking to share what you shared with them, and what you asked");
     let rw = rb.desired_width(ui);
-    let request_button = Rect::from_min_size(pos2(if narrow { controls.right() - rw } else { search.left() - 12.0 - rw }, controls.top()), vec2(rw, 40.0));
+    let request_button = Rect::from_min_size(pos2(if stacked { controls.right() - rw } else { search.left() - 12.0 - rw }, controls.top()), vec2(rw, 40.0));
+    // The layout picker: before Requests, or before the search under the filters.
+    let picker = if stacked {
+        Rect::from_min_size(pos2(controls.left(), controls.top() + 48.0), vec2(picker_w, 40.0))
+    } else {
+        Rect::from_min_size(pos2(request_button.left() - 12.0 - picker_w, controls.top()), vec2(picker_w, 40.0))
+    };
+    {
+        let mut pu = ui.new_child(UiBuilder::new().max_rect(picker).id_salt("gallery-layout"));
+        if arrangement::picker(&mut pu, picker, &mut state.layout) && !state.fixture {
+            cx.ctl.patch_settings(serde_json::json!({ "gallery_layout": state.layout }));
+        }
+    }
     let requests_open = state.requests.open || state.requests.is_out();
     {
         let mut ru = ui.new_child(UiBuilder::new().max_rect(request_button.expand(10.0)).id_salt("requests-button"));
@@ -722,12 +815,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                 e.picture = Some(crate::worlds::Picture::Capture { development, id: item.id, large: false });
             }
         }
-        state.dialog = Some(Dialog::new(&ctx, e, false).from(thumb, 20.0));
+        state.dialog = Some(Dialog::new(&ctx, e, false).from(thumb, picture_radius(layout)));
         state.from_card = true;
     }
     if let Some(d) = state.dialog.as_mut() {
         // The items before and after it in the gallery: arrows and ←/→ go through them.
-        let at = entries.iter().position(|e| e.key == d.entry.key);
+        let at = entries.iter().position(|e| e.key == d.layers.card_key(&d.entry));
         d.neighbours = (at.is_some_and(|i| i > 0), at.is_some_and(|i| i + 1 < entries.len()));
         let typing = ctx.memory(|m| m.focused().is_some());
         let key = ctx.input(|i| {
@@ -817,6 +910,57 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
 const CARD_BODY: f32 = 70.0;
 /// The narrowest card, as Visited worlds' (the same card): both pages get as many columns at every width.
 const CARD_MIN: f32 = 270.0;
+/// A picture's corners in the tile layouts (masonry, rows).
+pub const TILE_RADIUS: f32 = 16.0;
+
+/// The corners of a card's picture in `layout` (the window grows out of them).
+fn picture_radius(layout: GalleryLayout) -> f32 {
+    if arrangement::tiles(layout) {
+        TILE_RADIUS
+    } else {
+        20.0
+    }
+}
+
+/// A picture's shape (width over height): its size from the listing, else its thumbnail's once decoded, springing
+/// there from the stand-in (cards below it move with it instead of jumping).
+fn aspect(ctx: &egui::Context, known: &HashMap<String, f32>, e: &Entry) -> f32 {
+    if let Some([w, h]) = e.size.filter(|s| s[0] > 0 && s[1] > 0) {
+        return w as f32 / h as f32;
+    }
+    let target = known.get(&e.key).copied().unwrap_or(arrangement::STAND_IN);
+    anim::spring(ctx, Id::unique(("gallery-aspect", &e.key)), [target], Spring::SOFT)[0]
+}
+
+/// Keeps the shape of a picture the listing gave no size for, once its thumbnail is decoded.
+fn learn_aspect(ctx: &egui::Context, known: &mut HashMap<String, f32>, e: &Entry, pictures: &mut crate::worlds::Pictures) {
+    if let Some(t) = e.picture.as_ref().and_then(|p| pictures.get(ctx, p)) {
+        known.insert(e.key.clone(), t.size_vec2().x / t.size_vec2().y.max(1.0));
+    }
+}
+
+/// Shimmering places for pictures still coming: `rows` of cards in the grid, a band of mixed shapes otherwise. Their
+/// rects from the top left, and their height.
+fn shimmer_cells(layout: GalleryLayout, width: f32, rows: usize) -> (Vec<Rect>, f32) {
+    match layout {
+        GalleryLayout::Grid => {
+            let (cols, _) = orbiters_ui::layout::columns(width, CARD_MIN, arrangement::GAP);
+            let (mut cells, _) = arrangement::grid(cols, width, CARD_MIN, CARD_BODY);
+            let h = cells.first().map_or(0.0, |c| c.height());
+            cells.truncate(cols);
+            (cells, h)
+        }
+        _ => {
+            let shapes = [4.0 / 3.0, 3.0 / 4.0, 16.0 / 9.0, 1.0, 3.0 / 2.0, 9.0 / 16.0, 4.0 / 3.0, 16.0 / 9.0];
+            let n = if layout == GalleryLayout::Rows { 4 * rows } else { (width / arrangement::COLUMN_MAX).ceil() as usize * rows };
+            let aspects: Vec<f32> = shapes.iter().copied().cycle().take(n.max(1)).collect();
+            let (cells, _) = arrangement::arrange(layout, &aspects, width, CARD_MIN, CARD_BODY);
+            // As tall as its shortest column: an even band.
+            let h = rows as f32 * arrangement::ROW_HEIGHT;
+            (cells.into_iter().filter(|c| c.top() < h).map(|c| Rect::from_min_max(c.min, pos2(c.right(), c.bottom().min(h)))).collect(), h)
+        }
+    }
+}
 
 /// A group's heading: the world, when, what kind of instance and how many; the Instance button on the right.
 /// Returns that button's rect and whether it was pressed.
@@ -878,11 +1022,14 @@ struct CardLook<'a> {
     selecting: bool,
     /// Being dragged out of the window: lifted (smaller, faded) until the drop.
     carried: bool,
+    /// The picture alone, its shape kept (masonry, rows): what it is on it, its time on hover; else the grid's card.
+    tile: bool,
 }
 
 /// One card, as Visited worlds' and Capture files': the picture with what it is and who sees it, then its kind,
-/// time and who it is from. Returns its picture's rect and, when it takes input, its response (a click opens or
-/// selects it, a drag takes it out of the window: [`super::gallery_select`]).
+/// time and who it is from; in the tile layouts the picture alone, in its shape, who it is from on it and its kind
+/// and time over its bottom on hover. Returns its picture's rect and, when it takes input, its response (a click
+/// opens or selects it, a drag takes it out of the window: [`super::gallery_select`]).
 fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'_>) -> (Rect, Option<egui::Response>) {
     let ctx = ui.ctx().clone();
     let id = Id::unique(("gallery-card", &e.key));
@@ -905,16 +1052,34 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
     let mut p = ui.painter().clone();
     p.multiply_opacity(enter.clamp(0.0, 1.0) * look.shown * (1.0 - 0.6 * lift.clamp(0.0, 1.0)));
 
-    widgets::frame(&p, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover));
-    let thumb = Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0));
-    super::sessions::thumb_shape(&p, thumb, CornerRadius { nw: 20, ne: 20, sw: 0, se: 0 }, look.tex, 1.0 + 0.06 * ease::out_cubic(hover));
-    let shade = paint::rounded_rect_points_corners(thumb, [20.0, 20.0, 0.0, 0.0]);
+    let tile = look.tile;
+    let (thumb, corners) = if tile {
+        (r, [TILE_RADIUS; 4])
+    } else {
+        widgets::frame(&p, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover));
+        (Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0)), [20.0, 20.0, 0.0, 0.0])
+    };
+    let radius = CornerRadius { nw: corners[0] as u8, ne: corners[1] as u8, se: corners[2] as u8, sw: corners[3] as u8 };
+    // A layer alone keeps its transparency: over a checkerboard.
+    if look.tex.is_some() && matches!(e.picture, Some(crate::worlds::Picture::Layer { .. })) {
+        super::gallery_layers::checkerboard(&p, thumb, corners, 1.0);
+    }
+    super::sessions::thumb_shape(&p, thumb, radius, look.tex, 1.0 + 0.06 * ease::out_cubic(hover));
+    let from = e.remote.as_ref().filter(|i| !i.mine).and_then(|i| i.from.as_ref());
+    // A tile darkens its bottom for who it is from, and more on hover for its kind and time.
+    let bottom = if tile { 0.15 + 0.6 * ease::out_cubic(hover.clamp(0.0, 1.0)) + if from.is_some() { 0.25 } else { 0.0 } } else { 0.75 };
+    let shade = if tile { paint::squircle_points_corners(thumb, corners.map(theme::squircle)) } else { paint::rounded_rect_points_corners(thumb, corners) };
     paint::fill_gradient(
         &p,
         &shade,
         &Gradient::vertical(
             thumb,
-            &[(0.0, theme::alpha(theme::INK_950, 0.25)), (0.3, Color32::TRANSPARENT), (0.6, Color32::TRANSPARENT), (1.0, theme::alpha(theme::INK_950, 0.75))],
+            &[
+                (0.0, theme::alpha(theme::INK_950, 0.25)),
+                (0.3, Color32::TRANSPARENT),
+                (if tile { 0.55 } else { 0.6 }, Color32::TRANSPARENT),
+                (1.0, theme::alpha(theme::INK_950, bottom.min(0.85))),
+            ],
         ),
     );
 
@@ -926,9 +1091,17 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
     let queued = matches!(&e.local, Some(controller::Local::Session(d)) if cx.snap.reconstruct_queue.contains(d));
     let (kind_label, kind_color) = if e.is_picture() { ("Picture", theme::FG_2) } else { ("3D", theme::ACCENT) };
     // The check on its corner; the badges step aside for it.
-    let check = if look.riding { 0.0 } else { super::gallery_select::paint_card(&p, &ctx, &e.key, r, thumb, look.selected, look.selecting, hover) };
+    let card_radius = if tile { TILE_RADIUS } else { theme::CARD_RADIUS };
+    let check =
+        if look.riding { 0.0 } else { super::gallery_select::paint_card(&p, &ctx, &e.key, r, thumb, card_radius, look.selected, look.selecting, hover) };
     let mut x = thumb.left() + 12.0 + (super::gallery_select::CHECK + 6.0) * check;
-    x += super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), kind_label, theme::black(0.55), kind_color, false) + 6.0;
+    // A tile says what it is when it is not a picture (most are).
+    if !tile || !e.is_picture() {
+        x += super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), kind_label, theme::black(0.55), kind_color, false) + 6.0;
+    }
+    if let Some(layers) = super::gallery_layers::label(e) {
+        x += super::gallery_layers::badge(&p, ui, pos2(x, thumb.top() + 12.0), icons::STACK, &layers, false) + 6.0;
+    }
     if let Some(j) = job {
         super::sessions::badge(
             &p,
@@ -960,14 +1133,16 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         }
     }
     if let Some(j) = job {
-        let bar = Rect::from_min_max(pos2(thumb.left(), thumb.bottom() - 3.0), thumb.max);
+        // Along the picture's bottom (inside a tile's rounded corners).
+        let inset = if tile { 12.0 } else { 0.0 };
+        let bar = Rect::from_min_max(pos2(thumb.left() + inset, thumb.bottom() - 3.0 - inset * 0.5), pos2(thumb.right() - inset, thumb.bottom() - inset * 0.5));
         let f = anim::spring_from(&ctx, id.with("reconstruct"), [0.0], [super::sessions::overall_progress(j)], Spring::SOFT)[0].clamp(0.0, 1.0);
-        p.rect_filled(bar, 0.0, theme::white(0.08));
-        p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), 0.0, theme::ACCENT);
+        let round = if tile { 1.5 } else { 0.0 };
+        p.rect_filled(bar, round, theme::white(0.08));
+        p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), round, theme::ACCENT);
     }
 
     // Kind and time, then who sees it or who it is from.
-    let from = e.remote.as_ref().filter(|i| !i.mine).and_then(|i| i.from.as_ref());
     let bx = r.left() + 16.0;
     let title = if e.is_picture() {
         "VRChat picture"
@@ -978,6 +1153,10 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
     };
     let time = super::local_time(&controller::iso(e.taken));
     let time = time.rsplit_once(", ").map_or(time.clone(), |(_, t)| t.to_string());
+    if tile {
+        tile_caption(&p, ui, thumb, title, &time, from.map(|f| (f.name.as_str(), look.from)), hover);
+        return (thumb, resp.filter(|_| look.interactive));
+    }
     let tt = Txt::new(&time, 12.0).color(theme::FG_3);
     let tw = widgets::text_size(ui, &tt).x;
     widgets::text(&p, pos2(r.right() - 16.0, thumb.bottom() + 22.0), Align2::RIGHT_CENTER, &tt);
@@ -1005,6 +1184,35 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         widgets::text_truncated(&p, pos2(bx + 20.0, line_y), Align2::LEFT_CENTER, &Txt::new(label, 12.0).color(color), r.width() - 52.0);
     }
     (thumb, resp.filter(|_| look.interactive))
+}
+
+/// Over a tile's bottom: who shared it with you (always), its kind and time (on hover).
+fn tile_caption(p: &egui::Painter, ui: &Ui, thumb: Rect, title: &str, time: &str, from: Option<(&str, Option<&TextureHandle>)>, hover: f32) {
+    let y = thumb.bottom() - 12.0 - 11.0;
+    let mut left = thumb.left() + 12.0;
+    let tt = Txt::new(time, 11.5).weight(weight::MEDIUM).color(theme::FG_2);
+    let tw = widgets::text_size(ui, &tt).x;
+    if let Some((name, tex)) = from {
+        let t = Txt::new(format!("from {name}"), 11.5).weight(weight::SEMIBOLD).color(theme::FG);
+        let w = (widgets::text_size(ui, &t).x + 34.0).min(thumb.width() - 24.0);
+        let pill = Rect::from_min_size(pos2(left, y - 11.0), vec2(w, 22.0));
+        p.rect_filled(pill, theme::radius(11.0), theme::black(0.55));
+        widgets::avatar(p, Rect::from_center_size(pos2(pill.left() + 11.0, pill.center().y), vec2(18.0, 18.0)), tex, name);
+        widgets::text_truncated(p, pos2(pill.left() + 25.0, pill.center().y), Align2::LEFT_CENTER, &t, w - 32.0);
+        left = pill.right() + 8.0;
+    }
+    let k = ease::out_cubic(hover.clamp(0.0, 1.0));
+    if k < 0.01 {
+        return;
+    }
+    let mut hp = p.clone();
+    hp.multiply_opacity(k);
+    let dy = 4.0 * (1.0 - k);
+    widgets::text(&hp, pos2(thumb.right() - 12.0, y + dy), Align2::RIGHT_CENTER, &tt);
+    let room = thumb.right() - 12.0 - tw - 10.0 - left;
+    if room > 40.0 {
+        widgets::text_truncated(&hp, pos2(left, y + dy), Align2::LEFT_CENTER, &Txt::new(title, 12.5).weight(weight::SEMIBOLD), room);
+    }
 }
 
 fn empty_state(ui: &mut Ui, cx: &Cx, filter: Filter, searching: bool, height: f32) {

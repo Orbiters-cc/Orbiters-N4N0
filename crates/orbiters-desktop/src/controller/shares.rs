@@ -77,7 +77,16 @@ pub struct Entry {
     pub ready: bool,
     #[serde(skip)]
     pub picture: Option<crate::worlds::Picture>,
+    /// The picture's size in pixels when the listing knows it (a screenshot's header, a capture's frame, what Orbiters
+    /// says): its card has its shape before its thumbnail is decoded.
+    #[serde(default)]
+    pub size: Option<[u32; 2]>,
+    /// A VRChat multi-layer picture's layers, back to front ([`Entry::layers`]).
+    #[serde(default)]
+    pub layers: Vec<Layer>,
 }
+
+pub use crate::worlds::Layer;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Operation {
@@ -272,6 +281,37 @@ impl Entry {
     pub fn is_picture(&self) -> bool {
         matches!(self.local, Some(Local::Picture(_))) || self.remote.as_ref().is_some_and(|i| i.kind == Kind::Picture)
     }
+
+    /// A VRChat multi-layer picture's layers ([`Layer`]: each file, VRChat's name for it, its size), back to front, the
+    /// order to stack them in: empty for a plain picture and for captures. The entry's own file ([`Entry::local`]) is
+    /// the picture VRChat saved with them, all layers in one; when that file is gone, it is the bottom layer, then the
+    /// first of these too ([`Entry::has_composite`]).
+    pub fn layers(&self) -> &[Layer] {
+        &self.layers
+    }
+
+    /// Whether the entry's own file is the picture of all its layers (and not one of them).
+    pub fn has_composite(&self) -> bool {
+        let own = self.local.as_ref().map(Local::path);
+        !self.layers.iter().any(|l| Some(l.path.as_path()) == own)
+    }
+
+    /// One of its layers as an entry of its own: the picture window shares that file when the layer is chosen (its own
+    /// upload, its own grants). Its card key is its file's, as any picture's.
+    pub fn layer_entry(&self, i: usize) -> Option<Entry> {
+        let layer = self.layers.get(i)?;
+        let own = self.local.as_ref().is_some_and(|l| l.path() == layer.path);
+        Some(Entry {
+            key: layer.path.to_string_lossy().into(),
+            source_key: if own { self.source_key.clone() } else { None },
+            local: Some(Local::Picture(layer.path.clone())),
+            remote: layer.shared.clone(),
+            picture: Some(layer.picture(crate::worlds::THUMB_WIDTH)),
+            size: Some([layer.width, layer.height]),
+            layers: Vec::new(),
+            ..self.clone()
+        })
+    }
 }
 
 /// Server ids win; an owner's source key also identifies a local file before it has an upload record.
@@ -317,6 +357,8 @@ pub fn local_entries(root: &Path, server: Server) -> Vec<Entry> {
                 content: Content::read(&s.dir),
                 ready: s.reconstruction.is_some(),
                 picture: Some(crate::worlds::Picture::Session(s.dir.clone())),
+                size: session_picture_size(s.manifest.capture.width, s.manifest.capture.height),
+                layers: Vec::new(),
             });
         }
         for shot in &w.shots {
@@ -328,6 +370,16 @@ pub fn local_entries(root: &Path, server: Server) -> Vec<Entry> {
                 }
             }
             let remote = records.iter().find(|r| r.path == shot.path).and_then(|r| r.item.clone());
+            let mut layers = w.layers.get(&shot.path).cloned().unwrap_or_default();
+            for l in &mut layers {
+                l.shared = records.iter().find(|r| r.path == l.path).and_then(|r| r.item.clone());
+            }
+            // A layer alone (its picture deleted) shows with its transparency.
+            let face = layers.iter().find(|l| l.path == shot.path);
+            let picture = match face {
+                Some(l) if l.transparent() => l.picture(560),
+                _ => crate::worlds::Picture::Shot { path: shot.path.clone(), size: shot.size, width: 560 },
+            };
             entries.push(Entry {
                 key: shot.path.to_string_lossy().into(),
                 world_id: w.id.clone(),
@@ -340,7 +392,9 @@ pub fn local_entries(root: &Path, server: Server) -> Vec<Entry> {
                 remote,
                 content,
                 ready: true,
-                picture: Some(crate::worlds::Picture::Shot { path: shot.path.clone(), size: shot.size, width: 560 }),
+                picture: Some(picture),
+                size: (shot.info.width > 0 && shot.info.height > 0).then_some([shot.info.width, shot.info.height]),
+                layers,
             });
         }
     }
@@ -368,8 +422,20 @@ pub fn remote_entry(item: Item) -> Entry {
         content: Content { explicit: item.explicit, explicit_reasons: item.explicit_reasons.clone() },
         ready: true,
         picture,
+        size: item.picture.as_ref().filter(|p| p.width > 0 && p.height > 0).map(|p| [p.width, p.height]),
+        layers: Vec::new(),
         remote: Some(item),
     }
+}
+
+/// The size of a capture's picture: its frames without the strip at the top and the skeleton band's rows at the bottom
+/// ([`orbiters_core::bundle::capture_picture_rect`], as its thumbnail is cropped). None when the manifest has no size.
+pub fn session_picture_size(width: u32, height: u32) -> Option<[u32; 2]> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let r = orbiters_core::bundle::capture_picture_rect(width, height);
+    (r.y1 > r.y0).then_some([width, r.y1 - r.y0])
 }
 pub fn api(server: Server) -> anyhow::Result<(Api, String)> {
     let account = account::read(server).ok_or_else(|| anyhow::anyhow!("Sign in to Orbiters in Settings first."))?;
@@ -845,6 +911,37 @@ mod tests {
         assert!(dir.join(orbiters_core::explicit::FILE).is_file());
         std::fs::remove_dir_all(dir).unwrap();
     }
+    /// A multi-layer picture's layer, chosen in its window, is shared as its own file: its path, its own record's item,
+    /// no layers; the picture keeps its own.
+    #[test]
+    fn a_chosen_layer_is_an_entry_of_its_own() {
+        let layer = |name: &str, shared: Option<Item>| Layer {
+            path: PathBuf::from(format!("C:/P/VRChat_2026-10-29_21-04-11.532_1920x1080_{name}.png")),
+            name: name.into(),
+            width: 1920,
+            height: 1080,
+            shared,
+        };
+        let mut e = remote_entry(Item::default());
+        e.remote = None;
+        e.key = "C:/P/VRChat_2026-10-29_21-04-11.532_1920x1080.png".into();
+        e.local = Some(Local::Picture(PathBuf::from(&e.key)));
+        e.source_key = Some("composite-hash".into());
+        e.layers = vec![layer("Environment", None), layer("Player", Some(Item { kind: Kind::Picture, id: 7, mine: true, ..Default::default() }))];
+        assert!(e.has_composite());
+        let player = e.layer_entry(1).unwrap();
+        assert_eq!(player.key, e.layers[1].path.to_string_lossy());
+        assert!(matches!(&player.local, Some(Local::Picture(p)) if *p == e.layers[1].path));
+        assert_eq!(player.remote.as_ref().map(|i| i.id), Some(7));
+        assert!(player.layers().is_empty() && player.source_key.is_none());
+        assert_eq!((player.world_id.as_str(), player.size), (e.world_id.as_str(), Some([1920, 1080])));
+        // The picture deleted: the entry's own file is its bottom layer, whose fingerprint it keeps.
+        e.local = Some(Local::Picture(e.layers[0].path.clone()));
+        assert!(!e.has_composite());
+        assert_eq!(e.layer_entry(0).unwrap().source_key.as_deref(), Some("composite-hash"));
+        assert!(e.layer_entry(2).is_none());
+    }
+
     #[test]
     fn source_keys_match_only_owned_items_of_the_same_kind_and_world() {
         let item = Item {

@@ -529,6 +529,15 @@ impl ShotIndex {
         out
     }
 
+    /// Every PNG of the folders, with a world or not, newest first: the layers of VRChat's multi-layer pictures may
+    /// carry no world of their own (their picture does).
+    pub fn every_shot(&self) -> Vec<Shot> {
+        let mut out: Vec<Shot> =
+            self.files.iter().map(|(p, e)| Shot { path: p.clone(), size: e.size, info: e.info.clone(), sha256: e.sha256.clone() }).collect();
+        out.sort_by(|a, b| b.info.taken.cmp(&a.info.taken).then_with(|| b.path.cmp(&a.path)));
+        out
+    }
+
     /// Hashes the given screenshots that have no hash yet; returns whether any was added.
     pub fn hash(&mut self, paths: &[PathBuf]) -> bool {
         let mut changed = false;

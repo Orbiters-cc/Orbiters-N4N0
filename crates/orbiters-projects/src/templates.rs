@@ -130,11 +130,38 @@ pub fn validate_name(name: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
-fn excluded(name: &str) -> bool {
-    matches!(name.to_ascii_lowercase().as_str(), "library" | "temp" | "logs" | "obj" | "usersettings" | ".git" | "node_modules")
+/// What a copy of a project takes along besides its own files.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Keep {
+    /// Library, which Unity otherwise makes again from the project's files when the copy is first opened (long for a
+    /// large project).
+    pub library: bool,
+}
+
+/// Left out of a copy: what Unity or the IDE make again at the project's top (Library unless `keep` asks for it,
+/// Temp, Logs, obj, Visual Studio's .vs, the .csproj and .sln files), this computer's editor settings (UserSettings),
+/// and Git's history and Node's packages wherever they are. A folder of the same name deeper in (an asset folder
+/// called Library or Temp) is copied.
+fn excluded(name: &str, depth: usize, dir: bool, keep: Keep) -> bool {
+    let n = name.to_ascii_lowercase();
+    if matches!(n.as_str(), ".git" | "node_modules") {
+        return true;
+    }
+    if depth != 1 {
+        return false;
+    }
+    match n.as_str() {
+        "library" => dir && !keep.library,
+        "temp" | "logs" | "obj" | "usersettings" | ".vs" => dir,
+        _ => !dir && (n.ends_with(".csproj") || n.ends_with(".sln")),
+    }
 }
 /// Copy into a newly reserved folder only. Reparse points are excluded even when Windows reports them as dirs.
 pub fn copy(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
+    copy_keeping(source, destination, Keep::default(), cancel, progress)
+}
+/// [`copy`], taking along what `keep` asks for.
+pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
     if !source.is_dir() {
         bail!("The source folder no longer exists.");
     }
@@ -150,7 +177,10 @@ pub fn copy(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &S
     for entry in walkdir::WalkDir::new(&source)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|e| !excluded(&e.file_name().to_string_lossy()) && !e.metadata().ok().is_some_and(|m| crate::discovery::is_link(&m)))
+        .filter_entry(|e| {
+            !excluded(&e.file_name().to_string_lossy(), e.depth(), e.file_type().is_dir(), keep)
+                && !e.metadata().ok().is_some_and(|m| crate::discovery::is_link(&m))
+        })
     {
         if cancel.load(Ordering::Relaxed) {
             bail!("Copy cancelled. The incomplete folder was kept at {} and was not registered.", destination.display());
@@ -185,6 +215,9 @@ pub fn copy(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &S
     }
     Ok(())
 }
+/// A new project in `parent`/`name` from the template (or, with `duplicate`, the project) in `source`, its packages
+/// restored and registered.
+#[allow(clippy::too_many_arguments)]
 pub async fn create(
     root: &Path,
     source: &Path,
@@ -195,12 +228,44 @@ pub async fn create(
     cancel: &AtomicBool,
     progress: &SharedProgress,
 ) -> anyhow::Result<PathBuf> {
+    make(root, source, parent, name, unity, duplicate.then_some(Keep::default()), cancel, progress).await
+}
+
+/// A copy of the project in `source` named `name` in `parent`, taking along what `keep` asks for: its packages
+/// restored and registered in the list VCC and ALCOM share. Its scenes keep their blueprint IDs.
+pub async fn duplicate(
+    root: &Path,
+    source: &Path,
+    parent: &Path,
+    name: &str,
+    keep: Keep,
+    cancel: &AtomicBool,
+    progress: &SharedProgress,
+) -> anyhow::Result<PathBuf> {
+    let unity = std::fs::read_to_string(source.join("ProjectSettings/ProjectVersion.txt"))
+        .ok()
+        .and_then(|s| crate::discovery::parse_version(&s))
+        .unwrap_or_default();
+    make(root, source, parent, name, &unity, Some(keep), cancel, progress).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn make(
+    root: &Path,
+    source: &Path,
+    parent: &Path,
+    name: &str,
+    unity: &str,
+    copy: Option<Keep>,
+    cancel: &AtomicBool,
+    progress: &SharedProgress,
+) -> anyhow::Result<PathBuf> {
     validate_name(name)?;
     if !parent.is_absolute() {
         bail!("Choose an absolute destination folder.");
     }
     let destination = parent.join(name);
-    copy(source, &destination, cancel, progress)?;
+    copy_keeping(source, &destination, copy.unwrap_or_default(), cancel, progress)?;
     let version = destination.join("ProjectSettings/ProjectVersion.txt");
     if !version.is_file() {
         if vrc_get_vpm::version::UnityVersion::parse(unity).is_none() {
@@ -209,24 +274,12 @@ pub async fn create(
         std::fs::create_dir_all(version.parent().unwrap())?;
         std::fs::write(version, format!("m_EditorVersion: {unity}\n"))?;
     }
-    if !duplicate {
-        let path = destination.join("ProjectSettings/ProjectSettings.asset");
-        if let Ok(s) = std::fs::read_to_string(&path) {
-            let s = s
-                .lines()
-                .map(|l| {
-                    if l.trim_start().starts_with("productGUID:") {
-                        format!("  productGUID: {}", uuid::Uuid::new_v4().simple())
-                    } else if l.trim_start().starts_with("productName:") {
-                        format!("  productName: {}", serde_json::to_string(name).unwrap())
-                    } else {
-                        l.to_string()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            std::fs::write(path, s)?;
-        }
+    // A product GUID of its own; a template's product name always becomes the project's, a copy's when it was the
+    // copied project's name.
+    let path = destination.join("ProjectSettings/ProjectSettings.asset");
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        let from = copy.map(|_| source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        std::fs::write(&path, retarget(&s, name, from.as_deref()))?;
     }
     if cancel.load(Ordering::Relaxed) {
         bail!("Cancelled before resolving. The folder was kept and was not registered.");
@@ -236,4 +289,99 @@ pub async fn create(
     progress.lock().unwrap().phase = "Registering project".into();
     crate::vpm::register(root, &destination, true).await?;
     Ok(destination)
+}
+
+/// A project's `ProjectSettings.asset` (text) for a new project named `name`: a product GUID of its own, and its
+/// product name (under which the editor keeps the project's PlayerPrefs) changed to `name` when it was `from` (the
+/// copied project's name), or always without `from` (a template's). The other lines and every line's ending stay.
+pub fn retarget(settings: &str, name: &str, from: Option<&str>) -> String {
+    let mut out = String::with_capacity(settings.len() + 64);
+    for line in settings.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\r', '\n']);
+        let end = &line[body.len()..];
+        let trimmed = body.trim_start();
+        let indent = &body[..body.len() - trimmed.len()];
+        if trimmed.starts_with("productGUID:") {
+            out.push_str(&format!("{indent}productGUID: {}{end}", uuid::Uuid::new_v4().simple()));
+        } else if trimmed.strip_prefix("productName:").is_some_and(|v| from.is_none_or(|f| unquote(v.trim()) == f)) {
+            out.push_str(&format!("{indent}productName: {}{end}", serde_json::to_string(name).unwrap()));
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// A YAML scalar as Unity writes it: plain, 'single' or "double" quoted.
+fn unquote(s: &str) -> String {
+    if s.starts_with('"') {
+        serde_json::from_str(s).unwrap_or_else(|_| s.trim_matches('"').into())
+    } else if s.starts_with('\'') {
+        s.trim_matches('\'').replace("''", "'")
+    } else {
+        s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_copy_leaves_out_what_unity_makes_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("Source");
+        for file in [
+            "Assets/a.txt",
+            "Assets/Library/kept.txt",
+            "Assets/Tools/Temp/kept.txt",
+            "Library/ArtifactDB",
+            "Temp/x",
+            "Logs/x",
+            "obj/x",
+            "UserSettings/x",
+            ".vs/x",
+            ".git/x",
+            "Packages/local/node_modules/x",
+            "Source.sln",
+            "Assembly-CSharp.csproj",
+            "Assets/Plugins/Tool.csproj",
+            "ProjectSettings/ProjectVersion.txt",
+        ] {
+            let p = src.join(file);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        }
+        let progress: SharedProgress = Arc::new(Mutex::default());
+        let dst = temp.path().join("Copy");
+        copy(&src, &dst, &AtomicBool::new(false), &progress).unwrap();
+        let has = |f: &str| dst.join(f).exists();
+        for kept in ["Assets/a.txt", "Assets/Library/kept.txt", "Assets/Tools/Temp/kept.txt", "Assets/Plugins/Tool.csproj", "ProjectSettings/ProjectVersion.txt"] {
+            assert!(has(kept), "{kept}");
+        }
+        for left in ["Library", "Temp", "Logs", "obj", "UserSettings", ".vs", ".git", "Packages/local/node_modules", "Source.sln", "Assembly-CSharp.csproj"] {
+            assert!(!has(left), "{left}");
+        }
+        assert_eq!(progress.lock().unwrap().total, 5);
+        let with = temp.path().join("With Library");
+        copy_keeping(&src, &with, Keep { library: true }, &AtomicBool::new(false), &progress).unwrap();
+        assert!(with.join("Library/ArtifactDB").is_file());
+        assert!(!with.join("Temp").exists());
+        assert!(copy_keeping(&src, &with, Keep { library: true }, &AtomicBool::new(false), &progress).is_err(), "never over a folder");
+    }
+
+    #[test]
+    fn a_new_project_gets_its_own_product_and_a_copy_its_name_when_it_carried_the_old_one() {
+        let settings = "PlayerSettings:\r\n  productGUID: 0123456789abcdef0123456789abcdef\r\n  companyName: DefaultCompany\r\n  productName: My avatars\r\n  defaultScreenWidth: 1024\r\n";
+        let copy = retarget(settings, "My avatars copy", Some("My avatars"));
+        assert!(copy.contains("  productName: \"My avatars copy\"\r\n"), "{copy}");
+        assert!(!copy.contains("0123456789abcdef0123456789abcdef"));
+        assert!(copy.contains("  companyName: DefaultCompany\r\n") && copy.ends_with("  defaultScreenWidth: 1024\r\n"));
+        assert_eq!(copy.lines().count(), settings.lines().count());
+        // A product name of its own stays; a template's always becomes the project's.
+        let custom = "  productName: 'Studio''s base'\n  productGUID: aa\n";
+        assert!(retarget(custom, "Copy", Some("Base")).contains("productName: 'Studio''s base'\n"));
+        assert!(retarget(custom, "Copy", Some("Studio's base")).contains("productName: \"Copy\"\n"));
+        assert!(retarget(custom, "New", None).contains("productName: \"New\"\n"));
+    }
 }

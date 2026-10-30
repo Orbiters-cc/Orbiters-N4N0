@@ -86,4 +86,35 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
             library: None,
         });
     }
+    // Unity projects with a signed-in VRChat account (`pages/projects/vrchat_picture.rs`): the pointer over one of the
+    // member's avatar thumbnails, over someone else's, one of them uploading its new picture, and over a world's.
+    for name in ["projects-vrchat-picture", "projects-vrchat-picture-theirs", "projects-vrchat-picture-uploading", "projects-vrchat-picture-world"] {
+        let mut snapshot = base.clone();
+        snapshot.account.state = AccountState::SignedIn { username: "Desktop Tester".into() };
+        snapshot.vrchat_login = Status {
+            allowed: true,
+            user: Some(User { id: "usr_screenshot".into(), display_name: "Desktop Tester".into(), ..Default::default() }),
+            upload: (name == "projects-vrchat-picture-uploading").then(|| crate::controller::vrchat_login::PictureUpload {
+                serial: 1,
+                id: "avtr_00000000-0000-4000-8000-000000000001".into(),
+                step: Some(orbiters_core::vrchat_api::Step::Uploading),
+                outcome: None,
+            }),
+            ..Default::default()
+        };
+        scenarios.push(Scenario {
+            name,
+            page: Page::Projects,
+            snapshot,
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        });
+    }
 }

@@ -3,10 +3,11 @@ use egui::{ColorImage, Id, Rect, TextureHandle};
 use orbiters_core::account::Server;
 use orbiters_projects::{
     avatars::Avatar,
+    blender,
     discovery::{self, Project, Scan},
-    git, icons, network, setup, templates, vpm,
+    git, hidden, icons, network, setup, size, templates, vpm,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -15,6 +16,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 pub(super) enum ScanEvent {
+    /// The projects hidden from the lists, read before the cached scan.
+    Hidden(BTreeSet<String>),
     Update(Scan),
     Done(Result<Scan, String>),
 }
@@ -25,6 +28,21 @@ pub(super) enum Modal {
     Avatars,
     ChooseProject(String),
     Setup,
+    /// A copy of the project in this folder.
+    Duplicate(PathBuf),
+}
+/// The Duplicate dialog's choices: the copy's name and where it goes, Library taken along, and what was found of that
+/// place (on a worker, when they change).
+#[derive(Default)]
+pub(super) struct Dup {
+    pub name: String,
+    pub location: String,
+    pub library: bool,
+    /// The (location, name) last checked: whether that folder exists already, and the room on its disk.
+    pub checked: Option<(String, String, bool, Option<u64>)>,
+    pub check: Job<(String, String, bool, Option<u64>)>,
+    /// The folder dialog of its location.
+    pub pick: Job<Option<PathBuf>>,
 }
 pub(super) struct Flow {
     pub project: Project,
@@ -41,6 +59,8 @@ pub(super) enum Outcome {
     Added(PathBuf, String),
     Setup(Flow),
     Picked(Option<PathBuf>),
+    /// Done, with only this to say (a program opened).
+    Said(String),
 }
 type ViewResult = Result<(vpm::View, Vec<templates::Template>, Option<git::Repo>), String>;
 
@@ -167,6 +187,44 @@ pub struct State {
     pub(super) fixture_live_icons: bool,
     pub(super) fixture_banners_later: HashMap<PathBuf, TextureHandle>,
     pub(super) fixture_repo_icons_later: HashMap<String, PackageIcon>,
+    /// Projects hidden from the lists ([`hidden`], by [`discovery::key`] of their folder), how many changes were made
+    /// to it here (each save numbered; a list read later than one never replaces it), and whether the lists show them
+    /// anyway, dimmed and marked.
+    pub(super) hidden: BTreeSet<String>,
+    pub(super) hidden_changes: u64,
+    pub(super) show_hidden: bool,
+    /// Projects' sizes on disk as last measured ([`size`]), the projects looked up since the page opened, the lookup
+    /// and the walk running (one project at a time) and its cancel.
+    pub(super) sizes: HashMap<PathBuf, size::Size>,
+    pub(super) sizes_asked: HashSet<PathBuf>,
+    pub(super) size_lookup: Job<(PathBuf, size::Lookup)>,
+    pub(super) size_walk: Job<(PathBuf, Result<size::Size, String>)>,
+    pub(super) size_waiting: Vec<PathBuf>,
+    pub(super) size_cancel: Arc<AtomicBool>,
+    /// The Duplicate dialog's choices.
+    pub(super) dup: Dup,
+    /// The selected project's Blender files ([`blender`]), read when it is opened, and for which project.
+    pub(super) links: Vec<blender::Link>,
+    pub(super) links_of: Option<PathBuf>,
+    pub(super) links_job: Job<(PathBuf, Vec<blender::Link>)>,
+    /// World projects' worlds as this computer has them (the captures recorded and the pictures taken there), read
+    /// once per visit and library change, for the Worlds card.
+    pub(super) here: HashMap<String, super::world_card::Here>,
+    pub(super) here_key: Option<(u64, PathBuf, u64)>,
+    pub(super) here_job: Job<HashMap<String, super::world_card::Here>>,
+    /// Pictures picked to add to a world (the file dialog runs on a worker): the world's ID and name, and the files.
+    pub(super) pick_job: Job<Option<(String, String, Vec<PathBuf>)>>,
+    /// Uploads handed to the tray service, by world: when, and what (shown as starting until the service lists them).
+    pub(super) handed: HashMap<String, (f64, crate::state::UploadKind)>,
+    /// The visit Orbiters was last asked what this member added to its Map explorer.
+    pub(super) maps_visit: Option<u64>,
+    /// Screenshots: what this member added on Orbiters, and the uploads, instead of the controller's.
+    pub(super) fixture_maps: Option<crate::state::MapsMine>,
+    pub(super) fixture_uploads: Vec<crate::state::UploadStatus>,
+    /// Screenshots: the cards kept scrolled down by this much (under the header's blur).
+    pub(super) scroll_gallery: Option<f32>,
+    /// The member's avatars and worlds whose pictures can be changed on VRChat from their thumbnails.
+    pub(super) vrchat_pictures: super::vrchat_picture::Pictures,
 }
 impl Default for State {
     fn default() -> Self {
@@ -248,6 +306,29 @@ impl Default for State {
             fixture_live_icons: false,
             fixture_banners_later: HashMap::new(),
             fixture_repo_icons_later: HashMap::new(),
+            hidden: BTreeSet::new(),
+            hidden_changes: 0,
+            show_hidden: false,
+            sizes: HashMap::new(),
+            sizes_asked: HashSet::new(),
+            size_lookup: Job::default(),
+            size_walk: Job::default(),
+            size_waiting: vec![],
+            size_cancel: Arc::new(AtomicBool::new(false)),
+            dup: Dup::default(),
+            links: vec![],
+            links_of: None,
+            links_job: Job::default(),
+            here: HashMap::new(),
+            here_key: None,
+            here_job: Job::default(),
+            pick_job: Job::default(),
+            handed: HashMap::new(),
+            maps_visit: None,
+            fixture_maps: None,
+            fixture_uploads: vec![],
+            scroll_gallery: None,
+            vrchat_pictures: Default::default(),
         }
     }
 }
@@ -255,6 +336,7 @@ impl Drop for State {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
         self.copy_cancel.store(true, Ordering::Relaxed);
+        self.size_cancel.store(true, Ordering::Relaxed);
     }
 }
 /// Mixer's package, from the Orbiters repository.
@@ -334,6 +416,7 @@ impl State {
         self.scan_rx = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
+            let _ = tx.send(ScanEvent::Hidden(hidden::load()));
             let scan = discovery::cached();
             let _ = tx.send(ScanEvent::Update(scan.clone()));
             ctx.request_repaint();
@@ -373,8 +456,11 @@ impl State {
         if !self.fixture {
             self.view.packages.clear();
             self.git = None;
+            self.links.clear();
+            self.links_of = None;
         }
         self.load_view(ctx, false);
+        self.load_links(ctx);
     }
     pub(super) fn catalog(&mut self, ctx: &egui::Context, server: Server) {
         if !self.fixture {
@@ -391,16 +477,20 @@ impl State {
     }
     pub(super) fn poll(&mut self, ctx: &egui::Context, cx: &mut Cx) {
         let environment = crate::controller::vrchat_data::Scope::of(cx.snap);
+        // Another account or VRChat session: every picture is asked for again, the ones shown staying until their
+        // replacements arrive (a sign-in must not blank the page's covers first).
         if !self.fixture && self.thumbnail_environment.as_ref() != Some(&environment) {
             self.thumbnail_environment = Some(environment);
             self.thumb_ids.clear();
-            self.thumbs.clear();
             self.thumb_job = Job::default();
         }
         if let Some(rx) = &self.scan_rx {
             let mut done = false;
             while let Ok(event) = rx.try_recv() {
                 match event {
+                    // A list read before a change made here would undo it.
+                    ScanEvent::Hidden(list) if self.hidden_changes == 0 => self.hidden = list,
+                    ScanEvent::Hidden(_) => {}
                     ScanEvent::Update(scan) => self.scan = scan,
                     ScanEvent::Done(result) => {
                         done = true;
@@ -413,6 +503,8 @@ impl State {
             }
             if done {
                 self.scan_rx = None;
+                // Its scenes may have changed: their links are read again.
+                self.load_links(ctx);
             }
         }
         if let Some(result) = self.view_job.take() {
@@ -454,10 +546,15 @@ impl State {
                 }
                 Ok(Outcome::Added(path, message)) => {
                     cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, message);
+                    // The dialog that made it closes: the project opens in the panel.
+                    if matches!(self.modal, Some(Modal::New | Modal::Duplicate(_))) {
+                        self.close_modal(ctx);
+                    }
                     self.reveal = Some(path);
                     self.load_view(ctx, false);
                     self.refresh(ctx, false);
                 }
+                Ok(Outcome::Said(message)) => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, message),
                 Ok(Outcome::Setup(flow)) => {
                     self.flow = Some(flow);
                     self.pending = None;
@@ -569,6 +666,125 @@ impl State {
         if let Some(Err(e)) = self.ack_job.take() {
             self.error = Some(format!("Setup result was shown but could not be removed: {e}"));
         }
+        self.poll_panel(ctx, cx);
+    }
+    /// The panel's own jobs: projects' sizes, the Blender links, the worlds' captures and pictures, files picked to
+    /// add to a world, and the Duplicate dialog's check.
+    fn poll_panel(&mut self, ctx: &egui::Context, cx: &mut Cx) {
+        if let Some((path, lookup)) = self.size_lookup.take() {
+            if let Some(s) = lookup.size {
+                self.sizes.insert(path.clone(), s);
+            }
+            if !lookup.fresh && !self.size_waiting.contains(&path) {
+                self.size_waiting.push(path);
+            }
+        }
+        if let Some((path, result)) = self.size_walk.take() {
+            self.size_waiting.retain(|p| p != &path);
+            match result {
+                Ok(s) => {
+                    self.sizes.insert(path, s);
+                }
+                // Measuring is a nicety: a project it fails on shows no size (the folder went away, say).
+                Err(e) => eprintln!("project size {}: {e}", path.display()),
+            }
+        }
+        // The first waiting is walked; it stays listed (as measuring) until its answer arrives.
+        if let Some(path) = self.size_waiting.first().cloned().filter(|_| !self.size_walk.running()) {
+            let cancel = self.size_cancel.clone();
+            self.size_walk = Job::spawn(ctx, move || {
+                discovery::low_priority();
+                let r = size::measure(&path, &cancel).map_err(|e| format!("{e:#}"));
+                (path, r)
+            });
+        }
+        if let Some((path, links)) = self.links_job.take() {
+            if self.selected.as_ref() == Some(&path) {
+                self.links = links;
+                self.links_of = Some(path);
+            }
+        }
+        if let Some(here) = self.here_job.take() {
+            self.here = here;
+        }
+        if let Some(Some((id, name, paths))) = self.pick_job.take() {
+            if !paths.is_empty() {
+                self.handed.insert(id.clone(), (orbiters_ui::anim::time(ctx), crate::state::UploadKind::Pictures));
+                cx.ctl.upload_pictures(id, name, paths);
+            }
+        }
+        if let Some(checked) = self.dup.check.take() {
+            self.dup.checked = Some(checked);
+        }
+    }
+    /// Looks up (then, when it changed or is old, measures) the size of the project in `path`, once per visit of the
+    /// page.
+    pub(super) fn want_size(&mut self, ctx: &egui::Context, path: &std::path::Path) {
+        if self.fixture || !self.sizes_asked.insert(path.to_path_buf()) {
+            return;
+        }
+        if self.size_lookup.running() {
+            // One lookup at a time: this one waits for the next frame.
+            self.sizes_asked.remove(path);
+            return;
+        }
+        let p = path.to_path_buf();
+        self.size_lookup = Job::spawn(ctx, move || {
+            let lookup = size::lookup(&p);
+            (p, lookup)
+        });
+    }
+    /// Whether the size of `path` is being looked up or measured (or waits to be).
+    pub(super) fn measuring(&self, path: &std::path::Path) -> bool {
+        self.size_waiting.iter().any(|p| p == path) || (self.size_lookup.running() && self.sizes_asked.contains(path) && !self.sizes.contains_key(path))
+    }
+    /// Whether the project in `path` is hidden from the lists.
+    pub(super) fn is_hidden(&self, path: &std::path::Path) -> bool {
+        hidden::contains(&self.hidden, path)
+    }
+    /// Hides the project in `path` from the lists, or shows it again, and keeps that on a worker.
+    pub(super) fn set_hidden(&mut self, path: &std::path::Path, hide: bool) {
+        let key = discovery::key(path);
+        let changed = if hide { self.hidden.insert(key) } else { self.hidden.remove(&key) };
+        if !changed || self.fixture {
+            return;
+        }
+        self.hidden_changes += 1;
+        let (list, generation) = (self.hidden.clone(), self.hidden_changes);
+        std::thread::spawn(move || {
+            if let Err(e) = hidden::save(&list, generation) {
+                eprintln!("hidden projects: {e:#}");
+            }
+        });
+    }
+    /// The selected project's Blender links, read again.
+    pub(super) fn load_links(&mut self, ctx: &egui::Context) {
+        if self.fixture {
+            return;
+        }
+        let Some(project) = self.selected.as_ref().and_then(|s| self.scan.projects.iter().find(|p| &p.path == s)) else { return };
+        let path = project.path.clone();
+        let scenes: Vec<String> = project.avatars.iter().chain(&project.worlds).map(|a| a.scene.clone()).collect();
+        self.links_job = Job::spawn(ctx, move || {
+            let scenes: Vec<&str> = scenes.iter().map(String::as_str).collect();
+            let links = blender::links(&path, &scenes);
+            (path, links)
+        });
+    }
+    /// What this member added to Orbiters' Map explorer (a stand-in in screenshots).
+    pub(super) fn maps(&self, cx: &Cx) -> Option<crate::state::MapsMine> {
+        if self.fixture {
+            self.fixture_maps.clone()
+        } else {
+            cx.ctl.maps()
+        }
+    }
+    /// The uploads to Orbiters' Map explorer of the world `id`, the latest first.
+    pub(super) fn uploads(&self, cx: &Cx, id: &str) -> Vec<crate::state::UploadStatus> {
+        let all = if self.fixture { &self.fixture_uploads } else { &cx.snap.uploads };
+        let mut list: Vec<_> = all.iter().filter(|u| u.world_id == id).cloned().collect();
+        list.sort_by_key(|u| std::cmp::Reverse(u.id));
+        list
     }
     /// Looks for the icons of the packages drawn since the last look that were never looked for, a batch at a time.
     fn load_icons(&mut self, ctx: &egui::Context) {
@@ -1174,9 +1390,144 @@ impl State {
             }
             _ => {}
         }
+        self.stage_panel(name);
+        super::vrchat_picture::stage(self, name);
         if self.modal.is_some() {
             self.modal_serial = 1;
             self.modal_origin = Rect::from_center_size(ctx.content_rect().center() + egui::vec2(0.0, 120.0), egui::vec2(180.0, 44.0));
+        }
+    }
+    /// The stand-ins of the panel's sizes, Blender links, worlds' captures and uploads, the Duplicate dialog and the
+    /// hidden projects (`screenshot/projects_panel.rs`).
+    fn stage_panel(&mut self, name: &str) {
+        use crate::state::{MapsMine, UploadKind, UploadState, UploadStatus};
+        use orbiters_core::maps::{MinePicture, MinePreview, MineWorld};
+        // Every project measured (its Library a good part of it), but the one the panel measures in `-measuring`.
+        for (i, p) in self.scan.projects.iter().enumerate() {
+            let gb = [18.4, 3.1, 7.6, 12.9, 2.2, 5.4, 9.8][i % 7];
+            let total = (gb * 1e9) as u64;
+            self.sizes.insert(p.path.clone(), size::Size { total, library: total / 10 * 6, files: 40_000 + 23_000 * i as u64 });
+        }
+        let first = self.scan.projects[0].path.clone();
+        let world = self.scan.projects.iter().find(|p| p.kind == discovery::Kind::Worlds).map(|p| p.path.clone());
+        if let Some(w) = self.scan.projects.iter_mut().find(|p| p.kind == discovery::Kind::Worlds) {
+            for a in &mut w.worlds {
+                a.scene = "Assets/Scenes/Moonlight.unity".into();
+            }
+        }
+        let world_id = "wrld_00000000-0000-4000-8000-000000000001".to_string();
+        let now = discovery::now();
+        let links = |project: &str| -> Vec<blender::Link> {
+            let at = |file: &str| PathBuf::from(format!("H:/Unity projects/{project}/{file}"));
+            match project {
+                "My avatars" => vec![
+                    blender::Link::new(
+                        at("Assets/MCB/blenderProjects/MasculineCanine_a4d47dec0b66/blend~/MasculineCanine.blend"),
+                        blender::Tool::Mcb,
+                        Some("Assets/MasculineCanine/Avatar.unity".into()),
+                        Some("MasculineCanine".into()),
+                        now - 3 * 3600,
+                    ),
+                    blender::Link::new(PathBuf::from("H:/Blender/Hoodie outfit.blend"), blender::Tool::Mixer, Some("Assets/MasculineCanine/Avatar.unity".into()), None, now - 2 * 86400),
+                ],
+                _ => vec![blender::Link::new(
+                    at("Assets/Orbiters/Mixer/Blender/0b4e0f0e2c8d4a51b6f0a4c7d1e2f3a4/blend~/Moonlight.blend"),
+                    blender::Tool::Mixer,
+                    Some("Assets/Scenes/Moonlight.unity".into()),
+                    None,
+                    now - 26 * 3600,
+                )],
+            }
+        };
+        let here = super::world_card::Here {
+            name: Some("Moonlight".into()),
+            captures: vec![
+                super::world_card::Capture { dir: PathBuf::from("captures/moonlight-2"), when: "28 Oct 2026, 21:14".into(), splats: Some(1_240_000) },
+                super::world_card::Capture { dir: PathBuf::from("captures/moonlight-1"), when: "21 Oct 2026, 19:02".into(), splats: Some(860_000) },
+                super::world_card::Capture { dir: PathBuf::from("captures/moonlight-0"), when: "20 Oct 2026, 22:40".into(), splats: None },
+            ],
+            pictures: 23,
+            folder: None,
+        };
+        let mine = |preview: bool, pictures: u64| MapsMine {
+            worlds: vec![MineWorld {
+                world_id: world_id.clone(),
+                preview: preview.then(|| MinePreview { id: 1, splats: 1_240_000, ..Default::default() }),
+                pictures: (0..pictures).map(|id| MinePicture { id, source_hash: format!("{id:064x}") }).collect(),
+            }],
+            error: None,
+        };
+        let upload = |state: UploadState| UploadStatus {
+            id: 7,
+            world_id: world_id.clone(),
+            world_name: "Moonlight".into(),
+            kind: UploadKind::Pictures,
+            paths: (0..4).map(|i| PathBuf::from(format!("VRChat/2026-10/VRChat_2026-10-28_21-1{i}.png"))).collect(),
+            sent: 45,
+            total: 100,
+            state,
+        };
+        match name {
+            "projects-size" | "projects-size-measuring" => {
+                self.selected = Some(first.clone());
+                if name == "projects-size-measuring" {
+                    self.sizes.remove(&first);
+                }
+            }
+            "projects-avatars-links" => {
+                self.selected = Some(first.clone());
+                self.links = links("My avatars");
+                self.links_of = Some(first.clone());
+            }
+            "projects-worlds" | "projects-worlds-sharing" | "projects-worlds-done" | "projects-worlds-failed" | "projects-worlds-new" | "projects-worlds-signed-out"
+            | "projects-worlds-capture-menu" => {
+                self.selected = world.clone();
+                self.git = None;
+                self.links = links("Moonlight world");
+                self.links_of = world.clone();
+                self.here.insert(world_id.clone(), here);
+                self.fixture_maps = Some(if name == "projects-worlds-new" { MapsMine::default() } else { mine(true, 12) });
+                self.fixture_uploads = match name {
+                    "projects-worlds-sharing" => vec![upload(UploadState::Sending)],
+                    "projects-worlds-done" => vec![upload(UploadState::Done { added: 4, skipped: 1 })],
+                    "projects-worlds-failed" => vec![upload(UploadState::Failed { message: "Orbiters could not be reached. Try again shortly.".into() })],
+                    _ => vec![],
+                };
+            }
+            "projects-duplicate" | "projects-duplicate-taken" | "projects-duplicate-library" | "projects-duplicate-copying" => {
+                self.selected = Some(first.clone());
+                self.modal = Some(Modal::Duplicate(first.clone()));
+                let copy = if name == "projects-duplicate-taken" { "Weekend avatar" } else { "My avatars copy" };
+                self.dup = Dup {
+                    name: copy.into(),
+                    location: "H:/Unity projects".into(),
+                    library: name == "projects-duplicate-library",
+                    checked: Some(("H:/Unity projects".into(), copy.into(), name == "projects-duplicate-taken", Some(412_000_000_000))),
+                    ..Default::default()
+                };
+                if name == "projects-duplicate-copying" {
+                    self.fixture_action = Some("Duplicating My avatars…".into());
+                    *self.copy_progress.lock().unwrap() = templates::Progress {
+                        copied: 1840,
+                        total: 4310,
+                        file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),
+                        phase: "Copying project".into(),
+                    };
+                }
+            }
+            "projects-hidden" | "projects-hidden-shown" | "projects-hidden-press" => {
+                for p in [1, 4] {
+                    if let Some(p) = self.scan.projects.get(p) {
+                        self.hidden.insert(discovery::key(&p.path));
+                    }
+                }
+                self.show_hidden = name == "projects-hidden-shown";
+            }
+            "projects-header-blur" => {
+                self.selected = Some(first.clone());
+                self.scroll_gallery = Some(250.0);
+            }
+            _ => {}
         }
     }
     /// Screenshots: what the person does at `frame` of the scenario `name` (a press on a control where it was drawn,
@@ -1198,6 +1549,9 @@ impl State {
                 p.installed = Some("0.7.0".into());
             }
         }
+        if name.starts_with("projects-vrchat-picture") {
+            return super::vrchat_picture::stage_frame(self, name, frame);
+        }
         let at = |key: &str| self.anchors.get(key).map(|r| r.center());
         match (name, frame) {
             // The panel's edge dragged 160 points to the left, a frame at a time.
@@ -1214,6 +1568,8 @@ impl State {
             ("projects-menu", 60) => at("project-menu").map(Poke::Press),
             ("projects-setup-from-panel", 60) => at("add-n4n0-0").map(Poke::Press),
             ("projects-mixer-open-mid" | "projects-mixer-open", 60) => at("mixer-info").map(Poke::Press),
+            ("projects-worlds-capture-menu", 60) => at("world-capture-0").map(Poke::Press),
+            ("projects-hidden-press", 60) => at("hidden-filter").map(Poke::Press),
             _ => None,
         }
     }

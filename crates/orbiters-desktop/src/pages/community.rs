@@ -245,6 +245,8 @@ impl State {
                 content: Default::default(),
                 ready: true,
                 picture: source(p, false, self.covers.development, &self.stand_ins),
+                size: (p.width > 0 && p.height > 0).then_some([p.width, p.height]),
+                layers: Vec::new(),
             });
         }
         out
@@ -358,9 +360,10 @@ impl State {
     }
 
     /// One picture's card, as the gallery's: the picture with its gallery's audience and its likes, who posted it and
-    /// when, then its words or its gallery. Returns its picture's rect when pressed.
+    /// when, then its words or its gallery; with `tile` (the gallery's masonry and rows) the picture alone in its
+    /// shape, who posted it over its bottom. Returns its picture's rect when pressed.
     #[allow(clippy::too_many_arguments)]
-    pub fn card(&mut self, ui: &mut Ui, cx: &Cx, pictures: &mut Pictures, i: usize, e: &Entry, rect: Rect, interactive: bool) -> Option<Rect> {
+    pub fn card(&mut self, ui: &mut Ui, cx: &Cx, pictures: &mut Pictures, i: usize, e: &Entry, rect: Rect, interactive: bool, tile: bool) -> Option<Rect> {
         let ctx = ui.ctx().clone();
         let p = self.picture(&e.key)?.clone();
         let tex = e.picture.as_ref().and_then(|pic| pictures.get(&ctx, pic));
@@ -376,23 +379,27 @@ impl State {
         let enter = anim::spring_from(&ctx, id.with(("enter", cx.visit)), [0.0], [if elapsed >= delay { 1.0 } else { 0.0 }], Spring::SOFT)[0];
         let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered() && interactive, Spring::SOFT);
         let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on() && interactive, Spring::SNAPPY);
-        let thumb0 = Rect::from_min_size(rect.min, vec2(rect.width(), rect.width() * 9.0 / 16.0));
+        let thumb0 = if tile { rect } else { Rect::from_min_size(rect.min, vec2(rect.width(), rect.width() * 9.0 / 16.0)) };
         let landing = morph::bounce(&ctx, thumb0);
         let scale = (0.97 + 0.03 * enter) * (1.0 - 0.03 * press) * landing;
         let r = Rect::from_center_size(rect.center() + vec2(0.0, 20.0 * (1.0 - enter) - 4.0 * hover), rect.size() * scale);
         let shown = self.window.as_ref().filter(|w| w.key() == e.key).map_or(1.0, PictureWindow::card_shown);
         let mut pa = ui.painter().clone();
         pa.multiply_opacity(enter.clamp(0.0, 1.0) * shown);
-        widgets::frame(&pa, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover));
-        let thumb = Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0));
+        let (thumb, corners) = if tile {
+            (r, [super::gallery::TILE_RADIUS; 4])
+        } else {
+            widgets::frame(&pa, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover));
+            (Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0)), [20.0, 20.0, 0.0, 0.0])
+        };
         match &tex {
-            Some(t) => feedback::cover(&pa, thumb, [20.0, 20.0, 0.0, 0.0], t, 1.0 + 0.06 * ease::out_cubic(hover), 1.0),
+            Some(t) => feedback::cover(&pa, thumb, corners, t, 1.0 + 0.06 * ease::out_cubic(hover), 1.0),
             None => {
-                feedback::fill_corners(&pa, thumb, [20.0, 20.0, 0.0, 0.0], theme::INK_800);
+                feedback::fill_corners(&pa, thumb, corners, theme::INK_800);
                 widgets::icon(&pa, thumb.center(), icons::IMAGE, 28.0, theme::FG_4);
             }
         }
-        let shade = paint::rounded_rect_points_corners(thumb, [theme::squircle(20.0), theme::squircle(20.0), 0.0, 0.0]);
+        let shade = paint::rounded_rect_points_corners(thumb, corners.map(theme::squircle));
         paint::fill_gradient(
             &pa,
             &shade,
@@ -426,6 +433,18 @@ impl State {
             pa.rect_filled(br, theme::radius(11.0), theme::black(0.55));
             widgets::icon_fill(&pa, pos2(br.left() + 14.0, br.center().y), icons::HEART, 11.0, theme::REC);
             widgets::text(&pa, pos2(br.left() + 24.0, br.center().y), Align2::LEFT_CENTER, &t);
+        }
+        // A tile: who posted it, over its bottom.
+        if tile {
+            let name = p.author.as_ref().map(|a| a.username.clone()).unwrap_or_else(|| "Someone".into());
+            let t = Txt::new(&name, 11.5).weight(weight::SEMIBOLD).color(theme::FG);
+            let w = (widgets::text_size(ui, &t).x + 34.0).min(thumb.width() - 24.0);
+            let pill = Rect::from_min_size(pos2(thumb.left() + 12.0, thumb.bottom() - 12.0 - 22.0), vec2(w, 22.0));
+            pa.rect_filled(pill, theme::radius(11.0), theme::black(0.55));
+            widgets::avatar(&pa, Rect::from_center_size(pos2(pill.left() + 11.0, pill.center().y), vec2(18.0, 18.0)), author_tex.as_ref(), &name);
+            widgets::text_truncated(&pa, pos2(pill.left() + 25.0, pill.center().y), Align2::LEFT_CENTER, &t, w - 32.0);
+            self.cards.insert(e.key.clone(), thumb0);
+            return (interactive && sharing::pressed(resp)).then_some(thumb);
         }
         // Who posted it and when, then its words (or its gallery).
         let bx = r.left() + 16.0;

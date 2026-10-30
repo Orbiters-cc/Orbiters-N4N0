@@ -32,7 +32,13 @@ PREFERRED = ["MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "ISC", "Zlib",
 BUNDLED = [("fonts", r"(?i).*\.txt$"), ("opus", r"^COPYING$")]
 
 # Source assets embedded by our own crates are not Cargo dependencies, but their notices ship with the binaries.
-VENDORED = [("ALCOM project templates v1.9.3", "MIT", "crates/orbiters-projects/templates/LICENSE")]
+VENDORED = [("ALCOM project templates v1.9.3", "MIT", "crates/orbiters-projects/templates/LICENSE")] + [
+    # The photo editor's text fonts (orbiters-ui photo::text), embedded in orbiters-ui.
+    (f"{name} font", "OFL-1.1", f"crates/orbiters-ui/assets/fonts/{folder}/OFL.txt")
+    for name, folder in [("Inter", "Inter"), ("Bonbon", "Bonbon"), ("Creepster", "Creepster"), ("Diplomata", "Diplomata"),
+                         ("JetBrains Mono", "JetBrains_Mono"), ("Matemasie", "Matemasie"), ("Monoton", "Monoton"),
+                         ("Pirata One", "Pirata_One"), ("Plaster", "Plaster")]
+]
 
 # How a license file's text is recognised.
 SIGNATURES = {

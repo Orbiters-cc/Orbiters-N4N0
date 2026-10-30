@@ -173,6 +173,19 @@ fn repositories_packages_restore_and_templates_work_in_isolation() {
         let created = templates::create(root.path(), &source, projects.path(), "New from template", "2022.3.22f1", false, &cancel, &progress).await.unwrap();
         assert!(created.join("ProjectSettings/ProjectVersion.txt").is_file());
         assert_eq!(vpm::registered(root.path()).await.unwrap().len(), 2);
+        // The panel's Duplicate: Library taken along, the product renamed where it carried the project's name.
+        std::fs::create_dir_all(source.join("Library")).unwrap();
+        std::fs::write(source.join("Library/ArtifactDB"), "artifacts").unwrap();
+        std::fs::write(source.join("ProjectSettings/ProjectSettings.asset"), "PlayerSettings:\n  productGUID: 00000000000000000000000000000001\n  productName: Source\n")
+            .unwrap();
+        let keep = templates::Keep { library: true };
+        let twin = templates::duplicate(root.path(), &source, projects.path(), "Source copy", keep, &cancel, &progress).await.unwrap();
+        assert!(twin.join("Library/ArtifactDB").is_file());
+        assert!(twin.join("Packages/test.avatar/package.json").is_file());
+        let settings = std::fs::read_to_string(twin.join("ProjectSettings/ProjectSettings.asset")).unwrap();
+        assert!(settings.contains("productName: \"Source copy\"") && !settings.contains("00000000000000000000000000000001"), "{settings}");
+        assert_eq!(vpm::registered(root.path()).await.unwrap().len(), 3);
+        assert!(templates::duplicate(root.path(), &source, projects.path(), "Source copy", keep, &cancel, &progress).await.is_err(), "never over a folder");
         vpm::change(root.path(), &source, vpm::Change::Remove("test.avatar".into())).await.unwrap();
         assert!(installed(&source, "test.avatar").is_none());
         vpm::remove_repo(root.path(), "test.repo").await.unwrap();

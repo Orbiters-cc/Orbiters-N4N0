@@ -118,6 +118,13 @@ pub enum ToService {
         scope: crate::controller::vrchat_data::Scope,
         request: crate::controller::vrchat_data::Request,
     },
+    /// A new picture on VRChat for an avatar or world of the signed-in VRChat account, from a picture file
+    /// (`Controller::vrchat_picture`; its progress in the snapshot).
+    VrchatPicture {
+        scope: crate::controller::vrchat_data::Scope,
+        id: String,
+        path: PathBuf,
+    },
     /// Shares pictures of a world on the Map explorer.
     UploadPictures {
         world_id: String,

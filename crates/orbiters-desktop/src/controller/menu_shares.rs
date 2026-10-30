@@ -350,6 +350,8 @@ mod tests {
             content: Default::default(),
             ready,
             picture: None,
+            size: None,
+            layers: Vec::new(),
         }
     }
 

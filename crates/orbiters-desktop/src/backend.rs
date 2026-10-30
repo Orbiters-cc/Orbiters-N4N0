@@ -55,6 +55,9 @@ pub trait Backend: Send + Sync {
     fn vrchat_data(&self, _scope: controller::vrchat_data::Scope, _request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         Err("VRChat data is unavailable.".into())
     }
+    /// Uploads the picture file at `path` as the VRChat picture of `id`, an avatar or world of the signed-in VRChat
+    /// account. Its step and outcome come in the snapshot's `vrchat_login.upload`, the outcome as a notice too.
+    fn vrchat_picture(&self, _scope: controller::vrchat_data::Scope, _id: String, _path: PathBuf) {}
     /// Asks for the worker's log; [`Backend::worker_log`] has it once it arrived.
     fn request_worker_log(&self);
     fn worker_log(&self) -> Option<Vec<String>>;
@@ -107,6 +110,9 @@ pub struct Remote(pub Arc<Client>);
 impl Backend for Remote {
     fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         self.0.vrchat_data(scope, request)
+    }
+    fn vrchat_picture(&self, scope: controller::vrchat_data::Scope, id: String, path: PathBuf) {
+        self.0.send(&ToService::VrchatPicture { scope, id, path });
     }
     fn view(&self) -> Arc<Snapshot> {
         self.0.snapshot()
@@ -310,6 +316,9 @@ impl Local {
 impl Backend for Local {
     fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         self.ctl.vrchat_data(scope, request)
+    }
+    fn vrchat_picture(&self, scope: controller::vrchat_data::Scope, id: String, path: PathBuf) {
+        self.ctl.vrchat_picture(scope, id, path);
     }
     fn view(&self) -> Arc<Snapshot> {
         self.ctl.view()

@@ -3,7 +3,9 @@
 //! ([`orbiters_ui::software`], only what changed) and handed to SteamVR as D3D11 textures of a small device on the
 //! headset's GPU (raw pixels without one), only while the dashboard shows the tab and only the part that changed. It
 //! reads the device poses itself for T-pose calibrations, which also put a mirror and two hand targets in the play
-//! space, and runs walk boost and N4N0's menu in the play space.
+//! space, and runs walk boost and N4N0's menu in the play space. The same interface also floats in the play space
+//! beside VRChat, opened by a watch on a wrist and used with the controllers' own lasers ([`floating`]): the dashboard
+//! takes the controllers from VRChat, the floating panel does not.
 //!
 //! It never starts SteamVR: it connects as an overlay application (the kind SteamVR starts for) only after a
 //! background connection, which SteamVR refuses when it is not running, found it running; and it ends when SteamVR
@@ -14,6 +16,7 @@ pub mod calibration;
 pub mod coverage;
 #[cfg(windows)]
 pub mod eye_picture;
+pub mod floating;
 mod frames;
 mod menu;
 pub mod menu_pages;
@@ -493,6 +496,8 @@ struct Teardown<'a> {
     world: World,
     menu: menu::MenuOverlay,
     coverage: coverage::CoverageOverlayPanel,
+    /// The floating panel, the watch and their lasers (none when SteamVR would not make their overlays).
+    floating: Option<floating::Floating>,
 }
 
 impl Drop for Teardown<'_> {
@@ -504,6 +509,9 @@ impl Drop for Teardown<'_> {
         self.world.destroy(self.overlay);
         self.menu.destroy(self.overlay);
         self.coverage.destroy(self.overlay);
+        if let Some(f) = &self.floating {
+            f.destroy(self.overlay);
+        }
         let _ = self.overlay.destroy(self.main);
     }
 }
@@ -540,7 +548,9 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let world = World::new(&overlay)?;
     let menu = menu::MenuOverlay::new(&overlay, KEY)?;
     let coverage = coverage::CoverageOverlayPanel::new(&overlay)?;
-    let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage };
+    // The floating panel is an addition: without its overlays the tab and the rest work as before.
+    let floating = floating::Floating::new(&overlay, KEY).map_err(|e| eprintln!("floating panel unavailable: {e}")).ok();
+    let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage, floating };
     let mut frames = frames::FrameSampler::new(&steamvr);
     // What of the touchpads and sticks goes to the avatar's input parameters.
     let mut pads = orbiters_n4n0::input::Pacer::default();
@@ -693,11 +703,14 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         };
         t.walk.update(&steamvr, &moment);
         // The triggers press where the index fingers point on N4N0's screen (N4N0 reads them only while its menu is open
-        // there): each change goes, nothing else.
-        if input_read && snap.settings.orb.enabled {
-            for (hand, change) in actions.presses(&steamvr).into_iter().enumerate() {
-                if let Some(down) = change {
-                    backend.orb(OrbCommand::Trigger { right: hand == 1, down });
+        // there): each change goes, nothing else. The floating panel reads them held (read whether N4N0 is on or not).
+        if input_read {
+            let changes = actions.presses(&steamvr);
+            if snap.settings.orb.enabled {
+                for (hand, change) in changes.into_iter().enumerate() {
+                    if let Some(down) = change {
+                        backend.orb(OrbCommand::Trigger { right: hand == 1, down });
+                    }
                 }
             }
         }
@@ -715,6 +728,13 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         let button = input_read && actions.menu_pressed(&steamvr);
         if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button) {
             sounds.click();
+        }
+        // The floating panel and the watch, used with the controllers' own lasers beside VRChat (overlay/floating).
+        if let Some(floating) = t.floating.as_mut() {
+            let cx = floating::Cx { overlay: &overlay, steamvr: &steamvr, presenter: &mut presenter, snap: &snap, backend: &backend, actions: &actions, input_read, dashboard };
+            if floating.update(cx, &mut t.state, &mut poses) {
+                sounds.click();
+            }
         }
         t.menu.worlds.view.publish(&overlay);
         if !shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, &snap)) {

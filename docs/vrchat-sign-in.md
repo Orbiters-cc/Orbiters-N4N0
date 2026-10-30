@@ -72,6 +72,34 @@ for 60 seconds (at most 256 entries); revocation prevents even cached reads. Exp
 offer Open in VRChat; explicitly inactive instances do not. Unknown or inaccessible instances retain the existing
 current-instance behavior. No server feature row, version, release, push or live VRChat sign-in is included here.
 
+## Changing an avatar's or world's picture
+
+The one write. In the Unity projects panel (Avatars and Worlds cards), a thumbnail of an item the signed-in VRChat
+account uploaded dims under an upload mark on hover ("Change the picture on VRChat"); a press opens Windows' file dialog
+on a worker and the window sends `ToService::VrchatPicture { scope, id, path }` (windows only, not the overlay).
+`Controller::vrchat_picture` (controller/vrchat_data.rs) refuses without a signed-in session or while another picture
+uploads, then on its own thread checks the file (a file, 1 byte to 50 MB, PNG/JPEG/WebP/GIF, at least 128 px a side),
+turns it by its EXIF orientation, crops it about its centre to 4:3 (VRChat shows these pictures edge to edge, so bars
+would become part of the picture), makes it 1200 × 900, flattens transparency over black and encodes a PNG. Progress
+and outcome are in `Snapshot::vrchat_login.upload` (a serial per upload), the outcome a toast too. On success the
+copies kept on this computer are replaced where they exist (the Toolkit's `Avatars/<id>.png`, Orbiters' cached
+`avatar-thumbnails`, the world's `world-thumbnails` entry) and the page shows the new picture at once.
+
+`vrchat_api::replace_image` does what VRChat's SDK (librsync.net) and VRCX do, locking the client per request only:
+a fresh `GET /avatars/{id}` or `/worlds/{id}` whose `authorId` must be the session's user (else nothing is sent);
+`GET /file/{fileId}` of the current `imageUrl`, reused for a new version when it is the user's `image/png` file with a
+complete last version, else `POST /file {name, mimeType: image/png, extension: .png}` (nothing is ever deleted);
+`POST /file/{fileId}` with base64 `fileMd5`/`signatureMd5` and sizes; for `file` then `signature`:
+`PUT …/{version}/{part}/start` → a presigned URL, a cookie-less `PUT` of the bytes with `Content-Type` and base64
+`Content-MD5` (HTTPS `*.amazonaws.com` or `files.vrchat.cloud` only, default port, no userinfo; its cookies are never
+read), `PUT …/finish {"maxParts":"0","nextPartNumber":"0"}`; `GET /file/{fileId}` until the version is `complete`
+(about a minute at most); `PUT /avatars/{id}` or `/worlds/{id}` `{id, imageUrl}` with
+`https://api.vrchat.cloud/api/1/file/<file>/<version>/file`, which the answer must echo. The signature is librsync's
+BLAKE2 format: magic `0x72730137`, block length 2048, strong-sum length 32, then per block the rollsum and
+BLAKE2b-256, big-endian. MD5 and BLAKE2b are implemented in `vrchat_api` with reference vectors; the expected
+signatures come from a Python transcription of librsync.net. `Request::Owned { ids }` (16 at a time) tells the page
+which thumbnails are editable, from the client's day-long avatar/world caches (`authorId`).
+
 ## Validation
 
 All Cargo commands use `CARGO_TARGET_DIR=C:/Users/Enzo/.orbiters-target` and `CARGO_INCREMENTAL=0`.

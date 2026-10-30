@@ -1,6 +1,8 @@
 //! The selected project's panel: beside the cards on wide windows (its left edge drags to resize it; a double click
 //! gives it its own width back), a sheet sliding over them on narrow ones. A hero card (the project's avatars as its
-//! cover, where it is, opening it), then cards for its avatars (N4N0 and My Avatar for each), Mixer while the project
+//! cover, where it is, how much it takes on disk, opening it; Duplicate…, Hide in its menu), then cards for its avatars
+//! (N4N0 and My Avatar for each, its page on VRChat, its Blender files) or, for a world project, its worlds
+//! ([`super::world_card`]), Mixer while the project
 //! does not have it, its packages (their own icons, versions in dropdowns), the packages it could add, and its Git
 //! repository (branch, changes, remote page, last commits on a timeline). Switching projects crossfades the cards.
 
@@ -96,7 +98,14 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
             if state.modal.is_none() {
                 super::ui::errors(ui, state, "panel");
             }
-            avatars(ui, cx, state, &project);
+            // Which of their pictures the member can change on VRChat, and those changing.
+            super::vrchat_picture::poll(&ctx, cx, state);
+            // A world project has its worlds where an avatar project has its avatars.
+            if world_project(&project) {
+                super::world_card::card(ui, cx, state, &project);
+            } else {
+                avatars(ui, cx, state, &project);
+            }
             ctx.data_mut(|d| d.insert_temp(mixer_y, ui.cursor().top() - top));
             mixer(ui, cx, state, &project);
             ctx.data_mut(|d| d.insert_temp(packages_y, ui.cursor().top() - top));
@@ -169,6 +178,11 @@ fn sticky_bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, re
             Ok(Outcome::Changed("Project sent to Unity".into()))
         });
     }
+}
+
+/// A world project (by its SDK, or by what its scenes were uploaded as): its panel has the Worlds card.
+fn world_project(project: &Project) -> bool {
+    project.kind == orbiters_projects::discovery::Kind::Worlds || (project.avatars.is_empty() && !project.worlds.is_empty())
 }
 
 /// The hero card's height in a panel `w` wide.
@@ -261,6 +275,8 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     }
     if project.missing {
         widgets::pill_at(&p, ui, pos2(px, y + 11.0), Some(icons::WARNING), "Folder missing");
+    } else {
+        size_pill(ui, state, project, pos2(px, y + 11.0), r.right() - 16.0);
     }
     y += 22.0 + 16.0;
 
@@ -306,17 +322,46 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     }
     let menu_r = round(0);
     state.anchors.insert("project-menu".into(), menu_r);
-    let items = if project.registered {
-        vec![Item::new("Copy the folder's path").icon(icons::COPY), Item::new("Remove from the list").icon(glyph::TRASH_SIMPLE).danger()]
-    } else {
-        vec![Item::new("Copy the folder's path").icon(icons::COPY)]
-    };
-    match popup::menu_button(ui, "project-menu", menu_r, icons::DOTS_THREE, "More", &items) {
-        Some(0) => {
+    #[derive(Clone, Copy)]
+    enum Act {
+        CopyPath,
+        Duplicate,
+        Hide,
+        Remove,
+    }
+    let hidden = state.is_hidden(&project.path);
+    let mut acts = vec![(Item::new("Copy the folder's path").icon(icons::COPY), Act::CopyPath)];
+    if !project.missing {
+        acts.push((Item::new("Duplicate…").icon(icons::COPY_SIMPLE), Act::Duplicate));
+    }
+    acts.push((if hidden { Item::new("Show this project").icon(EYE) } else { Item::new("Hide this project").icon(icons::EYE_SLASH) }, Act::Hide));
+    if project.registered {
+        acts.push((Item::new("Remove from the list").icon(glyph::TRASH_SIMPLE).danger(), Act::Remove));
+    }
+    let items: Vec<Item> = acts.iter().map(|(i, _)| *i).collect();
+    match popup::menu_button(ui, "project-menu", menu_r, icons::DOTS_THREE, "More", &items).map(|k| acts[k].1) {
+        Some(Act::CopyPath) => {
             ctx.copy_text(project.path.display().to_string());
             cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Success, "Path copied");
         }
-        Some(1) if !busy => {
+        Some(Act::Duplicate) if !busy => super::duplicate::open(&ctx, state, project, menu_r),
+        Some(Act::Hide) => {
+            state.set_hidden(&project.path, !hidden);
+            if hidden {
+                cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Success, format!("{} is listed again", project.name));
+            } else {
+                cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Info, format!("{} is hidden: Hidden, above the cards, shows it again", project.name));
+                // Gone from the list: the panel moves on (a sheet slides away).
+                if !state.show_hidden {
+                    if sheet {
+                        state.panel_closing = true;
+                    } else {
+                        state.selected = None;
+                    }
+                }
+            }
+        }
+        Some(Act::Remove) if !busy => {
             let path = project.path.clone();
             state.selected = None;
             state.task(&ctx, "Removing from the list…", move || {
@@ -326,6 +371,57 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
         }
         _ => {}
     }
+}
+
+/// Phosphor's eye, which the shared icon list does not have.
+const EYE: &str = "\u{E220}";
+
+/// How much the project takes on disk, its left-centre at `at` (no further right than `right`): what Library takes of
+/// it too when there is room (with all of it on hover), and "Measuring…" until the first answer.
+fn size_pill(ui: &mut Ui, state: &mut State, project: &Project, at: egui::Pos2, right: f32) {
+    let ctx = ui.ctx().clone();
+    state.want_size(&ctx, &project.path);
+    let measuring = state.measuring(&project.path);
+    let p = ui.painter().clone();
+    let Some(s) = state.sizes.get(&project.path).copied() else {
+        if measuring || state.fixture {
+            // "Measuring…" with its spinner, or the spinner alone where the words do not fit.
+            let t = Txt::new("Measuring…", 11.5).color(theme::FG_3);
+            let full = Rect::from_min_size(pos2(at.x, at.y - 10.0), vec2(widgets::text_size(ui, &t).x + 32.0, 20.0));
+            let r = if full.right() <= right { full } else { Rect::from_min_size(full.min, vec2(28.0, 20.0)) };
+            if r.right() <= right {
+                feedback::shimmer(&p, r, 10.0);
+                feedback::spinner(&p, pos2(r.left() + 14.0, r.center().y), 4.5, 1.5, theme::FG_3);
+                if r == full {
+                    widgets::text(&p, pos2(r.left() + 24.0, r.center().y), Align2::LEFT_CENTER, &t);
+                }
+                let _ = ui.interact(r, Id::unique(("project-size", &project.path)), Sense::hover()).on_hover_text("Measuring how much the project takes on disk…");
+            }
+        }
+        return;
+    };
+    let total = format::bytes(s.total as f64);
+    let library = format::bytes(s.library as f64);
+    let wide = format!("{total} · Library {library}");
+    let width = |label: &str| widgets::text_size(ui, &Txt::new(label, 11.5)).x + 32.0;
+    let label = if s.library > 0 && at.x + width(&wide) <= right {
+        wide
+    } else if at.x + width(&total) <= right {
+        total.clone()
+    } else {
+        return;
+    };
+    let w = widgets::pill_at(&p, ui, at, Some(icons::HARD_DRIVE), &label);
+    let files = format::integer(s.files as f64);
+    let mut hint = if s.library > 0 {
+        format!("{total} on disk in {files} files. Library takes {library} of it: Unity makes it again from the project when it is missing.")
+    } else {
+        format!("{total} on disk in {files} files.")
+    };
+    if measuring {
+        hint.push_str(" Measuring again…");
+    }
+    let _ = ui.interact(Rect::from_min_size(pos2(at.x, at.y - 10.0), vec2(w, 20.0)), Id::unique(("project-size", &project.path)), Sense::hover()).on_hover_text(hint);
 }
 
 /// The project's uploaded avatars, each with N4N0 and My Avatar to add.
@@ -359,15 +455,25 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                 let w = ui.available_width();
                 let (r, _) = ui.allocate_exact_size(vec2(w, 92.0), Sense::hover());
                 let thumb = Rect::from_min_size(pos2(r.left(), r.top() + 6.0), vec2(64.0, 64.0));
-                art::avatar(ui.painter(), state, a, thumb, [14.0; 4], 1.0);
+                super::vrchat_picture::thumbnail(ui, cx, state, a, thumb, [14.0; 4], i);
                 let x = thumb.right() + 14.0;
+                // Its page on VRChat, at the row's top right.
+                let link = Rect::from_min_size(pos2(r.right() - 32.0, r.top() + 2.0), vec2(32.0, 32.0));
+                state.anchors.insert(format!("avatar-vrchat-{i}"), link);
+                let url = format!("https://vrchat.com/home/avatar/{}", a.id);
+                let open = IconButton::new(icons::ARROW_SQUARE_OUT, "Open on VRChat").size(32.0, 15.0).backdrop(theme::control()).id_salt(("avatar-vrchat", &a.id));
+                if widgets::activated(&open.show_at(ui, link).on_hover_text(&url)) {
+                    if let Err(e) = crate::controller::open_url(&url) {
+                        cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, format!("The page could not open: {e}"));
+                    }
+                }
                 let p = ui.painter();
                 let nr = widgets::text_truncated(
                     p,
                     pos2(x, thumb.top() + 11.0),
                     Align2::LEFT_CENTER,
                     &Txt::new(&a.name, 14.5).weight(weight::SEMIBOLD),
-                    r.right() - x - 80.0,
+                    link.left() - x - 88.0,
                 );
                 if worn.as_ref() == Some(&a.id) {
                     let t = Txt::new("Wearing", 10.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
@@ -376,7 +482,7 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                     p.rect_filled(pr, theme::radius(10.0), theme::alpha(theme::ACCENT, 0.14));
                     widgets::text(p, pr.center(), Align2::CENTER_CENTER, &t);
                 }
-                widgets::text_truncated(p, pos2(x, thumb.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(&a.scene, 11.5).color(theme::FG_3), r.right() - x);
+                widgets::text_truncated(p, pos2(x, thumb.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(&a.scene, 11.5).color(theme::FG_3), link.left() - 8.0 - x);
                 let enabled = project.registered && !state.running();
                 let nano = Button::new("Add N4N0").icon(icons::N4N0_MARK).size(Size::Sm).enabled(enabled).id_salt(("add-n4n0", &a.id, &a.scene));
                 let nw = nano.desired_width(ui);
@@ -398,6 +504,8 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                     state.modal_fill = theme::INK_850;
                     state.install(&ctx, project.clone(), a.clone(), false, server(cx), mr);
                 }
+                // Under the avatar's words, beside its picture's column.
+                super::blend::rows(ui, state, a, thumb.width() + 14.0);
             }
         },
     );

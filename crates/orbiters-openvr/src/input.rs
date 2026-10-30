@@ -49,6 +49,15 @@ pub struct DigitalData {
     pub update_time: f32,
 }
 
+/// `InputPoseActionData_t` (96 bytes on Windows: the origin handle is 8-aligned, the pose after it).
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct PoseData {
+    pub active: bool,
+    pub active_origin: u64,
+    pub pose: crate::Pose,
+}
+
 pub struct Input<'a> {
     table: *const usize,
     _client: &'a Client,
@@ -142,6 +151,15 @@ impl Input<'_> {
         result(unsafe { entry::<F>(self.table, 6)(action, &mut data, std::mem::size_of::<AnalogData>() as u32, 0) })?;
         Ok(data)
     }
+
+    /// A pose action (a controller's tip, its grip) in `universe` as SteamVR predicts it `seconds` from now.
+    pub fn pose(&self, action: ActionHandle, universe: crate::Universe, seconds: f32) -> Result<PoseData, i32> {
+        type F = unsafe extern "system" fn(u64, i32, f32, *mut PoseData, u32, u64) -> i32;
+        let mut data = PoseData::default();
+        // SAFETY: entry 7 is GetPoseActionDataRelativeToNow (after GetAnalogActionData 6); no device restriction.
+        result(unsafe { entry::<F>(self.table, 7)(action, universe as i32, seconds, &mut data, std::mem::size_of::<PoseData>() as u32, 0) })?;
+        Ok(data)
+    }
 }
 
 #[cfg(test)]
@@ -155,5 +173,8 @@ mod tests {
         assert_eq!(std::mem::offset_of!(super::DigitalData, state), 16);
         assert_eq!(std::mem::offset_of!(super::DigitalData, changed), 17);
         assert_eq!(std::mem::offset_of!(super::DigitalData, update_time), 20);
+        assert_eq!(std::mem::size_of::<super::PoseData>(), 96);
+        assert_eq!(std::mem::offset_of!(super::PoseData, active_origin), 8);
+        assert_eq!(std::mem::offset_of!(super::PoseData, pose), 16);
     }
 }

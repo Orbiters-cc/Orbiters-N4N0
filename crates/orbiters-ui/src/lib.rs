@@ -2,7 +2,7 @@
 //! icons), springs, the glow background shader, the progressive blur under bars, painting helpers, widgets, the
 //! record button, the trail map, toasts, the window that grows out of a card ([`viewer`]) and
 //! how such morphs land back on their source ([`morph`]), an offscreen GPU renderer
-//! (screenshots) and a CPU painter (the VR overlay).
+//! (screenshots), a CPU painter (the VR overlay) and the photo editor's pixels ([`photo`]).
 
 pub mod anim;
 pub mod blur;
@@ -19,6 +19,7 @@ pub mod n4n0_face;
 pub mod n4n0_logo;
 pub mod offscreen;
 pub mod paint;
+pub mod photo;
 pub mod popup;
 pub mod record;
 pub mod software;

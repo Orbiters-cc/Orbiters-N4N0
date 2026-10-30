@@ -45,6 +45,10 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             names.map(|(a, p)| format!("{a} in {p}")).unwrap_or_default(),
             580.0,
         ),
+        Modal::Duplicate(path) => {
+            let name = state.scan.projects.iter().find(|p| &p.path == path).map(|p| p.name.clone()).unwrap_or_else(|| "the project".into());
+            (icons::COPY, "Duplicate the project".into(), format!("A copy of {name}, beside it or anywhere you choose"), 600.0)
+        }
     };
     let step = match &modal {
         Modal::Repos => 0,
@@ -52,8 +56,9 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         Modal::Avatars => 2,
         Modal::ChooseProject(_) => 3,
         Modal::Setup => 4,
+        Modal::Duplicate(_) => 5,
     };
-    let creating = modal == Modal::New && state.running();
+    let creating = matches!(modal, Modal::New | Modal::Duplicate(_)) && state.running();
     let resp = Dialog::new(id, state.modal_origin, &title)
         .origin_fill(state.modal_fill)
         .glyph(glyph)
@@ -68,6 +73,7 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 Modal::Avatars => avatar_picker(ui, cx, state),
                 Modal::ChooseProject(avatar) => project_choice(ui, state, avatar),
                 Modal::Setup => setup_steps(ui, state),
+                Modal::Duplicate(path) => super::duplicate::body(ui, state, path),
             }),
             Part::Footer => match &modal {
                 Modal::Repos => {}
@@ -75,6 +81,7 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 Modal::Avatars => avatar_footer(ui, cx, state),
                 Modal::ChooseProject(avatar) => choice_footer(ui, cx, state, avatar),
                 Modal::Setup => setup_footer(ui, cx, state),
+                Modal::Duplicate(path) => super::duplicate::footer(ui, state, path),
             },
         });
     if resp.closed {
@@ -480,7 +487,7 @@ fn template_cover(p: &egui::Painter, state: &State, file: Option<&PathBuf>, rect
 }
 
 /// How far the creation or the copy got.
-fn creating(ui: &mut Ui, state: &State) {
+pub(super) fn creating(ui: &mut Ui, state: &State) {
     let ctx = ui.ctx().clone();
     let w = ui.available_width();
     {
@@ -509,7 +516,7 @@ fn creating(ui: &mut Ui, state: &State) {
     }
 }
 
-fn note(ui: &mut Ui, text: &str) {
+pub(super) fn note(ui: &mut Ui, text: &str) {
     let w = ui.available_width();
     let g = ui.painter().layout_job(Txt::new(text, 12.0).color(theme::FG_3).line_height(18.0).job(w - 22.0));
     let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y), Sense::hover());
@@ -517,7 +524,7 @@ fn note(ui: &mut Ui, text: &str) {
     ui.painter().galley(pos2(r.left() + 22.0, r.top()), g, theme::FG_3);
 }
 
-fn inline_warning(ui: &mut Ui, text: &str) {
+pub(super) fn inline_warning(ui: &mut Ui, text: &str) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
     widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.center().y), icons::WARNING, 13.0, theme::WARN);
     widgets::text(ui.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(text, 12.0).color(theme::WARN));

@@ -2,6 +2,7 @@
 
 pub mod capture;
 pub mod community;
+pub mod editor;
 pub mod events;
 pub mod form;
 pub mod header;
@@ -11,6 +12,8 @@ pub mod orb;
 pub mod projects;
 pub mod sessions;
 pub mod gallery;
+mod gallery_layers;
+mod gallery_layout;
 mod gallery_select;
 pub mod sharing;
 pub mod requests;

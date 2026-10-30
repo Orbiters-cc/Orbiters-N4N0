@@ -374,6 +374,24 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     apply |= widgets::toggle(ui, "perf-overlay", &mut draft.steamvr_overlay);
                 });
                 widgets::separator(ui);
+                widgets::field(
+                    ui,
+                    "Orbiters watch",
+                    Some("The N4N0 mark on a wrist in VR, shown as you turn the wrist to look at it. Point at it with the other hand and pull the trigger once: the Orbiters panel floats before you, used with your controllers' lasers while VRChat keeps them. Grab its handle to move it."),
+                    48.0,
+                    |ui| {
+                        apply |= widgets::toggle(ui, "floating-watch", &mut draft.floating.watch);
+                    },
+                );
+                if draft.floating.watch {
+                    widgets::separator(ui);
+                    use orbiters_core::settings::Hand;
+                    let wrists = [SegOption::new(Hand::Left, "Left wrist"), SegOption::new(Hand::Right, "Right wrist")];
+                    widgets::field(ui, "Watch on", None, 220.0, |ui| {
+                        apply |= widgets::segmented(ui, "floating-watch-hand", &mut draft.floating.watch_hand, &wrists, true);
+                    });
+                }
+                widgets::separator(ui);
                 let hands = [
                     SegOption::new(CoverageOverlay::Off, "Off"),
                     SegOption::new(CoverageOverlay::LeftHand, "Left hand"),

@@ -30,6 +30,71 @@ The display cache is kept and counted with the 3D view. Original captured frame 
 and reconstruction. A missing/unreadable original frame size leaves an older thumbnail unchanged because its data
 regions cannot be positioned reliably.
 
+## Layouts
+
+The three icons left of Requests (under the filters on a narrow window) choose how each group is laid out
+(`pages/gallery_layout.rs`); the choice is saved in the settings (`gallery_layout`: `masonry`, `rows`, `grid`).
+
+- **Masonry** (the default) is the website's gallery (`server/frontend/src/components/elements/GalleryMasonry.jsx`):
+  `ceil((width + 16) / (240 + 16))` columns 16 points apart (so at most 240 wide), each picture in the shortest column
+  (the leftmost of equals) in the gallery's order, as tall as its shape. A next page appends: nothing placed moves.
+- **Rows** are the website's Even rows: pictures side by side at 210 points, each full row scaled to the width (ended
+  before the picture that overfills it when that keeps it nearer 210), the last row left at 210 from the left.
+- **Grid** is the card it was: every item the same card, its picture cropped to 16:9, its kind, time and who sees it
+  under it.
+
+In Masonry and Rows a card is its picture alone, never cropped: the check and the badges on its top (3D for a capture,
+not Picture for every picture, the layers, Reconstructing, Sharing…, Public / Shared · N), who shared it with you over
+its bottom, and its kind and time there on hover; corners of 16. A picture's shape comes from the listing before its
+thumbnail loads: a screenshot's PNG header (the index already reads it), a capture's frame size without the strip and
+the skeleton band (as its thumbnail is cropped), what Orbiters says of a shared picture or a community's. Without one
+it stands in as 4:3 (the website's 800 × 600) and springs to the thumbnail's shape once decoded; what is under it in
+its column moves with it. Groups, selection (Ctrl/Shift-click, checks, rubber band), dragging out, the window growing
+out of its card, lazy pictures, the endless list (its shimmering places in the layout's shapes) and the communities'
+pictures work the same in every layout.
+
+## VRChat multi-layer pictures
+
+VRChat's camera in its Multi Layer mode saves, beside the picture, one PNG per mask turned on, named as the picture
+with the mask after it: `VRChat_2026-10-29_21-04-11.532_3840x2160.png` with `…_Environment.png` (the world, opaque),
+`…_Player.png` (the people) and `…_UI.png` (the interface), both transparent around what they show (the names as
+[VRChat Photo Manager](https://github.com/phaze-the-dumb/VRChat-Photo-Manager) reads them; VRChat's docs only say
+that multi-layer mode saves "multiple images for each Mask layer you have enabled", with alpha for the players and the
+UI). This computer had no VRChat pictures to compare; the reading follows those names and accepts any other single
+word after the size as a layer.
+
+The listing (`worlds::group_layers`) makes the files of one folder sharing that name one picture: the picture itself
+is its face, its layers listed back to front (Environment, Player, other masks, UI); it takes the world any of them has.
+Without its picture (deleted), the bottom layer is the face; a layer alone is a picture of its own that still says
+which layer it is. VRCX's renamed copy (`…_wrld_<id>.png`) counts as the picture; a numbered copy (`…_2.png`), another
+millisecond or another size is another picture. Visited worlds counts such a picture once too.
+
+The card says "3 layers" (or "Player layer"). The picture window shows a strip over the picture's bottom left: the
+picture, then each layer (its thumbnail over a checkerboard, its name, an eye). A press on a layer shows it alone over
+a checkerboard; the eyes show or hide the others stacked with it; the picture shows the picture again. The chosen
+layer is what the window is about: Share publicly, Share to …, the folder and who it is shared with are that file's
+(its own upload record and grants); with the picture chosen, sharing shares the picture as before. The strip waits
+while a share runs. Dragging the card out hands out the picture.
+
+For the picture editor: `Entry::layers()` is the list (`Layer { path, name, width, height, .. }`, back to front, empty
+for a plain picture or a capture); the entry's own file is VRChat's composite, or the bottom layer when
+`Entry::has_composite()` is false; `Entry::layer_entry(i)` is one layer as an entry; in the window,
+`Dialog::layers.layered(&dialog.entry)` is the multi-layer entry while one of its layers is chosen. Layers decode with
+their transparency (`Picture::Layer`, premultiplied, thumbnails kept in the cache as RGBA QOI).
+
+Checked: unit tests `worlds::tests` (names, a whole set, partial sets, a lone layer, times, folders, sizes, VRCX's
+copy, shrinking with alpha), `gallery_layout::tests` (the website's masonry test: places kept when appending, no
+overlap, widths; rows; stand-ins; the grid), `shares::tests::a_chosen_layer_is_an_entry_of_its_own`; screenshots
+`gallery-masonry` (also at `--width 900`, the picker under the filters), `gallery-masonry-hover`,
+`gallery-masonry-scrolled` (from Alex, Shared · 1), `gallery-rows`, `gallery-grid`,
+`gallery-layers-window`, `gallery-layer-chosen`, `gallery-layers-stack` on pictures the screenshot code makes
+(`src/screenshot/gallery_layouts.rs`). Real multi-layer captures from VRChat were not tried.
+
+## Editing
+
+A picture on this computer has Edit in its window, and a 3D capture's view has Save this view: both open the photo
+editor, which saves an edited copy beside the original (`docs/photo-editor.md`).
+
 ## Sharing and revoking
 
 Preparing a 3D capture reuses its finished upload files on later shares and retries, including between Map explorer

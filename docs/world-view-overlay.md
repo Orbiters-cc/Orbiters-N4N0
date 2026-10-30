@@ -5,11 +5,86 @@ scheduling policy and add repeated measurements, an independent Opus review, and
 
 **What it does.** N4N0's menu in the play space (the SteamVR overlay) has a pill under it, "3D worlds". It opens a
 panel in the menu's place: a search field (the panel's own keyboard, or the computer's keyboard as the menu's search
-takes it) over the worlds members captured and shared, as cards with each world's thumbnail. Pressing a card downloads
-that capture and shows it around you: its ground on your play space's floor, its start view where you stand, facing the
-way you face, appearing from there outward. Its page then has Hide, Recenter, See VRChat (the capture at 55 %, VRChat
-behind it) and how sharp it is (Light, Balanced, Sharp). The capture stays around you after the menu closes; the pill
-then says which one shows, a press away from its page. Code: `crates/orbiters-desktop/src/overlay/worlds/`.
+takes it) over the worlds members captured and shared, as cards with each world's thumbnail, likes, labels and frame
+rate, ordered newest, most liked or smoothest first and kept to the labels picked. Pressing a card downloads that
+capture and shows it around you: its ground on your play space's floor, its start view where you stand, facing the way
+you face, appearing from there outward. Its page has what Orbiters knows of the world and its feedback, given there as
+in the VRChat world and on the website (Like, labels, comments). The capture's controls are on a bar of their own under
+the menu or the panel, whatever page shows, while a capture shows or loads: the capture (its page a press away), See
+VRChat (the capture at 55 %, VRChat behind it), Recenter, how sharp it is (Light, Balanced, Sharp) and Hide. The
+capture stays around you after the menu closes. Code: `crates/orbiters-desktop/src/overlay/worlds/`.
+
+## What the search does, against the Map explorer and the VRChat world
+
+Inventoried 2026-10-30 from the website (`server/frontend` `MapExplorerPage.jsx`, `MapWorldPage.jsx`,
+`WorldFeedback.jsx`, `WorldPerformance.jsx`, `MapPictures.jsx`; API `backend/src/routes/mapsRouter.js`) and the world
+(`Assets/N4N0Viewer/Scripts/SplatMenu.cs`, `SplatFeedback.cs`, `SplatInfo.cs`, `SplatPerformance.cs`,
+`SplatImages.cs`). Nowhere is there a rating scale: "rating" is the Like (one per member per world), as on the website
+and in the world. Feedback belongs to the **world** (`wrld_…`), so a world's captures share it.
+
+| Feature | Map explorer (orbiters.cc/maps) | Viewer world | Overlay before | Overlay now |
+|---|---|---|---|---|
+| Search | VRChat's world search (Orbiters' known worlds when VRChat fails), a pasted world id or link | name, author or sharer containing the text | as the world | as the world |
+| Order | Smoothest first (share of the refresh rate, then fps) | as listed (newest) | as listed | Newest, Most liked, Smoothest |
+| Filters | none | none | none | labels (all those picked; how many worlds have each), shared by the world's author |
+| Card | cover, 3D badge, picture count, fps badge, name, author, capacity | thumbnail, name, by author, 3D by sharer, Official | thumbnail, name, author, splats, Official seal | + likes, fps badge (smooth/fair/heavy as the website colours it), the two labels given most |
+| Shared with some players only (`shared`, `for`) | (the captures API) | listed for those players only | listed for everyone | listed for the player whose VRChat name (VRChat signed in in Orbiters - N4N0) is in `for`, else not |
+| Like ("rating") | heart with the count | Like, N likes | none | Like with the count, the member's lit |
+| Labels | the 18, each with its count, the member's toggled; AI world with a reason of 10 words | the same, a reason page | none | the five given most on the capture's page, all 18 on Labels (counts, the member's lit, toggled); AI world asks its reason on the keyboard (words counted, refused under 10 or over 500 characters) |
+| Others' reasons ("why") | listed | – | none | not yet (see below) |
+| Comments | 20 a page and older, write, delete one's own, report others' | 5 a page, write, delete, report | none | the newest one under the picture; Comments: the newest 20, 4 a page, Write a comment on the keyboard, Delete on one's own (pressed twice); report not yet |
+| Feedback for everyone | per world | the listing's `feedback`, else the app's local address | none | the listing's on cards and as a world's page opens; the app's read (the member's part with it) once there |
+| World numbers | capacity, visits, favorites, author tags, description | capacity, visits, favorites, description, capture date, splats | description, splats, sky, sharer | + capacity, visits, favorites, capture date, the author's tags |
+| How smoothly VRChat runs | typical fps, slowest, % of refresh, by crowd size, members and minutes | the viewer's own FPS and automatic quality | none | typical fps with smooth/fair/heavy, slowest, % of refresh |
+| Pictures | 48 a page, shown whole with who and when | gallery pages of 6 | none | the first 48, 8 a page, shown whole with who and when |
+| The world's other captures | a tab per sharer | up to 3 buttons | each its own card | "N more captures" steps through them (showing each) |
+| Capture controls | – | Quality (with automatic), Debug | Hide, Recenter, See VRChat, sharpness on the capture's page once shown | on the bar, whatever page, while it shows or loads |
+| Capture details: share, download `.splat`, report the preview | signed in | – | none | not in the overlay (the website) |
+| Open in VRChat | vrchat.com link | portal | none | not in the overlay (an overlay cannot drop a portal) |
+
+**Giving feedback.** The panel sends what the member gives as N4N0's menus do: `OrbCommand::Feedback` with the
+contract's `FeedbackAsk` to the tray service, whose queue (`controller/world_feedback.rs`, kept on disk, coalesced,
+retried) sends it to `PUT /maps/worlds/:worldId/feedback` and the comments routes under the signed-in account. Opening
+a capture's page asks for its world (`FeedbackAsk::Show`, again every 2 minutes while it shows); the service now hands
+the menus the feedback of the six worlds a menu asked about lately besides its subjects, so the panel shows any
+capture's world, the member's part with it. A press shows at once; the service's answer replaces it. Signed out, or
+before the world's feedback is read (what the member gave is not known yet), a press says why and sends nothing.
+
+**Not done, for want of a route or a field** (the APIs exist; the overlay's path to them does not):
+
+- Reporting a comment: `POST /maps/comments/:id/report` and the queue's `Action::Report` exist, but the menus' ask
+  (`orbiters_orb::feedback::FeedbackAsk`) has no Report.
+- Others' reasons for AI world: `GET …/feedback` returns `justifications`; the menus' `WorldFeedback` does not carry them.
+- Comments older than the newest 20: `?before=` exists; `orbiters_core::world_feedback::Client::read` does not page.
+- Frame rate by crowd size: in the world page's `performance.by_crowd`, not shown (room).
+- Reporting a 3D preview (`POST /moderation/reports`, `targetType: map_preview`) needs a reason form: on the website.
+- A rating scale (stars, averages): no API has one.
+
+## The capture's bar
+
+The controls used to be on the capture's page only, and only once it showed: not while it downloaded or prepared
+(Cancel alone), not on the results, the search or another capture's page (Show around me instead), not after Back,
+and not while the panel was closed (the pill alone); a failed download also lost its page's controls and its error
+on the next turn. So See VRChat came and went with the page and the moment. They are now on a SteamVR overlay of
+their own (`{key}.worlds-bar`, 1024 × 88 px, as wide as the menu, 12 mm under it, sort order 10), shown whenever a
+capture shows or loads and the menu or the panel shows its front, whatever page: the capture (its loading ring or
+progress, a press opens its page), See VRChat, Recenter (once it shows), Light / Balanced / Sharp, Hide (Cancel while
+it loads, Close after an error). With no capture the pill shows as before. `--screenshot <out> --only worlds-overlay`
+draws the bar alone (`bar-*.png`) and under the panel with a capture's page open and closed (`with-bar-detail.png`,
+`with-bar-browse.png`). Like the menu, the bar goes when the menu closes: the capture stays around you.
+
+## Captures kept for showing again
+
+`overlay/worlds/cache.rs`. **In memory**, the ready captures (splats ordered for the reveal, sky map): about 60 bytes a
+splat, so 60 MB for a million; at most 1.25 GB (`ORBITERS_3D_WORLDS_MEMORY_MB` changes it), the least lately shown let
+go first, never the one on screen. Showing one of them again is at once: no download, no preparing, straight to the
+GPU. **On disk** (`%LOCALAPPDATA%\…\cache\3d-worlds`), the files as downloaded (the slot's PC tree or the API's
+`.splat`, the sky map) within 2 GB, the least lately used removed first, written only while the drive keeps 10 GB free
+after them. A kept file is asked about again with `If-None-Match` / `If-Modified-Since` when the storage sent `ETag` /
+`Last-Modified` (a `304` downloads nothing; unreachable, the kept file serves), else trusted by its name: listing id,
+slot, the upload's key and splat count (a capture shared again gets a new key; a slot's tree also carries its key,
+checked when read, and a file that fails its check is removed). The listing gives no updated time, so the key is the
+version.
 
 **Same captures, same placement as the VRChat world.** The panel reads what "N4N0 - 3D picture viewer"
 (`Assets/N4N0Viewer/Scripts/SplatMenu.cs`) reads: `GET /maps/vrchat/previews`, searched as its menu searches (the
@@ -163,6 +238,7 @@ Recenter puts its start view where you stand again.
 Nothing of this ran in SteamVR: no headset was reachable, and the person's own SteamVR and app were left alone. Unknown
 until tried: whether SteamVR takes a side-by-side overlay's height from half the texture (assumed: square faces;
 otherwise the faces would be half as high and the cube would gape), the shared texture's hand-over (SteamVR's
-`SetOverlayTexture` with a D3D11 texture opened from a D3D12 resource), the panel's laser input and the pill, the
+`SetOverlayTexture` with a D3D11 texture opened from a D3D12 resource), the panel's laser input, the pill and the bar
+(its place under the menu, its laser input), feedback given from the panel against the live server, the
 computer's keyboard reaching the panel, the predicted poses' timing, how the cube looks with VRChat behind it at 55 %,
 and what the batches cost VRChat's own frames (the governor's back-off included).

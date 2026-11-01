@@ -83,6 +83,9 @@ pub struct State {
     changed: bool,
     stand_ins: Vec<Picture>,
     fixture: bool,
+    /// Screenshots: what the pictures' windows say (their replies and reactions) and the reaction hovered.
+    talk: Option<super::community_talk::Said>,
+    talk_hover: Option<usize>,
 }
 
 impl State {
@@ -233,22 +236,7 @@ impl State {
                     continue;
                 }
             }
-            out.push(Entry {
-                key: format!("{KEY}{}", p.id),
-                world_id: format!("{GROUP}{}", p.gallery_id),
-                world_name: name,
-                taken: controller::unix(p.posted_at.as_deref().unwrap_or_default()),
-                instance: None,
-                source_key: None,
-                people: if author.is_empty() { Vec::new() } else { vec![author] },
-                local: None,
-                remote: None,
-                content: Default::default(),
-                ready: true,
-                picture: source(p, false, self.covers.development, &self.stand_ins),
-                size: (p.width > 0 && p.height > 0).then_some([p.width, p.height]),
-                layers: Vec::new(),
-            });
+            out.push(picture_entry(format!("{KEY}{}", p.id), name, p, self.covers.development, &self.stand_ins));
         }
         out
     }
@@ -522,7 +510,39 @@ impl State {
         let mut w = PictureWindow::open(ctx, list, index, origin, None, None);
         w.about = about;
         w.stand_ins = stand_ins;
+        w.drag_out = true;
+        if let Some(said) = self.talk.clone() {
+            w.talk.stage(said);
+        }
         self.window = Some(w);
+    }
+
+    /// The picture its window shows was dragged out of it this frame: what it hands out (its card's entry).
+    pub fn take_drag(&mut self) -> Option<Entry> {
+        self.window.as_mut()?.dragged.take()
+    }
+
+    /// The key of the card whose picture the window shows.
+    pub fn window_key(&self) -> Option<String> {
+        self.window.as_ref().map(PictureWindow::key)
+    }
+
+    /// The window's picture is carried out of it by a drag (drawn lifted).
+    pub fn set_lifted(&mut self, lifted: bool) {
+        if let Some(w) = self.window.as_mut() {
+            w.lifted = lifted;
+        }
+    }
+
+    /// Screenshots: every picture window says this (its replies and reactions, never read from Orbiters), with the
+    /// `hover`th reaction hovered.
+    pub fn stage_talk(&mut self, said: super::community_talk::Said, hover: Option<usize>) {
+        self.talk = Some(said.clone());
+        if let Some(w) = self.window.as_mut() {
+            w.talk.stage(said);
+            w.talk.hover = hover;
+        }
+        self.talk_hover = hover;
     }
 
     /// The gallery chips (Communities): all of them, then each gallery with its audience or its event.
@@ -570,6 +590,11 @@ impl State {
         let Some(index) = picture_id(key).and_then(|id| list.iter().position(|p| p.id == id)) else { return };
         let mut w = PictureWindow::open(ctx, list, index, origin, self.galleries.as_ref(), None);
         w.stand_ins = self.stand_ins.clone();
+        w.drag_out = true;
+        if let Some(said) = self.talk.clone() {
+            w.talk.stage(said);
+            w.talk.hover = self.talk_hover;
+        }
         self.window = Some(w);
     }
 
@@ -625,6 +650,27 @@ impl State {
             }
         }
         let _ = ctx;
+    }
+}
+
+/// A gallery picture as the gallery's entry (its card, what it hands out when dragged): `key`, under `name`.
+pub(super) fn picture_entry(key: String, name: String, p: &community::Picture, development: bool, stand_ins: &[Picture]) -> Entry {
+    let author = p.author.as_ref().map(|a| a.username.clone()).unwrap_or_default();
+    Entry {
+        key,
+        world_id: format!("{GROUP}{}", p.gallery_id),
+        world_name: name,
+        taken: controller::unix(p.posted_at.as_deref().unwrap_or_default()),
+        instance: None,
+        source_key: None,
+        people: if author.is_empty() { Vec::new() } else { vec![author] },
+        local: None,
+        remote: None,
+        content: Default::default(),
+        ready: true,
+        picture: source(p, false, development, stand_ins),
+        size: (p.width > 0 && p.height > 0).then_some([p.width, p.height]),
+        layers: Vec::new(),
     }
 }
 
@@ -774,6 +820,16 @@ pub struct PictureWindow {
     about: Vec<About>,
     /// The photo editor on a copy of the picture (downloaded at its full size), over the window while it is open.
     editor: Option<super::editor::Editor>,
+    /// Its replies and reactions, read once per picture ([`super::community_talk`]).
+    pub talk: super::community_talk::Talk,
+    /// Its page drags pictures out of the window (Photos & captures; not the Events page): a press on the picture that
+    /// moves is a drag out ([`super::gallery_select::WindowDrag`]).
+    pub drag_out: bool,
+    /// What the picture's drag out hands out, the frame it started (its card's entry).
+    pub dragged: Option<Entry>,
+    /// The page carries the picture out of the window: drawn lifted until the drop.
+    pub lifted: bool,
+    drag: super::gallery_select::WindowDrag,
 }
 
 const WINDOW_PAD: f32 = 24.0;
@@ -798,6 +854,11 @@ impl PictureWindow {
             covered: false,
             about: Vec::new(),
             editor: None,
+            talk: Default::default(),
+            drag_out: false,
+            dragged: None,
+            lifted: false,
+            drag: Default::default(),
         }
     }
 
@@ -867,8 +928,12 @@ impl PictureWindow {
             16.0 / 9.0
         });
         let measured = &self.measured;
+        // Details taller than what the picture leaves of the page (many replies) scroll under it: they take what the
+        // picture at its own height leaves, and at least two fifths of the page (the picture is cropped a little).
         let layout = viewer::picture_layout(area, aspect, |w| {
-            measured.get(&(w.round() as u32)).copied().unwrap_or(if w <= viewer::SIDE_W + 1.0 { 300.0 } else { 170.0 })
+            let natural = measured.get(&(w.round() as u32)).copied().unwrap_or(if w <= viewer::SIDE_W + 1.0 { 300.0 } else { 170.0 });
+            let room = if w <= viewer::SIDE_W + 1.0 { area.height() } else { (area.height() - w / aspect.max(0.01)).max(area.height() * 0.4) };
+            natural.min(room)
         });
         let origin = self.origin;
         let morph = self.morph.get_or_insert_with(|| Morph::new(Id::unique(("community-window", OPENED.fetch_add(1, Ordering::Relaxed))), origin, 20.0));
@@ -914,8 +979,25 @@ impl PictureWindow {
             if let Some(prev) = self.previous.as_ref().filter(|_| k < 0.999) {
                 feedback::cover(&pa, picture, radii, prev, 1.0, 1.0);
             }
-            let np = pa.with_clip_rect(picture.intersect(pa.clip_rect()));
+            // Dragged out of the window (its page allows it): a press on the picture that moves past the slop hands
+            // it to Windows' drag and drop; the controls over it (arrows, Edit, close) are above it and keep their
+            // presses. Lifted, it is a little smaller and faded until the drop, as the grid's cards.
+            let lift = anim::toggle(&ctx, wid.with("picture-lift"), self.lifted, Spring::BOUNCY).clamp(-0.2, 1.2);
+            if self.drag_out && !closing {
+                let resp = ui.interact(picture, wid.with("picture"), Sense::drag());
+                if self.drag.update(&resp) {
+                    let name = self.about.get(self.index).map(|a| a.title.clone()).or_else(|| gallery.as_ref().map(|g| g.name.clone()));
+                    self.dragged = Some(picture_entry(self.key(), name.unwrap_or_else(|| "Community gallery".into()), &p, development, &self.stand_ins));
+                }
+                resp.on_hover_cursor(if self.lifted || self.drag.dragging() { CursorIcon::Grabbing } else { CursorIcon::Grab });
+            }
+            let mut np = pa.with_clip_rect(picture.intersect(pa.clip_rect()));
+            if lift > 0.001 {
+                feedback::fill_corners(&np, picture, radii, theme::alpha(theme::INK_750, lift.clamp(0.0, 1.0)));
+                np.multiply_opacity(1.0 - 0.35 * lift.clamp(0.0, 1.0));
+            }
             let at = picture.translate(vec2(28.0 * self.nav.1 * (1.0 - k), 0.0));
+            let at = Rect::from_center_size(at.center(), at.size() * (1.0 - 0.04 * lift));
             let shown_large = feedback::loaded(&ctx, wid.with(("large", self.nav.0)), large.is_some());
             match (&thumb, &large) {
                 (Some(t), _) if shown_large < 0.99 => feedback::cover(&np, at, radii, t, 1.0, k),
@@ -975,30 +1057,47 @@ impl PictureWindow {
                     step = dir;
                 }
             }
-            // Details, laid out at the window's final width.
+            // Details, laid out at the window's final width and height, scrolling when they are taller (the bar in the
+            // window's right gutter, shown once the window landed).
             let d = match layout.arrangement {
-                Arrangement::Under => Rect::from_min_size(pos2(f.rect.left(), picture.bottom()), vec2(layout.details.width(), 4000.0)),
-                Arrangement::Beside => Rect::from_min_size(pos2(picture.right(), f.rect.top()), vec2(layout.details.width(), 4000.0)),
+                Arrangement::Under => Rect::from_min_size(pos2(f.rect.left(), picture.bottom()), layout.details.size()),
+                Arrangement::Beside => Rect::from_min_size(pos2(picture.right(), f.rect.top()), layout.details.size()),
             };
             let d = d.translate(vec2(14.0 * self.nav.1 * (1.0 - k), 0.0));
-            let mut du = ui.new_child(
-                UiBuilder::new().max_rect(d.shrink2(vec2(WINDOW_PAD, 0.0))).layout(egui::Layout::top_down(egui::Align::Min)).id_salt(wid.with("details")),
-            );
-            du.set_clip_rect(f.rect.intersect(ui.clip_rect()));
+            let mut du = ui.new_child(UiBuilder::new().max_rect(d).layout(egui::Layout::top_down(egui::Align::Min)).id_salt(wid.with("details")));
+            du.set_clip_rect(f.rect.intersect(ui.clip_rect()).intersect(d));
             let alpha = f.content * k;
             du.multiply_opacity(alpha);
             if closing || alpha < 0.5 {
                 du.disable();
             }
-            du.spacing_mut().item_spacing = vec2(0.0, 0.0);
-            let dy = 10.0 * (1.0 - alpha);
-            du.add_space(if layout.arrangement == Arrangement::Beside { 64.0 } else { 18.0 } + dy);
-            let top = du.cursor().top();
-            let about = self.about.get(self.index).cloned();
-            details(&mut du, wid, &p, gallery.as_ref(), event.as_ref(), about.as_ref(), pictures, &self.stand_ins, development, &mut open_url, &mut self.event_pressed);
-            du.add_space(22.0);
-            let h = du.cursor().top() - top + if layout.arrangement == Arrangement::Beside { 64.0 } else { 18.0 };
-            self.measured.insert(layout.details.width().round() as u32, h.ceil());
+            let pad_top = if layout.arrangement == Arrangement::Beside { 64.0 } else { 18.0 };
+            let landed = !closing && f.content > 0.99 && k > 0.99;
+            let mut natural = 0.0;
+            egui::ScrollArea::vertical()
+                .id_salt(wid.with(("details-scroll", p.id)))
+                .max_height(d.height())
+                .auto_shrink([false, true])
+                .scroll_bar_visibility(if landed {
+                    egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded
+                } else {
+                    egui::scroll_area::ScrollBarVisibility::AlwaysHidden
+                })
+                .show(&mut du, |su| {
+                    egui::Frame::NONE.inner_margin(egui::Margin::symmetric(WINDOW_PAD as i8, 0)).show(su, |su| {
+                        su.set_width(d.width() - 2.0 * WINDOW_PAD);
+                        su.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                        let dy = 10.0 * (1.0 - alpha);
+                        su.add_space(pad_top + dy);
+                        let top = su.cursor().top();
+                        let about = self.about.get(self.index).cloned();
+                        details(su, wid, &p, gallery.as_ref(), event.as_ref(), about.as_ref(), pictures, &self.stand_ins, development, &mut open_url, &mut self.event_pressed, &mut self.talk);
+                        talk_part(su, wid, &p, about.is_some(), &mut self.talk, pictures, development, &mut open_url);
+                        su.add_space(22.0);
+                        natural = su.cursor().top() - top + pad_top;
+                    });
+                });
+            self.measured.insert(layout.details.width().round() as u32, natural.ceil());
         });
         if let Some(url) = open_url {
             let r = crate::controller::open_url(&url);
@@ -1049,8 +1148,17 @@ impl PictureWindow {
     }
 }
 
+/// Under the details of a community's picture: the replies to its Discord message ([`super::community_talk`]); an
+/// asset's picture has none.
+#[allow(clippy::too_many_arguments)]
+fn talk_part(ui: &mut Ui, wid: Id, p: &community::Picture, asset: bool, talk: &mut super::community_talk::Talk, pictures: &mut Pictures, development: bool, open_url: &mut Option<String>) {
+    if !asset {
+        super::community_talk::replies(ui, wid, p, talk, pictures, development, open_url);
+    }
+}
+
 /// The picture's details: who posted it and when (with Open on Orbiters and the full picture), its gallery, its words,
-/// its likes and replies, and the event it was taken at. An asset's picture (`about`): the asset, what it is to the
+/// its reactions (who reacted on hover), and the event it was taken at. An asset's picture (`about`): the asset, what it is to the
 /// member, and its page.
 #[allow(clippy::too_many_arguments)]
 fn details(
@@ -1065,6 +1173,7 @@ fn details(
     development: bool,
     open_url: &mut Option<String>,
     event_pressed: &mut Option<(Card, Rect)>,
+    talk: &mut super::community_talk::Talk,
 ) {
     let ctx = ui.ctx().clone();
     let w = ui.available_width();
@@ -1134,27 +1243,8 @@ fn details(
         let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y), Sense::hover());
         ui.painter().galley(r.min, g, theme::FG);
     }
-    // Likes and replies.
-    if p.reaction_count > 0 || p.reply_count > 0 {
-        ui.add_space(12.0);
-        let (r, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
-        let mut x = r.left();
-        for (glyph, n, label, color) in [(icons::HEART, p.reaction_count, "reaction", theme::REC), (icons::CHAT_CIRCLE, p.reply_count, "reply", theme::FG_3)] {
-            if n == 0 {
-                continue;
-            }
-            widgets::icon_fill(&pa, pos2(x + 7.0, r.center().y), glyph, 13.0, color);
-            let plural = if n == 1 {
-                label.to_string()
-            } else if label == "reply" {
-                "replies".into()
-            } else {
-                format!("{label}s")
-            };
-            let tr = widgets::text(&pa, pos2(x + 20.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(format!("{n} {plural}"), 12.5).color(theme::FG_2));
-            x = tr.right() + 16.0;
-        }
-    }
+    // Its reactions, who reacted on hover ([`super::community_talk`]; its replies come after the event).
+    super::community_talk::reactions(ui, wid, p, talk, pictures, development);
     // The event it was taken at.
     if let Some(e) = event {
         ui.add_space(14.0);

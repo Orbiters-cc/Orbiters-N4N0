@@ -29,6 +29,7 @@ mod floating;
 mod gallery_layouts;
 mod gallery_folders;
 mod gallery_assets;
+mod gallery_talk;
 mod projects_panel;
 mod editor;
 mod vrchat_login;
@@ -1656,6 +1657,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     gallery_layouts::append(&mut scenarios);
     gallery_folders::append(&mut scenarios);
     gallery_assets::append(&mut scenarios);
+    gallery_talk::append(&mut scenarios);
     floating::append(&mut scenarios);
     vr_audio::append(&mut scenarios);
 
@@ -1883,6 +1885,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
                 release = Some(p);
             }
             gallery_assets::stage(&ctx, gallery, sc.name, f, &sc.snapshot.settings.sessions_dir);
+            gallery_talk::stage(&ctx, gallery, sc.name, f);
         }
         // The photo editor over a picture window, its preview made before each frame.
         if sc.name.starts_with("editor-") {

@@ -11,6 +11,15 @@
 //! wait for what is still coming (the bar counts it) and Windows gets the drag once everything is there, if the button
 //! is still down. A copy (Ctrl+C, a card's menu) puts the same files on the clipboard, after the same wait. The cards
 //! lift (smaller, faded) as the drag starts and settle back once it ended; the bar says what was copied.
+//!
+//! A picture open in its window (the item window, a community's or an asset's picture window) is dragged out the same
+//! way ([`Selection::carry`]): the window's picture is lifted alone, whatever is selected, and hands out the file its
+//! card would (the chosen layer's while the window shows one of a multi-layer picture's layers, [`window_payload`]).
+//! The gesture ([`WindowDrag`]): a press on the picture that moves [`DRAG_SLOP`] points with the button held is a drag
+//! out; a press released before it moved that far is the picture's click (See it whole), so a click never starts a drag
+//! and a drag never toggles the view. Presses on the controls over the picture (arrows, layers, Edit, close) stay
+//! theirs: they sit above the picture's own response. While a window is open the bar shows only what a drag out of it
+//! says.
 use crate::controller::shares::{Entry, Local};
 use crate::drag_out::{self, Outcome};
 use egui::{pos2, vec2, Align2, Id, Order, Pos2, Rect, Response, Sense, Stroke, Ui};
@@ -34,6 +43,8 @@ const SAID_FOR: f64 = 2.6;
 pub const CHECK: f32 = 24.0;
 /// Pictures from Orbiters fetched as they are selected (more wait for a drag or a copy of them).
 pub const PREFETCH: usize = 30;
+/// How far a press on a window's picture moves before it is a drag out of the window (egui's click distance).
+pub const DRAG_SLOP: f32 = 6.0;
 
 #[derive(Default)]
 pub struct Selection {
@@ -50,6 +61,10 @@ pub struct Selection {
     started: bool,
     /// What the drag handed out (the keys whose files went).
     handed: Vec<String>,
+    /// A picture carried out of its window that the page shows no card of (a layer, an item opened from Requests).
+    loose: Option<Entry>,
+    /// The drag came from a window: the bar says how it went over the window.
+    from_window: bool,
     /// The lifted drag waits for this many pictures still coming from Orbiters (of so many).
     waiting: Option<(usize, usize)>,
     /// A copy asked for, waiting for its pictures from Orbiters.
@@ -176,6 +191,17 @@ impl Selection {
         }
     }
 
+    /// Screenshots: a window's picture lifted by a drag out of it, as if Windows had it, or still `waiting` for it from
+    /// Orbiters.
+    pub fn stage_window_carry(&mut self, e: &Entry, waiting: bool) {
+        self.carried = vec![e.key.clone()];
+        self.loose = Some(e.clone());
+        self.from_window = true;
+        self.started = !waiting;
+        self.waiting = waiting.then_some((1, 1));
+        self.lifted_at = if waiting { f64::INFINITY } else { 0.0 };
+    }
+
     /// Screenshots: these cards lifted, the drag waiting for `waiting` of them still coming from Orbiters.
     pub fn stage_wait(&mut self, keys: Vec<String>, waiting: usize) {
         self.waiting = Some((waiting, keys.len()));
@@ -219,6 +245,34 @@ impl Selection {
         self.lifted_at = anim::time(ctx);
         self.started = false;
         self.waiting = None;
+        self.loose = None;
+        self.from_window = false;
+    }
+
+    /// A drag out of a picture's window: that picture alone, whatever is selected (`e` is what the window hands out,
+    /// [`window_payload`]); its file goes as its card's would, once what comes from Orbiters is there.
+    pub fn carry(&mut self, ctx: &egui::Context, e: &Entry) {
+        if !self.carried.is_empty() {
+            return;
+        }
+        self.from_window = true;
+        if !self.can_hand_out(e) {
+            self.said = Some(("This can't be dragged out".into(), anim::time(ctx)));
+            return;
+        }
+        if e.local.is_none() {
+            self.want(ctx, e, true);
+        }
+        self.carried = vec![e.key.clone()];
+        self.loose = Some(e.clone());
+        self.lifted_at = anim::time(ctx);
+        self.started = false;
+        self.waiting = None;
+    }
+
+    /// The window's picture is lifted by a drag out of it (drawn smaller and faded until the drop).
+    pub fn window_lifted(&self, key: &str) -> bool {
+        self.from_window && self.carried(key)
     }
 
     /// Copies these cards' files to the clipboard (those from Orbiters once fetched): Ctrl+C, a card's Copy.
@@ -314,6 +368,15 @@ impl Selection {
             }
         }
 
+        // A picture carried out of its window without a card on the page is looked for with the cards.
+        let with_loose;
+        let order = match self.loose.as_ref().filter(|l| !order.iter().any(|o| o.key == l.key)) {
+            Some(l) => {
+                with_loose = order.iter().cloned().chain(std::iter::once(l.clone())).collect::<Vec<_>>();
+                &with_loose[..]
+            }
+            None => order,
+        };
         // The lifted cards go to Windows once they have lifted on screen and what comes from Orbiters is there, if the
         // button is still down.
         if !self.carried.is_empty() && !self.started && self.lifted_at.is_finite() {
@@ -352,6 +415,9 @@ impl Selection {
             }
             self.carried.clear();
             self.started = false;
+        }
+        if self.carried.is_empty() {
+            self.loose = None;
         }
 
         // A copy, once what it waits for came.
@@ -419,30 +485,36 @@ impl Selection {
             _ => None,
         };
         let said = coming.clone().or(said);
-        let shown = !hidden && (self.any() || said.is_some());
+        // Over a window it says only how a drag out of that window goes (the selection waits under the window).
+        let lone = hidden;
+        let shown = if lone { self.from_window && said.is_some() } else { self.any() || said.is_some() };
         let k = anim::toggle(&ctx, Id::unique("gallery-select-bar"), shown, Spring::BOUNCY);
         if k < 0.01 {
+            if !lone {
+                self.from_window = false;
+            }
             return;
         }
+        let any = self.any() && !lone;
         let n = self.keys.len();
         let count = Txt::new(if n == 1 { "1 selected".to_string() } else { format!("{n} selected") }, 14.0).weight(weight::SEMIBOLD);
         let hint_text = said.clone().unwrap_or_else(|| "Drag them into Discord, a folder or any app".into());
         let hint = Txt::new(&hint_text, 12.5).color(if said.is_some() { theme::ACCENT } else { theme::FG_3 });
         let all = Button::new("Select all").variant(Variant::Ghost).size(Size::Sm).id_salt("gallery-select-all");
-        let thumbs = self.keys.len().min(3);
-        let count_w = if self.any() { widgets::text_size(ui, &count).x } else { 0.0 };
+        let thumbs = if any { self.keys.len().min(3) } else { 0 };
+        let count_w = if any { widgets::text_size(ui, &count).x } else { 0.0 };
         let narrow = page.width() < 760.0;
         let hint_w = if narrow && said.is_none() { 0.0 } else { widgets::text_size(ui, &hint).x };
-        let all_w = if self.any() && n < order.len() { all.desired_width(ui) } else { 0.0 };
+        let all_w = if any && n < order.len() { all.desired_width(ui) } else { 0.0 };
         let stack_w = if thumbs > 0 { 34.0 + 10.0 * (thumbs - 1) as f32 + 12.0 } else { 0.0 };
-        let icon_w = if coming.is_some() || said.is_some() && !self.any() { 26.0 } else { 0.0 };
+        let icon_w = if coming.is_some() || said.is_some() && !any { 26.0 } else { 0.0 };
         let inner = stack_w
             + icon_w
             + count_w
             + if count_w > 0.0 && hint_w > 0.0 { 16.0 } else { 0.0 }
             + hint_w
             + if all_w > 0.0 { 12.0 + all_w } else { 0.0 }
-            + if self.any() { 8.0 + 32.0 } else { 0.0 };
+            + if any { 8.0 + 32.0 } else { 0.0 };
         let w = (inner + 28.0).min(page.width() - 48.0);
         let h = 52.0;
         let target = Rect::from_center_size(pos2(page.center().x, page.bottom() - 28.0 - h * 0.5), vec2(w, h));
@@ -452,7 +524,7 @@ impl Selection {
         let id = Id::unique("gallery-select-bar-area");
         let mut clear = false;
         let mut select_all = false;
-        egui::Area::new(id).order(Order::Foreground).fixed_pos(rect.min).fade_in(false).show(&ctx, |ui| {
+        egui::Area::new(id).order(if lone { Order::Tooltip } else { Order::Foreground }).fixed_pos(rect.min).fade_in(false).show(&ctx, |ui| {
             ui.set_min_size(rect.size());
             ui.multiply_opacity(k.clamp(0.0, 1.0));
             let p = ui.painter().clone();
@@ -485,11 +557,11 @@ impl Selection {
                 x += count_w + 16.0;
             }
             if hint_w > 0.0 {
-                let room = rect.right() - x - 14.0 - if all_w > 0.0 { 12.0 + all_w } else { 0.0 } - if self.any() { 40.0 } else { 0.0 };
+                let room = rect.right() - x - 14.0 - if all_w > 0.0 { 12.0 + all_w } else { 0.0 } - if any { 40.0 } else { 0.0 };
                 widgets::text_truncated(&p, pos2(x, cy), Align2::LEFT_CENTER, &hint, room.max(0.0));
             }
             let mut right = rect.right() - 10.0;
-            if self.any() {
+            if any {
                 let close = Rect::from_center_size(pos2(right - 16.0, cy), vec2(32.0, 32.0));
                 let resp = ui.interact(close, id.with("clear"), Sense::click()).on_hover_text("Clear the selection (Esc)");
                 let hover = anim::toggle(&ctx, id.with("clear-hover"), resp.hovered(), Spring::SNAPPY);
@@ -545,6 +617,50 @@ pub fn paint_card(p: &egui::Painter, ctx: &egui::Context, key: &str, card: Rect,
 /// The check's rect on a card's picture (presses there toggle the card).
 pub fn check_rect(thumb: Rect) -> Rect {
     Rect::from_min_size(thumb.min + vec2(12.0, 12.0), vec2(CHECK, CHECK))
+}
+
+/// What a picture's window hands out when it is dragged out: the file the window is about. While one of a
+/// multi-layer picture's layers is chosen, that layer's file (`shown`, the window's entry); otherwise the card's own
+/// entry as the page lists it (`card_key` in `order`), so the window and its card hand out the same full file; an
+/// item without a card on the page (opened from Requests) is the window's entry as it is.
+pub fn window_payload(order: &[Entry], shown: &Entry, card_key: &str) -> Entry {
+    if shown.key != card_key {
+        return shown.clone();
+    }
+    order.iter().find(|e| e.key == card_key).cloned().unwrap_or_else(|| shown.clone())
+}
+
+/// The gesture that drags a window's picture out ([`DRAG_SLOP`]): pressed on the picture, then moved that far with the
+/// primary button held. Once per press: it re-arms when the button is up.
+#[derive(Default)]
+pub struct WindowDrag {
+    fired: bool,
+}
+
+impl WindowDrag {
+    /// The press became a drag out (until the button is up).
+    pub fn dragging(&self) -> bool {
+        self.fired
+    }
+
+    /// True on the frame the press on `resp` (sensing drags) became a drag out.
+    pub fn update(&mut self, resp: &Response) -> bool {
+        let (down, origin, at) = resp.ctx.input(|i| (i.pointer.primary_down(), i.pointer.press_origin(), i.pointer.latest_pos()));
+        if !down {
+            self.fired = false;
+            return false;
+        }
+        if self.fired || !resp.dragged_by(egui::PointerButton::Primary) {
+            return false;
+        }
+        self.fired = moved_past(origin, at, DRAG_SLOP);
+        self.fired
+    }
+}
+
+/// Whether the pointer went `slop` points or more from where it was pressed.
+fn moved_past(origin: Option<Pos2>, at: Option<Pos2>, slop: f32) -> bool {
+    matches!((origin, at), (Some(o), Some(a)) if o.distance(a) >= slop)
 }
 
 /// What a drag or a copy could hand out of some cards now.
@@ -1119,5 +1235,90 @@ mod tests {
         assert!(c.rgba.chunks_exact(4).any(|p| p[1] > 200 && p[0] < 20));
         assert!(c.rgba.chunks_exact(4).any(|p| p[3] == 255 && p[1] < 40 && p[0] < 20));
         assert_eq!(c.rgba[((5 * 80 + 5) * 4 + 3) as usize] < 160, true);
+    }
+
+    #[test]
+    fn a_window_hands_out_its_card_s_file_or_its_chosen_layer() {
+        let mut card = entry("VRChat_1", true);
+        card.world_name = "Midnight Rooftop".into();
+        let order = vec![entry("other", true), card.clone()];
+        // The window's own copy of its card (a remote capture's window sets its picture): the card's entry goes.
+        let mut shown = card.clone();
+        shown.picture = Some(crate::worlds::Picture::Capture { development: false, id: 3, large: false });
+        let out = window_payload(&order, &shown, &card.key);
+        assert_eq!((out.key.as_str(), out.picture.is_none()), ("VRChat_1", true));
+        // A layer chosen: that layer's file, a key the page has no card of.
+        let mut layer = entry("VRChat_1#Player", true);
+        layer.local = Some(Local::Picture(PathBuf::from("VRChat_1_Player.png")));
+        assert_eq!(window_payload(&order, &layer, &card.key).key, "VRChat_1#Player");
+        // Opened from Requests: no card, the window's entry as it is.
+        let alone = remote_entry("picture:4", None, Some(orbiters_core::shares::Item { kind: Kind::Picture, id: 4, ..Default::default() }));
+        assert_eq!(window_payload(&order, &alone, "picture:4").key, "picture:4");
+    }
+
+    #[test]
+    fn a_window_s_picture_is_carried_alone_whatever_is_selected() {
+        let ctx = egui::Context::default();
+        let mut sel = Selection::default();
+        let order = vec![entry("a", true), entry("b", true)];
+        sel.stage(vec!["a".into(), "b".into()]);
+        let mut layer = entry("a#UI", true);
+        layer.local = Some(Local::Picture(PathBuf::from("a_UI.png")));
+        sel.carry(&ctx, &layer);
+        assert_eq!(sel.carried, ["a#UI"], "the window's picture alone, not the selection");
+        assert!(sel.window_lifted("a#UI") && !sel.window_lifted("a"));
+        assert!(sel.any(), "the selection is kept for after the window");
+        // Its file is found though the page has no card of it, and only one drag at a time.
+        assert_eq!(files(&[sel.loose.as_ref().unwrap()]), Vec::<PathBuf>::new(), "a missing file is not handed out");
+        sel.carry(&ctx, &order[1]);
+        assert_eq!(sel.carried, ["a#UI"]);
+        // Nothing to hand out: the bar says so over the window, nothing is lifted.
+        let mut sel = Selection::default();
+        sel.carry(&ctx, &remote_entry("community:9", None, None));
+        assert!(sel.carried.is_empty() && sel.from_window);
+        assert_eq!(sel.said.as_ref().map(|s| s.0.as_str()), Some("This can't be dragged out"));
+        // A card's own drag is the grid's again.
+        sel.lift(&ctx, &order[0], &order);
+        assert!(!sel.from_window && sel.loose.is_none());
+    }
+
+    #[test]
+    fn a_press_on_a_window_s_picture_drags_only_once_it_moved() {
+        assert!(!moved_past(Some(pos2(10.0, 10.0)), Some(pos2(14.0, 13.0)), DRAG_SLOP), "5 points: still a click");
+        assert!(moved_past(Some(pos2(10.0, 10.0)), Some(pos2(16.0, 10.0)), DRAG_SLOP));
+        assert!(!moved_past(None, Some(pos2(0.0, 0.0)), DRAG_SLOP));
+        // In egui: a press, a small move (a click), then a move past the slop with the button held (one drag out).
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(pos2(100.0, 100.0), vec2(200.0, 120.0));
+        let mut gesture = WindowDrag::default();
+        let mut fired = Vec::new();
+        let mut clicked = Vec::new();
+        let at = pos2(150.0, 150.0);
+        let steps: Vec<Vec<egui::Event>> = vec![
+            vec![egui::Event::PointerMoved(at)],
+            vec![egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }],
+            vec![egui::Event::PointerMoved(at + vec2(3.0, 0.0))],
+            vec![egui::Event::PointerButton { pos: at + vec2(3.0, 0.0), button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }],
+            vec![egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }],
+            vec![egui::Event::PointerMoved(at + vec2(4.0, 0.0))],
+            vec![egui::Event::PointerMoved(at + vec2(20.0, 0.0))],
+            vec![egui::Event::PointerMoved(at + vec2(40.0, 0.0))],
+            vec![egui::Event::PointerButton { pos: at + vec2(40.0, 0.0), button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }],
+        ];
+        for (i, events) in steps.into_iter().enumerate() {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), events, time: Some(i as f64 * 0.05), ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| {
+                let resp = ui.interact(rect, Id::unique("window-picture"), Sense::click_and_drag());
+                if gesture.update(&resp) {
+                    fired.push(i);
+                }
+                if resp.clicked() {
+                    clicked.push(i);
+                }
+            });
+            output.textures_delta.clear();
+        }
+        assert_eq!(clicked, [3], "the small move stays the picture's click");
+        assert_eq!(fired, [6], "the drag out starts once, as the press moved past the slop");
     }
 }

@@ -1,0 +1,61 @@
+{
+  "items": [
+    {
+      "emoji": {
+        "key": "orbit:923456789012345678",
+        "id": "923456789012345678",
+        "name": "orbit",
+        "animated": false
+      },
+      "count": 3,
+      "users": [
+        {
+          "discordId": "623456789012345678",
+          "name": "Alex",
+          "avatarUrl": null,
+          "profileId": 7
+        },
+        {
+          "discordId": "523456789012345678",
+          "name": "Mika",
+          "avatarUrl": null,
+          "profileId": null
+        },
+        {
+          "discordId": "723456789012345678",
+          "name": "Robin",
+          "avatarUrl": null,
+          "profileId": null
+        }
+      ]
+    },
+    {
+      "emoji": {
+        "key": "❤️",
+        "id": null,
+        "name": "❤️",
+        "animated": false
+      },
+      "count": 3,
+      "users": [
+        {
+          "discordId": "623456789012345678",
+          "name": "Alex",
+          "avatarUrl": null,
+          "profileId": 7
+        }
+      ]
+    },
+    {
+      "emoji": {
+        "key": "🔥",
+        "id": null,
+        "name": "🔥",
+        "animated": false
+      },
+      "count": 1,
+      "users": []
+    }
+  ],
+  "total": 7
+}

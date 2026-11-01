@@ -375,6 +375,18 @@ impl State {
         self.select.stage_carry(&carried, image);
     }
 
+    /// The open window's picture lifted by a drag out of it, as if Windows had it (or still `waiting` for it from
+    /// Orbiters, the bar saying so over the window) (screenshots).
+    pub fn stage_window_lift(&mut self, waiting: bool) {
+        let shown = match self.dialog.as_ref() {
+            Some(d) => Some(d.entry.clone()),
+            None => self.community.window_key().and_then(|k| self.shown.iter().find(|e| e.key == k).cloned()),
+        };
+        if let Some(e) = shown {
+            self.select.stage_window_carry(&e, waiting);
+        }
+    }
+
     /// What the last drag copied, said by the bar (screenshots).
     pub fn stage_copied(&mut self, ctx: &egui::Context, text: &str) {
         self.select.stage_said(ctx, text);
@@ -1041,7 +1053,14 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                 None => d.lose_origin(),
             }
         }
+        // Its picture drags out of the window as its card does ([`super::gallery_select::Selection::carry`]).
+        d.drag_out = true;
+        d.lifted = state.select.window_lifted(&d.entry.key);
         let close = d.show(ui, cx);
+        if std::mem::take(&mut d.dragged) {
+            let payload = super::gallery_select::window_payload(&entries, &d.entry, d.layers.card_key(&d.entry));
+            state.select.carry(&ctx, &payload);
+        }
         if d.changed {
             state.shown_key = None;
             let entry = d.entry.clone();
@@ -1085,8 +1104,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         state.community.open(&ctx, &key, thumb, &keys);
     }
     {
+        let lifted = state.community.window_key().is_some_and(|k| state.select.window_lifted(&k));
+        state.community.set_lifted(lifted);
         let pictures = state.pictures.as_mut().expect("pictures");
         state.community.show(ui, cx, pictures);
+        // A community's or an asset's picture dragged out of its window: its card's file, as from the grid.
+        if let Some(shown) = state.community.take_drag() {
+            let payload = super::gallery_select::window_payload(&entries, &shown, &shown.key);
+            state.select.carry(&ctx, &payload);
+        }
     }
     if let Some((e, anchor)) = instance_clicked {
         state.serial += 1;

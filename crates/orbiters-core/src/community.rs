@@ -247,8 +247,24 @@ pub struct Message {
 #[serde(rename_all = "camelCase", default)]
 pub struct Mentions {
     pub users: BTreeMap<String, String>,
+    /// Orbiters keeps a role as `{ name, color }` (`replyContent.mentionsOf`); an older shape had its name alone.
+    #[serde(deserialize_with = "names")]
     pub roles: BTreeMap<String, String>,
     pub channels: BTreeMap<String, String>,
+}
+
+/// Mentions' names by id, each a name or an object with its `name` (a role's colour is left out). Anything else reads
+/// as no name (the mention then shows as Discord wrote it), never as an error that would lose the whole page.
+fn names<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BTreeMap<String, String>, D::Error> {
+    let raw: BTreeMap<String, serde_json::Value> = Deserialize::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|(id, v)| match v {
+            serde_json::Value::String(s) => Some((id, s)),
+            serde_json::Value::Object(o) => o.get("name").and_then(|n| n.as_str()).map(|n| (id, n.to_string())),
+            _ => None,
+        })
+        .collect())
 }
 
 impl Message {
@@ -264,7 +280,9 @@ impl Message {
                 return out;
             };
             let inner = &tail[1..end];
-            let named = if let Some(id) = inner.strip_prefix("@&") {
+            let named = if let Some(name) = custom_emoji(inner) {
+                Some(format!(":{name}:"))
+            } else if let Some(id) = inner.strip_prefix("@&") {
                 self.mentions.roles.get(id).map(|n| format!("@{n}"))
             } else if let Some(id) = inner.strip_prefix("@!").or_else(|| inner.strip_prefix('@')) {
                 self.mentions.users.get(id).map(|n| format!("@{n}"))
@@ -282,6 +300,14 @@ impl Message {
         out.push_str(rest);
         out
     }
+}
+
+/// The name of a Discord custom emoji as Discord writes it in a message (`:orbit:123…`, animated `a:orbit:123…`).
+fn custom_emoji(inner: &str) -> Option<&str> {
+    let rest = inner.strip_prefix("a:").or_else(|| inner.strip_prefix(':'))?;
+    let (name, id) = rest.split_once(':')?;
+    (!name.is_empty() && name.len() <= 32 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()))
+        .then_some(name)
 }
 
 /// A picture of a gallery.
@@ -563,6 +589,12 @@ mod tests {
             },
         };
         assert_eq!(m.text(), "Thanks @Alex and @Mika in #photos @Staff <@9> <oops");
+        // Orbiters' roles are objects (name and colour); custom emoji read as their names.
+        let m: Message = serde_json::from_str(
+            r##"{"content":"<@&4> <:orbit:923456789012345678> <a:wave_2:1> <:bad name:1>","mentions":{"users":{},"roles":{"4":{"name":"Photographers","color":"#ff8800"},"5":7},"channels":{}}}"##,
+        )
+        .unwrap();
+        assert_eq!(m.text(), "@Photographers :orbit: :wave_2: <:bad name:1>");
         let author = Member { id: 1, username: "a".into(), discord_id: Some("42".into()), avatar: Some("abc".into()) };
         assert_eq!(author.avatar_url().as_deref(), Some("https://cdn.discordapp.com/avatars/42/abc.png?size=64"));
         assert_eq!(Member { avatar: Some("../x".into()), ..author }.avatar_url(), None);

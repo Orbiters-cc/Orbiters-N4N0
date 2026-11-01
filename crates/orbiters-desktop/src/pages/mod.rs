@@ -2,6 +2,7 @@
 
 pub mod capture;
 pub mod community;
+pub mod community_talk;
 pub mod editor;
 pub mod events;
 pub mod form;

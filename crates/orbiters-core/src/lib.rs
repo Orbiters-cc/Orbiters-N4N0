@@ -10,6 +10,7 @@ pub mod community;
 mod dpapi;
 pub mod explicit;
 pub mod features;
+pub mod gallery_talk;
 pub mod keyframes;
 pub mod maps;
 pub mod osc;

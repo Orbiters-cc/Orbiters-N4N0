@@ -183,6 +183,50 @@ is left out and said); screenshots `gallery-select`, `gallery-select-mid`, `gall
 (three asset pictures selected and lifted, the bar waiting for two). Real drags and pastes into other apps and the
 clipboard copy were not tried by hand; real fetches of shared and community pictures were not run.
 
+**Out of an open window (2026-11-01).** A picture open in its window (the item window, a community's or an asset's
+picture window) drags out as its card does (`Selection::carry`): the window's picture alone, whatever is selected, the
+same file its card hands out (`gallery_select::window_payload`: the card's entry; the chosen layer's file while the window
+shows one of a multi-layer picture's layers; the window's own item when it has no card, opened from Requests), fetched
+from Orbiters first for pictures that are only there. The gesture (`gallery_select::WindowDrag`): a press on the picture
+that moves 6 points with the button held is a drag out; a press released before is the picture's click, so See it whole
+now acts on the release instead of the press (a press may be a drag's). The controls over the picture (arrows, layers,
+Edit, See it whole, close) keep their presses. The picture lifts (a little smaller, faded) until the drop; while the
+window is open the bar shows only what that drag says ("Getting it from Orbiters…", "Copied a picture"), over the window.
+The Events page's picture window does not drag. Checked: `gallery_select::tests::a_window_hands_out_its_card_s_file_or_its_chosen_layer`,
+`a_window_s_picture_is_carried_alone_whatever_is_selected`, `a_press_on_a_window_s_picture_drags_only_once_it_moved`
+(egui input: a 3-point move stays a click, a 40-point move starts one drag); screenshots `gallery-open-drag`,
+`gallery-community-drag`, `gallery-community-drag-wait`. A real drop into another app was not tried by hand.
+
+## Replies and reactions of community pictures (2026-11-01)
+
+A community gallery's picture window shows, as the website's picture window (`GalleryImageDetails`,
+`galleryReplies/GalleryReplies.jsx`), under the picture's words a pill for each emoji people reacted with and its count
+(a server's own emoji as its picture from Discord's CDN); hovered, who reacted: the emoji large, "Alex, Mika and Robin"
+(the first 60 names, then "and N others") and "reacted with :orbit:". After the event it was taken at: the replies to
+the Discord message the picture was posted with ("5 replies", the message on Discord with Discord's logo), each with
+the author's picture and name (opening their Orbiters profile when they have one), when ("3 h ago", the full time on
+hover, "edited"), their words in a bubble (mentions, roles and custom emoji as names) and their stickers and files as
+chips; past the 200 listed, "N more on Discord". `pages/community_talk.rs`, `orbiters_core::gallery_talk`.
+
+Both are read once per picture shown, on a worker, only when the listing counts some (`reactionCount`, `replyCount`):
+while they come the pill is the count and the replies are placeholder rows (as many as counted, at most three); a
+failure keeps the count pill (its hover says so, a click tries again) and says why over the replies with Try again.
+Details taller than the window leaves scroll under the picture (they take what the picture at its own height leaves,
+at least two fifths of the page; the scroll bar shows once the window landed). An asset's showcase picture has neither.
+
+The picture message's role mentions are `{ name, color }` on Orbiters (`replyContent.mentionsOf`): they were read as
+plain names, so a page with a picture mentioning a role failed to read; roles now read in either shape.
+
+Server routes (backend `dev`, server commit `faebae64`): `GET /galleries/images/:id/replies` (existing, the website's)
+and `GET /galleries/images/:id/reactions` (new: `{ items: [{ emoji: { key, id, name, animated }, count, users:
+[{ discordId, name, avatarUrl, profileId }] }], total }`, the most used first, at most 100 names each, a closed account
+counted without its name, access through the picture as the replies), both now tool routes. A server without them
+(production until the backend is deployed) answers 401/404: the window keeps the counts and says "Orbiters does not let
+this app read them yet." Checked: `orbiters_core::gallery_talk::tests`, `community::tests::gallery_pictures_page_and_name_their_mentions`,
+`pages::community_talk::tests` (rows, hover lines, what is read, error words); backend `test/galleryReactions.test.js`,
+`test/authUtils.test.js`. Screenshots `gallery-community-talk`, `-talk-hover`, `-talk-loading`, `-talk-error` on
+`orbiters-core/tests/fixtures/gallery-replies.json` and `gallery-reactions.json`. Not run against a live server.
+
 ## My assets (2026-10-30)
 
 A fifth filter, **My assets**, shows the **showcase galleries** of the Orbiters assets the member has (made, bought,

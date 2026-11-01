@@ -109,6 +109,14 @@ pub struct Dialog {
     pub step: Option<i64>,
     /// A multi-layer picture's layers: which one the window is about, how they are shown ([`super::gallery_layers`]).
     pub layers: super::gallery_layers::LayerView,
+    /// Its page drags pictures out of the window (Photos & captures): the picture senses drags
+    /// ([`super::gallery_select::WindowDrag`]: a press that moves is a drag out, a click still shows it whole).
+    pub drag_out: bool,
+    /// The picture's press became a drag out this frame: the page hands its file to Windows.
+    pub dragged: bool,
+    /// The page carries the picture out of the window: drawn lifted until the drop.
+    pub lifted: bool,
+    drag: super::gallery_select::WindowDrag,
 }
 
 /// What sits under the actions.
@@ -168,6 +176,10 @@ impl Dialog {
             neighbours: (false, false),
             step: None,
             layers: Default::default(),
+            drag_out: false,
+            dragged: false,
+            lifted: false,
+            drag: Default::default(),
         }
     }
 
@@ -677,16 +689,32 @@ impl Dialog {
                 (false, Arrangement::Under) => [r, r, r * full, r * full],
                 (false, Arrangement::Beside) => [r, r * full, r * full, r],
             };
-            let pic_resp = ui.interact(picture, wid.with("picture"), if closing { Sense::hover() } else { Sense::click() });
+            // Dragging it out of the window (its page allows it): a press that moves past the slop is a drag out, a
+            // press released before is its click, which shows it whole on the release (not on the press, which may be
+            // a drag's).
+            let sense = match (closing, self.drag_out) {
+                (true, _) => Sense::hover(),
+                (false, true) => Sense::click_and_drag(),
+                (false, false) => Sense::click(),
+            };
+            let pic_resp = ui.interact(picture, wid.with("picture"), sense);
+            self.dragged = self.drag_out && !closing && self.drag.update(&pic_resp);
+            let lift = anim::toggle(&ctx, wid.with("picture-lift"), self.lifted, Spring::BOUNCY);
             let hover = anim::toggle(&ctx, wid.with("picture-hover"), pic_resp.hovered() && self.entry.is_picture(), Spring::SOFT);
             let shown_large = feedback::loaded(&ctx, wid.with(("large", self.nav.0)), large_tex.is_some());
             let k = nav.clamp(0.0, 1.0);
             if let Some(prev) = self.previous.as_ref().filter(|_| k < 0.999) {
                 feedback::cover(&p, picture, radii, prev, 1.0, 1.0);
             }
-            // The new one slides in over the one before, inside the picture's frame.
-            let np = p.with_clip_rect(picture.intersect(p.clip_rect()));
+            // The new one slides in over the one before, inside the picture's frame; lifted by a drag out, a little
+            // smaller and faded until the drop (as the grid's cards).
+            let mut np = p.with_clip_rect(picture.intersect(p.clip_rect()));
             let at = picture.translate(vec2(slide * (1.0 - k), 0.0));
+            let at = Rect::from_center_size(at.center(), at.size() * (1.0 - 0.04 * lift));
+            if lift > 0.001 {
+                feedback::fill_corners(&np, picture, radii, theme::alpha(theme::INK_750, lift.clamp(0.0, 1.0)));
+                np.multiply_opacity(1.0 - 0.35 * lift.clamp(0.0, 1.0));
+            }
             match (&thumb_tex, &large_tex) {
                 (Some(t), _) if shown_large < 0.99 => feedback::cover(&np, at, radii, t, 1.0 + 0.015 * hover, k),
                 (None, None) => {
@@ -702,7 +730,10 @@ impl Dialog {
             self.last_picture = large_tex.clone().filter(|_| shown_large > 0.99).or_else(|| thumb_tex.clone());
             // A multi-layer picture's layers, stacked over a checkerboard, when they are shown instead of it.
             self.layers.paint(&np, at, radii, k, &mut self.pictures, &self.entry);
-            if self.entry.is_picture() && pressed(pic_resp.on_hover_cursor(egui::CursorIcon::ZoomIn)) {
+            let cursor = if self.lifted || pic_resp.dragged() && self.drag_out { egui::CursorIcon::Grabbing } else { egui::CursorIcon::ZoomIn };
+            let pic_resp = pic_resp.on_hover_cursor(cursor);
+            let shown_whole = if self.drag_out { pic_resp.clicked() } else { pressed(pic_resp) };
+            if self.entry.is_picture() && shown_whole {
                 toggle_full = true;
             }
             let mut cu = ui.new_child(UiBuilder::new().max_rect(f.rect).id_salt(wid.with("chrome")));

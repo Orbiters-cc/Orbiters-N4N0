@@ -1925,7 +1925,7 @@ fn n4n0_keeps_its_files_where_the_app_says() {
     let (t, n) = n4n0(Settings::default());
     std::fs::create_dir_all(&n.files.avatars).unwrap();
     // A manifest Orbiters Toolkit wrote for the avatar: N4N0 reads it there.
-    let manifest = r#"{ "format": "orbiters.avatar", "version": 1, "avatar_id": "avtr_files", "orb": { "text_sync": 8, "screen": 0 } }"#;
+    let manifest = r#"{ "format": "orbiters.avatar", "version": 1, "avatar_id": "avtr_files", "n4n0": { "text_sync": 8, "screen": 0 } }"#;
     std::fs::write(n.files.avatars.join(orbiters_contracts::avatar::file_name("avtr_files")), manifest).unwrap();
     // (OSC off: VRChat's tree says nothing, and it is not asked again.)
     n.refresh_avatar(Some("avtr_files".into()), HashMap::new(), crate::runtime::TREE_RETRIES);

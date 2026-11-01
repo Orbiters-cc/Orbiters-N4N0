@@ -11,7 +11,9 @@ use std::time::SystemTime;
 /// Where a project keeps its previews, from the project's folder.
 pub const FOLDER: &str = "UserSettings/Orbiters/Previews";
 pub const EXTENSION: &str = "preview";
-pub const MAGIC: &[u8; 8] = b"ORBPREV\0";
+pub const MAGIC: &[u8; 8] = b"N4N0PRV\0";
+/// The start of previews written before Orbiters Toolkit 0.4.11 (same layout): still read.
+const LEGACY_MAGIC: &[u8; 8] = b"ORBPREV\0";
 pub const SCHEMA: u32 = 1;
 /// Position (3 × f32), octahedral normal (2 × snorm16), UV (2 × f16).
 pub const VERTEX_SIZE: usize = 20;
@@ -326,7 +328,7 @@ pub fn parse(bytes: Vec<u8>) -> anyhow::Result<Preview> {
 }
 
 fn parse_header(bytes: &[u8]) -> anyhow::Result<(Header, usize)> {
-    ensure!(bytes.len() >= START && &bytes[..8] == MAGIC, "not an Orbiters project preview");
+    ensure!(bytes.len() >= START && (&bytes[..8] == MAGIC || &bytes[..8] == LEGACY_MAGIC), "not an Orbiters project preview");
     let schema = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
     ensure!(schema == SCHEMA, "a project preview of schema {schema}, this version reads {SCHEMA}");
     let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;

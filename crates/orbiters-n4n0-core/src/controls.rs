@@ -454,7 +454,7 @@ mod tests {
                 { "path": ["Outfits", "Winter"], "type": "toggle", "parameter": "Outfit", "value": 3 },
                 { "path": ["Size"], "type": "radial", "parameter": "Size", "sub_parameters": ["Size"] },
                 { "path": ["GoGo Loco", "Poses", "Sit"], "type": "button", "parameter": "VRCEmote", "value": 129, "tags": ["pose"] },
-                { "path": ["N4N0", "N4N0"], "type": "toggle", "parameter": "N4N0/Visible", "value": 1, "tags": ["orb"] }
+                { "path": ["N4N0", "N4N0"], "type": "toggle", "parameter": "N4N0/Visible", "value": 1, "tags": ["n4n0"] }
               ] }"#,
         )
         .unwrap()
@@ -526,7 +526,7 @@ mod tests {
                   "controls": [
                     { "path": ["Hat"], "type": "toggle", "parameter": "Hat", "value": 1 },
                     { "path": ["N4N0", "Call", "Go"], "type": "button", "parameter": "N4N0/Call/Go", "value": 1 },
-                    { "path": ["N4N0", "3D picture"], "type": "button", "parameter": "N4N0/Photo3D", "value": 1, "tags": ["orb"] },
+                    { "path": ["N4N0", "3D picture"], "type": "button", "parameter": "N4N0/Photo3D", "value": 1, "tags": ["n4n0"] },
                     { "path": ["Kit", "Record"], "type": "toggle", "parameter": "OrbitersRecord", "value": 1 },
                     { "path": ["Kit", "Record here"], "type": "toggle", "parameter": "MyRecord", "value": 1, "tags": ["system"] },
                     { "path": ["Kit", "My record"], "type": "toggle", "parameter": "MyRecord", "value": 1 },

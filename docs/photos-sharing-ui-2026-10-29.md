@@ -60,7 +60,7 @@ app and the website's picture viewer (`server/frontend/src/components/captures/C
 ## Screenshots
 
 `orbiters-desktop --screenshot <dir> --sessions <dir> --only sharing` renders every state, `--only vrchat-login` the
-account card, `--only overlay` the overlay's share pages, `--orb-menu <dir>` the avatar's screen pages. Frames in the
+account card, `--only overlay` the overlay's share pages, `--n4n0-menu <dir>` the avatar's screen pages. Frames in the
 middle of their motion: `gallery-open-mid` (a card growing into its window, five frames in), `gallery-close-mid`,
 `gallery-next-mid` (the next item sliding in), `gallery-requests-opening` (the requests window out of its button),
 `world-share-mid`; settled: `gallery-open`, `gallery-next`, `gallery-done`, `gallery-requests-empty`,

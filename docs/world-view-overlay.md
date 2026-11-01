@@ -106,7 +106,7 @@ Offline review: `--screenshot <out> --only worlds-overlay` adds `panel-search.pn
 `panel-browse-favorites-signed-out.png`, `panel-world.png` (Launch VRChat) and `panel-world-invite.png`; the earlier
 captures' shots show the 3D captures section.
 
-**Giving feedback.** The panel sends what the member gives as N4N0's menus do: `OrbCommand::Feedback` with the
+**Giving feedback.** The panel sends what the member gives as N4N0's menus do: `N4n0Command::Feedback` with the
 contract's `FeedbackAsk` to the tray service, whose queue (`controller/world_feedback.rs`, kept on disk, coalesced,
 retried) sends it to `PUT /maps/worlds/:worldId/feedback` and the comments routes under the signed-in account. Opening
 a capture's page asks for its world (`FeedbackAsk::Show`, again every 2 minutes while it shows); the service now hands
@@ -117,7 +117,7 @@ before the world's feedback is read (what the member gave is not known yet), a p
 **Not done, for want of a route or a field** (the APIs exist; the overlay's path to them does not):
 
 - Reporting a comment: `POST /maps/comments/:id/report` and the queue's `Action::Report` exist, but the menus' ask
-  (`orbiters_orb::feedback::FeedbackAsk`) has no Report.
+  (`orbiters_n4n0_core::feedback::FeedbackAsk`) has no Report.
 - Others' reasons for AI world: `GET …/feedback` returns `justifications`; the menus' `WorldFeedback` does not carry them.
 - Comments older than the newest 20: `?before=` exists; `orbiters_core::world_feedback::Client::read` does not page.
 - Frame rate by crowd size: in the world page's `performance.by_crowd`, not shown (room).

@@ -180,7 +180,7 @@ impl State {
 mod tests {
     use super::*;
     use crate::backend::{Backend, Ctl};
-    use crate::ipc::{OrbCommand, UpdateAction};
+    use crate::ipc::{N4n0Command, UpdateAction};
     use crate::state::Snapshot;
     use egui::{pos2, vec2, Event, Modifiers, PointerButton, RawInput};
     use orbiters_core::settings::Settings;
@@ -193,7 +193,7 @@ mod tests {
     }
 
     impl Backend for Recorder {
-        fn orb(&self, _command: OrbCommand) {}
+        fn n4n0(&self, _command: N4n0Command) {}
         fn patch_settings(&self, patch: serde_json::Value) {
             self.patches.lock().unwrap().push(patch);
         }

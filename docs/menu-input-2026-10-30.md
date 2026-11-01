@@ -14,7 +14,7 @@ expiry, or recovery outside the page cancels it. A held trigger cannot click on 
 held flag on Hover as well as Away, and closes the input session when the menu closes. Submenu navigation keeps the
 physical press latched until release, so one touch still cannot click through successive pages.
 
-The avatar placement fix is in Orbiters Toolkit's `OrbInstaller.Placement.cs`, delivered separately as an N4N0
+The avatar placement fix is in Orbiters Toolkit's N4N0 installer (its placement), delivered separately as an N4N0
 development gallery update. A completed glide or released grip settles first. Visibility must remain valid for
 200 ms before it can arm the existing 400 ms look-away timer. This prevents short contact pulses from restarting
 recenter indefinitely. Closing the screen drops its handle grip even before the hand gesture relaxes.

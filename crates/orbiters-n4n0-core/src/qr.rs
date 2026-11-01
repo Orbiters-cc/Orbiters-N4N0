@@ -1,4 +1,4 @@
-//! The QR code scanner (N4N0's menu, More; contracts `Docs/orb.md`, Menu): what it shows, which codes open a page and how
+//! The QR code scanner (N4N0's menu, More; contracts `Docs/n4n0.md`, Menu): what it shows, which codes open a page and how
 //! often. The desktop reads VRChat's stream camera and decodes the codes; what a code may open, the same link not opened
 //! again, and when scanning stops are decided here, the same for every menu.
 

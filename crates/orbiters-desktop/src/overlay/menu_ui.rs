@@ -1,18 +1,18 @@
-//! Draws N4N0's menu pages from their layout (`orbiters_orb::menu::layout`). The SteamVR overlay draws everything; the
+//! Draws N4N0's menu pages from their layout (`orbiters_n4n0_core::menu::layout`). The SteamVR overlay draws everything; the
 //! avatar's projected screen shows a picture of each page's unchanging part (cards, buttons, icons, labels: drawn here
 //! too, see [`draw_chrome`]) and draws the rest over it, at the same places, from what the desktop sends.
 //!
-//! What it is drawn with is a [`Skin`]: the colours (a theme's palette, `orbiters_orb::menu::theme`) and the texts of
-//! the unchanging part (`orbiters_orb::menu::strings`, English unless told otherwise). A text wider than its place (see
+//! What it is drawn with is a [`Skin`]: the colours (a theme's palette, `orbiters_n4n0_core::menu::theme`) and the texts of
+//! the unchanging part (`orbiters_n4n0_core::menu::strings`, English unless told otherwise). A text wider than its place (see
 //! [`Place`]) is drawn smaller until it fits, never cut.
 
 use super::menu_retro::{self, RetroPalette};
 use egui::epaint::RectShape;
 use egui::{pos2, vec2, Align2, Color32, Painter, Pos2, Rect, Stroke, StrokeKind, TextureId};
-use orbiters_orb::menu::layout::{self, Align, Element, Icon, Label, Layout, Look, ScreenPage, Style, Tint};
-use orbiters_orb::menu::strings::{Strings, Text};
-use orbiters_orb::menu::theme::{Colors, Rgb, Theme};
-use orbiters_orb::menu::{Menu, Page};
+use orbiters_n4n0_core::menu::layout::{self, Align, Element, Icon, Label, Layout, Look, ScreenPage, Style, Tint};
+use orbiters_n4n0_core::menu::strings::{Strings, Text};
+use orbiters_n4n0_core::menu::theme::{Colors, Rgb, Theme};
+use orbiters_n4n0_core::menu::{Menu, Page};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{icons, widgets};
 use std::sync::OnceLock;
@@ -295,7 +295,7 @@ pub fn glyph(icon: Icon) -> &'static str {
 pub fn tint(t: Tint) -> Color32 {
     match t {
         Tint::Light(i) => {
-            let [r, g, b] = orbiters_contracts::orb::LIGHT_COLORS.get(i as usize).map_or([255; 3], |c| c.1);
+            let [r, g, b] = orbiters_contracts::n4n0::LIGHT_COLORS.get(i as usize).map_or([255; 3], |c| c.1);
             Color32::from_rgb(r, g, b)
         }
         _ => base_palette().tint(t),
@@ -528,7 +528,7 @@ fn element(p: &Painter, e: &Element, origin: Pos2, skin: &Skin) {
         Look::Accent | Look::Danger => icon_and_label(p, r, e.icon, label, place, weight::SEMIBOLD, pal.ink(e.look)),
     }
     // A key's character (its label when it has none).
-    if let (Look::Key, orbiters_orb::menu::Target::Key(c), None) = (e.look, e.target, e.label) {
+    if let (Look::Key, orbiters_n4n0_core::menu::Target::Key(c), None) = (e.look, e.target, e.label) {
         widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new(c.to_string(), 28.0).color(pal.text));
     }
 }
@@ -555,7 +555,7 @@ pub fn tile_is_compact(r: layout::Rect) -> bool {
 }
 
 /// N4N0 itself, `radius` large: its dot (the accent) with its eyes (the page's colour), as the menu's back shows it.
-fn orb_face(p: &Painter, center: Pos2, radius: f32, pal: &Palette) {
+fn n4n0_face(p: &Painter, center: Pos2, radius: f32, pal: &Palette) {
     let s = radius / 26.0;
     p.circle_filled(center, radius, pal.accent);
     for side in [-1.0, 1.0] {
@@ -572,7 +572,7 @@ fn backdrop(p: &Painter, origin: Pos2, layout: &Layout, listening: Option<f64>, 
     for b in &layout.boxes {
         let r = rect(*b, origin);
         p.rect_filled(r, theme::radius(24.0), pal.surface);
-        orb_face(p, r.min + vec2(38.0, 36.0), 14.0, pal);
+        n4n0_face(p, r.min + vec2(38.0, 36.0), 14.0, pal);
     }
     for (r, icon, t) in &layout.icons {
         let r = rect(*r, origin);
@@ -744,8 +744,8 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
             p.rect_stroke(r.shrink(1.0), radius, Stroke::new(3.0, pal.accent), StrokeKind::Inside);
         }
         // World feedback: a liked world's heart is filled, and what was just switched on pops.
-        if state.on && e.target == orbiters_orb::menu::Target::Like {
-            liked(p, r, menu.popping().filter(|(t, _)| *t == orbiters_orb::menu::Target::Like).map(|(_, d)| d.as_secs_f32()), pal);
+        if state.on && e.target == orbiters_n4n0_core::menu::Target::Like {
+            liked(p, r, menu.popping().filter(|(t, _)| *t == orbiters_n4n0_core::menu::Target::Like).map(|(_, d)| d.as_secs_f32()), pal);
         } else if let Some((_, t)) = menu.popping().filter(|(t, _)| *t == e.target && state.on) {
             ring_pop(p, r, radius, t.as_secs_f32(), pal);
         }
@@ -806,7 +806,7 @@ fn ring_pop(p: &Painter, r: Rect, radius: egui::CornerRadius, t: f32, pal: &Pale
 
 /// An average character of Orbiters' font, in ems (Segoe UI's lower-case letters with a capital now and then).
 pub const MODERN_EM: f32 = 0.5;
-/// How far a text may shrink and still be within the `max` of its key (`orbiters-desktop --orb-menu-strings`).
+/// How far a text may shrink and still be within the `max` of its key (`orbiters-desktop --n4n0-menu-strings`).
 pub const MIN_SCALE: f32 = 0.8;
 
 /// Every place a text of the unchanging part has in both looks, with the width of an average character there in ems.

@@ -1,8 +1,8 @@
-//! N4N0's menu (contracts `Docs/orb.md`, Menu): what opens when the person calls N4N0 (a controller button, the wake word
+//! N4N0's menu (contracts `Docs/n4n0.md`, Menu): what opens when the person calls N4N0 (a controller button, the wake word
 //! on its own, touching N4N0): fast walk, YouTube, calls, a 3D picture (and sharing 3D captures), the computer's music,
 //! N4N0's light and the avatar's saved states. Orbiters - N4N0's SteamVR overlay shows it, or the avatar's projected screen when the N4N0 prop
 //! has one; both draw the same pages from [`layout`]. A link copied from the results can be dropped in the world as a card
-//! (contracts `Docs/orb.md`, Link card), which the avatar's screen shows.
+//! (contracts `Docs/n4n0.md`, Link card), which the avatar's screen shows.
 //!
 //! This module holds what the menu shows and what each press does, without IO: presses and typing return [`Effect`]s
 //! that the host carries out (fetching suggestions and results, copying a link, starting a call), and the host hands the
@@ -196,7 +196,7 @@ pub const TRACKING_KINDS: [&str; 3] = [strings::TRACKING_KINDS[0].en(), strings:
 pub const SMOOTHING_LABELS: [&str; 4] = [strings::SMOOTHING[0].en(), strings::SMOOTHING[1].en(), strings::SMOOTHING[2].en(), strings::SMOOTHING[3].en()];
 pub const SMOOTHING_STRENGTHS: [f32; 4] = [0.0, 0.35, 0.65, 0.9];
 
-/// The pages a display has (contracts `Docs/orb.md`, Menu): the avatar's screen by its version (`N4N0/Screen/Version`),
+/// The pages a display has (contracts `Docs/n4n0.md`, Menu): the avatar's screen by its version (`N4N0/Screen/Version`),
 /// the overlay and the window all of them ([`Pages::ALL`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Pages {
@@ -233,7 +233,7 @@ impl Pages {
 
     /// The pages of a screen of `version` (`None`: a screen from before `N4N0/Screen/Version`).
     pub fn of_screen(version: Option<i32>) -> Pages {
-        use orbiters_contracts::orb::{
+        use orbiters_contracts::n4n0::{
             SCREEN_FEEDBACK, SCREEN_MIRROR, SCREEN_MUSIC_LIGHT, SCREEN_QR, SCREEN_SHARE, SCREEN_SIMPLE, SCREEN_STATES_CARDS, SCREEN_TEN_TILES,
             SCREEN_TIMELINE,
         };
@@ -365,7 +365,7 @@ pub enum InviteAnswer {
     Failed { message: String },
 }
 
-/// A saved state of the avatar worn, as the menu lists it (Orbiters - N4N0 keeps them: contracts `Docs/orb.md`, States).
+/// A saved state of the avatar worn, as the menu lists it (Orbiters - N4N0 keeps them: contracts `Docs/n4n0.md`, States).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StateRow {
     pub id: String,
@@ -377,7 +377,7 @@ pub struct StateRow {
     pub size: bool,
 }
 
-/// A link card dropped in the world (contracts `Docs/orb.md`, Link card): its picture (a video id: the hosts keep
+/// A link card dropped in the world (contracts `Docs/n4n0.md`, Link card): its picture (a video id: the hosts keep
 /// pictures by key), title and link, and the whole seconds it has left.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Card {
@@ -484,16 +484,16 @@ pub enum MediaCommand {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Light {
     pub on: bool,
-    /// An index into contracts `orb::LIGHT_COLORS`.
+    /// An index into contracts `n4n0::LIGHT_COLORS`.
     pub color: u8,
     /// 0 to 1.
     pub level: f32,
 }
 
 impl Light {
-    /// The brightness choice (contracts `orb::LIGHT_LEVELS`) nearest the level.
+    /// The brightness choice (contracts `n4n0::LIGHT_LEVELS`) nearest the level.
     pub fn level_choice(&self) -> usize {
-        let levels = orbiters_contracts::orb::LIGHT_LEVELS;
+        let levels = orbiters_contracts::n4n0::LIGHT_LEVELS;
         (0..levels.len()).min_by(|&a, &b| (levels[a].1 - self.level).abs().total_cmp(&(levels[b].1 - self.level).abs())).unwrap_or(0)
     }
 }
@@ -742,7 +742,7 @@ pub enum Effect {
         id: String,
         name: String,
     },
-    /// Drop a link card in the world: the avatar's screen shows it (contracts `Docs/orb.md`, Link card).
+    /// Drop a link card in the world: the avatar's screen shows it (contracts `Docs/n4n0.md`, Link card).
     Drop {
         link: String,
         title: String,
@@ -777,7 +777,7 @@ pub enum Effect {
     ShareCapture(ShareAsk),
     /// Read or send world feedback (`Docs/world-feedback.md`): the host answers with [`Menu::set_feedback`].
     Feedback(FeedbackAsk),
-    /// The screen mirror (contracts `Docs/orb.md`, Screen mirror): the host keeps the camera and shows it in
+    /// The screen mirror (contracts `Docs/n4n0.md`, Screen mirror): the host keeps the camera and shows it in
     /// [`Menu::mirror`].
     Mirror(crate::mirror::MirrorAsk),
     /// The menu closed.
@@ -1593,11 +1593,11 @@ impl Menu {
             Target::LightSwitch | Target::LightColor(_) | Target::LightLevel(_) => match self.light.as_mut() {
                 Some(light) => {
                     match target {
-                        Target::LightColor(i) if (i as usize) < orbiters_contracts::orb::LIGHT_COLORS.len() => {
+                        Target::LightColor(i) if (i as usize) < orbiters_contracts::n4n0::LIGHT_COLORS.len() => {
                             light.color = i;
                             light.on = true;
                         }
-                        Target::LightLevel(i) => match orbiters_contracts::orb::LIGHT_LEVELS.get(i as usize) {
+                        Target::LightLevel(i) => match orbiters_contracts::n4n0::LIGHT_LEVELS.get(i as usize) {
                             Some(&(_, level)) => {
                                 light.level = level;
                                 light.on = true;
@@ -2697,7 +2697,7 @@ mod tests {
     }
 
     #[test]
-    fn cuts_what_orb_says_into_lines() {
+    fn cuts_what_n4n0_says_into_lines() {
         assert_eq!(pieces("Voilà ton sweat, va voir tes potes maintenant", 16), vec!["Voilà ton sweat,", "va voir tes", "potes maintenant"]);
         assert_eq!(pieces("abcdefghijklmnopqrstuvwxyz", 10), vec!["abcdefghij"]);
         assert!(pieces("  ", 10).is_empty());

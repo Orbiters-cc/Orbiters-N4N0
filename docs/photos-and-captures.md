@@ -247,7 +247,7 @@ nothing can be fetched for them).
 ## From N4N0's menu
 
 N4N0's menu on the avatar's screen (screen version 12) and in the SteamVR overlay shares 3D captures too (contracts
-`Docs/orb.md`, Menu): the 3D picture page shows the last capture the desktop made with Share publicly and Share to …,
+`Docs/n4n0.md`, Menu): the 3D picture page shows the last capture the desktop made with Share publicly and Share to …,
 History lists the computer's captures (Photos & captures' own listing, sessions only, the newest 60), Share to … lists
 the VRChat friends from `Controller::vrchat_source()` (the member's VRChat session, else VRCX or VRCNext), and a capture
 flagged explicit (or answered 409) shows the contract's warning with Share anyway / Cancel. The tray controller

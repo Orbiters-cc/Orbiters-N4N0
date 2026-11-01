@@ -33,7 +33,7 @@ pub struct Results {
 }
 
 const API: &str = "https://www.youtube.com/youtubei/v1";
-/// The website's client, as the server's own YouTube reader sends it (`agents/orb/orb_sync/youtube.py`): sent when a
+/// The website's client, as the server's own YouTube reader sends it: sent when a
 /// recent one ([`client_version`]) is refused.
 const CLIENT_VERSION: &str = "2.20251015.01.00";
 /// Search filter: videos only (no channels, playlists or shorts shelves).
@@ -654,7 +654,7 @@ mod tests {
     }
 
     /// A playing video found on YouTube itself (`PLAYING_TITLE`, `PLAYING_CHANNEL` and `PLAYING_SECONDS` as Windows' media
-    /// controls give them): `cargo test -p orbiters-orb playing_live -- --ignored --nocapture`.
+    /// controls give them): `cargo test -p orbiters-n4n0-core playing_live -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn playing_live() {
@@ -667,7 +667,7 @@ mod tests {
         assert!(found.is_some());
     }
 
-    /// Against YouTube itself: `cargo test -p orbiters-orb youtube_live -- --ignored --nocapture`.
+    /// Against YouTube itself: `cargo test -p orbiters-n4n0-core youtube_live -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn youtube_live() {
@@ -685,7 +685,7 @@ mod tests {
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
     }
 
-    /// Accented suggestions against Google itself: `cargo test -p orbiters-orb accented_suggestions_live -- --ignored`.
+    /// Accented suggestions against Google itself: `cargo test -p orbiters-n4n0-core accented_suggestions_live -- --ignored`.
     #[test]
     #[ignore]
     fn accented_suggestions_live() {

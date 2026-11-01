@@ -1,4 +1,4 @@
-//! N4N0 calls in the tray service (contracts `Docs/orb-calls.md`): presence and the friends this computer's VRCX and
+//! N4N0 calls in the tray service (contracts `Docs/n4n0-calls.md`): presence and the friends this computer's VRCX and
 //! VRCNext know (as hashes) go to Orbiters every minute while calls are on; the server's event stream brings incoming
 //! calls and the other side's answer and candidates; the `orbiters-call` worker carries the audio peer to peer
 //! (protocol `orbiters_core::call`). N4N0's panel lists the contacts while its Call menu is open and says who is
@@ -12,7 +12,7 @@
 //!
 //! This computer's addresses reach no one who only lets a call ring: the worker leaves the candidates out of the
 //! descriptions, and each side's own wait until both took the call. Calls go through the relay only unless direct
-//! calls are on (`OrbSettings::direct_calls`), so the other side does not learn them then either.
+//! calls are on (`N4n0Settings::direct_calls`), so the other side does not learn them then either.
 
 use super::{NoticeKind, Shared};
 use crate::state::{CallContact, CallLink, CallPhase, CallView};
@@ -209,13 +209,13 @@ impl Ending {
 /// A request to Orbiters about a call, sent in order by one thread.
 #[derive(Debug, PartialEq)]
 enum Signal {
-    /// `POST /orb/calls`: our offer; the answer gives the call its id.
+    /// `POST /n4n0/calls`: our offer; the answer gives the call its id.
     Create { number: u64, contact: String, offer: String },
-    /// `POST /orb/calls/:id/answer`: the call is over when it fails.
+    /// `POST /n4n0/calls/:id/answer`: the call is over when it fails.
     Answer { number: u64, id: String, sdp: String },
-    /// `POST /orb/calls/:id/candidates`, with those that follow within [`BATCH`].
+    /// `POST /n4n0/calls/:id/candidates`, with those that follow within [`BATCH`].
     Candidates { id: String, candidates: Vec<IceCandidate> },
-    /// `POST /orb/calls/:id/decline` or `/end` (the call is over here: a failure is only logged).
+    /// `POST /n4n0/calls/:id/decline` or `/end` (the call is over here: a failure is only logged).
     Close { id: String, decline: bool },
 }
 
@@ -715,7 +715,7 @@ fn post(api: &Api, token: &str, path: &str, body: &Value) -> anyhow::Result<Valu
 fn ice_servers(api: &Api, token: &str) -> anyhow::Result<Vec<IceServer>> {
     let response = api
         .agent()
-        .get(&api.url("orb/calls/ice-servers"))
+        .get(&api.url("n4n0/calls/ice-servers"))
         .config()
         .timeout_global(Some(ICE_TIMEOUT))
         .build()
@@ -758,10 +758,10 @@ impl super::Controller {
             let agent = orbiters_core::http_agent(Some(Duration::from_secs(2)), Some(Duration::from_secs(3)));
             let auth = format!("Bearer {token}");
             if let Some(id) = call_id {
-                let _ = agent.post(&api.url(&format!("orb/calls/{id}/end"))).header("Authorization", &auth).send_json(json!({}));
+                let _ = agent.post(&api.url(&format!("n4n0/calls/{id}/end"))).header("Authorization", &auth).send_json(json!({}));
             }
             if was_on {
-                let _ = agent.delete(&api.url("orb/calls/presence")).header("Authorization", &auth).call();
+                let _ = agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &auth).call();
             }
             let _ = done.send(());
         });
@@ -780,7 +780,7 @@ impl super::Controller {
 
     fn calls_tick(self: &Shared) {
         let settings = self.settings();
-        let on = settings.orb.enabled && settings.orb.calls;
+        let on = settings.n4n0.enabled && settings.n4n0.calls;
         // A phase that lasted too long ends.
         {
             let mut rt = self.calls.lock().unwrap();
@@ -803,7 +803,7 @@ impl super::Controller {
             if was {
                 if let Some((api, token)) = self.account_api() {
                     let agent = orbiters_core::http_agent(Some(Duration::from_secs(5)), Some(Duration::from_secs(10)));
-                    let _ = agent.delete(&api.url("orb/calls/presence")).header("Authorization", &format!("Bearer {token}")).call();
+                    let _ = agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &format!("Bearer {token}")).call();
                 }
             }
             let link = if !on { CallLink::Off } else { CallLink::SignedOut };
@@ -840,7 +840,7 @@ impl super::Controller {
         };
         let available = {
             let snap = self.snapshot.lock().unwrap();
-            snap.vrchat.running && snap.orb.prop_sync.is_some()
+            snap.vrchat.running && snap.n4n0.prop_sync.is_some()
         };
         let (due, friends) = {
             let rt = self.calls.lock().unwrap();
@@ -856,7 +856,7 @@ impl super::Controller {
             }
             let answer = api
                 .agent()
-                .put(&api.url("orb/calls/presence"))
+                .put(&api.url("n4n0/calls/presence"))
                 .config()
                 .timeout_global(Some(SIGNAL_TIMEOUT))
                 .build()
@@ -897,7 +897,7 @@ impl super::Controller {
         if contacts_due && available {
             let answer = api
                 .agent()
-                .get(&api.url("orb/calls/contacts"))
+                .get(&api.url("n4n0/calls/contacts"))
                 .config()
                 .timeout_global(Some(SIGNAL_TIMEOUT))
                 .build()
@@ -964,7 +964,7 @@ impl super::Controller {
     fn calls_events(self: &Shared, api: &Api, token: &str, number: u64) -> anyhow::Result<bool> {
         let agent = idle_agent(Duration::from_secs(15), STREAM_IDLE);
         let response =
-            agent.get(&api.url("orb/calls/events")).header("Authorization", &format!("Bearer {token}")).header("Accept", "text/event-stream").call()?;
+            agent.get(&api.url("n4n0/calls/events")).header("Authorization", &format!("Bearer {token}")).header("Accept", "text/event-stream").call()?;
         let mut reader = BufReader::new(response.into_body().into_with_config().limit(u64::MAX).reader());
         let mut sse = Sse::default();
         let mut line = Vec::new();
@@ -1044,7 +1044,7 @@ impl super::Controller {
         drop(rt);
         drop(gone);
         for text in said {
-            self.orb_say(&text);
+            self.n4n0_say(&text);
         }
         for (kind, message) in notices {
             self.notify(kind, message);
@@ -1140,16 +1140,16 @@ impl super::Controller {
                             Err(_) => break,
                         }
                     }
-                    if let Err(e) = post(&api, &token, &format!("orb/calls/{id}/candidates"), &json!({ "candidates": candidates })) {
+                    if let Err(e) = post(&api, &token, &format!("n4n0/calls/{id}/candidates"), &json!({ "candidates": candidates })) {
                         eprintln!("calls candidates: {e:#}");
                     }
                 }
                 Signal::Create { number, contact, offer } => {
-                    let answer = match post(&api, &token, "orb/calls", &json!({ "contact": contact, "offer": offer })) {
+                    let answer = match post(&api, &token, "n4n0/calls", &json!({ "contact": contact, "offer": offer })) {
                         Ok(v) => v["call"].as_str().filter(|id| !id.is_empty()).map(str::to_string).ok_or(Ending::Failed),
                         Err(e) if e.downcast_ref::<ApiError>().is_some_and(|a| a.status == 409) => Err(Ending::Busy),
                         Err(e) => {
-                            eprintln!("calls orb/calls: {e:#}");
+                            eprintln!("calls n4n0/calls: {e:#}");
                             self.notify(NoticeKind::Warning, format!("Call: {e}"));
                             Err(Ending::Failed)
                         }
@@ -1159,7 +1159,7 @@ impl super::Controller {
                     self.calls_act(rt, acts);
                 }
                 Signal::Answer { number, id, sdp } => {
-                    if let Err(e) = post(&api, &token, &format!("orb/calls/{id}/answer"), &json!({ "answer": sdp })) {
+                    if let Err(e) = post(&api, &token, &format!("n4n0/calls/{id}/answer"), &json!({ "answer": sdp })) {
                         eprintln!("calls answer: {e:#}");
                         self.notify(NoticeKind::Warning, format!("Call: {e}"));
                         let mut rt = self.calls.lock().unwrap();
@@ -1168,7 +1168,7 @@ impl super::Controller {
                     }
                 }
                 Signal::Close { id, decline } => {
-                    let path = format!("orb/calls/{id}/{}", if decline { "decline" } else { "end" });
+                    let path = format!("n4n0/calls/{id}/{}", if decline { "decline" } else { "end" });
                     if let Err(e) = post(&api, &token, &path, &json!({})) {
                         eprintln!("calls {path}: {e:#}");
                     }
@@ -1191,14 +1191,14 @@ impl super::Controller {
             (number, name)
         };
         self.calls_publish(|_| {});
-        self.orb_say(&format!("Calling {name}…"));
+        self.n4n0_say(&format!("Calling {name}…"));
         let ctl = self.clone();
         std::thread::spawn(move || {
             let servers = match ctl.calls_api() {
                 Some((api, token)) => ice_servers(&api, &token).map_err(|e| format!("the call relay could not be reached: {e}")),
                 None => Err("sign in to Orbiters to call.".to_string()),
             };
-            let (mic, direct) = ctl.with_settings(|s| (s.orb.mic_device.clone(), s.orb.direct_calls));
+            let (mic, direct) = ctl.with_settings(|s| (s.n4n0.mic_device.clone(), s.n4n0.direct_calls));
             let mic = (!mic.is_empty()).then_some(mic);
             let mut rt = ctl.calls.lock().unwrap();
             rt.direct = direct;
@@ -1221,7 +1221,7 @@ impl super::Controller {
 
     /// Answers the ringing call.
     pub fn call_answer(self: &Shared) {
-        let (mic, direct) = self.with_settings(|s| (s.orb.mic_device.clone(), s.orb.direct_calls));
+        let (mic, direct) = self.with_settings(|s| (s.n4n0.mic_device.clone(), s.n4n0.direct_calls));
         let mic = (!mic.is_empty()).then_some(mic);
         let mut rt = self.calls.lock().unwrap();
         rt.direct = direct;
@@ -1269,10 +1269,10 @@ impl super::Controller {
             (rt.menu_open, menu_text(&rt.contacts, rt.picked))
         };
         if open {
-            // The owner opened it to pick from: it shows at once (Docs/orb-calls.md, Call menu).
-            self.orb_say_quick(&text);
+            // The owner opened it to pick from: it shows at once (Docs/n4n0-calls.md, Call menu).
+            self.n4n0_say_quick(&text);
         } else {
-            self.orb_command(crate::ipc::OrbCommand::HidePanel);
+            self.n4n0_command(crate::ipc::N4n0Command::HidePanel);
         }
         self.calls_publish(|_| {});
     }
@@ -1291,7 +1291,7 @@ impl super::Controller {
             }
         };
         if let Some(text) = text {
-            self.orb_say_quick(&text);
+            self.n4n0_say_quick(&text);
         }
         self.calls_publish(|_| {});
     }
@@ -1341,8 +1341,8 @@ impl super::Controller {
             }
         };
         self.update_if(|s| {
-            let changed = s.orb.calls != status;
-            s.orb.calls = status;
+            let changed = s.n4n0.calls != status;
+            s.n4n0.calls = status;
             changed
         });
     }
@@ -1605,7 +1605,7 @@ mod tests {
             let _ = wait.recv_timeout(Duration::from_secs(30));
         });
         let agent = idle_agent(Duration::from_secs(2), Duration::from_millis(300));
-        let response = agent.get(&format!("http://127.0.0.1:{port}/orb/calls/events")).call().unwrap();
+        let response = agent.get(&format!("http://127.0.0.1:{port}/n4n0/calls/events")).call().unwrap();
         let mut reader = BufReader::new(response.into_body().into_with_config().limit(u64::MAX).reader());
         let mut line = Vec::new();
         assert_eq!(read_line(&mut reader, &mut line, EVENT_MOST).unwrap(), Some(true));

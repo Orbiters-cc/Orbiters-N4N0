@@ -1,5 +1,5 @@
-//! `orbiters-desktop --orb-menu <out> [--theme <theme.json>] [--strings <strings.json>]`: N4N0's menu pages as files
-//! (contracts `Docs/orb.md`, Pages and layout; Menu themes and translations).
+//! `orbiters-desktop --n4n0-menu <out> [--theme <theme.json>] [--strings <strings.json>]`: N4N0's menu pages as files
+//! (contracts `Docs/n4n0.md`, Pages and layout; Menu themes and translations).
 //!
 //! - `N4N0 screen pages.png`: the picture of every page's unchanging part, one 1024 × 576 slice per page (slice 0 is
 //!   the back; slice `n` is page `n`), top first: Toolkit imports it as the projected screen's page texture array.
@@ -13,7 +13,7 @@
 //!   128-byte thumbnails (1024 bytes).
 //!
 //! `--strings` draws the pages' texts in another language (missing keys stay English); `orbiters-desktop
-//! --orb-menu-strings <file>` writes the English base with each key's `max` ([`run_strings`]).
+//! --n4n0-menu-strings <file>` writes the English base with each key's `max` ([`run_strings`]).
 
 use super::menu_retro;
 use super::menu_ui::{self, Skin, View};
@@ -21,15 +21,15 @@ use super::Canvas;
 use anyhow::{anyhow, bail};
 use egui::{pos2, ColorImage, TextureHandle, TextureId, TextureOptions};
 use orbiters_core::settings::MenuLook;
-use orbiters_orb::menu::layout::{self, ScreenPage, MAX_ELEMENTS, MAX_SLOTS, PICTURES};
-use orbiters_orb::menu::strings::{Strings, Text};
-use orbiters_orb::menu::theme::Theme;
-use orbiters_orb::menu::{
+use orbiters_n4n0_core::menu::layout::{self, ScreenPage, MAX_ELEMENTS, MAX_SLOTS, PICTURES};
+use orbiters_n4n0_core::menu::strings::{Strings, Text};
+use orbiters_n4n0_core::menu::theme::Theme;
+use orbiters_n4n0_core::menu::{
     screen, Call, Card, Contact, InstanceRow, InviteAccount, InviteAnswer, KeyboardLayout, Keys, Light, Media, Menu, Page, Pages, PhotoLength, StateRow, Target, Tracking,
     Volume, WorldVideo,
 };
-use orbiters_orb::picture;
-use orbiters_orb::youtube::{Results, Video};
+use orbiters_n4n0_core::picture;
+use orbiters_n4n0_core::youtube::{Results, Video};
 use std::path::{Path, PathBuf};
 
 pub const WIDTH: u32 = layout::WIDTH as u32;
@@ -446,7 +446,7 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     out.push((ScreenPage::History, history.clone(), hovered(ScreenPage::History, Target::ShareTo(0)), None));
     let mut friends = history.clone();
     friends.press(Target::ShareTo(0));
-    friends.set_friends(orbiters_orb::captures::Friends::ready(sample_friends()));
+    friends.set_friends(orbiters_n4n0_core::captures::Friends::ready(sample_friends()));
     friends.press(Target::Friend(1));
     friends.press(Target::Friend(3));
     out.push((ScreenPage::ShareTo, friends, hovered(ScreenPage::ShareTo, Target::SendShare), None));
@@ -477,7 +477,7 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     // Screens from version 14 (and the overlay): More with the screen mirror, and the mirror's page with a camera placed
     // at a zoom (its picture's place as everyone but its owner sees it).
     let mirror = || {
-        use orbiters_orb::mirror::{MirrorView, Phase, Reach};
+        use orbiters_n4n0_core::mirror::{MirrorView, Phase, Reach};
         let mut m = share();
         m.set_feedback(sample_feedback());
         m.mirror = MirrorView { phase: Phase::Placed, zoom: 4, reach: Reach::Screen };
@@ -495,8 +495,8 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
 
 /// The sample player's world feedback: the world they are in (liked, two labels of theirs, comments of theirs and
 /// others'), and two worlds to step to.
-pub(crate) fn sample_feedback() -> orbiters_orb::feedback::FeedbackView {
-    use orbiters_orb::feedback::{CommentRow, FeedbackView, LabelCount, Subject, WorldFeedback, Why};
+pub(crate) fn sample_feedback() -> orbiters_n4n0_core::feedback::FeedbackView {
+    use orbiters_n4n0_core::feedback::{CommentRow, FeedbackView, LabelCount, Subject, WorldFeedback, Why};
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let here = "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b";
     let label = |id: &str, count: u32, mine: bool| LabelCount { id: id.into(), count, mine };
@@ -528,8 +528,8 @@ pub(crate) fn sample_feedback() -> orbiters_orb::feedback::FeedbackView {
 
 /// The sample player's 3D captures: the last one ready to share, History's in every state (one flagged explicit), each
 /// picture a sample thumbnail ([`sample_rgba`] by the number in its key).
-pub(crate) fn sample_captures() -> orbiters_orb::captures::CapturesView {
-    use orbiters_orb::captures::{CapturePhase, CaptureRow, CapturesView, Sharing};
+pub(crate) fn sample_captures() -> orbiters_n4n0_core::captures::CapturesView {
+    use orbiters_n4n0_core::captures::{CapturePhase, CaptureRow, CapturesView, Sharing};
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let row = |n: usize, world: &str, ago: u64| CaptureRow {
         key: format!("sample{n}"),
@@ -555,18 +555,18 @@ pub(crate) fn sample_captures() -> orbiters_orb::captures::CapturesView {
 }
 
 /// The sample player's VRChat friends.
-pub(crate) fn sample_friends() -> Vec<orbiters_orb::captures::Friend> {
+pub(crate) fn sample_friends() -> Vec<orbiters_n4n0_core::captures::Friend> {
     ["Kasumi", "Lyra Nightfall", "Bob the Builder", "Ana", "Mika", "Zephyr", "Juniper", "Orion"]
         .iter()
         .enumerate()
-        .map(|(i, n)| orbiters_orb::captures::Friend { id: format!("usr_{i:04}"), name: n.to_string() })
+        .map(|(i, n)| orbiters_n4n0_core::captures::Friend { id: format!("usr_{i:04}"), name: n.to_string() })
         .collect()
 }
 
 /// The QR code scanner having opened a link, looking for more.
-pub(crate) fn sample_qr() -> orbiters_orb::qr::QrView {
-    orbiters_orb::qr::QrView {
-        phase: orbiters_orb::qr::QrPhase::Looking,
+pub(crate) fn sample_qr() -> orbiters_n4n0_core::qr::QrView {
+    orbiters_n4n0_core::qr::QrView {
+        phase: orbiters_n4n0_core::qr::QrPhase::Looking,
         note: String::new(),
         link: Some("https://orbiters.cc/maps/wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b".into()),
         opened: 1,
@@ -602,7 +602,7 @@ pub(crate) fn sample_states() -> Vec<StateRow> {
     .collect()
 }
 
-/// What `--orb-menu` was asked for.
+/// What `--n4n0-menu` was asked for.
 struct Options {
     out: PathBuf,
     theme: Option<Theme>,
@@ -631,12 +631,12 @@ fn options(args: &[String]) -> anyhow::Result<Options> {
                     strings = Some(parsed.strings);
                 }
             }
-            flag if flag.starts_with("--") => bail!("unknown option {flag} (--orb-menu <out> [--theme <theme.json>] [--strings <strings.json>])"),
+            flag if flag.starts_with("--") => bail!("unknown option {flag} (--n4n0-menu <out> [--theme <theme.json>] [--strings <strings.json>])"),
             path if out.is_none() => out = Some(PathBuf::from(path)),
             extra => bail!("one output folder only ({extra:?} is a second)"),
         }
     }
-    Ok(Options { out: out.unwrap_or_else(|| PathBuf::from("orb-menu")), theme, strings: strings.unwrap_or_else(|| Strings::english().clone()) })
+    Ok(Options { out: out.unwrap_or_else(|| PathBuf::from("n4n0-menu")), theme, strings: strings.unwrap_or_else(|| Strings::english().clone()) })
 }
 
 /// Each key's `max`: the characters that fit its places ([`menu_ui::max_length`]).
@@ -696,15 +696,15 @@ fn noting_shrunk<T>(draw: impl FnOnce() -> T) -> T {
     out
 }
 
-/// The English base strings file, with each key's `max`: what `--orb-menu-strings` writes.
+/// The English base strings file, with each key's `max`: what `--n4n0-menu-strings` writes.
 pub fn base_strings() -> String {
     let max = max_lengths();
     Strings::english().to_json(Some(&|t: Text| max.iter().find(|(k, _)| *k == t).map_or(0, |(_, m)| *m)))
 }
 
-/// `orbiters-desktop --orb-menu-strings <file>`: the English base strings file, with each key's `max`.
+/// `orbiters-desktop --n4n0-menu-strings <file>`: the English base strings file, with each key's `max`.
 pub fn run_strings(args: &[String]) -> anyhow::Result<()> {
-    let path = PathBuf::from(args.first().ok_or_else(|| anyhow!("--orb-menu-strings needs a file to write: --orb-menu-strings <file.json>"))?);
+    let path = PathBuf::from(args.first().ok_or_else(|| anyhow!("--n4n0-menu-strings needs a file to write: --n4n0-menu-strings <file.json>"))?);
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
@@ -772,7 +772,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             if id == SAMPLE_ART {
                 return Some(art_texture.id());
             }
-            let id = id.strip_prefix(orbiters_orb::captures::PICTURE_PREFIX).unwrap_or(id);
+            let id = id.strip_prefix(orbiters_n4n0_core::captures::PICTURE_PREFIX).unwrap_or(id);
             id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).and_then(|i| thumbs.get(i)).map(|t| t.id())
         };
         let modern = paint(&mut canvas, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &picture, time: 0.4, skin }));
@@ -783,7 +783,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             if id == SAMPLE_ART {
                 return Some(art_dots.id());
             }
-            let id = id.strip_prefix(orbiters_orb::captures::PICTURE_PREFIX).unwrap_or(id);
+            let id = id.strip_prefix(orbiters_n4n0_core::captures::PICTURE_PREFIX).unwrap_or(id);
             id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).and_then(|i| dots.get(i)).map(|t| t.id())
         };
         let rgba = paint(&mut canvas, |p| menu_retro::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover, pressed, picture: &dotted, time: 0.4, skin }));
@@ -803,7 +803,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             if id == SAMPLE_ART {
                 return Some(screen::picture_from_rgb(&art));
             }
-            let id = id.strip_prefix(orbiters_orb::captures::PICTURE_PREFIX).unwrap_or(id);
+            let id = id.strip_prefix(orbiters_n4n0_core::captures::PICTURE_PREFIX).unwrap_or(id);
             id.strip_prefix("sample").and_then(|n| n.parse::<usize>().ok()).map(sample_picture)
         };
         let flags = screen::Flags { listening: menu.listening, loading: menu.loading(), ..Default::default() };
@@ -834,9 +834,9 @@ mod tests {
     use crate::overlay::menu_ui::Palette;
     use orbiters_ui::theme;
 
-    /// A base strings file beside `orbiters-orb`.
+    /// A base strings file beside `orbiters-n4n0-core`.
     fn base(name: &str) -> String {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../orbiters-orb/menu-strings").join(format!("{name}.json"));
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../orbiters-n4n0-core/menu-strings").join(format!("{name}.json"));
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).replace("\r\n", "\n")
     }
 
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn the_english_base_file_is_what_the_layout_gives() {
-        assert_eq!(base("en"), base_strings(), "write it again: orbiters-desktop --orb-menu-strings crates/orbiters-orb/menu-strings/en.json");
+        assert_eq!(base("en"), base_strings(), "write it again: orbiters-desktop --n4n0-menu-strings crates/orbiters-n4n0-core/menu-strings/en.json");
     }
 
     #[test]
@@ -968,7 +968,7 @@ mod tests {
 
     #[test]
     fn options_read_their_files_and_refuse_what_is_wrong() {
-        let dir = std::env::temp_dir().join(format!("orbiters-orb-menu-options-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("orbiters-n4n0-core-menu-options-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let theme = dir.join("theme.json");
         std::fs::write(&theme, r##"{ "schema": 1, "style": "retro", "colors": { "accent": "#FFC247" } }"##).unwrap();
@@ -983,7 +983,7 @@ mod tests {
         assert_eq!((t.style, t.colors.accent, t.colors.background), (MenuLook::Retro, [0xff, 0xc2, 0x47], Theme::RETRO.colors.background));
         assert_eq!(o.strings.language(), "fr");
         let o = options(&[]).unwrap();
-        assert!(o.theme.is_none() && o.strings.language() == "en" && o.out == Path::new("orb-menu"));
+        assert!(o.theme.is_none() && o.strings.language() == "en" && o.out == Path::new("n4n0-menu"));
         for (args, says) in [
             (vec!["out".to_string(), "--theme".into()], "needs a file"),
             (vec!["a".into(), "b".into()], "one output folder"),

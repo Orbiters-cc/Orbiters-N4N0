@@ -1,37 +1,37 @@
-//! N4N0 in the app (contracts `Docs/orb.md`): drives the N4N0 prop on the avatar over OSC (its text panel and its face),
+//! N4N0 in the app (contracts `Docs/n4n0.md`): drives the N4N0 prop on the avatar over OSC (its text panel and its face),
 //! keeps the helpers that need no AI (the AFK message, held and carried parameters, saved videos), and runs the
 //! assistant's turns: a question from the voice worker, the avatar's menu or an interface goes to Orbiters, the tools
 //! it asks for run here, and what N4N0 answers goes on the panel.
 //!
-//! The OSC receiving thread only records what it hears: messages to VRChat leave from the orb thread (stopping OSC
-//! joins the receiving thread while it holds the OSC lock, so that thread must never wait for it). The orb thread
+//! The OSC receiving thread only records what it hears: messages to VRChat leave from the N4N0 thread (stopping OSC
+//! joins the receiving thread while it holds the OSC lock, so that thread must never wait for it). The N4N0 thread
 //! sleeps until its next step is due (the panel's, the screen's, a message's) or something wakes it.
 //!
 //! A turn is a transaction: the conversation it started from stays until the turn ends with an answer, so a request
 //! that fails between tool rounds never leaves calls without results behind, and New conversation stops a turn under
-//! way. What the assistant asks for goes through `orbiters_orb::policy`: only so many actions a turn, and those that
+//! way. What the assistant asks for goes through `orbiters_n4n0_core::policy`: only so many actions a turn, and those that
 //! last or show beyond the moment wait for the owner's own yes.
 
 use crate::media::Watcher;
 use crate::platform::{Browser, CallRequest, Clipboard, Ears, Files, Host, Locale, Osc, Platform, Sounds};
 use crate::screen::ScreenRuntime;
 use crate::states::StatesRuntime;
-use crate::status::{NoticeKind, OrbConfirmation, OrbFace, OrbLight, OrbLine, OrbStatus, OrbWho, ProcessUsage, TrackingView, VoiceStatus, LOCAL_APPROVAL};
+use crate::status::{NoticeKind, N4n0Confirmation, N4n0Face, N4n0Light, N4n0Line, N4n0Status, N4n0Who, ProcessUsage, TrackingView, VoiceStatus, LOCAL_APPROVAL};
 use crate::voice::VoiceRuntime;
 use crate::Command;
 use orbiters_contracts::avatar::{self, AvatarManifest, Tag};
-use orbiters_contracts::orb::{self as contract, params};
+use orbiters_contracts::n4n0::{self as contract, params};
 use orbiters_core::account::{Api, Server};
 use orbiters_core::osc::{OscValue, AVATAR_CHANGE, AVATAR_NAME, CAPTURE_PARAMETERS, PARAMETERS_PREFIX};
-use orbiters_core::settings::{OrbSettings, Pin, Settings};
-use orbiters_orb::assistant::{self, AssistantError, Display, Event, Input, Quota, Request, ToolCall, ToolResult};
-use orbiters_orb::context::{self, Moment, NAME_CHARS, URL_CHARS};
-use orbiters_orb::controls::{Controls, Setting};
-use orbiters_orb::menu::Pages;
-use orbiters_orb::policy::{self, TurnPolicy, Verdict};
-use orbiters_orb::text::{Message, TextSender};
-use orbiters_orb::tools::{self, Action, Mood};
-use orbiters_orb::videos::{self, SavedVideo, Videos};
+use orbiters_core::settings::{N4n0Settings, Pin, Settings};
+use orbiters_n4n0_core::assistant::{self, AssistantError, Display, Event, Input, Quota, Request, ToolCall, ToolResult};
+use orbiters_n4n0_core::context::{self, Moment, NAME_CHARS, URL_CHARS};
+use orbiters_n4n0_core::controls::{Controls, Setting};
+use orbiters_n4n0_core::menu::Pages;
+use orbiters_n4n0_core::policy::{self, TurnPolicy, Verdict};
+use orbiters_n4n0_core::text::{Message, TextSender};
+use orbiters_n4n0_core::tools::{self, Action, Mood};
+use orbiters_n4n0_core::videos::{self, SavedVideo, Videos};
 use rosc::OscType;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -43,14 +43,14 @@ use std::time::{Duration, Instant};
 /// Most messages a bundle carries: a screen step (16 values and a pointer) in one, under 1.2 KB, which any OSC receiver
 /// takes in one datagram.
 const BUNDLE_MESSAGES: usize = 20;
-/// The orb thread sleeps at most this long (what the settings or VRChat changed shows by then), shorter while the
+/// The N4N0 thread sleeps at most this long (what the settings or VRChat changed shows by then), shorter while the
 /// avatar's screen is open, and never less than the floor.
 const MAX_WAIT: Duration = Duration::from_millis(250);
 const MAX_WAIT_OPEN: Duration = Duration::from_millis(100);
 const MIN_WAIT: Duration = Duration::from_millis(4);
 /// Lines of the conversation the window keeps.
 const MAX_LINES: usize = 60;
-/// Tool rounds of one turn: requests that bring tool results, after the first (contracts `Docs/orb-assistant.md`).
+/// Tool rounds of one turn: requests that bring tool results, after the first (contracts `Docs/n4n0-assistant.md`).
 const MAX_ROUNDS: usize = 8;
 /// What waits for the owner's yes is dropped after this.
 const CONFIRM_FOR: Duration = Duration::from_secs(120);
@@ -116,7 +116,7 @@ struct TurnTools {
 }
 
 #[derive(Default)]
-pub(crate) struct OrbRuntime {
+pub(crate) struct N4n0Runtime {
     pub(crate) sender: Option<TextSender>,
     pub(crate) avatar_id: Option<String>,
     /// The avatar's name as set in its SDK (VRChat's OSCQuery `/avatar/name`, whole in UTF-8), once read after its change.
@@ -125,26 +125,26 @@ pub(crate) struct OrbRuntime {
     pub(crate) params: HashSet<String>,
     pub(crate) controls: Controls,
     pub(crate) manifest: bool,
-    /// Messages for the orb thread to send, and when.
+    /// Messages for the N4N0 thread to send, and when.
     pub(crate) outbox: Vec<(Instant, Message)>,
     /// When the held parameters are put back.
     pub(crate) pins_due: Option<Instant>,
     face_sent: Option<i32>,
     /// The face the assistant asked for, while its answer is up.
-    mood: Option<OrbFace>,
+    mood: Option<N4n0Face>,
     pub(crate) afk: bool,
     mute_self: bool,
     afk_showing: bool,
     pub(crate) listening: Option<(Source, Instant)>,
-    muted_by_orb: bool,
+    muted_by_n4n0: bool,
     /// The turn under way (N4N0 thinks), and the last turn's number.
     turn: Option<Turn>,
     turns: u64,
     pub(crate) conversation: Vec<Value>,
     /// Bumped by New conversation: a turn started before it never writes its conversation back.
     generation: u64,
-    lines: Vec<OrbLine>,
-    confirmations: Vec<OrbConfirmation>,
+    lines: Vec<N4n0Line>,
+    confirmations: Vec<N4n0Confirmation>,
     /// What the assistant asked to do that waits for the owner's yes, since when, and its number.
     pending: Vec<Pending>,
     pending_at: Option<Instant>,
@@ -163,7 +163,7 @@ pub(crate) struct OrbRuntime {
     pub(crate) tree_unknown: bool,
     /// VRChat ran at the last tick.
     pub(crate) vrchat_running: bool,
-    /// Where N4N0's menu goes (contracts `Docs/orb.md`, Menu): the avatar's N4N0 prop has the projected screen, with
+    /// Where N4N0's menu goes (contracts `Docs/n4n0.md`, Menu): the avatar's N4N0 prop has the projected screen, with
     /// these text values; VRChat runs in VR (`VRMode`, `None` until it says); the screen shows the menu in VR too
     /// (`N4N0/Screen/Replace`, as VRChat or the manifest says); the bytes of each of its thumbnails
     /// (`N4N0/Screen/ThumbnailBytes`, likewise; 72 when neither says).
@@ -174,22 +174,22 @@ pub(crate) struct OrbRuntime {
     screen_thumbnail: Option<usize>,
     /// The screen's version (`N4N0/Screen/Version`; older screens lack it): from 3, Home has six tiles.
     screen_version: Option<i32>,
-    /// N4N0's light (the Light option), as the avatar holds it: `None` when its orb has none.
-    pub(crate) light: Option<orbiters_orb::menu::Light>,
+    /// N4N0's light (the Light option), as the avatar holds it: `None` when its N4N0 has none.
+    pub(crate) light: Option<orbiters_n4n0_core::menu::Light>,
     /// The screen's size last sent to this avatar (`N4N0/Screen/Size`, times its own size).
     size_sent: Option<f32>,
     voice_hint_shown: bool,
     enabled: bool,
-    /// Wakes the orb thread before its next deadline (`woken`: a wake came while it was busy).
+    /// Wakes the N4N0 thread before its next deadline (`woken`: a wake came while it was busy).
     wake: Arc<Condvar>,
     woken: bool,
     /// Testing (the N4N0 page): the state N4N0 is held in, when every state began to show in turn, the owner acted as
-    /// away, the whole orb hidden.
-    pub(crate) test_face: Option<OrbFace>,
+    /// away, all of N4N0 hidden.
+    pub(crate) test_face: Option<N4n0Face>,
     test_cycle: Option<Instant>,
     test_afk: bool,
     test_hidden: bool,
-    /// The orb thread ends (the app quits).
+    /// The N4N0 thread ends (the app quits).
     stop: bool,
     /// N4N0's menu on the avatar's screen, and the overlay menu's requests (screen.rs).
     pub(crate) screen: ScreenRuntime,
@@ -204,21 +204,21 @@ pub(crate) struct OrbRuntime {
     /// The last suggestion a menu other than the screen's sent, numbered, and why it failed.
     pub(crate) suggestion: Option<(u32, Option<String>)>,
     /// How the last Invite me of a menu other than the screen's went, numbered.
-    pub(crate) invite: Option<(u32, orbiters_orb::menu::InviteAnswer)>,
+    pub(crate) invite: Option<(u32, orbiters_n4n0_core::menu::InviteAnswer)>,
     /// The QR code scanner (qr.rs): the scan running, and what the menus show of it.
     pub(crate) qr: crate::qr::QrRuntime,
     /// The 3D captures as the app last handed them, and the VRChat friends read for Share to … (captures.rs), the number
     /// of the last read asked for.
-    pub(crate) captures: orbiters_orb::captures::CapturesView,
-    pub(crate) friends: orbiters_orb::captures::Friends,
+    pub(crate) captures: orbiters_n4n0_core::captures::CapturesView,
+    pub(crate) friends: orbiters_n4n0_core::captures::Friends,
     pub(crate) friends_asked: u32,
     /// The worlds' feedback as the app last handed it (feedback.rs).
-    pub(crate) feedback: orbiters_orb::feedback::FeedbackView,
+    pub(crate) feedback: orbiters_n4n0_core::feedback::FeedbackView,
     /// The computer's keys for the overlay menu's keyboard (the last few, numbered), and whether the keyboard is taken.
-    pub(crate) keys: std::collections::VecDeque<(u32, orbiters_orb::menu::KeyInput)>,
+    pub(crate) keys: std::collections::VecDeque<(u32, orbiters_n4n0_core::menu::KeyInput)>,
     pub(crate) keyboard_taken: bool,
     /// The world's video, and the titles of those seen (`None` while asked).
-    pub(crate) world_video: Option<orbiters_orb::menu::WorldVideo>,
+    pub(crate) world_video: Option<orbiters_n4n0_core::menu::WorldVideo>,
     pub(crate) video_titles: HashMap<String, Option<String>>,
     /// The controllers' touchpads and sticks the avatar's input parameters follow (input.rs).
     pub(crate) input: crate::input::InputRuntime,
@@ -226,7 +226,7 @@ pub(crate) struct OrbRuntime {
     pub(crate) mirror: crate::mirror::MirrorRuntime,
 }
 
-impl OrbRuntime {
+impl N4n0Runtime {
     /// N4N0 keeping its files in `files`.
     fn new(files: &Files) -> Self {
         Self { states: StatesRuntime::at(files.states.clone()), ..Default::default() }
@@ -237,7 +237,7 @@ impl OrbRuntime {
         self.turn.is_some()
     }
 
-    /// Wakes the orb thread: something changed that its next step should carry (a page to show, a message, a touch).
+    /// Wakes the N4N0 thread: something changed that its next step should carry (a page to show, a message, a touch).
     pub(crate) fn wake(&mut self) {
         self.woken = true;
         self.wake.notify_one();
@@ -256,7 +256,7 @@ impl OrbRuntime {
         self.sender = None;
         self.afk = false;
         self.mute_self = false;
-        self.muted_by_orb = false;
+        self.muted_by_n4n0 = false;
         self.afk_showing = false;
         self.face_sent = None;
         self.pins_due = None;
@@ -283,7 +283,7 @@ impl OrbRuntime {
         self.screen.set_card_capable(false);
     }
 
-    /// Puts N4N0's menu where it shows now (contracts `Docs/orb.md`, Menu): on the avatar's screen when the prop has one
+    /// Puts N4N0's menu where it shows now (contracts `Docs/n4n0.md`, Menu): on the avatar's screen when the prop has one
     /// and VRChat runs in desktop mode, or in VR with `N4N0/Screen/Replace` on; else in the overlay, and no screen block
     /// is written (the animator keeps the screen closed then). Until VRChat says its mode, VR is taken while SteamVR
     /// runs, desktop mode otherwise. A prop from before `N4N0/Screen/Replace` had the screen only when it replaced the
@@ -292,7 +292,7 @@ impl OrbRuntime {
         let desktop = self.vr_mode.map_or(!steamvr, |vr| !vr);
         let shows = self.screen_present && (desktop || self.screen_replace.unwrap_or(true));
         let thumbnail = self.screen_thumbnail.unwrap_or(contract::thumbnail::SIZES[0]);
-        let fits = self.screen_sync.is_some_and(|n| orbiters_orb::menu::screen::fits(n, thumbnail));
+        let fits = self.screen_sync.is_some_and(|n| orbiters_n4n0_core::menu::screen::fits(n, thumbnail));
         let used = shows && fits;
         // The screen may show a dropped link card even while the menu shows in the overlay (VR without Replace).
         let present = self.screen_present && fits;
@@ -301,7 +301,7 @@ impl OrbRuntime {
         }
         // In desktop mode its owner points by looking and clicks; in VR the fingers do. Fast walk is VR's only.
         self.screen.set_gaze(used && desktop);
-        // Screens of version 8 show full pictures (contracts Docs/orb-picture.md).
+        // Screens of version 8 show full pictures (contracts Docs/n4n0-picture.md).
         self.screen.set_full_pictures(present && self.screen_version.is_some_and(|v| v >= contract::SCREEN_FULL_PICTURES), self.screen_version);
         self.screen.menu.desktop_mode = desktop;
     }
@@ -315,7 +315,7 @@ impl OrbRuntime {
         self.screen.menu_sync(now).map(|open| (parameter(params::MENU), OscType::Bool(open)))
     }
 
-    /// When the orb thread's next step is due: the soonest of the panel's, the messages', the held parameters', the
+    /// When the N4N0 thread's next step is due: the soonest of the panel's, the messages', the held parameters', the
     /// listen's time limit, the screen's, at most [`MAX_WAIT`] away.
     fn next_due(&self, now: Instant, vrchat: bool) -> Instant {
         let mut due = now + if self.screen.menu.open { MAX_WAIT_OPEN } else { MAX_WAIT };
@@ -345,23 +345,23 @@ impl OrbRuntime {
         due
     }
 
-    fn face(&self) -> OrbFace {
+    fn face(&self) -> N4n0Face {
         if let Some(face) = self.test_face {
             face
         } else if self.listening.is_some() {
-            OrbFace::Listening
+            N4n0Face::Listening
         } else if self.thinking() {
-            OrbFace::Thinking
+            N4n0Face::Thinking
         } else if self.sender.as_ref().is_some_and(TextSender::busy) {
             if self.afk_showing {
-                OrbFace::Sleeping
+                N4n0Face::Sleeping
             } else {
-                self.mood.unwrap_or(OrbFace::Talking)
+                self.mood.unwrap_or(N4n0Face::Talking)
             }
         } else if self.away() {
-            OrbFace::Sleeping
+            N4n0Face::Sleeping
         } else {
-            OrbFace::Idle
+            N4n0Face::Idle
         }
     }
 
@@ -370,8 +370,8 @@ impl OrbRuntime {
         self.afk || self.test_afk
     }
 
-    fn status(&self) -> OrbStatus {
-        OrbStatus {
+    fn status(&self) -> N4n0Status {
+        N4n0Status {
             avatar_id: self.avatar_id.clone(),
             prop_sync: self.sender.as_ref().map(|s| s.sync() as u8),
             manifest: self.manifest,
@@ -400,7 +400,7 @@ impl OrbRuntime {
             menu_toggle: self.screen.menu_toggle,
             dictation: self.screen.dictation.clone(),
             photo_countdown: self.screen.countdown(Instant::now()),
-            light: self.light.map(|l| OrbLight { on: l.on, color: l.color, level: l.level }),
+            light: self.light.map(|l| N4n0Light { on: l.on, color: l.color, level: l.level }),
             states: self.states.view(self.avatar_id.as_deref(), self.avatar_name.as_deref()),
             can_drop: self.screen.card_ready(),
             card: self.screen.card_view(),
@@ -422,8 +422,8 @@ impl OrbRuntime {
         }
     }
 
-    pub(crate) fn line(&mut self, who: OrbWho, text: impl Into<String>) {
-        self.lines.push(OrbLine { who, text: text.into(), at_ms: crate::unix_ms() });
+    pub(crate) fn line(&mut self, who: N4n0Who, text: impl Into<String>) {
+        self.lines.push(N4n0Line { who, text: text.into(), at_ms: crate::unix_ms() });
         let excess = self.lines.len().saturating_sub(MAX_LINES);
         self.lines.drain(..excess);
     }
@@ -458,7 +458,7 @@ impl OrbRuntime {
     }
 }
 
-/// What a tick of the orb thread reads of the settings, taken in place rather than as a copy of them all.
+/// What a tick of the N4N0 thread reads of the settings, taken in place rather than as a copy of them all.
 struct TickSettings {
     enabled: bool,
     /// The AFK message, when it should show while the owner is away.
@@ -473,15 +473,15 @@ struct TickSettings {
 }
 
 impl TickSettings {
-    fn of(orb: &OrbSettings, pins: bool) -> Self {
-        let afk = (orb.enabled && orb.afk_message_enabled && !orb.afk_message.trim().is_empty()).then(|| orb.afk_message.clone());
+    fn of(n4n0: &N4n0Settings, pins: bool) -> Self {
+        let afk = (n4n0.enabled && n4n0.afk_message_enabled && !n4n0.afk_message.trim().is_empty()).then(|| n4n0.afk_message.clone());
         Self {
-            enabled: orb.enabled,
+            enabled: n4n0.enabled,
             afk,
-            text_step_ms: orb.text_step_ms,
-            pins: if pins { orb.pins.clone() } else { Vec::new() },
-            screen_size: orb.menu.screen_size.scale(),
-            input: orb.enabled && orb.controller_input,
+            text_step_ms: n4n0.text_step_ms,
+            pins: if pins { n4n0.pins.clone() } else { Vec::new() },
+            screen_size: n4n0.menu.screen_size.scale(),
+            input: n4n0.enabled && n4n0.controller_input,
         }
     }
 }
@@ -511,16 +511,16 @@ fn osc_value(arg: &OscType) -> Option<OscValue> {
     })
 }
 
-fn face_value(face: OrbFace) -> i32 {
+fn face_value(face: N4n0Face) -> i32 {
     (match face {
-        OrbFace::Idle => contract::State::Idle,
-        OrbFace::Listening => contract::State::Listening,
-        OrbFace::Thinking => contract::State::Thinking,
-        OrbFace::Talking => contract::State::Talking,
-        OrbFace::Sleeping => contract::State::Sleeping,
-        OrbFace::Happy => contract::State::Happy,
-        OrbFace::Annoyed => contract::State::Annoyed,
-        OrbFace::Surprised => contract::State::Surprised,
+        N4n0Face::Idle => contract::State::Idle,
+        N4n0Face::Listening => contract::State::Listening,
+        N4n0Face::Thinking => contract::State::Thinking,
+        N4n0Face::Talking => contract::State::Talking,
+        N4n0Face::Sleeping => contract::State::Sleeping,
+        N4n0Face::Happy => contract::State::Happy,
+        N4n0Face::Annoyed => contract::State::Annoyed,
+        N4n0Face::Surprised => contract::State::Surprised,
     }) as i32
 }
 
@@ -552,7 +552,7 @@ pub(crate) struct Device {
 /// N4N0 in an app: started once ([`N4n0::start`]), fed what VRChat says ([`N4n0::on_parameter`], [`N4n0::on_avatar`])
 /// and what the interfaces ask ([`N4n0::command`]), stopped when the app quits ([`N4n0::shutdown`]).
 pub struct N4n0 {
-    pub(crate) orb: Mutex<OrbRuntime>,
+    pub(crate) n4n0: Mutex<N4n0Runtime>,
     pub(crate) voice: Mutex<VoiceRuntime>,
     pub(crate) host: Arc<dyn Host>,
     pub(crate) osc: Arc<dyn Osc>,
@@ -567,12 +567,12 @@ impl N4n0 {
     /// runs until [`N4n0::start`].
     pub fn new(host: Arc<dyn Host>, osc: Arc<dyn Osc>, platform: Platform, files: Files) -> Shared {
         let Platform { clipboard, browser, sounds, locale, ears, media, mouse } = platform;
-        let mut orb = OrbRuntime::new(&files);
+        let mut n4n0 = N4n0Runtime::new(&files);
         if let Some(mouse) = mouse {
-            orb.screen.mouse = mouse;
+            n4n0.screen.mouse = mouse;
         }
         Arc::new(Self {
-            orb: Mutex::new(orb),
+            n4n0: Mutex::new(n4n0),
             voice: Mutex::new(VoiceRuntime::default()),
             host,
             osc,
@@ -622,12 +622,12 @@ impl N4n0 {
         self.host.queue(Box::new(move || action(&n)));
     }
 
-    /// Loads N4N0's saved videos and states and starts the orb thread (the panel's steps, N4N0's face, AFK, held
+    /// Loads N4N0's saved videos and states and starts the N4N0 thread (the panel's steps, N4N0's face, AFK, held
     /// parameters) and the ears' watch.
     pub fn start(self: &Shared) {
         let (list, loaded) = Videos::read(&self.files.videos);
         {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             rt.states.load();
             rt.videos = list;
             rt.voice.installed = self.models_installed();
@@ -635,21 +635,21 @@ impl N4n0 {
                 videos::Loaded::Whole => {}
                 videos::Loaded::Partial(kept) => {
                     let kept = kept.map(|p| format!(": the file as it was is kept as {}", p.display())).unwrap_or_default();
-                    rt.line(OrbWho::Note, format!("Some saved videos could not be read{kept}."));
+                    rt.line(N4n0Who::Note, format!("Some saved videos could not be read{kept}."));
                 }
                 videos::Loaded::Unreadable(e) => {
-                    rt.line(OrbWho::Error, format!("N4N0's saved videos could not be read ({e}): they stay as they are until they can be."));
+                    rt.line(N4n0Who::Error, format!("N4N0's saved videos could not be read ({e}): they stay as they are until they can be."));
                     rt.videos_unreadable = Some(e);
                 }
             }
         }
         self.publish();
         let n = self.clone();
-        let _ = std::thread::Builder::new().name("orb".into()).spawn(move || {
-            let wake = n.orb.lock().unwrap().wake.clone();
+        let _ = std::thread::Builder::new().name("n4n0".into()).spawn(move || {
+            let wake = n.n4n0.lock().unwrap().wake.clone();
             loop {
                 let due = n.tick(Instant::now());
-                let mut rt = n.orb.lock().unwrap();
+                let mut rt = n.n4n0.lock().unwrap();
                 if rt.stop {
                     break;
                 }
@@ -664,7 +664,7 @@ impl N4n0 {
         });
         // The ears follow VRChat and the settings apart, so the panel's steps never wait for them.
         let n = self.clone();
-        let _ = std::thread::Builder::new().name("orb-watch".into()).spawn(move || {
+        let _ = std::thread::Builder::new().name("n4n0-watch".into()).spawn(move || {
             while !n.stopped() {
                 n.voice_follow();
                 std::thread::sleep(Duration::from_secs(1));
@@ -672,18 +672,18 @@ impl N4n0 {
         });
     }
 
-    /// The orb thread ended (the app quits): what runs beside it ends too.
+    /// The N4N0 thread ended (the app quits): what runs beside it ends too.
     pub fn stopped(&self) -> bool {
-        self.orb.lock().unwrap().stop
+        self.n4n0.lock().unwrap().stop
     }
 
-    /// One step of the orb thread at `now`; returns when the next is due.
+    /// One step of the N4N0 thread at `now`; returns when the next is due.
     fn tick(self: &Shared, now: Instant) -> Instant {
         let (pins_due, screen) = {
-            let rt = self.orb.lock().unwrap();
+            let rt = self.n4n0.lock().unwrap();
             (rt.pins_due.is_some_and(|t| t <= now), rt.screen.available)
         };
-        let (settings, walk, tracking) = self.with_settings(|s| (TickSettings::of(&s.orb, pins_due), s.walk_boost.enabled, s.tracking.clone()));
+        let (settings, walk, tracking) = self.with_settings(|s| (TickSettings::of(&s.n4n0, pins_due), s.walk_boost.enabled, s.tracking.clone()));
         let scene = self.host.scene();
         // What the Tracking page shows, and the versions at the bottom of Home.
         let smoothing = self.host.smoothing();
@@ -705,7 +705,7 @@ impl N4n0 {
         let due;
         let default_state;
         {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             before = (
                 rt.face(),
                 rt.sender.as_ref().and_then(TextSender::current_text),
@@ -731,7 +731,7 @@ impl N4n0 {
                 }
             }
             let video =
-                seen_video.map(|seen| orbiters_orb::menu::WorldVideo { title: rt.video_titles.get(&seen.url).cloned().flatten(), url: seen.url, at: seen.at });
+                seen_video.map(|seen| orbiters_n4n0_core::menu::WorldVideo { title: rt.video_titles.get(&seen.url).cloned().flatten(), url: seen.url, at: seen.at });
             rt.screen.menu.world_video = video.clone();
             rt.world_video = video;
             // The menu where it shows now (VRChat's mode or N4N0/Screen/Replace may have changed).
@@ -753,7 +753,7 @@ impl N4n0 {
             if let Some(start) = rt.test_cycle {
                 // Every state for two seconds, then back to what N4N0 is doing.
                 let step = (now.duration_since(start).as_millis() / TEST_CYCLE_STEP.as_millis()) as usize;
-                rt.test_face = OrbFace::ALL.get(step).copied();
+                rt.test_face = N4n0Face::ALL.get(step).copied();
                 if rt.test_face.is_none() {
                     rt.test_cycle = None;
                 }
@@ -800,7 +800,7 @@ impl N4n0 {
             // The controllers' touchpads and sticks and the screen mirror last: the screen's steps above keep their bundles.
             let r = &mut *rt;
             out.extend(r.input.tick(now, settings.input, &r.params));
-            let shown = r.screen.available && r.screen.menu.open && r.screen.menu.page == orbiters_orb::menu::Page::Mirror;
+            let shown = r.screen.available && r.screen.menu.open && r.screen.menu.page == orbiters_n4n0_core::menu::Page::Mirror;
             out.extend(r.mirror.tick(now, shown, &r.params));
             r.screen.menu.mirror = r.mirror.view(now, crate::mirror::reach(r.screen.available, &r.params));
             if rt.listening.is_some_and(|(_, since)| now.duration_since(since) > crate::voice::LISTEN_LIMIT) {
@@ -836,14 +836,14 @@ impl N4n0 {
         }
         if let Some(url) = title_wanted {
             let n = self.clone();
-            let _ = std::thread::Builder::new().name("orb-video-title".into()).spawn(move || {
-                let title = orbiters_orb::videos::youtube_title(&url);
-                n.orb.lock().unwrap().video_titles.insert(url, title);
+            let _ = std::thread::Builder::new().name("n4n0-video-title".into()).spawn(move || {
+                let title = orbiters_n4n0_core::videos::youtube_title(&url);
+                n.n4n0.lock().unwrap().video_titles.insert(url, title);
                 n.publish();
             });
         }
         let keyboard = {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             let s = &rt.screen;
             let wanted = (s.available && s.menu.shows_keyboard()) || (s.overlay_open && s.overlay_keyboard);
             (wanted != rt.keyboard_taken).then(|| {
@@ -861,7 +861,7 @@ impl N4n0 {
             self.voice_cancel();
         }
         if !expired.is_empty() {
-            self.add_line(OrbWho::Note, format!("Not done (no answer came): {}", expired.join("; ")));
+            self.add_line(N4n0Who::Note, format!("Not done (no answer came): {}", expired.join("; ")));
         }
         let screen_changed = followups.changed();
         self.screen_followups(followups);
@@ -877,7 +877,7 @@ impl N4n0 {
     }
 
     /// Shows the AFK message while VRChat says the person is away (and nothing else is up), takes it down after.
-    fn afk(rt: &mut OrbRuntime, settings: &TickSettings) {
+    fn afk(rt: &mut N4n0Runtime, settings: &TickSettings) {
         let wanted = settings.afk.as_deref().filter(|_| rt.away());
         let free = !rt.thinking() && rt.listening.is_none();
         let Some(sender) = rt.sender.as_mut() else { return };
@@ -907,14 +907,14 @@ impl N4n0 {
             let mut all = true;
             for (chunk, sent) in bundles.iter().zip(results) {
                 if let Err(e) = sent {
-                    eprintln!("orb: {} messages from {}: {e}", chunk.len(), chunk[0].0);
+                    eprintln!("N4N0: {} messages from {}: {e}", chunk.len(), chunk[0].0);
                     all = false;
                 }
             }
             all
         });
         if all != Some(true) {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             if let Some(sender) = rt.sender.as_mut() {
                 sender.forget();
             }
@@ -923,40 +923,40 @@ impl N4n0 {
         }
     }
 
-    /// Publishes N4N0's state, and wakes the orb thread: what changed (listening, an answer) shows at its next step.
+    /// Publishes N4N0's state, and wakes the N4N0 thread: what changed (listening, an answer) shows at its next step.
     pub(crate) fn publish(&self) {
         let status = {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             rt.wake();
             rt.status()
         };
         self.host.publish(status);
     }
 
-    /// Wakes the orb thread (an answer from YouTube, a thumbnail).
+    /// Wakes the N4N0 thread (an answer from YouTube, a thumbnail).
     pub(crate) fn wake(&self) {
-        self.orb.lock().unwrap().wake();
+        self.n4n0.lock().unwrap().wake();
     }
 
     /// Shows `text` on the panel (nothing without the prop).
     pub fn say(&self, text: &str) {
-        self.orb.lock().unwrap().show(text);
+        self.n4n0.lock().unwrap().show(text);
     }
 
     /// Shows a short list the owner opened and picks from on the panel, its blocks as fast as the owner's avatar takes
     /// them (N4N0's Call menu).
     pub fn say_quick(&self, text: &str) {
-        self.orb.lock().unwrap().show_quick(text);
+        self.n4n0.lock().unwrap().show_quick(text);
     }
 
-    pub(crate) fn add_line(&self, who: OrbWho, text: impl Into<String>) {
-        self.orb.lock().unwrap().line(who, text);
+    pub(crate) fn add_line(&self, who: N4n0Who, text: impl Into<String>) {
+        self.n4n0.lock().unwrap().line(who, text);
         self.publish();
     }
 
     /// Whether the avatar has parameter `name`, or its parameters are not known (yet).
     fn avatar_has(&self, name: &str) -> bool {
-        let rt = self.orb.lock().unwrap();
+        let rt = self.n4n0.lock().unwrap();
         rt.params.is_empty() || rt.params.contains(name)
     }
 
@@ -967,7 +967,7 @@ impl N4n0 {
         PINNED.with(|cell| {
             let mut cache = cell.borrow_mut();
             if cache.0 != key || cache.1.is_none_or(|t| t.elapsed() >= PINNED_FOR) {
-                let names = self.with_settings(|s| if s.orb.enabled { s.orb.pins.iter().map(|p| p.parameter.clone()).collect() } else { Vec::new() });
+                let names = self.with_settings(|s| if s.n4n0.enabled { s.n4n0.pins.iter().map(|p| p.parameter.clone()).collect() } else { Vec::new() });
                 *cache = (key, Some(Instant::now()), names);
             }
             cache.2.iter().any(|p| p == name)
@@ -977,7 +977,7 @@ impl N4n0 {
     /// Whether `name` is N4N0's own parameter coming back: VRChat echoes every value the app writes (the panel's and the
     /// screen's, hundreds a second while the screen is open), which says nothing new.
     pub fn echo(name: &str) -> bool {
-        use orbiters_orb::menu::screen::local;
+        use orbiters_n4n0_core::menu::screen::local;
         name.starts_with("N4N0/Text/")
             || name == params::STATE
             || (name.starts_with("N4N0/Screen/")
@@ -992,9 +992,9 @@ impl N4n0 {
     }
 
     /// VRChat's mode, the avatar's `N4N0/Screen/Replace` or `N4N0/Screen/ThumbnailBytes` (on the OSC receiving thread):
-    /// where N4N0's menu goes, and what the screen keeps, is looked at again at the orb thread's next step.
+    /// where N4N0's menu goes, and what the screen keeps, is looked at again at the N4N0 thread's next step.
     fn screen_choice(&self, name: &str, value: &OscValue) {
-        let mut rt = self.orb.lock().unwrap();
+        let mut rt = self.n4n0.lock().unwrap();
         if name == params::VR_MODE {
             rt.vr_mode = Some(value.truthy());
         } else if name == params::SCREEN_THUMBNAIL_BYTES {
@@ -1013,12 +1013,12 @@ impl N4n0 {
     /// writes coming back. N4N0's menus show it.
     fn light_parameter(self: &Shared, name: &str, value: &OscValue) {
         {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             // An avatar whose parameters are known and lack the light has none.
             if !rt.params.is_empty() && !rt.params.contains(params::LIGHT) {
                 return;
             }
-            let mut light = rt.light.unwrap_or(orbiters_orb::menu::Light { on: false, color: 0, level: LIGHT_LEVEL_DEFAULT });
+            let mut light = rt.light.unwrap_or(orbiters_n4n0_core::menu::Light { on: false, color: 0, level: LIGHT_LEVEL_DEFAULT });
             match (name, value) {
                 (params::LIGHT, v) => light.on = v.truthy(),
                 (params::LIGHT_COLOR, v) => light.color = int_value(v).map_or(light.color, |c| c.clamp(0, contract::LIGHT_COLORS.len() as i32 - 1) as u8),
@@ -1035,15 +1035,15 @@ impl N4n0 {
     }
 
     /// Sets N4N0's light (N4N0's menu, the assistant): its three parameters, when the avatar's N4N0 has a light.
-    pub(crate) fn set_light(self: &Shared, light: orbiters_orb::menu::Light) -> Result<(), String> {
+    pub(crate) fn set_light(self: &Shared, light: orbiters_n4n0_core::menu::Light) -> Result<(), String> {
         if !self.avatar_has(params::LIGHT) {
             return Err("This avatar's N4N0 has no light: turn Light on for it in My Avatar (N4N0's card), then upload.".into());
         }
         let color = light.color.min(contract::LIGHT_COLORS.len() as u8 - 1);
         let level = light.level.clamp(0.0, 1.0);
         {
-            let mut rt = self.orb.lock().unwrap();
-            rt.light = Some(orbiters_orb::menu::Light { on: light.on, color, level });
+            let mut rt = self.n4n0.lock().unwrap();
+            rt.light = Some(orbiters_n4n0_core::menu::Light { on: light.on, color, level });
             rt.send_now([
                 (parameter(params::LIGHT_COLOR), OscType::Int(color as i32)),
                 (parameter(params::LIGHT_LEVEL), OscType::Float(level)),
@@ -1071,7 +1071,7 @@ impl N4n0 {
         }
         // A hand on a dropped link card (the owner's own, or someone else's): its link is copied.
         if name == params::CARD_TOUCH_L || name == params::CARD_TOUCH_R {
-            if self.avatar_has(name) && self.orb.lock().unwrap().screen.card_touch(name == params::CARD_TOUCH_R, value.truthy(), Instant::now()) {
+            if self.avatar_has(name) && self.n4n0.lock().unwrap().screen.card_touch(name == params::CARD_TOUCH_R, value.truthy(), Instant::now()) {
                 self.queue(|n| n.card_grab());
             }
             return;
@@ -1109,7 +1109,7 @@ impl N4n0 {
                 self.queue(move |n| n.menu_toggled(on));
             }
             "AFK" => {
-                let mut rt = self.orb.lock().unwrap();
+                let mut rt = self.n4n0.lock().unwrap();
                 rt.afk = value.truthy();
                 rt.wake();
             }
@@ -1148,7 +1148,7 @@ impl N4n0 {
                     self.queue(move |n| n.host.walk_boost(v));
                 }
             }
-            "MuteSelf" => self.orb.lock().unwrap().mute_self = value.truthy(),
+            "MuteSelf" => self.n4n0.lock().unwrap().mute_self = value.truthy(),
             "InStation" | "Seated" | "VelocityMagnitude" => self.host.motion(Some((name, value))),
             _ => {
                 // A pinned parameter the avatar moved goes back to its pin. Most parameters are no pin: let go at once,
@@ -1157,15 +1157,15 @@ impl N4n0 {
                     return;
                 }
                 let moved = self.with_settings(|s| {
-                    s.orb.enabled
-                        && s.orb.pins.iter().find(|p| p.parameter == name).is_some_and(|pin| match (&pin.value, value) {
+                    s.n4n0.enabled
+                        && s.n4n0.pins.iter().find(|p| p.parameter == name).is_some_and(|pin| match (&pin.value, value) {
                             (OscValue::Float(a), OscValue::Float(b)) => (a - b).abs() > 0.005,
                             (a, b) => a != b,
                         })
                 });
                 if moved {
                     // From the first change on: one that keeps changing (a radial moving) is put back all the same.
-                    let mut rt = self.orb.lock().unwrap();
+                    let mut rt = self.n4n0.lock().unwrap();
                     rt.pins_due.get_or_insert_with(|| Instant::now() + PIN_DEBOUNCE);
                     rt.wake();
                 }
@@ -1176,15 +1176,15 @@ impl N4n0 {
     /// VRChat loaded an avatar (on the OSC receiving thread, before the app forgets the last avatar's values): what the
     /// carried parameters held on the avatar being left is kept for the new one, which is looked at once it settled.
     pub fn on_avatar(self: &Shared, id: String) {
-        let carried = self.with_settings(|s| s.orb.carry_parameters.clone());
+        let carried = self.with_settings(|s| s.n4n0.carry_parameters.clone());
         let carry: HashMap<String, OscValue> = {
-            let left = self.orb.lock().unwrap().params.clone();
+            let left = self.n4n0.lock().unwrap().params.clone();
             let kept: Vec<&String> = carried.iter().filter(|p| left.contains(*p)).collect();
             let latest = self.osc.latest(&mut kept.iter().map(|p| parameter(p)));
             kept.into_iter().filter_map(|p| latest.get(&parameter(p)).cloned().map(|v| (p.clone(), v))).collect()
         };
         {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             if rt.avatar_id.as_deref() != Some(id.as_str()) {
                 // Another avatar's name is read once it settled.
                 rt.avatar_name = None;
@@ -1202,7 +1202,7 @@ impl N4n0 {
             rt.face_sent = None;
             // The new avatar's parameters are not the old one's, nor its size (a state being applied); the rest still
             // goes (a mute press's release, a picture's camera put back).
-            rt.outbox.retain(|(_, (address, _))| !address.starts_with(PARAMETERS_PREFIX) && address != orbiters_orb::states::EYE_HEIGHT);
+            rt.outbox.retain(|(_, (address, _))| !address.starts_with(PARAMETERS_PREFIX) && address != orbiters_n4n0_core::states::EYE_HEIGHT);
         }
         // The new avatar says how it moves again: until then the walk boost follows the stick alone.
         self.host.motion(None);
@@ -1238,7 +1238,7 @@ impl N4n0 {
         let flag = |name: &str| parameters.iter().find(|(a, _)| a[PARAMETERS_PREFIX.len()..] == *name).map(|(_, v)| v.truthy());
         let (afk, mute_self) = (flag("AFK"), flag("MuteSelf"));
         let manifest = read_manifest(&self.files.avatars, &id);
-        let manifest_screen = manifest.as_ref().and_then(|m| m.orb.as_ref()).is_some_and(|o| o.screen > 0);
+        let manifest_screen = manifest.as_ref().and_then(|m| m.n4n0.as_ref()).is_some_and(|o| o.screen > 0);
         // Where N4N0's menu goes: VRChat's mode (an int, 1 in VR), and N4N0/Screen/Replace.
         let vr_mode = flag(params::VR_MODE);
         let replace = screen_replace(flag(params::SCREEN_REPLACE), manifest.as_ref());
@@ -1250,7 +1250,7 @@ impl N4n0 {
         let default = |name: &str| manifest.as_ref().and_then(|m| m.parameter(name)).map(|p| p.default);
         let screen_version = value(params::SCREEN_VERSION).and_then(int_value).or_else(|| default(params::SCREEN_VERSION).map(|d| d.round() as i32));
         // N4N0's light, as VRChat holds it (else the manifest's defaults).
-        let light = (names.contains(params::LIGHT) || (!known && default(params::LIGHT).is_some())).then(|| orbiters_orb::menu::Light {
+        let light = (names.contains(params::LIGHT) || (!known && default(params::LIGHT).is_some())).then(|| orbiters_n4n0_core::menu::Light {
             on: value(params::LIGHT).is_some_and(OscValue::truthy),
             color: value(params::LIGHT_COLOR).and_then(int_value).or_else(|| default(params::LIGHT_COLOR).map(|d| d.round() as i32)).unwrap_or(0).clamp(0, 7)
                 as u8,
@@ -1263,8 +1263,8 @@ impl N4n0 {
         let synced = names.iter().filter(|n| n.starts_with(params::TEXT_SYNC_PREFIX)).count();
         let sync = if contract::SYNC_COUNTS.contains(&synced) {
             Some(synced)
-        } else if names.contains(params::TEXT_POINTER) || (!known && manifest.as_ref().is_some_and(|m| m.orb.is_some())) {
-            Some(manifest.as_ref().and_then(|m| m.orb.as_ref()).map(|o| o.text_sync as usize).filter(|n| contract::SYNC_COUNTS.contains(n)).unwrap_or(8))
+        } else if names.contains(params::TEXT_POINTER) || (!known && manifest.as_ref().is_some_and(|m| m.n4n0.is_some())) {
+            Some(manifest.as_ref().and_then(|m| m.n4n0.as_ref()).map(|o| o.text_sync as usize).filter(|n| contract::SYNC_COUNTS.contains(n)).unwrap_or(8))
         } else {
             None
         };
@@ -1274,10 +1274,10 @@ impl N4n0 {
         };
         controls.learn_types(parameters.iter().copied());
         // Orbiters - N4N0's own parameters (N4N0's capture kit and camera rig) are never the assistant's.
-        let (pins, enabled, text_step_ms) = self.with_settings(|s| (s.orb.pins.clone(), s.orb.enabled, s.orb.text_step_ms));
+        let (pins, enabled, text_step_ms) = self.with_settings(|s| (s.n4n0.pins.clone(), s.n4n0.enabled, s.n4n0.text_step_ms));
         controls.withhold(&CAPTURE_PARAMETERS);
-        controls.withhold(&orbiters_contracts::orb::input::all().collect::<Vec<_>>());
-        controls.withhold(&orbiters_contracts::orb::mirror::ALL);
+        controls.withhold(&orbiters_contracts::n4n0::input::all().collect::<Vec<_>>());
+        controls.withhold(&orbiters_contracts::n4n0::mirror::ALL);
         let has_gogo = names.iter().any(|n| n.starts_with("Go/"));
         let mut out: Vec<Message> =
             carry.iter().filter(|(p, _)| names.contains(*p) && (p.as_str() != "VRCEmote" || has_gogo)).map(|(p, v)| (parameter(p), osc_arg(v))).collect();
@@ -1285,7 +1285,7 @@ impl N4n0 {
             out.extend(pin_messages(&pins, &names));
         }
         {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             // A newer avatar change came meanwhile: its own look follows.
             if rt.avatar_id.as_ref().is_some_and(|current| *current != id) {
                 return;
@@ -1301,7 +1301,7 @@ impl N4n0 {
             let capable = rt.params.contains(contract::card::OUT);
             rt.screen.set_card_capable(capable);
             rt.manifest = manifest.is_some();
-            rt.n4n0_version = manifest.as_ref().and_then(|m| m.orb.as_ref()).and_then(|o| o.version.clone());
+            rt.n4n0_version = manifest.as_ref().and_then(|m| m.n4n0.as_ref()).and_then(|o| o.version.clone());
             rt.controls = controls;
             rt.tree_unknown = !known;
             match sync {
@@ -1321,7 +1321,7 @@ impl N4n0 {
             if known || manifest.is_some() {
                 // The projected screen: its local pointer is listed, or the manifest says so. Whether it shows the menu
                 // is VRChat's mode and N4N0/Screen/Replace.
-                rt.screen_present = rt.params.contains(orbiters_orb::menu::screen::local::POINTER) || manifest_screen;
+                rt.screen_present = rt.params.contains(orbiters_n4n0_core::menu::screen::local::POINTER) || manifest_screen;
                 rt.screen_sync = sync;
                 rt.screen_replace = replace;
                 rt.screen_thumbnail = thumbnail;
@@ -1354,7 +1354,7 @@ impl N4n0 {
             std::thread::spawn(move || {
                 std::thread::sleep(TREE_RETRY * 2u32.pow(attempt));
                 // Unless another avatar came meanwhile, which is looked at on its own.
-                if n.orb.lock().unwrap().avatar_id.as_deref() == Some(id.as_str()) {
+                if n.n4n0.lock().unwrap().avatar_id.as_deref() == Some(id.as_str()) {
                     n.refresh_avatar(Some(id), carry, attempt + 1);
                 }
             });
@@ -1364,7 +1364,7 @@ impl N4n0 {
     /// The avatar menu's Talk button (or the window's, or the overlay's), pressed or let go. Letting go ends the
     /// sentence: the worker transcribes it and answers that listen by its number ([`N4n0::heard`]).
     pub(crate) fn talk(self: &Shared, down: bool, source: Source) {
-        let settings = self.with_settings(|s| s.orb.clone());
+        let settings = self.with_settings(|s| s.n4n0.clone());
         if !settings.enabled || !settings.assistant {
             return;
         }
@@ -1372,7 +1372,7 @@ impl N4n0 {
             if !self.can_listen() {
                 return;
             }
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             if rt.listening.is_some_and(|(s, _)| s == source) {
                 // Pressed again while held (a repeated message): still the same sentence.
                 return;
@@ -1383,19 +1383,19 @@ impl N4n0 {
                 let now = Instant::now();
                 rt.send_at(now, [("/input/Voice".to_string(), OscType::Int(1))]);
                 rt.send_at(now + VOICE_PRESS, [("/input/Voice".to_string(), OscType::Int(0))]);
-                rt.muted_by_orb = true;
+                rt.muted_by_n4n0 = true;
             }
             drop(rt);
             self.voice_listen(source);
         } else {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             let held = rt.listening.is_some_and(|(s, _)| s == source);
             if held {
                 rt.listening = None;
             }
             // Unmute only what N4N0 muted (in push-to-talk mode the press never muted anything), even when the
             // sentence ended on its own meanwhile (its time limit, the worker stopping).
-            if source == Source::Menu && std::mem::take(&mut rt.muted_by_orb) && rt.mute_self {
+            if source == Source::Menu && std::mem::take(&mut rt.muted_by_n4n0) && rt.mute_self {
                 let now = Instant::now();
                 rt.send_at(now + Duration::from_millis(150), [("/input/Voice".to_string(), OscType::Int(1))]);
                 rt.send_at(now + Duration::from_millis(150) + VOICE_PRESS, [("/input/Voice".to_string(), OscType::Int(0))]);
@@ -1418,7 +1418,7 @@ impl N4n0 {
     pub fn link_closed(self: &Shared, overlay: bool) {
         let source = if overlay { Source::Overlay } else { Source::Window };
         let held = {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             let held = rt.listening.is_some_and(|(s, _)| s == source);
             if held {
                 rt.listening = None;
@@ -1442,47 +1442,47 @@ impl N4n0 {
             std::thread::spawn(move || n.host.call(CallRequest::Answer));
             return;
         }
-        let settings = self.with_settings(|s| s.orb.clone());
+        let settings = self.with_settings(|s| s.n4n0.clone());
         // N4N0's menu opens (on the avatar's screen or in the overlay) and N4N0 listens; touched again, it closes.
         if settings.enabled && settings.menu.touch {
             self.menu_open(true);
             return;
         }
-        if !settings.enabled || !settings.assistant || self.orb.lock().unwrap().listening.is_some() || !self.can_listen() {
+        if !settings.enabled || !settings.assistant || self.n4n0.lock().unwrap().listening.is_some() || !self.can_listen() {
             return;
         }
-        self.orb.lock().unwrap().listening = Some((Source::Touch, Instant::now()));
+        self.n4n0.lock().unwrap().listening = Some((Source::Touch, Instant::now()));
         self.voice_listen(Source::Touch);
         self.publish();
     }
 
     /// Whether N4N0 can listen: the speech models are installed. When not, the panel says how to get them (once).
     fn can_listen(self: &Shared) -> bool {
-        let mut rt = self.orb.lock().unwrap();
+        let mut rt = self.n4n0.lock().unwrap();
         if rt.voice.installed {
             return true;
         }
         if !rt.voice_hint_shown {
             rt.voice_hint_shown = true;
-            rt.line(OrbWho::Note, "N4N0 cannot hear yet: install its speech models in Orbiters - N4N0 › N4N0.");
+            rt.line(N4n0Who::Note, "N4N0 cannot hear yet: install its speech models in Orbiters - N4N0 › N4N0.");
             rt.show("I can't hear you yet: install my ears in Orbiters - N4N0 > N4N0.");
         }
         false
     }
 
-    /// A sentence the voice worker heard: the one N4N0 listened for (`for_orb`; `current` when it answers the latest
+    /// A sentence the voice worker heard: the one N4N0 listened for (`for_n4n0`; `current` when it answers the latest
     /// listen, which ends N4N0's listening), or one heard while the wake word is on. The sentence a held Talk button
     /// asked for arrives after the button was let go: it counts whatever the listening slot says by then.
-    pub(crate) fn heard(self: &Shared, text: String, for_orb: bool, current: bool) {
+    pub(crate) fn heard(self: &Shared, text: String, for_n4n0: bool, current: bool) {
         let (on, wake_word, wake_words, menu_wake) =
-            self.with_settings(|s| (s.orb.enabled && s.orb.assistant, s.orb.wake_word, s.orb.wake_words.clone(), s.orb.menu.wake_word));
+            self.with_settings(|s| (s.n4n0.enabled && s.n4n0.assistant, s.n4n0.wake_word, s.n4n0.wake_words.clone(), s.n4n0.menu.wake_word));
         if !on {
             return;
         }
         let text = text.trim().to_string();
-        if for_orb {
+        if for_n4n0 {
             if current {
-                self.orb.lock().unwrap().listening = None;
+                self.n4n0.lock().unwrap().listening = None;
             }
             self.publish();
             // The answer to what N4N0 asked to do comes first; a menu's search page takes the rest as what to search for.
@@ -1492,14 +1492,14 @@ impl N4n0 {
             return;
         }
         if wake_word {
-            match orbiters_orb::wake::command(&text, &wake_words) {
+            match orbiters_n4n0_core::wake::command(&text, &wake_words) {
                 Some(command) if command.is_empty() && menu_wake => {
                     // Only the name: N4N0's menu opens and N4N0 listens to the next sentence.
                     self.menu_open(false);
                 }
                 Some(command) if command.is_empty() => {
                     // Only the name: N4N0 listens to the next sentence.
-                    self.orb.lock().unwrap().listening = Some((Source::WakeWord, Instant::now()));
+                    self.n4n0.lock().unwrap().listening = Some((Source::WakeWord, Instant::now()));
                     self.voice_listen(Source::WakeWord);
                     self.publish();
                 }
@@ -1509,10 +1509,10 @@ impl N4n0 {
         }
     }
 
-    /// Sends one avatar parameter to VRChat from the orb thread (never from the OSC receiving thread): the walk boost's
+    /// Sends one avatar parameter to VRChat from the N4N0 thread (never from the OSC receiving thread): the walk boost's
     /// strength the app's slider set, for the avatar's radial.
     pub fn send_parameter(&self, name: &str, value: OscType) {
-        self.orb.lock().unwrap().send_now([(parameter(name), value)]);
+        self.n4n0.lock().unwrap().send_now([(parameter(name), value)]);
     }
 
     /// The owner's sentence after N4N0 asked to do something (`true`: it was the answer): a yes does it, a no drops it.
@@ -1520,7 +1520,7 @@ impl N4n0 {
     fn answer(self: &Shared, text: &str) -> bool {
         let reply = policy::reply(text);
         let pending = {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             if rt.pending.is_empty() {
                 return false;
             }
@@ -1532,8 +1532,8 @@ impl N4n0 {
             Some(true) => self.confirmed(pending),
             Some(false) | None => {
                 let what: Vec<String> = pending.into_iter().map(|p| p.what).collect();
-                let mut rt = self.orb.lock().unwrap();
-                rt.line(OrbWho::Note, format!("Not done: {}", what.join("; ")));
+                let mut rt = self.n4n0.lock().unwrap();
+                rt.line(N4n0Who::Note, format!("Not done: {}", what.join("; ")));
                 let why = if reply.is_some() { "said no" } else { "asked something else" };
                 rt.notes.push(format!("Since your last answer the owner {why}: Orbiters - N4N0 did not {}.", what.join(", nor ")));
                 if reply.is_some() {
@@ -1555,13 +1555,13 @@ impl N4n0 {
                 Err(e) => failed.push(format!("{} ({e})", p.what)),
             }
         }
-        let mut rt = self.orb.lock().unwrap();
+        let mut rt = self.n4n0.lock().unwrap();
         if !done.is_empty() {
-            rt.line(OrbWho::Note, format!("Done: {}", done.join("; ")));
+            rt.line(N4n0Who::Note, format!("Done: {}", done.join("; ")));
             rt.notes.push(format!("Since your last answer the owner said yes, and Orbiters - N4N0 did: {}.", done.join(", ")));
         }
         if !failed.is_empty() {
-            rt.line(OrbWho::Error, format!("Not done: {}", failed.join("; ")));
+            rt.line(N4n0Who::Error, format!("Not done: {}", failed.join("; ")));
             rt.notes.push(format!("Since your last answer the owner said yes, but Orbiters - N4N0 could not: {}.", failed.join(", ")));
         }
         rt.show(if failed.is_empty() { "Done." } else { "I couldn't do it: see Orbiters - N4N0." });
@@ -1576,7 +1576,7 @@ impl N4n0 {
             Command::Talk { down } => self.talk(down, Source::Window),
             Command::Say { text } => {
                 let shown = {
-                    let mut rt = self.orb.lock().unwrap();
+                    let mut rt = self.n4n0.lock().unwrap();
                     rt.show(&text);
                     rt.sender.is_some()
                 };
@@ -1586,7 +1586,7 @@ impl N4n0 {
             }
             Command::HidePanel => self.hide_panel(),
             Command::NewConversation => {
-                let mut rt = self.orb.lock().unwrap();
+                let mut rt = self.n4n0.lock().unwrap();
                 rt.conversation.clear();
                 rt.lines.clear();
                 rt.confirmations.clear();
@@ -1602,7 +1602,7 @@ impl N4n0 {
             Command::SaveVideo => {
                 let n = self.clone();
                 std::thread::spawn(move || match n.save_video() {
-                    Ok(video) => n.add_line(OrbWho::Note, format!("Saved {}", video.title.as_deref().unwrap_or(&video.url))),
+                    Ok(video) => n.add_line(N4n0Who::Note, format!("Saved {}", video.title.as_deref().unwrap_or(&video.url))),
                     Err(e) => n.notify(NoticeKind::Warning, e),
                 });
             }
@@ -1629,7 +1629,7 @@ impl N4n0 {
                 if let Some(id) = url.strip_prefix(LOCAL_APPROVAL).and_then(|n| n.parse::<u64>().ok()) {
                     // The owner approved, in the window, what N4N0 asked to do.
                     let pending = {
-                        let mut rt = self.orb.lock().unwrap();
+                        let mut rt = self.n4n0.lock().unwrap();
                         let current = rt.pending_id == id && !rt.pending.is_empty();
                         rt.confirmations.retain(|c| !c.approve_url.starts_with(LOCAL_APPROVAL));
                         if current {
@@ -1655,7 +1655,7 @@ impl N4n0 {
             Command::InstallVoice => self.voice_install(),
             Command::CancelVoiceInstall => self.voice_cancel_install(),
             Command::TestFace { face } => {
-                let mut rt = self.orb.lock().unwrap();
+                let mut rt = self.n4n0.lock().unwrap();
                 rt.test_cycle = None;
                 rt.test_face = face;
             }
@@ -1665,14 +1665,14 @@ impl N4n0 {
             Command::MuteCall { on } => self.host.call(CallRequest::Mute(on)),
             Command::Photo3D => self.photo_3d_now(),
             Command::TestCycle => {
-                let mut rt = self.orb.lock().unwrap();
+                let mut rt = self.n4n0.lock().unwrap();
                 rt.test_cycle = Some(Instant::now());
-                rt.test_face = Some(OrbFace::ALL[0]);
+                rt.test_face = Some(N4n0Face::ALL[0]);
             }
-            Command::TestAfk { on } => self.orb.lock().unwrap().test_afk = on,
+            Command::TestAfk { on } => self.n4n0.lock().unwrap().test_afk = on,
             Command::TestTouch => self.touch(),
             Command::MenuState { open, dictation, keyboard } => {
-                self.orb.lock().unwrap().screen.overlay_keyboard = open && keyboard;
+                self.n4n0.lock().unwrap().screen.overlay_keyboard = open && keyboard;
                 self.menu_overlay_state(open, dictation)
             }
             Command::Tracking { on, levels } => self.update_settings(|s| {
@@ -1695,17 +1695,17 @@ impl N4n0 {
             Command::ToggleScreen => self.menu_open(true),
             Command::Photo3DIn { seconds } => self.photo_3d_in(seconds),
             Command::Light { on, color, level } => {
-                if let Err(e) = self.set_light(orbiters_orb::menu::Light { on, color, level }) {
+                if let Err(e) = self.set_light(orbiters_n4n0_core::menu::Light { on, color, level }) {
                     self.notify(NoticeKind::Warning, e);
                 }
             }
             Command::TestPictures { on } => {
-                let mut rt = self.orb.lock().unwrap();
+                let mut rt = self.n4n0.lock().unwrap();
                 rt.screen.pictures_diagnostics = on;
                 rt.wake();
             }
             Command::TestVisible { on } => {
-                let mut rt = self.orb.lock().unwrap();
+                let mut rt = self.n4n0.lock().unwrap();
                 rt.test_hidden = !on;
                 rt.outbox.push((Instant::now(), (parameter(params::VISIBLE), OscType::Bool(on))));
             }
@@ -1713,14 +1713,14 @@ impl N4n0 {
             Command::Drop { link, title, video } => self.card_drop(link, title, video),
             Command::TakeBack => self.card_take_back(),
             Command::Input { pads } => {
-                // Up to 30 a second: the orb thread sends them at once, nothing is published.
-                let mut rt = self.orb.lock().unwrap();
+                // Up to 30 a second: the N4N0 thread sends them at once, nothing is published.
+                let mut rt = self.n4n0.lock().unwrap();
                 rt.input.heard(pads, Instant::now());
                 rt.wake();
                 return;
             }
             Command::Trigger { right, down } => {
-                let mut rt = self.orb.lock().unwrap();
+                let mut rt = self.n4n0.lock().unwrap();
                 rt.screen.trigger(right, down);
                 if rt.screen.menu.open {
                     rt.wake();
@@ -1733,7 +1733,7 @@ impl N4n0 {
 
     /// Takes the panel down (an interface's Hide, the call menu closing).
     pub fn hide_panel(&self) {
-        let mut rt = self.orb.lock().unwrap();
+        let mut rt = self.n4n0.lock().unwrap();
         rt.afk_showing = false;
         if let Some(s) = rt.sender.as_mut() {
             s.hide();
@@ -1746,22 +1746,22 @@ impl N4n0 {
         if text.is_empty() || self.answer(&text) {
             return;
         }
-        if !self.with_settings(|s| s.orb.enabled && s.orb.assistant) {
-            self.add_line(OrbWho::Note, "N4N0's assistant is off: turn it on in Orbiters - N4N0 › N4N0.");
+        if !self.with_settings(|s| s.n4n0.enabled && s.n4n0.assistant) {
+            self.add_line(N4n0Who::Note, "N4N0's assistant is off: turn it on in Orbiters - N4N0 › N4N0.");
             return;
         }
         let Some((api, token)) = self.host.account() else {
-            let mut rt = self.orb.lock().unwrap();
-            rt.line(OrbWho::Error, "Sign in to Orbiters to talk to N4N0.");
+            let mut rt = self.n4n0.lock().unwrap();
+            rt.line(N4n0Who::Error, "Sign in to Orbiters to talk to N4N0.");
             rt.show("Sign in to Orbiters - N4N0 to talk to me.");
             drop(rt);
             self.publish();
             return;
         };
         let (id, cancel) = {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             if rt.turn.is_some() {
-                rt.line(OrbWho::Note, "N4N0 is still answering the last one.");
+                rt.line(N4n0Who::Note, "N4N0 is still answering the last one.");
                 drop(rt);
                 self.publish();
                 return;
@@ -1770,12 +1770,12 @@ impl N4n0 {
             let (id, cancel) = (rt.turns, Arc::new(AtomicBool::new(false)));
             rt.turn = Some(Turn { id, cancel: cancel.clone() });
             rt.mood = None;
-            rt.line(OrbWho::You, text.clone());
+            rt.line(N4n0Who::You, text.clone());
             (id, cancel)
         };
         self.publish();
         let n = self.clone();
-        let _ = std::thread::Builder::new().name("orb-turn".into()).spawn(move || n.turn(api, token, text, via, id, cancel));
+        let _ = std::thread::Builder::new().name("n4n0-turn".into()).spawn(move || n.turn(api, token, text, via, id, cancel));
     }
 
     /// One turn (number `id`): requests and tool rounds until an answer, on the conversation as it was when the turn
@@ -1783,7 +1783,7 @@ impl N4n0 {
     /// at the next turn), and a turn New conversation stopped shows nothing.
     fn turn(self: Shared, api: Api, token: String, text: String, via: &'static str, id: u64, cancel: Arc<AtomicBool>) {
         let (mut conversation, generation, notes) = {
-            let rt = self.orb.lock().unwrap();
+            let rt = self.n4n0.lock().unwrap();
             (rt.conversation.clone(), rt.generation, rt.notes.len())
         };
         let mut input = Some(Input { text: assistant::utf16_prefix(&text, assistant::INPUT_UNITS).to_string(), via });
@@ -1796,7 +1796,7 @@ impl N4n0 {
                 break Err(anyhow::anyhow!("cancelled"));
             }
             let (tools, display) = {
-                let rt = self.orb.lock().unwrap();
+                let rt = self.n4n0.lock().unwrap();
                 let bare = !rt.manifest && !rt.controls.is_empty();
                 (tools::specs(bare), rt.sender.is_some())
             };
@@ -1813,14 +1813,14 @@ impl N4n0 {
                 Event::Text(t) => answer.push_str(&t),
                 Event::Tool { name, phase } => {
                     if phase == "running" {
-                        self.add_line(OrbWho::Note, format!("N4N0: {}…", tool_words(&name)));
+                        self.add_line(N4n0Who::Note, format!("N4N0: {}…", tool_words(&name)));
                     }
                 }
                 Event::Confirmation(c) => {
-                    let mut rt = self.orb.lock().unwrap();
-                    rt.line(OrbWho::Note, format!("Waiting for your approval on Orbiters: {}", if c.title.is_empty() { &c.summary } else { &c.title }));
+                    let mut rt = self.n4n0.lock().unwrap();
+                    rt.line(N4n0Who::Note, format!("Waiting for your approval on Orbiters: {}", if c.title.is_empty() { &c.summary } else { &c.title }));
                     rt.confirmations.retain(|x| x.id != c.id);
-                    rt.confirmations.push(OrbConfirmation { id: c.id, title: c.title, summary: c.summary, approve_url: c.approve_url });
+                    rt.confirmations.push(N4n0Confirmation { id: c.id, title: c.title, summary: c.summary, approve_url: c.approve_url });
                     drop(rt);
                     self.notify(NoticeKind::Info, "N4N0 prepared something that needs your approval: see Orbiters - N4N0 › N4N0.");
                 }
@@ -1829,7 +1829,7 @@ impl N4n0 {
                 Err(e) => break Err(e),
                 Ok(done) => {
                     if done.quota.is_some() {
-                        self.orb.lock().unwrap().quota = done.quota;
+                        self.n4n0.lock().unwrap().quota = done.quota;
                     }
                     // `send` returns no answer without its conversation.
                     conversation = done.messages.unwrap_or_default();
@@ -1850,7 +1850,7 @@ impl N4n0 {
                 }
             }
         };
-        let mut rt = self.orb.lock().unwrap();
+        let mut rt = self.n4n0.lock().unwrap();
         if rt.turn.as_ref().is_none_or(|t| t.id != id) || rt.generation != generation {
             // New conversation stopped it: nothing of it comes back.
             return;
@@ -1865,7 +1865,7 @@ impl N4n0 {
                 let whats: Vec<String> = tools_run.waiting.iter().map(|p| p.what.clone()).collect();
                 let question = policy::question(&whats);
                 if !shown.is_empty() {
-                    rt.line(OrbWho::Orb, shown.clone());
+                    rt.line(N4n0Who::N4n0, shown.clone());
                 }
                 if !tools_run.waiting.is_empty() {
                     // The app's own question, last: what a yes does is what it says, whatever the answer said.
@@ -1873,9 +1873,9 @@ impl N4n0 {
                     let n = rt.pending_id;
                     rt.pending = tools_run.waiting;
                     rt.pending_at = Some(Instant::now());
-                    rt.line(OrbWho::Note, question.clone());
-                    rt.confirmations.push(OrbConfirmation {
-                        id: format!("orb-{n}"),
+                    rt.line(N4n0Who::Note, question.clone());
+                    rt.confirmations.push(N4n0Confirmation {
+                        id: format!("n4n0-{n}"),
                         title: "N4N0 asks".into(),
                         summary: format!("{question} (or say yes or no)"),
                         approve_url: format!("{LOCAL_APPROVAL}{n}"),
@@ -1893,7 +1893,7 @@ impl N4n0 {
                     rt.notes.push(format!("Your last answer did not arrive; before that, Orbiters - N4N0 did: {}.", tools_run.done.join(", ")));
                 }
                 let message = e.downcast_ref::<AssistantError>().map(|a| a.message.clone()).unwrap_or_else(|| format!("N4N0 could not answer: {e:#}"));
-                rt.line(OrbWho::Error, message.clone());
+                rt.line(N4n0Who::Error, message.clone());
                 rt.show(&message);
             }
         }
@@ -1901,7 +1901,7 @@ impl N4n0 {
         self.publish();
     }
 
-    /// The app quits: N4N0's ears stop, the orb thread ends with a turn under way, and N4N0's projected screen and its
+    /// The app quits: N4N0's ears stop, the N4N0 thread ends with a turn under way, and N4N0's projected screen and its
     /// Menu toggle are turned off over OSC (best effort, one datagram), so the avatar's screen does not stay open with
     /// nothing left to drive it once the app is gone. Called while OSC still runs.
     pub fn shutdown(&self) {
@@ -1913,7 +1913,7 @@ impl N4n0 {
     /// N4N0's projected screen and its Menu toggle turned off, whatever the avatar is known to have: VRChat leaves out
     /// parameters an avatar lacks.
     fn close_on_quit(&self) {
-        self.orb.lock().unwrap().screen.quit();
+        self.n4n0.lock().unwrap().screen.quit();
         // The card goes back too: nobody could take its link from the app any more.
         let off = [
             (parameter(contract::card::OUT), OscType::Bool(false)),
@@ -1927,9 +1927,9 @@ impl N4n0 {
         }
     }
 
-    /// Ends the orb thread, and a turn under way.
+    /// Ends the N4N0 thread, and a turn under way.
     fn stop(&self) {
-        let mut rt = self.orb.lock().unwrap();
+        let mut rt = self.n4n0.lock().unwrap();
         rt.stop = true;
         if let Some(turn) = rt.turn.take() {
             turn.cancel.store(true, Ordering::Relaxed);
@@ -1946,9 +1946,9 @@ impl N4n0 {
     fn moment(&self) -> Moment {
         let running = self.host.scene().vrchat;
         let world = self.host.world();
-        let addresses = self.orb.lock().unwrap().controls.addresses();
+        let addresses = self.n4n0.lock().unwrap().controls.addresses();
         let latest = self.osc_latest(addresses);
-        let rt = self.orb.lock().unwrap();
+        let rt = self.n4n0.lock().unwrap();
         let last_video = world.last_video.as_ref().map(|v| {
             let title = rt.videos.videos.iter().find(|s| videos::canonical(&s.url) == videos::canonical(&v.url)).and_then(|s| s.title.clone());
             (v.url.clone(), title)
@@ -1958,7 +1958,7 @@ impl N4n0 {
             world_name: world.in_world.then(|| world.world_name.clone()).flatten(),
             others: world.others(),
             avatar_name: rt.avatar_name.clone().or_else(|| world.avatar_name.clone()),
-            orb_prop: rt.sender.is_some(),
+            n4n0_prop: rt.sender.is_some(),
             afk: rt.afk,
             last_video,
             controls: rt.controls.summary(&latest, CONTROLS_CHARS),
@@ -2010,7 +2010,7 @@ impl N4n0 {
     /// The control an action names, as the policy looks at it (its path, its nsfw tag), when the avatar has it.
     fn named_control(&self, action: &Action) -> Option<policy::Control> {
         let (Action::SetControl { control, .. } | Action::Hold { control, .. }) = action else { return None };
-        let rt = self.orb.lock().unwrap();
+        let rt = self.n4n0.lock().unwrap();
         let found = rt.controls.find(control).ok()?;
         Some(policy::Control { path: found.path_text(), nsfw: found.tags.contains(&Tag::Nsfw) })
     }
@@ -2024,24 +2024,24 @@ impl N4n0 {
                     (Some(false), None) => Setting::Off,
                     (None, None) => Setting::Press,
                 };
-                let mut rt = self.orb.lock().unwrap();
+                let mut rt = self.n4n0.lock().unwrap();
                 let found = rt.controls.find(&control)?.clone();
                 let plan = rt.controls.plan(&found, setting)?;
                 rt.send_now(plan.now);
                 rt.send_at(Instant::now() + BUTTON_RELEASE, plan.later);
-                rt.line(OrbWho::Note, format!("N4N0 set {}", found.path_text()));
+                rt.line(N4n0Who::Note, format!("N4N0 set {}", found.path_text()));
                 Ok(json!({ "done": true, "control": found.path_text() }))
             }
             Action::SetParameter { name, value } => {
-                let mut rt = self.orb.lock().unwrap();
+                let mut rt = self.n4n0.lock().unwrap();
                 let found = rt.controls.find(&name)?.clone();
                 let plan = rt.controls.plan(&found, Setting::Value(value))?;
                 rt.send_now(plan.now);
-                rt.line(OrbWho::Note, format!("N4N0 set {}", found.path_text()));
+                rt.line(N4n0Who::Note, format!("N4N0 set {}", found.path_text()));
                 Ok(json!({ "done": true, "parameter": found.path_text() }))
             }
             Action::FindControls { query } => {
-                let found: Vec<orbiters_orb::controls::Control> = self.orb.lock().unwrap().controls.search(&query, 25).into_iter().cloned().collect();
+                let found: Vec<orbiters_n4n0_core::controls::Control> = self.n4n0.lock().unwrap().controls.search(&query, 25).into_iter().cloned().collect();
                 if found.is_empty() {
                     return Err(format!("No control of this avatar matches {}.", context::quoted(&query, NAME_CHARS)));
                 }
@@ -2049,7 +2049,7 @@ impl N4n0 {
                 let list: Vec<Value> = found
                     .iter()
                     .map(|c| {
-                        let state = orbiters_orb::controls::state_of(c, &latest);
+                        let state = orbiters_n4n0_core::controls::state_of(c, &latest);
                         json!({ "control": context::data(&c.path_text(), context::PATH_CHARS), "kind": c.kind.word(), "state": state })
                     })
                     .collect();
@@ -2057,7 +2057,7 @@ impl N4n0 {
             }
             Action::Hold { control, on, value, release } => {
                 let (target, plan) = {
-                    let rt = self.orb.lock().unwrap();
+                    let rt = self.n4n0.lock().unwrap();
                     let found = rt.controls.find(&control)?.clone();
                     let setting = match (on, value) {
                         (_, Some(v)) => Setting::Value(v),
@@ -2071,14 +2071,14 @@ impl N4n0 {
                     None
                 } else {
                     let value = plan.now.first().and_then(|(_, arg)| osc_value(arg)).ok_or("Nothing to hold.")?;
-                    self.orb.lock().unwrap().send_now(plan.now);
+                    self.n4n0.lock().unwrap().send_now(plan.now);
                     Some(Pin { parameter: target.clone(), value })
                 };
                 self.update_settings(|s| {
-                    s.orb.pins.retain(|p| p.parameter != target);
-                    s.orb.pins.extend(pin);
+                    s.n4n0.pins.retain(|p| p.parameter != target);
+                    s.n4n0.pins.extend(pin);
                 });
-                self.add_line(OrbWho::Note, if release { format!("N4N0 let go of {target}") } else { format!("N4N0 holds {target}") });
+                self.add_line(N4n0Who::Note, if release { format!("N4N0 let go of {target}") } else { format!("N4N0 holds {target}") });
                 Ok(json!({ "done": true, "held": !release, "parameter": target }))
             }
             Action::TakePhoto { delay_seconds } => self.photo(delay_seconds),
@@ -2086,7 +2086,7 @@ impl N4n0 {
                 self.save_video().map(|v| json!({ "saved": context::data(&v.url, URL_CHARS), "title": v.title.as_deref().map(|t| context::data(t, NAME_CHARS)) }))
             }
             Action::ListSavedVideos => {
-                let rt = self.orb.lock().unwrap();
+                let rt = self.n4n0.lock().unwrap();
                 let data = |text: &Option<String>| text.as_deref().map(|t| context::data(t, NAME_CHARS));
                 let list: Vec<Value> = rt
                     .videos
@@ -2099,19 +2099,19 @@ impl N4n0 {
             }
             Action::CopyToClipboard { text } => {
                 self.device.clipboard.copy(&text)?;
-                self.add_line(OrbWho::Note, format!("N4N0 copied: {}", context::data(&text, 200)));
+                self.add_line(N4n0Who::Note, format!("N4N0 copied: {}", context::data(&text, 200)));
                 Ok(json!({ "copied": true }))
             }
             Action::SetAfkMessage { text, enabled } => {
                 let (mut message, mut on) = (String::new(), false);
                 self.update_settings(|s| {
                     if let Some(text) = text {
-                        s.orb.afk_message = text;
+                        s.n4n0.afk_message = text;
                     }
                     if let Some(enabled) = enabled {
-                        s.orb.afk_message_enabled = enabled;
+                        s.n4n0.afk_message_enabled = enabled;
                     }
-                    (message, on) = (s.orb.afk_message.clone(), s.orb.afk_message_enabled);
+                    (message, on) = (s.n4n0.afk_message.clone(), s.n4n0.afk_message_enabled);
                 });
                 Ok(json!({ "afk_message": message, "enabled": on }))
             }
@@ -2121,7 +2121,7 @@ impl N4n0 {
                 let command = command.or_else(|| {
                     let change = volume_change?;
                     let now = before.volume.map_or(50, |v| v.percent) as i32;
-                    Some(orbiters_orb::menu::MediaCommand::Volume((now + change as i32).clamp(0, 100) as u8))
+                    Some(orbiters_n4n0_core::menu::MediaCommand::Volume((now + change as i32).clamp(0, 100) as u8))
                 });
                 if let Some(command) = command {
                     media.command(command);
@@ -2138,7 +2138,7 @@ impl N4n0 {
                     })
                 });
                 if let Some(command) = command {
-                    self.add_line(OrbWho::Note, format!("N4N0: music {}", media_word(command)));
+                    self.add_line(N4n0Who::Note, format!("N4N0: music {}", media_word(command)));
                 }
                 Ok(json!({
                     "playing": playing,
@@ -2148,30 +2148,30 @@ impl N4n0 {
                 }))
             }
             Action::Light { on, color, level } => {
-                let now = self.orb.lock().unwrap().light;
+                let now = self.n4n0.lock().unwrap().light;
                 let Some(now) =
-                    now.or_else(|| self.avatar_has(params::LIGHT).then_some(orbiters_orb::menu::Light { on: false, color: 0, level: LIGHT_LEVEL_DEFAULT }))
+                    now.or_else(|| self.avatar_has(params::LIGHT).then_some(orbiters_n4n0_core::menu::Light { on: false, color: 0, level: LIGHT_LEVEL_DEFAULT }))
                 else {
                     return Err("This avatar's N4N0 has no light: the owner can turn Light on for it in My Avatar (N4N0's card), then upload.".into());
                 };
                 // A colour or a brightness alone turns it on, as in N4N0's menu.
-                let light = orbiters_orb::menu::Light {
+                let light = orbiters_n4n0_core::menu::Light {
                     on: on.unwrap_or(now.on || color.is_some() || level.is_some()),
                     color: color.unwrap_or(now.color),
                     level: level.unwrap_or(now.level),
                 };
                 self.set_light(light)?;
                 let name = contract::LIGHT_COLORS.get(light.color as usize).map_or("", |c| c.0);
-                self.add_line(OrbWho::Note, if light.on { format!("N4N0's light: {name}") } else { "N4N0's light: off".into() });
+                self.add_line(N4n0Who::Note, if light.on { format!("N4N0's light: {name}") } else { "N4N0's light: off".into() });
                 Ok(json!({ "on": light.on, "color": name.to_lowercase(), "brightness": light.level }))
             }
             Action::Mood { mood } => {
-                self.orb.lock().unwrap().mood = Some(match mood {
-                    Mood::Neutral => OrbFace::Talking,
-                    Mood::Happy => OrbFace::Happy,
-                    Mood::Annoyed => OrbFace::Annoyed,
-                    Mood::Surprised => OrbFace::Surprised,
-                    Mood::Sleepy => OrbFace::Sleeping,
+                self.n4n0.lock().unwrap().mood = Some(match mood {
+                    Mood::Neutral => N4n0Face::Talking,
+                    Mood::Happy => N4n0Face::Happy,
+                    Mood::Annoyed => N4n0Face::Annoyed,
+                    Mood::Surprised => N4n0Face::Surprised,
+                    Mood::Sleepy => N4n0Face::Sleeping,
                 });
                 Ok(json!({ "done": true }))
             }
@@ -2194,7 +2194,7 @@ impl N4n0 {
         let now = Instant::now();
         let open = if before == Some(1) { Duration::ZERO } else { Duration::from_millis(800) };
         let shot = now + open + Duration::from_secs(delay_seconds as u64);
-        let mut rt = self.orb.lock().unwrap();
+        let mut rt = self.n4n0.lock().unwrap();
         if before != Some(1) {
             rt.send_at(now, [("/usercamera/Mode".to_string(), OscType::Int(1))]);
         }
@@ -2202,7 +2202,7 @@ impl N4n0 {
         if before != Some(1) {
             rt.send_at(shot + Duration::from_millis(1500), [("/usercamera/Mode".to_string(), OscType::Int(before.unwrap_or(0)))]);
         }
-        rt.line(OrbWho::Note, if delay_seconds > 0 { format!("N4N0 takes a picture in {delay_seconds} s") } else { "N4N0 takes a picture".to_string() });
+        rt.line(N4n0Who::Note, if delay_seconds > 0 { format!("N4N0 takes a picture in {delay_seconds} s") } else { "N4N0 takes a picture".to_string() });
         Ok(json!({ "done": true, "in_seconds": delay_seconds }))
     }
 
@@ -2212,7 +2212,7 @@ impl N4n0 {
         let seen = world.last_video.ok_or("No video played in this world yet.")?;
         let title = videos::youtube_title(&seen.url);
         let video = SavedVideo { url: seen.url, title, world: world.world_name, saved_utc: orbiters_core::now_utc_iso() };
-        // Written outside the orb's lock: the screen's steps (every 14 ms) never wait for the disk.
+        // Written outside the N4N0's lock: the screen's steps (every 14 ms) never wait for the disk.
         let list = self.videos_writable().map(|mut rt| rt.videos.add(video.clone()).then(|| rt.videos.clone()))?;
         if let Some(list) = list {
             list.save(&self.files.videos).map_err(|e| format!("Could not save the video list: {e}"))?;
@@ -2223,15 +2223,15 @@ impl N4n0 {
 
     /// N4N0's state, for a change to the saved videos: refused while the list on disk could not be read (a save would
     /// replace it), which is tried again first.
-    fn videos_writable(&self) -> Result<std::sync::MutexGuard<'_, OrbRuntime>, String> {
-        if self.orb.lock().unwrap().videos_unreadable.is_none() {
-            return Ok(self.orb.lock().unwrap());
+    fn videos_writable(&self) -> Result<std::sync::MutexGuard<'_, N4n0Runtime>, String> {
+        if self.n4n0.lock().unwrap().videos_unreadable.is_none() {
+            return Ok(self.n4n0.lock().unwrap());
         }
         let (list, loaded) = Videos::read(&self.files.videos);
         if let videos::Loaded::Unreadable(e) = loaded {
             return Err(format!("N4N0's saved videos could not be read ({e}): nothing is saved, so the list stays whole."));
         }
-        let mut rt = self.orb.lock().unwrap();
+        let mut rt = self.n4n0.lock().unwrap();
         rt.videos = list;
         rt.videos_unreadable = None;
         Ok(rt)
@@ -2240,7 +2240,7 @@ impl N4n0 {
     /// CPU and memory of the app's processes and VRChat's (the N4N0 page's footprint), as the app measured them.
     pub fn set_resources(&self, usage: Vec<ProcessUsage>) {
         let changed = {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             let changed = rt.resources != usage;
             rt.resources = usage;
             changed
@@ -2258,29 +2258,29 @@ pub(crate) fn screen_replace(tree: Option<bool>, manifest: Option<&AvatarManifes
 }
 
 /// `N4N0/Screen/ThumbnailBytes` as VRChat holds it (`tree`), else its default in the avatar's manifest, when it is one
-/// of the sizes a screen keeps (contracts `orb::thumbnail::SIZES`).
+/// of the sizes a screen keeps (contracts `n4n0::thumbnail::SIZES`).
 pub(crate) fn thumbnail_bytes(tree: Option<i32>, manifest: Option<&AvatarManifest>) -> Option<usize> {
     let value = tree.or_else(|| manifest.and_then(|m| m.parameter(params::SCREEN_THUMBNAIL_BYTES)).map(|p| p.default.round() as i32))?;
     usize::try_from(value).ok().filter(|n| contract::thumbnail::SIZES.contains(n))
 }
 
 /// What a music command did, for the conversation's note.
-fn media_word(command: orbiters_orb::menu::MediaCommand) -> String {
-    use orbiters_orb::menu::MediaCommand;
+fn media_word(command: orbiters_n4n0_core::menu::MediaCommand) -> String {
+    use orbiters_n4n0_core::menu::MediaCommand;
     match command {
         MediaCommand::PlayPause => "played or paused".into(),
         MediaCommand::Play => "played".into(),
         MediaCommand::Pause => "paused".into(),
         MediaCommand::Next => "skipped to the next".into(),
         MediaCommand::Previous => "went back".into(),
-        MediaCommand::Seek(at) => format!("moved to {}", orbiters_orb::menu::clock(at as u64)),
+        MediaCommand::Seek(at) => format!("moved to {}", orbiters_n4n0_core::menu::clock(at as u64)),
         MediaCommand::Volume(v) => format!("volume at {v} %"),
         MediaCommand::Mute(true) => "muted".into(),
         MediaCommand::Mute(false) => "unmuted".into(),
     }
 }
 
-/// Whether a screen of `version` points along the index fingers with contacts (contracts `Docs/orb.md`, Pointing): from
+/// Whether a screen of `version` points along the index fingers with contacts (contracts `Docs/n4n0.md`, Pointing): from
 /// version 7 (versions 4 to 6 had VRChat raycasts, which never met their own avatar).
 fn pointing(version: Option<i32>) -> bool {
     version.is_some_and(|v| v >= contract::SCREEN_FINGER_RAYS)

@@ -84,7 +84,7 @@ impl Videos {
             return;
         }
         let (tx, rx) = mpsc::channel();
-        let spawned = std::thread::Builder::new().name("video-titles".into()).spawn(move || ask(urls, &tx, orbiters_orb::videos::youtube_oembed));
+        let spawned = std::thread::Builder::new().name("video-titles".into()).spawn(move || ask(urls, &tx, orbiters_n4n0_core::videos::youtube_oembed));
         if spawned.is_ok() {
             self.titles = Some(rx);
         }

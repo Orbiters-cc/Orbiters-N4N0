@@ -20,7 +20,7 @@ pub fn watcher() -> &'static Arc<Watcher> {
 mod platform {
     use super::{Reading, ART_MAX_BYTES};
     use orbiters_n4n0::media::{art, MediaBackend};
-    use orbiters_orb::menu::{Media as Playing, MediaCommand, Volume};
+    use orbiters_n4n0_core::menu::{Media as Playing, MediaCommand, Volume};
     use windows::Media::Control::{
         GlobalSystemMediaTransportControlsSession as Session, GlobalSystemMediaTransportControlsSessionManager as Manager,
         GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
@@ -235,7 +235,7 @@ mod tests {
         println!("art: {:?}", reading.art.as_ref().map(|a| (&a.key, a.rgb.width, a.rgb.height)));
         assert!(reading.volume.is_some(), "this computer has speakers");
         // A YouTube video in a browser: found on YouTube within a few readings.
-        if reading.media.as_ref().is_some_and(|m| orbiters_orb::youtube::worth_looking_up(&m.app, &m.title, &m.artist, &m.album)) {
+        if reading.media.as_ref().is_some_and(|m| orbiters_n4n0_core::youtube::worth_looking_up(&m.app, &m.title, &m.artist, &m.album)) {
             let found = (0..10).find_map(|_| watcher().fresh(Duration::from_secs(5)).media.and_then(|m| m.link()));
             println!("YouTube link: {found:?}");
         }

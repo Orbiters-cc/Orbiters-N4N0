@@ -1,4 +1,4 @@
-//! 3D captures shared from N4N0's menu (contracts `Docs/orb.md`, Menu, from screen version 12; `Docs/capture-sharing.md`):
+//! 3D captures shared from N4N0's menu (contracts `Docs/n4n0.md`, Menu, from screen version 12; `Docs/capture-sharing.md`):
 //! the captures the menus list, where each stands (its 3D view, its shares), and the friends a capture goes to. The
 //! desktop lists the captures, reads the friends and shares; what the menus show of them is decided here.
 

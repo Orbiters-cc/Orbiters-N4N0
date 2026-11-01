@@ -1,4 +1,4 @@
-//! The avatar's projected screen (contracts `Docs/orb.md`, Screen): the menu as bytes in the screen's memory, and the
+//! The avatar's projected screen (contracts `Docs/n4n0.md`, Screen): the menu as bytes in the screen's memory, and the
 //! sender that writes them. The screen shows a picture of the page (rendered from [`super::layout`], part of the prop)
 //! and draws over it what changes, read from its memory: [`bank_bytes`] bytes (744, or 1024 with 128-byte thumbnails),
 //! two to an animator value.
@@ -6,7 +6,7 @@
 //! The owner's screen is written through local parameters (`N4N0/Screen/Pointer` and 16 values a step, as fast as
 //! VRChat takes them); everyone else's through the text panel's synced channel (`N4N0/Text/Pointer` past the panel's
 //! blocks, `N4N0/Text/Sync*`), a block every step: the header first, then the texts, then the thumbnails a layer at a time
-//! (contracts `orb::thumbnail`: a blur first, sharper with each layer), so others see the page early and the pictures
+//! (contracts `n4n0::thumbnail`: a blur first, sharper with each layer), so others see the page early and the pictures
 //! sharpen.
 //!
 //! Only the bytes a page reads are ever sent for it, and resent in turn; a new page clears the memory first, so none of
@@ -16,7 +16,7 @@
 use super::layout::{self, Layout, ScreenPage, MAX_ELEMENTS, PICTURES};
 use super::Menu;
 use crate::text::Message;
-use orbiters_contracts::orb::{self, params, thumbnail};
+use orbiters_contracts::n4n0::{self, params, thumbnail};
 use rosc::OscType;
 
 /// The largest screen memory (128-byte thumbnails): every memory here is this long, its bytes past the avatar's
@@ -44,7 +44,7 @@ pub const UNAVAILABLE: usize = 21;
 pub const UNAVAILABLE_BYTES: usize = 3;
 /// Where the texts start (slot offsets count from here).
 pub const TEXT: usize = HEADER;
-/// Where the thumbnails start: [`PICTURES`] of the avatar's thumbnail size (contracts `orb::thumbnail::SIZES`).
+/// Where the thumbnails start: [`PICTURES`] of the avatar's thumbnail size (contracts `n4n0::thumbnail::SIZES`).
 pub const PICTURES_AT: usize = TEXT + layout::TEXT_BYTES as usize;
 
 /// The screen's memory with thumbnails of `size` bytes: 744 with 72, 1024 with 128.
@@ -59,9 +59,9 @@ pub const LOCAL_CLEAR: i32 = 255;
 /// Values per local step (`N4N0/Screen/Value0` …).
 pub const LOCAL_VALUES: usize = 16;
 /// `N4N0/Text/Pointer`: the screen closed (everyone else's screen hides and clears).
-pub const POINTER_SCREEN_CLOSE: i32 = orb::POINTER_SCREEN_CLOSE;
+pub const POINTER_SCREEN_CLOSE: i32 = n4n0::POINTER_SCREEN_CLOSE;
 /// `N4N0/Text/Pointer`: everyone else's screen is a dropped link card, frozen where it is until the screen closes.
-pub const POINTER_SCREEN_DROP: i32 = orb::POINTER_SCREEN_DROP;
+pub const POINTER_SCREEN_DROP: i32 = n4n0::POINTER_SCREEN_DROP;
 
 const _: () = assert!(bank_bytes(72) == 744 && BANK == 1024);
 const _: () = assert!(HIDDEN_BYTES * 7 >= MAX_ELEMENTS);
@@ -73,7 +73,7 @@ pub struct Flags {
     pub listening: bool,
     pub loading: bool,
     pub thinking: bool,
-    /// The full pictures' diagnostics show (screens of revision 12, contracts `Docs/orb-picture.md`, Diagnostics).
+    /// The full pictures' diagnostics show (screens of revision 12, contracts `Docs/n4n0-picture.md`, Diagnostics).
     pub pictures: bool,
 }
 
@@ -82,8 +82,8 @@ pub struct Frame {
     pub bank: [u8; BANK],
 }
 
-/// A thumbnail as the screen shows it (contracts `orb::thumbnail`), in both sizes a prop may keep, and the picture at
-/// its full sizes when made from one (contracts `orb::picture`: the screens of version 8 show those once they arrived).
+/// A thumbnail as the screen shows it (contracts `n4n0::thumbnail`), in both sizes a prop may keep, and the picture at
+/// its full sizes when made from one (contracts `n4n0::picture`: the screens of version 8 show those once they arrived).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Picture {
     small: Vec<u8>,
@@ -103,7 +103,7 @@ impl Picture {
         self
     }
 
-    /// The full picture's stream for picture slot `slot` (contracts `orb::picture`), under this thumbnail as a prop of
+    /// The full picture's stream for picture slot `slot` (contracts `n4n0::picture`), under this thumbnail as a prop of
     /// `size`-byte thumbnails keeps it (its signature).
     pub fn full_stream(&self, slot: usize, size: usize) -> Option<std::sync::Arc<Vec<u8>>> {
         self.full.as_ref()?.stream(slot, self.bytes(size))
@@ -131,8 +131,8 @@ pub fn picture_from_rgb(rgb: &crate::picture::Rgb) -> Picture {
 
 /// Glyph indices for `text` in `cols` cells (aligned as the slot says).
 fn cells(text: &str, cols: usize, align: layout::Align) -> Vec<u8> {
-    let folded = orb::panel_text(text).replace('\n', " ");
-    let mut glyphs: Vec<u8> = folded.chars().filter_map(orb::glyph_index).take(cols).collect();
+    let folded = n4n0::panel_text(text).replace('\n', " ");
+    let mut glyphs: Vec<u8> = folded.chars().filter_map(n4n0::glyph_index).take(cols).collect();
     let pad = cols - glyphs.len();
     if align == layout::Align::Center && pad > 0 {
         let mut centered = vec![0u8; pad / 2];
@@ -233,7 +233,7 @@ fn layer_bytes(size: usize, layer: usize) -> impl Iterator<Item = std::ops::Rang
     })
 }
 
-/// The bytes page `page` reads (contracts `Docs/orb.md`, Memory) with thumbnails of `size` bytes: the header, the
+/// The bytes page `page` reads (contracts `Docs/n4n0.md`, Memory) with thumbnails of `size` bytes: the header, the
 /// page's text slots and, on the results page, the thumbnails. The rest of the memory is never sent for that page (its
 /// bytes count as equal whatever they hold), nor resent. Page 0 (nothing shown) reads the header only.
 fn visible(page: u8, size: usize) -> &'static [bool; BANK] {
@@ -268,7 +268,7 @@ fn visible(page: u8, size: usize) -> &'static [bool; BANK] {
 /// page's picture shows at once, its texts follow).
 const HEADER_EVERY: usize = 6;
 
-/// What one step of a screen channel sends (contracts `Docs/orb.md`, Screen): the pointer or the values, never both.
+/// What one step of a screen channel sends (contracts `Docs/n4n0.md`, Screen): the pointer or the values, never both.
 /// VRChat may apply values a frame or more before a pointer sent with them, which wrote a block with the next one's
 /// bytes; so a block goes in three steps: the pointer to 0 (nothing written), its values, the pointer to it.
 #[derive(Clone, Debug, PartialEq)]
@@ -554,9 +554,9 @@ fn parameter(name: &str) -> String {
     format!("{}{name}", orbiters_core::osc::PARAMETERS_PREFIX)
 }
 
-/// The screen's local parameters (contracts `Docs/orb.md`, Screen).
+/// The screen's local parameters (contracts `Docs/n4n0.md`, Screen).
 pub mod local {
-    use orbiters_contracts::orb::params;
+    use orbiters_contracts::n4n0::params;
 
     pub const OPEN: &str = params::SCREEN_OPEN;
     pub const POINTER: &str = params::SCREEN_POINTER;
@@ -581,7 +581,7 @@ pub mod local {
 pub fn local_messages(send: &Send) -> Vec<Message> {
     match send {
         Send::Rest => vec![(parameter(local::POINTER), OscType::Int(0))],
-        Send::Values(_, bytes) => bytes.iter().enumerate().map(|(i, &b)| (parameter(&local::value(i)), OscType::Float(orb::sync_value(b)))).collect(),
+        Send::Values(_, bytes) => bytes.iter().enumerate().map(|(i, &b)| (parameter(&local::value(i)), OscType::Float(n4n0::sync_value(b)))).collect(),
         Send::Pointer(block) => vec![(parameter(local::POINTER), OscType::Int(*block as i32 + 1))],
         Send::Clear => local_clear(),
     }
@@ -598,7 +598,7 @@ pub fn local_open(open: bool) -> Message {
 
 /// The first `N4N0/Text/Pointer` of the screen for a prop with `sync` values: right after the panel's blocks.
 pub fn first_pointer(sync: usize) -> usize {
-    orb::pointer_count(sync) + 1
+    n4n0::pointer_count(sync) + 1
 }
 
 /// Whether a prop with `sync` values and thumbnails of `size` bytes can address the whole screen through
@@ -614,7 +614,7 @@ pub fn synced_messages(sync: usize, send: &Send) -> Vec<Message> {
     match send {
         Send::Rest => vec![(parameter(params::TEXT_POINTER), OscType::Int(0))],
         Send::Values(_, bytes) => {
-            bytes.iter().take(sync).enumerate().map(|(i, &b)| (parameter(&params::text_sync(i)), OscType::Float(orb::sync_value(b)))).collect()
+            bytes.iter().take(sync).enumerate().map(|(i, &b)| (parameter(&params::text_sync(i)), OscType::Float(n4n0::sync_value(b)))).collect()
         }
         Send::Pointer(block) => vec![(parameter(params::TEXT_POINTER), OscType::Int((first_pointer(sync) + block) as i32))],
         Send::Clear => synced_close(),
@@ -626,10 +626,10 @@ pub fn synced_close() -> Vec<Message> {
     vec![(parameter(params::TEXT_POINTER), OscType::Int(POINTER_SCREEN_CLOSE))]
 }
 
-/// The link card's memory (screen version 7, contracts `orb::card`): the words of `bank` (a card page's frame) the card
+/// The link card's memory (screen version 7, contracts `n4n0::card`): the words of `bank` (a card page's frame) the card
 /// keeps, two bytes each, its picture's with `picture`.
 pub fn card_bytes(bank: &[u8; BANK], size: usize, picture: bool) -> Vec<u8> {
-    orb::card::words(size, picture).into_iter().flat_map(|w| [bank[2 * w], bank[2 * w + 1]]).collect()
+    n4n0::card::words(size, picture).into_iter().flat_map(|w| [bank[2 * w], bank[2 * w + 1]]).collect()
 }
 
 /// Everyone's copy of the link card's memory, as the synced channel's steps wrote it (every client reads the card's
@@ -768,16 +768,16 @@ impl CardSender {
     }
 }
 
-/// The card's step through the synced channel (block `b` is pointer `orb::card::first_pointer(sync, size) + b`; the
+/// The card's step through the synced channel (block `b` is pointer `n4n0::card::first_pointer(sync, size) + b`; the
 /// clear, pointer 252).
 pub fn card_messages(sync: usize, size: usize, send: &Send) -> Vec<Message> {
     match send {
         Send::Rest => vec![(parameter(params::TEXT_POINTER), OscType::Int(0))],
         Send::Values(_, bytes) => {
-            bytes.iter().take(sync).enumerate().map(|(i, &b)| (parameter(&params::text_sync(i)), OscType::Float(orb::sync_value(b)))).collect()
+            bytes.iter().take(sync).enumerate().map(|(i, &b)| (parameter(&params::text_sync(i)), OscType::Float(n4n0::sync_value(b)))).collect()
         }
-        Send::Pointer(block) => vec![(parameter(params::TEXT_POINTER), OscType::Int((orb::card::first_pointer(sync, size) + block) as i32))],
-        Send::Clear => vec![(parameter(params::TEXT_POINTER), OscType::Int(orb::card::POINTER_CLEAR))],
+        Send::Pointer(block) => vec![(parameter(params::TEXT_POINTER), OscType::Int((n4n0::card::first_pointer(sync, size) + block) as i32))],
+        Send::Clear => vec![(parameter(params::TEXT_POINTER), OscType::Int(n4n0::card::POINTER_CLEAR))],
     }
 }
 
@@ -824,7 +824,7 @@ mod tests {
         let layout = Frame::layout(&menu);
         let title = layout.slots.iter().find(|s| s.content == layout::Content::ResultTitle(1)).unwrap();
         let at = TEXT + title.offset as usize;
-        let glyphs: String = bank[at..at + 6].iter().map(|&g| orb::glyphs()[g as usize]).collect();
+        let glyphs: String = bank[at..at + 6].iter().map(|&g| n4n0::glyphs()[g as usize]).collect();
         assert_eq!(glyphs, "Song 1");
         // Five results on page one: nothing hidden among rows; "previous" hidden.
         let previous = layout.elements.iter().position(|e| e.target == Target::Previous).unwrap();
@@ -833,7 +833,7 @@ mod tests {
         assert_eq!(bank[LAYER_COUNTS], 0, "no thumbnail for the first result yet");
         assert_eq!(&bank[PICTURES_AT + 72..PICTURES_AT + 144], thumb.bytes(72), "result 1's thumbnail, as encoded");
         assert!(bank[bank_bytes(72)..].iter().all(|&b| b == 0), "nothing past 744 bytes");
-        assert!(bank.iter().all(|&b| b != orb::UNSENDABLE), "every byte can be sent");
+        assert!(bank.iter().all(|&b| b != n4n0::UNSENDABLE), "every byte can be sent");
         // 128-byte thumbnails: four layers, result 1 from byte 384 + 128.
         let large = Frame::new(&menu, None, None, Flags::default(), 128, &|id| (id == "video000001").then(|| thumb.clone())).bank;
         assert_eq!(large[LAYER_COUNTS + 1], 4);
@@ -920,7 +920,7 @@ mod tests {
         let public = Frame::public(&menu, Flags::default(), 72, &|_| None).bank;
         assert_eq!((owner[HOVER], owner[PRESSED]), (4, 5));
         assert_eq!((public[HOVER], public[PRESSED]), (0, 0), "no hover: block 0 stays put while the finger moves");
-        let lyra: Vec<u8> = "Lyra".chars().map(|c| orb::glyph_index(c).unwrap()).collect();
+        let lyra: Vec<u8> = "Lyra".chars().map(|c| n4n0::glyph_index(c).unwrap()).collect();
         assert!(owner.windows(4).any(|w| w == lyra));
         assert!(!public.windows(4).any(|w| w == lyra), "no friend's name for everyone else");
     }
@@ -951,7 +951,7 @@ mod tests {
         assert_eq!(synced_messages(8, &Send::Rest), vec![(pointer, OscType::Int(0))]);
         let m = synced_messages(8, &Send::Values(2, vec![0, 1, 255, 129, 4, 5, 6, 7]));
         assert_eq!(m.len(), 8);
-        assert_eq!(m[2].1, OscType::Float(orb::sync_value(255)));
+        assert_eq!(m[2].1, OscType::Float(n4n0::sync_value(255)));
         let l = local_messages(&Send::Values(0, vec![1; LOCAL_VALUES]));
         assert_eq!(l.len(), 16);
         assert!(l[15].0.ends_with("N4N0/Screen/Value15"));
@@ -1015,12 +1015,12 @@ mod tests {
         assert_eq!(&owner[PICTURES_AT..PICTURES_AT + 72], thumb.bytes(72));
         // The card's memory: its words of the page, the title and link, the picture; nothing else of the page is read.
         let card = card_bytes(&owner, 72, true);
-        assert_eq!(card.len(), 2 * orb::card::words(72, true).len());
+        assert_eq!(card.len(), 2 * n4n0::card::words(72, true).len());
         assert_eq!((card[0], card[2]), (ScreenPage::Card as u8, 3), "the page and the picture's layers");
         assert_eq!(&card[4..4 + 86], &owner[TEXT..TEXT + 86], "the title's two lines and the link");
         assert_eq!(&card[90..], thumb.bytes(72));
         let mask = visible(owner[PAGE], 72);
-        assert!((0..BANK).filter(|&i| mask[i] && owner[i] != 0).all(|i| orb::card::words(72, true).contains(&(i / 2))), "every byte the page shows is the card's");
+        assert!((0..BANK).filter(|&i| mask[i] && owner[i] != 0).all(|i| n4n0::card::words(72, true).contains(&(i / 2))), "every byte the page shows is the card's");
         // Cleared, then each block in three steps, then again in turn once the wait is over.
         let start = std::time::Instant::now();
         let mut sender = CardSender::new(8, card.clone());
@@ -1077,7 +1077,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "a measure, run by hand: cargo test -p orbiters-orb steps_to_show_a_page -- --ignored --nocapture"]
+    #[ignore = "a measure, run by hand: cargo test -p orbiters-n4n0-core steps_to_show_a_page -- --ignored --nocapture"]
     fn steps_to_show_a_page() {
         use crate::menu::Contact;
         let pages: [(&str, Target, bool, usize); 5] =

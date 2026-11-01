@@ -1,11 +1,11 @@
-//! Controller input for avatars (contracts `Docs/orb-input.md`): each hand's touchpad and thumbstick, as the SteamVR
+//! Controller input for avatars (contracts `Docs/n4n0-input.md`): each hand's touchpad and thumbstick, as the SteamVR
 //! overlay reads them, sent as N4N0's local parameters to an avatar that lists them. The overlay paces what it hands
-//! over ([`Pacer`]); the orb thread sends what changed of the parameters the avatar has ([`InputRuntime`]), the whole
+//! over ([`Pacer`]); the N4N0 thread sends what changed of the parameters the avatar has ([`InputRuntime`]), the whole
 //! state again now and then while something is off its rest, and puts everything back to rest once the overlay is
 //! silent.
 
-use orbiters_contracts::orb::input as contract;
-use orbiters_orb::text::Message;
+use orbiters_contracts::n4n0::input as contract;
+use orbiters_n4n0_core::text::Message;
 use rosc::OscType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -54,7 +54,7 @@ impl Pads {
         self.touchpads.iter().chain(&self.sticks)
     }
 
-    /// Each parameter and its value, as contracts `orb::input::all()` lists them; booleans as 0 or 1.
+    /// Each parameter and its value, as contracts `n4n0::input::all()` lists them; booleans as 0 or 1.
     fn values(&self) -> impl Iterator<Item = (&'static str, f32)> + '_ {
         let b = |v: bool| if v { 1.0 } else { 0.0 };
         let touchpads = (0..2).flat_map(move |h| {
@@ -112,7 +112,7 @@ impl Pacer {
     }
 }
 
-/// The orb thread's side.
+/// The N4N0 thread's side.
 #[derive(Default)]
 pub(crate) struct InputRuntime {
     /// What the overlay last handed over, and when.

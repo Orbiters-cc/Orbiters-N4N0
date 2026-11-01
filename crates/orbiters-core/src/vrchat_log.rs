@@ -144,7 +144,7 @@ impl WorldState {
         out
     }
 
-    /// The instance as Orbiters knows it for N4N0's link cards (contracts `Docs/orb.md`, Link card): the lowercase hex
+    /// The instance as Orbiters knows it for N4N0's link cards (contracts `Docs/n4n0.md`, Link card): the lowercase hex
     /// SHA-256 of `<world id>:<instance>`, as VRChat's log writes them on joining. `None` outside a world: everyone in the
     /// same instance computes the same, and Orbiters never learns the world.
     pub fn instance_hash(&self) -> Option<String> {

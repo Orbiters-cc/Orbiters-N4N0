@@ -880,7 +880,7 @@ impl State {
     }
 }
 
-/// A stand-in scene for screenshots: N4N0's black orb with white strokes floating over a plinth, a ring round it and
+/// A stand-in scene for screenshots: N4N0's black sphere with white strokes floating over a plinth, a ring round it and
 /// two cubes, as an avatar scene.
 fn stand_in() -> Vec<u8> {
     stand_in_scene("Avatar")
@@ -915,7 +915,7 @@ fn stand_in_scene(scene: &str) -> Vec<u8> {
     add_mesh(&mut w, cylinder(0.5, 0.42, 0.12, 64));
     add_mesh(&mut w, torus(0.52, 0.018, 96, 12));
     add_mesh(&mut w, cuboid(0.16));
-    // The orb's strokes: white curves on black.
+    // The sphere's strokes: white curves on black.
     let (tw, th) = (512u32, 256u32);
     let mut rgb = vec![0u8; (tw * th * 3) as usize];
     for y in 0..th {
@@ -947,7 +947,7 @@ fn stand_in_scene(scene: &str) -> Vec<u8> {
         cull: Cull::Back,
     };
     let materials = vec![
-        mat("Orb", [1.0, 1.0, 1.0, 1.0], 0),
+        mat("Sphere", [1.0, 1.0, 1.0, 1.0], 0),
         mat("Plinth", [0.36, 0.36, 0.40, 1.0], -1),
         mat("Ring", [0.0, 0.85, 0.43, 1.0], -1),
         mat("Cube", [0.86, 0.55, 0.33, 1.0], -1),

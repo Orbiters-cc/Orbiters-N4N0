@@ -5,13 +5,13 @@
 //! [`Link`], which holds the controller weakly: N4N0 lives inside it.
 
 use super::{Controller, NoticeKind, Shared};
-use crate::state::{CallsStatus, OrbStatus, ProcessUsage};
+use crate::state::{CallsStatus, N4n0Status, ProcessUsage};
 use orbiters_core::account::Api;
 use orbiters_core::osc::OscValue;
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::WorldState;
 use orbiters_n4n0::{CallRequest, Files, Host, Osc, Scene};
-use orbiters_orb::text::Message;
+use orbiters_n4n0_core::text::Message;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Weak;
@@ -68,15 +68,15 @@ impl Host for Link {
 
     /// Into the snapshot, with the calls' part (published by the calls themselves) and the avatar's name (VRChat's
     /// log's, when N4N0 has none: VRChat's OSCQuery, its states), and only when it changed.
-    fn publish(&self, mut status: OrbStatus) {
+    fn publish(&self, mut status: N4n0Status) {
         self.with(|c| {
             c.update_if(|s| {
-                status.calls = s.orb.calls.clone();
+                status.calls = s.n4n0.calls.clone();
                 if status.states.avatar_name.is_none() {
                     status.states.avatar_name = s.vrchat.world.avatar_name.clone();
                 }
-                let changed = s.orb != status;
-                s.orb = status;
+                let changed = s.n4n0 != status;
+                s.n4n0 = status;
                 changed
             })
         });
@@ -96,7 +96,7 @@ impl Host for Link {
     }
 
     fn calls(&self) -> CallsStatus {
-        self.with(|c| c.snapshot.lock().unwrap().orb.calls.clone()).unwrap_or_default()
+        self.with(|c| c.snapshot.lock().unwrap().n4n0.calls.clone()).unwrap_or_default()
     }
 
     fn ringing_in(&self) -> bool {
@@ -155,23 +155,23 @@ impl Host for Link {
     }
 
     /// A 3D capture shared from N4N0's menu, as Photos & captures shares it.
-    fn share_capture(&self, ask: orbiters_orb::captures::ShareAsk) -> Result<(), String> {
+    fn share_capture(&self, ask: orbiters_n4n0_core::captures::ShareAsk) -> Result<(), String> {
         self.with(|c| c.menu_capture_share(ask)).unwrap_or(Ok(()))
     }
 
     /// The VRChat friends for N4N0's Share to … (the member's VRChat session, else VRCX's or VRCNext's).
-    fn friends(&self) -> Result<Vec<orbiters_orb::captures::Friend>, String> {
+    fn friends(&self) -> Result<Vec<orbiters_n4n0_core::captures::Friend>, String> {
         self.with(|c| c.menu_friends()).unwrap_or_else(|| Ok(Vec::new()))
     }
 
     /// World feedback N4N0's menu asked: read a world's, or send the player's like, label or comment (controller/
     /// world_feedback.rs).
-    fn world_feedback(&self, ask: orbiters_orb::feedback::FeedbackAsk) {
+    fn world_feedback(&self, ask: orbiters_n4n0_core::feedback::FeedbackAsk) {
         self.with(|c| c.world_feedback_ask(ask));
     }
 
     /// A capture's picture: its session's thumbnail.
-    fn capture_picture(&self, key: &str) -> Option<orbiters_orb::picture::Rgb> {
+    fn capture_picture(&self, key: &str) -> Option<orbiters_n4n0_core::picture::Rgb> {
         super::menu_shares::capture_picture(key)
     }
 
@@ -243,15 +243,15 @@ impl Controller {
     /// N4N0 starts, with the service's own watch beside it: the footprint of Orbiters' processes and VRChat's (the N4N0
     /// page's), the world performance summaries still waiting (VRChat closed before they were sent), and the 3D captures
     /// its menu shows.
-    pub(super) fn start_orb(self: &Shared) {
+    pub(super) fn start_n4n0(self: &Shared) {
         self.n4n0.start();
         let ctl = self.clone();
-        let _ = std::thread::Builder::new().name("orb-resources".into()).spawn(move || {
+        let _ = std::thread::Builder::new().name("n4n0-resources".into()).spawn(move || {
             let mut system = sysinfo::System::new();
             let mut beat = 0u64;
             while !ctl.n4n0.stopped() {
                 if beat.is_multiple_of(3) {
-                    ctl.orb_resources(&mut system);
+                    ctl.n4n0_resources(&mut system);
                 }
                 // Where the 3D captures N4N0's menu shows stand (their recording, 3D view and shares).
                 ctl.menu_captures_tick();
@@ -265,33 +265,33 @@ impl Controller {
     }
 
     /// What the window and the overlay ask of N4N0.
-    pub fn orb_command(self: &Shared, command: crate::ipc::OrbCommand) {
+    pub fn n4n0_command(self: &Shared, command: crate::ipc::N4n0Command) {
         self.n4n0.command(command);
     }
 
     /// The Talk button of the window, or of the overlay (`overlay`), from the service's link with it.
-    pub fn orb_app_talk(self: &Shared, down: bool, overlay: bool) {
+    pub fn n4n0_app_talk(self: &Shared, down: bool, overlay: bool) {
         self.n4n0.app_talk(down, overlay);
     }
 
     /// The window or the overlay went away: a Talk button it held is let go without its sentence, and the overlay's menu
     /// is closed.
-    pub fn orb_link_closed(self: &Shared, overlay: bool) {
+    pub fn n4n0_link_closed(self: &Shared, overlay: bool) {
         self.n4n0.link_closed(overlay);
     }
 
     /// Shows `text` on N4N0's panel (nothing without the prop).
-    pub(super) fn orb_say(&self, text: &str) {
+    pub(super) fn n4n0_say(&self, text: &str) {
         self.n4n0.say(text);
     }
 
     /// The panel shows `text` at once for the owner ([`orbiters_n4n0::runtime::N4n0::say_quick`]).
-    pub(super) fn orb_say_quick(&self, text: &str) {
+    pub(super) fn n4n0_say_quick(&self, text: &str) {
         self.n4n0.say_quick(text);
     }
 
     /// CPU and memory of Orbiters' processes and VRChat's (the N4N0 page's footprint).
-    fn orb_resources(&self, system: &mut sysinfo::System) {
+    fn n4n0_resources(&self, system: &mut sysinfo::System) {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
         system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cpu().with_memory());
         let groups: [(&str, &[&str]); 5] = [
@@ -337,12 +337,12 @@ mod tests {
         let ctl = Controller::new(settings);
         ctl.start_osc_with(false);
         // The calls' part of the snapshot stays the calls' own.
-        ctl.update(|s| s.orb.calls.menu_open = true);
+        ctl.update(|s| s.n4n0.calls.menu_open = true);
         ctl.n4n0.say("nothing to show: no prop");
-        ctl.orb_command(crate::ipc::OrbCommand::TestFace { face: Some(crate::state::OrbFace::Happy) });
-        let orb = ctl.view().orb.clone();
-        assert_eq!(orb.test_face, Some(crate::state::OrbFace::Happy), "published into the snapshot");
-        assert!(orb.calls.menu_open, "the calls' part kept");
+        ctl.n4n0_command(crate::ipc::N4n0Command::TestFace { face: Some(crate::state::N4n0Face::Happy) });
+        let n4n0 = ctl.view().n4n0.clone();
+        assert_eq!(n4n0.test_face, Some(crate::state::N4n0Face::Happy), "published into the snapshot");
+        assert!(n4n0.calls.menu_open, "the calls' part kept");
         // An avatar parameter and an avatar change go to N4N0, and the values VRChat sent are kept for it.
         let mut events = vec![
             OscEvent::Parameter { name: "AFK".into(), value: OscValue::Bool(true) },
@@ -369,6 +369,6 @@ mod tests {
                 }
             }
         }
-        assert!(offs.contains(&format!("{PARAMETERS_PREFIX}{}", orbiters_contracts::orb::params::SCREEN_OPEN)), "{offs:?}");
+        assert!(offs.contains(&format!("{PARAMETERS_PREFIX}{}", orbiters_contracts::n4n0::params::SCREEN_OPEN)), "{offs:?}");
     }
 }

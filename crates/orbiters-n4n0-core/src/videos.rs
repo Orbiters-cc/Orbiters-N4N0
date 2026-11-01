@@ -20,9 +20,40 @@ pub struct Videos {
     pub videos: Vec<SavedVideo>,
 }
 
-/// `<config>/orb/videos.json`.
+/// `<config>/n4n0/videos.json` (N4N0's earlier folder moved there first, [`migrate`]).
 pub fn file() -> PathBuf {
-    orbiters_core::paths::config_dir().join("orb").join("videos.json")
+    let config = orbiters_core::paths::config_dir();
+    migrate(&config);
+    config.join(DIR).join("videos.json")
+}
+
+/// N4N0's folder in the config folder.
+const DIR: &str = "n4n0";
+
+/// The folder N4N0 kept its saved videos in before the companion took its name (0.3.4-dev.8 and earlier).
+const LEGACY_DIR: &str = "orb";
+
+/// Moves N4N0's earlier folder in `config` to today's, all of it (the list and the copies kept aside), once: when
+/// today's is there already, only an earlier list it lacks moves, and the earlier folder goes once empty. What cannot
+/// be moved stays where it was, and is said.
+pub fn migrate(config: &Path) {
+    let (legacy, dir) = (config.join(LEGACY_DIR), config.join(DIR));
+    if !legacy.is_dir() {
+        return;
+    }
+    if !dir.exists() {
+        if let Err(e) = std::fs::rename(&legacy, &dir) {
+            eprintln!("videos: {} could not move to {}: {e}", legacy.display(), dir.display());
+        }
+        return;
+    }
+    let (from, to) = (legacy.join("videos.json"), dir.join("videos.json"));
+    if from.is_file() && !to.exists() {
+        if let Err(e) = std::fs::rename(&from, &to) {
+            eprintln!("videos: {} could not move to {}: {e}", from.display(), to.display());
+        }
+    }
+    let _ = std::fs::remove_dir(&legacy);
 }
 
 /// How reading the saved videos went.
@@ -175,7 +206,7 @@ mod tests {
         assert!(matches!(youtube_oembed("https://vimeo.com/1"), Ok(None)), "not YouTube's: nothing asked");
     }
 
-    /// Against YouTube itself: `cargo test -p orbiters-orb oembed_live -- --ignored --nocapture`.
+    /// Against YouTube itself: `cargo test -p orbiters-n4n0-core oembed_live -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn oembed_live() {
@@ -183,6 +214,37 @@ mod tests {
         println!("{found:?}");
         assert_eq!(found.map(|(_, channel)| channel).as_deref(), Some("Rick Astley"));
         assert_eq!(youtube_oembed("https://www.youtube.com/watch?v=aaaaaaaaaaa").unwrap(), None, "no such video");
+    }
+
+    #[test]
+    fn n4n0_s_earlier_folder_moves_once() {
+        let config = std::env::temp_dir().join(format!("n4n0-videos-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&config);
+        let (legacy, dir) = (config.join(LEGACY_DIR), config.join(DIR));
+        std::fs::create_dir_all(&legacy).unwrap();
+        let list = Videos { videos: vec![SavedVideo { url: "https://youtu.be/36YnV9STBqc".into(), title: None, world: None, saved_utc: "t".into() }] };
+        list.save(&legacy.join("videos.json")).unwrap();
+        std::fs::write(legacy.join("videos.json.bad-1"), "{").unwrap();
+        migrate(&config);
+        assert_eq!(Videos::read(&dir.join("videos.json")), (list.clone(), Loaded::Whole), "the list moved");
+        assert!(dir.join("videos.json.bad-1").is_file(), "with what was kept aside");
+        assert!(!legacy.exists(), "the earlier folder is gone");
+        migrate(&config);
+        assert_eq!(Videos::load(&dir.join("videos.json")), list, "a second time changes nothing");
+        // Today's folder there already (another N4N0 file in it): an earlier list it lacks still moves.
+        std::fs::remove_file(dir.join("videos.json")).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        list.save(&legacy.join("videos.json")).unwrap();
+        migrate(&config);
+        assert_eq!(Videos::load(&dir.join("videos.json")), list);
+        assert!(!legacy.exists());
+        // Both lists: today's is kept, the earlier one stays where it was.
+        std::fs::create_dir_all(&legacy).unwrap();
+        Videos::default().save(&legacy.join("videos.json")).unwrap();
+        migrate(&config);
+        assert_eq!(Videos::load(&dir.join("videos.json")), list);
+        assert!(legacy.join("videos.json").is_file());
+        std::fs::remove_dir_all(&config).ok();
     }
 
     #[test]
@@ -195,7 +257,7 @@ mod tests {
         assert_eq!(videos.videos.len(), 2);
         assert_eq!(videos.videos[0].title.as_deref(), Some("Song"), "the title saved before stays");
         assert!(!videos.add(v("https://youtu.be/36YnV9STBqc", None)), "already the newest");
-        let path = std::env::temp_dir().join(format!("orb-videos-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!("n4n0-videos-{}.json", std::process::id()));
         videos.save(&path).unwrap();
         assert_eq!(Videos::load(&path), videos);
         std::fs::remove_file(path).ok();
@@ -203,7 +265,7 @@ mod tests {
 
     #[test]
     fn a_list_read_in_part_is_kept_aside_before_it_is_replaced() {
-        let dir = std::env::temp_dir().join(format!("orb-videos-partial-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("n4n0-videos-partial-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("videos.json");
         assert_eq!(Videos::read(&path), (Videos::default(), Loaded::Whole), "no file yet");

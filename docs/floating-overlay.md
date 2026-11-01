@@ -69,7 +69,7 @@ against Valve's `openvr_capi.h`. `Overlay::inject_event` queues events this proc
 ## Calls on the menu and the panel
 
 Measured 2026-10-30 (`cargo test -p orbiters-desktop call_page_timing -- --ignored --nocapture`, `cargo test -p
-orbiters-orb steps_to_show_a_page -- --ignored --nocapture`, and `a_quick_page_is_whole_at_once…` in `orbiters-orb`
+orbiters-n4n0-core steps_to_show_a_page -- --ignored --nocapture`, and `a_quick_page_is_whole_at_once…` in `orbiters-n4n0-core`
 `text.rs`). Opening Calls in the play-space menu waits on nothing (the press 0.01 ms, the page's first picture 1.2 ms;
 contacts are the service's, already in the snapshot). On the avatar's N4N0 screen (the owner's local values, a block
 of 16 bytes in three steps of 28 to 40 ms) the Call page showed after 3 steps and was whole after 15 with nobody to
@@ -120,7 +120,7 @@ binding again to get these.
   dashboard returning) presses nothing; only a new pull does.
 - **Move it as N4N0's screen moves.** Grip with a hand at the handle (within 12 cm) or at the panel (within 8 cm), or grip
   from a distance while the laser is on the panel or bar, or hold the trigger on the handle. Held, it rides the hand from where it was taken,
-  turned toward the eyes and kept upright relative to the head: the carry frame of `OrbInstaller.Placement.cs`, at the
+  turned toward the eyes and kept upright relative to the head: the carry frame of Orbiters Toolkit's N4N0 installer (its placement), at the
   hand, its +Z toward the eyes, the head's up. Released, it stays put. The other hand can take it over.
 - **Where it opens.** It reopens where it was left (saved in `Settings::floating.placement`, a 3 × 4 matrix in
   SteamVR's standing universe) when that place is still in front of you (0.25 to 2.5 m away, within 40° of your gaze

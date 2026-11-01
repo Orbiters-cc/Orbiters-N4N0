@@ -1,12 +1,12 @@
 //! The texts N4N0's menu pages draw in their unchanging part (titles, buttons, chips, captions: the page pictures the
 //! avatar's screen shows, and the same places on the SteamVR overlay), by key, English being the base. A strings file
-//! (contracts `Docs/orb.md`, Menu themes and translations) gives them in another language:
+//! (contracts `Docs/n4n0.md`, Menu themes and translations) gives them in another language:
 //! `{ "schema": 1, "language": "fr", "strings": { "home.fastWalk": "Marche rapide" } }`; a key it leaves out stays
 //! English. The changing parts (what N4N0 heard, a tile's note, names, results) are not here: the running app writes
 //! them into the screen's memory ([`super::layout::text`]).
 //!
 //! The base translations are files beside this crate (`menu-strings/en.json`, `fr`, `es`, `pt`, `ja`), the English one
-//! with each key's `max` (`orbiters-desktop --orb-menu-strings` writes it: the characters that fit the key's place).
+//! with each key's `max` (`orbiters-desktop --n4n0-menu-strings` writes it: the characters that fit the key's place).
 
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -98,7 +98,7 @@ texts! {
     LightSwitch = "light.switch" => "Light",
     LightColour = "light.colour" => "Colour",
     LightBrightness = "light.brightness" => "Brightness",
-    /// The light's colours (contracts `orb::LIGHT_COLORS` in order).
+    /// The light's colours (contracts `n4n0::LIGHT_COLORS` in order).
     LightWhite = "light.white" => "White",
     LightWarm = "light.warm" => "Warm",
     LightSunset = "light.sunset" => "Sunset",
@@ -107,7 +107,7 @@ texts! {
     LightBlue = "light.blue" => "Blue",
     LightCyan = "light.cyan" => "Cyan",
     LightGreen = "light.green" => "Green",
-    /// Its brightness choices (contracts `orb::LIGHT_LEVELS` in order).
+    /// Its brightness choices (contracts `n4n0::LIGHT_LEVELS` in order).
     LightSoft = "light.soft" => "Soft",
     LightMedium = "light.medium" => "Medium",
     LightBright = "light.bright" => "Bright",
@@ -236,10 +236,10 @@ texts! {
 pub const TIMERS: [Text; 4] = [Text::PhotoTimerOff, Text::PhotoTimer3, Text::PhotoTimer5, Text::PhotoTimer10];
 /// Its camera flights ([`super::PhotoLength::ALL`] in order).
 pub const FLIGHTS: [Text; 3] = [Text::PhotoFlight1, Text::PhotoFlight4, Text::PhotoFlight8];
-/// The light's colours (contracts `orb::LIGHT_COLORS` in order).
+/// The light's colours (contracts `n4n0::LIGHT_COLORS` in order).
 pub const LIGHT_COLORS: [Text; 8] =
     [Text::LightWhite, Text::LightWarm, Text::LightSunset, Text::LightPink, Text::LightViolet, Text::LightBlue, Text::LightCyan, Text::LightGreen];
-/// Its brightness choices (contracts `orb::LIGHT_LEVELS` in order).
+/// Its brightness choices (contracts `n4n0::LIGHT_LEVELS` in order).
 pub const LIGHT_LEVELS: [Text; 3] = [Text::LightSoft, Text::LightMedium, Text::LightBright];
 /// The kinds of devices the Tracking page smooths ([`super::TRACKING_KINDS`]).
 pub const TRACKING_KINDS: [Text; 3] = [Text::TrackingHeadset, Text::TrackingControllers, Text::TrackingTrackers];
@@ -413,11 +413,11 @@ mod tests {
 
     #[test]
     fn lists_follow_what_they_name() {
-        for (i, (name, _)) in orbiters_contracts::orb::LIGHT_COLORS.iter().enumerate() {
+        for (i, (name, _)) in orbiters_contracts::n4n0::LIGHT_COLORS.iter().enumerate() {
             assert_eq!(LIGHT_COLORS[i].en(), *name);
         }
-        assert_eq!(LIGHT_COLORS.len(), orbiters_contracts::orb::LIGHT_COLORS.len());
-        for (i, (name, _)) in orbiters_contracts::orb::LIGHT_LEVELS.iter().enumerate() {
+        assert_eq!(LIGHT_COLORS.len(), orbiters_contracts::n4n0::LIGHT_COLORS.len());
+        for (i, (name, _)) in orbiters_contracts::n4n0::LIGHT_LEVELS.iter().enumerate() {
             assert_eq!(LIGHT_LEVELS[i].en(), *name);
         }
         assert_eq!(TIMERS.len(), super::super::TIMERS.len());

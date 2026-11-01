@@ -15,7 +15,7 @@ orbiters-core = { workspace = true }
 orbiters-contracts = { workspace = true }
 orbiters-ui = { workspace = true }
 orbiters-sound = { workspace = true }
-orbiters-orb = { workspace = true }
+orbiters-n4n0-core = { workspace = true }
 orbiters-n4n0 = { workspace = true }
 orbiters-update = { workspace = true, features = ["net"] }
 orbiters-reconstruct = { path = "../orbiters-reconstruct" }

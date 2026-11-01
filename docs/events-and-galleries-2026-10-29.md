@@ -32,7 +32,7 @@ inspiration as you can from the website".
   the group, Check again = eligibility with `refresh=true`, then the sign-up), the community's account not a friend
   (Open the account), a failed invite and why (`not_friends`, `not_member`), signed out (Sign in). For a step whose
   instance is open but takes no sign-ups, Invite me asks Orbiters' own VRChat account to invite the member there
-  (`POST /orb/invites`, Home's Previous instances), with its own "add Orbiters as a friend" answer. A dead Invite me
+  (`POST /n4n0/invites`, Home's Previous instances), with its own "add Orbiters as a friend" answer. A dead Invite me
   (nothing open, over, loading) stays a quiet button with the reason as its tooltip.
 
 ## Communities in Photos & captures (`pages/community.rs`, hooks in `pages/gallery.rs`)
@@ -75,7 +75,7 @@ VRChat either). The desktop client is `orbiters_core::community` (fixtures in
 is under way and the second starts in 2 h 14 min; this computer's captures stand in for covers and pictures):
 `events`, `events-enter-mid`, `events-empty`, `events-error`, `events-search`, `events-open` (from the hero),
 `events-open-mid`, `events-open-card` (an upcoming event: no instance, Invite me green), `events-close-mid`,
-`events-loading`, `events-invite-busy|listed|friend|group|link|sent|orb`, `events-pictures`, and in Photos & captures
+`events-loading`, `events-invite-busy|listed|friend|group|link|sent|n4n0`, `events-pictures`, and in Photos & captures
 `gallery-community`, `gallery-community-all`, `gallery-community-one` (an event gallery's chip),
 `gallery-community-open(-mid)` (a picture), `gallery-community-event(-mid)` (the event's card into its window).
 

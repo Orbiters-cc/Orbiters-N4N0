@@ -16,7 +16,7 @@ It never asks for your VRChat login: it only reads VRChat's local log, OSC and S
 Orbiters - N4N0 also runs **N4N0**, the companion that floats on your avatar (the N4N0 prop from My Avatar's gallery):
 it answers on a text panel everyone around you can read, puts your hoodie on when you ask, keeps your GoGoLoco pose
 when you change avatar, holds parameters that worlds reset, shows an AFK message while you are away, saves the videos
-a world plays and takes pictures. Its assistant runs on Orbiters (`/orb` on the website, free quota or your own key);
+a world plays and takes pictures. Its assistant runs on Orbiters (`/n4n0/workspace` on the website, free quota or your own key);
 the window's N4N0 page turns it off for a tool without AI. You talk to it by holding Talk in its menu, touching it, the
 Talk button in the window or the SteamVR tab, or by starting a sentence with "Nano" (N4N0 said aloud); speech is transcribed on this
 computer and only the sentences meant for N4N0 go to the assistant.
@@ -28,11 +28,11 @@ boost on or off), YouTube (a keyboard with YouTube's suggestions as you type, fi
 channel and duration, and "Copy link" to paste in a world's video player; a sentence you say on the search page is what
 it searches), calls, a 3D picture with a timer, the music that plays, N4N0's light and the avatar's states. A copied link
 can be dropped in the world as a card on N4N0's screen (Drop): for 15 seconds whoever grabs it copies the link, through
-Orbiters for everyone else (contracts `Docs/orb.md`, Link card). The window's Home is the same
+Orbiters for everyone else (contracts `Docs/n4n0.md`, Link card). The window's Home is the same
 menu, with the keyboard for searching. It opens in the SteamVR overlay in front of you, and SteamVR's laser
-works on it; when your orb has the projected screen ("Replace Orbiters overlay" on N4N0's card in My Avatar), it
+works on it; when your N4N0 has the projected screen ("Replace Orbiters overlay" on N4N0's card in My Avatar), it
 opens on that screen in VRChat instead, where you touch it with your index finger and people around see it too
-(contracts `Docs/orb.md`, Menu and Screen). YouTube is read without an account or a key, as YouTube's own website does.
+(contracts `Docs/n4n0.md`, Menu and Screen). YouTube is read without an account or a key, as YouTube's own website does.
 
 A **3D picture** (1, 4 or 8 s) flies VRChat's camera around you while it records, then reconstructs the place. N4N0's
 camera rig follows the camera and about every other frame shows six more views at once (left, front, right, back, up,
@@ -56,7 +56,7 @@ change world or recenter. Its strength is a slider in the SteamVR tab, in Settin
 **States** keep how an avatar is: every parameter OSC can set (GoGoLoco's pose and the avatar's size only when the state
 says so, N4N0's own never), saved under a name from Home's States page or N4N0's menu, and put back over OSC in one
 press. One state per avatar can be its default, put back after each world join and each switch to that avatar. They
-live in `avatar-states.json` beside the settings (contracts `Docs/orb.md`, Saved states).
+live in `avatar-states.json` beside the settings (contracts `Docs/n4n0.md`, Saved states).
 
 And, when you turn it on in Settings, it shares **your frame rate per world** with Orbiters: a summary a minute with
 the world, your avatar, how many people were there and the names of their avatars (never who they are), plus your
@@ -72,10 +72,10 @@ well.
 | `crates/orbiters-capture` | Capture worker process (`orbiters-capture`): frame sources, strip and depth decoding, session bundles |
 | `crates/orbiters-reconstruct` | Reconstruction worker process (`orbiters-reconstruct`): trains Gaussian splats from a session's keyframes, poses and depth on the GPU (WGSL kernels on wgpu, checked against an f64 reference) |
 | `crates/orbiters-sound` | Interface sounds computed at start-up (a port of React Bits' Sound Lab renderer, see its NOTICE.md), the default-output player and the settings' mic monitor |
-| `crates/orbiters-orb` | N4N0, the companion on the avatar (contracts `Docs/orb.md`): its text panel's sender, avatar controls found by label, the tools and client of its assistant, the wake word, saved videos |
+| `crates/orbiters-n4n0-core` | N4N0, the companion on the avatar (contracts `Docs/n4n0.md`): its text panel's sender, avatar controls found by label, the tools and client of its assistant, the wake word, saved videos |
 | `crates/orbiters-n4n0` | N4N0's runtime, shared with the Android app: the panel, faces and helpers, the assistant's turns, N4N0's menu on the avatar's screen and the menu host the interfaces run, saved states, link cards, its ears, the music watcher; what each platform does its own way behind small traits (the app, OSC, clipboard, browser, sounds, language, ears, mouse, music, files) |
 | `crates/orbiters-voice` | N4N0's ears, a worker process (`orbiters-voice`): the microphone while N4N0 listens, Silero VAD and NVIDIA Parakeet through sherpa-onnx, on the CPU; it also installs the speech models |
-| `crates/orbiters-call` | N4N0's calls, a worker process (`orbiters-call`): WebRTC voice (webrtc-rs, Opus) between two Orbiters - N4N0 apps, through Cloudflare Realtime TURN when needed (contracts `Docs/orb-calls.md`) |
+| `crates/orbiters-call` | N4N0's calls, a worker process (`orbiters-call`): WebRTC voice (webrtc-rs, Opus) between two Orbiters - N4N0 apps, through Cloudflare Realtime TURN when needed (contracts `Docs/n4n0-calls.md`) |
 | `crates/orbiters-audio` | Microphones and a process's sound through WASAPI, for the capture worker and the voice worker |
 | `crates/orbiters-core` | Shared logic: settings, session bundles, keyframes, VRChat log, OSC/OSCQuery (this computer's VRChat, or a Quest's over the Wi-Fi), worker protocols; TLS, folders and the account's store per platform |
 | `crates/orbiters-projects` | Unity discovery, shared VCC/ALCOM project storage and VPM packages, avatar inventory and Toolkit setup requests ([Unity projects](docs/unity-projects.md)) |
@@ -150,18 +150,18 @@ cargo run -p orbiters-capture -- send-test --name Dolly2 --stream 1             
 cargo run -p orbiters-capture -- record --source spout:Dolly1 --extra Dolly2,Dolly3   # several senders as one session
 cargo run -p orbiters-capture -- verify "<raw capture folder>"                        # compare with its ground truth
 cargo run --release -p orbiters-reconstruct -- "<session folder>" [--iterations N] [--budget N] [--width N]
-cargo run -p orbiters-desktop -- --orb-menu <folder>    # N4N0's screen pages and layout table (for Toolkit), sample pages
-cargo run -p orbiters-desktop -- --orb-menu <folder> --theme <theme.json> --strings <strings.json>   # in a theme and language
-cargo run -p orbiters-desktop -- --orb-menu-strings <file.json>    # the menu's English texts by key, with each key's max
+cargo run -p orbiters-desktop -- --n4n0-menu <folder>    # N4N0's screen pages and layout table (for Toolkit), sample pages
+cargo run -p orbiters-desktop -- --n4n0-menu <folder> --theme <theme.json> --strings <strings.json>   # in a theme and language
+cargo run -p orbiters-desktop -- --n4n0-menu-strings <file.json>    # the menu's English texts by key, with each key's max
 ```
 
-`--orb-menu` writes `N4N0 screen pages.png` and `N4N0 screen layout.png`, which Orbiters Toolkit carries as
-`Editor/VRChat/OrbScreenPages.png.bytes` and `OrbScreenLayout.png.bytes`: run it and copy them over whenever the
+`--n4n0-menu` writes `N4N0 screen pages.png` and `N4N0 screen layout.png`, which Orbiters Toolkit carries as
+its screen pages and layout (`.png.bytes` in its `Editor/VRChat` folder): run it and copy them over whenever the
 menu's layout or look changes, so the avatar's screen matches the overlay. With `--theme` it writes only that theme's
 pages (as `N4N0 screen pages.png`), the layout and `N4N0 screen colors.json`; `--strings` draws the pages' texts in
-another language. The base themes and translations are `crates/orbiters-orb/menu-themes/` and
-`crates/orbiters-orb/menu-strings/` (contracts `Docs/orb.md`, Menu themes and translations); write `en.json` again with
-`--orb-menu-strings` when a text or a place changes (a test says so).
+another language. The base themes and translations are `crates/orbiters-n4n0-core/menu-themes/` and
+`crates/orbiters-n4n0-core/menu-strings/` (contracts `Docs/n4n0.md`, Menu themes and translations); write `en.json` again with
+`--n4n0-menu-strings` when a text or a place changes (a test says so).
 
 ## Tests
 

@@ -1,4 +1,4 @@
-//! Saved avatar states (N4N0's States, contracts `Docs/orb.md`, States): every parameter of the avatar worn that OSC may
+//! Saved avatar states (N4N0's States, contracts `Docs/n4n0.md`, States): every parameter of the avatar worn that OSC may
 //! write, and its eye height, kept by avatar under names, so that the avatar can be put back as it was, by hand or on its
 //! own after each world join and each switch to it (its default state). GoGoLoco's pose is saved with the rest and put
 //! back only when the state says so; so is the avatar's size. N4N0's own parameters are never saved nor sent.
@@ -21,7 +21,7 @@ pub const EYE_HEIGHT_SCALING_ALLOWED: &str = "/avatar/eyeheightscalingallowed";
 /// GoGoLoco's parameters all start so; the pose itself is VRChat's `VRCEmote`, which GoGoLoco drives.
 pub const POSE_PREFIX: &str = "Go/";
 pub const POSE_EMOTE: &str = "VRCEmote";
-/// N4N0's own parameters (contracts `Docs/orb.md`): never saved, never sent.
+/// N4N0's own parameters (contracts `Docs/n4n0.md`): never saved, never sent.
 pub const N4N0_PREFIX: &str = "N4N0/";
 /// States one avatar keeps at most.
 pub const MAX_STATES: usize = 50;
@@ -633,7 +633,7 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("orb-states-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("n4n0-states-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

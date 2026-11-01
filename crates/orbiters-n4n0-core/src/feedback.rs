@@ -1,4 +1,4 @@
-//! World feedback in N4N0's menu (contracts `Docs/orb.md`, Menu, from screen version 13; `Docs/world-feedback.md`): the
+//! World feedback in N4N0's menu (contracts `Docs/n4n0.md`, Menu, from screen version 13; `Docs/world-feedback.md`): the
 //! worlds the menus give feedback on (the one the player is in, the last capture's, previous instances'), each world's
 //! likes, labels and comments as the host knows them, and what the menus ask the host to send. The desktop reads and
 //! sends (through the same queue as the N4N0 world's lines); what the menus show of it is decided here.

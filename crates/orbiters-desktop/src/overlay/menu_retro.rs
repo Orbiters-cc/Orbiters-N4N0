@@ -1,4 +1,4 @@
-//! N4N0's menu in its retro look (contracts `Docs/orb.md`, Retro look): a cassette-futurism terminal, the same pages and
+//! N4N0's menu in its retro look (contracts `Docs/n4n0.md`, Retro look): a cassette-futurism terminal, the same pages and
 //! layout as Orbiters' own look (so pointing, hovering and the screen's memory stay as they are) drawn as phosphor-green
 //! line work on black. Panels have cut corners instead of round ones, labels are monospace capitals, icons sit in corner
 //! brackets, a dot grid runs behind everything and the page has a double frame with tick marks. Pictures are green dots.
@@ -9,9 +9,9 @@
 use super::menu_ui::{fit, glyph, Place, Skin, View};
 use egui::epaint::{PathShape, PathStroke};
 use egui::{pos2, vec2, Align2, Color32, ColorImage, Painter, Pos2, Rect, Shape, Stroke, TextureId};
-use orbiters_orb::menu::layout::{self, Align, Element, Icon, Label, Layout, Look, ScreenPage, Style, Tint};
-use orbiters_orb::menu::strings::Text;
-use orbiters_orb::menu::theme::{Colors, Rgb};
+use orbiters_n4n0_core::menu::layout::{self, Align, Element, Icon, Label, Layout, Look, ScreenPage, Style, Tint};
+use orbiters_n4n0_core::menu::strings::Text;
+use orbiters_n4n0_core::menu::theme::{Colors, Rgb};
 use orbiters_ui::theme::Txt;
 use orbiters_ui::widgets;
 
@@ -216,7 +216,7 @@ fn frame(p: &Painter, origin: Pos2, layout: Option<&Layout>, skin: &Skin) {
     // A plate on the top line: the system's name, and hatched tape beside it.
     let plate = Rect::from_center_size(pos2(card.center().x, card.min.y + 5.0), vec2(176.0, 12.0));
     p.rect_filled(plate.expand2(vec2(6.0, 2.0)), 0.0, pal.bg);
-    let system = format!("// {} {} //", skin.text(Text::RetroSystem), orbiters_contracts::orb::SCREEN_LATEST);
+    let system = format!("// {} {} //", skin.text(Text::RetroSystem), orbiters_contracts::n4n0::SCREEN_LATEST);
     widgets::text(p, plate.center(), Align2::CENTER_CENTER, &fit(p, mono(&system, SYSTEM_PLACE.size, pal.text2), SYSTEM_PLACE.room).txt);
     for side in [-1.0f32, 1.0] {
         let tape = Rect::from_center_size(pos2(card.center().x + side * 128.0, card.min.y + 5.0), vec2(64.0, 7.0));
@@ -353,7 +353,7 @@ fn element(p: &Painter, e: &Element, origin: Pos2, ink: Ink, skin: &Skin) {
     let cut = if small { 7.0 } else { 14.0 };
     match e.look {
         // The places over the music's timeline: nothing drawn (the timeline is the rule).
-        Look::Row if matches!(e.target, orbiters_orb::menu::Target::Seek(_)) => {}
+        Look::Row if matches!(e.target, orbiters_n4n0_core::menu::Target::Seek(_)) => {}
         // A timeline's segment: a plain line.
         Look::Track => {
             p.rect_filled(r, 0.0, ink.fill);
@@ -435,7 +435,7 @@ fn element(p: &Painter, e: &Element, origin: Pos2, ink: Ink, skin: &Skin) {
         // A countdown's segment: lit, nothing on it; a text area is its panel; a timeline's segment is its line.
         Look::Bar | Look::Area | Look::Track => {}
     }
-    if let (Look::Key, orbiters_orb::menu::Target::Key(c), None) = (e.look, e.target, e.label) {
+    if let (Look::Key, orbiters_n4n0_core::menu::Target::Key(c), None) = (e.look, e.target, e.label) {
         widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new(c.to_string(), 28.0).mono().color(ink.text));
     }
 }
@@ -447,10 +447,10 @@ fn furniture(p: &Painter, origin: Pos2, layout: &Layout, skin: &Skin) {
     for b in &layout.boxes {
         let r = rect(*b, origin);
         panel(p, r, 14.0, pal.panel, Stroke::new(1.5, pal.dim));
-        let orb = r.min + vec2(38.0, 36.0);
-        p.circle_stroke(orb, 13.0, Stroke::new(1.5, pal.line));
+        let n4n0 = r.min + vec2(38.0, 36.0);
+        p.circle_stroke(n4n0, 13.0, Stroke::new(1.5, pal.line));
         for side in [-1.0, 1.0] {
-            p.rect_filled(Rect::from_center_size(orb + vec2(side * 4.5, -1.0), vec2(3.0, 6.0)), 0.0, pal.line);
+            p.rect_filled(Rect::from_center_size(n4n0 + vec2(side * 4.5, -1.0), vec2(3.0, 6.0)), 0.0, pal.line);
         }
     }
     for (r, icon, t) in &layout.icons {
@@ -582,8 +582,8 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
         let r = rect(pic.rect, origin);
         match (layout::picture_key(menu, pic).as_deref(), menu.page) {
             (Some(key), _) => picture(p, r, (view.picture)(key), skin),
-            (None, orbiters_orb::menu::Page::Music | orbiters_orb::menu::Page::Mirror) => no_picture(p, r, skin),
-            (None, orbiters_orb::menu::Page::Photo) if menu.pages.share() => no_picture(p, r, skin),
+            (None, orbiters_n4n0_core::menu::Page::Music | orbiters_n4n0_core::menu::Page::Mirror) => no_picture(p, r, skin),
+            (None, orbiters_n4n0_core::menu::Page::Photo) if menu.pages.share() => no_picture(p, r, skin),
             (None, _) => {}
         }
     }
@@ -607,12 +607,12 @@ pub fn draw_back(p: &Painter, origin: Pos2, skin: &Skin) {
     hatch(p, Rect::from_center_size(pos2(c.x, c.y + 100.0), vec2(360.0, 10.0)), 8.0, Stroke::new(1.5, pal.dim));
 }
 
-/// A thumbnail as the retro look shows it (contracts `Docs/orb.md`, Retro look): its light, levels stretched, as 96 × 54
+/// A thumbnail as the retro look shows it (contracts `Docs/n4n0.md`, Retro look): its light, levels stretched, as 96 × 54
 /// green dots in four steps with an ordered 4 × 4 dither, each dot square with a dark gap, `scale` pixels apart (in the
 /// phosphor's own colours).
 pub fn dots(image: &ColorImage, scale: usize) -> ColorImage {
-    let (w, h) = (orbiters_orb::menu::retro::DOTS_X, orbiters_orb::menu::retro::DOTS_Y);
-    let light = orbiters_orb::menu::retro::lights(image.size[0], image.size[1], |x, y| {
+    let (w, h) = (orbiters_n4n0_core::menu::retro::DOTS_X, orbiters_n4n0_core::menu::retro::DOTS_Y);
+    let light = orbiters_n4n0_core::menu::retro::lights(image.size[0], image.size[1], |x, y| {
         let c = image.pixels[y * image.size[0] + x];
         [c.r(), c.g(), c.b()]
     });
@@ -620,7 +620,7 @@ pub fn dots(image: &ColorImage, scale: usize) -> ColorImage {
     let mut out = ColorImage::filled([w * scale, h * scale], BASE.bg);
     for y in 0..h {
         for x in 0..w {
-            let level = orbiters_orb::menu::retro::step(light[y * w + x], x, y);
+            let level = orbiters_n4n0_core::menu::retro::step(light[y * w + x], x, y);
             for dy in 0..scale.saturating_sub(1).max(1) {
                 for dx in 0..scale.saturating_sub(1).max(1) {
                     out.pixels[(y * scale + dy) * w * scale + x * scale + dx] = steps[level];

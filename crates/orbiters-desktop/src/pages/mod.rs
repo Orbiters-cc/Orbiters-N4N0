@@ -8,7 +8,7 @@ pub mod form;
 pub mod header;
 pub mod home;
 pub mod mic;
-pub mod orb;
+pub mod n4n0;
 pub mod projects;
 pub mod sessions;
 pub mod gallery;
@@ -40,7 +40,7 @@ pub enum Page {
     Home,
     Capture,
     Projects,
-    Orb,
+    N4n0,
     Sessions,
     Worlds,
     /// Orbiters' events, soonest first, and their windows (Invite me).

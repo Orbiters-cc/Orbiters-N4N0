@@ -4,7 +4,7 @@
 //! overlay process runs while SteamVR does.
 
 use crate::controller::{self, Controller, NoticeKind};
-use crate::ipc::{self, Endpoint, OrbCommand, Role, ToClient, ToService};
+use crate::ipc::{self, Endpoint, N4n0Command, Role, ToClient, ToService};
 use crate::mailbox::Mailbox;
 use crate::single;
 use orbiters_core::settings::Settings;
@@ -307,8 +307,8 @@ impl Service {
             }
             ToService::WalkBoost { strength } => ctl.set_walk_boost(strength, false),
             // Which Talk button is held matters: the service lets it go when that window or overlay goes away.
-            ToService::Orb { command: OrbCommand::Talk { down } } => ctl.orb_app_talk(down, role == Role::Overlay),
-            ToService::Orb { command } => ctl.orb_command(command),
+            ToService::N4n0 { command: N4n0Command::Talk { down } } => ctl.n4n0_app_talk(down, role == Role::Overlay),
+            ToService::N4n0 { command } => ctl.n4n0_command(command),
             ToService::OscReconnect => ctl.osc_rediscover(),
             ToService::Updates { action } => ctl.update_action(action),
             ToService::Quit => self.quit(),
@@ -372,7 +372,7 @@ impl Service {
         }
         if !still_there {
             // What it held (a Talk button, the overlay's open menu) ends with it.
-            self.ctl.orb_link_closed(role == Role::Overlay);
+            self.ctl.n4n0_link_closed(role == Role::Overlay);
         }
         // Without a tray (Linux for now) nothing would bring the window back: closing it quits.
         if role == Role::Window && cfg!(not(windows)) {
@@ -597,9 +597,9 @@ mod tests {
 
     #[test]
     fn a_settings_patch_reaches_the_service_as_a_patch() {
-        let line = r#"{"type":"patch_settings","patch":{"orb":{"wake_word":true}}}"#;
+        let line = r#"{"type":"patch_settings","patch":{"n4n0":{"wake_word":true}}}"#;
         match serde_json::from_str::<ToService>(line).unwrap() {
-            ToService::PatchSettings { patch } => assert_eq!(patch["orb"]["wake_word"], true),
+            ToService::PatchSettings { patch } => assert_eq!(patch["n4n0"]["wake_word"], true),
             other => panic!("{other:?}"),
         }
     }

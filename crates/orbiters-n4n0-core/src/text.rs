@@ -1,8 +1,8 @@
-//! The sender of N4N0's text panel (contracts `Docs/orb.md`, Text): turns text into pages and, step by step, into
+//! The sender of N4N0's text panel (contracts `Docs/n4n0.md`, Text): turns text into pages and, step by step, into
 //! the pointer and sync values VRChat syncs to everyone, resending blocks while a page is up so that people who
 //! arrive late see it whole.
 
-use orbiters_contracts::orb::{self, params, Page, POINTER_CLEAR, TEXT_LENGTH};
+use orbiters_contracts::n4n0::{self, params, Page, POINTER_CLEAR, TEXT_LENGTH};
 use rosc::OscType;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 /// One OSC message to VRChat: an avatar parameter (full address) and its value.
 pub type Message = (String, OscType);
 
-/// Time between the phases of a block (contracts `Docs/orb.md`, Text). VRChat may apply sync values a frame or more
+/// Time between the phases of a block (contracts `Docs/n4n0.md`, Text). VRChat may apply sync values a frame or more
 /// before a pointer sent with them, which wrote each block with the next one's letters; so no message batch changes
 /// both: the pointer goes to 0 (nothing written), then the values change, then the pointer moves to the block.
 pub const PHASE_GAP: Duration = Duration::from_millis(80);
@@ -127,7 +127,7 @@ fn greek(c: char) -> Option<&'static str> {
     })
 }
 
-/// `text` with what the contract's folding (`orb::fold`) cannot place made placeable first: accents written as a
+/// `text` with what the contract's folding (`n4n0::fold`) cannot place made placeable first: accents written as a
 /// letter and a combining mark joined into one letter, Vietnamese letters as their nearest, Greek in Latin letters.
 /// The contract would show them as `?`, or drop the accent.
 pub fn fold_more(text: &str) -> std::borrow::Cow<'_, str> {
@@ -163,7 +163,7 @@ pub fn fold_more(text: &str) -> std::borrow::Cow<'_, str> {
 
 /// How long a page stays up once it was fully sent: time to read its words, at least three seconds.
 pub fn reading_time(page: &Page) -> Duration {
-    let text = orb::page_text(page);
+    let text = n4n0::page_text(page);
     let words = text.split_whitespace().count() as u64;
     Duration::from_millis((1000 + words * 300).max(3000))
 }
@@ -212,8 +212,8 @@ impl TextSender {
     /// A sender for a prop with `sync` text sync values (4, 8 or 16), one step every `step`.
     pub fn new(sync: usize, step: Duration) -> Self {
         Self {
-            sync: if orb::SYNC_COUNTS.contains(&sync) { sync } else { 8 },
-            step: step.max(Duration::from_millis(orb::MIN_STEP_MS)),
+            sync: if n4n0::SYNC_COUNTS.contains(&sync) { sync } else { 8 },
+            step: step.max(Duration::from_millis(n4n0::MIN_STEP_MS)),
             sent: [0; TEXT_LENGTH],
             known: false,
             current: None,
@@ -239,7 +239,7 @@ impl TextSender {
     }
 
     pub fn set_step(&mut self, step: Duration) {
-        self.step = step.max(Duration::from_millis(orb::MIN_STEP_MS));
+        self.step = step.max(Duration::from_millis(n4n0::MIN_STEP_MS));
     }
 
     /// Shows `text` from the next step on, replacing what was shown or waiting; blank text hides the panel.
@@ -251,7 +251,7 @@ impl TextSender {
 
     /// Shows `text` as [`TextSender::show`] does, its blocks [`QUICK_STEP`] apart until it is whole: a short list the
     /// owner opened and picks from (N4N0's Call menu), seen at once by them (their avatar's parameters apply as they
-    /// come). Remote viewers may miss blocks that go faster than [`orb::MIN_STEP_MS`]; the resends while it is up
+    /// come). Remote viewers may miss blocks that go faster than [`n4n0::MIN_STEP_MS`]; the resends while it is up
     /// bring them, a step at a time.
     pub fn show_quick(&mut self, text: &str) {
         self.sticky = false;
@@ -276,7 +276,7 @@ impl TextSender {
     }
 
     fn load(&mut self, text: &str) {
-        let mut pages: VecDeque<Page> = orb::pages(&fold_more(text)).into();
+        let mut pages: VecDeque<Page> = n4n0::pages(&fold_more(text)).into();
         self.complete_at = None;
         self.resync = 0;
         self.current = pages.pop_front();
@@ -306,7 +306,7 @@ impl TextSender {
             .current
             .iter()
             .chain(&self.queue)
-            .map(|page| orb::page_text(page).split_whitespace().collect::<Vec<_>>().join(" "))
+            .map(|page| n4n0::page_text(page).split_whitespace().collect::<Vec<_>>().join(" "))
             .filter(|t| !t.is_empty())
             .collect();
         self.hide();
@@ -314,7 +314,7 @@ impl TextSender {
     }
 
     /// When the sender next has something to do (a block's next phase, a step), `None` when it has nothing: the
-    /// orb's thread sleeps until then.
+    /// N4N0 thread sleeps until then.
     pub fn next_due(&self) -> Option<Instant> {
         if let Some((at, _)) = &self.phase {
             return Some(*at);
@@ -377,7 +377,7 @@ impl TextSender {
 
     /// The page on display, as text.
     pub fn current_text(&self) -> Option<String> {
-        self.current.as_ref().map(|p| orb::page_text(p).lines().map(str::trim_end).collect::<Vec<_>>().join("\n"))
+        self.current.as_ref().map(|p| n4n0::page_text(p).lines().map(str::trim_end).collect::<Vec<_>>().join("\n"))
     }
 
     /// The messages of the step due at `now` (none between steps or with nothing to do).
@@ -412,7 +412,7 @@ impl TextSender {
                 let page = self.current.unwrap_or([0; TEXT_LENGTH]);
                 let n = self.sync;
                 let cells = page[block * n..(block + 1) * n].to_vec();
-                let out = cells.iter().enumerate().map(|(i, &g)| (parameter(&params::text_sync(i)), OscType::Float(orb::sync_value(g)))).collect();
+                let out = cells.iter().enumerate().map(|(i, &g)| (parameter(&params::text_sync(i)), OscType::Float(n4n0::sync_value(g)))).collect();
                 self.phase = Some((now + PHASE_GAP, Phase::Pointer(block, cells)));
                 out
             }
@@ -424,7 +424,7 @@ impl TextSender {
                 // Complete once its last block went: its reading time starts now (and a quick page goes on at the
                 // steps' pace, its resends for whoever missed a block).
                 if let Some(page) = self.current {
-                    let whole = (0..orb::pointer_count(n)).all(|b| page[b * n..(b + 1) * n] == self.sent[b * n..(b + 1) * n]);
+                    let whole = (0..n4n0::pointer_count(n)).all(|b| page[b * n..(b + 1) * n] == self.sent[b * n..(b + 1) * n]);
                     if self.complete_at.is_none() && self.force == 0 && whole {
                         self.complete_at = Some(now);
                         self.quick = false;
@@ -455,7 +455,7 @@ impl TextSender {
             self.visible = true;
         }
         let n = self.sync;
-        let pointers = orb::pointer_count(n);
+        let pointers = n4n0::pointer_count(n);
         if std::mem::take(&mut self.fresh) {
             // A new page: every block that shows text, or that the panel should hold text in, goes whatever `sent` says.
             let blank = |cells: &[u8]| cells.iter().all(|&g| g == 0);
@@ -540,7 +540,7 @@ impl PanelModel {
                 }
                 (n, OscType::Float(v)) => {
                     if let Some(i) = n.strip_prefix(params::TEXT_SYNC_PREFIX).and_then(|i| i.parse::<usize>().ok()).filter(|&i| i < sync.min(16)) {
-                        self.values[i] = Some(orb::glyph_of_value(*v));
+                        self.values[i] = Some(n4n0::glyph_of_value(*v));
                         self.write(sync, i);
                     }
                 }
@@ -551,7 +551,7 @@ impl PanelModel {
     }
 
     fn write(&mut self, sync: usize, i: usize) {
-        if let (true, Some(g)) = ((1..=orb::pointer_count(sync) as i32).contains(&self.pointer), self.values[i]) {
+        if let (true, Some(g)) = ((1..=n4n0::pointer_count(sync) as i32).contains(&self.pointer), self.values[i]) {
             self.cells[(self.pointer as usize - 1) * sync + i] = g;
         }
     }
@@ -608,8 +608,8 @@ mod tests {
                 } else {
                     sender.show(text);
                 }
-                let want = orb::pages(text)[0];
-                // Asked every 10 ms, as the orb thread wakes for the sender's next phase.
+                let want = n4n0::pages(text)[0];
+                // Asked every 10 ms, as the N4N0 thread wakes for the sender's next phase.
                 let mut t = start;
                 while panel.cells != want {
                     let mut out = sender.tick(t);
@@ -623,7 +623,7 @@ mod tests {
             let (slow, _) = whole(false);
             let (fast, sender) = whole(true);
             eprintln!("{text:?}: whole after {} ms, quick {} ms", slow.as_millis(), fast.as_millis());
-            let blocks = orb::pages(text)[0].chunks(8).filter(|b| b.iter().any(|&g| g != 0)).count() as u32;
+            let blocks = n4n0::pages(text)[0].chunks(8).filter(|b| b.iter().any(|&g| g != 0)).count() as u32;
             // The clear, the first block's values and pointer, then for each other block: the step, the pointer to 0,
             // its values, its pointer.
             let most = QUICK_STEP + PHASE_GAP + (QUICK_STEP + 2 * PHASE_GAP) * (blocks - 1) + Duration::from_millis(20);
@@ -635,12 +635,12 @@ mod tests {
     }
 
     fn first_row(cells: &Page) -> String {
-        orb::page_text(cells).lines().next().unwrap().trim_end().to_string()
+        n4n0::page_text(cells).lines().next().unwrap().trim_end().to_string()
     }
 
     #[test]
     fn a_page_arrives_block_by_block_then_hides() {
-        for sync in orb::SYNC_COUNTS {
+        for sync in n4n0::SYNC_COUNTS {
             let mut sender = TextSender::new(sync, STEP);
             let mut panel = PanelModel::new([7; TEXT_LENGTH]);
             sender.show("Ça marche ! Je mets ton sweat.");
@@ -688,10 +688,10 @@ mod tests {
         panel.apply(8, &sender.tick(t0));
         // Rows hold "ligne n" in their first block only: four blocks for four rows.
         let (t, _) = run(&mut sender, &mut panel, t0 + STEP, BLOCK * 4);
-        assert_eq!(orb::page_text(&panel.cells).lines().filter(|l| l.starts_with("ligne")).count(), 4);
+        assert_eq!(n4n0::page_text(&panel.cells).lines().filter(|l| l.starts_with("ligne")).count(), 4);
         // After the first page's reading time the second replaces it, again one changed block at a time.
         let (_, _) = run(&mut sender, &mut panel, t + Duration::from_secs(5), BLOCK * 4);
-        let shown: Vec<String> = orb::page_text(&panel.cells).lines().map(|l| l.trim_end().to_string()).collect();
+        let shown: Vec<String> = n4n0::page_text(&panel.cells).lines().map(|l| l.trim_end().to_string()).collect();
         assert_eq!(shown, vec!["ligne 5", "ligne 6", "", ""]);
     }
 
@@ -702,12 +702,12 @@ mod tests {
         let text = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen";
         // Kept up (sticky) for as long as the round takes.
         sender.show_sticky(text);
-        let (t, _) = run(&mut sender, &mut panel, Instant::now(), BLOCK * (1 + orb::pointer_count(16)) as u32);
+        let (t, _) = run(&mut sender, &mut panel, Instant::now(), BLOCK * (1 + n4n0::pointer_count(16)) as u32);
         // Someone who loads the avatar now starts from an empty panel and gets every block within one round.
         let mut late = PanelModel::new([0; TEXT_LENGTH]);
         let mut pointers = std::collections::HashSet::new();
         let mut now = t;
-        while now < t + BLOCK * orb::pointer_count(16) as u32 {
+        while now < t + BLOCK * n4n0::pointer_count(16) as u32 {
             let out = sender.tick(now);
             for (a, v) in &out {
                 if let (true, OscType::Int(p)) = (a.ends_with(params::TEXT_POINTER), v) {
@@ -717,7 +717,7 @@ mod tests {
             late.apply(16, &out);
             now += TICK;
         }
-        assert!(pointers.len() >= orb::pointer_count(16));
+        assert!(pointers.len() >= n4n0::pointer_count(16));
         assert_eq!(late.cells, panel.cells);
     }
 
@@ -850,8 +850,8 @@ mod tests {
         // Accents written as a letter and a combining mark.
         assert_eq!(fold_more("cafe\u{0301} nai\u{0308}ve Vie\u{0323}\u{0302}t"), "café naïve Viêt");
         assert!(matches!(fold_more("Ça va ? Привет"), std::borrow::Cow::Borrowed(_)), "nothing to do: no copy");
-        let page = &orb::pages(&fold_more("Việt"))[0];
-        assert_eq!(orb::page_text(page).lines().next().unwrap().trim_end(), "Viêt", "every letter has a glyph");
+        let page = &n4n0::pages(&fold_more("Việt"))[0];
+        assert_eq!(n4n0::page_text(page).lines().next().unwrap().trim_end(), "Viêt", "every letter has a glyph");
     }
 
     #[test]

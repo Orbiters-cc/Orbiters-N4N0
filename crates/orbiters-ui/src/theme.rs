@@ -61,7 +61,7 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     a.lerp_to_gamma(b, t.clamp(0.0, 1.0))
 }
 
-/// Card fill (the website's `--orb-surface`: content1 at 92 %).
+/// Card fill (the website's `--n4n0-surface`: content1 at 92 %).
 pub fn surface() -> Color32 {
     alpha(INK_850, 0.92)
 }
@@ -71,7 +71,7 @@ pub fn surface_strong() -> Color32 {
     INK_800
 }
 
-/// A surface inside a card (the website's `--orb-surface-soft`).
+/// A surface inside a card (the website's `--n4n0-surface-soft`).
 pub fn surface_soft() -> Color32 {
     alpha(INK_750, 0.45)
 }

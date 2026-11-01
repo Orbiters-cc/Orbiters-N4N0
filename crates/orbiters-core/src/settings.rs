@@ -27,7 +27,7 @@ pub struct Settings {
     /// Show Orbiters in SteamVR's dashboard while SteamVR runs.
     pub steamvr_overlay: bool,
     /// N4N0, the Orbiters companion on the avatar.
-    pub orb: OrbSettings,
+    pub n4n0: N4n0Settings,
     /// Share VRChat's frame rate in each world with Orbiters, a summary a minute (contracts `Docs/world-performance.md`).
     pub world_performance: bool,
     /// Walk boost: the play space moves along with the movement stick, so walking in VRChat goes faster.
@@ -156,7 +156,7 @@ impl Default for FloatingSettings {
 }
 
 /// Tracking smoothing (Orbiters - N4N0's SteamVR driver): on or off, and each kind of device's strength as an index of
-/// the menu's choices (`orbiters_orb::menu::SMOOTHING_STRENGTHS`: off, low, medium, high), headset, controllers,
+/// the menu's choices (`orbiters_n4n0_core::menu::SMOOTHING_STRENGTHS`: off, low, medium, high), headset, controllers,
 /// trackers.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -306,10 +306,10 @@ pub enum Follow {
     Hand,
 }
 
-/// N4N0, the Orbiters companion (contracts `Docs/orb.md`): its helpers, and its assistant.
+/// N4N0, the Orbiters companion (contracts `Docs/n4n0.md`): its helpers, and its assistant.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct OrbSettings {
+pub struct N4n0Settings {
     /// N4N0's helpers run: the text panel, the AFK message, held and carried parameters, saved videos.
     pub enabled: bool,
     /// N4N0's assistant: listening and answers. Off, N4N0 is a tool without AI: nothing is transcribed or sent.
@@ -332,7 +332,7 @@ pub struct OrbSettings {
     pub carry_parameters: Vec<String>,
     /// Parameters held at a value: put back whenever something else changes them.
     pub pins: Vec<Pin>,
-    /// Calls with VRChat friends who have Orbiters and N4N0 too (contracts `Docs/orb-calls.md`): presence and the
+    /// Calls with VRChat friends who have Orbiters and N4N0 too (contracts `Docs/n4n0-calls.md`): presence and the
     /// friends this computer's VRCX and VRCNext know go to Orbiters (as hashes) while on.
     pub calls: bool,
     /// Calls may go straight between the two computers (a little faster on one network), each side then seeing the
@@ -340,7 +340,7 @@ pub struct OrbSettings {
     pub direct_calls: bool,
     /// N4N0's menu (fast walk, YouTube, calls, a 3D picture): what opens it, the keyboard's letters.
     pub menu: MenuSettings,
-    /// The controllers' touchpads and sticks go to the avatar's N4N0 input parameters (contracts `Docs/orb-input.md`),
+    /// The controllers' touchpads and sticks go to the avatar's N4N0 input parameters (contracts `Docs/n4n0-input.md`),
     /// when it has them.
     pub controller_input: bool,
 }
@@ -394,7 +394,7 @@ impl ScreenSize {
     }
 }
 
-/// How N4N0's menu looks: Orbiters' own, or a green phosphor terminal (`orbiters_orb::menu::retro`).
+/// How N4N0's menu looks: Orbiters' own, or a green phosphor terminal (`orbiters_n4n0_core::menu::retro`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MenuLook {
@@ -439,7 +439,7 @@ pub const GOGOLOCO_PARAMETERS: &[&str] = &[
     "Go/PoseY",
 ];
 
-impl Default for OrbSettings {
+impl Default for N4n0Settings {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -535,7 +535,7 @@ impl Default for Settings {
             consent_acknowledged: false,
             reduce_motion: false,
             steamvr_overlay: true,
-            orb: OrbSettings::default(),
+            n4n0: N4n0Settings::default(),
             world_performance: false,
             walk_boost: WalkBoostSettings::default(),
             photo_3d: Photo3dLength::default(),
@@ -572,10 +572,17 @@ impl Settings {
                 return Self::default();
             }
         };
-        let (settings, dropped) = crate::json_lenient::<Self>(&text);
+        let migrated = migrated(&text);
+        let (settings, dropped) = crate::json_lenient::<Self>(migrated.as_deref().unwrap_or(&text));
         if !dropped.is_empty() {
             let aside = crate::keep_aside(path);
             eprintln!("settings: {} left at their default ({}), the file kept as {:?}", dropped.join(", "), path.display(), aside);
+        }
+        if migrated.is_some() {
+            // Written again at once under today's names: the earlier one is read this once only.
+            if let Err(e) = settings.save_to(path) {
+                eprintln!("settings: {}: {e:#}", path.display());
+            }
         }
         settings
     }
@@ -599,7 +606,7 @@ impl Settings {
     }
 
     /// These settings with what `patch` changes: a JSON object of the fields to change and their values, a section as
-    /// an object of its own changed fields (`{"orb": {"wake_word": true}}`; a list, the pins say, is replaced whole).
+    /// an object of its own changed fields (`{"n4n0": {"wake_word": true}}`; a list, the pins say, is replaced whole).
     /// Each field goes onto the settings as they are, so whatever else changed meanwhile stays; a field the settings do
     /// not have, or a value that does not fit it, is left out. Returns the settings and the fields left out.
     pub fn patched(&self, patch: &serde_json::Value) -> (Settings, Vec<String>) {
@@ -670,9 +677,47 @@ fn field_mut<'v>(value: &'v mut serde_json::Value, path: &[String]) -> Option<&'
     path.iter().try_fold(value, |v, key| v.as_object_mut()?.get_mut(key))
 }
 
+/// The key N4N0's section was saved under before the companion took its name (0.3.4-dev.8 and earlier).
+const LEGACY_N4N0_KEY: &str = "orb";
+
+/// The settings' text with N4N0's section moved from its earlier key to `n4n0` (today's wins when both are there),
+/// or `None` when the text has no earlier key (or is not a JSON object: [`crate::json_lenient`] deals with that).
+fn migrated(text: &str) -> Option<String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let fields = value.as_object_mut()?;
+    let legacy = fields.remove(LEGACY_N4N0_KEY)?;
+    fields.entry("n4n0").or_insert(legacy);
+    serde_json::to_string(&value).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn n4n0_s_section_moves_from_its_earlier_key_once() {
+        let dir = std::env::temp_dir().join(format!("orbiters-settings-n4n0-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let earlier = format!(
+            "{{\"storage_limit_gb\": 7, \"{LEGACY_N4N0_KEY}\": {{\"wake_word\": true, \"afk_message\": \"Back soon\", \"menu\": {{\"keyboard\": \"azerty\"}}}}}}"
+        );
+        std::fs::write(&path, &earlier).unwrap();
+        let s = Settings::load_from(&path);
+        assert!(s.n4n0.wake_word, "N4N0's settings kept");
+        assert_eq!((s.n4n0.afk_message.as_str(), s.n4n0.menu.keyboard, s.storage_limit_gb), ("Back soon", KeyboardLayout::Azerty, 7.0));
+        // Saved again under today's key at once.
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(saved.get(LEGACY_N4N0_KEY).is_none() && saved["n4n0"]["wake_word"] == true, "{saved}");
+        assert_eq!(Settings::load_from(&path), s, "and read the same way afterwards");
+        assert!(migrated(&std::fs::read_to_string(&path).unwrap()).is_none(), "nothing left to move");
+        // Both keys (an earlier version wrote the file after a newer one): today's wins.
+        let both = format!("{{\"{LEGACY_N4N0_KEY}\": {{\"wake_word\": true}}, \"n4n0\": {{\"wake_word\": false}}}}");
+        std::fs::write(&path, both).unwrap();
+        assert!(!Settings::load_from(&path).n4n0.wake_word);
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn round_trip_and_defaults() {
@@ -685,7 +730,7 @@ mod tests {
         let partial = Settings::load_from(&path);
         assert_eq!(partial.storage_limit_gb, 3.0);
         assert!(partial.rig_views == RigViews::Every3s && partial.coverage_overlay == CoverageOverlay::LeftHand, "the rig's views and the coverage overlay on");
-        assert_eq!(partial.orb, OrbSettings::default(), "settings from before N4N0 get its defaults");
+        assert_eq!(partial.n4n0, N4n0Settings::default(), "settings from before N4N0 get its defaults");
         assert!(partial.floating.watch && partial.floating.watch_hand == Hand::Left && partial.floating.placement.is_none(), "the watch on the left wrist");
         assert!(FloatingSettings::WIDTHS.contains(&partial.floating.width_m));
         assert_eq!(partial.window_gpu, WindowGpu::GraphicsCard, "the window draws on the graphics card unless chosen otherwise");
@@ -698,22 +743,22 @@ mod tests {
         let mut now = Settings::default();
         // Changed by the service since the window read its copy.
         now.walk_boost.strength = 0.9;
-        now.orb.pins = vec![Pin { parameter: "Hoodie".into(), value: crate::osc::OscValue::Bool(true) }];
+        now.n4n0.pins = vec![Pin { parameter: "Hoodie".into(), value: crate::osc::OscValue::Bool(true) }];
         let patch = serde_json::json!({
             "storage_limit_gb": 50,
-            "orb": { "wake_word": true, "menu": { "keyboard": "azerty", "layout": "dvorak" }, "pins": [] },
+            "n4n0": { "wake_word": true, "menu": { "keyboard": "azerty", "layout": "dvorak" }, "pins": [] },
             "walk_boost": { "enabled": true, "hand": "both" },
             "osc": { "vrchat_port": 70000 },
             "no_such_setting": 1,
         });
         let (patched, left_out) = now.patched(&patch);
         assert_eq!(patched.storage_limit_gb, 50.0);
-        assert!(patched.orb.wake_word && patched.walk_boost.enabled);
-        assert_eq!(patched.orb.menu.keyboard, KeyboardLayout::Azerty);
-        assert!(patched.orb.pins.is_empty(), "a list is replaced whole");
+        assert!(patched.n4n0.wake_word && patched.walk_boost.enabled);
+        assert_eq!(patched.n4n0.menu.keyboard, KeyboardLayout::Azerty);
+        assert!(patched.n4n0.pins.is_empty(), "a list is replaced whole");
         assert_eq!(patched.walk_boost.strength, 0.9, "what changed meanwhile stays");
         assert_eq!((patched.walk_boost.hand, patched.osc.vrchat_port), (Hand::Left, 9000), "values that do not fit are left out");
-        assert_eq!(left_out, vec!["no_such_setting", "orb.menu.layout", "osc.vrchat_port", "walk_boost.hand"]);
+        assert_eq!(left_out, vec!["n4n0.menu.layout", "no_such_setting", "osc.vrchat_port", "walk_boost.hand"]);
         assert_eq!(now.patched(&serde_json::json!([1])).0, now, "not an object: nothing changes");
     }
 
@@ -723,12 +768,12 @@ mod tests {
         // A window flips a switch, types an AFK message and replaces the pins on its copy.
         let mut mine = base.clone();
         mine.reduce_motion = !base.reduce_motion;
-        mine.orb.afk_message = "Back soon".into();
-        mine.orb.pins = vec![Pin { parameter: "Hoodie".into(), value: crate::osc::OscValue::Bool(true) }];
+        mine.n4n0.afk_message = "Back soon".into();
+        mine.n4n0.pins = vec![Pin { parameter: "Hoodie".into(), value: crate::osc::OscValue::Bool(true) }];
         let patch = base.diff(&mine);
         assert_eq!(
             patch,
-            serde_json::json!({ "reduce_motion": mine.reduce_motion, "orb": { "afk_message": "Back soon", "pins": serde_json::to_value(&mine.orb.pins).unwrap() } })
+            serde_json::json!({ "reduce_motion": mine.reduce_motion, "n4n0": { "afk_message": "Back soon", "pins": serde_json::to_value(&mine.n4n0.pins).unwrap() } })
         );
         assert_eq!(base.patched(&patch), (mine.clone(), vec![]));
         // Meanwhile the avatar's radial moved: the patch keeps that.
@@ -736,7 +781,7 @@ mod tests {
         now.walk_boost.strength = 0.8;
         let (patched, left_out) = now.patched(&patch);
         assert!(left_out.is_empty());
-        assert_eq!((patched.walk_boost.strength, patched.reduce_motion, patched.orb.afk_message.as_str()), (0.8, mine.reduce_motion, "Back soon"));
+        assert_eq!((patched.walk_boost.strength, patched.reduce_motion, patched.n4n0.afk_message.as_str()), (0.8, mine.reduce_motion, "Back soon"));
         // Nothing changed: an empty patch.
         assert_eq!(base.diff(&base), serde_json::json!({}));
     }
@@ -766,15 +811,15 @@ mod tests {
         // A port out of range, a keyboard from a newer version, a byte order mark from an editor.
         let text = "\u{feff}{\"consent_acknowledged\": true, \"storage_limit_gb\": 7, \
                     \"osc\": {\"vrchat_port\": 70000, \"drive_camera\": false}, \
-                    \"orb\": {\"wake_word\": true, \"menu\": {\"keyboard\": \"dvorak\"}}}";
+                    \"n4n0\": {\"wake_word\": true, \"menu\": {\"keyboard\": \"dvorak\"}}}";
         std::fs::write(&path, text).unwrap();
         let s = Settings::load_from(&path);
         assert!(s.consent_acknowledged, "consent survives a bad field elsewhere");
         assert_eq!(s.storage_limit_gb, 7.0);
         assert!(!s.osc.drive_camera);
         assert_eq!(s.osc.vrchat_port, OscSettings::default().vrchat_port);
-        assert!(s.orb.wake_word);
-        assert_eq!(s.orb.menu, MenuSettings::default());
+        assert!(s.n4n0.wake_word);
+        assert_eq!(s.n4n0.menu, MenuSettings::default());
         let kept = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().starts_with("settings.json.bad-"));
         assert!(kept, "the file that needed repair is kept beside");
         std::fs::remove_dir_all(dir).ok();

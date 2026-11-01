@@ -39,7 +39,7 @@ pub struct App {
     events: pages::events::State,
     videos: pages::videos::State,
     settings: pages::settings::State,
-    orb: pages::orb::State,
+    n4n0: pages::n4n0::State,
     logo_glitch: Option<(f64, f32)>,
     logo_hovered: bool,
 }
@@ -83,7 +83,7 @@ impl App {
             events: Default::default(),
             videos: Default::default(),
             settings: Default::default(),
-            orb: Default::default(),
+            n4n0: Default::default(),
             logo_glitch: None,
             logo_hovered: false,
         }
@@ -97,8 +97,8 @@ impl App {
         if self.page == Page::Settings && page != Page::Settings {
             self.settings.stop_mic_test();
         }
-        if self.page == Page::Orb && page != Page::Orb {
-            self.orb.leave(&self.ctl);
+        if self.page == Page::N4n0 && page != Page::N4n0 {
+            self.n4n0.leave(&self.ctl);
         }
         // Home again while a feature's page shows: back to Home itself.
         if page == Page::Home && self.page == Page::Home {
@@ -333,7 +333,7 @@ impl App {
         let nav_top = logo_rect.bottom() + 28.0;
         let items = [
             (Page::Home, "Home", icons::HOUSE),
-            (Page::Orb, "N4N0", icons::N4N0),
+            (Page::N4n0, "N4N0", icons::N4N0),
             (Page::Capture, "Capture", icons::APERTURE),
             (Page::Projects, "Unity projects", icons::CUBE),
             (Page::Sessions, "Photos & captures", icons::IMAGES),
@@ -506,7 +506,7 @@ impl App {
             Page::Home => pages::home::show(&mut child, &mut cx, &mut self.home),
             Page::Capture => pages::capture::show(&mut child, &mut cx, &mut self.capture, &mut self.projects),
             Page::Projects => pages::projects::show(&mut child, &mut cx, &mut self.projects),
-            Page::Orb => pages::orb::show(&mut child, &mut cx, &mut self.orb),
+            Page::N4n0 => pages::n4n0::show(&mut child, &mut cx, &mut self.n4n0),
             Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions),
             Page::Worlds => pages::worlds::show(&mut child, &mut cx, &mut self.worlds),
             Page::Events => pages::events::show(&mut child, &mut cx, &mut self.events),
@@ -669,7 +669,7 @@ impl eframe::App for App {
 
     /// The window closes with Talk held: let go of it, or VRChat would stay muted and N4N0 go on listening.
     fn on_exit(&mut self) {
-        self.orb.leave(&self.ctl);
+        self.n4n0.leave(&self.ctl);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

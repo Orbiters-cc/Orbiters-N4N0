@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::overlay::Canvas;
-use orbiters_orb::feedback::FeedbackView;
+use orbiters_n4n0_core::feedback::FeedbackView;
 
 /// Stand-in captures: names, authors, splats, a sky, likes and labels for everyone.
 fn stand_ins() -> anyhow::Result<Vec<Entry>> {

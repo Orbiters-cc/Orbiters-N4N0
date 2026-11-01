@@ -404,7 +404,7 @@ impl eframe::App for Bench {
                 }
                 if self.scenario == Scenario::Pages {
                     if now >= self.next_page {
-                        const PAGES: [Page; 6] = [Page::Orb, Page::Capture, Page::Sessions, Page::Worlds, Page::Settings, Page::Home];
+                        const PAGES: [Page; 6] = [Page::N4n0, Page::Capture, Page::Sessions, Page::Worlds, Page::Settings, Page::Home];
                         self.app.set_page(PAGES[self.pages % PAGES.len()], orbiters_ui::anim::time(ctx));
                         self.pages += 1;
                         self.next_page += 1.0;

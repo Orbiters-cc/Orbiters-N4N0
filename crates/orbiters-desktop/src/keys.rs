@@ -4,7 +4,7 @@
 //! keyboard layout writes them (Shift, AltGr, Caps Lock); Backspace, Enter (Search or Done), Escape (back) and Ctrl+V
 //! (the clipboard's text) do what they do in a text field. Shift, Ctrl, Alt and the Windows keys go through untouched.
 
-use orbiters_orb::menu::KeyInput;
+use orbiters_n4n0_core::menu::KeyInput;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 

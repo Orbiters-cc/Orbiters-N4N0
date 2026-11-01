@@ -31,14 +31,14 @@ pub mod view;
 use super::{Canvas, Presenter};
 use crate::backend::Ctl;
 use crate::controller::vrchat_data::{Request as DataRequest, Response as DataResponse, Scope};
-use crate::ipc::OrbCommand;
+use crate::ipc::N4n0Command;
 use crate::state::Snapshot;
 use catalog::{Capture, Catalog, Entry, Progress, Source};
 use egui::TextureId;
 use orbiters_core::maps::WorldList;
 use orbiters_openvr::{self as vr, overlay_flag, Matrix34};
-use orbiters_orb::feedback::{CommentRow, FeedbackAsk, FeedbackView};
-use orbiters_orb::menu::KeyboardLayout;
+use orbiters_n4n0_core::feedback::{CommentRow, FeedbackAsk, FeedbackView};
+use orbiters_n4n0_core::menu::KeyboardLayout;
 use panel::{Action, Data, Facts, ListStatus, Panel, Section, Status, Target, BAR_PX, CHIP_PX};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -167,7 +167,7 @@ fn interactive(overlay: &vr::Overlay, handle: vr::OverlayHandle, width_m: f32) {
 
 /// The transform `height_m` tall hanging under the menu at `at`.
 fn under_menu(at: &Matrix34, height_m: f32) -> Matrix34 {
-    let menu_height = super::menu::WIDTH_M * orbiters_orb::menu::layout::HEIGHT as f32 / orbiters_orb::menu::layout::WIDTH as f32;
+    let menu_height = super::menu::WIDTH_M * orbiters_n4n0_core::menu::layout::HEIGHT as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32;
     let down = menu_height / 2.0 + CHIP_GAP_M + height_m / 2.0;
     let mut t = *at;
     for i in 0..3 {
@@ -461,9 +461,9 @@ impl Worlds {
         menu_at: Option<&Matrix34>,
     ) -> (bool, bool) {
         // The app's feedback replaces the panel's own (its presses show at once, before the app has them).
-        if snap.orb.feedback != self.feedback_seen {
-            self.feedback_seen = snap.orb.feedback.clone();
-            self.feedback = snap.orb.feedback.clone();
+        if snap.n4n0.feedback != self.feedback_seen {
+            self.feedback_seen = snap.n4n0.feedback.clone();
+            self.feedback = snap.n4n0.feedback.clone();
             self.panel.dirty = true;
         }
         let me = snap.vrchat_login.user.as_ref().map(|u| u.display_name.clone()).filter(|n| !n.trim().is_empty());
@@ -514,7 +514,7 @@ impl Worlds {
         opened |= bar_opened;
         clicked |= bar_clicked;
         for ask in self.outbox.drain(..) {
-            backend.orb(OrbCommand::Feedback { ask });
+            backend.n4n0(N4n0Command::Feedback { ask });
         }
         (opened, clicked)
     }
@@ -749,7 +749,7 @@ impl Worlds {
 
     /// The computer's keys typed while the panel types (numbered: only the new ones count). What they ask is done on
     /// the next turn.
-    pub fn keys(&mut self, keys: &[(u32, orbiters_orb::menu::KeyInput)]) {
+    pub fn keys(&mut self, keys: &[(u32, orbiters_n4n0_core::menu::KeyInput)]) {
         let newest = keys.last().map_or(0, |(n, _)| *n);
         let Some(seen) = self.keys_seen.replace(newest) else { return };
         if !self.open || !keys.iter().any(|(n, _)| n.wrapping_sub(seen) as i32 > 0) {

@@ -1,4 +1,4 @@
-//! N4N0's runtime (contracts `Docs/orb.md`), shared by Orbiters - N4N0 on Windows and the Android app: the companion on
+//! N4N0's runtime (contracts `Docs/n4n0.md`), shared by Orbiters - N4N0 on Windows and the Android app: the companion on
 //! the avatar (its text panel, its face, the AFK message, held and carried parameters, saved videos), its assistant's
 //! turns, its menu on the avatar's projected screen and in the apps' interfaces ([`menu_host`]), the avatar's saved
 //! states, link cards, its ears, and the music it shows.

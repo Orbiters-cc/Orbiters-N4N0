@@ -386,7 +386,7 @@ impl Controller {
         world_feedback::spawn(self.clone());
         self.start_account();
         self.start_vrchat_login();
-        self.start_orb();
+        self.start_n4n0();
         self.start_calls();
         self.start_updates();
     }
@@ -652,7 +652,7 @@ impl Controller {
                     Some(OscValue::Text(id)) => Some(id),
                     _ => None,
                 }
-                .or_else(|| self.snapshot.lock().unwrap().orb.avatar_id.clone());
+                .or_else(|| self.snapshot.lock().unwrap().n4n0.avatar_id.clone());
                 content.merge(&orbiters_core::explicit::manifest_content(avatar.as_deref()));
                 if let Err(e) = content.save(&session_dir) {
                     self.notify(NoticeKind::Error, format!("Could not save capture content flags: {e}"));
@@ -1158,7 +1158,7 @@ impl Controller {
     }
 
     /// What one datagram from VRChat said, on the OSC receiving thread, which never waits for the OSC lock (see
-    /// orb.rs): what it starts goes to the OSC action thread, what it says is kept, under one lock for the whole
+    /// n4n0.rs): what it starts goes to the OSC action thread, what it says is kept, under one lock for the whole
     /// datagram.
     fn on_osc_events(self: &Shared, events: &mut Vec<OscEvent>, at_ns: u64, record_parameter: &str) {
         let mut messages = Vec::with_capacity(events.len());
@@ -1354,7 +1354,7 @@ impl Controller {
         };
         self.publish();
         if echo && previous.walk_boost.strength != settings.walk_boost.strength {
-            self.n4n0.send_parameter(orbiters_contracts::orb::params::WALK_BOOST, rosc::OscType::Float(settings.walk_boost.strength));
+            self.n4n0.send_parameter(orbiters_contracts::n4n0::params::WALK_BOOST, rosc::OscType::Float(settings.walk_boost.strength));
         }
         if previous.reconstruct_while_playing != settings.reconstruct_while_playing {
             // Reconstructions held while VRChat runs may start now.
@@ -2507,12 +2507,12 @@ mod tests {
         let ctl = Controller::new(Settings::default());
         // The avatar's radial moves after the window read its copy of the settings.
         ctl.set_walk_boost(0.9, true);
-        ctl.patch_settings(&serde_json::json!({ "orb": { "wake_word": true }, "walk_boost": { "enabled": true }, "osc": { "vrchat_port": "x" } }));
+        ctl.patch_settings(&serde_json::json!({ "n4n0": { "wake_word": true }, "walk_boost": { "enabled": true }, "osc": { "vrchat_port": "x" } }));
         let s = ctl.settings();
-        assert!(s.orb.wake_word && s.walk_boost.enabled);
+        assert!(s.n4n0.wake_word && s.walk_boost.enabled);
         assert_eq!(s.walk_boost.strength, 0.9, "the radial's change stays");
         assert_eq!(s.osc.vrchat_port, 9000, "a value that does not fit is left out");
-        assert!(ctl.view().settings.orb.wake_word, "published");
+        assert!(ctl.view().settings.n4n0.wake_word, "published");
     }
 
     #[test]

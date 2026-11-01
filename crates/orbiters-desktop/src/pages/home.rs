@@ -2,23 +2,23 @@
 //! the avatar's saved states, tracking, suggest, previous instances, the QR code scanner) are cards like the rest of the
 //! app's, and each opens a page of its own drawn the
 //! same way; what N4N0 says fills the grid's last row. What they show and what a press does are the menu's
-//! (`orbiters_orb::menu`, run by [`crate::menu_host`] in step with the tray service like the menu in VR); only the
+//! (`orbiters_n4n0_core::menu`, run by [`crate::menu_host`] in step with the tray service like the menu in VR); only the
 //! drawing is the window's (the States page is [`super::states`]). Cards and choices act on the pointer's press, buttons
 //! on its release with the press shown at once, and the menu shows a change before the service answers.
 
 use super::{block, row_columns, section, section_up_to, Cx};
-use crate::ipc::OrbCommand;
+use crate::ipc::N4n0Command;
 use crate::menu_host::MenuHost;
 use crate::overlay::menu_ui;
 use crate::state::StateAction;
 use egui::epaint::RectShape;
 use egui::{pos2, vec2, Align, Align2, Color32, CursorIcon, Id, Key, Layout, Painter, Pos2, Rect, Sense, Stroke, TextureId, Ui, UiBuilder, Vec2};
-use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
+use orbiters_contracts::n4n0::{LIGHT_COLORS, LIGHT_LEVELS};
 use orbiters_core::settings::Settings;
-use orbiters_orb::menu::layout::{self, Content, Icon, Tint, HOME_TILES, LENGTH_LABELS, MORE_CARDS_QR, TIMER_LABELS};
-use orbiters_orb::menu::strings::Text;
-use orbiters_orb::menu::{Call, Effect, Media, MediaCommand, Menu, Page, PhotoLength, Target, Volume, SMOOTHING_LABELS, TIMERS, TRACKING_KINDS};
-use orbiters_orb::youtube::Video;
+use orbiters_n4n0_core::menu::layout::{self, Content, Icon, Tint, HOME_TILES, LENGTH_LABELS, MORE_CARDS_QR, TIMER_LABELS};
+use orbiters_n4n0_core::menu::strings::Text;
+use orbiters_n4n0_core::menu::{Call, Effect, Media, MediaCommand, Menu, Page, PhotoLength, Target, Volume, SMOOTHING_LABELS, TIMERS, TRACKING_KINDS};
+use orbiters_n4n0_core::youtube::Video;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
 use orbiters_ui::theme::{self, weight, Txt};
@@ -245,7 +245,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
                 effects.push(Effect::Media(MediaCommand::Seek(at)));
             }
-            Act::States(action, avatar) => cx.ctl.orb(OrbCommand::States { action, avatar }),
+            Act::States(action, avatar) => cx.ctl.n4n0(N4n0Command::States { action, avatar }),
             Act::Suggestion(text) => host.menu.suggestion = text,
             Act::Home => effects.extend(go_home(host)),
         }
@@ -278,7 +278,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
 /// What Home's heading says while N4N0 does not listen: how to call it from here.
 fn idle_line(settings: &Settings) -> String {
-    match settings.orb.wake_words.first().filter(|_| settings.orb.wake_word) {
+    match settings.n4n0.wake_words.first().filter(|_| settings.n4n0.wake_word) {
         Some(word) => {
             let mut letters = word.chars();
             let word: String = letters.next().map(|c| c.to_uppercase().chain(letters).collect()).unwrap_or_default();
@@ -443,7 +443,7 @@ fn said(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, menu: &Menu) {
     widgets::frame(&p, r, theme::CARD_RADIUS, theme::surface());
     let chip = Rect::from_min_size(r.min + vec2(INSET, 22.0), vec2(36.0, 36.0));
     p.rect_filled(chip, theme::radius(11.0), theme::alpha(theme::ACCENT, 0.12));
-    orb_face(&p, chip.center(), 10.0);
+    n4n0_face(&p, chip.center(), 10.0);
     let caption = match (&menu.heard, menu.heard_private) {
         (None, _) => "N4N0",
         (Some(_), true) => "You said",
@@ -461,7 +461,7 @@ fn said(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, menu: &Menu) {
 }
 
 /// N4N0 itself, `radius` large: its green dot with its eyes, as the menu's back shows it.
-fn orb_face(p: &Painter, center: Pos2, radius: f32) {
+fn n4n0_face(p: &Painter, center: Pos2, radius: f32) {
     let s = radius / 26.0;
     p.circle_filled(center, radius, theme::ACCENT);
     for side in [-1.0, 1.0] {
@@ -561,7 +561,7 @@ fn youtube(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<T
 /// The link card out in the world (dropped from the results or the music): its title and link, the time it has left,
 /// and Take back.
 fn card_out(ui: &mut Ui, cx: &Cx, index: usize, acts: &mut Vec<Act>) {
-    let Some(card) = cx.snap.orb.card.as_ref() else { return };
+    let Some(card) = cx.snap.n4n0.card.as_ref() else { return };
     let left = match card.left {
         0..60 => "less than a minute left".to_string(),
         s => format!("{} min left", s.div_ceil(60)),
@@ -613,7 +613,7 @@ fn timeline(ui: &mut Ui, media: &Media, acts: &mut Vec<Act>) {
         p.circle_filled(pos2(filled.right(), bar.center().y), 4.0 + 3.0 * hover, theme::FG);
     }
     let shown_at = if held { (fraction * length as f32).round() as u64 } else { at as u64 };
-    let time = |s: u64| Txt::new(orbiters_orb::menu::clock(s), 12.0).color(theme::FG_3);
+    let time = |s: u64| Txt::new(orbiters_n4n0_core::menu::clock(s), 12.0).color(theme::FG_3);
     widgets::text(p, pos2(row.left(), row.center().y), Align2::LEFT_CENTER, &time(shown_at));
     widgets::text(p, pos2(row.right(), row.center().y), Align2::RIGHT_CENTER, &time(length as u64));
     if !media.can_seek {
@@ -1082,7 +1082,7 @@ fn suggest(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
                 .frame(egui::Frame::NONE)
                 .desired_rows(5)
                 .desired_width(w - 24.0)
-                .char_limit(orbiters_orb::menu::SUGGESTION_MAX)
+                .char_limit(orbiters_n4n0_core::menu::SUGGESTION_MAX)
                 .font(egui::FontId::proportional(14.0));
             ui.add(edit);
         });
@@ -1117,7 +1117,7 @@ fn qr(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
             "VRChat's stream camera",
             Some("Read about three times a second while this page shows, for two minutes at most"),
             |ui| {
-                use orbiters_orb::qr::QrPhase;
+                use orbiters_n4n0_core::qr::QrPhase;
                 let tone = match scanner.phase {
                     QrPhase::Looking => Tone::Ok,
                     QrPhase::Starting => Tone::Info,
@@ -1272,8 +1272,8 @@ fn swatches(ui: &mut Ui, chosen: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use crate::backend::{Backend, Ctl};
-    use crate::ipc::OrbCommand;
-    use crate::state::{OrbLight, Snapshot};
+    use crate::ipc::N4n0Command;
+    use crate::state::{N4n0Light, Snapshot};
     use egui::{Event, Modifiers, PointerButton, RawInput};
     use orbiters_ui::toast::Toasts;
     use std::path::PathBuf;
@@ -1283,12 +1283,12 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         patches: Mutex<Vec<serde_json::Value>>,
-        orb: Mutex<Vec<OrbCommand>>,
+        n4n0: Mutex<Vec<N4n0Command>>,
     }
 
     impl Backend for Recorder {
-        fn orb(&self, command: OrbCommand) {
-            self.orb.lock().unwrap().push(command);
+        fn n4n0(&self, command: N4n0Command) {
+            self.n4n0.lock().unwrap().push(command);
         }
         fn patch_settings(&self, patch: serde_json::Value) {
             self.patches.lock().unwrap().push(patch);
@@ -1357,7 +1357,7 @@ mod tests {
             let recorder = Arc::new(Recorder::default());
             let ctl: Ctl = recorder.clone();
             let mut snap = Snapshot::new(Settings::default());
-            snap.orb.light = Some(OrbLight { on: true, color: 1, level: 0.6 });
+            snap.n4n0.light = Some(N4n0Light { on: true, color: 1, level: 0.6 });
             Self { ctx, recorder, ctl, snap, toasts: Toasts::default(), state: State::default(), time: 0.0 }
         }
 
@@ -1443,14 +1443,14 @@ mod tests {
         h.press(qr);
         h.release(qr);
         assert_eq!(h.page(), Page::Qr);
-        assert!(matches!(h.recorder.orb.lock().unwrap().as_slice(), [OrbCommand::Qr { on: true }]));
+        assert!(matches!(h.recorder.n4n0.lock().unwrap().as_slice(), [N4n0Command::Qr { on: true }]));
         h.settle();
         // Back home: the scanner stops.
         let back = pos2(60.0, 64.0);
         h.press(back);
         h.release(back);
         assert_ne!(h.page(), Page::Qr);
-        assert!(matches!(h.recorder.orb.lock().unwrap().as_slice(), [OrbCommand::Qr { on: true }, OrbCommand::Qr { on: false }]));
+        assert!(matches!(h.recorder.n4n0.lock().unwrap().as_slice(), [N4n0Command::Qr { on: true }, N4n0Command::Qr { on: false }]));
         h.settle();
         // Previous instances, beside it, opens its own page.
         h.press(pos2(397.0, 490.0));
@@ -1477,7 +1477,7 @@ mod tests {
         h.press(light);
         h.release(light);
         h.frame(Vec::new());
-        assert!(matches!(h.recorder.orb.lock().unwrap().as_slice(), [OrbCommand::Light { on: false, .. }]));
+        assert!(matches!(h.recorder.n4n0.lock().unwrap().as_slice(), [N4n0Command::Light { on: false, .. }]));
         assert!(!h.menu().light.expect("a light").on, "as switched, though the service still says on");
         assert_eq!(h.page(), Page::Home, "its card did not open the light's page");
     }
@@ -1490,7 +1490,7 @@ mod tests {
         let states =
             vec![StateView { id: "s1".into(), name: "Hoodie on".into(), parameters: 10, pose_parameters: 2, eye_height: Some(1.6), ..Default::default() }];
         let party = StateView { id: "s9".into(), name: "Party".into(), ..Default::default() };
-        h.snap.orb.states = StatesView {
+        h.snap.n4n0.states = StatesView {
             avatar_id: Some("avtr_a".into()),
             avatar_name: Some("Rexouium".into()),
             states: states.clone(),
@@ -1517,9 +1517,9 @@ mod tests {
         let (default, _) = widgets::control(&h.ctx, "Set as default").expect("drawn");
         h.press(default.center());
         assert!(
-            matches!(h.recorder.orb.lock().unwrap().last(), Some(OrbCommand::States { action: StateAction::Default { id: Some(id) }, avatar: Some(a) }) if id == "s9" && a == "avtr_b"),
+            matches!(h.recorder.n4n0.lock().unwrap().last(), Some(N4n0Command::States { action: StateAction::Default { id: Some(id) }, avatar: Some(a) }) if id == "s9" && a == "avtr_b"),
             "{:?}",
-            h.recorder.orb.lock().unwrap()
+            h.recorder.n4n0.lock().unwrap()
         );
         h.release(default.center());
         // Back to the cards, then the avatar worn's.
@@ -1535,9 +1535,9 @@ mod tests {
         let (default, _) = widgets::control(&h.ctx, "Set as default").expect("drawn");
         h.press(default.center());
         assert!(
-            matches!(h.recorder.orb.lock().unwrap().last(), Some(OrbCommand::States { action: StateAction::Default { id: Some(id) }, avatar: None }) if id == "s1"),
+            matches!(h.recorder.n4n0.lock().unwrap().last(), Some(N4n0Command::States { action: StateAction::Default { id: Some(id) }, avatar: None }) if id == "s1"),
             "{:?}",
-            h.recorder.orb.lock().unwrap()
+            h.recorder.n4n0.lock().unwrap()
         );
         h.release(default.center());
         h.frame(Vec::new());
@@ -1547,8 +1547,8 @@ mod tests {
         h.press(save.center());
         h.release(save.center());
         assert!(matches!(
-            h.recorder.orb.lock().unwrap().last(),
-            Some(OrbCommand::States { action: StateAction::Save { name: Some(name), .. }, avatar: None }) if name == "State 2"
+            h.recorder.n4n0.lock().unwrap().last(),
+            Some(N4n0Command::States { action: StateAction::Save { name: Some(name), .. }, avatar: None }) if name == "State 2"
         ));
     }
 }

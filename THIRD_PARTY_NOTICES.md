@@ -84,6 +84,6 @@ every crate built into the programs, and of the native libraries next to them, a
 | Spout2 (Lynn Jarvis / leadedge, BSD-2-Clause) | Orbiters - N4N0 implements the Spout2 sender/receiver protocol (shared memory names and layout, access mutex, frame counter) in Rust, written from the published protocol; no Spout2 SDK code is included. Spout is a trademark of its authors. |
 | QOI image format (Dominic Szablewski) | Implemented from the specification (qoiformat.org). |
 | OSC 1.0 and OSCQuery | OSC messages through rosc; the OSCQuery service follows the OSCQuery proposal used by VRChat. |
-| KillFrenzy Avatar Text (KillFrenzy / Evan Tran, MIT) | N4N0's text panel speaks its pointer and sync-value protocol under N4N0's parameter names (contracts `Docs/orb.md`); the sender is written in Rust from the protocol, no KAT code is included. |
+| KillFrenzy Avatar Text (KillFrenzy / Evan Tran, MIT) | N4N0's text panel speaks its pointer and sync-value protocol under N4N0's parameter names (contracts `Docs/n4n0.md`); the sender is written in Rust from the protocol, no KAT code is included. |
 
 VRChat is a trademark of VRChat Inc. Orbiters - N4N0 is not affiliated with or endorsed by VRChat Inc.

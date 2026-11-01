@@ -4,7 +4,7 @@
 
 use orbiters_core::voice::{VoiceCommand, VoiceEvent};
 use orbiters_n4n0::{Browser, Clipboard, Ears, Locale, Mouse, MouseState, Platform, Sounds, VoiceEnded, VoiceEvents, VoiceWorker};
-use orbiters_orb::menu::KeyboardLayout;
+use orbiters_n4n0_core::menu::KeyboardLayout;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};

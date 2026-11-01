@@ -98,9 +98,9 @@ pub async fn register(root: &Path, path: &Path, add: bool) -> anyhow::Result<()>
     Ok(())
 }
 
-struct EnabledCollection {
-    inner: PackageCollection,
-    hidden: HashSet<String>,
+pub(crate) struct EnabledCollection {
+    pub(crate) inner: PackageCollection,
+    pub(crate) hidden: HashSet<String>,
 }
 impl EnabledCollection {
     fn enabled(&self, p: vrc_get_vpm::PackageInfo<'_>) -> bool {
@@ -127,7 +127,7 @@ fn missing_cache(root: &Path, settings: &Settings) -> bool {
     ];
     predefined.into_iter().flatten().any(|p| !root.join(p).is_file())
 }
-async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Settings, EnabledCollection)> {
+pub(crate) async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Settings, EnabledCollection)> {
     let io = DefaultEnvironmentIo::new(root.into());
     let settings = Settings::load(&io).await?;
     // Disabled repositories remain in VCC's settings; only the collection supplied to the resolver omits them.

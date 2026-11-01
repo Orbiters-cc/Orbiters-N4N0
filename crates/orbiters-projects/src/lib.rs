@@ -3,15 +3,18 @@ pub mod avatars;
 pub mod blender;
 mod builtin_templates;
 pub mod discovery;
+pub mod editor;
 pub mod git;
 pub mod hidden;
 pub mod icons;
+pub mod missing;
 pub mod network;
 pub mod preview;
 pub mod setup;
 pub mod size;
 pub mod storage;
 pub mod templates;
+pub mod updates;
 pub mod vpm;
 
 use std::path::{Path, PathBuf};

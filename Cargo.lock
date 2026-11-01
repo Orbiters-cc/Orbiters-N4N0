@@ -4098,6 +4098,7 @@ dependencies = [
  "resvg",
  "serde",
  "serde_json",
+ "sysinfo",
  "tempfile",
  "time",
  "tokio",

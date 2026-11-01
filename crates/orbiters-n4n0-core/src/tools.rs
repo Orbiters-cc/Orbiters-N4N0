@@ -1,4 +1,4 @@
-//! The tools Orbiters - N4N0 lends N4N0's assistant (contracts `Docs/orb-assistant.md`, client tools): what the
+//! The tools Orbiters - N4N0 lends N4N0's assistant (contracts `Docs/n4n0-assistant.md`, client tools): what the
 //! assistant may ask the desktop to do, as JSON Schemas for the server, and the actions its calls become.
 
 use serde_json::{json, Value};
@@ -127,7 +127,7 @@ pub fn specs(bare_parameters: bool) -> Vec<Value> {
             } }
         }),
         json!({
-            "name": "orb_light",
+            "name": "n4n0_light",
             "description": "Make N4N0 a light (for a dark world, or a photo): on or off, its colour and brightness. Everyone around sees it. Only for N4N0 with the Light option (the avatar lists N4N0/Light/On); the result says when it has none.",
             "input_schema": { "type": "object", "properties": {
                 "on": { "type": "boolean" },
@@ -136,7 +136,7 @@ pub fn specs(bare_parameters: bool) -> Vec<Value> {
             } }
         }),
         json!({
-            "name": "orb_mood",
+            "name": "n4n0_mood",
             "description": "How N4N0 looks while your answer is up.",
             "input_schema": { "type": "object", "properties": { "mood": { "enum": ["neutral", "happy", "annoyed", "surprised", "sleepy"] } }, "required": ["mood"] }
         }),
@@ -178,7 +178,7 @@ pub fn parse(name: &str, input: &Value) -> Result<Action, String> {
         "list_saved_videos" => Action::ListSavedVideos,
         "copy_to_clipboard" => Action::CopyToClipboard { text: need("text")?.chars().take(2000).collect() },
         "set_afk_message" => Action::SetAfkMessage { text: text(input, "text").map(|t| t.chars().take(120).collect()), enabled: flag(input, "enabled") },
-        "orb_mood" => Action::Mood {
+        "n4n0_mood" => Action::Mood {
             mood: match text(input, "mood").as_deref() {
                 Some("happy") => Mood::Happy,
                 Some("annoyed") => Mood::Annoyed,
@@ -205,10 +205,10 @@ pub fn parse(name: &str, input: &Value) -> Result<Action, String> {
             };
             Action::Media { command, volume_change }
         }
-        "orb_light" => {
+        "n4n0_light" => {
             let color = match text(input, "color") {
                 Some(name) => Some(
-                    orbiters_contracts::orb::LIGHT_COLORS
+                    orbiters_contracts::n4n0::LIGHT_COLORS
                         .iter()
                         .position(|(n, _)| n.eq_ignore_ascii_case(&name))
                         .ok_or_else(|| format!("N4N0's light has no colour \"{name}\"."))? as u8,
@@ -253,7 +253,7 @@ mod tests {
             Ok(Action::SetControl { control: "Clothes / Hoodie".into(), on: Some(true), value: None })
         );
         assert_eq!(parse("take_photo", &json!({ "delay_seconds": 99 })), Ok(Action::TakePhoto { delay_seconds: 10 }));
-        assert_eq!(parse("orb_mood", &json!({ "mood": "annoyed" })), Ok(Action::Mood { mood: Mood::Annoyed }));
+        assert_eq!(parse("n4n0_mood", &json!({ "mood": "annoyed" })), Ok(Action::Mood { mood: Mood::Annoyed }));
         assert!(parse("set_avatar_control", &json!({})).unwrap_err().contains("control"));
         assert_eq!(parse("control_media", &json!({})), Ok(Action::Media { command: None, volume_change: None }));
         assert_eq!(parse("control_media", &json!({ "action": "volume_down" })), Ok(Action::Media { command: None, volume_change: Some(-10) }));
@@ -261,8 +261,8 @@ mod tests {
             parse("control_media", &json!({ "volume": 140 })),
             Ok(Action::Media { command: Some(crate::menu::MediaCommand::Volume(100)), volume_change: None })
         );
-        assert_eq!(parse("orb_light", &json!({ "color": "Pink", "brightness": 2 })), Ok(Action::Light { on: None, color: Some(3), level: Some(1.0) }));
-        assert!(parse("orb_light", &json!({ "color": "plaid" })).is_err());
+        assert_eq!(parse("n4n0_light", &json!({ "color": "Pink", "brightness": 2 })), Ok(Action::Light { on: None, color: Some(3), level: Some(1.0) }));
+        assert!(parse("n4n0_light", &json!({ "color": "plaid" })).is_err());
         assert!(parse("format_disk", &json!({})).is_err());
     }
 }

@@ -1,4 +1,4 @@
-//! A theme of N4N0's menu (contracts `Docs/orb.md`, Menu themes and translations): which drawing (Orbiters' own look,
+//! A theme of N4N0's menu (contracts `Docs/n4n0.md`, Menu themes and translations): which drawing (Orbiters' own look,
 //! "modern", or the phosphor terminal, "retro"), the palette both drawings take their colours from, and the colours of the
 //! avatar's screen itself (its projected plate and edge, its glow), which Orbiters Toolkit puts on the screen's shader:
 //!
@@ -107,7 +107,7 @@ impl Theme {
         screen: BASE_SCREEN,
     };
 
-    /// The retro look, as it is (contracts `Docs/orb.md`, Retro look): ground, panels, lines, text, secondary text and
+    /// The retro look, as it is (contracts `Docs/n4n0.md`, Retro look): ground, panels, lines, text, secondary text and
     /// alerts; its home tiles' colours are its lines' (it draws icons in its lines' colour, YouTube's in red).
     pub const RETRO: Theme = Theme {
         style: MenuLook::Retro,

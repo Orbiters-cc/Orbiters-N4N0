@@ -1,4 +1,4 @@
-//! The client of N4N0's assistant on the Orbiters server (contracts `Docs/orb-assistant.md`): one request of a turn,
+//! The client of N4N0's assistant on the Orbiters server (contracts `Docs/n4n0-assistant.md`): one request of a turn,
 //! read as server-sent events. The conversation lives here, on the desktop; the server keeps nothing.
 
 use anyhow::Context as _;
@@ -158,7 +158,7 @@ fn error_from(status: u16, body: &str) -> AssistantError {
 pub fn send(api: &Api, token: &str, request: &Request, cancel: &AtomicBool, mut on_event: impl FnMut(Event)) -> anyhow::Result<Done> {
     let response = api
         .agent()
-        .post(&api.url("orb/assistant/turns"))
+        .post(&api.url("n4n0/assistant/turns"))
         .header("Authorization", &format!("Bearer {token}"))
         .header("Accept", "text/event-stream")
         .send_json(request)
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn trims_where_a_turn_starts() {
         let user = |t: &str| serde_json::json!({ "role": "user", "content": t });
-        let call = serde_json::json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": "c1", "name": "orb_mood", "input": {} }] });
+        let call = serde_json::json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": "c1", "name": "n4n0_mood", "input": {} }] });
         let result = serde_json::json!({ "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "c1", "content": "{}" }] });
         let answer = serde_json::json!({ "role": "assistant", "content": "ok" });
         assert!(starts_turn(&user("hi")) && !starts_turn(&result) && !starts_turn(&answer));

@@ -1,5 +1,5 @@
 //! Small pictures for N4N0's screen: a JPEG (a video's thumbnail) or a PNG (music art) decoded and fitted to a few dozen
-//! pixels, which the screen's thumbnail codec (contracts `orb::thumbnail`) then encodes.
+//! pixels, which the screen's thumbnail codec (contracts `n4n0::thumbnail`) then encodes.
 
 use zune_core::bytestream::ZCursor;
 use zune_core::colorspace::ColorSpace;

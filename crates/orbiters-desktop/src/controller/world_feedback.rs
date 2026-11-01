@@ -10,7 +10,7 @@ use orbiters_contracts::world_feedback::{self as contract, Action as Line, Refus
 use orbiters_core::account::Api;
 use orbiters_core::vrchat_log::{LogEvent, LogWatcher};
 use orbiters_core::world_feedback::{client_id, Action, Client, Failure, Known, Queue, Seen, Set};
-use orbiters_orb::feedback::{CommentRow, FeedbackAsk, FeedbackView, LabelCount, Subject, Why, WorldFeedback, SUBJECTS_MAX};
+use orbiters_n4n0_core::feedback::{CommentRow, FeedbackAsk, FeedbackView, LabelCount, Subject, Why, WorldFeedback, SUBJECTS_MAX};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -59,7 +59,7 @@ pub(super) struct WorldFeedbackRuntime {
     menu_errors: HashMap<String, String>,
     /// Worlds a menu asked about (read, liked, labelled, commented), newest first, since when.
     asked: Vec<(String, Instant)>,
-    instances: (Vec<orbiters_orb::menu::InstanceRow>, Option<Instant>),
+    instances: (Vec<orbiters_n4n0_core::menu::InstanceRow>, Option<Instant>),
     /// Why the local address cannot be served (another program has the port).
     pub(super) port_note: Option<String>,
     sent: Option<FeedbackView>,
@@ -215,7 +215,7 @@ impl WorldFeedbackRuntime {
     /// The worlds N4N0's menus give feedback on, and what they show of each.
     fn view(&mut self, here: Option<(String, String)>, signed_in: bool) -> FeedbackView {
         if self.instances.1.is_none_or(|at| at.elapsed() > INSTANCES_EVERY) {
-            self.instances = (orbiters_orb::invites::read_rows(), Some(Instant::now()));
+            self.instances = (orbiters_n4n0_core::invites::read_rows(), Some(Instant::now()));
         }
         let mut subjects: Vec<Subject> = Vec::new();
         let add = |subjects: &mut Vec<Subject>, world: &str, name: &str, why: Why| {

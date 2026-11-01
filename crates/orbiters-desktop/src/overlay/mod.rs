@@ -27,7 +27,7 @@ pub mod walk;
 pub mod worlds;
 
 use crate::backend::{Ctl, Remote};
-use crate::ipc::{Client, Endpoint, OrbCommand, Role};
+use crate::ipc::{Client, Endpoint, N4n0Command, Role};
 use anyhow::Context as _;
 use calibration::{MIRROR_PX, MIRROR_WIDTH_M, TARGET_PX, TARGET_WIDTH_M};
 use egui::{pos2, Event, PointerButton, RawInput, Rect, ViewportId, ViewportInfo};
@@ -505,7 +505,7 @@ impl Drop for Teardown<'_> {
     fn drop(&mut self) {
         self.state.release(self.backend);
         // Always: the menu may have closed on this turn's effects after its state was reported, unheard yet.
-        self.backend.orb(OrbCommand::MenuState { open: false, dictation: false, keyboard: false });
+        self.backend.n4n0(N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
         self.walk.reset(self.steamvr);
         self.world.destroy(self.overlay);
         self.menu.destroy(self.overlay);
@@ -678,7 +678,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             }
         }
         // VRChat's frame times also pace N4N0's projected screen (the owner's steps follow the frame rate).
-        if snap.settings.world_performance || snap.settings.orb.enabled {
+        if snap.settings.world_performance || snap.settings.n4n0.enabled {
             if let Some(chunk) = frames.update(&steamvr, vrchat_scene) {
                 backend.frames(chunk);
             }
@@ -692,7 +692,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             walking_allowed: vrchat_scene && !dashboard,
             place: place.as_deref(),
             held: t.menu.host.menu.open || t.state.busy() || t.state.calibrator.in_world(now),
-            away: snap.orb.afk,
+            away: snap.n4n0.afk,
             // VRChat's InStation, Seated and VelocityMagnitude tell whether it walks the avatar; without them (VRChat
             // not talking to Orbiters, or not lately) the stick alone says it.
             motion: snap
@@ -707,24 +707,24 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         // there): each change goes, nothing else. The floating panel reads them held (read whether N4N0 is on or not).
         if input_read {
             let changes = actions.presses(&steamvr);
-            if snap.settings.orb.enabled {
+            if snap.settings.n4n0.enabled {
                 for (hand, change) in changes.into_iter().enumerate() {
                     if let Some(down) = change {
-                        backend.orb(OrbCommand::Trigger { right: hand == 1, down });
+                        backend.n4n0(N4n0Command::Trigger { right: hand == 1, down });
                     }
                 }
             }
         }
-        // The touchpads and sticks reach the avatar's N4N0 input parameters (contracts `Docs/orb-input.md`), paced; turned
+        // The touchpads and sticks reach the avatar's N4N0 input parameters (contracts `Docs/n4n0-input.md`), paced; turned
         // off (or VRChat gone), they go back to rest once.
-        let pads_wanted = snap.settings.orb.enabled && snap.settings.orb.controller_input && snap.vrchat.running;
+        let pads_wanted = snap.settings.n4n0.enabled && snap.settings.n4n0.controller_input && snap.vrchat.running;
         let paced = match (pads_wanted, input_read) {
             (true, true) => actions.pads(&steamvr).and_then(|read| pads.step(Instant::now(), read)),
             (true, false) => None,
             (false, _) => pads.stop(),
         };
         if let Some(state) = paced {
-            backend.orb(OrbCommand::Input { pads: state });
+            backend.n4n0(N4n0Command::Input { pads: state });
         }
         let button = input_read && actions.menu_pressed(&steamvr);
         // The floating panel, the watch and N4N0's menu, used with the controllers' own lasers beside VRChat
@@ -732,7 +732,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         let mut watch = false;
         if let Some(floating) = t.floating.as_mut() {
             let pointables = t.menu.pointables();
-            let menu_open = t.menu.host.menu.open || (snap.orb.screen && snap.orb.screen_open);
+            let menu_open = t.menu.host.menu.open || (snap.n4n0.screen && snap.n4n0.screen_open);
             let cx = floating::Cx {
                 overlay: &overlay,
                 steamvr: &steamvr,

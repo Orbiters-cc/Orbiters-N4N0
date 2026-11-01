@@ -1,4 +1,4 @@
-//! N4N0's full pictures, the desktop's side (contracts `Docs/orb-picture.md`): each picture encoded once at both sizes
+//! N4N0's full pictures, the desktop's side (contracts `Docs/n4n0-picture.md`): each picture encoded once at both sizes
 //! ([`Full`]), what each of the avatar's picture slots should hold, and the lanes that carry the streams there in chunks:
 //! everyone's through the text channel ([`Synced`]: a chunk in the channel's three steps, in turn with the panel, the
 //! screen and the card), the owner's through the 64 local values ([`Lane::local`], a chunk every local step).
@@ -8,8 +8,8 @@
 //! again in rounds, for whoever loaded the avatar since and to repair what VRChat dropped (everyone's lane always; the
 //! owner's twice, then a round now and then).
 
-use orbiters_contracts::orb::picture::{self, chunk, Encoded, Size};
-use orbiters_contracts::orb::{self, params};
+use orbiters_contracts::n4n0::picture::{self, chunk, Encoded, Size};
+use orbiters_contracts::n4n0::{self, params};
 use rosc::OscType;
 use std::sync::Arc;
 
@@ -206,7 +206,7 @@ fn parameter(name: &str) -> String {
 
 /// The owner's chunk as messages: the 64 local values.
 pub fn local_messages(chunk: &Chunk) -> Vec<crate::text::Message> {
-    chunk.bytes.iter().enumerate().map(|(i, &b)| (parameter(&params::picture_value(i)), OscType::Float(orb::sync_value(b)))).collect()
+    chunk.bytes.iter().enumerate().map(|(i, &b)| (parameter(&params::picture_value(i)), OscType::Float(n4n0::sync_value(b)))).collect()
 }
 
 /// `N4N0/Picture/Send`: the owner's bridge on while chunks flow through the local values.
@@ -233,7 +233,7 @@ impl Step {
     pub fn messages(&self) -> Vec<crate::text::Message> {
         match self {
             Step::Rest => vec![(parameter(params::TEXT_POINTER), OscType::Int(0))],
-            Step::Values(bytes) => bytes.iter().enumerate().map(|(i, &b)| (parameter(&params::text_sync(i)), OscType::Float(orb::sync_value(b)))).collect(),
+            Step::Values(bytes) => bytes.iter().enumerate().map(|(i, &b)| (parameter(&params::text_sync(i)), OscType::Float(n4n0::sync_value(b)))).collect(),
             Step::Pointer(p) => vec![(parameter(params::TEXT_POINTER), OscType::Int(*p))],
         }
     }

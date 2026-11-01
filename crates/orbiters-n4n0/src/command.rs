@@ -1,7 +1,7 @@
 //! What the apps' interfaces ask of N4N0: the window and the SteamVR overlay over the desktop's link, a phone's
 //! screen in its own process.
 
-use crate::status::{OrbFace, StateAction};
+use crate::status::{N4n0Face, StateAction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -56,21 +56,21 @@ pub enum Command {
     },
     /// Testing: holds N4N0 in a state (`None`: back to what N4N0 is doing).
     TestFace {
-        face: Option<OrbFace>,
+        face: Option<N4n0Face>,
     },
     /// Testing: shows every state in turn, two seconds each.
     TestCycle,
-    /// Testing: acts as if VRChat said the owner is away (the sleeping orb and the AFK message).
+    /// Testing: acts as if VRChat said the owner is away (the sleeping N4N0 and the AFK message).
     TestAfk {
         on: bool,
     },
     /// Testing: acts as if the owner touched N4N0.
     TestTouch,
-    /// Testing: shows or hides the whole orb (`N4N0/Visible`).
+    /// Testing: shows or hides all of N4N0 (`N4N0/Visible`).
     TestVisible {
         on: bool,
     },
-    /// Testing: the avatar's screen shows the full pictures' diagnostics (contracts `Docs/orb-picture.md`, Diagnostics).
+    /// Testing: the avatar's screen shows the full pictures' diagnostics (contracts `Docs/n4n0-picture.md`, Diagnostics).
     TestPictures {
         on: bool,
     },
@@ -104,7 +104,7 @@ pub enum Command {
         avatar: Option<String>,
     },
     /// Tracking smoothing as N4N0's menu set it (its Tracking page): on or off, each kind's strength (an index of
-    /// `orbiters_orb::menu::SMOOTHING_LABELS`: headset, controllers, trackers).
+    /// `orbiters_n4n0_core::menu::SMOOTHING_LABELS`: headset, controllers, trackers).
     Tracking {
         on: bool,
         levels: [u8; 3],
@@ -120,7 +120,7 @@ pub enum Command {
     Watch {
         link: String,
     },
-    /// A copied link dropped in the world as a card, which the avatar's screen shows (contracts `Docs/orb.md`, Link card).
+    /// A copied link dropped in the world as a card, which the avatar's screen shows (contracts `Docs/n4n0.md`, Link card).
     Drop {
         link: String,
         title: String,
@@ -148,12 +148,12 @@ pub enum Command {
     },
     /// A 3D capture shared from the overlay's menu: how it goes comes in its row of the status' `captures`.
     ShareCapture {
-        share: orbiters_orb::captures::ShareAsk,
+        share: orbiters_n4n0_core::captures::ShareAsk,
     },
     /// World feedback the overlay's menu asked (read a world's, like, label, comment): what the app knows comes in the
     /// status' `feedback`.
     Feedback {
-        ask: orbiters_orb::feedback::FeedbackAsk,
+        ask: orbiters_n4n0_core::feedback::FeedbackAsk,
     },
     /// A controller's trigger pulled or let go (the SteamVR overlay reads it): on a screen of version 7 it presses where
     /// that hand's index finger points.
@@ -161,7 +161,7 @@ pub enum Command {
         right: bool,
         down: bool,
     },
-    /// Each hand's touchpad and thumbstick as the SteamVR overlay read them (contracts `Docs/orb-input.md`), paced by
+    /// Each hand's touchpad and thumbstick as the SteamVR overlay read them (contracts `Docs/n4n0-input.md`), paced by
     /// [`crate::input::Pacer`]: the avatar's N4N0 input parameters follow them.
     Input {
         pads: crate::input::Pads,
@@ -179,7 +179,7 @@ mod tests {
         assert_eq!(json(&Command::Talk { down: true }), r#"{"kind":"talk","down":true}"#);
         assert_eq!(json(&Command::Photo3DIn { seconds: 3 }), r#"{"kind":"photo_3d_in","seconds":3}"#);
         assert_eq!(json(&Command::Photo3D), r#"{"kind":"photo3_d"}"#);
-        assert_eq!(json(&Command::TestFace { face: Some(OrbFace::Happy) }), r#"{"kind":"test_face","face":"happy"}"#);
+        assert_eq!(json(&Command::TestFace { face: Some(N4n0Face::Happy) }), r#"{"kind":"test_face","face":"happy"}"#);
         assert_eq!(
             json(&Command::States { action: StateAction::Save { name: None, size: true, pose: false, default: false }, avatar: None }),
             r#"{"kind":"states","action":{"do":"save","name":null,"size":true,"pose":false,"default":false}}"#
@@ -196,10 +196,10 @@ mod tests {
         assert_eq!(json(&Command::Qr { on: true }), r#"{"kind":"qr","on":true}"#);
         assert_eq!(json(&Command::Friends { on: false }), r#"{"kind":"friends","on":false}"#);
         let share = Command::ShareCapture {
-            share: orbiters_orb::captures::ShareAsk {
+            share: orbiters_n4n0_core::captures::ShareAsk {
                 key: "C:/s/a".into(),
                 public: false,
-                recipients: vec![orbiters_orb::captures::Friend { id: "usr_a".into(), name: "A".into() }],
+                recipients: vec![orbiters_n4n0_core::captures::Friend { id: "usr_a".into(), name: "A".into() }],
                 acknowledge_explicit: false,
             },
         };

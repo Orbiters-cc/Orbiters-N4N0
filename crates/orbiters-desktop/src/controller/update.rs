@@ -321,7 +321,7 @@ mod tests {
         s.capture.state = CaptureState::Stopping;
         assert_eq!(s.busy_with(), Some("the recording"), "still being saved");
         s.capture.state = CaptureState::Idle;
-        s.orb.voice.downloading = Some(0.3);
+        s.n4n0.voice.downloading = Some(0.3);
         assert_eq!(s.busy_with(), Some("the speech models' download"));
     }
 

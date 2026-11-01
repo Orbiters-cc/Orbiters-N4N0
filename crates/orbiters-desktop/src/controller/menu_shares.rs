@@ -1,4 +1,4 @@
-//! N4N0's menu sharing 3D captures (contracts `Docs/orb.md`, Menu, from screen version 12), in the tray service: the
+//! N4N0's menu sharing 3D captures (contracts `Docs/n4n0.md`, Menu, from screen version 12), in the tray service: the
 //! computer's captures listed for History, the last one the desktop made, and the shares menus asked, handed to N4N0
 //! ([`orbiters_n4n0::N4n0::set_captures`]) whenever where they stand changes (looked at once a second). A share is a
 //! Photos & captures job ([`super::shares`]: the same upload records, preparation and server calls); one asked before
@@ -8,7 +8,7 @@ use super::shares::{self, Entry, Local, Operation, Outcome, Request};
 use super::Shared;
 use crate::state::{CaptureState, Snapshot};
 use orbiters_core::account::Server;
-use orbiters_orb::captures::{CapturePhase, CaptureRow, CapturesView, Friend, ShareAsk, Sharing, HISTORY_MAX, RECIPIENTS_MAX};
+use orbiters_n4n0_core::captures::{CapturePhase, CaptureRow, CapturesView, Friend, ShareAsk, Sharing, HISTORY_MAX, RECIPIENTS_MAX};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -324,10 +324,10 @@ impl super::Controller {
 }
 
 /// A capture's picture for N4N0's menus (its key: the session's folder), as the session's thumbnail.
-pub(crate) fn capture_picture(key: &str) -> Option<orbiters_orb::picture::Rgb> {
+pub(crate) fn capture_picture(key: &str) -> Option<orbiters_n4n0_core::picture::Rgb> {
     let (width, height, rgba) = orbiters_core::bundle::read_thumbnail(Path::new(key))?;
     let pixels = rgba.as_chunks::<4>().0.iter().flat_map(|&[r, g, b, _]| [r, g, b]).collect();
-    Some(orbiters_orb::picture::Rgb { width: width as usize, height: height as usize, pixels })
+    Some(orbiters_n4n0_core::picture::Rgb { width: width as usize, height: height as usize, pixels })
 }
 
 #[cfg(test)]

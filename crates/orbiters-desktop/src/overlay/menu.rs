@@ -4,7 +4,7 @@
 //! SteamVR's laser mouse would take VRChat's input while it shows), and a grip moves it as the floating panel moves:
 //! held, it rides the hand turned toward the eyes; let go, it stays, and opens next time where it was left, as seen
 //! from the eyes. It draws the same pages as the avatar's screen ([`super::menu_ui`]) and runs the same menu
-//! (`orbiters_orb::menu`, through [`crate::menu_host`] as Home in the window does): YouTube is fetched here, the rest
+//! (`orbiters_n4n0_core::menu`, through [`crate::menu_host`] as Home in the window does): YouTube is fetched here, the rest
 //! (calls, the clipboard, a 3D picture, fast walk) goes to the tray service.
 
 use super::menu_retro;
@@ -12,14 +12,14 @@ use super::menu_ui::{self, Skin, View};
 use super::floating::{space, Pointable};
 use super::{Canvas, Presenter};
 use crate::backend::Ctl;
-use crate::ipc::OrbCommand;
+use crate::ipc::N4n0Command;
 use crate::menu_host::MenuHost;
 use crate::state::Snapshot;
 use egui::{pos2, TextureId};
 use orbiters_core::settings::MenuLook;
 use orbiters_openvr::{self as vr, overlay_flag, Matrix34, Pose, Universe, MAX_DEVICES};
 use space::Quad;
-use orbiters_orb::menu::layout::{self, ScreenPage};
+use orbiters_n4n0_core::menu::layout::{self, ScreenPage};
 
 use std::time::{Duration, Instant};
 
@@ -225,26 +225,26 @@ impl MenuOverlay {
     pub fn update(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter, snap: &Snapshot, backend: &Ctl, button: bool, watch: bool) -> bool {
         let mut clicked = false;
         // The service asks for the menu (the wake word alone, a hand on N4N0) or, with N4N0's screen, keeps it.
-        let request = snap.orb.menu_request;
+        let request = snap.n4n0.menu_request;
         let asked = self.request_seen.is_some_and(|seen| seen != request);
         self.request_seen = Some(request);
-        if (button && snap.settings.orb.menu.button) || watch {
-            if snap.orb.screen {
-                backend.orb(OrbCommand::ToggleScreen);
+        if (button && snap.settings.n4n0.menu.button) || watch {
+            if snap.n4n0.screen {
+                backend.n4n0(N4n0Command::ToggleScreen);
             } else if self.host.menu.open {
                 self.close(overlay);
             } else {
                 self.open(overlay, steamvr, snap);
             }
-        } else if asked && !snap.orb.screen {
+        } else if asked && !snap.n4n0.screen {
             let just_closed = self.closed_at.is_some_and(|t| t.elapsed() < TOGGLE_AFTER_CLOSE);
-            if self.host.menu.open && snap.orb.menu_toggle {
+            if self.host.menu.open && snap.n4n0.menu_toggle {
                 self.close(overlay);
-            } else if !self.host.menu.open && !(snap.orb.menu_toggle && just_closed) {
+            } else if !self.host.menu.open && !(snap.n4n0.menu_toggle && just_closed) {
                 self.open(overlay, steamvr, snap);
             }
         }
-        if snap.orb.screen && self.host.menu.open {
+        if snap.n4n0.screen && self.host.menu.open {
             // The avatar now has N4N0's screen: the menu lives there.
             self.close(overlay);
         }
@@ -263,7 +263,7 @@ impl MenuOverlay {
         let state = (self.host.menu.open, self.host.menu.takes_speech() && !worlds, if worlds { self.worlds.typing() } else { self.host.menu.shows_keyboard() });
         if self.reported != Some(state) {
             self.reported = Some(state);
-            backend.orb(OrbCommand::MenuState { open: state.0, dictation: state.1, keyboard: state.2 });
+            backend.n4n0(N4n0Command::MenuState { open: state.0, dictation: state.1, keyboard: state.2 });
         }
         if !self.host.menu.open {
             // Drain the laser's events of a hidden overlay.
@@ -273,12 +273,12 @@ impl MenuOverlay {
         self.host.follow(snap);
         self.host.follow_media();
         // The computer's keyboard typing on the menu's keyboard (the service took the keys from VRChat).
-        self.worlds.keys(&snap.orb.keys);
-        let mut effects = self.host.take_keys(&snap.orb);
+        self.worlds.keys(&snap.n4n0.keys);
+        let mut effects = self.host.take_keys(&snap.n4n0);
         if !effects.is_empty() {
             self.last_activity = Instant::now();
         }
-        if let Some((n, text)) = &snap.orb.dictation {
+        if let Some((n, text)) = &snap.n4n0.dictation {
             if self.dictation_seen.is_some_and(|seen| seen != *n) {
                 self.last_activity = Instant::now();
                 if let Some(more) = self.host.menu.heard(text) {
@@ -350,7 +350,7 @@ impl MenuOverlay {
                     if let Some((i, target)) = layout::hit_pointable(page, &self.host.menu, x, HEIGHT as f32 - y) {
                         // The press shows at once; what it does follows.
                         self.pressed = Some(i);
-                        self.dragging = orbiters_orb::menu::timeline_segment(target);
+                        self.dragging = orbiters_n4n0_core::menu::timeline_segment(target);
                         effects.extend(self.host.press(target));
                         clicked = true;
                         self.last_activity = Instant::now();
@@ -386,7 +386,7 @@ impl MenuOverlay {
             return clicked;
         }
         // A look switched in Orbiters - N4N0: the whole picture again.
-        let retro_now = snap.settings.orb.menu.look == MenuLook::Retro;
+        let retro_now = snap.settings.n4n0.menu.look == MenuLook::Retro;
         if retro_now != self.retro {
             self.retro = retro_now;
             self.canvas.invalidate();
@@ -493,7 +493,7 @@ mod tests {
     #[test]
     #[ignore = "a timing, run by hand: cargo test -p orbiters-desktop call_page_timing -- --ignored --nocapture"]
     fn call_page_timing() {
-        use orbiters_orb::menu::{KeyboardLayout, Menu, PhotoLength, Target};
+        use orbiters_n4n0_core::menu::{KeyboardLayout, Menu, PhotoLength, Target};
         let mut canvas = Canvas::new(WIDTH, HEIGHT);
         let mut menu = Menu::new(KeyboardLayout::Qwerty, 5, PhotoLength::Standard);
         menu.open();

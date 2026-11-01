@@ -97,7 +97,7 @@ pub struct Moment {
     pub others: usize,
     pub avatar_name: Option<String>,
     /// The avatar carries the N4N0 prop (answers show on its panel).
-    pub orb_prop: bool,
+    pub n4n0_prop: bool,
     pub afk: bool,
     /// The video the world played last, with its title when known.
     pub last_video: Option<(String, Option<String>)>,
@@ -125,7 +125,7 @@ impl Moment {
                 out.push_str("The owner is away (AFK).\n");
             }
         }
-        if self.orb_prop {
+        if self.n4n0_prop {
             out.push_str("The owner's avatar carries the N4N0 prop: your answers show on its panel.\n");
         } else if self.avatar_name.is_some() || self.vrchat_running {
             out.push_str("The owner's avatar has no N4N0 prop: answers show in Orbiters - N4N0 only.\n");
@@ -184,7 +184,7 @@ mod tests {
             world_name: Some("The Black Cat".into()),
             others: 11,
             avatar_name: Some("Rexouium".into()),
-            orb_prop: true,
+            n4n0_prop: true,
             last_video: Some(("https://youtu.be/x".into(), Some("Song".into()))),
             controls: "\"Clothes / Hoodie\" (toggle, off)\n".into(),
             controls_from_manifest: true,

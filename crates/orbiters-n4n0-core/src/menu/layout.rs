@@ -11,7 +11,7 @@ use super::{
 };
 use crate::captures::{CaptureRow, Friends, Sharing};
 use crate::feedback::{self, COMMENTS_PER_PAGE, TOP_LABELS};
-use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
+use orbiters_contracts::n4n0::{LIGHT_COLORS, LIGHT_LEVELS};
 use std::sync::OnceLock;
 
 pub const WIDTH: u16 = 1024;
@@ -549,7 +549,7 @@ pub enum Tint {
     Pink,
     Indigo,
     Purple,
-    /// One of the light's colours (contracts `orb::LIGHT_COLORS`): a chip shows it as a swatch.
+    /// One of the light's colours (contracts `n4n0::LIGHT_COLORS`): a chip shows it as a swatch.
     Light(u8),
 }
 
@@ -1941,7 +1941,7 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             None => String::new(),
         },
         Content::LightNote => match menu.light {
-            Some(_) => "Everyone around sees your orb's light".into(),
+            Some(_) => "Everyone around sees N4N0's light".into(),
             None => "Turn Light on for N4N0 in My Avatar (its card's options)".into(),
         },
         Content::HeardWide(i) => {
@@ -2278,13 +2278,13 @@ pub fn suggestion_lines(text: &str) -> Vec<String> {
 
 /// `text` as the screen's font writes it, its spaces kept (a text being typed ends in the space just typed).
 fn shown_keep_spaces(text: &str) -> String {
-    orbiters_contracts::orb::panel_text(&crate::text::fold_more(text)).replace('\n', " ")
+    orbiters_contracts::n4n0::panel_text(&crate::text::fold_more(text)).replace('\n', " ")
 }
 
 /// `text` as the screen's font writes it (folded, one space between words): what text is wrapped from, so that the lines
 /// keep their length on the screen.
 fn shown(text: &str) -> String {
-    orbiters_contracts::orb::panel_text(&crate::text::fold_more(text)).split_whitespace().collect::<Vec<_>>().join(" ")
+    orbiters_contracts::n4n0::panel_text(&crate::text::fold_more(text)).split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// `text` cut to `cols` characters, ending in "…" when cut.
@@ -2310,7 +2310,7 @@ pub fn slot_text(menu: &Menu, slot: &Slot) -> String {
 
 /// What a slot shows, cut to its cells, to the owner or to everyone else (`public`, see [`text_for`]).
 pub fn slot_text_for(menu: &Menu, slot: &Slot, public: bool) -> String {
-    let text = orbiters_contracts::orb::panel_text(&crate::text::fold_more(&text_for(menu, slot.content, public))).replace('\n', " ");
+    let text = orbiters_contracts::n4n0::panel_text(&crate::text::fold_more(&text_for(menu, slot.content, public))).replace('\n', " ");
     match slot.content {
         // The field keeps the end in view, with the caret.
         Content::Query => {

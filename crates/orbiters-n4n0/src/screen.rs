@@ -1,34 +1,34 @@
-//! N4N0's menu in the app (contracts `Docs/orb.md`, Menu and Screen): on the avatar's projected screen when the N4N0
+//! N4N0's menu in the app (contracts `Docs/n4n0.md`, Menu and Screen): on the avatar's projected screen when the N4N0
 //! prop has one, and the requests that open it in the SteamVR overlay otherwise.
 //!
-//! The screen's menu lives here, beside the OSC link: the orb thread writes its memory (the owner's through local
+//! The screen's menu lives here, beside the OSC link: the N4N0 thread writes its memory (the owner's through local
 //! values, a block every step; everyone else's through the text channel, in turn with the panel), the screen's touch
 //! points say where a finger is, and what the menu asks for runs on threads of its own (YouTube, calls, a picture).
 //!
 //! Everyone else's screen is built apart from the owner's ([`Frame::public`]): it never names the owner's friends, and
 //! leaves out the owner's hover and presses, which changed with every move of the finger and held the rest back.
 //!
-//! A copied link can be dropped in the world as a card (contracts `Docs/orb.md`, Link card; screen version 7): an object
+//! A copied link can be dropped in the world as a card (contracts `Docs/n4n0.md`, Link card; screen version 7): an object
 //! of the avatar's own beside the screen, which appears in front of its owner and stays where it is (anyone may move
-//! it) until another replaces it, [`orb::card::LIFE_SECONDS`] pass, or the owner goes to another world or avatar
+//! it) until another replaces it, [`n4n0::card::LIFE_SECONDS`] pass, or the owner goes to another world or avatar
 //! (`N4N0/Card/Out`). Its memory, the card page's words, goes to every client through the text channel (in turn with the
 //! panel and the screen). Orbiters is told so that whoever grabs it there copies its link, and a hand on a card
 //! (`N4N0/Card/TouchL`, `TouchR`) copies the owner's own link, or asks Orbiters for the card dropped there.
 
 use crate::media::Watcher;
 use crate::platform::{CallRequest, Locale, Mouse, NoMouse};
-use crate::runtime::{N4n0, OrbRuntime, Shared, Source};
+use crate::runtime::{N4n0, N4n0Runtime, Shared, Source};
 use crate::status::{CallsStatus, CardView, NoticeKind};
-use orbiters_contracts::orb::{self, thumbnail};
+use orbiters_contracts::n4n0::{self, thumbnail};
 use orbiters_core::account::{Api, Server};
 use orbiters_core::osc::OscValue;
-use orbiters_orb::menu::layout::{Content, ScreenPage};
-use orbiters_orb::menu::pictures::{self as full, Lane, Synced};
-use orbiters_orb::menu::screen::{self, Audience, Flags, Frame, Picture, LOCAL_VALUES};
-use orbiters_orb::menu::touch::{self, Gesture, Ray, Touch, LOST_GRACE};
-use orbiters_orb::menu::{self, layout, Card, Effect, KeyboardLayout, Menu, Page, Pages, PhotoLength, SuggestQueue};
-use orbiters_orb::text::{Message, TextSender};
-use orbiters_orb::youtube;
+use orbiters_n4n0_core::menu::layout::{Content, ScreenPage};
+use orbiters_n4n0_core::menu::pictures::{self as full, Lane, Synced};
+use orbiters_n4n0_core::menu::screen::{self, Audience, Flags, Frame, Picture, LOCAL_VALUES};
+use orbiters_n4n0_core::menu::touch::{self, Gesture, Ray, Touch, LOST_GRACE};
+use orbiters_n4n0_core::menu::{self, layout, Card, Effect, KeyboardLayout, Menu, Page, Pages, PhotoLength, SuggestQueue};
+use orbiters_n4n0_core::text::{Message, TextSender};
+use orbiters_n4n0_core::youtube;
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -93,7 +93,7 @@ struct CardOut {
     out_sent: bool,
 }
 
-/// What a step of the screen leaves to do once the orb's lock is let go.
+/// What a step of the screen leaves to do once the N4N0's lock is let go.
 #[derive(Default)]
 pub(crate) struct Followups {
     pub effects: Vec<Effect>,
@@ -230,7 +230,7 @@ pub(crate) struct ScreenRuntime {
     /// The hands on a card (`N4N0/Card/TouchL`, `TouchR`), and when a grab was last taken.
     grab: [bool; 2],
     grab_at: Option<Instant>,
-    /// Full pictures (screen version 8, contracts `Docs/orb-picture.md`): the avatar's screen has them; its owner's lane
+    /// Full pictures (screen version 8, contracts `Docs/n4n0-picture.md`): the avatar's screen has them; its owner's lane
     /// (the local values, a chunk a local step) and everyone's (the text channel, with 8 or 16 values); how many turns
     /// everyone's took since the screen's last; `N4N0/Picture/Send` as last sent; when the owner's next chunk may go and
     /// when its lane goes round again.
@@ -392,7 +392,7 @@ impl ScreenRuntime {
     /// A copied link can be dropped as a card here: the avatar's N4N0 has the card of its own and its text channel
     /// reaches the card's blocks.
     pub(crate) fn card_ready(&self) -> bool {
-        self.card_capable && self.sync.is_some_and(|n| orb::card::fits(n, self.thumbnail))
+        self.card_capable && self.sync.is_some_and(|n| n4n0::card::fits(n, self.thumbnail))
     }
 
     /// The card out in the world, for the window.
@@ -413,13 +413,13 @@ impl ScreenRuntime {
     /// channel reaches it), its memory cleared first and written whole.
     fn put_card(&mut self, card: Card, now: Instant) {
         let Some(sync) = self.sync else { return };
-        let picture = orb::card::picture_fits(sync, self.thumbnail);
+        let picture = n4n0::card::picture_fits(sync, self.thumbnail);
         let mut menu = Menu::default();
         menu.pages = self.menu.pages;
         menu.show_card(card);
         let bytes = self.card_bytes(&menu, picture);
         self.card_off = false;
-        self.card = Some(CardOut { menu, picture, sender: screen::CardSender::new(sync, bytes), until: now + Duration::from_secs(orb::card::LIFE_SECONDS as u64), out_sent: false });
+        self.card = Some(CardOut { menu, picture, sender: screen::CardSender::new(sync, bytes), until: now + Duration::from_secs(n4n0::card::LIFE_SECONDS as u64), out_sent: false });
     }
 
     /// The card's memory for `menu` (its card page) as everyone sees it.
@@ -436,7 +436,7 @@ impl ScreenRuntime {
             self.end_card();
         }
         if std::mem::take(&mut self.card_off) {
-            out.push((crate::runtime::parameter(orb::card::OUT), rosc::OscType::Bool(false)));
+            out.push((crate::runtime::parameter(n4n0::card::OUT), rosc::OscType::Bool(false)));
         }
         let Some(card) = self.card.as_ref() else { return };
         let bytes = self.card_bytes(&card.menu, card.picture);
@@ -444,7 +444,7 @@ impl ScreenRuntime {
         card.sender.update(bytes);
         if !card.out_sent {
             card.out_sent = true;
-            out.push((crate::runtime::parameter(orb::card::OUT), rosc::OscType::Bool(true)));
+            out.push((crate::runtime::parameter(n4n0::card::OUT), rosc::OscType::Bool(true)));
         }
     }
 
@@ -561,7 +561,7 @@ impl ScreenRuntime {
         self.frame_ms.map_or(LOCAL_STEP_UNMEASURED, |ms| Duration::from_secs_f32(2.0 * ms / 1000.0)).clamp(LOCAL_STEP_MIN, LOCAL_STEP_MAX)
     }
 
-    /// When the screen next has something to do (for the orb thread's sleep).
+    /// When the screen next has something to do (for the N4N0 thread's sleep).
     pub(crate) fn next_due(&self, now: Instant) -> Option<Instant> {
         let mut due: Option<Instant> = None;
         let mut at = |t: Instant| due = Some(due.map_or(t, |d: Instant| d.min(t)));
@@ -615,7 +615,7 @@ impl ScreenRuntime {
             }
         }
         // The screen's turn on the text channel; one already due waits for the panel's block to end, whose own steps
-        // wake the orb thread.
+        // wake the N4N0 thread.
         let card_wants = self.card.as_ref().is_some_and(|c| c.sender.wants(now));
         let pictures_want = self.picture_everyone.as_ref().is_some_and(Synced::wants);
         if self.everyone.is_some() && ((self.menu.open && self.available) || self.close_everyone || card_wants || pictures_want) && self.next_synced > now {
@@ -894,16 +894,16 @@ impl ScreenRuntime {
     /// picture pointers.
     fn reset_pictures(&mut self) {
         self.picture_owner = Lane::local();
-        self.picture_everyone = self.sync.filter(|&n| self.full_pictures && orbiters_contracts::orb::picture::chunk::reaches_everyone(n, self.thumbnail)).map(Synced::new);
+        self.picture_everyone = self.sync.filter(|&n| self.full_pictures && orbiters_contracts::n4n0::picture::chunk::reaches_everyone(n, self.thumbnail)).map(Synced::new);
         self.picture_send = None;
         self.picture_repair = None;
     }
 
-    /// What the picture slots should hold now (contracts `Docs/orb-picture.md`, Slots): the results' thumbnails (slots
+    /// What the picture slots should hold now (contracts `Docs/n4n0-picture.md`, Slots): the results' thumbnails (slots
     /// 0 to 4) or the music's art (slot 5) while the menu shows on the screen, and the card's picture (slot 6) while it
     /// is out with its picture; each under its thumbnail as the prop keeps it.
     fn wanted_pictures(&self) -> Vec<(usize, std::sync::Arc<Vec<u8>>)> {
-        use orbiters_contracts::orb::picture::{SLOT_CARD, SLOT_MUSIC};
+        use orbiters_contracts::n4n0::picture::{SLOT_CARD, SLOT_MUSIC};
         let mut out = Vec::new();
         if !self.full_pictures {
             return out;
@@ -1024,7 +1024,7 @@ fn picture_log(line: &str) {
 }
 
 /// Closes N4N0's menu under N4N0's lock: the screen's (what it leaves to do), or the overlay's.
-fn close_menu(rt: &mut OrbRuntime) -> Vec<Effect> {
+fn close_menu(rt: &mut N4n0Runtime) -> Vec<Effect> {
     let s = &mut rt.screen;
     if s.available {
         s.menu.close()
@@ -1097,17 +1097,17 @@ impl N4n0 {
     /// avatar's screen when there is one, else in the overlay; N4N0 listens either way. Opening it again closes it.
     pub(crate) fn menu_open(self: &Shared, toggle: bool) {
         let settings = self.settings();
-        let opened = self.open_menu(&mut self.orb.lock().unwrap(), toggle, &settings);
+        let opened = self.open_menu(&mut self.n4n0.lock().unwrap(), toggle, &settings);
         self.menu_opened(opened);
     }
 
     /// [`N4n0::menu_open`] under N4N0's lock.
-    fn open_menu(&self, rt: &mut OrbRuntime, toggle: bool, settings: &orbiters_core::settings::Settings) -> Opened {
+    fn open_menu(&self, rt: &mut N4n0Runtime, toggle: bool, settings: &orbiters_core::settings::Settings) -> Opened {
         if rt.screen.available {
             if rt.screen.menu.open {
                 return if toggle { Opened::Closed(rt.screen.menu.close()) } else { Opened::Nothing };
             }
-            let keyboard = keyboard(settings.orb.menu.keyboard, &*self.device.locale);
+            let keyboard = keyboard(settings.n4n0.menu.keyboard, &*self.device.locale);
             let s = &mut rt.screen;
             s.menu.layout = keyboard;
             s.menu.photo_timer = settings.photo_3d_timer;
@@ -1150,11 +1150,11 @@ impl N4n0 {
 
     /// The Menu toggle of N4N0's expressions menu (`N4N0/Menu`, on the OSC action queue): on opens N4N0's menu as the
     /// binding does, off closes it. VRChat sending back what the app set asks nothing. The toggle is read and the menu
-    /// opened or closed in one turn of N4N0's lock: a step of the orb thread in between would find the toggle and the
+    /// opened or closed in one turn of N4N0's lock: a step of the N4N0 thread in between would find the toggle and the
     /// menu apart, and send the toggle back as it was.
     pub(crate) fn menu_toggled(self: &Shared, on: bool) {
         let settings = self.settings();
-        let mut rt = self.orb.lock().unwrap();
+        let mut rt = self.n4n0.lock().unwrap();
         match rt.screen.menu_toggled(on, Instant::now()) {
             Some(true) => {
                 let opened = self.open_menu(&mut rt, false, &settings);
@@ -1173,8 +1173,8 @@ impl N4n0 {
 
     /// A key of the computer's keyboard while N4N0's menu shows its keyboard: typed there on the avatar's screen, or handed
     /// to the overlay's menu (Ctrl+V's clipboard read here).
-    pub fn key(self: &Shared, input: orbiters_orb::menu::KeyInput) {
-        use orbiters_orb::menu::KeyInput;
+    pub fn key(self: &Shared, input: orbiters_n4n0_core::menu::KeyInput) {
+        use orbiters_n4n0_core::menu::KeyInput;
         let input = match input {
             KeyInput::Paste => match self.device.clipboard.paste() {
                 Some(text) => KeyInput::Text(text.replace(['\r', '\n'], " ")),
@@ -1183,7 +1183,7 @@ impl N4n0 {
             other => other,
         };
         let effects = {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             if rt.screen.available && rt.screen.menu.shows_keyboard() {
                 rt.screen.last_activity = Instant::now();
                 let effects = rt.screen.menu.key(input, || None);
@@ -1206,24 +1206,24 @@ impl N4n0 {
 
     /// N4N0 listens to one sentence (as a hand on N4N0 does), unless it already listens.
     pub(crate) fn menu_listen(self: &Shared) {
-        let settings = self.with_settings(|s| s.orb.clone());
+        let settings = self.with_settings(|s| s.n4n0.clone());
         if !settings.enabled || !settings.assistant {
             return;
         }
         {
-            let rt = self.orb.lock().unwrap();
+            let rt = self.n4n0.lock().unwrap();
             if rt.listening.is_some() || !rt.voice.installed {
                 return;
             }
         }
-        self.orb.lock().unwrap().listening = Some((Source::Touch, Instant::now()));
+        self.n4n0.lock().unwrap().listening = Some((Source::Touch, Instant::now()));
         self.voice_listen(Source::Touch);
     }
 
     /// The overlay's menu opened, closed, or moved to or from its search page.
     pub(crate) fn menu_overlay_state(self: &Shared, open: bool, dictation: bool) {
         let listen = {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             let s = &mut rt.screen;
             let opened = open && !s.overlay_open;
             s.overlay_open = open;
@@ -1250,7 +1250,7 @@ impl N4n0 {
 
     /// A sentence N4N0 heard while a menu is open: the screen's search page takes it, or the overlay's (`true`: taken).
     pub(crate) fn menu_heard(self: &Shared, text: &str) -> bool {
-        let mut rt = self.orb.lock().unwrap();
+        let mut rt = self.n4n0.lock().unwrap();
         if rt.screen.menu.open {
             rt.screen.last_activity = Instant::now();
             if let Some(effects) = rt.screen.menu.heard(text) {
@@ -1274,19 +1274,19 @@ impl N4n0 {
     /// screen (`screen`: its menu hears how it went), or from the overlay's or the window's (numbered in the status).
     pub(crate) fn suggestion_send(self: &Shared, text: String, voice: bool, screen: bool) {
         let n = self.clone();
-        let _ = std::thread::Builder::new().name("orb-suggestion".into()).spawn(move || {
-            let about = orbiters_orb::suggestions::About {
+        let _ = std::thread::Builder::new().name("n4n0-suggestion".into()).spawn(move || {
+            let about = orbiters_n4n0_core::suggestions::About {
                 source: "menu",
                 app_version: n.host.app_version(),
-                n4n0_version: n.orb.lock().unwrap().n4n0_version.clone(),
+                n4n0_version: n.n4n0.lock().unwrap().n4n0_version.clone(),
                 voice,
             };
             let result = match n.host.account() {
-                Some((api, token)) => orbiters_orb::suggestions::send(&api, &token, &text, &about).map_err(|e| format!("{e:#}")),
+                Some((api, token)) => orbiters_n4n0_core::suggestions::send(&api, &token, &text, &about).map_err(|e| format!("{e:#}")),
                 None => Err("Sign in to Orbiters in Orbiters - N4N0 first (Settings)".to_string()),
             };
             {
-                let mut rt = n.orb.lock().unwrap();
+                let mut rt = n.n4n0.lock().unwrap();
                 if screen {
                     rt.screen.menu.suggestion_sent(result.clone());
                     rt.screen.last_activity = Instant::now();
@@ -1306,15 +1306,15 @@ impl N4n0 {
     /// Orbiters' VRChat account invites the player to `location` (Previous instances' Invite me), from the screen's menu
     /// (`screen`) or another's (the answer then goes in the status' `invite`); a toast says how it went.
     pub(crate) fn invite_send(self: &Shared, location: String, screen: bool) {
-        use orbiters_orb::menu::InviteAnswer;
+        use orbiters_n4n0_core::menu::InviteAnswer;
         let n = self.clone();
-        let _ = std::thread::Builder::new().name("orb-invite".into()).spawn(move || {
+        let _ = std::thread::Builder::new().name("n4n0-invite".into()).spawn(move || {
             let answer = match n.host.account() {
-                Some((api, token)) => orbiters_orb::invites::send(&api, &token, &location),
+                Some((api, token)) => orbiters_n4n0_core::invites::send(&api, &token, &location),
                 None => InviteAnswer::Failed { message: "Sign in to Orbiters in Orbiters - N4N0 first (Settings)".into() },
             };
             {
-                let mut rt = n.orb.lock().unwrap();
+                let mut rt = n.n4n0.lock().unwrap();
                 if screen {
                     rt.screen.menu.invite_answered(answer.clone());
                     rt.screen.last_activity = Instant::now();
@@ -1346,8 +1346,8 @@ impl N4n0 {
     /// (numbered), on the overlay's and the window's.
     fn photo_stopped(self: &Shared, text: String) {
         {
-            let mut rt = self.orb.lock().unwrap();
-            if rt.screen.menu.open && rt.screen.menu.page == orbiters_orb::menu::Page::Photo {
+            let mut rt = self.n4n0.lock().unwrap();
+            if rt.screen.menu.open && rt.screen.menu.page == orbiters_n4n0_core::menu::Page::Photo {
                 rt.screen.menu.notice = Some(text.clone());
             }
             let number = rt.screen.photo_note.as_ref().map_or(1, |(n, _)| n.wrapping_add(1));
@@ -1368,7 +1368,7 @@ impl N4n0 {
             if n.host.camera_open() == Some(false) {
                 return n.photo_stopped(crate::platform::CAMERA_CLOSED.to_string());
             }
-            n.orb.lock().unwrap().screen.photo_at = Some(Instant::now() + Duration::from_secs(seconds as u64));
+            n.n4n0.lock().unwrap().screen.photo_at = Some(Instant::now() + Duration::from_secs(seconds as u64));
             n.publish();
         });
     }
@@ -1377,7 +1377,7 @@ impl N4n0 {
     /// `N4N0/Card/Out` goes off at the next step.
     pub(crate) fn card_take_back(self: &Shared) {
         let taken = {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             let taken = rt.screen.card.is_some();
             rt.screen.end_card();
             rt.screen.menu.card_out = false;
@@ -1391,16 +1391,16 @@ impl N4n0 {
         self.publish();
     }
 
-    /// Drops a link card in the world (contracts `Docs/orb.md`, Link card): the avatar's card of its own shows it where it
-    /// appears and stays (contracts `orb::card`); Orbiters is told, so that whoever grabs it in this instance copies its link.
+    /// Drops a link card in the world (contracts `Docs/n4n0.md`, Link card): the avatar's card of its own shows it where it
+    /// appears and stays (contracts `n4n0::card`); Orbiters is told, so that whoever grabs it in this instance copies its link.
     /// From N4N0's menu on the screen, the overlay's or the window's Home.
     pub(crate) fn card_drop(self: &Shared, link: String, title: String, video: Option<String>) {
-        if !orbiters_orb::drops::copyable(&link) {
+        if !orbiters_n4n0_core::drops::copyable(&link) {
             self.notify(NoticeKind::Warning, "Only web links can be dropped as cards.");
             return;
         }
         let fetch = {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             if !rt.screen.card_ready() {
                 drop(rt);
                 self.notify(NoticeKind::Info, "This avatar's N4N0 cannot drop cards: update N4N0 in My Avatar, then upload the avatar again.");
@@ -1408,7 +1408,7 @@ impl N4n0 {
             }
             let now = Instant::now();
             let s = &mut rt.screen;
-            s.put_card(Card { link: link.clone(), title: title.clone(), video: video.clone(), left: orb::card::LIFE_SECONDS }, now);
+            s.put_card(Card { link: link.clone(), title: title.clone(), video: video.clone(), left: n4n0::card::LIFE_SECONDS }, now);
             s.last_activity = now;
             let fetch = video.filter(|id| !matches!(s.pictures.get(id), Some(Thumb::Ready(_))));
             rt.wake();
@@ -1423,7 +1423,7 @@ impl N4n0 {
             (Some((api, token)), Some(instance)) => {
                 let n = self.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = orbiters_orb::drops::post(&api, &token, &instance, &link, &title) {
+                    if let Err(e) = orbiters_n4n0_core::drops::post(&api, &token, &instance, &link, &title) {
                         n.notify(NoticeKind::Warning, format!("People around cannot copy your card's link: {e:#}"));
                     }
                 });
@@ -1437,7 +1437,7 @@ impl N4n0 {
     /// A hand on a dropped card (on the OSC action queue): the owner's own card's link is copied; with none out, someone
     /// else's card was grabbed, and Orbiters gives the newest dropped in this instance.
     pub(crate) fn card_grab(self: &Shared) {
-        let own = self.orb.lock().unwrap().screen.card_view().map(|c| (c.link, c.title));
+        let own = self.n4n0.lock().unwrap().screen.card_view().map(|c| (c.link, c.title));
         if let Some((link, title)) = own {
             self.card_copied(&link, &title);
             return;
@@ -1445,7 +1445,7 @@ impl N4n0 {
         let Some(instance) = self.host.world().instance_hash() else { return };
         let api = self.host.account().map(|(api, _)| api).unwrap_or_else(|| Api::new(Server::current()));
         let n = self.clone();
-        std::thread::spawn(move || match orbiters_orb::drops::latest(&api, &instance) {
+        std::thread::spawn(move || match orbiters_n4n0_core::drops::latest(&api, &instance) {
             Ok(Some(card)) => n.card_copied(&card.link, &card.title),
             Ok(None) => n.notify(NoticeKind::Info, "That card is gone: its link can no longer be copied."),
             Err(e) => n.notify(NoticeKind::Warning, format!("Could not copy the card's link: {e:#}")),
@@ -1470,7 +1470,7 @@ impl N4n0 {
     /// Runs `fetch` on a thread of its own; what it brings back goes to the screen's next step, which it wakes.
     fn screen_fetch(self: &Shared, fetch: impl FnOnce() -> Done + Send + 'static) {
         let n = self.clone();
-        let tx = self.orb.lock().unwrap().screen.done_tx.clone();
+        let tx = self.n4n0.lock().unwrap().screen.done_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(fetch());
             n.wake();
@@ -1481,7 +1481,7 @@ impl N4n0 {
     /// failed is tried again a little later, a few times.
     fn screen_thumbnails(self: &Shared, ids: Vec<String>) {
         let wanted: Vec<(String, u8)> = {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             let s = &mut rt.screen;
             // Keep the pictures of the last few pages only.
             if s.pictures.len() > 60 {
@@ -1504,7 +1504,7 @@ impl N4n0 {
             let n = self.clone();
             self.screen_fetch(move || {
                 // A 3D capture's picture is the app's (its key after the prefix); the rest are YouTube's.
-                let picture = match id.strip_prefix(orbiters_orb::captures::PICTURE_PREFIX) {
+                let picture = match id.strip_prefix(orbiters_n4n0_core::captures::PICTURE_PREFIX) {
                     Some(key) => n.host.capture_picture(key).map(|rgb| screen::picture_from_rgb(&rgb)),
                     None => youtube::thumbnail(&id).ok().and_then(|jpeg| screen::picture_of(&jpeg).ok()),
                 };
@@ -1540,7 +1540,7 @@ impl N4n0 {
             match effect {
                 Effect::Suggest { id, text } => {
                     // Asked for once typing pauses, one request at a time: the screen's step sends it.
-                    let mut rt = self.orb.lock().unwrap();
+                    let mut rt = self.n4n0.lock().unwrap();
                     rt.screen.suggest.want(id, text, Instant::now());
                     rt.wake();
                 }
@@ -1606,8 +1606,8 @@ impl N4n0 {
                 Effect::Instances => {
                     let n = self.clone();
                     std::thread::spawn(move || {
-                        let rows = orbiters_orb::invites::read_rows();
-                        n.orb.lock().unwrap().screen.menu.set_instances(rows, true, "");
+                        let rows = orbiters_n4n0_core::invites::read_rows();
+                        n.n4n0.lock().unwrap().screen.menu.set_instances(rows, true, "");
                         n.publish();
                     });
                 }
@@ -1621,7 +1621,7 @@ impl N4n0 {
                 Effect::ShareCapture(ask) => self.share_capture(ask),
                 Effect::Feedback(ask) => self.feedback_ask(ask),
                 Effect::Mirror(ask) => {
-                    let mut rt = self.orb.lock().unwrap();
+                    let mut rt = self.n4n0.lock().unwrap();
                     rt.mirror.ask(ask, Instant::now());
                     rt.wake();
                 }
@@ -1636,7 +1636,7 @@ impl N4n0 {
                     }
                 }
                 Effect::Close => {
-                    let mut rt = self.orb.lock().unwrap();
+                    let mut rt = self.n4n0.lock().unwrap();
                     rt.screen.hover = None;
                     rt.screen.pressed = None;
                 }
@@ -1644,7 +1644,7 @@ impl N4n0 {
         }
     }
 
-    /// What the screen's touch points send (on the OSC receiving thread: record only, and wake the orb thread while the
+    /// What the screen's touch points send (on the OSC receiving thread: record only, and wake the N4N0 thread while the
     /// menu is open). The other `N4N0/Screen/` parameters are the app's own writes coming back.
     pub(crate) fn screen_parameter(&self, name: &str, value: &OscValue) -> bool {
         if !name.starts_with("N4N0/Screen/") {
@@ -1652,15 +1652,15 @@ impl N4n0 {
         }
         let finger = [screen::local::TOUCH_PREFIX, screen::local::AIM_PREFIX, screen::local::OTHERS_PREFIX].iter().any(|p| name.starts_with(p));
         if let (true, OscValue::Float(v)) = (finger, value) {
-            let mut rt = self.orb.lock().unwrap();
+            let mut rt = self.n4n0.lock().unwrap();
             let s = &mut rt.screen;
             let _ = s.touch_point(name, *v) || s.aim_point(name, *v) || s.others_point(name, *v);
             if rt.screen.menu.open {
                 rt.wake();
             }
         } else if let (true, OscValue::Float(v)) = (name.starts_with(screen::local::EYE_PREFIX) || name.starts_with(screen::local::GAZE_PREFIX), value) {
-            // Read at the orb thread's next step, a few milliseconds away while looking points: no wake for each.
-            self.orb.lock().unwrap().screen.gaze_value(name, *v);
+            // Read at the N4N0 thread's next step, a few milliseconds away while looking points: no wake for each.
+            self.n4n0.lock().unwrap().screen.gaze_value(name, *v);
         }
         true
     }
@@ -1675,16 +1675,16 @@ impl N4n0 {
         }
         sorted.sort_by(f32::total_cmp);
         let slow = sorted[sorted.len() * 9 / 10];
-        self.orb.lock().unwrap().screen.frame_ms = Some(slow.min(200.0));
+        self.n4n0.lock().unwrap().screen.frame_ms = Some(slow.min(200.0));
     }
 }
 
-/// The screen's part of the orb thread's tick: what came back from threads, the finger, the picture timer, then the
+/// The screen's part of the N4N0 thread's tick: what came back from threads, the finger, the picture timer, then the
 /// steps to the screen (`calls`: the app's, for the screen's menu; `walk`: fast walk is on; `vrchat`: VRChat's
 /// process, for desktop mode's clicks; `media`: the music the menu shows). Returns the messages for VRChat; what is
 /// left to do goes in `followups`.
 pub(crate) fn tick(
-    rt: &mut OrbRuntime,
+    rt: &mut N4n0Runtime,
     now: Instant,
     calls: &CallsStatus,
     walk: bool,
@@ -1709,7 +1709,7 @@ pub(crate) fn tick(
     let listening = rt.listening.is_some();
     let thinking = rt.thinking();
     let light = rt.light;
-    let tracking = rt.tracking.as_ref().map(|t| orbiters_orb::menu::Tracking { on: t.on, levels: t.levels, note: t.note.clone() });
+    let tracking = rt.tracking.as_ref().map(|t| orbiters_n4n0_core::menu::Tracking { on: t.on, levels: t.levels, note: t.note.clone() });
     let (tracking_note, versions) = (rt.tracking_note.clone(), rt.versions.clone());
     // The avatar's saved states, as the States page lists them (again while one saved there waits for the list).
     let states_key = (rt.states.version, rt.avatar_id.clone());
@@ -1751,7 +1751,7 @@ pub(crate) fn tick(
                 s.suggest.answered(id);
                 match result {
                     Ok(list) => s.menu.suggestions_arrived(id, &text, list),
-                    Err(e) => eprintln!("orb menu: YouTube suggestions: {e:#}"),
+                    Err(e) => eprintln!("N4N0 menu: YouTube suggestions: {e:#}"),
                 }
             }
             Done::Results { id, more, result: Ok(results) } => followups.effects.extend(s.menu.results_arrived(id, results, more)),
@@ -1771,7 +1771,7 @@ pub(crate) fn tick(
     if s.menu.open && matches!(s.menu.page, Page::Results | Page::History) {
         let ids: Vec<String> = match s.menu.page {
             Page::Results => s.menu.page_results().iter().map(|v| v.id.clone()).collect(),
-            _ => s.menu.page_captures().iter().map(orbiters_orb::captures::CaptureRow::picture_key).collect(),
+            _ => s.menu.page_captures().iter().map(orbiters_n4n0_core::captures::CaptureRow::picture_key).collect(),
         };
         for id in ids {
             if let Some(Thumb::Failed { at, tries }) = s.pictures.get(&id) {
@@ -1873,7 +1873,7 @@ pub(crate) fn tick(
 /// steps a phase apart, then the pointer stays on it a whole step), and every client's card the same way. The panel,
 /// the screen and the card take turns, a whole block each; whoever takes the channel after another moved the pointer
 /// onto a block of its own rests the pointer first, so its values never write that block.
-pub(crate) fn synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
+pub(crate) fn synced(rt: &mut N4n0Runtime, now: Instant) -> Vec<Message> {
     let panel_wants = rt.sender.as_ref().is_some_and(|p| p.wants_step(now));
     // A panel block between its steps finishes first.
     let panel_mid_block = rt.sender.as_ref().is_some_and(TextSender::mid_block);
@@ -1906,7 +1906,7 @@ pub(crate) fn synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
         }
         return Vec::new();
     }
-    // Full pictures (contracts Docs/orb-picture.md): a chunk between its steps finishes first; else, once the screen's page
+    // Full pictures (contracts Docs/n4n0-picture.md): a chunk between its steps finishes first; else, once the screen's page
     // went whole (its blocks only go again) or the screen wants nothing, three turns of every four, when the card waits for
     // nothing.
     let screen_settled = !screen_wants
@@ -1931,7 +1931,7 @@ pub(crate) fn synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
                     s.picture_turns = s.picture_turns.wrapping_add(1);
                     s.picture_sent[1] += 1;
                 } else {
-                    wait = orbiters_orb::text::PHASE_GAP;
+                    wait = orbiters_n4n0_core::text::PHASE_GAP;
                 }
                 p.messages()
             }
@@ -1965,7 +1965,7 @@ pub(crate) fn synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
             }
         }
         if !send.holds() {
-            wait = orbiters_orb::text::PHASE_GAP;
+            wait = orbiters_n4n0_core::text::PHASE_GAP;
         }
         screen::card_messages(sync, s.thumbnail, &send)
     } else if s.close_everyone {
@@ -1991,7 +1991,7 @@ pub(crate) fn synced(rt: &mut OrbRuntime, now: Instant) -> Vec<Message> {
             }
         }
         if !send.holds() {
-            wait = orbiters_orb::text::PHASE_GAP;
+            wait = orbiters_n4n0_core::text::PHASE_GAP;
         }
         screen::synced_messages(sync, &send)
     };
@@ -2059,7 +2059,7 @@ mod tests {
     fn point(s: &mut ScreenRuntime, right: bool, tip: [f64; 3], at: [f64; 3]) {
         let along = [at[0] - tip[0], at[1] - tip[1], at[2] - tip[2]];
         let length = (along[0] * along[0] + along[1] * along[1] + along[2] * along[2]).sqrt();
-        let aim = [0, 1, 2].map(|i| tip[i] + along[i] / length * orbiters_contracts::orb::AIM_DISTANCE);
+        let aim = [0, 1, 2].map(|i| tip[i] + along[i] / length * orbiters_contracts::n4n0::AIM_DISTANCE);
         let hand = if right { "R" } else { "L" };
         for (i, v) in reading(tip, touch::REACH).into_iter().enumerate() {
             assert!(s.touch_point(&format!("{}{hand}{i}", screen::local::TOUCH_PREFIX), v));
@@ -2192,7 +2192,7 @@ mod tests {
     }
 
     #[test]
-    fn what_waits_never_wakes_the_orb_thread_at_once() {
+    fn what_waits_never_wakes_the_n4n0_thread_at_once() {
         let mut s = ScreenRuntime::default();
         s.avatar(true, true, Some(8), 72);
         s.menu.open();
@@ -2234,7 +2234,7 @@ mod tests {
 
     /// What VRChat sends of the eyes (at rest) and the gaze point when the owner looks at pixel (`x`, `y`) of the page.
     fn look_at(s: &mut ScreenRuntime, x: f32, y: f32) {
-        let eyes = orbiters_contracts::orb::params::GAZE_EYES;
+        let eyes = orbiters_contracts::n4n0::params::GAZE_EYES;
         let on =
             [x as f64 / layout::WIDTH as f64 * touch::WIDTH - touch::WIDTH / 2.0, touch::HEIGHT / 2.0 - y as f64 / layout::HEIGHT as f64 * touch::HEIGHT, 0.0];
         let ahead = [on[0] - eyes[0], on[1] - eyes[1], on[2] - eyes[2]];
@@ -2326,11 +2326,11 @@ mod tests {
 
     #[test]
     fn the_screen_s_own_menu_offers_drop_with_the_avatar_s_card_only() {
-        use orbiters_orb::menu::Target;
-        let mut rt = OrbRuntime::default();
+        use orbiters_n4n0_core::menu::Target;
+        let mut rt = N4n0Runtime::default();
         rt.screen.avatar(true, true, Some(8), 72);
         let media = Watcher::new(|| Box::new(crate::media::NoMedia));
-        let tick = |rt: &mut OrbRuntime| {
+        let tick = |rt: &mut N4n0Runtime| {
             super::tick(rt, Instant::now(), &CallsStatus::default(), false, None, &media, &mut Followups::default());
         };
         rt.screen.menu.pages = Pages::Ten;
@@ -2354,8 +2354,8 @@ mod tests {
 
     #[test]
     fn a_results_page_on_a_version_8_screen_sends_its_full_pictures_through_the_owner_s_values() {
-        use orbiters_contracts::orb::params;
-        let mut rt = OrbRuntime::default();
+        use orbiters_contracts::n4n0::params;
+        let mut rt = N4n0Runtime::default();
         rt.screen.avatar(true, true, Some(8), 128);
         rt.screen.menu.pages = Pages::of_screen(Some(8));
         rt.screen.set_full_pictures(true, Some(8));
@@ -2369,8 +2369,8 @@ mod tests {
         menu.results_arrived(1, youtube::Results { videos: videos.clone(), continuation: None }, false);
         assert_eq!(menu.page, Page::Results);
         for (i, v) in videos.iter().enumerate() {
-            let rgb = orbiters_orb::picture::Rgb { width: 320, height: 180, pixels: (0..320 * 180 * 3).map(|p| ((p * (7 + i)) % 251) as u8).collect() };
-            rt.screen.put_picture(&v.id, orbiters_orb::menu::screen::picture_from_rgb(&rgb));
+            let rgb = orbiters_n4n0_core::picture::Rgb { width: 320, height: 180, pixels: (0..320 * 180 * 3).map(|p| ((p * (7 + i)) % 251) as u8).collect() };
+            rt.screen.put_picture(&v.id, orbiters_n4n0_core::menu::screen::picture_from_rgb(&rgb));
         }
         let mut sent = Vec::new();
         let start = Instant::now();
@@ -2378,7 +2378,7 @@ mod tests {
             sent.extend(super::tick(&mut rt, start + Duration::from_millis(step * 25), &CallsStatus::default(), false, None, &media, &mut Followups::default()));
         }
         assert!(sent.contains(&full::local_send(true)), "the bridge on");
-        // Each chunk's first value: slot + 8 Ã— salt (contracts Docs/orb-picture.md, local chunks).
+        // Each chunk's first value: slot + 8 Ã— salt (contracts Docs/n4n0-picture.md, local chunks).
         let first = crate::runtime::parameter(&params::picture_value(0));
         let firsts: Vec<f32> = sent.iter().filter(|(a, _)| *a == first).filter_map(|(_, v)| if let rosc::OscType::Float(f) = v { Some(*f) } else { None }).collect();
         let slots: std::collections::BTreeSet<i32> = firsts.iter().map(|f| ((f * 127.0).round() as i32).rem_euclid(256) & 7).collect();

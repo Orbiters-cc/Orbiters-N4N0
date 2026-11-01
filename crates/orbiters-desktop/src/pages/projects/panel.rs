@@ -402,7 +402,7 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                 ui.painter().galley(r.min, g, theme::FG_3);
                 return;
             }
-            let worn = cx.snap.orb.avatar_id.clone();
+            let worn = cx.snap.n4n0.avatar_id.clone();
             for (i, a) in project.avatars.iter().enumerate() {
                 if i > 0 {
                     widgets::separator(ui);

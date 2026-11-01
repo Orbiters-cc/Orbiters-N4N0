@@ -608,7 +608,7 @@ fn avatar_list(state: &State, worn: Option<&String>) -> Vec<(Project, Avatar, us
 fn avatar_picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     errors(ui, state, "avatars");
-    let worn = cx.snap.orb.avatar_id.clone();
+    let worn = cx.snap.n4n0.avatar_id.clone();
     let list = avatar_list(state, worn.as_ref());
     if state.preselected.as_ref().is_none_or(|id| !list.iter().any(|(_, a, _)| &a.id == id)) {
         state.preselected = list.first().map(|(_, a, _)| a.id.clone());
@@ -696,7 +696,7 @@ fn avatar_picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
 fn avatar_footer(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
-    let worn = cx.snap.orb.avatar_id.clone();
+    let worn = cx.snap.n4n0.avatar_id.clone();
     let list = avatar_list(state, worn.as_ref());
     if list.is_empty() {
         if widgets::activated(&Button::new("Close").variant(Variant::Ghost).id_salt("avatars-close").show(ui)) {

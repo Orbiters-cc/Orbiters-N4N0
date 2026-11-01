@@ -56,7 +56,7 @@ a thin shape's shadow being its blurred box across the narrower side.
 frames past its shot and writes the last frames (`<name>-<frame>.png`). Closings: `gallery-close-mid` (closed 6 frames
 before the shot), `gallery-requests-close` (frame 120), `gallery-instance-close` (frame 120), `world-close` (frame 120,
 the first card), `world-viewer-close` (frame 170); e.g. `--only gallery-close-mid --extend 40 --sequence 47`. Wide
-pages: `--only home|orb|videos|videos-list|settings|home-results|home-music|home-instances|home-qr --width 1920
+pages: `--only home|n4n0|videos|videos-list|settings|home-results|home-music|home-instances|home-qr --width 1920
 --height 1080`.
 
 ## Not verified here

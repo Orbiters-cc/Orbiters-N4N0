@@ -1,4 +1,4 @@
-//! N4N0's link cards on Orbiters (contracts `Docs/orb.md`, Link card): a card dropped in a VRChat instance is told to
+//! N4N0's link cards on Orbiters (contracts `Docs/n4n0.md`, Link card): a card dropped in a VRChat instance is told to
 //! Orbiters, which knows the instance only by the SHA-256 its players compute from VRChat's log, so that whoever grabs it
 //! there fetches its link (for twenty seconds, without an account). Only links a browser opens are ever copied.
 
@@ -52,7 +52,7 @@ pub fn post(api: &Api, token: &str, instance: &str, link: &str, title: &str) -> 
     anyhow::ensure!(copyable(link), "This card has no link that can be opened.");
     let response = api
         .agent()
-        .post(&api.url("orb/drops"))
+        .post(&api.url("n4n0/drops"))
         .config()
         .timeout_global(Some(TIMEOUT))
         .build()
@@ -65,7 +65,7 @@ pub fn post(api: &Api, token: &str, instance: &str, link: &str, title: &str) -> 
 /// The newest card dropped in `instance` within the last twenty seconds (`None`: none there), when its link may be
 /// copied ([`copyable`]; another one is answered as none).
 pub fn latest(api: &Api, instance: &str) -> anyhow::Result<Option<Dropped>> {
-    let response = api.agent().get(&api.url(&format!("orb/drops/latest?instance={instance}"))).config().timeout_global(Some(TIMEOUT)).build().call()?;
+    let response = api.agent().get(&api.url(&format!("n4n0/drops/latest?instance={instance}"))).config().timeout_global(Some(TIMEOUT)).build().call()?;
     if response.status().as_u16() == 404 {
         return Ok(None);
     }
@@ -141,11 +141,11 @@ mod tests {
         assert_eq!(latest(&api, &hash).unwrap(), None, "a link no browser opens is never copied");
         assert_eq!(latest(&api, &hash).unwrap_err().to_string(), "Too many cards at once. Wait a moment and try again.");
         let seen = seen.lock().unwrap();
-        assert_eq!(seen[0].0, "POST /orb/drops HTTP/1.1");
+        assert_eq!(seen[0].0, "POST /n4n0/drops HTTP/1.1");
         assert_eq!(seen[0].1.as_deref(), Some("Bearer orbit-test"));
         let body: serde_json::Value = serde_json::from_str(&seen[0].2).unwrap();
         assert_eq!(body, serde_json::json!({ "instance": hash, "link": link, "title": "Never Gonna" }));
-        assert_eq!(seen[1].0, format!("GET /orb/drops/latest?instance={hash} HTTP/1.1"));
+        assert_eq!(seen[1].0, format!("GET /n4n0/drops/latest?instance={hash} HTTP/1.1"));
         assert_eq!(seen[1].1, None, "fetching needs no account");
     }
 

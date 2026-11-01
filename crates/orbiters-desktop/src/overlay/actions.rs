@@ -2,7 +2,7 @@
 //! boost's sticks, what opens N4N0's menu (a press of whatever the person binds, or two taps on a touch sensor: the
 //! defaults, [`MENU_OPEN`]), each hand's trigger (it presses where that index finger points
 //! on N4N0's screen, and where its laser points on the floating panel), each hand's touchpad and stick for the avatar
-//! (contracts `Docs/orb-input.md`), each hand's laser (its controller's tip) and grip for the floating panel, and their
+//! (contracts `Docs/n4n0-input.md`), each hand's laser (its controller's tip) and grip for the floating panel, and their
 //! default bindings for each kind of controller (people change them in SteamVR's controller settings, under Orbiters).
 //! SteamVR gives the same inputs to VRChat as well. Every set is read once a frame, together.
 
@@ -331,7 +331,7 @@ impl Actions {
         pressed || tapped
     }
 
-    /// Each hand's touchpad and stick as this frame's read says (contracts `Docs/orb-input.md`): nothing when an action
+    /// Each hand's touchpad and stick as this frame's read says (contracts `Docs/n4n0-input.md`): nothing when an action
     /// could not be read. A position is 0 while untouched; a touchpad without a force sensor presses with 1 while
     /// clicked; a stick without a touch sensor counts as touched off centre or clicked.
     pub fn pads(&self, steamvr: &vr::Client) -> Option<Pads> {
@@ -446,7 +446,7 @@ impl Taps {
 /// A touchpad or stick from its actions: `position` when bound, `force` when a force sensor is; a stick (`stick`)
 /// without a touch sensor counts as touched off centre.
 fn pad(position: Option<(f32, f32)>, touch: bool, click: bool, force: Option<f32>, stick: bool) -> Pad {
-    use orbiters_contracts::orb::input::STICK_TOUCHED;
+    use orbiters_contracts::n4n0::input::STICK_TOUCHED;
     let (x, y) = position.unwrap_or_default();
     let (x, y) = (x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0));
     let touch = touch || click || (stick && x.hypot(y) >= STICK_TOUCHED);

@@ -19,7 +19,7 @@ use egui::{pos2, vec2, Event, Pos2, RawInput, Rect, Vec2, ViewportId, ViewportIn
 use orbiters_core::protocol::{coverage, CaptureStats, CoverageMap, SpoutSourceInfo};
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::WorldState;
-use orbiters_orb::menu::Page as MenuPage;
+use orbiters_n4n0_core::menu::Page as MenuPage;
 use orbiters_ui::offscreen::{save_png, Offscreen};
 use orbiters_ui::{toast, widgets};
 use std::path::{Path, PathBuf};
@@ -247,36 +247,36 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         });
         s
     };
-    let orb_busy = orb_snapshot(&signed_in);
-    let orb_new = {
+    let n4n0_busy = n4n0_snapshot(&signed_in);
+    let n4n0_new = {
         let mut s = with_account(&idle, crate::state::AccountState::SignedOut, None);
         s.vrchat.world.avatar_name = Some("Rexouium".into());
-        s.orb.avatar_id = Some("avtr_7f3c2b1e-0d4a-4a7b-9c55-1f0e9a2b6c11".into());
+        s.n4n0.avatar_id = Some("avtr_7f3c2b1e-0d4a-4a7b-9c55-1f0e9a2b6c11".into());
         s
     };
 
     // Home: N4N0's menu with what the service knows (friends to call, the light on, fast walk on, the avatar's saved
     // states).
     let home = {
-        let mut s = with_calls(&orb_busy, false);
-        s.orb.light = Some(crate::state::OrbLight { on: true, color: 1, level: 0.6 });
+        let mut s = with_calls(&n4n0_busy, false);
+        s.n4n0.light = Some(crate::state::N4n0Light { on: true, color: 1, level: 0.6 });
         s.settings.walk_boost.enabled = true;
-        s.orb.states = sample_states(s.orb.avatar_id.clone());
-        s.orb.tracking = Some(orbiters_n4n0::status::TrackingView { on: true, levels: [0, 1, 2], note: "Smoothing your devices now".into() });
-        s.orb.versions = "N4N0 1.0.9 · App 0.4.0".into();
-        s.orb.world_video = Some(("https://www.youtube.com/watch?v=36YnV9STBqc".into(), Some("Lo-fi beats to relax to".into()), None));
+        s.n4n0.states = sample_states(s.n4n0.avatar_id.clone());
+        s.n4n0.tracking = Some(orbiters_n4n0::status::TrackingView { on: true, levels: [0, 1, 2], note: "Smoothing your devices now".into() });
+        s.n4n0.versions = "N4N0 1.0.9 · App 0.4.0".into();
+        s.n4n0.world_video = Some(("https://www.youtube.com/watch?v=36YnV9STBqc".into(), Some("Lo-fi beats to relax to".into()), None));
         s
     };
     // The same, its N4N0's screen of version 5: a copied link can be dropped as a card.
     let home_drop = {
         let mut s = home.clone();
-        s.orb.can_drop = true;
+        s.n4n0.can_drop = true;
         s
     };
     // The same with a link card out in the world (Take back).
     let home_card = {
         let mut s = home_drop.clone();
-        s.orb.card = Some(orbiters_n4n0::status::CardView {
+        s.n4n0.card = Some(orbiters_n4n0::status::CardView {
             title: "1 A.M Study Session 📚 [lofi hip hop]".into(),
             link: "https://www.youtube.com/watch?v=sample00003".into(),
             left: 452,
@@ -286,14 +286,14 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     // Home as many first see it: VRChat in desktop mode (no fast walk), calls off, no light on this N4N0.
     let home_plain = {
         let mut s = idle.clone();
-        s.orb.desktop_mode = true;
-        s.settings.orb.wake_word = true;
+        s.n4n0.desktop_mode = true;
+        s.settings.n4n0.wake_word = true;
         s
     };
     let home_listening = {
         let mut s = home.clone();
-        s.orb.listening = true;
-        s.orb.panel = Some("Fast walk is on. Say what you want, or tap a tile.".into());
+        s.n4n0.listening = true;
+        s.n4n0.panel = Some("Fast walk is on. Say what you want, or tap a tile.".into());
         s
     };
 
@@ -492,7 +492,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             page: Page::Home,
             snapshot: {
                 let mut s = home.clone();
-                s.orb.qr = crate::overlay::menu_pages::sample_qr();
+                s.n4n0.qr = crate::overlay::menu_pages::sample_qr();
                 s
             },
             frames: 90,
@@ -524,9 +524,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             page: Page::Home,
             snapshot: {
                 let mut s = home.clone();
-                s.orb.qr = orbiters_orb::qr::QrView {
-                    phase: orbiters_orb::qr::QrPhase::NoCamera,
-                    note: orbiters_orb::qr::no_camera_note(Some(false)),
+                s.n4n0.qr = orbiters_n4n0_core::qr::QrView {
+                    phase: orbiters_n4n0_core::qr::QrPhase::NoCamera,
+                    note: orbiters_n4n0_core::qr::no_camera_note(Some(false)),
                     ..Default::default()
                 };
                 s
@@ -738,9 +738,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
-            name: "orb-calls",
-            page: Page::Orb,
-            snapshot: with_calls(&orb_busy, true),
+            name: "n4n0-calls",
+            page: Page::N4n0,
+            snapshot: with_calls(&n4n0_busy, true),
             frames: 120,
             splash: false,
             open_detail: false,
@@ -752,9 +752,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
-            name: "orb",
-            page: Page::Orb,
-            snapshot: orb_busy.clone(),
+            name: "n4n0",
+            page: Page::N4n0,
+            snapshot: n4n0_busy.clone(),
             frames: 90,
             splash: false,
             open_detail: false,
@@ -767,11 +767,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         },
         // On your avatar: the panel, the menu, the AFK message, Keep my pose and Controller input (an avatar using four).
         Scenario {
-            name: "orb-avatar",
-            page: Page::Orb,
+            name: "n4n0-avatar",
+            page: Page::N4n0,
             snapshot: {
-                let mut s = orb_busy.clone();
-                s.orb.input_params = 4;
+                let mut s = n4n0_busy.clone();
+                s.n4n0.input_params = 4;
                 s
             },
             frames: 90,
@@ -785,12 +785,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
-            name: "orb-testing",
-            page: Page::Orb,
+            name: "n4n0-testing",
+            page: Page::N4n0,
             snapshot: {
-                let mut s = orb_busy.clone();
-                s.orb.test_face = Some(crate::state::OrbFace::Happy);
-                s.orb.test_afk = true;
+                let mut s = n4n0_busy.clone();
+                s.n4n0.test_face = Some(crate::state::N4n0Face::Happy);
+                s.n4n0.test_afk = true;
                 s
             },
             frames: 120,
@@ -804,9 +804,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
-            name: "orb-scrolled",
-            page: Page::Orb,
-            snapshot: orb_busy.clone(),
+            name: "n4n0-scrolled",
+            page: Page::N4n0,
+            snapshot: n4n0_busy.clone(),
             frames: 120,
             splash: false,
             open_detail: false,
@@ -819,9 +819,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         },
         // N4N0's menu settings: its keyboard and look.
         Scenario {
-            name: "orb-menu-settings",
-            page: Page::Orb,
-            snapshot: orb_busy,
+            name: "n4n0-menu-settings",
+            page: Page::N4n0,
+            snapshot: n4n0_busy,
             frames: 120,
             splash: false,
             open_detail: false,
@@ -833,9 +833,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
-            name: "orb-new",
-            page: Page::Orb,
-            snapshot: orb_new,
+            name: "n4n0-new",
+            page: Page::N4n0,
+            snapshot: n4n0_new,
             frames: 90,
             splash: false,
             open_detail: false,
@@ -1473,9 +1473,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     ] {
         let capture = name.starts_with("projects-avatars") || matches!(name, "projects-choice" | "projects-ready" | "projects-capture");
         let mut snapshot = scenarios[0].snapshot.clone();
-        snapshot.orb.avatar_id = Some("avtr_00000000-0000-4000-8000-000000000000".into());
-        snapshot.orb.manifest = name == "projects-ready";
-        snapshot.orb.prop_sync = (name == "projects-ready").then_some(8);
+        snapshot.n4n0.avatar_id = Some("avtr_00000000-0000-4000-8000-000000000000".into());
+        snapshot.n4n0.manifest = name == "projects-ready";
+        snapshot.n4n0.prop_sync = (name == "projects-ready").then_some(8);
         // The development gallery, which has N4N0.
         snapshot.account.development = true;
         scenarios.push(Scenario {
@@ -1626,7 +1626,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         ("events-invite-group", 150),
         ("events-invite-link", 150),
         ("events-invite-sent", 150),
-        ("events-invite-orb", 150),
+        ("events-invite-n4n0", 150),
         ("events-pictures", 150),
         ("gallery-community", 140),
         ("gallery-community-all", 140),
@@ -1664,7 +1664,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     // Home's music is the overlay's sample song, never what this computer plays.
     crate::media::watcher().stand_in(crate::media::Reading {
         media: Some(crate::overlay::menu_pages::sample_media()),
-        volume: Some(orbiters_orb::menu::Volume { percent: 40, muted: false }),
+        volume: Some(orbiters_n4n0_core::menu::Volume { percent: 40, muted: false }),
         art: Some(std::sync::Arc::new(crate::media::Art { key: crate::overlay::menu_pages::SAMPLE_ART.into(), rgb: crate::overlay::menu_pages::sample_art() })),
     });
 
@@ -1723,7 +1723,7 @@ fn stage_events(ctx: &egui::Context, app: &mut App, sc: &Scenario, f: u32) {
                 "events-invite-group" => Ask::Group,
                 "events-invite-link" => Ask::Link,
                 "events-invite-sent" => Ask::Sent("Invite sent"),
-                "events-invite-orb" => Ask::Befriend { name: "Orbiters".into(), link: "https://vrchat.com/home/user/usr_orbiters".into() },
+                "events-invite-n4n0" => Ask::Befriend { name: "Orbiters".into(), link: "https://vrchat.com/home/user/usr_orbiters".into() },
                 _ => Ask::Idle,
             };
             let n = usize::from(sc.name == "events-open-card");
@@ -1932,8 +1932,8 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         // An avatar's card opened on the States page (once the page opened on the cards).
         if f == 4 {
             let opened = match sc.name {
-                "home-states-avatar" => sc.snapshot.orb.states.avatar_id.clone(),
-                "home-states-other" => sc.snapshot.orb.states.avatars.iter().find(|a| !a.worn).map(|a| a.id.clone()),
+                "home-states-avatar" => sc.snapshot.n4n0.states.avatar_id.clone(),
+                "home-states-other" => sc.snapshot.n4n0.states.avatars.iter().find(|a| !a.worn).map(|a| a.id.clone()),
                 _ => None,
             };
             if let Some(id) = opened {
@@ -2089,14 +2089,14 @@ fn stage_videos(ctx: &egui::Context, app: &mut App, name: &str) {
 /// music say.
 fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }: HomeShot) {
     use crate::overlay::menu_pages::{sample_rgba, sample_suggestions, sample_videos};
-    use orbiters_orb::menu::{Effect, Target};
+    use orbiters_n4n0_core::menu::{Effect, Target};
     // Where a card can be dropped: a browser plays one of the sample results, found on YouTube (Home's music card copies
     // its link; the music page shows it copied, offering Drop).
     if samples && host.menu.can_drop && matches!(page, MenuPage::Home | MenuPage::Music) {
         let video = &sample_videos()[3];
         let (w, h, rgba) = sample_rgba(3);
         host.put_picture(&video.id, egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba));
-        host.menu.media = Some(orbiters_orb::menu::Media {
+        host.menu.media = Some(orbiters_n4n0_core::menu::Media {
             title: video.title.clone(),
             artist: video.channel.clone(),
             app: "Chrome".into(),
@@ -2140,7 +2140,7 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
     match page {
         // The sample player's instances (never this computer's), and Orbiters asking to be added as a friend first.
         MenuPage::Instances | MenuPage::AddFriend => {
-            use orbiters_orb::menu::{InviteAccount, InviteAnswer};
+            use orbiters_n4n0_core::menu::{InviteAccount, InviteAnswer};
             host.menu.set_instances(crate::overlay::menu_pages::sample_instances(), true, "");
             if page == MenuPage::AddFriend {
                 host.press(Target::InviteMe(0));
@@ -2163,7 +2163,7 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
                     let (w, h, rgba) = sample_rgba(i);
                     host.put_picture(&video.id, egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba));
                 }
-                host.menu.results_arrived(id, orbiters_orb::youtube::Results { videos, continuation: Some("next".into()) }, false);
+                host.menu.results_arrived(id, orbiters_n4n0_core::youtube::Results { videos, continuation: Some("next".into()) }, false);
                 // Where a card can be dropped: the second result's link copied, its row offering Drop.
                 if host.menu.can_drop {
                     host.press(Target::Copy(1));
@@ -2582,46 +2582,46 @@ impl StandInVrchat {
 }
 
 /// N4N0 on an avatar with its prop and menu, a conversation under way, saved videos and the speech models installed.
-fn orb_snapshot(base: &Snapshot) -> Snapshot {
-    use crate::state::{OrbConfirmation, OrbFace, OrbLine, OrbWho, ProcessUsage};
+fn n4n0_snapshot(base: &Snapshot) -> Snapshot {
+    use crate::state::{N4n0Confirmation, N4n0Face, N4n0Line, N4n0Who, ProcessUsage};
     let mut s = base.clone();
     s.vrchat.world.avatar_name = Some("Rexouium".into());
     s.vrchat.world.last_video = Some(orbiters_core::vrchat_log::VideoSeen { url: "https://www.youtube.com/watch?v=36YnV9STBqc".into(), at: None });
-    s.settings.orb.afk_message_enabled = true;
-    s.settings.orb.afk_message = "Getting food, back in 10!".into();
-    s.settings.orb.pins = vec![orbiters_core::settings::Pin { parameter: "Hoodie".into(), value: orbiters_core::osc::OscValue::Bool(true) }];
-    let line = |who, text: &str| OrbLine { who, text: text.into(), at_ms: 0 };
-    let o = &mut s.orb;
+    s.settings.n4n0.afk_message_enabled = true;
+    s.settings.n4n0.afk_message = "Getting food, back in 10!".into();
+    s.settings.n4n0.pins = vec![orbiters_core::settings::Pin { parameter: "Hoodie".into(), value: orbiters_core::osc::OscValue::Bool(true) }];
+    let line = |who, text: &str| N4n0Line { who, text: text.into(), at_ms: 0 };
+    let o = &mut s.n4n0;
     o.avatar_id = Some("avtr_7f3c2b1e-0d4a-4a7b-9c55-1f0e9a2b6c11".into());
     o.prop_sync = Some(8);
     o.manifest = true;
     o.controls = 42;
-    o.face = OrbFace::Talking;
+    o.face = N4n0Face::Talking;
     o.panel = Some("Done, hoodie on. Now go find\nyour friends instead of\ntalking to a floating ball.".into());
     o.lines = vec![
-        line(OrbWho::You, "Nano, mets mon sweat à capuche"),
-        line(OrbWho::Note, "N4N0 set Clothes / Hoodie"),
-        line(OrbWho::Orb, "Done, hoodie on. Now go find your friends instead of talking to a floating ball."),
-        line(OrbWho::You, "Plan a movie night for my community on Saturday at 9 pm"),
-        line(OrbWho::Note, "N4N0: create event draft…"),
-        line(OrbWho::Orb, "Drafted “Movie night” for Saturday 21:00 in Cozy Cinema. Approve it on Orbiters and I'll announce it."),
+        line(N4n0Who::You, "Nano, mets mon sweat à capuche"),
+        line(N4n0Who::Note, "N4N0 set Clothes / Hoodie"),
+        line(N4n0Who::N4n0, "Done, hoodie on. Now go find your friends instead of talking to a floating ball."),
+        line(N4n0Who::You, "Plan a movie night for my community on Saturday at 9 pm"),
+        line(N4n0Who::Note, "N4N0: create event draft…"),
+        line(N4n0Who::N4n0, "Drafted “Movie night” for Saturday 21:00 in Cozy Cinema. Approve it on Orbiters and I'll announce it."),
     ];
-    o.confirmations = vec![OrbConfirmation {
+    o.confirmations = vec![N4n0Confirmation {
         id: "c1".into(),
         title: "Publish “Movie night”".into(),
         summary: "Saturday 21:00 · Cozy Cinema · announced in #events".into(),
         approve_url: "https://orbiters.cc/confirm/c1".into(),
     }];
-    o.quota = Some(orbiters_orb::assistant::Quota { used: 13, limit: 80, resets_at: None, own_key: false });
+    o.quota = Some(orbiters_n4n0_core::assistant::Quota { used: 13, limit: 80, resets_at: None, own_key: false });
     o.voice = crate::state::VoiceStatus { installed: true, running: true, ..Default::default() };
     o.videos = vec![
-        orbiters_orb::videos::SavedVideo {
+        orbiters_n4n0_core::videos::SavedVideo {
             url: "https://www.youtube.com/watch?v=36YnV9STBqc".into(),
             title: Some("Lo-fi beats to sit in a VRChat club to".into()),
             world: Some("The Black Cat".into()),
             saved_utc: "2026-10-20T22:14:03Z".into(),
         },
-        orbiters_orb::videos::SavedVideo {
+        orbiters_n4n0_core::videos::SavedVideo {
             url: "https://youtu.be/pUaeOcyzDrA".into(),
             title: None,
             world: Some("Palm Point - Night".into()),
@@ -2779,7 +2779,7 @@ fn spiral() -> Vec<[f32; 3]> {
 struct Still;
 
 impl crate::backend::Backend for Still {
-    fn orb(&self, _command: crate::ipc::OrbCommand) {}
+    fn n4n0(&self, _command: crate::ipc::N4n0Command) {}
 
     fn view(&self) -> std::sync::Arc<Snapshot> {
         std::sync::Arc::new(Snapshot::new(Settings::default()))
@@ -2891,11 +2891,11 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
         skeleton_frames: 4_050,
         ..Default::default()
     });
-    let mut talking = orb_snapshot(&with_account(&idle, crate::state::AccountState::SignedIn { username: "Desktop Tester".into() }, None));
+    let mut talking = n4n0_snapshot(&with_account(&idle, crate::state::AccountState::SignedIn { username: "Desktop Tester".into() }, None));
     talking.vrchat.running = true;
     let mut listening = talking.clone();
-    listening.orb.listening = true;
-    listening.orb.voice.level = 0.55;
+    listening.n4n0.listening = true;
+    listening.n4n0.voice.level = 0.55;
     let calling = with_calls(&talking, true);
     let mut walking = talking.clone();
     walking.vrchat.world.in_world = true;
@@ -2904,10 +2904,10 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
     // (name, snapshot, calibration: (T-pose held, started at this time; the last frame is at 1.48 s)).
     type Shot<'a> = (&'a str, &'a Snapshot, Option<(bool, f64)>);
     let shots: [Shot; 9] = [
-        ("overlay-orb-call", &calling, None),
+        ("overlay-n4n0-call", &calling, None),
         ("overlay-walk", &walking, None),
-        ("overlay-orb", &talking, None),
-        ("overlay-orb-listening", &listening, None),
+        ("overlay-n4n0", &talking, None),
+        ("overlay-n4n0-listening", &listening, None),
         ("overlay-idle", &idle, None),
         ("overlay-recording", &recording, None),
         ("overlay-countdown", &idle, Some((true, 0.0))),
@@ -2919,8 +2919,8 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
         orbiters_ui::install(&ctx);
         let backend: Ctl = std::sync::Arc::new(Still);
         let mut ui_state = OverlayUi::default();
-        if name.starts_with("overlay-orb") {
-            ui_state.page = crate::overlay::ui::Page::Orb;
+        if name.starts_with("overlay-n4n0") {
+            ui_state.page = crate::overlay::ui::Page::N4n0;
         }
         if name == "overlay-walk" {
             ui_state.page = crate::overlay::ui::Page::Walk;
@@ -2994,14 +2994,14 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
 fn overlay_menu_shots(out: &std::path::Path, snap: &Snapshot) -> anyhow::Result<()> {
     use crate::menu_host::MenuHost;
     use crate::overlay::menu_pages::{sample_captures, sample_friends, sample_rgba};
-    use orbiters_orb::captures::Friends;
-    use orbiters_orb::menu::Target;
+    use orbiters_n4n0_core::captures::Friends;
+    use orbiters_n4n0_core::menu::Target;
     let backend: Ctl = std::sync::Arc::new(Still);
     let mut snap = snap.clone();
-    snap.orb.captures = sample_captures();
+    snap.n4n0.captures = sample_captures();
     let mut canvas = crate::overlay::Canvas::new(1024, 576);
     let mut host = MenuHost::new(canvas.ctx().clone());
-    for row in &snap.orb.captures.history {
+    for row in &snap.n4n0.captures.history {
         let (w, h, rgba) = sample_rgba(row.key.trim_start_matches("sample").parse().unwrap_or(0));
         host.put_picture(&row.picture_key(), egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba));
     }
@@ -3013,7 +3013,7 @@ fn overlay_menu_shots(out: &std::path::Path, snap: &Snapshot) -> anyhow::Result<
     };
     let mut shoot = |host: &MenuHost, name: &str, hover: Target| -> anyhow::Result<()> {
         use crate::overlay::menu_ui::{self, Skin, View};
-        use orbiters_orb::menu::layout::{self, ScreenPage};
+        use orbiters_n4n0_core::menu::layout::{self, ScreenPage};
         let hover = layout::cached(ScreenPage::of(&host.menu)).elements.iter().position(|e| e.target == hover);
         let picture = |id: &str| host.picture(id, false);
         let view = View { menu: &host.menu, hover, pressed: None, picture: &picture, time: 0.4, skin: Skin::english() };
@@ -3030,13 +3030,13 @@ fn overlay_menu_shots(out: &std::path::Path, snap: &Snapshot) -> anyhow::Result<
     // Share to …: the friends come with the next snapshot, two are chosen.
     press(&mut host, &snap, Target::ShareTo(0));
     shoot(&host, "overlay-menu-share-to-loading", Target::FindFriend)?;
-    snap.orb.friends = Friends::ready(sample_friends());
+    snap.n4n0.friends = Friends::ready(sample_friends());
     host.follow(&snap);
     press(&mut host, &snap, Target::Friend(0));
     press(&mut host, &snap, Target::Friend(4));
     shoot(&host, "overlay-menu-share-to", Target::SendShare)?;
     press(&mut host, &snap, Target::SendShare);
-    snap.orb.friends = Friends::None;
+    snap.n4n0.friends = Friends::None;
     // The flagged capture's Share publicly: the warning first.
     press(&mut host, &snap, Target::SharePublic(2));
     shoot(&host, "overlay-menu-explicit", Target::ShareAnyway)?;
@@ -3063,12 +3063,12 @@ fn over_ground(rgba: &[u8], width: u32, height: u32) -> egui::ColorImage {
 fn with_calls(snap: &Snapshot, ringing: bool) -> Snapshot {
     use crate::state::{CallContact, CallLink, CallPhase, CallView};
     let mut s = snap.clone();
-    s.settings.orb.calls = true;
-    s.orb.calls.link = CallLink::Linked { account: "usr_1339e525-d75d-4832-9104-98dd89287681".into() };
-    s.orb.calls.contacts =
+    s.settings.n4n0.calls = true;
+    s.n4n0.calls.link = CallLink::Linked { account: "usr_1339e525-d75d-4832-9104-98dd89287681".into() };
+    s.n4n0.calls.contacts =
         ["Kiri", "Nova Fox", "Rexouium Fan"].iter().enumerate().map(|(i, n)| CallContact { id: format!("c_{i}"), name: n.to_string() }).collect();
     if ringing {
-        s.orb.calls.call = Some(CallView {
+        s.n4n0.calls.call = Some(CallView {
             name: "Nova Fox".into(),
             phase: CallPhase::Ringing,
             incoming: true,

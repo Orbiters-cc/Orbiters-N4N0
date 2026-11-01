@@ -36,7 +36,7 @@ pub fn send(api: &Api, token: &str, text: &str, about: &About) -> anyhow::Result
     });
     let response = api
         .agent()
-        .post(&api.url("orb/suggestions"))
+        .post(&api.url("n4n0/suggestions"))
         .config()
         .timeout_global(Some(TIMEOUT))
         .build()

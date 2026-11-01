@@ -586,7 +586,7 @@ pub fn capture_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
     let ctx = ui.ctx().clone();
     state.poll(&ctx, cx);
     state.anchors.insert("capture-card".into(), rect);
-    let on_avatar = cx.snap.orb.manifest && cx.snap.orb.prop_sync.is_some();
+    let on_avatar = cx.snap.n4n0.manifest && cx.snap.n4n0.prop_sync.is_some();
     let waiting = state.flow.as_ref().is_some_and(|f| f.request.is_some() && f.result.is_none());
     let (value, tone, trailing) = if state.running() {
         ("Setting up…", Tone::Info, None)
@@ -642,7 +642,7 @@ pub fn capture_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
         if waiting && !on_avatar && !state.running() {
             state.open_modal(&ctx, Modal::Setup, rect);
         } else {
-            let worn = cx.snap.orb.avatar_id.clone().filter(|id| state.scan.projects.iter().any(|p| p.registered && p.avatars.iter().any(|a| &a.id == id)));
+            let worn = cx.snap.n4n0.avatar_id.clone().filter(|id| state.scan.projects.iter().any(|p| p.registered && p.avatars.iter().any(|a| &a.id == id)));
             state.preselected = worn.or_else(|| state.preselected.clone());
             state.open_modal(&ctx, if state.running() { Modal::Setup } else { Modal::Avatars }, rect);
         }

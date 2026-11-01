@@ -159,7 +159,7 @@ impl super::Controller {
         }
         let (world, avatar_id) = {
             let snap = self.snapshot.lock().unwrap();
-            (snap.vrchat.world.clone(), snap.orb.avatar_id.clone())
+            (snap.vrchat.world.clone(), snap.n4n0.avatar_id.clone())
         };
         let (Some(world_id), Some(instance), true) = (world.world_id.clone(), world.instance.clone(), world.in_world) else { return };
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);

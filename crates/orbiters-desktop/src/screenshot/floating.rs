@@ -4,7 +4,7 @@
 //! alone; `floating-watch.png` the watch closed, and open under a laser; `floating-laser.png` the beam and its dot.
 //! `settings-watch` (a window scenario): the watch's switches in Settings.
 
-use super::{idle_snapshot, orb_snapshot, over_ground, with_account, Page, Scenario, StandInBody, Still};
+use super::{idle_snapshot, n4n0_snapshot, over_ground, with_account, Page, Scenario, StandInBody, Still};
 use crate::backend::Ctl;
 use crate::overlay::floating::{laser, panel, watch};
 use crate::overlay::ui::{OverlayUi, Page as TabPage, Surface, SIZE};
@@ -43,11 +43,11 @@ pub(super) fn shots(out: &Path, settings: &Settings) -> anyhow::Result<()> {
     idle.steamvr.overlay = true;
     idle.vrchat.running = true;
     idle.osc.vrchat_found = true;
-    let mut talking = orb_snapshot(&with_account(&idle, crate::state::AccountState::SignedIn { username: "Desktop Tester".into() }, None));
+    let mut talking = n4n0_snapshot(&with_account(&idle, crate::state::AccountState::SignedIn { username: "Desktop Tester".into() }, None));
     talking.vrchat.running = true;
     // (name, snapshot, the tab's page, where the laser points on the panel).
     let shots: [(&str, &Snapshot, TabPage, Pos2); 2] =
-        [("floating-panel", &idle, TabPage::Capture, pos2(250.0, 210.0)), ("floating-panel-orb", &talking, TabPage::Orb, pos2(250.0, 330.0))];
+        [("floating-panel", &idle, TabPage::Capture, pos2(250.0, 210.0)), ("floating-panel-n4n0", &talking, TabPage::N4n0, pos2(250.0, 330.0))];
     for (name, snap, page, laser_at) in shots {
         let panel_px = paint_panel(snap, page, laser_at);
         let bar_px = paint_bar(Some(panel::BarButton::Handle), None, FloatingSettings::default().width_m);

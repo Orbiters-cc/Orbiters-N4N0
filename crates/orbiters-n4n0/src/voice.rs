@@ -8,7 +8,7 @@
 
 use crate::platform::VoiceWorker;
 use crate::runtime::{N4n0, Shared, Source};
-use crate::status::{NoticeKind, OrbWho, VoiceStatus};
+use crate::status::{NoticeKind, N4n0Who, VoiceStatus};
 use orbiters_core::voice::{self, VoiceCommand, VoiceEvent};
 use std::time::{Duration, Instant};
 
@@ -138,9 +138,9 @@ impl N4n0 {
     /// the assistant is on, the models are here), stops it otherwise, and passes on a changed microphone or wake
     /// word (without loading anything again). Called once a second.
     pub(crate) fn voice_follow(self: &Shared) {
-        let settings = self.with_settings(|s| s.orb.clone());
+        let settings = self.with_settings(|s| s.n4n0.clone());
         let vrchat = self.host.scene().vrchat;
-        let installed = self.orb.lock().unwrap().voice.installed;
+        let installed = self.n4n0.lock().unwrap().voice.installed;
         let mut rt = self.voice.lock().unwrap();
         let leased = rt.lease_until.is_some_and(|t| Instant::now() < t);
         let wanted = settings.enabled && settings.assistant && installed && (vrchat || leased);
@@ -204,7 +204,7 @@ impl N4n0 {
     /// N4N0 listens for a sentence from `source` (the worker starts if it was not running, as for the window's Talk
     /// button with VRChat closed, and stays a while after).
     pub(crate) fn voice_listen(self: &Shared, source: Source) {
-        let settings = self.with_settings(|s| s.orb.clone());
+        let settings = self.with_settings(|s| s.n4n0.clone());
         let mut rt = self.voice.lock().unwrap();
         rt.lease_until = Some(Instant::now() + LISTEN_LIMIT + LISTEN_LEASE);
         if rt.handle.is_none() {
@@ -289,7 +289,7 @@ impl N4n0 {
     }
 
     fn voice_status(&self, f: impl FnOnce(&mut VoiceStatus)) {
-        f(&mut self.orb.lock().unwrap().voice);
+        f(&mut self.n4n0.lock().unwrap().voice);
         self.publish();
     }
 
@@ -308,24 +308,24 @@ impl N4n0 {
                 // Coarse steps: the meter moves, and an unchanged level is not published again.
                 let level = (level.clamp(0.0, 1.0) * 20.0).round() / 20.0;
                 let changed = {
-                    let mut orb = self.orb.lock().unwrap();
-                    let changed = orb.voice.level != level;
-                    orb.voice.level = level;
+                    let mut n4n0 = self.n4n0.lock().unwrap();
+                    let changed = n4n0.voice.level != level;
+                    n4n0.voice.level = level;
                     changed
                 };
                 if changed {
                     self.publish();
                 }
             }
-            VoiceEvent::Heard { text, for_orb, seconds, decode_ms, listen } => {
-                if for_orb {
+            VoiceEvent::Heard { text, for_n4n0, seconds, decode_ms, listen } => {
+                if for_n4n0 {
                     eprintln!("voice: {seconds:.1} s transcribed in {decode_ms} ms");
                 }
                 // A sentence for a cancelled listen goes nowhere; one for the latest listen ends N4N0's listening.
                 let (dropped, current) = {
                     let mut rt = self.voice.lock().unwrap();
-                    let dropped = for_orb && listen != 0 && rt.cancelled_take(listen);
-                    let current = for_orb && (listen == 0 || rt.current == Some(listen));
+                    let dropped = for_n4n0 && listen != 0 && rt.cancelled_take(listen);
+                    let current = for_n4n0 && (listen == 0 || rt.current == Some(listen));
                     if current {
                         rt.current = None;
                     }
@@ -335,7 +335,7 @@ impl N4n0 {
                 };
                 self.voice_status(|v| v.level = 0.0);
                 if !dropped {
-                    self.heard(text, for_orb, current);
+                    self.heard(text, for_n4n0, current);
                 }
             }
             VoiceEvent::Installing { fraction } => self.voice_status(|v| v.downloading = Some(fraction)),
@@ -356,7 +356,7 @@ impl N4n0 {
                 self.notify(NoticeKind::Success, "N4N0 can hear now.");
             }
             VoiceEvent::Error { message } => {
-                self.orb.lock().unwrap().line(OrbWho::Error, message.clone());
+                self.n4n0.lock().unwrap().line(N4n0Who::Error, message.clone());
                 self.voice_status(|v| v.error = Some(message));
             }
         }
@@ -396,9 +396,9 @@ impl N4n0 {
         drop(handle);
         eprintln!("voice: {message}");
         {
-            let mut orb = self.orb.lock().unwrap();
-            orb.listening = None;
-            orb.line(OrbWho::Error, message.clone());
+            let mut n4n0 = self.n4n0.lock().unwrap();
+            n4n0.listening = None;
+            n4n0.line(N4n0Who::Error, message.clone());
         }
         self.voice_status(|v| {
             v.running = false;

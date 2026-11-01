@@ -25,8 +25,8 @@ use egui::epaint::RectShape;
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, Painter, Pos2, Rect, Stroke, StrokeKind, TextureId};
 use orbiters_contracts::world_feedback as contract;
 use orbiters_core::maps::{FoundBy, WorldPage, WorldPerformance, WorldPicture};
-use orbiters_orb::feedback::{CommentRow, FeedbackAsk, FeedbackView, LabelCount, WorldFeedback};
-use orbiters_orb::menu::KeyboardLayout;
+use orbiters_n4n0_core::feedback::{CommentRow, FeedbackAsk, FeedbackView, LabelCount, WorldFeedback};
+use orbiters_n4n0_core::menu::KeyboardLayout;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{icons, widgets};
 use std::collections::HashMap;
@@ -1015,8 +1015,8 @@ impl Panel {
     }
 
     /// A key of the computer's keyboard while the panel types (the service takes them from VRChat).
-    pub fn key(&mut self, key: &orbiters_orb::menu::KeyInput, d: &Data, time: f64) -> Vec<Action> {
-        use orbiters_orb::menu::KeyInput;
+    pub fn key(&mut self, key: &orbiters_n4n0_core::menu::KeyInput, d: &Data, time: f64) -> Vec<Action> {
+        use orbiters_n4n0_core::menu::KeyInput;
         if !self.typing() {
             return Vec::new();
         }
@@ -1288,7 +1288,7 @@ impl Panel {
         } else if let Some((last, visits)) = entry.visited {
             meta.push(if visits == 1 { "Visited once".to_string() } else { format!("Visited {visits} times") });
             if last > 0 {
-                meta.push(format!("last {}", orbiters_orb::feedback::ago(d.now.saturating_sub(last))));
+                meta.push(format!("last {}", orbiters_n4n0_core::feedback::ago(d.now.saturating_sub(last))));
             }
         }
         if !meta.is_empty() {
@@ -1406,7 +1406,7 @@ impl Panel {
         match wf.comments.first() {
             Some(c) => {
                 let by = if c.by.is_empty() { "Someone".to_string() } else { c.by.clone() };
-                let head = format!("{by} · {}", orbiters_orb::feedback::ago(d.now.saturating_sub(c.at)));
+                let head = format!("{by} · {}", orbiters_n4n0_core::feedback::ago(d.now.saturating_sub(c.at)));
                 text_cut(p, pos2(teaser.min.x + 56.0, teaser.min.y + 16.0), teaser.width() - 72.0, Txt::new(head, 14.0).weight(weight::MEDIUM).color(fade(theme::FG_3, rest)));
                 let mut job = Txt::new(c.text.split_whitespace().collect::<Vec<_>>().join(" "), 16.0).color(fade(theme::FG_2, rest)).line_height(21.0).job(teaser.width() - 72.0);
                 job.wrap.max_rows = 2;

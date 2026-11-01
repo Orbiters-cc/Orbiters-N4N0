@@ -58,10 +58,10 @@ fn main() -> anyhow::Result<()> {
         Some("--gpu-bench") => bench::run(&args[1..]),
         Some("--window") => window::run(&args[1..]),
         Some("--overlay") => overlay::run(&args[1..]),
-        Some("--orb-menu") => overlay::menu_pages::run(&args[1..]),
+        Some("--n4n0-menu") => overlay::menu_pages::run(&args[1..]),
         Some("--world-view") => overlay::worlds::shots::run(&args[1..]),
         Some("--world-timing") => overlay::worlds::timing_lab::run(&args[1..]),
-        Some("--orb-menu-strings") => overlay::menu_pages::run_strings(&args[1..]),
+        Some("--n4n0-menu-strings") => overlay::menu_pages::run_strings(&args[1..]),
         Some("--prepare-upload") => upload_prep::run(&args[1..]),
         #[cfg(windows)]
         Some("--eye-picture") => overlay::eye_picture::run(&args[1..]),

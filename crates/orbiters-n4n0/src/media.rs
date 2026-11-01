@@ -1,4 +1,4 @@
-//! The device's music and volume, for N4N0's menu and N4N0's assistant (contracts `Docs/orb.md`, Menu): what plays (the
+//! The device's music and volume, for N4N0's menu and N4N0's assistant (contracts `Docs/n4n0.md`, Menu): what plays (the
 //! app that played last: Spotify, a browser, any app that tells the system), its art, and the speakers' volume. A
 //! process reads them on a thread of its own, about once a second, only while something shows them
 //! ([`Watcher::want`]), through its platform's [`MediaBackend`] (Windows' media controls on the desktop; on a phone,
@@ -10,9 +10,9 @@
 //! What a browser or YouTube's app plays is looked up on YouTube ([`Links`]): the media controls give no link, and the
 //! menus offer the video's link to copy and drop as they do a search result's.
 
-use orbiters_orb::menu::{Media, MediaCommand, Volume};
-use orbiters_orb::picture::{self, Rgb};
-use orbiters_orb::youtube::{self, Video};
+use orbiters_n4n0_core::menu::{Media, MediaCommand, Volume};
+use orbiters_n4n0_core::picture::{self, Rgb};
+use orbiters_n4n0_core::youtube::{self, Video};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};

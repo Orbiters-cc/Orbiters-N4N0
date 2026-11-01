@@ -4,8 +4,8 @@
 
 use super::calibration::{Calibrator, Phase};
 use crate::backend::Ctl;
-use crate::ipc::OrbCommand;
-use crate::state::{CaptureState, OrbWho, Snapshot};
+use crate::ipc::N4n0Command;
+use crate::state::{CaptureState, N4n0Who, Snapshot};
 use egui::{pos2, vec2, Align2, Id, Rect, Ui, UiBuilder, Vec2};
 use orbiters_contracts::performance::tracking::{Device, Sample};
 use orbiters_core::settings::Settings;
@@ -27,7 +27,7 @@ pub trait Poses {
 pub enum Page {
     #[default]
     Capture,
-    Orb,
+    N4n0,
     Walk,
 }
 
@@ -73,7 +73,7 @@ impl OverlayUi {
     /// button is let go, as the press's end will never come.
     pub fn release(&mut self, ctl: &Ctl) {
         if std::mem::take(&mut self.talking) {
-            ctl.orb(OrbCommand::Talk { down: false });
+            ctl.n4n0(N4n0Command::Talk { down: false });
         }
     }
 
@@ -121,20 +121,20 @@ impl OverlayUi {
             &mut tabs,
             "overlay-page",
             &mut page,
-            &[SegOption::new(Page::Capture, "Capture"), SegOption::new(Page::Orb, "N4N0"), SegOption::new(Page::Walk, "Walk boost")],
+            &[SegOption::new(Page::Capture, "Capture"), SegOption::new(Page::N4n0, "N4N0"), SegOption::new(Page::Walk, "Walk boost")],
             false,
         );
         if page != self.page {
             self.page = page;
             if self.talking {
                 self.talking = false;
-                ctl.orb(OrbCommand::Talk { down: false });
+                ctl.n4n0(N4n0Command::Talk { down: false });
             }
         }
         let left = Rect::from_min_size(pos2(24.0, 96.0), vec2(452.0, 520.0));
         let right = Rect::from_min_max(pos2(left.right() + 20.0, left.top()), pos2(rect.right() - 24.0, left.bottom()));
-        if self.page == Page::Orb {
-            self.orb(ui, snap, ctl, left, right);
+        if self.page == Page::N4n0 {
+            self.n4n0(ui, snap, ctl, left, right);
             return;
         }
         if self.page == Page::Walk {
@@ -311,34 +311,34 @@ impl OverlayUi {
         p.galley(pos2(right.left() + 22.0, y + 8.0), g, theme::FG_3);
     }
 
-    fn orb(&mut self, ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, left: Rect, right: Rect) {
-        let orb = &snap.orb;
-        let settings = &snap.settings.orb;
+    fn n4n0(&mut self, ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, left: Rect, right: Rect) {
+        let n4n0 = &snap.n4n0;
+        let settings = &snap.settings.n4n0;
         let signed_in = matches!(
             snap.account.state,
             crate::state::AccountState::SignedIn { .. } | crate::state::AccountState::Offline { .. } | crate::state::AccountState::Checking { .. }
         );
-        let can_talk = settings.enabled && settings.assistant && signed_in && orb.voice.installed;
+        let can_talk = settings.enabled && settings.assistant && signed_in && n4n0.voice.installed;
 
         // Hold to talk: a round button that grows a ring with the voice.
         widgets::card(ui.painter(), left, theme::CARD_RADIUS);
         widgets::text(ui.painter(), pos2(left.left() + 22.0, left.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps("Talk to N4N0"));
         let center = pos2(left.center().x, left.top() + 56.0 + 100.0);
         let disc = Rect::from_center_size(center, Vec2::splat(200.0));
-        let resp = ui.interact(disc, Id::unique("overlay-orb-talk"), egui::Sense::click_and_drag());
+        let resp = ui.interact(disc, Id::unique("overlay-n4n0-talk"), egui::Sense::click_and_drag());
         let held = can_talk && resp.is_pointer_button_down_on();
         if held != self.talking {
             self.talking = held;
-            ctl.orb(OrbCommand::Talk { down: held });
+            ctl.n4n0(N4n0Command::Talk { down: held });
         }
         let p = ui.painter().clone();
-        let level = if orb.listening { orb.voice.level.clamp(0.0, 1.0) } else { 0.0 };
-        if orb.listening || orb.thinking {
+        let level = if n4n0.listening { n4n0.voice.level.clamp(0.0, 1.0) } else { 0.0 };
+        if n4n0.listening || n4n0.thinking {
             p.circle_filled(center, 100.0 + 14.0 * level, theme::alpha(theme::ACCENT, 0.10 + 0.15 * level));
         }
         let fill = if !can_talk {
             theme::INK_750
-        } else if held || orb.listening {
+        } else if held || n4n0.listening {
             theme::ACCENT_HOVER
         } else {
             theme::ACCENT
@@ -349,11 +349,11 @@ impl OverlayUi {
             ("N4N0's assistant is off", "Turn it on in Orbiters - N4N0 › N4N0".to_string())
         } else if !signed_in {
             ("Sign in to talk to N4N0", "In Orbiters - N4N0 › Settings".to_string())
-        } else if !orb.voice.installed {
+        } else if !n4n0.voice.installed {
             ("N4N0 cannot hear yet", "Install its ears in Orbiters - N4N0 › N4N0".to_string())
-        } else if orb.listening {
+        } else if n4n0.listening {
             ("Listening…", "Let go when you are done".to_string())
-        } else if orb.thinking {
+        } else if n4n0.thinking {
             ("Thinking…", "N4N0 answers on its panel".to_string())
         } else {
             ("Hold and speak", "Or hold Talk in N4N0's menu, or touch N4N0".to_string())
@@ -361,7 +361,7 @@ impl OverlayUi {
         let y = disc.bottom() + 28.0;
         widgets::text_truncated(&p, pos2(left.center().x, y), Align2::CENTER_CENTER, &Txt::new(title, 20.0).weight(weight::SEMIBOLD), left.width() - 40.0);
         widgets::text_truncated(&p, pos2(left.center().x, y + 28.0), Align2::CENTER_CENTER, &Txt::new(sub, 13.5).color(theme::FG_3), left.width() - 40.0);
-        let quota = orb.quota.as_ref().filter(|q| q.limit > 0 && !q.own_key);
+        let quota = n4n0.quota.as_ref().filter(|q| q.limit > 0 && !q.own_key);
         if let Some(q) = quota {
             let line = format!("{} of {} free answers left today", q.limit.saturating_sub(q.used), q.limit);
             widgets::text(&p, pos2(left.center().x, left.bottom() - 28.0), Align2::CENTER_CENTER, &Txt::new(line, 12.5).color(theme::FG_4));
@@ -385,7 +385,7 @@ impl OverlayUi {
         let reconnect_w = 150.0;
         let x0 = left.center().x - (w + if quiet { 12.0 + reconnect_w } else { 0.0 }) / 2.0;
         if menu_button.width(w).show_at(ui, Rect::from_min_size(pos2(x0, by), vec2(w, 40.0))).clicked() {
-            ctl.orb(OrbCommand::ToggleScreen);
+            ctl.n4n0(N4n0Command::ToggleScreen);
         }
         if quiet {
             let b = Button::new("Reconnect").icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Ghost);
@@ -393,7 +393,7 @@ impl OverlayUi {
                 ctl.osc_reconnect();
             }
         }
-        if orb.listening || orb.thinking || held {
+        if n4n0.listening || n4n0.thinking || held {
             ui.ctx().request_repaint();
         }
 
@@ -403,7 +403,7 @@ impl OverlayUi {
         widgets::text(ui.painter(), pos2(said.left() + 22.0, said.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps("N4N0 said"));
         let body = Rect::from_min_max(pos2(said.left() + 22.0, said.top() + 48.0), pos2(said.right() - 22.0, said.bottom() - 18.0));
         let mut yy = body.top();
-        let last: Vec<_> = orb.lines.iter().filter(|l| matches!(l.who, OrbWho::You | OrbWho::Orb | OrbWho::Error)).rev().take(3).collect();
+        let last: Vec<_> = n4n0.lines.iter().filter(|l| matches!(l.who, N4n0Who::You | N4n0Who::N4n0 | N4n0Who::Error)).rev().take(3).collect();
         if last.is_empty() {
             let g = p.layout_job(
                 Txt::new("Nothing yet. Ask N4N0 to put your hoodie on, take a picture, or plan a movie night.", 15.0)
@@ -415,13 +415,13 @@ impl OverlayUi {
         }
         for line in last.into_iter().rev() {
             let (who, color) = match line.who {
-                OrbWho::You => ("You", theme::FG_3),
-                OrbWho::Error => ("N4N0", theme::DANGER),
+                N4n0Who::You => ("You", theme::FG_3),
+                N4n0Who::Error => ("N4N0", theme::DANGER),
                 _ => ("N4N0", theme::ACCENT),
             };
             widgets::text(&p, pos2(body.left(), yy + 9.0), Align2::LEFT_CENTER, &Txt::caps(who).color(color));
             let g = p.layout_job(
-                Txt::new(&line.text, 15.0).color(if line.who == OrbWho::You { theme::FG_2 } else { theme::FG }).line_height(21.0).job(body.width() - 56.0),
+                Txt::new(&line.text, 15.0).color(if line.who == N4n0Who::You { theme::FG_2 } else { theme::FG }).line_height(21.0).job(body.width() - 56.0),
             );
             let h = g.size().y.min(64.0);
             if yy + h > body.bottom() {
@@ -478,15 +478,15 @@ impl OverlayUi {
             .new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(r1.right() - 48.0, r1.center().y - 14.0), vec2(48.0, 28.0))).id_salt("overlay-afk"));
         if widgets::toggle(&mut sw, "overlay-afk", &mut afk) {
             let mut s = snap.settings.clone();
-            s.orb.afk_message_enabled = afk;
+            s.n4n0.afk_message_enabled = afk;
             ctl.save_changes(&snap.settings, &s);
         }
         // Buttons.
         let r2 = row(2);
-        let call = snap.orb.calls.call.as_ref();
+        let call = snap.n4n0.calls.call.as_ref();
         if let Some(call) = call {
             let ringing = call.incoming && call.phase == crate::state::CallPhase::Ringing;
-            let (first, first_cmd) = if ringing { ("Answer", OrbCommand::AnswerCall) } else { ("Hang up", OrbCommand::EndCall) };
+            let (first, first_cmd) = if ringing { ("Answer", N4n0Command::AnswerCall) } else { ("Hang up", N4n0Command::EndCall) };
             let b = Button::new(first).icon(if ringing { icons::MICROPHONE } else { icons::X }).variant(if ringing {
                 Variant::Primary
             } else {
@@ -494,13 +494,13 @@ impl OverlayUi {
             });
             let w1 = b.desired_width(ui).max(150.0);
             if b.width(w1).show_at(ui, Rect::from_min_size(pos2(r2.left(), r2.top() + 2.0), vec2(w1, 40.0))).clicked() {
-                ctl.orb(first_cmd);
+                ctl.n4n0(first_cmd);
             }
             if ringing {
                 let d = Button::new("Decline").icon(icons::X).variant(Variant::Ghost);
                 let w2 = d.desired_width(ui).max(120.0);
                 if d.width(w2).show_at(ui, Rect::from_min_size(pos2(r2.left() + w1 + 12.0, r2.top() + 2.0), vec2(w2, 40.0))).clicked() {
-                    ctl.orb(OrbCommand::EndCall);
+                    ctl.n4n0(N4n0Command::EndCall);
                 }
             }
             return;
@@ -508,16 +508,16 @@ impl OverlayUi {
         let save = Button::new("Save this video").icon(icons::DOWNLOAD_SIMPLE).enabled(snap.vrchat.world.last_video.is_some());
         let w = save.desired_width(ui).max(180.0);
         if save.width(w).show_at(ui, Rect::from_min_size(pos2(r2.left(), r2.top() + 2.0), vec2(w, 40.0))).clicked() {
-            ctl.orb(OrbCommand::SaveVideo);
+            ctl.n4n0(N4n0Command::SaveVideo);
         }
         let photo = Button::new("Picture in 3 s").icon(icons::CAMERA).enabled(snap.vrchat.running && !snap.is_capturing());
         let w2 = photo.desired_width(ui).max(160.0);
         if photo.width(w2).show_at(ui, Rect::from_min_size(pos2(r2.left() + w + 12.0, r2.top() + 2.0), vec2(w2, 40.0))).clicked() {
-            ctl.orb(OrbCommand::Photo { delay_seconds: 3 });
+            ctl.n4n0(N4n0Command::Photo { delay_seconds: 3 });
         }
-        let clear = Button::new("").icon(icons::X).variant(Variant::Ghost).hint("Clear the panel").enabled(orb.panel.is_some());
+        let clear = Button::new("").icon(icons::X).variant(Variant::Ghost).hint("Clear the panel").enabled(n4n0.panel.is_some());
         if clear.width(48.0).show_at(ui, Rect::from_min_size(pos2(r2.right() - 48.0, r2.top() + 2.0), vec2(48.0, 40.0))).clicked() {
-            ctl.orb(OrbCommand::HidePanel);
+            ctl.n4n0(N4n0Command::HidePanel);
         }
     }
 }
@@ -643,7 +643,7 @@ fn recorder(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
         }
         let r = b.width(w).show_at(ui, Rect::from_min_size(pos2(left + seg_w + 12.0, card.bottom() - 64.0), vec2(w, 40.0)));
         if r.clicked() {
-            ctl.orb(OrbCommand::Photo3D);
+            ctl.n4n0(N4n0Command::Photo3D);
         }
     }
 }

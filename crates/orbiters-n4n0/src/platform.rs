@@ -6,14 +6,14 @@
 //! keyboard and mouse are read, and the voice workers started and told, under N4N0's locks, so they answer at once
 //! and never call N4N0 back from within.
 
-use crate::status::{CallsStatus, NoticeKind, OrbStatus};
+use crate::status::{CallsStatus, NoticeKind, N4n0Status};
 use orbiters_core::account::Api;
 use orbiters_core::osc::OscValue;
 use orbiters_core::settings::Settings;
 use orbiters_core::voice::{VoiceCommand, VoiceEvent};
 use orbiters_core::vrchat_log::WorldState;
-use orbiters_orb::menu::KeyboardLayout;
-use orbiters_orb::text::Message;
+use orbiters_n4n0_core::menu::KeyboardLayout;
+use orbiters_n4n0_core::text::Message;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -89,7 +89,7 @@ pub trait Host: Send + Sync + 'static {
         false
     }
     /// N4N0's state changed: what the interfaces show. The app adds what it keeps itself (its calls, the avatar's name).
-    fn publish(&self, status: OrbStatus);
+    fn publish(&self, status: N4n0Status);
     /// Something to tell the person (a toast).
     fn notify(&self, kind: NoticeKind, message: String);
     /// The Orbiters account the assistant asks with and link cards are dropped with: its API and credential.
@@ -121,25 +121,25 @@ pub trait Host: Send + Sync + 'static {
     fn qr_scan(&self, _events: QrEvents) -> Result<Box<dyn QrScan>, String> {
         Err("QR codes are read from VRChat's camera by Orbiters - N4N0 on the computer running VRChat".into())
     }
-    /// Lists the 3D captures again (N4N0's menu opened History; contracts `Docs/orb.md`, Menu, from screen version 12):
+    /// Lists the 3D captures again (N4N0's menu opened History; contracts `Docs/n4n0.md`, Menu, from screen version 12):
     /// the app reads them off N4N0's threads and hands them over with [`crate::N4n0::set_captures`], as it does whenever
     /// one of them changes (recorded, its 3D view made, shared).
     fn captures_list(&self) {}
     /// Shares a 3D capture as the app's own pages do (contracts `Docs/capture-sharing.md`): how it goes comes back in its
     /// row ([`crate::N4n0::set_captures`]). A device that does not keep the captures says why.
-    fn share_capture(&self, _ask: orbiters_orb::captures::ShareAsk) -> Result<(), String> {
+    fn share_capture(&self, _ask: orbiters_n4n0_core::captures::ShareAsk) -> Result<(), String> {
         Err("3D captures are shared by Orbiters - N4N0 on the computer that took them".into())
     }
     /// The VRChat friends a capture can go to (called on a thread of its own: it may ask VRChat or read VRCX).
-    fn friends(&self) -> Result<Vec<orbiters_orb::captures::Friend>, String> {
+    fn friends(&self) -> Result<Vec<orbiters_n4n0_core::captures::Friend>, String> {
         Err("VRChat friends are read by Orbiters - N4N0 on the computer".into())
     }
     /// World feedback a menu asked (contracts `Docs/world-feedback.md`): a world's read again, or the player's like,
     /// label or comment sent, called on a thread of its own. The app answers with [`crate::N4n0::set_feedback`], at once
     /// with the action applied (before it reaches Orbiters). A device that cannot send feedback leaves it.
-    fn world_feedback(&self, _ask: orbiters_orb::feedback::FeedbackAsk) {}
+    fn world_feedback(&self, _ask: orbiters_n4n0_core::feedback::FeedbackAsk) {}
     /// A 3D capture's picture for the menus (its key: `CaptureRow::key`), read on a thread of its own.
-    fn capture_picture(&self, _key: &str) -> Option<orbiters_orb::picture::Rgb> {
+    fn capture_picture(&self, _key: &str) -> Option<orbiters_n4n0_core::picture::Rgb> {
         None
     }
     /// The avatar's Walk boost radial moved (`N4N0/WalkBoost`): the strength, 0 to 1.
@@ -288,7 +288,7 @@ pub struct Platform {
 /// Where N4N0 keeps its files.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Files {
-    /// The saved videos (`orb/videos.json` in the config folder).
+    /// The saved videos (`n4n0/videos.json` in the config folder).
     pub videos: PathBuf,
     /// The avatars' saved states (`avatar-states.json` beside the settings).
     pub states: PathBuf,
@@ -303,8 +303,8 @@ impl Files {
     /// `orbiters_core::paths::set_roots`, else the platform's).
     pub fn app() -> Self {
         Self {
-            videos: orbiters_orb::videos::file(),
-            states: orbiters_orb::states::file(),
+            videos: orbiters_n4n0_core::videos::file(),
+            states: orbiters_n4n0_core::states::file(),
             avatars: orbiters_core::paths::avatars_dir(),
             models: orbiters_core::paths::models_dir(),
         }
@@ -404,7 +404,7 @@ mod tests {
         let files = Files::in_dir(dir);
         assert_eq!(files.states, dir.join("avatar-states.json"));
         let app = Files::app();
-        assert!(app.states.ends_with("avatar-states.json") && app.videos.ends_with(Path::new("orb").join("videos.json")));
+        assert!(app.states.ends_with("avatar-states.json") && app.videos.ends_with(Path::new("n4n0").join("videos.json")));
         assert!(app.avatars.is_absolute() && app.models.is_absolute());
     }
 }

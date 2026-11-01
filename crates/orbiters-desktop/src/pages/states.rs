@@ -12,8 +12,8 @@ use super::{block, section, Cx};
 use crate::overlay::menu_ui;
 use crate::state::{AvatarView, StateAction, StateView, StatesView};
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Key, Rect, Sense, Ui};
-use orbiters_orb::menu::layout::Tint;
-use orbiters_orb::menu::{next_state_name, StateRow};
+use orbiters_n4n0_core::menu::layout::Tint;
+use orbiters_n4n0_core::menu::{next_state_name, StateRow};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
 use orbiters_ui::theme::{self, weight, Txt};
@@ -163,7 +163,7 @@ fn count(n: usize) -> String {
 /// The page: the avatars' cards, or one avatar's states.
 pub fn show(ui: &mut Ui, cx: &mut Cx, page: &mut StatesPage, out: &mut Vec<Out>) {
     let now = anim::time(ui.ctx());
-    let view = cx.snap.orb.states.clone();
+    let view = cx.snap.n4n0.states.clone();
     // What the service said of the last save, apply or change: a toast, once (what went wrong comes as the service's own
     // toast).
     if let Some(note) = &view.note {

@@ -18,7 +18,7 @@
 
 use orbiters_core::settings::TrackingSettings;
 use orbiters_openvr::DeviceClass;
-use orbiters_orb::menu::SMOOTHING_STRENGTHS;
+use orbiters_n4n0_core::menu::SMOOTHING_STRENGTHS;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};

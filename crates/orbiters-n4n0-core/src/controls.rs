@@ -134,7 +134,7 @@ pub fn normalize(text: &str) -> String {
             '>' if in_tag => in_tag = false,
             _ if in_tag => {}
             '>' | '\\' | '|' | '›' | '»' | ':' => plain.push('/'),
-            _ => match orbiters_contracts::orb::unaccented(c) {
+            _ => match orbiters_contracts::n4n0::unaccented(c) {
                 Some(base) => plain.push_str(&base.to_lowercase()),
                 None => plain.extend(c.to_lowercase()),
             },
@@ -162,7 +162,7 @@ pub struct Controls {
 /// system's (the capture kit's record toggle), and writing nothing VRChat, N4N0 or an OSC app drives. VRChat echoes a
 /// write to such a parameter, and Orbiters - N4N0 would take the echo for the owner's press (a call, a recording).
 fn offered(tags: &[Tag], parameter: Option<&String>, sub_parameters: &[String]) -> bool {
-    !tags.iter().any(|t| matches!(t, Tag::Orb | Tag::System)) && parameter.into_iter().chain(sub_parameters).all(|p| !is_system_parameter(p))
+    !tags.iter().any(|t| matches!(t, Tag::N4n0 | Tag::System)) && parameter.into_iter().chain(sub_parameters).all(|p| !is_system_parameter(p))
 }
 
 impl Controls {
@@ -429,7 +429,7 @@ pub fn tag_word(tag: &Tag) -> &'static str {
         Tag::Prop => "prop",
         Tag::Effect => "effect",
         Tag::System => "system",
-        Tag::Orb => "orb",
+        Tag::N4n0 => "n4n0",
         Tag::Other => "other",
     }
 }
@@ -454,7 +454,7 @@ mod tests {
                 { "path": ["Outfits", "Winter"], "type": "toggle", "parameter": "Outfit", "value": 3 },
                 { "path": ["Size"], "type": "radial", "parameter": "Size", "sub_parameters": ["Size"] },
                 { "path": ["GoGo Loco", "Poses", "Sit"], "type": "button", "parameter": "VRCEmote", "value": 129, "tags": ["pose"] },
-                { "path": ["N4N0", "N4N0"], "type": "toggle", "parameter": "N4N0/Visible", "value": 1, "tags": ["orb"] }
+                { "path": ["N4N0", "N4N0"], "type": "toggle", "parameter": "N4N0/Visible", "value": 1, "tags": ["n4n0"] }
               ] }"#,
         )
         .unwrap()
@@ -497,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn summarises_with_state_and_leaves_orb_out() {
+    fn summarises_with_state_and_leaves_n4n0_out() {
         let c = Controls::from_manifest(&manifest());
         let latest: HashMap<String, OscValue> =
             [(format!("{PARAMETERS_PREFIX}Outfit"), OscValue::Int(3)), (format!("{PARAMETERS_PREFIX}VF1_Clothes/Hoodie"), OscValue::Bool(true))].into();
@@ -517,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn never_offers_orb_system_or_app_controls() {
+    fn never_offers_n4n0_system_or_app_controls() {
         let mut c = Controls::from_manifest(
             &AvatarManifest::parse(
                 r#"{ "format": "orbiters.avatar", "version": 1, "avatar_id": "avtr_x",
@@ -526,7 +526,7 @@ mod tests {
                   "controls": [
                     { "path": ["Hat"], "type": "toggle", "parameter": "Hat", "value": 1 },
                     { "path": ["N4N0", "Call", "Go"], "type": "button", "parameter": "N4N0/Call/Go", "value": 1 },
-                    { "path": ["N4N0", "3D picture"], "type": "button", "parameter": "N4N0/Photo3D", "value": 1, "tags": ["orb"] },
+                    { "path": ["N4N0", "3D picture"], "type": "button", "parameter": "N4N0/Photo3D", "value": 1, "tags": ["n4n0"] },
                     { "path": ["Kit", "Record"], "type": "toggle", "parameter": "OrbitersRecord", "value": 1 },
                     { "path": ["Kit", "Record here"], "type": "toggle", "parameter": "MyRecord", "value": 1, "tags": ["system"] },
                     { "path": ["Kit", "My record"], "type": "toggle", "parameter": "MyRecord", "value": 1 },

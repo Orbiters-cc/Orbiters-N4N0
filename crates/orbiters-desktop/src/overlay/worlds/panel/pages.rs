@@ -214,7 +214,7 @@ impl Panel {
                     p.circle_filled(face, 20.0, fade(theme::alpha(widgets::name_color(by), 0.3), appear));
                     let initial: String = by.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
                     text(p, face, Align2::CENTER_CENTER, Txt::new(initial, 18.0).weight(weight::SEMIBOLD).color(fade(theme::FG, appear)));
-                    let when = if c.id == 0 && c.mine { "sending…".to_string() } else { orbiters_orb::feedback::ago(d.now.saturating_sub(c.at)) };
+                    let when = if c.id == 0 && c.mine { "sending…".to_string() } else { orbiters_n4n0_core::feedback::ago(d.now.saturating_sub(c.at)) };
                     let width = if c.mine { 740.0 } else { 860.0 };
                     text_cut(p, pos2(row.min.x + 72.0, row.min.y + 12.0), width, Txt::new(format!("{by} · {when}"), 15.0).weight(weight::MEDIUM).color(fade(theme::FG_3, appear)));
                     let mut job = Txt::new(c.text.split_whitespace().collect::<Vec<_>>().join(" "), 17.0).color(fade(theme::FG, appear)).line_height(23.0).job(width);

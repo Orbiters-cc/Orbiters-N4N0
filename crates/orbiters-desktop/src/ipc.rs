@@ -75,7 +75,7 @@ pub enum ToService {
         settings: Box<Settings>,
     },
     /// Changes only these settings: a JSON object of the changed fields, a section as an object of its own changed
-    /// fields (`{"orb": {"wake_word": true}}`), merged into the service's settings as they are ([`Settings::patched`]).
+    /// fields (`{"n4n0": {"wake_word": true}}`), merged into the service's settings as they are ([`Settings::patched`]).
     /// A window's copy of the settings may lag the service's (the avatar's radial moved meanwhile): saved whole, it
     /// would put back what changed in between.
     PatchSettings {
@@ -151,8 +151,8 @@ pub enum ToService {
         calibration: Box<Calibration>,
     },
     /// N4N0: a question, the Talk button, the panel, saved videos.
-    Orb {
-        command: OrbCommand,
+    N4n0 {
+        command: N4n0Command,
     },
     /// Make VRChat find the OSC service again (it sends avatar parameters only to services it found).
     OscReconnect,
@@ -192,7 +192,7 @@ pub enum UpdateAction {
 }
 
 /// What the window and the overlay ask of N4N0 (`orbiters_n4n0::Command`, the phone app's too).
-pub use orbiters_n4n0::Command as OrbCommand;
+pub use orbiters_n4n0::Command as N4n0Command;
 
 /// Longest Hello a client may send, and how long it has to send it. Any local process can connect: before it proves
 /// it was started by the service, it must not make the service read without end.

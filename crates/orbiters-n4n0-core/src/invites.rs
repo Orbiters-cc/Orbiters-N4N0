@@ -1,6 +1,6 @@
 //! Previous instances (N4N0's menu, More): the instances the player was in, read from the visits Orbiters - N4N0 keeps
 //! from VRChat's logs (`orbiters_core::visited`), and Invite me, through which Orbiters' own VRChat account invites the
-//! signed-in member's VRChat account to one of them (`POST /orb/invites`). VRChat lets an account invite only its
+//! signed-in member's VRChat account to one of them (`POST /n4n0/invites`). VRChat lets an account invite only its
 //! friends: until the member added it, Orbiters answers with the account to add.
 
 use crate::menu::{InstanceRow, InviteAccount, InviteAnswer};
@@ -48,7 +48,7 @@ struct Account {
 pub fn send(api: &Api, token: &str, location: &str) -> InviteAnswer {
     let response = api
         .agent()
-        .post(&api.url("orb/invites"))
+        .post(&api.url("n4n0/invites"))
         .config()
         .timeout_global(Some(TIMEOUT))
         .build()

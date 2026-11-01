@@ -8,14 +8,14 @@
 //! member when the step starts and its instance is ready, as long as VRChat is linked on Orbiters, the member is in
 //! the group with its role, and that account is their friend (each missing piece is said, with its way out). For an
 //! instance under way that takes no sign-ups, Orbiters' own VRChat account invites them there, as Home's Previous
-//! instances do (`orbiters_orb::invites`).
+//! instances do (`orbiters_n4n0_core::invites`).
 
 use super::{sharing, Cx, Job};
 use crate::worlds::{Picture, Pictures};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Order, Painter, Pos2, Rect, Sense, TextureHandle, Ui, UiBuilder};
 use orbiters_core::account::{Api, Server};
 use orbiters_core::community::{self, Card, Cards, Friend, Invites, Overview, Refused, Signup};
-use orbiters_orb::menu::InviteAnswer;
+use orbiters_n4n0_core::menu::InviteAnswer;
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::paint::{self, Gradient};
 use orbiters_ui::theme::{self, weight, Txt};
@@ -649,7 +649,7 @@ enum Outcome {
     Withdrawn(anyhow::Result<Signup>),
     /// Checked again: not allowed yet, or signed up.
     Checked(Ask),
-    Orb(InviteAnswer),
+    N4n0(InviteAnswer),
 }
 
 /// Every opening gets springs of its own.
@@ -826,9 +826,9 @@ impl Window {
                 },
                 Outcome::Withdrawn(Err(e)) => Ask::of_error(&e),
                 Outcome::Checked(a) => a,
-                Outcome::Orb(InviteAnswer::Sent) => Ask::Invited,
-                Outcome::Orb(InviteAnswer::NeedsFriend { account, .. }) => Ask::Befriend { name: account.name, link: account.link },
-                Outcome::Orb(InviteAnswer::Failed { message }) => Ask::Error(message),
+                Outcome::N4n0(InviteAnswer::Sent) => Ask::Invited,
+                Outcome::N4n0(InviteAnswer::NeedsFriend { account, .. }) => Ask::Befriend { name: account.name, link: account.link },
+                Outcome::N4n0(InviteAnswer::Failed { message }) => Ask::Error(message),
             };
             self.asks.insert(step, ask);
         }
@@ -867,7 +867,7 @@ impl Window {
             }
             Act::SignIn => cx.ctl.sign_in(),
             Act::Retry => self.load(ctx),
-            Act::Ask(step) | Act::Check(step) | Act::Withdraw(step) | Act::Orb(step, _) if self.fixture => {
+            Act::Ask(step) | Act::Check(step) | Act::Withdraw(step) | Act::N4n0(step, _) if self.fixture => {
                 self.focus = Some(step);
             }
             Act::Ask(step) => {
@@ -915,7 +915,7 @@ impl Window {
                     (step, Outcome::Withdrawn(r))
                 });
             }
-            Act::Orb(step, location) => {
+            Act::N4n0(step, location) => {
                 self.focus = Some(step.clone());
                 let Some(token) = token() else {
                     self.asks.insert(step, Ask::SignIn);
@@ -923,8 +923,8 @@ impl Window {
                 };
                 self.asks.insert(step.clone(), Ask::Busy("Asking VRChat…"));
                 self.action = Job::spawn(ctx, move || {
-                    let answer = orbiters_orb::invites::send(&Api::new(server), &token, &location);
-                    (step, Outcome::Orb(answer))
+                    let answer = orbiters_n4n0_core::invites::send(&Api::new(server), &token, &location);
+                    (step, Outcome::N4n0(answer))
                 });
             }
         }
@@ -1139,7 +1139,7 @@ impl Window {
         let instance = self.page.as_ref().and_then(|o| o.instance_url.clone()).filter(|u| u.starts_with("https://"));
         let hero_step = self.hero_step(now).map(|s| s.id.clone());
         // An instance under way that takes no sign-ups: Orbiters' own account invites them into it.
-        let orb_step = self.page.as_ref().and_then(|o| o.steps.iter().find(|s| s.live && !s.invite_open && s.instance_url.is_some())).map(|s| s.id.clone());
+        let n4n0_step = self.page.as_ref().and_then(|o| o.steps.iter().find(|s| s.live && !s.invite_open && s.instance_url.is_some())).map(|s| s.id.clone());
         let ph = self.phase_now(now);
         let mut x = if narrow { row.left() } else { row.right() };
         let mut place = |w: f32| -> Pos2 {
@@ -1170,7 +1170,7 @@ impl Window {
                     }
                 }
                 1 => {
-                    let (step, orb) = match (&hero_step, &orb_step) {
+                    let (step, n4n0) = match (&hero_step, &n4n0_step) {
                         (Some(s), _) => (Some(s.clone()), false),
                         (None, Some(s)) => (Some(s.clone()), true),
                         _ => (None, false),
@@ -1191,7 +1191,7 @@ impl Window {
                         });
                     }
                     if let (Some(step), Some(press)) = (step, press) {
-                        acts.push(match (press, orb) {
+                        acts.push(match (press, n4n0) {
                             (Press::Cancel, _) => Act::Withdraw(step),
                             (Press::Ask, true) => {
                                 let location = self
@@ -1201,7 +1201,7 @@ impl Window {
                                     .and_then(|s| s.instance_url.as_deref())
                                     .and_then(community::launch_location)
                                     .unwrap_or_default();
-                                Act::Orb(step, location)
+                                Act::N4n0(step, location)
                             }
                             (Press::Ask, false) if matches!(ask, Ask::Group | Ask::Link) => Act::Check(step),
                             (Press::Ask, false) => Act::Ask(step),
@@ -1221,7 +1221,7 @@ impl Window {
             }
         }
         // What happens next, or what is missing, for the step last asked for.
-        let focus = self.focus.clone().or(hero_step.clone()).or(orb_step.clone());
+        let focus = self.focus.clone().or(hero_step.clone()).or(n4n0_step.clone());
         if let Some(step) = focus {
             let ask = self.ask_of(&step);
             if let Some((tone, text, actions)) = ask_note(&ask, self.page.as_ref()) {
@@ -1501,7 +1501,7 @@ enum Act {
     Check(String),
     Withdraw(String),
     /// Orbiters' own account invites them into the open instance of a step (`wrld_…:<instance>`).
-    Orb(String, String),
+    N4n0(String, String),
 }
 
 /// The width the Invite me control `id` has this frame (on its way to [`invite_width`]), to place it before drawing it.

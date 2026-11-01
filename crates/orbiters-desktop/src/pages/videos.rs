@@ -4,7 +4,7 @@
 //! of the person's own (`video-bookmarks.json`, which only this page changes), each list a press away above the videos.
 
 use super::{Cx, Job};
-use crate::ipc::OrbCommand;
+use crate::ipc::N4n0Command;
 use egui::{pos2, vec2, Align2, Color32, ColorImage, CursorIcon, Id, Key, Order, Rect, Sense, TextureHandle, TextureId, TextureOptions, Ui, UiBuilder};
 use orbiters_core::video_history::{self, Bookmark, Bookmarks, History, Loaded, Played};
 use orbiters_ui::anim::{self, ease, Spring};
@@ -139,9 +139,9 @@ impl Thumbs {
             self.running += 1;
             let (tx, ctx) = (tx.clone(), ctx.clone());
             std::thread::spawn(move || {
-                let image = orbiters_orb::youtube::thumbnail(&id)
+                let image = orbiters_n4n0_core::youtube::thumbnail(&id)
                     .ok()
-                    .and_then(|jpeg| orbiters_orb::picture::rgb_jpeg(&jpeg).ok())
+                    .and_then(|jpeg| orbiters_n4n0_core::picture::rgb_jpeg(&jpeg).ok())
                     .map(|rgb| ColorImage::from_rgb([rgb.width, rgb.height], &rgb.pixels));
                 let _ = tx.send((id, image));
                 ctx.request_repaint();
@@ -472,7 +472,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 fn apply(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act, t: f64, now: u64) {
     match act {
         Act::Copy(url) => {
-            cx.ctl.orb(OrbCommand::CopyText { text: url.clone() });
+            cx.ctl.n4n0(N4n0Command::CopyText { text: url.clone() });
             state.copied = Some((url, t));
         }
         Act::Open(url) => {
@@ -1045,12 +1045,12 @@ mod tests {
     /// What the page asked of N4N0 (copies).
     #[derive(Default)]
     struct Recorder {
-        orb: Mutex<Vec<OrbCommand>>,
+        n4n0: Mutex<Vec<N4n0Command>>,
     }
 
     impl Backend for Recorder {
-        fn orb(&self, command: OrbCommand) {
-            self.orb.lock().unwrap().push(command);
+        fn n4n0(&self, command: N4n0Command) {
+            self.n4n0.lock().unwrap().push(command);
         }
         fn patch_settings(&self, _patch: serde_json::Value) {}
         fn view(&self) -> Arc<Snapshot> {
@@ -1162,7 +1162,7 @@ mod tests {
         h.settle();
         // Copy link: N4N0 copies it.
         h.click(h.control("Copy link").center());
-        assert_eq!(h.recorder.orb.lock().unwrap().as_slice(), &[OrbCommand::CopyText { text: "https://www.youtube.com/watch?v=36YnV9STBqc".into() }]);
+        assert_eq!(h.recorder.n4n0.lock().unwrap().as_slice(), &[N4n0Command::CopyText { text: "https://www.youtube.com/watch?v=36YnV9STBqc".into() }]);
         // The bookmark opens the picker; Add with no name makes Favourites, the video in it.
         h.click(h.control("Bookmark in a list").center());
         h.settle();

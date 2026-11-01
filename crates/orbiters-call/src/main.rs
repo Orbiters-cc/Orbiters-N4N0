@@ -1,5 +1,5 @@
 //! N4N0's calls: the call worker of Orbiters - N4N0 (protocol: `orbiters_core::call`, the call itself:
-//! `contracts/Docs/orb-calls.md`). One WebRTC peer connection at a time with one two-way Opus track (48 kHz mono, about
+//! `contracts/Docs/n4n0-calls.md`). One WebRTC peer connection at a time with one two-way Opus track (48 kHz mono, about
 //! 32 kbit/s, inband FEC); candidates trickle both ways as JSON lines. The microphone and the speaker open once the
 //! call connects and close when it ends.
 //!

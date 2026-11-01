@@ -10,7 +10,7 @@
 //! changes nothing, as receivers and fingers scale together): x to the right, y up, z away from the person (the screen's
 //! face looks at −z).
 
-use orbiters_contracts::orb;
+use orbiters_contracts::n4n0;
 use std::time::{Duration, Instant};
 
 /// How long a finger may go unfound (a fit rejected on a mix of new and old readings, a hand moving fast) before it
@@ -23,7 +23,7 @@ pub const HEIGHT: f64 = 0.27;
 /// The receivers' radius: the eyes', the gaze point's, everyone else's fingertips' (and every finger's before version 7).
 pub const RADIUS: f64 = 0.8;
 /// The owner's fingertips' and aims' receivers' radius (screen version 7): far enough to point from across a room.
-pub const REACH: f64 = orb::POINTING_REACH;
+pub const REACH: f64 = n4n0::POINTING_REACH;
 /// How far outside the screen's edges the receivers sit: a finger on the screen never reaches one's centre, where its
 /// proximity would stop at 1.
 pub const MARGIN: f64 = 0.05;
@@ -60,7 +60,7 @@ pub fn locate(proximity: [f32; 4], radius: f64) -> Option<Finger> {
     Some(Finger { x, y, depth })
 }
 
-/// Where an index finger points (screen version 7), in pixels: its fingertip and the point [`orb::AIM_DISTANCE`] along it,
+/// Where an index finger points (screen version 7), in pixels: its fingertip and the point [`n4n0::AIM_DISTANCE`] along it,
 /// found from their receivers ([`REACH`]), and where the line from the tip through that point meets the screen's plane.
 /// `None` when either is not found, the finger points away from the screen or along it, or the tip is past the screen.
 pub fn aimed(tip: [f32; 4], aim: [f32; 4]) -> Option<(f32, f32)> {
@@ -69,7 +69,7 @@ pub fn aimed(tip: [f32; 4], aim: [f32; 4]) -> Option<(f32, f32)> {
     let along = [a[0] - t[0], a[1] - t[1], a[2] - t[2]];
     let length = (along[0] * along[0] + along[1] * along[1] + along[2] * along[2]).sqrt();
     // Two points this near (the receivers found one sender twice) or a line along the screen tell nothing.
-    if length < orb::AIM_DISTANCE * 0.25 || along[2] / length < 0.02 || t[2] > 0.01 {
+    if length < n4n0::AIM_DISTANCE * 0.25 || along[2] / length < 0.02 || t[2] > 0.01 {
         return None;
     }
     let k = -t[2] / along[2];
@@ -81,7 +81,7 @@ fn on_page(x: f64, y: f64) -> (f32, f32) {
     (((x + WIDTH / 2.0) / WIDTH * super::layout::WIDTH as f64) as f32, ((HEIGHT / 2.0 - y) / HEIGHT * super::layout::HEIGHT as f64) as f32)
 }
 
-/// Where the owner looks on the page in desktop mode (contracts `Docs/orb.md`, Looking and clicking), in pixels: the
+/// Where the owner looks on the page in desktop mode (contracts `Docs/n4n0.md`, Looking and clicking), in pixels: the
 /// eyes and the gaze point from their receivers' proximities, and where the line from the eyes through the gaze point
 /// meets the screen's plane. Eyes not found: the eyes at rest stand in. `None` when the gaze point is not found or the
 /// line meets the plane nowhere ahead of the eyes.
@@ -91,7 +91,7 @@ pub fn look(eyes: [f32; 4], gaze: [f32; 4]) -> Option<(f32, f32)> {
 }
 
 /// The eyes at rest, in the screen's space.
-const GAZE_EYES: [f64; 3] = orbiters_contracts::orb::params::GAZE_EYES;
+const GAZE_EYES: [f64; 3] = orbiters_contracts::n4n0::params::GAZE_EYES;
 
 /// Where the line from `eyes` (else the eyes at rest) through `gaze` meets the screen's plane, in pixels.
 fn looked_at(eyes: Option<[f64; 3]>, gaze: [f64; 3]) -> Option<(f32, f32)> {
@@ -558,8 +558,8 @@ mod tests {
             for target in [[0.0, 0.0, 0.0], [-0.2, 0.11, 0.0], [0.21, -0.12, 0.0], [0.05, 0.02, 0.0]] {
                 let along: [f64; 3] = [target[0] - tip[0], target[1] - tip[1], target[2] - tip[2]];
                 let length = (along[0] * along[0] + along[1] * along[1] + along[2] * along[2]).sqrt();
-                let aim = [0, 1, 2].map(|i| tip[i] + along[i] / length * orb::AIM_DISTANCE);
-                let r = orb::POINT_RADIUS;
+                let aim = [0, 1, 2].map(|i| tip[i] + along[i] / length * n4n0::AIM_DISTANCE);
+                let r = n4n0::POINT_RADIUS;
                 let found = aimed(read_far(tip, r, REACH), read_far(aim, r, REACH)).unwrap_or_else(|| panic!("{tip:?} at {target:?}"));
                 let wanted = on_page(target[0], target[1]);
                 // Within 1 mm on the screen (float proximities).
@@ -568,7 +568,7 @@ mod tests {
             }
         }
         // Pointing away, along the screen, or from behind it: nowhere.
-        let r = orb::POINT_RADIUS;
+        let r = n4n0::POINT_RADIUS;
         assert_eq!(aimed(read_far([0.0, 0.0, -0.3], r, REACH), read_far([0.0, 0.0, -0.6], r, REACH)), None, "away");
         assert_eq!(aimed(read_far([0.0, 0.0, -0.3], r, REACH), read_far([0.3, 0.0, -0.3], r, REACH)), None, "along");
         assert_eq!(aimed(read_far([0.0, 0.0, 0.1], r, REACH), read_far([0.0, 0.0, 0.4], r, REACH)), None, "from behind");
@@ -604,8 +604,8 @@ mod tests {
                     for target in [[0.0, 0.0, 0.0], [-0.2, 0.11, 0.0], [0.2, -0.11, 0.0]] {
                         let delta: [f64; 3] = [0, 1, 2].map(|i| target[i] - tip[i]);
                         let length = delta.iter().map(|v| v * v).sum::<f64>().sqrt();
-                        let aim = [0, 1, 2].map(|i| tip[i] + delta[i] / length * orb::AIM_DISTANCE);
-                        let found = aimed(read_far(tip, orb::POINT_RADIUS, REACH), read_far(aim, orb::POINT_RADIUS, REACH))
+                        let aim = [0, 1, 2].map(|i| tip[i] + delta[i] / length * n4n0::AIM_DISTANCE);
+                        let found = aimed(read_far(tip, n4n0::POINT_RADIUS, REACH), read_far(aim, n4n0::POINT_RADIUS, REACH))
                             .unwrap_or_else(|| panic!("lost {tip:?} pointing at {target:?}"));
                         assert!(near(found, on_page(target[0], target[1])), "{tip:?} at {target:?}: {found:?}");
                     }

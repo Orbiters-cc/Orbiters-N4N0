@@ -1,4 +1,4 @@
-//! N4N0's screen mirror as the menus show it (contracts `Docs/orb.md`, Screen mirror, from screen version 14): a camera
+//! N4N0's screen mirror as the menus show it (contracts `Docs/n4n0.md`, Screen mirror, from screen version 14): a camera
 //! N4N0 leaves in the world before a world's video screen, its picture on the Screen mirror page of N4N0's projected
 //! screen. The menu asks ([`MirrorAsk`]); N4N0's runtime keeps the camera's state and hands back what the page shows
 //! ([`MirrorView`]).
@@ -49,7 +49,7 @@ pub enum Reach {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MirrorView {
     pub phase: Phase,
-    /// The zoom step, 0 (widest) to `orbiters_contracts::orb::mirror::ZOOM_STEPS`.
+    /// The zoom step, 0 (widest) to `orbiters_contracts::n4n0::mirror::ZOOM_STEPS`.
     pub zoom: u8,
     pub reach: Reach,
 }
@@ -60,7 +60,7 @@ impl MirrorView {
     }
 
     pub fn can_zoom_in(&self) -> bool {
-        self.zoom < orbiters_contracts::orb::mirror::ZOOM_STEPS
+        self.zoom < orbiters_contracts::n4n0::mirror::ZOOM_STEPS
     }
 
     pub fn can_zoom_out(&self) -> bool {
@@ -96,7 +96,7 @@ impl MirrorView {
 
     /// How much the picture is magnified against the widest view, rounded for the status line.
     pub fn magnification(&self) -> String {
-        use orbiters_contracts::orb::mirror::{fov, ZOOM_STEPS};
+        use orbiters_contracts::n4n0::mirror::{fov, ZOOM_STEPS};
         let z = self.zoom.min(ZOOM_STEPS) as f64 / ZOOM_STEPS as f64;
         let k = (fov(0.0) / 2.0).to_radians().tan() / (fov(z) / 2.0).to_radians().tan();
         if k < 9.95 {
@@ -119,7 +119,7 @@ mod tests {
         assert!(!v.can_zoom_out() && v.can_zoom_in());
         v.phase = Phase::Placed;
         assert_eq!(v.state(), "Mirroring · zoom 1.0×");
-        v.zoom = orbiters_contracts::orb::mirror::ZOOM_STEPS;
+        v.zoom = orbiters_contracts::n4n0::mirror::ZOOM_STEPS;
         assert_eq!(v.state(), "Mirroring · zoom 10×");
         assert!(!v.can_zoom_in());
         v.reach = Reach::Overlay;

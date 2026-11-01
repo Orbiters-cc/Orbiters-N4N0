@@ -5,7 +5,7 @@ use crate::state::CaptureState;
 use egui::{pos2, vec2, Align, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder, Vec2};
 use orbiters_contracts::manifest::{CaptureMode, StorageQuality};
 use orbiters_core::settings::{Photo3dLength, Settings};
-use orbiters_orb::menu::layout::LENGTH_LABELS;
+use orbiters_n4n0_core::menu::layout::LENGTH_LABELS;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::format;
 use orbiters_ui::record::{self, RecState, RecordButton};
@@ -152,7 +152,7 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
         cx.ctl.start_test_capture();
     }
     if picture {
-        cx.ctl.orb(crate::ipc::OrbCommand::Photo3D);
+        cx.ctl.n4n0(crate::ipc::N4n0Command::Photo3D);
     }
     if scan {
         cx.ctl.scan();

@@ -4017,8 +4017,8 @@ dependencies = [
  "orbiters-contracts",
  "orbiters-core",
  "orbiters-n4n0",
+ "orbiters-n4n0-core",
  "orbiters-openvr",
- "orbiters-orb",
  "orbiters-projects",
  "orbiters-reconstruct",
  "orbiters-smooth",
@@ -4052,7 +4052,7 @@ dependencies = [
  "anyhow",
  "orbiters-contracts",
  "orbiters-core",
- "orbiters-orb",
+ "orbiters-n4n0-core",
  "rosc",
  "serde",
  "serde_json",
@@ -4060,16 +4060,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "orbiters-openvr"
-version = "0.3.4-dev.8"
-dependencies = [
- "orbiters-contracts",
- "serde_json",
- "windows 0.62.2",
-]
-
-[[package]]
-name = "orbiters-orb"
+name = "orbiters-n4n0-core"
 version = "0.3.4-dev.8"
 dependencies = [
  "anyhow",
@@ -4082,6 +4073,15 @@ dependencies = [
  "ureq 3.4.2",
  "zune-core",
  "zune-jpeg",
+]
+
+[[package]]
+name = "orbiters-openvr"
+version = "0.3.4-dev.8"
+dependencies = [
+ "orbiters-contracts",
+ "serde_json",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -4225,7 +4225,7 @@ dependencies = [
  "bzip2 0.4.4",
  "orbiters-audio",
  "orbiters-core",
- "orbiters-orb",
+ "orbiters-n4n0-core",
  "serde",
  "serde_json",
  "sha2 0.10.9",

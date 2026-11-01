@@ -299,7 +299,7 @@ pub struct MapsMine {
 
 // N4N0's part of the snapshot, shared with the phone app (`orbiters_n4n0::status`).
 pub use orbiters_n4n0::status::{
-    AvatarView, CallContact, CallLink, CallPhase, CallView, CallsStatus, OrbConfirmation, OrbFace, OrbLight, OrbLine, OrbStatus, OrbWho, ProcessUsage,
+    AvatarView, CallContact, CallLink, CallPhase, CallView, CallsStatus, N4n0Confirmation, N4n0Face, N4n0Light, N4n0Line, N4n0Status, N4n0Who, ProcessUsage,
     StateAction, StateView, StatesView, VoiceStatus,
 };
 
@@ -378,7 +378,7 @@ pub struct Snapshot {
     pub uploads: Vec<UploadStatus>,
     pub capture_shares: Vec<crate::controller::shares::ShareJob>,
     #[serde(default)]
-    pub orb: OrbStatus,
+    pub n4n0: N4n0Status,
     #[serde(default)]
     pub update: UpdateStatus,
     /// Space being freed in the library.
@@ -424,7 +424,7 @@ impl Snapshot {
             vrchat_login: Default::default(),
             uploads: Vec::new(),
             capture_shares: Vec::new(),
-            orb: OrbStatus::default(),
+            n4n0: N4n0Status::default(),
             update: UpdateStatus::default(),
             cleanup: None,
             vr_audio: Default::default(),
@@ -442,11 +442,11 @@ impl Snapshot {
             Some("the recording")
         } else if self.reconstruction.is_some() || !self.reconstruct_queue.is_empty() {
             Some("the reconstruction")
-        } else if self.orb.calls.call.is_some() {
+        } else if self.n4n0.calls.call.is_some() {
             Some("the call")
         } else if self.uploads.iter().any(UploadStatus::running) || self.capture_shares.iter().any(|j| j.outcome.is_none()) {
             Some("the upload")
-        } else if self.orb.voice.downloading.is_some() {
+        } else if self.n4n0.voice.downloading.is_some() {
             Some("the speech models' download")
         } else if self.cleanup.is_some() {
             Some("the clean-up")

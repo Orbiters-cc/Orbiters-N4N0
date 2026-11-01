@@ -1,4 +1,4 @@
-//! The policy between N4N0's assistant and what it asks Orbiters - N4N0 to do (contracts `Docs/orb-assistant.md`,
+//! The policy between N4N0's assistant and what it asks Orbiters - N4N0 to do (contracts `Docs/n4n0-assistant.md`,
 //! client tools). The assistant reads text other people chose (a world's name, a video's title, an avatar's labels), so
 //! a tool call is a request, not an order: the desktop runs one only once this policy lets it.
 //!
@@ -218,7 +218,7 @@ fn among(words: &str, word: &str) -> bool {
 pub fn reply(text: &str) -> Option<bool> {
     let words: Vec<String> = text
         .chars()
-        .map(|c| match orbiters_contracts::orb::unaccented(c) {
+        .map(|c| match orbiters_contracts::n4n0::unaccented(c) {
             Some(base) => base.to_lowercase(),
             None => c.to_lowercase().collect(),
         })

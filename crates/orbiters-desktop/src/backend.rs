@@ -3,7 +3,7 @@
 //! and failures come back as notices.
 
 use crate::controller::{self, Notice, NoticeKind};
-use crate::ipc::{Client, OrbCommand, ToService, UpdateAction};
+use crate::ipc::{Client, N4n0Command, ToService, UpdateAction};
 use crate::state::{AccountState, MapsMine, Snapshot};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::settings::Settings;
@@ -74,7 +74,7 @@ pub trait Backend: Send + Sync {
     /// A T-pose calibration taken in the overlay.
     fn calibrated(&self, calibration: Calibration);
     /// N4N0: a question, the Talk button, the panel, saved videos.
-    fn orb(&self, command: OrbCommand);
+    fn n4n0(&self, command: N4n0Command);
     /// VRChat's frames the overlay saw, for world performance statistics.
     fn frames(&self, chunk: crate::state::FrameChunk);
     /// Whether someone wears the headset (the overlay reads SteamVR's activity level).
@@ -270,8 +270,8 @@ impl Backend for Remote {
         self.0.send(&ToService::Calibrated { calibration: Box::new(calibration) });
     }
 
-    fn orb(&self, command: OrbCommand) {
-        self.0.send(&ToService::Orb { command });
+    fn n4n0(&self, command: N4n0Command) {
+        self.0.send(&ToService::N4n0 { command });
     }
 
     fn updates(&self, action: UpdateAction) {
@@ -469,8 +469,8 @@ impl Backend for Local {
         self.ctl.calibrated(calibration);
     }
 
-    fn orb(&self, command: OrbCommand) {
-        self.ctl.orb_command(command);
+    fn n4n0(&self, command: N4n0Command) {
+        self.ctl.n4n0_command(command);
     }
 
     fn updates(&self, action: UpdateAction) {

@@ -103,7 +103,7 @@ $env:ORBITERS_PREVIEW_FILE = "<a .preview Toolkit wrote>"   # instead of the sta
 
 Scenarios: `projects-preview` (settled), `-reveal` (rising, 0.5 s in), `-swing` (1 s in), `-turned` (dragged),
 `-open-mid` (the window six frames into its morph), `-open`, `-scenes` (two scenes to switch between), `-sheet`
-(with `--width 1040`), `-none`, `-no-toolkit` and `-old-toolkit` (the notes). The stand-in is N4N0's black orb with white strokes over
+(with `--width 1040`), `-none`, `-no-toolkit` and `-old-toolkit` (the notes). The stand-in is N4N0's black sphere with white strokes over
 a plinth, a green ring and two cubes, as an avatar scene.
 
 ## Not done or untested

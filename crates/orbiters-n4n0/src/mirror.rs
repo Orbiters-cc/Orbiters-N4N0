@@ -1,12 +1,12 @@
-//! N4N0's screen mirror (contracts `Docs/orb.md`, Screen mirror, from screen version 14): the camera N4N0 leaves in the
+//! N4N0's screen mirror (contracts `Docs/n4n0.md`, Screen mirror, from screen version 14): the camera N4N0 leaves in the
 //! world before a world's video screen. The Screen mirror page asks ([`MirrorAsk`]); this keeps where the camera is (its
 //! aim's countdown, placed, its zoom) and sends `N4N0/Mirror/On`, `Placed` and `Zoom` as they change, to an avatar that
 //! has them. The camera renders only while its page shows on the avatar's screen: off the page, it stays where it is,
 //! and coming back shows it at once.
 
-use orbiters_contracts::orb::mirror as contract;
-use orbiters_orb::mirror::{MirrorAsk, MirrorView, Phase, Reach};
-use orbiters_orb::text::Message;
+use orbiters_contracts::n4n0::mirror as contract;
+use orbiters_n4n0_core::mirror::{MirrorAsk, MirrorView, Phase, Reach};
+use orbiters_n4n0_core::text::Message;
 use rosc::OscType;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};

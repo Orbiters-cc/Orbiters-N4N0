@@ -1,4 +1,4 @@
-//! N4N0's menu in its retro look (contracts `Docs/orb.md`, Retro look): pictures as green dots. The overlay draws a
+//! N4N0's menu in its retro look (contracts `Docs/n4n0.md`, Retro look): pictures as green dots. The overlay draws a
 //! thumbnail this way from its pixels, the avatar's retro screen from the thumbnail's bytes (the light the codec carries
 //! at each dot's centre), with the same steps and dither, so both read alike.
 

@@ -485,6 +485,50 @@ mod tests {
         assert!(partial.edit.layers[0].visible);
     }
 
+    /// A depth blur (Edit in 3D) keeps its focus, distance and lens through its JSON; an edit saved before it existed
+    /// opens with none, a blur saved then is the blur it was, and a flat picture is left as it is by one.
+    #[test]
+    fn a_depth_blur_round_trips_and_older_edits_have_none() {
+        use orbiters_ui::photo::{Blur, BlurKind, Focus};
+        let mut edit = Edit::default();
+        let blur = Blur { focus: Focus::Manual, point: [0.3, 0.6], distance: 7.5, aperture: 0.65, near: 0.25, far: 0.9, ..Blur::depth() };
+        let l = edit.layer(Effect::Blur(blur.clone()));
+        edit.layers.push(l);
+        let saved = Saved::new(Source::picture("a/Orbiters 3D view.png"), edit);
+        let json = serde_json::to_string(&saved).unwrap();
+        assert!(json.contains(r#""kind":"depth""#) && json.contains(r#""focus":"manual""#), "{json}");
+        let back: Saved = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, saved);
+        let (b, opacity) = back.edit.depth_blur().expect("a depth blur");
+        assert_eq!((b, opacity), (&blur, 1.0));
+        // Saved before depth blurs: a lens blur, with none of their fields.
+        let old: Saved = serde_json::from_str(r#"{"format":"orbiters-photo-edit","version":1,"source":{"picture":"x.png"},"edit":{"layers":[{"effect":{"type":"blur","kind":"lens","radius":0.02,"bokeh":0.7}}]}}"#).unwrap();
+        let Effect::Blur(b) = &old.edit.layers[0].effect else { panic!() };
+        assert_eq!((b.kind, b.radius, b.bokeh), (BlurKind::Lens, 0.02, 0.7));
+        assert!(old.edit.depth_blur().is_none(), "no depth of field in an old edit");
+        assert!(!old.edit.layers[0].effect.on_splats());
+        // A depth blur with only its kind: auto focus on the middle, the usual lens.
+        let bare: Saved = serde_json::from_str(r#"{"format":"orbiters-photo-edit","version":1,"source":{"picture":"x.png"},"edit":{"layers":[{"effect":{"type":"blur","kind":"depth"}}]}}"#).unwrap();
+        let (b, _) = bare.edit.depth_blur().expect("on");
+        assert_eq!((b.focus, b.point, b.aperture, b.near, b.far), (Focus::Auto, [0.5, 0.5], 0.4, 1.0, 1.0));
+        // Hidden, or no aperture: off; the topmost shown one counts, its opacity with it.
+        let mut two = Edit::default();
+        let mut low = two.layer(Effect::Blur(Blur { distance: 2.0, focus: Focus::Manual, ..Blur::depth() }));
+        low.opacity = 0.5;
+        let mut high = two.layer(Effect::Blur(Blur { distance: 9.0, focus: Focus::Manual, ..Blur::depth() }));
+        high.visible = false;
+        two.layers.extend([low, high]);
+        assert_eq!(two.depth_blur().map(|(b, o)| (b.distance, o)), Some((2.0, 0.5)));
+        two.layers[0].effect = Effect::Blur(Blur { aperture: 0.0, ..Blur::depth() });
+        assert!(two.depth_blur().is_none());
+        // On a picture's pixels it changes nothing.
+        let mut img = orbiters_ui::photo::Image::from_rgba8(&Rgba8::new(4, 2, (0..32).map(|i| (i * 7) as u8).collect()));
+        let before = img.clone();
+        let layer = Edit::default().layer(Effect::Blur(Blur::depth()));
+        orbiters_ui::photo::render::apply(&mut img, &layer);
+        assert_eq!(img.data, before.data);
+    }
+
     #[test]
     fn multi_layer_pictures_stack_the_world_first_or_the_composite() {
         let with_world = Source::with_layers("p.png", [("Environment".into(), "e.png".into()), ("Player".into(), "pl.png".into()), ("UI".into(), "u.png".into())]);

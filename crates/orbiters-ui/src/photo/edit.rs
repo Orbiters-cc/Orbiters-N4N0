@@ -206,7 +206,7 @@ impl Kind {
             Kind::Vignette => "Darker or lighter edges around a centre you can move.",
             Kind::Aberration => "Colour fringes toward the edges, like a cheap lens.",
             Kind::Comic => "Flat colours in a few tones and ink outlines, like a comic page. Dots add a print screen.",
-            Kind::Blur => "Gaussian, lens (round bokeh) or directional (motion).",
+            Kind::Blur => "Gaussian, lens (round bokeh) or directional (motion); in 3D, by each splat's depth.",
             Kind::Text => "A line of text in a font and a style, placed on the picture.",
         }
     }
@@ -409,6 +409,9 @@ pub enum BlurKind {
     Lens,
     /// Along a line (motion).
     Directional,
+    /// A 3D picture's depth of field (Edit in 3D): each splat blurred by its own distance from the focus, as a lens
+    /// would ([`Blur::focus`]); a flat picture has no depth, and is left as it is.
+    Depth,
 }
 
 impl BlurKind {
@@ -417,6 +420,27 @@ impl BlurKind {
             BlurKind::Gaussian => "Gaussian",
             BlurKind::Lens => "Lens",
             BlurKind::Directional => "Directional",
+            BlurKind::Depth => "Depth",
+        }
+    }
+}
+
+/// How a depth blur finds what is sharp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Focus {
+    /// On what lies under a dot on the picture ([`Blur::point`]), followed as the camera moves.
+    #[default]
+    Auto,
+    /// At [`Blur::distance`] metres.
+    Manual,
+}
+
+impl Focus {
+    pub fn name(self) -> &'static str {
+        match self {
+            Focus::Auto => "Auto",
+            Focus::Manual => "Manual",
         }
     }
 }
@@ -431,11 +455,48 @@ pub struct Blur {
     pub angle: f32,
     /// 0 to 1: how much bright points outweigh the rest in a lens blur.
     pub bokeh: f32,
+    /// A depth blur's focus: found under `point` (shares of the picture) or at `distance` metres along the view.
+    pub focus: Focus,
+    pub point: [f32; 2],
+    pub distance: f32,
+    /// 0 to 1: a depth blur's aperture (orbiters_reconstruct::dof::APERTURE_MAX at 1).
+    pub aperture: f32,
+    /// 0 to 1: how much a depth blur shows in front of the focus and behind it.
+    pub near: f32,
+    pub far: f32,
 }
 
 impl Default for Blur {
     fn default() -> Self {
-        Self { kind: BlurKind::Gaussian, radius: 0.01, angle: 0.0, bokeh: 0.5 }
+        Self { kind: BlurKind::Gaussian, radius: 0.01, angle: 0.0, bokeh: 0.5, focus: Focus::Auto, point: [0.5, 0.5], distance: 3.0, aperture: 0.4, near: 1.0, far: 1.0 }
+    }
+}
+
+impl Blur {
+    /// A manual focus's range, metres.
+    pub const MIN_DISTANCE: f32 = 0.1;
+    pub const MAX_DISTANCE: f32 = 500.0;
+
+    pub fn depth() -> Self {
+        Self { kind: BlurKind::Depth, ..Self::default() }
+    }
+}
+
+impl Effect {
+    /// A depth blur: drawn on a 3D picture's splats, not on its pixels.
+    pub fn on_splats(&self) -> bool {
+        matches!(self, Effect::Blur(b) if b.kind == BlurKind::Depth)
+    }
+}
+
+impl Edit {
+    /// The depth blur a 3D picture is drawn with: the topmost shown one over the whole picture (its opacity scales its
+    /// aperture), if any.
+    pub fn depth_blur(&self) -> Option<(&Blur, f32)> {
+        self.layers.iter().rev().filter(|l| l.visible && l.opacity > 0.0).find_map(|l| match &l.effect {
+            Effect::Blur(b) if b.kind == BlurKind::Depth && b.aperture > 0.0 && (b.near > 0.0 || b.far > 0.0) => Some((b, l.opacity.clamp(0.0, 1.0))),
+            _ => None,
+        })
     }
 }
 

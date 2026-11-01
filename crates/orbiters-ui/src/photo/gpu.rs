@@ -417,7 +417,8 @@ impl Stack {
 
     /// The passes of one layer over `cur`; returns where its result is.
     fn layer(&mut self, steps: &mut Vec<Step>, data: &mut Vec<f32>, lens_rows: &mut u64, cur: Tex, l: &Layer, size: (u32, u32)) -> Tex {
-        if !l.visible || l.opacity <= 0.0 {
+        // A depth blur is drawn on the splats before the layers (Edit in 3D).
+        if !l.visible || l.opacity <= 0.0 || l.effect.on_splats() {
             return cur;
         }
         let next = if cur == Tex::Work(0) { Tex::Work(1) } else { Tex::Work(0) };
@@ -515,6 +516,7 @@ impl Stack {
                     p.ints[1] = (length.ceil() as i32 + 1).max(2);
                     Entry::Directional
                 }
+                BlurKind::Depth => return cur,
             },
             Effect::Text(t) => {
                 let Some(slot) = self.lettering(t, size) else { return cur };

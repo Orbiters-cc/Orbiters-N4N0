@@ -1,12 +1,12 @@
 //! The editor's canvas: the preview as large as it fits, over a checkerboard where the picture is transparent (a
 //! VRChat layer, a straightened picture's corners), and what the chosen layer moves on it. Crop and rotate draws the
 //! canvas itself ([`super::crop`]). The vignette's and the aberration's centre, a mask's centre and its circle's edge
-//! or band, and texts (a press on one chooses it) are dragged on the picture.
+//! or band, texts (a press on one chooses it) and a depth blur's focus dot are dragged on the picture.
 
 use super::{find_mut, Editor, Selected};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, Ui};
 use orbiters_ui::photo::render::{self, Stage};
-use orbiters_ui::photo::{self, Effect, Mask};
+use orbiters_ui::photo::{self, BlurKind, Effect, Focus, Mask};
 use orbiters_ui::theme::{self, Txt};
 use orbiters_ui::{feedback, paint, viewer, widgets};
 
@@ -151,18 +151,43 @@ fn knob(p: &egui::Painter, at: Pos2, held: bool, square: bool) {
     }
 }
 
+/// The auto focus's dot: a camera's focus point (a ring with four ticks around a dot), and the distance it focuses at.
+fn focus_reticle(p: &egui::Painter, at: Pos2, held: bool, distance: Option<f32>) {
+    let r = if held { 19.0 } else { 16.0 };
+    let shadow = Stroke::new(4.0, theme::black(0.35));
+    let line = Stroke::new(1.8, if held { theme::ACCENT } else { Color32::WHITE });
+    p.circle_stroke(at, r, shadow);
+    p.circle_stroke(at, r, line);
+    for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+        let d = vec2(dx, dy);
+        p.line_segment([at + d * (r - 5.0), at + d * (r + 5.0)], shadow);
+        p.line_segment([at + d * (r - 5.0), at + d * (r + 5.0)], line);
+    }
+    p.circle_filled(at, 4.5, theme::black(0.35));
+    p.circle_filled(at, 3.0, theme::ACCENT);
+    if let Some(d) = distance {
+        let t = Txt::new(super::controls::distance_text(d), 11.5).color(theme::FG);
+        let w = p.layout_job(t.job(f32::INFINITY)).size().x + 16.0;
+        let pill = Rect::from_min_size(pos2(at.x + r + 8.0, at.y - 11.0), vec2(w, 22.0));
+        p.rect_filled(pill, theme::radius(11.0), theme::black(0.6));
+        widgets::text(p, pill.center(), Align2::CENTER_CENTER, &t);
+    }
+}
+
 /// What the chosen layer moves on the canvas, and texts chosen by a press on them.
 fn handles(ed: &mut Editor, ui: &mut Ui, frame: Rect, size: (u32, u32)) {
     let id = ed.id.with("canvas-handles");
     let resp = ui.interact(frame, id, Sense::click_and_drag());
     let p = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
     let held = ed.canvas.drag;
+    let focus_dot = ed.layer().is_some_and(|l| matches!(&l.effect, Effect::Blur(b) if b.kind == BlurKind::Depth && b.focus == Focus::Auto));
     let (center, mask, text_box) = match ed.layer() {
         Some(l) => {
             let center = match &l.effect {
                 Effect::Vignette(v) => Some((v.center, Some(v.size / 1.8f32.sqrt()))),
                 Effect::Aberration(a) => Some((a.center, None)),
                 Effect::Text(t) => Some((t.center, None)),
+                Effect::Blur(b) if b.kind == BlurKind::Depth && b.focus == Focus::Auto => Some((b.point, None)),
                 _ => None,
             };
             let text_box = match &l.effect {
@@ -199,7 +224,11 @@ fn handles(ed: &mut Editor, ui: &mut Ui, frame: Rect, size: (u32, u32)) {
         if let Some(rr) = ring {
             paint::dashed_circle(&p, at, rr * frame.height(), [6.0, 5.0], 1.5, theme::white(0.7), 0.0);
         }
-        knob(&p, at, matches!(held, Some(Drag::Center { mask: false, .. })), false);
+        if focus_dot {
+            focus_reticle(&p, at, matches!(held, Some(Drag::Center { mask: false, .. })), ed.live.as_ref().and_then(|l| l.focus));
+        } else {
+            knob(&p, at, matches!(held, Some(Drag::Center { mask: false, .. })), false);
+        }
     }
     if let Some(c) = mask.center() {
         knob(&p, screen(frame, c), matches!(held, Some(Drag::Center { mask: true, .. })), true);
@@ -242,6 +271,7 @@ fn handles(ed: &mut Editor, ui: &mut Ui, frame: Rect, size: (u32, u32)) {
                             Effect::Vignette(v) => v.center = c,
                             Effect::Aberration(a) => a.center = c,
                             Effect::Text(t) => t.center = c,
+                            Effect::Blur(b) => b.point = c,
                             _ => {}
                         }
                     }

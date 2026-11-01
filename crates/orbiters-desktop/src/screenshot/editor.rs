@@ -487,6 +487,111 @@ pub(super) fn three_d_live(gpu: &mut orbiters_ui::offscreen::Offscreen, out: &Pa
     Ok(())
 }
 
+/// `--only edit3d-depth`: the depth blur over the live view of the first reconstructed capture of `--sessions`: the
+/// view without it (`edit3d-depth-off`), auto focus on the middle with its dot (`edit3d-depth-auto`), the dot moved low
+/// and to the left (`edit3d-depth-auto-moved`), a manual focus near and far (`edit3d-depth-manual-near`, `-far`), its
+/// focus tinted as while it is set (`edit3d-depth-plane`), then Save picture (the view and its blurred copy into
+/// `<out>/editor-pictures`). Prints the focus distance of each shot.
+pub(super) fn three_d_depth(gpu: &mut orbiters_ui::offscreen::Offscreen, out: &Path, settings: &orbiters_core::settings::Settings, scale: f32) -> anyhow::Result<()> {
+    use super::{controller, idle_snapshot, Controller, Ctl, Local, Run};
+    use orbiters_ui::photo::Focus;
+    let pictures = out.join("editor-pictures");
+    std::fs::create_dir_all(&pictures)?;
+    std::env::set_var("ORBITERS_EDITOR_PICTURES", &pictures);
+    std::env::set_var("ORBITERS_EDITOR_LOOKS", out);
+    let ctl = Controller::new(settings.clone());
+    let sessions = controller::list_sessions(&settings.sessions_dir);
+    ctl.set_snapshot(idle_snapshot(settings, &sessions));
+    let backend: Ctl = std::sync::Arc::new(Local::new(ctl));
+    let handles = crate::gpu::Handles::of_offscreen(gpu);
+    let mut run = Run::new(gpu, backend, scale);
+    run.app.set_gpu(handles.clone());
+    let t = run.time();
+    run.app.set_page(Page::Sessions, t);
+    run.until("the session list", 30.0, |run| run.app.sessions_mut().loaded())?;
+    let ctx = run.ctx.clone();
+    run.app.sessions_mut().open_first(&ctx, egui::Rect::from_min_size(egui::pos2(264.0, 160.0), egui::vec2(300.0, 265.0)));
+    anyhow::ensure!(run.app.sessions_mut().open_dir().is_some(), "no session in {}", settings.sessions_dir.display());
+    run.wait(1.0)?;
+    run.app.sessions_mut().open_viewer(&ctx, &handles, false);
+    run.until("the 3D view's splats", 120.0, |run| run.app.sessions_mut().viewer_loaded())?;
+    run.wait(0.6)?;
+    run.click("Edit in 3D", 20.0)?;
+    run.until("Edit in 3D", 20.0, |run| run.app.sessions_mut().viewer_mut().is_some_and(|v| v.editing()))?;
+    run.wait(1.5)?;
+    run.shoot(out, "edit3d-depth-off")?;
+    let stage = |run: &mut Run, f: &dyn Fn(&mut Editor)| {
+        if let Some(e) = run.app.sessions_mut().viewer_mut().and_then(|v| v.editing_mut()) {
+            f(e);
+        }
+    };
+    let focus = |run: &mut Run, shot: &str| {
+        let f = run.app.sessions_mut().viewer_mut().and_then(|v| v.editing_mut()).and_then(|e| e.live_mut().and_then(|l| l.focus));
+        println!("{shot}: focus {f:?} m");
+    };
+    stage(&mut run, &|e: &mut Editor| {
+        let doc = e.edit_mut();
+        let l = doc.layer(Effect::Blur(Blur { aperture: 0.7, ..Blur::depth() }));
+        let id = l.id;
+        doc.layers.push(l);
+        e.select(Selected::Layer(None, id));
+    });
+    run.wait(1.5)?;
+    focus(&mut run, "edit3d-depth-auto");
+    run.shoot(out, "edit3d-depth-auto")?;
+    stage(&mut run, &|e: &mut Editor| {
+        if let Some(Effect::Blur(b)) = e.edit_mut().layers.last_mut().map(|l| &mut l.effect) {
+            b.point = [0.22, 0.78];
+        }
+    });
+    run.wait(1.5)?;
+    focus(&mut run, "edit3d-depth-auto-moved");
+    run.shoot(out, "edit3d-depth-auto-moved")?;
+    for (shot, distance) in [("edit3d-depth-manual-near", 1.5), ("edit3d-depth-manual-far", 25.0)] {
+        stage(&mut run, &|e: &mut Editor| {
+            if let Some(Effect::Blur(b)) = e.edit_mut().layers.last_mut().map(|l| &mut l.effect) {
+                b.focus = Focus::Manual;
+                b.distance = distance;
+            }
+        });
+        run.wait(1.0)?;
+        focus(&mut run, shot);
+        run.shoot(out, shot)?;
+    }
+    // The focus tinted as while its distance is dragged (the slider is not held here: the layer's controls closed, so
+    // they do not say it is let go).
+    stage(&mut run, &|e: &mut Editor| {
+        if let Some(Effect::Blur(b)) = e.edit_mut().layers.last_mut().map(|l| &mut l.effect) {
+            b.distance = 6.0;
+        }
+        e.select(Selected::Nothing);
+        if let Some(l) = e.live_mut() {
+            l.setting_focus = true;
+        }
+    });
+    run.wait(1.0)?;
+    run.shoot(out, "edit3d-depth-plane")?;
+    stage(&mut run, &|e: &mut Editor| {
+        if let Some(l) = e.live_mut() {
+            l.setting_focus = false;
+        }
+        if let Some(Effect::Blur(b)) = e.edit_mut().layers.last_mut().map(|l| &mut l.effect) {
+            b.focus = Focus::Auto;
+            b.point = [0.5, 0.5];
+        }
+    });
+    run.wait(1.5)?;
+    let before = crate::pages::editor::saved();
+    run.click("Save picture", 10.0)?;
+    run.until("the picture saved", 120.0, |_| crate::pages::editor::saved() > before)?;
+    run.wait(0.8)?;
+    run.shoot(out, "edit3d-depth-saved")?;
+    for e in walk(&pictures) {
+        println!("{}", e.display());
+    }
+    Ok(())
+}
+
 /// Every file under `dir`.
 fn walk(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();

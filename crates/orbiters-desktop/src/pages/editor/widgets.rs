@@ -212,6 +212,8 @@ pub fn slider_look(
     let (rect, _) = ui.allocate_exact_size(vec2(w, 46.0), Sense::hover());
     let track = Rect::from_min_max(pos2(rect.left(), rect.top() + 22.0), pos2(rect.right(), rect.bottom()));
     let resp = ui.interact(track, id, Sense::click_and_drag());
+    let held = resp.is_pointer_button_down_on() || resp.dragged();
+    ui.data_mut(|d| d.insert_temp(id.with("held"), held));
     let mut changed = false;
     if resp.double_clicked() {
         changed = (*value - default).abs() > f32::EPSILON;
@@ -276,6 +278,12 @@ pub fn slider_look(
     }
     resp.on_hover_cursor(CursorIcon::PointingHand);
     changed
+}
+
+/// Whether the [`slider`] of `id_salt` just drawn in `ui` is held (pressed or dragged).
+pub fn slider_held(ui: &Ui, id_salt: impl egui::AsIdSalt) -> bool {
+    let id = ui.scope_id().with(("editor-slider", id_salt));
+    ui.data(|d| d.get_temp(id.with("held")).unwrap_or(false))
 }
 
 // A quiet caps label over a group of controls.

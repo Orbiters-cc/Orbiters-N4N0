@@ -28,6 +28,11 @@ struct Frame {
     // horizon's colour (rgb).
     far: vec4<f32>,
     horizon: vec4<f32>,
+    // A viewer's depth of field (crate::dof): aperture (metres across; 0 off), focus (metres along the view), how much
+    // of the disc shows in front of the focus and behind it (0 to 1).
+    dof: vec4<f32>,
+    // The auto focus's probe: its pixel (x, y), 1 to fill the histogram there; 1 to tint the splats at the focus.
+    probe: vec4<f32>,
 }
 
 // Tiles of TILE × TILE pixels: 16 for colour steps and viewers; depth steps render their sample grid on 8×8 tiles

@@ -119,6 +119,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     if only.as_deref() == Some("editor-3d-live") {
         return editor::three_d_live(&mut Offscreen::new()?, &out, &settings, scale);
     }
+    if only.as_deref() == Some("edit3d-depth") {
+        return editor::three_d_depth(&mut Offscreen::new()?, &out, &settings, scale);
+    }
     if only.as_deref() == Some("e2e-cleanup") {
         return e2e_cleanup(&mut Offscreen::new()?, &out, &settings, scale);
     }

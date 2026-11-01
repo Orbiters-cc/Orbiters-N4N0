@@ -40,7 +40,8 @@ pub fn fit_size(size: (u32, u32), max_w: u32, max_h: u32) -> (u32, u32) {
 
 /// One layer over `img`: its effect, mixed with the picture before it by its opacity and mask.
 pub fn apply(img: &mut Image, layer: &Layer) {
-    if !layer.visible || layer.opacity <= 0.0 {
+    // A depth blur draws on a 3D picture's splats (Edit in 3D); a picture's pixels have no depth.
+    if !layer.visible || layer.opacity <= 0.0 || layer.effect.on_splats() {
         return;
     }
     if let Effect::Text(t) = &layer.effect {
@@ -68,6 +69,7 @@ fn effect(img: &mut Image, e: &Effect) {
             super::BlurKind::Gaussian => blur::gaussian(img, b.radius.clamp(0.0, GAUSSIAN_MAX) * h),
             super::BlurKind::Lens => blur::lens(img, b.radius.clamp(0.0, LENS_MAX) * h, b.bokeh),
             super::BlurKind::Directional => blur::directional(img, b.radius.clamp(0.0, DIRECTIONAL_MAX) * h, b.angle),
+            super::BlurKind::Depth => {}
         },
         Effect::Text(_) => {}
     }

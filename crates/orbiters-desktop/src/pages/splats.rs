@@ -23,7 +23,7 @@ use orbiters_core::reconstruction;
 use orbiters_core::settings::ViewGpu;
 use orbiters_reconstruct::camera::{normalize, Camera};
 use orbiters_reconstruct::gaussians::Gaussians;
-use orbiters_reconstruct::gpu::{Confidence, ConfidenceMode, FarField, FarMode, Gpu, Target};
+use orbiters_reconstruct::gpu::{Confidence, ConfidenceMode, DepthOfField, FarField, FarMode, Gpu, Target};
 use orbiters_reconstruct::ply;
 use orbiters_reconstruct::sky::SkyMap;
 use orbiters_ui::theme::{self, weight, Txt};
@@ -100,6 +100,9 @@ struct Renderer {
     checks: u8,
     /// Frames drawn into the target (Edit in 3D puts each new one through its layers).
     drawn: u64,
+    /// The auto focus's distance under its probe as last read back, and whether one is on its way.
+    focus: Option<f32>,
+    probing: bool,
 }
 
 /// How many frames after a render its count is waited for.
@@ -344,7 +347,7 @@ impl Viewer {
             let far = FarField { mode: self.far, distance: self.far_distance, horizon: l.horizon };
             let error = match &mut l.source {
                 Source::Window(renderer) => {
-                    p.add(egui_wgpu::Callback::new_paint_callback(rect, SplatCallback { renderer: renderer.clone(), camera, confidence, far }));
+                    p.add(egui_wgpu::Callback::new_paint_callback(rect, SplatCallback { renderer: renderer.clone(), camera, confidence, far, dof: DepthOfField::default(), probe: None }));
                     let (error, checking) = renderer.lock().map(|r| (r.error.clone(), r.checks > 0)).unwrap_or_default();
                     if checking {
                         ctx.request_repaint();
@@ -353,7 +356,7 @@ impl Viewer {
                 }
                 Source::Integrated(worker) => {
                     // Its thread asks for a repaint with each frame.
-                    worker.ask(Request { camera, confidence, far });
+                    worker.ask(Request { camera, confidence, far, dof: DepthOfField::default(), probe: None });
                     p.add(egui_wgpu::Callback::new_paint_callback(rect, worker.callback()));
                     worker.error()
                 }
@@ -658,11 +661,13 @@ impl Viewer {
 /// renderer of its own on the window's device, so that the view on screen carries on; saved as a picture of the
 /// capture's world ([`super::editor::files::save_view`]).
 fn still(dir: &Path, window: (wgpu::Device, wgpu::Queue), camera: Camera, confidence: Confidence, far: FarField) -> anyhow::Result<PathBuf> {
-    super::editor::files::save_view(dir, &shoot(dir, window, camera, confidence, far)?)
+    let view = shoot(dir, window, camera, confidence, far, &[DepthOfField::default()])?.pop().expect("one view");
+    super::editor::files::save_view(dir, &view)
 }
 
-/// `camera`'s view of the splats of `dir` as [`still`] draws it: RGBA8, encoded sRGB, opaque.
-fn shoot(dir: &Path, window: (wgpu::Device, wgpu::Queue), camera: Camera, confidence: Confidence, far: FarField) -> anyhow::Result<orbiters_ui::photo::Rgba8> {
+/// `camera`'s view of the splats of `dir` as [`still`] draws it, once for each depth of field of `dofs`: RGBA8,
+/// encoded sRGB, opaque.
+fn shoot(dir: &Path, window: (wgpu::Device, wgpu::Queue), camera: Camera, confidence: Confidence, far: FarField, dofs: &[DepthOfField]) -> anyhow::Result<Vec<orbiters_ui::photo::Rgba8>> {
     let (g, sky) = read(dir)?;
     let mut gpu = Gpu::renderer(window.0, window.1);
     gpu.upload(&g);
@@ -672,18 +677,23 @@ fn shoot(dir: &Path, window: (wgpu::Device, wgpu::Queue), camera: Camera, confid
     drop(g);
     gpu.confidence = confidence;
     gpu.far = far;
-    // Drawn again while the GPU's count says the frame left splats out.
-    let mut image = Vec::new();
-    for _ in 0..=REDRAW_CHECKS {
-        gpu.step(&camera, BACKGROUND, Target::None, None)?;
-        image = gpu.read_image()?;
-        if !gpu.needs_redraw() {
-            break;
-        }
-    }
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-    let rgba: Vec<u8> = image.iter().flat_map(|p| [byte(p[0]), byte(p[1]), byte(p[2]), 255]).collect();
-    Ok(orbiters_ui::photo::Rgba8::new(camera.width, camera.height, rgba))
+    let mut out = Vec::with_capacity(dofs.len());
+    for dof in dofs {
+        gpu.dof = *dof;
+        // Drawn again while the GPU's count says the frame left splats out.
+        let mut image = Vec::new();
+        for _ in 0..=REDRAW_CHECKS {
+            gpu.step(&camera, BACKGROUND, Target::None, None)?;
+            image = gpu.read_image()?;
+            if !gpu.needs_redraw() {
+                break;
+            }
+        }
+        let rgba: Vec<u8> = image.iter().flat_map(|p| [byte(p[0]), byte(p[1]), byte(p[2]), 255]).collect();
+        out.push(orbiters_ui::photo::Rgba8::new(camera.width, camera.height, rgba));
+    }
+    Ok(out)
 }
 
 /// Reads a session's splats and their sky map.
@@ -714,7 +724,7 @@ fn source(ctx: &egui::Context, window: (wgpu::Device, wgpu::Queue), integrated: 
         return Ok(Source::Integrated(Worker::start(ctx, gpu, device, queue)));
     }
     let gpu = renderer(window.0, window.1)?;
-    Ok(Source::Window(Arc::new(Mutex::new(Renderer { gpu, target: None, last: None, error: None, checks: 0, drawn: 0 }))))
+    Ok(Source::Window(Arc::new(Mutex::new(Renderer { gpu, target: None, last: None, error: None, checks: 0, drawn: 0, focus: None, probing: false }))))
 }
 
 /// Reads the splats, their sky map and the recorded views, and sets the renderer up on the integrated GPU (with
@@ -879,6 +889,9 @@ struct SplatCallback {
     camera: Camera,
     confidence: Confidence,
     far: FarField,
+    /// Edit in 3D's depth blur, and its auto focus's pixel.
+    dof: DepthOfField,
+    probe: Option<[f32; 2]>,
 }
 
 impl egui_wgpu::CallbackTrait for SplatCallback {
@@ -909,9 +922,11 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
             r.target = Some(Presented { size, view, bind_group });
             r.last = None;
         }
-        let changed = r.gpu.confidence != self.confidence || r.gpu.far != self.far;
+        let changed = r.gpu.confidence != self.confidence || r.gpu.far != self.far || r.gpu.dof != self.dof || r.gpu.probe != self.probe;
         r.gpu.confidence = self.confidence;
         r.gpu.far = self.far;
+        r.gpu.dof = self.dof;
+        r.gpu.probe = self.probe;
         let moved = r.last != Some(self.camera) || changed;
         let left_out = !moved && r.checks > 0 && {
             r.checks -= 1;
@@ -929,6 +944,13 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
                 Err(e) => r.error = Some(format!("{e:#}")),
             }
             r.last = Some(self.camera);
+        }
+        // The auto focus's probe as it comes back (never waited for).
+        if self.probe.is_some() || r.probing {
+            if let Some(f) = r.gpu.probed() {
+                r.focus = Some(f);
+            }
+            r.probing = r.gpu.probing();
         }
         Vec::new()
     }

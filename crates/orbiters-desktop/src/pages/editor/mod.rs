@@ -142,6 +142,17 @@ pub struct Live {
     pub free: Option<egui::Response>,
     /// What the top bar asked for.
     pub asked: Option<LiveAsk>,
+    /// A depth blur's focus distance as the host draws it now (metres; the auto focus's, eased).
+    pub focus: Option<f32>,
+    /// A manual focus distance is being set (its slider held), and whether the splats at it are tinted meanwhile.
+    pub setting_focus: bool,
+    pub show_plane: bool,
+}
+
+impl Live {
+    fn new() -> Self {
+        Self { slot: None, free: None, asked: None, focus: None, setting_focus: false, show_plane: true }
+    }
 }
 
 /// The picture's place on the canvas: a shape to set ([`egui::Painter::set`]) on its layer, within its clip, the
@@ -285,7 +296,7 @@ impl Editor {
     pub fn live(title: impl Into<String>, full: (u32, u32), doc: Edit) -> Self {
         let mut e = Self::with(Source::picture("3D view"), title.into(), doc, None, None);
         e.loaded = Some(Loaded { inputs: Arc::new(Vec::new()), full });
-        e.live = Some(Live { slot: None, free: None, asked: None });
+        e.live = Some(Live::new());
         e
     }
 
@@ -911,6 +922,36 @@ mod tests {
         doc.layers.clear();
         h.settle(&doc, false, 3.0);
         assert!(h.future.is_empty());
+    }
+
+    /// Dragging a depth blur's focus dot, or its distance, is one step of undo each.
+    #[test]
+    fn moving_the_focus_is_one_undo_step() {
+        use orbiters_ui::photo::{Blur, Focus};
+        let mut doc = Edit::default();
+        let l = doc.layer(Effect::Blur(Blur::depth()));
+        doc.layers.push(l);
+        let mut h = History::new(&doc);
+        for i in 0..20 {
+            if let Effect::Blur(b) = &mut doc.layers[0].effect {
+                b.point = [0.5 + i as f32 * 0.01, 0.5];
+            }
+            h.settle(&doc, true, 1.0 + i as f64 * 0.01);
+        }
+        h.settle(&doc, false, 1.5);
+        if let Effect::Blur(b) = &mut doc.layers[0].effect {
+            b.focus = Focus::Manual;
+            b.distance = 12.0;
+        }
+        h.settle(&doc, false, 2.0);
+        assert_eq!(h.past.len(), 2);
+        h.undo(&mut doc);
+        assert!(matches!(&doc.layers[0].effect, Effect::Blur(b) if b.focus == Focus::Auto && (b.point[0] - 0.69).abs() < 1e-5));
+        h.undo(&mut doc);
+        assert!(matches!(&doc.layers[0].effect, Effect::Blur(b) if b.point == [0.5, 0.5]));
+        h.redo(&mut doc);
+        h.redo(&mut doc);
+        assert!(matches!(&doc.layers[0].effect, Effect::Blur(b) if b.distance == 12.0));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use super::{glyph, layers, tint, widgets as w, Editor, Selected};
 use crate::pages::Job;
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui, UiBuilder};
 use orbiters_ui::photo::text::FontInfo;
-use orbiters_ui::photo::{self, render, Aspect, BlurKind, Channel, Effect, Kind, Mask, TextStyle};
+use orbiters_ui::photo::{self, render, Aspect, Blur, BlurKind, Channel, Effect, Focus, Kind, Mask, TextStyle};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Chip, IconButton, SegOption, Size};
 use orbiters_ui::icons;
@@ -320,6 +320,18 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
             paragraph(ui, "The Toolkit photoshoot's comic look. On a VRChat layer (the people), its outline is inked too.");
         }
         Effect::Blur(b) => {
+            // By depth: on a 3D view's splats (Edit in 3D, or an edit saved there).
+            if ed.live.is_some() || b.kind == BlurKind::Depth {
+                let mut by_depth = b.kind == BlurKind::Depth;
+                if w::switch(ui, ("blur-depth", lid), "Depth of field", &mut by_depth) {
+                    b.kind = if by_depth { BlurKind::Depth } else { BlurKind::Gaussian };
+                }
+            }
+            if b.kind == BlurKind::Depth {
+                ui.add_space(4.0);
+                depth(ui, lid, b, ed.live.as_mut());
+                return;
+            }
             ui.add_space(8.0);
             let options = [SegOption::new(BlurKind::Gaussian, "Gaussian"), SegOption::new(BlurKind::Lens, "Lens"), SegOption::new(BlurKind::Directional, "Directional")];
             widgets::segmented(ui, ("blur-kind", lid), &mut b.kind, &options, true);
@@ -328,6 +340,7 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
                 BlurKind::Gaussian => render::GAUSSIAN_MAX,
                 BlurKind::Lens => render::LENS_MAX,
                 BlurKind::Directional => render::DIRECTIONAL_MAX,
+                BlurKind::Depth => 0.0,
             };
             b.radius = b.radius.min(max);
             let label = match b.kind {
@@ -342,7 +355,7 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
                 BlurKind::Directional => {
                     w::slider(ui, ("angle", lid), "Angle", &mut b.angle, -90.0..=90.0, 0.0, |v| format!("{v:+.0}°"));
                 }
-                BlurKind::Gaussian => {}
+                BlurKind::Gaussian | BlurKind::Depth => {}
             }
             ui.add_space(4.0);
             paragraph(ui, "Keep part of the picture sharp with Where: a circle (inverted) or a band, like a tilt-shift.");
@@ -392,6 +405,80 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
     if kind != Kind::Text {
         mask(ui, lid, &mut l.mask);
     }
+}
+
+/// A distance in metres, as the depth blur shows it.
+pub(super) fn distance_text(m: f32) -> String {
+    if m >= 0.9 * orbiters_reconstruct::dof::FAR_FOCUS {
+        "far away".into()
+    } else if m < 1.0 {
+        format!("{:.0} cm", m * 100.0)
+    } else if m < 10.0 {
+        format!("{m:.1} m")
+    } else {
+        format!("{m:.0} m")
+    }
+}
+
+/// A depth blur's controls: how the focus is found (the dot on the picture, or a distance), the aperture and how much
+/// shows in front of the focus and behind it. Drawn on the splats (Edit in 3D): it has no Where.
+fn depth(ui: &mut Ui, lid: u32, b: &mut Blur, mut live: Option<&mut super::Live>) {
+    if live.is_none() {
+        paragraph(ui, "Depth of field blurs a 3D view's splats by how far they are from the focus: it shows and saves in Edit in 3D. A picture has no depth, so here it changes nothing.");
+        ui.add_space(6.0);
+    }
+    w::label(ui, "Focus");
+    let options = [SegOption::new(Focus::Auto, Focus::Auto.name()), SegOption::new(Focus::Manual, Focus::Manual.name())];
+    widgets::segmented(ui, ("dof-focus", lid), &mut b.focus, &options, true);
+    ui.add_space(6.0);
+    let measured = live.as_ref().and_then(|l| l.focus);
+    let mut setting = false;
+    match b.focus {
+        Focus::Auto => {
+            paragraph(ui, "Drag the focus dot on the picture: what lies under it stays sharp, and the focus follows it as you move around.");
+            if let Some(f) = measured {
+                ui.add_space(4.0);
+                paragraph(ui, &format!("Focused at {}.", distance_text(f)));
+            }
+            ui.add_space(8.0);
+            let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
+            let centre = Button::new("Centre it").icon(icons::CROSSHAIR).size(Size::Sm).enabled(b.point != [0.5, 0.5]).id_salt(("dof-centre", lid));
+            let cw = centre.desired_width(ui);
+            if super::super::sharing::pressed(centre.show_at(ui, Rect::from_min_size(row.min, vec2(cw, 32.0)))) {
+                b.point = [0.5, 0.5];
+            }
+            if let Some(f) = measured.filter(|f| *f < 0.9 * orbiters_reconstruct::dof::FAR_FOCUS) {
+                let keep = Button::new("Keep this distance").size(Size::Sm).id_salt(("dof-keep", lid));
+                let kw = keep.desired_width(ui);
+                if super::super::sharing::pressed(keep.show_at(ui, Rect::from_min_size(row.min + vec2(cw + 8.0, 0.0), vec2(kw, 32.0)))) {
+                    b.focus = Focus::Manual;
+                    b.distance = f.clamp(Blur::MIN_DISTANCE, Blur::MAX_DISTANCE);
+                }
+            }
+        }
+        Focus::Manual => {
+            // Along the log of the distance: as fine near the eye as far from it.
+            let (lo, hi) = (Blur::MIN_DISTANCE.ln(), Blur::MAX_DISTANCE.ln());
+            let mut t = b.distance.clamp(Blur::MIN_DISTANCE, Blur::MAX_DISTANCE).ln();
+            if w::slider(ui, ("dof-distance", lid), "Distance", &mut t, lo..=hi, 3f32.ln(), |t| distance_text(t.exp())) {
+                b.distance = t.exp();
+            }
+            setting = w::slider_held(ui, ("dof-distance", lid));
+            if let Some(l) = live.as_deref_mut() {
+                w::switch(ui, ("dof-plane", lid), "Show the focus while setting it", &mut l.show_plane);
+                paragraph(ui, "While you drag the distance, what lies at it is tinted green.");
+            }
+        }
+    }
+    if let Some(l) = live {
+        l.setting_focus = setting;
+    }
+    w::label(ui, "Lens");
+    w::slider(ui, ("dof-aperture", lid), "Aperture", &mut b.aperture, 0.0..=1.0, 0.4, w::percent);
+    w::slider(ui, ("dof-near", lid), "Foreground", &mut b.near, 0.0..=1.0, 1.0, w::percent);
+    w::slider(ui, ("dof-far", lid), "Background", &mut b.far, 0.0..=1.0, 1.0, w::percent);
+    ui.add_space(4.0);
+    paragraph(ui, "Each splat spreads over a lens's disc as wide as it is out of focus, in front of the focus and behind it. Opacity lowers the aperture.");
 }
 
 /// Where a layer acts, and the shape's sliders.

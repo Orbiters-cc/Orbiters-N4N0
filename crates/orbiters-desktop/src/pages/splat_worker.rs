@@ -8,7 +8,7 @@
 use super::splats::{Blit, BACKGROUND, REDRAW_CHECKS};
 use eframe::egui_wgpu::{self, wgpu};
 use orbiters_reconstruct::camera::Camera;
-use orbiters_reconstruct::gpu::{Confidence, FarField, Gpu, Target};
+use orbiters_reconstruct::gpu::{Confidence, DepthOfField, FarField, Gpu, Target};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -16,12 +16,15 @@ use std::time::Duration;
 /// Frames drawn on the integrated GPU since the app started (the GPU bench counts them).
 pub static DRAWN: AtomicU64 = AtomicU64::new(0);
 
-/// A view of the splats: the camera and how poorly seen and far splats show.
+/// A view of the splats: the camera, how poorly seen and far splats show, the depth of field and the auto focus's
+/// pixel.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Request {
     pub camera: Camera,
     pub confidence: Confidence,
     pub far: FarField,
+    pub dof: DepthOfField,
+    pub probe: Option<[f32; 2]>,
 }
 
 /// A drawn frame: RGBA8, encoded sRGB, rows packed.
@@ -35,6 +38,8 @@ struct State {
     asked: Option<Request>,
     frame: Option<Frame>,
     error: Option<String>,
+    /// The auto focus's distance under its probe, as last read back.
+    focus: Option<f32>,
     quit: bool,
 }
 
@@ -93,6 +98,11 @@ impl Worker {
     /// Why the last view could not be drawn.
     pub fn error(&self) -> Option<String> {
         self.shared.state.lock().unwrap().error.clone()
+    }
+
+    /// The auto focus's distance under the probe of the last frame that had one.
+    pub fn focus(&self) -> Option<f32> {
+        self.shared.state.lock().unwrap().focus
     }
 
     /// The paint callback that shows the last frame.
@@ -156,6 +166,8 @@ fn run(shared: &Shared, ctx: &egui::Context, mut gpu: Gpu, device: &wgpu::Device
         };
         gpu.confidence = request.confidence;
         gpu.far = request.far;
+        gpu.dof = request.dof;
+        gpu.probe = request.probe;
         let (w, h) = (request.camera.width, request.camera.height);
         let drawn = gpu.step(&request.camera, BACKGROUND, Target::None, None).and_then(|_| {
             let r = match readback.take() {
@@ -167,8 +179,13 @@ fn run(shared: &Shared, ctx: &egui::Context, mut gpu: Gpu, device: &wgpu::Device
             readback = Some(r);
             frame
         });
+        // Its probe came back with the frame (the read waited for the GPU).
+        let focus = if request.probe.is_some() { gpu.probed() } else { None };
         {
             let mut s = shared.state.lock().unwrap();
+            if focus.is_some() {
+                s.focus = focus;
+            }
             match drawn {
                 Ok(frame) => {
                     DRAWN.fetch_add(1, Ordering::Relaxed);
@@ -328,7 +345,7 @@ mod tests {
         let (wd, wq) = block_on(adapter.request_device(&Default::default())).expect("device");
         let g = wall();
         let camera = Camera::look([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 1.0, 150, 90);
-        let request = Request { camera, confidence: Confidence::default(), far: FarField::default() };
+        let request = Request { camera, confidence: Confidence::default(), far: FarField::default(), dof: DepthOfField::default(), probe: None };
 
         // On the window's device, as the paint callback draws.
         let mut window = Gpu::renderer(wd.clone(), wq.clone());

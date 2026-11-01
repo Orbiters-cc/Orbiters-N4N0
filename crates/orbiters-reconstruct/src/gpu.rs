@@ -10,6 +10,7 @@
 
 use crate::camera::Camera;
 use crate::cpu;
+pub use crate::dof::DepthOfField;
 use crate::gaussians::{Gaussians, Seen, PACKED, SEEN_IN};
 use anyhow::{anyhow, bail, Context as _};
 use bytemuck::{Pod, Zeroable};
@@ -119,6 +120,8 @@ struct Frame {
     confidence: [f32; 4],
     far: [f32; 4],
     horizon: [f32; 4],
+    dof: [f32; 4],
+    probe: [f32; 4],
 }
 
 /// How a viewer shows the splats its keyframes saw weakly, rarely, from one side only or from much farther than the eye
@@ -354,6 +357,14 @@ struct SkyAdamInfo {
     n: [u32; 4],
 }
 
+/// A readback of the auto focus's depth histogram ([`Gpu::probe`]): 0 idle, 1 in flight, 2 mapped, 3 failed; which
+/// probe it holds.
+struct Probe {
+    buffer: wgpu::Buffer,
+    state: Arc<AtomicU32>,
+    seq: u64,
+}
+
 /// A readback of one pipelined step's intersection count.
 struct Readback {
     buffer: wgpu::Buffer,
@@ -402,6 +413,15 @@ pub struct Gpu {
     /// With the guards: how the splats the keyframes saw poorly show, and the far field.
     pub confidence: Confidence,
     pub far: FarField,
+    /// With the guards: the depth of field (crate::dof), and the pixel whose depth the auto focus asks for
+    /// ([`Gpu::probed`]).
+    pub dof: DepthOfField,
+    pub probe: Option<[f32; 2]>,
+    probes: Vec<Probe>,
+    probe_bins: wgpu::Buffer,
+    /// Probes recorded, and the newest of them read back.
+    probe_seq: u64,
+    probe_taken: u64,
     /// The sky map ([`Gpu::set_sky`]), its Adam learning rate, and what the kernels bind without one.
     sky: Option<SkyBuffers>,
     pub sky_lr: f32,
@@ -948,6 +968,20 @@ impl Gpu {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::INDIRECT,
             mapped_at_creation: false,
         });
+        let probe_bytes = (crate::dof::BINS * 4) as u64;
+        let probe_bins = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("focus probe"),
+            size: probe_bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let probes = (0..2)
+            .map(|_| Probe {
+                buffer: device.create_buffer(&wgpu::BufferDescriptor { label: Some("focus probe readback"), size: probe_bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
+                state: Default::default(),
+                seq: 0,
+            })
+            .collect();
         let ring = (0..RING)
             .map(|_| Readback {
                 buffer: device.create_buffer(&wgpu::BufferDescriptor { label: Some("total readback"), size: 16, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
@@ -983,6 +1017,12 @@ impl Gpu {
             guards: false,
             confidence: Confidence::default(),
             far: FarField::default(),
+            dof: DepthOfField::default(),
+            probe: None,
+            probes,
+            probe_bins,
+            probe_seq: 0,
+            probe_taken: 0,
             sky: None,
             sky_lr: 0.01,
             no_sky,
@@ -1524,7 +1564,50 @@ impl Gpu {
                 0.0,
             ],
             horizon: [self.far.horizon[0], self.far.horizon[1], self.far.horizon[2], self.sky.as_ref().map_or(0.0, |s| s.width as f32)],
+            // The focus goes along for the focus plane's tint even with no aperture.
+            dof: if train || self.dof.focus <= 0.0 {
+                [0.0; 4]
+            } else {
+                [if self.dof.on() { self.dof.aperture } else { 0.0 }, self.dof.focus, self.dof.near.clamp(0.0, 1.0), self.dof.far.clamp(0.0, 1.0)]
+            },
+            probe: [
+                self.probe.map_or(0.0, |p| p[0]),
+                self.probe.map_or(0.0, |p| p[1]),
+                if self.probe.is_some() && !train { 1.0 } else { 0.0 },
+                if self.dof.show_plane && self.dof.focus > 0.0 && !train { 1.0 } else { 0.0 },
+            ],
         }
+    }
+
+    /// The focus distance (metres along the view) under the [`Gpu::probe`] pixel of the newest frame whose probe came
+    /// back since the last call (crate::dof::focus_of), without waiting: `None` while none has.
+    pub fn probed(&mut self) -> Option<f32> {
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        let mut newest: Option<(u64, f32)> = None;
+        for p in &mut self.probes {
+            match p.state.load(Ordering::SeqCst) {
+                2 => {
+                    let bins = p.buffer.get_mapped_range(..).ok().map(|view| bytemuck::cast_slice::<u8, u32>(&view).to_vec());
+                    p.buffer.unmap();
+                    p.state.store(0, Ordering::SeqCst);
+                    if let Some(bins) = bins {
+                        if p.seq > self.probe_taken && newest.is_none_or(|(s, _)| p.seq > s) {
+                            newest = Some((p.seq, crate::dof::focus_of(&bins)));
+                        }
+                    }
+                }
+                3 => p.state.store(0, Ordering::SeqCst),
+                _ => {}
+            }
+        }
+        let (seq, focus) = newest?;
+        self.probe_taken = seq;
+        Some(focus)
+    }
+
+    /// Whether a probe is on its way back ([`Gpu::probed`] has it after a poll or two).
+    pub fn probing(&self) -> bool {
+        self.probes.iter().any(|p| p.state.load(Ordering::SeqCst) != 0)
     }
 
     fn estimate(&self, size: (u32, u32)) -> Option<u32> {
@@ -1690,7 +1773,11 @@ impl Gpu {
                 self.dispatch(&mut enc, &big_pass, &bind, (512, 1));
             }
             None => {
-                let bind = self.bind_cached(&self.k.project, &[(0, &self.frame), (1, &params), (2, &proj), (3, &counts), (4, &filter), (5, &seen_buf)]);
+                if frame.probe[2] > 0.5 {
+                    enc.clear_buffer(&self.probe_bins, 0, None);
+                }
+                let bins = self.probe_bins.clone();
+                let bind = self.bind_cached(&self.k.project, &[(0, &self.frame), (1, &params), (2, &proj), (3, &counts), (4, &filter), (5, &seen_buf), (6, &bins)]);
                 self.dispatch(&mut enc, &self.k.project, &bind, groups(n));
             }
         }
@@ -1877,6 +1964,21 @@ impl Gpu {
                 self.sky_step(&mut enc, &out_state, &d_pixel, (cam.width * cam.height) as usize);
             }
         }
+        // The auto focus's histogram, to a free readback (none free: this frame's is not read).
+        let probe_slot = if frame.probe[2] > 0.5 && !split { self.probes.iter().position(|p| p.state.load(Ordering::SeqCst) == 0) } else { None };
+        if let Some(i) = probe_slot {
+            enc.copy_buffer_to_buffer(&self.probe_bins, 0, &self.probes[i].buffer, 0, (crate::dof::BINS * 4) as u64);
+        }
+        let probe_mapped = |gpu: &mut Self| {
+            if let Some(i) = probe_slot {
+                gpu.probe_seq += 1;
+                let p = &mut gpu.probes[i];
+                p.seq = gpu.probe_seq;
+                p.state.store(1, Ordering::SeqCst);
+                let state = p.state.clone();
+                p.buffer.map_async(wgpu::MapMode::Read, .., move |res| state.store(if res.is_ok() { 2 } else { 3 }, Ordering::SeqCst));
+            }
+        };
         if pipelined.is_some() {
             // The count comes back through the ring; a slot still in flight is waited for first.
             let slot = self.ring_next;
@@ -1891,8 +1993,10 @@ impl Gpu {
             r.state.store(1, Ordering::SeqCst);
             let state = r.state.clone();
             r.buffer.map_async(wgpu::MapMode::Read, .., move |res| state.store(if res.is_ok() { 2 } else { 3 }, Ordering::SeqCst));
+            probe_mapped(self);
         } else {
             self.queue.submit([enc.finish()]);
+            probe_mapped(self);
         }
         self.paced_part(2)?;
         if let Some(p) = &self.profiler {
@@ -2686,6 +2790,152 @@ mod tests {
         let at = |img: &[[f32; 4]]| img[24 * 64 + 46];
         let (by_depth, by_distance) = (at(&draw(&pair, false)), at(&draw(&pair, true)));
         assert!(by_depth[1] > by_depth[0] && by_distance[0] > by_distance[1], "{by_depth:?} {by_distance:?}");
+    }
+
+    /// A viewer's depth of field: the splat at the focus as it was, one away from it wider and fainter with its light
+    /// kept, nothing changed without an aperture; the focus plane tinted while asked.
+    #[test]
+    fn a_viewer_blurs_splats_by_their_depth() {
+        let Ok(mut gpu) = Gpu::new() else { return };
+        gpu.guards = true;
+        let (w, h) = (160u32, 120u32);
+        let cam = Camera::look([0.0; 3], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 0.9, w, h);
+        let mut g = Gaussians::default();
+        let opaque = crate::gaussians::logit(0.95);
+        // Red 2 m ahead on the left, green 12 m ahead on the right: about the same size on screen.
+        g.push([-0.35, 0.0, 2.0], [(0.03f32).ln(); 3], [1.0, 0.0, 0.0, 0.0], opaque, [1.0, 0.0, 0.0]);
+        g.push([2.1, 0.0, 12.0], [(0.18f32).ln(); 3], [1.0, 0.0, 0.0, 0.0], opaque, [0.0, 1.0, 0.0]);
+        gpu.upload(&g);
+        let px = |p: [f32; 3]| cam.project(p).map(|(x, y, _)| (y.round() as u32 * w + x.round() as u32) as usize).expect("ahead");
+        let (red_at, green_at) = (px([-0.35, 0.0, 2.0]), px([2.1, 0.0, 12.0]));
+        let mut draw = |dof: DepthOfField| {
+            gpu.dof = dof;
+            crate::train::render(&mut gpu, &cam, [0.0; 3]).expect("render")
+        };
+        let sum = |img: &[[f32; 4]], c: usize| img.iter().map(|p| p[c] as f64).sum::<f64>();
+        let sharp = draw(DepthOfField::default());
+        let lens = |focus: f32| DepthOfField { aperture: crate::dof::APERTURE_MAX, focus, near: 1.0, far: 1.0, show_plane: false };
+        // No aperture: the same picture.
+        assert_eq!(draw(DepthOfField { aperture: 0.0, ..lens(2.0) }), sharp);
+        // Focused on red: red as it was, green spread out (its peak lower, its light about the same).
+        let near = draw(lens(2.0));
+        assert!((near[red_at][0] - sharp[red_at][0]).abs() < 1e-3, "{:?} {:?}", near[red_at], sharp[red_at]);
+        assert!(near[green_at][1] < 0.6 * sharp[green_at][1], "{:?} {:?}", near[green_at], sharp[green_at]);
+        let (lit_sharp, lit_near) = (sharp.iter().filter(|p| p[1] > 0.02).count(), near.iter().filter(|p| p[1] > 0.02).count());
+        assert!(2 * lit_near > 3 * lit_sharp, "{lit_near} {lit_sharp}");
+        let kept = sum(&near, 1) / sum(&sharp, 1);
+        assert!(kept > 0.8 && kept < 1.2, "{kept}");
+        // Focused on green: the other way round.
+        let far = draw(lens(12.0));
+        assert!((far[green_at][1] - sharp[green_at][1]).abs() < 1e-3);
+        assert!(far[red_at][0] < 0.6 * sharp[red_at][0]);
+        // Only the background blurred: red in front of a far focus stays sharp.
+        let only_far = draw(DepthOfField { near: 0.0, ..lens(12.0) });
+        assert!((only_far[red_at][0] - sharp[red_at][0]).abs() < 1e-3);
+        // The focus plane, tinted while it is set.
+        let plane = draw(DepthOfField { show_plane: true, ..lens(2.0) });
+        assert!(plane[red_at][1] > 0.3 && plane[red_at][0] < near[red_at][0], "{:?}", plane[red_at]);
+        // A frame without the depth of field after one with it: as before.
+        assert_eq!(draw(DepthOfField::default()), sharp);
+    }
+
+    /// The auto focus's probe: the depth where what is under the pixel hides half of what is behind it, the faint veil
+    /// in front of it passed, far away where nothing hides half; not changed by the blur it sets.
+    #[test]
+    fn the_focus_probe_finds_the_dominant_surface_under_a_pixel() {
+        let Ok(mut gpu) = Gpu::new() else { return };
+        gpu.guards = true;
+        let (w, h) = (96u32, 72u32);
+        let cam = Camera::look([0.0; 3], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 0.9, w, h);
+        let mut g = Gaussians::default();
+        // A wall of opaque splats 6 m ahead over the left half, a faint veil 1.5 m ahead over the middle, a small far
+        // splat at 40 m on the right.
+        for y in -12..=12 {
+            for x in -24..=0 {
+                g.push([x as f32 * 0.2, y as f32 * 0.2, 6.0], [(0.12f32).ln(), (0.12f32).ln(), (0.02f32).ln()], [1.0, 0.0, 0.0, 0.0], crate::gaussians::logit(0.9), [0.6; 3]);
+            }
+        }
+        g.push([0.0, 0.0, 1.5], [0.3, 0.3, 0.01].map(f32::ln), [1.0, 0.0, 0.0, 0.0], crate::gaussians::logit(0.15), [0.9; 3]);
+        g.push([8.0, 0.0, 40.0], [1.0, 1.0, 0.1].map(f32::ln), [1.0, 0.0, 0.0, 0.0], crate::gaussians::logit(0.95), [0.2, 0.3, 0.9]);
+        gpu.upload(&g);
+        let probe = |gpu: &mut Gpu, at: [f32; 3], dof: DepthOfField| {
+            let (x, y, _) = cam.project(at).expect("ahead");
+            gpu.probe = Some([x, y]);
+            gpu.dof = dof;
+            gpu.step(&cam, [0.0; 3], Target::None, None).expect("render");
+            gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+            let f = gpu.probed().expect("a probe came back");
+            assert!(gpu.probed().is_none(), "each probe is taken once");
+            f
+        };
+        let step = (crate::dof::FARTHEST.ln() - crate::dof::NEAREST.ln()) / crate::dof::BINS as f32;
+        let near = |f: f32, z: f32| (f.ln() - z.ln()).abs() <= 1.5 * step;
+        // Through the veil at the wall (and in front of it, where there is only the wall).
+        let f = probe(&mut gpu, [-0.05, 0.0, 6.0], DepthOfField::default());
+        assert!(near(f, 6.0), "{f}");
+        let f = probe(&mut gpu, [-2.0, 1.0, 6.0], DepthOfField::default());
+        assert!(near(f, 6.0), "{f}");
+        // The far splat, and nothing (the background): far away.
+        let f = probe(&mut gpu, [8.0, 0.0, 40.0], DepthOfField::default());
+        assert!(near(f, 40.0), "{f}");
+        assert_eq!(probe(&mut gpu, [3.0, -2.5, 10.0], DepthOfField::default()), crate::dof::FAR_FOCUS);
+        // The blur does not move it: a strong depth of field focused elsewhere still finds the wall.
+        let blurred = DepthOfField { aperture: crate::dof::APERTURE_MAX, focus: 40.0, near: 1.0, far: 1.0, show_plane: false };
+        let f = probe(&mut gpu, [-0.05, 0.0, 6.0], blurred);
+        assert!(near(f, 6.0), "{f}");
+        gpu.probe = None;
+    }
+
+    /// The depth of field's cost on a real capture: `ORBITERS_DOF_PLY=<splats.ply> cargo test -p orbiters-reconstruct
+    /// --lib gpu::tests::depth_of_field_frame_time -- --ignored --nocapture`. Frames of 1600×900 from the splats' median
+    /// looking four ways, each waited for, without and with a depth of field and with the auto focus's probe.
+    #[test]
+    #[ignore]
+    fn depth_of_field_frame_time() {
+        let Ok(path) = std::env::var("ORBITERS_DOF_PLY") else { return };
+        let g = crate::ply::read(std::path::Path::new(&path)).expect("ply");
+        let mut gpu = Gpu::new().expect("gpu");
+        gpu.guards = true;
+        gpu.upload(&g);
+        let median = |k: usize| {
+            let mut v: Vec<f32> = (0..g.len()).map(|i| g.means[i][k]).collect();
+            v.sort_by(f32::total_cmp);
+            v[v.len() / 2]
+        };
+        let eye = [median(0), median(1), median(2)];
+        println!("{} splats, eye {eye:?}", g.len());
+        let modes = [
+            ("off", DepthOfField::default(), None),
+            ("aperture 40 %", DepthOfField { aperture: 0.4 * crate::dof::APERTURE_MAX, focus: 3.0, near: 1.0, far: 1.0, show_plane: false }, None),
+            ("aperture 100 %", DepthOfField { aperture: crate::dof::APERTURE_MAX, focus: 3.0, near: 1.0, far: 1.0, show_plane: false }, None),
+            ("aperture 100 %, near focus 0.8 m", DepthOfField { aperture: crate::dof::APERTURE_MAX, focus: 0.8, near: 1.0, far: 1.0, show_plane: false }, None),
+            ("aperture 40 % + probe", DepthOfField { aperture: 0.4 * crate::dof::APERTURE_MAX, focus: 3.0, near: 1.0, far: 1.0, show_plane: false }, Some([800.0, 450.0])),
+            // Again, after the first round warmed the GPU up.
+            ("off", DepthOfField::default(), None),
+        ];
+        for (name, dof, probe) in modes {
+            gpu.dof = dof;
+            gpu.probe = probe;
+            let mut total = std::time::Duration::ZERO;
+            let mut entries = 0u64;
+            for k in 0..4 {
+                let a = k as f32 * std::f32::consts::FRAC_PI_2;
+                let cam = Camera::look(eye, [a.sin(), 0.0, a.cos()], [0.0, 1.0, 0.0], 1.0, 1600, 900);
+                for i in 0..23 {
+                    let start = std::time::Instant::now();
+                    let n = gpu.step(&cam, [0.0; 3], Target::None, None).expect("step");
+                    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+                    if probe.is_some() {
+                        let _ = gpu.probed();
+                    }
+                    if i >= 3 {
+                        total += start.elapsed();
+                        entries += n as u64;
+                    }
+                }
+            }
+            println!("{name}: {:.2} ms a frame, {} tile entries", total.as_secs_f64() * 1000.0 / 80.0, entries / 80);
+        }
     }
 
     #[test]

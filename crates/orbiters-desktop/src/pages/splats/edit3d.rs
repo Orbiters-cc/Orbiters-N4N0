@@ -10,12 +10,17 @@
 //! the view at full size, puts the layers on it on the GPU and writes the view as Save this view does, then its edited
 //! copy beside it with the edit and the camera ([`files::View3d`]): Edit in 3D on that copy comes back to this view
 //! with these layers. Save this view writes the view without them. Leaving keeps the layers for the next time.
+//!
+//! A depth blur is drawn on the splats themselves ([`lens`], orbiters_reconstruct::dof): each frame's projection blurs
+//! every splat by its own circle of confusion. Its auto focus asks the projection for the depth under the focus dot
+//! (the dot's place on the picture taken back through the crop to the view's pixels) and eases towards each answer.
 
 use super::super::editor::{files, Editor, LiveAsk};
 use super::*;
 use orbiters_ui::photo::gpu::{self, Stack};
 use orbiters_ui::photo::render::{self as photo_render, Stage};
-use orbiters_ui::photo::Edit;
+use orbiters_reconstruct::dof;
+use orbiters_ui::photo::{Edit, Focus};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Default)]
@@ -41,6 +46,9 @@ struct Editing {
     shared: Arc<Mutex<Shared>>,
     /// When a picture was asked, for the shutter's flash.
     flashed: f64,
+    /// The auto focus's distance as drawn (eased towards each probe's), and when it was last eased.
+    focus: Option<f32>,
+    focused_at: f64,
 }
 
 /// What the paint callback and the interface share.
@@ -130,7 +138,7 @@ impl Viewer {
         if let Err(e) = made {
             eprintln!("Edit in 3D: {e}");
         }
-        self.edit3d.editing = Some(Editing { editor: Editor::live(self.title.clone(), full, doc), full, shared, flashed: f64::NEG_INFINITY });
+        self.edit3d.editing = Some(Editing { editor: Editor::live(self.title.clone(), full, doc), full, shared, flashed: f64::NEG_INFINITY, focus: None, focused_at: 0.0 });
     }
 }
 
@@ -167,6 +175,37 @@ fn resume(v: &mut Viewer, ctx: &egui::Context, rect: Rect) {
         v.edit3d.kept = Some(edit);
         v.enter_edit(ctx, rect);
     }
+}
+
+/// The depth of field `edit` draws the splats with at `stage` (its topmost shown depth blur; none while compared with
+/// the view without its layers) for a view of `full` pixels rendered at `input` pixels, and the pixel of that render
+/// its auto focus asks about. `focus` is the auto focus's distance as drawn; `plane` tints the focus of a manual one.
+pub(super) fn lens(edit: &Edit, stage: Stage, full: (u32, u32), input: (u32, u32), focus: Option<f32>, plane: bool) -> (DepthOfField, Option<[f32; 2]>) {
+    let Some((b, opacity)) = edit.depth_blur().filter(|_| stage == Stage::Full) else { return (DepthOfField::default(), None) };
+    let probe = match b.focus {
+        Focus::Auto => probe_pixel(edit, full, input, b.point),
+        Focus::Manual => None,
+    };
+    let distance = match b.focus {
+        Focus::Manual => b.distance.clamp(orbiters_ui::photo::Blur::MIN_DISTANCE, orbiters_ui::photo::Blur::MAX_DISTANCE),
+        Focus::Auto => focus.unwrap_or(0.0),
+    };
+    let dof = DepthOfField {
+        aperture: b.aperture.clamp(0.0, 1.0) * opacity * dof::APERTURE_MAX,
+        focus: distance,
+        near: b.near.clamp(0.0, 1.0),
+        far: b.far.clamp(0.0, 1.0),
+        show_plane: plane && b.focus == Focus::Manual,
+    };
+    (dof, probe)
+}
+
+/// The pixel of a render of `input` pixels (of the whole view, `full` pixels when saved) under `point`, a share of the
+/// cropped picture: back through the crop, the turns, the straightening and the tilts. None beyond the view.
+pub(super) fn probe_pixel(edit: &Edit, full: (u32, u32), input: (u32, u32), point: [f32; 2]) -> Option<[f32; 2]> {
+    let g = &edit.geometry;
+    let s = g.source_point(g.effective_crop(full.0, full.1), full.0 as f32 / full.1.max(1) as f32, point[0].clamp(0.0, 1.0), point[1].clamp(0.0, 1.0));
+    ((0.0..=1.0).contains(&s[0]) && (0.0..=1.0).contains(&s[1])).then(|| [s[0] * input.0 as f32 - 0.5, s[1] * input.1 as f32 - 0.5])
 }
 
 /// Edit in 3D over `rect` while it is open: Some(whether the view stays open), else None (the view draws itself).
@@ -214,16 +253,40 @@ pub(super) fn show(v: &mut Viewer, ui: &mut Ui, rect: Rect) -> Option<bool> {
             input = within(input.0, input.1, MOVING_PIXELS);
         }
         let camera = orbit.camera(input.0, input.1);
+        // The auto focus: towards the distance its last probe found, eased.
+        let measured = match &l.source {
+            Source::Window(renderer) => renderer.lock().ok().and_then(|r| r.focus),
+            Source::Integrated(worker) => worker.focus(),
+        };
+        let auto = ed.editor.edit().depth_blur().is_some_and(|(b, _)| b.focus == Focus::Auto);
+        if auto {
+            let dt = (now - ed.focused_at).clamp(0.0, 0.1) as f32;
+            ed.focus = match (ed.focus, measured) {
+                (Some(f), Some(m)) if (f.ln() - m.ln()).abs() > 0.002 => {
+                    ctx.request_repaint();
+                    Some(dof::ease(f, m, dt))
+                }
+                (_, Some(m)) => Some(m),
+                (f, None) => f,
+            };
+        }
+        ed.focused_at = now;
+        let plane = ed.editor.live_mut().is_some_and(|l| l.setting_focus && l.show_plane);
+        let (depth, probe) = lens(ed.editor.edit(), s.stage, ed.full, input, ed.focus, plane);
+        let shown_focus = (ed.editor.edit().depth_blur().is_some() && depth.focus > 0.0).then_some(depth.focus);
+        if let Some(live) = ed.editor.live_mut() {
+            live.focus = shown_focus;
+        }
         let (inner, error) = match &mut l.source {
             Source::Window(renderer) => {
-                let (error, checking) = renderer.lock().map(|r| (r.error.clone(), r.checks > 0)).unwrap_or_default();
+                let (error, checking) = renderer.lock().map(|r| (r.error.clone(), r.checks > 0 || r.probing)).unwrap_or_default();
                 if checking {
                     ctx.request_repaint();
                 }
-                (Inner::Window(SplatCallback { renderer: renderer.clone(), camera, confidence, far }, renderer.clone()), error)
+                (Inner::Window(SplatCallback { renderer: renderer.clone(), camera, confidence, far, dof: depth, probe }, renderer.clone()), error)
             }
             Source::Integrated(worker) => {
-                worker.ask(Request { camera, confidence, far });
+                worker.ask(Request { camera, confidence, far, dof: depth, probe });
                 (Inner::Integrated(Box::new(worker.callback()), worker.shown()), worker.error())
             }
         };
@@ -274,7 +337,9 @@ pub(super) fn show(v: &mut Viewer, ui: &mut Ui, rect: Rect) -> Option<bool> {
                 far_distance: v.far_distance,
             };
             let edit = ed.editor.edit().clone();
-            Job::spawn(&ctx, move || picture(&dir, window, camera, confidence, far, &edit, view, &p).map_err(|e| format!("{e:#}")))
+            // The depth blur as drawn now (the auto focus where it is), at full size.
+            let (depth, _) = lens(&edit, Stage::Full, ed.full, ed.full, ed.focus, false);
+            Job::spawn(&ctx, move || picture(&dir, window, camera, (confidence, far, depth), &edit, view, &p).map_err(|e| format!("{e:#}")))
         }
     };
     ed.editor.start_saving(job, progress);
@@ -283,14 +348,18 @@ pub(super) fn show(v: &mut Viewer, ui: &mut Ui, rect: Rect) -> Option<bool> {
 }
 
 /// The view of `camera` with the layers of `edit` put on it on the GPU, saved: the view as Save this view saves it,
-/// then its edited copy beside it with the edit and `view` (where the camera was). Returns the copy.
-#[allow(clippy::too_many_arguments)]
-fn picture(dir: &Path, window: (wgpu::Device, wgpu::Queue), camera: Camera, confidence: Confidence, far: FarField, edit: &Edit, view: files::View3d, progress: &AtomicU32) -> anyhow::Result<PathBuf> {
+/// then its edited copy beside it with the edit and `view` (where the camera was). Returns the copy. With a depth of
+/// field (`shown.2`), the copy's layers go over a second render of the splats blurred by it.
+fn picture(dir: &Path, window: (wgpu::Device, wgpu::Queue), camera: Camera, shown: (Confidence, FarField, DepthOfField), edit: &Edit, view: files::View3d, progress: &AtomicU32) -> anyhow::Result<PathBuf> {
+    let (confidence, far, depth) = shown;
     let full = (camera.width, camera.height);
     progress.store(50, Ordering::Relaxed);
-    let image = shoot(dir, window.clone(), camera, confidence, far)?;
+    let dofs = if depth.on() { vec![DepthOfField::default(), depth] } else { vec![DepthOfField::default()] };
+    let mut images = shoot(dir, window.clone(), camera, confidence, far, &dofs)?;
+    let image = images.pop().expect("a view");
+    let plain = images.pop();
     progress.store(550, Ordering::Relaxed);
-    let original = files::save_view(dir, &image)?;
+    let original = files::save_view(dir, plain.as_ref().unwrap_or(&image))?;
     progress.store(650, Ordering::Relaxed);
     let mut stack = Stack::new(&window.0, &window.1);
     let (_texture, input) = gpu::upload(&window.0, &window.1, &image);
@@ -485,6 +554,37 @@ impl Show {
 mod tests {
     use super::*;
     use orbiters_ui::photo::{Effect, Light};
+    use orbiters_ui::photo::render::Stage;
+
+    /// The depth of field a stack draws the splats with: its topmost depth blur's lens and focus, none while compared
+    /// with the plain view, an auto focus off until its first probe and asking about the dot's pixel through the crop.
+    #[test]
+    fn a_depth_blur_sets_the_lens_and_where_the_auto_focus_looks() {
+        use orbiters_ui::photo::{Blur, Crop, Focus};
+        let full = (2000, 1000);
+        let input = (1000, 500);
+        let mut edit = Edit::default();
+        assert_eq!(lens(&edit, Stage::Full, full, input, None, false), (DepthOfField::default(), None));
+        let mut l = edit.layer(Effect::Blur(Blur { focus: Focus::Manual, distance: 4.0, aperture: 0.5, near: 0.3, ..Blur::depth() }));
+        l.opacity = 0.8;
+        edit.layers.push(l);
+        let (d, probe) = lens(&edit, Stage::Full, full, input, Some(9.0), true);
+        assert_eq!(probe, None, "a manual focus asks nothing");
+        assert_eq!((d.focus, d.near, d.far, d.show_plane), (4.0, 0.3, 1.0, true));
+        assert!((d.aperture - 0.5 * 0.8 * dof::APERTURE_MAX).abs() < 1e-6);
+        assert_eq!(lens(&edit, Stage::Plain, full, input, None, false).0, DepthOfField::default(), "compared: the view as it is");
+        // Auto: off until a focus came back, then at it; the dot's pixel asked about, never the plane.
+        edit.layers[0].effect = Effect::Blur(Blur { point: [0.25, 0.5], ..Blur::depth() });
+        let (d, probe) = lens(&edit, Stage::Full, full, input, None, true);
+        assert!(!d.on() && !d.show_plane);
+        assert_eq!(probe, Some([249.5, 249.5]));
+        let (d, _) = lens(&edit, Stage::Full, full, input, Some(6.0), false);
+        assert!(d.on() && d.focus == 6.0);
+        // Cropped to the right half: the dot in the middle of the picture is three quarters across the view.
+        edit.geometry.crop = Crop { x: 0.5, y: 0.0, w: 0.5, h: 1.0 };
+        let p = probe_pixel(&edit, full, input, [0.5, 0.5]).expect("inside");
+        assert!((p[0] - 749.5).abs() < 0.5 && (p[1] - 249.5).abs() < 0.5, "{p:?}");
+    }
 
     #[test]
     fn a_view_reads_back_as_it_was_written() {

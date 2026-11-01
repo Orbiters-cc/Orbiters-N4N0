@@ -5,7 +5,9 @@
 // view turns, instead of by depth along the view (the depth they render is that distance too). With frame.confidence
 // a viewer also fades, blurs or hazes the splats the keyframes saw weakly, rarely, from one side or from much farther
 // than the eye is now (common.wgsl `trust`), and fogs towards the horizon's colour, or crops, what lies beyond the reach
-// of the depth frames (frame.far), the sky shell aside.
+// of the depth frames (frame.far), the sky shell aside. With frame.dof a viewer blurs each splat by its circle of
+// confusion (crate::dof: a thin lens's disc for its depth along the view, its weight kept), and with frame.probe.z adds
+// each splat's optical depth at the probe's pixel, unblurred, into the auto focus's depth histogram.
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<storage, read> params: array<f32>;
@@ -16,6 +18,17 @@
 // with a negative weight where unknown; metres beyond what the depth frames reached), for a viewer's confidence control
 // and far field.
 @group(0) @binding(5) var<storage, read> seen: array<vec4<f32>>;
+// The auto focus's histogram (crate::dof: BINS bins of optical depth × SCALE, from NEAREST to FARTHEST metres in the
+// log of the depth).
+@group(0) @binding(6) var<storage, read_write> probe_bins: array<atomic<u32>>;
+
+const DOF_BINS: f32 = 256.0;
+const DOF_NEAREST: f32 = 0.05;
+const DOF_FARTHEST: f32 = 2000.0;
+const DOF_SCALE: f32 = 4096.0;
+const DOF_MAX_COC: f32 = 0.12;
+// The tint of the splats at the focus while it is set (the interface's accent green).
+const DOF_PLANE: vec3<f32> = vec3<f32>(0.0, 0.855, 0.427);
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
@@ -77,6 +90,40 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
             } else {
                 color = mix(color, frame.horizon.rgb, k);
             }
+        }
+        if (frame.probe.z > 0.5) {
+            // The probe pixel's optical depth from this splat as the raster would blend it, before any depth of field.
+            let det0 = a * c - bb * bb;
+            if (det0 > 0.0) {
+                let d = frame.probe.xy - vec2<f32>(mx, my);
+                let power = -0.5 * (c * d.x * d.x + a * d.y * d.y) / det0 + bb * d.x * d.y / det0;
+                let alpha = min(MAX_ALPHA, op * exp(min(power, 0.0)));
+                if (power <= 0.0 && alpha >= MIN_ALPHA) {
+                    let t = (log(max(m.pc.z, 1e-6)) - log(DOF_NEAREST)) / (log(DOF_FARTHEST) - log(DOF_NEAREST));
+                    let bin = u32(clamp(floor(t * DOF_BINS), 0.0, DOF_BINS - 1.0));
+                    atomicAdd(&probe_bins[bin], u32(round(-log(1.0 - alpha) * DOF_SCALE)));
+                }
+            }
+        }
+        if (frame.dof.x > 0.0) {
+            // The thin lens's disc for this depth along the view, fy · aperture · |1/focus − 1/z| pixels across (its
+            // side's share of it), at most a share of the height; a disc of radius r spreads r²/4 along each axis.
+            let z = max(m.pc.z, 1e-3);
+            let inv = 1.0 / frame.dof.y - 1.0 / z;
+            let side = select(frame.dof.z, frame.dof.w, inv > 0.0);
+            let coc = min(frame.focal.y * frame.dof.x * abs(inv) * side, DOF_MAX_COC * f32(frame.size.y));
+            let v = 0.0625 * coc * coc;
+            if (v > 0.0) {
+                let before = a * c - bb * bb;
+                a += v;
+                c += v;
+                op *= sqrt(max(before, 0.0) / (a * c - bb * bb));
+            }
+        }
+        if (frame.probe.w > 0.5) {
+            // While the focus is set: the splats at it tinted (within about 4 % of its distance).
+            let off = abs(1.0 - frame.dof.y / max(m.pc.z, 1e-3));
+            color = mix(color, DOF_PLANE, 0.7 * (1.0 - smoothstep(0.015, 0.05, off)));
         }
     }
     // Out to α = 1/255 at this opacity (cpu::extent_sigmas); a Gaussian that never gets there draws nothing.

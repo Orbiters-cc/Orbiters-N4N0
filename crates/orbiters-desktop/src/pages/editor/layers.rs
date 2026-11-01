@@ -368,6 +368,10 @@ pub(super) fn summary(e: &Effect) -> String {
             orbiters_ui::photo::BlurKind::Directional => format!("{:.1} % long, {:+.0}°", b.radius * 100.0, b.angle),
             orbiters_ui::photo::BlurKind::Lens => format!("Radius {:.1} %, bokeh {}", b.radius * 100.0, w::percent(b.bokeh)),
             orbiters_ui::photo::BlurKind::Gaussian => format!("Radius {:.1} %", b.radius * 100.0),
+            orbiters_ui::photo::BlurKind::Depth => match b.focus {
+                orbiters_ui::photo::Focus::Auto => format!("Auto focus, aperture {}", w::percent(b.aperture)),
+                orbiters_ui::photo::Focus::Manual => format!("Focus {}, aperture {}", super::controls::distance_text(b.distance), w::percent(b.aperture)),
+            },
         },
         Effect::Text(t) => {
             let font = if t.font.is_empty() { "Inter".to_string() } else { std::path::Path::new(&t.font).file_stem().map_or(t.font.clone(), |s| s.to_string_lossy().into_owned()) };

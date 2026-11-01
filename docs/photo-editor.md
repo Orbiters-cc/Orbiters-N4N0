@@ -67,7 +67,7 @@ shares of the picture (of its height for lengths), so the preview and the saved 
 | Vignette | The Toolkit's `pow(saturate(1 - d·d·1.8), 2.2)` around a centre that moves, size and softness added; below zero it lightens the edges |
 | Chromatic aberration | The Toolkit's: red sampled `amount × 0.012` of the way towards the centre, blue as far away (amount 0 to 3) |
 | Comic | The Toolkit photoshoot's halftone pass (`PhotoshootEffects.shader`, `Comic`), on encoded values: the luma stepped to 2–12 tones with the hue kept and a 1.2 saturation boost, print dots on a 45° grid whose area is the darkness (cell from a 260th to a 36th of the height), ink lines (0.06, 0.05, 0.08). The Toolkit finds lines in the scene's depth and normals; a picture has none, so lines come from the jumps of a softened luma across a line width (a 520th of the height) and, stronger, of alpha: on VRChat's People layer the silhouettes are inked |
-| Blur | Gaussian (exact kernel up to σ 3 px, else three box blurs of Kovesi's widths), lens (a disc of running row sums, its edge antialiased, bright points weighted for bokeh; up to 4 % of the height), directional (a line of bilinear taps; up to 10 %) |
+| Blur | Gaussian (exact kernel up to σ 3 px, else three box blurs of Kovesi's widths), lens (a disc of running row sums, its edge antialiased, bright points weighted for bokeh; up to 4 % of the height), directional (a line of bilinear taps; up to 10 %); depth of field on a 3D view's splats ([below](#depth-of-field)), nothing on a picture's pixels |
 | Text | The Toolkit's text layer (`PhotoshootText.cs`): lines centred on a point, a share of the height high, styles Clean, Outline (7.5 % of the size, dark around light letters), Shadow (blurred, offset down-right, black 75 %) and Glow (the colour blurred around brighter letters); outlines from the font file (skrifa) filled by tiny-skia |
 
 Fonts: Inter ExtraBold (default) and the eight OFL fonts My Avatar offers the Toolkit's photoshoot (Bonbon, Creepster,
@@ -184,6 +184,7 @@ time; the eye at the top shows the view without them while held.
 - **Back to 3D**: the editor opened on such a copy (from Photos & captures, or Edit after saving a view) has **Edit in
   3D** in its top bar while the capture is there: it opens the capture's 3D view where the camera was, with the
   display settings it had, in Edit in 3D with the copy's layers and crop.
+- **Depth of field** (a Blur layer's "Depth of field" switch, offered in Edit in 3D): see [below](#depth-of-field).
 - **Looks** (the sparkle button left of Save, in both editors, `editor/looks.rs`): the layers kept under a name ("Look
   1"…, in `looks.json` in the settings folder; the crop is the picture's own and is not kept), applied over the layers
   of another picture or of the 3D view, removed from the same list.
@@ -278,6 +279,52 @@ community's or an event's gallery and an asset's picture are edited as a copy of
   (`edit3d-looks`) and Save picture done (`edit3d-saved`; the view, its edited copy and the edit with the camera are
   written into `<out>/editor-pictures`).
 
+### Depth of field
+
+A Blur layer with **Depth of field** on (`BlurKind::Depth`, offered in Edit in 3D) blurs the splats themselves, each by
+its own distance from the focus, on every frame as the camera moves (`orbiters_reconstruct::dof`,
+`shaders/project.wgsl`). A thin lens: a point `z` metres along the view, through an aperture `A` metres across focused
+at `s` metres, spreads over a disc `fy · A · |1/s − 1/z|` pixels across (`fy` the camera's focal length in pixels, so
+the disc is the same share of the picture at any size; at most 12 % of the height). In the projection pass each splat's
+2D covariance grows by that disc's variance (`r²/4` along each axis for a disc of radius `r`) and its opacity falls by
+`√(det before / det after)`, so its light is kept (as the confidence control's blur and the 2D filter keep it). No pass
+over the splats on the CPU, no extra GPU pass.
+
+- **Controls**: Focus **Auto** or **Manual**; Aperture (0 to 100 %, 100 % = 0.2 m across: a subject 2 m away in a 60°
+  view puts the far background in discs about 8 % of the height), Foreground and Background (how much of the disc shows
+  in front of the focus and behind it). The layer's opacity scales the aperture; it has no Where. The topmost shown depth
+  blur counts (`Edit::depth_blur`). Its row says "Auto focus, aperture 70 %" or "Focus 6.0 m, aperture 70 %".
+- **Auto**: a focus dot on the canvas (a ring with four ticks, the distance beside it), dragged like a vignette's centre
+  (`Blur::point`, a share of the picture: taken back through the crop and tilts to the view's pixel). The same projection
+  pass adds each splat's optical depth at that pixel, `−ln(1 − α)` with α as the raster blends it before any blur, into
+  256 bins of depth (log-spaced, 5 cm to 2 km, fixed point in a 1 KB buffer). Light through splats keeps `Π(1 − α)` in
+  any order, so the bins say without sorting where what is under the dot has hidden half of what is behind it (`dof::
+  focus_of`): the nearest surface that dominates the dot, a faint veil in front passed through; the sky or nothing:
+  far away (1 km). The histogram comes back through a mapped buffer a frame or two later, never waited for
+  (`Gpu::probed`); the focus eases towards each answer in the log of the distance (about 0.12 s). Since the probe reads
+  unblurred alphas, the blur never moves its own focus. **Keep this distance** turns the found focus into a manual one.
+- **Manual**: Distance (10 cm to 500 m along a log slider). While it is dragged, with **Show the focus while setting it**
+  on, the splats within about 4 % of the distance are tinted green.
+- **Saved**: with the edit as other layers (`"kind": "depth"`, `"focus": "auto" | "manual"`, `"point"`, `"distance"`,
+  `"aperture"`, `"near"`, `"far"`; an edit without them has no depth of field). Save picture renders the view twice at
+  full size: the original without it (as Save this view), and the one its layers go over with it (the auto focus where it
+  is when saved). Compared (the eye held) the view shows without it.
+- **Cost** (`ORBITERS_DOF_PLY=<splats.ply> cargo test -p orbiters-reconstruct --lib gpu::tests::depth_of_field_frame_time
+  -- --ignored --nocapture`, 1600×900, RTX 4080, each frame waited for, four directions from the splats' median): Palm
+  Point (745 k splats) 1.8–2.0 ms off, 2.0 ms at 40 %, 2.1 ms at 100 %, 2.25 ms at 100 % focused at 0.8 m, 2.2 ms with
+  the probe; New Generation (970 k) 2.0 ms off, 2.1, 2.4, 2.7, 2.2. The wider splats touch more tiles (up to twice the
+  entries focused near at full aperture).
+- **Checked**: `cargo test -p orbiters-reconstruct dof` (the disc is zero at the focus and grows on either side, the thin
+  lens's size, the cap, no aperture changes nothing, a blurred splat keeps its weight, the focus at half the light past a
+  veil, faint splats adding up, nothing: far away, easing), `gpu::tests::a_viewer_blurs_splats_by_their_depth` (on the
+  GPU: the splat at the focus unchanged, the other wider, fainter and its light within 20 %, foreground or background
+  alone, the focus tinted) and `the_focus_probe_finds_the_dominant_surface_under_a_pixel` (a wall behind a faint veil, a
+  far splat, empty sky, unchanged by a strong blur); `cargo test -p orbiters-desktop editor splats` (its JSON round trip,
+  old edits with none, a picture left as it is, the topmost shown one with its opacity, one undo step per drag, the lens
+  and the dot's pixel through a crop). Screenshots: `--only edit3d-depth --sessions <dir>`: `edit3d-depth-off`,
+  `-auto` (the dot in the middle, 14 m on Palm Point: the posts in front blurred), `-auto-moved` (the dot on a near
+  post, 4.6 m: the pergolas blurred), `-manual-near` (1.5 m), `-manual-far` (25 m), `-plane` (6 m tinted), `-saved`.
+
 ## Not done or simplified
 
 - Edit in 3D: one source (VRChat's multi-layer stacks are for pictures); the curves draw no histogram over the live view;
@@ -299,3 +346,9 @@ community's or an event's gallery and an asset's picture are edited as a copy of
   local ones. Text has no kerning, no font fallback for missing letters, no rotation.
 - A text's colour is one of twelve swatches (no free picker).
 - Save this view reads the capture's splats again for its own renderer (a second copy on the GPU while it renders).
+- Depth of field: a picture has no depth, so a depth blur draws only in Edit in 3D; a copy saved there and opened in the
+  picture editor (which renders from the view without it) loses it when saved from there (the layer says so). The blur
+  is a Gaussian as wide as the lens's disc (no bokeh shapes); splats still blend in their order from the eye, so a
+  blurred foreground does not spread over what is behind it as a lens would show it, and a dense surface blurred a lot
+  lets a little of what is behind it through. The auto focus follows one pixel (no area), and the plain 3D view (outside
+  Edit in 3D) has no depth of field.

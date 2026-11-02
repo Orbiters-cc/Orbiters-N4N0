@@ -1066,6 +1066,25 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             home: None,
             library: None,
         },
+        // VRChat and OSC, with the development environment's choice for the avatar worn uploaded again.
+        Scenario {
+            name: "settings-osc",
+            page: Page::Settings,
+            snapshot: {
+                let mut s = idle.clone();
+                s.settings.development = true;
+                s
+            },
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 900.0,
+            world: None,
+            home: None,
+            library: None,
+        },
         Scenario {
             name: "settings-scrolled",
             page: Page::Settings,

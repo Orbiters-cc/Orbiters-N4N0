@@ -52,10 +52,18 @@ static) and disable its renderer; do not mirror it again.
 
 ## Measured
 
-See the lab report for every number and render: plaza coverage over all and reachable ground-truth pixels, a capsule
-walking the recorded path (0.2 m radius, 0.35 m steps, 45° slopes), one connected floor under the keyframe cameras,
-boundary and non-manifold edges, triangles, bytes and seconds for plaza, VRChat Home, Exoplanet Journey and Find the
-Needle.
+Plaza (synthetic walk, 104 ground-truth views), 4 cm, byte-identical over three runs: 8.1 ± 0.5 s (worker end to end
+7.9 ± 0.3 s), 39 147 triangles, 0.57 MB.
+- **Ground truth:** 92.8 % of the reachable region's true pixels covered (95.1 % within 10 m of the path, 98.0 % of
+  what the capture observed: 6.5 % of the region was never seen), 88.3 % within 5 % of true depth, median error 0.05 %.
+- **Walking:** a capsule walking the recorded path is supported along 100 % of it with no fall, and one connected floor
+  lies under 98.4 % of the keyframe cameras.
+- **Topology:** 0 non-manifold edges.
+
+The first experiment, under the same scorer: 78–80 % coverage, 64–67 % within 5 %, 1.06 % median, a walk with 5–7
+falls, 21–27 k non-manifold edges, 67–186 s. Without the floor fill: 92.4 % walk support with 2 falls. VRChat Home 6.5 s
+/ 74 k triangles (Quest 50 k), Exoplanet 1.5 s / 12 k, Find the Needle 2.0 s / 63 k, all manifold. Every number, render
+and its reason: the lab report `reports/colliders-v2.md`.
 
 ## Limits
 

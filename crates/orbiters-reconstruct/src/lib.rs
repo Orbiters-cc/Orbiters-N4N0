@@ -8,6 +8,7 @@ pub mod cpu;
 pub mod dataset;
 pub mod depthfix;
 pub mod dof;
+pub mod export;
 pub mod gaussians;
 pub mod governor;
 pub mod gpu;
@@ -23,5 +24,3 @@ pub mod train;
 pub mod tree;
 pub mod tree_tune;
 pub mod web;
-
-pub mod export;

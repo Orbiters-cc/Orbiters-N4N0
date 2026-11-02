@@ -8,7 +8,7 @@ use crate::backend::Ctl;
 use crate::ipc::UpdateAction;
 use crate::state::{AccountState, Snapshot, UpdateState};
 use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder};
-use orbiters_core::settings::{CoverageOverlay, RigViews, SameAvatarReload, ViewGpu, WhilePlaying, WindowGpu};
+use orbiters_core::settings::{CoverageOverlay, RigViews, ViewGpu, WhilePlaying, WindowGpu};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, SegOption, Size, Variant};
@@ -258,31 +258,6 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     },
                 );
                 widgets::separator(ui);
-                widgets::field(
-                    ui,
-                    "Switch to the avatar after an upload",
-                    Some("After you upload from Unity, VRChat changes to the new version (not while you record)."),
-                    48.0,
-                    |ui| {
-                        apply |= widgets::toggle(ui, "osc-switch-upload", &mut draft.osc.switch_after_upload);
-                    },
-                );
-                widgets::separator(ui);
-                // Which way VRChat reloads the avatar it already wears is not verified yet (contracts'
-                // Docs/avatar-upload.md): the choice, to test it, while the development environment is on.
-                if draft.development && draft.osc.switch_after_upload {
-                    let ways = [SegOption::new(SameAvatarReload::Reload, "Reload"), SegOption::new(SameAvatarReload::AwayAndBack, "Away and back")];
-                    widgets::field(
-                        ui,
-                        "The avatar you wear, uploaded again",
-                        Some("Development: ask VRChat to reload it, or switch to the avatar you wore before it and back. Each switch is noted in avatar-upload.log, in Orbiters' logs folder."),
-                        220.0,
-                        |ui| {
-                            apply |= widgets::segmented(ui, "osc-same-avatar", &mut draft.osc.same_avatar_reload, &ways, true);
-                        },
-                    );
-                    widgets::separator(ui);
-                }
                 let every = [
                     SegOption::new(RigViews::Off, "Off"),
                     SegOption::new(RigViews::Every2s, "2 s"),

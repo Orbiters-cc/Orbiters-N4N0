@@ -256,6 +256,54 @@ fn half() -> f32 {
     0.5
 }
 
+/// A directional light of the scene.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneLight {
+    /// The way the light travels (world space).
+    pub direction: [f32; 3],
+    /// Linear RGB as shaders receive it, the intensity included.
+    pub color: [f32; 3],
+    #[serde(default = "one")]
+    pub intensity: f32,
+    #[serde(default)]
+    pub shadows: bool,
+    #[serde(default = "one")]
+    pub shadow_strength: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AmbientMode {
+    #[default]
+    Skybox,
+    Trilight,
+    Flat,
+}
+
+/// The scene's ambient light as shaders receive it (linear RGB): facing up, round the horizon, facing down.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Ambient {
+    #[serde(default)]
+    pub mode: AmbientMode,
+    pub sky: [f32; 3],
+    pub equator: [f32; 3],
+    pub ground: [f32; 3],
+}
+
+/// The light the scene gives shaders in Unity (optional within schema 2; previews without it are drawn in the
+/// desktop's studio light).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Lighting {
+    #[serde(default)]
+    pub lights: Vec<SceneLight>,
+    #[serde(default)]
+    pub ambient: Option<Ambient>,
+    #[serde(default = "one")]
+    pub reflection_intensity: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IndexFormat {
@@ -370,6 +418,8 @@ pub struct Header {
     pub instances: Instances,
     #[serde(default)]
     pub draws: Vec<Draw>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lighting: Option<Lighting>,
     #[serde(default)]
     pub stats: Stats,
     #[serde(default)]
@@ -745,6 +795,30 @@ mod tests {
         assert_eq!((m.shading, m.metallic, m.smoothness), (Shading::Lit, 0.0, 0.2));
         assert_eq!((m.surface_texture, m.normal_texture, m.emission_texture, m.normal_scale), (-1, -1, -1, 1.0));
         assert_eq!(m.emission, [0.0; 3]);
+    }
+
+    #[test]
+    fn the_scenes_lighting_reads_back_and_is_optional() {
+        // Without it (Toolkit 0.4.14 and older): none.
+        assert_eq!(parse(triangle_scene()).unwrap().header.lighting, None);
+        let lit = rewritten(&triangle_scene(), SCHEMA, |h| {
+            h["lighting"] = serde_json::json!({
+                "lights": [{ "direction": [0.19, -0.88, -0.44], "color": [1.0, 0.91, 0.67], "shadows": true }],
+                "ambient": { "mode": "trilight", "sky": [0.2, 0.3, 0.4], "equator": [0.1, 0.1, 0.1], "ground": [0.0, 0.0, 0.0] },
+                "somethingNewer": 1
+            });
+        });
+        let l = parse(lit).unwrap().header.lighting.unwrap();
+        assert_eq!(l.lights.len(), 1);
+        let k = l.lights[0];
+        assert_eq!((k.direction, k.color, k.intensity, k.shadows, k.shadow_strength), ([0.19, -0.88, -0.44], [1.0, 0.91, 0.67], 1.0, true, 1.0));
+        let a = l.ambient.unwrap();
+        assert_eq!((a.mode, a.sky, a.ground), (AmbientMode::Trilight, [0.2, 0.3, 0.4], [0.0; 3]));
+        assert_eq!(l.reflection_intensity, 1.0);
+        // A scene without directional lights and an ambient probe never computed.
+        let dark = rewritten(&triangle_scene(), SCHEMA, |h| h["lighting"] = serde_json::json!({ "lights": [], "ambient": null }));
+        let l = parse(dark).unwrap().header.lighting.unwrap();
+        assert!(l.lights.is_empty() && l.ambient.is_none());
     }
 
     #[test]

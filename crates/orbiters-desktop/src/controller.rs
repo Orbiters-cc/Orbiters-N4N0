@@ -139,7 +139,6 @@ pub struct Controller {
     world_captures: Mutex<world_captures::WorldCapturesRuntime>,
     /// World feedback: the N4N0 world's lines, the queue to Orbiters, the menus' worlds (controller/world_feedback.rs).
     world_feedback: Mutex<world_feedback::WorldFeedbackRuntime>,
-    avatar_upload: Mutex<avatar_upload::AvatarUploadRuntime>,
     /// A scan under way (controller/scan.rs).
     scan: Mutex<scan::ScanRuntime>,
     /// N4N0's camera rig while recording (controller/rig.rs).
@@ -276,7 +275,6 @@ fn calibration_info(stored: &StoredCalibration) -> CalibrationInfo {
 pub type Shared = Arc<Controller>;
 
 mod account;
-mod avatar_upload;
 mod burst;
 mod calls;
 mod cleanup;
@@ -338,7 +336,6 @@ impl Controller {
             burst: Mutex::new(burst::BurstRuntime::default()),
             world_captures: Mutex::new(world_captures::WorldCapturesRuntime::default()),
             world_feedback: Mutex::new(world_feedback::WorldFeedbackRuntime::default()),
-            avatar_upload: Mutex::new(avatar_upload::AvatarUploadRuntime::default()),
             scan: Mutex::new(scan::ScanRuntime::default()),
             rig: Mutex::new(rig::RigRuntime::default()),
             calls: Mutex::new(calls::CallsRuntime::default()),
@@ -1179,8 +1176,6 @@ impl Controller {
                 }
                 OscEvent::AvatarChanged { id } => {
                     self.on_avatar_changed();
-                    // A switch to an avatar just uploaded follows what VRChat wears.
-                    self.avatar_upload_echo(&id);
                     // N4N0 reads the parameters the last avatar held before they go (`on_osc`).
                     self.n4n0.on_avatar(id.clone());
                     messages.push((AVATAR_CHANGE.to_string(), vec![OscValue::Text(id)]));
@@ -2175,9 +2170,6 @@ fn spawn_watchers(ctl: Shared) {
                         }
                     }
                 }
-
-                // An avatar uploaded from Unity: VRChat is asked to wear it (contracts' Docs/avatar-upload.md).
-                ctl.avatar_upload_tick();
 
                 // Storage, every 30 s (it walks the session folders).
                 if tick.is_multiple_of(30) {

@@ -29,6 +29,7 @@ mod reconstruct;
 mod screenshot;
 mod service;
 mod single;
+mod splat_export;
 mod startup;
 mod state;
 mod streams;

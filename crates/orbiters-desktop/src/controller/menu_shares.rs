@@ -352,6 +352,8 @@ mod tests {
             picture: None,
             size: None,
             layers: Vec::new(),
+            edits: None,
+            uploaded_edits: None,
         }
     }
 
@@ -381,7 +383,7 @@ mod tests {
         let ask = ShareAsk { key: entry(&dir, true).key, public: true, ..Default::default() };
         m.asked.insert(name.clone(), Asked::Job { id: "j".into(), ask: ask.clone(), since: Instant::now() - JOB_SHOWS });
         assert_eq!(row(&m, &snap).sharing, Sharing::Idle, "a job no longer kept");
-        snap.capture_shares.push(ShareJob { id: "j".into(), key: ask.key.clone(), stage: Default::default(), outcome: None });
+        snap.capture_shares.push(ShareJob { id: "j".into(), key: ask.key.clone(), stage: Default::default(), outcome: None, update: false });
         assert_eq!(row(&m, &snap).sharing, Sharing::Busy { public: true, people: 0 });
         snap.capture_shares[0].outcome = Some(Outcome::Failed { message: orbiters_core::shares::EXPLICIT_WARNING.into(), explicit: true });
         let flagged = row(&m, &snap);

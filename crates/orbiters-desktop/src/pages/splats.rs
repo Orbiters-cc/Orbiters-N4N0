@@ -12,6 +12,7 @@
 //! the view is open, once loaded on the other.
 //! Select splats ([`select`]) hides and deletes splats (a leftover avatar, floaters, a menu caught in the capture): they
 //! are not drawn here, and leave every file shared or exported from the capture; the PLY stays as trained.
+//! Export… ([`super::splat_export`]) saves what the view shows as an SPZ, GLB or PLY file for other tools.
 
 mod edit3d;
 mod select;

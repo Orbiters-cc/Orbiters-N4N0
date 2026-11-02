@@ -149,6 +149,31 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
     run.wait(0.8)?;
     run.click("Close the 3D view", 10.0)?;
     run.wait(0.5)?;
+
+    // Photos & captures: Export… among the capture's window's actions, its dialog over the window, and its card's menu.
+    run.click("Close", 10.0)?;
+    run.wait(1.2)?;
+    let mine = |e: &crate::controller::shares::Entry| matches!(&e.local, Some(crate::controller::shares::Local::Session(d)) if *d == dir);
+    run.until("the capture's card", 60.0, |run| {
+        let g = run.app.sessions_mut().gallery_mut();
+        !g.busy() && g.shown().iter().any(mine)
+    })?;
+    let n = run.app.sessions_mut().gallery_mut().shown().iter().position(mine).context("its card")?;
+    run.wait(0.5)?;
+    let ctx = run.ctx.clone();
+    run.app.sessions_mut().gallery_mut().open_card(&ctx, n);
+    run.wait(1.4)?;
+    run.shoot(out, "splat-export-window")?;
+    run.click("Export…", 10.0)?;
+    run.wait(0.9)?;
+    run.shoot(out, "splat-export-over-window")?;
+    run.click("Cancel", 10.0)?;
+    run.wait(0.8)?;
+    run.app.sessions_mut().gallery_mut().close_window();
+    run.wait(1.2)?;
+    run.app.sessions_mut().gallery_mut().stage_menu(&ctx, n);
+    run.wait(0.6)?;
+    run.shoot(out, "splat-export-menu")?;
     Ok(())
 }
 

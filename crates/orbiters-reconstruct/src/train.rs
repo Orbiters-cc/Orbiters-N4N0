@@ -162,7 +162,12 @@ pub struct Settings {
     /// the capture uses), and there the noise rescued faint Gaussians that should die, its set grew to the whole budget
     /// at the end of relocation and quality fell; with the rule the noise ran there only for the first thousand steps
     /// and four single late rounds. Exoplanet passes it from step 1600 on, VRChat Home and the plaza a few rounds after
-    /// each fade (about 40 % of Home's rounds), and on Home it scored 0.26 dB higher than the noise in every round.
+    /// each fade (about 40 % of Home's rounds), and on Home it scored 0.26 dB higher than the noise in every round; on
+    /// the 3D picture `needle` (313 views, two runs) +0.35 dB held-out and on the best 90 %. But the rule protects
+    /// Silent Dawn through its dead share, not because the noise only hurts a budget it does not fill: at a 1M budget,
+    /// which Silent Dawn fills (2–4 % dead), the noise lost 0.65 dB there and with the rule 0.71 (two runs each; the
+    /// best 90 % 0.87 and 0.85). Whatever makes that world lose (faint content the noise scatters, as fog would be, is
+    /// the next thing to look at) is not measured yet: a capture like it that fills its budget would lose the same.
     pub noise_dead_max: f32,
     /// Births at measured depth (crate::births, ConeGS without its proxy): this share of each relocation round's moves
     /// become new Gaussians at the depth samples of a few depth frames where the render errs most against the

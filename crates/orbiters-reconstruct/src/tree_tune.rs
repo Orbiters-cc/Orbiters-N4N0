@@ -241,19 +241,18 @@ fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, 
             let target = Target::Color { rgba: &targets[j], scene_pixels: (v.width * v.height) as f32, weight: 1.0, ssim: 0.2, robust: 0.0 };
             gpu.step(v, [0.0; 3], target, Some(lr))?;
         }
-        // What the file will hold of the tuned boxes: their trained splats, rounded box by box as it stores them (the
-        // rest of the cut stays as it started).
+        // What the file will hold of the tuned boxes: their trained splats (a splat whose training went non-finite keeps
+        // its own), rounded box by box as it stores them (the rest of the cut stays as it started).
         let trained = gpu.download_params()?;
         let mut tuned_cut = cut.clone();
-        for &(from, _, count) in &at {
-            for k in from..from + count {
-                if trained.is_finite(k) {
-                    tuned_cut.means[k] = trained.means[k];
-                    tuned_cut.log_scales[k] = trained.log_scales[k];
-                    tuned_cut.rotations[k] = trained.rotations[k];
-                    tuned_cut.opacity_logits[k] = trained.opacity_logits[k];
-                    tuned_cut.colors[k] = trained.colors[k];
-                }
+        for &(from, to, count) in &at {
+            for k in 0..count {
+                let (source, i) = if trained.is_finite(from + k) { (&trained, from + k) } else { (&tree.splats, to + k) };
+                tuned_cut.means[from + k] = source.means[i];
+                tuned_cut.log_scales[from + k] = source.log_scales[i];
+                tuned_cut.rotations[from + k] = source.rotations[i];
+                tuned_cut.opacity_logits[from + k] = source.opacity_logits[i];
+                tuned_cut.colors[from + k] = source.colors[i];
             }
             crate::tree_file::round_box(&mut tuned_cut, from..from + count);
         }

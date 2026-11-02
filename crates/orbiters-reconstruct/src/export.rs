@@ -266,10 +266,11 @@ pub fn spz(g: &Gaussians) -> anyhow::Result<Vec<u8>> {
 
 /// `<splats.ply> <out>`: encodes (and so validates) everything before touching the destination, then writes beside it
 /// and renames, so a failed export never leaves a truncated file under the destination's name nor overwrites the PLY
-/// it reads. No GPU or sky map is loaded.
+/// it reads. No GPU or sky map is loaded. What the 3D view hid or deleted (crate::edit, the edit beside the PLY) is
+/// left out, as from every other output; a damaged or outdated edit refuses the export instead of exporting it all.
 fn cli(args: &[String], encode: fn(&Gaussians) -> anyhow::Result<Vec<u8>>) -> anyhow::Result<()> {
     ensure!(args.len() == 2, "usage: --export-gltf <splats.ply> <out.glb> or --export-spz <splats.ply> <out.spz>");
-    let g = ply::read(Path::new(&args[0])).with_context(|| format!("reading {}", args[0]))?;
+    let (g, _, _) = crate::edit::read_edited(Path::new(&args[0])).with_context(|| format!("reading {}", args[0]))?;
     let bytes = encode(&g)?;
     let out = Path::new(&args[1]);
     if out.exists() {
@@ -462,6 +463,29 @@ mod tests {
         g.means[0][0] = 1.;
         g.filter_3d[0] = 1e-4;
         assert!(gltf(&g).is_err());
+    }
+
+    /// What the 3D view hid or deleted never leaves in an export (crate::edit), as from every other output.
+    #[test]
+    fn exports_leave_out_what_the_3d_view_removed() {
+        let dir = std::env::temp_dir().join(format!("orbiters-export-edit-{}-{}", std::process::id(), fastrand::u64(..)));
+        std::fs::create_dir(&dir).unwrap();
+        let mut g = Gaussians::default();
+        for i in 0..6 {
+            g.push([i as f32, 0., 1.], [-3.; 3], [1., 0., 0., 0.], 1., [0.5; 3]);
+        }
+        let input = dir.join(orbiters_core::reconstruction::PLY_FILE);
+        ply::write(&input, &g).unwrap();
+        let (_, identity, _) = crate::edit::read_for_view(&input).unwrap();
+        let mut edit = crate::edit::Edit::new(6, identity);
+        edit.marks[1] = crate::edit::HIDDEN;
+        edit.marks[4] = crate::edit::DELETED;
+        edit.save(&dir).unwrap();
+        let output = dir.join("model.spz");
+        spz_cli(&[input.to_string_lossy().into_owned(), output.to_string_lossy().into_owned()]).unwrap();
+        let bytes = std::fs::read(&output).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 4, "four of six splats exported");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

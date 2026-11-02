@@ -1,0 +1,1344 @@
+//! Select splats: taking what does not belong out of a capture (a leftover avatar, floaters, a menu caught in it)
+//! before it is shared. Select splats in the 3D view, then hide or delete them: they are not drawn here, and leave
+//! every file made of the capture (the VRChat trees for PC, Quest and the coarse first load, the website's preview made
+//! from the PC tree, the command line's exports, the capture's picture). The PLY stays as trained: the edit is a file
+//! beside it (orbiters_reconstruct::edit), saved after every change, and undo, Show all and Restore all bring any
+//! splat back.
+//!
+//! The selection is a set of splats in the world, by their IDs (their order in the PLY), not a shape on the screen: it
+//! stays on them as the camera moves. Its tools (orbiters_reconstruct::select): **Pick** clicks the splats under the
+//! cursor (what the pixel shows, through what is hidden; a drag orbits), **Brush** paints over what you see (never what
+//! it hides), **Box** drags a rectangle that selects through every depth, **Sphere** presses on a surface and drags
+//! out a sphere around it. Shift adds to the selection, Ctrl takes away; Grow and Shrink widen or narrow it by its
+//! neighbours, Invert swaps it with the rest. While a tool takes the drags, the right button orbits and the middle one
+//! pans. Keys: H hides, Delete deletes, Alt+H shows all, Ctrl+A selects all, Ctrl+I inverts, Ctrl+Z and Ctrl+Shift+Z
+//! undo and redo, 1 to 4 pick a tool, Esc clears the selection and then leaves.
+//!
+//! The capture's picture (its card, its uploads' link previews, a drag out of the app) is drawn again without what is
+//! removed once the selection is left or the view closed ([`redraw_picture`], from the camera the worker drew it
+//! from); the worker's own picture waits beside it until nothing is removed.
+
+use super::*;
+use egui::{PointerButton, Pos2};
+use orbiters_reconstruct::edit::{self, DELETED, Edit, Found, HIDDEN, History, Identity, SELECTED};
+use orbiters_reconstruct::select::{self as pick, Splats};
+use orbiters_ui::widgets::Size;
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Pictures of captures drawn again for their edits since the app started: a session's detail keyed by it shows the
+/// new one at once.
+static PICTURES: AtomicU64 = AtomicU64::new(0);
+
+pub fn pictures() -> u64 {
+    PICTURES.load(Ordering::Relaxed)
+}
+
+/// Writes of edit files and of the picture's flag in this process, one at a time: a picture's flag is written only while
+/// the file still holds the edit it was drawn for, and no save lands in between.
+static WRITING: Mutex<()> = Mutex::new(());
+
+fn writing() -> std::sync::MutexGuard<'static, ()> {
+    WRITING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Why a view's splats or edits no longer go together with the PLY on the disk.
+const RECONSTRUCTED: &str = "The capture was reconstructed again since its 3D view opened: close the view and open it again.";
+
+/// A PLY's length and modification time: what tells cheaply that it is still the one an edit was made on (it is hashed
+/// again only when they changed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Stamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl Stamp {
+    fn of(ply: &Path) -> Option<Self> {
+        let m = std::fs::metadata(ply).ok()?;
+        Some(Self { len: m.len(), modified: m.modified().ok() })
+    }
+}
+
+/// Writes `edit` beside the PLY in `result` before it returns, so that whatever reads the edits next (a share asked
+/// right after, the upload preparation in the service's process, this view opened again) reads these: only while the PLY
+/// there is still the one the edit was made on (its stamp as loaded, `loaded`; hashed again when the stamp changed). An
+/// edit that removes nothing takes its file away and puts the worker's picture of that PLY back.
+fn persist(result: &Path, edit: &Edit, loaded: Option<Stamp>) -> anyhow::Result<()> {
+    let _w = writing();
+    let ply = result.join(reconstruction::PLY_FILE);
+    if loaded.is_none() || Stamp::of(&ply) != loaded {
+        anyhow::ensure!(Identity::read(&ply)? == edit.ply, "{RECONSTRUCTED} These edits were not saved.");
+    }
+    if edit.removes_nothing() {
+        edit::discard_for(result, Some(edit.ply))?;
+        PICTURES.fetch_add(1, Ordering::Relaxed);
+    } else {
+        edit.save(result)?;
+    }
+    Ok(())
+}
+
+/// A session's splats in PLY order (a downloaded `.splat`'s as they come), its sky map, and for a PLY its identity and
+/// the edit found beside it.
+pub(super) fn read(dir: &Path) -> anyhow::Result<(Gaussians, Option<SkyMap>, Option<(Identity, Found)>)> {
+    if dir.extension().is_some_and(|e| e == "splat") {
+        return Ok((orbiters_reconstruct::web::read_splat(&std::fs::read(dir)?)?, None, None));
+    }
+    let result = reconstruction::result_dir(dir);
+    let (g, identity, found) = edit::read_for_view(&result.join(reconstruction::PLY_FILE))?;
+    let sky_file = result.join(reconstruction::SKY_FILE);
+    let sky = if sky_file.is_file() { Some(SkyMap::read(&sky_file)?) } else { None };
+    Ok((g, sky, Some((identity, found))))
+}
+
+/// The splats and sky map of `dir` read again (moving them to the other GPU, a picture of the view), only when they are
+/// still those of the PLY the view loaded (`expected`): the view's marks are never laid over another reconstruction's
+/// splats.
+pub(super) fn read_again(dir: &Path, expected: Option<Identity>) -> anyhow::Result<(Gaussians, Option<SkyMap>)> {
+    let (g, sky, found) = read(dir)?;
+    if let (Some(want), Some((now, _))) = (expected, found) {
+        anyhow::ensure!(now == want, "{RECONSTRUCTED}");
+    }
+    Ok((g, sky))
+}
+
+/// The edits of a reconstruction's splats as the view holds them: the marks (hidden, deleted, selected), what the file
+/// holds, undo, and what draws them.
+pub(super) struct Edits {
+    session: PathBuf,
+    result: PathBuf,
+    pub(super) edit: Edit,
+    /// What the last save wrote (nothing to save while the outputs are the same).
+    saved: Edit,
+    /// The PLY as loaded: a save checks it is still there.
+    stamp: Option<Stamp>,
+    /// The edit found beside the PLY could not be applied (made on an earlier reconstruction, or damaged): why. Shares
+    /// stop, pictures of the view are refused and selecting waits until it is discarded.
+    pub(super) problem: Option<String>,
+    /// The marks as the GPU draws them (orbiters_reconstruct::edit::Edit::view_marks) and their version; the version of
+    /// what is drawn at all (hidden and deleted, which a pick's projection depends on).
+    pub(super) version: u64,
+    pub(super) drawn: Arc<Vec<u8>>,
+    shown: u64,
+    /// Selected, hidden, deleted.
+    counts: [usize; 3],
+    history: History,
+    save_error: Option<String>,
+    /// The capture's picture does not show the outputs as saved yet, and the job drawing it again.
+    picture_stale: bool,
+    drawing: Option<Job<Result<bool, String>>>,
+    picture_error: Option<String>,
+    window: (wgpu::Device, wgpu::Queue),
+}
+
+impl Edits {
+    /// The edits of the `splats` splats of `session`'s PLY (`identity`) as `found` beside it.
+    pub(super) fn new(session: &Path, splats: usize, identity: Identity, found: Found, window: (wgpu::Device, wgpu::Queue)) -> Self {
+        let blank = Edit::new(splats, identity);
+        let problem = match &found {
+            Found::Stale(_) => Some(
+                "Its splat edits were made on an earlier reconstruction: nothing they hid is hidden here, and sharing it stops until they are discarded."
+                    .to_string(),
+            ),
+            Found::Unreadable(e) => Some(format!("Its splat edits could not be read ({e}): sharing it stops until they are discarded.")),
+            _ => None,
+        };
+        let (edit, picture_stale) = match found {
+            Found::Current(e) => {
+                let stale = !e.picture;
+                (e, stale)
+            }
+            _ => (blank, false),
+        };
+        let result = reconstruction::result_dir(session);
+        let mut e = Self {
+            session: session.to_path_buf(),
+            stamp: Stamp::of(&result.join(reconstruction::PLY_FILE)),
+            result,
+            saved: edit.clone(),
+            drawn: Arc::new(edit.view_marks()),
+            edit,
+            problem,
+            version: 1,
+            shown: 1,
+            counts: [0; 3],
+            history: History::default(),
+            save_error: None,
+            picture_stale,
+            drawing: None,
+            picture_error: None,
+            window,
+        };
+        e.count();
+        e
+    }
+
+    fn count(&mut self) {
+        let mut c = [0usize; 3];
+        for &m in &self.edit.marks {
+            c[0] += usize::from(m & SELECTED != 0);
+            c[1] += usize::from(m & HIDDEN != 0);
+            c[2] += usize::from(m & DELETED != 0);
+        }
+        self.counts = c;
+    }
+
+    pub(super) fn selected(&self) -> usize {
+        self.counts[0]
+    }
+
+    pub(super) fn hidden(&self) -> usize {
+        self.counts[1]
+    }
+
+    pub(super) fn deleted(&self) -> usize {
+        self.counts[2]
+    }
+
+    /// The marks changed: drawn again, counted again, and saved when what leaves the capture changed.
+    fn changed(&mut self) {
+        let drawn = self.edit.view_marks();
+        // What is drawn at all changed (not only the selection): the tools' projection is made again.
+        if drawn.iter().zip(self.drawn.iter()).any(|(a, b)| (*a >= 2) != (*b >= 2)) {
+            self.shown += 1;
+        }
+        self.drawn = Arc::new(drawn);
+        self.version += 1;
+        self.count();
+        self.save();
+    }
+
+    /// One step of undo: `marks` (the new mark of each splat named).
+    fn apply(&mut self, marks: impl IntoIterator<Item = (u32, u8)>) -> bool {
+        let changed = self.history.apply(&mut self.edit, marks);
+        if changed {
+            self.changed();
+        }
+        changed
+    }
+
+    /// Starts a brush stroke: every change until [`Edits::end_stroke`] is one step of undo.
+    fn begin_stroke(&mut self) {
+        self.history.begin();
+    }
+
+    /// Ends the stroke under way, if any (its release, or a cancel: Esc, another tool, Done, the view closed).
+    pub(super) fn end_stroke(&mut self) {
+        self.history.end();
+    }
+
+    /// `ids` (drawn splats) into the selection as `mode` says.
+    fn select(&mut self, ids: &[u32], mode: Mode) -> bool {
+        // Adding or taking away touches only those (a brush's dabs, every frame of a stroke).
+        if mode != Mode::Replace {
+            let marks = &self.edit.marks;
+            let changes: Vec<(u32, u8)> = ids
+                .iter()
+                .filter_map(|&i| {
+                    let m = *marks.get(i as usize)?;
+                    let new = if mode == Mode::Add { m | SELECTED } else { m & !SELECTED };
+                    (new != m && pick::drawn(m)).then_some((i, new))
+                })
+                .collect();
+            return self.apply(changes);
+        }
+        let n = self.edit.len();
+        let mut want = vec![false; n];
+        for &i in ids {
+            if let Some(w) = want.get_mut(i as usize) {
+                *w = true;
+            }
+        }
+        let marks = &self.edit.marks;
+        let changes: Vec<(u32, u8)> = (0..n)
+            .filter_map(|i| {
+                let m = marks[i];
+                let new = if want[i] { m | SELECTED } else { m & !SELECTED };
+                (new != m).then_some((i as u32, new))
+            })
+            .collect();
+        self.apply(changes)
+    }
+
+    /// Every splat whose marks `f` changes, changed so (one step).
+    fn map(&mut self, f: impl Fn(u8) -> u8) -> bool {
+        let changes: Vec<(u32, u8)> = self.edit.marks.iter().enumerate().filter_map(|(i, &m)| (f(m) != m).then(|| (i as u32, f(m)))).collect();
+        self.apply(changes)
+    }
+
+    fn select_all(&mut self) -> bool {
+        self.map(|m| if pick::drawn(m) { m | SELECTED } else { m })
+    }
+
+    pub(super) fn clear(&mut self) -> bool {
+        self.map(|m| m & !SELECTED)
+    }
+
+    fn invert(&mut self) -> bool {
+        self.map(|m| if pick::drawn(m) { m ^ SELECTED } else { m })
+    }
+
+    /// The selection hidden (`mark` HIDDEN) or deleted (DELETED).
+    fn remove(&mut self, mark: u8) -> bool {
+        self.map(|m| if m & SELECTED != 0 { (m & !SELECTED) | mark } else { m })
+    }
+
+    fn show_all(&mut self) -> bool {
+        self.map(|m| m & !HIDDEN)
+    }
+
+    fn restore_all(&mut self) -> bool {
+        self.map(|m| m & !(HIDDEN | DELETED))
+    }
+
+    fn undo(&mut self) {
+        if self.history.undo(&mut self.edit) {
+            self.changed();
+        }
+    }
+
+    fn redo(&mut self) {
+        if self.history.redo(&mut self.edit) {
+            self.changed();
+        }
+    }
+
+    /// Saves the edit when what leaves the capture changed since the last save (or the last save failed), on the disk
+    /// before it returns ([`persist`]); never while an edit that could not be applied waits to be discarded (saving
+    /// would drop it unseen).
+    fn save(&mut self) {
+        if self.problem.is_some() || (self.save_error.is_none() && self.edit.same_outputs(&self.saved)) {
+            return;
+        }
+        let mut e = self.edit.clone();
+        e.picture = false;
+        match persist(&self.result, &e, self.stamp) {
+            Ok(()) => {
+                self.picture_stale = !e.removes_nothing();
+                self.saved = e;
+                self.save_error = None;
+            }
+            Err(err) => self.save_error = Some(format!("{err:#}")),
+        }
+    }
+
+    /// Saves again after a failure.
+    fn retry(&mut self) {
+        self.save();
+    }
+
+    /// Takes in what the picture's job came back with.
+    pub(super) fn poll(&mut self) {
+        if let Some(r) = self.drawing.as_mut().and_then(|j| j.take()) {
+            self.drawing = None;
+            match r {
+                Ok(_) => self.picture_error = None,
+                Err(e) => {
+                    self.picture_stale = true;
+                    self.picture_error = Some(e);
+                }
+            }
+        }
+    }
+
+    /// Draws the capture's picture again when it does not show the edit as saved.
+    pub(super) fn redraw(&mut self, ctx: &egui::Context) {
+        if !self.picture_stale || self.problem.is_some() || self.drawing.is_some() || self.save_error.is_some() || self.picture_error.is_some() {
+            return;
+        }
+        self.picture_stale = false;
+        let (session, window) = (self.session.clone(), self.window.clone());
+        self.drawing = Some(Job::spawn(ctx, move || redraw_picture(&session, window).map_err(|e| format!("{e:#}"))));
+    }
+
+    /// The edit that could not be applied, discarded: the trained splats and the worker's picture of this PLY back,
+    /// shares and pictures of the view possible again.
+    fn discard(&mut self) -> anyhow::Result<()> {
+        let _w = writing();
+        edit::discard_for(&self.result, Some(self.edit.ply))?;
+        PICTURES.fetch_add(1, Ordering::Relaxed);
+        self.problem = None;
+        Ok(())
+    }
+
+    /// Whether the picture is being drawn.
+    fn busy(&self) -> bool {
+        self.drawing.is_some()
+    }
+}
+
+impl Drop for Edits {
+    /// The view closed: a save that failed is tried once more (saves are written as they are made, so there is nothing
+    /// else to write), a stroke under way ends, and the picture is drawn again in a thread of its own when it does not
+    /// show the edit saved (it checks the file still holds that edit before it says so; a view opened next draws it
+    /// again otherwise).
+    fn drop(&mut self) {
+        self.history.end();
+        if self.problem.is_some() {
+            return;
+        }
+        if self.save_error.is_some() {
+            self.save();
+            if let Some(e) = &self.save_error {
+                eprintln!("Splat edits of {} not saved: {e}", self.session.display());
+                return;
+            }
+        }
+        if !self.picture_stale || self.drawing.is_some() {
+            return;
+        }
+        let (session, window) = (self.session.clone(), self.window.clone());
+        let spawned = std::thread::Builder::new().name("splat edits' picture".into()).spawn(move || {
+            if let Err(err) = redraw_picture(&session, window) {
+                eprintln!("The picture of {}: {err:#}", session.display());
+            }
+        });
+        if let Err(e) = spawned {
+            eprintln!("Splat edits: {e}");
+        }
+    }
+}
+
+/// The capture's picture drawn again without what its edit removes: from the camera the worker drew it from, at its
+/// size, as the worker draws (no viewer's guards, the sky map behind), into its place, the worker's kept aside for this
+/// PLY (orbiters_reconstruct::edit::write_picture); then the edit file says so, only while it still holds the edit drawn.
+/// Everything removed draws the sky alone. Nothing to do (false) when the file's edit already has its picture or
+/// removes nothing. Not drawn, and an error, when the records do not say where the worker's camera was (the picture then
+/// stays out of shares: orbiters_reconstruct::edit::picture_state).
+pub(super) fn redraw_picture(session: &Path, window: (wgpu::Device, wgpu::Queue)) -> anyhow::Result<bool> {
+    use anyhow::Context as _;
+    let result = reconstruction::result_dir(session);
+    let ply = result.join(reconstruction::PLY_FILE);
+    let (mut g, identity, found) = edit::read_for_view(&ply)?;
+    let Found::Current(drawn) = found else { return Ok(false) };
+    if drawn.picture || drawn.removes_nothing() {
+        return Ok(false);
+    }
+    let splats = g.len();
+    let camera = edit::preview_camera(session).context("its records do not say where its picture was taken from")?;
+    edit::apply(&mut g, &drawn);
+    if g.is_empty() {
+        // Everything removed: the renderer draws nothing of an empty set, so one splat too faint to show (far ahead,
+        // fully transparent) stands in, and the picture is the sky behind.
+        let f = camera.forward();
+        let at = camera.position();
+        g.push([at[0] + f[0] * 100.0, at[1] + f[1] * 100.0, at[2] + f[2] * 100.0], [-6.0; 3], [1.0, 0.0, 0.0, 0.0], -40.0, [0.0; 3]);
+    }
+    let mut gpu = Gpu::renderer(window.0, window.1);
+    gpu.guards = false;
+    gpu.upload(&g);
+    drop(g);
+    let sky_file = result.join(reconstruction::SKY_FILE);
+    if sky_file.is_file() {
+        let map = SkyMap::read(&sky_file)?;
+        gpu.set_sky(Some((map.width, &map.rgb)))?;
+    }
+    let mut image = Vec::new();
+    for _ in 0..=REDRAW_CHECKS {
+        gpu.step(&camera, [0.0; 3], Target::None, None)?;
+        image = gpu.read_image()?;
+        if !gpu.needs_redraw() {
+            break;
+        }
+    }
+    let rgb: Vec<u8> = image.iter().flat_map(|p| [0, 1, 2].map(|c| (p[c].clamp(0.0, 1.0) * 255.0 + 0.5) as u8)).collect();
+    let qoi = orbiters_core::contracts::qoi::encode(&rgb, camera.width, camera.height, 3);
+    // Only while the file still holds the edit drawn (a newer save draws its own).
+    let _w = writing();
+    match edit::find(&ply, identity, splats) {
+        Found::Current(now) if now.same_outputs(&drawn) => {
+            edit::write_picture(&result, identity, &qoi)?;
+            Edit { picture: true, ..now }.save(&result)?;
+            PICTURES.fetch_add(1, Ordering::Relaxed);
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Tool {
+    #[default]
+    Pick,
+    Brush,
+    Box,
+    Sphere,
+}
+
+impl Tool {
+    /// Whether it takes the left button's drags (the right one orbits then).
+    fn drags(self) -> bool {
+        self != Tool::Pick
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Tool::Pick => "Click a splat to select it · Shift adds, Ctrl takes away · drag to orbit, right-drag to pan",
+            Tool::Brush => "Paint over what to select · Shift adds, Ctrl takes away · right-drag to orbit, middle-drag to pan",
+            Tool::Box => "Drag a box: it selects at every depth · Shift adds, Ctrl takes away · right-drag to orbit",
+            Tool::Sphere => "Press on a surface and drag out the sphere · Shift adds, Ctrl takes away · right-drag to orbit",
+        }
+    }
+}
+
+/// How a tool's splats change the selection: instead of it, added to it, taken from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Replace,
+    Add,
+    Remove,
+}
+
+impl Mode {
+    fn of(m: egui::Modifiers) -> Self {
+        if m.shift {
+            Mode::Add
+        } else if m.command || m.alt {
+            Mode::Remove
+        } else {
+            Mode::Replace
+        }
+    }
+}
+
+/// A tool's drag under way (positions in points on the screen).
+enum Drag {
+    Brush {
+        mode: Mode,
+        last: Pos2,
+    },
+    /// From where it was pressed to where the pointer is.
+    Box {
+        from: Pos2,
+        to: Pos2,
+        mode: Mode,
+    },
+    /// Its centre in the world, how far along the view it is, and its radius (metres).
+    Sphere {
+        centre: [f32; 3],
+        depth: f32,
+        radius: f32,
+        mode: Mode,
+    },
+}
+
+/// The brush's radius, points.
+const BRUSH: std::ops::RangeInclusive<f32> = 4.0..=120.0;
+
+pub(super) struct State {
+    on: bool,
+    pub(super) tool: Tool,
+    brush: f32,
+    /// The splats' geometry for the tools (read when the mode first opens), or why it could not be.
+    splats: Option<Arc<Splats>>,
+    loading: Option<Job<Result<Arc<Splats>, String>>>,
+    error: Option<String>,
+    /// The tools' projection, for its camera and the version of what is drawn.
+    view: Option<(Camera, u64, pick::View)>,
+    drag: Option<Drag>,
+    /// A word under the tools (nothing under the cursor), and when it was said.
+    notice: Option<(String, f64)>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self { on: false, tool: Tool::Pick, brush: 24.0, splats: None, loading: None, error: None, view: None, drag: None, notice: None }
+    }
+}
+
+/// [`Viewer::stop_drag`] on its parts.
+fn stop_drag(s: &mut State, edits: Option<&mut Edits>) {
+    if matches!(s.drag.take(), Some(Drag::Brush { .. })) {
+        if let Some(e) = edits {
+            e.end_stroke();
+        }
+    }
+}
+
+impl State {
+    /// Select splats is open.
+    pub(super) fn on(&self) -> bool {
+        self.on
+    }
+
+    /// The left button's drags go to the tool.
+    pub(super) fn takes_drags(&self) -> bool {
+        self.on && self.tool.drags()
+    }
+}
+
+impl Viewer {
+    /// Select splats is open and its tools ready (screenshots).
+    pub fn select_ready(&self) -> bool {
+        self.select.on && self.select.splats.is_some()
+    }
+
+    /// What is selected, hidden and deleted (screenshots).
+    pub fn select_counts(&self) -> Option<[usize; 3]> {
+        self.loaded.as_ref()?.edits.as_ref().map(|e| e.counts)
+    }
+
+    /// Why the edit found beside the splats could not be applied, while it waits to be discarded (screenshots).
+    pub fn edits_problem(&self) -> Option<String> {
+        self.loaded.as_ref()?.edits.as_ref()?.problem.clone()
+    }
+
+    /// Why no picture of the view may be made now (Save this view, Edit in 3D's pictures: screenshots).
+    pub fn picture_refused(&self) -> Option<String> {
+        self.loaded.as_ref()?.drawn().err()
+    }
+}
+
+impl Viewer {
+    /// Opens Select splats (the splats' geometry read for its tools the first time).
+    pub(super) fn enter_select(&mut self, ctx: &egui::Context) {
+        let Some(e) = self.loaded.as_ref().and_then(|l| l.edits.as_ref()) else { return };
+        if e.problem.is_some() {
+            return;
+        }
+        let want = e.edit.ply;
+        self.select.on = true;
+        self.stop_drag();
+        if self.select.splats.is_none() && self.select.loading.is_none() {
+            let ply = reconstruction::result_dir(&self.session).join(reconstruction::PLY_FILE);
+            self.select.error = None;
+            self.select.loading = Some(Job::spawn(ctx, move || {
+                // The very PLY the view shows (its hash, not only its count: IDs are its order).
+                let (g, now, _) = edit::read_for_view(&ply).map_err(|e| format!("{e:#}"))?;
+                if now != want {
+                    return Err(RECONSTRUCTED.into());
+                }
+                Ok(Arc::new(Splats::new(&g)))
+            }));
+        }
+    }
+
+    /// Leaves Select splats: a stroke under way ended, the selection cleared, the picture drawn again.
+    pub(super) fn leave_select(&mut self, ctx: &egui::Context) {
+        self.stop_drag();
+        self.select.on = false;
+        if let Some(e) = self.loaded.as_mut().and_then(|l| l.edits.as_mut()) {
+            e.clear();
+            e.redraw(ctx);
+        }
+    }
+
+    /// Drops a tool's drag under way (Esc, another tool, the mode left): a brush stroke ends there as one step of undo,
+    /// so that what comes next is a step of its own.
+    pub(super) fn stop_drag(&mut self) {
+        stop_drag(&mut self.select, self.loaded.as_mut().and_then(|l| l.edits.as_mut()));
+    }
+
+    /// Select splats' work each frame, open or not: what saving and the picture's job came back with, the tools'
+    /// geometry, and the picture drawn again once the mode is left.
+    pub(super) fn tend_edits(&mut self, ctx: &egui::Context) {
+        if let Some(r) = self.select.loading.as_mut().and_then(|j| j.take()) {
+            self.select.loading = None;
+            match r {
+                Ok(s) => self.select.splats = Some(s),
+                Err(e) => self.select.error = Some(e),
+            }
+        }
+        let on = self.select.on;
+        if let Some(e) = self.loaded.as_mut().and_then(|l| l.edits.as_mut()) {
+            e.poll();
+            if !on {
+                e.redraw(ctx);
+            }
+            if e.busy() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+
+    /// The tools on the view's pointer (`resp` over `rect`) and keys, with what they draw over the view.
+    pub(super) fn select_pointer(&mut self, ui: &Ui, resp: &egui::Response, rect: Rect, p: &egui::Painter) {
+        let ctx = ui.ctx().clone();
+        if !self.select.on {
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        self.select_keys(&ctx);
+        let (Some(l), Some(orbit), Some(splats)) = (self.loaded.as_mut(), self.orbit, self.select.splats.clone()) else { return };
+        let Some(edits) = l.edits.as_mut() else { return };
+        let s = &mut self.select;
+        let ppp = ctx.pixels_per_point();
+        let (w, h) = (((rect.width() * ppp).round() as u32).max(16), ((rect.height() * ppp).round() as u32).max(16));
+        let camera = orbit.camera(w, h);
+        // Points on the screen to the camera's pixels (pixel centres at integers).
+        let px = |q: Pos2| [(q.x - rect.left()) * ppp - 0.5, (q.y - rect.top()) * ppp - 0.5];
+        let mode = Mode::of(ctx.input(|i| i.modifiers));
+        let (press, primary_down) = ctx.input(|i| (i.pointer.press_origin(), i.pointer.primary_down()));
+        let hover = resp.hover_pos();
+        let shown = edits.shown;
+        // The projection of what is drawn, made again only when the camera or what is drawn changed.
+        let view = |s: &mut State, edits: &Edits| {
+            if s.view.as_ref().is_none_or(|(c, v, _)| *c != camera || *v != shown) {
+                s.view = Some((camera, shown, splats.view(&camera, &edits.edit.marks)));
+            }
+        };
+        let say = |s: &mut State, text: &str| s.notice = Some((text.to_string(), now));
+        match s.tool {
+            Tool::Pick => {
+                if resp.clicked_by(PointerButton::Primary) {
+                    if let Some(at) = resp.interact_pointer_pos() {
+                        view(s, edits);
+                        let [x, y] = px(at);
+                        let ids = s.view.as_ref().map(|(_, _, v)| v.clicked(x, y)).unwrap_or_default();
+                        if ids.is_empty() {
+                            say(s, "Nothing there to select");
+                            if mode == Mode::Replace {
+                                edits.clear();
+                            }
+                        } else {
+                            edits.select(&ids, mode);
+                        }
+                    }
+                }
+            }
+            Tool::Brush => {
+                let radius = s.brush;
+                // Dabs every half radius from `from` to `to`, one step of undo with the rest of the stroke.
+                let dab = |s: &mut State, edits: &mut Edits, from: Pos2, to: Pos2, mode: Mode| {
+                    view(s, edits);
+                    let Some((_, _, v)) = s.view.as_ref() else { return };
+                    let steps = ((to - from).length() / (0.5 * radius)).ceil().max(1.0) as usize;
+                    let mut ids = Vec::new();
+                    for k in 0..=steps {
+                        let q = from + (to - from) * (k as f32 / steps as f32);
+                        ids.extend(v.visible_in_circle(px(q), radius * ppp, pick::BRUSH_WEIGHT));
+                    }
+                    edits.select(&ids, mode);
+                };
+                // A stroke adds what it paints (or takes it away with Ctrl), after clearing the selection without
+                // Shift or Ctrl.
+                let paints = if mode == Mode::Remove { Mode::Remove } else { Mode::Add };
+                let start = |s: &mut State, edits: &mut Edits, at: Pos2| {
+                    edits.begin_stroke();
+                    if mode == Mode::Replace {
+                        edits.clear();
+                    }
+                    dab(s, edits, at, at, paints);
+                };
+                if resp.drag_started_by(PointerButton::Primary) {
+                    if let Some(from) = press {
+                        start(s, edits, from);
+                        s.drag = Some(Drag::Brush { mode: paints, last: from });
+                    }
+                } else if resp.clicked_by(PointerButton::Primary) {
+                    if let Some(at) = resp.interact_pointer_pos() {
+                        start(s, edits, at);
+                        edits.end_stroke();
+                    }
+                }
+                let stroke = match s.drag {
+                    Some(Drag::Brush { mode, last }) => Some((mode, last)),
+                    _ => None,
+                };
+                if let (Some((m, last)), Some(at), true) = (stroke, resp.interact_pointer_pos(), resp.dragged_by(PointerButton::Primary)) {
+                    if at != last {
+                        dab(s, edits, last, at, m);
+                        s.drag = Some(Drag::Brush { mode: m, last: at });
+                    }
+                }
+                if (resp.drag_stopped_by(PointerButton::Primary) || !primary_down) && stroke.is_some() {
+                    s.drag = None;
+                    edits.end_stroke();
+                }
+                if let Some(at) = hover.or(resp.interact_pointer_pos()) {
+                    p.circle_stroke(at, radius, egui::Stroke::new(1.5, theme::white(0.85)));
+                    p.circle_stroke(at, radius + 1.5, egui::Stroke::new(1.0, theme::black(0.5)));
+                }
+            }
+            Tool::Box => {
+                if resp.drag_started_by(PointerButton::Primary) {
+                    if let Some(from) = press {
+                        s.drag = Some(Drag::Box { from, to: from, mode });
+                    }
+                }
+                if let Some(Drag::Box { from, to, mode }) = s.drag.as_mut() {
+                    if let Some(at) = resp.interact_pointer_pos() {
+                        *to = at;
+                    }
+                    let (r, mode) = (Rect::from_two_pos(*from, *to), *mode);
+                    if resp.drag_stopped_by(PointerButton::Primary) || !primary_down {
+                        s.drag = None;
+                        let ids = pick::in_rectangle(&splats, &edits.edit.marks, &camera, px(r.min), px(r.max));
+                        if ids.is_empty() {
+                            say(s, "Nothing there to select");
+                        }
+                        edits.select(&ids, mode);
+                    } else {
+                        p.rect_filled(r, 0.0, theme::alpha(SELECTION, 0.12));
+                        p.rect_stroke(r, 0.0, egui::Stroke::new(1.5, SELECTION), egui::StrokeKind::Inside);
+                    }
+                }
+            }
+            Tool::Sphere => {
+                if resp.drag_started_by(PointerButton::Primary) {
+                    if let Some(from) = press {
+                        view(s, edits);
+                        let [x, y] = px(from);
+                        match s.view.as_ref().and_then(|(_, _, v)| v.pick(x, y)) {
+                            Some(hit) => s.drag = Some(Drag::Sphere { centre: hit.point, depth: camera.to_camera(hit.point)[2], radius: 0.0, mode }),
+                            None => say(s, "Press on a surface to place the sphere"),
+                        }
+                    }
+                }
+                if let Some(Drag::Sphere { centre, depth, radius, mode }) = s.drag.as_mut() {
+                    // Its radius: from the centre to the point under the cursor at the centre's depth along the view.
+                    if let Some(at) = resp.interact_pointer_pos() {
+                        let [x, y] = px(at);
+                        let q = camera.unproject(x, y, *depth);
+                        *radius = ((q[0] - centre[0]).powi(2) + (q[1] - centre[1]).powi(2) + (q[2] - centre[2]).powi(2)).sqrt();
+                    }
+                    let (c3, d, r3, mode) = (*centre, *depth, *radius, *mode);
+                    if resp.drag_stopped_by(PointerButton::Primary) || !primary_down {
+                        s.drag = None;
+                        let ids = pick::in_sphere(&splats, &edits.edit.marks, c3, r3);
+                        if ids.is_empty() {
+                            say(s, "Nothing inside the sphere");
+                        }
+                        edits.select(&ids, mode);
+                    } else if let Some((cx, cy, _)) = camera.project(c3) {
+                        let c = pos2(rect.left() + (cx + 0.5) / ppp, rect.top() + (cy + 0.5) / ppp);
+                        let r = r3 * camera.fy / d.max(1e-3) / ppp;
+                        p.circle_filled(c, r, theme::alpha(SELECTION, 0.12));
+                        p.circle_stroke(c, r, egui::Stroke::new(1.5, SELECTION));
+                        p.circle_filled(c, 3.0, SELECTION);
+                        let label = Txt::new(format!("{} across", metres(2.0 * r3)), 12.0).color(theme::FG);
+                        let size = widgets::text_size(ui, &label);
+                        let lr = Rect::from_center_size(c + vec2(0.0, -r - 18.0), size + vec2(20.0, 10.0));
+                        p.rect_filled(lr, theme::radius(lr.height() * 0.5), theme::black(0.6));
+                        widgets::text(p, lr.center(), Align2::CENTER_CENTER, &label);
+                    }
+                }
+            }
+        }
+        if s.drag.is_some() {
+            ctx.request_repaint();
+        }
+        if s.notice.as_ref().is_some_and(|(_, at)| now - at > 2.5) {
+            s.notice = None;
+        }
+    }
+
+    fn select_keys(&mut self, ctx: &egui::Context) {
+        if ctx.memory(|m| m.focused().is_some()) {
+            return;
+        }
+        use egui::{Key, Modifiers};
+        let pressed = ctx.input_mut(|i| {
+            let redo = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || i.consume_key(Modifiers::COMMAND, Key::Y);
+            let undo = i.consume_key(Modifiers::COMMAND, Key::Z);
+            let all = i.consume_key(Modifiers::COMMAND, Key::A);
+            let invert = i.consume_key(Modifiers::COMMAND, Key::I);
+            let show = i.consume_key(Modifiers::ALT, Key::H);
+            let hide = i.consume_key(Modifiers::NONE, Key::H);
+            let delete = i.consume_key(Modifiers::NONE, Key::Delete) || i.consume_key(Modifiers::NONE, Key::Backspace);
+            let escape = i.consume_key(Modifiers::NONE, Key::Escape);
+            let tool = [(Key::Num1, Tool::Pick), (Key::Num2, Tool::Brush), (Key::Num3, Tool::Box), (Key::Num4, Tool::Sphere)]
+                .into_iter()
+                .find(|(k, _)| i.consume_key(Modifiers::NONE, *k))
+                .map(|(_, t)| t);
+            (undo, redo, all, invert, show, hide, delete, escape, tool)
+        });
+        let (undo, redo, all, invert, show, hide, delete, escape, tool) = pressed;
+        if let Some(t) = tool {
+            self.select.tool = t;
+            self.stop_drag();
+        }
+        if escape && self.select.drag.is_some() {
+            self.stop_drag();
+            return;
+        }
+        let Some(e) = self.loaded.as_mut().and_then(|l| l.edits.as_mut()) else { return };
+        if undo {
+            e.undo();
+        }
+        if redo {
+            e.redo();
+        }
+        if all {
+            e.select_all();
+        }
+        if invert {
+            e.invert();
+        }
+        if show {
+            e.show_all();
+        }
+        if hide {
+            e.remove(HIDDEN);
+        }
+        if delete {
+            e.remove(DELETED);
+        }
+        if escape {
+            if e.selected() > 0 {
+                e.clear();
+            } else {
+                self.leave_select(ctx);
+            }
+        }
+    }
+
+    /// The top bar while Select splats is open, after the title: Done, undo and redo, and what is selected, hidden and
+    /// deleted, and whether it is saved.
+    pub(super) fn select_bar(&mut self, ui: &mut Ui, p: &egui::Painter, title_r: Rect) {
+        let ctx = ui.ctx().clone();
+        let done = Button::new("Done").icon(icons::CHECK).variant(Variant::Primary).hint("Leaves Select splats (Esc)").id_salt("splat-select-done");
+        let dw = done.desired_width(ui);
+        let done_r = Rect::from_min_size(pos2(title_r.right() + 10.0, title_r.top() + 2.0), vec2(dw, 40.0));
+        if done.show_at(ui, done_r).clicked() {
+            self.leave_select(&ctx);
+            return;
+        }
+        let Some(e) = self.loaded.as_mut().and_then(|l| l.edits.as_mut()) else { return };
+        let mut x = done_r.right() + 10.0;
+        let chip_r = Rect::from_min_size(pos2(x, title_r.top()), vec2(92.0, 44.0));
+        p.rect_filled(chip_r, theme::radius(22.0), theme::black(0.55));
+        for (glyph, label, enabled, undo) in [
+            (icons::ARROW_U_UP_LEFT, "Undo (Ctrl+Z)", e.history.can_undo(), true),
+            (icons::ARROW_U_UP_RIGHT, "Redo (Ctrl+Shift+Z)", e.history.can_redo(), false),
+        ] {
+            let r = Rect::from_center_size(pos2(x + 24.0, chip_r.center().y), vec2(36.0, 36.0));
+            let mut bu = ui.new_child(UiBuilder::new().max_rect(r).id_salt(("splat-select-history", label)));
+            if !enabled {
+                bu.disable();
+                bu.multiply_opacity(0.35);
+            }
+            if IconButton::new(glyph, label).size(36.0, 17.0).show_at(&mut bu, r).clicked() && enabled {
+                if undo {
+                    e.undo();
+                } else {
+                    e.redo();
+                }
+            }
+            x += 44.0;
+        }
+        // What is selected, hidden and deleted; saved or not.
+        let counts = format!(
+            "{} selected · {} hidden · {} deleted",
+            format::integer(e.selected() as f64),
+            format::integer(e.hidden() as f64),
+            format::integer(e.deleted() as f64)
+        );
+        let (state, tone) = match (&e.save_error, e.drawing.is_some()) {
+            (Some(_), _) => ("Not saved", theme::DANGER),
+            (None, true) => ("Saved · drawing its picture again…", theme::FG_3),
+            (None, false) => ("Saved beside the splats", theme::FG_3),
+        };
+        let t1 = Txt::new(counts, 12.5).color(theme::FG);
+        let t2 = Txt::new(state, 11.0).color(tone);
+        let tw = widgets::text_size(ui, &t1).x.max(widgets::text_size(ui, &t2).x);
+        let retry = e.save_error.is_some();
+        let status_r = Rect::from_min_size(pos2(chip_r.right() + 10.0, title_r.top()), vec2(tw + 40.0 + if retry { 84.0 } else { 0.0 }, 44.0));
+        p.rect_filled(status_r, theme::radius(22.0), theme::black(0.55));
+        widgets::text(p, pos2(status_r.left() + 20.0, status_r.center().y - 7.0), Align2::LEFT_CENTER, &t1);
+        widgets::text(p, pos2(status_r.left() + 20.0, status_r.center().y + 9.0), Align2::LEFT_CENTER, &t2);
+        if retry {
+            let r = Rect::from_min_size(pos2(status_r.right() - 84.0, status_r.center().y - 16.0), vec2(76.0, 32.0));
+            if Button::new("Retry")
+                .variant(Variant::Ghost)
+                .size(Size::Sm)
+                .hint(e.save_error.as_deref().unwrap_or_default())
+                .id_salt("splat-select-retry")
+                .show_at(ui, r)
+                .clicked()
+            {
+                e.retry();
+            }
+        }
+    }
+
+    /// The tools at the bottom left (above them its hint and anything to say) and the actions at the bottom right,
+    /// in the view's chips.
+    pub(super) fn select_controls(&mut self, ui: &mut Ui, p: &egui::Painter, rect: Rect) {
+        let ctx = ui.ctx().clone();
+        let chip = |r: Rect| p.rect_filled(r, theme::radius(r.height() * 0.5), theme::black(0.55));
+        // The tools: a segmented control, and the brush's size.
+        let label = Txt::new("Select", 12.0).color(theme::FG_3);
+        let label_w = widgets::text_size(ui, &label).x;
+        let options = [
+            SegOption::new(Tool::Pick, "Pick").hint("Click the splats under the cursor (1)"),
+            SegOption::new(Tool::Brush, "Brush").hint("Paint over what you see (2)"),
+            SegOption::new(Tool::Box, "Box").hint("Drag a rectangle: every depth inside it (3)"),
+            SegOption::new(Tool::Sphere, "Sphere").hint("Press on a surface, drag out a sphere (4)"),
+        ];
+        let seg_w = options.iter().map(|o| widgets::text_size(ui, &Txt::new(o.label, 12.0).weight(weight::MEDIUM)).x + 24.0).sum::<f32>() + 8.0;
+        let slider_w = if self.select.tool == Tool::Brush { 284.0 + 16.0 } else { 0.0 };
+        let tools_r = Rect::from_min_size(pos2(rect.left() + 16.0, rect.bottom() - 16.0 - 44.0), vec2(18.0 + label_w + 12.0 + seg_w + slider_w + 6.0, 44.0));
+        chip(tools_r);
+        widgets::text(p, pos2(tools_r.left() + 18.0, tools_r.center().y), Align2::LEFT_CENTER, &label);
+        let seg_r = Rect::from_min_size(pos2(tools_r.left() + 18.0 + label_w + 12.0, tools_r.center().y - 18.0), vec2(seg_w, 36.0));
+        let mut seg = ui.new_child(UiBuilder::new().max_rect(seg_r).id_salt("splat-select-tool"));
+        let before = self.select.tool;
+        widgets::segmented(&mut seg, "splat-select-tool", &mut self.select.tool, &options, true);
+        if self.select.tool != before {
+            self.stop_drag();
+        }
+        if self.select.tool == Tool::Brush {
+            let slider_r = Rect::from_min_size(pos2(seg_r.right() + 16.0, tools_r.center().y - 14.0), vec2(284.0, 28.0));
+            let mut su = ui.new_child(UiBuilder::new().max_rect(slider_r).id_salt("splat-select-brush"));
+            widgets::slider(&mut su, "splat-select-brush", &mut self.select.brush, BRUSH, 1.0, |v| format!("{v:.0} px"));
+        }
+        // Above it: the hint, or what there is to say (the geometry still being read, why not, nothing there).
+        let (text, color) = match (&self.select.error, self.select.splats.is_some(), &self.select.notice) {
+            (Some(e), _, _) => (format!("The splats cannot be selected: {e}"), theme::DANGER),
+            (None, false, _) => ("Getting the splats ready to select…".to_string(), theme::FG_2),
+            (None, true, Some((n, _))) => (n.clone(), theme::WARN),
+            (None, true, None) => (self.select.tool.hint().to_string(), theme::FG_2),
+        };
+        let hint = Txt::new(text, 11.5).color(color);
+        let hs = widgets::text_size(ui, &hint);
+        let hint_r = Rect::from_min_size(pos2(rect.left() + 16.0, tools_r.top() - 10.0 - 30.0), vec2(hs.x + 28.0, 30.0));
+        chip(hint_r);
+        widgets::text(p, hint_r.center(), Align2::CENTER_CENTER, &hint);
+        if self.select.loading.is_some() {
+            orbiters_ui::feedback::spinner(p, pos2(hint_r.right() + 18.0, hint_r.center().y), 8.0, 2.0, theme::ACCENT);
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+
+        // The actions, right to left from the bottom right: on the selection, then on everything.
+        let Some(e) = self.loaded.as_mut().and_then(|l| l.edits.as_mut()) else { return };
+        let ready = self.select.splats.is_some();
+        let some = e.selected() > 0;
+        type Act = (&'static str, &'static str, &'static str, bool, u8);
+        let rows: [&[Act]; 2] = [
+            &[
+                (icons::ARROWS_OUT, "Grow", "Adds the splats right beside the selection", some && ready, 0),
+                (icons::CORNERS_IN, "Shrink", "Takes the selection's edge away", some && ready, 1),
+                (icons::CIRCLE_HALF, "Invert", "Selects everything else (Ctrl+I)", true, 2),
+                (icons::EYE_SLASH, "Hide", "Hides the selection: not drawn, not shared; Show all brings it back (H)", some, 3),
+                (icons::TRASH, "Delete", "Deletes the selection from everything shared or exported; undo brings it back (Delete)", some, 4),
+            ],
+            &[
+                (icons::SQUARES_FOUR, "Select all", "Selects every splat drawn (Ctrl+A)", true, 5),
+                (icons::EYE, "Show all", "Shows every hidden splat again (Alt+H)", e.hidden() > 0, 6),
+                (
+                    icons::ARROW_COUNTER_CLOCKWISE,
+                    "Restore all",
+                    "Brings back every hidden and deleted splat: the capture as reconstructed",
+                    e.hidden() + e.deleted() > 0,
+                    7,
+                ),
+            ],
+        ];
+        let mut bottom = rect.bottom() - 16.0;
+        let mut clicked = None;
+        for acts in rows {
+            let buttons: Vec<Button> = acts
+                .iter()
+                .map(|&(glyph, label, hint, enabled, _)| {
+                    let b = Button::new(label)
+                        .icon(glyph)
+                        .variant(if label == "Delete" { Variant::Danger } else { Variant::Ghost })
+                        .size(Size::Sm)
+                        .enabled(enabled)
+                        .hint(hint);
+                    b.id_salt(("splat-select-action", label))
+                })
+                .collect();
+            let widths: Vec<f32> = buttons.iter().map(|b| b.desired_width(ui)).collect();
+            let w = widths.iter().sum::<f32>() + 6.0 * (widths.len() as f32 - 1.0) + 12.0;
+            let r = Rect::from_min_size(pos2(rect.right() - 16.0 - w, bottom - 44.0), vec2(w, 44.0));
+            chip(r);
+            let mut x = r.left() + 6.0;
+            for ((b, bw), act) in buttons.into_iter().zip(widths).zip(acts.iter()) {
+                if b.show_at(ui, Rect::from_min_size(pos2(x, r.center().y - 16.0), vec2(bw, 32.0))).clicked() && act.3 {
+                    clicked = Some(act.4);
+                }
+                x += bw + 6.0;
+            }
+            bottom = r.top() - 10.0;
+        }
+        match clicked {
+            Some(0) | Some(1) => {
+                if let Some(splats) = self.select.splats.clone() {
+                    // A step of three times the selection's median size (orbiters_reconstruct::select::step).
+                    let radius = pick::step(&splats, &e.edit.marks);
+                    let ids = if clicked == Some(0) { pick::grow(&splats, &e.edit.marks, radius) } else { pick::shrink(&splats, &e.edit.marks, radius) };
+                    let mode = if clicked == Some(0) { Mode::Add } else { Mode::Remove };
+                    if !e.select(&ids, mode) {
+                        self.select.notice = Some((
+                            if mode == Mode::Add { "Nothing beside the selection to add" } else { "Nothing to take away" }.into(),
+                            ctx.input(|i| i.time),
+                        ));
+                    }
+                }
+            }
+            Some(2) => {
+                e.invert();
+            }
+            Some(3) => {
+                e.remove(HIDDEN);
+            }
+            Some(4) => {
+                e.remove(DELETED);
+            }
+            Some(5) => {
+                e.select_all();
+            }
+            Some(6) => {
+                e.show_all();
+            }
+            Some(7) => {
+                e.restore_all();
+            }
+            _ => {}
+        }
+    }
+
+    /// An edit that could not be applied: under the top bar, why, and Discard them. Returns whether one is shown.
+    pub(super) fn problem_chip(&mut self, ui: &mut Ui, p: &egui::Painter, rect: Rect, title_r: Rect) -> bool {
+        let Some(e) = self.loaded.as_mut().and_then(|l| l.edits.as_mut()) else { return false };
+        let Some(problem) = e.problem.clone() else { return false };
+        let t = Txt::new(&problem, 12.5).color(theme::FG);
+        let tw = widgets::text_size(ui, &t).x.min(rect.width() - 260.0);
+        let b = Button::new("Discard them").icon(icons::TRASH).variant(Variant::Danger).size(Size::Sm).id_salt("splat-edits-discard");
+        let bw = b.desired_width(ui);
+        let chip_r = Rect::from_center_size(pos2(rect.center().x, title_r.bottom() + 16.0 + 22.0), vec2(42.0 + tw + 12.0 + bw + 8.0, 44.0));
+        p.rect_filled(chip_r, theme::radius(22.0), theme::black(0.72));
+        widgets::icon(p, pos2(chip_r.left() + 26.0, chip_r.center().y), icons::WARNING, 16.0, theme::WARN);
+        widgets::text_truncated(p, pos2(chip_r.left() + 42.0, chip_r.center().y), Align2::LEFT_CENTER, &t, tw);
+        if b.show_at(ui, Rect::from_min_size(pos2(chip_r.right() - 8.0 - bw, chip_r.center().y - 16.0), vec2(bw, 32.0))).clicked() {
+            if let Err(err) = e.discard() {
+                e.problem = Some(format!("They could not be discarded: {err:#}"));
+            }
+        }
+        true
+    }
+}
+
+/// The selection's colour on the screen (project.wgsl's SELECTED).
+const SELECTION: Color32 = Color32::from_rgb(255, 199, 41);
+
+fn metres(m: f32) -> String {
+    if m < 1.0 { format!("{:.0} cm", m * 100.0) } else { format!("{m:.2} m") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("orbiters-select-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(reconstruction::dir(&dir)).unwrap();
+        dir
+    }
+
+    /// A session of one keyframe looking down +Z (64 × 36 at the training's size), a grey wall at 4 m and a red
+    /// "avatar" in front of it, with the worker's picture (all grey) and report.
+    fn session(dir: &Path) -> (Gaussians, std::ops::Range<usize>) {
+        use orbiters_core::contracts::frame_record::{FrameRecord, record_flags};
+        let mut g = Gaussians::default();
+        for y in -12..=12 {
+            for x in -20..=20 {
+                g.push([x as f32 * 0.15, y as f32 * 0.15, 4.0], [(0.12f32).ln(); 3], [1.0, 0.0, 0.0, 0.0], 3.0, [0.5; 3]);
+            }
+        }
+        let avatar = g.len()..g.len() + 25;
+        for y in 0..5 {
+            for x in 0..5 {
+                g.push([x as f32 * 0.08 - 0.16, y as f32 * 0.08 - 0.16, 2.0], [(0.06f32).ln(); 3], [1.0, 0.0, 0.0, 0.0], 3.0, [1.0, 0.0, 0.0]);
+            }
+        }
+        let result = reconstruction::dir(dir);
+        orbiters_reconstruct::ply::write(&result.join(reconstruction::PLY_FILE), &g).unwrap();
+        let record = FrameRecord {
+            flags: record_flags::STRIP_OK | record_flags::KEYFRAME,
+            camera_to_world: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            projection: [1.2, 2.1, 0.0, 0.0],
+            width: 128,
+            height: 72,
+            keyframe_index: 3,
+            ..Default::default()
+        };
+        std::fs::write(dir.join(orbiters_core::contracts::manifest::FRAMES_FILE), record.to_bytes()).unwrap();
+        let report = reconstruction::Report { width: 64, height: 36, held_out_keyframes: vec![3], ..Default::default() };
+        std::fs::write(result.join(reconstruction::REPORT_FILE), serde_json::to_vec(&report).unwrap()).unwrap();
+        std::fs::write(result.join(reconstruction::PREVIEW_FILE), orbiters_core::contracts::qoi::encode(&[128u8; 64 * 36 * 3], 64, 36, 3)).unwrap();
+        (g, avatar)
+    }
+
+    fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
+        let adapter = orbiters_reconstruct::gpu::block_on(instance.request_adapter(&Default::default())).ok()?;
+        orbiters_reconstruct::gpu::block_on(adapter.request_device(&Default::default())).ok()
+    }
+
+    fn reds(session: &Path) -> usize {
+        let (_, _, rgba) = reconstruction::read_preview(session).expect("a picture");
+        rgba.chunks(4).filter(|p| p[0] > 150 && p[1] < 100).count()
+    }
+
+    fn stamp(dir: &Path) -> Option<Stamp> {
+        Stamp::of(&reconstruction::dir(dir).join(reconstruction::PLY_FILE))
+    }
+
+    /// The edits a view would open with now.
+    fn open(dir: &Path, window: &(wgpu::Device, wgpu::Queue)) -> Edits {
+        let (g, identity, found) = edit::read_for_view(&reconstruction::dir(dir).join(reconstruction::PLY_FILE)).unwrap();
+        Edits::new(dir, g.len(), identity, found, window.clone())
+    }
+
+    /// The capture's picture: drawn from the worker's camera with the avatar where it was, then again without it once
+    /// it is deleted (the file says the picture is drawn), the worker's own kept aside under its PLY's name; with every
+    /// splat deleted, the background alone; restored once nothing is removed. Saves of a view whose PLY was replaced
+    /// meanwhile are refused. Opens its own GPU device.
+    #[test]
+    fn the_picture_is_drawn_again_without_what_is_removed() {
+        let Some(window) = device() else { return };
+        let dir = temp("picture");
+        let (g, avatar) = session(&dir);
+        let result = reconstruction::dir(&dir);
+        let ply = result.join(reconstruction::PLY_FILE);
+        let camera = edit::preview_camera(&dir).expect("the worker's camera");
+        assert_eq!((camera.width, camera.height), (64, 36));
+        // No edits: nothing to draw.
+        assert!(!redraw_picture(&dir, window.clone()).unwrap());
+        // An edit hiding a wall splat off to the side: the avatar shows.
+        let identity = Identity::read(&ply).unwrap();
+        let trained = result.join(reconstruction::trained_preview_file(identity.hash));
+        let mut e = Edit::new(g.len(), identity);
+        e.marks[0] = HIDDEN;
+        e.picture = false;
+        persist(&result, &e, stamp(&dir)).unwrap();
+        assert_eq!(edit::picture_state(&result), edit::PictureState::NotDrawn);
+        assert!(redraw_picture(&dir, window.clone()).unwrap());
+        assert!(reds(&dir) > 10, "the avatar in the picture: {}", reds(&dir));
+        assert_eq!(edit::picture_state(&result), edit::PictureState::Drawn);
+        assert!(!redraw_picture(&dir, window.clone()).unwrap(), "drawn already");
+        // Deleted: the picture has none of it; the worker's own kept aside.
+        for i in avatar.clone() {
+            e.marks[i] = DELETED;
+        }
+        persist(&result, &e, stamp(&dir)).unwrap();
+        assert!(redraw_picture(&dir, window.clone()).unwrap());
+        assert_eq!(reds(&dir), 0, "the avatar left the picture");
+        assert_eq!(std::fs::read(&trained).unwrap(), orbiters_core::contracts::qoi::encode(&[128u8; 64 * 36 * 3], 64, 36, 3), "the worker's kept aside");
+        // Everything deleted: the background alone (no sky map here), drawn all the same.
+        let mut all = e.clone();
+        all.marks.iter_mut().for_each(|m| *m = DELETED);
+        persist(&result, &all, stamp(&dir)).unwrap();
+        assert!(redraw_picture(&dir, window.clone()).unwrap(), "everything deleted is drawn too");
+        let (_, _, rgba) = reconstruction::read_preview(&dir).unwrap();
+        assert!(rgba.chunks(4).all(|p| p[0] < 8 && p[1] < 8 && p[2] < 8), "the background alone");
+        assert_eq!(edit::picture_state(&result), edit::PictureState::Drawn);
+        // Nothing removed: the worker's picture back, the edit file gone.
+        persist(&result, &Edit::new(g.len(), identity), stamp(&dir)).unwrap();
+        assert!(!result.join(reconstruction::EDIT_FILE).exists() && !trained.exists());
+        assert_eq!(reconstruction::read_preview(&dir).unwrap().2[..4], [128, 128, 128, 255]);
+        // The PLY replaced under the view (a new reconstruction): its saves are refused, the file left as it is.
+        let before = stamp(&dir);
+        let mut other = g.clone();
+        other.means[0][1] += 0.5;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        orbiters_reconstruct::ply::write(&ply, &other).unwrap();
+        let refused = persist(&result, &e, before).unwrap_err().to_string();
+        assert!(refused.contains("reconstructed again"), "{refused}");
+        assert!(!result.join(reconstruction::EDIT_FILE).exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The edits as the view holds them: selections are steps of undo but never saved; hide and delete are on the disk
+    /// as soon as they are made (a share or a view opened next reads them), and so are undo and redo; a view closed and
+    /// opened again at once has every removal, and adds to them; edits that cannot be applied block saving until
+    /// discarded. Opens its own GPU device (the picture's).
+    #[test]
+    fn edits_are_on_the_disk_as_they_are_made() {
+        let Some(window) = device() else { return };
+        let dir = temp("edits");
+        let (g, avatar) = session(&dir);
+        let ply = reconstruction::dir(&dir).join(reconstruction::PLY_FILE);
+        let removed = || edit::read_edited(&ply).unwrap().1;
+        let mut e = open(&dir, &window);
+        let ids: Vec<u32> = avatar.clone().map(|i| i as u32).collect();
+        assert!(e.select(&ids, Mode::Replace));
+        assert_eq!(e.selected(), 25);
+        assert_eq!(e.drawn[avatar.start], 1, "drawn tinted");
+        assert!(!reconstruction::dir(&dir).join(reconstruction::EDIT_FILE).exists(), "a selection is not saved");
+        assert!(e.remove(DELETED));
+        assert_eq!((e.selected(), e.deleted()), (0, 25));
+        assert_eq!(e.drawn[avatar.start], 2, "not drawn");
+        assert!(e.save_error.is_none(), "{:?}", e.save_error);
+        assert_eq!(removed(), 25, "on the disk at once");
+        e.undo();
+        assert_eq!((e.selected(), e.deleted(), removed()), (25, 0, 0));
+        e.redo();
+        assert_eq!(removed(), 25);
+        // Invert then hide: everything else hidden; Show all brings it back, the deleted avatar stays out.
+        e.invert();
+        assert_eq!(e.selected(), g.len() - 25);
+        e.remove(HIDDEN);
+        assert_eq!(removed(), g.len());
+        e.show_all();
+        assert_eq!((e.hidden(), e.deleted(), removed()), (0, 25, 25));
+        // Closed and opened again at once: the avatar is still out, and a new removal adds to it.
+        drop(e);
+        let mut again = open(&dir, &window);
+        assert_eq!(again.deleted(), 25, "every removal of the view closed");
+        let wall: Vec<u32> = (0..10).collect();
+        again.select(&wall, Mode::Replace);
+        again.remove(DELETED);
+        assert_eq!(removed(), 35, "the earlier removals kept");
+        drop(again);
+        // Damaged: refused, nothing saved over it until discarded, then the trained splats.
+        std::fs::write(reconstruction::dir(&dir).join(reconstruction::EDIT_FILE), b"N4EDIT01 damaged").unwrap();
+        let mut e = open(&dir, &window);
+        assert!(e.problem.is_some() && e.edit.removes_nothing());
+        e.select(&ids, Mode::Replace);
+        e.remove(DELETED);
+        assert_eq!(std::fs::read(reconstruction::dir(&dir).join(reconstruction::EDIT_FILE)).unwrap(), b"N4EDIT01 damaged", "never saved over");
+        assert!(edit::read_edited(&ply).is_err(), "and shares stop");
+        e.discard().unwrap();
+        assert!(e.problem.is_none());
+        assert_eq!(removed(), 0);
+        drop(e);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A brush stroke cancelled halfway (Esc, another tool, Done) ends there as one step: a delete made next is a step of
+    /// its own, and undoing it brings back the selection the stroke made.
+    #[test]
+    fn a_cancelled_stroke_is_one_step_of_its_own() {
+        let Some(window) = device() else { return };
+        let dir = temp("stroke");
+        let (_, avatar) = session(&dir);
+        let mut e = open(&dir, &window);
+        let mut s = State::default();
+        let ids: Vec<u32> = avatar.map(|i| i as u32).collect();
+        e.begin_stroke();
+        s.drag = Some(Drag::Brush { mode: Mode::Add, last: Pos2::ZERO });
+        e.select(&ids[..10], Mode::Add);
+        e.select(&ids[10..], Mode::Add);
+        stop_drag(&mut s, Some(&mut e));
+        assert!(s.drag.is_none() && !e.history.is_open());
+        e.remove(DELETED);
+        assert_eq!(e.deleted(), 25);
+        e.undo();
+        assert_eq!((e.deleted(), e.selected()), (0, 25), "the delete undone alone: the stroke's selection back");
+        e.undo();
+        assert_eq!(e.selected(), 0, "then the whole stroke");
+        drop(e);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The splats read again (the other GPU, a picture of the view) only from the PLY the view loaded: another
+    /// reconstruction's are refused, never drawn with this view's marks.
+    #[test]
+    fn splats_are_read_again_only_from_the_ply_the_view_loaded() {
+        let dir = temp("again");
+        let (mut g, _) = session(&dir);
+        let ply = reconstruction::dir(&dir).join(reconstruction::PLY_FILE);
+        let loaded = Identity::read(&ply).unwrap();
+        assert_eq!(read_again(&dir, Some(loaded)).unwrap().0.len(), g.len());
+        g.means[3][0] += 1.0;
+        orbiters_reconstruct::ply::write(&ply, &g).unwrap();
+        assert!(read_again(&dir, Some(loaded)).unwrap_err().to_string().contains("reconstructed again"));
+        assert!(read_again(&dir, Some(Identity::read(&ply).unwrap())).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

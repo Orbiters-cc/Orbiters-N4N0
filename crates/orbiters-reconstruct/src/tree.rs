@@ -425,6 +425,32 @@ impl Tree {
         }
         bytes
     }
+
+    /// A tree back from [`Tree::file`]'s bytes (what a world loads: checks of what a shared file holds), the boxes'
+    /// depths and leaves worked out from their parents. Anything else is an error.
+    pub fn parse(bytes: &[u8]) -> anyhow::Result<Tree> {
+        anyhow::ensure!(bytes.len() >= RECORD && bytes.len().is_multiple_of(RECORD) && &bytes[..8] == MAGIC, "not a splat tree");
+        let u = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
+        let f = |at: usize| f32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
+        anyhow::ensure!(u(8) == VERSION, "a splat tree of version {}", u(8));
+        let (count, splats) = (u(12) as usize, u(16) as usize);
+        anyhow::ensure!(bytes.len() / RECORD == 1 + count + splats, "a splat tree's counts do not match its size");
+        let mut nodes: Vec<Node> = Vec::with_capacity(count);
+        for i in 0..count {
+            let at = (i + 1) * RECORD;
+            let parent = (u(at + 20) != u32::MAX).then(|| u(at + 20));
+            anyhow::ensure!(parent.is_none_or(|p| (p as usize) < i), "a box's parent comes after it");
+            let depth = parent.map_or(0, |p| nodes[p as usize].depth + 1);
+            let (start, n) = (u(at + 24), u(at + 28));
+            anyhow::ensure!(start as usize + n as usize <= splats, "a box's splats run past the file's");
+            nodes.push(Node { center: [f(at), f(at + 4), -f(at + 8)], radius: f(at + 12), error: f(at + 16), parent, depth, start, count: n, leaf: true });
+            if let Some(p) = parent {
+                nodes[p as usize].leaf = false;
+            }
+        }
+        let splats = if splats == 0 { Gaussians::default() } else { crate::web::read_splat(&bytes[(1 + count) * RECORD..])? };
+        Ok(Tree { nodes, splats })
+    }
 }
 
 #[cfg(test)]

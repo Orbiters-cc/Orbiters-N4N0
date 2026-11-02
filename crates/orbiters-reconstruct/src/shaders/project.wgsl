@@ -21,6 +21,9 @@
 // The auto focus's histogram (crate::dof: BINS bins of optical depth × SCALE, from NEAREST to FARTHEST metres in the
 // log of the depth).
 @group(0) @binding(6) var<storage, read_write> probe_bins: array<atomic<u32>>;
+// A viewer's mark of each Gaussian, a byte each, four to a word (crate::gpu::Gpu::set_marks): 0 as trained, 1 selected
+// in the 3D view (tinted towards SELECTED), 2 or more hidden or deleted there (not drawn).
+@group(0) @binding(7) var<storage, read> marks: array<u32>;
 
 const DOF_BINS: f32 = 256.0;
 const DOF_NEAREST: f32 = 0.05;
@@ -29,6 +32,10 @@ const DOF_SCALE: f32 = 4096.0;
 const DOF_MAX_COC: f32 = 0.12;
 // The tint of the splats at the focus while it is set (the interface's accent green).
 const DOF_PLANE: vec3<f32> = vec3<f32>(0.0, 0.855, 0.427);
+// The tint of selected splats (a warm yellow no capture's colour is mistaken for, as in other splat editors), and how
+// far towards it.
+const SELECTED: vec3<f32> = vec3<f32>(1.0, 0.78, 0.16);
+const SELECTED_TINT: f32 = 0.6;
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
@@ -39,6 +46,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let o = i * PROJ;
     proj[o + 15u] = 0.0;
     counts[i] = 0u;
+    let mark = (marks[i >> 2u] >> ((i & 3u) * 8u)) & 0xFFu;
+    if (mark >= 2u) {
+        return;
+    }
     let b = i * PARAM;
     let mean = vec3<f32>(params[b], params[b + 1u], params[b + 2u]);
     let log_scale = vec3<f32>(params[b + 3u], params[b + 4u], params[b + 5u]);
@@ -125,6 +136,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
             let off = abs(1.0 - frame.dof.y / max(m.pc.z, 1e-3));
             color = mix(color, DOF_PLANE, 0.7 * (1.0 - smoothstep(0.015, 0.05, off)));
         }
+    }
+    if (mark == 1u) {
+        color = mix(color, SELECTED, SELECTED_TINT);
     }
     // Out to α = 1/255 at this opacity (cpu::extent_sigmas); a Gaussian that never gets there draws nothing.
     let tau = alpha_reach(op);

@@ -16,8 +16,8 @@ use std::time::Duration;
 /// Frames drawn on the integrated GPU since the app started (the GPU bench counts them).
 pub static DRAWN: AtomicU64 = AtomicU64::new(0);
 
-/// A view of the splats: the camera, how poorly seen and far splats show, the depth of field and the auto focus's
-/// pixel.
+/// A view of the splats: the camera, how poorly seen and far splats show, the depth of field, the auto focus's pixel
+/// and the version of the marks it draws ([`Worker::set_marks`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Request {
     pub camera: Camera,
@@ -25,6 +25,7 @@ pub struct Request {
     pub far: FarField,
     pub dof: DepthOfField,
     pub probe: Option<[f32; 2]>,
+    pub marks: u64,
 }
 
 /// A drawn frame: RGBA8, encoded sRGB, rows packed.
@@ -40,6 +41,8 @@ struct State {
     error: Option<String>,
     /// The auto focus's distance under its probe, as last read back.
     focus: Option<f32>,
+    /// Marks the next frame draws with (the selection's, `splats/select.rs`), until the thread takes them.
+    marks: Option<Arc<Vec<u8>>>,
     quit: bool,
 }
 
@@ -74,16 +77,18 @@ pub struct Worker {
     shared: Arc<Shared>,
     shown: Arc<Mutex<Option<Shown>>>,
     last: Option<Request>,
+    /// The version of the marks handed over last (those `gpu` was started with: `marks`).
+    marks: u64,
 }
 
 impl Worker {
-    /// Starts drawing with `gpu`, a renderer on the integrated GPU's `device` and `queue` with the splats uploaded;
-    /// `ctx` repaints for each frame.
-    pub fn start(ctx: &egui::Context, gpu: Gpu, device: wgpu::Device, queue: wgpu::Queue) -> Self {
+    /// Starts drawing with `gpu`, a renderer on the integrated GPU's `device` and `queue` with the splats uploaded and
+    /// marks of version `marks` set; `ctx` repaints for each frame.
+    pub fn start(ctx: &egui::Context, gpu: Gpu, device: wgpu::Device, queue: wgpu::Queue, marks: u64) -> Self {
         let shared = Arc::new(Shared::default());
         let (s, ctx) = (shared.clone(), ctx.clone());
         std::thread::Builder::new().name("splats on the integrated GPU".into()).spawn(move || run(&s, &ctx, gpu, &device, &queue)).expect("thread");
-        Self { shared, shown: Arc::default(), last: None }
+        Self { shared, shown: Arc::default(), last: None, marks }
     }
 
     /// Asks for this view, unless it is the one asked last.
@@ -93,6 +98,20 @@ impl Worker {
             self.shared.state.lock().unwrap().asked = Some(request);
             self.shared.wake.notify_one();
         }
+    }
+
+    /// Draws the splats with `marks` (one byte each: orbiters_reconstruct::gpu::Gpu::set_marks) from the next frame on;
+    /// the request naming their `version` draws again.
+    pub fn set_marks(&mut self, version: u64, marks: Arc<Vec<u8>>) {
+        if self.marks != version {
+            self.marks = version;
+            self.shared.state.lock().unwrap().marks = Some(marks);
+        }
+    }
+
+    /// The version of the marks last handed over.
+    pub fn marks(&self) -> u64 {
+        self.marks
     }
 
     /// Why the last view could not be drawn.
@@ -131,9 +150,9 @@ fn run(shared: &Shared, ctx: &egui::Context, mut gpu: Gpu, device: &wgpu::Device
     let mut last: Option<Request> = None;
     let mut checks = 0u8;
     loop {
-        let asked = {
+        let (asked, marks) = {
             let mut s = shared.state.lock().unwrap();
-            loop {
+            let asked = loop {
                 if s.quit {
                     return;
                 }
@@ -148,8 +167,12 @@ fn run(shared: &Shared, ctx: &egui::Context, mut gpu: Gpu, device: &wgpu::Device
                 if s.asked.is_none() && !s.quit {
                     break None;
                 }
-            }
+            };
+            (asked, s.marks.take())
         };
+        if let Some(m) = marks {
+            gpu.set_marks(&m);
+        }
         let request = match (asked, last) {
             (Some(r), _) => r,
             (None, Some(r)) => {
@@ -345,33 +368,49 @@ mod tests {
         let (wd, wq) = block_on(adapter.request_device(&Default::default())).expect("device");
         let g = wall();
         let camera = Camera::look([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 1.0, 150, 90);
-        let request = Request { camera, confidence: Confidence::default(), far: FarField::default(), dof: DepthOfField::default(), probe: None };
+        let request = Request { camera, confidence: Confidence::default(), far: FarField::default(), dof: DepthOfField::default(), probe: None, marks: 0 };
 
         // On the window's device, as the paint callback draws.
         let mut window = Gpu::renderer(wd.clone(), wq.clone());
         window.upload(&g);
-        window.step(&camera, BACKGROUND, Target::None, None).expect("window");
         let r = Readback::new(&wd, 150, 90);
-        window.present(&r.view);
-        let want = r.read(&wd, &wq).expect("window frame");
+        let draw = |window: &mut Gpu| {
+            window.step(&camera, BACKGROUND, Target::None, None).expect("window");
+            window.present(&r.view);
+            r.read(&wd, &wq).expect("window frame")
+        };
+        let want = draw(&mut window);
 
         let mut gpu = Gpu::renderer(device.clone(), queue.clone());
         gpu.upload(&g);
-        let mut worker = Worker::start(&egui::Context::default(), gpu, device, queue);
-        worker.ask(request);
-        let start = std::time::Instant::now();
-        let frame = loop {
-            if let Some(f) = worker.shared.state.lock().unwrap().frame.take() {
-                break f;
+        let mut worker = Worker::start(&egui::Context::default(), gpu, device, queue, 0);
+        let next = |worker: &mut Worker| {
+            let start = std::time::Instant::now();
+            loop {
+                if let Some(f) = worker.shared.state.lock().unwrap().frame.take() {
+                    break f;
+                }
+                assert!(worker.error().is_none(), "{:?}", worker.error());
+                assert!(start.elapsed().as_secs() < 30, "no frame");
+                std::thread::sleep(Duration::from_millis(10));
             }
-            assert!(worker.error().is_none(), "{:?}", worker.error());
-            assert!(start.elapsed().as_secs() < 30, "no frame");
-            std::thread::sleep(Duration::from_millis(10));
         };
+        worker.ask(request);
+        let frame = next(&mut worker);
         assert_eq!(frame.size, (150, 90));
         assert_eq!(frame.pixels.len(), want.pixels.len());
         assert!(want.pixels.chunks(4).any(|p| p[0] > 40), "the wall shows");
-        let worst = frame.pixels.iter().zip(&want.pixels).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
-        assert!(worst <= 2, "{worst}");
+        let worst = |a: &Frame, b: &Frame| a.pixels.iter().zip(&b.pixels).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+        assert!(worst(&frame, &want) <= 2, "{}", worst(&frame, &want));
+        // The selection's marks reach the integrated GPU's thread: the left half of the wall hidden, its middle
+        // selected, drawn there as the window draws them.
+        let marks: Vec<u8> = (0..g.len()).map(|i| if i % 20 < 10 { 2 } else { u8::from(i % 20 == 12) }).collect();
+        window.set_marks(&marks);
+        let want_marked = draw(&mut window);
+        assert!(worst(&want_marked, &want) > 40, "the marks change the picture");
+        worker.set_marks(1, Arc::new(marks));
+        worker.ask(Request { marks: 1, ..request });
+        let marked = next(&mut worker);
+        assert!(worst(&marked, &want_marked) <= 2, "{}", worst(&marked, &want_marked));
     }
 }

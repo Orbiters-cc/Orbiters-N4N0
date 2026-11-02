@@ -477,11 +477,18 @@ mod tests {
         }
     }
 
+    /// The window's size in the harness: the app's default (screenshot.rs).
+    const SCREEN: egui::Vec2 = vec2(1280.0, 820.0);
+
     struct Harness {
         ctx: egui::Context,
         export: Export,
         open: bool,
         time: f64,
+        /// With `ORBITERS_TEST_OUT` set: the CPU painter (orbiters_ui::software) the dialog's states are shot with into
+        /// that folder, no GPU needed, and the last frame's shapes.
+        painter: Option<(PathBuf, orbiters_ui::software::Software)>,
+        shapes: Option<(Vec<egui::epaint::ClippedShape>, f32)>,
     }
 
     impl Harness {
@@ -490,19 +497,36 @@ mod tests {
             orbiters_ui::install(&ctx);
             widgets::watch_controls();
             let export = Export::with_hooks(&ctx, dir, "VRChat Home", Rect::from_min_size(pos2(900.0, 40.0), vec2(120.0, 40.0)), hooks());
-            let mut h = Self { ctx, export, open: true, time: 0.0 };
+            let painter =
+                std::env::var_os("ORBITERS_TEST_OUT").map(|d| (PathBuf::from(d), orbiters_ui::software::Software::new(SCREEN.x as u32, SCREEN.y as u32)));
+            let mut h = Self { ctx, export, open: true, time: 0.0, painter, shapes: None };
             h.settle();
             h
         }
 
+        /// The last frame as `dialog-<name>.png` in `ORBITERS_TEST_OUT` (nothing without it), over the app's dark page.
+        fn shoot(&mut self, name: &str) {
+            self.frame(Vec::new());
+            let (Some((dir, sw)), Some((shapes, ppp))) = (self.painter.as_mut(), self.shapes.take()) else { return };
+            let primitives = self.ctx.tessellate(shapes, ppp);
+            let pixels = sw.paint(&primitives, ppp, egui::Color32::from_rgb(9, 9, 11));
+            let image = egui::ColorImage::from_rgba_premultiplied([SCREEN.x as usize, SCREEN.y as usize], pixels);
+            std::fs::create_dir_all(&*dir).unwrap();
+            orbiters_ui::offscreen::save_png(&dir.join(format!("dialog-{name}.png")), &image).unwrap();
+        }
+
         fn frame(&mut self, events: Vec<Event>) {
             self.time += 1.0 / 60.0;
-            let input =
-                RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 820.0))), time: Some(self.time), events, ..Default::default() };
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), SCREEN)), time: Some(self.time), events, ..Default::default() };
             let (export, open) = (&mut self.export, &mut self.open);
             let mut output = self.ctx.run_ui(input, |ui| {
                 *open = export.show(ui.ctx());
             });
+            if let Some((_, sw)) = self.painter.as_mut() {
+                sw.set_textures(&mut output.textures_delta);
+                sw.free_textures(&mut output.textures_delta);
+                self.shapes = Some((output.shapes, output.pixels_per_point));
+            }
             output.textures_delta.clear();
         }
 
@@ -557,11 +581,16 @@ mod tests {
         let mut h = Harness::new(&dir);
         // Its edits are read on a worker as it opens.
         h.until("SPZ first, ready", |h| h.control("Export SPZ…").is_some_and(|(_, on)| on));
+        h.shoot("open");
         h.click("GLB");
         assert_eq!(h.export.format, Format::Glb);
+        h.settle();
+        h.shoot("glb");
         *PICK.lock().unwrap() = Some(out.join("My capture"));
         h.click("Export GLB…");
         h.until("the export", |h| h.control("Show in folder").is_some());
+        h.settle();
+        h.shoot("saved");
         assert_eq!(ASKED.lock().unwrap().as_deref(), Some("Home 2026-11-02 21-30.glb"), "the capture's name offered");
         let file = out.join("My capture.glb");
         assert_eq!(positions(&file, Format::Glb).len(), kept.len());
@@ -578,6 +607,8 @@ mod tests {
         *PICK.lock().unwrap() = Some(out.join("Second.glb"));
         h.click("Export GLB…");
         h.until("the failure", |h| h.control("Choose another place…").is_some());
+        h.settle();
+        h.shoot("no-room");
         assert!(matches!(h.export.outcome, Some((Format::Glb, Err(Failure::NoRoom { .. })))));
         assert!(!out.join("Second.glb").exists() && !out.join("Second.glb.part").exists());
         *FREE.lock().unwrap() = None;
@@ -593,6 +624,8 @@ mod tests {
         let mut h = Harness::new(&dir);
         h.until("the damaged edits found", |h| h.control("Discard them").is_some_and(|(_, on)| on));
         assert!(h.control("Export GLB…").is_some_and(|(_, on)| !on), "Export waits for the edits");
+        h.settle();
+        h.shoot("damaged");
         h.click("Discard them");
         h.until("the edits discarded", |h| h.control("Export GLB…").is_some_and(|(_, on)| on));
         assert!(!rec::result_dir(&dir).join(rec::EDIT_FILE).exists());

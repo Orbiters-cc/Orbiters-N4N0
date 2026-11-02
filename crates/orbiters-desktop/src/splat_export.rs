@@ -195,7 +195,7 @@ impl Failure {
 
 /// Room left free on the disk an export goes to, beyond the file: a full disk breaks whatever writes next (VRChat's
 /// cache, Unity, Windows itself).
-pub const ROOM_KEPT: u64 = 64 << 20;
+pub const ROOM_KEPT: u64 = 64_000_000;
 
 /// What the capture's splat edits leave out now, or why they cannot be applied, and how many splats its reconstruction
 /// made (its report's count, sky shell included; none without a report).

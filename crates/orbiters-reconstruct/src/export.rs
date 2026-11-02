@@ -212,7 +212,7 @@ fn byte(x: f32) -> u8 {
 /// too strong (a 0.01 px² splat under a 0.3 px² dilation keeps its full opacity instead of 1/31 of it).
 const SPZ_ANTIALIASED: u8 = 0x1;
 
-//// How many values SPZ's 8-bit quantisation saturated, of `components` each (three a splat): log scales outside
+/// How many values SPZ's 8-bit quantisation saturated, of `components` each (three a splat): log scales outside
 /// [−10, 5.94] (splats thinner than 45 µm, which only get wider) and degree-zero colours outside about [−0.44, 1.44]
 /// (learned colours brighter or darker than SPZ stores: the module doc). [`gltf`] and [`ply`] keep them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

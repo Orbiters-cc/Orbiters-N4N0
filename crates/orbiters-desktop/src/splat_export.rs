@@ -12,8 +12,10 @@
 //! ([`Failure::Edits`]): the dialog offers to discard them, as the 3D view does.
 //!
 //! The file is made whole in memory first, checked against the room left on its disk ([`ROOM_KEPT`]), written beside
-//! its name (`<name>.part`, flushed to the disk) and renamed over it: an export that fails or is stopped leaves nothing
-//! under the chosen name and no part file behind. Never into the capture's own `reconstruction/` folder.
+//! its name (`<name>.<n>.part`, a name of its own that no other file or export has, flushed to the disk) and renamed
+//! over it once the edits it applied are still those saved: an export that fails or is stopped leaves nothing under the
+//! chosen name and no part file behind. Never anywhere inside the capture's own folder: reconstructing it again deletes
+//! its `reconstruction/` folder whole, and deleting the capture deletes the rest for good ([`Failure::OwnFiles`]).
 
 use orbiters_core::reconstruction as rec;
 use orbiters_reconstruct::{edit, export as encode};
@@ -158,8 +160,13 @@ pub enum Failure {
     NoRoom { needed: u64, free: u64, folder: PathBuf },
     /// The file cannot be written there: the folder, and why in words.
     NotWritable { folder: PathBuf, why: &'static str },
-    /// The place chosen is the capture's own `reconstruction/` folder.
+    /// The place chosen is inside the capture's own folder: reconstructing it again replaces its `reconstruction/`
+    /// folder whole (the previous one is deleted) and deleting the capture deletes the folder for good, a file saved
+    /// there with it.
     OwnFiles,
+    /// The capture's splat edits were saved again while the file was made (other splats hidden, deleted or shown): it
+    /// would not hold what its 3D view shows now, so it was not saved. Trying again exports them.
+    Changed,
     /// Stopped (the dialog closed meanwhile).
     Stopped,
     /// Anything else (no splats, a damaged PLY): what happened.
@@ -173,7 +180,7 @@ impl Failure {
         match self {
             Failure::Edits(why) => format!("{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again."),
             Failure::NoRoom { needed, free, folder } => format!(
-                "Not enough room: the {} takes {} and {} has {} left ({} kept free). Choose another place, or free up space there.",
+                "Not enough room: the {} takes {}, and {} has {} left, with {} to leave free for Windows and other programs. Choose another place, or free up space there.",
                 format.label(),
                 mb(needed.saturating_sub(ROOM_KEPT)),
                 folder.display(),
@@ -181,7 +188,11 @@ impl Failure {
                 mb(ROOM_KEPT)
             ),
             Failure::NotWritable { folder, why } => format!("N4N0 cannot write in {}: {why}. Choose another place.", folder.display()),
-            Failure::OwnFiles => "That is the capture's own folder, where N4N0 keeps its splats: choose another place.".into(),
+            Failure::OwnFiles => {
+                "That is inside the capture's own folder: N4N0 replaces its files when it reconstructs it, and deletes them with it. Choose another place."
+                    .into()
+            }
+            Failure::Changed => "Its splat edits changed while the file was made: nothing was saved. Try again to export what its 3D view shows now.".into(),
             Failure::Stopped => "The export was stopped: nothing was saved.".into(),
             Failure::Failed(e) => format!("The export failed: {e}"),
         }
@@ -274,26 +285,32 @@ pub fn export(session: &Path, format: Format, dest: &Path, progress: &Progress) 
 
 /// Exports the capture in `session` as `format` to `dest`: reads its PLY (in steps, saying how far), leaves out what its
 /// edits remove (stops when they cannot be applied), makes the file, checks the room `free_space` says the disk has,
-/// writes it beside `dest` and renames it over `dest`; stops at the next step once `progress` is told to.
+/// writes it beside `dest` and renames it over `dest` once the edits saved are still those it applied (else
+/// [`Failure::Changed`]); stops at the next step once `progress` is told to.
 pub fn export_with(session: &Path, format: Format, dest: &Path, progress: &Progress, free_space: &dyn Fn(&Path) -> Option<u64>) -> Result<Exported, Failure> {
     let result = rec::result_dir(session);
     let ply = result.join(rec::PLY_FILE);
     let folder = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
     let name = dest.file_name().ok_or_else(|| Failure::Failed(format!("{} is not a file name", dest.display())))?;
-    if std::fs::canonicalize(&folder).ok().zip(std::fs::canonicalize(&result).ok()).is_some_and(|(a, b)| a == b) {
+    if std::fs::canonicalize(&folder).ok().zip(std::fs::canonicalize(session).ok()).is_some_and(|(a, b)| a.starts_with(b)) {
         return Err(Failure::OwnFiles);
     }
     let bytes = read(&ply, progress)?;
     progress.set(Step::Making, 0.0);
     let (mut g, _, found) = edit::parse_for_view(&ply, &bytes).map_err(|e| Failure::Failed(format!("{e:#}")))?;
     drop(bytes);
-    let removed = match found {
-        edit::Found::None => 0,
-        edit::Found::Current(e) => edit::apply(&mut g, &e),
+    // What the edits leave out, and their generation (edit::generation): what the file beside the PLY must still say
+    // once the export is written.
+    let (removed, applied) = match found {
+        edit::Found::None => (0, edit::UNEDITED.to_string()),
+        edit::Found::Current(e) => (edit::apply(&mut g, &e), e.generation()),
         edit::Found::Stale(_) => return Err(Failure::Edits(stale())),
         edit::Found::Unreadable(e) => return Err(Failure::Edits(unreadable(e))),
     };
     let splats = (0..g.len()).filter(|&i| !g.sky.get(i).copied().unwrap_or(false)).count();
+    if splats == 0 {
+        return Err(Failure::Failed("its 3D view hides or deletes every splat: show some again in Select splats to export them".into()));
+    }
     progress.go_on()?;
     let made = match format {
         Format::Spz => encode::spz3(&g, &mut |f| {
@@ -313,12 +330,25 @@ pub fn export_with(session: &Path, format: Format, dest: &Path, progress: &Progr
             return Err(Failure::NoRoom { needed, free, folder });
         }
     }
-    let part = folder.join(format!("{}.part", name.to_string_lossy()));
-    let written = write(&part, &data, progress).and_then(|()| std::fs::rename(&part, dest).map_err(Wrote::Io));
+    // A part name of its own: never a file that was there (a download's `.part`), nor another export's to the same name
+    // (one stopped a moment ago still clearing its own).
+    let part = folder.join(format!("{}.{:x}-{}.part", name.to_string_lossy(), std::process::id(), PARTS.fetch_add(1, Ordering::Relaxed)));
+    let written = write(&part, &data, progress).and_then(|()| {
+        // Edits saved since the PLY was read (in another 3D view, or one that saved again as it closed): the file would
+        // not be what the view shows now.
+        if edit::generation(&result).ok().as_deref() != Some(applied.as_str()) {
+            return Err(Wrote::Changed);
+        }
+        std::fs::rename(&part, dest).map_err(Wrote::Io)
+    });
     if let Err(e) = written {
-        let _ = std::fs::remove_file(&part);
+        if !matches!(e, Wrote::Exists) {
+            let _ = std::fs::remove_file(&part);
+        }
         return Err(match e {
             Wrote::Stopped => Failure::Stopped,
+            Wrote::Changed => Failure::Changed,
+            Wrote::Exists => Failure::Failed(format!("{} is already there", part.display())),
             Wrote::Io(e) => failure(&e, &folder, needed, free_space),
         });
     }
@@ -349,15 +379,26 @@ fn read(path: &Path, progress: &Progress) -> Result<Vec<u8>, Failure> {
     Ok(out)
 }
 
-/// Why the part file could not be written.
+/// Part files made by this run of the app: each export's own number.
+static PARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Why the part file could not be written, or not renamed.
 enum Wrote {
     Stopped,
+    /// The edits saved are no longer those applied.
+    Changed,
+    /// A file of the part's name was there already (left alone).
+    Exists,
     Io(std::io::Error),
 }
 
-/// `data` written to `part` 4 MB at a time (saying how far, stopping when asked), then flushed to the disk.
+/// `data` written to `part` (a new file: one already there is left alone) 4 MB at a time (saying how far, stopping when
+/// asked), then flushed to the disk.
 fn write(part: &Path, data: &[u8], progress: &Progress) -> Result<(), Wrote> {
-    let mut file = std::fs::File::create(part).map_err(Wrote::Io)?;
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(part).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => Wrote::Exists,
+        _ => Wrote::Io(e),
+    })?;
     let mut done = 0;
     for chunk in data.chunks(4 << 20) {
         file.write_all(chunk).map_err(Wrote::Io)?;
@@ -569,14 +610,76 @@ pub(crate) mod tests {
             other => panic!("{other:?}"),
         }
 
-        let own = rec::result_dir(&dir).join("copy.ply");
-        assert_eq!(export(&dir, Format::Ply, &own, &Progress::default()), Err(Failure::OwnFiles));
-        assert!(!own.exists());
+        // Anywhere inside the capture's folder: its reconstruction folder (over the PLY itself too), a folder in it
+        // (deleted with it when the capture is reconstructed again), the capture's folder (deleted with the capture).
+        let result = rec::result_dir(&dir);
+        let trained = std::fs::read(result.join(rec::PLY_FILE)).unwrap();
+        std::fs::create_dir_all(result.join("exports")).unwrap();
+        for own in [result.join("copy.ply"), result.join(rec::PLY_FILE), result.join("exports").join("x.ply"), dir.join("x.ply")] {
+            assert_eq!(export(&dir, Format::Ply, &own, &Progress::default()), Err(Failure::OwnFiles), "{}", own.display());
+            assert!(Failure::OwnFiles.elsewhere());
+        }
+        assert_eq!(std::fs::read(result.join(rec::PLY_FILE)).unwrap(), trained, "the PLY as trained");
+        assert!(!result.join("copy.ply").exists() && !dir.join("x.ply").exists());
 
         let stopped = Progress::default();
         stopped.stop();
         assert_eq!(export(&dir, Format::Spz, &out.join("y.spz"), &stopped), Err(Failure::Stopped));
         assert!(!out.join("y.spz").exists() && parts() == 0);
+
+        // A file named as a part file of the old scheme (a download's `.part`) is never the export's.
+        let theirs = out.join("z.spz.part");
+        std::fs::write(&theirs, b"someone else's").unwrap();
+        export(&dir, Format::Spz, &out.join("z.spz"), &Progress::default()).unwrap();
+        assert_eq!(std::fs::read(&theirs).unwrap(), b"someone else's");
+        std::fs::remove_file(&theirs).unwrap();
+        assert_eq!(parts(), 0);
+
+        // Windows' own codes for a disk filling during the write, and for a file of that name open in another program.
+        for code in [39, 112] {
+            let f = failure(&std::io::Error::from_raw_os_error(code), &out, ROOM_KEPT + 100, &|_| Some(5));
+            assert_eq!(f, Failure::NoRoom { needed: ROOM_KEPT + 100, free: 5, folder: out.clone() });
+        }
+        let open = failure(&std::io::Error::from_raw_os_error(32), &out, 0, &|_| None);
+        assert!(open.elsewhere() && open.message(Format::Spz).contains("open in another program"), "{open:?}");
+        remove(&dir);
+    }
+
+    /// Edits saved while the file is made (here as the room on the disk is asked, after the PLY was read): the export is
+    /// not saved, says why, and the next one holds the edits there are now.
+    #[test]
+    fn edits_saved_during_an_export_keep_it_from_being_saved() {
+        let (dir, _) = session("changed", true);
+        let out = dir.parent().unwrap().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let dest = out.join("x.glb");
+        let result = rec::result_dir(&dir);
+        let hide_another = |_: &Path| {
+            let mut e = edit::Edit::decode(&std::fs::read(result.join(rec::EDIT_FILE)).unwrap()).unwrap();
+            e.marks[0] = edit::HIDDEN;
+            e.save(&result).unwrap();
+            None::<u64>
+        };
+        assert_eq!(export_with(&dir, Format::Glb, &dest, &Progress::default(), &hide_another), Err(Failure::Changed));
+        assert!(Failure::Changed.message(Format::Glb).contains("Try again"));
+        assert!(!dest.exists());
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "no part file");
+        let done = export(&dir, Format::Glb, &dest, &Progress::default()).unwrap();
+        assert_eq!((done.splats, done.removed), (4, 3));
+        assert_eq!(positions(&dest, Format::Glb).len(), 4);
+
+        // Every splat hidden or deleted: why, not an encoder's limit.
+        let mut e = edit::Edit::decode(&std::fs::read(result.join(rec::EDIT_FILE)).unwrap()).unwrap();
+        for (i, m) in e.marks.iter_mut().enumerate() {
+            if i != 2 {
+                *m = edit::DELETED;
+            }
+        }
+        e.save(&result).unwrap();
+        match export(&dir, Format::Spz, &out.join("none.spz"), &Progress::default()) {
+            Err(Failure::Failed(why)) => assert!(why.contains("every splat"), "{why}"),
+            other => panic!("{other:?}"),
+        }
         remove(&dir);
     }
 

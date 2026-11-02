@@ -134,7 +134,8 @@ fn walk(run: &mut Run<'_>, out: &Path, settings: &Settings, handles: Option<&cra
     run.wait(0.5)?;
     run.shoot(out, "splat-export-no-room")?;
     let spz = crate::splat_export::file_name(&dir, "", crate::splat_export::Format::Spz);
-    anyhow::ensure!(!exports.join(&spz).exists() && !exports.join(format!("{spz}.part")).exists(), "nothing written on a full disk");
+    let parts = std::fs::read_dir(&exports)?.flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".part")).count();
+    anyhow::ensure!(!exports.join(&spz).exists() && parts == 0, "nothing written on a full disk");
     *FREE.lock().unwrap() = None;
     run.click("Close", 10.0)?;
     run.wait(0.8)?;

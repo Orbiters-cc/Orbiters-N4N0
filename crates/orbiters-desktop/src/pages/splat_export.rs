@@ -226,13 +226,13 @@ impl Export {
         let edits = self.edits.poll().cloned();
         let busy = self.running.is_some() || self.picking.running();
         let removed = edits.as_ref().map_or(0, |e| e.removed);
-        let lead = if removed > 0 {
-            format!(
-                "What its 3D view shows: the {} splats Select splats hid or deleted are left out, as from every share. The sky stays in N4N0: other tools draw their own.",
-                format::integer(removed as f64)
-            )
-        } else {
-            "What its 3D view shows, every splat as trained. The sky stays in N4N0: other tools draw their own.".to_string()
+        let lead = match removed {
+            0 => "The file holds what its 3D view shows: every splat as trained. The sky stays in N4N0: other tools draw their own.".to_string(),
+            1 => "The file holds what its 3D view shows: the splat hidden or deleted there is left out, as from every share. The sky stays in N4N0: other tools draw their own.".to_string(),
+            n => format!(
+                "The file holds what its 3D view shows: the {} splats hidden or deleted there are left out, as from every share. The sky stays in N4N0: other tools draw their own.",
+                format::integer(n as f64)
+            ),
         };
         paragraph(ui, &lead, theme::FG_2);
 
@@ -378,7 +378,7 @@ impl Export {
                 }
                 return;
             }
-            Some((f, Err(Failure::Failed(_)))) if *f == self.format => {
+            Some((f, Err(Failure::Failed(_) | Failure::Changed))) if *f == self.format => {
                 if widgets::activated(&Button::new("Try again").icon(icons::ARROW_CLOCKWISE).variant(Variant::Primary).id_salt("export-retry").show(ui)) {
                     if let Some(dest) = self.dest.clone() {
                         self.start(&ctx, dest);
@@ -405,6 +405,16 @@ impl Export {
         }
         if widgets::activated(&Button::new("Cancel").variant(Variant::Ghost).id_salt("export-cancel").show(ui)) {
             close(&ctx, self.id);
+        }
+    }
+}
+
+impl Drop for Export {
+    /// A dialog its page let go of without closing it (its 3D view or window gone, another one opened while it was
+    /// closing) stops its export too: closing stops it, and so does going.
+    fn drop(&mut self) {
+        if let Some(r) = &self.running {
+            r.progress.stop();
         }
     }
 }
@@ -462,6 +472,8 @@ mod tests {
     static ASKED: Mutex<Option<String>> = Mutex::new(None);
     static REVEALED: Mutex<Option<PathBuf>> = Mutex::new(None);
     static FREE: Mutex<Option<u64>> = Mutex::new(None);
+    /// A capture whose splat edits the next export hides one more splat of while it is made (as it asks for the room).
+    static EDIT_DURING: Mutex<Option<PathBuf>> = Mutex::new(None);
 
     fn hooks() -> Hooks {
         Hooks {
@@ -473,7 +485,15 @@ mod tests {
                 *REVEALED.lock().unwrap() = Some(p.to_path_buf());
                 Ok(())
             },
-            free_space: |_| *FREE.lock().unwrap(),
+            free_space: |_| {
+                if let Some(dir) = EDIT_DURING.lock().unwrap().take() {
+                    let result = rec::result_dir(&dir);
+                    let mut e = orbiters_reconstruct::edit::Edit::decode(&std::fs::read(result.join(rec::EDIT_FILE)).unwrap()).unwrap();
+                    e.marks[0] = orbiters_reconstruct::edit::HIDDEN;
+                    e.save(&result).unwrap();
+                }
+                *FREE.lock().unwrap()
+            },
         }
     }
 
@@ -610,10 +630,12 @@ mod tests {
         h.settle();
         h.shoot("no-room");
         assert!(matches!(h.export.outcome, Some((Format::Glb, Err(Failure::NoRoom { .. })))));
-        assert!(!out.join("Second.glb").exists() && !out.join("Second.glb.part").exists());
+        let parts = || std::fs::read_dir(&out).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".part")).count();
+        assert!(!out.join("Second.glb").exists() && parts() == 0);
         *FREE.lock().unwrap() = None;
         h.click("Choose another place…");
-        assert_eq!(ASKED.lock().unwrap().as_deref(), Some("Second.glb"), "the name chosen is offered again");
+        // Windows' dialog runs on a worker: what it was asked, once it was.
+        h.until("the name chosen offered again", |_| ASKED.lock().unwrap().as_deref() == Some("Second.glb"));
         h.until("the export elsewhere", |h| h.control("Show in folder").is_some());
         assert!(out.join("Second.glb").is_file());
         h.click("Done");
@@ -650,7 +672,26 @@ mod tests {
         assert!(!out.join("Late.glb").exists());
         h.click("Discard them");
         h.until("ready again", |h| h.control("Export GLB…").is_some_and(|(_, on)| on));
+        h.click("Cancel");
+        h.until("closed", |h| !h.open);
+
+        // Edits saved while the file is made: nothing saved, why, and Try again exports them.
+        let (dir2, kept2) = session("dialog-changed", true);
+        let mut h = Harness::new(&dir2);
+        h.until("ready", |h| h.control("Export GLB…").is_some_and(|(_, on)| on));
+        *EDIT_DURING.lock().unwrap() = Some(dir2.clone());
+        *PICK.lock().unwrap() = Some(out.join("Changed.glb"));
+        h.click("Export GLB…");
+        h.until("the change found", |h| h.control("Try again").is_some());
+        assert!(matches!(h.export.outcome, Some((Format::Glb, Err(Failure::Changed)))));
+        assert!(!out.join("Changed.glb").exists());
+        h.click("Try again");
+        h.until("the export again", |h| h.control("Show in folder").is_some());
+        assert_eq!(positions(&out.join("Changed.glb"), Format::Glb).len(), kept2.len() - 1, "the splat hidden meanwhile left out");
+        h.click("Done");
+        h.until("closed", |h| !h.open);
         *LAST.lock().unwrap() = None;
+        remove(&dir2);
         remove(&dir);
     }
 }

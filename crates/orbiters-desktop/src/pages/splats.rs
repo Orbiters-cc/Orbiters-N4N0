@@ -637,6 +637,8 @@ impl Viewer {
         let Some(l) = self.loaded.as_ref() else { return };
         // Whether its splats can be selected (None for a downloaded `.splat`, false while edits wait to be discarded).
         let selectable = l.edits.as_ref().map(|e| e.problem.is_none());
+        // Whether its last save of edits failed (Export waits for Retry, below).
+        let unsaved = l.edits.as_ref().is_some_and(|e| e.unsaved());
         let views = l.views.len();
         let saving = self.still.is_some();
         let b = Button::new(if saving { "Saving the view…" } else { "Save this view" })
@@ -694,12 +696,21 @@ impl Viewer {
             }
             // Export… beside it: what the view shows, as a file for other tools. Its icon alone (the label its tooltip)
             // where the whole button would reach the view's controls on the right (a long world name, a narrow window):
-            // Recorded view, the views' steps when there are several, and Close.
+            // Recorded view, the views' steps when there are several, and Close. The file is made from the edits saved
+            // beside the PLY: while the last save failed, it would hold splats this view leaves out, so Export waits for
+            // Retry (in Select splats) as it waits for edits that could not be applied.
+            let ok = can && !unsaved;
             let b = Button::new("Export…")
                 .icon(icons::UPLOAD_SIMPLE)
                 .variant(Variant::Glass)
-                .enabled(can)
-                .hint(if can { "Saves what this view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender" } else { "Discard the edits that could not be applied first" })
+                .enabled(ok)
+                .hint(if !can {
+                    "Discard the edits that could not be applied first"
+                } else if unsaved {
+                    "Its splat edits are not saved: Retry in Select splats first, so that the file leaves out what this view hides"
+                } else {
+                    "Saves what this view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender"
+                })
                 .id_salt("splat-export");
             let bw = b.desired_width(ui);
             let controls = rect.right() - 16.0 - 44.0 - 10.0 - RESET_W - if views > 1 { 10.0 + 2.0 * STEP_W + STEP_LABEL_W } else { 0.0 };
@@ -710,9 +721,14 @@ impl Viewer {
             } else {
                 let r = Rect::from_min_size(pos2(x, edit_r.top()), vec2(40.0, 40.0));
                 let icon = IconButton::new(icons::UPLOAD_SIMPLE, "Export…").size(40.0, 17.0).backdrop(theme::black(0.55)).id_salt("splat-export-icon");
-                (icon.show_at(ui, r).clicked(), r)
+                // Dimmed and deaf while it waits, as the whole button is.
+                let mut iu = ui.new_child(UiBuilder::new().max_rect(r).id_salt("splat-export-icon"));
+                if !ok {
+                    iu.disable();
+                }
+                (icon.show_at(&mut iu, r).clicked(), r)
             };
-            if clicked && can {
+            if clicked && ok {
                 self.export = Some(super::splat_export::Export::open(&ctx, &self.session, &self.title, export_r).order(egui::Order::Tooltip));
             }
         }

@@ -27,16 +27,23 @@ Failures say why and give a way on:
 - Splat edits that cannot be applied (damaged, or made on an earlier reconstruction) stop the export, as they stop
   shares; Export waits and the dialog offers **Discard them** (the 3D view's own action: the file goes, the worker's picture
   comes back), after which every splat as trained is exported. In the 3D view, Export is disabled while its edits wait to
-  be discarded there.
+  be discarded there, and while its last save of them failed (the file would bring back what the view hides): Retry in
+  Select splats first.
+- Splat edits saved again while the file is made: it is not saved (it would not be what the view shows now), and **Try
+  again** exports the edits there are now. The edits' generation is read again just before the rename.
 - Not enough room on the disk: the file is made in memory first. It is written only if the disk keeps 64 MB free after
   it (**Choose another place** offers the same name elsewhere). A disk that fills during the write gives the same message.
 - A place N4N0 may not write in (a read-only file in the way, a protected folder, a file of that name open in another
-  program, a folder gone with its drive), or the capture's own `reconstruction/` folder: why, and Choose another place.
+  program, a folder gone with its drive), or anywhere inside the capture's own folder (reconstructing it again deletes
+  its previous `reconstruction/` folder whole, folders in it included; deleting the capture deletes the rest for good):
+  why, and Choose another place.
+- Every splat hidden or deleted: said so (nothing to export).
 - Anything else (no splats, a damaged PLY): what happened, and Try again.
 
-The file is written beside its name (`<name>.part`, flushed to the disk) and renamed over it, so an export that fails or
-is stopped never leaves a truncated file under the chosen name and never a part file; a file that was in the way stays
-as it was. Code: `crates/orbiters-desktop/src/splat_export.rs` (the export), `src/pages/splat_export.rs` (the dialog);
+The file is written beside its name (`<name>.<n>.part`, a new file of its own: never a file already there, nor another
+export's; flushed to the disk) and renamed over it, so an export that fails or is stopped never leaves a truncated file
+under the chosen name and never a part file; a file that was in the way stays as it was. A dialog closed, or let go of
+by its page, stops its export. Only the app quitting mid-write can leave a part file (the chosen name stays as it was). Code: `crates/orbiters-desktop/src/splat_export.rs` (the export), `src/pages/splat_export.rs` (the dialog);
 the walkthrough with its screenshots is `--screenshot <out> --sessions <copy> --only splat-export`.
 
 ### Why SPZ version 3

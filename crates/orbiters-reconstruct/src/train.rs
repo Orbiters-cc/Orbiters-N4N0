@@ -120,8 +120,8 @@ pub struct Settings {
     /// 3DGS-MCMC samples them: no score did better at the 1M budget (three interleaved runs; reports/births.md of the
     /// lab). By rank alone, faint sources churn (see `sources_by_opacity`); by rank times opacity, Exoplanet Journey and
     /// the plaza scored within their noise and VRChat Home 0.2–0.3 dB higher with 10–19 % more splats and up to 18 %
-    /// more time. At 300k, gradient ranks times opacity gained 0.16 dB on Exoplanet with a fifth fewer splats, less
-    /// than the SGLD noise alone (`noise`), and nothing on top of it.
+    /// more time. At 300k, gradient ranks times opacity gained 0.16 dB on Exoplanet (with a fifth fewer splats) and
+    /// 0.12 dB on the plaza, lost 0.16 dB on Home, and added nothing to the SGLD noise (`noise`).
     pub sources: Sources,
     /// A score-ranked source's chance is also its opacity, as 3DGS-MCMC's is: ranks alone copy faint Gaussians, whose
     /// copies split an opacity they cannot spare (eq. 9) and die by the next round (Exoplanet Journey: 150k of 566k
@@ -139,12 +139,14 @@ pub struct Settings {
     /// With [`Settings::noise_gate`], three interleaved runs each at the 1M budget: held-out PSNR +0.39 dB on Exoplanet
     /// Journey (24.22 against 23.83), +0.46 dB on VRChat Home (26.65 against 26.19), +0.19 dB on the synthetic plaza and
     /// +0.15 dB off its path (22.03 against 21.88), Canine within its noise; the best 90 % of pixels within the noise
-    /// (Home −0.11, plaza −0.02, Exoplanet +0.13); at a 300k budget Exoplanet +0.28 and the plaza +0.45 dB (+0.39 and
-    /// +0.47 on the best 90 %) at equal splats and 4–9 % less time. But on Silent Dawn (a 78 s recording, 419 views,
+    /// (Home −0.11, plaza −0.02, Exoplanet +0.13); at a 300k budget Exoplanet +0.28, the plaza +0.45 and Home +0.52 dB
+    /// (+0.39, +0.47 and +0.52 on the best 90 %) at equal splats. But on Silent Dawn (a 78 s recording, 419 views,
     /// 2.9M budget; two runs each) −0.52 dB held-out and −0.72 dB on the best 90 % (25.93 against 26.45, 32.99 against
     /// 33.71; the control's runs 0.15 dB apart), its set growing to the whole budget in the last tenth of relocation
     /// (2.1M splats left against 1.4M) where the control's never grew. The scene's size does not explain it (16.6 m
-    /// against the plaza's 17.5), nor does noise on what no view of the step shows ([`Settings::noise_visible`]).
+    /// against the plaza's 17.5), nor does noise on what no view of the step shows ([`Settings::noise_visible`]); its
+    /// control leaves about 800k of 2.6M dead every round, so the noise may hurt where the budget exceeds what a
+    /// capture uses and help where it binds (untested).
     /// The confidence-aware densification paper (arXiv 2610.13541) found the noise worse than none for its own births.
     pub noise: f32,
     /// The noise spares the Gaussians anchored on the measured surface (within [`ANCHORED`] of it where depth steps
@@ -162,8 +164,8 @@ pub struct Settings {
     /// keyframes, a pixel's size across and the keyframes' colour, instead of copies (0: none). Off: a fifth of the
     /// moves cost 0.36 dB on Exoplanet Journey and 0.58 dB on the plaza's best 90 % at 1M (one run each) and 0.12 dB on
     /// Exoplanet at 300k (three runs), but gained 0.87 dB held-out, 0.67 dB on the best 90 % and 0.22 dB off the path
-    /// on the synthetic plaza at 300k (three runs), where ConeGS gains most: worth a switch for small budgets on clean
-    /// captures.
+    /// on the synthetic plaza at 300k (three runs), and 0.68 dB on Home's best 90 % at 300k (−0.11 on the whole
+    /// image), where ConeGS gains most: worth a switch for small budgets.
     pub depth_births: f32,
 }
 

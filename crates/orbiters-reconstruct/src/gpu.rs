@@ -315,6 +315,8 @@ struct SplatBuffers {
     /// What the keyframes saw of each ([`Gaussians::seen`], eight floats), for a viewer's [`Confidence`] and
     /// [`FarField`].
     seen: wgpu::Buffer,
+    /// A viewer's mark of each ([`Gpu::set_marks`]), a byte each, four to a word.
+    marks: wgpu::Buffer,
 }
 
 /// Buffers for one image size (its loss mask lives apart, in [`Gpu::masks`], so dropping these never loses it).
@@ -1183,6 +1185,18 @@ impl Gpu {
         self.upload_with_moments(g, None);
     }
 
+    /// A viewer's marks of the Gaussians uploaded, one byte each in their order (crate::edit::Edit::view_marks): 0 as
+    /// trained, 1 selected (tinted, project.wgsl's SELECTED), 2 or more left out (hidden or deleted). An upload clears
+    /// them. A quarter of the bytes of one float per Gaussian: 0.75 MB for three million, written again whole with
+    /// each change of a selection (a brush stroke's), which costs a frame nothing.
+    pub fn set_marks(&mut self, marks: &[u8]) {
+        let Some(s) = self.splats.as_ref() else { return };
+        let n = self.count.min(marks.len());
+        let mut words = vec![0u8; self.count.div_ceil(4) * 4];
+        words[..n].copy_from_slice(&marks[..n]);
+        self.queue.write_buffer(&s.marks, 0, &words);
+    }
+
     /// Uploads Gaussians with their Adam moments (packed like the parameters): the same set after relocation. A set
     /// the device cannot hold fails the next step (and readback) instead of panicking here.
     pub fn upload_with_moments(&mut self, g: &Gaussians, moments: Option<(&[f32], &[f32])>) {
@@ -1213,6 +1227,8 @@ impl Gpu {
         self.queue.write_buffer(&s.filter, 0, bytemuck::cast_slice(&filter));
         let seen: Vec<[f32; 8]> = (0..n).map(|i| g.seen(i)).map(|s| [s.weight, s.views as f32, s.sectors as f32, s.rate, s.beyond, 0.0, 0.0, 0.0]).collect();
         self.queue.write_buffer(&s.seen, 0, bytemuck::cast_slice(&seen));
+        // A new set: nothing marked.
+        self.queue.write_buffer(&s.marks, 0, &vec![0u8; n.div_ceil(4) * 4]);
         if training {
             let mut enc = self.device.create_command_encoder(&Default::default());
             match moments {
@@ -1351,6 +1367,7 @@ impl Gpu {
             stats: storage(d, "stats", t(cap * 8)),
             filter: storage(d, "3D filter", f(cap)),
             seen: storage(d, "seen", f(cap * 8)),
+            marks: storage(d, "marks", f(cap.div_ceil(4))),
         }
     }
 
@@ -1755,9 +1772,9 @@ impl Gpu {
             _ => 0.0,
         };
         self.queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));
-        let (params, proj, counts, offsets, filter, seen_buf) = {
+        let (params, proj, counts, offsets, filter, seen_buf, marks) = {
             let s = self.splats.as_ref().context("no Gaussians")?;
-            (s.params.clone(), s.proj.clone(), s.counts.clone(), s.offsets.clone(), s.filter.clone(), s.seen.clone())
+            (s.params.clone(), s.proj.clone(), s.counts.clone(), s.offsets.clone(), s.filter.clone(), s.seen.clone(), s.marks.clone())
         };
         // A training device sizes the sort from the counts read back for this image size, without waiting: entries
         // past the end are dropped for this step and counted as an overflow when its count arrives, and the buffers
@@ -1811,7 +1828,7 @@ impl Gpu {
                     enc.clear_buffer(&self.probe_bins, 0, None);
                 }
                 let bins = self.probe_bins.clone();
-                let bind = self.bind_cached(&self.k.project, &[(0, &self.frame), (1, &params), (2, &proj), (3, &counts), (4, &filter), (5, &seen_buf), (6, &bins)]);
+                let bind = self.bind_cached(&self.k.project, &[(0, &self.frame), (1, &params), (2, &proj), (3, &counts), (4, &filter), (5, &seen_buf), (6, &bins), (7, &marks)]);
                 self.dispatch(&mut enc, &self.k.project, &bind, groups(n));
             }
         }
@@ -2752,6 +2769,39 @@ mod tests {
         // Seen well, but only from the other side (sectors 0 and 1): fades by the three sectors and more between.
         let behind = centre(&draw(Seen { sectors: 0b11, ..well }, false, fade))[0];
         assert!(behind > 0.25 * plain[0] && behind < 0.6 * plain[0], "{behind} of {}", plain[0]);
+    }
+
+    /// A viewer's marks (crate::edit): a selected splat is tinted towards the selection's yellow, a hidden or deleted one
+    /// is not drawn (the one behind shows through it), and a new upload starts with nothing marked. On the window's own
+    /// renderer too ([`Gpu::renderer`]), which binds the marks as the training device's viewer does.
+    #[test]
+    fn a_viewer_tints_what_is_selected_and_leaves_out_what_is_hidden() {
+        let Ok(gpu) = Gpu::new() else { return };
+        let mut viewer = Gpu::renderer(gpu.device.clone(), gpu.queue.clone());
+        let cam = Camera::look([0.0; 3], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 1.0, 64, 48);
+        let mut g = Gaussians::default();
+        // Red in front, blue behind it.
+        g.push([0.0, 0.0, 2.0], [(0.2f32).ln(); 3], [1.0, 0.0, 0.0, 0.0], crate::gaussians::logit(0.95), [1.0, 0.0, 0.0]);
+        g.push([0.0, 0.0, 4.0], [(0.5f32).ln(); 3], [1.0, 0.0, 0.0, 0.0], crate::gaussians::logit(0.95), [0.0, 0.0, 1.0]);
+        viewer.upload(&g);
+        let centre = |gpu: &mut Gpu| crate::train::render(gpu, &cam, [0.0; 3]).expect("render")[24 * 64 + 32];
+        let plain = centre(&mut viewer);
+        assert!(plain[0] > 0.8 && plain[2] < 0.1, "red in front: {plain:?}");
+        viewer.set_marks(&[1, 0]);
+        let selected = centre(&mut viewer);
+        assert!(selected[1] > 0.3 && selected[0] > 0.8 && selected[2] < 0.2, "tinted yellow: {selected:?}");
+        for left_out in [2u8, 3] {
+            viewer.set_marks(&[left_out, 0]);
+            let through = centre(&mut viewer);
+            assert!(through[0] < 0.05 && through[2] > 0.8, "the blue one through the {left_out}: {through:?}");
+        }
+        viewer.set_marks(&[2, 2]);
+        assert!(centre(&mut viewer).iter().take(3).all(|c| *c < 0.01), "everything left out: the background");
+        // Marks for fewer splats than uploaded mark only those; a new upload clears them.
+        viewer.set_marks(&[2]);
+        assert!(centre(&mut viewer)[2] > 0.8);
+        viewer.upload(&g);
+        assert!((centre(&mut viewer)[0] - plain[0]).abs() < 1e-4);
     }
 
     /// A viewer's far field fogs a splat beyond the depth frames' reach towards the horizon's colour, or crops it,

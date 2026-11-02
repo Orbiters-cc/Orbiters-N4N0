@@ -99,6 +99,8 @@ pub struct State {
     /// Clean-ups asked and shown as done already ([`Pending`]).
     pending: Pending,
     serial: u64,
+    /// Export… of the open detail's capture ([`super::splat_export`]), over it.
+    export: Option<super::splat_export::Export>,
 }
 
 impl State {
@@ -414,6 +416,11 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     } else if state.detail.is_some() {
         detail(&ctx, cx, state, page);
     }
+    if let Some(e) = state.export.as_mut() {
+        if !e.show(&ctx) {
+            state.export = None;
+        }
+    }
     trim_thumbs(&mut state.thumbs, now);
 }
 
@@ -426,6 +433,11 @@ impl State {
     /// The 3D view open (screenshots stage Edit in 3D in it).
     pub fn viewer_mut(&mut self) -> Option<&mut super::splats::Viewer> {
         self.viewer.as_mut()
+    }
+
+    /// Export's dialog is open (screenshots).
+    pub fn exporting(&self) -> bool {
+        self.export.is_some()
     }
 
     /// The session whose detail is open (screenshots).
@@ -489,7 +501,8 @@ fn trim_thumbs(thumbs: &mut HashMap<PathBuf, Kept>, now: f64) {
 
 /// The reconstruction's preview render as a texture (loaded off the interface thread, at most 960 px wide).
 fn preview(ctx: &egui::Context, d: &mut Detail, s: &SessionSummary) -> Option<TextureHandle> {
-    let key = s.reconstruction.as_ref()?.created_utc.clone();
+    // Read again when a picture is drawn again without the splats its edits removed (splats::pictures).
+    let key = format!("{}#{}", s.reconstruction.as_ref()?.created_utc, super::splats::pictures());
     if d.preview.as_ref().is_none_or(|(k, _)| *k != key) {
         let dir = s.dir.clone();
         let job = Job::spawn(ctx, move || {
@@ -891,9 +904,10 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
     let mut asked = false;
     let mut open_folder = false;
     let mut open_viewer = false;
+    let mut open_export: Option<Rect> = None;
     let serial = state.serial + 1;
     // Escape and clicks outside go to the dialog first, when one asks (this frame closes it, not the detail).
-    let asking = d.trim.is_some();
+    let asking = d.trim.is_some() || state.export.is_some();
 
     // The whole window dims, sidebar and title bar included; a click anywhere but the title bar (which still moves,
     // minimises and closes the window) closes the detail.
@@ -1072,12 +1086,26 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             }
         }
         y += 52.0;
-        let mut send = Button::new("Send to Mixer").icon(icons::SPARKLE).enabled(session.reconstruction.is_some() && job.is_none()).width(side.width());
+        // Send to Mixer, and beside it Export… (what its 3D view shows, as a file for other tools).
+        let ready = session.reconstruction.is_some() && job.is_none();
+        let mut export = Button::new("Export…").icon(icons::UPLOAD_SIMPLE).enabled(ready).id_salt("detail-export");
+        export = export.hint(if session.reconstruction.is_none() {
+            "Reconstruct first: the file holds its splats"
+        } else {
+            "Saves what its 3D view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender"
+        });
+        let export_w = export.desired_width(&cu);
+        let send_r = Rect::from_min_size(pos2(side.left(), y), vec2(side.width() - 8.0 - export_w, 40.0));
+        let export_r = Rect::from_min_max(pos2(send_r.right() + 8.0, y), pos2(side.right(), y + 40.0));
+        let mut send = Button::new("Send to Mixer").icon(icons::SPARKLE).enabled(ready).width(send_r.width());
         if session.reconstruction.is_none() {
             send = send.hint("Reconstruct first: Mixer gets the splats");
         }
-        if send.show_at(&mut cu, full(y)).clicked() {
+        if send.show_at(&mut cu, send_r).clicked() {
             cx.ctl.send_to_mixer(session.dir.clone(), title(&session));
+        }
+        if export.width(export_r.width()).show_at(&mut cu, export_r).clicked() && ready {
+            open_export = Some(export_r);
         }
         y += 52.0;
         let bin = Rect::from_min_size(pos2(side.right() - 40.0, y), vec2(40.0, 40.0));
@@ -1145,6 +1173,9 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
     }
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !asking && !trim {
         close = true;
+    }
+    if let Some(origin) = open_export {
+        state.export = Some(super::splat_export::Export::open(ctx, &session.dir, &title(&session), origin));
     }
     if open_viewer {
         if let Some(gpu) = cx.gpu {

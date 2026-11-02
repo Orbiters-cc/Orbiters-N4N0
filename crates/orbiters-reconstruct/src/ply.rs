@@ -65,7 +65,11 @@ pub fn write(path: &Path, g: &Gaussians) -> anyhow::Result<()> {
 /// Reads a PLY written by [`write`] back into the training parametrisation (Unity world), or one of the reference
 /// layout alone (what the keyframes saw then unknown).
 pub fn read(path: &Path) -> anyhow::Result<Gaussians> {
-    let data = std::fs::read(path)?;
+    parse(&std::fs::read(path)?)
+}
+
+/// [`read`] of a PLY's bytes.
+pub fn parse(data: &[u8]) -> anyhow::Result<Gaussians> {
     let end = data.windows(11).position(|w| w == b"end_header\n").context("no PLY header")? + 11;
     let header = std::str::from_utf8(&data[..end])?;
     let count: usize = header.lines().find_map(|l| l.strip_prefix("element vertex ")).context("no vertex count")?.trim().parse()?;

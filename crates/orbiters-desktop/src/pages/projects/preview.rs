@@ -6,8 +6,10 @@
 //! (the card's shared geometry) where it also zooms and pans; Escape or the × shrinks it back into the card. The
 //! project's UserSettings folder is watched, so a save in Unity shows here as soon as Toolkit wrote it. A project
 //! without one says how to get it, and offers to add or update Orbiters Toolkit when it lacks one that writes them.
+//! A preview that recorded its scene's lights is drawn in them; the window's switch shows it in the studio's light
+//! instead (remembered for every preview).
 
-use super::preview_gpu::{self, Pipelines, Scene, View};
+use super::preview_gpu::{self, LightMode, Pipelines, Scene, View};
 use super::state::{Outcome, State};
 use crate::gpu::Handles;
 use crate::pages::{Cx, Job};
@@ -48,6 +50,61 @@ pub(super) struct Previews {
     opened_at: f64,
     /// Screenshots: the project folder whose previews every project shows; read on the frame (no jobs).
     fixture: Option<PathBuf>,
+    /// Whether previews that recorded their scene's lights are drawn in them (else the studio's): read from
+    /// [`PREFS_FILE`] the first time it is needed.
+    scene_light: Option<bool>,
+    /// Where the window's light switch drew its two halves (scene, studio), for screenshots to press.
+    light_switch: Option<[Rect; 2]>,
+}
+
+/// The person's preview choices, in the config folder.
+const PREFS_FILE: &str = "project-preview.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Prefs {
+    /// Previews that recorded their scene's lights are drawn in them.
+    #[serde(default = "yes")]
+    scene_light: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self { scene_light: true }
+    }
+}
+
+impl Prefs {
+    fn read(path: &Path) -> Self {
+        std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    }
+
+    fn write(&self, path: &Path) -> std::io::Result<()> {
+        orbiters_core::write_atomic(path, &serde_json::to_vec_pretty(self).unwrap_or_default())
+    }
+}
+
+impl Previews {
+    /// Whether previews that recorded their scene's lights are drawn in them (the default), else in the studio's.
+    fn prefer_scene_light(&mut self) -> bool {
+        let fixture = self.fixture.is_some();
+        *self.scene_light.get_or_insert_with(|| fixture || Prefs::read(&orbiters_core::paths::config_dir().join(PREFS_FILE)).scene_light)
+    }
+
+    /// The switch's choice, remembered (not for screenshots).
+    fn set_scene_light(&mut self, on: bool) {
+        self.scene_light = Some(on);
+        if self.fixture.is_none() {
+            let path = orbiters_core::paths::config_dir().join(PREFS_FILE);
+            if let Err(e) = (Prefs { scene_light: on }).write(&path) {
+                eprintln!("project preview: could not remember the light chosen in {}: {e}", path.display());
+            }
+        }
+    }
 }
 
 struct Current {
@@ -397,12 +454,13 @@ fn steer(ctx: &egui::Context, resp: &egui::Response, camera: &mut Camera, rect: 
 }
 
 /// The view `c`'s camera shows now (after this frame's step), and whether it still moves.
-fn frame_view(ctx: &egui::Context, c: &mut Current, dragging: bool, shift: f32) -> (View, bool) {
+fn frame_view(ctx: &egui::Context, c: &mut Current, dragging: bool, shift: f32, prefer_scene_light: bool) -> (View, bool) {
+    let light = c.scene.as_ref().map_or(LightMode::Studio, |s| preview_gpu::light_mode(prefer_scene_light, &s.header));
     let dt = ctx.input(|i| i.stable_dt.clamp(1.0 / 240.0, 0.05));
     let cam = c.camera.as_mut().unwrap();
     let moving = cam.step(dt, dragging);
     let reveal = (anim::since(ctx, c.shown_at, REVEAL_S) / REVEAL_S).clamp(0.0, 1.0) as f32;
-    (View { eye: cam.now.eye(), forward: cam.now.forward(), fov_y: cam.now.fov, shift, reveal }, moving)
+    (View { eye: cam.now.eye(), forward: cam.now.forward(), fov_y: cam.now.fov, shift, reveal, light }, moving)
 }
 
 fn pixels(ctx: &egui::Context, rect: Rect) -> (u32, u32) {
@@ -430,6 +488,7 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
     let mut act: Option<String> = None;
     let window_open = state.preview.window.is_some();
     let pv = &mut state.preview;
+    let scene_light = pv.prefer_scene_light();
     let c = pv.current.as_mut().unwrap();
     let corner = rect.right() - 12.0 - if sheet { 40.0 } else { 0.0 };
     let id = Id::unique(("project-preview-cover", &project.path));
@@ -532,7 +591,7 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
     c.touched |= steer(&ctx, &resp, camera, rect, false);
     let dragging = resp.dragged();
     // Above the title and its shade.
-    let (view, moving) = frame_view(&ctx, c, dragging, 0.1);
+    let (view, moving) = frame_view(&ctx, c, dragging, 0.1, scene_light);
     if moving {
         ctx.request_repaint();
     }
@@ -574,6 +633,8 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     };
     let busy = state.running();
     let pv = &mut state.preview;
+    let scene_light = pv.prefer_scene_light();
+    let mut light_switch = None;
     let Some(morph) = pv.window.as_mut() else { return };
     let Some(c) = pv.current.as_mut().filter(|c| c.scene.is_some()) else {
         pv.window = None;
@@ -608,7 +669,7 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             c.touched |= steer(&ctx, &resp, camera, f.rect, true);
         }
         // Clear of the facts and buttons along the bottom.
-        let (view, moving) = frame_view(&ctx, c, resp.dragged(), 0.07);
+        let (view, moving) = frame_view(&ctx, c, resp.dragged(), 0.07, scene_light);
         if moving {
             ctx.request_repaint();
         }
@@ -625,7 +686,9 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         }
         let header = &c.scene.as_ref().unwrap().header;
         let written = c.entry().map(|e| e.modified);
-        chrome(&mut cu, cx, &project, header, written, &c.entries, c.file.as_ref().map(|f| f.0.clone()), busy, f.rect, &mut act);
+        // The light switch, when the file recorded its scene's lights.
+        let light = header.lighting.is_some().then_some(scene_light);
+        chrome(&mut cu, cx, &project, header, written, &c.entries, c.file.as_ref().map(|f| f.0.clone()), busy, f.rect, light, &mut light_switch, &mut act);
         if viewer::close_button(&mut cu, f.rect, "Close") {
             close = true;
         }
@@ -649,7 +712,12 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if !closing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !orbiters_ui::popup::any_open(&ctx) {
         close = true;
     }
+    pv.light_switch = light_switch;
     match act {
+        Some(WindowAct::SceneLight(on)) => {
+            state.preview.set_scene_light(on);
+            ctx.request_repaint();
+        }
         Some(WindowAct::Scene(path)) => {
             c.chosen = Some(path);
         }
@@ -676,6 +744,8 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
 enum WindowAct {
     Scene(PathBuf),
+    /// The scene's light (true) or the studio's.
+    SceneLight(bool),
     Reset,
     Open,
 }
@@ -692,9 +762,48 @@ fn chrome(
     shown: Option<PathBuf>,
     busy: bool,
     rect: Rect,
+    light: Option<bool>,
+    light_switch: &mut Option<[Rect; 2]>,
     act: &mut Option<WindowAct>,
 ) {
     let p = ui.painter().clone();
+    // The light it is drawn in, top right beside the close button: the scene's own, or the studio's.
+    if let Some(scene_light) = light {
+        let labels = [(true, icons::LIGHTBULB, "Scene light"), (false, icons::SUN, "Studio light")];
+        let txts = labels.map(|(on, _, l)| Txt::new(l, 12.5).weight(if on == scene_light { weight::SEMIBOLD } else { weight::MEDIUM }));
+        let widths = txts.each_ref().map(|t| widgets::text_size(ui, t).x + 50.0);
+        let close = viewer::close_rect(rect);
+        let row =
+            Rect::from_min_size(pos2(close.left() - 10.0 - widths[0] - widths[1] - 8.0, close.center().y - 19.0), vec2(widths[0] + widths[1] + 8.0, 38.0));
+        paint::fill_squircle(&p, row, theme::squircle(19.0), theme::black(0.5));
+        let mut sx = row.left() + 4.0;
+        let mut rects = [Rect::NOTHING; 2];
+        for (i, ((on, glyph, label), txt)) in labels.into_iter().zip(txts).enumerate() {
+            let r = Rect::from_min_size(pos2(sx, row.top() + 4.0), vec2(widths[i], 30.0));
+            rects[i] = r;
+            let chosen = on == scene_light;
+            let resp = ui.interact(r, Id::unique(("preview-light", i)), Sense::click());
+            let k = anim::toggle(ui.ctx(), Id::unique(("preview-light-on", i)), chosen, Spring::SNAPPY);
+            let hk = anim::toggle(ui.ctx(), Id::unique(("preview-light-hover", i)), resp.hovered(), Spring::SNAPPY);
+            if k > 0.01 || hk > 0.01 {
+                p.rect_filled(r, theme::radius(15.0), theme::white(0.13 * k + 0.05 * hk * (1.0 - k)));
+            }
+            let fg = theme::mix(theme::FG_2, theme::FG, k);
+            widgets::icon(&p, pos2(r.left() + 19.0, r.center().y), glyph, 13.0, theme::mix(theme::FG_3, theme::ACCENT, k));
+            widgets::text(&p, pos2(r.left() + 31.0, r.center().y), Align2::LEFT_CENTER, &txt.color(fg));
+            let tip = if on {
+                "The lights the scene has in Unity: its directional lights and ambient light"
+            } else {
+                "The same studio light for every preview, as bright as a new Unity scene"
+            };
+            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip);
+            if widgets::activated(&resp) && !chosen {
+                *act = Some(WindowAct::SceneLight(label == "Scene light"));
+            }
+            sx = r.right();
+        }
+        *light_switch = Some(rects);
+    }
     // Title, over a dark chip so it reads over any scene.
     let scene_name = if h.scene.name.is_empty() { project.name.clone() } else { h.scene.name.clone() };
     let saved = written
@@ -853,6 +962,8 @@ impl State {
             }
         }
         self.preview.fixture = Some(dir);
+        // Screenshots start from the default (the scene's light), whatever this machine remembers.
+        self.preview.scene_light = Some(true);
         if name == "projects-preview-old-toolkit" {
             // A world project's Toolkit before previews (Enzo's had 0.4.8), the repositories offering a newer one.
             for p in self.view.packages.iter_mut().filter(|p| p.name == "orbiters.toolkit") {
@@ -871,12 +982,46 @@ impl State {
         use super::state::Poke;
         let at = |key: &str| self.anchors.get(key).map(|r| r.center());
         match (name, frame) {
-            ("projects-preview-open" | "projects-preview-open-mid" | "projects-preview-scenes", 90) => at("preview-cover").map(Poke::Press),
+            (
+                "projects-preview-open"
+                | "projects-preview-open-mid"
+                | "projects-preview-scenes"
+                | "projects-preview-close"
+                | "projects-preview-back"
+                | "projects-preview-scene-light"
+                | "projects-preview-studio-light",
+                90,
+            ) => at("preview-cover").map(Poke::Press),
+            ("projects-preview-studio-light", 150) => self.preview.light_switch.map(|r| Poke::Press(r[1].center())),
+            ("projects-preview-close" | "projects-preview-back", 140) => {
+                self.preview.frame_for_screenshot(name == "projects-preview-close");
+                None
+            }
             ("projects-preview-turned", 100) => at("preview-cover").map(Poke::Hold),
             ("projects-preview-turned", 101..=112) => at("preview-cover").map(|p| Poke::Hover(p + vec2(9.0 * (frame - 100) as f32, 0.0))),
             ("projects-preview-sheet", 30) => at("card-0").map(Poke::Press),
             _ => None,
         }
+    }
+}
+
+impl Previews {
+    /// Screenshots: the shown preview's camera on the upper half of the subject from close by (`close`), else on its
+    /// back, at once.
+    pub(super) fn frame_for_screenshot(&mut self, close: bool) {
+        let Some(c) = self.current.as_mut() else { return };
+        let Some(cam) = c.camera.as_mut() else { return };
+        let mut o = cam.home;
+        if close {
+            o.distance *= 0.45;
+            o.pivot[1] += cam.radius * 0.28;
+            o.pitch = -0.08;
+        } else {
+            o.yaw += std::f32::consts::PI;
+        }
+        cam.goal = o;
+        cam.now = o;
+        cam.spin = [0.0; 2];
     }
 }
 
@@ -935,23 +1080,22 @@ fn stand_in_scene(scene: &str) -> Vec<u8> {
         enc.set_depth(png::BitDepth::Eight);
         enc.write_header().unwrap().write_image_data(&rgb).unwrap();
     }
-    let texture = Texture { width: tw, height: th, format: ImageFormat::Png, data: w.push(&png_bytes) };
+    let texture = Texture { width: tw, height: th, format: ImageFormat::Png, linear: false, data: w.push(&png_bytes) };
+    // Each look once: a glossy sphere, a matte plinth, a glowing ring, a toon cube and a metal one.
     let mat = |name: &str, color: [f32; 4], texture: i32| Material {
         name: name.into(),
         color,
         texture,
-        tiling: [1.0, 1.0],
-        offset: [0.0, 0.0],
-        alpha: Alpha::Opaque,
-        cutoff: 0.5,
         cull: Cull::Back,
+        alpha: Alpha::Opaque,
+        ..Default::default()
     };
     let materials = vec![
-        mat("Sphere", [1.0, 1.0, 1.0, 1.0], 0),
-        mat("Plinth", [0.36, 0.36, 0.40, 1.0], -1),
-        mat("Ring", [0.0, 0.85, 0.43, 1.0], -1),
-        mat("Cube", [0.86, 0.55, 0.33, 1.0], -1),
-        mat("Cube 2", [0.42, 0.52, 0.92, 1.0], -1),
+        Material { smoothness: 0.75, ..mat("Sphere", [1.0, 1.0, 1.0, 1.0], 0) },
+        Material { smoothness: 0.1, ..mat("Plinth", [0.36, 0.36, 0.40, 1.0], -1) },
+        Material { shading: file::Shading::Unlit, emission: [0.0, 0.35, 0.08], ..mat("Ring", [0.0, 0.85, 0.43, 1.0], -1) },
+        Material { shading: file::Shading::Toon, shade: [0.62, 0.55, 0.72], ..mat("Cube", [0.86, 0.55, 0.33, 1.0], -1) },
+        Material { metallic: 1.0, smoothness: 0.7, ..mat("Cube 2", [0.42, 0.52, 0.92, 1.0], -1) },
     ];
     let trs = |t: [f32; 3], yaw: f32, tilt: f32| -> [f32; 16] {
         let (sy, cy) = yaw.sin_cos();
@@ -987,6 +1131,20 @@ fn stand_in_scene(scene: &str) -> Vec<u8> {
         meshes,
         instances: Instances { count: instances.len() as u32, matrices },
         draws,
+        // Its scene's light: a low warm sun from the right casting shadows, a cool light from behind, a dusky sky.
+        lighting: Some(file::Lighting {
+            lights: vec![
+                file::SceneLight { direction: [-0.8, -0.45, 0.4], color: [1.25, 0.82, 0.52], intensity: 1.25, shadows: true, shadow_strength: 0.9 },
+                file::SceneLight { direction: [0.2, -0.3, -0.93], color: [0.18, 0.3, 0.6], intensity: 0.6, shadows: false, shadow_strength: 1.0 },
+            ],
+            ambient: Some(file::Ambient {
+                mode: file::AmbientMode::Trilight,
+                sky: [0.16, 0.13, 0.24],
+                equator: [0.12, 0.09, 0.13],
+                ground: [0.05, 0.04, 0.04],
+            }),
+            reflection_intensity: 1.0,
+        }),
         stats: file::Stats { renderers: 5, triangles: 24_576, vertices: 14_000, skipped: Default::default() },
         cost: None,
     };
@@ -1099,6 +1257,22 @@ fn cuboid(s: f32) -> Geometry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_light_chosen_is_remembered_and_the_scenes_is_the_default() {
+        let dir = std::env::temp_dir().join(format!("orbiters-preview-prefs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PREFS_FILE);
+        assert!(Prefs::read(&path).scene_light, "nothing remembered yet: the scene's light");
+        Prefs { scene_light: false }.write(&path).unwrap();
+        assert!(!Prefs::read(&path).scene_light);
+        std::fs::write(&path, b"{}").unwrap();
+        assert!(Prefs::read(&path).scene_light, "a file without the choice");
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(Prefs::read(&path).scene_light, "an unreadable file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_stand_in_reads_back() {

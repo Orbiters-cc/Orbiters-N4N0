@@ -2,7 +2,9 @@
 //! Quest and the top of that one, which a world shows while the full file downloads. Each depth of merged boxes is
 //! tuned on the GPU to look like the leaves it stands in for: from the session's recorded cameras, at the resolution
 //! where that depth is drawn instead of them (the leaves' render there is the target, so a session whose keyframes
-//! are gone tunes all the same).
+//! are gone tunes all the same). Both are as the file stores them (crate::tree_file: positions in steps of each box's
+//! bounds, half-float scales, the rotation's smallest three components, colour bytes): the target is what a world
+//! draws up close, and a depth keeps its tuning only when what the file will hold of it scores better.
 
 use crate::camera::Camera;
 use crate::gaussians::Gaussians;
@@ -13,12 +15,13 @@ use orbiters_core::contracts::frame_record::record_flags;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Splats in the PC file at most (64 MB): with Quest's, the coarse one and a sky map, an upload stays under the
-/// Cloudflare limit of 100 MB in front of Orbiters (contracts' Docs/splat-tree.md).
+/// Splats in the PC file at most (41.9 MB of 20-byte records; version 1's 32 bytes made it 67.1): with Quest's, the
+/// coarse one and a sky map, an upload stays under the Cloudflare limit of 100 MB in front of Orbiters (contracts'
+/// Docs/splat-tree.md). Smaller records leave the cap as it was: the world's sort and blending cost the same a splat.
 pub const PC_SPLATS: usize = 1 << 21;
-/// In the Quest file at most (16 MB): what a Quest decodes and sorts smoothly.
+/// In the Quest file at most (10.5 MB): what a Quest decodes and sorts smoothly.
 pub const QUEST_SPLATS: usize = 1 << 19;
-/// In the coarse file at most (1.5 MB).
+/// In the coarse file at most (about 1 MB).
 pub const COARSE_SPLATS: usize = 49_152;
 /// Training steps per depth of merged boxes.
 const STEPS: u32 = 400;
@@ -171,7 +174,8 @@ fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, 
     let centre = cameras.iter().fold([0.0f32; 3], |a, c| [0, 1, 2].map(|k| a[k] + c.position()[k] / cameras.len() as f32));
     let extent = cameras.iter().map(|c| (0..3).map(|k| (c.position()[k] - centre[k]).powi(2)).sum::<f32>().sqrt()).fold(1.0f32, f32::max);
     let lr = LearningRates { means: 1.6e-5 * extent, log_scales: 0.005, rotations: 0.001, opacity: 0.025, colors: 0.0025 };
-    let leaves = tree.leaf_splats();
+    // The leaves as the file stores them: what a world draws where a merged depth stands in for them.
+    let leaves = tree.select_stored(|n| n.leaf);
     let mut depths: Vec<u32> = tree.nodes.iter().filter(|n| !n.leaf).map(|n| n.depth).collect();
     depths.sort_unstable();
     depths.dedup();
@@ -209,7 +213,8 @@ fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, 
             })
             .collect::<anyhow::Result<_>>()?;
         drop(_target_time);
-        let cut = tree.select(|n| n.depth == depth || (n.leaf && n.depth < depth));
+        // As the file stores it: the tuning starts from what a world would draw, and `before` scores that.
+        let cut = tree.select_stored(|n| n.depth == depth || (n.leaf && n.depth < depth));
         // Where each tuned box's splats sit in the cut (it keeps the tree's box order).
         let mut at = Vec::with_capacity(tuned.len());
         let mut offset = 0usize;
@@ -236,6 +241,22 @@ fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, 
             let target = Target::Color { rgba: &targets[j], scene_pixels: (v.width * v.height) as f32, weight: 1.0, ssim: 0.2, robust: 0.0 };
             gpu.step(v, [0.0; 3], target, Some(lr))?;
         }
+        // What the file will hold of the tuned boxes: their trained splats (a splat whose training went non-finite keeps
+        // its own), rounded box by box as it stores them (the rest of the cut stays as it started).
+        let trained = gpu.download_params()?;
+        let mut tuned_cut = cut.clone();
+        for &(from, to, count) in &at {
+            for k in 0..count {
+                let (source, i) = if trained.is_finite(from + k) { (&trained, from + k) } else { (&tree.splats, to + k) };
+                tuned_cut.means[from + k] = source.means[i];
+                tuned_cut.log_scales[from + k] = source.log_scales[i];
+                tuned_cut.rotations[from + k] = source.rotations[i];
+                tuned_cut.opacity_logits[from + k] = source.opacity_logits[i];
+                tuned_cut.colors[from + k] = source.colors[i];
+            }
+            crate::tree_file::round_box(&mut tuned_cut, from..from + count);
+        }
+        gpu.upload(&tuned_cut);
         let after = mean_score(gpu)?;
         drop(_step_time);
         eprintln!("tree depth {depth}: {} boxes, PSNR against the leaves {before:.6} → {after:.6} dB", tuned.len());
@@ -250,7 +271,6 @@ fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, 
             progress((done + 1) as f32 / depths.len() as f32);
             continue;
         }
-        let trained = gpu.download_params()?;
         for (from, to, count) in at {
             for k in 0..count {
                 if trained.is_finite(from + k) {
@@ -290,32 +310,7 @@ mod tests {
     #[ignore]
     fn serialized_upload_quality() {
         fn read(path: &Path) -> Tree {
-            let bytes = std::fs::read(path).unwrap();
-            let u = |at| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-            let f = |at| f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-            assert_eq!(&bytes[..8], tree::MAGIC);
-            assert_eq!(u(8), tree::VERSION);
-            let count = u(12) as usize;
-            let mut nodes: Vec<tree::Node> = Vec::new();
-            for i in 0..count {
-                let at = (i + 1) * 32;
-                let parent = (u(at + 20) != u32::MAX).then(|| u(at + 20));
-                let depth = parent.map_or(0, |p| nodes[p as usize].depth + 1);
-                nodes.push(tree::Node {
-                    center: [f(at), f(at + 4), -f(at + 8)],
-                    radius: f(at + 12),
-                    error: f(at + 16),
-                    parent,
-                    depth,
-                    start: u(at + 24),
-                    count: u(at + 28),
-                    leaf: true,
-                });
-                if let Some(parent) = parent {
-                    nodes[parent as usize].leaf = false;
-                }
-            }
-            Tree { nodes, splats: crate::web::read_splat(&bytes[(1 + count) * 32..]).unwrap() }
+            Tree::parse(&std::fs::read(path).unwrap()).unwrap()
         }
         let base = std::path::PathBuf::from(std::env::var_os("ORBITERS_PREP_BASE").unwrap());
         let repeat = std::env::var_os("ORBITERS_PREP_BASE_REPEAT").map(std::path::PathBuf::from);

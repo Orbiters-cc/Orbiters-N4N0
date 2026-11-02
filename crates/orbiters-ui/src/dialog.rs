@@ -42,6 +42,7 @@ pub struct Dialog<'a> {
     footer: bool,
     busy: bool,
     origin_fill: egui::Color32,
+    order: Order,
 }
 
 fn closing_id(id: Id) -> Id {
@@ -79,7 +80,7 @@ const BODY_ROOM: i8 = 6;
 impl<'a> Dialog<'a> {
     /// A dialog `id` titled `title` that grows out of `origin`.
     pub fn new(id: Id, origin: Rect, title: &'a str) -> Self {
-        Self { id, origin, width: 640.0, glyph: None, title, subtitle: None, footer: false, busy: false, origin_fill: theme::surface_strong() }
+        Self { id, origin, width: 640.0, glyph: None, title, subtitle: None, footer: false, busy: false, origin_fill: theme::surface_strong(), order: Order::Foreground }
     }
 
     /// The colour of what it grows out of (a green button, a card), which it turns from into its own.
@@ -113,6 +114,13 @@ impl<'a> Dialog<'a> {
     /// Something runs that it shows: a click beside it or Escape does not close it (its × still does).
     pub fn busy(mut self, b: bool) -> Self {
         self.busy = b;
+        self
+    }
+
+    /// The layer it is drawn in (the foreground, by default): one opened from what is drawn above it (a 3D view shown in
+    /// the tooltip layer) goes there too, and is drawn over it as the newer area.
+    pub fn order(mut self, order: Order) -> Self {
+        self.order = order;
         self
     }
 
@@ -161,7 +169,7 @@ impl<'a> Dialog<'a> {
         let solid = morph::shape_alpha_by(t, morph::HANDOVER_LATE);
         // egui fades new areas in: this one grows out of its origin instead. While it closes, the page under it takes
         // presses again (its button reopens it).
-        egui::Area::new(id.with("dialog-area")).order(Order::Foreground).fixed_pos(screen.min).fade_in(false).interactable(!closing).show(ctx, |ui| {
+        egui::Area::new(id.with("dialog-area")).order(self.order).fixed_pos(screen.min).fade_in(false).interactable(!closing).show(ctx, |ui| {
             ui.set_min_size(screen.size());
             let scrim = ui.interact(screen, id.with("scrim"), Sense::click());
             ui.painter().rect_filled(screen, 0.0, theme::black(0.55 * morph::smoothstep(0.08, 0.5, t)));

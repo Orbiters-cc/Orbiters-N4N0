@@ -14,7 +14,11 @@ pub const EXTENSION: &str = "preview";
 pub const MAGIC: &[u8; 8] = b"N4N0PRV\0";
 /// The start of previews written before Orbiters Toolkit 0.4.11 (same layout): still read.
 const LEGACY_MAGIC: &[u8; 8] = b"ORBPREV\0";
-pub const SCHEMA: u32 = 1;
+/// The schema written: 2 added the materials' look (shading, metallic, smoothness, normal, surface and emission maps)
+/// and linear pictures.
+pub const SCHEMA: u32 = 2;
+/// The oldest schema still read (its materials draw with the defaults of the fields 2 added).
+pub const OLDEST_SCHEMA: u32 = 1;
 /// Position (3 × f32), octahedral normal (2 × snorm16), UV (2 × f16).
 pub const VERTEX_SIZE: usize = 20;
 const START: usize = 16;
@@ -110,6 +114,9 @@ pub struct Texture {
     pub width: u32,
     pub height: u32,
     pub format: ImageFormat,
+    /// Data stored as they are (a normal or metallic-smoothness picture), not sRGB colours.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linear: bool,
     pub data: Blob,
 }
 
@@ -131,7 +138,23 @@ pub enum Cull {
     Off,
 }
 
+/// How a material takes the light (schema 2; a schema 1 material is `Lit`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Shading {
+    /// Unity's Standard: Lambert and a GGX highlight by metallic and smoothness.
+    #[default]
+    Lit,
+    /// Two bands, the shadowed one tinted by `shade`.
+    Toon,
+    /// Lit evenly whichever way it faces.
+    Flat,
+    /// The colour as it is.
+    Unlit,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Material {
     #[serde(default)]
     pub name: String,
@@ -151,6 +174,73 @@ pub struct Material {
     pub cutoff: f32,
     #[serde(default)]
     pub cull: Cull,
+    #[serde(default)]
+    pub shading: Shading,
+    /// Linear, as the shader computes with it; times `surface_texture`'s R.
+    #[serde(default)]
+    pub metallic: f32,
+    /// Perceptual (Unity's slider); times `surface_texture`'s G. Missing (schema 1): a little, most avatars are matte.
+    #[serde(default = "default_smoothness")]
+    pub smoothness: f32,
+    /// A linear picture: R metallic, G smoothness; or -1.
+    #[serde(default = "none")]
+    pub surface_texture: i32,
+    /// A linear tangent-space normal picture, or -1.
+    #[serde(default = "none")]
+    pub normal_texture: i32,
+    #[serde(default = "one")]
+    pub normal_scale: f32,
+    /// Linear RGB, HDR.
+    #[serde(default)]
+    pub emission: [f32; 3],
+    #[serde(default = "none")]
+    pub emission_texture: i32,
+    /// Toon: the shadowed band's tint (linear RGB, multiplied), where it starts on the half-Lambert term, how soft.
+    #[serde(default = "default_shade")]
+    pub shade: [f32; 3],
+    #[serde(default = "half")]
+    pub shade_border: f32,
+    #[serde(default = "default_blur")]
+    pub shade_blur: f32,
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            color: white(),
+            texture: -1,
+            tiling: ones(),
+            offset: [0.0; 2],
+            alpha: Alpha::Opaque,
+            cutoff: 0.5,
+            cull: Cull::Back,
+            shading: Shading::Lit,
+            metallic: 0.0,
+            smoothness: default_smoothness(),
+            surface_texture: -1,
+            normal_texture: -1,
+            normal_scale: 1.0,
+            emission: [0.0; 3],
+            emission_texture: -1,
+            shade: default_shade(),
+            shade_border: 0.5,
+            shade_blur: default_blur(),
+        }
+    }
+}
+
+fn default_smoothness() -> f32 {
+    0.2
+}
+fn default_shade() -> [f32; 3] {
+    [0.7; 3]
+}
+fn default_blur() -> f32 {
+    0.1
+}
+fn one() -> f32 {
+    1.0
 }
 
 fn white() -> [f32; 4] {
@@ -164,6 +254,54 @@ fn ones() -> [f32; 2] {
 }
 fn half() -> f32 {
     0.5
+}
+
+/// A directional light of the scene.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneLight {
+    /// The way the light travels (world space).
+    pub direction: [f32; 3],
+    /// Linear RGB as shaders receive it, the intensity included.
+    pub color: [f32; 3],
+    #[serde(default = "one")]
+    pub intensity: f32,
+    #[serde(default)]
+    pub shadows: bool,
+    #[serde(default = "one")]
+    pub shadow_strength: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AmbientMode {
+    #[default]
+    Skybox,
+    Trilight,
+    Flat,
+}
+
+/// The scene's ambient light as shaders receive it (linear RGB): facing up, round the horizon, facing down.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Ambient {
+    #[serde(default)]
+    pub mode: AmbientMode,
+    pub sky: [f32; 3],
+    pub equator: [f32; 3],
+    pub ground: [f32; 3],
+}
+
+/// The light the scene gives shaders in Unity (optional within schema 2; previews without it are drawn in the
+/// desktop's studio light).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Lighting {
+    #[serde(default)]
+    pub lights: Vec<SceneLight>,
+    #[serde(default)]
+    pub ambient: Option<Ambient>,
+    #[serde(default = "one")]
+    pub reflection_intensity: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,6 +418,8 @@ pub struct Header {
     pub instances: Instances,
     #[serde(default)]
     pub draws: Vec<Draw>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lighting: Option<Lighting>,
     #[serde(default)]
     pub stats: Stats,
     #[serde(default)]
@@ -330,7 +470,7 @@ pub fn parse(bytes: Vec<u8>) -> anyhow::Result<Preview> {
 fn parse_header(bytes: &[u8]) -> anyhow::Result<(Header, usize)> {
     ensure!(bytes.len() >= START && (&bytes[..8] == MAGIC || &bytes[..8] == LEGACY_MAGIC), "not an Orbiters project preview");
     let schema = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-    ensure!(schema == SCHEMA, "a project preview of schema {schema}, this version reads {SCHEMA}");
+    ensure!((OLDEST_SCHEMA..=SCHEMA).contains(&schema), "a project preview of schema {schema}, this version reads {OLDEST_SCHEMA} to {SCHEMA}");
     let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
     ensure!(START + len <= bytes.len(), "the preview's header runs past its end");
     let header: Header = serde_json::from_slice(&bytes[START..START + len]).context("the preview's header")?;
@@ -366,7 +506,9 @@ fn check(p: &Preview) -> anyhow::Result<()> {
         ensure!(d.materials.iter().all(|&m| m < h.materials.len() as i32), "a draw of a material the preview does not have");
     }
     for (i, m) in h.materials.iter().enumerate() {
-        ensure!(m.texture < h.textures.len() as i32, "material {i} uses a texture the preview does not have");
+        for t in [m.texture, m.surface_texture, m.normal_texture, m.emission_texture] {
+            ensure!(t < h.textures.len() as i32, "material {i} uses a texture the preview does not have");
+        }
     }
     Ok(())
 }
@@ -600,12 +742,11 @@ mod tests {
             materials: vec![Material {
                 name: "M".into(),
                 color: [1.0, 0.5, 0.25, 1.0],
-                texture: -1,
-                tiling: [1.0; 2],
-                offset: [0.0; 2],
-                alpha: Alpha::Opaque,
-                cutoff: 0.5,
-                cull: Cull::Back,
+                shading: Shading::Toon,
+                metallic: 0.25,
+                smoothness: 0.5,
+                emission: [2.0, 0.0, 0.0],
+                ..Default::default()
             }],
             meshes: vec![Mesh { vertices: 3, data, index_format: IndexFormat::U16, indices, submeshes: vec![Submesh { start: 0, count: 3 }], bounds: b }],
             instances: Instances { count: 1, matrices },
@@ -623,6 +764,69 @@ mod tests {
         assert_eq!(p.blob(p.header.meshes[0].data).len(), 60);
         assert_eq!(p.matrix(0)[12], 0.5);
         assert_eq!(p.header.materials[0].color, [1.0, 0.5, 0.25, 1.0]);
+        let m = &p.header.materials[0];
+        assert_eq!((m.shading, m.metallic, m.smoothness, m.emission), (Shading::Toon, 0.25, 0.5, [2.0, 0.0, 0.0]));
+    }
+
+    /// The same file with another header (the blobs kept), at `schema`.
+    fn rewritten(bytes: &[u8], schema: u32, edit: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+        let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        let mut header: serde_json::Value = serde_json::from_slice(&bytes[START..START + json_len]).unwrap();
+        edit(&mut header);
+        let json = serde_json::to_vec(&header).unwrap();
+        let mut out = MAGIC.to_vec();
+        out.extend_from_slice(&schema.to_le_bytes());
+        out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        out.extend_from_slice(&json);
+        out.resize(align(out.len()), 0);
+        out.extend_from_slice(&bytes[align(START + json_len)..]);
+        out
+    }
+
+    /// A file Toolkit 0.4.10 to 0.4.12 wrote: schema 1, materials without their look, which draw lit and nearly matte.
+    #[test]
+    fn schema_1_previews_read_with_the_looks_defaults() {
+        let old = rewritten(&triangle_scene(), 1, |h| {
+            let m = h["materials"][0].as_object_mut().unwrap();
+            m.retain(|k, _| ["name", "color", "texture", "tiling", "offset", "alpha", "cutoff", "cull"].contains(&k.as_str()));
+        });
+        let p = parse(old).unwrap();
+        let m = &p.header.materials[0];
+        assert_eq!((m.shading, m.metallic, m.smoothness), (Shading::Lit, 0.0, 0.2));
+        assert_eq!((m.surface_texture, m.normal_texture, m.emission_texture, m.normal_scale), (-1, -1, -1, 1.0));
+        assert_eq!(m.emission, [0.0; 3]);
+    }
+
+    #[test]
+    fn the_scenes_lighting_reads_back_and_is_optional() {
+        // Without it (Toolkit 0.4.14 and older): none.
+        assert_eq!(parse(triangle_scene()).unwrap().header.lighting, None);
+        let lit = rewritten(&triangle_scene(), SCHEMA, |h| {
+            h["lighting"] = serde_json::json!({
+                "lights": [{ "direction": [0.19, -0.88, -0.44], "color": [1.0, 0.91, 0.67], "shadows": true }],
+                "ambient": { "mode": "trilight", "sky": [0.2, 0.3, 0.4], "equator": [0.1, 0.1, 0.1], "ground": [0.0, 0.0, 0.0] },
+                "somethingNewer": 1
+            });
+        });
+        let l = parse(lit).unwrap().header.lighting.unwrap();
+        assert_eq!(l.lights.len(), 1);
+        let k = l.lights[0];
+        assert_eq!((k.direction, k.color, k.intensity, k.shadows, k.shadow_strength), ([0.19, -0.88, -0.44], [1.0, 0.91, 0.67], 1.0, true, 1.0));
+        let a = l.ambient.unwrap();
+        assert_eq!((a.mode, a.sky, a.ground), (AmbientMode::Trilight, [0.2, 0.3, 0.4], [0.0; 3]));
+        assert_eq!(l.reflection_intensity, 1.0);
+        // A scene without directional lights and an ambient probe never computed.
+        let dark = rewritten(&triangle_scene(), SCHEMA, |h| h["lighting"] = serde_json::json!({ "lights": [], "ambient": null }));
+        let l = parse(dark).unwrap().header.lighting.unwrap();
+        assert!(l.lights.is_empty() && l.ambient.is_none());
+    }
+
+    #[test]
+    fn a_material_pointing_past_the_textures_is_refused() {
+        let bad = rewritten(&triangle_scene(), SCHEMA, |h| h["materials"][0]["normalTexture"] = 3.into());
+        assert!(parse(bad).is_err());
+        let fine = rewritten(&triangle_scene(), SCHEMA, |h| h["materials"][0]["normalTexture"] = (-1).into());
+        assert!(parse(fine).is_ok());
     }
 
     #[test]
@@ -631,8 +835,11 @@ mod tests {
         bytes[0] = b'X';
         assert!(parse(bytes).is_err(), "magic");
         let mut bytes = triangle_scene();
-        bytes[8] = 2;
+        bytes[8] = SCHEMA as u8 + 1;
         assert!(parse(bytes).is_err(), "schema");
+        let mut bytes = triangle_scene();
+        bytes[8] = 0;
+        assert!(parse(bytes).is_err(), "schema 0");
         let mut bytes = triangle_scene();
         bytes.truncate(bytes.len() - 70);
         assert!(parse(bytes).is_err(), "a blob past the end");

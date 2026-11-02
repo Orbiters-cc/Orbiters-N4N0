@@ -294,7 +294,7 @@ pub mod vr_audio;
 mod world_captures;
 mod world_feedback;
 pub use account::open_url;
-pub(crate) use maps::prepare as prepare_upload;
+pub(crate) use maps::{prepare as prepare_upload, Prepared};
 
 impl Controller {
     pub fn new(settings: Settings) -> Shared {
@@ -1533,14 +1533,21 @@ impl Controller {
         let Some(editor) = editors.first() else {
             anyhow::bail!("Open your Unity project with Mixer to send the splats to it.");
         };
-        crate::mixer_inbox::send_splats(editor, &dir, &title)?;
+        // Mixer reads the PLY itself: an edited capture goes as a copy holding only the splats its 3D view keeps.
+        let sent = crate::mixer_inbox::session_for_mixer(&dir, &crate::mixer_inbox::exports_dir())?;
+        crate::mixer_inbox::send_splats(editor, &sent, &title)?;
         let project = if editor.project_name.is_empty() { "Unity".to_string() } else { editor.project_name.clone() };
-        self.notify(NoticeKind::Success, format!("Sent to Mixer in {project}: the splats appear in its open scene."));
+        let without = if sent != dir { ", without the splats hidden or deleted in its 3D view" } else { "" };
+        self.notify(NoticeKind::Success, format!("Sent to Mixer in {project}{without}: the splats appear in its open scene."));
         Ok(())
     }
 
     /// Trains splats from a session: now when nothing runs and nothing records, else once its turn comes.
     pub fn reconstruct(self: &Shared, dir: PathBuf) -> anyhow::Result<()> {
+        // Splat edits name splats of the result they were made on: the new result replaces them with it.
+        if orbiters_core::reconstruction::result_dir(&dir).join(orbiters_core::reconstruction::EDIT_FILE).is_file() {
+            self.notify(NoticeKind::Warning, "The splats hidden or deleted in its 3D view come back with the new reconstruction: select them again there.".to_string());
+        }
         if self.queue_reconstruction(dir)? {
             self.notify(NoticeKind::Info, format!("Waiting its turn: the reconstruction starts {}.", self.reconstruction_waits_for()));
         }

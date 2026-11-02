@@ -301,6 +301,8 @@ fn session_entry(s: &SessionSummary, world: &str, world_name: &str, remote: Opti
         picture: None,
         size: None,
         layers: Vec::new(),
+        edits: None,
+        uploaded_edits: None,
     }
 }
 
@@ -402,7 +404,13 @@ fn status(
             } else {
                 ("captured", None)
             };
-            let preview = [dir.join("reconstruction").join("preview.qoi"), dir.join("thumbnail.qoi")].into_iter().find(|p| p.is_file());
+            // With splat edits, only a picture drawn for them (orbiters_reconstruct::edit::picture_state): never the
+            // preview as trained nor the recording's thumbnail of what they removed.
+            let picture = orbiters_reconstruct::edit::picture_state(&orbiters_core::reconstruction::result_dir(dir));
+            let preview = [(dir.join("reconstruction").join("preview.qoi"), picture.preview_ok()), (dir.join("thumbnail.qoi"), picture.thumbnail_ok())]
+                .into_iter()
+                .find(|(p, ok)| *ok && p.is_file())
+                .map(|(p, _)| p);
             let shared = uploads.iter().find(|(p, _)| same_path(p, dir)).map(|(_, item)| Upload {
                 id: item.id,
                 public: item.public,

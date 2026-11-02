@@ -34,8 +34,9 @@ fn pixel_grad(px: ptr<function, Pixel>, pix: vec2<f32>, dp: vec4<f32>, live: boo
     if (out.hit) {
         let tb = (*px).t / (1.0 - alpha);
         let w = alpha * tb;
-        out.g2 = dp * w;
-        let d_alpha = dot(dp.xyz, col - (*px).acc_c) * tb + dp.w * (bb.z - (*px).acc_d) * tb;
+        let st = stat_grads(dp, w, bb.z);
+        out.g2 = st.g2;
+        let d_alpha = dot(st.dc, col - (*px).acc_c) * tb + st.dz * (bb.z - (*px).acc_d) * tb;
         (*px).acc_c = alpha * col + (1.0 - alpha) * (*px).acc_c;
         (*px).acc_d = alpha * bb.z + (1.0 - alpha) * (*px).acc_d;
         (*px).t = tb;

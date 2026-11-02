@@ -22,7 +22,8 @@ struct Frame {
     // (cpu::FILTER_2D at the training resolution; renders on the depth-sample grid scale it to keep the same
     // footprint).
     reg: vec4<f32>,
-    // A viewer's confidence control (crate::gpu::Confidence): amount (0 to 1), mode (0 fade, 1 blur, 2 haze), unused.
+    // A viewer's confidence control (crate::gpu::Confidence): amount (0 to 1), mode (0 fade, 1 blur, 2 haze); in a
+    // training step, the birth statistics it records (`stats_mode`); unused.
     confidence: vec4<f32>,
     // A viewer's far field (crate::gpu::FarField): mode (0 shown, 1 fog, 2 crop), distance (metres), unused; the
     // horizon's colour (rgb).
@@ -80,6 +81,17 @@ const GRAD2D: u32 = 10u;
 // Linear invocation index of a (possibly two-dimensional) dispatch of 256-wide workgroups.
 fn flat_index(gid: vec3<u32>, nwg: vec3<u32>) -> u32 {
     return gid.x + gid.y * nwg.x * 256u;
+}
+
+// The birth statistics a training step records for relocation (crate::gpu::Gpu::birth_stats, crate::train::Sources):
+// 0 none; 1 a colour step, whose d_pixel.w holds each scene pixel's colour error (mean absolute, 0–1) instead of a
+// depth gradient, so the backward's depth slot sums error × α·T per Gaussian; 2 a depth step, whose d_pixel.xy hold the
+// measured depth at each sample's pixel and their count instead of colour gradients, so the colour slots sum each
+// Gaussian's relative distance from the measured surface × α·T and its α·T there.
+const STATS_COLOR: u32 = 1u;
+const STATS_DEPTH: u32 = 2u;
+fn stats_mode() -> u32 {
+    return u32(frame.confidence.z + 0.5);
 }
 
 fn quat_rows(qn: vec4<f32>) -> array<vec3<f32>, 3> {

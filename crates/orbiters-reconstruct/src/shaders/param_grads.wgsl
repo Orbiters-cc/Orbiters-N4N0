@@ -1,8 +1,12 @@
 // The projection backward's mathematics (after common.wgsl and a sums_read_*.wgsl variant, with `proj` at binding 2 and
 // `stats` at binding 5): Gaussian i's 2D gradients (grad2d, cleared for the next step's sums) to gradients of its
-// parameters, the regularisers' gradients, and the largest screen radius it reached since the last relocation round
-// (stats.z, as a share of each view's width, so steps on the depth-sample grid compare alike). project_backward.wgsl
-// writes them out (tests), project_backward_adam.wgsl takes its Adam step with them.
+// parameters, the regularisers' gradients, and its statistics since the last relocation round (two vec4s a Gaussian,
+// cleared by each round): the largest screen radius it reached (stats[2i].z, as a share of each view's width, so steps
+// on the depth-sample grid compare alike) and, on steps that record birth statistics (common.wgsl stats_mode), on
+// colour steps the sum of its screen-space positional gradient's norm (x, 3DGS's densification statistic), the colour
+// steps that showed it (y) and the colour error it blended (w, Σ error × α·T); on depth steps (stats[2i + 1]) the sum
+// of α·T × its relative distance from the measured surface (x) and of α·T at depth samples (y).
+// project_backward.wgsl writes them out (tests), project_backward_adam.wgsl takes its Adam step with them.
 
 struct ParamGrads {
     mean: vec3<f32>,
@@ -19,9 +23,28 @@ fn param_grads(i: u32, mean: vec3<f32>, log_scale: vec3<f32>, q: vec4<f32>, opac
     let d_mean2 = vec2<f32>(grad(g), grad(g + 1u));
     let d_conic = vec3<f32>(grad(g + 2u), grad(g + 3u), grad(g + 4u));
     let d_op = grad(g + 5u);
-    let d_color = vec3<f32>(grad(g + 6u), grad(g + 7u), grad(g + 8u));
-    let d_z = grad(g + 9u);
+    var d_color = vec3<f32>(grad(g + 6u), grad(g + 7u), grad(g + 8u));
+    var d_z = grad(g + 9u);
     clear_grads(g);
+    var st = stats[2u * i];
+    st.z = max(st.z, proj[i * PROJ + 10u] / f32(frame.size.x));
+    let mode = stats_mode();
+    if (mode == STATS_COLOR) {
+        // The depth slot summed colour error × α·T (raster_backward.wgsl stat_grads), not a depth gradient.
+        st.x += length(d_mean2);
+        st.y += 1.0;
+        st.w += d_z;
+        d_z = 0.0;
+    }
+    stats[2u * i] = st;
+    if (mode == STATS_DEPTH) {
+        // The colour slots summed distance from the measured surface and α·T at the samples, not colour gradients.
+        var sd = stats[2u * i + 1u];
+        sd.x += d_color.x;
+        sd.y += d_color.y;
+        stats[2u * i + 1u] = sd;
+        d_color = vec3<f32>(0.0);
+    }
     let d_opacity = (d_op * m.c3 * m.c2 + frame.reg.x) * op * (1.0 - op);
     let d_c2 = d_op * op * m.c3;
     let d_c3 = d_op * op * m.c2;
@@ -114,9 +137,6 @@ fn param_grads(i: u32, mean: vec3<f32>, log_scale: vec3<f32>, q: vec4<f32>, opac
         -2.0 * qz * dr[0].x - qw * dr[0].y + qx * dr[0].z + qw * dr[1].x - 2.0 * qz * dr[1].y + qy * dr[1].z + qx * dr[2].x + qy * dr[2].y,
     );
     let d_rot = (dq - m.qn * dot(m.qn, dq)) / m.qlen;
-    var st = stats[i];
-    st.z = max(st.z, proj[i * PROJ + 10u] / f32(frame.size.x));
-    stats[i] = st;
     var out: ParamGrads;
     out.mean = d_mean;
     out.scale = d_scale;

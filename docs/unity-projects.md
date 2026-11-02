@@ -243,6 +243,59 @@ Development's N4N0 gallery ID is 30. Production is deliberately unset in
 until then, while Add My Avatar remains available. The request contract has no server/environment field despite
 server-scoped gallery IDs; the desktop and My Avatar must use the same environment.
 
+## Package updates
+
+After each look at the selected project's packages (opening its panel, a change, Refresh) a worker checks its updates
+(`orbiters_projects::updates::check`, against the repositories as last downloaded); the repositories themselves are
+downloaded again once a window and every half hour while a project is shown, quietly (a failure keeps the cached
+view). Each installed package's newer versions are tried newest first with the resolver the version lists install
+with (`add_package_request`, as `vpm::change` does): the project's Unity version, the other packages' dependency
+ranges, releases only unless Pre-release versions is on (both answers are kept, the switch picks one). An update that
+would also move a VRChat SDK package (`com.vrchat.*`) is not offered for another package; the SDK's own rows offer
+theirs. The row's second line then says **Update to x.y.z** (its hover names what else it changes) or, for a newer
+version needing other changes, **Update to x.y.z…** in amber, which opens the conflict dialog below. **Update all · n**
+in the card's heading opens the plan above the rows (every package from → to, what is left out and why: the SDK,
+updates that do not go together) and applies it at once. Updates go through `panel::package_action`, the version
+lists' path. A manifest still holding the old "3.2-3.8" range spelling (which `UnityProject::load` rewrites) is not
+checked automatically.
+
+## Packages missing from the repositories
+
+When a change fails with the resolver's "Following dependencies are not found: …", the panel's error banner becomes a
+card naming those packages with **Add their repositories** (`missing_card.rs`, `orbiters_projects::missing`). It looks
+them up in Orbiters' Known VPM catalog (`GET /avatar-assets/known-dependencies`, public; repositories named from
+`GET /vpm/known`), then the person's repositories turned off on this computer, then the listings creators publish on
+Orbiters (`GET /vpm/public`, each feed read, at most 40). A pinned version (`=1.1.5`) is found only in a repository
+listing it; a Known VPM repository naming the package without that version (the catalog keeps 40 versions in its
+supported range) is read itself first. The card then lists each repository to add (or turn back on) with the
+packages and versions it brings, the packages listed only at other versions, and those no repository provides;
+**Add n repositories and retry** adds them (`missing::add`) and runs the failed change again (the last change, else
+Restore). The card goes once it succeeds; what still fails comes back in a new card.
+
+## Conflicts
+
+An install that conflicts (an installed package's range does not accept a version it installs) is refused as before,
+with `coherent::Conflicted` carrying the plan that solves it (`orbiters_projects::coherent`): the asked versions, then
+each package whose range broke moved to its newest version accepting what the plan installs (Gesture Manager,
+Av3Manager and the like along with the SDK, the SDK's base brought by its avatars package), until nothing conflicts.
+The **Update to coherent versions** dialog (`conflict.rs`) shows what conflicts (who accepts which range), every
+change (from → to, added, removed) with why, and **Update n packages together**, which applies `vpm::Change::Plan`:
+removals, then the exact versions, the manifest and its packages put back on any failure. A package with no fitting
+version blocks the plan, named with the range it holds; **Remove it too** solves again without it when nothing else
+needs it. Cancel changes nothing.
+
+## A project open in Unity
+
+`orbiters_projects::editor` reads the Unity editors open from their command lines (`-projectPath`; import workers and
+batch mode excluded; an unreadable command line is matched by the window title while the project's lock file is
+held), every second and a half on a worker while the page is shown. A project open in Unity has, in place of Open in
+Unity (hero card, compact bar, right-click menus): **Show** (its window to the front, restored when minimised, or the
+dialog it waits on), **Save & Exit** (`WM_CLOSE` to its main window, as its close button: Unity asks whether to save
+modified scenes, that question brought to the front and the button saying Answer in Unity; a toast when it quit, or
+when it stayed open after the question) and **Kill** (after Kill, losing unsaved changes: that editor and its own
+import workers ended, other editors untouched, nothing in the project deleted). The Toolkit has no command channel
+with the desktop, so saving is Unity's own question rather than a silent save.
+
 ## Verification
 
 Set `CARGO_TARGET_DIR=C:/Users/Enzo/.orbiters-target` and `CARGO_INCREMENTAL=0` for every build. Focused checks:
@@ -263,7 +316,10 @@ answered), the panel's additions in `screenshot/projects_panel.rs`: `projects-si
 `-avatars-links` (Open on VRChat and Blender files), `-worlds` (what Orbiters has, three captures, a Blender file),
 `-worlds-new`, `-worlds-sharing`, `-worlds-done`, `-worlds-failed`, `-worlds-signed-out`, `-worlds-capture-menu`
 (the captures' list open), `-duplicate`, `-duplicate-taken`, `-duplicate-library`, `-duplicate-copying`, `-hidden`,
-`-hidden-shown`, `-hidden-press` (the chip pressed) and `-header-blur` (the cards under the header's blur); the
+`-hidden-shown`, `-hidden-press` (the chip pressed), `-header-blur` (the cards under the header's blur), `-updates`,
+`-updates-plan`, `-missing`, `-missing-looking`, `-missing-found`, `-missing-adding`, `-missing-done`, `-conflict`,
+`-conflict-blocked`, `-unity-open`, `-unity-kill`, `-unity-closing`, `-unity-killing`, `-unity-bar` and `-unity-menu`
+(`package_fixtures.rs`; `--only a,b,c` renders several in one run); the
 Worlds card shows whole with `--height 1300`. `projects-repos-crossfade` (repository
 icons fading in), `projects-repos-live` (review only: the repositories' real icons, cache then network), `projects-new-novcc` and
 `projects-repos-novcc` (a computer without VCC), `projects-new-loading` (covers fading in) and `projects-new-covers`
@@ -276,5 +332,8 @@ binary paths, scene/prefab avatars, skip rules, copying, setup JSON/results and 
 
 The loopback repository integration test exercises real ZIP downloads, dependency installation, upgrade, downgrade,
 missing-package restore, conflict refusal, repository headers/visibility/removal and creation/duplicate resolution,
-entirely in disposable folders. Manual acceptance still requires public-repository downloads, VCC/ALCOM cross-app
+entirely in disposable folders. `tests/package_updates.rs` does the same for updates (releases and pre-releases,
+dependency ranges, the SDK held back, Update all applied), missing packages' repositories found, added and resolved
+again, and the N4N0 sample avatar's SDK conflict (com.vrchat.avatars/base 3.7.5 with Gesture Manager, Av3Manager and
+Fuck OSC Config pinning it) solved into one plan, blocked until removed, and rolled back on failure. Manual acceptance still requires public-repository downloads, VCC/ALCOM cross-app
 synchronization, Toolkit confirmation and a VRChat SDK upload. Those writes must use disposable projects.

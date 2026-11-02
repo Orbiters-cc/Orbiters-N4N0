@@ -163,6 +163,12 @@ pub(super) fn add_existing(ctx: &egui::Context, state: &mut State) {
 
 /// The banner of the page's last error (and the scan's warnings), dismissable.
 pub(super) fn errors(ui: &mut Ui, state: &mut State, salt: &str) {
+    // Packages missing from the repositories: their card, with Add their repositories, in the panel.
+    if salt == "panel" && state.missing.as_ref().is_some_and(|m| state.selected.as_ref() == Some(&m.path)) {
+        if super::missing_card::show(ui, state, salt) {
+            return;
+        }
+    }
     if let Some(e) = state.error.clone() {
         if feedback::banner(ui, Id::unique(("projects-error", salt, &e)), Tone::Danger, &e, true) {
             state.error = None;
@@ -564,7 +570,7 @@ fn found_row(ui: &mut Ui, state: &State, p: &Project, rect: Rect) -> (Option<boo
 /// The capsule over the bottom of the cards while an action runs (unless a dialog shows it), with a project copy's
 /// progress and its Cancel.
 fn activity(ui: &mut Ui, state: &mut State, area: Rect) {
-    let shown_in_dialog = matches!(state.modal, Some(Modal::New | Modal::Setup | Modal::Repos | Modal::Duplicate(_)));
+    let shown_in_dialog = matches!(state.modal, Some(Modal::New | Modal::Setup | Modal::Repos | Modal::Duplicate(_) | Modal::Conflict));
     let label = state.acting().map(str::to_string).filter(|_| !shown_in_dialog);
     let p = state.copy_progress.lock().unwrap().clone();
     let copying = p.total > 0 && label.is_some();

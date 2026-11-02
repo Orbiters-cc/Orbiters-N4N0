@@ -1670,13 +1670,14 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     let mut gpu = Offscreen::new()?;
     for sc in scenarios {
-        if only.as_deref().is_some_and(|o| {
+        // `--only a,b,c`: several scenarios in one run (the scenarios are made once).
+        if only.as_deref().is_some_and(|list| list.split(',').all(|o| {
             o != sc.name
                 && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))
                 && !(o == "editor" && sc.name.starts_with("editor-"))
                 && !(o == "sharing" && (sc.name.starts_with("gallery-") || sc.name.starts_with("world-share")))
                 && !(o == "events" && (sc.name.starts_with("events") || sc.name.starts_with("gallery-community")))
-        }) {
+        })) {
             continue;
         }
         let path = out.join(format!("{}.png", sc.name));

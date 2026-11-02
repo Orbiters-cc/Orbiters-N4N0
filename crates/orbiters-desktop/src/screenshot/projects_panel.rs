@@ -28,6 +28,22 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
         "projects-revisit",
         "projects-card-menu",
         "projects-avatar-menu",
+        // Updates, missing packages' repositories, conflicts, a project open in Unity (`package_fixtures.rs`).
+        "projects-updates",
+        "projects-updates-plan",
+        "projects-missing",
+        "projects-missing-looking",
+        "projects-missing-found",
+        "projects-missing-adding",
+        "projects-missing-done",
+        "projects-conflict",
+        "projects-conflict-blocked",
+        "projects-unity-open",
+        "projects-unity-kill",
+        "projects-unity-closing",
+        "projects-unity-killing",
+        "projects-unity-bar",
+        "projects-unity-menu",
     ] {
         let mut snapshot = base.clone();
         snapshot.account.development = true;

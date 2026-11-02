@@ -110,7 +110,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
             ctx.data_mut(|d| d.insert_temp(mixer_y, ui.cursor().top() - top));
             mixer(ui, cx, state, &project);
             ctx.data_mut(|d| d.insert_temp(packages_y, ui.cursor().top() - top));
-            packages(ui, state, &project);
+            super::packages_card::packages(ui, state, &project);
             available(ui, state, &project);
             ctx.data_mut(|d| d.insert_temp(commits_y, ui.cursor().top() - top));
             commits(ui, cx, state, &project);
@@ -152,7 +152,8 @@ fn sticky_bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, re
         .size(Size::Sm)
         .enabled(project.registered && !project.missing && !state.running() && k > 0.5)
         .id_salt("panel-bar-open");
-    let bw = b.desired_width(&bu);
+    let open = project.registered && state.session(&project.path).open();
+    let bw = if open { 280.0_f32.min(band.width() * 0.6) } else { b.desired_width(&bu) };
     let mut right = band.right() - 20.0;
     if sheet {
         let close = Rect::from_center_size(pos2(right - 16.0, band.center().y + dy), vec2(32.0, 32.0));
@@ -172,7 +173,11 @@ fn sticky_bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, re
         &Txt::new(&project.name, 15.0).weight(weight::SEMIBOLD),
         br.left() - thumb.right() - 22.0,
     );
-    if project.registered && widgets::activated(&b.show_at(&mut bu, br)) {
+    if open {
+        if k > 0.5 {
+            super::unity_session::controls(&mut bu, state, project, br, "bar");
+        }
+    } else if project.registered && widgets::activated(&b.show_at(&mut bu, br)) {
         let p = project.clone();
         state.task(&ctx, "Opening Unity…", move || {
             orbiters_projects::open_project(&p)?;
@@ -287,7 +292,9 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     let busy = state.running();
     let main_w = row.width() - 3.0 * 48.0;
     let main = Rect::from_min_size(row.min, vec2(main_w, 40.0));
-    if project.registered {
+    // Open in Unity already: Show, Save & Exit and Kill in its place.
+    if project.registered && super::unity_session::controls(ui, state, project, main, "hero") {
+    } else if project.registered {
         let b = Button::new("Open in Unity").icon(icons::PLAY).variant(Variant::Primary).width(main_w).enabled(!project.missing && !busy).id_salt("panel-open");
         if widgets::activated(&b.show_at(ui, main)) {
             let p = project.clone();
@@ -622,7 +629,7 @@ fn mixer_info(ui: &mut Ui, cx: &mut Cx, id: Id, open: bool) {
 }
 
 /// A package's row: its icon, names, and on the right what `control` draws (given the rect left for it).
-fn package_row(ui: &mut Ui, icon: Option<&PackageIcon>, name: &str, display: &str, control_w: f32, control: impl FnOnce(&mut Ui, Rect)) {
+pub(super) fn package_row(ui: &mut Ui, icon: Option<&PackageIcon>, name: &str, display: &str, control_w: f32, control: impl FnOnce(&mut Ui, Rect)) {
     let w = ui.available_width();
     let (r, _) = ui.allocate_exact_size(vec2(w, 48.0), Sense::hover());
     let p = ui.painter();
@@ -644,7 +651,7 @@ fn package_row(ui: &mut Ui, icon: Option<&PackageIcon>, name: &str, display: &st
 }
 
 /// Shimmering rows while the packages are read.
-fn row_skeletons(ui: &mut Ui, n: usize) {
+pub(super) fn row_skeletons(ui: &mut Ui, n: usize) {
     for _ in 0..n {
         let w = ui.available_width();
         let (r, _) = ui.allocate_exact_size(vec2(w, 48.0), Sense::hover());
@@ -657,90 +664,8 @@ fn row_skeletons(ui: &mut Ui, n: usize) {
 }
 
 /// The versions offered for a package: releases, pre-releases only when asked for (and the installed one always).
-fn versions<'a>(p: &'a vpm::Package, prerelease: bool) -> Vec<&'a String> {
+pub(super) fn versions<'a>(p: &'a vpm::Package, prerelease: bool) -> Vec<&'a String> {
     p.versions.iter().filter(|v| prerelease || !v.contains('-') || Some(v.as_str()) == p.installed.as_deref()).collect()
-}
-
-fn packages(ui: &mut Ui, state: &mut State, project: &Project) {
-    let ctx = ui.ctx().clone();
-    let installed: Vec<vpm::Package> = state.view.packages.iter().filter(|p| p.installed.is_some()).cloned().collect();
-    let count = (!installed.is_empty()).then(|| installed.len().to_string());
-    let loading = state.view_loading() && installed.is_empty();
-    let busy = state.running();
-    let mut restore = false;
-    art::card(
-        ui,
-        "packages",
-        glyph::PACKAGE,
-        "Packages",
-        count,
-        |ui, slot| {
-            let b = Button::new("Restore")
-                .icon(icons::ARROW_COUNTER_CLOCKWISE)
-                .variant(Variant::Ghost)
-                .size(Size::Sm)
-                .enabled(!busy && !project.missing)
-                .id_salt("restore");
-            let bw = b.desired_width(ui);
-            let r = Rect::from_min_size(pos2(slot.right() - bw, slot.center().y - 16.0), vec2(bw, 32.0));
-            restore = widgets::activated(&b.show_at(ui, r).on_hover_text("Downloads the packages the project lists but does not have (VCC's Resolve)"));
-        },
-        |ui| {
-            if loading {
-                row_skeletons(ui, 3);
-                return;
-            }
-            if installed.is_empty() {
-                widgets::text(
-                    ui.painter(),
-                    ui.cursor().min + vec2(0.0, 10.0),
-                    Align2::LEFT_CENTER,
-                    &Txt::new("No VPM package in this project yet.", 12.5).color(theme::FG_3),
-                );
-                ui.add_space(22.0);
-            }
-            for (i, pkg) in installed.iter().enumerate() {
-                if i > 0 {
-                    widgets::separator(ui);
-                }
-                let current = pkg.installed.clone().unwrap_or_default();
-                let list = versions(pkg, state.prerelease);
-                let working = state.busy_package.as_deref() == Some(pkg.name.as_str());
-                state.icons_wanted.push(pkg.name.clone());
-                let icon = state.icons.get(&pkg.name).cloned();
-                package_row(ui, icon.as_ref(), &pkg.name, &pkg.display_name, 108.0 + 8.0 + 32.0, |ui, c| {
-                    let dd = Rect::from_min_size(pos2(c.left(), c.center().y - 15.0), vec2(108.0, 30.0));
-                    let rm = Rect::from_min_size(pos2(c.right() - 32.0, c.center().y - 16.0), vec2(32.0, 32.0));
-                    if i == 0 {
-                        state.anchors.insert("version-0".into(), dd);
-                    }
-                    if working {
-                        feedback::spinner(ui.painter(), dd.center(), 8.0, 2.0, theme::ACCENT);
-                    } else {
-                        let items: Vec<Item> = list.iter().map(|v| if v.contains('-') { Item::new(v).detail("Pre-release") } else { Item::new(v) }).collect();
-                        let selected = list.iter().position(|v| **v == current);
-                        if let Some(k) = popup::dropdown(ui, ("version", &pkg.name), dd, &current, &items, selected, !busy) {
-                            if list[k] != &current {
-                                let change = vpm::Change::Install { names: vec![(pkg.name.clone(), Some(list[k].clone()))], prerelease: state.prerelease };
-                                package_action(state, &ctx, project, change, &format!("Changing {} to {}…", pkg.display_name, list[k]), &pkg.name);
-                            }
-                        }
-                    }
-                    let rb = IconButton::new(glyph::TRASH_SIMPLE, "Remove the package").size(32.0, 15.0).danger().id_salt(("remove", &pkg.name));
-                    if !busy && widgets::activated(&rb.show_at(ui, rm)) {
-                        package_action(state, &ctx, project, vpm::Change::Remove(pkg.name.clone()), &format!("Removing {}…", pkg.display_name), &pkg.name);
-                    }
-                });
-            }
-            widgets::separator(ui);
-            widgets::field(ui, "Pre-release versions", Some("Beta versions in the version lists"), 48.0, |ui| {
-                widgets::toggle(ui, "prerelease", &mut state.prerelease);
-            });
-        },
-    );
-    if restore {
-        package_action(state, &ctx, project, vpm::Change::Resolve, "Restoring missing packages…", "");
-    }
 }
 
 fn available(ui: &mut Ui, state: &mut State, project: &Project) {
@@ -822,9 +747,17 @@ fn available(ui: &mut Ui, state: &mut State, project: &Project) {
 pub(super) fn package_action(state: &mut State, ctx: &egui::Context, p: &Project, change: vpm::Change, label: &str, name: &str) {
     let path = p.path.clone();
     state.busy_package = (!name.is_empty()).then(|| name.to_string());
+    state.last_change = Some((path.clone(), change.clone()));
+    state.plan_open = false;
     state.task(ctx, label, move || {
-        orbiters_projects::runtime()?.block_on(vpm::change(&orbiters_projects::vcc_dir(), &path, change))?;
-        Ok(Outcome::Changed("Packages updated".into()))
+        match orbiters_projects::runtime()?.block_on(vpm::change(&orbiters_projects::vcc_dir(), &path, change)) {
+            Ok(()) => Ok(Outcome::Changed("Packages updated".into())),
+            // Not cancelled: the plan making it coherent, in its dialog.
+            Err(e) => match e.downcast::<orbiters_projects::coherent::Conflicted>() {
+                Ok(c) => Ok(Outcome::Conflict(path, c.plan)),
+                Err(e) => Err(e),
+            },
+        }
     });
 }
 

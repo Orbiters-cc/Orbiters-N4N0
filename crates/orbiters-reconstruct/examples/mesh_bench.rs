@@ -330,21 +330,16 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn playcanvas_engine_coordinates_restore_native_world() {
+    fn mesh_playcanvas_engine_coordinates_restore_native_world() {
         let m = Mesh { positions: vec![[1., 2., 3.], [2., 2., 3.], [1., 3., 3.]], triangles: vec![[0, 1, 2]] };
         let path = std::env::temp_dir().join(format!("orbiters-playcanvas-{}.glb", std::process::id()));
-        m.write(&path).unwrap();
-        let mut bytes = std::fs::read(&path).unwrap();
-        let n = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-        // Mesh::write reflects X. Also reflect Y/Z to reproduce PlayCanvas's engine output.
-        for i in 0..3 {
-            for c in 1..3 {
-                let at = 28 + n + i * 12 + c * 4;
-                let v = f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-                bytes[at..at + 4].copy_from_slice(&(-v).to_le_bytes());
-            }
-        }
-        std::fs::write(&path, bytes).unwrap();
+        // Mesh::write reflects X and winding. Pre-reflect Y/Z so the fixture is a valid
+        // PlayCanvas-engine GLB, including correct accessor bounds, not just patched bytes.
+        let fixture = Mesh {
+            positions: m.positions.iter().map(|p| [p[0], -p[1], -p[2]]).collect(),
+            triangles: m.triangles.clone(),
+        };
+        fixture.write(&path).unwrap();
         let restored = collision_glb(&path).unwrap();
         assert_eq!(restored.positions, m.positions);
         assert_eq!(restored.triangles, m.triangles);

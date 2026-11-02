@@ -159,6 +159,10 @@ pub struct Settings {
     /// for thousands of steps. Off: on Silent Dawn it lost 0.44 dB held-out and 0.60 dB on the best 90 % (two runs)
     /// instead of 0.52 and 0.72.
     pub noise_visible: bool,
+    /// The noise runs only in rounds whose relocation found at most this share of the set dead (faded, broken or huge;
+    /// 0: every round): while the budget binds. A capture whose relocation keeps much of its set dead round after round
+    /// has more budget than it uses, and there the noise rescues faint Gaussians that should die.
+    pub noise_dead_max: f32,
     /// Births at measured depth (crate::births, ConeGS without its proxy): this share of each relocation round's moves
     /// become new Gaussians at the depth samples of a few depth frames where the render errs most against the
     /// keyframes, a pixel's size across and the keyframes' colour, instead of copies (0: none). Off: a fifth of the
@@ -249,6 +253,7 @@ impl Default for Settings {
             noise: 0.0,
             noise_gate: true,
             noise_visible: false,
+            noise_dead_max: 0.0,
             depth_births: 0.0,
         }
     }
@@ -682,6 +687,16 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                             // With birth scores, they follow the weights (Gpu::request_relocation_weights).
                             let scores = if scored { weights.split_off(weights.len() / 4) } else { Vec::new() };
                             let n = weights.len();
+                            if settings.noise > 0.0 && settings.noise_dead_max > 0.0 {
+                                // The noise runs while the budget binds: not in a round whose relocation found much of
+                                // the set dead (Settings::noise_dead_max).
+                                let share = weights.iter().filter(|w| **w == -1.0 || !w.is_finite()).count() as f32 / n.max(1) as f32;
+                                let on = share <= settings.noise_dead_max;
+                                if on != (gpu.noise > 0.0) {
+                                    eprintln!("it {round}: {:.0} % dead: noise {}", share * 100.0, if on { "on" } else { "off" });
+                                }
+                                gpu.noise = if on { settings.noise } else { 0.0 };
+                            }
                             if round % 500 == 0 {
                                 let dead = weights.iter().filter(|w| **w == -1.0).count();
                                 eprintln!("it {round}: {n} Gaussians, {dead} dead or huge, {intersections} entries");

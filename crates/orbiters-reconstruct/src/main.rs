@@ -4,7 +4,7 @@
 //! orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]
 //!     [--regularise-unseen] [--adam-restart] [--filter-3d S] [--cleanup]
 //!     [--sources opacity|gradient|error|confidence] [--sources-by-opacity] [--split footprint|long-axis|long-axis-on-depth]
-//!     [--noise λ | --no-noise] [--no-noise-gate] [--noise-visible] [--depth-births share]
+//!     [--noise λ | --no-noise] [--no-noise-gate] [--noise-visible] [--noise-dead-max share] [--depth-births share]
 //! ```
 //!
 //! Prints one [`Event`] per line on stdout for the app and writes the session's `reconstruction/` folder: the splats
@@ -99,6 +99,7 @@ fn args() -> anyhow::Result<Args> {
             "--no-noise" => settings.noise = 0.0,
             "--no-noise-gate" => settings.noise_gate = false,
             "--noise-visible" => settings.noise_visible = true,
+            "--noise-dead-max" => settings.noise_dead_max = it.next().context("--noise-dead-max needs a value")?.parse().context("--noise-dead-max takes a share (0–1)")?,
             "--depth-births" => settings.depth_births = it.next().context("--depth-births needs a value")?.parse().context("--depth-births takes a number (0–1)")?,
             "--gpu" => {
                 device.low_power = match it.next().as_deref() {

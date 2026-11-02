@@ -23,7 +23,7 @@ use egui::{PointerButton, Pos2};
 use orbiters_reconstruct::edit::{self, DELETED, Edit, Found, HIDDEN, History, Identity, SELECTED};
 use orbiters_reconstruct::select::{self as pick, Splats};
 use orbiters_ui::widgets::Size;
-use std::collections::BTreeMap;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Pictures of captures drawn again for their edits since the app started: a session's detail keyed by it shows the
@@ -34,31 +34,49 @@ pub fn pictures() -> u64 {
     PICTURES.load(Ordering::Relaxed)
 }
 
-/// Saves are numbered; the newest written per reconstruction, so that a save finishing late (its thread was slow, the
-/// view closed meanwhile) never puts an older edit back over a newer one, and the picture is drawn for the edit the
-/// file holds.
-static SAVES: AtomicU64 = AtomicU64::new(0);
-static WRITTEN: Mutex<BTreeMap<PathBuf, u64>> = Mutex::new(BTreeMap::new());
+/// Writes of edit files and of the picture's flag in this process, one at a time: a picture's flag is written only while
+/// the file still holds the edit it was drawn for, and no save lands in between.
+static WRITING: Mutex<()> = Mutex::new(());
 
-fn written() -> std::sync::MutexGuard<'static, BTreeMap<PathBuf, u64>> {
-    WRITTEN.lock().unwrap_or_else(|e| e.into_inner())
+fn writing() -> std::sync::MutexGuard<'static, ()> {
+    WRITING.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Writes `edit` beside the PLY in `result` as save number `seq`, unless a newer one was written; an edit that removes
-/// nothing takes its file away and puts the worker's picture back.
-fn persist(result: &Path, edit: &Edit, seq: u64) -> anyhow::Result<bool> {
-    let mut w = written();
-    if w.get(result).is_some_and(|&s| s > seq) {
-        return Ok(false);
+/// Why a view's splats or edits no longer go together with the PLY on the disk.
+const RECONSTRUCTED: &str = "The capture was reconstructed again since its 3D view opened: close the view and open it again.";
+
+/// A PLY's length and modification time: what tells cheaply that it is still the one an edit was made on (it is hashed
+/// again only when they changed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Stamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl Stamp {
+    fn of(ply: &Path) -> Option<Self> {
+        let m = std::fs::metadata(ply).ok()?;
+        Some(Self { len: m.len(), modified: m.modified().ok() })
+    }
+}
+
+/// Writes `edit` beside the PLY in `result` before it returns, so that whatever reads the edits next (a share asked
+/// right after, the upload preparation in the service's process, this view opened again) reads these: only while the PLY
+/// there is still the one the edit was made on (its stamp as loaded, `loaded`; hashed again when the stamp changed). An
+/// edit that removes nothing takes its file away and puts the worker's picture of that PLY back.
+fn persist(result: &Path, edit: &Edit, loaded: Option<Stamp>) -> anyhow::Result<()> {
+    let _w = writing();
+    let ply = result.join(reconstruction::PLY_FILE);
+    if loaded.is_none() || Stamp::of(&ply) != loaded {
+        anyhow::ensure!(Identity::read(&ply)? == edit.ply, "{RECONSTRUCTED} These edits were not saved.");
     }
     if edit.removes_nothing() {
-        edit::discard(result)?;
+        edit::discard_for(result, Some(edit.ply))?;
         PICTURES.fetch_add(1, Ordering::Relaxed);
     } else {
         edit.save(result)?;
     }
-    w.insert(result.to_path_buf(), seq);
-    Ok(true)
+    Ok(())
 }
 
 /// A session's splats in PLY order (a downloaded `.splat`'s as they come), its sky map, and for a PLY its identity and
@@ -74,6 +92,17 @@ pub(super) fn read(dir: &Path) -> anyhow::Result<(Gaussians, Option<SkyMap>, Opt
     Ok((g, sky, Some((identity, found))))
 }
 
+/// The splats and sky map of `dir` read again (moving them to the other GPU, a picture of the view), only when they are
+/// still those of the PLY the view loaded (`expected`): the view's marks are never laid over another reconstruction's
+/// splats.
+pub(super) fn read_again(dir: &Path, expected: Option<Identity>) -> anyhow::Result<(Gaussians, Option<SkyMap>)> {
+    let (g, sky, found) = read(dir)?;
+    if let (Some(want), Some((now, _))) = (expected, found) {
+        anyhow::ensure!(now == want, "{RECONSTRUCTED}");
+    }
+    Ok((g, sky))
+}
+
 /// The edits of a reconstruction's splats as the view holds them: the marks (hidden, deleted, selected), what the file
 /// holds, undo, and what draws them.
 pub(super) struct Edits {
@@ -82,8 +111,10 @@ pub(super) struct Edits {
     pub(super) edit: Edit,
     /// What the last save wrote (nothing to save while the outputs are the same).
     saved: Edit,
+    /// The PLY as loaded: a save checks it is still there.
+    stamp: Option<Stamp>,
     /// The edit found beside the PLY could not be applied (made on an earlier reconstruction, or damaged): why. Shares
-    /// stop and selecting waits until it is discarded.
+    /// stop, pictures of the view are refused and selecting waits until it is discarded.
     pub(super) problem: Option<String>,
     /// The marks as the GPU draws them (orbiters_reconstruct::edit::Edit::view_marks) and their version; the version of
     /// what is drawn at all (hidden and deleted, which a pick's projection depends on).
@@ -93,7 +124,6 @@ pub(super) struct Edits {
     /// Selected, hidden, deleted.
     counts: [usize; 3],
     history: History,
-    saving: Option<Job<Result<(), String>>>,
     save_error: Option<String>,
     /// The capture's picture does not show the outputs as saved yet, and the job drawing it again.
     picture_stale: bool,
@@ -121,9 +151,11 @@ impl Edits {
             }
             _ => (blank, false),
         };
+        let result = reconstruction::result_dir(session);
         let mut e = Self {
             session: session.to_path_buf(),
-            result: reconstruction::result_dir(session),
+            stamp: Stamp::of(&result.join(reconstruction::PLY_FILE)),
+            result,
             saved: edit.clone(),
             drawn: Arc::new(edit.view_marks()),
             edit,
@@ -132,7 +164,6 @@ impl Edits {
             shown: 1,
             counts: [0; 3],
             history: History::default(),
-            saving: None,
             save_error: None,
             picture_stale,
             drawing: None,
@@ -166,7 +197,7 @@ impl Edits {
     }
 
     /// The marks changed: drawn again, counted again, and saved when what leaves the capture changed.
-    fn changed(&mut self, ctx: &egui::Context) {
+    fn changed(&mut self) {
         let drawn = self.edit.view_marks();
         // What is drawn at all changed (not only the selection): the tools' projection is made again.
         if drawn.iter().zip(self.drawn.iter()).any(|(a, b)| (*a >= 2) != (*b >= 2)) {
@@ -175,20 +206,30 @@ impl Edits {
         self.drawn = Arc::new(drawn);
         self.version += 1;
         self.count();
-        self.save(ctx);
+        self.save();
     }
 
     /// One step of undo: `marks` (the new mark of each splat named).
-    fn apply(&mut self, ctx: &egui::Context, marks: impl IntoIterator<Item = (u32, u8)>) -> bool {
+    fn apply(&mut self, marks: impl IntoIterator<Item = (u32, u8)>) -> bool {
         let changed = self.history.apply(&mut self.edit, marks);
         if changed {
-            self.changed(ctx);
+            self.changed();
         }
         changed
     }
 
+    /// Starts a brush stroke: every change until [`Edits::end_stroke`] is one step of undo.
+    fn begin_stroke(&mut self) {
+        self.history.begin();
+    }
+
+    /// Ends the stroke under way, if any (its release, or a cancel: Esc, another tool, Done, the view closed).
+    pub(super) fn end_stroke(&mut self) {
+        self.history.end();
+    }
+
     /// `ids` (drawn splats) into the selection as `mode` says.
-    fn select(&mut self, ctx: &egui::Context, ids: &[u32], mode: Mode) -> bool {
+    fn select(&mut self, ids: &[u32], mode: Mode) -> bool {
         // Adding or taking away touches only those (a brush's dabs, every frame of a stroke).
         if mode != Mode::Replace {
             let marks = &self.edit.marks;
@@ -200,7 +241,7 @@ impl Edits {
                     (new != m && pick::drawn(m)).then_some((i, new))
                 })
                 .collect();
-            return self.apply(ctx, changes);
+            return self.apply(changes);
         }
         let n = self.edit.len();
         let mut want = vec![false; n];
@@ -213,94 +254,82 @@ impl Edits {
         let changes: Vec<(u32, u8)> = (0..n)
             .filter_map(|i| {
                 let m = marks[i];
-                let new = match mode {
-                    Mode::Replace if want[i] => m | SELECTED,
-                    Mode::Replace => m & !SELECTED,
-                    Mode::Add if want[i] => m | SELECTED,
-                    Mode::Remove if want[i] => m & !SELECTED,
-                    _ => m,
-                };
+                let new = if want[i] { m | SELECTED } else { m & !SELECTED };
                 (new != m).then_some((i as u32, new))
             })
             .collect();
-        self.apply(ctx, changes)
+        self.apply(changes)
     }
 
     /// Every splat whose marks `f` changes, changed so (one step).
-    fn map(&mut self, ctx: &egui::Context, f: impl Fn(u8) -> u8) -> bool {
+    fn map(&mut self, f: impl Fn(u8) -> u8) -> bool {
         let changes: Vec<(u32, u8)> = self.edit.marks.iter().enumerate().filter_map(|(i, &m)| (f(m) != m).then(|| (i as u32, f(m)))).collect();
-        self.apply(ctx, changes)
+        self.apply(changes)
     }
 
-    fn select_all(&mut self, ctx: &egui::Context) -> bool {
-        self.map(ctx, |m| if pick::drawn(m) { m | SELECTED } else { m })
+    fn select_all(&mut self) -> bool {
+        self.map(|m| if pick::drawn(m) { m | SELECTED } else { m })
     }
 
-    pub(super) fn clear(&mut self, ctx: &egui::Context) -> bool {
-        self.map(ctx, |m| m & !SELECTED)
+    pub(super) fn clear(&mut self) -> bool {
+        self.map(|m| m & !SELECTED)
     }
 
-    fn invert(&mut self, ctx: &egui::Context) -> bool {
-        self.map(ctx, |m| if pick::drawn(m) { m ^ SELECTED } else { m })
+    fn invert(&mut self) -> bool {
+        self.map(|m| if pick::drawn(m) { m ^ SELECTED } else { m })
     }
 
     /// The selection hidden (`mark` HIDDEN) or deleted (DELETED).
-    fn remove(&mut self, ctx: &egui::Context, mark: u8) -> bool {
-        self.map(ctx, |m| if m & SELECTED != 0 { (m & !SELECTED) | mark } else { m })
+    fn remove(&mut self, mark: u8) -> bool {
+        self.map(|m| if m & SELECTED != 0 { (m & !SELECTED) | mark } else { m })
     }
 
-    fn show_all(&mut self, ctx: &egui::Context) -> bool {
-        self.map(ctx, |m| m & !HIDDEN)
+    fn show_all(&mut self) -> bool {
+        self.map(|m| m & !HIDDEN)
     }
 
-    fn restore_all(&mut self, ctx: &egui::Context) -> bool {
-        self.map(ctx, |m| m & !(HIDDEN | DELETED))
+    fn restore_all(&mut self) -> bool {
+        self.map(|m| m & !(HIDDEN | DELETED))
     }
 
-    fn undo(&mut self, ctx: &egui::Context) {
+    fn undo(&mut self) {
         if self.history.undo(&mut self.edit) {
-            self.changed(ctx);
+            self.changed();
         }
     }
 
-    fn redo(&mut self, ctx: &egui::Context) {
+    fn redo(&mut self) {
         if self.history.redo(&mut self.edit) {
-            self.changed(ctx);
+            self.changed();
         }
     }
 
-    /// Saves the edit when what leaves the capture changed since the last save (never while an edit that could not be
-    /// applied waits to be discarded: saving would drop it unseen).
-    fn save(&mut self, ctx: &egui::Context) {
-        if self.problem.is_some() || self.edit.same_outputs(&self.saved) {
+    /// Saves the edit when what leaves the capture changed since the last save (or the last save failed), on the disk
+    /// before it returns ([`persist`]); never while an edit that could not be applied waits to be discarded (saving
+    /// would drop it unseen).
+    fn save(&mut self) {
+        if self.problem.is_some() || (self.save_error.is_none() && self.edit.same_outputs(&self.saved)) {
             return;
         }
-        let seq = SAVES.fetch_add(1, Ordering::Relaxed) + 1;
         let mut e = self.edit.clone();
         e.picture = false;
-        self.saved = e.clone();
-        self.picture_stale = true;
-        self.save_error = None;
-        let result = self.result.clone();
-        self.saving = Some(Job::spawn(ctx, move || persist(&result, &e, seq).map(|_| ()).map_err(|e| format!("{e:#}"))));
+        match persist(&self.result, &e, self.stamp) {
+            Ok(()) => {
+                self.picture_stale = !e.removes_nothing();
+                self.saved = e;
+                self.save_error = None;
+            }
+            Err(err) => self.save_error = Some(format!("{err:#}")),
+        }
     }
 
     /// Saves again after a failure.
-    fn retry(&mut self, ctx: &egui::Context) {
-        self.saved = Edit::default();
-        self.save(ctx);
+    fn retry(&mut self) {
+        self.save();
     }
 
-    /// Takes in what the save and the picture's job came back with.
+    /// Takes in what the picture's job came back with.
     pub(super) fn poll(&mut self) {
-        if let Some(r) = self.saving.as_mut().and_then(|j| j.take()) {
-            self.saving = None;
-            if let Err(e) = r {
-                self.save_error = Some(e);
-                // Saved again with the next change, or Retry.
-                self.saved = Edit::default();
-            }
-        }
         if let Some(r) = self.drawing.as_mut().and_then(|j| j.take()) {
             self.drawing = None;
             match r {
@@ -313,9 +342,9 @@ impl Edits {
         }
     }
 
-    /// Draws the capture's picture again when it does not show the edit as saved (once its save is through).
+    /// Draws the capture's picture again when it does not show the edit as saved.
     pub(super) fn redraw(&mut self, ctx: &egui::Context) {
-        if !self.picture_stale || self.problem.is_some() || self.saving.is_some() || self.drawing.is_some() || self.save_error.is_some() {
+        if !self.picture_stale || self.problem.is_some() || self.drawing.is_some() || self.save_error.is_some() || self.picture_error.is_some() {
             return;
         }
         self.picture_stale = false;
@@ -323,43 +352,44 @@ impl Edits {
         self.drawing = Some(Job::spawn(ctx, move || redraw_picture(&session, window).map_err(|e| format!("{e:#}"))));
     }
 
-    /// The edit that could not be applied, discarded: the trained splats and picture back, shares possible again.
+    /// The edit that could not be applied, discarded: the trained splats and the worker's picture of this PLY back,
+    /// shares and pictures of the view possible again.
     fn discard(&mut self) -> anyhow::Result<()> {
-        edit::discard(&self.result)?;
+        let _w = writing();
+        edit::discard_for(&self.result, Some(self.edit.ply))?;
         PICTURES.fetch_add(1, Ordering::Relaxed);
         self.problem = None;
         Ok(())
     }
 
-    /// Whether a save or a picture is on its way.
+    /// Whether the picture is being drawn.
     fn busy(&self) -> bool {
-        self.saving.is_some() || self.drawing.is_some()
+        self.drawing.is_some()
     }
 }
 
 impl Drop for Edits {
-    /// The view closed: what is not saved yet is, and the picture drawn again, in a thread of their own (the app goes
-    /// on; a save number keeps them in order with any still under way).
+    /// The view closed: a save that failed is tried once more (saves are written as they are made, so there is nothing
+    /// else to write), a stroke under way ends, and the picture is drawn again in a thread of its own when it does not
+    /// show the edit saved (it checks the file still holds that edit before it says so; a view opened next draws it
+    /// again otherwise).
     fn drop(&mut self) {
+        self.history.end();
         if self.problem.is_some() {
             return;
         }
-        // A save still under way is written again with a newer number: the picture then reads the edit as it ends.
-        let unsaved = !self.edit.same_outputs(&self.saved) || self.save_error.is_some() || self.saving.is_some();
-        if !unsaved && !self.picture_stale && self.drawing.is_none() {
+        if self.save_error.is_some() {
+            self.save();
+            if let Some(e) = &self.save_error {
+                eprintln!("Splat edits of {} not saved: {e}", self.session.display());
+                return;
+            }
+        }
+        if !self.picture_stale || self.drawing.is_some() {
             return;
         }
-        let seq = SAVES.fetch_add(1, Ordering::Relaxed) + 1;
-        let mut e = std::mem::take(&mut self.edit);
-        e.picture = false;
-        let (session, result, window) = (self.session.clone(), self.result.clone(), self.window.clone());
-        let spawned = std::thread::Builder::new().name("splat edits".into()).spawn(move || {
-            if unsaved {
-                if let Err(err) = persist(&result, &e, seq) {
-                    eprintln!("Splat edits of {}: {err:#}", session.display());
-                    return;
-                }
-            }
+        let (session, window) = (self.session.clone(), self.window.clone());
+        let spawned = std::thread::Builder::new().name("splat edits' picture".into()).spawn(move || {
             if let Err(err) = redraw_picture(&session, window) {
                 eprintln!("The picture of {}: {err:#}", session.display());
             }
@@ -371,22 +401,30 @@ impl Drop for Edits {
 }
 
 /// The capture's picture drawn again without what its edit removes: from the camera the worker drew it from, at its
-/// size, as the worker draws (no viewer's guards, the sky map behind), into its place, the worker's kept aside
-/// (orbiters_reconstruct::edit::write_picture); then the edit file says so. Nothing to do (false) when the file's edit
-/// already has its picture or removes nothing. Not drawn, and an error, when the records do not say where the worker's
-/// camera was.
+/// size, as the worker draws (no viewer's guards, the sky map behind), into its place, the worker's kept aside for this
+/// PLY (orbiters_reconstruct::edit::write_picture); then the edit file says so, only while it still holds the edit drawn.
+/// Everything removed draws the sky alone. Nothing to do (false) when the file's edit already has its picture or
+/// removes nothing. Not drawn, and an error, when the records do not say where the worker's camera was (the picture then
+/// stays out of shares: orbiters_reconstruct::edit::picture_state).
 pub(super) fn redraw_picture(session: &Path, window: (wgpu::Device, wgpu::Queue)) -> anyhow::Result<bool> {
     use anyhow::Context as _;
     let result = reconstruction::result_dir(session);
     let ply = result.join(reconstruction::PLY_FILE);
     let (mut g, identity, found) = edit::read_for_view(&ply)?;
     let Found::Current(drawn) = found else { return Ok(false) };
-    if drawn.picture {
+    if drawn.picture || drawn.removes_nothing() {
         return Ok(false);
     }
     let splats = g.len();
     let camera = edit::preview_camera(session).context("its records do not say where its picture was taken from")?;
     edit::apply(&mut g, &drawn);
+    if g.is_empty() {
+        // Everything removed: the renderer draws nothing of an empty set, so one splat too faint to show (far ahead,
+        // fully transparent) stands in, and the picture is the sky behind.
+        let f = camera.forward();
+        let at = camera.position();
+        g.push([at[0] + f[0] * 100.0, at[1] + f[1] * 100.0, at[2] + f[2] * 100.0], [-6.0; 3], [1.0, 0.0, 0.0, 0.0], -40.0, [0.0; 3]);
+    }
     let mut gpu = Gpu::renderer(window.0, window.1);
     gpu.guards = false;
     gpu.upload(&g);
@@ -407,10 +445,10 @@ pub(super) fn redraw_picture(session: &Path, window: (wgpu::Device, wgpu::Queue)
     let rgb: Vec<u8> = image.iter().flat_map(|p| [0, 1, 2].map(|c| (p[c].clamp(0.0, 1.0) * 255.0 + 0.5) as u8)).collect();
     let qoi = orbiters_core::contracts::qoi::encode(&rgb, camera.width, camera.height, 3);
     // Only while the file still holds the edit drawn (a newer save draws its own).
-    let _w = written();
+    let _w = writing();
     match edit::find(&ply, identity, splats) {
         Found::Current(now) if now.same_outputs(&drawn) => {
-            edit::write_picture(&result, &qoi)?;
+            edit::write_picture(&result, identity, &qoi)?;
             Edit { picture: true, ..now }.save(&result)?;
             PICTURES.fetch_add(1, Ordering::Relaxed);
             Ok(true)
@@ -509,6 +547,15 @@ impl Default for State {
     }
 }
 
+/// [`Viewer::stop_drag`] on its parts.
+fn stop_drag(s: &mut State, edits: Option<&mut Edits>) {
+    if matches!(s.drag.take(), Some(Drag::Brush { .. })) {
+        if let Some(e) = edits {
+            e.end_stroke();
+        }
+    }
+}
+
 impl State {
     /// Select splats is open.
     pub(super) fn on(&self) -> bool {
@@ -536,6 +583,11 @@ impl Viewer {
     pub fn edits_problem(&self) -> Option<String> {
         self.loaded.as_ref()?.edits.as_ref()?.problem.clone()
     }
+
+    /// Why no picture of the view may be made now (Save this view, Edit in 3D's pictures: screenshots).
+    pub fn picture_refused(&self) -> Option<String> {
+        self.loaded.as_ref()?.drawn().err()
+    }
 }
 
 impl Viewer {
@@ -545,29 +597,37 @@ impl Viewer {
         if e.problem.is_some() {
             return;
         }
+        let want = e.edit.ply;
         self.select.on = true;
-        self.select.drag = None;
+        self.stop_drag();
         if self.select.splats.is_none() && self.select.loading.is_none() {
-            let (ply, n) = (reconstruction::result_dir(&self.session).join(reconstruction::PLY_FILE), e.edit.len());
+            let ply = reconstruction::result_dir(&self.session).join(reconstruction::PLY_FILE);
             self.select.error = None;
             self.select.loading = Some(Job::spawn(ctx, move || {
-                let g = orbiters_reconstruct::ply::read(&ply).map_err(|e| format!("{e:#}"))?;
-                if g.len() != n {
-                    return Err("The capture was reconstructed again meanwhile: close its 3D view and open it again.".into());
+                // The very PLY the view shows (its hash, not only its count: IDs are its order).
+                let (g, now, _) = edit::read_for_view(&ply).map_err(|e| format!("{e:#}"))?;
+                if now != want {
+                    return Err(RECONSTRUCTED.into());
                 }
                 Ok(Arc::new(Splats::new(&g)))
             }));
         }
     }
 
-    /// Leaves Select splats: the selection cleared, the picture drawn again.
+    /// Leaves Select splats: a stroke under way ended, the selection cleared, the picture drawn again.
     pub(super) fn leave_select(&mut self, ctx: &egui::Context) {
+        self.stop_drag();
         self.select.on = false;
-        self.select.drag = None;
         if let Some(e) = self.loaded.as_mut().and_then(|l| l.edits.as_mut()) {
-            e.clear(ctx);
+            e.clear();
             e.redraw(ctx);
         }
+    }
+
+    /// Drops a tool's drag under way (Esc, another tool, the mode left): a brush stroke ends there as one step of undo,
+    /// so that what comes next is a step of its own.
+    pub(super) fn stop_drag(&mut self) {
+        stop_drag(&mut self.select, self.loaded.as_mut().and_then(|l| l.edits.as_mut()));
     }
 
     /// Select splats' work each frame, open or not: what saving and the picture's job came back with, the tools'
@@ -629,10 +689,10 @@ impl Viewer {
                         if ids.is_empty() {
                             say(s, "Nothing there to select");
                             if mode == Mode::Replace {
-                                edits.clear(&ctx);
+                                edits.clear();
                             }
                         } else {
-                            edits.select(&ctx, &ids, mode);
+                            edits.select(&ids, mode);
                         }
                     }
                 }
@@ -649,15 +709,15 @@ impl Viewer {
                         let q = from + (to - from) * (k as f32 / steps as f32);
                         ids.extend(v.visible_in_circle(px(q), radius * ppp, pick::BRUSH_WEIGHT));
                     }
-                    edits.select(&ctx, &ids, mode);
+                    edits.select(&ids, mode);
                 };
                 // A stroke adds what it paints (or takes it away with Ctrl), after clearing the selection without
                 // Shift or Ctrl.
                 let paints = if mode == Mode::Remove { Mode::Remove } else { Mode::Add };
                 let start = |s: &mut State, edits: &mut Edits, at: Pos2| {
-                    edits.history.begin();
+                    edits.begin_stroke();
                     if mode == Mode::Replace {
-                        edits.clear(&ctx);
+                        edits.clear();
                     }
                     dab(s, edits, at, at, paints);
                 };
@@ -669,7 +729,7 @@ impl Viewer {
                 } else if resp.clicked_by(PointerButton::Primary) {
                     if let Some(at) = resp.interact_pointer_pos() {
                         start(s, edits, at);
-                        edits.history.end();
+                        edits.end_stroke();
                     }
                 }
                 let stroke = match s.drag {
@@ -684,7 +744,7 @@ impl Viewer {
                 }
                 if (resp.drag_stopped_by(PointerButton::Primary) || !primary_down) && stroke.is_some() {
                     s.drag = None;
-                    edits.history.end();
+                    edits.end_stroke();
                 }
                 if let Some(at) = hover.or(resp.interact_pointer_pos()) {
                     p.circle_stroke(at, radius, egui::Stroke::new(1.5, theme::white(0.85)));
@@ -708,7 +768,7 @@ impl Viewer {
                         if ids.is_empty() {
                             say(s, "Nothing there to select");
                         }
-                        edits.select(&ctx, &ids, mode);
+                        edits.select(&ids, mode);
                     } else {
                         p.rect_filled(r, 0.0, theme::alpha(SELECTION, 0.12));
                         p.rect_stroke(r, 0.0, egui::Stroke::new(1.5, SELECTION), egui::StrokeKind::Inside);
@@ -740,7 +800,7 @@ impl Viewer {
                         if ids.is_empty() {
                             say(s, "Nothing inside the sphere");
                         }
-                        edits.select(&ctx, &ids, mode);
+                        edits.select(&ids, mode);
                     } else if let Some((cx, cy, _)) = camera.project(c3) {
                         let c = pos2(rect.left() + (cx + 0.5) / ppp, rect.top() + (cy + 0.5) / ppp);
                         let r = r3 * camera.fy / d.max(1e-3) / ppp;
@@ -787,36 +847,37 @@ impl Viewer {
         let (undo, redo, all, invert, show, hide, delete, escape, tool) = pressed;
         if let Some(t) = tool {
             self.select.tool = t;
-            self.select.drag = None;
+            self.stop_drag();
         }
-        if escape && self.select.drag.take().is_some() {
+        if escape && self.select.drag.is_some() {
+            self.stop_drag();
             return;
         }
         let Some(e) = self.loaded.as_mut().and_then(|l| l.edits.as_mut()) else { return };
         if undo {
-            e.undo(ctx);
+            e.undo();
         }
         if redo {
-            e.redo(ctx);
+            e.redo();
         }
         if all {
-            e.select_all(ctx);
+            e.select_all();
         }
         if invert {
-            e.invert(ctx);
+            e.invert();
         }
         if show {
-            e.show_all(ctx);
+            e.show_all();
         }
         if hide {
-            e.remove(ctx, HIDDEN);
+            e.remove(HIDDEN);
         }
         if delete {
-            e.remove(ctx, DELETED);
+            e.remove(DELETED);
         }
         if escape {
             if e.selected() > 0 {
-                e.clear(ctx);
+                e.clear();
             } else {
                 self.leave_select(ctx);
             }
@@ -850,9 +911,9 @@ impl Viewer {
             }
             if IconButton::new(glyph, label).size(36.0, 17.0).show_at(&mut bu, r).clicked() && enabled {
                 if undo {
-                    e.undo(&ctx);
+                    e.undo();
                 } else {
-                    e.redo(&ctx);
+                    e.redo();
                 }
             }
             x += 44.0;
@@ -864,9 +925,9 @@ impl Viewer {
             format::integer(e.hidden() as f64),
             format::integer(e.deleted() as f64)
         );
-        let (state, tone) = match (&e.save_error, e.saving.is_some() || e.drawing.is_some()) {
+        let (state, tone) = match (&e.save_error, e.drawing.is_some()) {
             (Some(_), _) => ("Not saved", theme::DANGER),
-            (None, true) => ("Saving…", theme::FG_3),
+            (None, true) => ("Saved · drawing its picture again…", theme::FG_3),
             (None, false) => ("Saved beside the splats", theme::FG_3),
         };
         let t1 = Txt::new(counts, 12.5).color(theme::FG);
@@ -887,7 +948,7 @@ impl Viewer {
                 .show_at(ui, r)
                 .clicked()
             {
-                e.retry(&ctx);
+                e.retry();
             }
         }
     }
@@ -916,7 +977,7 @@ impl Viewer {
         let before = self.select.tool;
         widgets::segmented(&mut seg, "splat-select-tool", &mut self.select.tool, &options, true);
         if self.select.tool != before {
-            self.select.drag = None;
+            self.stop_drag();
         }
         if self.select.tool == Tool::Brush {
             let slider_r = Rect::from_min_size(pos2(seg_r.right() + 16.0, tools_r.center().y - 14.0), vec2(284.0, 28.0));
@@ -1000,7 +1061,7 @@ impl Viewer {
                     let radius = pick::step(&splats, &e.edit.marks);
                     let ids = if clicked == Some(0) { pick::grow(&splats, &e.edit.marks, radius) } else { pick::shrink(&splats, &e.edit.marks, radius) };
                     let mode = if clicked == Some(0) { Mode::Add } else { Mode::Remove };
-                    if !e.select(&ctx, &ids, mode) {
+                    if !e.select(&ids, mode) {
                         self.select.notice = Some((
                             if mode == Mode::Add { "Nothing beside the selection to add" } else { "Nothing to take away" }.into(),
                             ctx.input(|i| i.time),
@@ -1009,22 +1070,22 @@ impl Viewer {
                 }
             }
             Some(2) => {
-                e.invert(&ctx);
+                e.invert();
             }
             Some(3) => {
-                e.remove(&ctx, HIDDEN);
+                e.remove(HIDDEN);
             }
             Some(4) => {
-                e.remove(&ctx, DELETED);
+                e.remove(DELETED);
             }
             Some(5) => {
-                e.select_all(&ctx);
+                e.select_all();
             }
             Some(6) => {
-                e.show_all(&ctx);
+                e.show_all();
             }
             Some(7) => {
-                e.restore_all(&ctx);
+                e.restore_all();
             }
             _ => {}
         }
@@ -1113,9 +1174,20 @@ mod tests {
         rgba.chunks(4).filter(|p| p[0] > 150 && p[1] < 100).count()
     }
 
+    fn stamp(dir: &Path) -> Option<Stamp> {
+        Stamp::of(&reconstruction::dir(dir).join(reconstruction::PLY_FILE))
+    }
+
+    /// The edits a view would open with now.
+    fn open(dir: &Path, window: &(wgpu::Device, wgpu::Queue)) -> Edits {
+        let (g, identity, found) = edit::read_for_view(&reconstruction::dir(dir).join(reconstruction::PLY_FILE)).unwrap();
+        Edits::new(dir, g.len(), identity, found, window.clone())
+    }
+
     /// The capture's picture: drawn from the worker's camera with the avatar where it was, then again without it once
-    /// it is deleted (the file says the picture is drawn), the worker's own kept aside; restored once nothing is
-    /// removed. A GPU test (run under the lab's GPU lock).
+    /// it is deleted (the file says the picture is drawn), the worker's own kept aside under its PLY's name; with every
+    /// splat deleted, the background alone; restored once nothing is removed. Saves of a view whose PLY was replaced
+    /// meanwhile are refused. Opens its own GPU device.
     #[test]
     fn the_picture_is_drawn_again_without_what_is_removed() {
         let Some(window) = device() else { return };
@@ -1125,118 +1197,148 @@ mod tests {
         let ply = result.join(reconstruction::PLY_FILE);
         let camera = edit::preview_camera(&dir).expect("the worker's camera");
         assert_eq!((camera.width, camera.height), (64, 36));
-        // An edit that removes nothing: nothing to draw.
+        // No edits: nothing to draw.
         assert!(!redraw_picture(&dir, window.clone()).unwrap());
-        // As trained (an edit hiding a wall splat off to the side): the avatar shows.
+        // An edit hiding a wall splat off to the side: the avatar shows.
         let identity = Identity::read(&ply).unwrap();
+        let trained = result.join(reconstruction::trained_preview_file(identity.hash));
         let mut e = Edit::new(g.len(), identity);
         e.marks[0] = HIDDEN;
         e.picture = false;
-        e.save(&result).unwrap();
+        persist(&result, &e, stamp(&dir)).unwrap();
+        assert_eq!(edit::picture_state(&result), edit::PictureState::NotDrawn);
         assert!(redraw_picture(&dir, window.clone()).unwrap());
         assert!(reds(&dir) > 10, "the avatar in the picture: {}", reds(&dir));
-        assert!(edit::Edit::decode(&std::fs::read(result.join(reconstruction::EDIT_FILE)).unwrap()).unwrap().picture);
+        assert_eq!(edit::picture_state(&result), edit::PictureState::Drawn);
         assert!(!redraw_picture(&dir, window.clone()).unwrap(), "drawn already");
-        // Deleted: the picture has none of it, and is a picture of the training's size.
+        // Deleted: the picture has none of it; the worker's own kept aside.
         for i in avatar.clone() {
             e.marks[i] = DELETED;
         }
-        persist(&result, &e, u64::MAX - 1).unwrap();
+        persist(&result, &e, stamp(&dir)).unwrap();
         assert!(redraw_picture(&dir, window.clone()).unwrap());
         assert_eq!(reds(&dir), 0, "the avatar left the picture");
-        assert_eq!(
-            std::fs::read(result.join(reconstruction::TRAINED_PREVIEW_FILE)).unwrap(),
-            orbiters_core::contracts::qoi::encode(&[128u8; 64 * 36 * 3], 64, 36, 3),
-            "the worker's kept aside"
-        );
+        assert_eq!(std::fs::read(&trained).unwrap(), orbiters_core::contracts::qoi::encode(&[128u8; 64 * 36 * 3], 64, 36, 3), "the worker's kept aside");
+        // Everything deleted: the background alone (no sky map here), drawn all the same.
+        let mut all = e.clone();
+        all.marks.iter_mut().for_each(|m| *m = DELETED);
+        persist(&result, &all, stamp(&dir)).unwrap();
+        assert!(redraw_picture(&dir, window.clone()).unwrap(), "everything deleted is drawn too");
+        let (_, _, rgba) = reconstruction::read_preview(&dir).unwrap();
+        assert!(rgba.chunks(4).all(|p| p[0] < 8 && p[1] < 8 && p[2] < 8), "the background alone");
+        assert_eq!(edit::picture_state(&result), edit::PictureState::Drawn);
         // Nothing removed: the worker's picture back, the edit file gone.
-        persist(&result, &Edit::new(g.len(), identity), u64::MAX).unwrap();
-        assert!(!result.join(reconstruction::EDIT_FILE).exists() && !result.join(reconstruction::TRAINED_PREVIEW_FILE).exists());
+        persist(&result, &Edit::new(g.len(), identity), stamp(&dir)).unwrap();
+        assert!(!result.join(reconstruction::EDIT_FILE).exists() && !trained.exists());
         assert_eq!(reconstruction::read_preview(&dir).unwrap().2[..4], [128, 128, 128, 255]);
-        // An older save finishing late never writes over a newer one.
-        assert!(!persist(&result, &e, 5).unwrap());
+        // The PLY replaced under the view (a new reconstruction): its saves are refused, the file left as it is.
+        let before = stamp(&dir);
+        let mut other = g.clone();
+        other.means[0][1] += 0.5;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        orbiters_reconstruct::ply::write(&ply, &other).unwrap();
+        let refused = persist(&result, &e, before).unwrap_err().to_string();
+        assert!(refused.contains("reconstructed again"), "{refused}");
         assert!(!result.join(reconstruction::EDIT_FILE).exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The edits as the view holds them: selections are steps of undo but never saved; hide and delete are saved at
-    /// once and leave the outputs; undo brings them back, and that is saved too; an edit that could not be applied
-    /// blocks saving until it is discarded. A view closed with changes not saved yet saves them.
+    /// The edits as the view holds them: selections are steps of undo but never saved; hide and delete are on the disk
+    /// as soon as they are made (a share or a view opened next reads them), and so are undo and redo; a view closed and
+    /// opened again at once has every removal, and adds to them; edits that cannot be applied block saving until
+    /// discarded. Opens its own GPU device (the picture's).
     #[test]
-    fn edits_are_saved_as_they_change_and_undone_the_same_way() {
+    fn edits_are_on_the_disk_as_they_are_made() {
         let Some(window) = device() else { return };
-        let ctx = egui::Context::default();
         let dir = temp("edits");
         let (g, avatar) = session(&dir);
         let ply = reconstruction::dir(&dir).join(reconstruction::PLY_FILE);
-        let wait = |e: &mut Edits| {
-            let start = std::time::Instant::now();
-            while e.busy() {
-                e.poll();
-                assert!(start.elapsed().as_secs() < 30);
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        };
-        let (_, identity, found) = edit::read_for_view(&ply).unwrap();
-        let mut e = Edits::new(&dir, g.len(), identity, found, window.clone());
+        let removed = || edit::read_edited(&ply).unwrap().1;
+        let mut e = open(&dir, &window);
         let ids: Vec<u32> = avatar.clone().map(|i| i as u32).collect();
-        assert!(e.select(&ctx, &ids, Mode::Replace));
+        assert!(e.select(&ids, Mode::Replace));
         assert_eq!(e.selected(), 25);
         assert_eq!(e.drawn[avatar.start], 1, "drawn tinted");
-        assert!(e.saving.is_none(), "a selection is not saved");
-        assert!(e.remove(&ctx, DELETED));
+        assert!(!reconstruction::dir(&dir).join(reconstruction::EDIT_FILE).exists(), "a selection is not saved");
+        assert!(e.remove(DELETED));
         assert_eq!((e.selected(), e.deleted()), (0, 25));
         assert_eq!(e.drawn[avatar.start], 2, "not drawn");
-        wait(&mut e);
         assert!(e.save_error.is_none(), "{:?}", e.save_error);
-        let (kept, removed) = edit::read_edited(&ply).unwrap();
-        assert_eq!((kept.len(), removed), (g.len() - 25, 25), "saved: out of the outputs");
-        assert!(kept.colors.iter().all(|c| c[1] > 0.4), "no red left");
-        // Undo: the avatar back in the outputs, and selected again as before the delete.
-        e.undo(&ctx);
-        wait(&mut e);
-        assert_eq!((e.selected(), e.deleted()), (25, 0));
-        assert_eq!(edit::read_edited(&ply).unwrap().1, 0);
-        e.redo(&ctx);
-        wait(&mut e);
-        assert_eq!(edit::read_edited(&ply).unwrap().1, 25);
+        assert_eq!(removed(), 25, "on the disk at once");
+        e.undo();
+        assert_eq!((e.selected(), e.deleted(), removed()), (25, 0, 0));
+        e.redo();
+        assert_eq!(removed(), 25);
         // Invert then hide: everything else hidden; Show all brings it back, the deleted avatar stays out.
-        e.invert(&ctx);
+        e.invert();
         assert_eq!(e.selected(), g.len() - 25);
-        e.remove(&ctx, HIDDEN);
-        e.show_all(&ctx);
-        wait(&mut e);
-        assert_eq!((e.hidden(), e.deleted()), (0, 25));
-        // A view closed before its save: saved by its drop, the picture drawn again.
-        e.restore_all(&ctx);
-        e.select(&ctx, &ids[..5], Mode::Replace);
-        e.remove(&ctx, HIDDEN);
+        e.remove(HIDDEN);
+        assert_eq!(removed(), g.len());
+        e.show_all();
+        assert_eq!((e.hidden(), e.deleted(), removed()), (0, 25, 25));
+        // Closed and opened again at once: the avatar is still out, and a new removal adds to it.
         drop(e);
-        // Its last step: the file says its picture is drawn (after the picture itself).
-        let start = std::time::Instant::now();
-        let done = || {
-            let file = std::fs::read(reconstruction::dir(&dir).join(reconstruction::EDIT_FILE)).ok().and_then(|b| edit::Edit::decode(&b).ok());
-            file.is_some_and(|e| e.picture && e.removed() == 5) && reconstruction::dir(&dir).join(reconstruction::TRAINED_PREVIEW_FILE).exists()
-        };
-        while !done() {
-            assert!(start.elapsed().as_secs() < 30, "saved after the view closed");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        let mut again = open(&dir, &window);
+        assert_eq!(again.deleted(), 25, "every removal of the view closed");
+        let wall: Vec<u32> = (0..10).collect();
+        again.select(&wall, Mode::Replace);
+        again.remove(DELETED);
+        assert_eq!(removed(), 35, "the earlier removals kept");
+        drop(again);
         // Damaged: refused, nothing saved over it until discarded, then the trained splats.
         std::fs::write(reconstruction::dir(&dir).join(reconstruction::EDIT_FILE), b"N4EDIT01 damaged").unwrap();
-        let (_, identity, found) = edit::read_for_view(&ply).unwrap();
-        let mut e = Edits::new(&dir, g.len(), identity, found, window);
+        let mut e = open(&dir, &window);
         assert!(e.problem.is_some() && e.edit.removes_nothing());
-        e.select(&ctx, &ids, Mode::Replace);
-        e.remove(&ctx, DELETED);
-        assert!(e.saving.is_none(), "never saved over an edit it could not read");
+        e.select(&ids, Mode::Replace);
+        e.remove(DELETED);
+        assert_eq!(std::fs::read(reconstruction::dir(&dir).join(reconstruction::EDIT_FILE)).unwrap(), b"N4EDIT01 damaged", "never saved over");
         assert!(edit::read_edited(&ply).is_err(), "and shares stop");
         e.discard().unwrap();
         assert!(e.problem.is_none());
-        assert_eq!(edit::read_edited(&ply).unwrap().1, 0);
-        e.restore_all(&ctx);
+        assert_eq!(removed(), 0);
         drop(e);
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A brush stroke cancelled halfway (Esc, another tool, Done) ends there as one step: a delete made next is a step of
+    /// its own, and undoing it brings back the selection the stroke made.
+    #[test]
+    fn a_cancelled_stroke_is_one_step_of_its_own() {
+        let Some(window) = device() else { return };
+        let dir = temp("stroke");
+        let (_, avatar) = session(&dir);
+        let mut e = open(&dir, &window);
+        let mut s = State::default();
+        let ids: Vec<u32> = avatar.map(|i| i as u32).collect();
+        e.begin_stroke();
+        s.drag = Some(Drag::Brush { mode: Mode::Add, last: Pos2::ZERO });
+        e.select(&ids[..10], Mode::Add);
+        e.select(&ids[10..], Mode::Add);
+        stop_drag(&mut s, Some(&mut e));
+        assert!(s.drag.is_none() && !e.history.is_open());
+        e.remove(DELETED);
+        assert_eq!(e.deleted(), 25);
+        e.undo();
+        assert_eq!((e.deleted(), e.selected()), (0, 25), "the delete undone alone: the stroke's selection back");
+        e.undo();
+        assert_eq!(e.selected(), 0, "then the whole stroke");
+        drop(e);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The splats read again (the other GPU, a picture of the view) only from the PLY the view loaded: another
+    /// reconstruction's are refused, never drawn with this view's marks.
+    #[test]
+    fn splats_are_read_again_only_from_the_ply_the_view_loaded() {
+        let dir = temp("again");
+        let (mut g, _) = session(&dir);
+        let ply = reconstruction::dir(&dir).join(reconstruction::PLY_FILE);
+        let loaded = Identity::read(&ply).unwrap();
+        assert_eq!(read_again(&dir, Some(loaded)).unwrap().0.len(), g.len());
+        g.means[3][0] += 1.0;
+        orbiters_reconstruct::ply::write(&ply, &g).unwrap();
+        assert!(read_again(&dir, Some(loaded)).unwrap_err().to_string().contains("reconstructed again"));
+        assert!(read_again(&dir, Some(Identity::read(&ply).unwrap())).is_ok());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

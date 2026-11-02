@@ -307,6 +307,18 @@ fn replace(dir: &Path, partial: &Path) -> anyhow::Result<()> {
 /// previous ones; renders of keyframes the new run did not hold out are deleted where possible.
 fn replace_files(out: &Path, partial: &Path) -> anyhow::Result<()> {
     retry(|| std::fs::rename(partial.join(rec::PLY_FILE), out.join(rec::PLY_FILE))).with_context(|| format!("{} is open in another program: close it and reconstruct again", out.join(rec::PLY_FILE).display()))?;
+    // The previous splats' edits and the worker's pictures kept aside for them go with them (a folder moved as a whole
+    // takes them along): edits name splats of the PLY they were made on, and a picture kept aside belongs to its PLY.
+    retry(|| match std::fs::remove_file(out.join(rec::EDIT_FILE)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    })
+    .with_context(|| format!("{} is open in another program: close it and reconstruct again", out.join(rec::EDIT_FILE).display()))?;
+    for e in std::fs::read_dir(out).into_iter().flatten().flatten() {
+        if rec::is_trained_preview_file(&e.file_name().to_string_lossy()) {
+            let _ = retry(|| std::fs::remove_file(e.path()));
+        }
+    }
     // The sky map goes with the splats it was trained with: a result without one leaves none behind.
     let sky = out.join(rec::SKY_FILE);
     if partial.join(rec::SKY_FILE).exists() {
@@ -340,7 +352,7 @@ fn web_preview(args: &[String]) -> anyhow::Result<()> {
         _ => orbiters_reconstruct::web::DEFAULT_MAX,
     };
     // Without what the 3D view hid or deleted (orbiters_reconstruct::edit, the edit beside the PLY).
-    let (g, removed) = orbiters_reconstruct::edit::read_edited(std::path::Path::new(ply_path))?;
+    let (g, removed, _) = orbiters_reconstruct::edit::read_edited(std::path::Path::new(ply_path))?;
     let n = g.len().max(1) as f32;
     let centre = g.means.iter().fold([0.0f32; 3], |a, m| [a[0] + m[0] / n, a[1] + m[1] / n, a[2] + m[2] / n]);
     let web = orbiters_reconstruct::web::splat_file(&g, max, centre);
@@ -355,7 +367,7 @@ fn web_preview(args: &[String]) -> anyhow::Result<()> {
 fn vrchat(args: &[String]) -> anyhow::Result<()> {
     let (Some(session), Some(out)) = (args.first(), args.get(1)) else { bail!("usage: orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned]") };
     let session = std::path::Path::new(session);
-    let (g, removed) = orbiters_reconstruct::edit::read_edited(&rec::result_dir(session).join(rec::PLY_FILE))?;
+    let (g, removed, _) = orbiters_reconstruct::edit::read_edited(&rec::result_dir(session).join(rec::PLY_FILE))?;
     if removed > 0 {
         eprintln!("{removed} splats left out by its edits");
     }
@@ -489,6 +501,31 @@ mod tests {
         drop(held);
         assert_eq!((read(&dir, rec::PLY_FILE), read(&dir, rec::REPORT_FILE)), ("newer".into(), "r2".into()));
         recover(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The previous splats' edits and the worker's picture kept aside for them go with them, whether the folder moves
+    /// whole or file by file (a viewer holding a render open): a new result never meets an old result's edits.
+    #[cfg(windows)]
+    #[test]
+    fn the_splat_edits_go_with_their_splats() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const SHARE_READ: u32 = 1;
+        let dir = session("edits");
+        let trained = rec::trained_preview_file(0x1234);
+        for held_open in [false, true] {
+            result(&dir, rec::DIR, "old", "r0");
+            std::fs::write(rec::dir(&dir).join(rec::EDIT_FILE), "edits of old").unwrap();
+            std::fs::write(rec::dir(&dir).join(&trained), "old's own picture").unwrap();
+            result(&dir, rec::PARTIAL_DIR, "new", "r1");
+            let held = held_open.then(|| std::fs::OpenOptions::new().read(true).share_mode(SHARE_READ).open(rec::dir(&dir).join(rec::PREVIEW_FILE)).unwrap());
+            replace(&dir, &dir.join(rec::PARTIAL_DIR)).expect("replaced");
+            drop(held);
+            assert_eq!(read(&dir, rec::PLY_FILE), "new");
+            assert!(!rec::dir(&dir).join(rec::EDIT_FILE).exists(), "held open: {held_open}");
+            assert!(!rec::dir(&dir).join(&trained).exists(), "held open: {held_open}");
+            recover(&dir);
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

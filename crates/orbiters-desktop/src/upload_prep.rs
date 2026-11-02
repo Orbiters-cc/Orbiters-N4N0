@@ -31,16 +31,13 @@ pub struct Fingerprint(Vec<Option<String>>);
 
 impl Fingerprint {
     pub fn read(session: &Path, result: &Path) -> anyhow::Result<Self> {
-        // The splat edits too (orbiters_reconstruct::edit): trees prepared before a splat was hidden must not answer
-        // after.
         let paths = [
             result.join(reconstruction::PLY_FILE),
             session.join(manifest::FRAMES_FILE),
             result.join(reconstruction::REPORT_FILE),
             session.join(manifest::MANIFEST_FILE),
-            result.join(reconstruction::EDIT_FILE),
         ];
-        let hashes = paths
+        let mut hashes: Vec<Option<String>> = paths
             .iter()
             .enumerate()
             .map(|(i, path)| match sha256_file(path) {
@@ -49,7 +46,16 @@ impl Fingerprint {
                 Err(e) => Err(e),
             })
             .collect::<Result<_, _>>()?;
+        // The splat edits too, as what they leave out (orbiters_reconstruct::edit::generation): trees prepared before a
+        // splat was hidden never answer after, and the picture's flag (drawn again or not) changes nothing. Edits that
+        // cannot be read have no fingerprint: nothing prepared answers for them.
+        hashes.push(Some(format!("edits:{}", orbiters_reconstruct::edit::generation(result)?)));
         Ok(Self(hashes))
+    }
+
+    /// The generation of the splat edits it holds.
+    pub fn generation(&self) -> Option<&str> {
+        self.0.last()?.as_deref()?.strip_prefix("edits:")
     }
 }
 
@@ -389,14 +395,28 @@ mod tests {
         std::fs::write(result.join(reconstruction::PLY_FILE), b"ply").unwrap();
         std::fs::write(dir.join(manifest::FRAMES_FILE), b"frames").unwrap();
         let unedited = Fingerprint::read(&dir, &result).unwrap();
-        std::fs::write(result.join(reconstruction::EDIT_FILE), b"edit 1").unwrap();
+        assert_eq!(unedited.generation(), Some(orbiters_reconstruct::edit::UNEDITED));
+        use orbiters_reconstruct::edit::{DELETED, Edit, HIDDEN, Identity};
+        let mut edit = Edit::new(10, Identity { bytes: 1 << 20, hash: 5 });
+        edit.marks[1] = DELETED;
+        edit.save(&result).unwrap();
         let edited = Fingerprint::read(&dir, &result).unwrap();
         assert_ne!(edited, unedited);
+        assert_eq!(edited.generation(), Some(edit.generation().as_str()));
         let files = PreviewFiles { vrchat_pc: tree_fixture(), vrchat_quest: tree_fixture(), vrchat_coarse: tree_fixture() };
         save(&result, &unedited, &files, &serde_json::json!({})).unwrap();
         assert!(load(&result, &edited, 1).is_none(), "prepared before the edit: not used");
-        std::fs::write(result.join(reconstruction::EDIT_FILE), b"edit 2").unwrap();
+        // The picture drawn again (its flag) or hidden instead of deleted: the same outputs, the same fingerprint.
+        edit.picture = false;
+        edit.marks[1] = HIDDEN;
+        edit.save(&result).unwrap();
+        assert_eq!(Fingerprint::read(&dir, &result).unwrap(), edited);
+        edit.marks[2] = DELETED;
+        edit.save(&result).unwrap();
         assert_ne!(Fingerprint::read(&dir, &result).unwrap(), edited);
+        // Damaged: no fingerprint, so nothing prepared answers.
+        std::fs::write(result.join(reconstruction::EDIT_FILE), b"damaged").unwrap();
+        assert!(Fingerprint::read(&dir, &result).is_err());
         std::fs::remove_file(result.join(reconstruction::EDIT_FILE)).unwrap();
         assert_eq!(Fingerprint::read(&dir, &result).unwrap(), unedited, "undone: the trees as trained answer again");
         assert!(load(&result, &unedited, 1).is_some());

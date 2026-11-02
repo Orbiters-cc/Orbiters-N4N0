@@ -29,7 +29,6 @@ use orbiters_core::settings::ViewGpu;
 use orbiters_reconstruct::camera::{normalize, Camera};
 use orbiters_reconstruct::gaussians::Gaussians;
 use orbiters_reconstruct::gpu::{Confidence, ConfidenceMode, DepthOfField, FarField, FarMode, Gpu, Target};
-use orbiters_reconstruct::ply;
 use orbiters_reconstruct::sky::SkyMap;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, IconButton, SegOption, Variant};
@@ -279,8 +278,10 @@ impl Viewer {
         let Some(l) = self.loaded.as_ref() else { return };
         if l.source.integrated() != integrated && self.refused != Some(integrated) {
             let (dir, window, c, marks) = (self.session.clone(), self.window.clone(), ctx.clone(), l.marks());
+            let expected = l.edits.as_ref().map(|e| e.edit.ply);
             let job = Job::spawn(ctx, move || {
-                let (g, sky) = read(&dir).map_err(|e| format!("{e:#}"))?;
+                // The PLY the view loaded, or none: marks of one PLY never go onto another.
+                let (g, sky) = select::read_again(&dir, expected).map_err(|e| format!("{e:#}"))?;
                 // With the marks as they were; newer ones follow with the next frame (their version differs).
                 source(&c, window, integrated, &g, sky.as_ref(), marks.as_ref().map(|(v, m)| (*v, m.as_slice()))).map_err(|e| format!("{e:#}"))
             });
@@ -645,8 +646,8 @@ impl Viewer {
                 };
                 let confidence = mode.map(|mode| Confidence { amount: self.amount, mode }).unwrap_or_default();
                 let far = FarField { mode: self.far, distance: self.far_distance, horizon: l.horizon };
-                let (dir, window, marks) = (self.session.clone(), self.window.clone(), l.marks().map(|(_, m)| m));
-                self.still = Some(Job::spawn(&ctx, move || still(&dir, window, camera, confidence, far, marks).map_err(|e| format!("{e:#}"))));
+                let (dir, window, drawn) = (self.session.clone(), self.window.clone(), l.drawn());
+                self.still = Some(Job::spawn(&ctx, move || still(&dir, window, camera, confidence, far, drawn?).map_err(|e| format!("{e:#}"))));
                 self.flashed = now;
                 self.saved = None;
                 self.still_error = None;
@@ -719,17 +720,39 @@ impl Viewer {
     }
 }
 
+/// What a picture of the view draws the splats with: the view's marks, for the PLY it loaded.
+#[derive(Clone)]
+struct Drawn {
+    marks: Arc<Vec<u8>>,
+    ply: orbiters_reconstruct::edit::Identity,
+}
+
+impl Loaded {
+    /// What a picture of the view draws (none for a downloaded `.splat`), or why none may be made: while edits that
+    /// could not be applied wait to be discarded, the view shows the splats as trained, and a picture of it would hold
+    /// what they removed.
+    fn drawn(&self) -> Result<Option<Drawn>, String> {
+        match &self.edits {
+            None => Ok(None),
+            Some(e) => match &e.problem {
+                Some(p) => Err(format!("No picture of this view until its splat edits are discarded: {p}")),
+                None => Ok(Some(Drawn { marks: e.drawn.clone(), ply: e.edit.ply })),
+            },
+        }
+    }
+}
+
 /// `camera`'s view of the splats of `dir` (at the camera's size, as `confidence` and `far` show them, without the
-/// splats `marks` hides or deletes), drawn by a renderer of its own on the window's device, so that the view on screen
+/// splats `drawn` hides or deletes), drawn by a renderer of its own on the window's device, so that the view on screen
 /// carries on; saved as a picture of the capture's world ([`super::editor::files::save_view`]).
-fn still(dir: &Path, window: (wgpu::Device, wgpu::Queue), camera: Camera, confidence: Confidence, far: FarField, marks: Option<Arc<Vec<u8>>>) -> anyhow::Result<PathBuf> {
-    let view = shoot(dir, window, camera, confidence, far, &[DepthOfField::default()], marks)?.pop().expect("one view");
+fn still(dir: &Path, window: (wgpu::Device, wgpu::Queue), camera: Camera, confidence: Confidence, far: FarField, drawn: Option<Drawn>) -> anyhow::Result<PathBuf> {
+    let view = shoot(dir, window, camera, confidence, far, &[DepthOfField::default()], drawn)?.pop().expect("one view");
     super::editor::files::save_view(dir, &view)
 }
 
 /// `camera`'s view of the splats of `dir` as [`still`] draws it, once for each depth of field of `dofs`: RGBA8,
-/// encoded sRGB, opaque. `marks` are those of the view on screen ([`select::Edits::drawn`]): what it hides or deletes
-/// is not drawn, and what it selects is not tinted.
+/// encoded sRGB, opaque. `drawn` holds the marks of the view on screen ([`select::Edits`]): what they hide or delete is
+/// not drawn and what they select is not tinted, only on the PLY they were made for ([`select::read_again`]).
 fn shoot(
     dir: &Path,
     window: (wgpu::Device, wgpu::Queue),
@@ -737,13 +760,13 @@ fn shoot(
     confidence: Confidence,
     far: FarField,
     dofs: &[DepthOfField],
-    marks: Option<Arc<Vec<u8>>>,
+    drawn: Option<Drawn>,
 ) -> anyhow::Result<Vec<orbiters_ui::photo::Rgba8>> {
-    let (g, sky) = read(dir)?;
+    let (g, sky) = select::read_again(dir, drawn.as_ref().map(|d| d.ply))?;
     let mut gpu = Gpu::renderer(window.0, window.1);
     gpu.upload(&g);
-    if let Some(m) = marks {
-        gpu.set_marks(&m.iter().map(|&m| if m >= 2 { 2 } else { 0 }).collect::<Vec<u8>>());
+    if let Some(d) = &drawn {
+        gpu.set_marks(&d.marks.iter().map(|&m| if m >= 2 { 2 } else { 0 }).collect::<Vec<u8>>());
     }
     if let Some(map) = &sky {
         gpu.set_sky(Some((map.width, &map.rgb)))?;
@@ -770,17 +793,6 @@ fn shoot(
     Ok(out)
 }
 
-/// Reads a session's splats and their sky map.
-fn read(dir: &Path) -> anyhow::Result<(Gaussians, Option<SkyMap>)> {
-    if dir.extension().is_some_and(|e| e == "splat") {
-        return Ok((orbiters_reconstruct::web::read_splat(&std::fs::read(dir)?)?, None));
-    }
-    let result = reconstruction::result_dir(dir);
-    let g = ply::read(&result.join(reconstruction::PLY_FILE))?;
-    let sky_file = result.join(reconstruction::SKY_FILE);
-    let sky = if sky_file.is_file() { Some(SkyMap::read(&sky_file)?) } else { None };
-    Ok((g, sky))
-}
 
 /// A renderer of `g` and its sky map on the integrated GPU (with `integrated`) or the window's device, drawing with
 /// `marks` (and their version) from its first frame.

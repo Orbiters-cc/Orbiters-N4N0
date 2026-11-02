@@ -20,10 +20,20 @@ pub const SKY_FILE: &str = "sky.png";
 pub const REPORT_FILE: &str = "report.json";
 /// A render of the first held-out keyframe (QOI, RGB). With splat edits ([`EDIT_FILE`]) it is drawn again without the
 /// splats they remove, so that every picture of the capture (its card, its uploads, a drag out of the app) matches its
-/// shared files; the worker's own render waits in [`TRAINED_PREVIEW_FILE`] until the edits are undone.
+/// shared files; the worker's own render waits aside ([`trained_preview_file`]) until the edits are undone.
 pub const PREVIEW_FILE: &str = "preview.qoi";
-/// The worker's preview while [`PREVIEW_FILE`] shows the edited splats.
-pub const TRAINED_PREVIEW_FILE: &str = "preview.trained.qoi";
+
+/// Where the worker's preview of the PLY whose hash (orbiters_reconstruct::edit::Identity) is `ply_hash` waits while
+/// [`PREVIEW_FILE`] shows the edited splats: `preview.trained-<hash>.qoi`, so that one kept for an earlier
+/// reconstruction is never put back over a newer one's.
+pub fn trained_preview_file(ply_hash: u64) -> String {
+    format!("preview.trained-{ply_hash:016x}.qoi")
+}
+
+/// Whether `name` is a file [`trained_preview_file`] names.
+pub fn is_trained_preview_file(name: &str) -> bool {
+    name.strip_prefix("preview.trained-").and_then(|r| r.strip_suffix(".qoi")).is_some_and(|h| h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit()))
+}
 /// The splats hidden or deleted in the 3D view (orbiters_reconstruct::edit): beside [`PLY_FILE`], which is never
 /// rewritten, and applied wherever the splats leave the app (the VRChat trees, the web preview, the pictures). A new
 /// reconstruction replaces the folder and its edits with it: they name splats of the PLY they were made on.

@@ -92,6 +92,19 @@ struct PlyHeader {
     bytes: u64,
     /// [`content_hash`] as 16 hexadecimal digits (JSON numbers lose u64 precision in other readers).
     hash: String,
+    /// The PLY's modification time when the edit was saved (nanoseconds since 1970, 0 unknown): a reader that only needs
+    /// to know whether the PLY is still the one (the capture's picture) hashes it only when this or its length differs.
+    #[serde(default)]
+    modified: u64,
+}
+
+/// A file's modification time in nanoseconds since 1970 (0 when unknown).
+fn modified_ns(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -114,11 +127,13 @@ pub struct Edit {
     pub ply: Identity,
     /// The capture's preview was drawn with these marks (a file says so in its header).
     pub picture: bool,
+    /// The PLY's modification time when last saved ([`PlyHeader::modified`]; 0 unknown).
+    pub ply_modified: u64,
 }
 
 impl Edit {
     pub fn new(splats: usize, ply: Identity) -> Self {
-        Self { marks: vec![0; splats], ply, picture: true }
+        Self { marks: vec![0; splats], ply, picture: true, ply_modified: 0 }
     }
 
     pub fn len(&self) -> usize {
@@ -161,6 +176,16 @@ impl Edit {
         self.ply == other.ply && self.marks.len() == other.marks.len() && self.marks.iter().zip(&other.marks).all(|(a, b)| a & KEPT_BITS == b & KEPT_BITS)
     }
 
+    /// What leaves the outputs, as one word ([`generation`]): [`UNEDITED`] when nothing does, else the PLY's hash and
+    /// a hash of which splats it removes. Hidden or deleted, the picture flag and the selection do not change it.
+    pub fn generation(&self) -> String {
+        if self.removes_nothing() {
+            return UNEDITED.into();
+        }
+        let removed: Vec<u8> = self.marks.iter().map(|m| u8::from(m & KEPT_BITS != 0)).collect();
+        format!("{:016x}-{:016x}", self.ply.hash, content_hash(&removed))
+    }
+
     /// What the GPU draws each splat as (crate::gpu::Gpu::set_marks): 0 as trained, 1 selected (tinted), 2 left out.
     pub fn view_marks(&self) -> Vec<u8> {
         self.marks.iter().map(|m| if m & KEPT_BITS != 0 { 2 } else { u8::from(m & SELECTED != 0) }).collect()
@@ -172,7 +197,7 @@ impl Edit {
             format: FORMAT.into(),
             version: VERSION,
             splats: self.marks.len(),
-            ply: PlyHeader { bytes: self.ply.bytes, hash: format!("{:016x}", self.ply.hash) },
+            ply: PlyHeader { bytes: self.ply.bytes, hash: format!("{:016x}", self.ply.hash), modified: self.ply_modified },
             hidden: self.hidden(),
             deleted: self.deleted(),
             picture: self.picture,
@@ -240,7 +265,7 @@ impl Edit {
             marks.resize(marks.len() + n as usize, mark);
         }
         ensure!(marks.len() == header.splats, "the splat edit file is damaged");
-        Ok(Self { marks, ply: Identity { bytes: header.ply.bytes, hash }, picture: header.picture })
+        Ok(Self { marks, ply: Identity { bytes: header.ply.bytes, hash }, picture: header.picture, ply_modified: header.ply.modified })
     }
 
     /// Writes the edit beside the PLY in `result` (atomically), or removes the file when it leaves nothing out.
@@ -252,7 +277,8 @@ impl Edit {
                 _ => return Ok(()),
             }
         }
-        orbiters_core::write_atomic(&path, &self.encode()).with_context(|| format!("writing {}", path.display()))
+        let stamped = Edit { ply_modified: modified_ns(&result.join(rec::PLY_FILE)), ..self.clone() };
+        orbiters_core::write_atomic(&path, &stamped.encode()).with_context(|| format!("writing {}", path.display()))
     }
 }
 
@@ -309,16 +335,96 @@ pub fn read_for_view(ply: &Path) -> anyhow::Result<(Gaussians, Identity, Found)>
     Ok((g, identity, found))
 }
 
-/// The splats every output is made from: the PLY at `ply` without what its edit hides or deletes, and how many that
-/// left out. An edit that cannot be applied stops it ([`Found::problem`]).
-pub fn read_edited(ply: &Path) -> anyhow::Result<(Gaussians, usize)> {
+/// The splats every output is made from: the PLY at `ply` without what its edit hides or deletes, how many that left
+/// out, and the [`generation`] applied (what an upload records, and what its share checks again). An edit that cannot
+/// be applied stops it ([`Found::problem`]).
+pub fn read_edited(ply: &Path) -> anyhow::Result<(Gaussians, usize, String)> {
     let (mut g, _, found) = read_for_view(ply)?;
     if let Some(problem) = found.problem() {
         bail!("{problem}");
     }
-    let Found::Current(edit) = found else { return Ok((g, 0)) };
+    let Found::Current(edit) = found else { return Ok((g, 0, UNEDITED.into())) };
     let removed = apply(&mut g, &edit);
-    Ok((g, removed))
+    Ok((g, removed, edit.generation()))
+}
+
+/// The [`generation`] of a reconstruction with no splat edits.
+pub const UNEDITED: &str = "unedited";
+
+/// What the outputs of the reconstruction in `result` leave out now, as one word ([`Edit::generation`]), from its edit
+/// file alone (no PLY read: cheap enough to ask before and after each step of a share). An edit file that cannot be
+/// read is an error (the outputs stop). It tells two states of the edits apart: whether they apply to the PLY there is
+/// for [`read_edited`] to say.
+pub fn generation(result: &Path) -> anyhow::Result<String> {
+    let path = result.join(rec::EDIT_FILE);
+    match std::fs::read(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(UNEDITED.into()),
+        Err(e) => Err(e).with_context(|| format!("Its splat edits could not be read ({})", path.display())),
+        Ok(bytes) => {
+            Ok(Edit::decode(&bytes).map_err(|e| anyhow::anyhow!("Its splat edits could not be read ({e:#}): open its 3D view to discard them."))?.generation())
+        }
+    }
+}
+
+/// Whether the capture's picture (`preview.qoi`) may leave the app: what it shows against its splat edits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PictureState {
+    /// No edits: the picture as the worker drew it (or the recording's thumbnail without one).
+    Unedited,
+    /// Drawn again for the edits there are now.
+    Drawn,
+    /// Edited since it was drawn (or its redraw failed): it may show what was removed.
+    NotDrawn,
+    /// Edits that cannot be applied (damaged, or made on another PLY): why.
+    Problem(String),
+}
+
+impl PictureState {
+    /// Whether the preview may be shown outside the app (uploaded, dragged out, listed for a world).
+    pub fn preview_ok(&self) -> bool {
+        matches!(self, PictureState::Unedited | PictureState::Drawn)
+    }
+
+    /// Whether the recording's own thumbnail may stand in for a missing preview: only with no edits (it shows the
+    /// capture as recorded, removed avatars and all).
+    pub fn thumbnail_ok(&self) -> bool {
+        *self == PictureState::Unedited
+    }
+}
+
+/// [`PictureState`] of the reconstruction in `result`: the edit file's flag, once it is known to be the PLY's (its
+/// length and modification time as saved; the PLY hashed again only when the time differs).
+pub fn picture_state(result: &Path) -> PictureState {
+    let path = result.join(rec::EDIT_FILE);
+    let bytes = match std::fs::read(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return PictureState::Unedited,
+        Err(e) => return PictureState::Problem(e.to_string()),
+        Ok(b) => b,
+    };
+    let edit = match Edit::decode(&bytes) {
+        Ok(e) => e,
+        Err(e) => return PictureState::Problem(format!("{e:#}")),
+    };
+    let ply = result.join(rec::PLY_FILE);
+    let len = std::fs::metadata(&ply).map_or(0, |m| m.len());
+    let stale = || PictureState::Problem("made on an earlier reconstruction".into());
+    if len != edit.ply.bytes {
+        return stale();
+    }
+    if edit.ply_modified == 0 || modified_ns(&ply) != edit.ply_modified {
+        match Identity::read(&ply) {
+            Ok(id) if id == edit.ply => {}
+            Ok(_) => return stale(),
+            Err(e) => return PictureState::Problem(format!("{e:#}")),
+        }
+    }
+    if edit.removes_nothing() {
+        PictureState::Unedited
+    } else if edit.picture {
+        PictureState::Drawn
+    } else {
+        PictureState::NotDrawn
+    }
 }
 
 /// Leaves out of `g` (in PLY order) what `edit` hides or deletes; returns how many.
@@ -341,33 +447,82 @@ struct Change {
 }
 
 impl Change {
+    /// The memory it holds: its vectors' capacities, not their lengths (a stroke's vectors grow by doubling).
     fn bytes(&self) -> usize {
-        self.ids.len() * 6
+        self.ids.capacity() * 4 + self.before.capacity() + self.after.capacity()
+    }
+
+    fn shrink(&mut self) {
+        self.ids.shrink_to_fit();
+        self.before.shrink_to_fit();
+        self.after.shrink_to_fit();
     }
 }
 
-/// Undo and redo of an edit's marks (selections too), as the changes each step made: an invert of three million
-/// splats is 18 MB, so the steps kept together stay under [`History::MAX_BYTES`] (the oldest go first). Between
-/// [`History::begin`] and [`History::end`] every change is one step (a brush stroke's dabs).
-#[derive(Default)]
+/// Undo and redo of an edit's marks (selections too), as the changes each step made (six bytes a splat changed: an
+/// invert of three million splats is 18 MB). Between [`History::begin`] and [`History::end`] every change joins one step
+/// (a brush stroke's dabs). Everything kept (the steps to undo and to redo, and the stroke under way with its index)
+/// stays under [`History::MAX_BYTES`], counted by what the vectors hold allocated: the oldest steps go first, then the
+/// furthest redo; the newest completed step and a stroke under way always stay.
 pub struct History {
     past: Vec<Change>,
     future: Vec<Change>,
     /// The step under way: where each splat it changed is in it, and whether it is in `past` yet.
     open: Option<(std::collections::HashMap<u32, usize>, bool)>,
+    budget: usize,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self::with_budget(Self::MAX_BYTES)
+    }
 }
 
 impl History {
-    const MAX_BYTES: usize = 256 << 20;
+    pub const MAX_BYTES: usize = 256 << 20;
 
-    /// Starts a step that every change joins until [`History::end`].
+    /// A history kept under `budget` bytes (tests use small ones).
+    pub fn with_budget(budget: usize) -> Self {
+        Self { past: Vec::new(), future: Vec::new(), open: None, budget }
+    }
+
+    /// The bytes it holds now: its steps' vectors and the open stroke's index (about 16 bytes an entry).
+    pub fn memory(&self) -> usize {
+        let index = self.open.as_ref().map_or(0, |(i, _)| i.capacity() * 16);
+        self.past.iter().chain(&self.future).map(Change::bytes).sum::<usize>() + index
+    }
+
+    /// Starts a step that every change joins until [`History::end`] (one already under way ends first).
     pub fn begin(&mut self) {
         self.end();
         self.open = Some((Default::default(), false));
     }
 
+    /// Ends the step under way, if any: what it changed stays one step of undo.
     pub fn end(&mut self) {
-        self.open = None;
+        if let Some((_, true)) = self.open.take() {
+            if let Some(c) = self.past.last_mut() {
+                c.shrink();
+            }
+        }
+        self.trim();
+    }
+
+    /// Whether a step is under way.
+    pub fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// Drops the oldest steps, then the furthest redo, while it holds more than its budget.
+    fn trim(&mut self) {
+        let mut total = self.memory();
+        let keep = 1 + usize::from(self.open.as_ref().is_some_and(|o| o.1));
+        while total > self.budget && self.past.len() > keep {
+            total -= self.past.remove(0).bytes();
+        }
+        while total > self.budget && !self.future.is_empty() {
+            total -= self.future.remove(0).bytes();
+        }
     }
 
     /// Applies `marks` (the new mark of each splat `marks` names) to `edit` as one step (or into the step begun);
@@ -375,6 +530,7 @@ impl History {
     pub fn apply(&mut self, edit: &mut Edit, marks: impl IntoIterator<Item = (u32, u8)>) -> bool {
         if let Some((index, started)) = self.open.as_mut() {
             let mut changed = false;
+            let mut began = false;
             for (id, mark) in marks {
                 let Some(m) = edit.marks.get_mut(id as usize) else { continue };
                 if *m == mark {
@@ -382,6 +538,7 @@ impl History {
                 }
                 if !*started {
                     *started = true;
+                    began = true;
                     self.future.clear();
                     self.past.push(Change::default());
                 }
@@ -398,6 +555,9 @@ impl History {
                 *m = mark;
                 changed = true;
             }
+            if began {
+                self.trim();
+            }
             return changed;
         }
         let mut change = Change::default();
@@ -413,12 +573,10 @@ impl History {
         if change.ids.is_empty() {
             return false;
         }
+        change.shrink();
         self.future.clear();
         self.past.push(change);
-        let mut total: usize = self.past.iter().map(Change::bytes).sum();
-        while total > Self::MAX_BYTES && self.past.len() > 1 {
-            total -= self.past.remove(0).bytes();
-        }
+        self.trim();
         true
     }
 
@@ -451,38 +609,79 @@ impl History {
     }
 }
 
-/// The edits of the reconstruction in `result` with `ply` left out: what the 3D view's Restore all does (the file
-/// goes, and the trained preview comes back).
+/// The edits of the reconstruction in `result` left out: what Discard them does (the file goes, and the worker's own
+/// picture of this PLY comes back).
 pub fn discard(result: &Path) -> anyhow::Result<()> {
+    let identity = Identity::read(&result.join(rec::PLY_FILE)).ok();
+    discard_for(result, identity)
+}
+
+/// [`discard`] knowing the identity of the PLY there (None: no PLY, no picture to put back).
+pub fn discard_for(result: &Path, ply: Option<Identity>) -> anyhow::Result<()> {
     let path = result.join(rec::EDIT_FILE);
     match std::fs::remove_file(&path) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).with_context(|| format!("removing {}", path.display())),
         _ => {}
     }
-    restore_picture(result)
+    restore_picture(result, ply)
 }
 
-/// Puts `qoi` (a render of the preview's view with the edits applied) in place of the preview, keeping the worker's
-/// own render aside the first time ([`rec::TRAINED_PREVIEW_FILE`]).
-pub fn write_picture(result: &Path, qoi: &[u8]) -> anyhow::Result<()> {
+/// The most pixels a picture backed up or put back may have (4K): a file claiming more is damaged.
+const PICTURE_PIXELS: u64 = 3840 * 2160;
+
+/// Whether `bytes` are a whole QOI picture.
+fn whole_picture(bytes: &[u8]) -> bool {
+    orbiters_contracts::qoi::decode_rgba_max(bytes, PICTURE_PIXELS).is_ok()
+}
+
+/// Puts `qoi` (a render of the preview's view with the edits applied) in place of the preview of the PLY `ply`,
+/// keeping the worker's own render aside the first time, under that PLY's name
+/// (orbiters_core::reconstruction::trained_preview_file): written whole and checked before the preview is replaced,
+/// so a backup cut short (a crash, a full disk) is never taken for one. Backups of other PLYs (an earlier
+/// reconstruction's) go.
+pub fn write_picture(result: &Path, ply: Identity, qoi: &[u8]) -> anyhow::Result<()> {
     let preview = result.join(rec::PREVIEW_FILE);
-    let trained = result.join(rec::TRAINED_PREVIEW_FILE);
-    if !trained.is_file() && preview.is_file() {
-        std::fs::copy(&preview, &trained).with_context(|| format!("keeping {}", trained.display()))?;
+    let trained = result.join(rec::trained_preview_file(ply.hash));
+    let kept = std::fs::read(&trained).ok().filter(|b| whole_picture(b));
+    if kept.is_none() {
+        if let Ok(bytes) = std::fs::read(&preview) {
+            ensure!(whole_picture(&bytes), "{} is damaged: nothing to keep aside", preview.display());
+            orbiters_core::write_atomic(&trained, &bytes).with_context(|| format!("keeping {}", trained.display()))?;
+            ensure!(std::fs::read(&trained).is_ok_and(|b| b == bytes), "{} was not kept whole", trained.display());
+        }
     }
+    remove_other_backups(result, Some(ply));
     orbiters_core::write_atomic(&preview, qoi).with_context(|| format!("writing {}", preview.display()))
 }
 
-/// The worker's own preview back in its place, once nothing is edited.
-pub fn restore_picture(result: &Path) -> anyhow::Result<()> {
-    let trained = result.join(rec::TRAINED_PREVIEW_FILE);
-    if !trained.is_file() {
-        return Ok(());
+/// The worker's own picture of the PLY `ply` back in its place once nothing is edited (a damaged backup is refused,
+/// the picture there staying), and backups of other PLYs gone.
+pub fn restore_picture(result: &Path, ply: Option<Identity>) -> anyhow::Result<()> {
+    remove_other_backups(result, ply);
+    let Some(ply) = ply else { return Ok(()) };
+    let trained = result.join(rec::trained_preview_file(ply.hash));
+    let bytes = match std::fs::read(&trained) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        r => r.with_context(|| format!("reading {}", trained.display()))?,
+    };
+    if !whole_picture(&bytes) {
+        let _ = std::fs::remove_file(&trained);
+        bail!("the worker's picture kept aside ({}) was damaged: the picture there stays", trained.display());
     }
-    let bytes = std::fs::read(&trained)?;
     orbiters_core::write_atomic(&result.join(rec::PREVIEW_FILE), &bytes)?;
     std::fs::remove_file(&trained)?;
     Ok(())
+}
+
+/// Removes the pictures kept aside for PLYs other than `ply` (every one with None).
+fn remove_other_backups(result: &Path, ply: Option<Identity>) {
+    let mine = ply.map(|p| rec::trained_preview_file(p.hash));
+    for e in std::fs::read_dir(result).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if rec::is_trained_preview_file(&name) && Some(&name) != mine.as_ref() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// The camera the worker drew the preview from (crate's `main`: the first held-out keyframe, else the first keyframe of
@@ -620,7 +819,7 @@ mod tests {
         edit.marks[3] = HIDDEN;
         edit.marks[7] = DELETED;
         edit.save(&dir).unwrap();
-        let (kept, removed) = read_edited(&ply).unwrap();
+        let (kept, removed, _) = read_edited(&ply).unwrap();
         assert_eq!(removed, 2);
         assert_eq!(kept.means.iter().map(|m| m[0] as usize).collect::<Vec<_>>(), vec![0, 1, 2, 4, 5, 6, 8, 9], "in PLY order");
         // A new reconstruction (another PLY): the edit is never applied, and the outputs stop.
@@ -695,7 +894,7 @@ mod tests {
         // A selection is no removal: the first floor splats stay.
         edit.marks[0] = SELECTED;
         edit.save(&dir).unwrap();
-        let (kept, removed) = read_edited(&ply).unwrap();
+        let (kept, removed, _) = read_edited(&ply).unwrap();
         assert_eq!((kept.len(), removed), (4000, 600));
         let (trees, leaves, web) = outputs(&kept);
         for (t, name) in trees.iter().zip(["PC", "Quest", "coarse"]) {
@@ -707,21 +906,139 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn qoi(value: u8) -> Vec<u8> {
+        orbiters_contracts::qoi::encode(&[value; 4 * 2 * 3], 4, 2, 3)
+    }
+
+    /// The worker's picture waits aside under its PLY's name, written whole; a damaged one (a copy cut short) is never
+    /// taken for a backup nor put back; one of another PLY (an earlier reconstruction) is never put back and goes.
     #[test]
-    fn the_trained_preview_waits_aside_while_the_edited_one_shows() {
+    fn the_trained_preview_waits_aside_for_its_own_ply_only() {
         let dir = temp("picture");
-        std::fs::write(dir.join(rec::PREVIEW_FILE), b"trained").unwrap();
-        write_picture(&dir, b"edited 1").unwrap();
-        write_picture(&dir, b"edited 2").unwrap();
-        assert_eq!(std::fs::read(dir.join(rec::PREVIEW_FILE)).unwrap(), b"edited 2");
-        assert_eq!(std::fs::read(dir.join(rec::TRAINED_PREVIEW_FILE)).unwrap(), b"trained", "the worker's, not an edited one");
-        let mut edit = Edit::new(4, Identity::default());
+        let ply = Identity { bytes: 100, hash: 7 };
+        let trained = dir.join(rec::trained_preview_file(7));
+        std::fs::write(dir.join(rec::PREVIEW_FILE), qoi(1)).unwrap();
+        write_picture(&dir, ply, &qoi(2)).unwrap();
+        write_picture(&dir, ply, &qoi(3)).unwrap();
+        assert_eq!(std::fs::read(dir.join(rec::PREVIEW_FILE)).unwrap(), qoi(3));
+        assert_eq!(std::fs::read(&trained).unwrap(), qoi(1), "the worker's, not an edited one");
+        restore_picture(&dir, Some(ply)).unwrap();
+        assert_eq!(std::fs::read(dir.join(rec::PREVIEW_FILE)).unwrap(), qoi(1));
+        assert!(!trained.exists());
+        // A backup cut short: taken again from the preview, never restored as is.
+        std::fs::write(&trained, &qoi(1)[..10]).unwrap();
+        write_picture(&dir, ply, &qoi(2)).unwrap();
+        assert_eq!(std::fs::read(&trained).unwrap(), qoi(1), "the cut-short backup replaced by a whole one");
+        std::fs::write(&trained, &qoi(1)[..10]).unwrap();
+        assert!(restore_picture(&dir, Some(ply)).is_err(), "damaged: refused");
+        assert_eq!(std::fs::read(dir.join(rec::PREVIEW_FILE)).unwrap(), qoi(2), "the picture there stays");
+        // Another PLY's backup (an earlier reconstruction's): never put back, gone.
+        let other = dir.join(rec::trained_preview_file(9));
+        std::fs::write(&other, qoi(5)).unwrap();
+        restore_picture(&dir, Some(ply)).unwrap();
+        assert!(!other.exists());
+        assert_eq!(std::fs::read(dir.join(rec::PREVIEW_FILE)).unwrap(), qoi(2));
+        // Discard: the edit goes, the PLY's own backup comes back.
+        write_picture(&dir, ply, &qoi(4)).unwrap();
+        let mut edit = Edit::new(1, ply);
         edit.marks[0] = DELETED;
         edit.save(&dir).unwrap();
-        discard(&dir).unwrap();
-        assert_eq!(std::fs::read(dir.join(rec::PREVIEW_FILE)).unwrap(), b"trained");
-        assert!(!dir.join(rec::TRAINED_PREVIEW_FILE).exists() && !dir.join(rec::EDIT_FILE).exists());
-        discard(&dir).unwrap();
+        discard_for(&dir, Some(ply)).unwrap();
+        assert_eq!(std::fs::read(dir.join(rec::PREVIEW_FILE)).unwrap(), qoi(2));
+        assert!(!dir.join(rec::EDIT_FILE).exists() && !trained.exists());
+        assert!(rec::is_trained_preview_file(&rec::trained_preview_file(u64::MAX)) && !rec::is_trained_preview_file("preview.trained.qoi"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The generation: one word for what leaves the outputs, the same for the same removals whatever else changed (the
+    /// picture flag, hidden or deleted, a selection), different for other removals; damaged edits are an error.
+    #[test]
+    fn the_generation_names_what_leaves_the_outputs() {
+        let dir = temp("generation");
+        assert_eq!(generation(&dir).unwrap(), UNEDITED);
+        let ply = Identity { bytes: 1 << 20, hash: 0xABC };
+        let mut e = Edit::new(100, ply);
+        e.marks[3] = HIDDEN;
+        e.save(&dir).unwrap();
+        let g = generation(&dir).unwrap();
+        assert_ne!(g, UNEDITED);
+        e.marks[3] = DELETED | SELECTED;
+        e.picture = false;
+        e.save(&dir).unwrap();
+        assert_eq!(generation(&dir).unwrap(), g, "deleted instead of hidden, a selection, the picture flag: the same outputs");
+        e.marks[4] = HIDDEN;
+        e.save(&dir).unwrap();
+        assert_ne!(generation(&dir).unwrap(), g);
+        assert_eq!(Edit { ply: Identity { hash: 0xABD, ..ply }, ..e.clone() }.generation() == e.generation(), false, "another PLY");
+        std::fs::write(dir.join(rec::EDIT_FILE), b"damaged").unwrap();
+        assert!(generation(&dir).is_err());
+        assert_eq!(Edit::new(5, ply).generation(), UNEDITED);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Whether the picture may leave the app: with no edits, yes; with edits, only once drawn for them, never while
+    /// edited since, damaged, or made on another PLY (its length or, when its time changed, its hash).
+    #[test]
+    fn the_picture_leaves_the_app_only_when_drawn_for_the_edits_there_are() {
+        let dir = temp("picture-state");
+        let mut g = Gaussians::default();
+        for i in 0..10 {
+            g.push([i as f32, 0.0, 1.0], [-3.0; 3], [1.0, 0.0, 0.0, 0.0], 1.0, [0.5; 3]);
+        }
+        let ply = dir.join(rec::PLY_FILE);
+        crate::ply::write(&ply, &g).unwrap();
+        assert_eq!(picture_state(&dir), PictureState::Unedited);
+        assert!(picture_state(&dir).thumbnail_ok());
+        let mut e = Edit::new(10, Identity::read(&ply).unwrap());
+        e.marks[2] = DELETED;
+        e.picture = false;
+        e.save(&dir).unwrap();
+        assert_eq!(picture_state(&dir), PictureState::NotDrawn);
+        assert!(!picture_state(&dir).preview_ok());
+        e.picture = true;
+        e.save(&dir).unwrap();
+        assert_eq!(picture_state(&dir), PictureState::Drawn);
+        assert!(picture_state(&dir).preview_ok() && !picture_state(&dir).thumbnail_ok());
+        // Another reconstruction of the same size (same length, a new time): hashed again, refused.
+        g.means[0][1] = 0.25;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        crate::ply::write(&ply, &g).unwrap();
+        assert!(matches!(picture_state(&dir), PictureState::Problem(_)));
+        std::fs::write(dir.join(rec::EDIT_FILE), b"damaged").unwrap();
+        assert!(matches!(picture_state(&dir), PictureState::Problem(_)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Strokes held open (a brush's dabs) are trimmed like any step, by what their vectors hold allocated: sixteen
+    /// strokes over a million splats stay under a budget of four of them, the newest stroke kept, and undo still walks
+    /// back what is kept.
+    #[test]
+    fn the_history_stays_within_its_budget_with_strokes_too() {
+        let n = 1_000_000u32;
+        let mut edit = Edit::new(n as usize, Identity::default());
+        let step = (n as usize) * 6;
+        let mut h = History::with_budget(4 * step);
+        for k in 0..16u32 {
+            h.begin();
+            // Each stroke in two dabs, touching every splat (the selection flipped).
+            let mark = if k % 2 == 0 { SELECTED } else { 0 };
+            assert!(h.apply(&mut edit, (0..n / 2).map(|i| (i, mark))));
+            assert!(h.apply(&mut edit, (n / 2..n).map(|i| (i, mark))));
+            h.end();
+            assert!(h.memory() <= 4 * step, "stroke {k}: {} bytes held for a budget of {}", h.memory(), 4 * step);
+        }
+        assert!(h.can_undo());
+        assert!(h.undo(&mut edit));
+        assert_eq!(edit.marks[0], SELECTED, "the last stroke (cleared) undone");
+        // A stroke cancelled halfway (ended without its release) is one step: what comes next is a step of its own.
+        let mut e = Edit::new(10, Identity::default());
+        let mut h = History::default();
+        h.begin();
+        h.apply(&mut e, [(1, SELECTED)]);
+        h.end();
+        assert!(!h.is_open());
+        h.apply(&mut e, [(1, DELETED)]);
+        assert!(h.undo(&mut e));
+        assert_eq!(e.marks[1], SELECTED, "the delete undone alone, the selection back");
     }
 }

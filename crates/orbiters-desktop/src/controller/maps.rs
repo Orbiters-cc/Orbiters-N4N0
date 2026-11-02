@@ -183,7 +183,12 @@ impl Controller {
         let id = self.start_upload(&world_id, &world_name, UploadKind::Preview, vec![session.clone()])?;
         let c = self.clone();
         std::thread::spawn(move || {
-            let state = match web_preview(&session).and_then(|(files, sky, metadata)| {
+            let result = reconstruction::result_dir(&session);
+            let edits_now = || orbiters_reconstruct::edit::generation(&result);
+            let state = match web_preview(&session).and_then(|Prepared { files, sky, metadata, generation }| {
+                // The picture only when drawn for these edits (capture_picture), and the edits still those prepared.
+                let picture = crate::capture_picture::jpeg(&session);
+                anyhow::ensure!(edits_now()? == generation, "Its splat edits changed while it was being prepared: upload it again.");
                 let total = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
                 c.update_if(|s| match s.uploads.iter_mut().find(|u| u.id == id) {
                     Some(u) => {
@@ -193,7 +198,13 @@ impl Controller {
                     }
                     None => false,
                 });
-                api.add_preview(&token, &world_id, files, sky.as_deref(), crate::capture_picture::jpeg(&session), &metadata, c.progress(id)).map(|_| ())
+                api.add_preview(&token, &world_id, files, sky.as_deref(), picture, &metadata, c.progress(id))?;
+                // A world's preview is public once uploaded: edited meanwhile, it says so (the next upload replaces it).
+                anyhow::ensure!(
+                    edits_now()? == generation,
+                    "Its splats were changed in its 3D view while it was uploading: the world's preview has them as they were. Upload it again."
+                );
+                Ok(())
             }) {
                 Ok(()) => UploadState::Done { added: 1, skipped: 0 },
                 Err(e) => UploadState::Failed { message: e.to_string() },
@@ -204,21 +215,52 @@ impl Controller {
     }
 }
 
+/// What a share uploads of a session ([`web_preview`]): VRChat's three trees, the sky map, the upload's metadata, and
+/// the generation of the splat edits they were made with (orbiters_reconstruct::edit::generation), which the upload
+/// record keeps and the share checks again before anything is shared.
+pub struct Prepared {
+    pub files: PreviewFiles,
+    pub sky: Option<PathBuf>,
+    pub metadata: serde_json::Value,
+    pub generation: String,
+}
+
 /// A session's splats (without those its edits hide or delete: orbiters_reconstruct::edit) as VRChat's splat trees
 /// (their merged boxes tuned on the GPU when there is one; Orbiters makes the website's `.splat` from the PC one's
 /// leaves), its sky map (sky.png as trained, when training learnt one) and the upload's metadata: the start view
 /// (right-handed like the files: Unity's Z negated) at the eye height of the person who captured, over the ground they
 /// stood on (its height and that eye height too: crate::views::eye_level), the held-out quality and when the session
 /// was recorded.
-pub(super) fn web_preview(session: &Path) -> anyhow::Result<(PreviewFiles, Option<PathBuf>, serde_json::Value)> {
+pub(super) fn web_preview(session: &Path) -> anyhow::Result<Prepared> {
     // Prepared in the background since its reconstruction finished, or being prepared: that cache answers.
     crate::upload_prep::claim(session);
     prepare(session, orbiters_reconstruct::gpu::DeviceOptions::default())
 }
 
+/// Tries of a preparation whose splat edits changed while it ran.
+const PREPARE_TRIES: usize = 3;
+
 /// [`web_preview`]'s work on a GPU opened with `device` (the background preparation's: low priority, maybe the
-/// integrated GPU: crate::upload_prep::run).
-pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions) -> anyhow::Result<(PreviewFiles, Option<PathBuf>, serde_json::Value)> {
+/// integrated GPU: crate::upload_prep::run). The edits are another process's (the window saves them as they are made):
+/// their generation is read before and after, and the trees (made now, or from the cache, whose key holds the
+/// generation too) answer only when they are of that very generation, else it prepares again; edits that cannot be read
+/// stop it.
+pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions) -> anyhow::Result<Prepared> {
+    let result = reconstruction::result_dir(session);
+    for _ in 0..PREPARE_TRIES {
+        let before = orbiters_reconstruct::edit::generation(&result)?;
+        let prepared = prepare_once(session, device)?;
+        let after = orbiters_reconstruct::edit::generation(&result)?;
+        if prepared.generation == before && after == before {
+            return Ok(prepared);
+        }
+        eprintln!("the splat edits of {} changed while it was prepared: again", session.display());
+    }
+    anyhow::bail!("Its splat edits kept changing while it was being prepared: share it again once they are done.")
+}
+
+/// One [`prepare`]: the trees and the generation they were made with.
+fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions) -> anyhow::Result<Prepared> {
     use orbiters_reconstruct::timing::PrepStage;
     let _total = PrepStage::new("total");
     let _preparing = crate::upload_prep::PREPARING.lock().unwrap_or_else(|e| e.into_inner());
@@ -228,18 +270,18 @@ pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions)
     let fingerprint = crate::upload_prep::Fingerprint::read(session, &result).ok();
     drop(stage);
     let stage = PrepStage::new("cache read");
-    let cached = fingerprint.as_ref().and_then(|fingerprint| crate::upload_prep::load(&result, fingerprint, key));
+    let cached = fingerprint.as_ref().and_then(|fingerprint| Some((crate::upload_prep::load(&result, fingerprint, key)?, fingerprint.generation()?.to_string())));
     drop(stage);
-    if let Some((files, metadata)) = cached {
+    if let Some(((files, metadata), generation)) = cached {
         let stage = PrepStage::new("sky");
         let sky = crate::upload_prep::sky(&result);
         drop(stage);
-        return Ok((files, sky, metadata));
+        return Ok(Prepared { files, sky, metadata, generation });
     }
     let stage = PrepStage::new("read result");
     // Without what the 3D view hid or deleted (orbiters_reconstruct::edit): an edit that cannot be applied stops the
     // share with why, rather than letting a removed avatar back in.
-    let (g, _) = orbiters_reconstruct::edit::read_edited(&result.join(reconstruction::PLY_FILE))?;
+    let (g, _, generation) = orbiters_reconstruct::edit::read_edited(&result.join(reconstruction::PLY_FILE))?;
     drop(stage);
     let stage = PrepStage::new("start view");
     let (views, start) = crate::views::recorded(session)?;
@@ -281,7 +323,8 @@ pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions)
     drop(stage);
     // Never persist the untuned CPU fallback, or outputs whose sources changed while preparation was running.
     // A full/read-only disk must not prevent the upload; the next share can prepare again.
-    if let Some(fingerprint) = fingerprint.as_ref().filter(|_| gpu.is_some()) {
+    // Under the key of the generation the trees were made with only (not one the edits passed through meanwhile).
+    if let Some(fingerprint) = fingerprint.as_ref().filter(|f| gpu.is_some() && f.generation() == Some(generation.as_str())) {
         let stage = PrepStage::new("cache write");
         if crate::upload_prep::Fingerprint::read(session, &result).ok().as_ref() == Some(fingerprint) {
             if let Err(e) = crate::upload_prep::save(&result, fingerprint, &files, &metadata) {
@@ -290,8 +333,9 @@ pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions)
         }
         drop(stage);
     }
-    Ok((files, sky, metadata))
+    Ok(Prepared { files, sky, metadata, generation })
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -304,7 +348,7 @@ mod tests {
         let sessions = std::env::var("ORBITERS_TEST_SESSION").expect("ORBITERS_TEST_SESSION (semicolon-separated folders)");
         for (index, session) in sessions.split(';').filter(|s| !s.is_empty()).enumerate() {
             eprintln!("upload preparation session {index}: {session}");
-            let (files, sky, metadata) = web_preview(Path::new(session)).expect("prepare");
+            let Prepared { files, sky, metadata, .. } = web_preview(Path::new(session)).expect("prepare");
             eprintln!("upload preparation bytes: {}; sky: {}; metadata: {metadata}", files.len(), sky.is_some());
             if let Some(out) = std::env::var_os("ORBITERS_PREP_OUT") {
                 let out = PathBuf::from(out).join(index.to_string());
@@ -329,7 +373,7 @@ mod tests {
         let api = orbiters_core::account::Api::at(&env("ORBITERS_TEST_API"));
         let world = env("ORBITERS_TEST_WORLD");
         let t = Instant::now();
-        let (files, sky, metadata) = web_preview(Path::new(&env("ORBITERS_TEST_SESSION"))).unwrap();
+        let Prepared { files, sky, metadata, .. } = web_preview(Path::new(&env("ORBITERS_TEST_SESSION"))).unwrap();
         println!("{:.1} MB web preview and VRChat trees in {:?}: {metadata}", files.len() as f64 / 1e6, t.elapsed());
         assert_eq!(&files.vrchat_pc[..8], orbiters_reconstruct::tree::MAGIC);
         let view = &metadata["view"];
@@ -357,7 +401,7 @@ mod tests {
         for item in std::env::var("ORBITERS_SHARE").expect("ORBITERS_SHARE").split(';').filter(|s| !s.is_empty()) {
             let (world, session) = item.split_once('|').expect("<world id>|<session folder>");
             let t = Instant::now();
-            let (files, sky, metadata) = web_preview(Path::new(session)).unwrap();
+            let Prepared { files, sky, metadata, .. } = web_preview(Path::new(session)).unwrap();
             println!("{world}: {:.1} MB in {:.1} s, sky {}", files.len() as f64 / 1e6, t.elapsed().as_secs_f32(), sky.is_some());
             api.add_preview(&account.token, world, files, sky.as_deref(), None, &metadata, |_, _| {}).unwrap();
             println!("{world}: shared");

@@ -294,7 +294,7 @@ pub mod vr_audio;
 mod world_captures;
 mod world_feedback;
 pub use account::open_url;
-pub(crate) use maps::prepare as prepare_upload;
+pub(crate) use maps::{prepare as prepare_upload, Prepared};
 
 impl Controller {
     pub fn new(settings: Settings) -> Shared {
@@ -1533,15 +1533,12 @@ impl Controller {
         let Some(editor) = editors.first() else {
             anyhow::bail!("Open your Unity project with Mixer to send the splats to it.");
         };
-        crate::mixer_inbox::send_splats(editor, &dir, &title)?;
+        // Mixer reads the PLY itself: an edited capture goes as a copy holding only the splats its 3D view keeps.
+        let sent = crate::mixer_inbox::session_for_mixer(&dir, &crate::mixer_inbox::exports_dir())?;
+        crate::mixer_inbox::send_splats(editor, &sent, &title)?;
         let project = if editor.project_name.is_empty() { "Unity".to_string() } else { editor.project_name.clone() };
-        // Mixer reads the PLY itself: the request names the splat edits, which a Mixer that does not know them passes by.
-        let edited = orbiters_core::reconstruction::result_dir(&dir).join(orbiters_core::reconstruction::EDIT_FILE).is_file();
-        if edited {
-            self.notify(NoticeKind::Warning, format!("Sent to Mixer in {project}. A Mixer that does not read splat edits shows the splats hidden or deleted in the 3D view too."));
-        } else {
-            self.notify(NoticeKind::Success, format!("Sent to Mixer in {project}: the splats appear in its open scene."));
-        }
+        let without = if sent != dir { ", without the splats hidden or deleted in its 3D view" } else { "" };
+        self.notify(NoticeKind::Success, format!("Sent to Mixer in {project}{without}: the splats appear in its open scene."));
         Ok(())
     }
 

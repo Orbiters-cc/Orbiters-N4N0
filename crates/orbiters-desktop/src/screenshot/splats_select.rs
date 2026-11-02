@@ -185,9 +185,10 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
             .and_then(|b| edit::Edit::decode(&b).ok())
             .is_some_and(|e| e.picture && e.hidden() == hidden && e.deleted() == deleted)
     })?;
-    let (kept, removed) = edit::read_edited(&ply)?;
+    let (kept, removed, _) = edit::read_edited(&ply)?;
     anyhow::ensure!(removed == hidden + deleted, "the file leaves out {removed}, the view said {hidden} hidden and {deleted} deleted");
-    anyhow::ensure!(std::fs::read(result.join(reconstruction::TRAINED_PREVIEW_FILE))? == trained_picture, "the worker's picture kept aside");
+    let trained_file = result.join(reconstruction::trained_preview_file(edit::Identity::read(&ply)?.hash));
+    anyhow::ensure!(std::fs::read(&trained_file)? == trained_picture, "the worker's picture kept aside for this PLY");
     anyhow::ensure!(std::fs::read(result.join(reconstruction::PREVIEW_FILE))? != trained_picture, "the picture drawn again");
     run.wait(1.0)?;
     run.shoot(out, "splats-select-detail")?;
@@ -207,7 +208,8 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
     let bits = |p: [f32; 3]| p.map(f32::to_bits);
     let gone: std::collections::HashSet<[u32; 3]> = (0..all.len()).filter(|&i| !e.keeps(i)).map(|i| bits(all.means[i])).collect();
     let start = Instant::now();
-    let (files, _, _) = crate::controller::prepare_upload(&dir, orbiters_reconstruct::gpu::DeviceOptions::default())?;
+    let crate::controller::Prepared { files, generation, .. } = crate::controller::prepare_upload(&dir, orbiters_reconstruct::gpu::DeviceOptions::default())?;
+    anyhow::ensure!(generation == e.generation(), "prepared with the edits there are");
     println!("upload files prepared in {:.1} s", start.elapsed().as_secs_f32());
     let mut report = Vec::new();
     for (name, bytes) in [("PC", &files.vrchat_pc), ("Quest", &files.vrchat_quest), ("coarse", &files.vrchat_coarse)] {
@@ -227,6 +229,16 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
         }
     }
     println!("{} removed of {}: {}", gone.len(), all.len(), report.join("; "));
+    // The capture's picture leaves the app (uploads, drag-out) now that it is drawn for the edits.
+    anyhow::ensure!(crate::capture_picture::jpeg(&dir).is_some(), "the picture drawn for the edits is given");
+    // Mixer gets a copy of the 3D view's files holding only the kept splats (in a folder of this run, gone after).
+    let exports = out.join("mixer-exports");
+    let sent = crate::mixer_inbox::session_for_mixer(&dir, &exports)?;
+    let to_mixer = orbiters_reconstruct::ply::read(&reconstruction::dir(&sent).join(reconstruction::PLY_FILE))?;
+    anyhow::ensure!(to_mixer.len() == kept.len(), "Mixer's copy holds {} splats, the view keeps {}", to_mixer.len(), kept.len());
+    anyhow::ensure!((0..to_mixer.len()).all(|i| !gone.contains(&bits(to_mixer.means[i]))), "Mixer's copy holds a removed splat");
+    println!("Mixer's copy: {} splats, none removed", to_mixer.len());
+    std::fs::remove_dir_all(&exports)?;
 
     // Damaged: the upload stops with why; the view says so, Select splats waits, Discard them recovers.
     std::fs::write(result.join(reconstruction::EDIT_FILE), b"N4EDIT01 damaged")?;
@@ -235,10 +247,13 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
     open(&mut run)?;
     run.wait(0.6)?;
     anyhow::ensure!(viewer(&mut run).edits_problem().is_some(), "the view says so");
+    anyhow::ensure!(viewer(&mut run).picture_refused().is_some(), "no picture of the view (Save this view, Edit in 3D) while it waits");
+    anyhow::ensure!(crate::capture_picture::jpeg(&dir).is_none(), "nor of the capture");
     anyhow::ensure!(counts(&mut run) == [0, 0, 0], "nothing applied from it");
     run.shoot(out, "splats-select-problem")?;
     run.click("Discard them", 10.0)?;
     run.until("the edit discarded", 10.0, |run| viewer(run).edits_problem().is_none())?;
+    anyhow::ensure!(viewer(&mut run).picture_refused().is_none(), "pictures of the view again");
     anyhow::ensure!(!result.join(reconstruction::EDIT_FILE).exists() && edit::read_edited(&ply)?.1 == 0, "the capture as trained");
     anyhow::ensure!(std::fs::read(result.join(reconstruction::PREVIEW_FILE))? == trained_picture, "the worker's picture back");
     run.wait(0.4)?;

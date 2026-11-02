@@ -381,6 +381,7 @@ fn main() {
     orbiters_core::panic_log::install();
     let all: Vec<String> = std::env::args().skip(1).collect();
     let tool: Option<fn(&[String]) -> anyhow::Result<()>> = match all.first().map(String::as_str) {
+        Some("--mesh") => Some(orbiters_reconstruct::mesh::cli),
         Some("--web-preview") => Some(web_preview),
         Some("--vrchat") => Some(vrchat),
         _ => None,
@@ -511,3 +512,4 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+

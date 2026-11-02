@@ -117,6 +117,21 @@ impl Camera {
         }
     }
 
+    /// The camera of this image `factor` times larger (the inverse of [`Camera::scaled`]).
+    pub fn upscaled(&self, factor: u32) -> Camera {
+        let f = factor.max(1) as f32;
+        Camera {
+            r: self.r,
+            t: self.t,
+            fx: self.fx * f,
+            fy: self.fy * f,
+            cx: (self.cx + 0.5) * f - 0.5,
+            cy: (self.cy + 0.5) * f - 0.5,
+            width: self.width * factor.max(1),
+            height: self.height * factor.max(1),
+        }
+    }
+
     /// Vertical field of view in radians.
     pub fn fov_y(&self) -> f32 {
         2.0 * (0.5 * self.height as f32 / self.fy).atan()

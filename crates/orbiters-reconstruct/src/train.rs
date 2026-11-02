@@ -36,6 +36,10 @@ pub struct Settings {
     /// gradient, which Adam turns into full opacity-rate steps, so on a long walk most seeds would fade before a view
     /// shows them; `opacity_reg` needs retuning with it.
     pub regularise_unseen: bool,
+    /// Every colour stays within 0–1 at every step (crate::gpu::Gpu::clamp_colors), what the splat files' colour bytes
+    /// hold (the web `.splat`, VRChat's trees): a model trained so is what its files show. Off until measured (lab:
+    /// the trees' colour bytes clip what about 45 % of a trained model's splats hold, crate::tree_tune).
+    pub clamp_colors: bool,
     /// A relocated or faded Gaussian counts Adam's bias correction from its restart (about one learning rate a step
     /// while it settles) instead of from the run's first step, as 3DGS-MCMC does (3 to 6 times it). Off until
     /// measured: on, training moves away from the reference and from the runs the defaults were tuned on.
@@ -130,6 +134,7 @@ impl Default for Settings {
             opacity_reg: 0.01,
             scale_reg: 0.01,
             regularise_unseen: false,
+            clamp_colors: false,
             adam_restart: false,
             max_radius: 0.1,
             background: [0.0; 3],
@@ -395,6 +400,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
         gpu.set_mask(f.width, f.height, &f.mask)?;
     }
     gpu.regularise_unseen = settings.regularise_unseen;
+    gpu.clamp_colors = settings.clamp_colors;
     gpu.adam_restart = settings.adam_restart;
     // Each phase of the colour steps' sub-grid (Settings::stride): its size, mask and scene pixels.
     let stride = settings.stride.max(1);

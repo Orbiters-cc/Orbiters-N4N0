@@ -39,33 +39,302 @@ pub struct VrchatFiles {
 
 /// The session's recorded cameras (one a keyframe), at most [`MAX_WIDTH`] wide.
 pub fn session_cameras(session: &Path) -> anyhow::Result<Vec<Camera>> {
+    session_cameras_without(session, &[])
+}
+
+/// The same without the keyframes `skip` (the lab: a run's held-out keyframes stay unseen by the export too).
+pub fn session_cameras_without(session: &Path, skip: &[i32]) -> anyhow::Result<Vec<Camera>> {
     let records = orbiters_core::bundle::read_records(session)?;
     Ok(records
         .iter()
         .filter(|r| r.has(record_flags::KEYFRAME) && r.has(record_flags::STRIP_OK) && r.keyframe_index >= 0 && r.width > 0 && r.height > 0)
+        .filter(|r| !skip.contains(&r.keyframe_index))
         .map(|r| Camera::from_strip(&r.camera_to_world, &r.projection, r.width, r.height, (MAX_WIDTH as f32 / r.width as f32).min(1.0)))
         .filter(|c| c.fx.is_finite() && c.fx > 0.0)
         .collect())
 }
 
-/// The largest tree of `g`'s most important splats within `max` splats.
-fn fitting(g: &Gaussians, max: usize) -> Tree {
-    let mut leaves = max * 3 / 4;
-    loop {
-        let t = tree::build(g, &tree::leaves(g, leaves));
-        if t.len() <= max || leaves < 1000 {
-            return t;
-        }
-        leaves = leaves * 9 / 10;
+/// How a tree picks the splats it keeps when a reconstruction has more than fit (lab switch `--rank`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Rank {
+    /// Opacity times area (crate::tree::importances): big opaque splats first, whether or not a view sees them.
+    #[default]
+    Area,
+    /// What each adds to the recorded cameras' images: the sum of its blending weights α·T over their pixels
+    /// (crate::gpu::Gpu::contribution, LightGaussian's global significance), rendered from the full model, so a session
+    /// whose keyframes are gone ranks all the same.
+    Contribution,
+    /// The PLY's seen statistics alone (no GPU): the largest weight times the keyframes that saw it times its footprint
+    /// in pixels at the finest rate it was seen at.
+    Seen,
+}
+
+impl Rank {
+    pub fn parse(name: &str) -> anyhow::Result<Self> {
+        Ok(match name {
+            "area" => Self::Area,
+            "contribution" => Self::Contribution,
+            "seen" => Self::Seen,
+            _ => anyhow::bail!("a rank is area, contribution or seen, not {name}"),
+        })
     }
+}
+
+/// How [`vrchat_files_with`] makes the trees (lab switches of `orbiters-reconstruct --vrchat` and examples/treeloss.rs).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExportOptions {
+    pub rank: Rank,
+    /// Steps re-fitting a tree's kept leaves to the full model's renders from the recorded cameras (distillation: no
+    /// keyframe needed), when the tree keeps fewer splats than the model has; 0: the leaves stay as trained.
+    pub refit_steps: u32,
+    /// Cameras the re-fit renders from at most, spread over the session (one in eight checks it instead).
+    pub cameras: usize,
+    /// Cameras the contribution adds up over at most, spread over the session.
+    pub rank_cameras: usize,
+    /// Decode-aware: the leaves are re-fitted (with `refit_steps`) and the merged depths tuned as the file rounds them,
+    /// every colour within 0–1 (the colour bytes), the merged depths against the leaves as rounded.
+    pub decoded: bool,
+    /// The most leaves the budget holds (a few builds), rather than 10 % fewer until the tree fits.
+    pub tight: bool,
+    /// Training steps per depth of merged boxes.
+    pub tune_steps: u32,
+    /// The PC and Quest trees' merged depths are tuned where their error looks this many pixels wide.
+    pub drawn_at: [f32; 2],
+    /// The re-fit's cameras are this wide at most: whole multiples of the recorded cameras (themselves at most 960 wide).
+    pub refit_width: u32,
+    /// A PC tree that keeps every splat re-fits only their colours and opacities (decode-aware: what the colour bytes
+    /// clip), not where they are or their shape.
+    pub pc_appearance: bool,
+}
+
+impl Default for ExportOptions {
+    fn default() -> Self {
+        Self { rank: Rank::Area, refit_steps: 0, cameras: 48, rank_cameras: 256, decoded: false, tight: false, tune_steps: STEPS, drawn_at: [DRAWN_AT_PIXELS; 2], refit_width: MAX_WIDTH, pc_appearance: false }
+    }
+}
+
+/// Each splat's score for [`Rank`] (higher is kept first). Contribution needs the GPU; without one it falls back to area.
+pub fn rank(g: &Gaussians, cameras: &[Camera], gpu: Option<&mut Gpu>, rank: Rank) -> anyhow::Result<Vec<f32>> {
+    match (rank, gpu) {
+        (Rank::Contribution, Some(gpu)) if !cameras.is_empty() => {
+            gpu.upload(g);
+            for c in cameras {
+                gpu.set_mask(c.width, c.height, &vec![1.0; (c.width * c.height) as usize])?;
+            }
+            let sums = gpu.contribution(cameras, [0.0; 3])?;
+            // Splats no camera sees keep their area order, behind every seen one.
+            let area = tree::importances(g);
+            let top = area.iter().copied().fold(0.0f32, f32::max).max(1e-30);
+            Ok(sums.iter().zip(&area).map(|(s, a)| if *s > 0.0 { *s + 1.0 } else { a / top }).collect())
+        }
+        (Rank::Seen, _) => {
+            let area = tree::importances(g);
+            Ok((0..g.len())
+                .map(|i| {
+                    let s = g.seen(i);
+                    if s.weight < 0.0 {
+                        return area[i];
+                    }
+                    let sigma2 = (2.0 * g.log_scales[i].iter().copied().fold(f32::NEG_INFINITY, f32::max)).exp();
+                    s.weight * s.views.max(1) as f32 * (sigma2 * s.rate * s.rate).max(1.0)
+                })
+                .collect())
+        }
+        _ => Ok(tree::importances(g)),
+    }
+}
+
+/// The largest tree of the splats of `g` that `score` ranks highest within `max` splats, and those leaves, from
+/// `start` leaves down: 10 % fewer a try, or (`tight`) as many fewer as the last try was over, and up again while it
+/// fits.
+fn fitting(g: &Gaussians, max: usize, score: &[f32], start: usize, tight: bool) -> (Vec<usize>, Tree) {
+    let available = tree::eligible(g);
+    let mut leaves = start.min(available);
+    let mut best: Option<(Vec<usize>, Tree)> = None;
+    for _ in 0..if tight { 6 } else { 64 } {
+        let keep = tree::leaves_by(g, leaves, score);
+        let t = tree::build(g, &keep);
+        let (n, len) = (keep.len(), t.len());
+        let fits = len <= max;
+        if fits && best.as_ref().is_none_or(|(k, _)| k.len() < n) {
+            best = Some((keep, t));
+        }
+        if !tight {
+            if fits || leaves < 1000 {
+                break;
+            }
+            leaves = leaves * 9 / 10;
+            continue;
+        }
+        // The merged boxes are about a third of the leaves: scale by what the budget leaves, just under it.
+        let next = (((n as f64 * max as f64 / len as f64) * 0.999) as usize).min(available);
+        if (fits && (n == available || next <= n + n / 1000)) || next < 1000 {
+            break;
+        }
+        leaves = if fits { next } else { next.min(n - 1) };
+    }
+    match best {
+        Some(best) => best,
+        None if tight => fitting(g, max, score, leaves * 9 / 10, false),
+        None => {
+            let keep = tree::leaves_by(g, leaves, score);
+            let t = tree::build(g, &keep);
+            (keep, t)
+        }
+    }
+}
+
+/// The splats `keep` of `g`, as a set of their own.
+fn subset(g: &Gaussians, keep: &[usize]) -> Gaussians {
+    let mut out = Gaussians::default();
+    for &i in keep {
+        out.push(g.means[i], g.log_scales[i], g.rotations[i], g.opacity_logits[i], g.colors[i]);
+    }
+    out
+}
+
+/// `g` as the file rounds it (crate::web::write_splat: colour, opacity and rotation in bytes).
+pub fn quantize(g: &mut Gaussians) {
+    let mut bytes = Vec::with_capacity(crate::web::SPLAT_BYTES);
+    for i in 0..g.len() {
+        bytes.clear();
+        crate::web::write_splat(&mut bytes, g, i);
+        if let Ok(back) = crate::web::read_splat(&bytes) {
+            g.means[i] = back.means[0];
+            g.log_scales[i] = back.log_scales[0];
+            g.rotations[i] = back.rotations[0];
+            g.opacity_logits[i] = back.opacity_logits[0];
+            g.colors[i] = back.colors[0];
+        }
+    }
+}
+
+/// The full model's renders from `cameras` (black behind, as the leaves train): the re-fit's targets.
+fn full_renders(g: &Gaussians, cameras: &[Camera], gpu: &mut Gpu) -> anyhow::Result<Vec<Arc<[u32]>>> {
+    gpu.upload(g);
+    cameras.iter().map(|c| Ok(packed(&crate::train::render(gpu, c, [0.0; 3])?).into())).collect()
+}
+
+/// The learning rates of tuning and re-fitting: training's, the means' a tenth of where training starts them.
+fn learning_rates(cameras: &[Camera]) -> LearningRates {
+    let centre = cameras.iter().fold([0.0f32; 3], |a, c| [0, 1, 2].map(|k| a[k] + c.position()[k] / cameras.len() as f32));
+    let extent = cameras.iter().map(|c| (0..3).map(|k| (c.position()[k] - centre[k]).powi(2)).sum::<f32>().sqrt()).fold(1.0f32, f32::max);
+    LearningRates { means: 1.6e-5 * extent, log_scales: 0.005, rotations: 0.001, opacity: 0.025, colors: 0.0025 }
+}
+
+/// Recorded cameras and the full model's renders from them (crate::tree_tune::full_renders).
+type Views = [(Camera, Arc<[u32]>)];
+
+/// Re-fits a tree's leaves (the splats `keep` of `g`) to the full model's renders from the cameras of `train`, then
+/// builds the tree again from them within `max` (the re-fitted set's lowest-ranked splats left out if it no longer
+/// fits). With `in_gamut`, every colour stays within 0–1 from the start (what the file's colour bytes hold: the leaves are
+/// scored as the file would show them, and the other parameters make up for the colours a trained model holds outside).
+/// None when the re-fit did not bring the leaves closer to the full model from the cameras of `check` (recorded cameras
+/// it did not train on: on the plaza walk, 48 cameras made the leaves closer from those 48 and farther from the others,
+/// −0.44 dB on held-out views): the tree stays as it was.
+#[allow(clippy::too_many_arguments)]
+fn refit(
+    g: &Gaussians,
+    keep: &[usize],
+    score: &[f32],
+    max: usize,
+    train: &Views,
+    check: &Views,
+    gpu: &mut Gpu,
+    steps: u32,
+    in_gamut: bool,
+    appearance_only: bool,
+    platform: &str,
+) -> anyhow::Result<Option<Tree>> {
+    let cameras: Vec<Camera> = train.iter().map(|v| v.0).collect();
+    let cameras = &cameras[..];
+    let mut leaves = subset(g, keep);
+    if in_gamut {
+        for c in &mut leaves.colors {
+            *c = c.map(|v| v.clamp(0.0, 1.0));
+        }
+    }
+    let base = learning_rates(cameras);
+    // Appearance only: the splats stay where they are, as they are shaped.
+    let base = if appearance_only { LearningRates { means: 0.0, log_scales: 0.0, rotations: 0.0, ..base } } else { base };
+    gpu.upload(&leaves);
+    gpu.step = 0;
+    for (c, _) in train.iter().chain(check) {
+        gpu.set_mask(c.width, c.height, &vec![1.0; (c.width * c.height) as usize])?;
+    }
+    let mean_score = |gpu: &mut Gpu, views: &Views| -> anyhow::Result<f32> {
+        Ok(views.iter().map(|(c, t)| gpu.score(c, [0.0; 3], t)).collect::<anyhow::Result<Vec<f32>>>()?.iter().sum::<f32>() / views.len() as f32)
+    };
+    let check = if check.is_empty() { train } else { check };
+    let (before, before_train) = (mean_score(gpu, check)?, mean_score(gpu, train)?);
+    let mut rng = fastrand::Rng::with_seed(2);
+    gpu.clamp_colors = in_gamut;
+    for s in 0..steps {
+        let j = rng.usize(..cameras.len());
+        let c = &cameras[j];
+        // The means' rate falls tenfold over the re-fit, as training's does towards its end.
+        let lr = LearningRates { means: base.means * 0.1f32.powf(s as f32 / steps as f32), ..base };
+        let target = Target::Color { rgba: &train[j].1, scene_pixels: (c.width * c.height) as f32, weight: 1.0, ssim: 0.2, robust: 0.0 };
+        if let Err(e) = gpu.step(c, [0.0; 3], target, Some(lr)) {
+            gpu.clamp_colors = false;
+            return Err(e);
+        }
+    }
+    gpu.clamp_colors = false;
+    let (after, after_train) = (mean_score(gpu, check)?, mean_score(gpu, train)?);
+    eprintln!(
+        "{platform} leaves re-fit: {} of {} splats, {steps} steps from {} cameras, PSNR against the full model {before_train:.3} → {after_train:.3} dB there, {before:.3} → {after:.3} dB from {} others",
+        keep.len(),
+        g.len(),
+        train.len(),
+        check.len()
+    );
+    if after <= before {
+        return Ok(None);
+    }
+    let trained = gpu.download_params()?;
+    for i in 0..leaves.len() {
+        if trained.is_finite(i) {
+            leaves.means[i] = trained.means[i];
+            leaves.log_scales[i] = trained.log_scales[i];
+            leaves.rotations[i] = trained.rotations[i];
+            leaves.opacity_logits[i] = trained.opacity_logits[i];
+            leaves.colors[i] = trained.colors[i];
+        }
+    }
+    // The re-fitted set fitted the budget before; moved, it may need a few splats fewer.
+    let sub: Vec<f32> = keep.iter().map(|&i| score[i]).collect();
+    let (_, tree) = fitting(&leaves, max, &sub, leaves.len(), true);
+    Ok(Some(tree))
 }
 
 /// The three files of `g` (a reconstruction), named `key` (the upload they belong to). Without a GPU, the merged
 /// boxes stay as merged.
-pub fn vrchat_files(g: &Gaussians, cameras: &[Camera], gpu: Option<&mut Gpu>, key: u32, mut progress: impl FnMut(f32)) -> anyhow::Result<VrchatFiles> {
-    let mut pc = {
+pub fn vrchat_files(g: &Gaussians, cameras: &[Camera], gpu: Option<&mut Gpu>, key: u32, progress: impl FnMut(f32)) -> anyhow::Result<VrchatFiles> {
+    vrchat_files_with(g, cameras, gpu, key, &ExportOptions::default(), progress)
+}
+
+/// [`vrchat_files`] made as `options` say.
+pub fn vrchat_files_with(
+    g: &Gaussians,
+    cameras: &[Camera],
+    mut gpu: Option<&mut Gpu>,
+    key: u32,
+    options: &ExportOptions,
+    mut progress: impl FnMut(f32),
+) -> anyhow::Result<VrchatFiles> {
+    let poses: Vec<([f32; 3], [f32; 3])> = cameras.iter().map(|c| (c.position(), c.forward())).collect();
+    let spread: Vec<Camera> = crate::dataset::spread(&poses, options.cameras).into_iter().map(|i| cameras[i]).collect();
+    // The re-fit's cameras at up to `refit_width` pixels wide (whole multiples of the recorded cameras' size).
+    let refit_cameras: Vec<Camera> = spread.iter().map(|c| c.upscaled((options.refit_width / c.width.max(1)).max(1))).collect();
+    let score = {
+        let _time = PrepStage::new("tree rank");
+        let ranking: Vec<Camera> = crate::dataset::spread(&poses, options.rank_cameras).into_iter().map(|i| cameras[i]).collect();
+        rank(g, &ranking, gpu.as_deref_mut(), options.rank)?
+    };
+    let (pc_keep, mut pc) = {
         let _time = PrepStage::new("tree build pc");
-        fitting(g, PC_SPLATS)
+        fitting(g, PC_SPLATS, &score, PC_SPLATS * 3 / 4, options.tight)
     };
     anyhow::ensure!(pc.leaf_splats().len() >= 1000, "This reconstruction has too few splats to show the world.");
     let same = pc.len() <= QUEST_SPLATS;
@@ -73,20 +342,70 @@ pub fn vrchat_files(g: &Gaussians, cameras: &[Camera], gpu: Option<&mut Gpu>, ke
         None
     } else {
         let _time = PrepStage::new("tree build quest");
-        Some(fitting(g, QUEST_SPLATS))
+        Some(fitting(g, QUEST_SPLATS, &score, QUEST_SPLATS * 3 / 4, options.tight))
     };
+    eprintln!(
+        "trees: PC {} leaves ({} splats), Quest {} leaves ({} splats), of {} splats ({} visible)",
+        pc_keep.len(),
+        pc.len(),
+        quest.as_ref().map_or(pc_keep.len(), |q| q.0.len()),
+        quest.as_ref().map_or(pc.len(), |q| q.1.len()),
+        g.len(),
+        tree::eligible(g)
+    );
     progress(0.1);
     if let Some(gpu) = gpu {
-        let share = if same { 0.85 } else { 0.55 };
+        if options.refit_steps > 0 && !spread.is_empty() {
+            let available = tree::eligible(g);
+            // Decode-aware, every tree's leaves are re-fitted (the colour bytes clip what a full tree keeps too).
+            let cut = |keep: &[usize]| keep.len() < available || options.decoded;
+            let cut_pc = pc_keep.len() < available;
+            if cut(&pc_keep) || quest.as_ref().is_some_and(|q| cut(&q.0)) {
+                let _time = PrepStage::new("refit targets");
+                let rendered = full_renders(g, &refit_cameras, gpu)?;
+                // One camera in eight checks the re-fit instead of training it.
+                let (mut train, mut check) = (Vec::new(), Vec::new());
+                for (k, view) in refit_cameras.iter().copied().zip(rendered).enumerate() {
+                    if refit_cameras.len() >= 16 && k % 8 == 4 { check.push(view) } else { train.push(view) }
+                }
+                drop(_time);
+                if cut(&pc_keep) {
+                    let _time = PrepStage::new("refit pc");
+                    if let Some(t) = refit(g, &pc_keep, &score, PC_SPLATS, &train, &check, gpu, options.refit_steps, options.decoded, options.pc_appearance && !cut_pc, "pc")? {
+                        pc = t;
+                    }
+                }
+                if let Some((keep, q)) = quest.as_mut().filter(|q| cut(&q.0)) {
+                    let _time = PrepStage::new("refit quest");
+                    if let Some(t) = refit(g, keep, &score, QUEST_SPLATS, &train, &check, gpu, options.refit_steps, options.decoded, false, "quest")? {
+                        *q = t;
+                    }
+                }
+            }
+        }
+        if options.decoded {
+            quantize(&mut pc.splats);
+            if let Some((_, q)) = quest.as_mut() {
+                quantize(&mut q.splats);
+            }
+        }
+        let share = if quest.is_none() { 0.85 } else { 0.55 };
         let _time = PrepStage::new("tune pc");
-        tune_for(&mut pc, cameras, gpu, "pc", |p| progress(0.1 + share * p))?;
+        gpu.clamp_colors = options.decoded;
+        let tuned = tune_for(&mut pc, cameras, gpu, "pc", options.tune_steps, options.drawn_at[0], |p| progress(0.1 + share * p));
+        gpu.clamp_colors = false;
+        tuned?;
         drop(_time);
-        if let Some(q) = quest.as_mut() {
+        if let Some((_, q)) = quest.as_mut() {
             let _time = PrepStage::new("tune quest");
-            tune_for(q, cameras, gpu, "quest", |p| progress(0.65 + 0.3 * p))?;
+            gpu.clamp_colors = options.decoded;
+            let tuned = tune_for(q, cameras, gpu, "quest", options.tune_steps, options.drawn_at[1], |p| progress(0.65 + 0.3 * p));
+            gpu.clamp_colors = false;
+            tuned?;
         }
     }
     let _time = PrepStage::new("tree serialize");
+    let quest = quest.map(|(_, q)| q);
     let q = quest.as_ref().unwrap_or(&pc);
     let coarse = q.top(COARSE_SPLATS);
     progress(1.0);
@@ -134,7 +453,7 @@ impl LeafTargets {
     }
 }
 
-fn depth_views(tree: &Tree, cameras: &[Camera], tuned: &[usize]) -> Vec<Camera> {
+fn depth_views(tree: &Tree, cameras: &[Camera], tuned: &[usize], drawn_at: f32) -> Vec<Camera> {
     cameras
         .iter()
         .filter_map(|c| {
@@ -151,7 +470,7 @@ fn depth_views(tree: &Tree, cameras: &[Camera], tuned: &[usize]) -> Vec<Camera> 
             }
             let k = seen.len() / 2;
             let median = *seen.select_nth_unstable_by(k, f32::total_cmp).1;
-            let factor = ((median / DRAWN_AT_PIXELS).ceil() as u32).clamp(1, (c.width / 48).max(1));
+            let factor = ((median / drawn_at).ceil() as u32).clamp(1, (c.width / 48).max(1));
             Some(c.scaled(factor))
         })
         .collect()
@@ -159,18 +478,17 @@ fn depth_views(tree: &Tree, cameras: &[Camera], tuned: &[usize]) -> Vec<Camera> 
 
 /// Tunes every depth of `tree`'s merged boxes against its leaves.
 pub fn tune(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, mut progress: impl FnMut(f32)) -> anyhow::Result<()> {
-    tune_for(tree, cameras, gpu, "tree", &mut progress)
+    tune_for(tree, cameras, gpu, "tree", STEPS, DRAWN_AT_PIXELS, &mut progress)
 }
 
-fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, mut progress: impl FnMut(f32)) -> anyhow::Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, steps: u32, drawn_at: f32, mut progress: impl FnMut(f32)) -> anyhow::Result<()> {
     if cameras.is_empty() {
         return Ok(());
     }
     let poses: Vec<([f32; 3], [f32; 3])> = cameras.iter().map(|c| (c.position(), c.forward())).collect();
     let cameras: Vec<Camera> = crate::dataset::spread(&poses, CAMERAS).into_iter().map(|i| cameras[i]).collect();
-    let centre = cameras.iter().fold([0.0f32; 3], |a, c| [0, 1, 2].map(|k| a[k] + c.position()[k] / cameras.len() as f32));
-    let extent = cameras.iter().map(|c| (0..3).map(|k| (c.position()[k] - centre[k]).powi(2)).sum::<f32>().sqrt()).fold(1.0f32, f32::max);
-    let lr = LearningRates { means: 1.6e-5 * extent, log_scales: 0.005, rotations: 0.001, opacity: 0.025, colors: 0.0025 };
+    let lr = learning_rates(&cameras);
     let leaves = tree.leaf_splats();
     let mut depths: Vec<u32> = tree.nodes.iter().filter(|n| !n.leaf).map(|n| n.depth).collect();
     depths.sort_unstable();
@@ -188,8 +506,8 @@ fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, 
         }
         let gpu_start = gpu.profiler.as_ref().map(|p| p.span.get().0);
         let tuned: Vec<usize> = (0..tree.nodes.len()).filter(|&i| !tree.nodes[i].leaf && tree.nodes[i].depth == depth).collect();
-        // Each camera at the resolution where this depth's boxes are drawn: their median error about DRAWN_AT_PIXELS.
-        let views = depth_views(tree, &cameras, &tuned);
+        // Each camera at the resolution where this depth's boxes are drawn: their median error about `drawn_at` pixels.
+        let views = depth_views(tree, &cameras, &tuned, drawn_at);
         if views.is_empty() {
             continue;
         }
@@ -230,7 +548,7 @@ fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, 
         };
         let before = mean_score(gpu)?;
         let _step_time = PrepStage::new(format!("{platform} depth {depth} steps"));
-        for _ in 0..STEPS {
+        for _ in 0..steps {
             let j = rng.usize(..views.len());
             let v = &views[j];
             let target = Target::Color { rgba: &targets[j], scene_pixels: (v.width * v.height) as f32, weight: 1.0, ssim: 0.2, robust: 0.0 };
@@ -271,6 +589,114 @@ fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, 
 mod tests {
     use super::*;
 
+    fn cloud(n: usize) -> Gaussians {
+        let mut g = Gaussians::default();
+        let mut rng = fastrand::Rng::with_seed(3);
+        for _ in 0..n {
+            let q = [rng.f32() - 0.5, rng.f32() - 0.5, rng.f32() - 0.5, rng.f32() - 0.5];
+            g.push([rng.f32() * 30.0, rng.f32() * 3.0, rng.f32() * 30.0], [-4.0 + rng.f32() * 2.0; 3], q, rng.f32() * 6.0 - 3.0, [rng.f32() * 1.2 - 0.1, 0.5, rng.f32()]);
+        }
+        g
+    }
+
+    #[test]
+    fn a_tight_fit_keeps_more_leaves_within_the_budget() {
+        let g = cloud(60_000);
+        let score = tree::importances(&g);
+        for max in [9_000, 20_000] {
+            let (loose_keep, loose) = fitting(&g, max, &score, max * 3 / 4, false);
+            let (tight_keep, tight) = fitting(&g, max, &score, max * 3 / 4, true);
+            assert!(loose.len() <= max && tight.len() <= max, "{} and {} splats for {max}", loose.len(), tight.len());
+            assert!(tight_keep.len() >= loose_keep.len() && tight.len() >= max * 98 / 100, "{} leaves ({} splats) for {max}", tight_keep.len(), tight.len());
+            assert_eq!(tight.leaf_splats().len(), tight_keep.len());
+        }
+        // Everything fits: everything is kept, tight or not.
+        let (keep, _) = fitting(&g, 1 << 20, &score, 1 << 19, true);
+        assert_eq!(keep.len(), tree::eligible(&g));
+    }
+
+    #[test]
+    fn rounded_splats_write_the_same_file() {
+        let g = cloud(5000);
+        let mut rounded = g.clone();
+        quantize(&mut rounded);
+        let bytes = |g: &Gaussians| {
+            let mut b = Vec::new();
+            (0..g.len()).for_each(|i| crate::web::write_splat(&mut b, g, i));
+            b
+        };
+        let (a, b) = (bytes(&g), bytes(&rounded));
+        // Positions, colour and opacity write the same bytes, scales the same floats but for the last bit (through
+        // their logarithm), and a rotation byte may move by one where normalising the decoded quaternion crosses a
+        // rounding edge.
+        let scale = |x: &[u8], k: usize| f32::from_le_bytes(x[12 + 4 * k..16 + 4 * k].try_into().unwrap());
+        let moved = a
+            .chunks(32)
+            .zip(b.chunks(32))
+            .filter(|(x, y)| {
+                x[..12] != y[..12]
+                    || x[24..28] != y[24..28]
+                    || (0..3).any(|k| (scale(x, k) - scale(y, k)).abs() > 1e-6 * scale(x, k))
+                    || x[28..].iter().zip(&y[28..]).any(|(p, q)| p.abs_diff(*q) > 1)
+            })
+            .count();
+        assert_eq!(moved, 0);
+    }
+
+    /// A wall of small splats in front of the cameras (about seven deep: a few thousandths of the light gets through), a
+    /// large one hidden behind it, and a few cameras.
+    fn hidden_scene() -> (Gaussians, Vec<Camera>) {
+        let mut g = Gaussians::default();
+        let mut rng = fastrand::Rng::with_seed(5);
+        for _ in 0..8000 {
+            let p = [rng.f32() * 4.0 - 2.0, rng.f32() * 3.0 - 1.5, 4.0 + rng.f32() * 0.05];
+            let q = [1.0, rng.f32() * 0.2, rng.f32() * 0.2, rng.f32() * 0.2];
+            g.push(p, [(0.06f32).ln(), (0.06f32).ln(), (0.005f32).ln()], q, 3.0, [rng.f32(), rng.f32(), rng.f32()]);
+        }
+        // Big and opaque, but behind the wall from every camera.
+        g.push([0.0, 0.0, 6.0], [(0.4f32).ln(); 3], [1.0, 0.0, 0.0, 0.0], 4.0, [1.0, 0.0, 0.0]);
+        let cameras = (0..6).map(|k| Camera::look([k as f32 * 0.2 - 0.5, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 0.9, 160, 120)).collect();
+        (g, cameras)
+    }
+
+    #[test]
+    fn contribution_keeps_what_the_cameras_see_over_what_is_big() {
+        let Ok(mut gpu) = Gpu::new() else { return };
+        let (g, cameras) = hidden_scene();
+        let hidden = g.len() - 1;
+        let area = rank(&g, &cameras, Some(&mut gpu), Rank::Area).unwrap();
+        let seen = rank(&g, &cameras, Some(&mut gpu), Rank::Contribution).unwrap();
+        // By area the hidden splat is the most important of all; by what the cameras see, it is not worth half the
+        // budget (the wall's back layers, behind its front ones, are worth little too).
+        assert!(area[..hidden].iter().all(|a| *a < area[hidden]));
+        let below = seen[..hidden].iter().filter(|s| **s < seen[hidden]).count();
+        assert!(below < hidden / 2, "{below} of {hidden} visible splats rank below the hidden one");
+        assert!(tree::leaves_by(&g, hidden / 2, &area).contains(&hidden));
+        assert!(!tree::leaves_by(&g, hidden / 2, &seen).contains(&hidden));
+    }
+
+    #[test]
+    fn a_refit_brings_the_kept_leaves_closer_to_the_full_model() {
+        let Ok(mut gpu) = Gpu::new() else { return };
+        let (g, cameras) = hidden_scene();
+        let score = tree::importances(&g);
+        let keep = tree::leaves_by(&g, g.len() / 3, &score);
+        let targets = full_renders(&g, &cameras, &mut gpu).unwrap();
+        gpu.set_mask(160, 120, &[1.0; 160 * 120]).unwrap();
+        let psnr = |t: &Gaussians, gpu: &mut Gpu| {
+            gpu.upload(t);
+            cameras.iter().zip(&targets).map(|(c, p)| gpu.score(c, [0.0; 3], p).unwrap()).sum::<f32>() / cameras.len() as f32
+        };
+        let before = psnr(&subset(&g, &keep), &mut gpu);
+        // Trained from five cameras, checked from the sixth.
+        let views: Vec<(Camera, Arc<[u32]>)> = cameras.iter().copied().zip(targets.iter().cloned()).collect();
+        let tree = refit(&g, &keep, &score, usize::MAX, &views[..5], &views[5..], &mut gpu, 300, true, false, "test").unwrap().expect("a re-fit that gains");
+        assert!(tree.splats.colors.iter().flatten().all(|c| (0.0..=1.0).contains(c)), "colours within the bytes' range");
+        let after = psnr(&tree.leaf_splats(), &mut gpu);
+        assert!(after > before + 1.0, "{before} → {after} dB");
+        assert!(tree.leaf_splats().len() <= keep.len());
+    }
+
     #[test]
     fn leaf_targets_only_reuse_the_exact_camera_and_resolution() {
         let camera = Camera { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0; 3], fx: 2.0, fy: 2.0, cx: 1.0, cy: 1.0, width: 2, height: 2 };
@@ -290,32 +716,7 @@ mod tests {
     #[ignore]
     fn serialized_upload_quality() {
         fn read(path: &Path) -> Tree {
-            let bytes = std::fs::read(path).unwrap();
-            let u = |at| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-            let f = |at| f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-            assert_eq!(&bytes[..8], tree::MAGIC);
-            assert_eq!(u(8), tree::VERSION);
-            let count = u(12) as usize;
-            let mut nodes: Vec<tree::Node> = Vec::new();
-            for i in 0..count {
-                let at = (i + 1) * 32;
-                let parent = (u(at + 20) != u32::MAX).then(|| u(at + 20));
-                let depth = parent.map_or(0, |p| nodes[p as usize].depth + 1);
-                nodes.push(tree::Node {
-                    center: [f(at), f(at + 4), -f(at + 8)],
-                    radius: f(at + 12),
-                    error: f(at + 16),
-                    parent,
-                    depth,
-                    start: u(at + 24),
-                    count: u(at + 28),
-                    leaf: true,
-                });
-                if let Some(parent) = parent {
-                    nodes[parent as usize].leaf = false;
-                }
-            }
-            Tree { nodes, splats: crate::web::read_splat(&bytes[(1 + count) * 32..]).unwrap() }
+            Tree::parse(&std::fs::read(path).unwrap()).unwrap()
         }
         let base = std::path::PathBuf::from(std::env::var_os("ORBITERS_PREP_BASE").unwrap());
         let repeat = std::env::var_os("ORBITERS_PREP_BASE_REPEAT").map(std::path::PathBuf::from);
@@ -350,7 +751,7 @@ mod tests {
                     if tuned.is_empty() {
                         continue;
                     }
-                    let views = depth_views(&reference, &cameras, &tuned);
+                    let views = depth_views(&reference, &cameras, &tuned, DRAWN_AT_PIXELS);
                     if views.is_empty() {
                         continue;
                     }

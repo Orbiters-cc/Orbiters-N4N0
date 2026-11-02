@@ -211,11 +211,26 @@ fn importance(g: &Gaussians, i: usize) -> f32 {
     sigmoid(g.opacity_logits[i]) * (s[0] * s[1] + s[1] * s[2] + s[0] * s[2])
 }
 
+/// Every splat's [`importance`] (opacity times area), for [`leaves_by`].
+pub fn importances(g: &Gaussians) -> Vec<f32> {
+    (0..g.len()).into_par_iter().map(|i| importance(g, i)).collect()
+}
+
+/// The splats that can be in a tree: visible and finite.
+pub fn eligible(g: &Gaussians) -> usize {
+    (0..g.len()).filter(|&i| g.is_finite(i) && sigmoid(g.opacity_logits[i]) >= MIN_OPACITY).count()
+}
+
 /// The splats worth a tree: visible and finite, at most `max` of them (the most important).
 pub fn leaves(g: &Gaussians, max: usize) -> Vec<usize> {
+    leaves_by(g, max, &importances(g))
+}
+
+/// The splats worth a tree: visible and finite, at most `max` of them, those `score` (one a splat) ranks highest.
+pub fn leaves_by(g: &Gaussians, max: usize, score: &[f32]) -> Vec<usize> {
     let mut keep: Vec<usize> = (0..g.len()).filter(|&i| g.is_finite(i) && sigmoid(g.opacity_logits[i]) >= MIN_OPACITY).collect();
     if keep.len() > max {
-        keep.select_nth_unstable_by(max, |&a, &b| importance(g, b).total_cmp(&importance(g, a)));
+        keep.select_nth_unstable_by(max, |&a, &b| score[b].total_cmp(&score[a]));
         keep.truncate(max);
         keep.sort_unstable();
     }
@@ -404,6 +419,38 @@ impl Tree {
         top
     }
 
+    /// A tree file back (the layout of [`Tree::file`]), in Unity's coordinates again: what a world draws, its splats
+    /// as the file rounds them.
+    pub fn parse(bytes: &[u8]) -> anyhow::Result<Tree> {
+        anyhow::ensure!(bytes.len() >= RECORD && bytes.len().is_multiple_of(RECORD) && &bytes[..8] == MAGIC, "not a splat tree");
+        let u = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let f = |at: usize| f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        anyhow::ensure!(u(8) == VERSION, "a splat tree of version {}", u(8));
+        let (count, splats) = (u(12) as usize, u(16) as usize);
+        anyhow::ensure!(bytes.len() == (1 + count + splats) * RECORD, "a splat tree of {} bytes for {count} boxes and {splats} splats", bytes.len());
+        let mut nodes: Vec<Node> = Vec::with_capacity(count);
+        for i in 0..count {
+            let at = (i + 1) * RECORD;
+            let parent = (u(at + 20) != u32::MAX).then(|| u(at + 20));
+            anyhow::ensure!(parent.is_none_or(|p| (p as usize) < i), "box {i}'s parent comes after it");
+            let depth = parent.map_or(0, |p| nodes[p as usize].depth + 1);
+            nodes.push(Node {
+                center: [f(at), f(at + 4), -f(at + 8)],
+                radius: f(at + 12),
+                error: f(at + 16),
+                parent,
+                depth,
+                start: u(at + 24),
+                count: u(at + 28),
+                leaf: true,
+            });
+            if let Some(parent) = parent {
+                nodes[parent as usize].leaf = false;
+            }
+        }
+        Ok(Tree { nodes, splats: crate::web::read_splat(&bytes[(1 + count) * RECORD..])? })
+    }
+
     /// The file VRChat worlds load (OrbitersContracts Docs/splat-tree.md): a header, the boxes and the splats, 32
     /// bytes each, right-handed like the web `.splat` (Unity's Z negated). `key` names the upload the file belongs to.
     pub fn file(&self, key: u32, flags: u32) -> Vec<u8> {
@@ -512,5 +559,35 @@ mod tests {
         assert_eq!(f(b + 8), -tree.nodes[0].center[2]);
         let s = (1 + tree.nodes.len()) * RECORD;
         assert_eq!(f(s + 8), -tree.splats.means[0][2]);
+    }
+
+    #[test]
+    fn a_ranking_picks_the_leaves_and_invisible_splats_never_count() {
+        let mut g = scene(1000);
+        g.opacity_logits[3] = -20.0;
+        // Ranked by index: the last ones first, but the invisible one never.
+        let score: Vec<f32> = (0..g.len()).map(|i| i as f32).collect();
+        let keep = leaves_by(&g, 100, &score);
+        assert_eq!(keep, (g.len() - 100..g.len()).collect::<Vec<_>>());
+        let reversed: Vec<f32> = score.iter().map(|s| -s).collect();
+        let keep = leaves_by(&g, 5, &reversed);
+        assert_eq!(keep, vec![0, 1, 2, 4, 5]);
+        assert_eq!(eligible(&g), g.len() - 1);
+        assert_eq!(leaves(&g, usize::MAX).len(), g.len() - 1);
+    }
+
+    #[test]
+    fn a_file_reads_back_as_its_tree_with_the_splats_as_it_rounds_them() {
+        let g = scene(9000);
+        let tree = build(&g, &leaves(&g, usize::MAX));
+        let back = Tree::parse(&tree.file(5, 0)).unwrap();
+        assert_eq!(back.nodes, tree.nodes);
+        assert_eq!(back.len(), tree.len());
+        assert_eq!(back.splats.means, tree.splats.means);
+        for i in 0..tree.len() {
+            assert!((sigmoid(back.splats.opacity_logits[i]) - sigmoid(tree.splats.opacity_logits[i]).min(1.0)).abs() <= 0.5 / 255.0 + 1e-6);
+            assert!(back.splats.colors[i].iter().zip(tree.splats.colors[i]).all(|(a, b)| (a - b.clamp(0.0, 1.0)).abs() <= 0.5 / 255.0 + 1e-6));
+        }
+        assert!(Tree::parse(&tree.file(5, 0)[..RECORD * 2]).is_err());
     }
 }

@@ -56,6 +56,8 @@ fn args() -> anyhow::Result<Args> {
             "--robust" => settings.robust = it.next().context("--robust needs a value")?.parse().context("--robust takes a number (0–1)")?,
             // Lab A/Bs: the regularisers on every Gaussian every step (orbiters_reconstruct::train::Settings).
             "--regularise-unseen" => settings.regularise_unseen = true,
+            // Colours within 0–1 at every step, what the splat files hold.
+            "--clamp-colors" => settings.clamp_colors = true,
             // Adam's bias correction per Gaussian from its restart, rather than from the run's first step.
             "--adam-restart" => settings.adam_restart = true,
             // Mip-Splatting's 3D filter's scale (0, the default: none; its own is orbiters_reconstruct::cpu::FILTER_3D).
@@ -348,16 +350,42 @@ fn web_preview(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned]`: the reconstruction's files for VRChat
-/// worlds (orbiters_reconstruct::tree_tune): pc.n4tree, quest.n4tree and coarse.n4tree.
+/// `orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned] [--rank area|contribution|seen]
+/// [--refit <steps>] [--cameras <n>] [--rank-cameras <n>] [--decoded] [--tight] [--tune-steps <n>]
+/// [--drawn-at <pc>,<quest>]`: the reconstruction's files for VRChat worlds (orbiters_reconstruct::tree_tune; the lab
+/// switches are tree_tune::ExportOptions'): pc.n4tree, quest.n4tree and coarse.n4tree.
 fn vrchat(args: &[String]) -> anyhow::Result<()> {
-    let (Some(session), Some(out)) = (args.first(), args.get(1)) else { bail!("usage: orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned]") };
+    let usage = "usage: orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned] [--rank area|contribution|seen] [--refit <steps>] [--cameras <n>] [--rank-cameras <n>] [--decoded] [--tight] [--tune-steps <n>] [--drawn-at <pc px>,<quest px>] [--refit-width <n>] [--pc-appearance]";
+    let (Some(session), Some(out)) = (args.first(), args.get(1)) else { bail!(usage) };
+    let mut options = orbiters_reconstruct::tree_tune::ExportOptions::default();
+    let mut untuned = false;
+    let mut it = args[2..].iter();
+    while let Some(a) = it.next() {
+        let mut value = || it.next().with_context(|| format!("{a} needs a value"));
+        match a.as_str() {
+            "--untuned" => untuned = true,
+            "--rank" => options.rank = orbiters_reconstruct::tree_tune::Rank::parse(value()?)?,
+            "--refit" => options.refit_steps = value()?.parse()?,
+            "--cameras" => options.cameras = value()?.parse()?,
+            "--rank-cameras" => options.rank_cameras = value()?.parse()?,
+            "--tune-steps" => options.tune_steps = value()?.parse()?,
+            "--drawn-at" => {
+                let v: Vec<f32> = value()?.split(',').map(str::parse).collect::<Result<_, _>>()?;
+                options.drawn_at = [v[0], *v.get(1).unwrap_or(&v[0])];
+            }
+            "--decoded" => options.decoded = true,
+            "--refit-width" => options.refit_width = value()?.parse()?,
+            "--pc-appearance" => options.pc_appearance = true,
+            "--tight" => options.tight = true,
+            _ => bail!("unknown argument {a}; {usage}"),
+        }
+    }
     let session = std::path::Path::new(session);
     let g = ply::read(&rec::result_dir(session).join(rec::PLY_FILE))?;
     let cameras = orbiters_reconstruct::tree_tune::session_cameras(session)?;
-    let mut gpu = if args.iter().any(|a| a == "--untuned") { None } else { Some(gpu::Gpu::new()?) };
+    let mut gpu = if untuned { None } else { Some(gpu::Gpu::new()?) };
     let start = std::time::Instant::now();
-    let files = orbiters_reconstruct::tree_tune::vrchat_files(&g, &cameras, gpu.as_mut(), fastrand::u32(..), |p| eprintln!("{:.0} %", p * 100.0))?;
+    let files = orbiters_reconstruct::tree_tune::vrchat_files_with(&g, &cameras, gpu.as_mut(), fastrand::u32(..), &options, |p| eprintln!("{:.0} %", p * 100.0))?;
     let out = std::path::Path::new(out);
     std::fs::create_dir_all(out)?;
     for (name, bytes) in [("pc.n4tree", &files.pc), ("quest.n4tree", &files.quest), ("coarse.n4tree", &files.coarse)] {

@@ -9,7 +9,8 @@ struct AdamInfo {
     lr: array<vec4<f32>, 4>,
     // β1, β2, ε, unused.
     beta: vec4<f32>,
-    // Floats in the set, this step (bias correction), unused, unused.
+    // Floats in the set, this step (bias correction), 1: colours stay within 0–1 (crate::gpu::Gpu::clamp_colors),
+    // unused.
     n: vec4<u32>,
 }
 
@@ -82,11 +83,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let s1 = adam4(p1, m1[o + 1u], m2[o + 1u], g1, adam.lr[1], c1, c2);
     let s2 = adam4(p2, m1[o + 2u], m2[o + 2u], g2, adam.lr[2], c1, c2);
     let s3 = adam4(p3, m1[o + 3u], m2[o + 3u], g3, adam.lr[3], c1, c2);
+    var q2 = s2.p;
+    var q3 = s3.p;
+    if (adam.n.z != 0u) {
+        q2.w = clamp(q2.w, 0.0, 1.0);
+        q3 = vec4<f32>(clamp(q3.xy, vec2<f32>(0.0), vec2<f32>(1.0)), q3.zw);
+    }
     params4[o] = s0.p;
     params4[o + 1u] = s1.p;
-    params4[o + 2u] = s2.p;
+    params4[o + 2u] = q2;
     // The sky flag and the restart step are no parameters: kept as they were.
-    params4[o + 3u] = vec4<f32>(s3.p.xy, p3.zw);
+    params4[o + 3u] = vec4<f32>(q3.xy, p3.zw);
     m1[o] = s0.m;
     m1[o + 1u] = s1.m;
     m1[o + 2u] = s2.m;

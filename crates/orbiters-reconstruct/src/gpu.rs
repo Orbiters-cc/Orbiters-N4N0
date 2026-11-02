@@ -262,6 +262,9 @@ struct Training {
     /// The largest weights (the PLY's seen statistics), and whether they reach a threshold (fading).
     visibility: wgpu::ComputePipeline,
     visibility_over: wgpu::ComputePipeline,
+    /// The summed weights of a view ([`Gpu::contribution`]), and their fold into the run's.
+    contribution: wgpu::ComputePipeline,
+    contribution_fold: wgpu::ComputePipeline,
     filter_3d: wgpu::ComputePipeline,
     seen: wgpu::ComputePipeline,
     sky_gradient: wgpu::ComputePipeline,
@@ -451,6 +454,11 @@ pub struct Gpu {
     /// waiting for each view's count ([`Gpu::visibility`]).
     visibility_over: f32,
     visibility_pipelined: bool,
+    /// Visibility rounds sum the weights instead ([`Gpu::contribution`]).
+    visibility_sum: bool,
+    /// Steps keep every colour within 0–1, what a splat file's colour bytes hold (crate::tree_tune's decode-aware
+    /// re-fit and tuning).
+    pub clamp_colors: bool,
     /// The keyframes on the device ([`Gpu::set_keyframes`]), and the one the next colour step trains on instead of
     /// uploading its pixels.
     keyframes: Vec<wgpu::Buffer>,
@@ -720,6 +728,8 @@ fn kernel_sources(sums: Option<GradientSums>, sum_lanes: u32) -> Vec<KernelSourc
             source("project_backward adam", &[common, read, include_str!("shaders/param_grads.wgsl"), include_str!("shaders/project_backward_adam.wgsl")], &["main"]),
             source("relocate", &[include_str!("shaders/relocate.wgsl")], &["classify", "adjust", "copy"]),
             source("raster visibility", &[common, raster, include_str!("shaders/raster_visibility.wgsl")], &["visibility", "visibility_over"]),
+            source("raster contribution", &[common, raster, include_str!("shaders/raster_contribution.wgsl")], &["contribution"]),
+            source("contribution fold", &[include_str!("shaders/contribution_fold.wgsl")], &["main"]),
             source("filter3d", &[include_str!("shaders/filter3d.wgsl")], &["main"]),
             source("seen", &[include_str!("shaders/seen.wgsl")], &["main"]),
             source("sort subgroups", &[include_str!("shaders/sort.wgsl"), include_str!("shaders/sort_subgroups.wgsl")], &["scatter_subgroups"]),
@@ -919,6 +929,8 @@ impl Gpu {
             squared_error: pipe("loss", "squared_error"),
             visibility: pipe("raster visibility", "visibility"),
             visibility_over: pipe("raster visibility", "visibility_over"),
+            contribution: pipe("raster contribution", "contribution"),
+            contribution_fold: pipe("contribution fold", "main"),
             filter_3d: pipe("filter3d", "main"),
             seen: pipe("seen", "main"),
             sky_gradient: pipe("sky gradient", "gradient"),
@@ -1037,6 +1049,8 @@ impl Gpu {
             errors: Default::default(),
             visibility_over: 0.0,
             visibility_pipelined: false,
+            visibility_sum: false,
+            clamp_colors: false,
             keyframes: Vec::new(),
             resident_target: None,
             big: None,
@@ -1878,7 +1892,10 @@ impl Gpu {
             // A visibility round walks the entries as the forward pass would, recording what each Gaussian shows.
             let t = self.training()?;
             let mask = mask.as_ref().expect("checked above");
-            if self.visibility_over > 0.0 {
+            if self.visibility_sum {
+                let bind = self.bind(&t.contribution, &[(0, &self.frame), (1, &proj), (2, &values[0]), (3, &ranges), (8, mask), (9, seen)]);
+                self.dispatch(&mut enc, &t.contribution, &bind, tiles);
+            } else if self.visibility_over > 0.0 {
                 let bind = self.bind(&t.visibility_over, &[(0, &self.frame), (1, &proj), (2, &values[0]), (3, &ranges), (8, mask), (10, seen)]);
                 self.dispatch(&mut enc, &t.visibility_over, &bind, tiles);
             } else {
@@ -2074,7 +2091,7 @@ impl Gpu {
         if lr.is_some() {
             self.step += 1;
         }
-        let info = lr.map(|lr| self.uniform_at(("adam", 0), &AdamInfo { lr: rates_of(lr), beta: [0.9, 0.999, 1e-15, 0.0], n: [(self.count * PACKED) as u32, self.step, 0, 0] }));
+        let info = lr.map(|lr| self.uniform_at(("adam", 0), &AdamInfo { lr: rates_of(lr), beta: [0.9, 0.999, 1e-15, 0.0], n: [(self.count * PACKED) as u32, self.step, u32::from(self.clamp_colors), 0] }));
         let s = self.splats.as_ref().expect("splats");
         // No clear of grad2d: it is zero here, as the projection backward zeroes the sums it reads (new buffers start
         // zeroed).
@@ -2257,6 +2274,36 @@ impl Gpu {
         }
         let raw: Vec<[u32; 4]> = self.read::<u32>(&out, n * 4)?.as_chunks::<4>().0.to_vec();
         Ok(raw.into_iter().map(|[w, views, sectors, rate]| Seen { weight: f32::from_bits(w), views, sectors: sectors as u16, rate: f32::from_bits(rate), beyond: 0.0 }).collect())
+    }
+
+    /// Each Gaussian's contribution to the scene pixels (the mask set for each image size) of `cams`: the sum of the
+    /// blending weights α·T it reaches over them (LightGaussian's global significance; raster_contribution.wgsl), in
+    /// pixels. Each view waits for its count, so no entry is dropped.
+    pub fn contribution(&mut self, cams: &[Camera], background: [f32; 3]) -> anyhow::Result<Vec<f32>> {
+        let n = self.count;
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let view = storage(&self.device, "contribution in a view", (n * 4) as u64);
+        let total = storage(&self.device, "contribution", (n * 4) as u64);
+        self.visibility_sum = true;
+        let overflows = self.overflows;
+        let round = cams.iter().try_for_each(|cam| -> anyhow::Result<()> {
+            self.caught(|gpu| gpu.run(cam, background, Target::None, None, Some(&view)))?;
+            let t = self.training()?;
+            let info = self.uniform(&[n as u32, 0, 0, 0]);
+            let bind = self.bind(&t.contribution_fold, &[(0, &info), (1, &view), (2, &total)]);
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            self.dispatch(&mut enc, &t.contribution_fold, &bind, groups(n));
+            self.queue.submit([enc.finish()]);
+            Ok(())
+        });
+        self.visibility_sum = false;
+        round?;
+        if self.overflows != overflows {
+            eprintln!("a contribution round dropped tile entries");
+        }
+        self.read::<f32>(&total, n)
     }
 
     /// Each Gaussian's largest blending weight in a scene pixel of any of `cams` (`at_least` 0), or with `at_least` a
@@ -3351,5 +3398,26 @@ mod tests {
         assert!(seen[1] < 0.011, "hidden Gaussian: {}", seen[1]);
         assert_eq!(seen[2], 0.0, "off-screen Gaussian");
         assert!(seen[3] < 1e-3, "Gaussian under the masked rows: {}", seen[3]);
+    }
+
+    /// The contributions of all Gaussians add up to what they cover of the scene pixels: with white splats over black,
+    /// each pixel's colour is the sum of the blending weights α·T of its splats. Two views count twice; masked rows not.
+    #[test]
+    fn contributions_add_up_to_the_covered_scene_pixels() {
+        let Some(mut gpu) = devices().into_iter().next() else { return };
+        let (mut g, cam) = scene(20_000, 320, 180, 47);
+        for c in &mut g.colors {
+            *c = [1.0; 3];
+        }
+        gpu.upload(&g);
+        let mask: Vec<f32> = (0..cam.width * cam.height).map(|p| if p / cam.width < 20 { 0.0 } else { 1.0 }).collect();
+        gpu.set_mask(cam.width, cam.height, &mask).expect("mask");
+        let covered: f64 = crate::train::render(&mut gpu, &cam, [0.0; 3]).expect("render").iter().zip(&mask).map(|(p, m)| (p[0] * m) as f64).sum();
+        let sums = gpu.contribution(&[cam, cam], [0.0; 3]).expect("contribution");
+        let total: f64 = sums.iter().map(|s| *s as f64).sum();
+        assert!((total - 2.0 * covered).abs() < 2e-3 * covered, "contributions {total} for {covered} pixels covered twice");
+        // The visibility round's largest weight is never more than the sum.
+        let largest = gpu.visibility(&[cam], [0.0; 3], 0.0).expect("visibility");
+        assert!(largest.iter().zip(&sums).all(|(l, s)| *l <= *s / 2.0 + 1e-3), "a largest weight above its sum");
     }
 }

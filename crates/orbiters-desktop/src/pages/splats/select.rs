@@ -366,6 +366,22 @@ impl Edits {
     fn busy(&self) -> bool {
         self.drawing.is_some()
     }
+
+    /// Whether the last save failed: the view leaves out splats the file beside the PLY still keeps, so whatever is made
+    /// from the file (Export) would bring them back until Retry saves it.
+    pub(super) fn unsaved(&self) -> bool {
+        self.save_error.is_some()
+    }
+}
+
+/// The splat edits of `session` that could not be applied, discarded outside its 3D view (Export's dialog) as Discard
+/// them does in the view ([`Edits::discard`]): the file gone and the worker's own picture of its PLY back, under the same
+/// lock as every save.
+pub fn discard_edits(session: &Path) -> anyhow::Result<()> {
+    let _w = writing();
+    edit::discard(&reconstruction::result_dir(session))?;
+    PICTURES.fetch_add(1, Ordering::Relaxed);
+    Ok(())
 }
 
 impl Drop for Edits {

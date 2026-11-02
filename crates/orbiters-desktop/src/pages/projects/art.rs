@@ -203,7 +203,7 @@ pub(super) fn package_tint(name: &str) -> Color32 {
 }
 
 /// The selection ring around a chosen card (the same green ring as a focused field), springing in.
-pub(super) fn selection(p: &Painter, id: Id, rect: Rect, radius: f32, selected: bool) -> f32 {
+pub(crate) fn selection(p: &Painter, id: Id, rect: Rect, radius: f32, selected: bool) -> f32 {
     let k = anim::toggle(p.ctx(), id, selected, Spring::BOUNCY);
     if k > 0.01 {
         let r = rect.expand(3.0 * k.clamp(0.0, 1.2));
@@ -213,7 +213,7 @@ pub(super) fn selection(p: &Painter, id: Id, rect: Rect, radius: f32, selected: 
 }
 
 /// A filled check mark in a green disc (a chosen card's corner).
-pub(super) fn check(p: &Painter, center: egui::Pos2, k: f32) {
+pub(crate) fn check(p: &Painter, center: egui::Pos2, k: f32) {
     if k <= 0.01 {
         return;
     }

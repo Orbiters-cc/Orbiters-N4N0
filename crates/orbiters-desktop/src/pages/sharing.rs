@@ -92,6 +92,10 @@ pub struct Dialog {
     viewer: Option<super::splats::Viewer>,
     /// The photo editor on a copy of the picture ([`super::editor`]), over the page while it is open.
     editor: Option<super::editor::Editor>,
+    /// Export… of a 3D capture of this computer ([`super::splat_export`]) over the window, and where its button was
+    /// drawn last (the dialog grows out of it).
+    export: Option<super::splat_export::Export>,
+    export_button: Rect,
     /// Where it opens from (a card's picture) and that rect's corner radius; the middle of the page when not given.
     origin: Option<(Rect, f32)>,
     morph: Option<Morph>,
@@ -166,6 +170,8 @@ impl Dialog {
             pictures: crate::worlds::Pictures::new(ctx),
             viewer: None,
             editor: None,
+            export: None,
+            export_button: Rect::NOTHING,
             origin: None,
             morph: None,
             measured: HashMap::new(),
@@ -519,7 +525,14 @@ impl Dialog {
             }
             return false;
         }
-        self.window(ui, cx, server)
+        let closed = self.window(ui, cx, server);
+        // Export's dialog over the window, which waits under it.
+        if let Some(e) = self.export.as_mut() {
+            if !e.show(&ctx) {
+                self.export = None;
+            }
+        }
+        closed
     }
 
     fn rollback_or_settle(&mut self, ctx: &egui::Context, cx: &mut Cx, done: Outcome) {
@@ -797,7 +810,7 @@ impl Dialog {
         if let Some(a) = act {
             self.act(&ctx, cx, server, a);
         }
-        if !closing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if !closing && self.export.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.full {
                 self.full = false;
             } else if self.warning.is_some() {
@@ -946,6 +959,13 @@ impl Dialog {
                 if !self.entry.is_picture() {
                     actions.push((Act::CopyLink, self.copy_button(ui, busy, can_share)));
                 }
+                // A capture of this computer, reconstructed: what its 3D view shows, as a file for other tools.
+                if self.entry.ready && matches!(self.entry.local, Some(controller::Local::Session(_))) {
+                    let b = Button::new("Export…").icon(icons::UPLOAD_SIMPLE).variant(Variant::Secondary).hint(
+                        "Saves what its 3D view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender",
+                    );
+                    actions.push((Act::Export, b));
+                }
                 if super::editor::source_of(self.layers.layered(&self.entry)).is_some() {
                     actions.push((Act::Edit, Button::new("Edit").icon(icons::SLIDERS_HORIZONTAL).variant(Variant::Secondary)));
                 }
@@ -995,6 +1015,9 @@ impl Dialog {
             let r = Rect::from_min_size(pos2(x, row.top()), vec2(bw, 32.0));
             if matches!(a, Act::CopyLink) {
                 copy_rect = Some(r);
+            }
+            if matches!(a, Act::Export) {
+                self.export_button = r;
             }
             if pressed(b.show_at(ui, r)) {
                 *act = Some(a);
@@ -1472,6 +1495,11 @@ impl Dialog {
             }
             Act::Full => self.full = !self.full,
             Act::Edit => self.edit(ctx),
+            Act::Export => {
+                if let Some(controller::Local::Session(dir)) = &self.entry.local {
+                    self.export = Some(super::splat_export::Export::open(ctx, dir, &self.entry.world_name, self.export_button));
+                }
+            }
             Act::Unshare(u) => self.start(ctx, server, Action::Unshare(u)),
             Act::Send => {
                 let recipients = self
@@ -1550,6 +1578,7 @@ enum Act {
     Retry,
     CopyLink,
     Edit,
+    Export,
 }
 
 impl Act {
@@ -1561,6 +1590,7 @@ impl Act {
             Act::Reconstruct => 3,
             Act::CopyLink => 4,
             Act::Edit => 5,
+            Act::Export => 6,
             _ => 9,
         }
     }

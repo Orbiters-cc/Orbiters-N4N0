@@ -6,7 +6,11 @@
 //! On the session's detail: Export… beside Send to Mixer, and its dialog saying what the edits leave out; GLB chosen and
 //! exported (how far it got, then Saved and Show in folder), the file checked to hold exactly the splats its edits keep
 //! without the sky; then a full disk (why, Choose another place, nothing written); damaged edits (Export waits, Discard
-//! them, ready again). Last, the 3D view: Export… in its top bar, the dialog over the view.
+//! them, ready again). Then the 3D view: Export… in its top bar, the dialog over the view. Last, Photos & captures: the
+//! capture's window with Export… among its actions and the dialog over it.
+//!
+//! `--only splat-export-cpu` is the same walk painted by the CPU (orbiters_ui::software), without the 3D view: no GPU,
+//! so no wait for the lab's GPU lock.
 
 use super::*;
 use crate::pages::splat_export::{self as dialog, Hooks};
@@ -33,14 +37,28 @@ fn control(run: &Run<'_>, label: &str) -> Option<bool> {
     widgets::control(&run.ctx, label).map(|(_, enabled)| enabled)
 }
 
-pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {
+fn backend(settings: &Settings) -> Ctl {
     let ctl = Controller::new(settings.clone());
     let sessions = controller::list_sessions(&settings.sessions_dir);
     ctl.set_snapshot(idle_snapshot(settings, &sessions));
-    let backend: Ctl = std::sync::Arc::new(Local::new(ctl));
+    std::sync::Arc::new(Local::new(ctl))
+}
+
+pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {
     let handles = crate::gpu::Handles::of_offscreen(gpu);
-    let mut run = Run::new(gpu, backend, scale);
+    let mut run = Run::new(gpu, backend(settings), scale);
     run.app.set_gpu(handles.clone());
+    walk(&mut run, out, settings, Some(&handles))
+}
+
+/// The walk painted on the CPU, without the 3D view.
+pub(super) fn shots_cpu(out: &Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {
+    let mut run = Run::cpu(backend(settings), scale);
+    walk(&mut run, out, settings, None)
+}
+
+/// The walk; with `handles` (a GPU) the 3D view too.
+fn walk(run: &mut Run<'_>, out: &Path, settings: &Settings, handles: Option<&crate::gpu::Handles>) -> anyhow::Result<()> {
     let exports = out.join("exports");
     let _ = std::fs::remove_dir_all(&exports);
     std::fs::create_dir_all(&exports)?;
@@ -80,7 +98,7 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
     run.wait(0.3)?;
     run.click("Export GLB…", 10.0)?;
     run.until("the export under way", 30.0, |run| control(run, "Stop").is_some() || control(run, "Show in folder").is_some())?;
-    if control(&run, "Stop").is_some() {
+    if control(run, "Stop").is_some() {
         run.shoot(out, "splat-export-progress")?;
     }
     run.until("the export", 300.0, |run| control(run, "Show in folder").is_some())?;
@@ -125,11 +143,11 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
     std::fs::write(result.join(rec::EDIT_FILE), b"N4EDIT01 damaged")?;
     run.click("Export…", 10.0)?;
     run.until("the damaged edits found", 10.0, |run| control(run, "Discard them") == Some(true))?;
-    anyhow::ensure!(control(&run, "Export SPZ…") == Some(false), "Export waits while the edits cannot be applied");
+    anyhow::ensure!(control(run, "Export GLB…") == Some(false), "Export waits while the edits cannot be applied (on GLB, the format last exported)");
     run.wait(0.6)?;
     run.shoot(out, "splat-export-damaged")?;
     run.click("Discard them", 10.0)?;
-    run.until("the edits discarded", 10.0, |run| control(run, "Export SPZ…") == Some(true))?;
+    run.until("the edits discarded", 10.0, |run| control(run, "Export GLB…") == Some(true))?;
     anyhow::ensure!(!result.join(rec::EDIT_FILE).exists(), "the edit file is gone");
     run.wait(0.5)?;
     run.shoot(out, "splat-export-discarded")?;
@@ -137,20 +155,22 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
     run.wait(0.8)?;
 
     // The 3D view: Export… in its top bar, the dialog over the view.
-    let ctx = run.ctx.clone();
-    run.app.sessions_mut().open_viewer(&ctx, &handles, false);
-    run.until("the 3D view's splats", 120.0, |run| run.app.sessions_mut().viewer_loaded())?;
-    run.wait(0.8)?;
-    run.shoot(out, "splat-export-view")?;
-    run.click("Export…", 10.0)?;
-    run.wait(0.9)?;
-    run.shoot(out, "splat-export-over-view")?;
-    run.click("Cancel", 10.0)?;
-    run.wait(0.8)?;
-    run.click("Close the 3D view", 10.0)?;
-    run.wait(0.5)?;
+    if let Some(handles) = handles {
+        let ctx = run.ctx.clone();
+        run.app.sessions_mut().open_viewer(&ctx, handles, false);
+        run.until("the 3D view's splats", 120.0, |run| run.app.sessions_mut().viewer_loaded())?;
+        run.wait(0.8)?;
+        run.shoot(out, "splat-export-view")?;
+        run.click("Export…", 10.0)?;
+        run.wait(0.9)?;
+        run.shoot(out, "splat-export-over-view")?;
+        run.click("Cancel", 10.0)?;
+        run.wait(0.8)?;
+        run.click("Close the 3D view", 10.0)?;
+        run.wait(0.5)?;
+    }
 
-    // Photos & captures: Export… among the capture's window's actions, its dialog over the window, and its card's menu.
+    // Photos & captures: Export… among the capture's window's actions and its dialog over the window.
     run.click("Close", 10.0)?;
     run.wait(1.2)?;
     let mine = |e: &crate::controller::shares::Entry| matches!(&e.local, Some(crate::controller::shares::Local::Session(d)) if *d == dir);
@@ -171,9 +191,6 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
     run.wait(0.8)?;
     run.app.sessions_mut().gallery_mut().close_window();
     run.wait(1.2)?;
-    run.app.sessions_mut().gallery_mut().stage_menu(&ctx, n);
-    run.wait(0.6)?;
-    run.shoot(out, "splat-export-menu")?;
     Ok(())
 }
 
@@ -188,6 +205,19 @@ mod tests {
         let sessions = std::env::var("ORBITERS_TEST_SESSIONS").expect("ORBITERS_TEST_SESSIONS");
         let out = std::env::var("ORBITERS_TEST_OUT").unwrap_or_else(|_| std::env::temp_dir().join("orbiters-splat-export").display().to_string());
         let args: Vec<String> = [out.as_str(), "--sessions", sessions.as_str(), "--only", "splat-export"].map(String::from).into();
+        let run = std::thread::Builder::new().stack_size(16 << 20).spawn(move || super::super::run(&args)).unwrap();
+        run.join().expect("no panic").expect("the walkthrough");
+    }
+
+    /// The same walk painted on the CPU, without the 3D view (no GPU, no lock): `ORBITERS_TEST_SESSIONS=<folder holding
+    /// the copy> ORBITERS_TEST_OUT=<folder for the shots> cargo test -p orbiters-desktop export_walkthrough_on_the_cpu --
+    /// --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn export_walkthrough_on_the_cpu() {
+        let sessions = std::env::var("ORBITERS_TEST_SESSIONS").expect("ORBITERS_TEST_SESSIONS");
+        let out = std::env::var("ORBITERS_TEST_OUT").unwrap_or_else(|_| std::env::temp_dir().join("orbiters-splat-export").display().to_string());
+        let args: Vec<String> = [out.as_str(), "--sessions", sessions.as_str(), "--only", "splat-export-cpu"].map(String::from).into();
         let run = std::thread::Builder::new().stack_size(16 << 20).spawn(move || super::super::run(&args)).unwrap();
         run.join().expect("no panic").expect("the walkthrough");
     }

@@ -555,7 +555,7 @@ fn save_record_edits(records: anyhow::Result<&Path>, entry: &Entry, item: &Item,
     if let Some(local) = &entry.local {
         let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
         let path = records?;
-        let mut records = read_records(&path);
+        let mut records = read_records(path);
         // The splat edits it was uploaded with stay known (the same item: the same files) until it is updated.
         let edits = edits.or_else(|| {
             records.iter().find(|r| r.path == local.path() && r.uploaded.id == item.id && r.uploaded.kind == item.kind).and_then(|r| r.edits.clone())
@@ -567,7 +567,7 @@ fn save_record_edits(records: anyhow::Result<&Path>, entry: &Entry, item: &Item,
             uploaded: Uploaded { kind: item.kind, id: item.id, visibility: if item.public { "public" } else { "private" }.into() },
             edits,
         });
-        orbiters_core::write_atomic(&path, &serde_json::to_vec(&records)?)?;
+        orbiters_core::write_atomic(path, &serde_json::to_vec(&records)?)?;
     }
     Ok(())
 }
@@ -926,9 +926,12 @@ pub(crate) static TEST_WORK: Mutex<Vec<(String, TestWork)>> = Mutex::new(Vec::ne
 fn test_work(key: &str) -> Option<TestWork> {
     TEST_WORK.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(k, _)| k == key).map(|(_, w)| w.clone())
 }
+/// Tests: what makes a capture's upload files, shared with a job's thread.
+#[cfg(test)]
+pub(crate) type SharedPrepare = std::sync::Arc<dyn Fn(&Path) -> anyhow::Result<super::maps::Prepared> + Send + Sync>;
 /// Tests: [`Operation::Update`] through `api` (a stand-in), this account's records in `records`, files by `prepare`.
 #[cfg(test)]
-pub(crate) fn update_against(api: Api, records: PathBuf, prepare: std::sync::Arc<dyn Fn(&Path) -> anyhow::Result<super::maps::Prepared> + Send + Sync>) -> TestWork {
+pub(crate) fn update_against(api: Api, records: PathBuf, prepare: SharedPrepare) -> TestWork {
     std::sync::Arc::new(move |request: Request, report: Report| {
         let _one = Changing::of(&request.entry, report);
         update_with(&api, "token", Ok(records.as_path()), &request.entry, report, &mut Vec::new(), &*prepare)
@@ -1068,11 +1071,14 @@ pub(crate) mod tests {
         shares::Share { recipients: vec![shares::Recipient { vrchat_user_id: "usr_friend".into(), display_name: "Friend".into() }], ..Default::default() }
     }
 
+    /// The requests a stand-in got, each with its body.
+    pub(crate) type Seen = std::sync::Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
     /// A stand-in for Orbiters on a loopback port that answers each request with the first answer whose start matches its
     /// request line ("PUT /captures/capture/3/files"): an answer is used once while another one matches after it, the
     /// last one that matches stays; status 0 reads the request and closes the connection without an answer. The
     /// requests it got with their bodies, in order.
-    pub(crate) fn stand_in(answers: Vec<(&'static str, u16, String)>) -> (Api, std::sync::Arc<Mutex<Vec<(String, Vec<u8>)>>>) {
+    pub(crate) fn stand_in(answers: Vec<(&'static str, u16, String)>) -> (Api, Seen) {
         use std::io::{BufRead, BufReader, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let api = Api::at(&format!("http://{}/", listener.local_addr().unwrap()));
@@ -1393,7 +1399,7 @@ pub(crate) mod tests {
 
     /// How many 32-byte splat records of `bytes` (from byte `from`) sit at one of `removed`, of how many.
     fn removed_in(bytes: &[u8], from: usize, removed: &std::collections::HashSet<[u32; 3]>) -> (usize, usize) {
-        let records = bytes[from..].chunks_exact(32);
+        let records = bytes[from..].as_chunks::<32>().0.iter();
         let total = records.len();
         let found = records.filter(|r| removed.contains(&[0, 4, 8].map(|o| u32::from_le_bytes(r[o..o + 4].try_into().unwrap())))).count();
         (found, total)

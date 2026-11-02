@@ -4118,6 +4118,7 @@ dependencies = [
  "ash",
  "bytemuck",
  "fastrand",
+ "half",
  "naga",
  "orbiters-contracts",
  "orbiters-core",
@@ -4129,6 +4130,7 @@ dependencies = [
  "sysinfo",
  "wgpu",
  "windows 0.62.2",
+ "zstd",
 ]
 
 [[package]]

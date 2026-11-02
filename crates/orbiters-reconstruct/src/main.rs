@@ -383,6 +383,8 @@ fn main() {
     let tool: Option<fn(&[String]) -> anyhow::Result<()>> = match all.first().map(String::as_str) {
         Some("--web-preview") => Some(web_preview),
         Some("--vrchat") => Some(vrchat),
+        Some("--export-gltf") => Some(orbiters_reconstruct::export::gltf_cli),
+        Some("--export-spz") => Some(orbiters_reconstruct::export::spz_cli),
         _ => None,
     };
     if let Some(tool) = tool {

@@ -8,6 +8,7 @@ pub mod cpu;
 pub mod dataset;
 pub mod depthfix;
 pub mod dof;
+pub mod export;
 pub mod gaussians;
 pub mod governor;
 pub mod gpu;

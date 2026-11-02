@@ -1,18 +1,22 @@
 //! Draws a project preview (contracts' Docs/project-preview.md) on the window's device: its meshes in Unity's own
-//! left-handed world with a studio's lights (a warm key light whose soft shadow falls on the scene and on a ground of
-//! our own, a cool fill, a sky-and-ground ambient, a rim), the scene mirrored faintly in that ground, a sweep that
-//! reveals it from the ground up, then 4× multisampling resolved into a texture egui paints like any picture (squircle
-//! corners, fading over the avatar pictures). Loading runs on a worker: one file read, pictures decoded on every core
+//! left-handed world, lit as bright as Unity's default scene (its directional light as the key, whose soft shadow falls
+//! on the scene and on a ground of our own, the default sky's ambient light and reflections, a faint cool fill and rim
+//! for the side away from it), each material as its shader takes the light (Standard's metallic and smoothness, toon
+//! bands, flat, unlit; normal maps, emission), the scene mirrored faintly in that ground, a sweep that reveals it from
+//! the ground up, then 4× multisampling resolved into a texture egui paints like any picture (squircle corners, fading
+//! over the avatar pictures). Loading runs on a worker: one file read, pictures decoded on every core
 //! with their mipmaps, vertex and index blobs uploaded as they are, while the pipelines compile on another thread.
 
 use eframe::egui_wgpu::wgpu;
-use orbiters_projects::preview::{self, Alpha, Cull, ImageFormat, Kind, Preview};
+use orbiters_projects::preview::{self, Alpha, Cull, ImageFormat, Kind, Preview, Shading};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use wgpu::util::DeviceExt as _;
 
 const COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+/// Normal and metallic-smoothness pictures: data, not colours.
+const DATA: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SAMPLES: u32 = 4;
 const SHADOW_SIZE: u32 = 2048;
@@ -60,26 +64,31 @@ impl Layouts {
         });
         let shadow_frame =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("preview shadow frame"), entries: &[uniform(0, both)] });
+        let picture = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        // The base colour, the sampler, then the normal, metallic-smoothness and emission pictures.
         let material = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("preview material"),
             entries: &[
                 uniform(0, both),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                picture(1),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                picture(3),
+                picture(4),
+                picture(5),
             ],
         });
         Self { frame, shadow_frame, material }
@@ -371,7 +380,7 @@ fn decode_and_upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview) ->
                     ImageFormat::Png => image::ImageFormat::Png,
                 };
                 match image::load_from_memory_with_format(p.blob(t.data), format) {
-                    Ok(img) => *out[i].lock().unwrap() = Some(upload_texture(device, queue, img.to_rgba8())),
+                    Ok(img) => *out[i].lock().unwrap() = Some(upload_texture(device, queue, img.to_rgba8(), if t.linear { DATA } else { COLOR })),
                     Err(e) => eprintln!("project preview: picture {i}: {e}"),
                 }
             });
@@ -380,8 +389,8 @@ fn decode_and_upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview) ->
     out.into_iter().map(|m| m.into_inner().unwrap()).collect()
 }
 
-/// An sRGB texture with its mip chain (box-filtered on the CPU).
-fn upload_texture(device: &wgpu::Device, queue: &wgpu::Queue, img: image::RgbaImage) -> wgpu::TextureView {
+/// A texture with its mip chain (box-filtered on the CPU), sRGB colours or linear data by `format`.
+fn upload_texture(device: &wgpu::Device, queue: &wgpu::Queue, img: image::RgbaImage, format: wgpu::TextureFormat) -> wgpu::TextureView {
     let (w, h) = img.dimensions();
     let levels = 32 - w.max(h).max(1).leading_zeros();
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -390,7 +399,7 @@ fn upload_texture(device: &wgpu::Device, queue: &wgpu::Queue, img: image::RgbaIm
         mip_level_count: levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: COLOR,
+        format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -490,27 +499,9 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
         .materials
         .iter()
         .map(|m| {
-            let tex = usize::try_from(m.texture).ok().and_then(|i| textures.get(i)).and_then(|t| t.as_ref());
-            let c = m.color;
-            let mode = match m.alpha {
-                Alpha::Opaque => 0.0f32,
-                Alpha::Cutout => 1.0,
-                Alpha::Blend => 2.0,
-            };
-            let uniform: [f32; 12] = [
-                srgb_to_linear(c[0]),
-                srgb_to_linear(c[1]),
-                srgb_to_linear(c[2]),
-                c[3],
-                m.tiling[0],
-                m.tiling[1],
-                m.offset[0],
-                m.offset[1],
-                m.cutoff,
-                mode,
-                if tex.is_some() { 1.0 } else { 0.0 },
-                0.0,
-            ];
+            let picture = |i: i32| usize::try_from(i).ok().and_then(|i| textures.get(i)).and_then(|t| t.as_ref());
+            let (tex, normal, surface, emission) = (picture(m.texture), picture(m.normal_texture), picture(m.surface_texture), picture(m.emission_texture));
+            let uniform = material_uniform(m, tex.is_some(), normal.is_some(), surface.is_some(), emission.is_some());
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("preview material"),
                 contents: bytemuck::cast_slice(&uniform),
@@ -523,6 +514,9 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
                     wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(tex.unwrap_or(&white)) },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(normal.unwrap_or(&white)) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(surface.unwrap_or(&white)) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(emission.unwrap_or(&white)) },
                 ],
             });
             Material { bind_group, alpha: m.alpha, cull: m.cull }
@@ -622,6 +616,57 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
         texture: None,
         last: None,
     }
+}
+
+/// A material's uniform (the shader's `Material`): colour, tiling, then how it takes the light. A picture the file
+/// names but that could not be read counts as absent.
+fn material_uniform(m: &preview::Material, tex: bool, normal: bool, surface: bool, emission: bool) -> [f32; 28] {
+    let c = m.color;
+    let alpha = match m.alpha {
+        Alpha::Opaque => 0.0f32,
+        Alpha::Cutout => 1.0,
+        Alpha::Blend => 2.0,
+    };
+    let shading = match m.shading {
+        Shading::Lit => 0.0f32,
+        Shading::Toon => 1.0,
+        Shading::Flat => 2.0,
+        Shading::Unlit => 3.0,
+    };
+    let flag = |b: bool| if b { 1.0f32 } else { 0.0 };
+    let finite = |v: f32, d: f32| if v.is_finite() { v } else { d };
+    let e = m.emission.map(|v| finite(v, 0.0).clamp(0.0, 64.0));
+    let shade = m.shade.map(|v| finite(v, 0.7).clamp(0.0, 1.0));
+    [
+        srgb_to_linear(c[0]),
+        srgb_to_linear(c[1]),
+        srgb_to_linear(c[2]),
+        c[3],
+        m.tiling[0],
+        m.tiling[1],
+        m.offset[0],
+        m.offset[1],
+        m.cutoff,
+        alpha,
+        flag(tex),
+        shading,
+        finite(m.metallic, 0.0).clamp(0.0, 1.0),
+        finite(m.smoothness, 0.2).clamp(0.0, 1.0),
+        if normal { finite(m.normal_scale, 1.0).clamp(-4.0, 4.0) } else { 0.0 },
+        flag(surface),
+        e[0],
+        e[1],
+        e[2],
+        flag(emission),
+        shade[0],
+        shade[1],
+        shade[2],
+        finite(m.shade_border, 0.5).clamp(0.0, 1.0),
+        finite(m.shade_blur, 0.1).clamp(0.0, 1.0),
+        flag(normal),
+        0.0,
+        0.0,
+    ]
 }
 
 /// wgpu refuses empty buffers.
@@ -980,12 +1025,24 @@ struct Frame {
 struct Material {
     color: vec4<f32>,
     st: vec4<f32>,
+    // Cutoff, alpha mode (0 opaque, 1 cut out, 2 blended), has a base picture, shading (0 lit, 1 toon, 2 flat, 3 unlit).
     params: vec4<f32>,
+    // Metallic, smoothness, normal map strength (0 without one), has a metallic-smoothness picture.
+    look: vec4<f32>,
+    // Emission (linear, HDR), has an emission picture.
+    emission: vec4<f32>,
+    // Toon: the shadowed band's tint, its border on the half-Lambert term.
+    shade: vec4<f32>,
+    // Toon: the border's softness; has a normal map.
+    toon: vec4<f32>,
 }
 
 @group(1) @binding(0) var<uniform> material: Material;
 @group(1) @binding(1) var base: texture_2d<f32>;
 @group(1) @binding(2) var base_sampler: sampler;
+@group(1) @binding(3) var normal_map: texture_2d<f32>;
+@group(1) @binding(4) var surface_map: texture_2d<f32>;
+@group(1) @binding(5) var emission_map: texture_2d<f32>;
 
 struct VIn {
     @location(0) position: vec3<f32>,
@@ -1046,6 +1103,49 @@ fn albedo_at(uv: vec2<f32>) -> vec4<f32> {
     return material.color * select(vec4<f32>(1.0), t, material.params.z > 0.5);
 }
 
+// What a fragment shows, read before anything is discarded (samples and derivatives need every neighbour).
+struct Surface {
+    albedo: vec4<f32>,
+    n: vec3<f32>,
+    metallic: f32,
+    smoothness: f32,
+    emission: vec3<f32>,
+}
+
+// The normal map's normal in the frame the UVs make on screen (no tangents stored): Schüler's cotangent frame.
+fn perturb(n: vec3<f32>, world: vec3<f32>, uv: vec2<f32>, packed: vec4<f32>) -> vec3<f32> {
+    let dp1 = dpdx(world);
+    let dp2 = dpdy(world);
+    let duv1 = dpdx(uv);
+    let duv2 = dpdy(uv);
+    let p2 = cross(dp2, n);
+    let p1 = cross(n, dp1);
+    // The gradients of u and of the picture's row (which runs against Unity's v), whatever way the triangle faces.
+    let sgn = select(1.0, -1.0, dot(n, cross(dp1, dp2)) < 0.0);
+    let t = (p2 * duv1.x + p1 * duv2.x) * sgn;
+    let b = (p2 * duv1.y + p1 * duv2.y) * sgn;
+    let inv = inverseSqrt(max(max(dot(t, t), dot(b, b)), 1e-20));
+    // Unity's UnpackScaleNormal.
+    let xy = (packed.xy * 2.0 - 1.0) * material.look.z;
+    let z = sqrt(max(1.0 - dot(xy, xy), 0.0));
+    return normalize(t * inv * xy.x - b * inv * xy.y + n * max(z, 0.05));
+}
+
+fn surface_at(i: VOut, front: bool) -> Surface {
+    var s: Surface;
+    s.albedo = albedo_at(i.uv);
+    let packed = textureSample(normal_map, base_sampler, i.uv);
+    let ms = textureSample(surface_map, base_sampler, i.uv);
+    let glow = textureSample(emission_map, base_sampler, i.uv);
+    let n = normalize(i.normal) * select(-1.0, 1.0, front);
+    let bumped = perturb(n, i.world, i.uv, packed);
+    s.n = select(n, bumped, material.toon.y > 0.5);
+    s.metallic = material.look.x * select(1.0, ms.r, material.look.w > 0.5);
+    s.smoothness = material.look.y * select(1.0, ms.g, material.look.w > 0.5);
+    s.emission = material.emission.rgb * select(vec3<f32>(1.0), glow.rgb, material.emission.w > 0.5);
+    return s;
+}
+
 const TAPS = array<vec2<f32>, 12>(
     vec2<f32>(-0.326, -0.406), vec2<f32>(-0.840, -0.074), vec2<f32>(-0.696, 0.457), vec2<f32>(-0.203, 0.621),
     vec2<f32>(0.962, -0.195), vec2<f32>(0.473, -0.480), vec2<f32>(0.519, 0.767), vec2<f32>(0.185, -0.893),
@@ -1066,38 +1166,104 @@ fn shadow_at(world: vec3<f32>, n: vec3<f32>, softness: f32) -> f32 {
     return sum / 12.0;
 }
 
-// Khronos PBR Neutral: keeps base colours as they are up to the highlights.
-fn neutral(x_in: vec3<f32>) -> vec3<f32> {
-    let start = 0.76;
+// Unity's output below the highlights (its Scene view has no tone mapping), then Khronos PBR Neutral's shoulder so
+// that what Unity would clip rolls off instead.
+fn shoulder(c: vec3<f32>) -> vec3<f32> {
+    let start = 0.8;
     let desaturation = 0.15;
-    let x = min(x_in.r, min(x_in.g, x_in.b));
-    let offset = select(0.04, x - 6.25 * x * x, x < 0.08);
-    var c = x_in - offset;
     let peak = max(c.r, max(c.g, c.b));
     if (peak < start) {
         return c;
     }
     let d = 1.0 - start;
     let new_peak = 1.0 - d * d / (peak + d - start);
-    c = c * (new_peak / peak);
     let g = 1.0 - 1.0 / (desaturation * (peak - new_peak) + 1.0);
-    return mix(c, vec3<f32>(new_peak), g);
+    return mix(c * (new_peak / peak), vec3<f32>(new_peak), g);
 }
 
-fn shade(albedo: vec3<f32>, n: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
+// Unity's default scene: its directional light (colour, intensity 1), the default procedural sky's ambient light
+// (linear; the sky above, its horizon, the ground below) and reflections.
+const SUN = vec3<f32>(1.0, 0.956, 0.839);
+const AMBIENT_SKY = vec3<f32>(0.25, 0.31, 0.43);
+const AMBIENT_GROUND = vec3<f32>(0.12, 0.12, 0.13);
+const PI = 3.14159265;
+
+fn ambient(n: vec3<f32>) -> vec3<f32> {
+    return mix(AMBIENT_GROUND, AMBIENT_SKY, n.y * 0.5 + 0.5);
+}
+
+// The default sky as a reflection shows it: a bright hazy horizon, blue above, the dark ground below; blurred towards
+// the ambient light as the surface roughens.
+fn environment(r: vec3<f32>, perceptual_roughness: f32) -> vec3<f32> {
+    let up = clamp(r.y, -1.0, 1.0);
+    let sky = mix(vec3<f32>(0.52, 0.55, 0.58), vec3<f32>(0.20, 0.30, 0.50), sqrt(max(up, 0.0)));
+    let sharp = mix(vec3<f32>(0.14, 0.13, 0.12), sky, smoothstep(-0.08, 0.04, up));
+    return mix(sharp, ambient(r), perceptual_roughness);
+}
+
+// A fragment in the studio, as its material's shader takes the light.
+fn shade(s: Surface, world: vec3<f32>) -> vec3<f32> {
+    let albedo = s.albedo.rgb;
+    let mode = material.params.w;
+    if (mode > 2.5) {
+        return albedo + s.emission;
+    }
+    let n = s.n;
     let l = frame.light.xyz;
     let v = normalize(frame.camera.xyz - world);
-    let ndl = dot(n, l);
-    let s = mix(1.0, shadow_at(world, n, 2.5), frame.light.w);
-    let key = clamp((ndl + 0.3) / 1.3, 0.0, 1.0) * mix(0.3, 1.0, s);
-    let fill = clamp((dot(n, frame.fill.xyz) + 0.4) / 1.4, 0.0, 1.0);
-    let hemi = mix(vec3<f32>(0.32, 0.30, 0.29), vec3<f32>(0.78, 0.84, 0.95), n.y * 0.5 + 0.5);
-    let rim = pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 4.0) * (0.55 + 0.45 * clamp(n.y + 0.5, 0.0, 1.0));
-    let hv = normalize(l + v);
-    let spec = pow(clamp(dot(n, hv), 0.0, 1.0), 56.0) * 0.10 * s * step(0.0, ndl);
-    var c = albedo * (hemi * 0.36 + vec3<f32>(1.0, 0.95, 0.88) * key * 0.92 + vec3<f32>(0.70, 0.80, 1.0) * fill * 0.20);
-    c = c + vec3<f32>(0.62, 0.74, 1.0) * rim * 0.20 + vec3<f32>(spec);
-    return c;
+    let nl = dot(n, l);
+    let shadow = mix(1.0, shadow_at(world, n, 2.5), frame.light.w);
+    // The default sky's light averaged over every direction, as toon shaders add it to the light's.
+    let ambient_mean = (AMBIENT_SKY + AMBIENT_GROUND) * 0.5;
+    if (mode > 1.5) {
+        // Flat: lit by the light and the sky alike everywhere, capped at white as toon shaders cap it.
+        return albedo * min(SUN + ambient_mean, vec3<f32>(1.0)) + s.emission;
+    }
+    if (mode > 0.5) {
+        // Toon: two bands on the half-Lambert term; cast shadows left out, as Poiyomi and lilToon leave them by default.
+        let half_lambert = nl * 0.5 + 0.5;
+        let blur = max(material.toon.x, 0.002) * 0.5;
+        let lit = smoothstep(material.shade.w - blur, material.shade.w + blur, half_lambert);
+        let light = min(SUN + ambient_mean, vec3<f32>(1.0));
+        var c = albedo * mix(material.shade.rgb, vec3<f32>(1.0), lit) * light;
+        // A highlight only when the toon shader's reflections are on (smoothness above 0).
+        if (s.smoothness > 0.001) {
+            c = c + standard_specular(s, n, l, v, nl, shadow);
+        }
+        return c + s.emission;
+    }
+    // Lit: Unity's Standard (BRDF1: Lambert, GGX with Smith-joint visibility, its π scaling and grazing reflections).
+    let one_minus_reflectivity = 0.96 * (1.0 - s.metallic);
+    let diffuse = albedo * one_minus_reflectivity;
+    let direct = SUN * clamp(nl, 0.0, 1.0) * shadow;
+    // A faint cool fill and rim keep the side away from the light from sinking into the dark studio.
+    let fill = max(dot(n, frame.fill.xyz), 0.0) * vec3<f32>(0.06, 0.07, 0.09);
+    let rim = pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 4.0) * clamp(n.y + 0.6, 0.0, 1.0) * vec3<f32>(0.05, 0.06, 0.08);
+    return diffuse * (ambient(n) + direct + fill) + standard_specular(s, n, l, v, nl, shadow) + rim * diffuse * 2.0 + s.emission;
+}
+
+// Standard's highlight from the light and reflection of the sky.
+fn standard_specular(s: Surface, n: vec3<f32>, l: vec3<f32>, v: vec3<f32>, nl_raw: f32, shadow: f32) -> vec3<f32> {
+    let spec_color = mix(vec3<f32>(0.04), s.albedo.rgb, s.metallic);
+    let one_minus_reflectivity = 0.96 * (1.0 - s.metallic);
+    let perceptual = 1.0 - s.smoothness;
+    let a = max(perceptual * perceptual, 0.002);
+    let h = normalize(l + v);
+    let nl = clamp(nl_raw, 0.0, 1.0);
+    let nv = abs(dot(n, v));
+    let nh = clamp(dot(n, h), 0.0, 1.0);
+    let lh = clamp(dot(l, h), 0.0, 1.0);
+    let vis = 0.5 / (nl * (nv * (1.0 - a) + a) + nv * (nl * (1.0 - a) + a) + 1e-5);
+    let a2 = a * a;
+    let d = (nh * a2 - nh) * nh + 1.0;
+    let ggx = a2 / (PI * (d * d) + 1e-7);
+    let term = max(vis * ggx * PI * nl, 0.0);
+    let fresnel = spec_color + (1.0 - spec_color) * pow(1.0 - lh, 5.0);
+    let reduction = 1.0 / (a * a + 1.0);
+    let grazing = clamp(s.smoothness + (1.0 - one_minus_reflectivity), 0.0, 1.0);
+    let fresnel_lerp = mix(spec_color, vec3<f32>(grazing), pow(1.0 - nv, 5.0));
+    let r = reflect(-v, n);
+    return term * SUN * shadow * fresnel + reduction * environment(r, perceptual) * fresnel_lerp;
 }
 
 // The reveal's glowing edge, just under the rising plane.
@@ -1108,26 +1274,23 @@ fn edge(world: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_scene(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    let a = albedo_at(i.uv);
+    let s = surface_at(i, front);
+    let a = s.albedo;
     if (i.world.y > frame.reveal.x) {
         discard;
     }
     if (material.params.y > 0.5 && material.params.y < 1.5 && a.a < material.params.x) {
         discard;
     }
-    var n = normalize(i.normal);
-    if (!front) {
-        n = -n;
-    }
-    var c = shade(a.rgb, n, i.world);
-    c = neutral(c) + frame.accent.rgb * edge(i.world) * 3.0;
+    let c = shoulder(shade(s, i.world)) + frame.accent.rgb * edge(i.world) * 3.0;
     let alpha = select(1.0, a.a, material.params.y > 1.5);
     return vec4<f32>(c, alpha);
 }
 
 @fragment
 fn fs_mirror(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    let a = albedo_at(i.uv);
+    let s = surface_at(i, front);
+    let a = s.albedo;
     let above = i.world.y - frame.ground.x;
     if (i.world.y > frame.reveal.x || above < -0.002) {
         discard;
@@ -1135,11 +1298,7 @@ fn fs_mirror(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     if (material.params.y > 0.5 && a.a < select(material.params.x, 0.5, material.params.y > 1.5)) {
         discard;
     }
-    var n = normalize(i.normal);
-    if (!front) {
-        n = -n;
-    }
-    let c = neutral(shade(a.rgb, n, i.world)) + frame.accent.rgb * edge(i.world) * 2.2;
+    let c = shoulder(shade(s, i.world)) + frame.accent.rgb * edge(i.world) * 2.2;
     // Fainter the higher above the ground, and towards the ground's edge.
     let fade = exp(-above / max(frame.focus.w * 0.35, 0.05));
     let d = length(i.world.xz - frame.focus.xz) / frame.ground.y;
@@ -1240,6 +1399,22 @@ mod tests {
         // +X is to the right on screen, +Y up.
         assert!(transform(&vp, [1.0, 1.0, 0.0])[0] > 0.0);
         assert!(transform(&vp, [0.0, 2.0, 0.0])[1] > 0.0);
+    }
+
+    #[test]
+    fn materials_without_their_look_draw_lit_and_nearly_matte() {
+        // A schema 1 material: Standard-lit, smoothness 0.2, no metal, no normal map, no glow.
+        let u = material_uniform(&preview::Material::default(), true, false, false, false);
+        assert_eq!((u[10], u[11]), (1.0, 0.0), "base picture, lit");
+        assert_eq!((u[12], u[13], u[14], u[15]), (0.0, 0.2, 0.0, 0.0));
+        assert_eq!(&u[16..20], &[0.0; 4]);
+        // A toon material with a normal map whose picture could not be read draws without it; nonsense is clamped.
+        let m = preview::Material { shading: Shading::Toon, normal_texture: 0, smoothness: f32::NAN, emission: [-1.0, 100.0, 1.0], ..Default::default() };
+        let u = material_uniform(&m, false, false, false, false);
+        assert_eq!((u[11], u[13], u[14], u[25]), (1.0, 0.2, 0.0, 0.0));
+        assert_eq!(&u[16..19], &[0.0, 64.0, 1.0]);
+        let u = material_uniform(&m, false, true, false, false);
+        assert_eq!((u[14], u[25]), (1.0, 1.0), "normal map used");
     }
 
     #[test]

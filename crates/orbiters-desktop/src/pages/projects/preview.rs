@@ -871,12 +871,38 @@ impl State {
         use super::state::Poke;
         let at = |key: &str| self.anchors.get(key).map(|r| r.center());
         match (name, frame) {
-            ("projects-preview-open" | "projects-preview-open-mid" | "projects-preview-scenes", 90) => at("preview-cover").map(Poke::Press),
+            ("projects-preview-open" | "projects-preview-open-mid" | "projects-preview-scenes" | "projects-preview-close" | "projects-preview-back", 90) => {
+                at("preview-cover").map(Poke::Press)
+            }
+            ("projects-preview-close" | "projects-preview-back", 140) => {
+                self.preview.frame_for_screenshot(name == "projects-preview-close");
+                None
+            }
             ("projects-preview-turned", 100) => at("preview-cover").map(Poke::Hold),
             ("projects-preview-turned", 101..=112) => at("preview-cover").map(|p| Poke::Hover(p + vec2(9.0 * (frame - 100) as f32, 0.0))),
             ("projects-preview-sheet", 30) => at("card-0").map(Poke::Press),
             _ => None,
         }
+    }
+}
+
+impl Previews {
+    /// Screenshots: the shown preview's camera on the upper half of the subject from close by (`close`), else on its
+    /// back, at once.
+    pub(super) fn frame_for_screenshot(&mut self, close: bool) {
+        let Some(c) = self.current.as_mut() else { return };
+        let Some(cam) = c.camera.as_mut() else { return };
+        let mut o = cam.home;
+        if close {
+            o.distance *= 0.45;
+            o.pivot[1] += cam.radius * 0.28;
+            o.pitch = -0.08;
+        } else {
+            o.yaw += std::f32::consts::PI;
+        }
+        cam.goal = o;
+        cam.now = o;
+        cam.spin = [0.0; 2];
     }
 }
 
@@ -935,23 +961,22 @@ fn stand_in_scene(scene: &str) -> Vec<u8> {
         enc.set_depth(png::BitDepth::Eight);
         enc.write_header().unwrap().write_image_data(&rgb).unwrap();
     }
-    let texture = Texture { width: tw, height: th, format: ImageFormat::Png, data: w.push(&png_bytes) };
+    let texture = Texture { width: tw, height: th, format: ImageFormat::Png, linear: false, data: w.push(&png_bytes) };
+    // Each look once: a glossy sphere, a matte plinth, a glowing ring, a toon cube and a metal one.
     let mat = |name: &str, color: [f32; 4], texture: i32| Material {
         name: name.into(),
         color,
         texture,
-        tiling: [1.0, 1.0],
-        offset: [0.0, 0.0],
-        alpha: Alpha::Opaque,
-        cutoff: 0.5,
         cull: Cull::Back,
+        alpha: Alpha::Opaque,
+        ..Default::default()
     };
     let materials = vec![
-        mat("Sphere", [1.0, 1.0, 1.0, 1.0], 0),
-        mat("Plinth", [0.36, 0.36, 0.40, 1.0], -1),
-        mat("Ring", [0.0, 0.85, 0.43, 1.0], -1),
-        mat("Cube", [0.86, 0.55, 0.33, 1.0], -1),
-        mat("Cube 2", [0.42, 0.52, 0.92, 1.0], -1),
+        Material { smoothness: 0.75, ..mat("Sphere", [1.0, 1.0, 1.0, 1.0], 0) },
+        Material { smoothness: 0.1, ..mat("Plinth", [0.36, 0.36, 0.40, 1.0], -1) },
+        Material { shading: file::Shading::Unlit, emission: [0.0, 0.35, 0.08], ..mat("Ring", [0.0, 0.85, 0.43, 1.0], -1) },
+        Material { shading: file::Shading::Toon, shade: [0.62, 0.55, 0.72], ..mat("Cube", [0.86, 0.55, 0.33, 1.0], -1) },
+        Material { metallic: 1.0, smoothness: 0.7, ..mat("Cube 2", [0.42, 0.52, 0.92, 1.0], -1) },
     ];
     let trs = |t: [f32; 3], yaw: f32, tilt: f32| -> [f32; 16] {
         let (sy, cy) = yaw.sin_cos();

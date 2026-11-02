@@ -3,7 +3,7 @@
 //! ```text
 //! orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]
 //!     [--regularise-unseen] [--adam-restart] [--filter-3d S] [--cleanup]
-//!     [--sources opacity|gradient|error|confidence] [--split footprint|long-axis|long-axis-on-depth]
+//!     [--sources opacity|gradient|error|confidence] [--sources-by-opacity] [--split footprint|long-axis|long-axis-on-depth]
 //!     [--noise λ] [--noise-gate] [--depth-births share]
 //! ```
 //!
@@ -92,6 +92,7 @@ fn args() -> anyhow::Result<Args> {
                     _ => bail!("--split takes footprint, long-axis or long-axis-on-depth"),
                 }
             }
+            "--sources-by-opacity" => settings.sources_by_opacity = true,
             "--noise" => settings.noise = it.next().context("--noise needs a value")?.parse().context("--noise takes a number")?,
             "--noise-gate" => settings.noise_gate = true,
             "--depth-births" => settings.depth_births = it.next().context("--depth-births needs a value")?.parse().context("--depth-births takes a number (0–1)")?,

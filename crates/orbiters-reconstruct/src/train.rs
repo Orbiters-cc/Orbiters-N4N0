@@ -118,6 +118,10 @@ pub struct Settings {
     pub starved: bool,
     /// Which live Gaussians relocation copies ([`Sources`]): where the moved and new Gaussians are born.
     pub sources: Sources,
+    /// A score-ranked source's chance is also its opacity, as 3DGS-MCMC's is: ranks alone copy faint Gaussians, whose
+    /// copies split an opacity they cannot spare (eq. 9) and die by the next round (Exoplanet Journey: 150k of 566k
+    /// dead every round instead of 30k, the set never grew and 303k splats were left instead of 646k).
+    pub sources_by_opacity: bool,
     /// How a source and its copy share the source's footprint ([`Split`]).
     pub split: Split,
     /// 3DGS-MCMC's SGLD noise on the means while relocation runs (shaders/project_backward_adam.wgsl `sgld`): its λ,
@@ -204,6 +208,7 @@ impl Default for Settings {
             sky_map: 2048,
             starved: false,
             sources: Sources::Opacity,
+            sources_by_opacity: false,
             split: Split::Footprint,
             noise: 0.0,
             noise_gate: false,
@@ -644,9 +649,9 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                             }
                             let (grow_to, starved) = ((n + n / 20).min(settings.budget), settings.starved && n < settings.budget / 4);
                             let mut plan_rng = fastrand::Rng::with_seed(settings.seed ^ (round as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
-                            let (sources, split, share) = (settings.sources, settings.split, settings.depth_births);
+                            let (sources, by_opacity, split, share) = (settings.sources, settings.sources_by_opacity, settings.split, settings.depth_births);
                             pending_plan = Some(std::thread::spawn(move || {
-                                let births = Births { sources, split, scores: scored.then_some(scores.as_slice()), spawns: &spawns, spawn_share: share };
+                                let births = Births { sources, by_opacity, split, scores: scored.then_some(scores.as_slice()), spawns: &spawns, spawn_share: share };
                                 plan_relocation_by(&weights, grow_to, starved, &births, &mut plan_rng)
                             }));
                         }
@@ -866,6 +871,8 @@ pub(crate) fn weights(g: &Gaussians, huge: &[bool]) -> Vec<f32> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Births<'a> {
     pub sources: Sources,
+    /// Ranked sources' chances times their opacity ([`Settings::sources_by_opacity`]).
+    pub by_opacity: bool,
     pub split: Split,
     pub scores: Option<&'a [f32]>,
     pub spawns: &'a [[f32; 14]],
@@ -949,6 +956,9 @@ pub fn plan_relocation_by(weights: &[f32], grow_to: usize, starved: bool, births
             rank_into(&alive, |i| s[n + i], &mut error);
             alive.iter().for_each(|&i| chance[i] *= 0.2 + error[i]);
         }
+    }
+    if births.by_opacity && births.sources != Sources::Opacity && scores.is_some() {
+        alive.iter().for_each(|&i| chance[i] *= opacity(i));
     }
     let mut pool = alive.clone();
     let mut cdf = Vec::with_capacity(pool.len());
@@ -1297,6 +1307,26 @@ mod tests {
         // By opacity (the default), sources ignore the scores.
         let plan = plan_relocation_by(&weights, n, false, &Births { scores: Some(&up), ..Default::default() }, &mut fastrand::Rng::with_seed(9));
         assert!(plan.copies.iter().any(|c| (c[1] as usize) < n / 2));
+    }
+
+    /// With `by_opacity`, ranked sources' chances are times their opacity: faint high-ranked Gaussians, whose copies
+    /// would die, take few of the copies.
+    #[test]
+    fn ranked_sources_by_opacity_spare_the_faint() {
+        let n = 10_000;
+        // All alive, score rising with the index; every other one faint (opacity 0.01).
+        let weights: Vec<f32> = (0..n).map(|i| if i % 20 == 0 { -1.0 } else if i % 2 == 1 { 0.01 } else { 0.8 }).collect();
+        let mut scores = vec![0f32; 3 * n];
+        for (i, s) in scores[..n].iter_mut().enumerate() {
+            *s = i as f32 + 1.0;
+        }
+        let faint = |plan: &Relocation| plan.copies.iter().filter(|c| c[1] % 2 == 1).count() as f32 / plan.copies.len() as f32;
+        let ranked = plan_relocation_by(&weights, n, false, &Births { sources: Sources::Gradient, scores: Some(&scores), ..Default::default() }, &mut fastrand::Rng::with_seed(15));
+        let weighted = plan_relocation_by(&weights, n, false, &Births { sources: Sources::Gradient, by_opacity: true, scores: Some(&scores), ..Default::default() }, &mut fastrand::Rng::with_seed(15));
+        assert!(faint(&ranked) > 0.4, "ranks alone: {} faint", faint(&ranked));
+        assert!(faint(&weighted) < 0.05, "by opacity: {} faint", faint(&weighted));
+        let mean = weighted.copies.iter().map(|c| c[1] as f32).sum::<f32>() / weighted.copies.len() as f32;
+        assert!(mean > 0.6 * n as f32, "still by rank: mean source {mean}");
     }
 
     /// A long-axis split halves sources with one copy (mode 1, the footprint left to the copy kernel); on depth, only

@@ -1406,7 +1406,8 @@ pub(crate) mod tests {
 
     /// Update the shared capture from end to end on a disposable Orbiters (its backend on a disposable database, its
     /// storage a folder: reports/reshare.md says how to start one), with the app's own upload preparation (VRChat's trees
-    /// tuned on the GPU: run it under the lab's GPU lock) on a disposable copy of a reconstructed session:
+    /// tuned on the integrated GPU, as the app's background preparation does) on a disposable copy of a reconstructed
+    /// session:
     /// `ORBITERS_TEST_API=http://127.0.0.1:4243 ORBITERS_TEST_TOKEN=… ORBITERS_TEST_WORLD=wrld_… ORBITERS_TEST_SESSION=<copy>
     /// ORBITERS_TEST_STORAGE=<the server's storage folder> cargo test -p orbiters-desktop an_uploaded_capture_is_updated_end_to_end
     /// -- --ignored --nocapture --test-threads=1`.
@@ -1447,22 +1448,29 @@ pub(crate) mod tests {
             }
             out
         };
-        let slot_file = |slot: u32, name: &str| std::fs::read(storage.join("public-bucket").join(format!("public/vrchat/slots/{slot}/{name}"))).ok();
+        // The stand-in storage's objects: one file each, the key's '/' written '~'.
+        let slot_file = |slot: u32, name: &str| std::fs::read(storage.join("public-bucket").join(format!("public~vrchat~slots~{slot}~{name}"))).ok();
         let listed = |id: u64| -> serde_json::Value {
             let r = api.agent().get(&api.url("maps/vrchat/previews")).call().unwrap();
             let v: serde_json::Value = serde_json::from_str(&r.into_body().read_to_string().unwrap()).unwrap();
             v["previews"].as_array().unwrap().iter().find(|p| p["id"].as_u64() == Some(id)).cloned().expect("listed for worlds")
         };
+        // The app's preparation of a capture's upload files on the integrated GPU (as its background preparation runs
+        // it: DeviceOptions::low_power), which leaves the lab's graphics card to its queue.
+        let igpu = |s: &Path| super::super::maps::prepare(s, orbiters_reconstruct::gpu::DeviceOptions { low_power: true, ..Default::default() });
         let t = Instant::now();
 
+        // What earlier runs left in the stand-in storage (this run looks only at what it makes).
+        let existing = stored();
+
         // 1. Shared publicly, as trained (the app's share: prepared, uploaded with its picture, shared).
-        let shared = share_with(&api, &token, Ok(records.clone()), &entry, &shares::Share { public: true, ..Default::default() }, &|_| {}, &mut Vec::new(), &super::super::maps::web_preview)
+        let shared = share_with(&api, &token, Ok(records.clone()), &entry, &shares::Share { public: true, ..Default::default() }, &|_| {}, &mut Vec::new(), &igpu)
             .unwrap();
         let shares::Shared::Item { item } = shared else { panic!("shared as its owner") };
         let id = item.id;
         let slot = item.capture.as_ref().and_then(|c| c.vrchat_slot).expect("a public capture holds a VRChat slot");
         assert!(item.capture.as_ref().is_some_and(|c| c.picture_url.is_some() && c.revision == 1));
-        let first_files = stored();
+        let first_files: std::collections::BTreeSet<String> = stored().difference(&existing).cloned().collect();
         println!("1. shared publicly in {:.1} s: capture {id}, slot {slot}, {} stored objects", t.elapsed().as_secs_f32(), first_files.len());
 
         // 2. A fifth of its splats deleted in its 3D view (those farthest along X).
@@ -1475,6 +1483,8 @@ pub(crate) mod tests {
         for &i in &gone {
             edit.marks[i] = DELETED;
         }
+        // As the 3D view saves a change of what leaves the capture: its picture not drawn for it yet.
+        edit.picture = false;
         edit.save(&result).unwrap();
         let removed = positions_of(&g, gone.iter().copied());
         entry.edits = Some(Ok(edit.generation()));
@@ -1487,7 +1497,7 @@ pub(crate) mod tests {
         let t = Instant::now();
         let stages = Mutex::new(Vec::new());
         let (item, made_with) =
-            update_with(&api, &token, Ok(records.as_path()), &entry, &|s| stages.lock().unwrap().push(s), &mut Vec::new(), &super::super::maps::web_preview)
+            update_with(&api, &token, Ok(records.as_path()), &entry, &|s| stages.lock().unwrap().push(s), &mut Vec::new(), &igpu)
                 .unwrap();
         let capture = item.capture.clone().unwrap();
         assert_eq!((capture.revision, made_with.as_str()), (2, edit.generation().as_str()));
@@ -1526,10 +1536,11 @@ pub(crate) mod tests {
         for &i in &order[n / 5..n / 4] {
             edit.marks[i] = DELETED;
         }
+        edit.picture = false;
         edit.save(&result).unwrap();
         entry.edits = Some(Ok(edit.generation()));
         std::fs::write(storage.join("fail-slot-quest"), b"").unwrap();
-        let failed = update_with(&api, &token, Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &super::super::maps::web_preview).unwrap_err();
+        let failed = update_with(&api, &token, Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &igpu).unwrap_err();
         std::fs::remove_file(storage.join("fail-slot-quest")).unwrap();
         println!("4. refused as expected: {}", not_updated(&failed));
         let still = api.capture_item(&token, Kind::Capture, id).unwrap();
@@ -1544,12 +1555,12 @@ pub(crate) mod tests {
         assert_eq!(record_of(&records).unwrap().edits.as_deref(), entry.uploaded_edits.as_deref(), "the record still says revision 2's edits");
 
         // 5. Another computer's replacement of revision 1 (stale): a conflict naming revision 2.
-        let stale = super::super::maps::web_preview(&session).unwrap();
+        let stale = igpu(&session).unwrap();
         let conflict = api.replace_capture_files(&token, id, 1, stale.files, stale.sky.as_deref(), None, &stale.metadata, |_, _| {}).unwrap_err();
         assert_eq!(conflict.downcast_ref::<shares::RevisionConflict>().map(|c| c.revision), Some(2));
 
         // 6. Updated again: revision 3.
-        let (item, _) = update_with(&api, &token, Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &super::super::maps::web_preview).unwrap();
+        let (item, _) = update_with(&api, &token, Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &igpu).unwrap();
         assert_eq!(item.capture.map(|c| c.revision), Some(3));
         println!("6. updated again: revision 3; {} splats deleted in all", n / 4);
         let _ = std::fs::remove_file(records);

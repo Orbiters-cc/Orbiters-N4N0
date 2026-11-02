@@ -368,6 +368,16 @@ impl Edits {
     }
 }
 
+/// The splat edits of `session` that could not be applied, discarded outside its 3D view (Export's dialog) as Discard
+/// them does in the view ([`Edits::discard`]): the file gone and the worker's own picture of its PLY back, under the same
+/// lock as every save.
+pub fn discard_edits(session: &Path) -> anyhow::Result<()> {
+    let _w = writing();
+    edit::discard(&reconstruction::result_dir(session))?;
+    PICTURES.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
 impl Drop for Edits {
     /// The view closed: a save that failed is tried once more (saves are written as they are made, so there is nothing
     /// else to write), a stroke under way ends, and the picture is drawn again in a thread of its own when it does not

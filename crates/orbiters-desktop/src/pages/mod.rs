@@ -19,6 +19,7 @@ mod gallery_select;
 pub mod sharing;
 pub mod requests;
 pub mod settings;
+pub mod splat_export;
 pub mod splat_worker;
 pub mod splats;
 pub mod states;

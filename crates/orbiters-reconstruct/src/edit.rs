@@ -329,8 +329,14 @@ pub fn find(ply: &Path, identity: Identity, splats: usize) -> Found {
 /// The PLY at `ply` whole, its identity and its edit: what the 3D view loads (it draws the edit's marks).
 pub fn read_for_view(ply: &Path) -> anyhow::Result<(Gaussians, Identity, Found)> {
     let bytes = std::fs::read(ply).with_context(|| format!("reading {}", ply.display()))?;
-    let identity = Identity::of(&bytes);
-    let g = crate::ply::parse(&bytes)?;
+    parse_for_view(ply, &bytes)
+}
+
+/// [`read_for_view`] of the PLY at `ply` already read whole into `bytes` (the desktop's export reads it in steps, to
+/// show how far it got).
+pub fn parse_for_view(ply: &Path, bytes: &[u8]) -> anyhow::Result<(Gaussians, Identity, Found)> {
+    let identity = Identity::of(bytes);
+    let g = crate::ply::parse(bytes)?;
     let found = find(ply, identity, g.len());
     Ok((g, identity, found))
 }

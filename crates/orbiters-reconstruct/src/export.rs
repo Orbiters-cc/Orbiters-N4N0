@@ -1,6 +1,8 @@
 //! Standard exports of a reconstruction, for other tools: glTF 2.0 binary (GLB) with the ratified
-//! `KHR_gaussian_splatting` extension (three.js, Spark, Cesium, glTF importers) and Niantic's SPZ version 4 (Spark,
-//! PlayCanvas' SuperSplat and splat-transform, Unity splat importers). Degree-zero colour only: what the trainer learns.
+//! `KHR_gaussian_splatting` extension (three.js, Spark, Cesium, glTF importers), Niantic's SPZ (Spark, PlayCanvas'
+//! SuperSplat and splat-transform, Unity and VRChat splat importers) in version 3, which every SPZ reader opens (the
+//! desktop's Export), and version 4 (the command line), and the reference 3DGS PLY layout alone (every splat tool).
+//! Degree-zero colour only: what the trainer learns.
 //!
 //! Each file is in its own format's frame, so that a capture sits in every reader the way it was taken ([`Frame`]):
 //! glTF's is Unity's world with X negated, SPZ's is Unity's world with Z negated (the PLY's frame); the two differ by
@@ -210,18 +212,26 @@ fn byte(x: f32) -> u8 {
 /// too strong (a 0.01 px² splat under a 0.3 px² dilation keeps its full opacity instead of 1/31 of it).
 const SPZ_ANTIALIASED: u8 = 0x1;
 
-/// The splats as SPZ version 4 in RUB, the reference encoder's layout and quantisation (load-spz.cc saveSpz,
-/// packGaussians): a 32-byte plain header (magic NGSP, version, count, SH degree 0, 12 fractional position bits,
-/// flags, five streams, the table of contents at byte 32), 16 bytes of table per stream (compressed and uncompressed
-/// size), then positions (signed 24-bit fixed point), opacities (sigmoid · 255), colours (f_dc · 0.15 · 255 + 127.5),
-/// log scales ((s + 10) · 16) and rotations ([`pack_rotation`]), each its own Zstandard stream; degree zero has no SH
-/// stream. Positions past ±2048 m are refused (the reference wraps them silently; N4N0's worlds reach about 210 m once
-/// the sky shell is left out). Colours outside [−0.44, 1.44] and log scales outside [−10, 5.94] saturate, as in the
-/// reference; the second only enlarges splats thinner than 45 µm. Lossy: [`gltf`] keeps the full range.
-pub fn spz(g: &Gaussians) -> anyhow::Result<Vec<u8>> {
+//// How many values SPZ's 8-bit quantisation saturated, of `components` each (three a splat): log scales outside
+/// [−10, 5.94] (splats thinner than 45 µm, which only get wider) and degree-zero colours outside about [−0.44, 1.44]
+/// (learned colours brighter or darker than SPZ stores: the module doc). [`gltf`] and [`ply`] keep them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Saturated {
+    pub scales: usize,
+    pub colors: usize,
+    pub components: usize,
+}
+
+/// The exported splats as SPZ's five attribute streams in RUB, with the reference encoder's quantisation
+/// (load-spz.cc packGaussians): positions (signed 24-bit fixed point, 12 fractional bits), opacities (sigmoid · 255),
+/// colours (f_dc · 0.15 · 255 + 127.5), log scales ((s + 10) · 16) and rotations ([`pack_rotation`]); degree zero has no
+/// SH stream. Versions 3 and 4 hold these same bytes ([`spz3`], [`spz4`]). Positions past ±2048 m are refused (the
+/// reference wraps them silently; N4N0's worlds reach about 210 m once the sky shell is left out). Colours outside
+/// [−0.44, 1.44] and log scales outside [−10, 5.94] saturate, as in the reference ([`Saturated`]).
+fn spz_streams(g: &Gaussians) -> anyhow::Result<(u32, [Vec<u8>; 5], Saturated)> {
     let ids = exported(g)?;
     let mut streams: [Vec<u8>; 5] = Default::default();
-    let (mut clipped_scales, mut clipped_colors) = (0usize, 0usize);
+    let mut saturated = Saturated { components: ids.len() * 3, ..Default::default() };
     for &i in &ids {
         for p in Frame::Rub.position(g.means[i]) {
             let v = (p * 4096.).round();
@@ -231,25 +241,29 @@ pub fn spz(g: &Gaussians) -> anyhow::Result<Vec<u8>> {
         streams[1].push(byte(sigmoid(g.opacity_logits[i]) * 255.));
         for c in sh0(g.colors[i]) {
             let encoded = c * (0.15 * 255.) + 127.5;
-            clipped_colors += usize::from(!(0.0..=255.0).contains(&encoded));
+            saturated.colors += usize::from(!(0.0..=255.0).contains(&encoded));
             streams[2].push(byte(encoded));
         }
         for s in g.log_scales[i] {
-            clipped_scales += usize::from(!(-10.0..=5.9375).contains(&s));
+            saturated.scales += usize::from(!(-10.0..=5.9375).contains(&s));
             streams[3].push(byte((s + 10.) * 16.));
         }
         streams[4].extend(pack_rotation(Frame::Rub.rotation(g.rotations[i])).to_le_bytes());
     }
-    if clipped_scales > 0 || clipped_colors > 0 {
-        eprintln!(
-            "SPZ range saturation: {clipped_scales} scale components and {clipped_colors} colour components out of {} each; GLB preserves their full range",
-            ids.len() * 3
-        );
-    }
+    Ok((ids.len() as u32, streams, saturated))
+}
+
+/// The splats as SPZ version 4 in RUB, the reference encoder's layout (load-spz.cc saveSpz): a 32-byte plain header
+/// (magic NGSP, version, count, SH degree 0, 12 fractional position bits, flags, five streams, the table of contents at
+/// byte 32), 16 bytes of table per stream (compressed and uncompressed size), then [`spz_streams`]' five streams, each
+/// its own Zstandard stream. Lossy: [`gltf`] and [`ply`] keep the full range. Version 4 (May 2026) needs an updated
+/// reader; [`spz3`] opens in every one.
+pub fn spz4(g: &Gaussians) -> anyhow::Result<(Vec<u8>, Saturated)> {
+    let (count, streams, saturated) = spz_streams(g)?;
     let mut out = Vec::new();
     out.extend(b"NGSP");
     out.extend(4u32.to_le_bytes());
-    out.extend((ids.len() as u32).to_le_bytes());
+    out.extend(count.to_le_bytes());
     out.extend([0, 12, SPZ_ANTIALIASED, 5]);
     out.extend(32u32.to_le_bytes());
     out.extend([0; 12]);
@@ -260,6 +274,84 @@ pub fn spz(g: &Gaussians) -> anyhow::Result<Vec<u8>> {
         out[32 + i * 16..40 + i * 16].copy_from_slice(&(c.len() as u64).to_le_bytes());
         out[40 + i * 16..48 + i * 16].copy_from_slice(&(s.len() as u64).to_le_bytes());
         out.extend(c);
+    }
+    Ok((out, saturated))
+}
+
+/// [`spz4`], what the command line writes, saying what saturated.
+pub fn spz(g: &Gaussians) -> anyhow::Result<Vec<u8>> {
+    let (bytes, s) = spz4(g)?;
+    if s.scales > 0 || s.colors > 0 {
+        eprintln!(
+            "SPZ range saturation: {} scale components and {} colour components out of {} each; GLB preserves their full range",
+            s.scales, s.colors, s.components
+        );
+    }
+    Ok(bytes)
+}
+
+/// The splats as SPZ version 3, what the desktop's Export writes: the reference's legacy container (load-spz.cc
+/// serializePackedGaussians, compressGzipped), one gzip stream of a 16-byte header (magic NGSP, version 3, count, SH
+/// degree 0, 12 fractional position bits, flags, a reserved zero) and [`spz_streams`]' five streams one after the other,
+/// the bytes [`spz4`] compresses one by one. Every SPZ reader opens version 3 (Niantic's library reads 1 to 3 through
+/// its legacy path), while version 4, out since May 2026, opens only in readers built on the newest library ("Old
+/// loaders cannot read SPZ 4 files", Niantic): a VRChat splat importer or web viewer made before it refuses the file.
+/// Rotations are the smallest three since version 3, so nothing is lost against version 4, and the single gzip stream
+/// costs little: Home's 731,087 splats take 12.89 MB, 0.45% more than version 4's 12.83 MB. `progress` hears how much is
+/// compressed (0 to 1) and stops the export with an error.
+pub fn spz3(g: &Gaussians, progress: &mut dyn FnMut(f32) -> anyhow::Result<()>) -> anyhow::Result<(Vec<u8>, Saturated)> {
+    use std::io::Write as _;
+    let (count, streams, saturated) = spz_streams(g)?;
+    let mut header = Vec::with_capacity(16);
+    header.extend(b"NGSP");
+    header.extend(3u32.to_le_bytes());
+    header.extend(count.to_le_bytes());
+    header.extend([0, 12, SPZ_ANTIALIASED, 0]);
+    let total = 16 + streams.iter().map(Vec::len).sum::<usize>();
+    let mut gz = flate2::write::GzEncoder::new(Vec::with_capacity(total), flate2::Compression::default());
+    let mut done = 0;
+    for part in std::iter::once(&header).chain(&streams) {
+        for chunk in part.chunks(1 << 20) {
+            gz.write_all(chunk)?;
+            done += chunk.len();
+            progress(done as f32 / total as f32)?;
+        }
+    }
+    Ok((gz.finish()?, saturated))
+}
+
+/// The reference 3DGS layout's properties: what [`ply`] writes, as crate::ply writes them first.
+const PLY_PROPERTIES: [&str; 17] =
+    ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"];
+
+/// The splats as a binary little-endian PLY of the reference 3DGS layout alone (`x y z nx ny nz f_dc_0..2 opacity
+/// scale_0..2 rot_0..3`: degree-zero colour, opacity as a logit, log scales, the rotation w x y z), which every splat tool
+/// reads: in RUB like N4N0's own PLY (crate::ply) and [`spz3`], every value the float trained (lossless, as [`gltf`]),
+/// without the sky shell and without N4N0's own properties (crate::ply::EXTRAS), which other tools would carry along
+/// unread.
+pub fn ply(g: &Gaussians) -> anyhow::Result<Vec<u8>> {
+    use std::io::Write as _;
+    let ids = exported(g)?;
+    let mut out = Vec::with_capacity(512 + ids.len() * PLY_PROPERTIES.len() * 4);
+    out.extend_from_slice(b"ply\nformat binary_little_endian 1.0\ncomment Orbiters - N4N0 export (right-handed, +Y up: Unity's world with Z negated)\n");
+    writeln!(out, "element vertex {}", ids.len())?;
+    for p in PLY_PROPERTIES {
+        writeln!(out, "property float {p}")?;
+    }
+    out.extend_from_slice(b"end_header\n");
+    for &i in &ids {
+        let [x, y, z, w] = Frame::Rub.rotation(g.rotations[i]);
+        let values = Frame::Rub
+            .position(g.means[i])
+            .into_iter()
+            .chain([0.0; 3])
+            .chain(sh0(g.colors[i]))
+            .chain([g.opacity_logits[i]])
+            .chain(g.log_scales[i])
+            .chain([w, x, y, z]);
+        for v in values {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
     }
     Ok(out)
 }
@@ -438,6 +530,59 @@ mod tests {
         assert!(q.iter().zip(Frame::Rub.rotation(g.rotations[0])).map(|(a, b)| a * b).sum::<f32>().abs() > 0.99999);
     }
 
+    /// Version 3 is version 4's streams in the legacy container: one gzip stream of a 16-byte header (NGSP, 3, the count,
+    /// degree 0, 12 fractional bits, antialiased, reserved) and the five streams one after the other. Its progress
+    /// reaches 1, and an error from it stops the encoding.
+    #[test]
+    fn spz3_holds_version_4s_streams_in_one_gzip_stream() {
+        use std::io::Read as _;
+        let g = asymmetric();
+        let mut heard = Vec::new();
+        let (v3, s3) = spz3(&g, &mut |f| {
+            heard.push(f);
+            Ok(())
+        })
+        .unwrap();
+        let (v4, s4) = spz4(&g).unwrap();
+        assert_eq!(s3, s4);
+        assert_eq!(v3[..2], [0x1f, 0x8b], "a gzip stream");
+        let mut raw = Vec::new();
+        flate2::read::GzDecoder::new(&v3[..]).read_to_end(&mut raw).unwrap();
+        assert_eq!(raw[..4], *b"NGSP");
+        assert_eq!(u32::from_le_bytes(raw[4..8].try_into().unwrap()), 3);
+        assert_eq!(u32::from_le_bytes(raw[8..12].try_into().unwrap()), g.len() as u32);
+        assert_eq!(raw[12..16], [0, 12, SPZ_ANTIALIASED, 0]);
+        assert_eq!(raw[16..], read_spz(&v4).1.concat()[..]);
+        assert_eq!(heard.last(), Some(&1.0));
+        assert!(heard.windows(2).all(|w| w[0] <= w[1]));
+        assert!(spz3(&g, &mut |_| anyhow::bail!("stopped")).is_err());
+    }
+
+    /// The PLY export is the reference layout alone, which crate::ply reads back as the very splats (positions,
+    /// scales, opacities and shapes as trained, colours to float precision), without the sky shell.
+    #[test]
+    fn ply_export_reads_back_as_the_splats_without_the_sky() {
+        let mut g = asymmetric();
+        g.push([0., 300., 0.], [3.; 3], [1., 0., 0., 0.], 2., [0.4, 0.6, 0.9]);
+        *g.sky.last_mut().unwrap() = true;
+        let bytes = ply(&g).unwrap();
+        let end = bytes.windows(11).position(|w| w == b"end_header\n").unwrap() + 11;
+        let header = std::str::from_utf8(&bytes[..end]).unwrap();
+        assert!(header.contains("element vertex 4\n") && !header.contains("sky"), "{header}");
+        assert_eq!(header.matches("property float").count(), 17);
+        assert_eq!(bytes.len(), end + 4 * 17 * 4);
+        let back = crate::ply::parse(&bytes).unwrap();
+        assert_eq!(back.len(), 4);
+        for i in 0..4 {
+            assert_eq!(back.means[i], g.means[i]);
+            assert_eq!(back.log_scales[i], g.log_scales[i]);
+            assert_eq!(back.opacity_logits[i], g.opacity_logits[i]);
+            assert!(back.colors[i].iter().zip(g.colors[i]).all(|(a, b)| (a - b).abs() < 1e-6));
+            assert_same_covariance(covariance(back.log_scales[i], back.rotations[i]), covariance(g.log_scales[i], g.rotations[i]), 1e-6);
+            assert!(!back.sky[i]);
+        }
+    }
+
     #[test]
     fn rotations_cover_all_omitted_components_and_signs() {
         let mut rng = fastrand::Rng::with_seed(72);
@@ -460,6 +605,7 @@ mod tests {
         assert!(gltf(&g).is_err());
         g.means[0][0] = 2048.;
         assert!(spz(&g).is_err());
+        assert!(spz3(&g, &mut |_| Ok(())).is_err());
         g.means[0][0] = 1.;
         g.filter_3d[0] = 1e-4;
         assert!(gltf(&g).is_err());
@@ -486,6 +632,35 @@ mod tests {
         let bytes = std::fs::read(&output).unwrap();
         assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 4, "four of six splats exported");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Every format of a real reconstruction, timed, for other readers to check (a lab run, not by default):
+    /// `ORBITERS_EXPORT_PLY=<session>/reconstruction/splats.ply ORBITERS_EXPORT_OUT=<folder> cargo test --release -p
+    /// orbiters-reconstruct export_a_real_reconstruction -- --ignored --nocapture` writes there what its edits keep as
+    /// model.spz (version 3), model-v4.spz, model.glb and model.ply, and prints their sizes and times.
+    #[test]
+    #[ignore]
+    fn export_a_real_reconstruction() {
+        let ply_path = std::env::var("ORBITERS_EXPORT_PLY").expect("ORBITERS_EXPORT_PLY");
+        let out = std::path::PathBuf::from(std::env::var("ORBITERS_EXPORT_OUT").expect("ORBITERS_EXPORT_OUT"));
+        std::fs::create_dir_all(&out).unwrap();
+        let start = std::time::Instant::now();
+        let (g, removed, _) = crate::edit::read_edited(Path::new(&ply_path)).unwrap();
+        let kept = (0..g.len()).filter(|&i| !g.sky[i]).count();
+        println!("read {} splats ({removed} removed by edits, {kept} without the sky) in {:.2} s", g.len(), start.elapsed().as_secs_f32());
+        let encoders: [(&str, Box<dyn Fn(&Gaussians) -> anyhow::Result<(Vec<u8>, Option<Saturated>)>>); 4] = [
+            ("model.spz", Box::new(|g| spz3(g, &mut |_| Ok(())).map(|(b, s)| (b, Some(s))))),
+            ("model-v4.spz", Box::new(|g| spz4(g).map(|(b, s)| (b, Some(s))))),
+            ("model.glb", Box::new(|g| gltf(g).map(|b| (b, None)))),
+            ("model.ply", Box::new(|g| ply(g).map(|b| (b, None)))),
+        ];
+        for (name, encode) in encoders {
+            let start = std::time::Instant::now();
+            let (bytes, saturated) = encode(&g).unwrap();
+            let took = start.elapsed().as_secs_f32();
+            std::fs::write(out.join(name), &bytes).unwrap();
+            println!("{name}: {} bytes, {:.2} bytes a splat, {took:.2} s, saturated {saturated:?}", bytes.len(), bytes.len() as f64 / kept as f64);
+        }
     }
 
     #[test]

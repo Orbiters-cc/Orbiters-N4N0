@@ -141,6 +141,8 @@ pub struct State {
     fixture_extra: Vec<Entry>,
     /// The photo editor on a picture from Orbiters (Edit in a card's menu), over the page while it is open.
     editor: Option<super::editor::Editor>,
+    /// Export… of a 3D capture of this computer (its card's menu), over the page ([`super::splat_export`]).
+    export: Option<super::splat_export::Export>,
 }
 impl State {
     pub fn stage_folders(&mut self) { self.folders.stage(); }
@@ -1093,6 +1095,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             state.editor = None;
         }
     }
+    if let Some(e) = state.export.as_mut() {
+        if !e.show(&ctx) {
+            state.export = None;
+        }
+    }
     if let Some((key, thumb)) = asset_clicked {
         let keys: Vec<String> = entries.iter().filter(|e| assets::owns(&e.key)).map(|e| e.key.clone()).collect();
         if let Some((list, about, index, stand_ins)) = state.assets.window(&keys, &key, development) {
@@ -1137,7 +1144,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         }
     }
     instance_popover(&ctx, cx, state);
-    let modal = state.dialog.is_some() || state.instance.is_some() || state.community.is_open();
+    let modal = state.dialog.is_some() || state.instance.is_some() || state.community.is_open() || state.export.is_some();
     state.select.bar(ui, page, &entries, &mut state.pictures, modal);
     state.shown = entries;
     manage
@@ -1160,11 +1167,12 @@ enum Menu {
     Instance,
     World,
     Select,
+    Export,
 }
 
 /// A card's menu (a right press on it): what can be done with this item. A picture on this computer: Open, Edit, Share
 /// publicly, Share to …, Copy (with its layers for a multi-layer picture), Show in folder; a 3D capture: Reconstruct
-/// or the shares, Copy public link once public, Copy its picture, Open its folder; what is on Orbiters only: Ask to share
+/// or the shares, Copy public link once public, Export… once reconstructed, Copy its picture, Open its folder; what is on Orbiters only: Ask to share
 /// or the owner's shares, Copy, Download, Open on Orbiters; then the group's Instance… and World on VRChat, and Select
 /// (or Deselect). With the card in a selection of several, Copy copies the selection. The picked action, once.
 fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_select::Selection, cx: &Cx) -> Option<Menu> {
@@ -1201,6 +1209,9 @@ fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_
             mine_shares(&mut acts);
             if public {
                 acts.push((Menu::CopyLink, "Copy public link".into(), icons::LINK_SIMPLE));
+            }
+            if e.ready {
+                acts.push((Menu::Export, "Export…".into(), icons::UPLOAD_SIMPLE));
             }
             acts.push((Menu::Copy, copy("Copy its picture"), icons::COPY));
             acts.push((Menu::Folder, "Open its folder".into(), icons::FOLDER_OPEN));
@@ -1329,6 +1340,11 @@ fn act_menu(ctx: &egui::Context, cx: &mut Cx, state: &mut State, entries: &[Entr
             if let Some(link) = link {
                 let result = crate::controller::open_url(&link);
                 cx.run(ctx, result);
+            }
+        }
+        Menu::Export => {
+            if let Some(controller::Local::Session(dir)) = &e.local {
+                state.export = Some(super::splat_export::Export::open(ctx, dir, &e.world_name, thumb));
             }
         }
         Menu::Instance => *opened.instance = Some((e, thumb)),

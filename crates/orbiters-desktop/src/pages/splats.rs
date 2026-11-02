@@ -16,7 +16,7 @@
 mod edit3d;
 mod select;
 
-pub use select::pictures;
+pub use select::{discard_edits, pictures};
 
 use super::splat_worker::{Request, Worker};
 use super::{Cx, Job};
@@ -196,6 +196,8 @@ pub struct Viewer {
     edit3d: edit3d::State,
     /// Select splats ([`select`]).
     select: select::State,
+    /// Export… ([`super::splat_export`]): the dialog over the view.
+    export: Option<super::splat_export::Export>,
 }
 
 /// The long side of a view saved as a picture (at least the view's own size).
@@ -244,6 +246,7 @@ impl Viewer {
             editor: None,
             edit3d: edit3d::State::default(),
             select: select::State::default(),
+            export: None,
         }
     }
 
@@ -482,8 +485,14 @@ impl Viewer {
                 }
             }
         }
-        // Select splats takes Esc itself (the selection cleared, then the mode left).
-        if !self.select.on() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // Export's dialog over the view (in the tooltip layer, where the gallery draws the view itself).
+        if let Some(e) = self.export.as_mut() {
+            if !e.show(&ctx) {
+                self.export = None;
+            }
+        }
+        // Select splats takes Esc itself (the selection cleared, then the mode left), as Export's dialog does.
+        if !self.select.on() && self.export.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             open = false;
         }
         open
@@ -673,8 +682,21 @@ impl Viewer {
                 .hint(if can { "Selects splats to hide or delete them (a leftover avatar, floaters): they leave everything shared from this capture" } else { "Discard the edits that could not be applied first" })
                 .id_salt("splat-select");
             let bw = b.desired_width(ui);
-            if b.show_at(ui, Rect::from_min_size(pos2(edit_r.right() + 10.0, edit_r.top()), vec2(bw, 40.0))).clicked() && can {
+            let select_r = Rect::from_min_size(pos2(edit_r.right() + 10.0, edit_r.top()), vec2(bw, 40.0));
+            if b.show_at(ui, select_r).clicked() && can {
                 self.enter_select(&ctx);
+            }
+            // Export… beside it: what the view shows, as a file for other tools.
+            let b = Button::new("Export…")
+                .icon(icons::UPLOAD_SIMPLE)
+                .variant(Variant::Glass)
+                .enabled(can)
+                .hint(if can { "Saves what this view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender" } else { "Discard the edits that could not be applied first" })
+                .id_salt("splat-export");
+            let bw = b.desired_width(ui);
+            let export_r = Rect::from_min_size(pos2(select_r.right() + 10.0, edit_r.top()), vec2(bw, 40.0));
+            if b.show_at(ui, export_r).clicked() && can {
+                self.export = Some(super::splat_export::Export::open(&ctx, &self.session, &self.title, export_r).order(egui::Order::Tooltip));
             }
         }
         // Saved: where, and Edit right after.

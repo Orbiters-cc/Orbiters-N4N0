@@ -1,6 +1,7 @@
-//! Experimental, CPU-only colliders from trusted metric depth. Unknown space is never closed.
+//! Experimental, CPU-only colliders from trusted metric depth; no explicit unknown-space filling.
 //! Sparse samples contribute projective TSDF values only within their measured pixel footprint and a
-//! two-voxel truncation band. This deliberately leaves holes where the capture has no evidence.
+//! two-voxel truncation band. Unobserved cubes are skipped, but subsequent vertex clustering can
+//! bridge nearby surfaces and does not preserve the topology of unknown regions.
 use crate::{
     camera::{cross, dot, Camera},
     dataset::Dataset,

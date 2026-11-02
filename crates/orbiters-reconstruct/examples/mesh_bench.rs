@@ -1,4 +1,5 @@
 //! CPU mesh evaluation: mesh_bench <session> <output directory> [ground truth directory] [occupancy PLY].
+use anyhow::Context;
 use orbiters_reconstruct::{
     camera::Camera,
     mesh::{self, Mesh},
@@ -97,47 +98,76 @@ fn readback(file: &Path, m: &Mesh) -> anyhow::Result<f32> {
     anyhow::ensure!(maximum == 0., "exported coordinates do not round-trip");
     Ok(maximum)
 }
+// This deliberately supports the single, identity-node GLB emitted by splat-transform,
+// rejecting unsupported layouts instead of silently scoring a subset or ignoring a transform.
 fn collision_glb(path: &Path) -> anyhow::Result<Mesh> {
     let b = std::fs::read(path)?;
-    anyhow::ensure!(&b[..4] == b"glTF", "GLB header");
-    let n = u32::from_le_bytes(b[12..16].try_into()?) as usize;
-    let j: serde_json::Value = serde_json::from_slice(&b[20..20 + n])?;
+    let word = |at: usize| -> anyhow::Result<u32> { Ok(u32::from_le_bytes(b.get(at..at + 4).context("truncated GLB word")?.try_into()?)) };
+    anyhow::ensure!(b.get(..4) == Some(b"glTF") && word(4)? == 2 && word(8)? as usize == b.len(), "GLB header");
+    let n = word(12)? as usize;
+    anyhow::ensure!(word(16)? == 0x4e4f534a, "JSON chunk required");
+    let j: serde_json::Value = serde_json::from_slice(b.get(20..20 + n).context("truncated JSON")?)?;
     let binary = 28 + n;
+    anyhow::ensure!(word(24 + n)? == 0x004e4942 && binary + word(20 + n)? as usize == b.len(), "BIN chunk required");
+    anyhow::ensure!(
+        j["meshes"].as_array().is_some_and(|v| v.len() == 1)
+            && j["meshes"][0]["primitives"].as_array().is_some_and(|v| v.len() == 1)
+            && j["nodes"].as_array().is_some_and(|v| v.len() == 1)
+            && j["nodes"][0]["mesh"] == 0,
+        "only a single mesh/primitive/node is supported"
+    );
+    for field in ["matrix", "translation", "rotation", "scale", "children"] {
+        anyhow::ensure!(j["nodes"][0][field].is_null(), "transformed or hierarchical GLB is unsupported");
+    }
     let primitive = &j["meshes"][0]["primitives"][0];
-    let pa = &j["accessors"][primitive["attributes"]["POSITION"].as_u64().unwrap() as usize];
-    let ia = &j["accessors"][primitive["indices"].as_u64().unwrap() as usize];
-    let offset = |a: &serde_json::Value| {
-        let v = &j["bufferViews"][a["bufferView"].as_u64().unwrap() as usize];
-        binary + v["byteOffset"].as_u64().unwrap_or(0) as usize + a["byteOffset"].as_u64().unwrap_or(0) as usize
+    anyhow::ensure!(primitive["mode"].is_null() || primitive["mode"] == 4, "triangle list required");
+    let pa = &j["accessors"][primitive["attributes"]["POSITION"].as_u64().context("position accessor")? as usize];
+    let ia = &j["accessors"][primitive["indices"].as_u64().context("index accessor")? as usize];
+    let data = |a: &serde_json::Value, element: usize| -> anyhow::Result<(&[u8], usize, usize)> {
+        anyhow::ensure!(a["sparse"].is_null(), "sparse accessors unsupported");
+        let v = &j["bufferViews"][a["bufferView"].as_u64().context("buffer view")? as usize];
+        anyhow::ensure!(v["buffer"] == 0, "embedded buffer required");
+        let start = v["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let length = v["byteLength"].as_u64().context("buffer length")? as usize;
+        let start = binary.checked_add(start).context("buffer offset overflow")?;
+        let end = start.checked_add(length).context("buffer length overflow")?;
+        let bytes = b.get(start..end).context("buffer view out of range")?;
+        let offset = a["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let count = a["count"].as_u64().context("accessor count")? as usize;
+        let stride = v["byteStride"].as_u64().unwrap_or(element as u64) as usize;
+        let extent = count.saturating_sub(1).checked_mul(stride).and_then(|n| n.checked_add(element)).context("accessor overflow")?;
+        anyhow::ensure!(
+            count > 0 && stride >= element && offset.checked_add(extent).is_some_and(|end| end <= bytes.len()),
+            "accessor out of range"
+        );
+        Ok((&bytes[offset..], count, stride))
     };
     anyhow::ensure!(pa["componentType"] == 5126 && pa["type"] == "VEC3", "float positions required");
-    let start = offset(pa);
-    let count = pa["count"].as_u64().unwrap() as usize;
-    let stride = j["bufferViews"][pa["bufferView"].as_u64().unwrap() as usize]["byteStride"].as_u64().unwrap_or(12) as usize;
-    let positions = (0..count)
-        .map(|i| {
-            let mut p: [f32; 3] =
-                std::array::from_fn(|c| f32::from_le_bytes(b[start + i * stride + c * 4..start + i * stride + c * 4 + 4].try_into().unwrap()));
-            p[2] = -p[2];
-            p
-        })
+    let (bytes, count, stride) = data(pa, 12)?;
+    let positions: Vec<[f32; 3]> = (0..count)
+        .map(|i| std::array::from_fn(|c| -f32::from_le_bytes(bytes[i * stride + c * 4..i * stride + c * 4 + 4].try_into().unwrap())))
         .collect();
-    let start = offset(ia);
-    let count = ia["count"].as_u64().unwrap() as usize;
-    let ty = ia["componentType"].as_u64().unwrap();
-    anyhow::ensure!(ty == 5125 || ty == 5123, "unsigned indices required");
+    anyhow::ensure!(positions.iter().flatten().all(|v| v.is_finite()), "nonfinite position");
+    // N4N0 PLY stores [x,y,-z]. PlayCanvas labels PLY with a 180-degree Z rotation,
+    // and writeVoxel bakes it into engine space: [-x,-y,-z]. Negate all axes back.
+    let ty = ia["componentType"].as_u64().context("index component type")?;
+    anyhow::ensure!((ty == 5125 || ty == 5123) && ia["type"] == "SCALAR", "unsigned indices required");
+    let element = if ty == 5125 { 4 } else { 2 };
+    let (bytes, count, stride) = data(ia, element)?;
+    anyhow::ensure!(count % 3 == 0, "triangle index count");
     let indices: Vec<_> = (0..count)
         .map(|i| {
             if ty == 5125 {
-                u32::from_le_bytes(b[start + 4 * i..start + 4 * i + 4].try_into().unwrap())
+                u32::from_le_bytes(bytes[i * stride..i * stride + 4].try_into().unwrap())
             } else {
-                u16::from_le_bytes(b[start + 2 * i..start + 2 * i + 2].try_into().unwrap()) as u32
+                u16::from_le_bytes(bytes[i * stride..i * stride + 2].try_into().unwrap()) as u32
             }
         })
         .collect();
-    // PlayCanvas preserves this input PLY's world-with-Z-negated coordinates. Restore native world.
+    anyhow::ensure!(indices.iter().all(|&i| (i as usize) < positions.len()), "index out of range");
     Ok(Mesh { positions, triangles: indices.chunks_exact(3).map(|t| [t[0], t[2], t[1]]).collect() })
 }
+
 fn occupancy(path: &Path, size: f32) -> anyhow::Result<Mesh> {
     if path.extension().and_then(|s| s.to_str()) == Some("glb") {
         return collision_glb(path);
@@ -158,7 +188,10 @@ fn occupancy(path: &Path, size: f32) -> anyhow::Result<Mesh> {
         let extent: [f32; 3] = std::array::from_fn(|a| (0..3).map(|b| (r[a][b] * scale[b]).powi(2)).sum::<f32>().sqrt() * cutoff + size);
         let lo: [i32; 3] = std::array::from_fn(|a| ((p[a] - extent[a]) / size).floor() as i32);
         let hi: [i32; 3] = std::array::from_fn(|a| ((p[a] + extent[a]) / size).ceil() as i32);
-        anyhow::ensure!((0..3).map(|a| (hi[a] - lo[a] + 1) as i64).product::<i64>() < 10_000_000, "occupancy splat exceeds 10M candidate nodes");
+        anyhow::ensure!(
+            (0..3).map(|a| (hi[a] - lo[a] + 1) as i64).product::<i64>() < 10_000_000,
+            "occupancy splat exceeds 10M candidate nodes"
+        );
         for x in lo[0]..=hi[0] {
             for y in lo[1]..=hi[1] {
                 for z in lo[2]..=hi[2] {
@@ -291,4 +324,32 @@ fn main() -> anyhow::Result<()> {
     }
     anyhow::ensure!(!failed, "one or more mesh arms failed; see error JSON");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn playcanvas_engine_coordinates_restore_native_world() {
+        let m = Mesh { positions: vec![[1., 2., 3.], [2., 2., 3.], [1., 3., 3.]], triangles: vec![[0, 1, 2]] };
+        let path = std::env::temp_dir().join(format!("orbiters-playcanvas-{}.glb", std::process::id()));
+        m.write(&path).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let n = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        // Mesh::write reflects X. Also reflect Y/Z to reproduce PlayCanvas's engine output.
+        for i in 0..3 {
+            for c in 1..3 {
+                let at = 28 + n + i * 12 + c * 4;
+                let v = f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+                bytes[at..at + 4].copy_from_slice(&(-v).to_le_bytes());
+            }
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let restored = collision_glb(&path).unwrap();
+        assert_eq!(restored.positions, m.positions);
+        assert_eq!(restored.triangles, m.triangles);
+        std::fs::write(&path, b"bad").unwrap();
+        assert!(collision_glb(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
 }

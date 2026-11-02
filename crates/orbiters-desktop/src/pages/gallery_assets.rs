@@ -80,6 +80,14 @@ impl State {
     /// Screenshots: two avatars' showcases (one the member made, one they hold a licence to), this computer's pictures
     /// standing in for the Discord rooms' pictures, and an asset without showcase pictures (no group).
     pub fn stage(&mut self, sessions_dir: &std::path::Path) {
+        self.stage_assets();
+        self.stand_ins = super::super::events::Covers::stand_ins(sessions_dir);
+    }
+
+    /// [`State::stage`]'s assets alone, with the real links: no folder of this computer is read (the stand-ins index
+    /// every picture folder of the settings, an archive of thousands of pictures on an external drive among them,
+    /// which kept the test below reading for over half an hour).
+    fn stage_assets(&mut self) {
         self.fixture = true;
         self.job = Job::default();
         let made = assets::Asset { id: 41, name: "Lumen Fox".into(), kind: "AVATAR".into(), how: How::Made, ..Default::default() };
@@ -109,7 +117,7 @@ impl State {
             })
         };
         self.assets = assets::gather(vec![made, bought, quiet], showcase).unwrap_or_default();
-        self.stand_ins = super::super::events::Covers::stand_ins(sessions_dir);
+        self.stand_ins.clear();
         self.changed = true;
     }
 
@@ -273,9 +281,8 @@ mod tests {
     #[test]
     fn each_asset_is_a_group_of_its_showcase_pictures() {
         let mut state = State::default();
-        state.stage(std::path::Path::new("no such folder"));
         // The real links, not this computer's pictures standing in for them.
-        state.stand_ins.clear();
+        state.stage_assets();
         let entries = state.entries("", false);
         let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
         assert_eq!(keys, ["asset:41:0", "asset:41:1", "asset:41:2", "asset:77:0", "asset:77:1"], "an asset without showcase pictures has no group");

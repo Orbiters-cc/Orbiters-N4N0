@@ -231,7 +231,7 @@ pub(super) fn show(v: &mut Viewer, ui: &mut Ui, rect: Rect) -> Option<bool> {
     let before = *orbit;
     let typing = ctx.memory(|m| m.focused().is_some());
     if let (Some(resp), Some(s), false) = (&free, &slot, typing) {
-        steer(ui, resp, orbit, s.frame, ((s.frame.height() * ppp) as u32).max(16));
+        steer(ui, resp, orbit, s.frame, ((s.frame.height() * ppp) as u32).max(16), false);
         if resp.double_clicked() {
             if let Some(view) = l.views.get(v.view) {
                 *orbit = Orbit::from_view(view, l.depth);
@@ -277,16 +277,21 @@ pub(super) fn show(v: &mut Viewer, ui: &mut Ui, rect: Rect) -> Option<bool> {
         if let Some(live) = ed.editor.live_mut() {
             live.focus = shown_focus;
         }
+        // Without what Select splats hid or deleted.
+        let marks = l.marks();
         let (inner, error) = match &mut l.source {
             Source::Window(renderer) => {
                 let (error, checking) = renderer.lock().map(|r| (r.error.clone(), r.checks > 0 || r.probing)).unwrap_or_default();
                 if checking {
                     ctx.request_repaint();
                 }
-                (Inner::Window(SplatCallback { renderer: renderer.clone(), camera, confidence, far, dof: depth, probe }, renderer.clone()), error)
+                (Inner::Window(SplatCallback { renderer: renderer.clone(), camera, confidence, far, dof: depth, probe, marks }, renderer.clone()), error)
             }
             Source::Integrated(worker) => {
-                worker.ask(Request { camera, confidence, far, dof: depth, probe });
+                if let Some((version, m)) = marks {
+                    worker.set_marks(version, m);
+                }
+                worker.ask(Request { camera, confidence, far, dof: depth, probe, marks: worker.marks() });
                 (Inner::Integrated(Box::new(worker.callback()), worker.shown()), worker.error())
             }
         };
@@ -313,10 +318,13 @@ pub(super) fn show(v: &mut Viewer, ui: &mut Ui, rect: Rect) -> Option<bool> {
     // At full size, from where the camera is now.
     let camera = pose.camera(ed.full.0, ed.full.1);
     let progress = Arc::new(AtomicU32::new(0));
+    // The splats as drawn: without what Select splats hid or deleted; no picture while its edits wait to be discarded.
+    let drawn = v.loaded.as_ref().map_or(Ok(None), |l| l.drawn());
+
     let (dir, window, p) = (v.session.clone(), v.window.clone(), progress.clone());
     let job = match asked {
         LiveAsk::View => Job::spawn(&ctx, move || {
-            let r = still(&dir, window, camera, confidence, far).map_err(|e| format!("{e:#}"));
+            let r = drawn.and_then(|d| still(&dir, window, camera, confidence, far, d).map_err(|e| format!("{e:#}")));
             p.store(1000, Ordering::Relaxed);
             r
         }),
@@ -339,7 +347,7 @@ pub(super) fn show(v: &mut Viewer, ui: &mut Ui, rect: Rect) -> Option<bool> {
             let edit = ed.editor.edit().clone();
             // The depth blur as drawn now (the auto focus where it is), at full size.
             let (depth, _) = lens(&edit, Stage::Full, ed.full, ed.full, ed.focus, false);
-            Job::spawn(&ctx, move || picture(&dir, window, camera, (confidence, far, depth), &edit, view, &p).map_err(|e| format!("{e:#}")))
+            Job::spawn(&ctx, move || drawn.and_then(|d| picture(&dir, window, camera, (confidence, far, depth), &edit, view, &p, d).map_err(|e| format!("{e:#}"))))
         }
     };
     ed.editor.start_saving(job, progress);
@@ -349,13 +357,24 @@ pub(super) fn show(v: &mut Viewer, ui: &mut Ui, rect: Rect) -> Option<bool> {
 
 /// The view of `camera` with the layers of `edit` put on it on the GPU, saved: the view as Save this view saves it,
 /// then its edited copy beside it with the edit and `view` (where the camera was). Returns the copy. With a depth of
-/// field (`shown.2`), the copy's layers go over a second render of the splats blurred by it.
-fn picture(dir: &Path, window: (wgpu::Device, wgpu::Queue), camera: Camera, shown: (Confidence, FarField, DepthOfField), edit: &Edit, view: files::View3d, progress: &AtomicU32) -> anyhow::Result<PathBuf> {
+/// field (`shown.2`), the copy's layers go over a second render of the splats blurred by it. `drawn`: what Select splats
+/// hid or deleted is not drawn.
+#[allow(clippy::too_many_arguments)]
+fn picture(
+    dir: &Path,
+    window: (wgpu::Device, wgpu::Queue),
+    camera: Camera,
+    shown: (Confidence, FarField, DepthOfField),
+    edit: &Edit,
+    view: files::View3d,
+    progress: &AtomicU32,
+    drawn: Option<Drawn>,
+) -> anyhow::Result<PathBuf> {
     let (confidence, far, depth) = shown;
     let full = (camera.width, camera.height);
     progress.store(50, Ordering::Relaxed);
     let dofs = if depth.on() { vec![DepthOfField::default(), depth] } else { vec![DepthOfField::default()] };
-    let mut images = shoot(dir, window.clone(), camera, confidence, far, &dofs)?;
+    let mut images = shoot(dir, window.clone(), camera, confidence, far, &dofs, drawn)?;
     let image = images.pop().expect("a view");
     let plain = images.pop();
     progress.store(550, Ordering::Relaxed);

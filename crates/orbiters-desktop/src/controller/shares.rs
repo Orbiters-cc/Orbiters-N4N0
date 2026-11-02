@@ -457,6 +457,24 @@ struct Record {
     path: PathBuf,
     item: Option<Item>,
     uploaded: Uploaded,
+    /// For a capture: the generation of its splat edits the uploaded files were made with
+    /// (orbiters_reconstruct::edit::generation); none in records of uploads made before edits existed (as trained).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    edits: Option<String>,
+}
+
+/// Why a capture is not shared when its splat edits are not what its upload was made with.
+const EDITED_SINCE_UPLOAD: &str = "Its splats were hidden, deleted or brought back in its 3D view after it was uploaded: the uploaded copy does not \
+     match, so it is not shared. Bring the splats back as they were when it was uploaded (undo, Show all or Restore all) to share that copy; \
+     an uploaded capture's files cannot be replaced yet.";
+
+/// The generation of the splat edits of a capture's session now (none for a picture); edits that cannot be read stop
+/// whatever asked.
+fn edits_now(entry: &Entry) -> anyhow::Result<Option<String>> {
+    match entry.local.as_ref() {
+        Some(Local::Session(dir)) => Ok(Some(orbiters_reconstruct::edit::generation(&orbiters_core::reconstruction::result_dir(dir))?)),
+        _ => Ok(None),
+    }
 }
 fn records_path(server: Server) -> anyhow::Result<PathBuf> {
     let account = account::read(server).ok_or_else(|| anyhow::anyhow!("Sign in first"))?;
@@ -476,11 +494,14 @@ fn save_record(records: anyhow::Result<&Path>, entry: &Entry, item: &Item) -> an
         let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
         let path = records?;
         let mut records = read_records(&path);
+        // The splat edits it was uploaded with stay known (the same item: the same files).
+        let edits = records.iter().find(|r| r.path == local.path() && r.uploaded.id == item.id && r.uploaded.kind == item.kind).and_then(|r| r.edits.clone());
         records.retain(|r| r.path != local.path());
         records.push(Record {
             path: local.path().into(),
             item: Some(item.clone()),
             uploaded: Uploaded { kind: item.kind, id: item.id, visibility: if item.public { "public" } else { "private" }.into() },
+            edits,
         });
         orbiters_core::write_atomic(&path, &serde_json::to_vec(&records)?)?;
     }
@@ -553,14 +574,18 @@ fn share_with(
         step("waited for its other change", &mut at);
     }
     let records = records.as_deref().map_err(|e| anyhow::anyhow!("{e}"));
-    let remembered = entry
-        .local
-        .as_ref()
-        .and_then(|l| records.as_ref().ok().and_then(|p| read_records(p).into_iter().find(|r| r.path == l.path())))
-        .map(|r| (r.uploaded.kind, r.uploaded.id));
+    let record = entry.local.as_ref().and_then(|l| records.as_ref().ok().and_then(|p| read_records(p).into_iter().find(|r| r.path == l.path())));
+    let remembered = record.as_ref().map(|r| (r.uploaded.kind, r.uploaded.id));
     let existing = entry.remote.as_ref().map(|i| (i.kind, i.id)).or(remembered);
     let uploaded_now = existing.is_none();
+    // A capture's files on the server are of the splat edits it was uploaded with; it is shared only while the edits
+    // are still those (an upload this computer has no record of was made without any).
+    let uploaded_edits = record.as_ref().and_then(|r| r.edits.clone()).unwrap_or_else(|| orbiters_reconstruct::edit::UNEDITED.to_string());
+    let mut sent_edits = None;
     let (kind, id) = if let Some(known) = existing {
+        if let Some(now) = edits_now(entry)? {
+            anyhow::ensure!(now == uploaded_edits, "{EDITED_SINCE_UPLOAD}");
+        }
         known
     } else {
         anyhow::ensure!(!request.public || !entry.content.explicit || request.acknowledge_explicit, "{}", shares::EXPLICIT_WARNING);
@@ -580,8 +605,11 @@ fn share_with(
         let uploaded: Uploaded = match entry.local.as_ref().ok_or_else(|| anyhow::anyhow!("No local file to upload"))? {
             Local::Session(dir) => {
                 report(Stage::Preparing);
-                let (files, sky, view) = super::maps::web_preview(dir)?;
+                let super::maps::Prepared { files, sky, metadata: view, generation } = super::maps::web_preview(dir)?;
+                // The picture only when drawn for these edits (capture_picture), and the edits still those prepared.
                 let picture = crate::capture_picture::jpeg(dir);
+                anyhow::ensure!(edits_now(entry)?.as_deref() == Some(generation.as_str()), "Its splat edits changed while it was being prepared: share it again.");
+                sent_edits = Some(generation);
                 step("prepared", &mut at);
                 let bytes = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
                 metadata.as_object_mut().unwrap().extend(view.as_object().unwrap().clone());
@@ -624,11 +652,28 @@ fn share_with(
             let mut known = read_records(file);
             let local = entry.local.as_ref().unwrap();
             known.retain(|r| r.path != local.path());
-            known.push(Record { path: local.path().into(), item: None, uploaded: uploaded.clone() });
+            known.push(Record { path: local.path().into(), item: None, uploaded: uploaded.clone(), edits: sent_edits.clone() });
             orbiters_core::write_atomic(file, &serde_json::to_vec(&known)?)?;
         }
         (uploaded.kind, uploaded.id)
     };
+    // Edited while it was uploading: not shared, and an upload that went public at once taken back from the public.
+    if let (Some(sent), Ok(now)) = (&sent_edits, edits_now(entry)) {
+        if now.as_deref() != Some(sent.as_str()) {
+            if request.public {
+                let withdraw = shares::Unshare { public: true, recipients: Vec::new(), all: false };
+                if let Err(e) = api.unshare_capture(token, kind, id, &withdraw) {
+                    step(&format!("could not take it back from the public ({e})"), &mut at);
+                }
+            }
+            anyhow::bail!("Its splats were changed in its 3D view while it was being uploaded: it is not shared. {EDITED_SINCE_UPLOAD}");
+        }
+    }
+    // Edits that cannot be read now stop the share too.
+    if let Some(now) = edits_now(entry)? {
+        let made_with = sent_edits.as_deref().unwrap_or(&uploaded_edits);
+        anyhow::ensure!(now == made_with, "{EDITED_SINCE_UPLOAD}");
+    }
     report(Stage::Sharing);
     let shared = api.share_capture(token, kind, id, request);
     step("shared", &mut at);
@@ -795,6 +840,64 @@ mod tests {
         shares::Share { recipients: vec![shares::Recipient { vrchat_user_id: "usr_friend".into(), display_name: "Friend".into() }], ..Default::default() }
     }
 
+    /// A capture uploaded privately, then splats deleted in its 3D view: sharing it is refused (the server's copy
+    /// still holds them), nothing asked of the server; with the edits it was uploaded with it is shared; changed again,
+    /// damaged edits, or an upload this computer has no record of (made as trained): refused. Its record keeps the
+    /// edits it was uploaded with across the share's answer.
+    #[test]
+    fn a_capture_is_shared_only_with_the_splat_edits_it_was_uploaded_with() {
+        use orbiters_reconstruct::edit::{Edit, Identity, DELETED};
+        let dir = std::env::temp_dir().join(format!("orbiters-share-edits-{}", uuid::Uuid::new_v4()));
+        let session = dir.join("Home 2026-11-02 10-00-00");
+        let result = orbiters_core::reconstruction::dir(&session);
+        std::fs::create_dir_all(&result).unwrap();
+        let records = dir.join("capture-uploads.json");
+        let uploaded = Uploaded { kind: Kind::Capture, id: 3, visibility: "private".into() };
+        let write_record = |edits: Option<String>| {
+            std::fs::write(&records, serde_json::to_vec(&[Record { path: session.clone(), item: None, uploaded: uploaded.clone(), edits }]).unwrap()).unwrap()
+        };
+        let mut entry = remote_entry(Item::default());
+        entry.remote = None;
+        entry.local = Some(Local::Session(session.clone()));
+        let share = |entry: &Entry| {
+            let (api, seen) = fake_orbiters(vec![("POST /captures/capture/3/share", shared_item(Kind::Capture, 3))]);
+            let r = share_with(&api, "token", Ok(records.clone()), entry, &to_a_friend(), &|_| {}, &mut Vec::new());
+            let asked = seen.lock().unwrap().clone();
+            (r.map(|_| ()).map_err(|e| e.to_string()), asked)
+        };
+        // Uploaded as trained (a record of before edits existed), then the avatar deleted.
+        write_record(None);
+        let mut edit = Edit::new(10, Identity { bytes: 1 << 20, hash: 1 });
+        edit.marks[4] = DELETED;
+        edit.save(&result).unwrap();
+        let (r, seen) = share(&entry);
+        assert!(r.as_ref().is_err_and(|e| e.contains("after it was uploaded")), "{r:?}");
+        assert!(seen.is_empty(), "nothing asked of the server: {seen:?}");
+        // Uploaded with these very edits: shared, and the record keeps them.
+        write_record(Some(edit.generation()));
+        let (r, seen) = share(&entry);
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(seen, ["POST /captures/capture/3/share"]);
+        assert_eq!(read_records(&records)[0].edits.as_deref(), Some(edit.generation().as_str()), "kept across the share's answer");
+        // Edited again: refused.
+        edit.marks[5] = DELETED;
+        edit.save(&result).unwrap();
+        assert!(share(&entry).0.is_err());
+        // Damaged edits: refused.
+        std::fs::write(result.join(orbiters_core::reconstruction::EDIT_FILE), b"damaged").unwrap();
+        assert!(share(&entry).0.as_ref().is_err_and(|e| e.contains("could not be read")));
+        // Known to the server only (no record here: uploaded as trained), the capture edited: refused.
+        edit.save(&result).unwrap();
+        std::fs::remove_file(&records).unwrap();
+        let mut known = entry.clone();
+        known.remote = Some(Item { kind: Kind::Capture, id: 3, mine: true, ..Default::default() });
+        assert!(share(&known).0.as_ref().is_err_and(|e| e.contains("after it was uploaded")));
+        // Restored as uploaded (no edits): shared.
+        std::fs::remove_file(result.join(orbiters_core::reconstruction::EDIT_FILE)).unwrap();
+        assert!(share(&known).0.is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// An item uploaded before (its record says so) is shared with one request: nothing sent again, nothing fetched.
     #[test]
     fn an_uploaded_item_is_shared_with_one_request() {
@@ -803,7 +906,7 @@ mod tests {
         let session = dir.join("Silent Dawn 2026-10-28 23-52-12");
         let records = dir.join("capture-uploads.json");
         let uploaded = Uploaded { kind: Kind::Capture, id: 3, visibility: "private".into() };
-        std::fs::write(&records, serde_json::to_vec(&[Record { path: session.clone(), item: None, uploaded }]).unwrap()).unwrap();
+        std::fs::write(&records, serde_json::to_vec(&[Record { path: session.clone(), item: None, uploaded, edits: None }]).unwrap()).unwrap();
         let (api, seen) = fake_orbiters(vec![("POST /captures/capture/3/share", shared_item(Kind::Capture, 3))]);
         let mut entry = remote_entry(Item::default());
         entry.remote = None;

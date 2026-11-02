@@ -25,7 +25,7 @@ use orbiters_reconstruct::camera::Camera;
 use orbiters_reconstruct::gaussians::{logit, sigmoid, Gaussians};
 use orbiters_reconstruct::tree::Tree;
 use orbiters_reconstruct::tree_tune::{self, ExportOptions, Rank};
-use orbiters_reconstruct::{aberration, dataset, gpu, metrics, ply, prepare, train};
+use orbiters_reconstruct::{aberration, dataset, gpu, metrics, prepare, train};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -224,7 +224,8 @@ fn main() -> anyhow::Result<()> {
     }
     let result = orbiters_core::reconstruction::result_dir(&run);
     let ply_path = result.join(orbiters_core::reconstruction::PLY_FILE);
-    let g = ply::read(&ply_path)?;
+    // As an upload reads it: without the splats its edits hide or delete (orbiters_reconstruct::edit).
+    let (g, _, _) = orbiters_reconstruct::edit::read_edited(&ply_path)?;
     let mut gpu = gpu::Gpu::new()?;
 
     // The held-out keyframes (the run's report), scored as eval scores them (depth validation only marks depth samples,

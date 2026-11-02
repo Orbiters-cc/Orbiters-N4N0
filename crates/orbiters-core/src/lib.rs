@@ -2,6 +2,7 @@
 
 pub mod account;
 pub mod assets;
+pub mod avatar_upload;
 pub mod bundle;
 pub mod call;
 pub mod cleanup;

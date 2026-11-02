@@ -309,6 +309,18 @@ fn replace(dir: &Path, partial: &Path) -> anyhow::Result<()> {
 /// previous ones; renders of keyframes the new run did not hold out are deleted where possible.
 fn replace_files(out: &Path, partial: &Path) -> anyhow::Result<()> {
     retry(|| std::fs::rename(partial.join(rec::PLY_FILE), out.join(rec::PLY_FILE))).with_context(|| format!("{} is open in another program: close it and reconstruct again", out.join(rec::PLY_FILE).display()))?;
+    // The previous splats' edits and the worker's pictures kept aside for them go with them (a folder moved as a whole
+    // takes them along): edits name splats of the PLY they were made on, and a picture kept aside belongs to its PLY.
+    retry(|| match std::fs::remove_file(out.join(rec::EDIT_FILE)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    })
+    .with_context(|| format!("{} is open in another program: close it and reconstruct again", out.join(rec::EDIT_FILE).display()))?;
+    for e in std::fs::read_dir(out).into_iter().flatten().flatten() {
+        if rec::is_trained_preview_file(&e.file_name().to_string_lossy()) {
+            let _ = retry(|| std::fs::remove_file(e.path()));
+        }
+    }
     // The sky map goes with the splats it was trained with: a result without one leaves none behind.
     let sky = out.join(rec::SKY_FILE);
     if partial.join(rec::SKY_FILE).exists() {
@@ -334,26 +346,28 @@ fn replace_files(out: &Path, partial: &Path) -> anyhow::Result<()> {
 }
 
 /// `orbiters-reconstruct --web-preview <splats.ply> <out.splat> [--max N]`: the reconstruction as a web preview
-/// (orbiters_reconstruct::web), started from the scene's centre.
+/// (orbiters_reconstruct::web), started from the scene's centre, without the splats its edits hide or delete.
 fn web_preview(args: &[String]) -> anyhow::Result<()> {
     let (Some(ply_path), Some(out)) = (args.first(), args.get(1)) else { bail!("usage: orbiters-reconstruct --web-preview <splats.ply> <out.splat> [--max N]") };
     let max = match args.get(2).map(String::as_str) {
         Some("--max") => args.get(3).context("--max N")?.parse()?,
         _ => orbiters_reconstruct::web::DEFAULT_MAX,
     };
-    let g = ply::read(std::path::Path::new(ply_path))?;
+    // Without what the 3D view hid or deleted (orbiters_reconstruct::edit, the edit beside the PLY).
+    let (g, removed, _) = orbiters_reconstruct::edit::read_edited(std::path::Path::new(ply_path))?;
     let n = g.len().max(1) as f32;
     let centre = g.means.iter().fold([0.0f32; 3], |a, m| [a[0] + m[0] / n, a[1] + m[1] / n, a[2] + m[2] / n]);
     let web = orbiters_reconstruct::web::splat_file(&g, max, centre);
     std::fs::write(out, &web.bytes)?;
-    println!("{} of {} splats, {:.1} MB", web.count, g.len(), web.bytes.len() as f64 / 1e6);
+    println!("{} of {} splats ({removed} left out by its edits), {:.1} MB", web.count, g.len(), web.bytes.len() as f64 / 1e6);
     Ok(())
 }
 
 /// `orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned] [--rank area|contribution|seen]
 /// [--refit <steps>] [--cameras <n>] [--rank-cameras <n>] [--decoded] [--tight] [--tune-steps <n>]
-/// [--drawn-at <pc>,<quest>]`: the reconstruction's files for VRChat worlds (orbiters_reconstruct::tree_tune; the lab
-/// switches are tree_tune::ExportOptions'): pc.n4tree, quest.n4tree and coarse.n4tree.
+/// [--drawn-at <pc>,<quest>] [--refit-width <n>] [--pc-appearance]`: the reconstruction's files for VRChat worlds
+/// (orbiters_reconstruct::tree_tune; the lab switches are tree_tune::ExportOptions'): pc.n4tree, quest.n4tree and
+/// coarse.n4tree, without the splats its edits hide or delete (orbiters_reconstruct::edit).
 fn vrchat(args: &[String]) -> anyhow::Result<()> {
     let usage = "usage: orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned] [--rank area|contribution|seen] [--refit <steps>] [--cameras <n>] [--rank-cameras <n>] [--decoded] [--tight] [--tune-steps <n>] [--drawn-at <pc px>,<quest px>] [--refit-width <n>] [--pc-appearance]";
     let (Some(session), Some(out)) = (args.first(), args.get(1)) else { bail!(usage) };
@@ -381,7 +395,10 @@ fn vrchat(args: &[String]) -> anyhow::Result<()> {
         }
     }
     let session = std::path::Path::new(session);
-    let g = ply::read(&rec::result_dir(session).join(rec::PLY_FILE))?;
+    let (g, removed, _) = orbiters_reconstruct::edit::read_edited(&rec::result_dir(session).join(rec::PLY_FILE))?;
+    if removed > 0 {
+        eprintln!("{removed} splats left out by its edits");
+    }
     let cameras = orbiters_reconstruct::tree_tune::session_cameras(session)?;
     let mut gpu = if untuned { None } else { Some(gpu::Gpu::new()?) };
     let start = std::time::Instant::now();
@@ -409,8 +426,11 @@ fn main() {
     orbiters_core::panic_log::install();
     let all: Vec<String> = std::env::args().skip(1).collect();
     let tool: Option<fn(&[String]) -> anyhow::Result<()>> = match all.first().map(String::as_str) {
+        Some("--mesh") => Some(orbiters_reconstruct::mesh::cli),
         Some("--web-preview") => Some(web_preview),
         Some("--vrchat") => Some(vrchat),
+        Some("--export-gltf") => Some(orbiters_reconstruct::export::gltf_cli),
+        Some("--export-spz") => Some(orbiters_reconstruct::export::spz_cli),
         _ => None,
     };
     if let Some(tool) = tool {
@@ -512,6 +532,31 @@ mod tests {
         drop(held);
         assert_eq!((read(&dir, rec::PLY_FILE), read(&dir, rec::REPORT_FILE)), ("newer".into(), "r2".into()));
         recover(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The previous splats' edits and the worker's picture kept aside for them go with them, whether the folder moves
+    /// whole or file by file (a viewer holding a render open): a new result never meets an old result's edits.
+    #[cfg(windows)]
+    #[test]
+    fn the_splat_edits_go_with_their_splats() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const SHARE_READ: u32 = 1;
+        let dir = session("edits");
+        let trained = rec::trained_preview_file(0x1234);
+        for held_open in [false, true] {
+            result(&dir, rec::DIR, "old", "r0");
+            std::fs::write(rec::dir(&dir).join(rec::EDIT_FILE), "edits of old").unwrap();
+            std::fs::write(rec::dir(&dir).join(&trained), "old's own picture").unwrap();
+            result(&dir, rec::PARTIAL_DIR, "new", "r1");
+            let held = held_open.then(|| std::fs::OpenOptions::new().read(true).share_mode(SHARE_READ).open(rec::dir(&dir).join(rec::PREVIEW_FILE)).unwrap());
+            replace(&dir, &dir.join(rec::PARTIAL_DIR)).expect("replaced");
+            drop(held);
+            assert_eq!(read(&dir, rec::PLY_FILE), "new");
+            assert!(!rec::dir(&dir).join(rec::EDIT_FILE).exists(), "held open: {held_open}");
+            assert!(!rec::dir(&dir).join(&trained).exists(), "held open: {held_open}");
+            recover(&dir);
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

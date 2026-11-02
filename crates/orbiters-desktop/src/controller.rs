@@ -139,6 +139,7 @@ pub struct Controller {
     world_captures: Mutex<world_captures::WorldCapturesRuntime>,
     /// World feedback: the N4N0 world's lines, the queue to Orbiters, the menus' worlds (controller/world_feedback.rs).
     world_feedback: Mutex<world_feedback::WorldFeedbackRuntime>,
+    avatar_upload: Mutex<avatar_upload::AvatarUploadRuntime>,
     /// A scan under way (controller/scan.rs).
     scan: Mutex<scan::ScanRuntime>,
     /// N4N0's camera rig while recording (controller/rig.rs).
@@ -275,6 +276,7 @@ fn calibration_info(stored: &StoredCalibration) -> CalibrationInfo {
 pub type Shared = Arc<Controller>;
 
 mod account;
+mod avatar_upload;
 mod burst;
 mod calls;
 mod cleanup;
@@ -294,7 +296,7 @@ pub mod vr_audio;
 mod world_captures;
 mod world_feedback;
 pub use account::open_url;
-pub(crate) use maps::prepare as prepare_upload;
+pub(crate) use maps::{prepare as prepare_upload, Prepared};
 
 impl Controller {
     pub fn new(settings: Settings) -> Shared {
@@ -336,6 +338,7 @@ impl Controller {
             burst: Mutex::new(burst::BurstRuntime::default()),
             world_captures: Mutex::new(world_captures::WorldCapturesRuntime::default()),
             world_feedback: Mutex::new(world_feedback::WorldFeedbackRuntime::default()),
+            avatar_upload: Mutex::new(avatar_upload::AvatarUploadRuntime::default()),
             scan: Mutex::new(scan::ScanRuntime::default()),
             rig: Mutex::new(rig::RigRuntime::default()),
             calls: Mutex::new(calls::CallsRuntime::default()),
@@ -1176,6 +1179,8 @@ impl Controller {
                 }
                 OscEvent::AvatarChanged { id } => {
                     self.on_avatar_changed();
+                    // A switch to an avatar just uploaded follows what VRChat wears.
+                    self.avatar_upload_echo(&id);
                     // N4N0 reads the parameters the last avatar held before they go (`on_osc`).
                     self.n4n0.on_avatar(id.clone());
                     messages.push((AVATAR_CHANGE.to_string(), vec![OscValue::Text(id)]));
@@ -1533,14 +1538,21 @@ impl Controller {
         let Some(editor) = editors.first() else {
             anyhow::bail!("Open your Unity project with Mixer to send the splats to it.");
         };
-        crate::mixer_inbox::send_splats(editor, &dir, &title)?;
+        // Mixer reads the PLY itself: an edited capture goes as a copy holding only the splats its 3D view keeps.
+        let sent = crate::mixer_inbox::session_for_mixer(&dir, &crate::mixer_inbox::exports_dir())?;
+        crate::mixer_inbox::send_splats(editor, &sent, &title)?;
         let project = if editor.project_name.is_empty() { "Unity".to_string() } else { editor.project_name.clone() };
-        self.notify(NoticeKind::Success, format!("Sent to Mixer in {project}: the splats appear in its open scene."));
+        let without = if sent != dir { ", without the splats hidden or deleted in its 3D view" } else { "" };
+        self.notify(NoticeKind::Success, format!("Sent to Mixer in {project}{without}: the splats appear in its open scene."));
         Ok(())
     }
 
     /// Trains splats from a session: now when nothing runs and nothing records, else once its turn comes.
     pub fn reconstruct(self: &Shared, dir: PathBuf) -> anyhow::Result<()> {
+        // Splat edits name splats of the result they were made on: the new result replaces them with it.
+        if orbiters_core::reconstruction::result_dir(&dir).join(orbiters_core::reconstruction::EDIT_FILE).is_file() {
+            self.notify(NoticeKind::Warning, "The splats hidden or deleted in its 3D view come back with the new reconstruction: select them again there.".to_string());
+        }
         if self.queue_reconstruction(dir)? {
             self.notify(NoticeKind::Info, format!("Waiting its turn: the reconstruction starts {}.", self.reconstruction_waits_for()));
         }
@@ -2163,6 +2175,9 @@ fn spawn_watchers(ctl: Shared) {
                         }
                     }
                 }
+
+                // An avatar uploaded from Unity: VRChat is asked to wear it (contracts' Docs/avatar-upload.md).
+                ctl.avatar_upload_tick();
 
                 // Storage, every 30 s (it walks the session folders).
                 if tick.is_multiple_of(30) {

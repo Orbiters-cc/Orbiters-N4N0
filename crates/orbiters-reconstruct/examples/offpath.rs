@@ -190,7 +190,7 @@ fn main() -> anyhow::Result<()> {
         anyhow::ensure!(w == v.width && h == v.height, "{}: {w}×{h}, the list says {}×{}", v.file, v.width, v.height);
         let cam = Camera::from_strip(&v.camera_to_world, &v.projection, w, h, 1.0);
         let ones = vec![1.0f32; (w * h) as usize];
-        gpu.set_mask(w, h, &ones);
+        gpu.set_mask(w, h, &ones)?;
         let img = train::render(&mut gpu, &cam, [0.0; 3])?;
         let (psnr, _, ssim) = metrics::metrics(&img, &truth, &ones, w as usize, h as usize);
         let depth: Option<Vec<f32>> = match &v.depth {

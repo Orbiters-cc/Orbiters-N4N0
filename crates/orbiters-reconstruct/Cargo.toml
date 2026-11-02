@@ -21,6 +21,7 @@ wgpu = "30"
 # wgpu-hal's: the Vulkan device's queue priority and the memory budget (crate::gpu).
 ash = "0.38"
 fastrand = "2"
+zstd = "0.13"
 rayon = { workspace = true }
 # The sky map's sky.png (crate::sky).
 png = { workspace = true }
@@ -30,4 +31,5 @@ windows = { workspace = true }
 sysinfo = "0.37"
 
 [dev-dependencies]
+half = "2.7"
 naga = { version = "30", features = ["wgsl-in", "hlsl-out", "spv-out"] }

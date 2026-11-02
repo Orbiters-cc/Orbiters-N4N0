@@ -32,6 +32,7 @@ mod gallery_assets;
 mod gallery_talk;
 mod projects_panel;
 mod editor;
+mod splats_select;
 mod vrchat_login;
 mod vr_audio;
 mod worlds_overlay;
@@ -113,6 +114,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("splats-3d") {
         return splats_3d(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("splats-select") {
+        return splats_select::shots(&mut Offscreen::new()?, &out, &settings, scale);
     }
     if only.as_deref() == Some("editor-3d") {
         return editor::three_d(&mut Offscreen::new()?, &out, &settings, scale);
@@ -1066,6 +1070,25 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             home: None,
             library: None,
         },
+        // VRChat and OSC, with the development environment's choice for the avatar worn uploaded again.
+        Scenario {
+            name: "settings-osc",
+            page: Page::Settings,
+            snapshot: {
+                let mut s = idle.clone();
+                s.settings.development = true;
+                s
+            },
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 900.0,
+            world: None,
+            home: None,
+            library: None,
+        },
         Scenario {
             name: "settings-scrolled",
             page: Page::Settings,
@@ -1511,7 +1534,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     // The selected project's 3D preview (a stand-in scene, or `ORBITERS_PREVIEW_FILE`, one Toolkit wrote): settled,
     // rising out of the ground, the camera swinging round, turned by a drag, its window growing out of the card and
-    // open (with two scenes), a sheet's on narrow windows (`--width 1040`), and the notes of projects without one.
+    // open (with two scenes), close up and from behind in the open window (materials' look), a sheet's on narrow
+    // windows (`--width 1040`), and the notes of projects without one.
     for (name, frames) in [
         ("projects-preview", 200),
         ("projects-preview-reveal", 30),
@@ -1519,6 +1543,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         ("projects-preview-turned", 120),
         ("projects-preview-open-mid", 96),
         ("projects-preview-open", 230),
+        ("projects-preview-close", 230),
+        ("projects-preview-back", 230),
         ("projects-preview-scenes", 230),
         ("projects-preview-sheet", 200),
         ("projects-preview-none", 90),

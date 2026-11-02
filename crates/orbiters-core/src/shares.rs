@@ -56,6 +56,19 @@ pub struct Capture {
     pub picture_url: Option<String>,
     pub view: serde_json::Value,
     pub vrchat_slot: Option<u32>,
+    /// Its files' revision: 1 as uploaded, one more each time its owner replaced them after editing its splats
+    /// (contracts `Docs/capture-sharing.md`, Updating a capture); 0 from a server that does not say ([`Capture::revision`]).
+    #[serde(default)]
+    pub revision: u64,
+    /// When its files were last replaced (none until then).
+    #[serde(default)]
+    pub revised_at: Option<String>,
+}
+impl Capture {
+    /// Its files' revision (a server listing none has only the files as uploaded: 1).
+    pub fn revision(&self) -> u64 {
+        self.revision.max(1)
+    }
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -230,6 +243,21 @@ impl std::fmt::Display for ExplicitAcknowledgement {
 }
 impl std::error::Error for ExplicitAcknowledgement {}
 
+/// A replacement of a capture's files refused because they are not at the revision it named any more (contracts
+/// `Docs/capture-sharing.md`, Updating a capture: 409 `revision-conflict`): replaced meanwhile, from elsewhere.
+#[derive(Debug)]
+pub struct RevisionConflict {
+    /// The revision its files are at now.
+    pub revision: u64,
+    pub message: String,
+}
+impl std::fmt::Display for RevisionConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for RevisionConflict {}
+
 /// Shared by uploads and sharing so a 409 keeps its machine-readable meaning.
 pub(crate) fn json<T: serde::de::DeserializeOwned>(response: ureq::http::Response<ureq::Body>) -> anyhow::Result<T> {
     let status = response.status().as_u16();
@@ -239,6 +267,9 @@ pub(crate) fn json<T: serde::de::DeserializeOwned>(response: ureq::http::Respons
         let message = value["message"].as_str().or_else(|| value["error"].as_str()).unwrap_or("Orbiters could not complete the request").to_string();
         if status == 409 && value["code"] == "explicit-acknowledgement" {
             return Err(ExplicitAcknowledgement(message).into());
+        }
+        if status == 409 && value["code"] == "revision-conflict" {
+            return Err(RevisionConflict { revision: value["revision"].as_u64().unwrap_or(0), message }.into());
         }
         return Err(ApiError { status, message }.into());
     }

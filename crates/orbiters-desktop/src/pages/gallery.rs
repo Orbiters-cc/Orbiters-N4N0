@@ -318,6 +318,11 @@ impl State {
             "gallery-done",
             "gallery-copy-link",
             "gallery-copy-link-offer",
+            "gallery-edited",
+            "gallery-updating",
+            "gallery-update-replacing",
+            "gallery-updated",
+            "gallery-update-failed",
         ]
         .contains(&name)
         {
@@ -755,13 +760,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                         });
                         let shown = if open_key.as_ref() == Some(&e.key) { 0.0 } else { state.community.card_shown(&e.key) };
                         let about = if assets::owns(&e.key) { state.assets.labels(e) } else { None };
-                        let sharing = cx.snap.capture_shares.iter().any(|j| j.key == e.key && j.outcome.is_none());
+                        let running = cx.snap.capture_shares.iter().filter(|j| j.key == e.key && j.outcome.is_none());
+                        let (sharing, updating) = running.fold((false, false), |(s, u), j| (s || !j.update, u || j.update));
                         let look = CardLook {
                             tex: tex.as_ref(),
                             from: from_tex.as_ref(),
                             shown,
                             interactive: !modal,
                             sharing,
+                            updating,
                             riding: false,
                             selected: state.select.has(&e.key),
                             selecting,
@@ -800,6 +807,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                                         shown: 1.0,
                                         interactive: false,
                                         sharing,
+                                        updating,
                                         riding: true,
                                         selected: false,
                                         selecting: false,
@@ -1157,6 +1165,7 @@ enum Menu {
     Edit,
     SharePublicly,
     ShareTo,
+    Update,
     CopyLink,
     Copy,
     CopyLayers,
@@ -1182,6 +1191,11 @@ fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_
     let several = select.has(&e.key) && select.keys.len() > 1;
     let copy = |what: &str| if several { format!("Copy the {} selected", select.keys.len()) } else { what.to_string() };
     let mine_shares = |acts: &mut Vec<(Menu, String, &'static str)>| {
+        if e.edited_since_upload() && item.is_none_or(|i| i.hidden.is_none()) {
+            // As its window says it: shared (publicly or with friends), or only uploaded.
+            let label = if item.is_some_and(|i| i.public || !i.grants.is_empty()) { "Update the shared capture" } else { "Update the uploaded copy" };
+            acts.push((Menu::Update, label.into(), icons::CLOUD_ARROW_UP));
+        }
         if e.ready && item.is_none_or(|i| i.can_share && i.hidden.is_none()) {
             if !public {
                 acts.push((Menu::SharePublicly, "Share publicly".into(), icons::GLOBE));
@@ -1279,15 +1293,23 @@ fn act_menu(ctx: &egui::Context, cx: &mut Cx, state: &mut State, entries: &[Entr
             }
         }
         // The item's window out of its card, then what was picked in it (one window built: it is large on the stack).
-        Menu::Edit | Menu::SharePublicly | Menu::ShareTo => {
+        Menu::Edit | Menu::SharePublicly | Menu::ShareTo | Menu::Update => {
             state.from_card = true;
             let radius = picture_radius(state.layout);
             let d = state.dialog.insert(Dialog::new(ctx, e, m == Menu::ShareTo).from(thumb, radius));
             match m {
                 Menu::Edit => d.edit(ctx),
                 Menu::SharePublicly => d.public(ctx, server),
+                Menu::Update => d.update(ctx, server),
                 _ => {}
             }
+        }
+        // Edited since it was shared: its link would show it as it was. Its window updates it first, then copies the link
+        // (as the window's own Copy public link does).
+        Menu::CopyLink if e.edited_since_upload() && e.remote.as_ref().is_some_and(|i| i.public) => {
+            state.from_card = true;
+            let radius = picture_radius(state.layout);
+            state.dialog.insert(Dialog::new(ctx, e, false).from(thumb, radius)).update_then_copy_link(ctx, server);
         }
         Menu::CopyLink => {
             if let Some(item) = e.remote.as_ref().filter(|i| i.public) {
@@ -1472,6 +1494,8 @@ struct CardLook<'a> {
     interactive: bool,
     /// A share of it is running.
     sharing: bool,
+    /// Its shared copy is being updated (Update the shared capture).
+    updating: bool,
     /// Drawn by its window, riding under it: takes no input, its hover and press let go.
     riding: bool,
     /// Chosen in the selection; any card is (its check shows on every card).
@@ -1573,6 +1597,8 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         );
     } else if queued {
         super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), "Waiting to reconstruct", theme::black(0.55), theme::FG_2, false);
+    } else if look.updating {
+        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), "Updating…", theme::black(0.55), theme::ACCENT, false);
     } else if look.sharing {
         super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), "Sharing…", theme::black(0.55), theme::ACCENT, false);
     }
@@ -1635,6 +1661,11 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         );
     } else {
         let (glyph, label, color) = match &e.remote {
+            // Its splats edited since it was uploaded: what Orbiters shows is not what its 3D view shows.
+            _ if e.edited_since_upload() && !look.updating => {
+                let shared = e.remote.as_ref().is_some_and(|i| i.public || !i.grants.is_empty());
+                (icons::CLOUD_ARROW_UP, if shared { "Edited since shared: update it" } else { "Edited since uploaded: update it" }.to_string(), theme::WARN)
+            }
             Some(i) if i.public => (icons::GLOBE, "Public on Orbiters".to_string(), theme::OK),
             Some(i) if !i.grants.is_empty() => (icons::USERS, format!("Shared with {}", i.grants.len()), theme::FG_2),
             Some(_) => (icons::LOCK_SIMPLE, "Only you".to_string(), theme::FG_3),
@@ -1955,6 +1986,105 @@ fn encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A capture of this computer shared publicly, then edited: its card says so where it says who sees it ("Edited since
+    /// shared: update it"), and "Updating…" while the update runs; painted on the CPU into `ORBITERS_TEST_OUT`
+    /// (`card-edited.png`, `card-updating.png`) when it is set.
+    #[test]
+    fn an_edited_shared_capture_says_so_on_its_card() {
+        use egui::RawInput;
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: crate::backend::Ctl =
+            std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let snap = ctl.view();
+        let mut e = controller::remote_entry(orbiters_core::shares::Item { kind: orbiters_core::shares::Kind::Capture, id: 3, mine: true, public: true, ..Default::default() });
+        e.world_name = "Exoplanet Journey".into();
+        e.taken = controller::unix("2026-11-02T13:30:00Z");
+        e.local = Some(controller::Local::Session(std::path::PathBuf::from("C:/Sessions/Exoplanet Journey 2026-11-02 14-30-00")));
+        e.ready = true;
+        e.edits = Some(Ok("0f3a9c2be1d47a60-5b1e0c9d2a7f3e18".into()));
+        e.uploaded_edits = Some(orbiters_reconstruct::edit::UNEDITED.into());
+        assert!(e.edited_since_upload());
+        let size = vec2(380.0, 320.0);
+        let mut painter = std::env::var_os("ORBITERS_TEST_OUT").map(|d| (std::path::PathBuf::from(d), orbiters_ui::software::Software::new(size.x as u32, size.y as u32)));
+        for (name, updating) in [("edited", false), ("updating", true)] {
+            let mut shapes = None;
+            for frame in 0..90 {
+                let input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), size)), time: Some(frame as f64 / 60.0 + 10.0), ..Default::default() };
+                let mut toasts = orbiters_ui::toast::Toasts::default();
+                let mut output = ctx.run_ui(input, |ui| {
+                    let cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                    let look = CardLook {
+                        tex: None,
+                        from: None,
+                        shown: 1.0,
+                        interactive: true,
+                        sharing: false,
+                        updating,
+                        riding: false,
+                        selected: false,
+                        selecting: false,
+                        carried: false,
+                        tile: false,
+                        about: None,
+                    };
+                    card(ui, &cx, 0, &e, Rect::from_min_size(pos2(24.0, 24.0), vec2(332.0, 262.0)), &look);
+                });
+                if let Some((_, sw)) = painter.as_mut() {
+                    sw.set_textures(&mut output.textures_delta);
+                    sw.free_textures(&mut output.textures_delta);
+                    shapes = Some((output.shapes, output.pixels_per_point));
+                }
+                output.textures_delta.clear();
+            }
+            if let (Some((dir, sw)), Some((shapes, ppp))) = (painter.as_mut(), shapes) {
+                let primitives = ctx.tessellate(shapes, ppp);
+                let pixels = sw.paint(&primitives, ppp, egui::Color32::from_rgb(9, 9, 11));
+                let image = egui::ColorImage::from_rgba_premultiplied([size.x as usize, size.y as usize], pixels);
+                std::fs::create_dir_all(&*dir).unwrap();
+                orbiters_ui::offscreen::save_png(&dir.join(format!("card-{name}.png")), &image).unwrap();
+            }
+        }
+    }
+
+    /// Copy public link on the card of a capture edited since it was shared never copies the link of the version shared
+    /// before: its window opens, updates it and copies the link once that is done (as its own Copy public link does). An
+    /// unedited capture's link is copied at once, without a window.
+    #[test]
+    fn copy_public_link_on_an_edited_shared_capture_updates_it_first() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: crate::backend::Ctl =
+            std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let snap = ctl.view();
+        let mut e = controller::remote_entry(orbiters_core::shares::Item {
+            kind: orbiters_core::shares::Kind::Capture,
+            id: 3,
+            mine: true,
+            public: true,
+            can_share: true,
+            ..Default::default()
+        });
+        e.world_id = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd".into();
+        e.local = Some(controller::Local::Session(std::path::PathBuf::from("C:/Sessions/Exoplanet Journey 2026-11-02 14-30-00")));
+        e.ready = true;
+        e.edits = Some(Ok("0f3a9c2be1d47a60-5b1e0c9d2a7f3e18".into()));
+        e.uploaded_edits = Some(orbiters_reconstruct::edit::UNEDITED.into());
+        let copy_link = |e: &Entry| {
+            let mut state = State::default();
+            let (mut clicked, mut community, mut asset, mut instance) = (None, None, None, None);
+            let mut opened = Opened { clicked: &mut clicked, community: &mut community, asset: &mut asset, instance: &mut instance };
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let mut cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+            act_menu(&ctx, &mut cx, &mut state, &[], e.clone(), Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 120.0)), Menu::CopyLink, &mut opened);
+            state.dialog.as_ref().and_then(|d| d.asked().map(|(operation, copy)| (matches!(operation, controller::Operation::Update), copy)))
+        };
+        assert!(e.edited_since_upload());
+        assert_eq!(copy_link(&e), Some((true, true)), "its window updates it, then copies the link");
+        e.uploaded_edits = e.edits.clone().and_then(Result::ok);
+        assert_eq!(copy_link(&e), None, "as shared: the link is copied at once");
+    }
+
     #[test]
     fn progressive_layout_keeps_the_visible_picture_at_the_same_screen_position() {
         let before = HashMap::from([("visible".into(), 900.0)]);

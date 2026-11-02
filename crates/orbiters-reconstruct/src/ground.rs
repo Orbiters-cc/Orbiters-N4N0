@@ -25,7 +25,7 @@ const BELOW_CAMERA: (f32, f32) = (0.2, 3.0);
 const BIN: f32 = 0.025;
 /// Without a floor in the splats, the hips stand this many eye heights above the ground (standing avatars measured
 /// 0.6 to 0.7 on four captures).
-const HIPS_PER_EYE_HEIGHT: f32 = 0.62;
+pub const HIPS_PER_EYE_HEIGHT: f32 = 0.62;
 
 /// What the ground was found from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

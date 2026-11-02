@@ -1,36 +1,65 @@
-# Metric-depth mesh experiment
+# Walkable colliders from a capture's exact depth
 
-This is an opt-in lab exporter, not a validated walkable VRChat world.
+A collider someone can walk on when they open a captured world in VRChat or Unity: its floors, stairs and ramps to
+stand on, its walls to bump into, nothing to fall through or snag on. Lab exporter (`crates/orbiters-reconstruct`,
+`orbiters_reconstruct::mesh`); the measurements are in the lab report `reports/colliders-v2.md`.
 
 ```
-orbiters-reconstruct --mesh <session> <out.glb> [--voxel 0.05]
-orbiters-reconstruct --mesh <session> <out.obj> [--voxel 0.05]
+orbiters-reconstruct --mesh <session> <out.glb|out.obj> [--voxel 0.04] [--quest] [--no-fill] [--radius 40]
+mesh_bench <session> <out dir> [--gt DIR] [--splats PLY] [--voxel 0.04,0.05] [--quest] [--reference NAME=GLB]...
 ```
 
-The exporter uses CPU fusion of depth validated by the usual preparation pipeline. Unknown, unused, sky and capture-mask samples do not contribute. It does not train splats or modify the session. Voxel size must be finite and between 0.01 and 1 metre. Default 5 cm is an experimental comparison setting, not a measured quality recommendation. Components smaller than 16 faces are removed, then vertex clustering reduces the result to at most 100,000 triangles. Separate substantial objects are retained. Fusion streams overlapping 32-cell blocks and welds boundary vertices. Weighted vertex clusters bound the intermediate mesh at about 200,000 vertices / 300,000 unique triangles before the final 100,000-triangle pass. The cluster cell doubles when this intermediate budget is reached; the requested voxel is the fusion resolution, not a promise of final edge length. Unused colour keyframes load at a maximum width of 640 to limit RAM; depth grid rays retain their exact calibration.
+## What it does
 
-Both output formats use metres, +Y up, and reflected world X with reversed face winding to convert the captured Unity world to right-handed coordinates. This matches [UnityGLTF's X reflection](https://raw.githubusercontent.com/KhronosGroup/UnityGLTF/main/Runtime/Plugins/GLTFSerialization/Schema/SchemaExtensions.cs). A Unity glTF importer must perform that handedness conversion; do not manually mirror the imported mesh again. Actual Unity importer/collider cooking remains a validation requirement.
+1. **Walked path and reachable region** (`mesh::roi`). The path is the avatar's hips from the capture kit's skeleton
+   frames when the session has them, else every recorded camera pose taken as the eyes (feet one eye height below:
+   VRChat's `EyeHeightAsMeters` when recorded, else 1.6 m). The region: within 40 m of the path horizontally, from 2 m
+   below the lowest feet to 4 m above the highest. Far geometry (a city skyline, mountains, a planet) is not a collider:
+   the first experiment spent its whole triangle budget on a 1.17 km × 1.6 km Exoplanet Journey; this one keeps
+   30 × 7 × 39 m of it. A jump of more than 2 m between recorded points is a teleport and is not walked.
+2. **Sparse TSDF** (`mesh::tsdf`): 8³-voxel blocks at 4 cm, hashed, allocated only around trusted surfaces in the
+   region. Depth is interpolated inside each frame's sample-grid quads as inverse depth (exact on planes) only where the
+   four samples lie on one surface seen at least 4° off grazing, so a depth edge never becomes a skin. Distances are point
+   to plane (along the ray times the sine to the quad's surface): a walking capture sees its floor at 3–20° off grazing,
+   where projective distances jump across a voxel and the floor is lost. Samples farther than 30 m are not fused.
+3. **The capturing person is carved out** where the skeleton says they stood (`mesh::fill::carve_walker`): otherwise a
+   statue of them stands in the collider (VRChat Home). Without a skeleton (a camera orbiting an avatar, as in the
+   Exoplanet session) the avatar is not located and stays.
+4. **Floor holes are closed only where evidence says floor** (`mesh::fill`): the walkable floor is flooded from under
+   the path across columns within a stair step; holes enclosed by it at one plane (≤ 4 m²), occlusion shadows behind
+   posts and benches bounded by it (≤ 40 m², ≤ 15 % of the rim open), and the unobserved floor within 1.5 m of the walked
+   path are filled as a thin synthetic band in voxels nothing observed. Never where the capture saw through the floor
+   (free space below the plane, or a floor more than 0.3 m below), never inside obstacles, never walls.
+5. **Marching cubes** (`mesh::mc`) with asymptotic-decider face decisions and fans that never share a diagonal across
+   cubes: a manifold surface.
+6. **Quadric-error simplification** (`mesh::simplify`): half-edge collapses under 2 cm area-weighted RMS error, each
+   moved vertex within 4 cm of the planes around it, link condition (no edge ever gets a third face), no flips,
+   boundaries pinned; in parallel on 8 m columns, then globally, then raising the error until the budget fits.
+7. **Debris**: components smaller than 0.6 m along every axis go (particles, leaves in the air, the carved walker's
+   cut-off hands).
 
-Unobserved TSDF cubes are skipped; no floor-fill operation is applied. Vertex clustering can nevertheless merge nearby surfaces across unobserved gaps, so unknown-space topology is not guaranteed. Sparse distant depth, discontinuities, animated avatars/particles and vertex clustering can make unsafe collision geometry. Neither small-component cleanup nor accurate rendered depth guarantees traversability. The extractor uses face contours and fixed ambiguous-face pairing; it does not guarantee a manifold surface. This switch is intentionally independent of the trainer's defaults.
+Budgets: 150 000 triangles (PC), 50 000 (`--quest`). PhysX keeps a static triangle mesh in a BVH, so triangles cost
+cooked memory (about 50 bytes each) and cooking time, not frame time; Quest gets a third for its memory and the 100 MB
+world cap. The captures measured so far need 11 000–74 000 triangles at the 2 cm error, so the PC budget does not bind.
 
-`mesh_bench <session> <output-directory> [ground-truth-directory] [splats.ply]` evaluates 2/5/10 cm at the same triangle cap. Ground truth uses `offpath`'s views.jsonl and little-endian eye-depth files. Outputs include GLB, OBJ, depth PNGs and per-view JSON. Accuracy is the mean of per-view median relative errors over covered true-depth pixels; within-5% and coverage use all valid true-depth pixels as denominator. Near-plane-clipped, two-sided CPU rasterization uses perspective-correct depth. Path probes report any near-horizontal support and support belonging to one connected near-horizontal component, within 0.2�3 m below recorded camera centres. These probes do not test capsule clearance or step height; excluding steep risers can also separate traversable stair treads.
+## Coordinates
 
-The optional opacity baseline is implemented here: Gaussian alpha >= 0.1, rotated ellipsoid bounds, half-voxel axis expansion, binary marching cubes, shared component cleanup and vertex clustering. It is not a reproduction of PlayCanvas's capsule carving or coplanar simplification. The thresholded ellipsoid comparator has explicit work/memory limits and fails rather than silently clipping enormous sky splats.
+GLB: metres, +Y up, the capture's Unity world X reflected and the winding reversed (UnityGLTF's and glTFast's
+convention): importing it gives back the Unity world exactly (`mesh_bench` reads every GLB back that way and scores the
+imported mesh; the alignment renders blend it over the game's own keyframes and the splats). One node and one mesh named
+"N4N0 collider", 16-bit indices up to 65 535 vertices. In Unity: add a MeshCollider to the imported object (non-convex,
+static) and disable its renderer; do not mirror it again.
 
-The benchmark also reports pooled pixel median error/coverage/within-5% across all views; per-view means remain available for comparison with `offpath`. Set `MESH_BENCH_VOXEL=0.05` to restrict a real-session sanity run to five centimetres. Failed arms write explicit `.error.json` files and do not suppress the remaining arms.
+## Measured
 
-The opacity baseline excludes the PLY's explicitly flagged sky splats (5,663 of 970,341 in the trained plaza); depth fusion also excludes sky. It does not drop any unflagged splat or crop to a hand-selected box. The raw sky shell reaches about 400 m and has scales up to 44 m, so treating it as collision would be physically inappropriate as well as wasteful.
+See the lab report for every number and render: plaza coverage over all and reachable ground-truth pixels, a capsule
+walking the recorded path (0.2 m radius, 0.35 m steps, 45° slopes), one connected floor under the keyframe cameras,
+boundary and non-manifold edges, triangles, bytes and seconds for plaza, VRChat Home, Exoplanet Journey and Find the
+Needle.
 
-Measured plaza result (all 104 true-depth views; geometry identical across four 5 cm runs, including the repaired shared Cargo build): 91,069 triangles, 1,581,296 bytes, 67.35 ? 21.60 s fusion plus GLB/OBJ export, pooled median relative depth error 0.805%, completeness 76.36%, and 64.01% of true pixels within 5%. Only 90/127 (70.87%) path cameras have supporting floor. The mesh has 35,949 boundary edges and 27,027 non-manifold edges. The 2/10 cm variants support only 81.89%/57.48% of the path. All three resolutions fail the walkable-collider gate; reject this implementation for production use.
+## Limits
 
-At 5 cm the intermediate clustering cell reaches 0.8 m on plaza. This is a major loss of spatial detail despite a nominal 5 cm fusion voxel. Home, Exo and Needle also have visible floor holes; Exo bounds span approximately 1.17 ? 0.57 ? 1.60 km. File format validation reports zero errors/warnings for the eight representative GLBs, which does not establish safe collision geometry.
-
-The report and reproducible measurements are in the lab's `reports/colliders.md` and `reports/colliders/`. Actual capsule traversal, doorway/stair fixtures, transient-debris rejection, and Unity collider cooking remain validation requirements. Coordinate round-trip tests and a mesh/splat point overlay establish native-world alignment, not Unity physics behaviour.
-
-PlayCanvas collision GLB imports in the benchmark account for its extra 180-degree Z rotation when baking PLY into engine space. The benchmark restores all three position signs for our PLY; a regression test covers this. Only a single primitive in an untransformed node is accepted, so unsupported layouts fail rather than being scored partially.
-
-The successful PlayCanvas 3.10.3 occupancy baseline at 10 cm, reduced to the same 100,000-triangle cap, has 85,798 triangles, 10.384% pooled median error, 91.49% completeness and 92.91% path support. Depth at 10 cm improves error to 0.715% but falls to 60.19% completeness and 57.48% path support. Depth at 5 cm also loses completeness. This is an accuracy/completeness tradeoff, not a merge-criterion win. Native occupancy conversion took 87.73 s (n=1), plus 23.35 ? 0.29 s CPU budget reduction/export (n=3). Native 2/5 cm conversion failed its grid limits; the initial component-filtered 5 cm retry was skipped by the disk guard, then succeeded after headroom recovered. No geometry scores are assigned to failed or skipped arms.
-
-The final scorer also passes an end-to-end asymmetric coordinate/winding fixture: 25 native positions and 32 oriented triangles survive PlayCanvas-engine import and GLB export exactly. The lab report retains the fixture, output and binary hashes.
-
-The subsequent component-filtered 5 cm occupancy arm keeps about 799k splats and, at the same triangle cap, produces 79,972 triangles: 3.971% median error, 83.44% completeness and 92.91% path support. Native conversion took 50.07 s (n=1), plus 10.40 ? 0.92 s budget reduction/export (n=3, byte-identical outputs). Depth at 5 cm remains more accurate but less complete, with worse path support. The filtered occupancy result also has 27,301 non-manifold edges. Seven selected Rust tests passed through the repaired shared test script; eight GLBs and corresponding OBJ exports passed format/position/index validation. These checks do not make either result a safe collider.
+- Never-observed parts of the reachable region stay open (the floor behind where a capture started, walls past 30 m).
+- Without skeleton frames, a camera orbiting the person fuses their avatar as an obstacle.
+- Thin structures seen from both sides (a fence, a single-plane wall) can cancel in the field.
+- Unity import, PhysX cooking and a real VRChat walk were not run here; the capsule walk is the proxy.

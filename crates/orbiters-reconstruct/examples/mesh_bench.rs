@@ -1,15 +1,34 @@
-//! CPU mesh evaluation: mesh_bench <session> <output directory> [ground truth directory] [occupancy PLY].
+//! Collider evaluation (orbiters_reconstruct::mesh):
+//!
+//! ```text
+//! mesh_bench <session> <output directory> [--gt DIR] [--splats PLY] [--voxel 0.04,0.05] [--radius M] [--no-fill]
+//!            [--quest] [--label NAME] [--reference NAME=FILE.glb]...
+//! ```
+//!
+//! Builds the collider at each voxel size, writes its GLB and scores the GLB as Unity imports it (X reflected back):
+//! - with a ground truth (`offpath`'s views.jsonl and little-endian eye-depth files): median relative depth error over
+//!   covered true pixels, coverage (covered / valid true pixels) and within-5 % (correct / valid true pixels, holes
+//!   count as failures), pooled over all pixels, over the pixels whose true surface lies in the reachable region, and
+//!   over those the capture observed (a voxel with weight there);
+//! - the walked path: the first experiment's floor probes under the keyframe cameras (one connected floor) and a
+//!   capsule walk (orbiters_reconstruct::mesh::walk);
+//! - geometry: boundary and non-manifold edges, components, triangles, bytes, seconds per stage;
+//! - renders: ground-truth views (reachable pixels green within 5 %, yellow off, red holes), keyframes beside the
+//!   collider shaded in their camera, a top view with the path, falls and blocks, and the splats over the collider when
+//!   a PLY is given.
+//!
+//! `--reference NAME=FILE.glb` scores an existing GLB in the same convention (the first experiment's, say) against the
+//! first arm's region.
+
 use anyhow::Context;
 use orbiters_reconstruct::{
     camera::Camera,
-    mesh::{self, Mesh},
+    mesh::{self, walk, Mesh, Roi, Settings},
     ply, prepare,
 };
 use serde::Deserialize;
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-};
+use std::path::{Path, PathBuf};
+
 #[derive(Deserialize)]
 struct View {
     depth: String,
@@ -18,333 +37,402 @@ struct View {
     width: u32,
     height: u32,
 }
-fn png(path: &Path, c: &Camera, d: &[f32]) -> anyhow::Result<()> {
-    let rgb: Vec<u8> = d
-        .iter()
-        .flat_map(|&z| {
-            if z.is_finite() {
-                let v = (255. * (1. - z / 40.).clamp(0., 1.)) as u8;
-                [v, v, v]
-            } else {
-                [100, 0, 100]
-            }
-        })
-        .collect();
-    let mut e = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(path)?), c.width, c.height);
+
+fn write_png(path: &Path, w: u32, h: u32, rgb: &[u8]) -> anyhow::Result<()> {
+    let mut e = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(path)?), w, h);
     e.set_color(png::ColorType::Rgb);
     e.set_depth(png::BitDepth::Eight);
-    e.write_header()?.write_image_data(&rgb)?;
+    e.write_header()?.write_image_data(rgb)?;
     Ok(())
-}
-fn overlay(path: &Path, c: &Camera, d: &[f32], g: &orbiters_reconstruct::gaussians::Gaussians) -> anyhow::Result<()> {
-    let w = c.width as usize;
-    let h = c.height as usize;
-    let mut rgb = vec![0u8; w * h * 9];
-    let mut points = vec![f32::INFINITY; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let z = d[y * w + x];
-            let color = if z.is_finite() {
-                let v = (255. * (1. - z / 40.).clamp(0., 1.)) as u8;
-                [v, v, v]
-            } else {
-                [100, 0, 100]
-            };
-            for panel in [0, 2] {
-                let k = (y * w * 3 + panel * w + x) * 3;
-                rgb[k..k + 3].copy_from_slice(&color);
-            }
-        }
-    }
-    for (i, &p) in g.means.iter().enumerate() {
-        let Some((x, y, z)) = c.project(p) else { continue };
-        let x = x.round() as i32;
-        let y = y.round() as i32;
-        if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
-            continue;
-        }
-        let at = y as usize * w + x as usize;
-        if z >= points[at] {
-            continue;
-        }
-        points[at] = z;
-        let color = g.colors[i].map(|v| (255. * v.clamp(0., 1.)) as u8);
-        let k = (y as usize * w * 3 + w + x as usize) * 3;
-        rgb[k..k + 3].copy_from_slice(&color);
-        if !d[at].is_finite() || (z - d[at]).abs() < 0.15 {
-            let k = (y as usize * w * 3 + 2 * w + x as usize) * 3;
-            rgb[k..k + 3].copy_from_slice(&color);
-        }
-    }
-    let mut e = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(path)?), c.width * 3, c.height);
-    e.set_color(png::ColorType::Rgb);
-    e.set_depth(png::BitDepth::Eight);
-    e.write_header()?.write_image_data(&rgb)?;
-    Ok(())
-}
-fn readback(file: &Path, m: &Mesh) -> anyhow::Result<f32> {
-    let b = std::fs::read(file)?;
-    let n = u32::from_le_bytes(b[12..16].try_into()?) as usize;
-    let start = 28 + n;
-    let mut maximum = 0.0f32;
-    for (i, p) in m.positions.iter().enumerate() {
-        let k = start + i * 12;
-        let mut decoded: [f32; 3] = std::array::from_fn(|c| f32::from_le_bytes(b[k + c * 4..k + c * 4 + 4].try_into().unwrap()));
-        decoded[0] = -decoded[0];
-        for c in 0..3 {
-            maximum = maximum.max((decoded[c] - p[c]).abs());
-        }
-    }
-    anyhow::ensure!(maximum == 0., "exported coordinates do not round-trip");
-    Ok(maximum)
-}
-// This deliberately supports the single, identity-node GLB emitted by splat-transform,
-// rejecting unsupported layouts instead of silently scoring a subset or ignoring a transform.
-fn collision_glb(path: &Path) -> anyhow::Result<Mesh> {
-    let b = std::fs::read(path)?;
-    let word = |at: usize| -> anyhow::Result<u32> { Ok(u32::from_le_bytes(b.get(at..at + 4).context("truncated GLB word")?.try_into()?)) };
-    anyhow::ensure!(b.get(..4) == Some(b"glTF") && word(4)? == 2 && word(8)? as usize == b.len(), "GLB header");
-    let n = word(12)? as usize;
-    anyhow::ensure!(word(16)? == 0x4e4f534a, "JSON chunk required");
-    let j: serde_json::Value = serde_json::from_slice(b.get(20..20 + n).context("truncated JSON")?)?;
-    let binary = 28 + n;
-    anyhow::ensure!(word(24 + n)? == 0x004e4942 && binary + word(20 + n)? as usize == b.len(), "BIN chunk required");
-    anyhow::ensure!(
-        j["meshes"].as_array().is_some_and(|v| v.len() == 1)
-            && j["meshes"][0]["primitives"].as_array().is_some_and(|v| v.len() == 1)
-            && j["nodes"].as_array().is_some_and(|v| v.len() == 1)
-            && j["nodes"][0]["mesh"] == 0,
-        "only a single mesh/primitive/node is supported"
-    );
-    for field in ["matrix", "translation", "rotation", "scale", "children"] {
-        anyhow::ensure!(j["nodes"][0][field].is_null(), "transformed or hierarchical GLB is unsupported");
-    }
-    let primitive = &j["meshes"][0]["primitives"][0];
-    anyhow::ensure!(primitive["mode"].is_null() || primitive["mode"] == 4, "triangle list required");
-    let pa = &j["accessors"][primitive["attributes"]["POSITION"].as_u64().context("position accessor")? as usize];
-    let ia = &j["accessors"][primitive["indices"].as_u64().context("index accessor")? as usize];
-    let data = |a: &serde_json::Value, element: usize| -> anyhow::Result<(&[u8], usize, usize)> {
-        anyhow::ensure!(a["sparse"].is_null(), "sparse accessors unsupported");
-        let v = &j["bufferViews"][a["bufferView"].as_u64().context("buffer view")? as usize];
-        anyhow::ensure!(v["buffer"] == 0, "embedded buffer required");
-        let start = v["byteOffset"].as_u64().unwrap_or(0) as usize;
-        let length = v["byteLength"].as_u64().context("buffer length")? as usize;
-        let start = binary.checked_add(start).context("buffer offset overflow")?;
-        let end = start.checked_add(length).context("buffer length overflow")?;
-        let bytes = b.get(start..end).context("buffer view out of range")?;
-        let offset = a["byteOffset"].as_u64().unwrap_or(0) as usize;
-        let count = a["count"].as_u64().context("accessor count")? as usize;
-        let stride = v["byteStride"].as_u64().unwrap_or(element as u64) as usize;
-        let extent = count.saturating_sub(1).checked_mul(stride).and_then(|n| n.checked_add(element)).context("accessor overflow")?;
-        anyhow::ensure!(
-            count > 0 && stride >= element && offset.checked_add(extent).is_some_and(|end| end <= bytes.len()),
-            "accessor out of range"
-        );
-        Ok((&bytes[offset..], count, stride))
-    };
-    anyhow::ensure!(pa["componentType"] == 5126 && pa["type"] == "VEC3", "float positions required");
-    let (bytes, count, stride) = data(pa, 12)?;
-    let positions: Vec<[f32; 3]> = (0..count)
-        .map(|i| std::array::from_fn(|c| -f32::from_le_bytes(bytes[i * stride + c * 4..i * stride + c * 4 + 4].try_into().unwrap())))
-        .collect();
-    anyhow::ensure!(positions.iter().flatten().all(|v| v.is_finite()), "nonfinite position");
-    // N4N0 PLY stores [x,y,-z]. PlayCanvas labels PLY with a 180-degree Z rotation,
-    // and writeVoxel bakes it into engine space: [-x,-y,-z]. Negate all axes back.
-    let ty = ia["componentType"].as_u64().context("index component type")?;
-    anyhow::ensure!((ty == 5125 || ty == 5123) && ia["type"] == "SCALAR", "unsigned indices required");
-    let element = if ty == 5125 { 4 } else { 2 };
-    let (bytes, count, stride) = data(ia, element)?;
-    anyhow::ensure!(count % 3 == 0, "triangle index count");
-    let indices: Vec<_> = (0..count)
-        .map(|i| {
-            if ty == 5125 {
-                u32::from_le_bytes(bytes[i * stride..i * stride + 4].try_into().unwrap())
-            } else {
-                u16::from_le_bytes(bytes[i * stride..i * stride + 2].try_into().unwrap()) as u32
-            }
-        })
-        .collect();
-    anyhow::ensure!(indices.iter().all(|&i| (i as usize) < positions.len()), "index out of range");
-    Ok(Mesh { positions, triangles: indices.chunks_exact(3).map(|t| [t[0], t[2], t[1]]).collect() })
 }
 
-fn occupancy(path: &Path, size: f32) -> anyhow::Result<Mesh> {
-    if path.extension().and_then(|s| s.to_str()) == Some("glb") {
-        return collision_glb(path);
+/// A shaded colour for a surface normal: walkable faces green-grey, walls orange-grey, lit from above-left.
+fn shade(n: [f32; 3]) -> [f32; 3] {
+    let light = (0.35 * n[0] + 0.8 * n[1].abs() + 0.45 * n[2]).abs() * 0.6 + 0.4;
+    let base = if n[1].abs() >= 45f32.to_radians().cos() { [0.45, 0.85, 0.5] } else { [0.95, 0.65, 0.35] };
+    base.map(|c| c * light)
+}
+
+#[derive(Default)]
+struct Pool {
+    errors: Vec<f32>,
+    valid: usize,
+    within: usize,
+}
+
+impl Pool {
+    fn add(&mut self, truth: f32, d: f32) {
+        self.valid += 1;
+        if d.is_finite() {
+            let e = (d - truth).abs() / truth;
+            if e <= 0.05 {
+                self.within += 1;
+            }
+            self.errors.push(e);
+        }
     }
-    let g = ply::read(path)?;
-    let mut occupied = HashSet::new();
-    for (i, p) in g.means.iter().enumerate() {
-        if g.sky[i] {
-            continue;
+    fn json(&mut self) -> serde_json::Value {
+        self.errors.sort_unstable_by(f32::total_cmp);
+        serde_json::json!({
+            "pixels": self.valid,
+            "coverage": self.errors.len() as f64 / self.valid.max(1) as f64,
+            "within5": self.within as f64 / self.valid.max(1) as f64,
+            "median_relative": self.errors.get(self.errors.len() / 2),
+            "p90_relative": self.errors.get(self.errors.len() * 9 / 10),
+        })
+    }
+}
+
+struct Inputs<'a> {
+    session: &'a Path,
+    out: &'a Path,
+    gt: Option<&'a Path>,
+    views: &'a [View],
+    data: &'a orbiters_reconstruct::dataset::Dataset,
+    splats: Option<&'a orbiters_reconstruct::gaussians::Gaussians>,
+}
+
+/// Scores `m` (as Unity imports it) and writes its renders; returns the arm's JSON.
+fn evaluate(i: &Inputs, name: &str, m: &Mesh, roi: &Roi, volume: Option<&mesh::tsdf::Volume>, feet: &[[f32; 3]], eye_height: f32) -> anyhow::Result<serde_json::Value> {
+    let (mut all, mut reach, mut seen) = (Pool::default(), Pool::default(), Pool::default());
+    // Reachable pixels by the true surface's height over the lowest feet, and by its horizontal distance to the path.
+    let mut by_height: [Pool; 3] = Default::default();
+    let mut by_distance: [Pool; 3] = Default::default();
+    let floor = feet.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+    let near_path = PathDistance::new(feet);
+    let mut per_view = Vec::new();
+    for (k, v) in i.views.iter().enumerate() {
+        let c = Camera::from_strip(&v.camera_to_world, &v.projection, v.width, v.height, 1.);
+        let rendered = m.depth(&c);
+        let bytes = std::fs::read(i.gt.unwrap().join(&v.depth))?;
+        let truth: Vec<f32> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+        anyhow::ensure!(truth.len() == rendered.len(), "truth dimensions");
+        let mut view_reach = Pool::default();
+        let mut rgb = vec![0u8; truth.len() * 3];
+        for (p, (&t, &d)) in truth.iter().zip(&rendered).enumerate() {
+            if !(t > 0. && t.is_finite()) {
+                rgb[p * 3..p * 3 + 3].copy_from_slice(&[40, 40, 70]);
+                continue;
+            }
+            all.add(t, d);
+            let world = c.unproject((p as u32 % c.width) as f32, (p as u32 / c.width) as f32, t);
+            let inside = roi.contains(world);
+            let colour = if inside {
+                reach.add(t, d);
+                view_reach.add(t, d);
+                let up = world[1] - floor;
+                by_height[if up < 0.15 { 0 } else if up < 2.0 { 1 } else { 2 }].add(t, d);
+                let far = near_path.distance(world);
+                by_distance[if far < 10.0 { 0 } else if far < 25.0 { 1 } else { 2 }].add(t, d);
+                if volume.is_some_and(|v| v.observed(world)) {
+                    seen.add(t, d);
+                }
+                if !d.is_finite() {
+                    [230, 40, 40]
+                } else if (d - t).abs() / t <= 0.05 {
+                    [60, 200, 90]
+                } else {
+                    [230, 200, 40]
+                }
+            } else {
+                let g = (255. * (1. - t / 80.).clamp(0., 1.) * 0.5) as u8;
+                [g, g, g]
+            };
+            rgb[p * 3..p * 3 + 3].copy_from_slice(&colour);
         }
-        let opacity = 1.0 / (1.0 + (-g.opacity_logits[i]).exp());
-        if opacity < 0.1 {
-            continue;
+        per_view.push(view_reach.json());
+        if k % 35 == 0 {
+            write_png(&i.out.join(format!("{name}-gt-{k}.png")), c.width, c.height, &rgb)?;
         }
-        let r = orbiters_reconstruct::gaussians::rotation_matrix(g.rotations[i]);
-        let scale = g.log_scales[i].map(f32::exp);
-        let cutoff = (2.0 * (opacity / 0.1).ln()).sqrt();
-        let extent: [f32; 3] = std::array::from_fn(|a| (0..3).map(|b| (r[a][b] * scale[b]).powi(2)).sum::<f32>().sqrt() * cutoff + size);
-        let lo: [i32; 3] = std::array::from_fn(|a| ((p[a] - extent[a]) / size).floor() as i32);
-        let hi: [i32; 3] = std::array::from_fn(|a| ((p[a] + extent[a]) / size).ceil() as i32);
-        anyhow::ensure!(
-            (0..3).map(|a| (hi[a] - lo[a] + 1) as i64).product::<i64>() < 10_000_000,
-            "occupancy splat exceeds 10M candidate nodes"
-        );
-        for x in lo[0]..=hi[0] {
-            for y in lo[1]..=hi[1] {
-                for z in lo[2]..=hi[2] {
-                    let k = [x, y, z];
-                    let d: [f32; 3] = std::array::from_fn(|a| k[a] as f32 * size - p[a]);
-                    // Expand each Gaussian axis by half a voxel so sub-voxel thin discs are represented.
-                    let d2 = (0..3).map(|b| ((0..3).map(|a| r[a][b] * d[a]).sum::<f32>() / (scale[b] + size * 0.5)).powi(2)).sum::<f32>();
-                    if d2 <= cutoff * cutoff {
-                        occupied.insert(k);
+    }
+    // Keyframes beside the collider shaded in their camera, and blended over them.
+    for (k, v) in i.data.views.iter().step_by((i.data.views.len() / 3).max(1)).take(3).enumerate() {
+        let c = v.camera;
+        let (depth, normals) = m.render(&c);
+        let (w, h) = (c.width as usize, c.height as usize);
+        let mut rgb = vec![0u8; w * h * 9];
+        for y in 0..h {
+            for x in 0..w {
+                let px = v.image[y * w + x];
+                let photo = [px & 255, (px >> 8) & 255, (px >> 16) & 255].map(|c| c as f32 / 255.);
+                let at = y * w + x;
+                let mesh = if depth[at].is_finite() { Some(shade(normals[at])) } else { None };
+                let panels = [photo, mesh.unwrap_or([0.4, 0.0, 0.4]), mesh.map_or(photo, |m| std::array::from_fn(|i| 0.45 * photo[i] + 0.55 * m[i]))];
+                for (panel, colour) in panels.iter().enumerate() {
+                    let o = (y * w * 3 + panel * w + x) * 3;
+                    for ch in 0..3 {
+                        rgb[o + ch] = (colour[ch].clamp(0., 1.) * 255.) as u8;
                     }
                 }
             }
         }
-        anyhow::ensure!(occupied.len() < 12_000_000, "occupancy exceeds 12M nodes");
+        write_png(&i.out.join(format!("{name}-keyframe-{k}.png")), c.width * 3, c.height, &rgb)?;
+        if k == 0 {
+            if let Some(g) = i.splats {
+                // Splat centres (sky excluded) over the shaded collider: alignment in the capture's own camera.
+                let mut over = vec![0u8; w * h * 3];
+                for at in 0..w * h {
+                    let s = if depth[at].is_finite() { shade(normals[at]).map(|c| c * 0.6) } else { [0.15, 0.0, 0.15] };
+                    for ch in 0..3 {
+                        over[at * 3 + ch] = (s[ch] * 255.) as u8;
+                    }
+                }
+                let mut near = vec![f32::INFINITY; w * h];
+                for (j, &p) in g.means.iter().enumerate() {
+                    if g.sky.get(j).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    let Some((x, y, z)) = c.project(p) else { continue };
+                    let (x, y) = (x.round() as i64, y.round() as i64);
+                    if x < 0 || y < 0 || x >= w as i64 || y >= h as i64 {
+                        continue;
+                    }
+                    let at = y as usize * w + x as usize;
+                    if z < near[at] && (!depth[at].is_finite() || z < depth[at] + 0.1) {
+                        near[at] = z;
+                        let col = g.colors[j].map(|v| (v.clamp(0., 1.) * 255.) as u8);
+                        over[at * 3..at * 3 + 3].copy_from_slice(&col);
+                    }
+                }
+                write_png(&i.out.join(format!("{name}-splats-over-collider.png")), c.width, c.height, &over)?;
+            }
+        }
     }
-    let mut f = HashMap::new();
-    for &k in &occupied {
-        for x in -1..=1 {
-            for y in -1..=1 {
-                for z in -1..=1 {
-                    let q = [k[0] + x, k[1] + y, k[2] + z];
-                    f.insert(q, if occupied.contains(&q) { -0.5 } else { 0.5 });
+    let keyframe_cameras: Vec<_> = i.data.views.iter().map(|v| v.camera.position()).collect();
+    let (supported, same_floor) = m.floor_support(&keyframe_cameras);
+    let capsule = walk::Capsule::for_eye_height(eye_height);
+    let walked = walk::walk(m, feet, &capsule);
+    top_view(&i.out.join(format!("{name}-top.png")), m, feet, &walked)?;
+    let audit = m.audit();
+    let bounds_min: [f32; 3] = std::array::from_fn(|k| m.positions.iter().map(|p| p[k]).fold(f32::INFINITY, f32::min));
+    let bounds_max: [f32; 3] = std::array::from_fn(|k| m.positions.iter().map(|p| p[k]).fold(f32::NEG_INFINITY, f32::max));
+    let _ = i.session;
+    Ok(serde_json::json!({
+        "name": name,
+        "all_pixels": all.json(),
+        "reachable_pixels": reach.json(),
+        "observed_reachable_pixels": seen.json(),
+        "reachable_by_height": {"floor_below_0.15m": by_height[0].json(), "body_0.15_to_2m": by_height[1].json(), "above_2m": by_height[2].json()},
+        "reachable_by_path_distance": {"under_10m": by_distance[0].json(), "10_to_25m": by_distance[1].json(), "over_25m": by_distance[2].json()},
+        "keyframe_floor_support": supported as f64 / keyframe_cameras.len().max(1) as f64,
+        "keyframe_single_floor_support": same_floor as f64 / keyframe_cameras.len().max(1) as f64,
+        "walk": walked,
+        "capsule": capsule,
+        "audit": audit,
+        "triangles": m.triangles.len(),
+        "vertices": m.positions.len(),
+        "bounds_min": bounds_min,
+        "bounds_max": bounds_max,
+        "per_view_reachable": per_view,
+    }))
+}
+
+/// Horizontal distance to the walked path, on a 0.5 m grid.
+struct PathDistance {
+    x0: f32,
+    z0: f32,
+    w: usize,
+    h: usize,
+    d: Vec<f32>,
+}
+
+impl PathDistance {
+    fn new(feet: &[[f32; 3]]) -> Self {
+        let mut pts: Vec<[f32; 3]> = Vec::new();
+        for p in feet {
+            if pts.last().is_none_or(|l| ((p[0] - l[0]).powi(2) + (p[2] - l[2]).powi(2)).sqrt() >= 0.25) {
+                pts.push(*p);
+            }
+        }
+        let lo = |i: usize| pts.iter().map(|p| p[i]).fold(f32::INFINITY, f32::min) - 60.0;
+        let hi = |i: usize| pts.iter().map(|p| p[i]).fold(f32::NEG_INFINITY, f32::max) + 60.0;
+        let (x0, z0) = (lo(0), lo(2));
+        let (w, h) = (((hi(0) - x0) / 0.5) as usize + 1, ((hi(2) - z0) / 0.5) as usize + 1);
+        let d = (0..w * h)
+            .map(|i| {
+                let (x, z) = (x0 + (i % w) as f32 * 0.5 + 0.25, z0 + (i / w) as f32 * 0.5 + 0.25);
+                pts.iter().map(|p| (p[0] - x).powi(2) + (p[2] - z).powi(2)).fold(f32::INFINITY, f32::min).sqrt()
+            })
+            .collect();
+        Self { x0, z0, w, h, d }
+    }
+    fn distance(&self, p: [f32; 3]) -> f32 {
+        let (x, z) = (((p[0] - self.x0) / 0.5).floor(), ((p[2] - self.z0) / 0.5).floor());
+        if x < 0.0 || z < 0.0 || x as usize >= self.w || z as usize >= self.h {
+            return f32::INFINITY;
+        }
+        self.d[z as usize * self.w + x as usize]
+    }
+}
+
+/// A top view: height-shaded collider (walls darker), the path blue, falls red, blocks orange.
+fn top_view(path: &Path, m: &Mesh, feet: &[[f32; 3]], walked: &walk::Report) -> anyhow::Result<()> {
+    if m.positions.is_empty() {
+        return Ok(());
+    }
+    let lo: [f32; 3] = std::array::from_fn(|k| m.positions.iter().map(|p| p[k]).fold(f32::INFINITY, f32::min));
+    let hi: [f32; 3] = std::array::from_fn(|k| m.positions.iter().map(|p| p[k]).fold(f32::NEG_INFINITY, f32::max));
+    let scale = (1600.0 / (hi[0] - lo[0]).max(hi[2] - lo[2]).max(1.0)).min(40.0);
+    let (w, h) = (((hi[0] - lo[0]) * scale) as usize + 1, ((hi[2] - lo[2]) * scale) as usize + 1);
+    let mut top = vec![f32::NEG_INFINITY; w * h];
+    let mut rgb = vec![25u8; w * h * 3];
+    // Image x = world x mirrored (a map seen from above in Unity, +Z up the image).
+    let px = |p: [f32; 3]| (((hi[0] - p[0]) * scale), ((hi[2] - p[2]) * scale));
+    for t in &m.triangles {
+        let p = t.map(|v| m.positions[v as usize]);
+        let n = mesh::normal(p);
+        let s = p.map(px);
+        let (x0, x1) = (s.iter().map(|q| q.0).fold(f32::INFINITY, f32::min).floor().max(0.) as usize, (s.iter().map(|q| q.0).fold(f32::NEG_INFINITY, f32::max).ceil() as usize).min(w - 1));
+        let (y0, y1) = (s.iter().map(|q| q.1).fold(f32::INFINITY, f32::min).floor().max(0.) as usize, (s.iter().map(|q| q.1).fold(f32::NEG_INFINITY, f32::max).ceil() as usize).min(h - 1));
+        let area = (s[1].0 - s[0].0) * (s[2].1 - s[0].1) - (s[2].0 - s[0].0) * (s[1].1 - s[0].1);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                let a = ((s[1].0 - fx) * (s[2].1 - fy) - (s[2].0 - fx) * (s[1].1 - fy)) / area;
+                let b = ((s[2].0 - fx) * (s[0].1 - fy) - (s[0].0 - fx) * (s[2].1 - fy)) / area;
+                let c = 1. - a - b;
+                let inside = area.abs() > 1e-9 && a >= 0. && b >= 0. && c >= 0.;
+                // Walls (nearly vertical in the top view) get at least their outline.
+                let near = area.abs() <= 1e-9 || !inside;
+                if near && !(n[1].abs() < 0.7 && seg_dist(s, fx, fy) < 0.8) {
+                    continue;
+                }
+                let y_here = if inside { a * p[0][1] + b * p[1][1] + c * p[2][1] } else { p.iter().map(|q| q[1]).fold(f32::NEG_INFINITY, f32::max) };
+                let at = y * w + x;
+                if y_here > top[at] {
+                    top[at] = y_here;
+                    let v = ((y_here - lo[1]) / (hi[1] - lo[1]).max(0.1)).clamp(0., 1.);
+                    let col = if n[1].abs() >= 0.7 { [0.3 + 0.6 * v, 0.35 + 0.6 * v, 0.3 + 0.5 * v] } else { [0.55, 0.3, 0.15] };
+                    rgb[at * 3..at * 3 + 3].copy_from_slice(&col.map(|c| (c * 255.) as u8));
                 }
             }
         }
     }
-    Ok(mesh::marching_cubes(&f, size))
+    let mut dot = |p: [f32; 3], col: [u8; 3], r: i64| {
+        let (x, y) = px(p);
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let (xx, yy) = (x as i64 + dx, y as i64 + dy);
+                if xx >= 0 && yy >= 0 && (xx as usize) < w && (yy as usize) < h {
+                    let at = yy as usize * w + xx as usize;
+                    rgb[at * 3..at * 3 + 3].copy_from_slice(&col);
+                }
+            }
+        }
+    };
+    for p in feet {
+        dot(*p, [60, 120, 255], 1);
+    }
+    for p in &walked.fall_at {
+        dot(*p, [255, 30, 30], 5);
+    }
+    for p in &walked.block_at {
+        dot(*p, [255, 150, 0], 5);
+    }
+    write_png(path, w as u32, h as u32, &rgb)
 }
+
+fn seg_dist(s: [(f32, f32); 3], x: f32, y: f32) -> f32 {
+    (0..3)
+        .map(|k| {
+            let (a, b) = (s[k], s[(k + 1) % 3]);
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let l = dx * dx + dy * dy;
+            let t = if l > 0. { (((x - a.0) * dx + (y - a.1) * dy) / l).clamp(0., 1.) } else { 0. };
+            ((a.0 + t * dx - x).powi(2) + (a.1 + t * dy - y).powi(2)).sqrt()
+        })
+        .fold(f32::INFINITY, f32::min)
+}
+
 fn main() -> anyhow::Result<()> {
-    let a: Vec<_> = std::env::args().skip(1).collect();
-    anyhow::ensure!(a.len() >= 2, "session output [gt] [ply]");
+    let a: Vec<String> = std::env::args().skip(1).collect();
+    anyhow::ensure!(a.len() >= 2, "mesh_bench <session> <out> [--gt DIR] [--splats PLY] [--voxel 0.04,0.05] [--radius M] [--no-fill] [--quest] [--label NAME] [--reference NAME=GLB]");
+    let session = Path::new(&a[0]);
     let out = Path::new(&a[1]);
     std::fs::create_dir_all(out)?;
+    let (mut gt, mut splats, mut voxels, mut label, mut references) = (None, None, vec![0.04f32], String::from("v2"), Vec::new());
+    let mut base = Settings::default();
+    let mut k = 2;
+    while k < a.len() {
+        let value = || a.get(k + 1).cloned().context("missing value");
+        match a[k].as_str() {
+            "--gt" => gt = Some(PathBuf::from(value()?)),
+            "--splats" => splats = Some(PathBuf::from(value()?)),
+            "--voxel" => voxels = value()?.split(',').map(|v| v.parse()).collect::<Result<_, _>>()?,
+            "--radius" => base.radius = value()?.parse()?,
+            "--error" => base.error = value()?.parse()?,
+            "--max-depth" => base.max_depth = value()?.parse()?,
+            "--quant-trunc" => base.quant_trunc = value()?.parse()?,
+            "--label" => label = value()?,
+            "--reference" => references.push(value()?),
+            "--no-fill" => {
+                base.fill = false;
+                k -= 1
+            }
+            "--quest" => {
+                base.budget = mesh::QUEST_BUDGET;
+                k -= 1
+            }
+            other => anyhow::bail!("unknown option {other}"),
+        }
+        k += 2;
+    }
     let load = std::time::Instant::now();
-    let p = prepare::prepare(Path::new(&a[0]), &prepare::Options { width: 640, aberration: false, ..Default::default() }, |_| {})?;
+    let p = prepare::prepare(session, &prepare::Options { width: 640, aberration: false, ..Default::default() }, |_| {})?;
     let loading = load.elapsed().as_secs_f64();
     for s in p.describe() {
         eprintln!("{s}");
     }
-    let views: Vec<View> = if a.len() > 2 {
-        std::fs::read_to_string(Path::new(&a[2]).join("views.jsonl"))?.lines().map(serde_json::from_str).collect::<Result<_, _>>()?
-    } else {
-        vec![]
+    let views: Vec<View> = match &gt {
+        Some(g) => std::fs::read_to_string(g.join("views.jsonl"))?.lines().map(serde_json::from_str).collect::<Result<_, _>>()?,
+        None => vec![],
     };
-    let sizes: Vec<f32> = if let Ok(v) = std::env::var("MESH_BENCH_VOXEL") { vec![v.parse()?] } else { vec![0.02, 0.05, 0.1] };
-    let mut failed = false;
-    let first_mode = if std::env::var("MESH_BENCH_MODE").as_deref() == Ok("occupancy") { 1 } else { 0 };
-    for mode in first_mode..if a.len() > 3 { 2 } else { 1 } {
-        for &size in &sizes {
-            let name = format!("{}-{:.0}cm", if mode == 0 { "depth" } else { "occupancy-opacity" }, size * 100.);
-            let arm = (|| -> anyhow::Result<()> {
-                let start = std::time::Instant::now();
-                let mut m = if mode == 0 { mesh::fuse(&p.data, size)? } else { occupancy(Path::new(&a[3]), size)? };
-                let raw = m.triangles.len();
-                m.clean(16);
-                m.decimate(100_000, size);
-                let components = m.clean(16);
-                let file = out.join(format!("{name}.glb"));
-                m.write(&file)?;
-                let roundtrip_error = readback(&file, &m)?;
-                m.write(&out.join(format!("{name}.obj")))?;
-                let elapsed = start.elapsed().as_secs_f64();
-                let mut per_view = Vec::new();
-                let mut pooled_errors = Vec::new();
-                let mut total_true = 0usize;
-                let mut total_within = 0usize;
-                for (i, v) in views.iter().enumerate() {
-                    let c = Camera::from_strip(&v.camera_to_world, &v.projection, v.width, v.height, 1.);
-                    let rendered = m.depth(&c);
-                    let bytes = std::fs::read(Path::new(&a[2]).join(&v.depth))?;
-                    let truth: Vec<_> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
-                    anyhow::ensure!(truth.len() == rendered.len(), "truth dimensions");
-                    let mut errors = Vec::new();
-                    let mut valid = 0;
-                    let mut within = 0;
-                    for (&gt, &d) in truth.iter().zip(&rendered) {
-                        if gt > 0. && gt.is_finite() {
-                            valid += 1;
-                            if d.is_finite() {
-                                let e = (d - gt).abs() / gt;
-                                if e <= 0.05 {
-                                    within += 1
-                                }
-                                errors.push(e);
-                            }
-                        }
-                    }
-                    total_true += valid;
-                    total_within += within;
-                    pooled_errors.extend_from_slice(&errors);
-                    errors.sort_unstable_by(f32::total_cmp);
-                    per_view.push(serde_json::json!({"median_relative":errors.get(errors.len()/2),"within5_all":within as f64/valid.max(1) as f64,"coverage":errors.len() as f64/valid.max(1) as f64}));
-                    if i % 35 == 0 {
-                        png(&out.join(format!("{name}-gt-{i}.png")), &c, &rendered)?;
-                    }
-                }
-                for (i, v) in p.data.views.iter().step_by((p.data.views.len() / 3).max(1)).take(3).enumerate() {
-                    let c = v.camera;
-                    let depth = m.depth(&c);
-                    png(&out.join(format!("{name}-capture-{i}.png")), &c, &depth)?;
-                    if i == 0 && a.len() > 3 && Path::new(&a[3]).extension().and_then(|s| s.to_str()) == Some("ply") {
-                        let g = ply::read(Path::new(&a[3]))?;
-                        overlay(&out.join(format!("{name}-splat-overlay.png")), &c, &depth, &g)?;
-                    }
-                }
-                let path: Vec<_> = p.data.views.iter().map(|v| v.camera.position()).collect();
-                let (supported, same_floor) = m.floor_support(&path);
-                pooled_errors.sort_unstable_by(f32::total_cmp);
-                let mean = |key: &str| {
-                    let values: Vec<_> = per_view.iter().filter_map(|v| v[key].as_f64()).collect();
-                    (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64)
-                };
-                let bounds_min: [f32; 3] = std::array::from_fn(|i| m.positions.iter().map(|p| p[i]).fold(f32::INFINITY, f32::min));
-                let bounds_max: [f32; 3] = std::array::from_fn(|i| m.positions.iter().map(|p| p[i]).fold(f32::NEG_INFINITY, f32::max));
-                let result = serde_json::json!({"gltf_roundtrip_max_error":roundtrip_error,"pooled_median_relative":pooled_errors.get(pooled_errors.len()/2),"pooled_coverage":pooled_errors.len() as f64/total_true.max(1) as f64,"pooled_within5_all":total_within as f64/total_true.max(1) as f64,"bounds_min":bounds_min,"bounds_max":bounds_max,"name":name,"loading_seconds":loading,"mesh_seconds":elapsed,"pre_cleanup_triangles":raw,"triangles":m.triangles.len(),"bytes":std::fs::metadata(file)?.len(),"components":components,"single_floor_support_share":same_floor as f64/path.len().max(1) as f64,"path_support_share":supported as f64/p.data.views.len().max(1) as f64,"views":per_view.len(),"mean_median_relative":mean("median_relative"),"mean_within5_all":mean("within5_all"),"mean_coverage":mean("coverage"),"per_view":per_view});
-                std::fs::write(out.join(format!("{name}.json")), serde_json::to_vec_pretty(&result)?)?;
-                println!(
-                    "{}",
-                    serde_json::json!({"name":name,"seconds":elapsed,"triangles":m.triangles.len(),"coverage":result["mean_coverage"],"median":result["mean_median_relative"]})
-                );
-                Ok(())
-            })();
-            if let Err(error) = arm {
-                failed = true;
-                let failure = serde_json::json!({"name":name,"error":format!("{error:#}")});
-                eprintln!("{failure}");
-                std::fs::write(out.join(format!("{name}.error.json")), serde_json::to_vec_pretty(&failure)?)?;
-            }
+    let g = splats.as_ref().map(|s| ply::read(s)).transpose()?;
+    let inputs = Inputs { session, out, gt: gt.as_deref(), views: &views, data: &p.data, splats: g.as_ref() };
+    let mut first: Option<(Roi, Vec<[f32; 3]>, f32)> = None;
+    let mut summary = Vec::new();
+    for &voxel in &voxels {
+        let s = Settings { voxel, ..base.clone() };
+        let name = format!("{label}-{:.0}cm", voxel * 100.);
+        let built = mesh::build(session, &p.data, &s)?;
+        let file = out.join(format!("{name}.glb"));
+        let write = std::time::Instant::now();
+        built.mesh.write(&file)?;
+        let write_seconds = write.elapsed().as_secs_f64();
+        let imported = Mesh::read_glb(&file, true)?;
+        anyhow::ensure!(imported == built.mesh, "the GLB does not import back to the captured world exactly");
+        let mut result = evaluate(&inputs, &name, &imported, &built.roi, Some(&built.volume), &built.path.feet, built.path.eye_height)?;
+        result["build"] = built.stats.clone();
+        result["loading_seconds"] = loading.into();
+        result["write_seconds"] = write_seconds.into();
+        result["bytes"] = std::fs::metadata(&file)?.len().into();
+        result["volume_bytes"] = built.volume.bytes().into();
+        result["settings"] = format!("{s:?}").into();
+        std::fs::write(out.join(format!("{name}.json")), serde_json::to_vec_pretty(&result)?)?;
+        let line = serde_json::json!({
+            "name": name, "seconds": built.stats["seconds"], "triangles": result["triangles"], "bytes": result["bytes"],
+            "reachable": result["reachable_pixels"], "all": result["all_pixels"], "observed": result["observed_reachable_pixels"],
+            "walk_supported": result["walk"]["supported"], "walk_blocked": result["walk"]["blocked"], "falls": result["walk"]["falls"], "blocks": result["walk"]["blocks"],
+            "single_floor": result["keyframe_single_floor_support"], "audit": result["audit"],
+        });
+        println!("{line}");
+        summary.push(line);
+        if first.is_none() {
+            first = Some((built.roi.clone(), built.path.feet.clone(), built.path.eye_height));
         }
     }
-    anyhow::ensure!(!failed, "one or more mesh arms failed; see error JSON");
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn mesh_playcanvas_engine_coordinates_restore_native_world() {
-        let m = Mesh { positions: vec![[1., 2., 3.], [2., 2., 3.], [1., 3., 3.]], triangles: vec![[0, 1, 2]] };
-        let path = std::env::temp_dir().join(format!("orbiters-playcanvas-{}.glb", std::process::id()));
-        // Mesh::write reflects X and winding. Pre-reflect Y/Z so the fixture is a valid
-        // PlayCanvas-engine GLB, including correct accessor bounds, not just patched bytes.
-        let fixture = Mesh {
-            positions: m.positions.iter().map(|p| [p[0], -p[1], -p[2]]).collect(),
-            triangles: m.triangles.clone(),
-        };
-        fixture.write(&path).unwrap();
-        let restored = collision_glb(&path).unwrap();
-        assert_eq!(restored.positions, m.positions);
-        assert_eq!(restored.triangles, m.triangles);
-        std::fs::write(&path, b"bad").unwrap();
-        assert!(collision_glb(&path).is_err());
-        std::fs::remove_file(path).unwrap();
+    if let Some((roi, feet, eye_height)) = &first {
+        for r in &references {
+            let (name, file) = r.split_once('=').context("--reference NAME=FILE.glb")?;
+            let m = Mesh::read_glb(Path::new(file), true)?;
+            let mut result = evaluate(&inputs, name, &m, roi, None, feet, *eye_height)?;
+            result["bytes"] = std::fs::metadata(file)?.len().into();
+            std::fs::write(out.join(format!("{name}.json")), serde_json::to_vec_pretty(&result)?)?;
+            let line = serde_json::json!({"name": name, "triangles": result["triangles"], "reachable": result["reachable_pixels"], "all": result["all_pixels"], "walk_supported": result["walk"]["supported"], "walk_blocked": result["walk"]["blocked"], "falls": result["walk"]["falls"], "blocks": result["walk"]["blocks"], "single_floor": result["keyframe_single_floor_support"], "audit": result["audit"]});
+            println!("{line}");
+            summary.push(line);
+        }
     }
+    std::fs::write(out.join("summary.json"), serde_json::to_vec_pretty(&summary)?)?;
+    Ok(())
 }

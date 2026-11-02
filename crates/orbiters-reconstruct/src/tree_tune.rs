@@ -2,10 +2,13 @@
 //! Quest and the top of that one, which a world shows while the full file downloads. A tree keeps the splats that add
 //! the most to the recorded cameras' images ([`Rank::Contribution`]); its leaves are then re-fitted to the full model's
 //! renders from those cameras as the file's bytes hold them (colours within 0–1: a trained model holds about half its
-//! splats' colours outside, which the bytes clip; [`ExportOptions::decoded`]); and each depth of merged boxes is tuned
-//! on the GPU to look like the leaves it stands in for, at the resolution where that depth is drawn. Everything
-//! renders from the session's recorded cameras, never its keyframes, so a session whose keyframes are gone exports all
-//! the same. Measured on the lab's five sessions: the SOTA lab's reports/export-leaves.md (2026-11-02).
+//! splats' colours outside, which the colour bytes clip; [`ExportOptions::decoded`]); and each depth of merged boxes is
+//! tuned on the GPU to look like the leaves it stands in for, at the resolution where that depth is drawn. Leaves and
+//! merged depths are as the file stores them (crate::tree_file: positions in steps of each box's bounds, half-float
+//! scales, the rotation's smallest three components, colour bytes): the target is what a world draws up close, and a
+//! depth keeps its tuning only when what the file will hold of it scores better. Everything renders from the session's
+//! recorded cameras, never its keyframes, so a session whose keyframes are gone exports all the same. Measured on the
+//! lab's five sessions: the SOTA lab's reports/export-leaves.md (2026-11-02).
 
 use crate::camera::Camera;
 use crate::gaussians::Gaussians;
@@ -16,12 +19,13 @@ use orbiters_core::contracts::frame_record::record_flags;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Splats in the PC file at most (64 MB): with Quest's, the coarse one and a sky map, an upload stays under the
-/// Cloudflare limit of 100 MB in front of Orbiters (contracts' Docs/splat-tree.md).
+/// Splats in the PC file at most (41.9 MB of 20-byte records; version 1's 32 bytes made it 67.1): with Quest's, the
+/// coarse one and a sky map, an upload stays under the Cloudflare limit of 100 MB in front of Orbiters (contracts'
+/// Docs/splat-tree.md). Smaller records leave the cap as it was: the world's sort and blending cost the same a splat.
 pub const PC_SPLATS: usize = 1 << 21;
-/// In the Quest file at most (16 MB): what a Quest decodes and sorts smoothly.
+/// In the Quest file at most (10.5 MB): what a Quest decodes and sorts smoothly.
 pub const QUEST_SPLATS: usize = 1 << 19;
-/// In the coarse file at most (1.5 MB).
+/// In the coarse file at most (about 1 MB).
 pub const COARSE_SPLATS: usize = 49_152;
 /// Training steps per depth of merged boxes.
 const STEPS: u32 = 400;
@@ -245,20 +249,11 @@ fn subset(g: &Gaussians, keep: &[usize]) -> Gaussians {
     out
 }
 
-/// `g` as the file rounds it (crate::web::write_splat: colour, opacity and rotation in bytes).
+/// `g` as the file rounds it but for positions (crate::tree_file::round_attributes: half-float log scales, the
+/// rotation's smallest three components, colour and opacity bytes), for the lab's scoring of a model as a file holds it
+/// (examples/treeloss.rs).
 pub fn quantize(g: &mut Gaussians) {
-    let mut bytes = Vec::with_capacity(crate::web::SPLAT_BYTES);
-    for i in 0..g.len() {
-        bytes.clear();
-        crate::web::write_splat(&mut bytes, g, i);
-        if let Ok(back) = crate::web::read_splat(&bytes) {
-            g.means[i] = back.means[0];
-            g.log_scales[i] = back.log_scales[0];
-            g.rotations[i] = back.rotations[0];
-            g.opacity_logits[i] = back.opacity_logits[0];
-            g.colors[i] = back.colors[0];
-        }
-    }
+    crate::tree_file::round_attributes(g);
 }
 
 /// The full model's renders from `cameras` (black behind, as the leaves train): the re-fit's targets.
@@ -451,12 +446,8 @@ pub fn vrchat_files_with(
                 }
             }
         }
-        if options.decoded {
-            quantize(&mut pc.splats);
-            if let Some((_, q)) = quest.as_mut() {
-                quantize(&mut q.splats);
-            }
-        }
+        // Decode-aware tuning keeps the merged depths' colours within 0–1 too; what the file stores of leaves and merged
+        // depths is what tune_for scores either way (crate::tree_file, Tree::select_stored).
         let share = if quest.is_none() { 0.85 } else { 0.55 };
         let _time = PrepStage::new("tune pc");
         gpu.clamp_colors = options.decoded;
@@ -565,7 +556,8 @@ fn tune_for(
     let poses: Vec<([f32; 3], [f32; 3])> = cameras.iter().map(|c| (c.position(), c.forward())).collect();
     let cameras: Vec<Camera> = crate::dataset::spread(&poses, CAMERAS).into_iter().map(|i| cameras[i]).collect();
     let lr = learning_rates(&cameras);
-    let leaves = tree.leaf_splats();
+    // The leaves as the file stores them: what a world draws where a merged depth stands in for them.
+    let leaves = tree.select_stored(|n| n.leaf);
     let mut depths: Vec<u32> = tree.nodes.iter().filter(|n| !n.leaf).map(|n| n.depth).collect();
     depths.sort_unstable();
     depths.dedup();
@@ -603,7 +595,8 @@ fn tune_for(
             })
             .collect::<anyhow::Result<_>>()?;
         drop(_target_time);
-        let cut = tree.select(|n| n.depth == depth || (n.leaf && n.depth < depth));
+        // As the file stores it: the tuning starts from what a world would draw, and `before` scores that.
+        let cut = tree.select_stored(|n| n.depth == depth || (n.leaf && n.depth < depth));
         // Where each tuned box's splats sit in the cut (it keeps the tree's box order).
         let mut at = Vec::with_capacity(tuned.len());
         let mut offset = 0usize;
@@ -630,6 +623,22 @@ fn tune_for(
             let target = Target::Color { rgba: &targets[j], scene_pixels: (v.width * v.height) as f32, weight: 1.0, ssim: 0.2, robust: 0.0 };
             gpu.step(v, [0.0; 3], target, Some(lr))?;
         }
+        // What the file will hold of the tuned boxes: their trained splats (a splat whose training went non-finite keeps
+        // its own), rounded box by box as it stores them (the rest of the cut stays as it started).
+        let trained = gpu.download_params()?;
+        let mut tuned_cut = cut.clone();
+        for &(from, to, count) in &at {
+            for k in 0..count {
+                let (source, i) = if trained.is_finite(from + k) { (&trained, from + k) } else { (&tree.splats, to + k) };
+                tuned_cut.means[from + k] = source.means[i];
+                tuned_cut.log_scales[from + k] = source.log_scales[i];
+                tuned_cut.rotations[from + k] = source.rotations[i];
+                tuned_cut.opacity_logits[from + k] = source.opacity_logits[i];
+                tuned_cut.colors[from + k] = source.colors[i];
+            }
+            crate::tree_file::round_box(&mut tuned_cut, from..from + count);
+        }
+        gpu.upload(&tuned_cut);
         let after = mean_score(gpu)?;
         drop(_step_time);
         eprintln!("tree depth {depth}: {} boxes, PSNR against the leaves {before:.6} → {after:.6} dB", tuned.len());
@@ -644,7 +653,6 @@ fn tune_for(
             progress((done + 1) as f32 / depths.len() as f32);
             continue;
         }
-        let trained = gpu.download_params()?;
         for (from, to, count) in at {
             for k in 0..count {
                 if trained.is_finite(from + k) {
@@ -695,34 +703,6 @@ mod tests {
         // Everything fits: everything is kept, tight or not.
         let (keep, _) = fitting(&g, 1 << 20, &score, 1 << 19, true);
         assert_eq!(keep.len(), tree::eligible(&g));
-    }
-
-    #[test]
-    fn rounded_splats_write_the_same_file() {
-        let g = cloud(5000);
-        let mut rounded = g.clone();
-        quantize(&mut rounded);
-        let bytes = |g: &Gaussians| {
-            let mut b = Vec::new();
-            (0..g.len()).for_each(|i| crate::web::write_splat(&mut b, g, i));
-            b
-        };
-        let (a, b) = (bytes(&g), bytes(&rounded));
-        // Positions, colour and opacity write the same bytes, scales the same floats but for the last bit (through
-        // their logarithm), and a rotation byte may move by one where normalising the decoded quaternion crosses a
-        // rounding edge.
-        let scale = |x: &[u8], k: usize| f32::from_le_bytes(x[12 + 4 * k..16 + 4 * k].try_into().unwrap());
-        let moved = a
-            .chunks(32)
-            .zip(b.chunks(32))
-            .filter(|(x, y)| {
-                x[..12] != y[..12]
-                    || x[24..28] != y[24..28]
-                    || (0..3).any(|k| (scale(x, k) - scale(y, k)).abs() > 1e-6 * scale(x, k))
-                    || x[28..].iter().zip(&y[28..]).any(|(p, q)| p.abs_diff(*q) > 1)
-            })
-            .count();
-        assert_eq!(moved, 0);
     }
 
     /// A wall of small splats in front of the cameras (about seven deep: a few thousandths of the light gets through), a

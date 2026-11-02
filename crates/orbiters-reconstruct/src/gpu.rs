@@ -22,6 +22,10 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 const GRAD2D: usize = 10;
+/// [`Gpu::birth_stats`]: colour steps record each Gaussian's positional gradient and blended colour error, depth steps
+/// its distance from the measured surface (shaders/param_grads.wgsl).
+pub const BIRTH_STATS_COLOR: u32 = 1;
+pub const BIRTH_STATS_DEPTH: u32 = 2;
 const FAR: f32 = 1000.0;
 /// Readbacks of intersection counts in flight: the host runs at most this many steps ahead of the GPU.
 const RING: usize = 3;
@@ -258,6 +262,7 @@ struct Training {
     relocate_classify: wgpu::ComputePipeline,
     relocate_adjust: wgpu::ComputePipeline,
     relocate_copy: wgpu::ComputePipeline,
+    relocate_spawn: wgpu::ComputePipeline,
     squared_error: wgpu::ComputePipeline,
     /// The largest weights (the PLY's seen statistics), and whether they reach a threshold (fading).
     visibility: wgpu::ComputePipeline,
@@ -285,11 +290,14 @@ struct Training {
 
 /// A relocation round decided on the CPU (crate::train::plan_relocation) for [`Gpu::apply_relocation`]: sources' new
 /// opacity logits and log-scale deltas (`[index, logit bits, delta bits, 0]`), copies (`[target, source, three standard
-/// normal offsets as bits, 0, 0, 0]`; targets are dead slots, then the slots past the end) and the new set's size.
+/// normal offsets as bits, mode, 0, 0]`, mode 1 a long-axis split; targets are dead slots, then the slots past the end),
+/// new Gaussians written whole (`[target, mean, log scales, rotation, opacity logit, colour, 0]` as bits: births at
+/// measured depth, crate::births) and the new set's size.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Relocation {
     pub adjust: Vec<[u32; 4]>,
     pub copies: Vec<[u32; 8]>,
+    pub spawns: Vec<[u32; 16]>,
     pub len: usize,
 }
 
@@ -411,6 +419,15 @@ pub struct Gpu {
     pub regularise_unseen: bool,
     /// Whether relocated Gaussians count Adam's bias correction from their restart (crate::train::Settings).
     pub adam_restart: bool,
+    /// Birth statistics training steps record for relocation (shaders/common.wgsl stats_mode; crate::train::Sources):
+    /// [`BIRTH_STATS_COLOR`] on colour steps, [`BIRTH_STATS_DEPTH`] on depth steps.
+    pub birth_stats: u32,
+    /// 3DGS-MCMC's SGLD noise on the means (shaders/project_backward_adam.wgsl `sgld`), times the position learning
+    /// rate (0: none; crate::train::Settings::noise), and whether Gaussians anchored on measured depth are spared it.
+    pub noise: f32,
+    pub noise_gate: bool,
+    /// And whether only the Gaussians a step shows take it (crate::train::Settings::noise_visible).
+    pub noise_visible: bool,
     /// A viewer's guards (project.wgsl; [`Gpu::renderer`] sets them): splats fade in over the first 20 cm from the eye,
     /// those holding the eye are left out, none reaches further than 1024 px on screen, and they sort by distance from
     /// the eye. Training never uses them: what they hide there would never be corrected.
@@ -509,8 +526,8 @@ impl PendingWeights {
     }
 }
 
-/// A downloaded set: the Gaussians, their Adam moments (packed like the parameters) and statistics.
-pub type Download = (Gaussians, Vec<f32>, Vec<f32>, Vec<[f32; 4]>);
+/// A downloaded set: the Gaussians, their Adam moments (packed like the parameters) and statistics (param_grads.wgsl).
+pub type Download = (Gaussians, Vec<f32>, Vec<f32>, Vec<[f32; 8]>);
 
 const QUERIES: u32 = 2048;
 
@@ -728,7 +745,7 @@ fn kernel_sources(sums: Option<GradientSums>, sum_lanes: u32) -> Vec<KernelSourc
             source("depth_loss", &[common, include_str!("shaders/depth_loss.wgsl")], &["main"]),
             source("project_backward", &[common, read, include_str!("shaders/param_grads.wgsl"), include_str!("shaders/project_backward.wgsl")], &["main"]),
             source("project_backward adam", &[common, read, include_str!("shaders/param_grads.wgsl"), include_str!("shaders/project_backward_adam.wgsl")], &["main"]),
-            source("relocate", &[include_str!("shaders/relocate.wgsl")], &["classify", "adjust", "copy"]),
+            source("relocate", &[include_str!("shaders/relocate.wgsl")], &["classify", "adjust", "copy", "spawn"]),
             source("raster visibility", &[common, raster, include_str!("shaders/raster_visibility.wgsl")], &["visibility", "visibility_over"]),
             source("raster contribution", &[common, raster, include_str!("shaders/raster_contribution.wgsl")], &["contribution"]),
             source("contribution fold", &[include_str!("shaders/contribution_fold.wgsl")], &["main"]),
@@ -928,6 +945,7 @@ impl Gpu {
             relocate_classify: pipe("relocate", "classify"),
             relocate_adjust: pipe("relocate", "adjust"),
             relocate_copy: pipe("relocate", "copy"),
+            relocate_spawn: pipe("relocate", "spawn"),
             squared_error: pipe("loss", "squared_error"),
             visibility: pipe("raster visibility", "visibility"),
             visibility_over: pipe("raster visibility", "visibility_over"),
@@ -1028,6 +1046,10 @@ impl Gpu {
             scale_reg: 0.0,
             regularise_unseen: false,
             adam_restart: false,
+            birth_stats: 0,
+            noise: 0.0,
+            noise_gate: false,
+            noise_visible: false,
             guards: false,
             confidence: Confidence::default(),
             far: FarField::default(),
@@ -1281,7 +1303,7 @@ impl Gpu {
         let n = self.count;
         let m1: Vec<f32> = self.read(&s.m1, n * PACKED)?;
         let m2: Vec<f32> = self.read(&s.m2, n * PACKED)?;
-        let stats: Vec<[f32; 4]> = self.read::<f32>(&s.stats, n * 4)?.as_chunks::<4>().0.to_vec();
+        let stats: Vec<[f32; 8]> = self.read::<f32>(&s.stats, n * 8)?.as_chunks::<8>().0.to_vec();
         Ok((self.download_params()?, m1, m2, stats))
     }
 
@@ -1356,7 +1378,7 @@ impl Gpu {
             counts: storage(d, "tile counts", f(cap)),
             offsets: storage(d, "tile offsets", f(cap)),
             grad2d: storage(d, "grad2d", slot_bytes.unwrap_or(0) * (cap * GRAD2D) as u64),
-            stats: storage(d, "stats", t(cap * 4)),
+            stats: storage(d, "stats", t(cap * 8)),
             filter: storage(d, "3D filter", f(cap)),
             seen: storage(d, "seen", f(cap * 8)),
             marks: storage(d, "marks", f(cap.div_ceil(4))),
@@ -1381,25 +1403,27 @@ impl Gpu {
 
     /// [`Gpu::relocation_weights`] without waiting: the classification is queued behind the steps, and its result comes
     /// back through [`PendingWeights::take`] once the GPU gets there (training plans the round meanwhile, on another
-    /// thread, from weights a few steps old).
-    pub fn request_relocation_weights(&self, max_radius: f32) -> anyhow::Result<PendingWeights> {
+    /// thread, from weights a few steps old). With `scores`, the birth scores follow the weights (relocate.wgsl
+    /// `classify`: four floats a Gaussian in all).
+    pub fn request_relocation_weights(&self, max_radius: f32, scores: bool) -> anyhow::Result<PendingWeights> {
         let t = self.training()?;
         let s = self.splats.as_ref().context("no Gaussians")?;
         let n = self.count;
-        let weights = storage(&self.device, "relocation weights", (n * 4) as u64);
-        let info = self.uniform(&[n as u32, 0, max_radius.to_bits(), 0]);
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("relocation weights readback"), size: (n * 4).max(4) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let floats = if scores { 4 * n } else { n };
+        let weights = storage(&self.device, "relocation weights", (floats * 4) as u64);
+        let info = self.uniform(&[n as u32, u32::from(scores), max_radius.to_bits(), 0]);
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("relocation weights readback"), size: (floats * 4).max(4) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let mut enc = self.device.create_command_encoder(&Default::default());
         let bind = self.bind(&t.relocate_classify, &[(0, &info), (1, &s.params), (2, &s.stats), (3, &weights)]);
         self.dispatch(&mut enc, &t.relocate_classify, &bind, groups(n));
-        enc.copy_buffer_to_buffer(&weights, 0, &staging, 0, (n * 4) as u64);
+        enc.copy_buffer_to_buffer(&weights, 0, &staging, 0, (floats * 4) as u64);
         self.queue.submit([enc.finish()]);
         let state = Arc::new(AtomicU32::new(0));
         {
             let state = state.clone();
             staging.map_async(wgpu::MapMode::Read, .., move |r| state.store(if r.is_ok() { 1 } else { 2 }, Ordering::SeqCst));
         }
-        Ok(PendingWeights { staging, state, n })
+        Ok(PendingWeights { staging, state, n: floats })
     }
 
     /// Relocation on the device, second half: applies the plan (sources first, then their copies, whose Adam moments
@@ -1425,7 +1449,11 @@ impl Gpu {
         let t = self.training()?;
         let s = self.splats.as_ref().context("no Gaussians")?;
         let mut enc = self.device.create_command_encoder(&Default::default());
-        let passes: [(&wgpu::ComputePipeline, &[u8], usize); 2] = [(&t.relocate_adjust, bytemuck::cast_slice(&plan.adjust), plan.adjust.len()), (&t.relocate_copy, bytemuck::cast_slice(&plan.copies), plan.copies.len())];
+        let passes: [(&wgpu::ComputePipeline, &[u8], usize); 3] = [
+            (&t.relocate_adjust, bytemuck::cast_slice(&plan.adjust), plan.adjust.len()),
+            (&t.relocate_copy, bytemuck::cast_slice(&plan.copies), plan.copies.len()),
+            (&t.relocate_spawn, bytemuck::cast_slice(&plan.spawns), plan.spawns.len()),
+        ];
         for (pipeline, contents, count) in passes {
             if count == 0 {
                 continue;
@@ -1750,7 +1778,13 @@ impl Gpu {
         let tile8 = self.k.training.is_some() && (matches!(target, Target::Depth { .. }) || self.tile8_all);
         let tile = if tile8 { 8 } else { cpu::TILE };
         self.tile8_step = tile8;
-        let frame = self.frame_for(cam, background, loss, train, tile);
+        let mut frame = self.frame_for(cam, background, loss, train, tile);
+        // The birth statistics this step records (shaders/common.wgsl stats_mode), training steps only.
+        frame.confidence[2] = match &target {
+            Target::Color { .. } if self.birth_stats & BIRTH_STATS_COLOR != 0 => 1.0,
+            Target::Depth { .. } if self.birth_stats & BIRTH_STATS_DEPTH != 0 => 2.0,
+            _ => 0.0,
+        };
         self.queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));
         let (params, proj, counts, offsets, filter, seen_buf, marks) = {
             let s = self.splats.as_ref().context("no Gaussians")?;
@@ -2108,7 +2142,10 @@ impl Gpu {
         if lr.is_some() {
             self.step += 1;
         }
-        let info = lr.map(|lr| self.uniform_at(("adam", 0), &AdamInfo { lr: rates_of(lr), beta: [0.9, 0.999, 1e-15, 0.0], n: [(self.count * PACKED) as u32, self.step, u32::from(self.clamp_colors), 0] }));
+        // Gates (project_backward_adam.wgsl): bit 0 the noise spares the anchored, bit 1 only what this step shows, bit 2
+        // colours stay within 0–1.
+        let (noise, gate) = (self.noise, u32::from(self.noise_gate) | u32::from(self.noise_visible) << 1 | u32::from(self.clamp_colors) << 2);
+        let info = lr.map(|lr| self.uniform_at(("adam", 0), &AdamInfo { lr: rates_of(lr), beta: [0.9, 0.999, 1e-15, noise * lr.means], n: [(self.count * PACKED) as u32, self.step, gate, 0x5eed] }));
         let s = self.splats.as_ref().expect("splats");
         // No clear of grad2d: it is zero here, as the projection backward zeroes the sums it reads (new buffers start
         // zeroed).
@@ -3217,6 +3254,154 @@ mod tests {
         assert_eq!(gpu.overflows, 0);
     }
 
+    /// Birth statistics (shaders/common.wgsl stats_mode) ride in loss slots a step does not use: a colour step's and a
+    /// depth step's gradients are those of a step without them, and what they add up to is what the render says: over
+    /// every Gaussian, the colour error each blended sums to Σ error × (1 − T) over the scene pixels, and the weight at
+    /// depth samples to Σ (1 − T) over the samples' pixels.
+    #[test]
+    fn birth_statistics_leave_every_gradient_as_it_was_and_add_up() {
+        let Some(mut gpu) = devices().into_iter().next() else { return };
+        let (mut g, cam) = scene(3000, 96, 64, 71);
+        // A third of the set on one plane at depth 3, whose samples measure it.
+        for i in (0..g.len()).step_by(3) {
+            g.means[i] = cam.unproject((i % 96) as f32, ((i / 96) % 64) as f32, 3.0);
+        }
+        let mut rng = fastrand::Rng::with_seed(72);
+        let target: Vec<u32> = (0..cam.width * cam.height).map(|_| rng.u32(..) | 0xff00_0000).collect();
+        let mask: Vec<f32> = (0..cam.width * cam.height).map(|p| if p % 7 == 0 { 0.0 } else { 1.0 }).collect();
+        gpu.set_mask(cam.width, cam.height, &mask).expect("mask");
+        let px = mask.iter().sum::<f32>();
+        let samples: Vec<[f32; 4]> = (0..400).map(|k| [(k % 40) as f32 * 2.0 + 5.0, (k / 40) as f32 * 5.0 + 3.0, 3.0, 1.0]).collect();
+        for ssim in [0.0, 0.2] {
+            for depth in [false, true] {
+                let mut grads = Vec::new();
+                for stats in [0, BIRTH_STATS_COLOR | BIRTH_STATS_DEPTH] {
+                    gpu.birth_stats = stats;
+                    gpu.upload(&g);
+                    let t = if depth { Target::Depth { samples: &samples, weight: 0.3 } } else { Target::Color { rgba: &target, scene_pixels: px, weight: 1.0, ssim, robust: 0.0 } };
+                    gpu.step(&cam, [0.0; 3], t, None).expect("step");
+                    grads.push(gpu.read_grads().expect("gradients"));
+                }
+                let worst = grads[0].iter().zip(&grads[1]).map(|(a, b)| (a - b).abs() / a.abs().max(1e-6)).fold(0.0f32, f32::max);
+                assert!(worst < 1e-3, "depth {depth} (D-SSIM {ssim}): gradients off by {worst} with birth statistics");
+                // What the render says: its colour and each pixel's transmittance after the last splat.
+                let image = gpu.read_image().expect("image");
+                let left = gpu.read_transmittance().expect("transmittance");
+                let (_, _, _, stats) = gpu.download().expect("download");
+                if !depth {
+                    let expected: f64 = (0..image.len())
+                        .filter(|&p| mask[p] > 0.5)
+                        .map(|p| (0..3).map(|c| (image[p][c] as f64 - crate::dataset::channel(target[p], c) as f64).abs()).sum::<f64>() / 3.0 * (1.0 - left[p] as f64))
+                        .sum();
+                    let got: f64 = stats.iter().map(|s| s[3] as f64).sum();
+                    assert!((got - expected).abs() < 2e-3 * expected, "colour error blended: {got} on the device, {expected} from the render");
+                    assert!(stats.iter().filter(|s| s[1] == 1.0).count() > 1000 && stats.iter().all(|s| s[1] <= 1.0 && s[0] >= 0.0));
+                    assert!(stats.iter().any(|s| s[0] > 0.0));
+                } else {
+                    let pixels: std::collections::BTreeSet<usize> = samples.iter().map(|s| (s[1] as u32 * cam.width + s[0] as u32) as usize).collect();
+                    let expected: f64 = pixels.iter().map(|&p| 1.0 - left[p] as f64).sum();
+                    let got: f64 = stats.iter().map(|s| s[5] as f64).sum();
+                    assert!((got - expected).abs() < 2e-3 * expected, "weight at depth samples: {got} on the device, {expected} from the render");
+                    // The plane's Gaussians sit on the measured depth; most others do not.
+                    let on: Vec<f32> = (0..g.len()).step_by(3).filter(|&i| stats[i][5] > 0.01).map(|i| stats[i][4] / stats[i][5]).collect();
+                    assert!(on.len() > 20 && on.iter().all(|r| *r < 1e-3), "{} on the plane, worst {:?}", on.len(), on.iter().cloned().fold(0.0f32, f32::max));
+                    let off = (0..g.len()).filter(|i| i % 3 != 0 && stats[*i][5] > 0.01).filter(|&i| stats[i][4] / stats[i][5] > 0.05).count();
+                    assert!(off > 20, "{off} off the plane");
+                }
+            }
+        }
+        gpu.birth_stats = 0;
+    }
+
+    /// The long-axis split and births at measured depth on the device: what the CPU reference makes of the same plan.
+    #[test]
+    fn long_axis_splits_and_births_on_the_device_match_the_cpu() {
+        let Some(mut gpu) = devices().into_iter().next() else { return };
+        let (mut g, _) = scene(3000, 64, 48, 13);
+        for i in (0..g.len()).step_by(25) {
+            g.opacity_logits[i] = crate::gaussians::logit(0.001);
+        }
+        let n = g.len();
+        let ones = vec![1.0f32; n * PACKED];
+        gpu.upload_with_moments(&g, Some((&ones, &ones)));
+        let weights = gpu.relocation_weights(1e9).expect("weights");
+        let spawns: Vec<[f32; 14]> = (0..200).map(|k| [k as f32 * 0.01, 1.0, 2.0, -4.0, -4.5, -6.0, 0.9, 0.1, -0.3, 0.2, -2.2, 0.1, 0.5, 0.9]).collect();
+        let births = crate::train::Births { split: crate::train::Split::LongAxis, spawns: &spawns, spawn_share: 0.25, ..Default::default() };
+        let plan = crate::train::plan_relocation_by(&weights, n + n / 20, false, &births, &mut fastrand::Rng::with_seed(14));
+        let split = plan.copies.iter().filter(|c| c[5] == 1).count();
+        assert!(split > 50 && !plan.spawns.is_empty(), "{split} split, {} born", plan.spawns.len());
+        let mut expected = g.clone();
+        let (mut m1, mut m2) = (ones.clone(), ones.clone());
+        crate::train::apply_relocation(&mut expected, &mut m1, &mut m2, &plan);
+        gpu.apply_relocation(&plan).expect("apply");
+        let (got, got_m1, got_m2, _) = gpu.download().expect("download");
+        assert_eq!(got.len(), expected.len());
+        let (a, b) = (got.pack(), expected.pack());
+        for (k, (x, y)) in a.iter().zip(&b).enumerate() {
+            let same = x == y || (x - y).abs() <= 1e-5 * y.abs().max(1.0);
+            assert!(same, "Gaussian {} float {}: {x} on the device, {y} on the CPU", k / PACKED, k % PACKED);
+        }
+        assert_eq!(got_m1, m1);
+        assert_eq!(got_m2, m2);
+    }
+
+    /// SGLD noise (3DGS-MCMC) moves the nearly transparent Gaussians' means by about Σ·η times its scale, and the
+    /// opaque ones' not at all.
+    #[test]
+    fn sgld_noise_moves_only_the_nearly_transparent() {
+        let Some(mut gpu) = devices().into_iter().next() else { return };
+        let (mut g, cam) = scene(2000, 96, 64, 81);
+        for i in 0..g.len() {
+            g.opacity_logits[i] = crate::gaussians::logit(if i % 2 == 0 { 0.002 } else { 0.6 });
+            g.log_scales[i] = [-3.0; 3];
+        }
+        let target: Vec<u32> = vec![0xff40_8020; (cam.width * cam.height) as usize];
+        gpu.set_mask(cam.width, cam.height, &vec![1.0; (cam.width * cam.height) as usize]).expect("mask");
+        // Positions only (the other rates 0), so with the noise off the step is the same both times up to the order of
+        // the gradient sums.
+        let lr = LearningRates { means: 1e-4, log_scales: 0.0, rotations: 0.0, opacity: 0.0, colors: 0.0 };
+        let px = (cam.width * cam.height) as f32;
+        let mut after = Vec::new();
+        for noise in [0.0, 5e5] {
+            gpu.noise = noise;
+            gpu.upload(&g);
+            gpu.step = 0;
+            gpu.step(&cam, [0.0; 3], Target::Color { rgba: &target, scene_pixels: px, weight: 1.0, ssim: 0.0, robust: 0.0 }, Some(lr)).expect("step");
+            after.push(gpu.download_params().expect("download"));
+        }
+        gpu.noise = 0.0;
+        let moved = |i: usize| (0..3).map(|k| (after[1].means[i][k] - after[0].means[i][k]).powi(2)).sum::<f32>().sqrt();
+        // σ² = e^−6 ≈ 2.5e-3 m², the gate at opacity 0.002 is σ(0.3) ≈ 0.57 and the scale 1e-4 × 5e5 = 50: about
+        // 0.07 m a standard normal, 0.11 m for the length of three.
+        let transparent: Vec<f32> = (0..g.len()).step_by(2).map(moved).collect();
+        let mean = transparent.iter().sum::<f32>() / transparent.len() as f32;
+        assert!(mean > 0.07 && mean < 0.16, "the transparent ones moved {mean} m on average");
+        let opaque = (1..g.len()).step_by(2).map(moved).fold(0.0f32, f32::max);
+        assert!(opaque < 1e-5, "an opaque one moved {opaque} m");
+        // With `noise_visible`, transparent Gaussians the step does not show (behind the camera) stay where they are.
+        let mut behind = g.clone();
+        let back = [-cam.r[2][0], -cam.r[2][1], -cam.r[2][2]];
+        for i in (0..behind.len()).step_by(4) {
+            let p = behind.means[i];
+            behind.means[i] = [p[0] + 12.0 * back[0], p[1] + 12.0 * back[1], p[2] + 12.0 * back[2]];
+        }
+        let mut runs = Vec::new();
+        for visible in [false, true] {
+            gpu.noise = 5e5;
+            gpu.noise_visible = visible;
+            gpu.upload(&behind);
+            gpu.step = 0;
+            gpu.step(&cam, [0.0; 3], Target::Color { rgba: &target, scene_pixels: px, weight: 1.0, ssim: 0.0, robust: 0.0 }, Some(lr)).expect("step");
+            runs.push(gpu.download_params().expect("download"));
+        }
+        gpu.noise = 0.0;
+        gpu.noise_visible = false;
+        let off = |r: &Gaussians, i: usize| (0..3).map(|k| (r.means[i][k] - behind.means[i][k]).powi(2)).sum::<f32>().sqrt();
+        let unseen: Vec<usize> = (0..behind.len()).step_by(4).collect();
+        assert!(unseen.iter().map(|&i| off(&runs[0], i)).sum::<f32>() / unseen.len() as f32 > 0.05, "all Gaussians take the noise by default");
+        assert!(unseen.iter().all(|&i| off(&runs[1], i) == 0.0), "an unseen Gaussian moved with noise_visible");
+    }
+
     #[test]
     fn relocation_on_the_device_matches_the_cpu() {
         let Some(mut gpu) = devices().into_iter().next() else { return };
@@ -3255,7 +3440,7 @@ mod tests {
         }
         assert_eq!(got_m1, m1);
         assert_eq!(got_m2, m2);
-        assert!(stats.iter().all(|s| *s == [0.0; 4]));
+        assert!(stats.iter().all(|s| *s == [0.0; 8]));
     }
 
     #[test]

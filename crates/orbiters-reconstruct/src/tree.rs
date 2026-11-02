@@ -9,10 +9,9 @@ use crate::gaussians::{Gaussians, logit, rotation_matrix, sigmoid};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
-pub const MAGIC: &[u8; 8] = b"N4N0TREE";
-pub const VERSION: u32 = 1;
-/// Every record of the file (header, box, splat) is 32 bytes.
-pub const RECORD: usize = 32;
+pub const MAGIC: &[u8; 8] = orbiters_contracts::splat_tree::MAGIC;
+/// The file's version (crate::tree_file: 20-byte splat records, 64-byte boxes).
+pub const VERSION: u32 = orbiters_contracts::splat_tree::VERSION;
 /// A box with more splats than this is split in eight.
 pub const LEAF_SPLATS: usize = 2048;
 /// A merged box holds about this fraction of what its children hold.
@@ -23,7 +22,7 @@ const MIN_OPACITY: f32 = 1.0 / 255.0;
 /// A box's sphere reaches this many standard deviations past its splats' centres.
 const REACH: f32 = 2.0;
 /// Header flag: a coarse file, the top of a tree whose deepest boxes stand in for everything below them.
-pub const FLAG_COARSE: u32 = 1;
+pub const FLAG_COARSE: u32 = orbiters_contracts::splat_tree::FLAG_COARSE;
 
 /// One box of a tree. Boxes are in breadth-first order (a parent before its children, the root first) and each one's
 /// splats are contiguous, in box order.
@@ -419,52 +418,18 @@ impl Tree {
         top
     }
 
-    /// The file VRChat worlds load (OrbitersContracts Docs/splat-tree.md): a header, the boxes and the splats, 32
-    /// bytes each, right-handed like the web `.splat` (Unity's Z negated). `key` names the upload the file belongs to.
+    /// The file VRChat worlds load (OrbitersContracts Docs/splat-tree.md, version 2: crate::tree_file): a header, the
+    /// boxes with their splats' bounds, and the splats in 20 bytes each, right-handed like the web `.splat` (Unity's Z
+    /// negated). `key` names the upload the file belongs to.
     pub fn file(&self, key: u32, flags: u32) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity((1 + self.nodes.len() + self.len()) * RECORD);
-        bytes.extend_from_slice(MAGIC);
-        for v in [VERSION, self.nodes.len() as u32, self.len() as u32, key, flags, 0] {
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
-        for n in &self.nodes {
-            for v in [n.center[0], n.center[1], -n.center[2], n.radius, n.error] {
-                bytes.extend_from_slice(&v.to_le_bytes());
-            }
-            for v in [n.parent.unwrap_or(u32::MAX), n.start, n.count] {
-                bytes.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-        for i in 0..self.len() {
-            crate::web::write_splat(&mut bytes, &self.splats, i);
-        }
-        bytes
+        crate::tree_file::write(self, key, flags)
     }
 
     /// A tree back from [`Tree::file`]'s bytes (what a world loads: checks of what a shared file holds), the boxes'
-    /// depths and leaves worked out from their parents. Anything else is an error.
+    /// depths and leaves worked out from their parents, the splats as their records decode. Anything else is an error,
+    /// a version 1 file too (crate::tree_file::parse).
     pub fn parse(bytes: &[u8]) -> anyhow::Result<Tree> {
-        anyhow::ensure!(bytes.len() >= RECORD && bytes.len().is_multiple_of(RECORD) && &bytes[..8] == MAGIC, "not a splat tree");
-        let u = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
-        let f = |at: usize| f32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
-        anyhow::ensure!(u(8) == VERSION, "a splat tree of version {}", u(8));
-        let (count, splats) = (u(12) as usize, u(16) as usize);
-        anyhow::ensure!(bytes.len() / RECORD == 1 + count + splats, "a splat tree's counts do not match its size");
-        let mut nodes: Vec<Node> = Vec::with_capacity(count);
-        for i in 0..count {
-            let at = (i + 1) * RECORD;
-            let parent = (u(at + 20) != u32::MAX).then(|| u(at + 20));
-            anyhow::ensure!(parent.is_none_or(|p| (p as usize) < i), "a box's parent comes after it");
-            let depth = parent.map_or(0, |p| nodes[p as usize].depth + 1);
-            let (start, n) = (u(at + 24), u(at + 28));
-            anyhow::ensure!(start as usize + n as usize <= splats, "a box's splats run past the file's");
-            nodes.push(Node { center: [f(at), f(at + 4), -f(at + 8)], radius: f(at + 12), error: f(at + 16), parent, depth, start, count: n, leaf: true });
-            if let Some(p) = parent {
-                nodes[p as usize].leaf = false;
-            }
-        }
-        let splats = if splats == 0 { Gaussians::default() } else { crate::web::read_splat(&bytes[(1 + count) * RECORD..])? };
-        Ok(Tree { nodes, splats })
+        crate::tree_file::parse(bytes)
     }
 }
 
@@ -538,24 +503,6 @@ mod tests {
     }
 
     #[test]
-    fn the_file_is_a_header_the_boxes_and_the_splats() {
-        let g = scene(5000);
-        let tree = build(&g, &leaves(&g, 3000));
-        assert_eq!(tree.leaf_splats().len(), 3000, "the most important ones");
-        let bytes = tree.file(0xABCD, 0);
-        assert_eq!(bytes.len(), (1 + tree.nodes.len() + tree.len()) * RECORD);
-        let u = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
-        let f = |o: usize| f32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
-        assert_eq!(&bytes[..8], MAGIC);
-        assert_eq!((u(8), u(12) as usize, u(16) as usize, u(20)), (VERSION, tree.nodes.len(), tree.len(), 0xABCD));
-        let b = RECORD;
-        assert_eq!((u(b + 20), u(b + 24), u(b + 28)), (u32::MAX, 0, tree.nodes[0].count));
-        assert_eq!(f(b + 8), -tree.nodes[0].center[2]);
-        let s = (1 + tree.nodes.len()) * RECORD;
-        assert_eq!(f(s + 8), -tree.splats.means[0][2]);
-    }
-
-    #[test]
     fn a_ranking_picks_the_leaves_and_invisible_splats_never_count() {
         let mut g = scene(1000);
         g.opacity_logits[3] = -20.0;
@@ -568,20 +515,5 @@ mod tests {
         assert_eq!(keep, vec![0, 1, 2, 4, 5]);
         assert_eq!(eligible(&g), g.len() - 1);
         assert_eq!(leaves(&g, usize::MAX).len(), g.len() - 1);
-    }
-
-    #[test]
-    fn a_file_reads_back_as_its_tree_with_the_splats_as_it_rounds_them() {
-        let g = scene(9000);
-        let tree = build(&g, &leaves(&g, usize::MAX));
-        let back = Tree::parse(&tree.file(5, 0)).unwrap();
-        assert_eq!(back.nodes, tree.nodes);
-        assert_eq!(back.len(), tree.len());
-        assert_eq!(back.splats.means, tree.splats.means);
-        for i in 0..tree.len() {
-            assert!((sigmoid(back.splats.opacity_logits[i]) - sigmoid(tree.splats.opacity_logits[i]).min(1.0)).abs() <= 0.5 / 255.0 + 1e-6);
-            assert!(back.splats.colors[i].iter().zip(tree.splats.colors[i]).all(|(a, b)| (a - b.clamp(0.0, 1.0)).abs() <= 0.5 / 255.0 + 1e-6));
-        }
-        assert!(Tree::parse(&tree.file(5, 0)[..RECORD * 2]).is_err());
     }
 }

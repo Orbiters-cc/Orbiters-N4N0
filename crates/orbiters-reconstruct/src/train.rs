@@ -1,7 +1,8 @@
 //! Training in replay mode: Adam on the keyframes' colour ((1 − λ)·L1 + λ·D-SSIM over the scene pixels) and the
 //! exact depth samples (relative L1), with MCMC-style relocation (Kheradmand et al. 2024): every so often, Gaussians
 //! that faded out move onto live ones picked by opacity, the copies sharing the original's opacity and footprint, while
-//! the set grows to its budget. Depth steps render only the depth samples' rays; colour steps train on every other
+//! the set grows to its budget, and while it binds the nearly transparent Gaussians off the measured surface take MCMC's
+//! SGLD noise (lab switches place births by error, split them or add births at depth). Depth steps render only the depth samples' rays; colour steps train on every other
 //! pixel each way for the first half of the run (and can run coarse to fine). Every `hold_out_every`-th keyframe is never
 //! trained on and scores the result.
 
@@ -120,7 +121,111 @@ pub struct Settings {
     /// the worker sets it): relocation then grows the set while it is under a quarter of the budget, even while many
     /// Gaussians are dead. Otherwise the set grows only while few are, and a set that starts at a thousand never does.
     pub starved: bool,
+    /// Which live Gaussians relocation copies ([`Sources`]): where the moved and new Gaussians are born. Opacity, as
+    /// 3DGS-MCMC samples them: no score did better at the 1M budget (three interleaved runs, without the SGLD noise;
+    /// reports/births.md of the lab). By rank alone, faint sources churn (see `sources_by_opacity`); by rank times opacity, Exoplanet Journey and
+    /// the plaza scored within their noise and VRChat Home 0.2–0.3 dB higher with 10–19 % more splats and up to 18 %
+    /// more time. At 300k, gradient ranks times opacity gained 0.16 dB on Exoplanet (with a fifth fewer splats) and
+    /// 0.12 dB on the plaza, lost 0.16 dB on Home, and added nothing to the SGLD noise (`noise`).
+    pub sources: Sources,
+    /// A score-ranked source's chance is also its opacity, as 3DGS-MCMC's is: ranks alone copy faint Gaussians, whose
+    /// copies split an opacity they cannot spare (eq. 9) and die by the next round (Exoplanet Journey: 150k of 566k
+    /// dead every round instead of 30k, the set never grew and 303k splats were left instead of 646k).
+    pub sources_by_opacity: bool,
+    /// How a source and its copy share the source's footprint ([`Split`]). The footprint: ImprovedGS's long-axis split
+    /// cost 0.3 dB on Exoplanet Journey and 0.28 dB off the plaza's path (one run each), on measured depth only it was
+    /// within the runs' noise on all four captures.
+    pub split: Split,
+    /// 3DGS-MCMC's SGLD noise on the means while relocation runs (shaders/project_backward_adam.wgsl `sgld`): its λ,
+    /// gsplat's `noise_lr` [`NOISE`], times the position learning rate; 0: none. The term σ(100·((1 − o) − 0.995))
+    /// keeps it to nearly transparent Gaussians (half at opacity 0.005, a hundredth at 0.05): the faint ones relocation
+    /// would otherwise find where they last fitted a transient or one view's error, still blending a little into the
+    /// views that do not show it. On by default, spared on measured depth ([`Settings::noise_gate`]) and only while
+    /// the budget binds ([`Settings::noise_dead_max`]): against no noise, three interleaved runs each at the 1M budget
+    /// (lab reports/births.md), held-out PSNR +0.90 dB on VRChat Home (27.10 against 26.20), +0.41 dB on Exoplanet
+    /// Journey (24.22 against 23.81), +0.06 dB on the synthetic plaza and +0.13 dB off its path (21.99 against 21.86),
+    /// Silent Dawn unchanged (26.53 against 26.55, two runs); the best 90 % of pixels within the runs' noise
+    /// (+0.24, +0.12, +0.04, −0.11); 6–20 % fewer splats and 2–17 % less time on all four. Gated by depth alone it
+    /// gained as much or more on the short captures (Exoplanet +0.62, Home +0.64, the plaza +0.01 and +0.14 off the
+    /// path; at a 300k budget +0.28, +0.52 and +0.45) but lost 0.78 dB on Silent Dawn (0.91 on the best 90 %). The
+    /// confidence-aware densification paper (arXiv 2610.13541) found the noise worse than none for its own births.
+    pub noise: f32,
+    /// The noise spares the Gaussians anchored on the measured surface (within [`ANCHORED`] of it where depth steps
+    /// see them since the last relocation round): a seed on exact depth has nothing to explore. Ungated, VRChat Home's
+    /// best 90 % of pixels lost 0.25 dB (43.22 against 43.47, three runs, about 2 standard deviations) for 0.23 dB more
+    /// on the whole image.
+    pub noise_gate: bool,
+    /// The noise moves only the Gaussians the step's view shows (Brush weights its noise by visibility): dense Adam
+    /// steps every Gaussian every step, and on a long walk a faint Gaussian no view of the moment constrains wanders
+    /// for thousands of steps. Off: on Silent Dawn, without the budget rule, it lost 0.44 dB held-out and 0.60 dB on
+    /// the best 90 % (two runs) instead of 0.52 and 0.72; the budget rule is what fixes Silent Dawn.
+    pub noise_visible: bool,
+    /// The noise runs only in rounds whose relocation found at most this share of the set dead (faded, broken or huge;
+    /// 0: every round): while the budget binds. [`NOISE_DEAD_MAX`], a quarter: Silent Dawn's control keeps about 30 %
+    /// of its 2.6M dead round after round once fading stops (relocation's own copies dying again: more budget than
+    /// the capture uses), and there the noise rescued faint Gaussians that should die, its set grew to the whole budget
+    /// at the end of relocation and quality fell; with the rule the noise ran there only for the first thousand steps
+    /// and four single late rounds. Exoplanet passes it from step 1600 on, VRChat Home and the plaza a few rounds after
+    /// each fade (about 40 % of Home's rounds), and on Home it scored 0.26 dB higher than the noise in every round; on
+    /// the 3D picture `needle` (313 views, two runs) +0.35 dB held-out and on the best 90 %. But the rule protects
+    /// Silent Dawn through its dead share, not because the noise only hurts a budget it does not fill: at a 1M budget,
+    /// which Silent Dawn fills (2–4 % dead), the noise lost 0.65 dB there and with the rule 0.71 (two runs each; the
+    /// best 90 % 0.87 and 0.85). Whatever makes that world lose (faint content the noise scatters, as fog would be, is
+    /// the next thing to look at) is not measured yet: a capture like it that fills its budget would lose the same.
+    pub noise_dead_max: f32,
+    /// Births at measured depth (crate::births, ConeGS without its proxy): this share of each relocation round's moves
+    /// become new Gaussians at the depth samples of a few depth frames where the render errs most against the
+    /// keyframes, a pixel's size across and the keyframes' colour, instead of copies (0: none). Off: a fifth of the
+    /// moves cost 0.36 dB on Exoplanet Journey and 0.58 dB on the plaza's best 90 % at 1M (one run each) and 0.12 dB on
+    /// Exoplanet at 300k (three runs), but gained 0.87 dB held-out, 0.67 dB on the best 90 % and 0.22 dB off the path
+    /// on the synthetic plaza at 300k (three runs), and 0.68 dB on Home's best 90 % at 300k (−0.11 on the whole
+    /// image), where ConeGS gains most: worth a switch for small budgets.
+    pub depth_births: f32,
 }
+
+/// Which live Gaussians a relocation round copies onto the dead and new slots (crate::train::plan_relocation), from
+/// the statistics the colour steps since the last round recorded (shaders/param_grads.wgsl). Rank-weighted like the
+/// confidence-aware densification of Hofer, Kerbl, Steinberger et al. (arXiv 2610.13541): a source's chance is its
+/// rank among the live ones (0 to 1), so no outlier takes every copy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sources {
+    /// By opacity, as 3DGS-MCMC samples them.
+    #[default]
+    Opacity,
+    /// By the mean norm of the screen-space positional gradient over the colour steps that showed it (3DGS's
+    /// densification statistic).
+    Gradient,
+    /// By the mean colour error it blended (Σ error × α·T over a step's scene pixels).
+    Error,
+    /// Both: rank(gradient) × (0.2 + rank(error)), the paper's gradient × low-confidence product with blended error
+    /// standing for its learned confidence.
+    Confidence,
+}
+
+/// How a relocation copy is placed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Split {
+    /// Anywhere inside the source's footprint (a standard normal offset in its frame), both shrunk by MCMC's eq. 9.
+    #[default]
+    Footprint,
+    /// A source with one copy splits in two along its longest axis (ImprovedGS, Deng et al. arXiv 2508.12313): the
+    /// halves at ±0.45 of that axis's scale, it shrunk to 0.55 and the others to √(1 − 0.45²). A disc on a surface
+    /// splits within its plane. Sources with more copies place them as [`Split::Footprint`] does.
+    LongAxis,
+    /// [`Split::LongAxis`] only for sources anchored on the measured surface ([`ANCHORED`]), where depth confirms the
+    /// surface the halves land on; the others as [`Split::Footprint`].
+    LongAxisOnDepth,
+}
+
+/// SGLD noise's λ for `--noise` ([`Settings::noise`]): gsplat's `noise_lr` for 3DGS-MCMC, measured here.
+pub const NOISE: f32 = 5e5;
+
+/// The share of the set a relocation round may find dead for the noise to run ([`Settings::noise_dead_max`]).
+pub const NOISE_DEAD_MAX: f32 = 0.25;
+
+/// A Gaussian is anchored on the measured surface when, α·T-weighted over the depth samples it blends into, its centre
+/// lies within this share of the measured depth (shaders/project_backward_adam.wgsl's ANCHORED).
+pub const ANCHORED: f32 = 0.02;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -156,6 +261,14 @@ impl Default for Settings {
             cleanup: false,
             sky_map: 2048,
             starved: false,
+            sources: Sources::Opacity,
+            sources_by_opacity: false,
+            split: Split::Footprint,
+            noise: NOISE,
+            noise_gate: true,
+            noise_visible: false,
+            noise_dead_max: NOISE_DEAD_MAX,
+            depth_births: 0.0,
         }
     }
 }
@@ -377,6 +490,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let face_cams: Vec<Camera> = faces.map_or_else(Vec::new, |f| f.views.iter().map(|v| v.camera).collect());
     let face_steps = face_share(face_cams.len(), data.views.len(), settings.face_share);
     let extent = extent(data);
+    eprintln!("extent: {extent:.2} m");
     let mut rng = fastrand::Rng::with_seed(settings.seed);
     // Mid-run scores on at most 16 held-out keyframes: enough to follow, cheap at any session length.
     let probe = evenly(&held_out, 16);
@@ -402,6 +516,14 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     gpu.regularise_unseen = settings.regularise_unseen;
     gpu.clamp_colors = settings.clamp_colors;
     gpu.adam_restart = settings.adam_restart;
+    // The statistics relocation's sources and splits read, and the noise.
+    let scored = settings.sources != Sources::Opacity || settings.split == Split::LongAxisOnDepth;
+    gpu.birth_stats = if settings.sources != Sources::Opacity { crate::gpu::BIRTH_STATS_COLOR } else { 0 }
+        | if settings.split == Split::LongAxisOnDepth || (settings.noise > 0.0 && settings.noise_gate) { crate::gpu::BIRTH_STATS_DEPTH } else { 0 };
+    gpu.noise = settings.noise;
+    gpu.noise_visible = settings.noise_visible;
+    gpu.noise_gate = settings.noise_gate;
+    let spawner = (settings.depth_births > 0.0).then(|| crate::births::Spawner::new(data, &held_out));
     // Each phase of the colour steps' sub-grid (Settings::stride): its size, mask and scene pixels.
     let stride = settings.stride.max(1);
     let phases: Vec<(u32, u32, Vec<f32>, f32)> = if settings.stride_until > 0.0 && stride > 1 {
@@ -439,7 +561,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     // Relocation rounds off the steps' path: a round's weights come back while training goes on, a helper thread plans
     // it (its own random stream), and the plan lands a few steps later (VRChat Home: −4 %, quality equal): the plan took
     // 20–30 ms of the CPU a round, with the GPU waiting.
-    let mut pending_weights: Option<(u32, crate::gpu::PendingWeights)> = None;
+    let mut pending_weights: Option<(u32, crate::gpu::PendingWeights, Vec<[f32; 14]>)> = None;
     let mut pending_plan: Option<std::thread::JoinHandle<Relocation>> = None;
     // What the last fading round found (unseen, of how many), and whether rounds still fade (Settings::fade_until_rising).
     let mut last_round: Option<(usize, usize)> = None;
@@ -455,6 +577,10 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             }
         }
         let progress = (it - 1) as f32 / iterations as f32;
+        if it > relocate_until {
+            // Exploration only while relocation can still reuse what it moves (gsplat stops it with refinement too).
+            gpu.noise = 0.0;
+        }
         // Coarse to fine: this step's level (0 full, 1 half, 2 quarter resolution); positions decay from full on.
         let level = if coarse.is_empty() || progress >= settings.half_until {
             0
@@ -545,7 +671,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                 } else {
                     eprintln!("it {it}: fading {} of {} Gaussians no training pixel sees", adjust.len(), seen.len());
                     last_round = Some((adjust.len(), seen.len()));
-                    gpu.apply_relocation(&Relocation { adjust, copies: Vec::new(), len: seen.len() })?;
+                    gpu.apply_relocation(&Relocation { adjust, len: seen.len(), ..Default::default() })?;
                 }
             }
             let _sync = crate::timing::on().then(|| dev.poll(wgpu::PollType::wait_indefinitely()));
@@ -570,19 +696,35 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                 gpu.update_filter_3d(&filter_cams, settings.filter_3d)?;
             }
             if pending_plan.is_none() {
-                if let Some((round, w)) = pending_weights.take() {
+                if let Some((round, w, spawns)) = pending_weights.take() {
                     match w.take()? {
-                        Some(weights) => {
+                        Some(mut weights) => {
+                            // With birth scores, they follow the weights (Gpu::request_relocation_weights).
+                            let scores = if scored { weights.split_off(weights.len() / 4) } else { Vec::new() };
                             let n = weights.len();
+                            if settings.noise > 0.0 && settings.noise_dead_max > 0.0 && it <= relocate_until {
+                                // The noise runs while the budget binds: not in a round whose relocation found much of
+                                // the set dead (Settings::noise_dead_max).
+                                let share = weights.iter().filter(|w| **w == -1.0 || !w.is_finite()).count() as f32 / n.max(1) as f32;
+                                let on = share <= settings.noise_dead_max;
+                                if on != (gpu.noise > 0.0) {
+                                    eprintln!("it {round}: {:.0} % dead: noise {}", share * 100.0, if on { "on" } else { "off" });
+                                }
+                                gpu.noise = if on { settings.noise } else { 0.0 };
+                            }
                             if round % 500 == 0 {
                                 let dead = weights.iter().filter(|w| **w == -1.0).count();
                                 eprintln!("it {round}: {n} Gaussians, {dead} dead or huge, {intersections} entries");
                             }
                             let (grow_to, starved) = ((n + n / 20).min(settings.budget), settings.starved && n < settings.budget / 4);
                             let mut plan_rng = fastrand::Rng::with_seed(settings.seed ^ (round as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
-                            pending_plan = Some(std::thread::spawn(move || plan_relocation(&weights, grow_to, starved, &mut plan_rng)));
+                            let (sources, by_opacity, split, share) = (settings.sources, settings.sources_by_opacity, settings.split, settings.depth_births);
+                            pending_plan = Some(std::thread::spawn(move || {
+                                let births = Births { sources, by_opacity, split, scores: scored.then_some(scores.as_slice()), spawns: &spawns, spawn_share: share };
+                                plan_relocation_by(&weights, grow_to, starved, &births, &mut plan_rng)
+                            }));
                         }
-                        None => pending_weights = Some((round, w)),
+                        None => pending_weights = Some((round, w, spawns)),
                     }
                 }
             }
@@ -595,7 +737,16 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                 regularise(gpu, plan.len);
             }
             if pending_weights.is_none() {
-                pending_weights = Some((it, gpu.request_relocation_weights(settings.max_radius)?));
+                // Births at measured depth for this round, drawn now from what the device holds (crate::births).
+                let spawns = match &spawner {
+                    Some(sp) => {
+                        let _cpu = crate::priority::CpuWork::start();
+                        let count = ((settings.depth_births * (gpu.count / 10) as f32).ceil() as usize).max(1);
+                        crate::timing::section("4d0 depth births", Some(&dev), || sp.draw(gpu, data, count, settings.background, &mut rng))?
+                    }
+                    None => Vec::new(),
+                };
+                pending_weights = Some((it, gpu.request_relocation_weights(settings.max_radius, scored)?, spawns));
             }
         } else if it % 100 == 0 && it + 100 <= iterations {
             // As Mip-Splatting does: every 100 steps but the last 100's.
@@ -782,11 +933,46 @@ pub(crate) fn weights(g: &Gaussians, huge: &[bool]) -> Vec<f32> {
         .collect()
 }
 
+/// What a relocation round places where (crate::train::plan_relocation_by): which live Gaussians it copies and how,
+/// from the birth scores the device read back after the weights (relocate.wgsl `classify`: positional gradient, colour
+/// error and distance from the measured surface, `n` each), and births at measured depth (crate::births) taking
+/// `spawn_share` of the moves, in the order they were drawn.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Births<'a> {
+    pub sources: Sources,
+    /// Ranked sources' chances times their opacity ([`Settings::sources_by_opacity`]).
+    pub by_opacity: bool,
+    pub split: Split,
+    pub scores: Option<&'a [f32]>,
+    pub spawns: &'a [[f32; 14]],
+    pub spawn_share: f32,
+}
+
+/// Each of `pool`'s ranks by `score` among them, from 1/len (lowest) to 1 (highest), into `out` (indexed like the set);
+/// a score that is not positive (a Gaussian no colour step showed) or no number ranks 0.
+fn rank_into(pool: &[usize], score: impl Fn(usize) -> f32, out: &mut [f32]) {
+    let mut order: Vec<(f32, usize)> = pool.iter().map(|&i| (score(i), i)).filter(|(v, _)| v.is_finite() && *v > 0.0).collect();
+    order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    for &i in pool {
+        out[i] = 0.0;
+    }
+    let len = pool.len().max(1) as f32;
+    let skipped = pool.len() - order.len();
+    for (k, &(_, i)) in order.iter().enumerate() {
+        out[i] = (skipped + k + 1) as f32 / len;
+    }
+}
+
 /// Decides a relocation round from the Gaussians' [`weights`]: dead ones and new ones, up to `grow_to`, become copies
 /// of live ones sampled by opacity, never sky ones (unless nothing else lives). A weight that is no number counts as
 /// dead; weights that sum to nothing (a readback of zeros) move nothing. `starved` ([`Settings::starved`]): the set
 /// grows whatever number are dead.
 pub fn plan_relocation(weights: &[f32], grow_to: usize, starved: bool, rng: &mut fastrand::Rng) -> Relocation {
+    plan_relocation_by(weights, grow_to, starved, &Births::default(), rng)
+}
+
+/// [`plan_relocation`] with sources, splits and births at measured depth as `births` says.
+pub fn plan_relocation_by(weights: &[f32], grow_to: usize, starved: bool, births: &Births, rng: &mut fastrand::Rng) -> Relocation {
     let n = weights.len();
     let opacity = |i: usize| if weights[i] >= 0.0 { weights[i] } else { -2.0 - weights[i] };
     let (mut dead, mut alive): (Vec<usize>, Vec<usize>) = (0..n).partition(|&i| weights[i] == -1.0 || !weights[i].is_finite());
@@ -801,11 +987,47 @@ pub fn plan_relocation(weights: &[f32], grow_to: usize, starved: bool, rng: &mut
         rng.shuffle(&mut dead);
         dead.truncate(cap);
     }
-    let mut plan = Relocation { adjust: Vec::new(), copies: Vec::new(), len: n };
+    let mut plan = Relocation { len: n, ..Default::default() };
+    // Births at measured depth take their share of the moves (they need no source).
+    let wanted = dead.len() + grow;
+    let spawned = ((births.spawn_share.clamp(0.0, 1.0) * wanted as f32).round() as usize).min(births.spawns.len());
     // No more moves than the live ones can take (MAX_RATIO − 1 copies each): after a mass fade a few sources remain.
-    let moves = (dead.len() + grow).min(alive.len() * (MAX_RATIO - 1));
+    let moves = (wanted - spawned).min(alive.len() * (MAX_RATIO - 1));
+    let mut free = dead.into_iter();
+    let mut target = |plan: &mut Relocation| {
+        free.next().unwrap_or_else(|| {
+            plan.len += 1;
+            plan.len - 1
+        })
+    };
+    for b in &births.spawns[..spawned] {
+        let t = target(&mut plan);
+        let mut entry = [0u32; 16];
+        entry[0] = t as u32;
+        for (e, v) in entry[1..15].iter_mut().zip(b) {
+            *e = v.to_bits();
+        }
+        plan.spawns.push(entry);
+    }
     if moves == 0 {
         return plan;
+    }
+    // The sampling weight of each live Gaussian (Sources).
+    let scores = births.scores.filter(|s| s.len() >= 3 * n);
+    let mut chance = vec![0f32; n];
+    match (births.sources, scores) {
+        (Sources::Opacity, _) | (_, None) => alive.iter().for_each(|&i| chance[i] = opacity(i)),
+        (Sources::Gradient, Some(s)) => rank_into(&alive, |i| s[i], &mut chance),
+        (Sources::Error, Some(s)) => rank_into(&alive, |i| s[n + i], &mut chance),
+        (Sources::Confidence, Some(s)) => {
+            let mut error = vec![0f32; n];
+            rank_into(&alive, |i| s[i], &mut chance);
+            rank_into(&alive, |i| s[n + i], &mut error);
+            alive.iter().for_each(|&i| chance[i] *= 0.2 + error[i]);
+        }
+    }
+    if births.by_opacity && births.sources != Sources::Opacity && scores.is_some() {
+        alive.iter().for_each(|&i| chance[i] *= opacity(i));
     }
     let mut pool = alive.clone();
     let mut cdf = Vec::with_capacity(pool.len());
@@ -813,7 +1035,7 @@ pub fn plan_relocation(weights: &[f32], grow_to: usize, starved: bool, rng: &mut
         cdf.clear();
         let mut acc = 0.0f64;
         for &i in pool {
-            acc += opacity(i).max(0.0) as f64;
+            acc += chance[i].max(0.0) as f64;
             cdf.push(acc);
         }
         acc
@@ -845,22 +1067,30 @@ pub fn plan_relocation(weights: &[f32], grow_to: usize, starved: bool, rng: &mut
         ratio[j] += 1;
         picks.push(j);
     }
+    // Sources split along their longest axis (Split): one copy each, and anchored when the split asks for depth.
+    let anchored = |j: usize| scores.is_some_and(|s| (0.0..ANCHORED).contains(&s[2 * n + j]));
+    let halves = |j: usize| {
+        ratio[j] == 2
+            && match births.split {
+                Split::Footprint => false,
+                Split::LongAxis => true,
+                Split::LongAxisOnDepth => anchored(j),
+            }
+    };
     for &j in &alive {
         if ratio[j] > 1 {
             let (new_o, factor) = relocation(opacity(j) as f64, ratio[j]);
             let new_logit = logit((new_o as f32).clamp(DEAD, 1.0 - 1e-4));
-            plan.adjust.push([j as u32, new_logit.to_bits(), (factor as f32).max(1e-6).ln().to_bits(), 0]);
+            // A split's halves get their footprints in the copy (relocate.wgsl `copy`, mode 1).
+            let delta = if halves(j) { 0.0 } else { (factor as f32).max(1e-6).ln() };
+            plan.adjust.push([j as u32, new_logit.to_bits(), delta.to_bits(), 0]);
         }
     }
-    let mut free = dead.into_iter();
     for &j in &picks {
         // Somewhere inside the source's footprint, so the copies don't share every gradient forever.
         let e = [normal(rng), normal(rng), normal(rng)];
-        let target = free.next().unwrap_or_else(|| {
-            plan.len += 1;
-            plan.len - 1
-        });
-        plan.copies.push([target as u32, j as u32, e[0].to_bits(), e[1].to_bits(), e[2].to_bits(), 0, 0, 0]);
+        let t = target(&mut plan);
+        plan.copies.push([t as u32, j as u32, e[0].to_bits(), e[1].to_bits(), e[2].to_bits(), u32::from(halves(j)), 0, 0]);
     }
     plan
 }
@@ -884,16 +1114,7 @@ pub(crate) fn apply_relocation(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Ve
         restart(m1, j);
         restart(m2, j);
     }
-    for c in &plan.copies {
-        let (t, j) = (c[0] as usize, c[1] as usize);
-        let r = rotation_matrix(g.rotations[j]);
-        let s = g.log_scales[j].map(f32::exp);
-        let e = [f32::from_bits(c[2]) * s[0], f32::from_bits(c[3]) * s[1], f32::from_bits(c[4]) * s[2]];
-        let mut mean = g.means[j];
-        for (row, m) in r.iter().zip(mean.iter_mut()) {
-            *m += row[0] * e[0] + row[1] * e[1] + row[2] * e[2];
-        }
-        let (log_scale, rotation, opacity_logit, color, sky) = (g.log_scales[j], g.rotations[j], g.opacity_logits[j], g.colors[j], g.sky[j]);
+    let mut put = |g: &mut Gaussians, t: usize, mean: [f32; 3], log_scale: [f32; 3], rotation: [f32; 4], opacity_logit: f32, color: [f32; 3], sky: bool| {
         if t < g.len() {
             g.means[t] = mean;
             g.log_scales[t] = log_scale;
@@ -907,6 +1128,33 @@ pub(crate) fn apply_relocation(g: &mut Gaussians, m1: &mut Vec<f32>, m2: &mut Ve
         }
         restart(m1, t);
         restart(m2, t);
+    };
+    for c in &plan.copies {
+        let (t, j) = (c[0] as usize, c[1] as usize);
+        let r = rotation_matrix(g.rotations[j]);
+        let s = g.log_scales[j].map(f32::exp);
+        let (log_scale, rotation, opacity_logit, color, sky) = (g.log_scales[j], g.rotations[j], g.opacity_logits[j], g.colors[j], g.sky[j]);
+        if c[5] == 1 {
+            // Split along the longest axis (Split::LongAxis).
+            let axis = (0..3).fold(0, |a, k| if log_scale[k] > log_scale[a] { k } else { a });
+            let off: [f32; 3] = std::array::from_fn(|row| r[row][axis] * 0.45 * s[axis]);
+            let shrunk: [f32; 3] = std::array::from_fn(|k| log_scale[k] + if k == axis { 0.55f32.ln() } else { 0.8930f32.ln() });
+            let mean = g.means[j];
+            put(g, t, std::array::from_fn(|k| mean[k] - off[k]), shrunk, rotation, opacity_logit, color, sky);
+            g.means[j] = std::array::from_fn(|k| mean[k] + off[k]);
+            g.log_scales[j] = shrunk;
+            continue;
+        }
+        let e = [f32::from_bits(c[2]) * s[0], f32::from_bits(c[3]) * s[1], f32::from_bits(c[4]) * s[2]];
+        let mut mean = g.means[j];
+        for (row, m) in r.iter().zip(mean.iter_mut()) {
+            *m += row[0] * e[0] + row[1] * e[1] + row[2] * e[2];
+        }
+        put(g, t, mean, log_scale, rotation, opacity_logit, color, sky);
+    }
+    for b in &plan.spawns {
+        let v: [f32; 14] = std::array::from_fn(|k| f32::from_bits(b[1 + k]));
+        put(g, b[0] as usize, [v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8], v[9]], v[10], [v[11], v[12], v[13]], false);
     }
 }
 
@@ -1097,6 +1345,132 @@ mod tests {
         let plan = plan_relocation(&w, 4, false, &mut rng);
         assert_eq!(plan.copies.len(), 1);
         assert!(plan.copies.iter().all(|c| c[1] == 1 && c[0] != 1));
+    }
+
+    /// Sources drawn by a birth score never include a Gaussian no colour step showed (score 0), favour the high ranks,
+    /// and draw by rank, not by value: one huge score takes no more than its rank's share.
+    #[test]
+    fn births_follow_the_scores_they_are_sampled_by() {
+        let n = 20_000;
+        // Every 20th dead; the others alive at one opacity, the first half never shown (score 0, the lowest ranks).
+        let weights: Vec<f32> = (0..n).map(|i| if i % 20 == 0 { -1.0 } else { 0.5 }).collect();
+        let (mut up, mut down) = (vec![0f32; 3 * n], vec![0f32; 3 * n]);
+        for i in n / 2..n {
+            up[i] = i as f32;
+            up[n + i] = i as f32;
+            down[n + i] = (n - i) as f32;
+        }
+        up[n - 1] = 1e30;
+        // Rank-proportional over the upper half (ranks 0.5 to 1): the mean source at about 15,555 by gradient, 15,966
+        // by gradient × (0.2 + error) both rising, 14,445 by a falling error (about 90 a standard error).
+        for (sources, scores, mean_at) in [(Sources::Gradient, &up, 15_555.0), (Sources::Confidence, &up, 15_966.0), (Sources::Error, &down, 14_445.0)] {
+            let births = Births { sources, scores: Some(scores), ..Default::default() };
+            let plan = plan_relocation_by(&weights, n, false, &births, &mut fastrand::Rng::with_seed(9));
+            assert_eq!(plan.copies.len(), n / 20, "{sources:?}");
+            let picked: Vec<usize> = plan.copies.iter().map(|c| c[1] as usize).collect();
+            assert!(picked.iter().all(|&j| j >= n / 2), "{sources:?}: a source no colour step showed");
+            let mean = picked.iter().sum::<usize>() as f32 / picked.len() as f32;
+            assert!((mean - mean_at).abs() < 300.0, "{sources:?}: mean source {mean}, expected about {mean_at}");
+            assert!(picked.iter().filter(|&&j| j == n - 1).count() < 10, "{sources:?}: an outlier took the copies");
+        }
+        // By opacity (the default), sources ignore the scores.
+        let plan = plan_relocation_by(&weights, n, false, &Births { scores: Some(&up), ..Default::default() }, &mut fastrand::Rng::with_seed(9));
+        assert!(plan.copies.iter().any(|c| (c[1] as usize) < n / 2));
+    }
+
+    /// With `by_opacity`, ranked sources' chances are times their opacity: faint high-ranked Gaussians, whose copies
+    /// would die, take few of the copies.
+    #[test]
+    fn ranked_sources_by_opacity_spare_the_faint() {
+        let n = 10_000;
+        // All alive, score rising with the index; every other one faint (opacity 0.01).
+        let weights: Vec<f32> = (0..n).map(|i| if i % 20 == 0 { -1.0 } else if i % 2 == 1 { 0.01 } else { 0.8 }).collect();
+        let mut scores = vec![0f32; 3 * n];
+        for (i, s) in scores[..n].iter_mut().enumerate() {
+            *s = i as f32 + 1.0;
+        }
+        let faint = |plan: &Relocation| plan.copies.iter().filter(|c| c[1] % 2 == 1).count() as f32 / plan.copies.len() as f32;
+        let ranked = plan_relocation_by(&weights, n, false, &Births { sources: Sources::Gradient, scores: Some(&scores), ..Default::default() }, &mut fastrand::Rng::with_seed(15));
+        let weighted = plan_relocation_by(&weights, n, false, &Births { sources: Sources::Gradient, by_opacity: true, scores: Some(&scores), ..Default::default() }, &mut fastrand::Rng::with_seed(15));
+        assert!(faint(&ranked) > 0.4, "ranks alone: {} faint", faint(&ranked));
+        assert!(faint(&weighted) < 0.05, "by opacity: {} faint", faint(&weighted));
+        let mean = weighted.copies.iter().map(|c| c[1] as f32).sum::<f32>() / weighted.copies.len() as f32;
+        assert!(mean > 0.6 * n as f32, "still by rank: mean source {mean}");
+    }
+
+    /// A long-axis split halves sources with one copy (mode 1, the footprint left to the copy kernel); on depth, only
+    /// sources anchored on the measured surface.
+    #[test]
+    fn a_long_axis_split_halves_sources_with_one_copy() {
+        let n = 4000;
+        let weights: Vec<f32> = (0..n).map(|i| if i % 20 == 0 { -1.0 } else { 0.5 }).collect();
+        let mut scores = vec![0f32; 3 * n];
+        for i in 0..n {
+            // Every other Gaussian anchored (1 % from the surface), the rest 10 % off or never seen by depth.
+            scores[2 * n + i] = [0.01, 0.1, -1.0, 0.01][i % 4];
+        }
+        for split in [Split::LongAxis, Split::LongAxisOnDepth] {
+            let births = Births { split, scores: Some(&scores), ..Default::default() };
+            let plan = plan_relocation_by(&weights, n, false, &births, &mut fastrand::Rng::with_seed(10));
+            let mut copies = vec![0usize; n];
+            for c in &plan.copies {
+                copies[c[1] as usize] += 1;
+            }
+            let mut halved = 0;
+            for c in &plan.copies {
+                let j = c[1] as usize;
+                let expected = copies[j] == 1 && (split == Split::LongAxis || scores[2 * n + j] == 0.01);
+                assert_eq!(c[5] == 1, expected, "{split:?}: source {j} with {} copies", copies[j]);
+                halved += usize::from(c[5] == 1);
+            }
+            assert!(halved > plan.copies.len() / 3, "{split:?}: {halved} of {} halved", plan.copies.len());
+            for a in &plan.adjust {
+                let halves = plan.copies.iter().any(|c| c[1] == a[0] && c[5] == 1);
+                assert_eq!(f32::from_bits(a[2]) == 0.0, halves, "a split's source keeps its footprint for the copy kernel");
+            }
+        }
+    }
+
+    /// Births at measured depth take their share of the moves, into the dead slots first, in the order drawn.
+    #[test]
+    fn births_at_depth_take_their_share_of_the_moves() {
+        let n = 1000;
+        let weights: Vec<f32> = (0..n).map(|i| if i % 20 == 0 { -1.0 } else { 0.5 }).collect();
+        let spawns: Vec<[f32; 14]> = (0..30).map(|k| [k as f32, 0.0, 0.0, -3.0, -3.0, -5.0, 1.0, 0.0, 0.0, 0.0, -2.0, 0.1, 0.2, 0.3]).collect();
+        let births = Births { spawns: &spawns, spawn_share: 0.2, ..Default::default() };
+        let plan = plan_relocation_by(&weights, n, false, &births, &mut fastrand::Rng::with_seed(11));
+        assert_eq!(plan.spawns.len(), 10);
+        assert_eq!(plan.copies.len(), 40);
+        assert!(plan.spawns.iter().all(|b| b[0] % 20 == 0 && (b[0] as usize) < n), "spawns into dead slots");
+        assert!(plan.spawns.iter().enumerate().all(|(k, b)| f32::from_bits(b[1]) == k as f32 && f32::from_bits(b[11]) == -2.0));
+        // Growth: past the end once the dead slots are taken; a short list gives what it has.
+        let plan = plan_relocation_by(&weights, n + 50, false, &Births { spawns: &spawns, spawn_share: 1.0, ..Default::default() }, &mut fastrand::Rng::with_seed(12));
+        assert_eq!((plan.spawns.len(), plan.copies.len(), plan.len), (30, 70, n + 50));
+    }
+
+    /// The CPU reference splits along the longest axis as the copy kernel does: two halves at ±0.45 of its scale.
+    #[test]
+    fn the_long_axis_split_keeps_the_halves_on_the_axis() {
+        let mut g = Gaussians::default();
+        g.push([1.0, 2.0, 3.0], [0.1f32.ln(), 0.4f32.ln(), 0.01f32.ln()], [1.0, 0.0, 0.0, 0.0], logit(0.8), [0.5; 3]);
+        g.push([0.0; 3], [-3.0; 3], [1.0, 0.0, 0.0, 0.0], logit(0.001), [0.5; 3]);
+        let (mut m1, mut m2) = (vec![0.0; 2 * PACKED], vec![0.0; 2 * PACKED]);
+        let plan = Relocation { adjust: vec![[0, logit(0.55).to_bits(), 0f32.to_bits(), 0]], copies: vec![[1, 0, 0, 0, 0, 1, 0, 0]], spawns: Vec::new(), len: 2 };
+        apply_relocation(&mut g, &mut m1, &mut m2, &plan);
+        assert!((g.means[0][1] - (2.0 + 0.18)).abs() < 1e-6 && (g.means[1][1] - (2.0 - 0.18)).abs() < 1e-6, "{:?}", g.means);
+        assert!((g.log_scales[1][1].exp() - 0.22).abs() < 1e-6 && (g.log_scales[1][0].exp() - 0.0893).abs() < 1e-6);
+        assert_eq!(g.log_scales[0], g.log_scales[1]);
+        assert!((sigmoid(g.opacity_logits[1]) - 0.55).abs() < 1e-6);
+    }
+
+    /// What the defaults train with (the lab's reports/births.md): copies by opacity inside their source's footprint,
+    /// no births at depth, and MCMC's SGLD noise on the nearly transparent Gaussians off the measured surface while the
+    /// budget binds (rounds that find at most a quarter of the set dead), on every Gaussian, seen or not.
+    #[test]
+    fn the_defaults_explore_while_the_budget_binds() {
+        let s = Settings::default();
+        assert_eq!((s.sources, s.split, s.depth_births, s.sources_by_opacity), (Sources::Opacity, Split::Footprint, 0.0, false));
+        assert!(s.noise == NOISE && s.noise_gate && !s.noise_visible && s.noise_dead_max == NOISE_DEAD_MAX);
     }
 
     /// Fades run every thousand steps from step 1000, while a relocation round is left to reuse what they free.

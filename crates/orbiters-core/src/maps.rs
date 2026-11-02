@@ -421,6 +421,46 @@ impl Api {
         crate::shares::json(response)
     }
 
+    /// Replaces the files of the capture `id` (its owner's: contracts Docs/capture-sharing.md, Updating a capture) with a
+    /// complete new set made after its splats were edited: VRChat's three trees under a key of their own, the sky map and
+    /// the capture's picture (the old ones go when these have none), `metadata` as [`Api::add_preview`]'s, naming the
+    /// `revision` replaced. Answers its item at the next revision. Refused as a [`crate::shares::RevisionConflict`] when
+    /// its files are at another revision; any refusal leaves its files as they were.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_capture_files(
+        &self,
+        token: &str,
+        id: u64,
+        revision: u64,
+        files: PreviewFiles,
+        sky: Option<&Path>,
+        picture: Option<Vec<u8>>,
+        metadata: &serde_json::Value,
+        progress: impl FnMut(u64, u64) + Send + 'static,
+    ) -> anyhow::Result<crate::shares::Item> {
+        #[derive(serde::Deserialize)]
+        struct Answer {
+            item: crate::shares::Item,
+        }
+        let tree = |field: &'static str, name: &str, bytes: Vec<u8>| Part::bytes(field, format!("capture-{id}-{name}.n4tree"), "application/octet-stream", bytes);
+        let mut parts = vec![
+            tree("vrchatPc", "pc", files.vrchat_pc),
+            tree("vrchatQuest", "quest", files.vrchat_quest),
+            tree("vrchatCoarse", "coarse", files.vrchat_coarse),
+        ];
+        if let Some(sky) = sky {
+            parts.push(Part::file("sky", "sky.png", "image/png", sky)?);
+        }
+        if let Some(picture) = picture {
+            parts.push(Part::bytes("picture", format!("capture-{id}.jpg"), "image/jpeg", picture));
+        }
+        let mut metadata = metadata.clone();
+        anyhow::ensure!(metadata.is_object(), "The capture's details are not an object");
+        metadata["revision"] = serde_json::json!(revision);
+        let response = self.multipart_with("PUT", token, &format!("captures/capture/{id}/files"), &metadata.to_string(), parts, progress)?;
+        Ok(crate::shares::json::<Answer>(response)?.item)
+    }
+
     /// Gives a capture uploaded without one its picture (a JPEG of its 3D view), or a new one; answers its item.
     pub fn set_capture_picture(&self, token: &str, id: u64, jpeg: Vec<u8>) -> anyhow::Result<crate::shares::Item> {
         #[derive(serde::Deserialize)]
@@ -436,6 +476,19 @@ impl Api {
     /// it is sent, a part after the other, each let go once sent (a file part read from its file).
     fn multipart(
         &self,
+        token: &str,
+        path: &str,
+        metadata: &str,
+        parts: Vec<Part>,
+        progress: impl FnMut(u64, u64) + Send + 'static,
+    ) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
+        self.multipart_with("POST", token, path, metadata, parts, progress)
+    }
+
+    /// [`Api::multipart`] with another method (`PUT`: a capture's files replaced).
+    fn multipart_with(
+        &self,
+        method: &str,
         token: &str,
         path: &str,
         metadata: &str,
@@ -469,8 +522,9 @@ impl Api {
         let total = pieces.iter().map(Piece::len).sum::<u64>();
         pieces.reverse();
         let reader = Progress { pieces, sent: 0, total, report: Box::new(progress) };
-        self.agent()
-            .post(&self.url(path))
+        let url = self.url(path);
+        let request = if method == "PUT" { self.agent().put(&url) } else { self.agent().post(&url) };
+        request
             .header("Authorization", &format!("Bearer {token}"))
             .header("Content-Type", &format!("multipart/form-data; boundary={boundary}"))
             .header("Content-Length", &total.to_string())

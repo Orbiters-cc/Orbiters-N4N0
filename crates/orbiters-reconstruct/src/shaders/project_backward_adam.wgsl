@@ -7,11 +7,63 @@
 
 struct AdamInfo {
     lr: array<vec4<f32>, 4>,
-    // β1, β2, ε, unused.
+    // β1, β2, ε, the SGLD noise's scale (crate::train::Settings::noise × the position learning rate; 0: none).
     beta: vec4<f32>,
-    // Floats in the set, this step (bias correction), 1: colours stay within 0–1 (crate::gpu::Gpu::clamp_colors),
-    // unused.
+    // Floats in the set, this step (bias correction), gates (bit 0: the noise spares the Gaussians anchored on measured
+    // depth; bit 1: the noise only for the Gaussians this step shows; bit 2: colours stay within 0–1,
+    // crate::gpu::Gpu::clamp_colors), the noise's seed.
     n: vec4<u32>,
+}
+
+// A Gaussian sits on the measured surface where depth steps see it: α·T-weighted, its centre within this share of the
+// measured depth (crate::train::ANCHORED, stats[2i + 1] of param_grads.wgsl).
+const ANCHORED: f32 = 0.02;
+
+fn hash(x: u32) -> u32 {
+    // PCG's output permutation of an LCG step.
+    let state = x * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// Three standard normals for Gaussian i at this step (Box–Muller on four hashed uniforms).
+fn normals(i: u32) -> vec3<f32> {
+    var h = hash(i ^ hash(adam.n.y ^ hash(adam.n.w)));
+    var u: vec4<f32>;
+    for (var k = 0u; k < 4u; k++) {
+        h = hash(h);
+        u[k] = (f32(h >> 8u) + 0.5) / 16777216.0;
+    }
+    let r0 = sqrt(-2.0 * log(u.x));
+    let r1 = sqrt(-2.0 * log(u.z));
+    return vec3<f32>(r0 * cos(6.283185307 * u.y), r0 * sin(6.283185307 * u.y), r1 * cos(6.283185307 * u.w));
+}
+
+fn rotate_by(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    let u = q.yzw;
+    return v + 2.0 * cross(u, cross(u, v) + q.x * v);
+}
+
+// 3DGS-MCMC's exploration term (Kheradmand et al. 2024, eq. 7 as gsplat implements it): Σ·η × the scale × a gate that
+// opens only for nearly transparent Gaussians, σ(100·((1 − opacity) − 0.995)): one at opacity 0.005 has half the
+// noise, one at 0.05 a hundredth, an opaque one none.
+fn sgld(i: u32, log_scale: vec3<f32>, q: vec4<f32>, opacity_logit: f32) -> vec3<f32> {
+    let op = sigmoid(opacity_logit);
+    let gate = 1.0 / (1.0 + exp(-100.0 * ((1.0 - op) - 0.995)));
+    if (gate < 1e-6) {
+        return vec3<f32>(0.0);
+    }
+    if ((adam.n.z & 1u) != 0u) {
+        let sd = stats[2u * i + 1u];
+        if (sd.y > 0.0 && sd.x < ANCHORED * sd.y) {
+            return vec3<f32>(0.0);
+        }
+    }
+    let qn = q / max(length(q), 1e-12);
+    let s2 = exp(2.0 * log_scale);
+    // Σ η = R S² Rᵀ η.
+    let local = rotate_by(vec4<f32>(qn.x, -qn.yzw), normals(i));
+    return rotate_by(qn, s2 * local) * gate * adam.beta.w;
 }
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -79,13 +131,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let te = max(f32(adam.n.y) - p3.w, 1.0);
     let c1 = 1.0 - pow(adam.beta.x, te);
     let c2 = 1.0 - pow(adam.beta.y, te);
-    let s0 = adam4(p0, m1[o], m2[o], g0, adam.lr[0], c1, c2);
+    var s0 = adam4(p0, m1[o], m2[o], g0, adam.lr[0], c1, c2);
+    // The sky shell (its flag in slot 14) stays where it is; with gate bit 1, so does what this step does not show.
+    let shown = proj[i * PROJ + 15u] != 0.0 || (adam.n.z & 2u) == 0u;
+    if (adam.beta.w > 0.0 && p3.z < 0.5 && shown) {
+        s0.p = vec4<f32>(s0.p.xyz + sgld(i, vec3<f32>(p0.w, p1.x, p1.y), vec4<f32>(p1.z, p1.w, p2.x, p2.y), p2.z), s0.p.w);
+    }
     let s1 = adam4(p1, m1[o + 1u], m2[o + 1u], g1, adam.lr[1], c1, c2);
     let s2 = adam4(p2, m1[o + 2u], m2[o + 2u], g2, adam.lr[2], c1, c2);
     let s3 = adam4(p3, m1[o + 3u], m2[o + 3u], g3, adam.lr[3], c1, c2);
     var q2 = s2.p;
     var q3 = s3.p;
-    if (adam.n.z != 0u) {
+    if ((adam.n.z & 4u) != 0u) {
         q2.w = clamp(q2.w, 0.0, 1.0);
         q3 = vec4<f32>(clamp(q3.xy, vec2<f32>(0.0), vec2<f32>(1.0)), q3.zw);
     }

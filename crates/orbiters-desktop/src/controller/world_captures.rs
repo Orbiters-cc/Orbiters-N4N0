@@ -301,6 +301,8 @@ fn session_entry(s: &SessionSummary, world: &str, world_name: &str, remote: Opti
         picture: None,
         size: None,
         layers: Vec::new(),
+        edits: None,
+        uploaded_edits: None,
     }
 }
 

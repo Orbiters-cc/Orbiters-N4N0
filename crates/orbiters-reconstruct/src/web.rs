@@ -84,7 +84,8 @@ pub fn splat_file(g: &Gaussians, max: usize, origin: [f32; 3]) -> WebPreview {
     WebPreview { count: keep.len(), bytes }
 }
 
-/// Splat `i` of `g` in the `.splat` layout (also each splat of a VRChat tree, crate::tree).
+/// Splat `i` of `g` in the `.splat` layout (the server writes the same from a VRChat PC tree's leaves, which it decodes:
+/// crate::tree_file).
 pub fn write_splat(bytes: &mut Vec<u8>, g: &Gaussians, i: usize) {
     let [x, y, z] = g.means[i];
     let s = g.log_scales[i];
@@ -97,9 +98,6 @@ pub fn write_splat(bytes: &mut Vec<u8>, g: &Gaussians, i: usize) {
         bytes.extend_from_slice(&v.to_le_bytes());
     }
     bytes.extend_from_slice(&[byte(c[0]), byte(c[1]), byte(c[2]), byte(sigmoid(g.opacity_logits[i]))]);
-    // Each component rounded (contracts' Docs/splat-tree.md). Lab, 2026-11-02: the nearest representable rotation
-    // instead (the best floor/ceil quadruple of q or -q) cut the mean angular error by a quarter but gained the plaza
-    // walk only 0.025 dB of the 0.12 dB its rotation bytes cost, not worth departing from the contract's wording.
     bytes.extend(rotation.map(|v| (v * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8));
 }
 

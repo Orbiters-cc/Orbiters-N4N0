@@ -32,6 +32,7 @@ mod gallery_assets;
 mod gallery_talk;
 mod projects_panel;
 mod editor;
+mod splat_export;
 mod splats_select;
 mod vrchat_login;
 mod vr_audio;
@@ -117,6 +118,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("splats-select") {
         return splats_select::shots(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("splat-export") {
+        return splat_export::shots(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("splat-export-cpu") {
+        return splat_export::shots_cpu(&out, &settings, scale);
     }
     if only.as_deref() == Some("editor-3d") {
         return editor::three_d(&mut Offscreen::new()?, &out, &settings, scale);
@@ -1070,25 +1077,6 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             home: None,
             library: None,
         },
-        // VRChat and OSC, with the development environment's choice for the avatar worn uploaded again.
-        Scenario {
-            name: "settings-osc",
-            page: Page::Settings,
-            snapshot: {
-                let mut s = idle.clone();
-                s.settings.development = true;
-                s
-            },
-            frames: 120,
-            splash: false,
-            open_detail: false,
-            toasts: vec![],
-            pointer: None,
-            scroll: 900.0,
-            world: None,
-            home: None,
-            library: None,
-        },
         Scenario {
             name: "settings-scrolled",
             page: Page::Settings,
@@ -1534,8 +1522,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     // The selected project's 3D preview (a stand-in scene, or `ORBITERS_PREVIEW_FILE`, one Toolkit wrote): settled,
     // rising out of the ground, the camera swinging round, turned by a drag, its window growing out of the card and
-    // open (with two scenes), close up and from behind in the open window (materials' look), a sheet's on narrow
-    // windows (`--width 1040`), and the notes of projects without one.
+    // open (with two scenes), close up and from behind in the open window (materials' look), in the scene's light and
+    // switched to the studio's, a sheet's on narrow windows (`--width 1040`), and the notes of projects without one.
     for (name, frames) in [
         ("projects-preview", 200),
         ("projects-preview-reveal", 30),
@@ -1545,6 +1533,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         ("projects-preview-open", 230),
         ("projects-preview-close", 230),
         ("projects-preview-back", 230),
+        ("projects-preview-scene-light", 230),
+        ("projects-preview-studio-light", 230),
         ("projects-preview-scenes", 230),
         ("projects-preview-sheet", 200),
         ("projects-preview-none", 90),
@@ -1611,6 +1601,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "gallery-copied",
         "gallery-copy-link",
         "gallery-copy-link-offer",
+        "gallery-edited",
+        "gallery-updating",
+        "gallery-update-replacing",
+        "gallery-updated",
+        "gallery-update-failed",
         "world-share-window",
         "world-share-public",
         "world-share-sending",
@@ -2204,7 +2199,10 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
 /// An offscreen run in real time for the end-to-end flows: a frame about every 16 ms, presses on controls found by
 /// their labels, and waits on what the app or the controller shows, each with a time limit.
 struct Run<'a> {
-    gpu: &'a mut Offscreen,
+    /// What paints the frames shot: the GPU offscreen, or without one ([`Run::cpu`]) the VR overlay's CPU painter
+    /// (orbiters_ui::software), which skips paint callbacks (the 3D view's splats) and needs no GPU at all.
+    gpu: Option<&'a mut Offscreen>,
+    cpu: Option<orbiters_ui::software::Software>,
     ctx: egui::Context,
     app: App,
     scale: f32,
@@ -2223,7 +2221,19 @@ impl<'a> Run<'a> {
         backend.attach(&ctx);
         let mut app = App::offline(backend);
         app.skip_splash();
-        Self { gpu, ctx, app, scale, start: Instant::now(), release: None, pace: Duration::from_millis(16) }
+        Self { gpu: Some(gpu), cpu: None, ctx, app, scale, start: Instant::now(), release: None, pace: Duration::from_millis(16) }
+    }
+
+    /// A run painted on the CPU: no GPU, no 3D view.
+    fn cpu(backend: Ctl, scale: f32) -> Run<'static> {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        widgets::watch_controls();
+        backend.attach(&ctx);
+        let mut app = App::offline(backend);
+        app.skip_splash();
+        let painter = orbiters_ui::software::Software::new((1280.0 * scale).round() as u32, (820.0 * scale).round() as u32);
+        Run { gpu: None, cpu: Some(painter), ctx, app, scale, start: Instant::now(), release: None, pace: Duration::from_millis(16) }
     }
 
     fn time(&self) -> f64 {
@@ -2240,15 +2250,26 @@ impl<'a> Run<'a> {
         }
         input.events = events;
         let app = &mut self.app;
-        let image = self.gpu.frame(
-            &self.ctx,
-            input,
-            |ui| {
-                app.logic_offline(ui.ctx());
-                app.draw(ui);
-            },
-            capture,
-        )?;
+        let run_ui = |ui: &mut egui::Ui| {
+            app.logic_offline(ui.ctx());
+            app.draw(ui);
+        };
+        let image = match (self.gpu.as_mut(), self.cpu.as_mut()) {
+            (Some(gpu), _) => gpu.frame(&self.ctx, input, run_ui, capture)?,
+            (None, Some(sw)) => {
+                let mut full = self.ctx.run_ui(input, run_ui);
+                sw.set_textures(&mut full.textures_delta);
+                let ppp = full.pixels_per_point;
+                let image = capture.then(|| {
+                    let (w, h) = sw.size();
+                    let pixels = sw.paint(&self.ctx.tessellate(full.shapes, ppp), ppp, egui::Color32::BLACK);
+                    egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], pixels)
+                });
+                sw.free_textures(&mut full.textures_delta);
+                image
+            }
+            (None, None) => unreachable!("a run paints on the GPU or the CPU"),
+        };
         std::thread::sleep(self.pace);
         Ok(image)
     }

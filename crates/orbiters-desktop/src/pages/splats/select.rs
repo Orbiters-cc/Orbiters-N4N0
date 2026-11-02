@@ -1212,8 +1212,13 @@ mod tests {
         e.select(&ctx, &ids[..5], Mode::Replace);
         e.remove(&ctx, HIDDEN);
         drop(e);
+        // Its last step: the file says its picture is drawn (after the picture itself).
         let start = std::time::Instant::now();
-        while edit::read_edited(&ply).map(|r| r.1).unwrap_or(0) != 5 || !reconstruction::dir(&dir).join(reconstruction::TRAINED_PREVIEW_FILE).exists() {
+        let done = || {
+            let file = std::fs::read(reconstruction::dir(&dir).join(reconstruction::EDIT_FILE)).ok().and_then(|b| edit::Edit::decode(&b).ok());
+            file.is_some_and(|e| e.picture && e.removed() == 5) && reconstruction::dir(&dir).join(reconstruction::TRAINED_PREVIEW_FILE).exists()
+        };
+        while !done() {
             assert!(start.elapsed().as_secs() < 30, "saved after the view closed");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }

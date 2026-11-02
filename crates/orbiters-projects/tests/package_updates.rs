@@ -2,7 +2,7 @@
 //! request leaves the computer): which update each package can take (releases or pre-releases, the other packages'
 //! ranges, never the VRChat SDK behind the person's back), Update all applied through `vpm::change`, and a project
 //! needing packages no repository of the person lists: found in a catalog, the repository added, resolved again.
-use orbiters_projects::{missing, updates, vpm};
+use orbiters_projects::{coherent, missing, updates, vpm};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -313,4 +313,116 @@ fn reqwest_blocking(url: &str) -> Option<Vec<u8>> {
     s.read_to_end(&mut data).ok()?;
     let at = data.windows(4).position(|w| w == b"\r\n\r\n")?;
     Some(data[at + 4..].to_vec())
+}
+
+/// The N4N0 sample avatar's packages: the VRChat SDK 3.7.5 and tools pinning it below 3.8.
+fn sample_avatar(osc_update: bool) -> Server {
+    let mut packages = vec![
+        ("com.vrchat.base", "3.7.5", json!({})),
+        ("com.vrchat.base", "3.9.0", json!({})),
+        ("com.vrchat.avatars", "3.7.5", json!({"com.vrchat.base":"3.7.5"})),
+        ("com.vrchat.avatars", "3.9.0", json!({"com.vrchat.base":"3.9.0"})),
+        ("vrchat.blackstartx.gesture-manager", "3.9.3", json!({"com.vrchat.avatars":">=3.5.2 <3.8.X"})),
+        ("vrchat.blackstartx.gesture-manager", "3.9.4", json!({"com.vrchat.avatars":">=3.5.2 <3.10.X"})),
+        ("dev.vrlabs.av3manager", "2.0.34", json!({"com.vrchat.avatars":"3.2 - 3.7"})),
+        ("dev.vrlabs.av3manager", "2.1.0", json!({"com.vrchat.avatars":"3.2 - 3.9"})),
+        ("dev.hai-vr.fuck-osc-config", "1.1.5", json!({"com.vrchat.avatars":">=3.1.0 <3.8.0-a"})),
+    ];
+    if osc_update {
+        packages.push(("dev.hai-vr.fuck-osc-config", "1.2.0", json!({"com.vrchat.avatars":">=3.1.0 <3.10.0-a"})));
+    }
+    serve(vec![("index.json", "test.repo", packages)])
+}
+async fn sample_project(root: &Path, server: &Server, path: &Path) {
+    project(path);
+    vcc(root);
+    vpm::add_repo(root, &format!("{}/index.json", server.base), Default::default()).await.unwrap();
+    install(
+        root,
+        path,
+        &[("com.vrchat.avatars", "3.7.5"), ("vrchat.blackstartx.gesture-manager", "3.9.3"), ("dev.vrlabs.av3manager", "2.0.34"), ("dev.hai-vr.fuck-osc-config", "1.1.5")],
+    )
+    .await
+    .unwrap();
+    assert_eq!(installed(path, "com.vrchat.base").as_deref(), Some("3.7.5"));
+}
+fn conflicted(e: anyhow::Error) -> coherent::Plan {
+    e.downcast::<coherent::Conflicted>().unwrap_or_else(|e| panic!("not a conflict: {e:#}")).plan
+}
+
+#[test]
+fn a_conflicting_sdk_update_becomes_a_coherent_plan_applied_at_once() {
+    let server = sample_avatar(true);
+    let root = tempfile::tempdir().unwrap();
+    let projects = tempfile::tempdir().unwrap();
+    let source = projects.path().join("N4N0 sample avatar");
+    let rt = orbiters_projects::runtime().unwrap();
+    rt.block_on(async {
+        sample_project(root.path(), &server, &source).await;
+        // The version list's change: refused, not applied, with the plan.
+        let e = install(root.path(), &source, &[("com.vrchat.avatars", "3.9.0")]).await.unwrap_err();
+        assert!(e.to_string().contains("conflict"), "{e}");
+        let plan = conflicted(e);
+        assert_eq!(installed(&source, "com.vrchat.avatars").as_deref(), Some("3.7.5"), "nothing applied");
+        assert!(plan.solved(), "{plan:#?}");
+        let c = plan.conflicts.iter().find(|c| c.name == "com.vrchat.avatars").expect("the SDK's conflict");
+        assert_eq!(c.version, "3.9.0");
+        let needs: Vec<(&str, &str)> = c.needed_by.iter().map(|n| (n.name.as_str(), n.range.as_str())).collect();
+        assert!(needs.contains(&("dev.vrlabs.av3manager", "3.2 - 3.7")), "{needs:?}");
+        assert_eq!(needs.len(), 3, "{needs:?}");
+        let steps: Vec<(&str, Option<&str>, Option<&str>)> = plan.steps.iter().map(|s| (s.name.as_str(), s.from.as_deref(), s.to.as_deref())).collect();
+        assert_eq!(steps[0], ("com.vrchat.avatars", Some("3.7.5"), Some("3.9.0")), "what was asked for first");
+        for step in [
+            ("com.vrchat.base", Some("3.7.5"), Some("3.9.0")),
+            ("vrchat.blackstartx.gesture-manager", Some("3.9.3"), Some("3.9.4")),
+            ("dev.vrlabs.av3manager", Some("2.0.34"), Some("2.1.0")),
+            ("dev.hai-vr.fuck-osc-config", Some("1.1.5"), Some("1.2.0")),
+        ] {
+            assert!(steps.contains(&step), "{step:?} in {steps:?}");
+        }
+        assert_eq!(steps.len(), 5);
+        let why = |n: &str| plan.steps.iter().find(|s| s.name == n).unwrap().why.clone().unwrap_or_default();
+        assert!(why("com.vrchat.base").contains("needed by"), "{}", why("com.vrchat.base"));
+        assert!(why("dev.vrlabs.av3manager").contains("3.2 - 3.7"), "{}", why("dev.vrlabs.av3manager"));
+        // One press: the whole plan.
+        vpm::change(root.path(), &source, vpm::Change::Plan { install: plan.install.clone(), remove: plan.remove.clone(), prerelease: false }).await.unwrap();
+        for (n, v) in [("com.vrchat.avatars", "3.9.0"), ("com.vrchat.base", "3.9.0"), ("vrchat.blackstartx.gesture-manager", "3.9.4"), ("dev.vrlabs.av3manager", "2.1.0"), ("dev.hai-vr.fuck-osc-config", "1.2.0")] {
+            assert_eq!(installed(&source, n).as_deref(), Some(v), "{n}");
+        }
+    });
+}
+
+#[test]
+fn a_tool_without_a_coherent_version_blocks_until_removed_and_failures_roll_back() {
+    let server = sample_avatar(false);
+    let root = tempfile::tempdir().unwrap();
+    let projects = tempfile::tempdir().unwrap();
+    let source = projects.path().join("N4N0 sample avatar");
+    let rt = orbiters_projects::runtime().unwrap();
+    rt.block_on(async {
+        sample_project(root.path(), &server, &source).await;
+        let plan = conflicted(install(root.path(), &source, &[("com.vrchat.avatars", "3.9.0")]).await.unwrap_err());
+        assert!(!plan.solved());
+        assert_eq!(plan.blockers.len(), 1, "{plan:#?}");
+        let b = &plan.blockers[0];
+        assert_eq!((b.name.as_str(), b.range.as_str(), b.wanted.as_str()), ("dev.hai-vr.fuck-osc-config", ">=3.1.0 <3.8.0-a", "3.9.0"));
+        assert!(b.removable);
+        // Removing it too, as the dialog offers.
+        let plan = coherent::solve(root.path(), &source, &plan.requested, &["dev.hai-vr.fuck-osc-config".into()], false).await.unwrap();
+        assert!(plan.solved(), "{plan:#?}");
+        let removed = plan.steps.iter().find(|s| s.name == "dev.hai-vr.fuck-osc-config").unwrap();
+        assert_eq!((removed.from.as_deref(), removed.to.as_deref()), (Some("1.1.5"), None));
+        // A plan that fails halfway (a version gone from the repositories) puts everything back.
+        let broken = vpm::Change::Plan { install: vec![("com.vrchat.avatars".into(), "9.9.9".into())], remove: plan.remove.clone(), prerelease: false };
+        let e = vpm::change(root.path(), &source, broken).await.unwrap_err();
+        assert!(format!("{e:#}").contains("as they were"), "{e:#}");
+        assert_eq!(installed(&source, "dev.hai-vr.fuck-osc-config").as_deref(), Some("1.1.5"));
+        assert!(source.join("Packages/dev.hai-vr.fuck-osc-config/package.json").is_file(), "the removed package restored");
+        assert_eq!(installed(&source, "com.vrchat.avatars").as_deref(), Some("3.7.5"));
+        vpm::change(root.path(), &source, vpm::Change::Plan { install: plan.install.clone(), remove: plan.remove.clone(), prerelease: false }).await.unwrap();
+        assert_eq!(installed(&source, "com.vrchat.avatars").as_deref(), Some("3.9.0"));
+        assert_eq!(installed(&source, "com.vrchat.base").as_deref(), Some("3.9.0"));
+        assert_eq!(installed(&source, "dev.hai-vr.fuck-osc-config"), None);
+        assert!(!source.join("Packages/dev.hai-vr.fuck-osc-config").exists());
+    });
 }

@@ -2,6 +2,7 @@
 pub mod avatars;
 pub mod blender;
 mod builtin_templates;
+pub mod coherent;
 pub mod discovery;
 pub mod editor;
 pub mod git;

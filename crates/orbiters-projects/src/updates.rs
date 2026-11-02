@@ -21,6 +21,8 @@ pub struct Step {
     pub display_name: String,
     pub from: Option<String>,
     pub to: Option<String>,
+    /// Why it changes, in a plan solving a conflict ([`coherent`]).
+    pub why: Option<String>,
 }
 /// A newer version a package can take, and everything installing it changes (itself first).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -233,7 +235,7 @@ async fn attempt<'env>(
                 PackageChange::Install(i) => Some(i.install_package()?.version().to_string()),
                 PackageChange::Remove(_) => None,
             };
-            (from != to).then(|| Step { name: name.to_string(), display_name: display(name), from, to })
+            (from != to).then(|| Step { name: name.to_string(), display_name: display(name), from, to, why: None })
         })
         .collect();
     let first: Vec<&str> = requested.iter().map(|p| p.name()).collect();
@@ -242,7 +244,7 @@ async fn attempt<'env>(
 }
 
 /// Packages' names as people read them: the installed package's, else the repositories' newest.
-fn display_names(project: &UnityProject, packages: &impl PackageCollection) -> HashMap<String, String> {
+pub(crate) fn display_names(project: &UnityProject, packages: &impl PackageCollection) -> HashMap<String, String> {
     let mut out: HashMap<String, (vrc_get_vpm::version::Version, String)> = HashMap::new();
     for p in packages.get_all_packages() {
         if let Some(d) = p.display_name() {

@@ -19,12 +19,20 @@ Docs/project-preview.md.
   avatars, triangles and materials, with an ⓘ when meshes were left out for the budget or could not be read; Open in
   Unity sits bottom right; a project with several previews (one per scene) lists them as chips to switch between. A
   hint on how to move around fades once the view was turned or after 5 s.
-- **Lighting** is the desktop's own, the same for every project and as bright as Unity's default scene (2 November
-  2026, after Enzo found his avatar glossy and redder than in Unity): Unity's default directional light (colour
+- **Lighting** is the scene's own when Toolkit recorded it (contracts' Docs/project-preview.md, `lighting`; Enzo
+  chose it as the default on 2 November 2026): its main directional light as the key with its colour (intensity
+  included) and shadow strength, a second directional light beside it, its ambient light facing up, round the horizon
+  and down, its reflections from that ambient light at its reflection intensity, nothing of the studio's. A switch at
+  the top of the window, beside the close button, shows "Scene light" or "Studio light" instead (remembered for every
+  preview in `project-preview.json` in the configuration folder; the scene's light by default); it is there only
+  when the file recorded the scene's light, and the view changes as soon as it is pressed (the shadow map is drawn
+  again from the new key). A preview without it, from Toolkit 0.4.14 or older, keeps the studio light.
+- **The studio light** is the desktop's own, the same for every project and as bright as Unity's default scene (2
+  November 2026, after Enzo found his avatar glossy and redder than in Unity): Unity's default directional light (colour
   1, 0.956, 0.839, intensity 1) as the key from the front left of the avatar, about 50° up as in a new scene, with a
-  soft shadow (2048² shadow map, 12-tap Poisson PCF); the default procedural sky's ambient light (blue-grey above,
-  dark below) and its reflections; a faint cool fill and rim on lit materials so the side away from the light keeps
-  its shape. No tone mapping below 0.8 (Unity's Scene view has none), Khronos PBR Neutral's shoulder above; 4×
+  soft shadow (2048² shadow map, 12-tap Poisson PCF); the default procedural sky's ambient light (blue-grey above, dark
+  below) and its reflections; a faint cool fill and rim on lit materials so the side away from the light keeps its
+  shape. No tone mapping below 0.8 (Unity's Scene view has none), Khronos PBR Neutral's shoulder above; 4×
   multisampling. Before, Neutral's toe pushed dark browns towards orange and a fixed Blinn highlight made everything
   look like plastic.
 - **Materials** look as their shader shows them (contracts' Docs/project-preview.md, Materials, schema 2): `lit`
@@ -117,17 +125,19 @@ $env:ORBITERS_PREVIEW_FILE = "<a .preview Toolkit wrote>"   # instead of the sta
 
 Scenarios: `projects-preview` (settled), `-reveal` (rising, 0.5 s in), `-swing` (1 s in), `-turned` (dragged),
 `-open-mid` (the window six frames into its morph), `-open`, `-close` (the window on the upper half from close by, to
-judge materials), `-back` (from behind, the side away from the light), `-scenes` (two scenes to switch between), `-sheet`
-(with `--width 1040`), `-none`, `-no-toolkit` and `-old-toolkit` (the notes). The stand-in is N4N0's black sphere with white strokes over
-a plinth, a green ring and two cubes, as an avatar scene, one material look each: a glossy sphere, a matte plinth, a
-glowing unlit ring, a toon cube and a metal one.
+judge materials), `-back` (from behind, the side away from the light), `-scene-light` (the window in the scene's
+recorded light) and `-studio-light` (the same after a press on the switch's Studio light), `-scenes` (two scenes to
+switch between), `-sheet` (with `--width 1040`), `-none`, `-no-toolkit` and `-old-toolkit` (the notes). The stand-in is
+N4N0's black sphere with white strokes over a plinth, a green ring and two cubes, as an avatar scene, one material look
+each: a glossy sphere, a matte plinth, a glowing unlit ring, a toon cube and a metal one.
 
 ## Not done or untested
 
-- A real world project's capture (only the synthetic world was timed and drawn); terrains and lightmaps are not in
-  the format. A scene's own lights and environment are not used (the studio's are, the same for every preview), nor
-  occlusion and detail maps, toon ramps' pictures, matcaps, rim lights and outlines of toon shaders, specular-setup
-  colours, or metallic and smoothness from two different textures (the smoothness one is kept).
+- A real world project's capture (only the synthetic world was timed and drawn); terrains and lightmaps are not in the
+  format. Of a scene's lights only directional ones are used (two of them, the main one's shadow), not point and spot
+  lights, light probes, a skybox's picture in reflections (its ambient light's three colours stand in), fog or
+  post-processing; nor occlusion and detail maps, toon ramps' pictures, matcaps, rim lights and outlines of toon
+  shaders, specular-setup colours, or metallic and smoothness from two different textures (the smoothness one is kept).
 - The first capture after a domain reload makes one step of about 27 ms (JIT and first use); later ones stay under
   about 6 ms.
 - Non-readable meshes (FBX without Read/Write) were checked readable in Edit Mode without errors (FashionSuit's), and

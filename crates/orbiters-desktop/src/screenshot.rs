@@ -1522,8 +1522,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     // The selected project's 3D preview (a stand-in scene, or `ORBITERS_PREVIEW_FILE`, one Toolkit wrote): settled,
     // rising out of the ground, the camera swinging round, turned by a drag, its window growing out of the card and
-    // open (with two scenes), close up and from behind in the open window (materials' look), a sheet's on narrow
-    // windows (`--width 1040`), and the notes of projects without one.
+    // open (with two scenes), close up and from behind in the open window (materials' look), in the scene's light and
+    // switched to the studio's, a sheet's on narrow windows (`--width 1040`), and the notes of projects without one.
     for (name, frames) in [
         ("projects-preview", 200),
         ("projects-preview-reveal", 30),
@@ -1533,6 +1533,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         ("projects-preview-open", 230),
         ("projects-preview-close", 230),
         ("projects-preview-back", 230),
+        ("projects-preview-scene-light", 230),
+        ("projects-preview-studio-light", 230),
         ("projects-preview-scenes", 230),
         ("projects-preview-sheet", 200),
         ("projects-preview-none", 90),

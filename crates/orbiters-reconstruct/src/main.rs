@@ -4,7 +4,7 @@
 //! orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]
 //!     [--regularise-unseen] [--adam-restart] [--filter-3d S] [--cleanup]
 //!     [--sources opacity|gradient|error|confidence] [--sources-by-opacity] [--split footprint|long-axis|long-axis-on-depth]
-//!     [--noise λ] [--noise-gate] [--depth-births share]
+//!     [--noise λ | --no-noise] [--no-noise-gate] [--noise-visible] [--depth-births share]
 //! ```
 //!
 //! Prints one [`Event`] per line on stdout for the app and writes the session's `reconstruction/` folder: the splats
@@ -73,8 +73,9 @@ fn args() -> anyhow::Result<Args> {
             "--relocate-until" => settings.relocate_until = it.next().context("--relocate-until needs a value")?.parse().context("--relocate-until takes a number (0–1)")?,
             "--fade-to-the-end" => settings.fade_until_rising = false,
             // Lab A/Bs of where relocation places Gaussians (orbiters_reconstruct::train::{Sources, Split}): which live
-            // ones it copies, how a copy splits its source, SGLD noise on the means (λ, gsplat's 5e5; spared on
-            // measured depth with --noise-gate) and the share of the moves born at measured depth.
+            // ones it copies, how a copy splits its source, SGLD noise on the means (λ: gsplat's is 5e5; spared on
+            // measured depth unless --no-noise-gate; --noise-visible: only what the step shows) and the share of the
+            // moves born at measured depth.
             "--sources" => {
                 settings.sources = match it.next().as_deref() {
                     Some("opacity") => train::Sources::Opacity,
@@ -95,6 +96,9 @@ fn args() -> anyhow::Result<Args> {
             "--sources-by-opacity" => settings.sources_by_opacity = true,
             "--noise" => settings.noise = it.next().context("--noise needs a value")?.parse().context("--noise takes a number")?,
             "--noise-gate" => settings.noise_gate = true,
+            "--no-noise" => settings.noise = 0.0,
+            "--no-noise-gate" => settings.noise_gate = false,
+            "--noise-visible" => settings.noise_visible = true,
             "--depth-births" => settings.depth_births = it.next().context("--depth-births needs a value")?.parse().context("--depth-births takes a number (0–1)")?,
             "--gpu" => {
                 device.low_power = match it.next().as_deref() {

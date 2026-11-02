@@ -9,8 +9,8 @@ struct AdamInfo {
     lr: array<vec4<f32>, 4>,
     // β1, β2, ε, the SGLD noise's scale (crate::train::Settings::noise × the position learning rate; 0: none).
     beta: vec4<f32>,
-    // Floats in the set, this step (bias correction), 1 to spare the Gaussians anchored on measured depth the noise,
-    // the noise's seed.
+    // Floats in the set, this step (bias correction), the noise's gates (bit 0: spare the Gaussians anchored on measured
+    // depth; bit 1: only the Gaussians this step shows), the noise's seed.
     n: vec4<u32>,
 }
 
@@ -52,7 +52,7 @@ fn sgld(i: u32, log_scale: vec3<f32>, q: vec4<f32>, opacity_logit: f32) -> vec3<
     if (gate < 1e-6) {
         return vec3<f32>(0.0);
     }
-    if (adam.n.z != 0u) {
+    if ((adam.n.z & 1u) != 0u) {
         let sd = stats[2u * i + 1u];
         if (sd.y > 0.0 && sd.x < ANCHORED * sd.y) {
             return vec3<f32>(0.0);
@@ -131,8 +131,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let c1 = 1.0 - pow(adam.beta.x, te);
     let c2 = 1.0 - pow(adam.beta.y, te);
     var s0 = adam4(p0, m1[o], m2[o], g0, adam.lr[0], c1, c2);
-    // The sky shell (its flag in slot 14) stays where it is.
-    if (adam.beta.w > 0.0 && p3.z < 0.5) {
+    // The sky shell (its flag in slot 14) stays where it is; with gate bit 1, so does what this step does not show.
+    let shown = proj[i * PROJ + 15u] != 0.0 || (adam.n.z & 2u) == 0u;
+    if (adam.beta.w > 0.0 && p3.z < 0.5 && shown) {
         s0.p = vec4<f32>(s0.p.xyz + sgld(i, vec3<f32>(p0.w, p1.x, p1.y), vec4<f32>(p1.z, p1.w, p2.x, p2.y), p2.z), s0.p.w);
     }
     let s1 = adam4(p1, m1[o + 1u], m2[o + 1u], g1, adam.lr[1], c1, c2);

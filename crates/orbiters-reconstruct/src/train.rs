@@ -1,7 +1,7 @@
 //! Training in replay mode: Adam on the keyframes' colour ((1 − λ)·L1 + λ·D-SSIM over the scene pixels) and the
 //! exact depth samples (relative L1), with MCMC-style relocation (Kheradmand et al. 2024): every so often, Gaussians
 //! that faded out move onto live ones picked by opacity, the copies sharing the original's opacity and footprint, while
-//! the set grows to its budget. Depth steps render only the depth samples' rays; colour steps train on every other
+//! the set grows to its budget (lab switches place them by error, split them, add MCMC's SGLD noise or births at depth). Depth steps render only the depth samples' rays; colour steps train on every other
 //! pixel each way for the first half of the run (and can run coarse to fine). Every `hold_out_every`-th keyframe is never
 //! trained on and scores the result.
 
@@ -116,23 +116,54 @@ pub struct Settings {
     /// the worker sets it): relocation then grows the set while it is under a quarter of the budget, even while many
     /// Gaussians are dead. Otherwise the set grows only while few are, and a set that starts at a thousand never does.
     pub starved: bool,
-    /// Which live Gaussians relocation copies ([`Sources`]): where the moved and new Gaussians are born.
+    /// Which live Gaussians relocation copies ([`Sources`]): where the moved and new Gaussians are born. Opacity, as
+    /// 3DGS-MCMC samples them: no score did better at the 1M budget (three interleaved runs; reports/births.md of the
+    /// lab). By rank alone, faint sources churn (see `sources_by_opacity`); by rank times opacity, Exoplanet Journey and
+    /// the plaza scored within their noise and VRChat Home 0.2–0.3 dB higher with 10–19 % more splats and up to 18 %
+    /// more time. At 300k, gradient ranks times opacity gained 0.16 dB on Exoplanet with a fifth fewer splats, less
+    /// than the SGLD noise alone (`noise`), and nothing on top of it.
     pub sources: Sources,
     /// A score-ranked source's chance is also its opacity, as 3DGS-MCMC's is: ranks alone copy faint Gaussians, whose
     /// copies split an opacity they cannot spare (eq. 9) and die by the next round (Exoplanet Journey: 150k of 566k
     /// dead every round instead of 30k, the set never grew and 303k splats were left instead of 646k).
     pub sources_by_opacity: bool,
-    /// How a source and its copy share the source's footprint ([`Split`]).
+    /// How a source and its copy share the source's footprint ([`Split`]). The footprint: ImprovedGS's long-axis split
+    /// cost 0.3 dB on Exoplanet Journey and 0.28 dB off the plaza's path (one run each), on measured depth only it was
+    /// within the runs' noise on all four captures.
     pub split: Split,
-    /// 3DGS-MCMC's SGLD noise on the means while relocation runs (shaders/project_backward_adam.wgsl `sgld`): its λ,
-    /// gsplat's `noise_lr` of 5e5, times the position learning rate (0: none, as N4N0 always trained).
+    /// 3DGS-MCMC's SGLD noise on the means while relocation runs (shaders/project_backward_adam.wgsl `sgld`): its λ
+    /// (gsplat's `noise_lr` is [`NOISE`]) times the position learning rate; 0: none. The term
+    /// σ(100·((1 − o) − 0.995)) keeps it to nearly transparent Gaussians (half at opacity 0.005, a hundredth at 0.05),
+    /// the faint ones relocation would otherwise find where they last fitted a transient or one view's error, still
+    /// blending a little into the views that do not show it. Off: it wins on short captures and loses on a long one.
+    /// With [`Settings::noise_gate`], three interleaved runs each at the 1M budget: held-out PSNR +0.39 dB on Exoplanet
+    /// Journey (24.22 against 23.83), +0.46 dB on VRChat Home (26.65 against 26.19), +0.19 dB on the synthetic plaza and
+    /// +0.15 dB off its path (22.03 against 21.88), Canine within its noise; the best 90 % of pixels within the noise
+    /// (Home −0.11, plaza −0.02, Exoplanet +0.13); at a 300k budget Exoplanet +0.28 and the plaza +0.45 dB (+0.39 and
+    /// +0.47 on the best 90 %) at equal splats and 4–9 % less time. But on Silent Dawn (a 78 s recording, 419 views,
+    /// 2.9M budget; two runs each) −0.52 dB held-out and −0.72 dB on the best 90 % (25.93 against 26.45, 32.99 against
+    /// 33.71; the control's runs 0.15 dB apart), its set growing to the whole budget in the last tenth of relocation
+    /// (2.1M splats left against 1.4M) where the control's never grew. The scene's size does not explain it (16.6 m
+    /// against the plaza's 17.5), nor does noise on what no view of the step shows ([`Settings::noise_visible`]).
+    /// The confidence-aware densification paper (arXiv 2610.13541) found the noise worse than none for its own births.
     pub noise: f32,
     /// The noise spares the Gaussians anchored on the measured surface (within [`ANCHORED`] of it where depth steps
-    /// see them): a seed on exact depth has nothing to explore.
+    /// see them since the last relocation round): a seed on exact depth has nothing to explore. Ungated, VRChat Home's
+    /// best 90 % of pixels lost 0.25 dB (43.22 against 43.47, three runs, about 2 standard deviations) for 0.23 dB more
+    /// on the whole image.
     pub noise_gate: bool,
+    /// The noise moves only the Gaussians the step's view shows (Brush weights its noise by visibility): dense Adam
+    /// steps every Gaussian every step, and on a long walk a faint Gaussian no view of the moment constrains wanders
+    /// for thousands of steps. Off: on Silent Dawn it lost 0.44 dB held-out and 0.60 dB on the best 90 % (two runs)
+    /// instead of 0.52 and 0.72.
+    pub noise_visible: bool,
     /// Births at measured depth (crate::births, ConeGS without its proxy): this share of each relocation round's moves
     /// become new Gaussians at the depth samples of a few depth frames where the render errs most against the
-    /// keyframes, a pixel's size across and the keyframes' colour, instead of copies (0: none).
+    /// keyframes, a pixel's size across and the keyframes' colour, instead of copies (0: none). Off: a fifth of the
+    /// moves cost 0.36 dB on Exoplanet Journey and 0.58 dB on the plaza's best 90 % at 1M (one run each) and 0.12 dB on
+    /// Exoplanet at 300k (three runs), but gained 0.87 dB held-out, 0.67 dB on the best 90 % and 0.22 dB off the path
+    /// on the synthetic plaza at 300k (three runs), where ConeGS gains most: worth a switch for small budgets on clean
+    /// captures.
     pub depth_births: f32,
 }
 
@@ -169,6 +200,9 @@ pub enum Split {
     /// surface the halves land on; the others as [`Split::Footprint`].
     LongAxisOnDepth,
 }
+
+/// SGLD noise's λ for `--noise` ([`Settings::noise`]): gsplat's `noise_lr` for 3DGS-MCMC, measured here.
+pub const NOISE: f32 = 5e5;
 
 /// A Gaussian is anchored on the measured surface when, α·T-weighted over the depth samples it blends into, its centre
 /// lies within this share of the measured depth (shaders/project_backward_adam.wgsl's ANCHORED).
@@ -211,7 +245,8 @@ impl Default for Settings {
             sources_by_opacity: false,
             split: Split::Footprint,
             noise: 0.0,
-            noise_gate: false,
+            noise_gate: true,
+            noise_visible: false,
             depth_births: 0.0,
         }
     }
@@ -434,6 +469,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let face_cams: Vec<Camera> = faces.map_or_else(Vec::new, |f| f.views.iter().map(|v| v.camera).collect());
     let face_steps = face_share(face_cams.len(), data.views.len(), settings.face_share);
     let extent = extent(data);
+    eprintln!("extent: {extent:.2} m");
     let mut rng = fastrand::Rng::with_seed(settings.seed);
     // Mid-run scores on at most 16 held-out keyframes: enough to follow, cheap at any session length.
     let probe = evenly(&held_out, 16);
@@ -463,6 +499,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     gpu.birth_stats = if settings.sources != Sources::Opacity { crate::gpu::BIRTH_STATS_COLOR } else { 0 }
         | if settings.split == Split::LongAxisOnDepth || (settings.noise > 0.0 && settings.noise_gate) { crate::gpu::BIRTH_STATS_DEPTH } else { 0 };
     gpu.noise = settings.noise;
+    gpu.noise_visible = settings.noise_visible;
     gpu.noise_gate = settings.noise_gate;
     let spawner = (settings.depth_births > 0.0).then(|| crate::births::Spawner::new(data, &held_out));
     // Each phase of the colour steps' sub-grid (Settings::stride): its size, mask and scene pixels.
@@ -1392,6 +1429,15 @@ mod tests {
         assert!((g.log_scales[1][1].exp() - 0.22).abs() < 1e-6 && (g.log_scales[1][0].exp() - 0.0893).abs() < 1e-6);
         assert_eq!(g.log_scales[0], g.log_scales[1]);
         assert!((sigmoid(g.opacity_logits[1]) - 0.55).abs() < 1e-6);
+    }
+
+    /// What the defaults train with (the lab's reports/births.md): copies by opacity inside their source's footprint,
+    /// no births at depth, no SGLD noise (gated, and on every Gaussian, when a run asks for it).
+    #[test]
+    fn the_defaults_place_births_as_main_did() {
+        let s = Settings::default();
+        assert_eq!((s.sources, s.split, s.depth_births, s.sources_by_opacity), (Sources::Opacity, Split::Footprint, 0.0, false));
+        assert!(s.noise == 0.0 && s.noise_gate && !s.noise_visible);
     }
 
     /// Fades run every thousand steps from step 1000, while a relocation round is left to reuse what they free.

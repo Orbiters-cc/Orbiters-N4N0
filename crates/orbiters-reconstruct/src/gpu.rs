@@ -421,6 +421,8 @@ pub struct Gpu {
     /// rate (0: none; crate::train::Settings::noise), and whether Gaussians anchored on measured depth are spared it.
     pub noise: f32,
     pub noise_gate: bool,
+    /// And whether only the Gaussians a step shows take it (crate::train::Settings::noise_visible).
+    pub noise_visible: bool,
     /// A viewer's guards (project.wgsl; [`Gpu::renderer`] sets them): splats fade in over the first 20 cm from the eye,
     /// those holding the eye are left out, none reaches further than 1024 px on screen, and they sort by distance from
     /// the eye. Training never uses them: what they hide there would never be corrected.
@@ -1033,6 +1035,7 @@ impl Gpu {
             birth_stats: 0,
             noise: 0.0,
             noise_gate: false,
+            noise_visible: false,
             guards: false,
             confidence: Confidence::default(),
             far: FarField::default(),
@@ -2105,7 +2108,7 @@ impl Gpu {
         if lr.is_some() {
             self.step += 1;
         }
-        let (noise, gate) = (self.noise, u32::from(self.noise_gate));
+        let (noise, gate) = (self.noise, u32::from(self.noise_gate) | u32::from(self.noise_visible) << 1);
         let info = lr.map(|lr| self.uniform_at(("adam", 0), &AdamInfo { lr: rates_of(lr), beta: [0.9, 0.999, 1e-15, noise * lr.means], n: [(self.count * PACKED) as u32, self.step, gate, 0x5eed] }));
         let s = self.splats.as_ref().expect("splats");
         // No clear of grad2d: it is zero here, as the projection backward zeroes the sums it reads (new buffers start
@@ -3276,6 +3279,28 @@ mod tests {
         assert!(mean > 0.07 && mean < 0.16, "the transparent ones moved {mean} m on average");
         let opaque = (1..g.len()).step_by(2).map(moved).fold(0.0f32, f32::max);
         assert!(opaque < 1e-5, "an opaque one moved {opaque} m");
+        // With `noise_visible`, transparent Gaussians the step does not show (behind the camera) stay where they are.
+        let mut behind = g.clone();
+        let back = [-cam.r[2][0], -cam.r[2][1], -cam.r[2][2]];
+        for i in (0..behind.len()).step_by(4) {
+            let p = behind.means[i];
+            behind.means[i] = [p[0] + 12.0 * back[0], p[1] + 12.0 * back[1], p[2] + 12.0 * back[2]];
+        }
+        let mut runs = Vec::new();
+        for visible in [false, true] {
+            gpu.noise = 5e5;
+            gpu.noise_visible = visible;
+            gpu.upload(&behind);
+            gpu.step = 0;
+            gpu.step(&cam, [0.0; 3], Target::Color { rgba: &target, scene_pixels: px, weight: 1.0, ssim: 0.0, robust: 0.0 }, Some(lr)).expect("step");
+            runs.push(gpu.download_params().expect("download"));
+        }
+        gpu.noise = 0.0;
+        gpu.noise_visible = false;
+        let off = |r: &Gaussians, i: usize| (0..3).map(|k| (r.means[i][k] - behind.means[i][k]).powi(2)).sum::<f32>().sqrt();
+        let unseen: Vec<usize> = (0..behind.len()).step_by(4).collect();
+        assert!(unseen.iter().map(|&i| off(&runs[0], i)).sum::<f32>() / unseen.len() as f32 > 0.05, "all Gaussians take the noise by default");
+        assert!(unseen.iter().all(|&i| off(&runs[1], i) == 0.0), "an unseen Gaussian moved with noise_visible");
     }
 
     #[test]

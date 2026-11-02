@@ -292,8 +292,12 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     let busy = state.running();
     let main_w = row.width() - 3.0 * 48.0;
     let main = Rect::from_min_size(row.min, vec2(main_w, 40.0));
-    // Open in Unity already: Show, Save & Exit and Kill in its place.
-    if project.registered && super::unity_session::controls(ui, state, project, main, "hero") {
+    // Open in Unity already: Show, Save & Exit and Kill in its place, across the row up to the menu (Unity Hub is not
+    // needed then; Open the folder moves into the menu).
+    let open = project.registered && state.session(&project.path).open();
+    if open {
+        let wide = Rect::from_min_max(row.min, pos2(round(0).left() - 8.0, row.bottom()));
+        super::unity_session::controls(ui, state, project, wide, "hero");
     } else if project.registered {
         let b = Button::new("Open in Unity").icon(icons::PLAY).variant(Variant::Primary).width(main_w).enabled(!project.missing && !busy).id_salt("panel-open");
         if widgets::activated(&b.show_at(ui, main)) {
@@ -314,7 +318,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
         }
     }
     let folder = IconButton::new(icons::FOLDER_OPEN, "Open the folder").size(40.0, 17.0).backdrop(theme::control()).id_salt("panel-folder");
-    if !project.missing && widgets::activated(&folder.show_at(ui, round(2))) {
+    if !open && !project.missing && widgets::activated(&folder.show_at(ui, round(2))) {
         let path = project.path.clone();
         state.task(&ctx, "Opening the folder…", move || {
             orbiters_projects::hidden_command("explorer.exe").arg(path).spawn()?;
@@ -322,7 +326,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
         });
     }
     let hub = IconButton::new(icons::CUBE, "Open Unity Hub").size(40.0, 17.0).backdrop(theme::control()).id_salt("panel-hub");
-    if widgets::activated(&hub.show_at(ui, round(1))) {
+    if !open && widgets::activated(&hub.show_at(ui, round(1))) {
         state.task(&ctx, "Opening Unity Hub…", move || {
             orbiters_projects::open_hub()?;
             Ok(Outcome::Picked(None))

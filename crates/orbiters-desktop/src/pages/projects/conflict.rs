@@ -168,7 +168,13 @@ pub(super) fn footer(ui: &mut Ui, state: &mut State) {
     let Some(v) = state.conflict.as_ref() else { return };
     let solved = v.plan.solved() && !v.solving.running();
     let n = v.plan.steps.len();
-    let label = if n == 1 { "Apply the change".to_string() } else { format!("Update {n} packages together") };
+    let label = if !solved {
+        "Update together".to_string()
+    } else if n == 1 {
+        "Apply the change".to_string()
+    } else {
+        format!("Update {n} packages together")
+    };
     let b = Button::new(&label).icon(glyph::ARROW_UP).variant(Variant::Primary).enabled(solved && !state.running()).id_salt("conflict-apply");
     if widgets::activated(&b.show(ui)) {
         let (path, plan) = (v.path.clone(), v.plan.clone());

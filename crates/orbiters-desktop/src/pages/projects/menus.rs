@@ -49,6 +49,10 @@ pub(super) fn project_items(state: &State, project: &Project, opening: bool) -> 
             acts.push((Item::new("Open the folder").icon(icons::FOLDER_OPEN), ProjectAct::Folder));
         }
     }
+    // The panel's folder button gives its place to Unity's controls while the project is open.
+    if !opening && !project.missing && state.session(&project.path).open() {
+        acts.push((Item::new("Open the folder").icon(icons::FOLDER_OPEN), ProjectAct::Folder));
+    }
     acts.push((Item::new("Copy the folder's path").icon(icons::COPY), ProjectAct::CopyPath));
     if !project.missing && !busy {
         acts.push((Item::new("Duplicate…").icon(icons::COPY_SIMPLE), ProjectAct::Duplicate));

@@ -204,6 +204,11 @@ pub struct Viewer {
 /// The long side of a view saved as a picture (at least the view's own size).
 const STILL_LONG: f32 = 2560.0;
 
+/// The top bar's controls on the right: Recorded view, and the steps through the recorded views (‹, "View n of m", ›).
+const RESET_W: f32 = 132.0;
+const STEP_W: f32 = 40.0;
+const STEP_LABEL_W: f32 = 112.0;
+
 impl Viewer {
     /// Opens the 3D view of `session`, its splats on the integrated GPU with `integrated` ([`on_integrated`]).
     pub fn open(ctx: &egui::Context, gpu: &Handles, session: &Path, title: String, integrated: bool) -> Self {
@@ -437,7 +442,7 @@ impl Viewer {
             open = false;
         }
         if let Some(l) = self.loaded.as_ref() {
-            let reset_w = 132.0;
+            let reset_w = RESET_W;
             let reset_r = Rect::from_min_size(pos2(close_r.left() - 10.0 - reset_w, bar.top() + 2.0), vec2(reset_w, 40.0));
             if Button::new("Recorded view").icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Glass).width(reset_w).show_at(ui, reset_r).clicked() {
                 if let (Some(v), Some(o)) = (l.views.get(self.view), self.orbit.as_mut()) {
@@ -445,8 +450,7 @@ impl Viewer {
                 }
             }
             if l.views.len() > 1 {
-                let step_w = 40.0;
-                let label_w = 112.0;
+                let (step_w, label_w) = (STEP_W, STEP_LABEL_W);
                 let next_r = Rect::from_min_size(pos2(reset_r.left() - 10.0 - step_w, bar.top() + 2.0), vec2(step_w, 40.0));
                 let label_r = Rect::from_min_size(pos2(next_r.left() - label_w, bar.top() + 2.0), vec2(label_w, 40.0));
                 let prev_r = Rect::from_min_size(pos2(label_r.left() - step_w, bar.top() + 2.0), vec2(step_w, 40.0));
@@ -633,6 +637,7 @@ impl Viewer {
         let Some(l) = self.loaded.as_ref() else { return };
         // Whether its splats can be selected (None for a downloaded `.splat`, false while edits wait to be discarded).
         let selectable = l.edits.as_ref().map(|e| e.problem.is_none());
+        let views = l.views.len();
         let saving = self.still.is_some();
         let b = Button::new(if saving { "Saving the view…" } else { "Save this view" })
             .icon(icons::CAMERA)
@@ -687,7 +692,9 @@ impl Viewer {
             if b.show_at(ui, select_r).clicked() && can {
                 self.enter_select(&ctx);
             }
-            // Export… beside it: what the view shows, as a file for other tools.
+            // Export… beside it: what the view shows, as a file for other tools. Its icon alone (the label its tooltip)
+            // where the whole button would reach the view's controls on the right (a long world name, a narrow window):
+            // Recorded view, the views' steps when there are several, and Close.
             let b = Button::new("Export…")
                 .icon(icons::UPLOAD_SIMPLE)
                 .variant(Variant::Glass)
@@ -695,8 +702,17 @@ impl Viewer {
                 .hint(if can { "Saves what this view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender" } else { "Discard the edits that could not be applied first" })
                 .id_salt("splat-export");
             let bw = b.desired_width(ui);
-            let export_r = Rect::from_min_size(pos2(select_r.right() + 10.0, edit_r.top()), vec2(bw, 40.0));
-            if b.show_at(ui, export_r).clicked() && can {
+            let controls = rect.right() - 16.0 - 44.0 - 10.0 - RESET_W - if views > 1 { 10.0 + 2.0 * STEP_W + STEP_LABEL_W } else { 0.0 };
+            let x = select_r.right() + 10.0;
+            let (clicked, export_r) = if x + bw + 10.0 <= controls {
+                let r = Rect::from_min_size(pos2(x, edit_r.top()), vec2(bw, 40.0));
+                (b.show_at(ui, r).clicked(), r)
+            } else {
+                let r = Rect::from_min_size(pos2(x, edit_r.top()), vec2(40.0, 40.0));
+                let icon = IconButton::new(icons::UPLOAD_SIMPLE, "Export…").size(40.0, 17.0).backdrop(theme::black(0.55)).id_salt("splat-export-icon");
+                (icon.show_at(ui, r).clicked(), r)
+            };
+            if clicked && can {
                 self.export = Some(super::splat_export::Export::open(&ctx, &self.session, &self.title, export_r).order(egui::Order::Tooltip));
             }
         }

@@ -98,9 +98,9 @@ pub async fn register(root: &Path, path: &Path, add: bool) -> anyhow::Result<()>
     Ok(())
 }
 
-struct EnabledCollection {
-    inner: PackageCollection,
-    hidden: HashSet<String>,
+pub(crate) struct EnabledCollection {
+    pub(crate) inner: PackageCollection,
+    pub(crate) hidden: HashSet<String>,
 }
 impl EnabledCollection {
     fn enabled(&self, p: vrc_get_vpm::PackageInfo<'_>) -> bool {
@@ -127,7 +127,7 @@ fn missing_cache(root: &Path, settings: &Settings) -> bool {
     ];
     predefined.into_iter().flatten().any(|p| !root.join(p).is_file())
 }
-async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Settings, EnabledCollection)> {
+pub(crate) async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Settings, EnabledCollection)> {
     let io = DefaultEnvironmentIo::new(root.into());
     let settings = Settings::load(&io).await?;
     // Disabled repositories remain in VCC's settings; only the collection supplied to the resolver omits them.
@@ -265,6 +265,9 @@ pub enum Change {
     Install { names: Vec<(String, Option<String>)>, prerelease: bool },
     Remove(String),
     Resolve,
+    /// A conflict's plan ([`crate::coherent`]), confirmed: `remove` first, then the exact versions of `install`.
+    /// Any failure puts the project's manifest back and restores its packages.
+    Plan { install: Vec<(String, String)>, remove: Vec<String>, prerelease: bool },
 }
 pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<()> {
     // Serialize mutations across this app's windows. VCC's database has its own upstream shared LiteDB mutex.
@@ -273,7 +276,12 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
     let (_, packages) = collection(root, true).await?;
     let client = http()?;
     let mut project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
+    if let Change::Plan { install, remove, prerelease } = &action {
+        return apply_plan(&io, &client, &packages, path, project, install, remove, *prerelease).await;
+    }
+    let mut asked: Vec<(String, String)> = vec![];
     let changes = match &action {
+        Change::Plan { .. } => unreachable!(),
         Change::Resolve => project.resolve_request(&packages).await?,
         Change::Remove(name) => project.remove_request(&[name.as_str()]).await?,
         Change::Install { names, prerelease } => {
@@ -287,12 +295,18 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
                 let p = packages
                     .find_package_by_name(name, selector)
                     .with_context(|| format!("No compatible version of {name} is available in enabled repositories."))?;
+                asked.push((p.name().to_string(), p.version().to_string()));
                 requested.push(p);
             }
             project.add_package_request(&packages, &requested, vrc_get_vpm::unity_project::AddPackageOperation::AutoDetected, *prerelease).await?
         }
     };
     if !changes.conflicts().is_empty() {
+        // An install that conflicts: refused, with the plan that makes it coherent (the desktop shows it to confirm).
+        if let Change::Install { prerelease, .. } = &action {
+            let plan = crate::coherent::solve_with(&project, &packages, &asked, &[], *prerelease).await;
+            return Err(crate::coherent::Conflicted { plan }.into());
+        }
         bail!(
             "These package changes conflict with installed packages: {}. No changes were applied.",
             changes.conflicts().keys().map(|s| s.as_ref()).collect::<Vec<_>>().join(", ")
@@ -300,6 +314,69 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
     }
     project.apply_pending_changes(&PackageInstaller::new(&io, Some(&client)), changes).await?;
     project.save().await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_plan(
+    io: &DefaultEnvironmentIo,
+    client: &reqwest::Client,
+    packages: &EnabledCollection,
+    path: &Path,
+    project: UnityProject,
+    install: &[(String, String)],
+    remove: &[String],
+    prerelease: bool,
+) -> anyhow::Result<()> {
+    let manifest = path.join("Packages/vpm-manifest.json");
+    let backup = std::fs::read(&manifest)?;
+    let installer = PackageInstaller::new(io, Some(client));
+    let result: anyhow::Result<()> = async {
+        let mut project = project;
+        if !remove.is_empty() {
+            let names: Vec<&str> = remove.iter().map(String::as_str).collect();
+            let changes = project.remove_request(&names).await?;
+            project.apply_pending_changes(&installer, changes).await?;
+            project.save().await?;
+            project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
+        }
+        let mut requested = vec![];
+        for (name, version) in install {
+            let v: vrc_get_vpm::version::Version = version.parse()?;
+            requested.push(
+                packages
+                    .find_package_by_name(name, VersionSelector::specific_version(&v))
+                    .with_context(|| format!("{name} {version} is no longer in the enabled repositories."))?,
+            );
+        }
+        let changes = project.add_package_request(packages, &requested, vrc_get_vpm::unity_project::AddPackageOperation::AutoDetected, prerelease).await?;
+        if !changes.conflicts().is_empty() {
+            bail!(
+                "The plan conflicts again with: {} (the repositories changed since it was made).",
+                changes.conflicts().keys().map(|s| s.as_ref()).collect::<Vec<_>>().join(", ")
+            );
+        }
+        project.apply_pending_changes(&installer, changes).await?;
+        project.save().await?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = result {
+        // Rolled back: the manifest as it was, its locked packages restored.
+        std::fs::write(&manifest, &backup)?;
+        let restored: anyhow::Result<()> = async {
+            let mut project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
+            let changes = project.resolve_request(packages).await?;
+            project.apply_pending_changes(&installer, changes).await?;
+            project.save().await?;
+            Ok(())
+        }
+        .await;
+        return Err(match restored {
+            Ok(()) => e.context("Nothing was changed: the project's packages are as they were"),
+            Err(r) => e.context(format!("The package list was put back, but restoring its packages failed ({r:#}): use Restore")),
+        });
+    }
     Ok(())
 }
 /// Installs the latest releases of `names` from the Orbiters repository, adding it (or turning it back on) first.

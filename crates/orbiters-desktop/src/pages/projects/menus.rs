@@ -15,6 +15,10 @@ pub(super) const EYE: &str = "\u{E220}";
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum ProjectAct {
     Open,
+    /// Open in Unity already: its window to the front, quit (Unity asks to save), ended (after the panel's confirmation).
+    ShowUnity,
+    SaveExit,
+    Kill,
     Add,
     Folder,
     CopyPath,
@@ -29,7 +33,14 @@ pub(super) fn project_items(state: &State, project: &Project, opening: bool) -> 
     let busy = state.running();
     let mut acts = Vec::new();
     if opening {
-        if project.registered && !project.missing && !busy {
+        let session = state.session(&project.path);
+        if project.registered && session.open() {
+            acts.push((Item::new("Show in Unity").icon(icons::ARROW_SQUARE_OUT), ProjectAct::ShowUnity));
+            if matches!(session, orbiters_projects::editor::Session::Open { .. }) {
+                acts.push((Item::new("Save & Exit Unity").icon(icons::FLOPPY_DISK), ProjectAct::SaveExit));
+                acts.push((Item::new("Kill Unity…").icon(icons::X_CIRCLE).danger(), ProjectAct::Kill));
+            }
+        } else if project.registered && !project.missing && !busy {
             acts.push((Item::new("Open in Unity").icon(icons::PLAY), ProjectAct::Open));
         } else if !project.registered && !busy {
             acts.push((Item::new("Add to my projects").icon(icons::PLUS), ProjectAct::Add));
@@ -37,6 +48,10 @@ pub(super) fn project_items(state: &State, project: &Project, opening: bool) -> 
         if !project.missing {
             acts.push((Item::new("Open the folder").icon(icons::FOLDER_OPEN), ProjectAct::Folder));
         }
+    }
+    // The panel's folder button gives its place to Unity's controls while the project is open.
+    if !opening && !project.missing && state.session(&project.path).open() {
+        acts.push((Item::new("Open the folder").icon(icons::FOLDER_OPEN), ProjectAct::Folder));
     }
     acts.push((Item::new("Copy the folder's path").icon(icons::COPY), ProjectAct::CopyPath));
     if !project.missing && !busy {
@@ -62,6 +77,13 @@ pub(super) fn project_act(ctx: &egui::Context, cx: &mut Cx, state: &mut State, p
                 orbiters_projects::open_project(&p)?;
                 Ok(Outcome::Changed("Project sent to Unity".into()))
             });
+        }
+        ProjectAct::ShowUnity => state.show_editor(ctx, project),
+        ProjectAct::SaveExit => state.save_and_exit(ctx, project),
+        // Its confirmation is the panel's: the project opens there, Kill asking first.
+        ProjectAct::Kill => {
+            state.kill_confirm = Some(project.path.clone());
+            state.open(ctx, project.path.clone());
         }
         ProjectAct::Add => {
             let path = project.path.clone();

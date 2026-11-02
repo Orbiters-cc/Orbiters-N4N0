@@ -21,10 +21,12 @@ walkdir = "2"
 # Package icons (icons.rs): what websites serve, decoded and kept small.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "ico"] }
 resvg = { version = "0.49", default-features = false }
+# Unity editors open on the computer and the projects they have open (editor.rs).
+sysinfo = "0.37"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
-windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_IO"] }
+windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_IO", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
 junction = "2.1.0"
 
 [dev-dependencies]

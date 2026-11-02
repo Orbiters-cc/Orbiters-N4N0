@@ -6,7 +6,7 @@ use orbiters_projects::{
     avatars::Avatar,
     blender,
     discovery::{self, Project, Scan},
-    git, hidden, icons, network, setup, size, templates, vpm,
+    editor, git, hidden, icons, network, setup, size, templates, updates, vpm,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -31,6 +31,8 @@ pub(super) enum Modal {
     Setup,
     /// A copy of the project in this folder.
     Duplicate(PathBuf),
+    /// A package change that conflicted, and the plan solving it.
+    Conflict,
 }
 /// The Duplicate dialog's choices: the copy's name and where it goes, Library taken along, and what was found of that
 /// place (on a worker, when they change).
@@ -64,6 +66,8 @@ pub(super) enum Outcome {
     Picked(Option<PathBuf>),
     /// Done, with only this to say (a program opened).
     Said(String),
+    /// A package change refused for a conflict: the project and the plan making it coherent.
+    Conflict(PathBuf, orbiters_projects::coherent::Plan),
 }
 type ViewResult = Result<(vpm::View, Vec<templates::Template>, Option<git::Repo>), String>;
 
@@ -253,6 +257,31 @@ pub struct State {
     pub(super) scroll_gallery: Option<f32>,
     /// The member's avatars and worlds whose pictures can be changed on VRChat from their thumbnails.
     pub(super) vrchat_pictures: super::vrchat_picture::Pictures,
+    /// The selected project's package updates (for releases and with pre-releases) and the check running.
+    pub(super) updates: Option<(PathBuf, updates::Check)>,
+    pub(super) updates_job: Job<(PathBuf, Result<updates::Check, String>)>,
+    /// The repositories last downloaded again for the update check (once a window, then every half hour).
+    pub(super) repos_checked: Option<Instant>,
+    /// The view being read is that periodic look: its failure is not shown (the cached view stays).
+    pub(super) view_quiet: bool,
+    /// Update all's plan opened, waiting for its confirmation.
+    pub(super) plan_open: bool,
+    /// The package change last started: retried once the missing packages' repositories are added.
+    pub(super) last_change: Option<(PathBuf, vpm::Change)>,
+    /// Packages a project needs that no repository lists: the error card with "Add their repositories".
+    pub(super) missing: Option<super::missing_card::Card>,
+    /// Each project's Unity editor (by `discovery::key`), and since when Unity's save question was answered.
+    pub(super) sessions: HashMap<String, (editor::Session, Option<Instant>)>,
+    pub(super) editors_job: Job<HashMap<String, Option<(u32, bool)>>>,
+    pub(super) editors_at: Option<Instant>,
+    /// Show, Save & Exit or Kill running (not the page's one action: Unity may be asked while packages change).
+    pub(super) editor_action: Job<Result<(), String>>,
+    /// The project whose Kill waits for its confirmation.
+    pub(super) kill_confirm: Option<PathBuf>,
+    /// The conflict dialog's plan.
+    pub(super) conflict: Option<super::conflict::View>,
+    /// The Orbiters server the window uses (where missing packages are looked up), from the last frame.
+    pub(super) server_now: Option<Server>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -370,6 +399,20 @@ impl Default for State {
             fixture_uploads: vec![],
             scroll_gallery: None,
             vrchat_pictures: Default::default(),
+            updates: None,
+            updates_job: Job::default(),
+            repos_checked: None,
+            view_quiet: false,
+            plan_open: false,
+            last_change: None,
+            missing: None,
+            sessions: HashMap::new(),
+            editors_job: Job::default(),
+            editors_at: None,
+            editor_action: Job::default(),
+            kill_confirm: None,
+            conflict: None,
+            server_now: None,
         }
     }
 }
@@ -481,6 +524,7 @@ impl State {
         if self.fixture {
             return;
         }
+        self.view_quiet = false;
         let path = self.selected.clone();
         self.view_job = Job::spawn(ctx, move || {
             let root = orbiters_projects::vcc_dir();
@@ -510,6 +554,45 @@ impl State {
         self.load_view(ctx, false);
         self.load_links(ctx);
     }
+    /// Checks the selected project's packages for updates (after each look at its packages).
+    fn check_updates(&mut self, ctx: &egui::Context) {
+        if self.fixture {
+            return;
+        }
+        let Some(path) = self.selected.clone() else { return };
+        self.updates_job = Job::spawn(ctx, move || {
+            let r = orbiters_projects::runtime()
+                .and_then(|rt| rt.block_on(updates::check(&orbiters_projects::vcc_dir(), &path)))
+                .map_err(|e| format!("{e:#}"));
+            (path, r)
+        });
+    }
+    fn poll_updates(&mut self, ctx: &egui::Context) {
+        if let Some((path, result)) = self.updates_job.take() {
+            match result {
+                Ok(check) => self.updates = Some((path, check)),
+                // A project that cannot be read now (moved, its manifest broken) shows no update.
+                Err(_) => self.updates = None,
+            }
+        }
+        // The repositories downloaded again once a window and every half hour while a project is shown, so new
+        // versions show without Refresh; the check follows the view that brings them.
+        if !self.fixture
+            && self.selected.is_some()
+            && !self.running()
+            && !self.view_job.running()
+            && !self.updates_job.running()
+            && self.repos_checked.is_none_or(|t| t.elapsed() > Duration::from_secs(30 * 60))
+        {
+            self.repos_checked = Some(Instant::now());
+            self.load_view(ctx, true);
+            self.view_quiet = true;
+        }
+    }
+    /// The selected project's updates, with pre-releases when the switch is on.
+    pub(super) fn updates_of(&self, path: &std::path::Path) -> Option<&updates::Updates> {
+        self.updates.as_ref().filter(|(p, _)| p == path).map(|(_, c)| c.get(self.prerelease))
+    }
     pub(super) fn catalog(&mut self, ctx: &egui::Context, server: Server) {
         if !self.fixture {
             self.catalog_job = Job::spawn(ctx, move || network::catalog(server));
@@ -524,6 +607,7 @@ impl State {
         self.action = Job::spawn(ctx, move || f().map_err(|e| format!("{e:#}")));
     }
     pub(super) fn poll(&mut self, ctx: &egui::Context, cx: &mut Cx) {
+        self.server_now = Some(server(cx));
         self.poll_thumbs(ctx);
         let environment = crate::controller::vrchat_data::Scope::of(cx.snap);
         // Another account or VRChat session: every picture is asked for again, the ones shown staying until their
@@ -568,10 +652,16 @@ impl State {
                     self.templates = templates;
                     self.git = repo;
                     self.load_banners(ctx);
+                    self.check_updates(ctx);
                 }
+                // The periodic look at the repositories says nothing when it fails: the cached view stays.
+                Err(_) if self.view_quiet => {}
                 Err(e) => self.error = Some(e),
             }
+            self.view_quiet = false;
         }
+        self.poll_updates(ctx);
+        self.poll_editors(ctx, cx);
         self.load_icons(ctx);
         self.load_repo_icons(ctx);
         if let Some(covers) = self.banner_job.take() {
@@ -589,6 +679,10 @@ impl State {
         if let Some(result) = self.action.take() {
             self.action_label.clear();
             self.busy_package = None;
+            let change = self.last_change.take();
+            if result.is_ok() {
+                self.missing = None;
+            }
             match result {
                 Ok(Outcome::Changed(message)) => {
                     cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, message);
@@ -606,6 +700,11 @@ impl State {
                     self.refresh(ctx, false);
                 }
                 Ok(Outcome::Said(message)) => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, message),
+                Ok(Outcome::Conflict(path, plan)) => {
+                    self.conflict = Some(super::conflict::View { path, plan, solving: Job::default() });
+                    let origin = self.anchor("conflict-origin");
+                    self.open_modal(ctx, Modal::Conflict, origin);
+                }
                 Ok(Outcome::Setup(flow)) => {
                     self.flow = Some(flow);
                     self.pending = None;
@@ -616,6 +715,8 @@ impl State {
                 Ok(Outcome::Picked(Some(p))) => self.new_location = p.display().to_string(),
                 Ok(Outcome::Picked(None)) => {}
                 Err(e) => {
+                    // Packages no repository lists: the card offers to add the repositories that have them.
+                    self.missing = super::missing_card::Card::from_error(&e, change.or_else(|| self.selected.clone().map(|p| (p, vpm::Change::Resolve))));
                     self.error = Some(e);
                     self.pending = None;
                     self.load_view(ctx, false);
@@ -1565,6 +1666,7 @@ impl State {
     /// The stand-ins of the panel's sizes, Blender links, worlds' captures and uploads, the Duplicate dialog and the
     /// hidden projects (`screenshot/projects_panel.rs`).
     fn stage_panel(&mut self, name: &str) {
+        self.stage_packages(name);
         use crate::state::{MapsMine, UploadKind, UploadState, UploadStatus};
         use orbiters_core::maps::{MinePicture, MinePreview, MineWorld};
         // Every project measured (its Library a good part of it), but the one the panel measures in `-measuring`.
@@ -1714,6 +1816,7 @@ impl State {
         // Right-click menus: a project card's, a found project's, an avatar's row.
         match (name, frame) {
             ("projects-card-menu", 40) => return self.anchors.get("card-1").map(|r| Poke::Context(r.center())),
+            ("projects-unity-menu", 40) => return self.anchors.get("card-0").map(|r| Poke::Context(r.center())),
             ("projects-avatar-menu", 50) => return self.anchors.get("vrchat-picture-0").map(|r| Poke::Context(r.center() + egui::vec2(220.0, 0.0))),
             _ => {}
         }

@@ -258,7 +258,8 @@ pub(super) fn card_with(
     if let Some(c) = count {
         widgets::pill_at(child.painter(), &child, pos2(tr.right() + 8.0, head.center().y), None, &c);
     }
-    let slot = Rect::from_min_max(pos2(head.right() - 200.0, head.top()), head.max);
+    // Room for two buttons (Update all and Restore) when the title leaves it.
+    let slot = Rect::from_min_max(pos2((head.right() - 320.0).max(tr.right() + 48.0).min(head.right() - 200.0), head.top()), head.max);
     let mut su = child.new_child(UiBuilder::new().max_rect(slot).id_salt(("panel-card-right", salt)));
     right(&mut su, slot);
     child.add_space(2.0);

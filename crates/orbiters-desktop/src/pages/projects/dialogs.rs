@@ -49,6 +49,10 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let name = state.scan.projects.iter().find(|p| &p.path == path).map(|p| p.name.clone()).unwrap_or_else(|| "the project".into());
             (icons::COPY, "Duplicate the project".into(), format!("A copy of {name}, beside it or anywhere you choose"), 600.0)
         }
+        Modal::Conflict => {
+            let (t, s) = super::conflict::head(state);
+            (glyph::PACKAGE, t, s, 620.0)
+        }
     };
     let step = match &modal {
         Modal::Repos => 0,
@@ -57,8 +61,9 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         Modal::ChooseProject(_) => 3,
         Modal::Setup => 4,
         Modal::Duplicate(_) => 5,
+        Modal::Conflict => 6,
     };
-    let creating = matches!(modal, Modal::New | Modal::Duplicate(_)) && state.running();
+    let creating = matches!(modal, Modal::New | Modal::Duplicate(_)) && state.running() || (modal == Modal::Conflict && state.conflict.as_ref().is_some_and(|c| c.solving.running()));
     let resp = Dialog::new(id, state.modal_origin, &title)
         .origin_fill(state.modal_fill)
         .glyph(glyph)
@@ -74,6 +79,7 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 Modal::ChooseProject(avatar) => project_choice(ui, state, avatar),
                 Modal::Setup => setup_steps(ui, state),
                 Modal::Duplicate(path) => super::duplicate::body(ui, state, path),
+                Modal::Conflict => super::conflict::body(ui, state),
             }),
             Part::Footer => match &modal {
                 Modal::Repos => {}
@@ -82,9 +88,13 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 Modal::ChooseProject(avatar) => choice_footer(ui, cx, state, avatar),
                 Modal::Setup => setup_footer(ui, cx, state),
                 Modal::Duplicate(path) => super::duplicate::footer(ui, state, path),
+                Modal::Conflict => super::conflict::footer(ui, state),
             },
         });
     if resp.closed {
+        if state.modal == Some(Modal::Conflict) {
+            state.conflict = None;
+        }
         state.modal = None;
     }
 }

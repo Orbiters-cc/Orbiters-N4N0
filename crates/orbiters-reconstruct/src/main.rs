@@ -363,13 +363,13 @@ fn web_preview(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned] [--rank area|contribution|seen]
+/// `orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned] [--before] [--rank area|contribution|seen]
 /// [--refit <steps>] [--cameras <n>] [--rank-cameras <n>] [--decoded] [--tight] [--tune-steps <n>]
 /// [--drawn-at <pc>,<quest>] [--refit-width <n>] [--pc-appearance]`: the reconstruction's files for VRChat worlds
 /// (orbiters_reconstruct::tree_tune; the lab switches are tree_tune::ExportOptions'): pc.n4tree, quest.n4tree and
 /// coarse.n4tree, without the splats its edits hide or delete (orbiters_reconstruct::edit).
 fn vrchat(args: &[String]) -> anyhow::Result<()> {
-    let usage = "usage: orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned] [--rank area|contribution|seen] [--refit <steps>] [--cameras <n>] [--rank-cameras <n>] [--decoded] [--tight] [--tune-steps <n>] [--drawn-at <pc px>,<quest px>] [--refit-width <n>] [--pc-appearance]";
+    let usage = "usage: orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned] [--before] [--rank area|contribution|seen] [--refit <steps>] [--cameras <n>] [--rank-cameras <n>] [--decoded] [--tight] [--tune-steps <n>] [--drawn-at <pc px>,<quest px>] [--refit-width <n>] [--pc-appearance]";
     let (Some(session), Some(out)) = (args.first(), args.get(1)) else { bail!(usage) };
     let mut options = orbiters_reconstruct::tree_tune::ExportOptions::default();
     let mut untuned = false;
@@ -378,6 +378,7 @@ fn vrchat(args: &[String]) -> anyhow::Result<()> {
         let mut value = || it.next().with_context(|| format!("{a} needs a value"));
         match a.as_str() {
             "--untuned" => untuned = true,
+            "--before" => options = orbiters_reconstruct::tree_tune::ExportOptions::before(),
             "--rank" => options.rank = orbiters_reconstruct::tree_tune::Rank::parse(value()?)?,
             "--refit" => options.refit_steps = value()?.parse()?,
             "--cameras" => options.cameras = value()?.parse()?,

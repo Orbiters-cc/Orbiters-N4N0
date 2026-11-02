@@ -97,36 +97,10 @@ pub fn write_splat(bytes: &mut Vec<u8>, g: &Gaussians, i: usize) {
         bytes.extend_from_slice(&v.to_le_bytes());
     }
     bytes.extend_from_slice(&[byte(c[0]), byte(c[1]), byte(c[2]), byte(sigmoid(g.opacity_logits[i]))]);
-    bytes.extend(rotation_bytes(rotation));
-}
-
-/// A unit quaternion (w, x, y, z) as the record's four bytes `q · 128 + 128`: of the byte quadruples one step around it
-/// (each component rounded down or up, for `q` and for `-q`, the same rotation), the one whose decoded quaternion (every
-/// reader normalises it: crate::web::read_splat, the VRChat world's SplatDecode) is nearest the true rotation. Rounding
-/// each component alone cost the plaza walk's held-out views 0.12 dB (the rotation alone through the record, lab
-/// examples/treeloss.rs --diag); this cuts the mean angular error by a quarter (0.0075 to 0.0057 rad over random
-/// rotations), and every byte stays within one step of that rounding.
-pub fn rotation_bytes(q: [f32; 4]) -> [u8; 4] {
-    let decode = |b: [u8; 4]| {
-        let d = b.map(|v| (v as f32 - 128.0) / 128.0);
-        let n = d.iter().map(|v| v * v).sum::<f32>().sqrt();
-        (n > 1e-6).then(|| d.map(|v| v / n))
-    };
-    let mut best = q.map(|v| (v * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8);
-    let mut best_dot = decode(best).map_or(-1.0, |d| (0..4).map(|k| d[k] * q[k]).sum::<f32>().abs());
-    for sign in [1.0f32, -1.0] {
-        let scaled = q.map(|v| (sign * v * 128.0 + 128.0).clamp(0.0, 255.0));
-        for corner in 0..16u32 {
-            let b: [u8; 4] = std::array::from_fn(|k| if corner >> k & 1 == 1 { scaled[k].ceil() } else { scaled[k].floor() } as u8);
-            if let Some(d) = decode(b) {
-                let dot = (0..4).map(|k| d[k] * q[k]).sum::<f32>().abs();
-                if dot > best_dot {
-                    (best, best_dot) = (b, dot);
-                }
-            }
-        }
-    }
-    best
+    // Each component rounded (contracts' Docs/splat-tree.md). Lab, 2026-11-02: the nearest representable rotation
+    // instead (the best floor/ceil quadruple of q or -q) cut the mean angular error by a quarter but gained the plaza
+    // walk only 0.025 dB of the 0.12 dB its rotation bytes cost, not worth departing from the contract's wording.
+    bytes.extend(rotation.map(|v| (v * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8));
 }
 
 #[cfg(test)]
@@ -164,32 +138,6 @@ mod tests {
         // The invisible splat is left out even with room to spare.
         assert_eq!(splat_file(&g, 1000, [0.0; 3]).count, 99);
     }
-    #[test]
-    fn rotation_bytes_are_the_nearest_rotation_one_step_around_the_rounding() {
-        let mut rng = fastrand::Rng::with_seed(9);
-        let angle = |q: [f32; 4], b: [u8; 4]| {
-            let d = b.map(|v| (v as f32 - 128.0) / 128.0);
-            let n = d.iter().map(|v| v * v).sum::<f32>().sqrt();
-            2.0 * ((0..4).map(|k| d[k] / n * q[k]).sum::<f32>().abs().min(1.0)).acos()
-        };
-        let (mut rounded, mut nearest) = (0.0f64, 0.0f64);
-        for _ in 0..20_000 {
-            let q = [rng.f32() - 0.5, rng.f32() - 0.5, rng.f32() - 0.5, rng.f32() - 0.5];
-            let n = q.iter().map(|v| v * v).sum::<f32>().sqrt();
-            let q = q.map(|v| v / n);
-            let plain = q.map(|v| (v * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8);
-            let b = rotation_bytes(q);
-            let (a_plain, a_best) = (angle(q, plain), angle(q, b));
-            assert!(a_best <= a_plain + 1e-6, "{q:?}: {a_best} rad against {a_plain}");
-            // One step around q's rounding or -q's.
-            let minus = q.map(|v| (-v * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8);
-            assert!(b.iter().zip(&plain).all(|(x, y)| x.abs_diff(*y) <= 1) || b.iter().zip(&minus).all(|(x, y)| x.abs_diff(*y) <= 1));
-            rounded += a_plain as f64;
-            nearest += a_best as f64;
-        }
-        assert!(nearest < 0.85 * rounded, "mean error {nearest} against {rounded}");
-    }
-
     #[test]
     fn downloaded_splats_preserve_coordinates_and_reject_corruption() {
         let mut g = Gaussians::default();

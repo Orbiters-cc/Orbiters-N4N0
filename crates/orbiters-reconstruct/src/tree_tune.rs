@@ -1,8 +1,11 @@
 //! VRChat's files of a reconstruction (OrbitersContracts Docs/splat-tree.md): its splat tree for PC, a smaller one for
-//! Quest and the top of that one, which a world shows while the full file downloads. Each depth of merged boxes is
-//! tuned on the GPU to look like the leaves it stands in for: from the session's recorded cameras, at the resolution
-//! where that depth is drawn instead of them (the leaves' render there is the target, so a session whose keyframes
-//! are gone tunes all the same).
+//! Quest and the top of that one, which a world shows while the full file downloads. A tree keeps the splats that add
+//! the most to the recorded cameras' images ([`Rank::Contribution`]); its leaves are then re-fitted to the full model's
+//! renders from those cameras as the file's bytes hold them (colours within 0–1: a trained model holds about half its
+//! splats' colours outside, which the bytes clip; [`ExportOptions::decoded`]); and each depth of merged boxes is tuned
+//! on the GPU to look like the leaves it stands in for, at the resolution where that depth is drawn. Everything
+//! renders from the session's recorded cameras, never its keyframes, so a session whose keyframes are gone exports all
+//! the same. Measured on the lab's five sessions: the SOTA lab's reports/export-leaves.md (2026-11-02).
 
 use crate::camera::Camera;
 use crate::gaussians::Gaussians;
@@ -26,8 +29,18 @@ const STEPS: u32 = 400;
 const CAMERAS: usize = 24;
 /// The widest camera a depth trains from.
 const MAX_WIDTH: u32 = 960;
-/// A merged box is drawn once its error looks about this many pixels wide: what it is tuned at.
+/// A merged box was tuned where its error looks about this many pixels wide ([`ExportOptions::before`]).
 const DRAWN_AT_PIXELS: f32 = 1.5;
+/// Where the PC and Quest trees' merged depths are tuned: their error about this many pixels wide in a recorded camera
+/// (about 600 pixels per radian at 960 wide), near where the world draws them (2–4.5 px at 1000 px/rad on PC, 15–33 on
+/// Quest). Against 1.5 px, Quest's cut at auto's start (τ = 33) gained 0.15 dB on exo and 0.46 on plaza.
+const DRAWN_AT: [f32; 2] = [3.0, 20.0];
+/// Re-fit steps a tree's leaves take ([`ExportOptions::refit_steps`]): 2000 gained plaza's Quest tree 0.05–0.07 dB over
+/// 1000 for about twice the re-fit's time.
+const REFIT_STEPS: u32 = 1000;
+/// Recorded cameras the re-fit renders from at most ([`ExportOptions::cameras`]): 48 left a long capture's leaves fitted
+/// to those 48 and worse between them (silent-dawn, 419 keyframes: PC leaves +0.12 dB on held-out views, +0.53 from 256).
+const REFIT_CAMERAS: usize = 256;
 
 pub struct VrchatFiles {
     pub pc: Vec<u8>,
@@ -57,15 +70,19 @@ pub fn session_cameras_without(session: &Path, skip: &[i32]) -> anyhow::Result<V
 /// How a tree picks the splats it keeps when a reconstruction has more than fit (lab switch `--rank`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Rank {
-    /// Opacity times area (crate::tree::importances): big opaque splats first, whether or not a view sees them.
-    #[default]
+    /// Opacity times area (crate::tree::importances): big opaque splats first, whether or not a view sees them (the
+    /// ranking before 2026-11-02). It filled plaza's Quest tree with its sky shell: Quest leaves 23.1 dB on held-out views
+    /// against 34.3 for the PC tree's.
     Area,
     /// What each adds to the recorded cameras' images: the sum of its blending weights α·T over their pixels
     /// (crate::gpu::Gpu::contribution, LightGaussian's global significance), rendered from the full model, so a session
-    /// whose keyframes are gone ranks all the same.
+    /// whose keyframes are gone ranks all the same. Quest leaves on held-out views: plaza 30.1 dB (+7.1), home +0.39,
+    /// exo +0.18.
+    #[default]
     Contribution,
     /// The PLY's seen statistics alone (no GPU): the largest weight times the keyframes that saw it times its footprint
-    /// in pixels at the finest rate it was seen at.
+    /// in pixels at the finest rate it was seen at. On exo as good as contribution (Quest leaves 23.63 against 23.62 dB):
+    /// what a CPU-only export could use.
     Seen,
 }
 
@@ -85,14 +102,17 @@ impl Rank {
 pub struct ExportOptions {
     pub rank: Rank,
     /// Steps re-fitting a tree's kept leaves to the full model's renders from the recorded cameras (distillation: no
-    /// keyframe needed), when the tree keeps fewer splats than the model has; 0: the leaves stay as trained.
+    /// keyframe needed), when the tree keeps fewer splats than the model has (or, `decoded`, always); 0: the leaves stay
+    /// as trained. One camera in eight checks the re-fit, which is kept only if it gains there too.
     pub refit_steps: u32,
     /// Cameras the re-fit renders from at most, spread over the session (one in eight checks it instead).
     pub cameras: usize,
     /// Cameras the contribution adds up over at most, spread over the session.
     pub rank_cameras: usize,
     /// Decode-aware: the leaves are re-fitted (with `refit_steps`) and the merged depths tuned as the file rounds them,
-    /// every colour within 0–1 (the colour bytes), the merged depths against the leaves as rounded.
+    /// every colour within 0–1 (the colour bytes), the merged depths against the leaves as rounded. The colour bytes'
+    /// clip cost the full model 0.17–0.82 dB on held-out views (exo; home 0.51, silent-dawn 0.82), and the PC tree, which
+    /// keeps every splat on every lab session, lost exactly that.
     pub decoded: bool,
     /// The most leaves the budget holds (a few builds), rather than 10 % fewer until the tree fits.
     pub tight: bool,
@@ -103,13 +123,45 @@ pub struct ExportOptions {
     /// The re-fit's cameras are this wide at most: whole multiples of the recorded cameras (themselves at most 960 wide).
     pub refit_width: u32,
     /// A PC tree that keeps every splat re-fits only their colours and opacities (decode-aware: what the colour bytes
-    /// clip), not where they are or their shape.
+    /// clip), not where they are or their shape. A full re-fit moved plaza's sharp splats to fit the cameras it trained
+    /// from and lost 0.4 dB from the others (so it was refused); appearance alone gained 2.7 dB there (+0.20 held out).
     pub pc_appearance: bool,
 }
 
+impl ExportOptions {
+    /// The export as it was before contribution ranking and the re-fit (lab controls: `--before`).
+    pub fn before() -> Self {
+        Self {
+            rank: Rank::Area,
+            refit_steps: 0,
+            cameras: 48,
+            rank_cameras: 256,
+            decoded: false,
+            tight: false,
+            tune_steps: STEPS,
+            drawn_at: [DRAWN_AT_PIXELS; 2],
+            refit_width: MAX_WIDTH,
+            pc_appearance: false,
+        }
+    }
+}
+
 impl Default for ExportOptions {
+    /// What uploads make: contribution ranking, the decode-aware re-fit (the PC tree's of appearance only) and merged
+    /// depths tuned where they are drawn (the SOTA lab's reports/export-leaves.md).
     fn default() -> Self {
-        Self { rank: Rank::Area, refit_steps: 0, cameras: 48, rank_cameras: 256, decoded: false, tight: false, tune_steps: STEPS, drawn_at: [DRAWN_AT_PIXELS; 2], refit_width: MAX_WIDTH, pc_appearance: false }
+        Self {
+            rank: Rank::Contribution,
+            refit_steps: REFIT_STEPS,
+            cameras: REFIT_CAMERAS,
+            rank_cameras: 256,
+            decoded: true,
+            tight: false,
+            tune_steps: STEPS,
+            drawn_at: DRAWN_AT,
+            refit_width: MAX_WIDTH,
+            pc_appearance: true,
+        }
     }
 }
 

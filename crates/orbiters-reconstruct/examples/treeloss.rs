@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! cargo run --release --example treeloss -- <run folder> [--gt <views folder>] [--json <out.json>] [--save <dir>]
-//!     [--files <dir>] [--rank area|contribution|seen] [--refit <steps>] [--cameras <n>] [--rank-cameras <n>]
+//!     [--files <dir>] [--before] [--rank area|contribution|seen] [--refit <steps>] [--cameras <n>] [--rank-cameras <n>]
 //!     [--decoded] [--tight] [--tune-steps <n>] [--drawn-at <pc px>,<quest px>] [--refit-width <n>] [--pc-appearance]
 //!     [--no-full] [--width <n>]
 //!     [--arm <label> "<export options>"]... [--json-dir <dir> --name <session>] [--diag]
@@ -159,6 +159,7 @@ fn score(gpu: &mut gpu::Gpu, set: &mut Set, drawn: &Drawn, keep_full: bool) -> a
 fn export_option(a: &str, it: &mut dyn Iterator<Item = String>, options: &mut ExportOptions) -> anyhow::Result<bool> {
     let mut value = || it.next().with_context(|| format!("{a} needs a value"));
     match a {
+        "--before" => *options = ExportOptions::before(),
         "--rank" => options.rank = Rank::parse(&value()?)?,
         "--refit" => options.refit_steps = value()?.parse()?,
         "--cameras" => options.cameras = value()?.parse()?,
@@ -286,6 +287,9 @@ fn main() -> anyhow::Result<()> {
         };
         let variants: Vec<(&str, Gaussians)> = vec![
             ("full", g.clone()),
+            // KHR_gaussian_splatting's renderers clamp each splat's colour at 0 (crate::export), three.js, SPZ and the
+            // splat record within 0–1.
+            ("colour_nonnegative", field(&|o, _, i| o.colors[i] = o.colors[i].map(|c| c.max(0.0)))),
             ("colour_clamped", field(&|o, _, i| o.colors[i] = o.colors[i].map(|c| c.clamp(0.0, 1.0)))),
             ("colour_rounded", field(&|o, r, i| o.colors[i] = r.colors[i])),
             ("opacity_rounded", field(&|o, r, i| o.opacity_logits[i] = r.opacity_logits[i])),
@@ -298,7 +302,8 @@ fn main() -> anyhow::Result<()> {
             })),
         ];
         let outside = (0..g.len()).filter(|&i| g.colors[i].iter().any(|c| !(0.0..=1.0).contains(c))).count();
-        println!("{} splats, {outside} with a colour outside 0–1", g.len());
+        let negative = (0..g.len()).filter(|&i| g.colors[i].iter().any(|c| *c < 0.0)).count();
+        println!("{} splats, {outside} with a colour outside 0–1, {negative} with a negative channel", g.len());
         let mut out = serde_json::Map::new();
         for set in &mut sets {
             let mut scores = serde_json::Map::new();
@@ -310,7 +315,7 @@ fn main() -> anyhow::Result<()> {
             out.insert(set.name.into(), serde_json::Value::Object(scores));
         }
         if let Some(path) = json {
-            std::fs::write(path, serde_json::to_string_pretty(&serde_json::json!({ "run": run.display().to_string(), "outside": outside, "scores": out }))?)?;
+            std::fs::write(path, serde_json::to_string_pretty(&serde_json::json!({ "run": run.display().to_string(), "outside": outside, "negative": negative, "splats": g.len(), "scores": out }))?)?;
         }
         return Ok(());
     }

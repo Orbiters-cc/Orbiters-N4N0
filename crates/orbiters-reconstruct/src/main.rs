@@ -73,9 +73,9 @@ fn args() -> anyhow::Result<Args> {
             "--relocate-until" => settings.relocate_until = it.next().context("--relocate-until needs a value")?.parse().context("--relocate-until takes a number (0–1)")?,
             "--fade-to-the-end" => settings.fade_until_rising = false,
             // Lab A/Bs of where relocation places Gaussians (orbiters_reconstruct::train::{Sources, Split}): which live
-            // ones it copies, how a copy splits its source, SGLD noise on the means (λ: gsplat's is 5e5; spared on
-            // measured depth unless --no-noise-gate; --noise-visible: only what the step shows) and the share of the
-            // moves born at measured depth.
+            // ones it copies, how a copy splits its source, the SGLD noise on the means (on by default: λ 5e5, spared on
+            // measured depth, only in rounds at most a quarter dead; --no-noise, --no-noise-gate, --noise-dead-max 0 for
+            // every round, --noise-visible: only what the step shows) and the share of the moves born at measured depth.
             "--sources" => {
                 settings.sources = match it.next().as_deref() {
                     Some("opacity") => train::Sources::Opacity,

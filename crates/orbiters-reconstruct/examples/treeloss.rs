@@ -263,7 +263,13 @@ fn main() -> anyhow::Result<()> {
             .map(|v| {
                 let (truth, w, h) = read_png(&dir.join(&v.file))?;
                 anyhow::ensure!(w == v.width && h == v.height, "{}: size", v.file);
-                Ok(View { camera: Camera::from_strip(&v.camera_to_world, &v.projection, w, h, 1.0), truth, mask: vec![1.0; (w * h) as usize], aberration: None, full: None })
+                Ok(View {
+                    camera: Camera::from_strip(&v.camera_to_world, &v.projection, w, h, 1.0),
+                    truth,
+                    mask: vec![1.0; (w * h) as usize],
+                    aberration: None,
+                    full: None,
+                })
             })
             .collect::<anyhow::Result<_>>()?;
         sets.push(Set { name: "offpath", views });
@@ -294,12 +300,15 @@ fn main() -> anyhow::Result<()> {
             ("colour_rounded", field(&|o, r, i| o.colors[i] = r.colors[i])),
             ("opacity_rounded", field(&|o, r, i| o.opacity_logits[i] = r.opacity_logits[i])),
             ("rotation_rounded", field(&|o, r, i| o.rotations[i] = r.rotations[i])),
-            ("all_rounded", field(&|o, r, i| {
-                o.colors[i] = r.colors[i];
-                o.opacity_logits[i] = r.opacity_logits[i];
-                o.rotations[i] = r.rotations[i];
-                o.log_scales[i] = r.log_scales[i];
-            })),
+            (
+                "all_rounded",
+                field(&|o, r, i| {
+                    o.colors[i] = r.colors[i];
+                    o.opacity_logits[i] = r.opacity_logits[i];
+                    o.rotations[i] = r.rotations[i];
+                    o.log_scales[i] = r.log_scales[i];
+                }),
+            ),
         ];
         let outside = (0..g.len()).filter(|&i| g.colors[i].iter().any(|c| !(0.0..=1.0).contains(c))).count();
         let negative = (0..g.len()).filter(|&i| g.colors[i].iter().any(|c| *c < 0.0)).count();
@@ -309,13 +318,24 @@ fn main() -> anyhow::Result<()> {
             let mut scores = serde_json::Map::new();
             for (k, (name, v)) in variants.iter().enumerate() {
                 let s = score(&mut gpu, set, &Drawn::Model(v), k == 0)?;
-                println!("  {} {name:<16} PSNR {:7.3} dB  SSIM {:.4}  vs full {:7.3} dB", set.name, s["psnr"].as_f64().unwrap_or(0.0), s["ssim"].as_f64().unwrap_or(0.0), s["psnr_vs_full"].as_f64().unwrap_or(0.0));
+                println!(
+                    "  {} {name:<16} PSNR {:7.3} dB  SSIM {:.4}  vs full {:7.3} dB",
+                    set.name,
+                    s["psnr"].as_f64().unwrap_or(0.0),
+                    s["ssim"].as_f64().unwrap_or(0.0),
+                    s["psnr_vs_full"].as_f64().unwrap_or(0.0)
+                );
                 scores.insert((*name).into(), s);
             }
             out.insert(set.name.into(), serde_json::Value::Object(scores));
         }
         if let Some(path) = json {
-            std::fs::write(path, serde_json::to_string_pretty(&serde_json::json!({ "run": run.display().to_string(), "outside": outside, "negative": negative, "splats": g.len(), "scores": out }))?)?;
+            std::fs::write(
+                path,
+                serde_json::to_string_pretty(
+                    &serde_json::json!({ "run": run.display().to_string(), "outside": outside, "negative": negative, "splats": g.len(), "scores": out }),
+                )?,
+            )?;
         }
         return Ok(());
     }

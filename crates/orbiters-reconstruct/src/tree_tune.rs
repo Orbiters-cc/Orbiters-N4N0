@@ -418,12 +418,28 @@ pub fn vrchat_files_with(
                 // One camera in eight checks the re-fit instead of training it.
                 let (mut train, mut check) = (Vec::new(), Vec::new());
                 for (k, view) in refit_cameras.iter().copied().zip(rendered).enumerate() {
-                    if refit_cameras.len() >= 16 && k % 8 == 4 { check.push(view) } else { train.push(view) }
+                    if refit_cameras.len() >= 16 && k % 8 == 4 {
+                        check.push(view)
+                    } else {
+                        train.push(view)
+                    }
                 }
                 drop(_time);
                 if cut(&pc_keep) {
                     let _time = PrepStage::new("refit pc");
-                    if let Some(t) = refit(g, &pc_keep, &score, PC_SPLATS, &train, &check, gpu, options.refit_steps, options.decoded, options.pc_appearance && !cut_pc, "pc")? {
+                    if let Some(t) = refit(
+                        g,
+                        &pc_keep,
+                        &score,
+                        PC_SPLATS,
+                        &train,
+                        &check,
+                        gpu,
+                        options.refit_steps,
+                        options.decoded,
+                        options.pc_appearance && !cut_pc,
+                        "pc",
+                    )? {
                         pc = t;
                     }
                 }
@@ -534,7 +550,15 @@ pub fn tune(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, mut progress: im
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tune_for(tree: &mut Tree, cameras: &[Camera], gpu: &mut Gpu, platform: &str, steps: u32, drawn_at: f32, mut progress: impl FnMut(f32)) -> anyhow::Result<()> {
+fn tune_for(
+    tree: &mut Tree,
+    cameras: &[Camera],
+    gpu: &mut Gpu,
+    platform: &str,
+    steps: u32,
+    drawn_at: f32,
+    mut progress: impl FnMut(f32),
+) -> anyhow::Result<()> {
     if cameras.is_empty() {
         return Ok(());
     }
@@ -646,7 +670,13 @@ mod tests {
         let mut rng = fastrand::Rng::with_seed(3);
         for _ in 0..n {
             let q = [rng.f32() - 0.5, rng.f32() - 0.5, rng.f32() - 0.5, rng.f32() - 0.5];
-            g.push([rng.f32() * 30.0, rng.f32() * 3.0, rng.f32() * 30.0], [-4.0 + rng.f32() * 2.0; 3], q, rng.f32() * 6.0 - 3.0, [rng.f32() * 1.2 - 0.1, 0.5, rng.f32()]);
+            g.push(
+                [rng.f32() * 30.0, rng.f32() * 3.0, rng.f32() * 30.0],
+                [-4.0 + rng.f32() * 2.0; 3],
+                q,
+                rng.f32() * 6.0 - 3.0,
+                [rng.f32() * 1.2 - 0.1, 0.5, rng.f32()],
+            );
         }
         g
     }

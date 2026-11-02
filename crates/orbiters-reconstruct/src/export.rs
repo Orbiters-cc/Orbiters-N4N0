@@ -13,9 +13,11 @@
 //! rasteriser blends whatever the optimiser learns, and many splats darken what lies behind them with a negative
 //! channel (of the non-sky splats: Home 31%, 25% by opacity; Plaza 11%; Needle 17%). `KHR_gaussian_splatting` clamps
 //! each splat's colour at 0 before blending, three.js' RGBA8 at [0, 1], so those tools brighten such places whatever
-//! the file says; the GLB keeps the learned floats anyway (a clamp written into the file changes nothing in a
-//! conforming renderer and only loses range in a float one). The sky shell's discs and the separate sky map are left
-//! out: other tools draw no sky map.
+//! the file says. Rendered by N4N0 with the same clamps, held-out PSNR falls 0.27 dB on Home, 0.36 on Plaza and 0.15 on
+//! Needle at 0, and 0.65, 0.44 and 0.30 dB at [0, 1] (the clamp the VRChat tree's and web preview's colour bytes apply
+//! too). The GLB keeps the learned floats anyway: a clamp written into the file changes nothing in a conforming
+//! renderer and only loses range in a float one; matching needs a trainer that learns colours the standard can draw.
+//! The sky shell's discs and the separate sky map are left out: other tools draw no sky map.
 use crate::{
     gaussians::{Gaussians, sigmoid},
     ply,

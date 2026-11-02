@@ -483,22 +483,6 @@ pub struct OscSettings {
     /// While recording from Spout, open VRChat's camera in Stream mode with Spout Stream on (OSC), and put it back
     /// as it was afterwards.
     pub drive_camera: bool,
-    /// After an upload from Unity, ask VRChat to wear the uploaded avatar (contracts' `Docs/avatar-upload.md`).
-    pub switch_after_upload: bool,
-    /// How the avatar already worn is made to load its new version (which one VRChat honours is unverified).
-    pub same_avatar_reload: SameAvatarReload,
-}
-
-/// How [`OscSettings::switch_after_upload`] reloads the avatar VRChat already wears (contracts' `Docs/avatar-upload.md`,
-/// The avatar already worn).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SameAvatarReload {
-    /// `/avatar/change` with the worn avatar's own id.
-    #[default]
-    Reload,
-    /// To the previous other avatar seen this session, then back.
-    AwayAndBack,
 }
 
 /// What a session records besides the frames (avatar parameters are under [`OscSettings`]).
@@ -531,14 +515,7 @@ impl Default for KeyframeSettings {
 
 impl Default for OscSettings {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            vrchat_port: 9000,
-            record_parameters: true,
-            drive_camera: true,
-            switch_after_upload: true,
-            same_avatar_reload: SameAvatarReload::Reload,
-        }
+        Self { enabled: true, vrchat_port: 9000, record_parameters: true, drive_camera: true }
     }
 }
 

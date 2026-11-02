@@ -58,10 +58,32 @@ fn angle(a: [f32; 4], b: [f32; 4]) -> f64 {
 fn convert(args: &[String]) -> anyhow::Result<()> {
     anyhow::ensure!(args.len() == 2 || (args.len() == 4 && args[2] == "--coarse"), "tree_v2 convert <v1 tree> <v2 out> [--coarse <out>]");
     let bytes = std::fs::read(&args[0])?;
+    let start = std::time::Instant::now();
     let (tree, key, flags) = read_v1(&bytes)?;
+    let v1_read_ms = start.elapsed().as_secs_f64() * 1e3;
+    // Version 1's writer as it was (header, boxes, then the web record per splat), for its time.
+    let start = std::time::Instant::now();
+    let mut v1 = Vec::with_capacity(bytes.len());
+    v1.extend_from_slice(&bytes[..32]);
+    for n in &tree.nodes {
+        for v in [n.center[0], n.center[1], -n.center[2], n.radius, n.error] {
+            v1.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [n.parent.unwrap_or(u32::MAX), n.start, n.count] {
+            v1.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    for i in 0..tree.len() {
+        orbiters_reconstruct::web::write_splat(&mut v1, &tree.splats, i);
+    }
+    let v1_write_ms = start.elapsed().as_secs_f64() * 1e3;
+    let start = std::time::Instant::now();
     let v2 = tree.file(key, flags);
+    let v2_write_ms = start.elapsed().as_secs_f64() * 1e3;
     std::fs::write(&args[1], &v2)?;
+    let start = std::time::Instant::now();
     let back = Tree::parse(&v2)?;
+    let v2_read_ms = start.elapsed().as_secs_f64() * 1e3;
     anyhow::ensure!(back.nodes == tree.nodes, "the boxes come back");
     let (a, b) = (&tree.splats, &back.splats);
     // Worst and mean differences, per leaf and merged box.
@@ -93,7 +115,8 @@ fn convert(args: &[String]) -> anyhow::Result<()> {
         );
     }
     let mut line = serde_json::json!({ "tree": args[0], "boxes": tree.nodes.len(), "splats": tree.len(), "v1_bytes": bytes.len(), "v2_bytes": v2.len(),
-        "ratio": bytes.len() as f64 / v2.len() as f64, "stats": stats });
+        "ratio": bytes.len() as f64 / v2.len() as f64, "stats": stats,
+        "cpu_ms": { "v1_write": v1_write_ms, "v1_read": v1_read_ms, "v2_write": v2_write_ms, "v2_read": v2_read_ms } });
     if args.len() == 4 {
         let coarse = tree.top(COARSE_SPLATS);
         let file = coarse.file(key, orbiters_reconstruct::tree::FLAG_COARSE);

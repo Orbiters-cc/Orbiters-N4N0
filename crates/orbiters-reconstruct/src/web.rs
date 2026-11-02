@@ -84,7 +84,8 @@ pub fn splat_file(g: &Gaussians, max: usize, origin: [f32; 3]) -> WebPreview {
     WebPreview { count: keep.len(), bytes }
 }
 
-/// Splat `i` of `g` in the `.splat` layout (also each splat of a VRChat tree, crate::tree).
+/// Splat `i` of `g` in the `.splat` layout (the server writes the same from a VRChat PC tree's leaves, which it decodes:
+/// crate::tree_file).
 pub fn write_splat(bytes: &mut Vec<u8>, g: &Gaussians, i: usize) {
     let [x, y, z] = g.means[i];
     let s = g.log_scales[i];

@@ -482,28 +482,12 @@ impl Progress {
     }
 }
 
-/// The finest splats of a PC tree (contracts `Docs/splat-tree.md`): its leaf boxes', in the renderer's coordinates. A
-/// file whose key is not `key` was replaced at its slot since the listing.
+/// The finest splats of a PC tree (contracts `Docs/splat-tree.md`, version 2): its leaf boxes', in the renderer's
+/// coordinates, as their records decode. A file whose key is not `key` was replaced at its slot since the listing; one
+/// of version 1 (a capture shared before the 20-byte records) has to be shared again.
 pub fn tree_leaves(bytes: &[u8], key: u32) -> anyhow::Result<Gaussians> {
-    const RECORD: usize = 32;
-    anyhow::ensure!(bytes.len() >= RECORD && &bytes[..8] == b"N4N0TREE", "not a splat tree");
-    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-    anyhow::ensure!(word(8) == 1, "a splat tree of a newer version");
-    let (boxes, splats) = (word(12) as usize, word(16) as usize);
-    anyhow::ensure!(boxes >= 1 && splats >= 1 && bytes.len() >= (1 + boxes + splats) * RECORD, "a splat tree cut short");
-    anyhow::ensure!(word(20) == key, "this capture was replaced on Orbiters: refresh the list");
-    let first_splat = (1 + boxes) * RECORD;
-    let mut leaves = Vec::new();
-    for b in 0..boxes {
-        let at = (1 + b) * RECORD;
-        let error = f32::from_le_bytes(bytes[at + 16..at + 20].try_into().unwrap());
-        let (first, count) = (word(at + 24) as usize, word(at + 28) as usize);
-        anyhow::ensure!(first + count <= splats, "a box past the tree's splats");
-        if error == 0.0 {
-            leaves.extend_from_slice(&bytes[first_splat + first * RECORD..first_splat + (first + count) * RECORD]);
-        }
-    }
-    orbiters_reconstruct::web::read_splat(&leaves)
+    anyhow::ensure!(orbiters_reconstruct::tree_file::key(bytes)? == key, "this capture was replaced on Orbiters: refresh the list");
+    Ok(orbiters_reconstruct::tree::Tree::parse(bytes)?.leaf_splats())
 }
 
 /// A sky map JPEG (2:1, the world's `sky.jpg`) as the renderer's map: resized to a width that is a multiple of four
@@ -686,44 +670,34 @@ mod tests {
         assert!(find("nothing like it").is_empty());
     }
 
-    fn splat_bytes(x: f32) -> [u8; 32] {
-        let mut b = [0u8; 32];
-        for (i, v) in [x, 0.0, 0.0, 0.1, 0.1, 0.1].iter().enumerate() {
-            b[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
-        }
-        b[24..28].copy_from_slice(&[200, 100, 50, 255]);
-        b[28..32].copy_from_slice(&[255, 128, 128, 128]);
-        b
-    }
-
     #[test]
     fn a_tree_gives_its_leaf_boxes_splats() {
+        use orbiters_reconstruct::tree::{Node, Tree};
         // A root with one merged splat and two leaves of two and one.
-        let mut file = Vec::new();
-        let word = |v: u32| v.to_le_bytes();
-        let mut header = [0u8; 32];
-        header[..8].copy_from_slice(b"N4N0TREE");
-        header[8..12].copy_from_slice(&word(1));
-        header[12..16].copy_from_slice(&word(3));
-        header[16..20].copy_from_slice(&word(4));
-        header[20..24].copy_from_slice(&word(77));
-        file.extend_from_slice(&header);
-        for (error, parent, first, count) in [(0.5f32, u32::MAX, 0u32, 1u32), (0.0, 0, 1, 2), (0.0, 0, 3, 1)] {
-            let mut b = [0u8; 32];
-            b[12..16].copy_from_slice(&5f32.to_le_bytes());
-            b[16..20].copy_from_slice(&error.to_le_bytes());
-            b[20..24].copy_from_slice(&word(parent));
-            b[24..28].copy_from_slice(&word(first));
-            b[28..32].copy_from_slice(&word(count));
-            file.extend_from_slice(&b);
-        }
+        let mut splats = Gaussians::default();
         for x in [9.0f32, 1.0, 2.0, 3.0] {
-            file.extend_from_slice(&splat_bytes(x));
+            splats.push([x, 0.0, 0.0], [0.1f32.ln(); 3], [1.0, 0.0, 0.0, 0.0], 3.0, [200.0 / 255.0, 100.0 / 255.0, 50.0 / 255.0]);
         }
+        let node = |error: f32, parent: Option<u32>, start: u32, count: u32| Node {
+            center: [2.0, 0.0, 0.0],
+            radius: 9.0,
+            error,
+            parent,
+            depth: u32::from(parent.is_some()),
+            start,
+            count,
+            leaf: error == 0.0,
+        };
+        let tree = Tree { nodes: vec![node(0.5, None, 0, 1), node(0.0, Some(0), 1, 2), node(0.0, Some(0), 3, 1)], splats };
+        let file = tree.file(77, 0);
         let g = tree_leaves(&file, 77).unwrap();
-        assert_eq!(g.means.iter().map(|m| m[0]).collect::<Vec<_>>(), vec![1.0, 2.0, 3.0], "the merged root splat is left out");
+        let xs: Vec<f32> = g.means.iter().map(|m| m[0]).collect();
+        assert!(xs.len() == 3 && xs.iter().zip([1.0, 2.0, 3.0]).all(|(a, b)| (a - b).abs() < 1e-4), "the merged root splat is left out: {xs:?}");
         assert!(tree_leaves(&file, 78).unwrap_err().to_string().contains("replaced"));
         assert!(tree_leaves(&file[..100], 77).is_err());
+        let mut v1 = file.clone();
+        v1[8] = 1;
+        assert!(tree_leaves(&v1, 77).unwrap_err().to_string().contains("share the capture again"), "no reader of version 1");
     }
 
     #[test]

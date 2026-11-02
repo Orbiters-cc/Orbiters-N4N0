@@ -181,6 +181,9 @@ fn cli(args: &[String], encode: fn(&Gaussians) -> anyhow::Result<Vec<u8>>) -> an
         ensure!(std::fs::canonicalize(out)? != std::fs::canonicalize(&args[0])?, "input and output must differ");
     }
     let tmp = out.with_extension(format!("{}.part", out.extension().and_then(|x| x.to_str()).unwrap_or("export")));
+    if tmp.exists() {
+        ensure!(std::fs::canonicalize(&tmp)? != std::fs::canonicalize(&args[0])?, "input and temporary output must differ");
+    }
     std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, out)?;
     Ok(())
@@ -259,5 +262,21 @@ mod tests {
         assert!(gltf(&g).is_err());
         g.means[0][0] = 2048.;
         assert!(spz(&g).is_err());
+    }
+    #[test]
+    fn temporary_output_cannot_overwrite_input() {
+        let dir = std::env::temp_dir().join(format!("orbiters-export-{}-{}", std::process::id(), fastrand::u64(..)));
+        std::fs::create_dir(&dir).unwrap();
+        let input = dir.join("model.glb.part");
+        let output = dir.join("model.glb");
+        ply::write(&input, &sample()).unwrap();
+        let before = std::fs::read(&input).unwrap();
+        let args = [input.to_string_lossy().into_owned(), output.to_string_lossy().into_owned()];
+        let result = gltf_cli(&args);
+        assert!(result.unwrap_err().to_string().contains("input and temporary output must differ"));
+        assert_eq!(std::fs::read(&input).unwrap(), before);
+        assert!(!output.exists());
+        std::fs::remove_file(input).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 }

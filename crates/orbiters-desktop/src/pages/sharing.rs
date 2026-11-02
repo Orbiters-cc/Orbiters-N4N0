@@ -387,6 +387,19 @@ impl Dialog {
         self.start(ctx, server, Action::Update);
     }
 
+    /// Copy public link on a capture edited since it was shared (its window's button or its card's menu): the link would
+    /// show it as it was, so it is updated first and its link copied once that is done (not at all if the update fails).
+    pub fn update_then_copy_link(&mut self, ctx: &egui::Context, server: Server) {
+        self.copy_after = true;
+        self.update(ctx, server);
+    }
+
+    /// Tests: what the window was asked to do (not sent yet without a backend) and whether it copies the link after.
+    #[cfg(test)]
+    pub(crate) fn asked(&self) -> Option<(&Action, bool)> {
+        self.pending.as_ref().map(|r| (&r.operation, self.copy_after))
+    }
+
     /// The capture's splat edits, read on a worker every [`EDITS_EVERY`] seconds while the window is open on a capture of
     /// this computer that its owner uploaded: edited in its 3D view meanwhile, it offers to update the shared copy (and
     /// edited back to what was uploaded, it no longer does).
@@ -1630,8 +1643,7 @@ impl Dialog {
                 let item = self.entry.remote.as_ref();
                 // Edited since it was shared: the link would show it as it was; it is updated first, then copied.
                 if self.entry.edited_since_upload() && item.is_some_and(|i| i.public) {
-                    self.copy_after = true;
-                    self.update(ctx, server);
+                    self.update_then_copy_link(ctx, server);
                     return;
                 }
                 let pictured = item.and_then(|i| i.capture.as_ref()).is_some_and(|c| c.picture_url.is_some())
@@ -2029,7 +2041,8 @@ mod tests {
         h.click("Try again");
         h.until("the update done again", |h| h.dialog.notice.as_deref() == Some(UPDATED_NOTICE) && h.dialog.error.is_none());
         assert_eq!(h.dialog.entry.remote.as_ref().and_then(|i| i.capture.as_ref()).map(|c| c.revision), Some(3));
-        assert_eq!(requests(&seen).len(), 6);
+        // Each update's GET and PUT, and the revision read after the 502 (still 2: it did not switch).
+        assert_eq!(requests(&seen).len(), 7);
         // The tray said so too.
         let notices: Vec<String> = h
             .backend

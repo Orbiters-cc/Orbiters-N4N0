@@ -897,11 +897,15 @@ fn update_with(
                     conflict.revision
                 );
             }
-            // No answer after the files went (the connection dropped): Orbiters switched to them, or not, as its revision
-            // says (another computer's update of the same capture in that very moment would read the same).
-            let switched = match e.downcast_ref::<orbiters_core::account::ApiError>() {
-                Some(_) => None,
-                None => api.capture_item(token, Kind::Capture, id).ok().filter(|now| now.capture.as_ref().map_or(1, shares::Capture::revision) == revision + 1),
+            // No answer after the files went (the connection dropped), or a server error, which may come after the switch
+            // (Cloudflare's 524 when Orbiters took over 100 s, its 502 when the backend restarted, a 500 once committed):
+            // Orbiters switched to them, or not, as its revision says (another computer's update of the same capture in
+            // that very moment would read the same). Only a refusal (4xx) is final without asking.
+            let refused = e.downcast_ref::<orbiters_core::account::ApiError>().is_some_and(|a| a.status < 500);
+            let switched = if refused {
+                None
+            } else {
+                api.capture_item(token, Kind::Capture, id).ok().filter(|now| now.capture.as_ref().map_or(1, shares::Capture::revision) == revision + 1)
             };
             match switched {
                 Some(now) => {
@@ -913,7 +917,11 @@ fn update_with(
         }
     };
     step(steps, &format!("sent {:.1} MB and switched", bytes as f64 / 1e6), &mut at);
-    save_record_edits(records, entry, &item, Some(generation.clone()))?;
+    // Switched: everyone sees the update whatever happens here. A record that cannot be saved is only this computer's
+    // note of it (the capture then asks to be updated again), never "Not updated".
+    if let Err(e) = save_record_edits(records, entry, &item, Some(generation.clone())) {
+        step(steps, &format!("its upload record could not be saved ({e})"), &mut at);
+    }
     Ok((item, generation))
 }
 /// Tests: what a share of the entry with this key does instead of the real job (against a stand-in Orbiters), so that
@@ -1276,7 +1284,17 @@ pub(crate) mod tests {
         );
         assert_eq!(record_of(&records).unwrap().edits, None, "the record still says the files there are as trained");
         update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &prepared).unwrap();
-        assert_eq!(requests(&seen), ["GET /captures/capture/3", "PUT /captures/capture/3/files", "GET /captures/capture/3", "PUT /captures/capture/3/files"]);
+        assert_eq!(
+            requests(&seen),
+            [
+                "GET /captures/capture/3",
+                "PUT /captures/capture/3/files",
+                // A server error may follow the switch: its revision (still 1) says it did not.
+                "GET /captures/capture/3",
+                "GET /captures/capture/3",
+                "PUT /captures/capture/3/files"
+            ]
+        );
         assert!(record_of(&records).unwrap().edits.is_some());
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1320,8 +1338,42 @@ pub(crate) mod tests {
         let (api, _) = stand_in(vec![("GET /captures/capture/3", 200, capture_at(3, 1)), ("PUT /captures/capture/3/files", 0, String::new())]);
         assert!(update_with(&api, "token", Ok(records2.as_path()), &entry2, &|_| {}, &mut Vec::new(), &prepared).is_err());
         assert_eq!(record_of(&records2).unwrap().edits, None);
+        // Cloudflare giving up on a slow answer (524) after Orbiters switched: the update counts, it is not "Not updated".
+        let (api, _) = stand_in(vec![
+            ("GET /captures/capture/3", 200, capture_at(3, 1)),
+            ("PUT /captures/capture/3/files", 524, r#"{"error":"A timeout occurred"}"#.into()),
+            ("GET /captures/capture/3", 200, capture_at(3, 2)),
+        ]);
+        let (item, _) = update_with(&api, "token", Ok(records2.as_path()), &entry2, &|_| {}, &mut Vec::new(), &prepared).unwrap();
+        assert_eq!(item.capture.map(|c| c.revision), Some(2));
+        assert!(record_of(&records2).unwrap().edits.is_some());
+        // A refusal (4xx) is final: nothing asked after it.
+        let (api, seen) = stand_in(vec![
+            ("GET /captures/capture/3", 200, capture_at(3, 2)),
+            ("PUT /captures/capture/3/files", 400, r#"{"error":"The VRChat pc file of this 3D preview is not a valid splat tree."}"#.into()),
+        ]);
+        entry2.edits = Some(Ok(delete_splat(&session2, 3)));
+        assert!(update_with(&api, "token", Ok(records2.as_path()), &entry2, &|_| {}, &mut Vec::new(), &prepared).is_err());
+        assert_eq!(requests(&seen), ["GET /captures/capture/3", "PUT /captures/capture/3/files"]);
         std::fs::remove_dir_all(dir).unwrap();
         std::fs::remove_dir_all(dir2).unwrap();
+    }
+
+    /// Switched, but this computer's record of it cannot be written: the update is still done (everyone sees it), and the
+    /// capture asks to be updated again rather than say that nothing changed.
+    #[test]
+    fn an_update_whose_record_cannot_be_saved_is_still_done() {
+        let (dir, session, _, mut entry) = uploaded_session("record", None);
+        entry.edits = Some(Ok(delete_splat(&session, 2)));
+        // Known from the gallery (its item), since the record cannot be read either.
+        entry.remote = Some(Item { kind: Kind::Capture, id: 3, mine: true, ..Default::default() });
+        let (api, _) = stand_in(vec![("GET /captures/capture/3", 200, capture_at(3, 1)), ("PUT /captures/capture/3/files", 200, capture_at(3, 2))]);
+        let records = Err(anyhow::anyhow!("the records folder is not writable (fixture)"));
+        let mut steps = Vec::new();
+        let (item, _) = update_with(&api, "token", records, &entry, &|_| {}, &mut steps, &prepared).unwrap();
+        assert_eq!(item.capture.map(|c| c.revision), Some(2));
+        assert!(steps.iter().any(|s| s.contains("record could not be saved")), "{steps:?}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Edited again while its files were made: not sent (they would hold neither the edits before nor those after).

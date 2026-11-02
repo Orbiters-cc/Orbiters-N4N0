@@ -32,6 +32,7 @@ mod gallery_assets;
 mod gallery_talk;
 mod projects_panel;
 mod editor;
+mod splats_select;
 mod vrchat_login;
 mod vr_audio;
 mod worlds_overlay;
@@ -113,6 +114,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("splats-3d") {
         return splats_3d(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("splats-select") {
+        return splats_select::shots(&mut Offscreen::new()?, &out, &settings, scale);
     }
     if only.as_deref() == Some("editor-3d") {
         return editor::three_d(&mut Offscreen::new()?, &out, &settings, scale);

@@ -18,8 +18,16 @@ pub const PLY_FILE: &str = "splats.ply";
 /// draw it wherever the splats leave the view open (contracts Docs/session-bundle.md).
 pub const SKY_FILE: &str = "sky.png";
 pub const REPORT_FILE: &str = "report.json";
-/// A render of the first held-out keyframe (QOI, RGB).
+/// A render of the first held-out keyframe (QOI, RGB). With splat edits ([`EDIT_FILE`]) it is drawn again without the
+/// splats they remove, so that every picture of the capture (its card, its uploads, a drag out of the app) matches its
+/// shared files; the worker's own render waits in [`TRAINED_PREVIEW_FILE`] until the edits are undone.
 pub const PREVIEW_FILE: &str = "preview.qoi";
+/// The worker's preview while [`PREVIEW_FILE`] shows the edited splats.
+pub const TRAINED_PREVIEW_FILE: &str = "preview.trained.qoi";
+/// The splats hidden or deleted in the 3D view (orbiters_reconstruct::edit): beside [`PLY_FILE`], which is never
+/// rewritten, and applied wherever the splats leave the app (the VRChat trees, the web preview, the pictures). A new
+/// reconstruction replaces the folder and its edits with it: they name splats of the PLY they were made on.
+pub const EDIT_FILE: &str = "splat-edits.bin";
 /// Renders of every held-out keyframe, named after the keyframe (`000004.qoi`).
 pub const HELD_OUT_DIR: &str = "held-out";
 

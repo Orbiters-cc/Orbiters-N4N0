@@ -31,11 +31,14 @@ pub struct Fingerprint(Vec<Option<String>>);
 
 impl Fingerprint {
     pub fn read(session: &Path, result: &Path) -> anyhow::Result<Self> {
+        // The splat edits too (orbiters_reconstruct::edit): trees prepared before a splat was hidden must not answer
+        // after.
         let paths = [
             result.join(reconstruction::PLY_FILE),
             session.join(manifest::FRAMES_FILE),
             result.join(reconstruction::REPORT_FILE),
             session.join(manifest::MANIFEST_FILE),
+            result.join(reconstruction::EDIT_FILE),
         ];
         let hashes = paths
             .iter()
@@ -374,5 +377,35 @@ mod tests {
         std::fs::remove_file(&sources[2]).unwrap();
         assert_ne!(Fingerprint::read(&dir, &result).unwrap(), original);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Trees prepared before splats were hidden or deleted in the 3D view never answer after (nor after the edit is
+    /// changed or undone): the edit file is one of the sources.
+    #[test]
+    fn a_splat_edit_makes_prepared_trees_stale() {
+        let dir = std::env::temp_dir().join(format!("orbiters-prep-{}", uuid::Uuid::new_v4()));
+        let result = dir.join("reconstruction");
+        std::fs::create_dir_all(&result).unwrap();
+        std::fs::write(result.join(reconstruction::PLY_FILE), b"ply").unwrap();
+        std::fs::write(dir.join(manifest::FRAMES_FILE), b"frames").unwrap();
+        let unedited = Fingerprint::read(&dir, &result).unwrap();
+        std::fs::write(result.join(reconstruction::EDIT_FILE), b"edit 1").unwrap();
+        let edited = Fingerprint::read(&dir, &result).unwrap();
+        assert_ne!(edited, unedited);
+        let files = PreviewFiles { vrchat_pc: tree_fixture(), vrchat_quest: tree_fixture(), vrchat_coarse: tree_fixture() };
+        save(&result, &unedited, &files, &serde_json::json!({})).unwrap();
+        assert!(load(&result, &edited, 1).is_none(), "prepared before the edit: not used");
+        std::fs::write(result.join(reconstruction::EDIT_FILE), b"edit 2").unwrap();
+        assert_ne!(Fingerprint::read(&dir, &result).unwrap(), edited);
+        std::fs::remove_file(result.join(reconstruction::EDIT_FILE)).unwrap();
+        assert_eq!(Fingerprint::read(&dir, &result).unwrap(), unedited, "undone: the trees as trained answer again");
+        assert!(load(&result, &unedited, 1).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn tree_fixture() -> Vec<u8> {
+        let mut bytes = orbiters_reconstruct::tree::MAGIC.to_vec();
+        bytes.resize(32, 0);
+        bytes
     }
 }

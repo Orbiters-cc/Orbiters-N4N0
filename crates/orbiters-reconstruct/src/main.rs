@@ -332,28 +332,33 @@ fn replace_files(out: &Path, partial: &Path) -> anyhow::Result<()> {
 }
 
 /// `orbiters-reconstruct --web-preview <splats.ply> <out.splat> [--max N]`: the reconstruction as a web preview
-/// (orbiters_reconstruct::web), started from the scene's centre.
+/// (orbiters_reconstruct::web), started from the scene's centre, without the splats its edits hide or delete.
 fn web_preview(args: &[String]) -> anyhow::Result<()> {
     let (Some(ply_path), Some(out)) = (args.first(), args.get(1)) else { bail!("usage: orbiters-reconstruct --web-preview <splats.ply> <out.splat> [--max N]") };
     let max = match args.get(2).map(String::as_str) {
         Some("--max") => args.get(3).context("--max N")?.parse()?,
         _ => orbiters_reconstruct::web::DEFAULT_MAX,
     };
-    let g = ply::read(std::path::Path::new(ply_path))?;
+    // Without what the 3D view hid or deleted (orbiters_reconstruct::edit, the edit beside the PLY).
+    let (g, removed) = orbiters_reconstruct::edit::read_edited(std::path::Path::new(ply_path))?;
     let n = g.len().max(1) as f32;
     let centre = g.means.iter().fold([0.0f32; 3], |a, m| [a[0] + m[0] / n, a[1] + m[1] / n, a[2] + m[2] / n]);
     let web = orbiters_reconstruct::web::splat_file(&g, max, centre);
     std::fs::write(out, &web.bytes)?;
-    println!("{} of {} splats, {:.1} MB", web.count, g.len(), web.bytes.len() as f64 / 1e6);
+    println!("{} of {} splats ({removed} left out by its edits), {:.1} MB", web.count, g.len(), web.bytes.len() as f64 / 1e6);
     Ok(())
 }
 
 /// `orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned]`: the reconstruction's files for VRChat
-/// worlds (orbiters_reconstruct::tree_tune): pc.n4tree, quest.n4tree and coarse.n4tree.
+/// worlds (orbiters_reconstruct::tree_tune): pc.n4tree, quest.n4tree and coarse.n4tree, without the splats its edits hide
+/// or delete (orbiters_reconstruct::edit).
 fn vrchat(args: &[String]) -> anyhow::Result<()> {
     let (Some(session), Some(out)) = (args.first(), args.get(1)) else { bail!("usage: orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned]") };
     let session = std::path::Path::new(session);
-    let g = ply::read(&rec::result_dir(session).join(rec::PLY_FILE))?;
+    let (g, removed) = orbiters_reconstruct::edit::read_edited(&rec::result_dir(session).join(rec::PLY_FILE))?;
+    if removed > 0 {
+        eprintln!("{removed} splats left out by its edits");
+    }
     let cameras = orbiters_reconstruct::tree_tune::session_cameras(session)?;
     let mut gpu = if args.iter().any(|a| a == "--untuned") { None } else { Some(gpu::Gpu::new()?) };
     let start = std::time::Instant::now();

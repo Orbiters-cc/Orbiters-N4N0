@@ -489,7 +489,8 @@ fn trim_thumbs(thumbs: &mut HashMap<PathBuf, Kept>, now: f64) {
 
 /// The reconstruction's preview render as a texture (loaded off the interface thread, at most 960 px wide).
 fn preview(ctx: &egui::Context, d: &mut Detail, s: &SessionSummary) -> Option<TextureHandle> {
-    let key = s.reconstruction.as_ref()?.created_utc.clone();
+    // Read again when a picture is drawn again without the splats its edits removed (splats::pictures).
+    let key = format!("{}#{}", s.reconstruction.as_ref()?.created_utc, super::splats::pictures());
     if d.preview.as_ref().is_none_or(|(k, _)| *k != key) {
         let dir = s.dir.clone();
         let job = Job::spawn(ctx, move || {

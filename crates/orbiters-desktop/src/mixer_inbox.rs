@@ -27,6 +27,10 @@ struct Request<'a> {
     action: &'a str,
     session: &'a Path,
     title: &'a str,
+    /// The splats hidden or deleted in the 3D view (orbiters_reconstruct::edit's file beside the PLY), when there are
+    /// any: for a Mixer that leaves them out (one that does not know it imports the splats as trained).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edits: Option<PathBuf>,
 }
 
 /// Editors whose process still runs, the most recently (re)loaded first.
@@ -49,7 +53,8 @@ pub fn endpoints(root: &Path, alive: impl Fn(u32) -> bool) -> Vec<Endpoint> {
 /// Drops an import request for a session's splats into `endpoint`'s inbox (written whole, flushed to the disk, then
 /// renamed into view: Mixer never reads half a request).
 pub fn send_splats(endpoint: &Endpoint, session: &Path, title: &str) -> anyhow::Result<()> {
-    let request = Request { kind: REQUEST_KIND, action: IMPORT_SPLATS, session, title };
+    let edits = Some(orbiters_core::reconstruction::result_dir(session).join(orbiters_core::reconstruction::EDIT_FILE)).filter(|p| p.is_file());
+    let request = Request { kind: REQUEST_KIND, action: IMPORT_SPLATS, session, title, edits };
     let name = uuid::Uuid::new_v4().to_string();
     orbiters_core::write_atomic(&endpoint.dir.join(format!("{name}.json")), &serde_json::to_vec_pretty(&request)?)?;
     Ok(())
@@ -88,7 +93,17 @@ mod tests {
         assert_eq!(v["kind"], "orbiters.mixer.request");
         assert_eq!(v["action"], "import-splats");
         assert_eq!(v["session"], "C:/Sessions/Canine");
+        assert!(v.get("edits").is_none(), "no edits: no field");
         assert!(!files.iter().any(|f| f.ends_with(".part")));
+        // A session with splat edits names their file.
+        let session = root.join("session");
+        let result = orbiters_core::reconstruction::dir(&session);
+        std::fs::create_dir_all(&result).unwrap();
+        std::fs::write(result.join(orbiters_core::reconstruction::EDIT_FILE), b"edits").unwrap();
+        send_splats(&live[1], &session, "Edited").unwrap();
+        let request = std::fs::read_dir(root.join("11")).unwrap().flatten().map(|e| e.path()).find(|p| !p.ends_with("endpoint.json")).expect("a request");
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(request).unwrap()).unwrap();
+        assert_eq!(v["edits"].as_str().map(PathBuf::from), Some(result.join(orbiters_core::reconstruction::EDIT_FILE)));
         std::fs::remove_dir_all(&root).ok();
     }
 }

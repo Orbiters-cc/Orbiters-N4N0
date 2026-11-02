@@ -204,11 +204,12 @@ impl Controller {
     }
 }
 
-/// A session's splats as VRChat's splat trees (their merged boxes tuned on the GPU when there is one; Orbiters makes the
-/// website's `.splat` from the PC one's leaves), its sky map (sky.png as trained, when training learnt one) and the
-/// upload's metadata: the start view (right-handed like the files: Unity's Z negated) at the eye height of the person
-/// who captured, over the ground they stood on (its height and that eye height too: crate::views::eye_level), the
-/// held-out quality and when the session was recorded.
+/// A session's splats (without those its edits hide or delete: orbiters_reconstruct::edit) as VRChat's splat trees
+/// (their merged boxes tuned on the GPU when there is one; Orbiters makes the website's `.splat` from the PC one's
+/// leaves), its sky map (sky.png as trained, when training learnt one) and the upload's metadata: the start view
+/// (right-handed like the files: Unity's Z negated) at the eye height of the person who captured, over the ground they
+/// stood on (its height and that eye height too: crate::views::eye_level), the held-out quality and when the session
+/// was recorded.
 pub(super) fn web_preview(session: &Path) -> anyhow::Result<(PreviewFiles, Option<PathBuf>, serde_json::Value)> {
     // Prepared in the background since its reconstruction finished, or being prepared: that cache answers.
     crate::upload_prep::claim(session);
@@ -236,7 +237,9 @@ pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions)
         return Ok((files, sky, metadata));
     }
     let stage = PrepStage::new("read result");
-    let g = orbiters_reconstruct::ply::read(&result.join(reconstruction::PLY_FILE))?;
+    // Without what the 3D view hid or deleted (orbiters_reconstruct::edit): an edit that cannot be applied stops the
+    // share with why, rather than letting a removed avatar back in.
+    let (g, _) = orbiters_reconstruct::edit::read_edited(&result.join(reconstruction::PLY_FILE))?;
     drop(stage);
     let stage = PrepStage::new("start view");
     let (views, start) = crate::views::recorded(session)?;

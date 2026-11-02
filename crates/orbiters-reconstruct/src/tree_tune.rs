@@ -278,7 +278,9 @@ type Views = [(Camera, Arc<[u32]>)];
 /// scored as the file would show them, and the other parameters make up for the colours a trained model holds outside).
 /// None when the re-fit did not bring the leaves closer to the full model from the cameras of `check` (recorded cameras
 /// it did not train on: on the plaza walk, 48 cameras made the leaves closer from those 48 and farther from the others,
-/// −0.44 dB on held-out views): the tree stays as it was.
+/// −0.44 dB on held-out views): the tree stays as it was. Both sides are scored as the file stores them
+/// (crate::tree_file::round_attributes: colour and opacity bytes, half-float log scales, the rotation's smallest three;
+/// positions move only within their box's 16-bit steps): the leaves as trained against the leaves re-fitted.
 #[allow(clippy::too_many_arguments)]
 fn refit(
     g: &Gaussians,
@@ -295,7 +297,14 @@ fn refit(
 ) -> anyhow::Result<Option<Tree>> {
     let cameras: Vec<Camera> = train.iter().map(|v| v.0).collect();
     let cameras = &cameras[..];
+    let stored = |leaves: &Gaussians| {
+        let mut out = leaves.clone();
+        crate::tree_file::round_attributes(&mut out);
+        out
+    };
     let mut leaves = subset(g, keep);
+    // What the file would hold without the re-fit: the leaves as trained, as it stores them.
+    let unfitted = stored(&leaves);
     if in_gamut {
         for c in &mut leaves.colors {
             *c = c.map(|v| v.clamp(0.0, 1.0));
@@ -304,8 +313,6 @@ fn refit(
     let base = learning_rates(cameras);
     // Appearance only: the splats stay where they are, as they are shaped.
     let base = if appearance_only { LearningRates { means: 0.0, log_scales: 0.0, rotations: 0.0, ..base } } else { base };
-    gpu.upload(&leaves);
-    gpu.step = 0;
     for (c, _) in train.iter().chain(check) {
         gpu.set_mask(c.width, c.height, &vec![1.0; (c.width * c.height) as usize])?;
     }
@@ -313,7 +320,11 @@ fn refit(
         Ok(views.iter().map(|(c, t)| gpu.score(c, [0.0; 3], t)).collect::<anyhow::Result<Vec<f32>>>()?.iter().sum::<f32>() / views.len() as f32)
     };
     let check = if check.is_empty() { train } else { check };
+    gpu.upload(&unfitted);
     let (before, before_train) = (mean_score(gpu, check)?, mean_score(gpu, train)?);
+    drop(unfitted);
+    gpu.upload(&leaves);
+    gpu.step = 0;
     let mut rng = fastrand::Rng::with_seed(2);
     gpu.clamp_colors = in_gamut;
     for s in 0..steps {
@@ -328,17 +339,7 @@ fn refit(
         }
     }
     gpu.clamp_colors = false;
-    let (after, after_train) = (mean_score(gpu, check)?, mean_score(gpu, train)?);
-    eprintln!(
-        "{platform} leaves re-fit: {} of {} splats, {steps} steps from {} cameras, PSNR against the full model {before_train:.3} → {after_train:.3} dB there, {before:.3} → {after:.3} dB from {} others",
-        keep.len(),
-        g.len(),
-        train.len(),
-        check.len()
-    );
-    if after <= before {
-        return Ok(None);
-    }
+    let after_float = mean_score(gpu, check)?;
     let trained = gpu.download_params()?;
     for i in 0..leaves.len() {
         if trained.is_finite(i) {
@@ -348,6 +349,19 @@ fn refit(
             leaves.opacity_logits[i] = trained.opacity_logits[i];
             leaves.colors[i] = trained.colors[i];
         }
+    }
+    drop(trained);
+    gpu.upload(&stored(&leaves));
+    let (after, after_train) = (mean_score(gpu, check)?, mean_score(gpu, train)?);
+    eprintln!(
+        "{platform} leaves re-fit: {} of {} splats, {steps} steps from {} cameras, PSNR against the full model as the file stores them {before_train:.3} → {after_train:.3} dB there, {before:.3} → {after:.3} dB from {} others ({after_float:.3} before the file's rounding)",
+        keep.len(),
+        g.len(),
+        train.len(),
+        check.len()
+    );
+    if after <= before {
+        return Ok(None);
     }
     // The re-fitted set fitted the budget before; moved, it may need a few splats fewer.
     let sub: Vec<f32> = keep.iter().map(|&i| score[i]).collect();

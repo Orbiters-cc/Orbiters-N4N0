@@ -87,6 +87,10 @@ pub struct Dialog {
     copied_at: Option<f64>,
     /// The picture shown whole over the window, its details folded away (a click on the picture).
     full: bool,
+    /// The capture's splat edits read again while the window is open (edited in its 3D view meanwhile), and when they
+    /// were last asked ([`EDITS_EVERY`]).
+    edits_job: Job<Result<String, String>>,
+    edits_asked: f64,
     pub changed: bool,
     pictures: crate::worlds::Pictures,
     viewer: Option<super::splats::Viewer>,
@@ -156,6 +160,8 @@ impl Dialog {
             error: None,
             notice: None,
             fixture_busy: false,
+            edits_job: Job::default(),
+            edits_asked: f64::NEG_INFINITY,
             fixture_active: false,
             rollback: None,
             on_its_way: BTreeSet::new(),
@@ -335,6 +341,30 @@ impl Dialog {
         if state == "picture" {
             self.full = true;
         }
+        // A capture of this computer shared publicly, its splats edited since: Update the shared capture, under way,
+        // done, failed (the previous version kept).
+        if matches!(state, "edited" | "updating" | "update-replacing" | "updated" | "update-failed") {
+            self.entry.local = Some(controller::Local::Session(std::path::PathBuf::from("C:/Sessions/VRChat Home 2026-11-02 21-30-00")));
+            self.entry.ready = true;
+            self.entry.edits = Some(Ok("0f3a9c2be1d47a60-5b1e0c9d2a7f3e18".into()));
+            self.entry.uploaded_edits = Some(orbiters_reconstruct::edit::UNEDITED.into());
+            if let Some(item) = self.entry.remote.as_mut() {
+                (item.public, item.mine, item.can_share) = (true, true, true);
+            }
+        }
+        if state == "updating" || state == "update-replacing" {
+            self.fixture_busy = true;
+            self.last = Some(Action::Update);
+            self.stage = if state == "updating" { Stage::Sending { sent: 38_200_000, total: 61_900_000 } } else { Stage::Replacing };
+        }
+        if state == "updated" {
+            self.entry.uploaded_edits = self.entry.edits.clone().and_then(Result::ok);
+            self.notice = Some(UPDATED_NOTICE.into());
+        }
+        if state == "update-failed" {
+            self.last = Some(Action::Update);
+            self.error = Some(format!("Not updated: Orbiters could not be reached. {}", controller::KEPT));
+        }
         if state == "copy-link" {
             if let Some(item) = self.entry.remote.as_mut() {
                 item.public = true;
@@ -350,6 +380,31 @@ impl Dialog {
                 item.public = true;
             }
         }
+    }
+
+    /// Update the shared capture (a card's menu): its files on Orbiters replaced by what its 3D view shows now.
+    pub fn update(&mut self, ctx: &egui::Context, server: Server) {
+        self.start(ctx, server, Action::Update);
+    }
+
+    /// The capture's splat edits, read on a worker every [`EDITS_EVERY`] seconds while the window is open on a capture of
+    /// this computer that its owner uploaded: edited in its 3D view meanwhile, it offers to update the shared copy (and
+    /// edited back to what was uploaded, it no longer does).
+    fn watch_edits(&mut self, ctx: &egui::Context) {
+        if let Some(edits) = self.edits_job.take() {
+            self.entry.edits = Some(edits);
+        }
+        let uploaded = self.entry.uploaded_edits.is_some() || self.entry.remote.as_ref().is_some_and(|i| i.mine);
+        let Some(controller::Local::Session(dir)) = self.entry.local.as_ref().filter(|_| self.entry.ready && uploaded && !self.fixture_active) else {
+            return;
+        };
+        let now = anim::time(ctx);
+        if !self.edits_job.running() && now - self.edits_asked >= EDITS_EVERY {
+            self.edits_asked = now;
+            let result = orbiters_core::reconstruction::result_dir(dir);
+            self.edits_job = Job::spawn(ctx, move || orbiters_reconstruct::edit::generation(&result).map_err(|e| e.to_string()));
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(EDITS_EVERY));
     }
 
     pub fn public(&mut self, ctx: &egui::Context, server: Server) {
@@ -483,6 +538,7 @@ impl Dialog {
                 cx.ctl.prepare_share(dir.clone());
             }
         }
+        self.watch_edits(&ctx);
         let job = self.operation_id.as_ref().and_then(|id| cx.snap.capture_shares.iter().find(|j| &j.id == id));
         if let Some(j) = job {
             self.stage = j.stage;
@@ -570,6 +626,17 @@ impl Dialog {
                 let from =
                     self.entry.remote.as_ref().and_then(|i| i.from.as_ref()).map(|p| p.name.clone()).unwrap_or_else(|| "the person who shared it".into());
                 self.notice = Some(format!("Request sent: {from} decides"));
+            }
+            Outcome::Updated { item, edits } => {
+                self.entry.remote = Some(item);
+                self.entry.uploaded_edits = Some(edits);
+                self.changed = true;
+                self.rollback = None;
+                self.notice = Some(UPDATED_NOTICE.into());
+                if std::mem::take(&mut self.copy_after) {
+                    let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
+                    self.copy_link(ctx, server);
+                }
             }
             Outcome::Answered(request) => {
                 self.notice = Some("Share request answered".into());
@@ -937,6 +1004,9 @@ impl Dialog {
         let hidden = item.as_ref().is_some_and(|i| i.hidden.is_some());
         let public = item.as_ref().is_some_and(|i| i.public);
         let can_share = self.entry.ready && !hidden && self.warning.is_none();
+        // Its splats edited since it was uploaded: the copy on Orbiters is not what its 3D view shows.
+        let edited = mine && self.entry.edited_since_upload();
+        let updating = busy && matches!(self.last, Some(Action::Update));
 
         // The actions this item has.
         let mut actions: Vec<(Act, Button)> = Vec::new();
@@ -953,7 +1023,8 @@ impl Dialog {
             } else {
                 if !public {
                     let label = if busy && matches!(&self.last, Some(Action::Share(s)) if s.public) { "Sharing…" } else { "Share publicly" };
-                    actions.push((Act::Public, Button::new(label).icon(icons::GLOBE).variant(Variant::Primary).enabled(can_share && !busy)));
+                    let variant = if edited { Variant::Secondary } else { Variant::Primary };
+                    actions.push((Act::Public, Button::new(label).icon(icons::GLOBE).variant(variant).enabled(can_share && !busy)));
                 }
                 actions.push((Act::ShareTo, Button::new("Share to …").icon(icons::USERS).variant(Variant::Secondary).enabled(can_share && !busy)));
                 if !self.entry.is_picture() {
@@ -1049,10 +1120,36 @@ impl Dialog {
             ui.add_space(14.0);
             feedback::banner(ui, Id::unique(("capture-hidden", &self.entry.key)), Tone::Warn, "Hidden by a moderator: it can no longer be shared.", false);
         }
+        if edited && !updating && self.error.is_none() {
+            let shared = item.as_ref().is_some_and(|i| i.public || !i.grants.is_empty());
+            ui.add_space(14.0);
+            let why = if shared {
+                "Edited since it was shared: whoever sees it, on Orbiters and in VRChat, still sees its splats as they were then."
+            } else {
+                "Edited since it was uploaded: its copy on Orbiters still has its splats as they were then."
+            };
+            feedback::banner(ui, Id::unique(("capture-edited", &self.entry.key)), Tone::Warn, why, false);
+            ui.add_space(8.0);
+            let label = if shared { "Update the shared capture" } else { "Update the uploaded copy" };
+            let b = Button::new(label).icon(icons::CLOUD_ARROW_UP).variant(Variant::Primary).size(Size::Sm).enabled(!busy && !hidden).id_salt("capture-update");
+            let bw = b.desired_width(ui);
+            let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
+            if pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw.min(w), 32.0)))) {
+                *act = Some(Act::Update);
+            }
+        }
         if busy {
             ui.add_space(14.0);
             let what = match &self.last {
                 Some(Action::Download) => "Downloading…".to_string(),
+                Some(Action::Update) => match self.stage {
+                    Stage::Waiting => "Waiting for its other change to finish…".to_string(),
+                    Stage::Preparing => "Preparing its edited 3D view…".to_string(),
+                    Stage::Sending { sent, total } if sent > 0 && total > 0 => format!("Sending {} of {}…", megabytes(sent), megabytes(total)),
+                    Stage::Sending { total, .. } if total > 0 => format!("Sending {}…", megabytes(total)),
+                    Stage::Replacing => "Replacing the shared files…".to_string(),
+                    _ => "Updating the shared capture…".to_string(),
+                },
                 Some(Action::Unshare(_)) => "Updating who sees it…".to_string(),
                 Some(Action::Share(_)) if !mine => format!("Asking {}…", item.as_ref().and_then(|i| i.from.as_ref()).map_or("them", |p| p.name.as_str())),
                 Some(Action::Share(s)) => match self.stage {
@@ -1061,13 +1158,14 @@ impl Dialog {
                     Stage::Sending { sent, total } if sent > 0 && total > 0 => format!("Sending {} of {}…", megabytes(sent), megabytes(total)),
                     Stage::Sending { total, .. } if total > 0 => format!("Sending {}…", megabytes(total)),
                     Stage::Sending { .. } => "Sending…".to_string(),
+                    Stage::Replacing => "Replacing the shared files…".to_string(),
                     Stage::Starting | Stage::Sharing => format!("Sharing {}…", whom(s)),
                     Stage::Items { done, total } => format!("Sharing {} · {done} of {total} done…", whom(s)),
                 },
                 _ => "Working…".to_string(),
             };
             working_part(ui, &what, sent_part(self.stage));
-            if matches!(self.last, Some(Action::Share(_))) && mine {
+            if matches!(self.last, Some(Action::Share(_) | Action::Update)) && mine {
                 ui.add_space(6.0);
                 paragraph(ui, "You can close this window: it carries on.", 11.5, theme::FG_4, w);
             }
@@ -1467,6 +1565,7 @@ impl Dialog {
     fn act(&mut self, ctx: &egui::Context, cx: &mut Cx, server: Server, a: Act) {
         match a {
             Act::Public => self.public(ctx, server),
+            Act::Update => self.update(ctx, server),
             Act::ShareTo => self.picker = !self.picker,
             Act::Download => self.start(ctx, server, Action::Download),
             Act::View3d => match &self.entry.local {
@@ -1529,6 +1628,12 @@ impl Dialog {
                 // Copied at once when its page shows it with its picture; otherwise it is shared publicly (and given its
                 // picture) first, by the same job as Share publicly, with the same explicit warning.
                 let item = self.entry.remote.as_ref();
+                // Edited since it was shared: the link would show it as it was; it is updated first, then copied.
+                if self.entry.edited_since_upload() && item.is_some_and(|i| i.public) {
+                    self.copy_after = true;
+                    self.update(ctx, server);
+                    return;
+                }
                 let pictured = item.and_then(|i| i.capture.as_ref()).is_some_and(|c| c.picture_url.is_some())
                     || !self.entry.mine()
                     || !matches!(self.entry.local, Some(controller::Local::Session(_)));
@@ -1551,6 +1656,11 @@ impl Dialog {
         }
     }
 }
+
+/// What the window says once the shared capture is updated.
+const UPDATED_NOTICE: &str = "Updated: everyone now sees it as its 3D view shows it, on Orbiters and in VRChat";
+/// How often the open window reads the capture's splat edits again (a small file; edited in its 3D view meanwhile).
+const EDITS_EVERY: f64 = 2.0;
 
 /// How long Copy public link says the link was copied.
 const COPIED_FOR: f64 = 2.4;
@@ -1579,6 +1689,7 @@ enum Act {
     CopyLink,
     Edit,
     Export,
+    Update,
 }
 
 impl Act {
@@ -1591,6 +1702,7 @@ impl Act {
             Act::CopyLink => 4,
             Act::Edit => 5,
             Act::Export => 6,
+            Act::Update => 7,
             _ => 9,
         }
     }
@@ -1739,4 +1851,221 @@ pub fn morph(ui: &mut Ui, id: Id, right: egui::Pos2, expanded_width: f32, enable
     }
     ctx.data_mut(|d| d.insert_temp(id, expanded));
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::controller::shares::tests::{capture_at, delete_splat, prepared, requests, stand_in, uploaded_session};
+    use orbiters_core::shares::Item;
+    use egui::{Event, Modifiers, PointerButton, RawInput};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    /// The window's size in the harness: the app's default (screenshot.rs).
+    const SCREEN: egui::Vec2 = vec2(1280.0, 820.0);
+
+    /// The capture window as the app shows it, its backend the tray's (the real job machinery), painted on the CPU into
+    /// `ORBITERS_TEST_OUT` when it is set (`window-<name>.png`).
+    struct Harness {
+        ctx: egui::Context,
+        backend: crate::backend::Ctl,
+        dialog: Dialog,
+        time: f64,
+        painter: Option<(PathBuf, orbiters_ui::software::Software)>,
+        shapes: Option<(Vec<egui::epaint::ClippedShape>, f32)>,
+    }
+
+    impl Harness {
+        fn new(entry: Entry) -> Self {
+            let ctx = egui::Context::default();
+            orbiters_ui::install(&ctx);
+            orbiters_ui::widgets::watch_controls();
+            let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
+            let backend: crate::backend::Ctl = Arc::new(crate::backend::Local::new(ctl));
+            let mut dialog = Dialog::new(&ctx, entry, false);
+            // Friends are not read here (Share to … is not what this harness is about; it would read VRChat's data).
+            dialog.friend_scope = Some(crate::controller::vrchat_data::Scope::of(&backend.view()));
+            dialog.friends_requested = true;
+            let painter =
+                std::env::var_os("ORBITERS_TEST_OUT").map(|d| (PathBuf::from(d), orbiters_ui::software::Software::new(SCREEN.x as u32, SCREEN.y as u32)));
+            let mut h = Self { ctx, backend, dialog, time: 0.0, painter, shapes: None };
+            h.settle();
+            h
+        }
+
+        fn frame(&mut self, events: Vec<Event>) {
+            self.time += 1.0 / 60.0;
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), SCREEN)), time: Some(self.time), events, ..Default::default() };
+            let snap = self.backend.view();
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let (backend, dialog) = (&self.backend, &mut self.dialog);
+            let mut output = self.ctx.run_ui(input, |ui| {
+                let mut cx = Cx { ctl: backend, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 40.0, go: None };
+                dialog.show(ui, &mut cx);
+            });
+            if let Some((_, sw)) = self.painter.as_mut() {
+                sw.set_textures(&mut output.textures_delta);
+                sw.free_textures(&mut output.textures_delta);
+                self.shapes = Some((output.shapes, output.pixels_per_point));
+            }
+            output.textures_delta.clear();
+        }
+
+        fn settle(&mut self) {
+            for _ in 0..90 {
+                self.frame(Vec::new());
+            }
+        }
+
+        /// Frames until `done` (jobs run on threads), at most twenty seconds.
+        fn until(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
+            for _ in 0..2000 {
+                self.frame(Vec::new());
+                if done(self) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("waited for {what}");
+        }
+
+        fn control(&self, label: &str) -> Option<(Rect, bool)> {
+            orbiters_ui::widgets::control(&self.ctx, label)
+        }
+
+        fn click(&mut self, label: &str) {
+            let (r, enabled) = self.control(label).unwrap_or_else(|| panic!("{label:?} is drawn"));
+            assert!(enabled, "{label:?} takes clicks");
+            let at = r.center();
+            self.frame(vec![
+                Event::PointerMoved(at),
+                Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+            ]);
+            self.frame(vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }]);
+            self.frame(Vec::new());
+        }
+
+        /// The last frame as `window-<name>.png` in `ORBITERS_TEST_OUT` (nothing without it), over the app's dark page.
+        fn shoot(&mut self, name: &str) {
+            self.frame(Vec::new());
+            let (Some((dir, sw)), Some((shapes, ppp))) = (self.painter.as_mut(), self.shapes.take()) else { return };
+            let primitives = self.ctx.tessellate(shapes, ppp);
+            let pixels = sw.paint(&primitives, ppp, Color32::from_rgb(9, 9, 11));
+            let image = egui::ColorImage::from_rgba_premultiplied([SCREEN.x as usize, SCREEN.y as usize], pixels);
+            std::fs::create_dir_all(&*dir).unwrap();
+            orbiters_ui::offscreen::save_png(&dir.join(format!("window-{name}.png")), &image).unwrap();
+        }
+    }
+
+    /// A capture shared publicly, then edited in its 3D view: its window says so and offers Update the shared capture;
+    /// pressed, it says where the update stands (the files being made, here held until the shot is taken), then that
+    /// everyone sees the edited version, and asks nothing any more. Edited again and Orbiters refusing: the window says
+    /// what happened and that the version shared before stays; Try again goes through. Its share job is the tray's own,
+    /// the server a stand-in on a loopback port.
+    #[test]
+    fn the_capture_window_updates_the_shared_capture_and_recovers_from_a_failure() {
+        let (dir, session, records, mut entry) = uploaded_session("window", None);
+        entry.world_name = "Exoplanet Journey".into();
+        entry.taken = controller::unix("2026-11-02T13:30:00Z");
+        entry.remote = Some(Item { kind: shares::Kind::Capture, id: 3, mine: true, can_share: true, public: true, ..Default::default() });
+        entry.edits = Some(Ok(orbiters_reconstruct::edit::UNEDITED.into()));
+        if let Some(picture) = std::env::var_os("ORBITERS_TEST_PICTURE") {
+            entry.picture = Some(crate::worlds::Picture::Session(PathBuf::from(picture)));
+        }
+        let (api, seen) = stand_in(vec![
+            ("GET /captures/capture/3", 200, capture_at(3, 1)),
+            ("PUT /captures/capture/3/files", 200, capture_at(3, 2)),
+            ("GET /captures/capture/3", 200, capture_at(3, 2)),
+            ("PUT /captures/capture/3/files", 502, r#"{"error":"Cloud storage upload failed for file 81: fixture."}"#.into()),
+            ("GET /captures/capture/3", 200, capture_at(3, 2)),
+            ("PUT /captures/capture/3/files", 200, capture_at(3, 3)),
+        ]);
+        // The files are made only once the test lets them (the shot of the update under way).
+        let gate = Arc::new(Mutex::new(false));
+        let held = gate.clone();
+        let prepare = Arc::new(move |s: &Path| {
+            while !*held.lock().unwrap() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            prepared(s)
+        });
+        let key = entry.key.clone();
+        crate::controller::shares::TEST_WORK.lock().unwrap().push((key.clone(), crate::controller::shares::update_against(api, records.clone(), prepare)));
+
+        let mut h = Harness::new(entry);
+        assert!(h.control("Update the shared capture").is_none(), "as uploaded: nothing to update");
+        // Splats deleted in its 3D view: the window reads its edits again and offers the update.
+        delete_splat(&session, 4);
+        h.until("the edit seen", |h| h.control("Update the shared capture").is_some());
+        h.settle();
+        h.shoot("edited");
+        h.click("Update the shared capture");
+        h.until("the update under way", |h| h.dialog.stage == Stage::Preparing);
+        h.settle();
+        h.shoot("updating-preparing");
+        assert!(h.control("Update the shared capture").is_none(), "one update at a time");
+        *gate.lock().unwrap() = true;
+        h.until("the update done", |h| h.dialog.notice.as_deref() == Some(UPDATED_NOTICE));
+        h.settle();
+        h.shoot("updated");
+        assert_eq!(h.dialog.entry.remote.as_ref().and_then(|i| i.capture.as_ref()).map(|c| c.revision), Some(2));
+        assert!(!h.dialog.entry.edited_since_upload() && h.control("Update the shared capture").is_none(), "nothing to update any more");
+        assert_eq!(requests(&seen), ["GET /captures/capture/3", "PUT /captures/capture/3/files"]);
+
+        // Edited again; Orbiters refuses: why, the previous version kept, Try again.
+        delete_splat(&session, 5);
+        h.until("the second edit seen", |h| h.control("Update the shared capture").is_some());
+        h.settle();
+        h.click("Update the shared capture");
+        h.until("the failure", |h| h.dialog.error.is_some());
+        h.settle();
+        h.shoot("update-failed");
+        assert!(h.control("Try again").is_some_and(|(_, on)| on), "Try again offered after the failure");
+        assert!(h.control("Update the shared capture").is_none(), "one way to try again, not two");
+        let error = h.dialog.error.clone().unwrap();
+        assert!(error.starts_with("Not updated: Cloud storage upload failed") && error.ends_with("Everyone still sees the version shared before."), "{error}");
+        assert_eq!(h.dialog.entry.remote.as_ref().and_then(|i| i.capture.as_ref()).map(|c| c.revision), Some(2), "the window still shows revision 2");
+        h.click("Try again");
+        h.until("the update done again", |h| h.dialog.notice.as_deref() == Some(UPDATED_NOTICE) && h.dialog.error.is_none());
+        assert_eq!(h.dialog.entry.remote.as_ref().and_then(|i| i.capture.as_ref()).map(|c| c.revision), Some(3));
+        assert_eq!(requests(&seen).len(), 6);
+        // The tray said so too.
+        let notices: Vec<String> = h
+            .backend
+            .take_notices()
+            .into_iter()
+            .filter_map(|n| match n {
+                crate::controller::Notice::Toast { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert!(notices.iter().any(|n| n == crate::controller::shares::UPDATED), "{notices:?}");
+        crate::controller::shares::TEST_WORK.lock().unwrap().retain(|(k, _)| *k != key);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The window's other update states as the screenshot fixtures stage them (their bytes under way, the switch), shot
+    /// for review.
+    #[test]
+    fn the_update_states_of_the_screenshot_fixtures() {
+        let mut entry = crate::controller::shares::remote_entry(Item { kind: shares::Kind::Capture, id: 3, mine: true, can_share: true, ..Default::default() });
+        entry.world_name = "Exoplanet Journey".into();
+        entry.taken = controller::unix("2026-11-02T13:30:00Z");
+        if let Some(picture) = std::env::var_os("ORBITERS_TEST_PICTURE") {
+            entry.picture = Some(crate::worlds::Picture::Session(PathBuf::from(picture)));
+        }
+        for state in ["updating", "update-replacing"] {
+            let mut h = Harness::new(entry.clone());
+            h.dialog.fixture(state);
+            h.settle();
+            assert!(h.control("Update the shared capture").is_none(), "{state}: under way, no second update");
+            h.shoot(&format!("fixture-{state}"));
+        }
+        let mut h = Harness::new(entry);
+        h.dialog.fixture("edited");
+        h.settle();
+        assert!(h.control("Update the shared capture").is_some_and(|(_, on)| on));
+        assert!(h.control("Share to …").is_some(), "its other actions stay");
+    }
 }

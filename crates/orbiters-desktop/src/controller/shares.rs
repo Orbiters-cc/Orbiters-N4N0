@@ -84,6 +84,15 @@ pub struct Entry {
     /// A VRChat multi-layer picture's layers, back to front ([`Entry::layers`]).
     #[serde(default)]
     pub layers: Vec<Layer>,
+    /// A reconstructed capture's splat edits now (orbiters_reconstruct::edit::generation), or why they cannot be read;
+    /// none for a picture or a capture without its 3D view. Read with the entries ([`local_entries`]), again by its open
+    /// window.
+    #[serde(default)]
+    pub edits: Option<Result<String, String>>,
+    /// The splat edits its upload from this computer was made with (its upload record; `unedited` for an upload of
+    /// before edits existed); none without a record.
+    #[serde(default)]
+    pub uploaded_edits: Option<String>,
 }
 
 pub use crate::worlds::Layer;
@@ -94,6 +103,10 @@ pub enum Operation {
     Unshare(shares::Unshare),
     Download,
     Answer { id: u64, approve: bool, acknowledge_explicit: bool },
+    /// Update the shared capture: an uploaded capture edited since gets its files on Orbiters replaced by what its 3D
+    /// view shows now (contracts Docs/capture-sharing.md, Updating a capture), whoever sees it (publicly, friends, the
+    /// VRChat world) sees only that from then on. [`update`].
+    Update,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -109,6 +122,9 @@ pub enum Outcome {
     Unshared(Item),
     Downloaded(PathBuf),
     Answered(shares::ShareRequest),
+    /// Its files on Orbiters replaced ([`Operation::Update`]): its item at the new revision and the splat edits they were
+    /// made with.
+    Updated { item: Item, edits: String },
     Failed { message: String, explicit: bool },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -118,6 +134,9 @@ pub struct ShareJob {
     /// Where it stands while it runs.
     pub stage: Stage,
     pub outcome: Option<Outcome>,
+    /// It updates a shared capture's files ([`Operation::Update`]): its card says so.
+    #[serde(default)]
+    pub update: bool,
 }
 /// What a running share is doing (docs/share-speed-2026-10-29.md): what the window and the gallery's card say.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -131,6 +150,8 @@ pub enum Stage {
     Preparing,
     /// Sending its files: bytes sent of all.
     Sending { sent: u64, total: u64 },
+    /// Its files all sent to replace those of the shared capture: Orbiters checks them and switches to them.
+    Replacing,
     /// Telling Orbiters who sees it.
     Sharing,
     /// Several items (a world's pictures): how many are shared of all.
@@ -154,6 +175,7 @@ fn run_request(request: Request, report: Report) -> anyhow::Result<Outcome> {
             Ok(Outcome::Answered(api.answer_capture_request(&token, id, approve, acknowledge_explicit)?.request))
         }
         Operation::Download => download(request.server, request.entry.remote.ok_or_else(|| anyhow::anyhow!("No uploaded item"))?).map(Outcome::Downloaded),
+        Operation::Update => update(request.server, request.entry, report).map(|(item, edits)| Outcome::Updated { item, edits }),
     }
 }
 /// A share of several items ([`SHARES_AT_ONCE`] at a time, none started after one failed): the first item's answer, or
@@ -189,14 +211,23 @@ fn share_all(entries: Vec<Entry>, report: Report, one: impl Fn(Entry) -> anyhow:
 impl super::Controller {
     /// The tray owns each mutation until completion, even if the submitting window closes.
     pub fn capture_share(self: &super::Shared, request: Request) {
+        #[cfg(test)]
+        if let Some(work) = test_work(&request.entry.key) {
+            return self.capture_share_with(request, move |r, report| work(r, report));
+        }
         self.capture_share_with(request, run_request);
     }
-    fn capture_share_with(self: &super::Shared, request: Request, work: impl FnOnce(Request, Report) -> anyhow::Result<Outcome> + Send + 'static) {
+    pub(crate) fn capture_share_with(
+        self: &super::Shared,
+        request: Request,
+        work: impl FnOnce(Request, Report) -> anyhow::Result<Outcome> + Send + 'static,
+    ) {
+        let update = matches!(request.operation, Operation::Update);
         let accepted = self.update(|s| {
             if s.capture_shares.iter().any(|j| j.id == request.id) {
                 return false;
             }
-            s.capture_shares.push(ShareJob { id: request.id.clone(), key: request.entry.key.clone(), stage: Stage::Starting, outcome: None });
+            s.capture_shares.push(ShareJob { id: request.id.clone(), key: request.entry.key.clone(), stage: Stage::Starting, outcome: None, update });
             true
         });
         if !accepted {
@@ -233,6 +264,7 @@ impl super::Controller {
                 Outcome::Shared(shares::Shared::Request { .. }) => (super::NoticeKind::Success, "Share request sent.".into()),
                 Outcome::Answered(_) => (super::NoticeKind::Success, "Share request answered.".into()),
                 Outcome::Downloaded(p) => (super::NoticeKind::Success, format!("Saved {}", p.display())),
+                Outcome::Updated { .. } => (super::NoticeKind::Success, UPDATED.into()),
                 _ => (super::NoticeKind::Success, "Sharing updated.".into()),
             };
             ctl.update(|s| {
@@ -294,6 +326,16 @@ impl Entry {
         &self.layers
     }
 
+    /// A capture of this computer, uploaded, whose splat edits are not those its upload was made with: the copy on
+    /// Orbiters still shows what was removed since (or lacks what was brought back) until it is updated
+    /// ([`Operation::Update`]; a share of it updates it first). Edits that cannot be read are not that: whatever is asked
+    /// of them stops with why.
+    pub fn edited_since_upload(&self) -> bool {
+        let uploaded = self.uploaded_edits.is_some() || self.remote.as_ref().is_some_and(|i| i.mine && i.kind == Kind::Capture);
+        let made_with = self.uploaded_edits.as_deref().unwrap_or(orbiters_reconstruct::edit::UNEDITED);
+        uploaded && self.mine() && matches!(self.local, Some(Local::Session(_))) && matches!(&self.edits, Some(Ok(now)) if now != made_with)
+    }
+
     /// Whether the entry's own file is the picture of all its layers (and not one of them).
     pub fn has_composite(&self) -> bool {
         let own = self.local.as_ref().map(Local::path);
@@ -350,7 +392,14 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
         for s in &w.sessions {
             let taken = unix(&s.manifest.created_utc);
             let local = Local::Session(s.dir.clone());
-            let remote = records.iter().find(|r| r.path == s.dir).and_then(|r| r.item.clone());
+            let record = records.iter().find(|r| r.path == s.dir);
+            let remote = record.and_then(|r| r.item.clone());
+            // What its outputs leave out now, against what its upload was made with (its window offers to update it).
+            let edits = s
+                .reconstruction
+                .as_ref()
+                .map(|_| orbiters_reconstruct::edit::generation(&orbiters_core::reconstruction::result_dir(&s.dir)).map_err(|e| e.to_string()));
+            let uploaded_edits = record.map(|r| r.edits.clone().unwrap_or_else(|| orbiters_reconstruct::edit::UNEDITED.into()));
             entries.push(Entry {
                 key: s.dir.to_string_lossy().into(),
                 world_id: w.id.clone(),
@@ -366,6 +415,8 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
                 picture: Some(crate::worlds::Picture::Session(s.dir.clone())),
                 size: session_picture_size(s.manifest.capture.width, s.manifest.capture.height),
                 layers: Vec::new(),
+                edits,
+                uploaded_edits,
             });
         }
         for shot in &w.shots {
@@ -402,6 +453,8 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
                 picture: Some(picture),
                 size: (shot.info.width > 0 && shot.info.height > 0).then_some([shot.info.width, shot.info.height]),
                 layers,
+                edits: None,
+                uploaded_edits: None,
             });
         }
     }
@@ -431,6 +484,8 @@ pub fn remote_entry(item: Item) -> Entry {
         picture,
         size: item.picture.as_ref().filter(|p| p.width > 0 && p.height > 0).map(|p| [p.width, p.height]),
         layers: Vec::new(),
+        edits: None,
+        uploaded_edits: None,
         remote: Some(item),
     }
 }
@@ -463,10 +518,13 @@ struct Record {
     edits: Option<String>,
 }
 
-/// Why a capture is not shared when its splat edits are not what its upload was made with.
-const EDITED_SINCE_UPLOAD: &str = "Its splats were hidden, deleted or brought back in its 3D view after it was uploaded: the uploaded copy does not \
-     match, so it is not shared. Bring the splats back as they were when it was uploaded (undo, Show all or Restore all) to share that copy; \
-     an uploaded capture's files cannot be replaced yet.";
+/// Why a capture is not shared when its splat edits changed while it was being shared.
+const EDITED_MEANWHILE: &str = "Its splats were changed in its 3D view while it was being shared, so it is not shared: share it again to send what \
+     its 3D view shows now.";
+/// What the tray says once an update is done.
+pub(crate) const UPDATED: &str = "Updated: everyone who sees this 3D capture now sees it as its 3D view shows it.";
+/// How a failed update ends: Orbiters switches to new files whole or not at all.
+pub(crate) const KEPT: &str = "Everyone still sees the version shared before.";
 
 /// The generation of the splat edits of a capture's session now (none for a picture); edits that cannot be read stop
 /// whatever asked.
@@ -490,12 +548,18 @@ fn read_records(path: &Path) -> Vec<Record> {
     std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 fn save_record(records: anyhow::Result<&Path>, entry: &Entry, item: &Item) -> anyhow::Result<()> {
+    save_record_edits(records, entry, item, None)
+}
+/// [`save_record`] with the splat edits its files on Orbiters were made with (`None`: those its record had).
+fn save_record_edits(records: anyhow::Result<&Path>, entry: &Entry, item: &Item, edits: Option<String>) -> anyhow::Result<()> {
     if let Some(local) = &entry.local {
         let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
         let path = records?;
         let mut records = read_records(&path);
-        // The splat edits it was uploaded with stay known (the same item: the same files).
-        let edits = records.iter().find(|r| r.path == local.path() && r.uploaded.id == item.id && r.uploaded.kind == item.kind).and_then(|r| r.edits.clone());
+        // The splat edits it was uploaded with stay known (the same item: the same files) until it is updated.
+        let edits = edits.or_else(|| {
+            records.iter().find(|r| r.path == local.path() && r.uploaded.id == item.id && r.uploaded.kind == item.kind).and_then(|r| r.edits.clone())
+        });
         records.retain(|r| r.path != local.path());
         records.push(Record {
             path: local.path().into(),
@@ -506,6 +570,18 @@ fn save_record(records: anyhow::Result<&Path>, entry: &Entry, item: &Item) -> an
         orbiters_core::write_atomic(&path, &serde_json::to_vec(&records)?)?;
     }
     Ok(())
+}
+/// Its upload is not on Orbiters any more (removed there): its record goes, so that a share uploads it again.
+fn forget_record(path: &Path, dir: &Path, id: u64) {
+    let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut records = read_records(path);
+    let before = records.len();
+    records.retain(|r| !(r.path == dir && r.uploaded.kind == Kind::Capture && r.uploaded.id == id));
+    if records.len() != before {
+        if let Ok(bytes) = serde_json::to_vec(&records) {
+            let _ = orbiters_core::write_atomic(path, &bytes);
+        }
+    }
 }
 /// The items being changed (their local file, else their server key): one change at a time each, different items at
 /// once. A share uploading a 3D capture no longer holds up another item's share.
@@ -536,12 +612,14 @@ impl Drop for Changing {
     }
 }
 /// Upload identity is saved before granting: retry after a failed share never uploads a duplicate. An item already
-/// uploaded (as the gallery or its record says) is shared with one request, never sent or fetched again. How long
-/// each step took goes to `%LOCALAPPDATA%/Orbiters/logs/shares.log`.
+/// uploaded (as the gallery or its record says) is shared with one request, never sent or fetched again, unless it is a
+/// capture whose splats were edited since: its files on Orbiters are replaced first ([`update_with`]), so what is shared
+/// is what its 3D view shows. How long each step took goes to `%LOCALAPPDATA%/Orbiters/logs/shares.log`.
 pub fn share(server: Server, entry: Entry, request: shares::Share, report: Report) -> anyhow::Result<shares::Shared> {
     let started = Instant::now();
     let mut steps = Vec::new();
-    let result = api(server).and_then(|(api, token)| share_with(&api, &token, records_path(server), &entry, &request, report, &mut steps));
+    let result =
+        api(server).and_then(|(api, token)| share_with(&api, &token, records_path(server), &entry, &request, report, &mut steps, &super::maps::web_preview));
     let whom = match (request.public, request.recipients.len()) {
         (true, 0) => "publicly".to_string(),
         (public, n) => format!("{}with {n} friend{}", if public { "publicly and " } else { "" }, if n == 1 { "" } else { "s" }),
@@ -554,7 +632,16 @@ pub fn share(server: Server, entry: Entry, request: shares::Share, report: Repor
     share_log(&format!("{what} {} shared {whom}: {}; {:.2} s in all{end}", entry.key, steps.join(", "), started.elapsed().as_secs_f64()));
     result
 }
-/// [`share`] through `api` as `token`, this account's upload records in `records`; what took how long in `steps`.
+/// What makes a capture's upload files: [`super::maps::web_preview`] (a stand-in in tests).
+pub(crate) type Prepare<'a> = &'a (dyn Fn(&Path) -> anyhow::Result<super::maps::Prepared> + Sync);
+/// Notes how long a step took in `steps` (shares.log).
+fn step(steps: &mut Vec<String>, what: &str, at: &mut Instant) {
+    steps.push(format!("{what} {:.2} s", at.elapsed().as_secs_f64()));
+    *at = Instant::now();
+}
+/// [`share`] through `api` as `token`, this account's upload records in `records`, a capture's files made by `prepare`;
+/// what took how long in `steps`.
+#[allow(clippy::too_many_arguments)]
 fn share_with(
     api: &Api,
     token: &str,
@@ -563,28 +650,31 @@ fn share_with(
     request: &shares::Share,
     report: Report,
     steps: &mut Vec<String>,
+    prepare: Prepare,
 ) -> anyhow::Result<shares::Shared> {
     let mut at = Instant::now();
-    let mut step = |what: &str, at: &mut Instant| {
-        steps.push(format!("{what} {:.2} s", at.elapsed().as_secs_f64()));
-        *at = Instant::now();
-    };
     let _one = Changing::of(entry, report);
     if at.elapsed().as_millis() > 50 {
-        step("waited for its other change", &mut at);
+        step(steps, "waited for its other change", &mut at);
     }
     let records = records.as_deref().map_err(|e| anyhow::anyhow!("{e}"));
     let record = entry.local.as_ref().and_then(|l| records.as_ref().ok().and_then(|p| read_records(p).into_iter().find(|r| r.path == l.path())));
     let remembered = record.as_ref().map(|r| (r.uploaded.kind, r.uploaded.id));
     let existing = entry.remote.as_ref().map(|i| (i.kind, i.id)).or(remembered);
     let uploaded_now = existing.is_none();
-    // A capture's files on the server are of the splat edits it was uploaded with; it is shared only while the edits
-    // are still those (an upload this computer has no record of was made without any).
-    let uploaded_edits = record.as_ref().and_then(|r| r.edits.clone()).unwrap_or_else(|| orbiters_reconstruct::edit::UNEDITED.to_string());
+    // A capture's files on the server are of the splat edits it was uploaded with (an upload this computer has no record
+    // of was made without any).
+    let mut uploaded_edits = record.as_ref().and_then(|r| r.edits.clone()).unwrap_or_else(|| orbiters_reconstruct::edit::UNEDITED.to_string());
     let mut sent_edits = None;
     let (kind, id) = if let Some(known) = existing {
+        // Edited since it was uploaded: its files on Orbiters are replaced first (Update the shared capture).
         if let Some(now) = edits_now(entry)? {
-            anyhow::ensure!(now == uploaded_edits, "{EDITED_SINCE_UPLOAD}");
+            if now != uploaded_edits && known.0 == Kind::Capture {
+                let records = records.as_ref().map(|p| *p).map_err(|e| anyhow::anyhow!("{e}"));
+                let (_, made_with) = update_with(api, token, records, entry, report, steps, prepare).map_err(|e| anyhow::anyhow!("{}", not_updated(&e)))?;
+                at = Instant::now();
+                uploaded_edits = made_with;
+            }
         }
         known
     } else {
@@ -605,12 +695,12 @@ fn share_with(
         let uploaded: Uploaded = match entry.local.as_ref().ok_or_else(|| anyhow::anyhow!("No local file to upload"))? {
             Local::Session(dir) => {
                 report(Stage::Preparing);
-                let super::maps::Prepared { files, sky, metadata: view, generation } = super::maps::web_preview(dir)?;
+                let super::maps::Prepared { files, sky, metadata: view, generation } = prepare(dir)?;
                 // The picture only when drawn for these edits (capture_picture), and the edits still those prepared.
                 let picture = crate::capture_picture::jpeg(dir);
                 anyhow::ensure!(edits_now(entry)?.as_deref() == Some(generation.as_str()), "Its splat edits changed while it was being prepared: share it again.");
                 sent_edits = Some(generation);
-                step("prepared", &mut at);
+                step(steps, "prepared", &mut at);
                 let bytes = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
                 metadata.as_object_mut().unwrap().extend(view.as_object().unwrap().clone());
                 // The upload's progress callback must be 'static: it reports over a channel read here.
@@ -626,7 +716,7 @@ fn share_with(
                     }
                     sending.join().unwrap_or_else(|_| Err(anyhow::anyhow!("The upload stopped unexpectedly")))
                 })
-                .inspect(|_| step(&format!("sent {:.1} MB and stored", bytes as f64 / 1e6), &mut at))?
+                .inspect(|_| step(steps, &format!("sent {:.1} MB and stored", bytes as f64 / 1e6), &mut at))?
             }
             Local::Picture(path) => {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -634,7 +724,7 @@ fn share_with(
                 metadata["takenAt"] = serde_json::json!([iso(entry.taken)]);
                 report(Stage::Sending { sent: 0, total: std::fs::metadata(path).map_or(0, |m| m.len()) });
                 let result = api.add_shared_pictures(token, &entry.world_id, vec![part], &metadata)?;
-                step("sent and stored", &mut at);
+                step(steps, "sent and stored", &mut at);
                 match result.added.into_iter().next() {
                     Some(uploaded) => uploaded,
                     None => {
@@ -663,20 +753,20 @@ fn share_with(
             if request.public {
                 let withdraw = shares::Unshare { public: true, recipients: Vec::new(), all: false };
                 if let Err(e) = api.unshare_capture(token, kind, id, &withdraw) {
-                    step(&format!("could not take it back from the public ({e})"), &mut at);
+                    step(steps, &format!("could not take it back from the public ({e})"), &mut at);
                 }
             }
-            anyhow::bail!("Its splats were changed in its 3D view while it was being uploaded: it is not shared. {EDITED_SINCE_UPLOAD}");
+            anyhow::bail!("{EDITED_MEANWHILE}");
         }
     }
-    // Edits that cannot be read now stop the share too.
+    // Edits that cannot be read now stop the share too; edited while it was updated, it is not shared either.
     if let Some(now) = edits_now(entry)? {
         let made_with = sent_edits.as_deref().unwrap_or(&uploaded_edits);
-        anyhow::ensure!(now == made_with, "{EDITED_SINCE_UPLOAD}");
+        anyhow::ensure!(now == made_with, "{EDITED_MEANWHILE}");
     }
     report(Stage::Sharing);
     let shared = api.share_capture(token, kind, id, request);
-    step("shared", &mut at);
+    step(steps, "shared", &mut at);
     match shared {
         Ok(mut result) => {
             if let shares::Shared::Item { item } = &mut result {
@@ -686,9 +776,9 @@ fn share_with(
                         match crate::capture_picture::jpeg(dir).map(|jpeg| api.set_capture_picture(token, item.id, jpeg)) {
                             Some(Ok(with_picture)) => {
                                 *item = with_picture;
-                                step("gave it its picture", &mut at);
+                                step(steps, "gave it its picture", &mut at);
                             }
-                            Some(Err(e)) => step(&format!("its picture failed ({e})"), &mut at),
+                            Some(Err(e)) => step(steps, &format!("its picture failed ({e})"), &mut at),
                             None => {}
                         }
                     }
@@ -707,6 +797,144 @@ fn share_with(
             Err(e)
         }
     }
+}
+
+/// [`Operation::Update`]: the capture's files on Orbiters replaced by what its 3D view shows now, one change of the item
+/// at a time ([`Changing`]); its item at the new revision and the splat edits they were made with. How long each step
+/// took goes to shares.log. A failure says that the version shared before stays: Orbiters switches to new files whole or
+/// not at all (contracts Docs/capture-sharing.md, Updating a capture).
+pub fn update(server: Server, entry: Entry, report: Report) -> anyhow::Result<(Item, String)> {
+    let started = Instant::now();
+    let mut steps = Vec::new();
+    let result = api(server).and_then(|(api, token)| {
+        let _one = Changing::of(&entry, report);
+        let records = records_path(server);
+        update_with(&api, &token, records.as_deref().map_err(|e| anyhow::anyhow!("{e}")), &entry, report, &mut steps, &super::maps::web_preview)
+    });
+    let end = match &result {
+        Ok((item, _)) => format!(", revision {}", item.capture.as_ref().map_or(1, shares::Capture::revision)),
+        Err(e) => format!(", failed: {e}"),
+    };
+    share_log(&format!("3D capture {} updated: {}; {:.2} s in all{end}", entry.key, steps.join(", "), started.elapsed().as_secs_f64()));
+    result.map_err(|e| anyhow::anyhow!("{}", not_updated(&e)))
+}
+
+/// Why an update did not happen, and that the version shared before stays.
+fn not_updated(e: &anyhow::Error) -> String {
+    let why = e.to_string();
+    let end = if why.ends_with(['.', '!', '?']) { "" } else { "." };
+    format!("Not updated: {why}{end} {KEPT}")
+}
+
+/// [`update`] through `api` as `token` (the caller holds the item's [`Changing`]), this account's upload records in
+/// `records`: what Orbiters has (the revision to replace; still there, still this member's), the capture's files made
+/// for its edits now by `prepare`, sent to replace those of that revision; the record then keeps the edits they were made
+/// with.
+fn update_with(
+    api: &Api,
+    token: &str,
+    records: anyhow::Result<&Path>,
+    entry: &Entry,
+    report: Report,
+    steps: &mut Vec<String>,
+    prepare: Prepare,
+) -> anyhow::Result<(Item, String)> {
+    let mut at = Instant::now();
+    let Some(Local::Session(dir)) = entry.local.as_ref() else { anyhow::bail!("Only a 3D capture of this computer can be updated.") };
+    let record = records.as_ref().ok().and_then(|p| read_records(p).into_iter().find(|r| r.path == *dir));
+    let id = entry
+        .remote
+        .as_ref()
+        .filter(|i| i.kind == Kind::Capture)
+        .map(|i| i.id)
+        .or_else(|| record.as_ref().filter(|r| r.uploaded.kind == Kind::Capture).map(|r| r.uploaded.id))
+        .ok_or_else(|| anyhow::anyhow!("It is not uploaded yet: share it to upload it."))?;
+    // Damaged edits stop it before anything is asked of Orbiters.
+    edits_now(entry)?;
+    let current = match api.capture_item(token, Kind::Capture, id) {
+        Ok(item) => item,
+        Err(e) if e.downcast_ref::<orbiters_core::account::ApiError>().is_some_and(|a| a.status == 404) => {
+            if let Ok(path) = records.as_ref() {
+                forget_record(path, dir, id);
+            }
+            anyhow::bail!("It is not on Orbiters any more: share it again to upload it as its 3D view shows it now.");
+        }
+        Err(e) => return Err(e),
+    };
+    anyhow::ensure!(current.mine, "Only the member who uploaded it can update it.");
+    let revision = current.capture.as_ref().map_or(1, shares::Capture::revision);
+    step(steps, "asked Orbiters", &mut at);
+    report(Stage::Preparing);
+    let super::maps::Prepared { files, sky, metadata, generation } = prepare(dir)?;
+    // The picture only when drawn for these edits (capture_picture), and the edits still those prepared.
+    let picture = crate::capture_picture::jpeg(dir);
+    anyhow::ensure!(
+        edits_now(entry)?.as_deref() == Some(generation.as_str()),
+        "Its splat edits changed while it was being prepared: update it again once they are done."
+    );
+    step(steps, "prepared", &mut at);
+    let bytes = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let sent = std::thread::scope(|scope| {
+        let sending = scope.spawn(|| {
+            api.replace_capture_files(token, id, revision, files, sky.as_deref(), picture, &metadata, move |sent, total| {
+                let _ = tx.send((sent, total));
+            })
+        });
+        // Every byte sent: Orbiters checks the files and switches to them.
+        for (sent, total) in rx {
+            report(if total > 0 && sent >= total { Stage::Replacing } else { Stage::Sending { sent, total } });
+        }
+        sending.join().unwrap_or_else(|_| Err(anyhow::anyhow!("The update stopped unexpectedly")))
+    });
+    let item = match sent {
+        Ok(item) => item,
+        Err(e) => {
+            if let Some(conflict) = e.downcast_ref::<shares::RevisionConflict>() {
+                anyhow::bail!(
+                    "it was updated from somewhere else meanwhile (it is at revision {}; this computer replaced revision {revision}). Look at it, then \
+                     update it again to send what this computer's 3D view shows.",
+                    conflict.revision
+                );
+            }
+            // No answer after the files went (the connection dropped): Orbiters switched to them, or not, as its revision
+            // says (another computer's update of the same capture in that very moment would read the same).
+            let switched = match e.downcast_ref::<orbiters_core::account::ApiError>() {
+                Some(_) => None,
+                None => api.capture_item(token, Kind::Capture, id).ok().filter(|now| now.capture.as_ref().map_or(1, shares::Capture::revision) == revision + 1),
+            };
+            match switched {
+                Some(now) => {
+                    step(steps, &format!("lost the answer ({e}), found it switched"), &mut at);
+                    now
+                }
+                None => return Err(e),
+            }
+        }
+    };
+    step(steps, &format!("sent {:.1} MB and switched", bytes as f64 / 1e6), &mut at);
+    save_record_edits(records, entry, &item, Some(generation.clone()))?;
+    Ok((item, generation))
+}
+/// Tests: what a share of the entry with this key does instead of the real job (against a stand-in Orbiters), so that
+/// a window's own buttons run the tray's job machinery without an account or the network.
+#[cfg(test)]
+pub(crate) type TestWork = std::sync::Arc<dyn Fn(Request, Report) -> anyhow::Result<Outcome> + Send + Sync>;
+#[cfg(test)]
+pub(crate) static TEST_WORK: Mutex<Vec<(String, TestWork)>> = Mutex::new(Vec::new());
+#[cfg(test)]
+fn test_work(key: &str) -> Option<TestWork> {
+    TEST_WORK.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(k, _)| k == key).map(|(_, w)| w.clone())
+}
+/// Tests: [`Operation::Update`] through `api` (a stand-in), this account's records in `records`, files by `prepare`.
+#[cfg(test)]
+pub(crate) fn update_against(api: Api, records: PathBuf, prepare: std::sync::Arc<dyn Fn(&Path) -> anyhow::Result<super::maps::Prepared> + Send + Sync>) -> TestWork {
+    std::sync::Arc::new(move |request: Request, report: Report| {
+        let _one = Changing::of(&request.entry, report);
+        update_with(&api, "token", Ok(records.as_path()), &request.entry, report, &mut Vec::new(), &*prepare)
+            .map(|(item, edits)| Outcome::Updated { item, edits })
+            .map_err(|e| anyhow::anyhow!("{}", not_updated(&e)))
+    })
 }
 /// A line in `%LOCALAPPDATA%/Orbiters/logs/shares.log`, kept under 1 MB (the last one renamed .old). Tests write none.
 fn share_log(line: &str) {
@@ -749,7 +977,7 @@ pub fn download(server: Server, item: Item) -> anyhow::Result<PathBuf> {
     Ok(out)
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     #[test]
     fn grouping_never_assigns_another_world_or_a_future_join() {
@@ -840,62 +1068,491 @@ mod tests {
         shares::Share { recipients: vec![shares::Recipient { vrchat_user_id: "usr_friend".into(), display_name: "Friend".into() }], ..Default::default() }
     }
 
-    /// A capture uploaded privately, then splats deleted in its 3D view: sharing it is refused (the server's copy
-    /// still holds them), nothing asked of the server; with the edits it was uploaded with it is shared; changed again,
-    /// damaged edits, or an upload this computer has no record of (made as trained): refused. Its record keeps the
-    /// edits it was uploaded with across the share's answer.
-    #[test]
-    fn a_capture_is_shared_only_with_the_splat_edits_it_was_uploaded_with() {
-        use orbiters_reconstruct::edit::{Edit, Identity, DELETED};
-        let dir = std::env::temp_dir().join(format!("orbiters-share-edits-{}", uuid::Uuid::new_v4()));
+    /// A stand-in for Orbiters on a loopback port that answers each request with the first answer whose start matches its
+    /// request line ("PUT /captures/capture/3/files"): an answer is used once while another one matches after it, the
+    /// last one that matches stays; status 0 reads the request and closes the connection without an answer. The
+    /// requests it got with their bodies, in order.
+    pub(crate) fn stand_in(answers: Vec<(&'static str, u16, String)>) -> (Api, std::sync::Arc<Mutex<Vec<(String, Vec<u8>)>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = Api::at(&format!("http://{}/", listener.local_addr().unwrap()));
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            let mut answers = answers;
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let (mut line, mut length) = (String::new(), 0);
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let request = line.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+                log.lock().unwrap().push((request.clone(), body));
+                let matching: Vec<usize> = answers.iter().enumerate().filter(|(_, (start, ..))| request.starts_with(start)).map(|(i, _)| i).collect();
+                let (status, answer) = match matching.as_slice() {
+                    [] => (200, "{}".to_string()),
+                    [only] => (answers[*only].1, answers[*only].2.clone()),
+                    [first, ..] => {
+                        let (_, status, answer) = answers.remove(*first);
+                        (status, answer)
+                    }
+                };
+                if status == 0 {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    continue;
+                }
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                    answer.len()
+                );
+            }
+        });
+        (api, seen)
+    }
+
+    /// An item answer of the capture `id` at `revision`, its owner's.
+    pub(crate) fn capture_at(id: u64, revision: u64) -> String {
+        let capture = shares::Capture { splat_count: 2000, revision, preview_url: format!("/captures/capture/{id}/file?v={revision}"), ..Default::default() };
+        serde_json::json!({ "item": Item { kind: Kind::Capture, id, mine: true, can_share: true, public: true, capture: Some(capture), ..Default::default() } })
+            .to_string()
+    }
+
+    /// A reconstructed session in a temporary folder, uploaded as capture 3 (its record made with `edits`), and its entry
+    /// as Photos & captures has it (no item fetched yet).
+    pub(crate) fn uploaded_session(name: &str, edits: Option<String>) -> (PathBuf, PathBuf, PathBuf, Entry) {
+        let dir = std::env::temp_dir().join(format!("orbiters-update-{name}-{}", uuid::Uuid::new_v4()));
         let session = dir.join("Home 2026-11-02 10-00-00");
-        let result = orbiters_core::reconstruction::dir(&session);
-        std::fs::create_dir_all(&result).unwrap();
+        std::fs::create_dir_all(orbiters_core::reconstruction::dir(&session)).unwrap();
         let records = dir.join("capture-uploads.json");
-        let uploaded = Uploaded { kind: Kind::Capture, id: 3, visibility: "private".into() };
-        let write_record = |edits: Option<String>| {
-            std::fs::write(&records, serde_json::to_vec(&[Record { path: session.clone(), item: None, uploaded: uploaded.clone(), edits }]).unwrap()).unwrap()
-        };
+        let uploaded = Uploaded { kind: Kind::Capture, id: 3, visibility: "public".into() };
+        std::fs::write(&records, serde_json::to_vec(&[Record { path: session.clone(), item: None, uploaded, edits: edits.clone() }]).unwrap()).unwrap();
         let mut entry = remote_entry(Item::default());
+        entry.key = session.to_string_lossy().into();
         entry.remote = None;
         entry.local = Some(Local::Session(session.clone()));
-        let share = |entry: &Entry| {
-            let (api, seen) = fake_orbiters(vec![("POST /captures/capture/3/share", shared_item(Kind::Capture, 3))]);
-            let r = share_with(&api, "token", Ok(records.clone()), entry, &to_a_friend(), &|_| {}, &mut Vec::new());
-            let asked = seen.lock().unwrap().clone();
-            (r.map(|_| ()).map_err(|e| e.to_string()), asked)
-        };
-        // Uploaded as trained (a record of before edits existed), then the avatar deleted.
-        write_record(None);
-        let mut edit = Edit::new(10, Identity { bytes: 1 << 20, hash: 1 });
-        edit.marks[4] = DELETED;
+        entry.uploaded_edits = Some(edits.unwrap_or_else(|| orbiters_reconstruct::edit::UNEDITED.into()));
+        (dir, session, records, entry)
+    }
+
+    /// Splat `n` of the session deleted in its 3D view (on top of what the edit file holds); its generation.
+    pub(crate) fn delete_splat(session: &Path, n: usize) -> String {
+        use orbiters_reconstruct::edit::{Edit, Identity, DELETED};
+        let result = orbiters_core::reconstruction::result_dir(session);
+        let file = result.join(orbiters_core::reconstruction::EDIT_FILE);
+        let mut edit =
+            std::fs::read(&file).ok().and_then(|b| Edit::decode(&b).ok()).unwrap_or_else(|| Edit::new(10, Identity { bytes: 1 << 20, hash: 1 }));
+        edit.marks[n] = DELETED;
         edit.save(&result).unwrap();
-        let (r, seen) = share(&entry);
-        assert!(r.as_ref().is_err_and(|e| e.contains("after it was uploaded")), "{r:?}");
-        assert!(seen.is_empty(), "nothing asked of the server: {seen:?}");
-        // Uploaded with these very edits: shared, and the record keeps them.
-        write_record(Some(edit.generation()));
-        let (r, seen) = share(&entry);
-        assert!(r.is_ok(), "{r:?}");
-        assert_eq!(seen, ["POST /captures/capture/3/share"]);
-        assert_eq!(read_records(&records)[0].edits.as_deref(), Some(edit.generation().as_str()), "kept across the share's answer");
-        // Edited again: refused.
-        edit.marks[5] = DELETED;
-        edit.save(&result).unwrap();
-        assert!(share(&entry).0.is_err());
-        // Damaged edits: refused.
-        std::fs::write(result.join(orbiters_core::reconstruction::EDIT_FILE), b"damaged").unwrap();
-        assert!(share(&entry).0.as_ref().is_err_and(|e| e.contains("could not be read")));
-        // Known to the server only (no record here: uploaded as trained), the capture edited: refused.
-        edit.save(&result).unwrap();
-        std::fs::remove_file(&records).unwrap();
-        let mut known = entry.clone();
-        known.remote = Some(Item { kind: Kind::Capture, id: 3, mine: true, ..Default::default() });
-        assert!(share(&known).0.as_ref().is_err_and(|e| e.contains("after it was uploaded")));
-        // Restored as uploaded (no edits): shared.
-        std::fs::remove_file(result.join(orbiters_core::reconstruction::EDIT_FILE)).unwrap();
-        assert!(share(&known).0.is_ok());
+        edit.generation()
+    }
+
+    /// The upload files made for the session's edits now (a stand-in for the GPU-tuned trees: bytes the stand-in server
+    /// takes as they are), counted.
+    pub(crate) fn prepared(session: &Path) -> anyhow::Result<super::super::maps::Prepared> {
+        let generation = orbiters_reconstruct::edit::generation(&orbiters_core::reconstruction::result_dir(session))?;
+        let tree = |tag: u8| [orbiters_reconstruct::tree::MAGIC.as_slice(), &[tag; 56]].concat();
+        Ok(super::super::maps::Prepared {
+            files: orbiters_core::maps::PreviewFiles { vrchat_pc: tree(1), vrchat_quest: tree(2), vrchat_coarse: tree(3) },
+            sky: None,
+            metadata: serde_json::json!({ "view": { "position": [0.0, 1.6, 0.0], "target": [0.0, 1.6, -4.0] }, "quality": 31.5 }),
+            generation,
+        })
+    }
+
+    pub(crate) fn requests(seen: &Mutex<Vec<(String, Vec<u8>)>>) -> Vec<String> {
+        seen.lock().unwrap().iter().map(|(r, _)| r.clone()).collect()
+    }
+
+    fn record_of(records: &Path) -> Option<Record> {
+        read_records(records).into_iter().next()
+    }
+
+    /// Update the shared capture: what Orbiters has asked first (its revision), the files made for the edits now sent to
+    /// replace that revision's (each tree, the start view, the revision named), its stages said; the record then keeps
+    /// the edits sent and the item at the next revision, and the entry no longer asks for an update.
+    #[test]
+    fn an_edited_upload_is_updated_in_one_step_and_its_record_keeps_the_edits_sent() {
+        let (dir, session, records, mut entry) = uploaded_session("one-step", None);
+        let generation = delete_splat(&session, 4);
+        entry.edits = Some(Ok(generation.clone()));
+        assert!(entry.edited_since_upload());
+        let (api, seen) = stand_in(vec![("GET /captures/capture/3", 200, capture_at(3, 1)), ("PUT /captures/capture/3/files", 200, capture_at(3, 2))]);
+        let stages = Mutex::new(Vec::new());
+        let (item, edits) =
+            update_with(&api, "token", Ok(records.as_path()), &entry, &|s| stages.lock().unwrap().push(s), &mut Vec::new(), &prepared).unwrap();
+        assert_eq!((item.capture.as_ref().map(|c| c.revision), edits.as_str()), (Some(2), generation.as_str()));
+        assert_eq!(requests(&seen), ["GET /captures/capture/3", "PUT /captures/capture/3/files"]);
+        let body = String::from_utf8_lossy(&seen.lock().unwrap()[1].1).into_owned();
+        for part in ["name=\"vrchatPc\"", "name=\"vrchatQuest\"", "name=\"vrchatCoarse\"", "\"revision\":1", "\"quality\":31.5", "\"position\":[0.0,1.6,0.0]"] {
+            assert!(body.contains(part), "the replacement sends {part}");
+        }
+        assert!(!body.contains("name=\"sky\"") && !body.contains("name=\"picture\""), "no sky, no picture drawn: none sent (the old ones go)");
+        let said = stages.into_inner().unwrap();
+        assert_eq!(said.first(), Some(&Stage::Preparing));
+        assert_eq!(said.last(), Some(&Stage::Replacing), "every byte sent: Orbiters switches");
+        assert!(said.iter().any(|s| matches!(s, Stage::Sending { .. })));
+        let record = record_of(&records).unwrap();
+        assert_eq!(record.edits.as_deref(), Some(generation.as_str()));
+        assert_eq!(record.item.and_then(|i| i.capture).map(|c| c.revision), Some(2));
+        entry.uploaded_edits = Some(generation);
+        assert!(!entry.edited_since_upload(), "updated: nothing to update any more");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Sharing a capture edited since it was uploaded updates it first (its files replaced, then the share asked), never
+    /// shares the copy with what was removed; edited back to what was uploaded later, a share updates it again. Damaged
+    /// edits refuse before anything is asked of Orbiters.
+    #[test]
+    fn a_share_of_an_edited_upload_updates_it_first() {
+        let (dir, session, records, entry) = uploaded_session("share", None);
+        let generation = delete_splat(&session, 4);
+        let answers = || {
+            vec![
+                ("GET /captures/capture/3", 200, capture_at(3, 1)),
+                ("PUT /captures/capture/3/files", 200, capture_at(3, 2)),
+                ("POST /captures/capture/3/share", 200, shared_item(Kind::Capture, 3)),
+            ]
+        };
+        let (api, seen) = stand_in(answers());
+        share_with(&api, "token", Ok(records.clone()), &entry, &to_a_friend(), &|_| {}, &mut Vec::new(), &prepared).unwrap();
+        assert_eq!(requests(&seen), ["GET /captures/capture/3", "PUT /captures/capture/3/files", "POST /captures/capture/3/share"]);
+        assert_eq!(record_of(&records).unwrap().edits.as_deref(), Some(generation.as_str()), "kept across the share's answer");
+        // Shared again with the same edits: one request.
+        let (api, seen) = stand_in(answers());
+        share_with(&api, "token", Ok(records.clone()), &entry, &to_a_friend(), &|_| {}, &mut Vec::new(), &prepared).unwrap();
+        assert_eq!(requests(&seen), ["POST /captures/capture/3/share"]);
+        // Damaged edits: refused, nothing asked.
+        let edit_file = orbiters_core::reconstruction::result_dir(&session).join(orbiters_core::reconstruction::EDIT_FILE);
+        let kept = std::fs::read(&edit_file).unwrap();
+        std::fs::write(&edit_file, b"damaged").unwrap();
+        let (api, seen) = stand_in(answers());
+        let refused = share_with(&api, "token", Ok(records.clone()), &entry, &to_a_friend(), &|_| {}, &mut Vec::new(), &prepared).unwrap_err();
+        assert!(refused.to_string().contains("could not be read"), "{refused}");
+        assert!(requests(&seen).is_empty());
+        // Every splat brought back (the file gone: as trained): the share updates it again, to the capture as trained.
+        std::fs::write(&edit_file, kept).unwrap();
+        std::fs::remove_file(&edit_file).unwrap();
+        let (api, seen) = stand_in(answers());
+        share_with(&api, "token", Ok(records.clone()), &entry, &to_a_friend(), &|_| {}, &mut Vec::new(), &prepared).unwrap();
+        assert_eq!(requests(&seen).len(), 3);
+        assert_eq!(record_of(&records).unwrap().edits.as_deref(), Some(orbiters_reconstruct::edit::UNEDITED));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An update Orbiters refuses changes nothing here either (the record keeps the edits of the files there) and says
+    /// that everyone still sees the version shared before; tried again, it goes through.
+    #[test]
+    fn a_failed_update_keeps_the_previous_version_and_says_so() {
+        let (dir, session, records, mut entry) = uploaded_session("failed", None);
+        entry.edits = Some(Ok(delete_splat(&session, 2)));
+        let (api, seen) = stand_in(vec![
+            ("GET /captures/capture/3", 200, capture_at(3, 1)),
+            ("PUT /captures/capture/3/files", 502, r#"{"error":"Cloud storage upload failed for file 81: fixture."}"#.into()),
+            ("PUT /captures/capture/3/files", 200, capture_at(3, 2)),
+        ]);
+        let failed = update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &prepared).unwrap_err();
+        assert_eq!(
+            not_updated(&failed),
+            "Not updated: Cloud storage upload failed for file 81: fixture. Everyone still sees the version shared before."
+        );
+        assert_eq!(record_of(&records).unwrap().edits, None, "the record still says the files there are as trained");
+        update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &prepared).unwrap();
+        assert_eq!(requests(&seen), ["GET /captures/capture/3", "PUT /captures/capture/3/files", "GET /captures/capture/3", "PUT /captures/capture/3/files"]);
+        assert!(record_of(&records).unwrap().edits.is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Replaced from somewhere else meanwhile (409 revision-conflict): said with the revision it is at, nothing changed
+    /// here. Removed from Orbiters: said, and its record forgotten so that a share uploads it again.
+    #[test]
+    fn a_conflict_or_a_removed_upload_is_said_and_changes_nothing_else() {
+        let (dir, session, records, mut entry) = uploaded_session("conflict", None);
+        entry.edits = Some(Ok(delete_splat(&session, 2)));
+        let conflict = r#"{"error":"This capture was updated meanwhile: load it again, then update it.","code":"revision-conflict","revision":5}"#;
+        let (api, _) = stand_in(vec![("GET /captures/capture/3", 200, capture_at(3, 4)), ("PUT /captures/capture/3/files", 409, conflict.into())]);
+        let refused = update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &prepared).unwrap_err().to_string();
+        assert!(refused.contains("updated from somewhere else") && refused.contains("revision 5") && refused.contains("replaced revision 4"), "{refused}");
+        assert_eq!(record_of(&records).unwrap().edits, None);
+        let gone = r#"{"error":"This capture or picture is not available."}"#;
+        let (api, seen) = stand_in(vec![("GET /captures/capture/3", 404, gone.into())]);
+        let refused = update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &prepared).unwrap_err().to_string();
+        assert!(refused.contains("not on Orbiters any more"), "{refused}");
+        assert_eq!(requests(&seen), ["GET /captures/capture/3"], "nothing prepared or sent");
+        assert!(record_of(&records).is_none(), "its record forgotten: a share uploads it again");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The connection lost after the files went: the capture's revision says whether Orbiters switched to them (one more
+    /// than the one replaced: it did, and the update counts) or not (the failure stands).
+    #[test]
+    fn a_lost_answer_is_read_from_the_revision_the_capture_is_at() {
+        let (dir, session, records, mut entry) = uploaded_session("lost", None);
+        entry.edits = Some(Ok(delete_splat(&session, 2)));
+        let (api, _) = stand_in(vec![
+            ("GET /captures/capture/3", 200, capture_at(3, 1)),
+            ("PUT /captures/capture/3/files", 0, String::new()),
+            ("GET /captures/capture/3", 200, capture_at(3, 2)),
+        ]);
+        let (item, _) = update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &prepared).unwrap();
+        assert_eq!(item.capture.map(|c| c.revision), Some(2));
+        assert!(record_of(&records).unwrap().edits.is_some());
+        let (dir2, session2, records2, mut entry2) = uploaded_session("lost-not-switched", None);
+        entry2.edits = Some(Ok(delete_splat(&session2, 2)));
+        let (api, _) = stand_in(vec![("GET /captures/capture/3", 200, capture_at(3, 1)), ("PUT /captures/capture/3/files", 0, String::new())]);
+        assert!(update_with(&api, "token", Ok(records2.as_path()), &entry2, &|_| {}, &mut Vec::new(), &prepared).is_err());
+        assert_eq!(record_of(&records2).unwrap().edits, None);
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(dir2).unwrap();
+    }
+
+    /// Edited again while its files were made: not sent (they would hold neither the edits before nor those after).
+    #[test]
+    fn edits_changed_while_prepared_are_not_sent() {
+        let (dir, session, records, mut entry) = uploaded_session("moving", None);
+        entry.edits = Some(Ok(delete_splat(&session, 2)));
+        let (api, seen) = stand_in(vec![("GET /captures/capture/3", 200, capture_at(3, 1))]);
+        let moving = |s: &Path| {
+            let made = prepared(s);
+            delete_splat(s, 6);
+            made
+        };
+        let refused = update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &moving).unwrap_err().to_string();
+        assert!(refused.contains("changed while it was being prepared"), "{refused}");
+        assert_eq!(requests(&seen), ["GET /captures/capture/3"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Which captures ask to be updated: uploaded from this computer (or known to Orbiters as this member's) with other
+    /// edits than those it was uploaded with; never an unreadable edit, a picture, someone else's or one never uploaded.
+    #[test]
+    fn only_an_upload_edited_since_asks_to_be_updated() {
+        let unedited = orbiters_reconstruct::edit::UNEDITED.to_string();
+        let mut e = remote_entry(Item::default());
+        e.remote = None;
+        e.local = Some(Local::Session(PathBuf::from("C:/Sessions/Home")));
+        e.edits = Some(Ok("aa-bb".into()));
+        assert!(!e.edited_since_upload(), "never uploaded");
+        e.uploaded_edits = Some(unedited.clone());
+        assert!(e.edited_since_upload());
+        e.uploaded_edits = Some("aa-bb".into());
+        assert!(!e.edited_since_upload(), "uploaded with these edits");
+        e.uploaded_edits = None;
+        e.remote = Some(Item { kind: Kind::Capture, id: 3, mine: true, ..Default::default() });
+        assert!(e.edited_since_upload(), "known to Orbiters only: uploaded as trained");
+        e.edits = Some(Ok(unedited));
+        assert!(!e.edited_since_upload());
+        e.edits = Some(Err("damaged".into()));
+        assert!(!e.edited_since_upload(), "unreadable edits stop whatever is asked, with why");
+        e.edits = Some(Ok("aa-bb".into()));
+        e.remote.as_mut().unwrap().mine = false;
+        assert!(!e.edited_since_upload(), "someone else's");
+        e.remote = None;
+        e.uploaded_edits = Some("cc-dd".into());
+        e.local = Some(Local::Picture(PathBuf::from("C:/Pictures/a.png")));
+        assert!(!e.edited_since_upload(), "a picture");
+    }
+
+    /// The tray's job of an update says it is one (its card says Updating…), and its outcome carries the edits sent.
+    #[test]
+    fn an_update_job_is_marked_and_answers_its_item_and_edits() {
+        let ctl = super::super::Controller::new(orbiters_core::settings::Settings::default());
+        let request = Request { id: "update-job".into(), server: Server::Development, entry: remote_entry(Item::default()), extra: Vec::new(), operation: Operation::Update };
+        let json = serde_json::to_string(&crate::ipc::ToService::CaptureShare { request: Box::new(request.clone()) }).unwrap();
+        assert!(matches!(serde_json::from_str::<crate::ipc::ToService>(&json).unwrap(), crate::ipc::ToService::CaptureShare { .. }));
+        ctl.capture_share_with(request, |_, report| {
+            report(Stage::Replacing);
+            Ok(Outcome::Updated { item: Item { id: 3, ..Default::default() }, edits: "aa-bb".into() })
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while ctl.view().capture_shares[0].outcome.is_none() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let job = ctl.view().capture_shares[0].clone();
+        assert!(job.update);
+        assert!(matches!(job.outcome, Some(Outcome::Updated { ref edits, .. }) if edits == "aa-bb"));
+    }
+
+    /// The removed splats' positions as the files write them (right-handed: Z negated, exact), bit for bit.
+    fn positions_of(g: &orbiters_reconstruct::gaussians::Gaussians, ids: impl Iterator<Item = usize>) -> std::collections::HashSet<[u32; 3]> {
+        ids.map(|i| [g.means[i][0].to_bits(), g.means[i][1].to_bits(), (-g.means[i][2]).to_bits()]).collect()
+    }
+
+    /// How many 32-byte splat records of `bytes` (from byte `from`) sit at one of `removed`, of how many.
+    fn removed_in(bytes: &[u8], from: usize, removed: &std::collections::HashSet<[u32; 3]>) -> (usize, usize) {
+        let records = bytes[from..].chunks_exact(32);
+        let total = records.len();
+        let found = records.filter(|r| removed.contains(&[0, 4, 8].map(|o| u32::from_le_bytes(r[o..o + 4].try_into().unwrap())))).count();
+        (found, total)
+    }
+
+    /// Where a splat tree's splats start (after its header and boxes).
+    fn tree_splats(bytes: &[u8]) -> usize {
+        (1 + u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize) * 32
+    }
+
+    /// Update the shared capture from end to end on a disposable Orbiters (its backend on a disposable database, its
+    /// storage a folder: reports/reshare.md says how to start one), with the app's own upload preparation (VRChat's trees
+    /// tuned on the GPU: run it under the lab's GPU lock) on a disposable copy of a reconstructed session:
+    /// `ORBITERS_TEST_API=http://127.0.0.1:4243 ORBITERS_TEST_TOKEN=… ORBITERS_TEST_WORLD=wrld_… ORBITERS_TEST_SESSION=<copy>
+    /// ORBITERS_TEST_STORAGE=<the server's storage folder> cargo test -p orbiters-desktop an_uploaded_capture_is_updated_end_to_end
+    /// -- --ignored --nocapture --test-threads=1`.
+    /// Shared publicly as trained; a fifth of its splats deleted; updated: the item at revision 2 without the old picture,
+    /// the website's `.splat`, the VRChat slot's three trees and the listing hold none of the deleted splats, the old
+    /// files are gone from storage and their cached addresses purged. Then a slot refusing the new trees: not updated,
+    /// everything as at revision 2. A replacement of a stale revision: refused as a conflict. Updated again: revision 3.
+    #[test]
+    #[ignore]
+    fn an_uploaded_capture_is_updated_end_to_end() {
+        use orbiters_reconstruct::edit::{Edit, Identity, DELETED};
+        let env = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k}"));
+        let api = Api::at(&env("ORBITERS_TEST_API"));
+        let token = env("ORBITERS_TEST_TOKEN");
+        let session = PathBuf::from(env("ORBITERS_TEST_SESSION"));
+        let storage = PathBuf::from(env("ORBITERS_TEST_STORAGE"));
+        let result = orbiters_core::reconstruction::result_dir(&session);
+        let ply = result.join(orbiters_core::reconstruction::PLY_FILE);
+        let _ = std::fs::remove_file(result.join(orbiters_core::reconstruction::EDIT_FILE));
+        let records = std::env::temp_dir().join(format!("orbiters-e2e-records-{}.json", uuid::Uuid::new_v4()));
+        let mut entry = remote_entry(Item::default());
+        entry.remote = None;
+        entry.world_id = env("ORBITERS_TEST_WORLD");
+        entry.world_name = "Exoplanet Journey".into();
+        entry.local = Some(Local::Session(session.clone()));
+        entry.source_key = session.file_name().map(|n| n.to_string_lossy().into_owned());
+        let stored = || -> std::collections::BTreeSet<String> {
+            let mut out = std::collections::BTreeSet::new();
+            let mut stack = vec![storage.clone()];
+            while let Some(d) = stack.pop() {
+                for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                    if e.path().is_dir() {
+                        stack.push(e.path());
+                    } else if e.path().to_string_lossy().contains("files") {
+                        out.insert(e.path().strip_prefix(&storage).unwrap().to_string_lossy().replace('\\', "/"));
+                    }
+                }
+            }
+            out
+        };
+        let slot_file = |slot: u32, name: &str| std::fs::read(storage.join("public-bucket").join(format!("public/vrchat/slots/{slot}/{name}"))).ok();
+        let listed = |id: u64| -> serde_json::Value {
+            let r = api.agent().get(&api.url("maps/vrchat/previews")).call().unwrap();
+            let v: serde_json::Value = serde_json::from_str(&r.into_body().read_to_string().unwrap()).unwrap();
+            v["previews"].as_array().unwrap().iter().find(|p| p["id"].as_u64() == Some(id)).cloned().expect("listed for worlds")
+        };
+        let t = Instant::now();
+
+        // 1. Shared publicly, as trained (the app's share: prepared, uploaded with its picture, shared).
+        let shared = share_with(&api, &token, Ok(records.clone()), &entry, &shares::Share { public: true, ..Default::default() }, &|_| {}, &mut Vec::new(), &super::super::maps::web_preview)
+            .unwrap();
+        let shares::Shared::Item { item } = shared else { panic!("shared as its owner") };
+        let id = item.id;
+        let slot = item.capture.as_ref().and_then(|c| c.vrchat_slot).expect("a public capture holds a VRChat slot");
+        assert!(item.capture.as_ref().is_some_and(|c| c.picture_url.is_some() && c.revision == 1));
+        let first_files = stored();
+        println!("1. shared publicly in {:.1} s: capture {id}, slot {slot}, {} stored objects", t.elapsed().as_secs_f32(), first_files.len());
+
+        // 2. A fifth of its splats deleted in its 3D view (those farthest along X).
+        let g = orbiters_reconstruct::ply::read(&ply).unwrap();
+        let n = g.means.len();
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|a, b| g.means[*b][0].total_cmp(&g.means[*a][0]));
+        let gone: Vec<usize> = order[..n / 5].to_vec();
+        let mut edit = Edit::new(n, Identity::read(&ply).unwrap());
+        for &i in &gone {
+            edit.marks[i] = DELETED;
+        }
+        edit.save(&result).unwrap();
+        let removed = positions_of(&g, gone.iter().copied());
+        entry.edits = Some(Ok(edit.generation()));
+        entry.uploaded_edits = record_of(&records).map(|r| r.edits.unwrap_or_else(|| orbiters_reconstruct::edit::UNEDITED.into()));
+        assert!(entry.edited_since_upload(), "its window offers Update the shared capture");
+        let pc_before = slot_file(slot, "pc").unwrap();
+        assert!(removed_in(&pc_before, tree_splats(&pc_before), &removed).0 > 0, "the shared copy holds the splats deleted");
+
+        // 3. Update the shared capture.
+        let t = Instant::now();
+        let stages = Mutex::new(Vec::new());
+        let (item, made_with) =
+            update_with(&api, &token, Ok(records.as_path()), &entry, &|s| stages.lock().unwrap().push(s), &mut Vec::new(), &super::super::maps::web_preview)
+                .unwrap();
+        let capture = item.capture.clone().unwrap();
+        assert_eq!((capture.revision, made_with.as_str()), (2, edit.generation().as_str()));
+        assert!(capture.preview_url.ends_with("?v=2"));
+        assert!(capture.picture_url.is_none(), "its picture, drawn before the edit, is not shown any more");
+        println!("3. updated in {:.1} s; stages {:?}", t.elapsed().as_secs_f32(), stages.lock().unwrap().iter().filter(|s| !matches!(s, Stage::Sending { .. })).collect::<Vec<_>>());
+        // What the website loads: none of the deleted splats.
+        let web = std::env::temp_dir().join(format!("orbiters-e2e-{id}.splat"));
+        api.capture_file(&token, Kind::Capture, id, &web).unwrap();
+        let web = std::fs::read(web).unwrap();
+        let (found, total) = removed_in(&web, 0, &removed);
+        assert_eq!(found, 0, "the website's .splat holds none of the {} deleted splats ({total} splats)", removed.len());
+        assert!(total as u64 <= (n - gone.len()) as u64 && total > 0);
+        // What VRChat worlds load: the slot's three trees under the new key, none of the deleted splats; the listing.
+        let key = |b: &[u8]| u32::from_le_bytes(b[20..24].try_into().unwrap());
+        let pc = slot_file(slot, "pc").unwrap();
+        for name in ["pc", "quest", "coarse"] {
+            let tree = slot_file(slot, name).unwrap();
+            assert_eq!(key(&tree), key(&pc));
+            assert_eq!(removed_in(&tree, tree_splats(&tree), &removed).0, 0, "slot {name} holds none of the deleted splats");
+        }
+        assert_ne!(key(&pc), key(&pc_before));
+        let entry_listed = listed(id);
+        assert_eq!((entry_listed["key"].as_u64(), entry_listed["revision"].as_u64(), entry_listed["slot"].as_u64()), (Some(key(&pc) as u64), Some(2), Some(slot as u64)));
+        // The old files are gone from storage; their cached addresses (and the slot's) purged.
+        let second_files = stored();
+        let left: Vec<_> = first_files.intersection(&second_files).filter(|k| !k.contains("vrchat/slots")).collect();
+        assert!(left.is_empty(), "old objects left: {left:?}");
+        let purges = std::fs::read_to_string(storage.join("purges.jsonl")).unwrap_or_default();
+        assert!(purges.contains(&format!("public/vrchat/slots/{slot}/pc")), "the slot's cached files purged");
+        assert_eq!(record_of(&records).unwrap().edits.as_deref(), Some(edit.generation().as_str()));
+        entry.uploaded_edits = Some(made_with);
+        assert!(!entry.edited_since_upload());
+
+        // 4. More deleted, and the slot refusing the new trees: not updated, everything as at revision 2.
+        for &i in &order[n / 5..n / 4] {
+            edit.marks[i] = DELETED;
+        }
+        edit.save(&result).unwrap();
+        entry.edits = Some(Ok(edit.generation()));
+        std::fs::write(storage.join("fail-slot-quest"), b"").unwrap();
+        let failed = update_with(&api, &token, Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &super::super::maps::web_preview).unwrap_err();
+        std::fs::remove_file(storage.join("fail-slot-quest")).unwrap();
+        println!("4. refused as expected: {}", not_updated(&failed));
+        let still = api.capture_item(&token, Kind::Capture, id).unwrap();
+        assert_eq!(still.capture.as_ref().map(|c| c.revision), Some(2));
+        assert_eq!(stored().into_iter().filter(|k| !k.contains("vrchat/slots")).collect::<Vec<_>>(), second_files.iter().filter(|k| !k.contains("vrchat/slots")).cloned().collect::<Vec<_>>(), "revision 2's files, and only them");
+        let listed_now = listed(id);
+        let pc_now = slot_file(slot, "pc");
+        match listed_now["slot"].as_u64() {
+            Some(s) => assert_eq!((s, pc_now.as_deref().map(key)), (slot as u64, Some(key(&pc))), "its slot serves revision 2's trees again"),
+            None => assert!(pc_now.is_none(), "or it gave its slot up, emptied"),
+        }
+        assert_eq!(record_of(&records).unwrap().edits.as_deref(), entry.uploaded_edits.as_deref(), "the record still says revision 2's edits");
+
+        // 5. Another computer's replacement of revision 1 (stale): a conflict naming revision 2.
+        let stale = super::super::maps::web_preview(&session).unwrap();
+        let conflict = api.replace_capture_files(&token, id, 1, stale.files, stale.sky.as_deref(), None, &stale.metadata, |_, _| {}).unwrap_err();
+        assert_eq!(conflict.downcast_ref::<shares::RevisionConflict>().map(|c| c.revision), Some(2));
+
+        // 6. Updated again: revision 3.
+        let (item, _) = update_with(&api, &token, Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &super::super::maps::web_preview).unwrap();
+        assert_eq!(item.capture.map(|c| c.revision), Some(3));
+        println!("6. updated again: revision 3; {} splats deleted in all", n / 4);
+        let _ = std::fs::remove_file(records);
     }
 
     /// An item uploaded before (its record says so) is shared with one request: nothing sent again, nothing fetched.
@@ -912,7 +1569,7 @@ mod tests {
         entry.remote = None;
         entry.local = Some(Local::Session(session.clone()));
         let stages = Mutex::new(Vec::new());
-        let result = share_with(&api, "token", Ok(records.clone()), &entry, &to_a_friend(), &|s| stages.lock().unwrap().push(s), &mut Vec::new()).unwrap();
+        let result = share_with(&api, "token", Ok(records.clone()), &entry, &to_a_friend(), &|s| stages.lock().unwrap().push(s), &mut Vec::new(), &prepared).unwrap();
         assert!(matches!(result, shares::Shared::Item { ref item } if item.grants.len() == 1));
         assert_eq!(*seen.lock().unwrap(), ["POST /captures/capture/3/share"]);
         assert_eq!(*stages.lock().unwrap(), [Stage::Sharing]);
@@ -939,7 +1596,7 @@ mod tests {
         entry.source_key = Some("a".repeat(64));
         entry.local = Some(Local::Picture(picture.clone()));
         let stages = Mutex::new(Vec::new());
-        share_with(&api, "token", Ok(records.clone()), &entry, &to_a_friend(), &|s| stages.lock().unwrap().push(s), &mut Vec::new()).unwrap();
+        share_with(&api, "token", Ok(records.clone()), &entry, &to_a_friend(), &|s| stages.lock().unwrap().push(s), &mut Vec::new(), &prepared).unwrap();
         assert_eq!(*seen.lock().unwrap(), [format!("POST /maps/worlds/{world}/pictures"), "POST /captures/picture/9/share".to_string()]);
         assert_eq!(*stages.lock().unwrap(), [Stage::Sending { sent: 0, total: 4096 }, Stage::Sharing]);
         let saved = read_records(&records);

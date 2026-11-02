@@ -200,6 +200,8 @@ impl State {
                     picture,
                     size: (p.width > 0 && p.height > 0).then_some([p.width, p.height]),
                     layers: Vec::new(),
+                    edits: None,
+                    uploaded_edits: None,
                 });
             }
         }

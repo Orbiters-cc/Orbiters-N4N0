@@ -11,6 +11,7 @@ pub mod icons;
 pub mod missing;
 pub mod network;
 pub mod preview;
+pub mod scene;
 pub mod setup;
 pub mod size;
 pub mod storage;

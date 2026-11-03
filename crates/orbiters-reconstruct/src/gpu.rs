@@ -792,6 +792,17 @@ fn kernel_sources(sums: Option<GradientSums>, sum_lanes: u32) -> Vec<KernelSourc
     out
 }
 
+/// On Direct3D 12 the nested forward's modules (shaders/raster_forward_nested.wgsl) hold the flattened forward under
+/// its entry name: wgpu compiles HLSL there with FXC, which took 40 s over a nested raster loop (raster_forward.wgsl),
+/// and a training device builds every module when it starts. [`Gpu::nested_forward`] then changes nothing on D3D12.
+fn flattened_on_dx12(k: KernelSource) -> KernelSource {
+    if !k.name.starts_with("raster forward nested") {
+        return k;
+    }
+    let flat = include_str!("shaders/raster_forward.wgsl").replace("fn forward(", "fn forward_nested(");
+    KernelSource { code: k.code.replace(include_str!("shaders/raster_forward_nested.wgsl"), &flat), ..k }
+}
+
 impl Gpu {
     pub fn new() -> anyhow::Result<Self> {
         Self::with_options(DeviceOptions::default())
@@ -858,7 +869,7 @@ impl Gpu {
             });
         }
         let name = format!("{} ({:?}, {}{})", info.name, info.backend, sums.name(), if low_priority { ", low priority" } else { "" });
-        let mut gpu = Self::build(device, queue, name, Some(sums), options.sum_lanes);
+        let mut gpu = Self::build(device, queue, name, Some(sums), options.sum_lanes, info.backend == wgpu::Backend::Dx12);
         gpu.errors = errors;
         gpu.integrated = info.device_type == wgpu::DeviceType::IntegratedGpu;
         gpu.wgpu_adapter = Some(adapter);
@@ -871,7 +882,7 @@ impl Gpu {
     /// A renderer on someone else's device (a viewer's window): projection, sort and the forward pass only, so the
     /// device needs no features. [`Gpu::step`] takes only [`Target::None`] there.
     pub fn renderer(device: wgpu::Device, queue: wgpu::Queue) -> Self {
-        let mut gpu = Self::build(device, queue, String::new(), None, 0);
+        let mut gpu = Self::build(device, queue, String::new(), None, 0, false);
         gpu.guards = true;
         gpu
     }
@@ -924,7 +935,7 @@ impl Gpu {
         self.redraw
     }
 
-    fn build(device: wgpu::Device, queue: wgpu::Queue, adapter: String, sums: Option<GradientSums>, sum_lanes: u32) -> Self {
+    fn build(device: wgpu::Device, queue: wgpu::Queue, adapter: String, sums: Option<GradientSums>, sum_lanes: u32, dx12: bool) -> Self {
         // Every kernel writes its workgroup memory before reading it: without wgpu's zero-fill (one thread clearing
         // whole arrays), D3D's FXC compiles the raster kernel in moments instead of 40 s.
         let options = wgpu::PipelineCompilationOptions { zero_initialize_workgroup_memory: false, ..Default::default() };
@@ -955,7 +966,7 @@ impl Gpu {
         // device's 39 pipelines took 0.8 s on one.
         {
             use rayon::prelude::*;
-            let built: Vec<_> = kernel_sources(sums, sum_lanes).into_par_iter().map(compile).collect();
+            let built: Vec<_> = kernel_sources(sums, sum_lanes).into_iter().map(|k| if dx12 { flattened_on_dx12(k) } else { k }).collect::<Vec<_>>().into_par_iter().map(compile).collect();
             pipes.extend(built.into_iter().flatten());
         }
         let mut pipe = |module: &'static str, entry: &'static str| pipes.remove(&(module, entry)).expect("a kernel of kernel_sources");
@@ -2597,6 +2608,20 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    /// On D3D12 the nested forward's modules are the flattened forward under the nested entry name, and still validate.
+    #[test]
+    fn d3d12_builds_the_flattened_forward_under_the_nested_name() {
+        let nested: Vec<_> = kernel_sources(Some(GradientSums::Float), 0).into_iter().filter(|k| k.name.starts_with("raster forward nested")).collect();
+        assert_eq!(nested.len(), 2);
+        for k in nested {
+            assert!(k.code.contains("for (var b0"), "{}: the nested loop off D3D12", k.name);
+            let f = flattened_on_dx12(k);
+            assert!(f.code.contains("fn forward_nested(") && !f.code.contains("for (var b0") && f.code.contains("let slot = (e - first)"), "{}", f.name);
+            let module = naga::front::wgsl::parse_str(&f.code).unwrap_or_else(|e| panic!("{}: {}", f.name, e.emit_to_string(&f.code)));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).unwrap_or_else(|e| panic!("{}: {e:?}", f.name));
+        }
     }
 
     /// Every kernel module of every kind of device parses and validates, and translates for Vulkan (SPIR-V) and, but for

@@ -72,11 +72,7 @@ pub(super) fn project_items(state: &State, project: &Project, opening: bool) -> 
 pub(super) fn project_act(ctx: &egui::Context, cx: &mut Cx, state: &mut State, project: &Project, act: ProjectAct, anchor: Rect, sheet: bool) {
     match act {
         ProjectAct::Open => {
-            let p = project.clone();
-            state.task(ctx, "Opening Unity…", move || {
-                orbiters_projects::open_project(&p)?;
-                Ok(Outcome::Changed("Project sent to Unity".into()))
-            });
+            state.open_unity(ctx, project, false);
         }
         ProjectAct::ShowUnity => state.show_editor(ctx, project),
         ProjectAct::SaveExit => state.save_and_exit(ctx, project),

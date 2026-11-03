@@ -84,7 +84,11 @@ pub(super) struct Builder {
 impl Default for Builder {
     fn default() -> Self {
         Self {
-            shared: Arc::new(Shared { queue: Mutex::new(Queue { scene_light: true, ..Default::default() }), wake: Condvar::new(), stop: AtomicBool::new(false) }),
+            shared: Arc::new(Shared {
+                queue: Mutex::new(Queue { scene_light: true, ..Default::default() }),
+                wake: Condvar::new(),
+                stop: AtomicBool::new(false),
+            }),
             done: None,
             stills_asked: HashSet::new(),
         }
@@ -137,7 +141,8 @@ impl Builder {
     /// Whether `scene` of `project` is being built or waits to be.
     pub fn building(&self, project: &Path, guid: &str) -> bool {
         let q = self.shared.queue();
-        q.running.as_ref().is_some_and(|r| r.project == project && r.guid.as_deref() == Some(guid)) || q.builds.iter().any(|(p, s)| p == project && s.guid == guid)
+        q.running.as_ref().is_some_and(|r| r.project == project && r.guid.as_deref() == Some(guid))
+            || q.builds.iter().any(|(p, s)| p == project && s.guid == guid)
     }
 
     /// What finished since the last frame.

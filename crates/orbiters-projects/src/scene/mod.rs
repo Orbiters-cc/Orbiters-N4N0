@@ -526,7 +526,8 @@ fn trim_to(root: &Path, limit: u64) {
         if let Some(dir) = path.parent().filter(|d| d.parent() == Some(root)) {
             let left = std::fs::read_dir(dir).map(|d| d.flatten().any(|e| e.path().extension().is_some_and(|x| x == preview::EXTENSION))).unwrap_or(true);
             if !left {
-                let rest: u64 = walkdir::WalkDir::new(dir).into_iter().flatten().filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum();
+                let rest: u64 =
+                    walkdir::WalkDir::new(dir).into_iter().flatten().filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum();
                 if std::fs::remove_dir_all(dir).is_ok() {
                     total = total.saturating_sub(rest);
                 }

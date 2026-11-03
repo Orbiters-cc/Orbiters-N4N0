@@ -410,19 +410,18 @@ impl Previews {
             }
         }
         // The scene to show: built first when it has no preview yet (or an outdated one, shown meanwhile).
-        if let Some(slot) = c.slot().cloned() {
-            if slot.source.wants_build() {
-                let guid = slot.scene.guid.clone();
-                if fixture.is_some() {
-                    // Screenshots of a real project: built on the frame (unless the building state is the picture).
-                    if !self.hold_builds {
-                        let result = native::build_scene(&folder, &slot.scene, &native::Limits::default());
-                        apply_build(c, &guid, result);
-                    }
-                } else if !self.builds.building(project, &guid) && c.requested.get(&guid).is_none_or(|t| now - t > 20.0) {
-                    self.builds.build(project, &slot.scene);
-                    c.requested.insert(guid, now);
+        // Only the scene is copied (this runs every frame; the slot's preview header holds every draw of the scene).
+        if let Some(scene) = c.slot().filter(|s| s.source.wants_build()).map(|s| s.scene.clone()) {
+            let guid = scene.guid.clone();
+            if fixture.is_some() {
+                // Screenshots of a real project: built on the frame (unless the building state is the picture).
+                if !self.hold_builds {
+                    let result = native::build_scene(&folder, &scene, &native::Limits::default());
+                    apply_build(c, &guid, result);
                 }
+            } else if !self.builds.building(project, &guid) && c.requested.get(&guid).is_none_or(|t| now - t > 20.0) {
+                self.builds.build(project, &scene);
+                c.requested.insert(guid, now);
             }
         }
         let want = c.slot().and_then(|s| {
@@ -736,7 +735,11 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
                         )),
                         _ => None,
                     };
-                    let hint = if offer.is_some() {
+                    let hint = if why.starts_with("it took too long") {
+                        // `scene::RETRY_AFTER`: what the first try read is kept, so the next gets further.
+                        "It is tried again in half an hour (the first look at a project on a hard disk is the slowest), or as soon \
+                         as the scene is saved."
+                    } else if offer.is_some() {
                         "Orbiters Toolkit draws it exactly each time the scene is saved in Unity."
                     } else {
                         "Save the scene in Unity (Ctrl+S): Orbiters Toolkit draws it exactly and it shows here a moment later."
@@ -1151,6 +1154,8 @@ fn chrome(
         widgets::text(&p, r.center(), Align2::CENTER_CENTER, &txt);
         x = r.right() + 6.0;
     }
+    // Where the "Built from files" note goes once the scenes' chips took their room (drawn last, below).
+    let note_x = x + if skipped > 0 { 36.0 } else { 0.0 };
     if skipped > 0 {
         let r = Rect::from_min_size(pos2(x, y - 15.0), vec2(30.0, 30.0));
         p.circle_filled(r.center(), 15.0, theme::black(0.5));
@@ -1182,6 +1187,8 @@ fn chrome(
         *act = Some(WindowAct::Open);
     }
     let rr = Rect::from_min_size(pos2(br.left() - 8.0 - 32.0, br.top()), vec2(32.0, 32.0));
+    // The right end of the room the note may take: the chips' row when there is one, else the buttons.
+    let mut note_end = rr.left() - 8.0;
     if widgets::activated(
         &IconButton::new(icons::ARROW_COUNTER_CLOCKWISE, "Frame it again")
             .size(32.0, 15.0)
@@ -1231,6 +1238,7 @@ fn chrome(
         let total = used + if overflow { more_w } else { 0.0 } + 8.0;
         if total <= room + 8.0 && !picked.is_empty() || overflow && more_w + 8.0 <= room {
             let row = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 30.0), vec2(total, 38.0));
+            note_end = row.left() - 8.0;
             paint::fill_squircle(&p, row, theme::squircle(19.0), theme::black(0.5));
             let mut sx = row.left() + 4.0;
             for &i in &picked {
@@ -1308,6 +1316,25 @@ fn chrome(
             }
         }
     }
+
+    // Where it comes from, when the desktop built it (Toolkit's is the exact one, and needs no word): quieter than the
+    // facts, after them, only in the room the scenes' chips leave (it never takes one of their places), the title's
+    // tooltip saying the same when it does not fit.
+    if matches!(source, Some(Source::Built(_) | Source::Stale(_))) {
+        let txt = Txt::new("Built from files", 12.0).color(theme::FG_3);
+        let fw = widgets::text_size(ui, &txt).x + 24.0 + 18.0;
+        if note_x + fw <= note_end {
+            let r = Rect::from_min_size(pos2(note_x, y - 15.0), vec2(fw, 30.0));
+            p.rect_filled(r, theme::radius(15.0), theme::black(0.35));
+            widgets::icon(&p, pos2(r.left() + 19.0, r.center().y), icons::CUBE, 12.0, theme::FG_3);
+            widgets::text(&p, pos2(r.left() + 31.0, r.center().y), Align2::LEFT_CENTER, &txt);
+            ui.interact(r, Id::unique("project-preview-built"), Sense::hover()).on_hover_text(
+                "Built by Orbiters - N4N0 from the project's files, without Unity: close to what Unity shows, not exact (no \
+                 normal maps, animators or what tools do at upload). Orbiters Toolkit draws the exact one each time the scene \
+                 is saved in Unity.",
+            );
+        }
+    }
 }
 
 /// The project's scenes as the window's chips show them, and the one picked.
@@ -1367,8 +1394,10 @@ impl SceneChip {
     }
 }
 
-/// `c`'s scenes and where each stands.
+/// `c`'s scenes and where each stands. Scenes of the same name (`Main` in two folders) carry their folder's name too,
+/// so that their chips and lines in the list tell them apart.
 fn scene_chips(c: &Current, builds: &Builder) -> SceneChips {
+    let named = |n: &str| c.slots.iter().filter(|s| s.scene.name.eq_ignore_ascii_case(n)).count();
     let chips = c
         .slots
         .iter()
@@ -1383,7 +1412,11 @@ fn scene_chips(c: &Current, builds: &Builder) -> SceneChips {
                 Source::None => ChipState::Unbuilt,
                 Source::Failed(why) => ChipState::Failed(why.clone()),
             };
-            SceneChip { guid: s.scene.guid.clone(), name: s.scene.name.clone(), rel: s.scene.rel.clone(), state }
+            let name = match s.scene.rel.rsplit('/').nth(1) {
+                Some(folder) if named(&s.scene.name) > 1 => format!("{} · {folder}", s.scene.name),
+                _ => s.scene.name.clone(),
+            };
+            SceneChip { guid: s.scene.guid.clone(), name, rel: s.scene.rel.clone(), state }
         })
         .collect();
     SceneChips { chips, selected: c.slot().map(|s| s.scene.guid.clone()) }

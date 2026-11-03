@@ -135,8 +135,12 @@ fn sandbox_user_data() -> anyhow::Result<(PathBuf, Vec<PathBuf>)> {
     for sub in ["worlds", "3d-worlds"] {
         copy_tree(&real_cache.join(sub), &cache.join(sub), &[]);
     }
-    let folders: Vec<PathBuf> =
-        std::env::var("ORBITERS_SCREENSHOT_PICTURE_FOLDERS").unwrap_or_default().split(';').filter(|s| !s.trim().is_empty()).map(|s| PathBuf::from(s.trim())).collect();
+    let folders: Vec<PathBuf> = std::env::var("ORBITERS_SCREENSHOT_PICTURE_FOLDERS")
+        .unwrap_or_default()
+        .split(';')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| PathBuf::from(s.trim()))
+        .collect();
     if !folders.is_empty() {
         Settings { picture_folders: folders.clone(), ..Settings::default() }.save_to(&config.join("settings.json"))?;
     }

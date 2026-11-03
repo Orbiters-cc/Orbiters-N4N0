@@ -254,10 +254,20 @@ fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 /// The block keys (packed, sorted, unique) a frame's trusted surface and its truncation band touch in the region:
 /// each quad sampled at most half a block apart, each sample along its normal across the band one voxel at a time, every
 /// block holding a corner of the cube around each point (so marching cubes finds its neighbours).
+///
+/// Neighbouring samples almost always land in the blocks just listed: VRChat Home's 412 frames listed 419 M keys for
+/// 2.3 M distinct (frame, block) pairs: listing, sorting and freeing them took 42 CPU-seconds, 2.3–2.7 s of a 6–7 s
+/// collider, and held 3.3 GB at once (lab report `mc-fast.md`). A sample whose block range is the previous sample's is
+/// skipped, and a direct-mapped memory of the last key seen at each block position modulo 16³ drops repeats before they
+/// are listed: 2.8 M keys listed, 1.1 s, and Home's peak working set falls from 3.6 to 0.8 GB. Both only drop keys
+/// already listed, so the sorted, unique result is the same.
 fn allocate(data: &Dataset, vi: usize, lat: &Lattice, f: &Frame, roi: &Roi, voxel: f32) -> Vec<u64> {
     let cam = &data.depth_views[vi].camera;
     let mut keys = Vec::new();
-    let mut last = u64::MAX;
+    // The key last listed at each block position modulo 16³ (`u64::MAX`: none; a packed key never is), and the
+    // previous sample's block range.
+    let mut recent = vec![u64::MAX; 1 << 12];
+    let mut previous = ([i32::MAX; 3], [i32::MAX; 3]);
     let block = voxel * SIDE as f32;
     for i in 0..f.w.len() {
         if f.w[i] <= 0.0 {
@@ -285,13 +295,18 @@ fn allocate(data: &Dataset, vi: usize, lat: &Lattice, f: &Frame, roi: &Roi, voxe
                     let g = x.map(|c| (c / voxel).floor() as i32);
                     let lo = g.map(|c| c.div_euclid(SIDE));
                     let hi = g.map(|c| (c + 1).div_euclid(SIDE));
+                    if (lo, hi) == previous {
+                        continue;
+                    }
+                    previous = (lo, hi);
                     for bz in lo[2]..=hi[2] {
                         for by in lo[1]..=hi[1] {
                             for bx in lo[0]..=hi[0] {
                                 let key = pack([bx, by, bz]);
-                                if key != last {
+                                let slot = &mut recent[(bx & 15 | (by & 15) << 4 | (bz & 15) << 8) as usize];
+                                if *slot != key {
                                     keys.push(key);
-                                    last = key;
+                                    *slot = key;
                                 }
                             }
                         }

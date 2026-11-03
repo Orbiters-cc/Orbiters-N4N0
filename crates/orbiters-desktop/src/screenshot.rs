@@ -8,6 +8,11 @@
 //! controller says (each wait with a time limit), never on fixed coordinates or delays. `--extend` runs each scenario that
 //! many frames past its shot and `--sequence` writes its last frames too (`<name>-<frame>.png`), to check a motion frame
 //! by frame (a window closing back into its card).
+//!
+//! A run never writes this computer's own data ([`sandbox_user_data`]): its settings and caches folders are the run's
+//! own, under the temporary folder, seeded with copies of what scenarios read. It once refreshed the VRChat pictures'
+//! index in the person's cache with the harness's settings, which name no picture folder, so every picture of the
+//! folders the person added (2 TB on Enzo's archive disk) left the index, and the app read them all again.
 
 use crate::app::App;
 use crate::backend::{Ctl, Local};
@@ -85,10 +90,66 @@ struct WorldShot {
     maps: Option<crate::state::MapsMine>,
 }
 
+/// Gives this run settings and caches folders of its own (`orbiters_core::paths::set_roots`, before any path is
+/// asked for), so that nothing it does writes the person's: the VRChat pictures' index and thumbnails, world pages,
+/// project previews and their cards' stills, settings a scenario saves. Seeded with copies of what scenarios read
+/// (the settings folder's files but the settings themselves, the world pages and 3D worlds kept from Orbiters); the
+/// session library, documents and this computer's local data stay the real ones, read only by the scenarios. The
+/// picture folders the person added are not read (the harness's settings name none); `ORBITERS_SCREENSHOT_PICTURE_FOLDERS`
+/// (separated by `;`) names some for the run. Sandboxes of runs over six hours old are deleted.
+fn sandbox_user_data() -> anyhow::Result<(PathBuf, Vec<PathBuf>)> {
+    use orbiters_core::paths;
+    let (real_config, real_cache) = (paths::config_dir(), paths::cache_dir());
+    let base = std::env::temp_dir().join("orbiters-screenshot-sandbox");
+    if let Ok(dir) = std::fs::read_dir(&base) {
+        for e in dir.flatten() {
+            if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().unwrap_or_default() > Duration::from_secs(6 * 3600)) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+    let root = base.join(std::process::id().to_string());
+    let _ = std::fs::remove_dir_all(&root);
+    let (config, cache) = (root.join("config"), root.join("cache"));
+    std::fs::create_dir_all(&config)?;
+    std::fs::create_dir_all(&cache)?;
+    fn copy_tree(from: &Path, to: &Path, skip: &[&str]) {
+        let Ok(dir) = std::fs::read_dir(from) else { return };
+        let _ = std::fs::create_dir_all(to);
+        for e in dir.flatten() {
+            let name = e.file_name();
+            if skip.iter().any(|s| name.to_string_lossy().eq_ignore_ascii_case(s)) {
+                continue;
+            }
+            match e.file_type() {
+                Ok(t) if t.is_dir() => copy_tree(&e.path(), &to.join(&name), &[]),
+                Ok(t) if t.is_file() => {
+                    let _ = std::fs::copy(e.path(), to.join(&name));
+                }
+                _ => {}
+            }
+        }
+    }
+    // The settings' `.bad-` copies, the old cache inside the settings folder: not what scenarios read.
+    copy_tree(&real_config, &config, &["settings.json", "cache"]);
+    for sub in ["worlds", "3d-worlds"] {
+        copy_tree(&real_cache.join(sub), &cache.join(sub), &[]);
+    }
+    let folders: Vec<PathBuf> =
+        std::env::var("ORBITERS_SCREENSHOT_PICTURE_FOLDERS").unwrap_or_default().split(';').filter(|s| !s.trim().is_empty()).map(|s| PathBuf::from(s.trim())).collect();
+    if !folders.is_empty() {
+        Settings { picture_folders: folders.clone(), ..Settings::default() }.save_to(&config.join("settings.json"))?;
+    }
+    paths::set_roots(paths::Roots { config, local_data: paths::local_data_root(), cache, documents: paths::documents_root() })?;
+    Ok((root, folders))
+}
+
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let out =
         PathBuf::from(args.first().context("usage: --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]")?);
-    let mut settings = Settings::default();
+    let (sandbox, picture_folders) = sandbox_user_data()?;
+    eprintln!("screenshots: settings and caches in {}", sandbox.display());
+    let mut settings = Settings { picture_folders, ..Settings::default() };
     let mut scale = 1.0f32;
     let mut height = 820.0f32;
     let mut width = 1280.0f32;
@@ -206,8 +267,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     // Visited worlds: the world with the most captures has a 3D preview shared; in the one with the most pictures, the
     // first two count as shared and the next two as being sent.
-    // The pictures' index is this computer's (it reads every VRChat picture not indexed yet, hours on a large archive
-    // on a hard disk): `ORBITERS_SCREENSHOT_NO_PICTURES` leaves it out, for scenarios that do not show pictures.
+    // The pictures' index is the run's own ([`sandbox_user_data`]: VRChat's own picture folder only, unless
+    // `ORBITERS_SCREENSHOT_PICTURE_FOLDERS` names more); `ORBITERS_SCREENSHOT_NO_PICTURES` leaves it out altogether,
+    // for scenarios that do not show pictures when VRChat's folder is a large one.
     let visited = if std::env::var_os("ORBITERS_SCREENSHOT_NO_PICTURES").is_some() { Vec::new() } else { crate::worlds::load(&settings.sessions_dir) };
     let captured = visited.iter().max_by_key(|w| (w.reconstructed(), w.sessions.len())).cloned();
     let pictured = visited.iter().max_by_key(|w| w.shots.len()).cloned();

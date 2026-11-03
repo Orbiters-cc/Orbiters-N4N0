@@ -12,8 +12,15 @@ use std::path::Path;
 pub fn read(path: &Path, file_id: i64, limits: &Limits) -> anyhow::Result<ModelMesh> {
     let size = std::fs::metadata(path)?.len();
     ensure!(size <= limits.max_yaml_bytes, "{} MB", size >> 20);
-    let text = std::fs::read_to_string(path)?;
-    ensure!(yaml::is_text(&text), "saved in Unity's binary format");
+    let bytes = std::fs::read(path)?;
+    if super::serialized::is_serialized(&bytes) {
+        // Saved in Unity's binary format (a tool's generated mesh).
+        let (class, v) = super::serialized::object(&bytes, file_id, 43)?;
+        ensure!(class == 43, "the object is not a mesh");
+        return parse(&v);
+    }
+    let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("neither Unity text nor Unity's binary format"))?;
+    ensure!(yaml::is_text(&text), "not a Unity asset");
     let docs = yaml::documents(&text);
     let doc = docs.iter().find(|d| d.class == 43 && d.id == file_id).or_else(|| docs.iter().find(|d| d.class == 43)).context("no mesh in it")?;
     parse(&doc.parse())
@@ -73,7 +80,11 @@ pub fn parse(m: &Value) -> anyhow::Result<ModelMesh> {
     let vd = m.get("m_VertexData");
     let count = vd.get("m_VertexCount").as_i64().unwrap_or(0).max(0) as usize;
     ensure!(count <= 4_000_000, "{count} vertices");
-    let data = hex(vd.get("_typelessdata").str_or(""));
+    let data = match (vd.get("_typelessdata"), vd.get("m_DataSize")) {
+        (Value::Str(h), _) => hex(h),
+        (_, Value::Bytes(b)) => b.clone(),
+        _ => Vec::new(),
+    };
     let channels: Vec<(i64, i64, i64, i64)> = vd
         .get("m_Channels")
         .items()
@@ -123,7 +134,10 @@ pub fn parse(m: &Value) -> anyhow::Result<ModelMesh> {
     };
     let uvs: Vec<[f32; 2]> = if has(4) { (0..count).map(|v| [read(4, v, 0), read(4, v, 1)]).collect() } else { vec![[0.0; 2]; count] };
 
-    let index_bytes = hex(m.get("m_IndexBuffer").str_or(""));
+    let index_bytes = match m.get("m_IndexBuffer") {
+        Value::Bytes(b) => b.clone(),
+        v => hex(v.str_or("")),
+    };
     let wide = m.get("m_IndexFormat").as_i64() == Some(1);
     let index_size = if wide { 4 } else { 2 };
     let mut submeshes = Vec::new();
@@ -167,8 +181,17 @@ pub fn parse(m: &Value) -> anyhow::Result<ModelMesh> {
     });
 
     let shapes = m.get("m_Shapes");
-    let deltas: Vec<(u32, [f32; 3])> =
-        shapes.get("vertices").items().iter().map(|v| (v.get("index").as_i64().unwrap_or(0) as u32, v.get("vertex").vec3().unwrap_or([0.0; 3]))).collect();
+    let deltas: Vec<(u32, [f32; 3])> = match shapes.get("vertices") {
+        // A binary file's: records of a position, a normal and a tangent offset (3 floats each) and the vertex (u32).
+        Value::Bytes(b) => b
+            .chunks_exact(40)
+            .map(|r| {
+                let f = |k: usize| f32::from_le_bytes(r[k * 4..k * 4 + 4].try_into().unwrap());
+                (u32::from_le_bytes(r[36..40].try_into().unwrap()), [f(0), f(1), f(2)])
+            })
+            .collect(),
+        v => v.items().iter().map(|v| (v.get("index").as_i64().unwrap_or(0) as u32, v.get("vertex").vec3().unwrap_or([0.0; 3]))).collect(),
+    };
     let frames_of: Vec<(usize, usize)> = shapes
         .get("shapes")
         .items()

@@ -86,6 +86,8 @@ pub enum Value {
     Str(String),
     Map(Vec<(String, Value)>),
     Seq(Vec<Value>),
+    /// Raw bytes (a binary serialized file's byte arrays; see [`super::serialized`]).
+    Bytes(Vec<u8>),
 }
 
 /// A reference to an object: in the same file (`guid` none) or in the asset whose GUID it names.

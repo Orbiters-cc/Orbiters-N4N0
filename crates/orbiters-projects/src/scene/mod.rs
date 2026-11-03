@@ -24,6 +24,7 @@ mod mesh_asset;
 pub mod model;
 pub mod prefab;
 mod primitives;
+pub mod serialized;
 pub mod texture;
 pub mod yaml;
 
@@ -50,6 +51,8 @@ pub struct Limits {
     pub max_texture_bytes: u64,
     /// Threads decoding pictures.
     pub threads: usize,
+    /// Its threads run below normal priority (a build in the background never slows the window).
+    pub background: bool,
 }
 
 impl Limits {
@@ -59,13 +62,25 @@ impl Limits {
             cancel: None,
             max_files: 400_000,
             max_model_bytes: 600 << 20,
-            max_model_memory: 3 << 30,
+            max_model_memory: 2 << 30,
             max_model_triangles: 6_000_000,
             max_nodes: 200_000,
             max_yaml_bytes: 256 << 20,
             max_prefab_instances: 50_000,
             max_texture_bytes: 256 << 20,
             threads: 4,
+            background: false,
+        }
+    }
+
+    /// Lowers the calling thread's priority when the build runs in the background.
+    pub fn lower_priority(&self) {
+        #[cfg(windows)]
+        if self.background {
+            use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+            unsafe {
+                let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+            }
         }
     }
 
@@ -307,6 +322,14 @@ pub fn list(project: &Path) -> Vec<Slot> {
         }
     }
     out
+}
+
+/// The preview built here for `guid`, when nothing it was built from changed since (a build asked twice runs once).
+pub fn fresh(project: &Path, guid: &str) -> Option<preview::Entry> {
+    match built(&cache_dir(project), guid) {
+        Source::Built(e) => Some(e),
+        _ => None,
+    }
 }
 
 /// The preview built here for a scene, if any, and how it stands.

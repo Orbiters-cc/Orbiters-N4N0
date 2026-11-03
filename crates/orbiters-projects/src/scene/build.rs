@@ -855,24 +855,34 @@ fn lighting_of(graph: &Graph, world: &World) -> Option<file::Lighting> {
 fn decode_all(jobs: &[(String, bool, Option<PathBuf>, bool)], side: u32, limits: &Limits) -> Vec<anyhow::Result<texture::Encoded>> {
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, limits.threads.max(1));
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let results: Vec<std::sync::Mutex<Option<anyhow::Result<texture::Encoded>>>> = jobs.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    let results: Vec<Decoded> = jobs.iter().map(|_| std::sync::Mutex::new(None)).collect();
     std::thread::scope(|scope| {
         for _ in 0..threads.min(jobs.len().max(1)) {
-            scope.spawn(|| loop {
-                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some((_, main, path, keep_alpha)) = jobs.get(i) else { break };
-                let r = (|| {
-                    limits.check("reading the pictures")?;
-                    let path = path.as_ref().context("not in the project")?;
-                    let img = texture::decode(path, limits.max_texture_bytes)?;
-                    // An emission mask needs less detail than the colour.
-                    texture::encode(&img, if *main { side } else { side.min(256) }, *keep_alpha)
-                })();
-                *results[i].lock().unwrap() = Some(r);
+            scope.spawn(|| {
+                limits.lower_priority();
+                decode_next(jobs, &next, &results, side, limits)
             });
         }
     });
     results.into_iter().map(|r| r.into_inner().unwrap().unwrap_or_else(|| Err(anyhow::anyhow!("not read")))).collect()
+}
+
+type Decoded = std::sync::Mutex<Option<anyhow::Result<texture::Encoded>>>;
+
+/// Decodes pictures from `jobs` until none is left (one of [`decode_all`]'s threads).
+fn decode_next(jobs: &[(String, bool, Option<PathBuf>, bool)], next: &std::sync::atomic::AtomicUsize, results: &[Decoded], side: u32, limits: &Limits) {
+    loop {
+        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let Some((_, main, path, keep_alpha)) = jobs.get(i) else { break };
+        let r = (|| {
+            limits.check("reading the pictures")?;
+            let path = path.as_ref().context("not in the project")?;
+            let img = texture::decode(path, limits.max_texture_bytes)?;
+            // An emission mask needs less detail than the colour.
+            texture::encode(&img, if *main { side } else { side.min(256) }, *keep_alpha)
+        })();
+        *results[i].lock().unwrap() = Some(r);
+    }
 }
 
 #[cfg(test)]

@@ -76,7 +76,7 @@ fn main() -> anyhow::Result<()> {
         .or_else(|| reconstruction::read_report(&session));
     let reported = report.map(|r| r.held_out_keyframes).unwrap_or_default();
     let held: Vec<usize> = if reported.is_empty() {
-        train::held_out(data.views.len(), train::Settings::default().hold_out_every)
+        train::held_out_views(data, train::Settings::default().hold_out_every)
     } else {
         let found: Vec<usize> = reported.iter().filter_map(|&k| data.views.iter().position(|v| v.keyframe == k)).collect();
         if found.len() < reported.len() {

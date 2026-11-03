@@ -117,6 +117,20 @@ pub struct Settings {
     /// flight) gives them their share of the views instead ([`face_share`]). Those steps leave the sky map as it is: what
     /// only a face sees has no depth to tell the sky from a wall.
     pub face_share: f32,
+    /// Of the colour steps, the share that trains on the detail views when the session has any
+    /// (crate::dataset::detail_views: a 3D picture's close-ups, VRChat's camera zoomed in on the picture's framing where
+    /// it stood, before it flew); the other colour steps pick among the other keyframes and the rig's faces as before,
+    /// and the run takes as many more steps as keep their count ([`detail_iterations`]). Measured on the 3D pictures
+    /// Enzo took with friends on 2026-11-03, the close-ups emulated (native-resolution crops of the start frame, the
+    /// session trained at half resolution so that they carry twice its pixels a degree), scored on the people in the
+    /// start view at full resolution (three repeats, which agree within 0.2 dB): the 8 s picture 22.3 → 36.2 dB (SSIM
+    /// 0.87 → 0.99), the 4 s 22.1 → 27.7 dB (0.87 → 0.96; as plain keyframes, without a share, 26.7; at 40 %, 28.6 but
+    /// 1.2 dB less on the best 90 % of held-out flight views). Held-out flight views: the 8 s picture 28.4 → 28.0 dB
+    /// (about one standard deviation of its runs); the 4 s 25.3 → 23.3, its views of the people at other moments no
+    /// longer matching the picture's moment (the static parts score as before). On the static plaza walk: the start view +4.2 dB, the
+    /// held-out view 0.4 m on +0.8, the other held-out views −0.4. Training takes a third longer (the 8 s picture
+    /// 24.6 → 33.1 s at half resolution). 0: the detail views train as any keyframe (never held out all the same).
+    pub detail_share: f32,
     /// Depth seeded too few Gaussians, and seeds along the keyframes' rays made up for it (crate::init::add_from_rays;
     /// the worker sets it): relocation then grows the set while it is under a quarter of the budget, even while many
     /// Gaussians are dead. Otherwise the set grows only while few are, and a set that starts at a thousand never does.
@@ -217,6 +231,9 @@ pub enum Split {
     LongAxisOnDepth,
 }
 
+/// The detail views' share of the colour steps ([`Settings::detail_share`]).
+pub const DETAIL_SHARE: f32 = 0.25;
+
 /// SGLD noise's λ for `--noise` ([`Settings::noise`]): gsplat's `noise_lr` for 3DGS-MCMC, measured here.
 pub const NOISE: f32 = 5e5;
 
@@ -246,6 +263,7 @@ impl Default for Settings {
             seed: 1,
             ssim: 0.2,
             face_share: 0.5,
+            detail_share: DETAIL_SHARE,
             robust: 0.0,
             robust_from: 0.25,
             quarter_until: 0.0,
@@ -309,6 +327,16 @@ pub fn held_out(views: usize, every: usize) -> Vec<usize> {
     }
 }
 
+/// The keyframes a run on `data` holds out: every `every`-th of those that are not detail views
+/// (crate::dataset::detail_views), which a run always trains on: they are the only views of a 3D picture's subject at
+/// their resolution and moment, and held out they would leave it as mushy as before. A session without detail views
+/// holds out what [`held_out`] says.
+pub fn held_out_views(data: &Dataset, every: usize) -> Vec<usize> {
+    let detail = data.detail_views();
+    let others: Vec<usize> = (0..data.views.len()).filter(|i| detail.binary_search(i).is_err()).collect();
+    held_out(others.len(), every).into_iter().map(|j| others[j]).collect()
+}
+
 /// At most `k` of `items`, spread evenly over them.
 fn evenly(items: &[usize], k: usize) -> Vec<usize> {
     if items.len() <= k {
@@ -361,6 +389,16 @@ pub const MOST_GAUSSIANS: usize = 3_000_000;
 /// keyframes' steps scored 26.8 dB off the path where 2.4 times as many (faces counted half a keyframe) scored 25.9.
 pub fn default_iterations(data: &Dataset) -> u32 {
     (data.views.len() as u32 * 100).clamp(3_000, 30_000)
+}
+
+/// The steps of a session with detail views (crate::dataset::detail_views) and `views` others: as many as
+/// [`default_iterations`] gives the others, divided by what the detail views' `share` of the colour steps leaves them,
+/// so every other view and face gets as many steps as without the detail views, and the detail views' steps come on
+/// top. Taken from the others instead (the share without more steps), the 3D picture of 2026-11-03 lost 2.5 dB on the
+/// best 90 % of a held-out flight view's pixels at a quarter, and more at half.
+pub fn detail_iterations(views: usize, share: f32) -> u32 {
+    let base = (views as u32 * 100).clamp(3_000, 30_000) as f32;
+    (base / (1.0 - share.clamp(0.0, 0.9))).round() as u32
 }
 
 /// The share of colour steps on the rig's faces: their share of all the views, at most `most`
@@ -473,10 +511,21 @@ pub fn live(g: &Gaussians) -> Vec<bool> {
 
 pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings, mut report: impl FnMut(&Progress)) -> anyhow::Result<Outcome> {
     let start = Instant::now();
-    let iterations = if settings.iterations == 0 { default_iterations(data) } else { settings.iterations };
-    let held_out = held_out(data.views.len(), settings.hold_out_every);
+    let held_out = held_out_views(data, settings.hold_out_every);
+    // A 3D picture's zoomed-in views of its subject (never held out): their share of the colour steps, on top of the
+    // steps the other views get without them (detail_iterations); the other colour steps pick among the others only.
+    let detail = if settings.detail_share > 0.0 && settings.detail_share < 1.0 { data.detail_views() } else { Vec::new() };
     let train_views: Vec<usize> = (0..data.views.len()).filter(|i| held_out.binary_search(i).is_err()).collect();
-    ensure!(!train_views.is_empty(), "every keyframe is held out: nothing to train on");
+    let others: Vec<usize> = train_views.iter().copied().filter(|i| detail.binary_search(i).is_err()).collect();
+    ensure!(!others.is_empty(), "every keyframe is held out: nothing to train on");
+    let iterations = match settings.iterations {
+        0 if detail.is_empty() => default_iterations(data),
+        0 => detail_iterations(data.views.len() - detail.len(), settings.detail_share),
+        n => n,
+    };
+    if !detail.is_empty() {
+        eprintln!("{} detail views (keyframes {:?}): {:.0} % of the colour steps", detail.len(), detail.iter().map(|&i| data.views[i].keyframe).collect::<Vec<_>>(), settings.detail_share * 100.0);
+    }
     ensure!(!init.is_empty(), "no Gaussians to start from");
     // A session's frames whose every pixel is strip or band (or a mask never set) would train on nothing and score
     // nothing.
@@ -598,6 +647,8 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             colors: 0.0025,
         };
         let depth_step = !depth_views.is_empty() && settings.depth_weight > 0.0 && it % settings.depth_every.max(1) == 0;
+        // Drawn only when there are detail views: a session without keeps its random stream, step for step.
+        let detail_step = !depth_step && !detail.is_empty() && rng.f32() < settings.detail_share;
         let intersections = if depth_step {
             // Built for the step (all of a long session's targets at once would take GBs).
             let t = depth_target(&data.depth_views[depth_views[rng.usize(..depth_views.len())]]);
@@ -606,7 +657,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             let stepped = gpu.step(&t.camera, settings.background, Target::Depth { samples: &t.samples, weight: settings.depth_weight }, Some(lr));
             gpu.filter_2d = full;
             stepped?
-        } else if let Some(f) = faces.filter(|_| rng.f32() < face_steps) {
+        } else if let Some(f) = faces.filter(|_| !detail_step && rng.f32() < face_steps) {
             // A face, at its own resolution, the sky map left as it is.
             let v = &f.views[rng.usize(..f.views.len())];
             let robust = if progress >= settings.robust_from { settings.robust } else { 0.0 };
@@ -615,7 +666,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             gpu.sky_lr = sky_lr;
             stepped?
         } else {
-            let v = train_views[rng.usize(..train_views.len())];
+            let v = if detail_step { detail[rng.usize(..detail.len())] } else { others[rng.usize(..others.len())] };
             let (camera, rgba, pixels) = match level {
                 0 => (&data.views[v].camera, &data.views[v].image, scene_pixels),
                 l => (&coarse[l - 1].cameras[v], &coarse[l - 1].images[v], coarse[l - 1].scene_pixels),
@@ -1492,6 +1543,25 @@ mod tests {
         }
         g.rotations[3][2] = f32::NAN;
         assert_eq!(live(&g), vec![true, false, true, false]);
+    }
+
+    #[test]
+    fn detail_views_are_never_held_out_and_train_on_top_of_the_others() {
+        let s = crate::dataset::fixture::session("detail-held-out", 160, 90, 20, &[]);
+        let mut d = crate::dataset::load_with(&s.dir, 160, crate::dataset::Budget::UNLIMITED, |_| {}).unwrap();
+        // Without detail views: every 8th from the 4th, as before.
+        assert_eq!(held_out_views(&d, 8), held_out(20, 8));
+        // Views 4 and 5 zoomed in: never held out; every 8th of the 18 others.
+        for v in &mut d.views[4..6] {
+            v.camera.fy *= 2.35;
+        }
+        assert_eq!(held_out_views(&d, 8), vec![6, 14]);
+        assert!(held_out_views(&d, 0).is_empty());
+        // Steps: the others' 100 each (3000 at least), and a quarter more on top for a quarter of the colour steps.
+        assert_eq!(detail_iterations(37, 0.25), 4933);
+        assert_eq!(detail_iterations(10, 0.0), 3000);
+        assert_eq!(detail_iterations(62, 0.25), 8267);
+        assert!(detail_iterations(10, 1.0) <= 30_000, "a share of all is capped");
     }
 
     #[test]

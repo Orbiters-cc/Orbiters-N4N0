@@ -1063,7 +1063,7 @@ impl CaptureSession {
                         // The decoder is behind: this one is dropped rather than waited for.
                         self.stats.depth_dropped += 1;
                     }
-                } else if self.selector_of(stream).clone().consider(&p.camera_to_world, p.time) {
+                } else if self.selector_of(stream).clone().consider_view(&p.camera_to_world, p.projection[1], p.time) {
                     // A keyframe it is (asked on a copy of the selector, which keeps waiting for one until it is taken).
                     self.wait_for(|s| s.encoder.has_room() && s.buffers.room(bytes));
                     if !self.encoder.has_room() || !self.buffers.room(bytes) {
@@ -1076,7 +1076,7 @@ impl CaptureSession {
                             copy_upright(&view, d.flipped, &mut data);
                             view.order == PixelOrder::Bgra
                         };
-                        self.selector_of(stream).consider(&p.camera_to_world, p.time);
+                        self.selector_of(stream).consider_view(&p.camera_to_world, p.projection[1], p.time);
                         // The first keyframe makes the thumbnail, from below the strip and its patches.
                         let thumbnail = (main && !self.thumbnail_done).then(|| {
                             let top = self.areas.as_ref().and_then(|a| a.strip).map_or(0, |l| l.reserved.y1.min(height - 1));

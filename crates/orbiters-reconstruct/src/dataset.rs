@@ -157,6 +157,42 @@ pub struct Dataset {
     pub loaded: Loaded,
 }
 
+/// How much longer than the session's usual focal length a keyframe's must be for it to be a detail view
+/// ([`detail_views`]). VRChat's camera zoomed from its default 45° to its narrowest, 20°, is 2.35 times; a user's own
+/// zoom changes during a recording are seldom that large, and the 3D picture's zoom-in (the desktop's
+/// controller/burst.rs) always is.
+pub const DETAIL_ZOOM: f32 = 1.3;
+
+/// Which of keyframes with these focal lengths (any one unit) are detail views: those whose focal length is at least
+/// [`DETAIL_ZOOM`] times the median one, when they are fewer than a third of all. A 3D picture starts with a few frames
+/// of VRChat's camera zoomed in on what it aims at, from where it stands (the desktop's controller/burst.rs): through
+/// the same 1080p stream they show its subject — the people in the picture — with 2.35 times the pixels a degree of the
+/// other keyframes, all within about a second, while the people hardly move. Measured on the real 3D pictures of
+/// 2026-11-03 (Penthouse Palace), the reconstruction was mushy on the faces because the people moved during the
+/// flight and only the first keyframe saw them as framed; the detail views are what the picture's subject is learnt
+/// from (crate::train: never held out, and a quarter of the colour steps on top of the others'). A session most of whose keyframes are zoomed
+/// in (a user who records zoomed) has none: its usual view is the zoomed one.
+pub fn detail_views(focal_lengths: &[f32]) -> Vec<usize> {
+    let mut sorted: Vec<f32> = focal_lengths.iter().copied().filter(|f| f.is_finite() && *f > 0.0).collect();
+    if sorted.len() < 3 {
+        return Vec::new();
+    }
+    sorted.sort_by(f32::total_cmp);
+    let median = sorted[sorted.len() / 2];
+    let detail: Vec<usize> = (0..focal_lengths.len()).filter(|&i| focal_lengths[i] >= DETAIL_ZOOM * median).collect();
+    if detail.len() * 3 > focal_lengths.len() {
+        return Vec::new();
+    }
+    detail
+}
+
+impl Dataset {
+    /// The keyframes that are detail views ([`detail_views`]), as indices into [`Dataset::views`].
+    pub fn detail_views(&self) -> Vec<usize> {
+        detail_views(&self.views.iter().map(|v| v.camera.fy).collect::<Vec<_>>())
+    }
+}
+
 /// Counts of what [`load`] found and kept.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Loaded {
@@ -702,6 +738,35 @@ mod tests {
             p[0] as u32 | (p[1] as u32) << 8 | (p[2] as u32) << 16 | 255 << 24
         });
         View { camera: Camera::look([0.0; 3], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 1.0, w, h), image: image.collect(), game_time: 0.0, keyframe: 0 }
+    }
+
+    #[test]
+    fn detail_views_are_the_few_keyframes_zoomed_in_far() {
+        // A 4 s picture: 37 keyframes at 47.3° (focal length over height 1.143), nine close-ups at 20° (2.836).
+        let mut focals = vec![1.143f32; 37];
+        focals.splice(1..1, [2.836; 9]);
+        assert_eq!(detail_views(&focals), (1..10).collect::<Vec<_>>());
+        // Not a share of a recording zoomed in for most of it (its usual view is the zoomed one), nor a slight zoom.
+        let mut zoomed = vec![1.143f32; 20];
+        zoomed.extend([2.836; 15]);
+        assert!(detail_views(&zoomed).is_empty());
+        let mut slight = vec![1.143f32; 30];
+        slight[4] = 1.143 * 1.25;
+        assert!(detail_views(&slight).is_empty());
+        // Frames of another size (NaN) count for nothing; too few keyframes have none.
+        let mut odd = vec![f32::NAN; 3];
+        odd.extend([1.143, 1.143, 1.143, 2.836]);
+        assert_eq!(detail_views(&odd), vec![6]);
+        assert!(detail_views(&[1.0, 3.0]).is_empty());
+        // A loaded session's views: by their training cameras.
+        let s = fixture::session("detail-views", 160, 90, 12, &[]);
+        let mut d = load_with(&s.dir, 160, Budget::UNLIMITED, |_| {}).unwrap();
+        assert!(d.detail_views().is_empty());
+        for v in &mut d.views[2..4] {
+            v.camera.fx *= 2.35;
+            v.camera.fy *= 2.35;
+        }
+        assert_eq!(d.detail_views(), vec![2, 3]);
     }
 
     /// A capture size the training factor does not divide: keyframes, cameras, depth-sample positions and the mask

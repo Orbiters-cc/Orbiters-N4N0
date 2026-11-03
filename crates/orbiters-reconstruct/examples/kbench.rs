@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! cargo run --release --example kbench -- <session> [--ply <splats.ply>] [--steps N] [--width N] [--depth]
-//!     [--stride N] [--sums float|fixed|cas]
+//!     [--stride N] [--sums float|fixed|cas] [--nested-forward]
 //! ```
 //! `--stride N` times colour steps on every N-th pixel each way (crate::train::Settings::stride), at phase 0.
 //! Prints milliseconds per step per section and a gradient checksum of one fixed step (the gradient sums must agree).
@@ -18,12 +18,14 @@ fn main() -> anyhow::Result<()> {
     let mut it = std::env::args().skip(1);
     let (mut session, mut ply_path, mut steps, mut width, mut depth_steps, mut sums) = (None, None, 40usize, 1920u32, false, None);
     let mut stride = 1u32;
+    let mut nested = false;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--ply" => ply_path = Some(PathBuf::from(it.next().context("--ply")?)),
             "--steps" => steps = it.next().context("--steps")?.parse()?,
             "--width" => width = it.next().context("--width")?.parse()?,
             "--depth" => depth_steps = true,
+            "--nested-forward" => nested = true,
             "--stride" => stride = it.next().context("--stride")?.parse()?,
             "--sums" => {
                 sums = Some(match it.next().context("--sums")?.as_str() {
@@ -42,6 +44,7 @@ fn main() -> anyhow::Result<()> {
     let g = ply::read(&ply_path.clone().unwrap_or_else(|| session.join("reconstruction").join("splats.ply")))?;
     let mut gpu = Gpu::with_options(DeviceOptions { sums, profile: true, ..Default::default() })?;
     gpu.upload(&g);
+    gpu.nested_forward = nested;
     // The sky map trained with the splats, when there is one: its passes are timed too.
     let sky_file = ply_path.as_ref().map_or_else(|| session.join("reconstruction"), |p| p.parent().map(PathBuf::from).unwrap_or_default()).join(orbiters_core::reconstruction::SKY_FILE);
     if sky_file.is_file() {

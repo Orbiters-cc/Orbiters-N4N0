@@ -155,6 +155,10 @@ pub struct Settings {
     /// best 90 % of pixels lost 0.25 dB (43.22 against 43.47, three runs, about 2 standard deviations) for 0.23 dB more
     /// on the whole image.
     pub noise_gate: bool,
+    /// Lab (gpu-stacks experiment): render the training steps with the forward whose loop is nested
+    /// (shaders/raster_forward_nested.wgsl, crate::gpu::Gpu::nested_forward): the same entries, order and outputs, the
+    /// loop structure of the CUDA C++ port that ran 10 % faster than the flattened WGSL forward on plaza and Home.
+    pub nested_forward: bool,
     /// The noise moves only the Gaussians the step's view shows (Brush weights its noise by visibility): dense Adam
     /// steps every Gaussian every step, and on a long walk a faint Gaussian no view of the moment constrains wanders
     /// for thousands of steps. Off: on Silent Dawn, without the budget rule, it lost 0.44 dB held-out and 0.60 dB on
@@ -266,6 +270,7 @@ impl Default for Settings {
             split: Split::Footprint,
             noise: NOISE,
             noise_gate: true,
+            nested_forward: false,
             noise_visible: false,
             noise_dead_max: NOISE_DEAD_MAX,
             depth_births: 0.0,
@@ -523,6 +528,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     gpu.noise = settings.noise;
     gpu.noise_visible = settings.noise_visible;
     gpu.noise_gate = settings.noise_gate;
+    gpu.nested_forward = settings.nested_forward;
     let spawner = (settings.depth_births > 0.0).then(|| crate::births::Spawner::new(data, &held_out));
     // Each phase of the colour steps' sub-grid (Settings::stride): its size, mask and scene pixels.
     let stride = settings.stride.max(1);

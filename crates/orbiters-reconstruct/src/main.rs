@@ -5,6 +5,7 @@
 //!     [--regularise-unseen] [--adam-restart] [--filter-3d S] [--cleanup]
 //!     [--sources opacity|gradient|error|confidence] [--sources-by-opacity] [--split footprint|long-axis|long-axis-on-depth]
 //!     [--noise λ | --no-noise] [--no-noise-gate] [--noise-visible] [--noise-dead-max share] [--depth-births share]
+//!     [--nested-forward] [--gpu-profile]
 //! ```
 //!
 //! Prints one [`Event`] per line on stdout for the app and writes the session's `reconstruction/` folder: the splats
@@ -110,6 +111,11 @@ fn args() -> anyhow::Result<Args> {
                     _ => bail!("--gpu takes integrated or fastest"),
                 }
             }
+            // Lab: GPU timestamps around every pass of the whole run, printed as one `gpu_profile {json}` line on
+            // stderr at the end (per section: milliseconds and passes summed over all steps). The timestamps are read
+            // back after each step, which waits for it: the run is slower, the shares are what to read.
+            "--gpu-profile" => device.profile = true,
+            "--nested-forward" => settings.nested_forward = true,
             _ if a.starts_with("--") => bail!("unknown option {a}"),
             _ => session = Some(PathBuf::from(a)),
         }
@@ -264,6 +270,11 @@ fn run(args: Args) -> anyhow::Result<Report> {
     timing::section("7 replace", None, || replace(dir, &partial))?;
     timing::add("0 run", run_start.elapsed());
     timing::print();
+    if let Some(p) = &gpu.profiler {
+        let (span, steps) = p.span.get();
+        let sections: serde_json::Map<String, serde_json::Value> = p.totals.borrow().iter().map(|(k, (ms, n))| (k.to_string(), serde_json::json!({"ms": ms, "passes": n}))).collect();
+        eprintln!("gpu_profile {}", serde_json::json!({"steps": steps, "span_ms": span, "sections": sections, "gaussians": report.gaussians, "iterations": report.iterations, "seconds": report.seconds}));
+    }
     Ok(report)
 }
 

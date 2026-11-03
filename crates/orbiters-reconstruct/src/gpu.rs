@@ -286,6 +286,9 @@ struct Training {
     duplicate_big8: wgpu::ComputePipeline,
     forward8: wgpu::ComputePipeline,
     backward8: wgpu::ComputePipeline,
+    /// The forward with its loop nested (shaders/raster_forward_nested.wgsl), on 16×16 and 8×8 tiles ([`Gpu::nested_forward`]).
+    forward_nested: wgpu::ComputePipeline,
+    forward_nested8: wgpu::ComputePipeline,
 }
 
 /// A relocation round decided on the CPU (crate::train::plan_relocation) for [`Gpu::apply_relocation`]: sources' new
@@ -488,6 +491,9 @@ pub struct Gpu {
     /// for the one-pixel-a-thread backward on 16×16 tiles (the reference the two-pixel one is checked against).
     tile8_step: bool,
     pub(crate) tile8_all: bool,
+    /// Lab (crate::train::Settings::nested_forward): a training device's steps render with the forward whose loop is
+    /// nested (shaders/raster_forward_nested.wgsl) instead of `forward`: the same entries, order and outputs.
+    pub nested_forward: bool,
     pub(crate) reference_backward: bool,
     /// Loss masks per image size ([`Gpu::set_mask`]).
     masks: Vec<((u32, u32), wgpu::Buffer)>,
@@ -524,6 +530,27 @@ impl PendingWeights {
             _ => anyhow::bail!("the GPU did not hand the relocation weights back (was the device lost?)"),
         }
     }
+}
+
+/// One colour step's rasteriser buffers ([`Gpu::lab_raster_dump`]), as the kernels see them.
+pub struct RasterDump {
+    /// The frame uniform (shaders/common.wgsl `Frame`), as 32-bit words.
+    pub frame: Vec<u32>,
+    /// Projected Gaussians, 16 floats each (project.wgsl).
+    pub proj: Vec<f32>,
+    /// Sorted entries' Gaussian indices, and each tile's [first, end) of them.
+    pub values: Vec<u32>,
+    pub ranges: Vec<u32>,
+    /// The forward's output (before the sky composite) and per-pixel state (T bits, one past the last entry).
+    pub out_color: Vec<[f32; 4]>,
+    pub out_state: Vec<[u32; 2]>,
+    /// The loss's pixel gradients, and the backward's 2D gradient sums (10 floats a Gaussian).
+    pub d_pixel: Vec<[f32; 4]>,
+    pub grad2d: Vec<f32>,
+    /// The sky map's texels (rgba) when there is one.
+    pub sky: Vec<[f32; 4]>,
+    pub count: usize,
+    pub tiles: (u32, u32),
 }
 
 /// A downloaded set: the Gaussians, their Adam moments (packed like the parameters) and statistics (param_grads.wgsl).
@@ -758,6 +785,8 @@ fn kernel_sources(sums: Option<GradientSums>, sum_lanes: u32) -> Vec<KernelSourc
             source("duplicate split 8", &[common8.as_str(), include_str!("shaders/duplicate_split.wgsl")], &["duplicate_split", "duplicate_big"]),
             source("raster forward 8", &[common8.as_str(), raster, include_str!("shaders/raster_forward.wgsl")], &["forward"]),
             source("raster backward 8", &[common8.as_str(), raster, add, lanes.as_str(), sky_lookup, backward], &["backward"]),
+            source("raster forward nested", &[common, raster, include_str!("shaders/raster_forward_nested.wgsl")], &["forward_nested"]),
+            source("raster forward nested 8", &[common8.as_str(), raster, include_str!("shaders/raster_forward_nested.wgsl")], &["forward_nested"]),
         ]);
     }
     out
@@ -966,6 +995,8 @@ impl Gpu {
             duplicate_big8: pipe("duplicate split 8", "duplicate_big"),
             forward8: pipe("raster forward 8", "forward"),
             backward8: pipe("raster backward 8", "backward"),
+            forward_nested: pipe("raster forward nested", "forward_nested"),
+            forward_nested8: pipe("raster forward nested 8", "forward_nested"),
         });
         let k = Kernels {
             project: pipe("project", "main"),
@@ -985,7 +1016,8 @@ impl Gpu {
         let frame = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("frame"),
             size: std::mem::size_of::<Frame>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            // COPY_SRC: Gpu::lab_raster_dump reads it back.
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let total_staging = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1080,6 +1112,7 @@ impl Gpu {
             big: None,
             tile8_step: false,
             tile8_all: false,
+            nested_forward: false,
             reference_backward: false,
             masks: Vec::new(),
             reserved: 0,
@@ -1960,7 +1993,9 @@ impl Gpu {
         }
         self.section("forward");
         let forward = match self.k.training.as_ref() {
+            Some(t) if tile8 && self.nested_forward => &t.forward_nested8,
             Some(t) if tile8 => &t.forward8,
+            Some(t) if self.nested_forward => &t.forward_nested,
             _ => &self.k.forward,
         };
         let bind = self.bind_cached(forward, &[(0, &self.frame), (1, &proj), (2, &values[0]), (3, &ranges), (4, &out_color), (5, &out_state)]);
@@ -2260,6 +2295,93 @@ impl Gpu {
         let (proj, values, ranges, out_state, d_pixel) = (splats.proj.clone(), s.values[0].clone(), i.ranges.clone(), i.out_state.clone(), i.d_pixel.clone());
         self.backward_into(&mut enc, &proj, &values, &ranges, &out_state, &d_pixel, tiles, None);
         self.queue.submit([enc.finish()]);
+    }
+
+    /// Lab (`examples/rasterdump.rs`, the gpu-stacks experiment): one colour step's rasteriser inputs and outputs, read
+    /// back so ports of the forward and backward kernels to other GPU languages (Triton, CUDA C++) can be checked and
+    /// timed on real data. Runs the step without an Adam step, then the forward alone again (its output before the sky
+    /// composite) and the rasteriser's backward alone into zeroed sums (the projection backward would read and zero
+    /// them). Float sums on 16×16 tiles only (the training colour steps' path on Vulkan with f32 atomics).
+    pub fn lab_raster_dump(&mut self, cam: &Camera, target: Target<'_>) -> anyhow::Result<RasterDump> {
+        anyhow::ensure!(matches!(target, Target::Color { .. }), "a colour step");
+        self.step(cam, [0.0; 3], target, None)?;
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        anyhow::ensure!(!self.tile8_step, "16×16 tiles");
+        let t = self.k.training.as_ref().context("a training device")?;
+        anyhow::ensure!(matches!(t.sums, GradientSums::Float), "float gradient sums (this device has {:?})", t.sums);
+        let backward = if self.reference_backward { t.backward.clone() } else { t.backward_blocks.clone() };
+        let i = self.image.as_ref().context("image")?;
+        let s = self.sort.as_ref().context("sort")?;
+        let sp = self.splats.as_ref().context("splats")?;
+        let (out_color, out_state, d_pixel, ranges) = (i.out_color.clone(), i.out_state.clone(), i.d_pixel.clone(), i.ranges.clone());
+        let (proj, values, grad2d) = (sp.proj.clone(), s.values[0].clone(), sp.grad2d.clone());
+        let tiles = (cam.width.div_ceil(cpu::TILE), cam.height.div_ceil(cpu::TILE));
+        let ntiles = (tiles.0 * tiles.1) as usize;
+        let px = (cam.width * cam.height) as usize;
+        let ranges_v: Vec<u32> = self.read(&ranges, 2 * ntiles)?;
+        let entries = ranges_v.chunks(2).map(|r| r[1]).max().unwrap_or(0) as usize;
+        let sky = self.sky.as_ref().map(|s| s.texels.clone());
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let forward = if self.nested_forward { t.forward_nested.clone() } else { self.k.forward.clone() };
+        let bind = self.bind_cached(&forward, &[(0, &self.frame), (1, &proj), (2, &values), (3, &ranges), (4, &out_color), (5, &out_state)]);
+        self.dispatch(&mut enc, &forward, &bind, tiles);
+        enc.clear_buffer(&grad2d, 0, None);
+        let sky_buf = sky.clone().unwrap_or_else(|| self.no_sky.clone());
+        let bind = self.bind_cached(&backward, &[(0, &self.frame), (1, &proj), (2, &values), (3, &ranges), (5, &out_state), (6, &d_pixel), (7, &grad2d), (8, &sky_buf)]);
+        self.dispatch(&mut enc, &backward, &bind, tiles);
+        self.queue.submit([enc.finish()]);
+        let sky_texels = match (&sky, self.sky.as_ref()) {
+            (Some(b), Some(m)) => self.read(b, m.width as usize * (m.width as usize / 2))?,
+            _ => Vec::new(),
+        };
+        Ok(RasterDump {
+            frame: self.read(&self.frame, std::mem::size_of::<Frame>() / 4)?,
+            proj: self.read(&proj, self.count * 16)?,
+            values: self.read(&values, entries)?,
+            ranges: ranges_v,
+            out_color: self.read(&out_color, px)?,
+            out_state: self.read(&out_state, px)?,
+            d_pixel: self.read(&d_pixel, px)?,
+            grad2d: self.read(&grad2d, self.count * GRAD2D)?,
+            sky: sky_texels,
+            count: self.count,
+            tiles,
+        })
+    }
+
+    /// Lab (`examples/rasterdump.rs --time N`): after [`Gpu::lab_raster_dump`], the forward and the rasteriser's backward
+    /// of that step again `reps` times, each in its own submission, timed with GPU timestamps (needs
+    /// [`DeviceOptions::profile`]): (forward ms, backward ms) per repeat, the backward into sums cleared before it.
+    pub fn lab_time_raster(&mut self, cam: &Camera, reps: usize) -> anyhow::Result<Vec<(f64, f64)>> {
+        let t = self.k.training.as_ref().context("a training device")?;
+        let backward = if self.reference_backward { t.backward.clone() } else { t.backward_blocks.clone() };
+        let i = self.image.as_ref().context("image")?;
+        let s = self.sort.as_ref().context("sort")?;
+        let sp = self.splats.as_ref().context("splats")?;
+        let (out_color, out_state, d_pixel, ranges) = (i.out_color.clone(), i.out_state.clone(), i.d_pixel.clone(), i.ranges.clone());
+        let (proj, values, grad2d) = (sp.proj.clone(), s.values[0].clone(), sp.grad2d.clone());
+        let tiles = (cam.width.div_ceil(cpu::TILE), cam.height.div_ceil(cpu::TILE));
+        let sky_buf = self.sky.as_ref().map_or_else(|| self.no_sky.clone(), |s| s.texels.clone());
+        let forward = if self.nested_forward { t.forward_nested.clone() } else { self.k.forward.clone() };
+        let fbind = self.bind_cached(&forward, &[(0, &self.frame), (1, &proj), (2, &values), (3, &ranges), (4, &out_color), (5, &out_state)]);
+        let bbind = self.bind_cached(&backward, &[(0, &self.frame), (1, &proj), (2, &values), (3, &ranges), (5, &out_state), (6, &d_pixel), (7, &grad2d), (8, &sky_buf)]);
+        anyhow::ensure!(self.profiler.is_some(), "a profiling device (DeviceOptions::profile)");
+        let mut out = Vec::with_capacity(reps);
+        for _ in 0..reps {
+            self.profiler.as_ref().expect("profiler").reset();
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            self.section("forward");
+            self.dispatch(&mut enc, &forward, &fbind, tiles);
+            enc.clear_buffer(&grad2d, 0, None);
+            self.section("backward");
+            self.dispatch(&mut enc, &backward, &bbind, tiles);
+            self.queue.submit([enc.finish()]);
+            let p = self.profiler.as_ref().expect("profiler");
+            p.collect(&self.device, &self.queue);
+            let totals = p.totals.borrow();
+            out.push((totals.get("forward").map_or(0.0, |v| v.0), totals.get("backward").map_or(0.0, |v| v.0)));
+        }
+        Ok(out)
     }
 
     /// Writes the last rendered image (colour over the background) into `target`, an RGBA8 storage texture of the
@@ -3581,6 +3703,37 @@ mod tests {
         assert!(renders[0] == renders[1], "8×8 tiles rendered differently");
         // And the backward on them against the CPU reference.
         gpu.tile8_all = true;
+        forward_and_backward_match(vec![gpu]);
+    }
+
+    /// The nested forward (shaders/raster_forward_nested.wgsl) walks the same entries in the same order with the same
+    /// arithmetic as `forward`: the same image bit for bit, on 16×16 and 8×8 tiles, with tiles of several batches (20k
+    /// splats on a small image) and partial tiles; and the training path through it matches the CPU reference.
+    #[test]
+    fn nested_forward_renders_the_same_image_bit_for_bit() {
+        let Some(mut gpu) = devices().into_iter().next() else { return };
+        let (g, cam) = scene(20_000, 168, 95, 53);
+        gpu.upload(&g);
+        for tile8 in [false, true] {
+            gpu.tile8_all = tile8;
+            let mut renders = Vec::new();
+            for nested in [false, true] {
+                gpu.nested_forward = nested;
+                for _ in 0..2 {
+                    gpu.step(&cam, [0.1, 0.2, 0.3], Target::None, None).expect("step");
+                }
+                gpu.wait_readbacks();
+                let before = gpu.overflows;
+                gpu.step(&cam, [0.1, 0.2, 0.3], Target::None, None).expect("step");
+                renders.push(gpu.read_image().expect("image"));
+                gpu.wait_readbacks();
+                assert_eq!(gpu.overflows, before, "the compared render dropped entries");
+            }
+            assert!(renders[0].iter().any(|p| p[3] > 0.0));
+            let differ = renders[0].iter().zip(&renders[1]).filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.to_bits() != y.to_bits())).count();
+            assert_eq!(differ, 0, "{differ} pixels differ (8×8 tiles: {tile8})");
+        }
+        gpu.tile8_all = false;
         forward_and_backward_match(vec![gpu]);
     }
 

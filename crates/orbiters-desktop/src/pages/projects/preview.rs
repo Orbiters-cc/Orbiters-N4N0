@@ -425,13 +425,23 @@ impl Previews {
                 }
             }
         }
-        let want = c.slot().and_then(|s| s.source.entry().map(|e| (e.path.clone(), e.modified, s.scene.guid.clone())));
-        if let Some((path, modified, guid)) = want.filter(|w| c.file.as_ref() != Some(&(w.0.clone(), w.1))) {
+        let want = c.slot().and_then(|s| {
+            let built = matches!(s.source, Source::Built(_) | Source::Stale(_));
+            s.source.entry().map(|e| (e.path.clone(), e.modified, s.scene.guid.clone(), built))
+        });
+        if let Some((path, modified, guid, built)) = want.filter(|w| c.file.as_ref() != Some(&(w.0.clone(), w.1))) {
             if !c.loading.running() {
                 c.file = Some((path.clone(), modified));
                 c.error = None;
                 let (device, queue, pipelines) = (gpu.device.clone(), gpu.queue.clone(), self.pipelines.clone());
-                let load = move || preview_gpu::load(&device, &queue, pipelines, &path).map(|s| (s, guid)).map_err(|e| format!("{e:#}"));
+                let owner = folder.clone();
+                let load = move || {
+                    // Shown: the cache keeps it among the ones used last.
+                    if built {
+                        native::touch(&owner, &guid);
+                    }
+                    preview_gpu::load(&device, &queue, pipelines, &path).map(|s| (s, guid)).map_err(|e| format!("{e:#}"))
+                };
                 if fixture.is_some() {
                     // Screenshots wait for it.
                     let result = load();

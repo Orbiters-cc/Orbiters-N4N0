@@ -23,9 +23,22 @@ project, not only the one saved last. Orbiters - N4N0 now builds a scene's previ
   (`Library/SourceAssetDB`, read as LMDB without LMDB) when the project was opened once, else from the `.meta` files
   (read on 8 threads, the kinds a preview needs first, kept in the cache by modification time): on Enzo's hard disk a
   cold `.meta` costs about 12 ms, 87 s for a 7,000-asset project, against 0.3 s for the database.
-- **Never into the project.** Previews and what they were built from go to `%LOCALAPPDATA%/Orbiters/project-previews/
-  <project>/` (`<scene GUID>.preview`, `<scene GUID>.json`: every file read with its size and time, or why the build
-  failed), at most 1.5 GB, the least recently used first out.
+- **Never into the project.** Previews and what they were built from go to the app's cache folder,
+  `%LOCALAPPDATA%/Orbiters/Desktop/cache/project-previews/<project>/` (`<scene GUID>.preview`, `<scene GUID>.json`:
+  every file read with its size and time, or why the build failed; `guids.txt`, the cards' `cover.jpg`), at most
+  1.5 GB with everything in it counted, the previews shown least recently first out (their record's time, touched
+  when shown: Windows keeps no last-access times on large disks), a project left without one going whole. A
+  screenshot run builds into a cache of its own (`screenshot.rs`, `sandbox_user_data`).
+- **Bounded on odd files.** Reviewed 3 November 2026 against damaged and hostile files: a flow value nested deeper
+  than 64 is passed over (it once looped, filling the memory), a mesh asset's stream, offset and counts are checked
+  against Unity's ranges and its buffers, a binary file makes at most 4 million values and never repeats records of
+  no size, Unity's database read gives up on a tree whose branches point back up, a PSD header cannot ask for more
+  than its file could hold, nested prefabs copy at most a million objects, and a source that failed is not read again
+  for each instance. A build that panics anyway is caught on the worker (the scene says so until its files change).
+- **Retried, stopped, never waiting.** A build that ran out of time (the first look at a project never opened, on a
+  hard disk) is tried again after 30 minutes, not kept as a failure for two weeks; a build the panel or the window
+  asks for stops the card still or other build running (put back in its queue); the app closing stops the build
+  running; a scene saved during its build is built again.
 - **Which preview a scene gets.** Toolkit's when it is at least as new as the scene file (2 s of slack for copied file
   times): Unity drew it, it is exact. Else the one built here while none of the files it read changed (sizes and
   modification times, the project's package manifests too, at most 14 days); a changed one stays on screen while it is

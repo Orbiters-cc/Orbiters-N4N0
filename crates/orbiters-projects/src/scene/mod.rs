@@ -50,6 +50,8 @@ pub struct Limits {
     pub max_prefab_instances: usize,
     /// Objects copied into prefab instances, nested ones included (a world of 50 × 50 × 50 nested copies).
     pub max_objects: usize,
+    /// Triangles of all the models one build loads (ten times the 2 million a preview draws).
+    pub max_loaded_triangles: usize,
     pub max_texture_bytes: u64,
     /// Threads decoding pictures.
     pub threads: usize,
@@ -70,6 +72,7 @@ impl Limits {
             max_yaml_bytes: 256 << 20,
             max_prefab_instances: 50_000,
             max_objects: 1_000_000,
+            max_loaded_triangles: 20_000_000,
             max_texture_bytes: 256 << 20,
             threads: 4,
             background: false,
@@ -518,7 +521,9 @@ fn trim_to(root: &Path, limit: u64) {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("json"));
         total = total.saturating_sub(size);
-        if let Some(dir) = path.parent() {
+        // A project's own folder only (`<root>/<project>/`), never the root itself (`ORBITERS_PREVIEW_CACHE` may name
+        // any folder).
+        if let Some(dir) = path.parent().filter(|d| d.parent() == Some(root)) {
             let left = std::fs::read_dir(dir).map(|d| d.flatten().any(|e| e.path().extension().is_some_and(|x| x == preview::EXTENSION))).unwrap_or(true);
             if !left {
                 let rest: u64 = walkdir::WalkDir::new(dir).into_iter().flatten().filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum();

@@ -103,7 +103,7 @@ impl Assets {
             'roots: for root in roots(&self.project) {
                 for e in walk(&root) {
                     files += 1;
-                    if files > self.limits.max_files || (files % 4096 == 0 && self.limits.check("").is_err()) {
+                    if files > self.limits.max_files || (files.is_multiple_of(4096) && self.limits.check("").is_err()) {
                         break 'roots;
                     }
                     if !e.file_type().is_file() {
@@ -214,7 +214,7 @@ fn scan(project: &Path, cache: Option<&Path>, phase: u8, limits: &Limits, read: 
     'roots: for root in roots(project) {
         for entry in walk(&root) {
             files += 1;
-            if files > limits.max_files || (files % 4096 == 0 && limits.check("").is_err()) {
+            if files > limits.max_files || (files.is_multiple_of(4096) && limits.check("").is_err()) {
                 break 'roots;
             }
             if entry.file_type().is_dir() {
@@ -241,7 +241,7 @@ fn scan(project: &Path, cache: Option<&Path>, phase: u8, limits: &Limits, read: 
             scope.spawn(|| loop {
                 let k = next.fetch_add(1, Ordering::Relaxed);
                 let Some(&i) = todo.get(k) else { break };
-                if k % 64 == 0 && limits.check("").is_err() {
+                if k.is_multiple_of(64) && limits.check("").is_err() {
                     break;
                 }
                 *guids[i].lock().unwrap() = read_meta_guid(&metas[i].0);
@@ -428,7 +428,7 @@ pub mod lmdb {
                 let physical = v
                     .split(|&c| c == 0)
                     .filter(|s| s.len() > 2 && (s[1] == b':' || s[0] == b'/'))
-                    .last()
+                    .next_back()
                     .map(|s| PathBuf::from(String::from_utf8_lossy(s).into_owned()));
                 let physical = physical.filter(|p| p.is_dir()).unwrap_or_else(|| project.join(&logical));
                 roots.push((logical, physical));

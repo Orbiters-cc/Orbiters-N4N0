@@ -192,6 +192,8 @@ pub struct Loader<'a> {
     pub prefab_instances: usize,
     /// Objects copied into instances so far ([`Limits::max_objects`]).
     pub objects_made: usize,
+    /// Triangles of the models loaded so far ([`Limits::max_loaded_triangles`]).
+    pub model_triangles: usize,
 }
 
 const MAX_DEPTH: usize = 24;
@@ -210,6 +212,7 @@ impl<'a> Loader<'a> {
             missing: Vec::new(),
             prefab_instances: 0,
             objects_made: 0,
+            model_triangles: 0,
         }
     }
 
@@ -389,9 +392,18 @@ impl<'a> Loader<'a> {
             return Ok(m.clone());
         }
         let path = self.assets.path(guid).with_context(|| format!("a model that is not in the project ({guid})"))?;
+        // Every model a scene's renderers use is loaded before the drawing budget picks among them: a world of hundreds
+        // of models would hold them all (gigabytes) for a preview that draws 2 million triangles.
+        anyhow::ensure!(
+            self.model_triangles < self.limits.max_loaded_triangles,
+            "{} left out: the scene's models have more than {} million triangles",
+            rel(self.assets, &path),
+            self.limits.max_loaded_triangles / 1_000_000
+        );
         let settings = self.model_settings(guid);
         self.files.push(path.clone());
         let m = Arc::new(model::load(&path, &settings, self.limits)?);
+        self.model_triangles += m.meshes.iter().map(|x| x.triangles()).sum::<usize>();
         self.models.insert(guid.to_string(), m.clone());
         Ok(m)
     }
@@ -823,6 +835,19 @@ Material:
         assert_eq!(g.ambient.as_ref().map(|a| a.mode), Some(3));
         // The model was read once although two prefabs lead to it.
         assert_eq!(loader.models.len(), 1);
+    }
+
+    #[test]
+    fn models_past_the_loaded_triangle_limit_are_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut assets = project(dir.path());
+        let other = "eeee0000000000000000000000000005";
+        assets.insert(other, dir.path().join("Assets/Rig.fbx"));
+        let limits = Limits { max_loaded_triangles: 1, ..Limits::default() };
+        let mut loader = Loader::new(&assets, &limits);
+        assert!(loader.model(MODEL_GUID).is_ok(), "the first is always read");
+        let why = format!("{:#}", loader.model(other).err().expect("past the limit"));
+        assert!(why.contains("more than 0 million triangles"), "{why}");
     }
 
     #[test]

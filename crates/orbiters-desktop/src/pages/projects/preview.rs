@@ -6,7 +6,8 @@
 //! (the card's shared geometry) where it also zooms and pans; Escape or the × shrinks it back into the card. The
 //! project's UserSettings folder is watched, so a save in Unity shows here as soon as Toolkit wrote it. A project
 //! without one says how to get it, and offers to add or update Orbiters Toolkit when it lacks one that writes them.
-//! A preview that recorded its scene's lights is drawn in them; the window's switch shows it in the studio's light
+//! A preview that recorded its scene's lights is drawn in them when they show it (else in the studio's light, so an
+//! avatar never shows black: `preview_gpu::light_mode`); the window's switch shows it in the studio's light
 //! instead (remembered for every preview).
 
 use super::preview_gpu::{self, LightMode, Pipelines, Scene, View};
@@ -686,8 +687,8 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         }
         let header = &c.scene.as_ref().unwrap().header;
         let written = c.entry().map(|e| e.modified);
-        // The light switch, when the file recorded its scene's lights.
-        let light = header.lighting.is_some().then_some(scene_light);
+        // The light switch, when the file recorded its scene's lights; its Scene light only when they show the scene.
+        let light = header.lighting.as_ref().map(|l| LightSwitch { prefer_scene: scene_light, scene_shows: preview_gpu::scene_light_shows(l) });
         chrome(&mut cu, cx, &project, header, written, &c.entries, c.file.as_ref().map(|f| f.0.clone()), busy, f.rect, light, &mut light_switch, &mut act);
         if viewer::close_button(&mut cu, f.rect, "Close") {
             close = true;
@@ -742,6 +743,14 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
 }
 
+/// The window's light switch: whether the person prefers the scene's light, and whether this scene's shows it
+/// (`preview_gpu::scene_light_shows`; else the studio's is drawn and the Scene light half is not offered).
+#[derive(Clone, Copy)]
+struct LightSwitch {
+    prefer_scene: bool,
+    scene_shows: bool,
+}
+
 enum WindowAct {
     Scene(PathBuf),
     /// The scene's light (true) or the studio's.
@@ -762,13 +771,15 @@ fn chrome(
     shown: Option<PathBuf>,
     busy: bool,
     rect: Rect,
-    light: Option<bool>,
+    light: Option<LightSwitch>,
     light_switch: &mut Option<[Rect; 2]>,
     act: &mut Option<WindowAct>,
 ) {
     let p = ui.painter().clone();
-    // The light it is drawn in, top right beside the close button: the scene's own, or the studio's.
-    if let Some(scene_light) = light {
+    // The light it is drawn in, top right beside the close button: the scene's own, or the studio's (also when the scene's
+    // light would show nothing: its half then stays dim and says why).
+    if let Some(LightSwitch { prefer_scene, scene_shows }) = light {
+        let scene_light = prefer_scene && scene_shows;
         let labels = [(true, icons::LIGHTBULB, "Scene light"), (false, icons::SUN, "Studio light")];
         let txts = labels.map(|(on, _, l)| Txt::new(l, 12.5).weight(if on == scene_light { weight::SEMIBOLD } else { weight::MEDIUM }));
         let widths = txts.each_ref().map(|t| widgets::text_size(ui, t).x + 50.0);
@@ -782,21 +793,26 @@ fn chrome(
             let r = Rect::from_min_size(pos2(sx, row.top() + 4.0), vec2(widths[i], 30.0));
             rects[i] = r;
             let chosen = on == scene_light;
-            let resp = ui.interact(r, Id::unique(("preview-light", i)), Sense::click());
+            let offered = !on || scene_shows;
+            let resp = ui.interact(r, Id::unique(("preview-light", i)), if offered { Sense::click() } else { Sense::hover() });
             let k = anim::toggle(ui.ctx(), Id::unique(("preview-light-on", i)), chosen, Spring::SNAPPY);
-            let hk = anim::toggle(ui.ctx(), Id::unique(("preview-light-hover", i)), resp.hovered(), Spring::SNAPPY);
+            let hk = anim::toggle(ui.ctx(), Id::unique(("preview-light-hover", i)), offered && resp.hovered(), Spring::SNAPPY);
             if k > 0.01 || hk > 0.01 {
                 p.rect_filled(r, theme::radius(15.0), theme::white(0.13 * k + 0.05 * hk * (1.0 - k)));
             }
-            let fg = theme::mix(theme::FG_2, theme::FG, k);
-            widgets::icon(&p, pos2(r.left() + 19.0, r.center().y), glyph, 13.0, theme::mix(theme::FG_3, theme::ACCENT, k));
+            let fg = if offered { theme::mix(theme::FG_2, theme::FG, k) } else { theme::FG_3 };
+            let glyph_tint = if offered { theme::mix(theme::FG_3, theme::ACCENT, k) } else { theme::alpha(theme::FG_3, 0.6) };
+            widgets::icon(&p, pos2(r.left() + 19.0, r.center().y), glyph, 13.0, glyph_tint);
             widgets::text(&p, pos2(r.left() + 31.0, r.center().y), Align2::LEFT_CENTER, &txt.color(fg));
-            let tip = if on {
-                "The lights the scene has in Unity: its directional lights and ambient light"
-            } else {
-                "The same studio light for every preview, as bright as a new Unity scene"
+            let tip = match (on, offered) {
+                (true, true) => "The lights the scene has in Unity: its directional lights and ambient light",
+                (true, false) => {
+                    "This scene has too little light of its own to show it (no sun or a very dim one, and an ambient \
+                     light that is black or that Unity had not computed yet), so it is shown in the studio light"
+                }
+                _ => "The same studio light for every preview, as bright as a new Unity scene",
             };
-            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip);
+            let resp = if offered { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }.on_hover_text(tip);
             if widgets::activated(&resp) && !chosen {
                 *act = Some(WindowAct::SceneLight(label == "Scene light"));
             }

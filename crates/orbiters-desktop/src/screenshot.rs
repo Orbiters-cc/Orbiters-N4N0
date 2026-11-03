@@ -96,7 +96,8 @@ struct WorldShot {
 /// (the settings folder's files but the settings themselves, the world pages and 3D worlds kept from Orbiters); the
 /// session library, documents and this computer's local data stay the real ones, read only by the scenarios. The
 /// picture folders the person added are not read (the harness's settings name none); `ORBITERS_SCREENSHOT_PICTURE_FOLDERS`
-/// (separated by `;`) names some for the run. Sandboxes of runs over six hours old are deleted.
+/// (separated by `;`) names some for the run. The run deletes its sandbox when it ends; those of runs that did not end
+/// (killed) go at a later run once over six hours old.
 fn sandbox_user_data() -> anyhow::Result<(PathBuf, Vec<PathBuf>)> {
     use orbiters_core::paths;
     let (real_config, real_cache) = (paths::config_dir(), paths::cache_dir());
@@ -149,10 +150,20 @@ fn sandbox_user_data() -> anyhow::Result<(PathBuf, Vec<PathBuf>)> {
 }
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
-    let out =
-        PathBuf::from(args.first().context("usage: --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]")?);
     let (sandbox, picture_folders) = sandbox_user_data()?;
     eprintln!("screenshots: settings and caches in {}", sandbox.display());
+    let result = shots(args, picture_folders);
+    // The run's settings and caches go with it: each run copies some 40 MB of world pages, and a day of screenshots by
+    // several agents filled the system disk. `ORBITERS_SCREENSHOT_KEEP_SANDBOX` keeps them (to look at what a run wrote).
+    if std::env::var_os("ORBITERS_SCREENSHOT_KEEP_SANDBOX").is_none() {
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+    result
+}
+
+fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
+    let out =
+        PathBuf::from(args.first().context("usage: --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]")?);
     let mut settings = Settings { picture_folders, ..Settings::default() };
     let mut scale = 1.0f32;
     let mut height = 820.0f32;

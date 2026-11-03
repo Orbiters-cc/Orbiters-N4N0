@@ -76,10 +76,11 @@ pub fn psd(b: &[u8]) -> anyhow::Result<RgbaImage> {
     ensure!(width > 0 && height > 0 && width <= MAX_SIDE && height <= MAX_SIDE, "{width}×{height} pixels");
     ensure!(matches!(depth, 8 | 16 | 32), "{depth} bits a channel");
     ensure!(matches!(mode, 1 | 3), "colour mode {mode} (only grey and RGB are read)");
+    let skip = |at: usize, n: u64| -> anyhow::Result<usize> { usize::try_from(n).ok().and_then(|n| at.checked_add(n)).context("cut short") };
     let mut at = 26usize;
-    at += 4 + be32(at)? as usize; // colour mode data
-    at += 4 + be32(at)? as usize; // image resources
-    at += if version == 2 { 8 + be64(at)? as usize } else { 4 + be32(at)? as usize }; // layers and masks
+    at = skip(at + 4, be32(at)? as u64)?; // colour mode data
+    at = skip(at + 4, be32(at)? as u64)?; // image resources
+    at = if version == 2 { skip(at + 8, be64(at)?)? } else { skip(at + 4, be32(at)? as u64)? }; // layers and masks
     let compression = be16(at)?;
     at += 2;
     let (w, h) = (width as usize, height as usize);
@@ -87,6 +88,12 @@ pub fn psd(b: &[u8]) -> anyhow::Result<RgbaImage> {
     let row = w * bytes_per;
     let wanted = if mode == 3 { channels.min(4) } else { channels.min(2) };
     ensure!(wanted >= 1, "no channels");
+    // What the planes take once decoded: within `image`'s own limit for the other formats, and never more than the
+    // file could hold (PackBits makes at most 128 bytes of 2), so a header claiming 8192² at 32 bits in a 64 KB file
+    // is not given a gigabyte on each of the decoding threads.
+    let planes_bytes = row * h * wanted;
+    ensure!(planes_bytes <= 512 << 20, "{width}×{height} pixels at {depth} bits");
+    ensure!(planes_bytes <= b.len().saturating_mul(64), "cut short");
     let mut planes: Vec<Vec<u8>> = Vec::with_capacity(wanted);
     match compression {
         0 => {
@@ -98,17 +105,17 @@ pub fn psd(b: &[u8]) -> anyhow::Result<RgbaImage> {
         1 => {
             let count_size = if version == 2 { 4 } else { 2 };
             let counts_at = at;
-            let mut data = at + channels * h * count_size;
+            let mut data = channels.checked_mul(h * count_size).and_then(|n| at.checked_add(n)).context("cut short")?;
             for c in 0..channels {
                 let mut plane = Vec::with_capacity(row * h);
                 for y in 0..h {
                     let k = counts_at + (c * h + y) * count_size;
                     let n = if version == 2 { be32(k)? as usize } else { be16(k)? as usize };
                     if c < wanted {
-                        let src = b.get(data..data + n).context("cut short")?;
+                        let src = b.get(data..data.checked_add(n).context("cut short")?).context("cut short")?;
                         packbits(src, row, &mut plane);
                     }
-                    data += n;
+                    data = data.checked_add(n).context("cut short")?;
                 }
                 if c < wanted {
                     planes.push(plane);
@@ -216,6 +223,29 @@ mod tests {
         bad.truncate(bad.len() - 4);
         let _ = psd(&bad);
         assert!(psd(b"8BPS").is_err());
+        // A header claiming 8192² at 32 bits in a file of a few bytes: refused before anything is made of it.
+        let mut huge = tiny_psd(true);
+        huge[14..18].copy_from_slice(&8192u32.to_be_bytes());
+        huge[18..22].copy_from_slice(&8192u32.to_be_bytes());
+        huge[22..24].copy_from_slice(&32u16.to_be_bytes());
+        assert!(psd(&huge).is_err());
+        // Section lengths that run past the end of memory (a PSB's 64-bit one): an error, not an overflow.
+        let mut long = tiny_psd(false);
+        long[4..6].copy_from_slice(&2u16.to_be_bytes());
+        long[34..38].copy_from_slice(&u32::MAX.to_be_bytes());
+        long.splice(34..34, [0xff; 4]);
+        assert!(psd(&long).is_err());
+    }
+
+    #[test]
+    fn damaged_photoshop_files_never_panic_or_hang() {
+        let start = std::time::Instant::now();
+        for rle in [false, true] {
+            for b in crate::scene::damaged(&tiny_psd(rle), 3000) {
+                let _ = psd(&b);
+            }
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(20), "{:?}", start.elapsed());
     }
 
     #[test]

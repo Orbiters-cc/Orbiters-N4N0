@@ -180,6 +180,8 @@ pub struct Loader<'a> {
     pub assets: &'a Assets,
     pub limits: &'a Limits,
     sources: HashMap<String, Arc<Graph>>,
+    /// Sources that could not be resolved, and why: not read again for each of their instances.
+    failed: HashMap<String, String>,
     pub models: HashMap<String, Arc<Model>>,
     pub model_settings: HashMap<String, Arc<ImportSettings>>,
     resolving: HashSet<String>,
@@ -188,6 +190,8 @@ pub struct Loader<'a> {
     /// What could not be resolved, once each (shown in the preview's stats).
     pub missing: Vec<String>,
     pub prefab_instances: usize,
+    /// Objects copied into instances so far ([`Limits::max_objects`]).
+    pub objects_made: usize,
 }
 
 const MAX_DEPTH: usize = 24;
@@ -198,12 +202,14 @@ impl<'a> Loader<'a> {
             assets,
             limits,
             sources: HashMap::new(),
+            failed: HashMap::new(),
             models: HashMap::new(),
             model_settings: HashMap::new(),
             resolving: HashSet::new(),
             files: Vec::new(),
             missing: Vec::new(),
             prefab_instances: 0,
+            objects_made: 0,
         }
     }
 
@@ -348,6 +354,9 @@ impl<'a> Loader<'a> {
         if let Some(g) = self.sources.get(guid) {
             return Ok(g.clone());
         }
+        if let Some(why) = self.failed.get(guid) {
+            bail!("{why}");
+        }
         anyhow::ensure!(depth <= MAX_DEPTH, "prefabs nested more than {MAX_DEPTH} deep");
         anyhow::ensure!(self.resolving.insert(guid.to_string()), "a prefab that contains itself");
         let result = (|| {
@@ -363,6 +372,12 @@ impl<'a> Loader<'a> {
             }
         })();
         self.resolving.remove(guid);
+        if let Err(e) = &result {
+            // Not a time limit (that stops the whole preview): the same reason for its other instances.
+            if self.limits.check("").is_ok() {
+                self.failed.insert(guid.to_string(), format!("{e:#}"));
+            }
+        }
         let g = Arc::new(result?);
         self.sources.insert(guid.to_string(), g.clone());
         Ok(g)
@@ -413,6 +428,11 @@ impl<'a> Loader<'a> {
                 return Ok(());
             }
         };
+        // Each instance copies its source's objects, and a source holding fifty instances of a prefab holding fifty
+        // of another is 2,500 copies of that one: a few levels of that would fill the memory, which the count of
+        // instances (each source is resolved once) never sees.
+        anyhow::ensure!(self.objects_made + src.objects.len() <= self.limits.max_objects, "more than {} objects in its prefabs", self.limits.max_objects);
+        self.objects_made += src.objects.len();
         let m = pi.get("m_Modification");
         let parent = m.get("m_TransformParent").as_ref().map_or(0, |r| r.file_id);
         let mut objects: HashMap<i64, Obj> = HashMap::with_capacity(src.objects.len());
@@ -803,6 +823,37 @@ Material:
         assert_eq!(g.ambient.as_ref().map(|a| a.mode), Some(3));
         // The model was read once although two prefabs lead to it.
         assert_eq!(loader.models.len(), 1);
+    }
+
+    #[test]
+    fn prefabs_nested_fifty_by_fifty_stop_at_the_object_limit() {
+        // Six levels of 50 instances of the level below: 50⁵ × 2 objects at the top (600 million) without the limit.
+        let dir = tempfile::tempdir().unwrap();
+        let mut assets = Assets::empty(dir.path());
+        let guid = |k: usize| format!("{:032x}", 0xfeed_0000usize + k);
+        let leaf = "%YAML 1.1\n--- !u!1 &1\nGameObject:\n  m_Name: Leaf\n--- !u!4 &2\nTransform:\n  m_GameObject: {fileID: 1}\n";
+        std::fs::write(dir.path().join("P0.prefab"), leaf).unwrap();
+        assets.insert(&guid(0), dir.path().join("P0.prefab"));
+        for level in 1..=5 {
+            let mut text = String::from("%YAML 1.1\n");
+            for i in 0..50 {
+                // Instance IDs as random as Unity's (small ones mix into the same IDs, which hides the growth).
+                let id = (model::xxh64(format!("{level}-{i}").as_bytes(), 0) as i64) & MASK;
+                text += &format!("--- !u!1001 &{id}\nPrefabInstance:\n  m_SourcePrefab: {{fileID: 100100000, guid: {}, type: 3}}\n", guid(level - 1));
+            }
+            let p = dir.path().join(format!("P{level}.prefab"));
+            std::fs::write(&p, text).unwrap();
+            assets.insert(&guid(level), p);
+        }
+        let limits = Limits { max_objects: 20_000, ..Limits::default() };
+        let mut loader = Loader::new(&assets, &limits);
+        let start = std::time::Instant::now();
+        let g = loader.file(&dir.path().join("P5.prefab")).unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
+        assert!(g.objects.len() <= 20_000);
+        assert!(loader.missing.iter().any(|m| m.contains("more than 20000 objects")), "{:?}", loader.missing);
+        assert!(loader.objects_made <= 20_000, "{}", loader.objects_made);
+        assert_eq!(loader.files.iter().filter(|f| f.ends_with("P3.prefab")).count(), 1, "a source that failed is not read again for each instance");
     }
 
     #[test]

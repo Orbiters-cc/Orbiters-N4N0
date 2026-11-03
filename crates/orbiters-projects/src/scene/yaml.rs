@@ -378,9 +378,49 @@ fn skip_ws(bytes: &[u8], pos: &mut usize) {
     }
 }
 
+/// Past the flow collection or scalar at `pos` without reading it (one nested deeper than [`MAX_DEPTH`]): to its
+/// matching bracket, quotes honoured, or to the next `,` `}` `]` for a scalar. It always moves on when there is
+/// something left, so that the loops reading the collection around it end.
+fn skip_flow(bytes: &[u8], pos: &mut usize) {
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let start = *pos;
+    while *pos < bytes.len() {
+        let b = bytes[*pos];
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None => match b {
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' if depth == 0 => break,
+                b'}' | b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        *pos += 1;
+                        break;
+                    }
+                }
+                b',' if depth == 0 => break,
+                b'"' | b'\'' => quote = Some(b),
+                _ => {}
+            },
+        }
+        *pos += 1;
+    }
+    if *pos == start && *pos < bytes.len() && !matches!(bytes[*pos], b',' | b'}' | b']') {
+        *pos += 1;
+    }
+}
+
 fn flow_value(t: &str, bytes: &[u8], pos: &mut usize, depth: usize) -> Value {
     skip_ws(bytes, pos);
-    if *pos >= bytes.len() || depth > MAX_DEPTH {
+    if *pos >= bytes.len() {
+        return Value::Null;
+    }
+    if depth > MAX_DEPTH {
+        // Too deep to be Unity's: passed over whole. Returning without moving on made the sequence holding it read
+        // the same `[` again forever (a value of 70 `[` filled the memory).
+        skip_flow(bytes, pos);
         return Value::Null;
     }
     match bytes[*pos] {
@@ -400,6 +440,7 @@ fn flow_value(t: &str, bytes: &[u8], pos: &mut usize, depth: usize) -> Value {
                     *pos += 1;
                     continue;
                 }
+                let before = *pos;
                 let key = flow_scalar(t, bytes, pos, true);
                 skip_ws(bytes, pos);
                 let value = if *pos < bytes.len() && bytes[*pos] == b':' {
@@ -408,6 +449,10 @@ fn flow_value(t: &str, bytes: &[u8], pos: &mut usize, depth: usize) -> Value {
                 } else {
                     Value::Null
                 };
+                if *pos == before {
+                    // Nothing read (a stray `]`): past it.
+                    *pos += 1;
+                }
                 out.push((key, value));
             }
             Value::Map(out)
@@ -428,7 +473,12 @@ fn flow_value(t: &str, bytes: &[u8], pos: &mut usize, depth: usize) -> Value {
                     *pos += 1;
                     continue;
                 }
+                let before = *pos;
                 out.push(flow_value(t, bytes, pos, depth + 1));
+                if *pos == before {
+                    // Nothing read (a stray `}`): past it.
+                    *pos += 1;
+                }
             }
             Value::Seq(out)
         }
@@ -647,6 +697,41 @@ PrefabInstance:
             }
         }
         assert_eq!(flow("{x: 1, y: {z: 2}}").at(&["y", "z"]).as_i64(), Some(2));
+    }
+
+    #[test]
+    fn flow_nested_deeper_than_unity_ever_writes_is_passed_over() {
+        // A field of 70 `[` (or `{`) once made the sequence at the depth limit read the same bracket forever, filling
+        // the memory; it is skipped whole now, and what follows it still reads.
+        for open in ["[", "{a: ", "[{a: "] {
+            let deep = open.repeat(70);
+            let doc = format!("--- !u!1 &1\nGameObject:\n  m_Name: {deep}x\n  m_IsActive: 1\n");
+            let start = std::time::Instant::now();
+            let v = documents(&doc)[0].parse();
+            assert!(start.elapsed() < std::time::Duration::from_secs(1), "{open}");
+            assert_eq!(v.get("m_IsActive").as_i64(), Some(1), "{open}");
+            let closed = format!("{}{}", "[".repeat(90), "]".repeat(90));
+            let _ = flow(&format!("{{k: {closed}, after: 2}}"));
+            assert_eq!(flow(&format!("{{k: {closed}, after: 2}}")).get("after").as_i64(), Some(2));
+        }
+        // Stray closing brackets inside a collection are passed over too.
+        assert_eq!(flow("[1, }, 2]").items().len(), 3);
+        assert_eq!(flow("{a: 1, ], b: 2}").get("b").as_i64(), Some(2));
+    }
+
+    #[test]
+    fn damaged_files_never_panic_or_hang() {
+        let start = std::time::Instant::now();
+        for b in crate::scene::damaged(PREFAB.as_bytes(), 3000) {
+            let text = String::from_utf8_lossy(&b);
+            for d in documents(&text) {
+                let v = d.parse();
+                let _ = v.get("m_Modification").get("m_Modifications").items().len();
+            }
+            let _ = parse(&text);
+            let _ = meta_guid(&text);
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(20), "{:?}", start.elapsed());
     }
 
     #[test]

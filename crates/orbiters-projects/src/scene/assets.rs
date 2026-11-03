@@ -97,9 +97,18 @@ impl Assets {
     pub fn named(&self, name: &str, near: Option<&Path>) -> Vec<PathBuf> {
         let mut s = self.state.lock().unwrap();
         if s.names.is_none() {
+            // Within the build's limits: a folder linked into Assets can lead to a whole disk.
             let mut names: HashMap<String, Vec<PathBuf>> = HashMap::new();
-            for root in roots(&self.project) {
-                for e in walk(&root).filter(|e| e.file_type().is_file()) {
+            let mut files = 0usize;
+            'roots: for root in roots(&self.project) {
+                for e in walk(&root) {
+                    files += 1;
+                    if files > self.limits.max_files || (files % 4096 == 0 && self.limits.check("").is_err()) {
+                        break 'roots;
+                    }
+                    if !e.file_type().is_file() {
+                        continue;
+                    }
                     let n = e.file_name().to_string_lossy().to_ascii_lowercase();
                     if !n.ends_with(".meta") {
                         names.entry(n).or_default().push(e.into_path());
@@ -315,7 +324,13 @@ pub mod lmdb {
     struct Db<'a> {
         b: &'a [u8],
         page: usize,
+        /// Pages read so far: a tree reads each of its pages once, so more than the file has means a damaged one
+        /// whose branches point back up (each level of 32 would otherwise multiply the reads by thousands: hours).
+        visits: std::cell::Cell<usize>,
     }
+
+    /// The largest database read (Unity's is tens of megabytes for a large project): it is read whole.
+    const MAX_BYTES: u64 = 1 << 30;
 
     impl Db<'_> {
         fn u16(&self, at: usize) -> Option<u16> {
@@ -331,6 +346,10 @@ pub mod lmdb {
         /// Every (key, flags, value) of the tree under page `pg`.
         fn walk(&self, pg: u64, depth: usize, out: &mut Vec<(Vec<u8>, u16, Vec<u8>)>) -> Option<()> {
             if depth > 32 || out.len() > 2_000_000 {
+                return None;
+            }
+            self.visits.set(self.visits.get() + 1);
+            if self.visits.get() > self.b.len() / self.page + 16 {
                 return None;
             }
             let p = usize::try_from(pg).ok()?.checked_mul(self.page)?;
@@ -366,7 +385,7 @@ pub mod lmdb {
         if !(512..=65536).contains(&page) || !page.is_power_of_two() {
             return None;
         }
-        let db = Db { b, page };
+        let db = Db { b, page, visits: std::cell::Cell::new(0) };
         let meta = (0..2usize).filter(|m| db.u32(m * page + HEADER) == Some(MAGIC)).max_by_key(|m| db.u64(m * page + 144).unwrap_or(0))?;
         let root = db.u64(meta * page + 128)?;
         let mut main = Vec::new();
@@ -392,7 +411,11 @@ pub mod lmdb {
 
     /// Every asset Unity knew of in `project`: its GUID and file (packages at the folders Unity found them in).
     pub fn guid_to_path(project: &Path) -> Option<HashMap<String, PathBuf>> {
-        let bytes = std::fs::read(project.join("Library/SourceAssetDB")).ok()?;
+        let path = project.join("Library/SourceAssetDB");
+        if std::fs::metadata(&path).ok()?.len() > MAX_BYTES {
+            return None;
+        }
+        let bytes = std::fs::read(path).ok()?;
         let (db, tables) = tables(&bytes)?;
         // Where each root folder is (`Packages/com.x` may be in Library/PackageCache under a versioned name).
         let mut roots: Vec<(String, PathBuf)> = Vec::new();
@@ -439,6 +462,33 @@ pub mod lmdb {
             assert_eq!(super::guid_hex(&raw), "91b100eb3bc320843a1ba20c380ea3a2");
             assert!(super::tables(&[0u8; 100]).is_none());
             assert!(super::tables(&vec![0xffu8; 70000]).is_none());
+        }
+
+        #[test]
+        fn a_tree_whose_branches_point_back_up_is_given_up_at_once() {
+            // Two meta pages, the newer's root page 2: a branch page whose 2000 keys all point at page 2 itself.
+            let page = 4096usize;
+            let mut b = vec![0u8; page * 3];
+            for m in 0..2 {
+                let at = m * page;
+                b[at + 16..at + 20].copy_from_slice(&super::MAGIC.to_le_bytes());
+                b[at + 40..at + 44].copy_from_slice(&(page as u32).to_le_bytes());
+                b[at + 128..at + 136].copy_from_slice(&2u64.to_le_bytes());
+                b[at + 144..at + 152].copy_from_slice(&(m as u64).to_le_bytes());
+            }
+            let p = 2 * page;
+            let keys = 2000usize;
+            b[p + 10..p + 12].copy_from_slice(&1u16.to_le_bytes());
+            b[p + 12..p + 14].copy_from_slice(&((super::HEADER + 2 * keys) as u16).to_le_bytes());
+            let node = super::HEADER + 2 * keys;
+            for i in 0..keys {
+                b[p + super::HEADER + 2 * i..p + super::HEADER + 2 * i + 2].copy_from_slice(&(node as u16).to_le_bytes());
+            }
+            // The node: child page 2 (lo 2, hi 0, flags 0), no key.
+            b[p + node..p + node + 2].copy_from_slice(&2u16.to_le_bytes());
+            let start = std::time::Instant::now();
+            assert!(super::tables(&b).is_none());
+            assert!(start.elapsed() < std::time::Duration::from_secs(1), "{:?}", start.elapsed());
         }
     }
 }

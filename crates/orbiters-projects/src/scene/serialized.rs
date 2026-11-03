@@ -160,7 +160,14 @@ struct Reader<'a> {
     b: &'a [u8],
     at: usize,
     big: bool,
+    /// Values made so far ([`MAX_VALUES`]).
+    values: usize,
 }
+
+/// The most values one object is read into: a mesh of four million vertices, its blend shapes and bones make a few
+/// thousand (its large arrays stay bytes), so this only stops a damaged file whose nested arrays of small records
+/// would make billions (tens of gigabytes).
+const MAX_VALUES: usize = 4_000_000;
 
 impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> anyhow::Result<&'a [u8]> {
@@ -206,7 +213,7 @@ struct Type {
 /// The object `path_id` of a binary serialized file (else its first of class `class`): its class and fields.
 pub fn object(b: &[u8], path_id: i64, class: i32) -> anyhow::Result<(i32, Value)> {
     ensure!(is_serialized(b), "not a Unity serialized file");
-    let mut h = Reader { b, at: 0, big: true };
+    let mut h = Reader { b, at: 0, big: true, values: 0 };
     let _meta_size = h.u32()?;
     let _file_size = h.u32()?;
     let version = h.u32()?;
@@ -220,7 +227,7 @@ pub fn object(b: &[u8], path_id: i64, class: i32) -> anyhow::Result<(i32, Value)
         data_offset = h.u64()?;
         h.u64()?;
     }
-    let mut r = Reader { b, at: h.at, big };
+    let mut r = Reader { b, at: h.at, big, values: 0 };
     let _unity = r.cstr()?;
     let _platform = r.u32()?;
     let trees = r.u8()? != 0;
@@ -251,7 +258,7 @@ pub fn object(b: &[u8], path_id: i64, class: i32) -> anyhow::Result<(i32, Value)
         };
         let mut nodes = Vec::with_capacity(nodes_n as usize);
         for k in 0..nodes_n as usize {
-            let mut n = Reader { b: &raw[k * node_size..(k + 1) * node_size], at: 0, big };
+            let mut n = Reader { b: &raw[k * node_size..(k + 1) * node_size], at: 0, big, values: 0 };
             let _v = n.u16()?;
             let level = n.u8()?;
             let flags = n.u8()?;
@@ -288,9 +295,9 @@ pub fn object(b: &[u8], path_id: i64, class: i32) -> anyhow::Result<(i32, Value)
     }
     let (start, size, ty) = found.or(first_of_class).context("the object is not in the file")?;
     let t = types.get(ty).context("an object of an unknown type")?;
-    let begin = usize::try_from(data_offset + start)?;
-    let data = b.get(begin..begin + size as usize).context("an object past the file's end")?;
-    let mut d = Reader { b: data, at: 0, big };
+    let begin = usize::try_from(data_offset.checked_add(start).context("an object past the file's end")?)?;
+    let data = b.get(begin..begin.checked_add(size as usize).context("an object past the file's end")?).context("an object past the file's end")?;
+    let mut d = Reader { b: data, at: 0, big, values: 0 };
     let (value, _) = read(&t.nodes, 0, &mut d, 0)?;
     Ok((t.class, value))
 }
@@ -355,6 +362,8 @@ const MAX_DEPTH: usize = 48;
 /// Reads node `i` from `r`: its value and the node after its subtree.
 fn read(nodes: &[Node], i: usize, r: &mut Reader, depth: usize) -> anyhow::Result<(Value, usize)> {
     ensure!(depth < MAX_DEPTH, "a type tree too deep");
+    r.values += 1;
+    ensure!(r.values <= MAX_VALUES, "more than {MAX_VALUES} values in one object");
     let node = &nodes[i];
     let kids = children(nodes, i);
     let value = if node.ty == "string" {
@@ -376,11 +385,17 @@ fn read(nodes: &[Node], i: usize, r: &mut Reader, depth: usize) -> anyhow::Resul
         let plain = plain_size(nodes, element);
         // Bytes, and long runs of plain records, as they are.
         let v = match plain {
-            Some(size) if size == 1 || n > 4096 => Value::Bytes(r.take(size * n as usize)?.to_vec()),
+            Some(size) if size == 1 || n > 4096 => Value::Bytes(r.take(size.checked_mul(n as usize).context("cut short")?)?.to_vec()),
             _ => {
                 let mut items = Vec::with_capacity((n as usize).min(1 << 16));
-                for _ in 0..n {
+                for k in 0..n {
+                    let at = r.at;
                     items.push(read(nodes, element, r, depth + 1)?.0);
+                    // Records that take no bytes (a damaged type tree) would repeat for as long as the count says,
+                    // two billion times: one says what they all are.
+                    if k == 0 && r.at == at {
+                        break;
+                    }
                 }
                 Value::Seq(items)
             }
@@ -452,6 +467,11 @@ mod tests {
 
     /// A version 22 file with one object of a small type: `{ m_Name: string, m_Bytes: vector<UInt8>, m_Value: float }`.
     fn tiny() -> Vec<u8> {
+        tiny_with(false, 5)
+    }
+
+    /// [`tiny`], its byte array's elements of no size (`empty`, a damaged type tree) and `count` of them.
+    fn tiny_with(empty: bool, count: i32) -> Vec<u8> {
         let mut strings = Vec::new();
         let mut local = |s: &str| {
             let off = strings.len() as u32;
@@ -482,7 +502,7 @@ mod tests {
             (1, 0, c("vector"), bytes_name, -1, 0x4000),
             (2, 1, c("Array"), c("Array"), -1, 0x4001),
             (3, 0, c("int"), c("size"), 4, 0),
-            (3, 0, c("UInt8"), c("data"), 1, 0),
+            if empty { (3, 0, thing, c("data"), 0, 0) } else { (3, 0, c("UInt8"), c("data"), 1, 0) },
             (1, 0, c("float"), value_name, 4, 0),
         ];
         let mut meta = Vec::new();
@@ -518,7 +538,7 @@ mod tests {
         let mut obj = Vec::new();
         obj.extend_from_slice(&3i32.to_le_bytes());
         obj.extend_from_slice(b"Abc\0");
-        obj.extend_from_slice(&5i32.to_le_bytes());
+        obj.extend_from_slice(&count.to_le_bytes());
         obj.extend_from_slice(&[1, 2, 3, 4, 5, 0, 0, 0]);
         obj.extend_from_slice(&2.5f32.to_le_bytes());
         meta.extend_from_slice(&(obj.len() as u32).to_le_bytes());
@@ -538,6 +558,24 @@ mod tests {
         f.resize(data_offset, 0);
         f.extend_from_slice(&obj);
         f
+    }
+
+    #[test]
+    fn damaged_files_never_panic_or_hang() {
+        let start = std::time::Instant::now();
+        for b in crate::scene::damaged(&tiny(), 3000) {
+            let _ = object(&b, 7, 43);
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(20), "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn records_of_no_size_are_not_repeated_two_billion_times() {
+        // An array of i32::MAX elements that take no bytes: once two billion values (and a minute); now one.
+        let start = std::time::Instant::now();
+        let (_, v) = object(&tiny_with(true, i32::MAX), 7, 43).unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(v.get("m_Bytes").items().len(), 1);
     }
 
     #[test]

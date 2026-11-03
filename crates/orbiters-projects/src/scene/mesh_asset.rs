@@ -85,17 +85,20 @@ pub fn parse(m: &Value) -> anyhow::Result<ModelMesh> {
         (_, Value::Bytes(b)) => b.clone(),
         _ => Vec::new(),
     };
+    // Unity's channels: a stream of 0 to 3, an offset in its vertex of under 256 bytes, a format of 0 to 11 and 0 to 4
+    // components. A channel outside that (a damaged file) is left out: its stream once sized a list of that many
+    // streams (an allocation that ended the app) and a negative one indexed past it.
     let channels: Vec<(i64, i64, i64, i64)> = vd
         .get("m_Channels")
         .items()
         .iter()
         .map(|c| {
-            (
-                c.get("stream").as_i64().unwrap_or(0),
-                c.get("offset").as_i64().unwrap_or(0),
-                c.get("format").as_i64().unwrap_or(0),
-                c.get("dimension").as_i64().unwrap_or(0) & 0xf,
-            )
+            let field = |k: &str, range: std::ops::RangeInclusive<i64>| c.get(k).as_i64().filter(|v| range.contains(v));
+            let dimension = c.get("dimension").as_i64().map(|d| d & 0xf);
+            match (field("stream", 0..=3), field("offset", 0..=255), field("format", 0..=11), dimension) {
+                (Some(s), Some(o), Some(f), Some(d)) => (s, o, f, d),
+                _ => (0, 0, 0, 0),
+            }
         })
         .collect();
     if channels.is_empty() || data.is_empty() {
@@ -146,14 +149,15 @@ pub fn parse(m: &Value) -> anyhow::Result<ModelMesh> {
             submeshes.push(Vec::new());
             continue;
         }
-        let first = s.get("firstByte").as_i64().unwrap_or(0).max(0) as usize;
-        let n = s.get("indexCount").as_i64().unwrap_or(0).max(0) as usize;
-        let base = s.get("baseVertex").as_i64().unwrap_or(0).max(0) as u32;
+        let first = s.get("firstByte").as_i64().unwrap_or(0).clamp(0, index_bytes.len() as i64) as usize;
+        // No more indices than the buffer holds (a damaged count reserved terabytes).
+        let n = (s.get("indexCount").as_i64().unwrap_or(0).max(0) as usize).min((index_bytes.len() - first) / index_size);
+        let base = s.get("baseVertex").as_i64().unwrap_or(0).clamp(0, u32::MAX as i64) as u32;
         let mut idx = Vec::with_capacity(n);
         for k in 0..n - n % 3 {
             let at = first + k * index_size;
             let Some(b) = index_bytes.get(at..at + index_size) else { break };
-            let i = if wide { u32::from_le_bytes(b.try_into().unwrap()) } else { u16::from_le_bytes(b.try_into().unwrap()) as u32 } + base;
+            let i = (if wide { u32::from_le_bytes(b.try_into().unwrap()) } else { u16::from_le_bytes(b.try_into().unwrap()) as u32 }).saturating_add(base);
             idx.push(i.min(count.saturating_sub(1) as u32));
         }
         submeshes.push(idx);
@@ -196,17 +200,18 @@ pub fn parse(m: &Value) -> anyhow::Result<ModelMesh> {
         .get("shapes")
         .items()
         .iter()
-        .map(|s| (s.get("firstVertex").as_i64().unwrap_or(0) as usize, s.get("vertexCount").as_i64().unwrap_or(0) as usize))
+        .map(|s| (s.get("firstVertex").as_i64().unwrap_or(0).max(0) as usize, s.get("vertexCount").as_i64().unwrap_or(0).max(0) as usize))
         .collect();
     let full: Vec<f32> = shapes.get("fullWeights").items().iter().map(|w| w.f32_or(100.0)).collect();
     let mut blend_shapes = Vec::new();
     for c in shapes.get("channels").items() {
-        let first = c.get("frameIndex").as_i64().unwrap_or(0).max(0) as usize;
-        let n = c.get("frameCount").as_i64().unwrap_or(0).max(0) as usize;
+        // Only the frames there are (a damaged count once ran this loop for ever).
+        let first = (c.get("frameIndex").as_i64().unwrap_or(0).max(0) as usize).min(frames_of.len());
+        let n = (c.get("frameCount").as_i64().unwrap_or(0).max(0) as usize).min(frames_of.len() - first);
         let frames = (first..first + n)
             .filter_map(|f| {
                 let (a, k) = *frames_of.get(f)?;
-                Some((full.get(f).copied().unwrap_or(100.0), deltas.get(a..a + k)?.to_vec()))
+                Some((full.get(f).copied().unwrap_or(100.0), deltas.get(a..a.checked_add(k)?)?.to_vec()))
             })
             .collect();
         blend_shapes.push(BlendShape { name: c.get("name").str_or("").to_string(), frames, default_weight: 0.0 });
@@ -245,5 +250,29 @@ mod tests {
         assert_eq!(m.submeshes, [vec![0, 1, 2]]);
         assert!(m.skin.is_none());
         assert!(parse(yaml::parse("Mesh:\n  m_Name: Empty\n").get("Mesh")).is_err());
+    }
+
+    #[test]
+    fn damaged_mesh_assets_never_panic_or_hang() {
+        let text = "Mesh:\n  m_Name: Tri\n  m_SubMeshes:\n  - serializedVersion: 2\n    firstByte: 0\n    indexCount: 3\n    topology: 0\n    baseVertex: 0\n  m_IndexFormat: 0\n  m_IndexBuffer: 000001000200\n  m_BindPose:\n  - e00: 1\n    e11: 1\n  m_Shapes:\n    vertices:\n    - vertex: {x: 0, y: 1, z: 0}\n      index: 1\n    shapes:\n    - firstVertex: 0\n      vertexCount: 1\n    channels:\n    - name: s\n      frameIndex: 0\n      frameCount: 1\n    fullWeights: [100]\n  m_VertexData:\n    m_VertexCount: 3\n    m_Channels:\n    - stream: 0\n      offset: 0\n      format: 0\n      dimension: 3\n    m_DataSize: 36\n    _typelessdata: 000000000000000000000000000080400000000000000000000000000000803f00000000\n";
+        let start = std::time::Instant::now();
+        for b in crate::scene::damaged(text.as_bytes(), 3000) {
+            let t = String::from_utf8_lossy(&b);
+            let _ = parse(yaml::parse(&t).get("Mesh"));
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(20), "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_damaged_mesh_asset_reads_what_it_can_without_huge_lists_or_endless_loops() {
+        // A stream index of a trillion (once a list of a trillion strides), a negative one, an index count far past
+        // the buffer, a blend shape channel of i64::MAX frames: read at once, nothing out of bounds.
+        let text = "Mesh:\n  m_Name: Bad\n  m_SubMeshes:\n  - firstByte: 2\n    indexCount: 900000000000\n    topology: 0\n    baseVertex: -5\n  m_IndexFormat: 0\n  m_IndexBuffer: 00000100020003000400\n  m_Shapes:\n    vertices: []\n    shapes:\n    - firstVertex: -1\n      vertexCount: 99999999999\n    channels:\n    - name: x\n      frameIndex: 0\n      frameCount: 9223372036854775807\n  m_VertexData:\n    m_VertexCount: 3\n    m_Channels:\n    - stream: 0\n      offset: 0\n      format: 0\n      dimension: 3\n    - stream: 1000000000000\n      offset: 12\n      format: 0\n      dimension: 3\n    - stream: -1\n      offset: -7\n      format: 0\n      dimension: 2\n    m_DataSize: 36\n    _typelessdata: 000000000000000000000000000080400000000000000000000000000000803f00000000\n";
+        let start = std::time::Instant::now();
+        let m = parse(yaml::parse(text).get("Mesh")).unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(m.positions.len(), 3);
+        assert_eq!(m.submeshes[0], [1, 2, 2], "the indices the buffer holds, clamped to the vertices");
+        assert_eq!(m.blend_shapes[0].frames.len(), 0, "a frame whose vertices are not there is left out");
     }
 }

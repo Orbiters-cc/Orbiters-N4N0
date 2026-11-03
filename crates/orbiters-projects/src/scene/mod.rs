@@ -48,6 +48,8 @@ pub struct Limits {
     pub max_nodes: usize,
     pub max_yaml_bytes: u64,
     pub max_prefab_instances: usize,
+    /// Objects copied into prefab instances, nested ones included (a world of 50 × 50 × 50 nested copies).
+    pub max_objects: usize,
     pub max_texture_bytes: u64,
     /// Threads decoding pictures.
     pub threads: usize,
@@ -67,6 +69,7 @@ impl Limits {
             max_nodes: 200_000,
             max_yaml_bytes: 256 << 20,
             max_prefab_instances: 50_000,
+            max_objects: 1_000_000,
             max_texture_bytes: 256 << 20,
             threads: 4,
             background: false,
@@ -444,6 +447,51 @@ fn trim(root: &Path) {
         let _ = std::fs::remove_file(path.with_extension("json"));
         total -= size;
     }
+}
+
+/// Damaged copies of `sample` for the readers' tests: bytes changed, runs repeated (counts and depths grow), cut short
+/// and doubled, from a fixed seed (the same every run).
+#[cfg(test)]
+pub(crate) fn damaged(sample: &[u8], rounds: usize) -> Vec<Vec<u8>> {
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut out = Vec::with_capacity(rounds);
+    for _ in 0..rounds {
+        let mut b = sample.to_vec();
+        for _ in 0..1 + next() % 6 {
+            if b.is_empty() {
+                break;
+            }
+            let at = (next() as usize) % b.len();
+            match next() % 6 {
+                0 => b[at] = next() as u8,
+                1 => b[at] = [b'9', b'-', b'[', b'{', 0xff, 0x00, b'\n', b' '][(next() % 8) as usize],
+                2 => {
+                    let end = (at + 1 + (next() as usize) % 16).min(b.len());
+                    let run = b[at..end].to_vec();
+                    for _ in 0..1 + next() % 40 {
+                        b.splice(at..at, run.iter().copied());
+                    }
+                }
+                3 => b.truncate(at),
+                4 => {
+                    let end = (at + 1 + (next() as usize) % 8).min(b.len());
+                    b.drain(at..end);
+                }
+                _ => {
+                    let copy = b.clone();
+                    b.extend_from_slice(&copy);
+                }
+            }
+        }
+        out.push(b);
+    }
+    out
 }
 
 /// The GUID a file's `.meta` gives it.

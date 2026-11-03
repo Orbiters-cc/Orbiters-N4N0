@@ -401,8 +401,33 @@ pub fn collider(m: &mut Mesh, s: &Settings) -> [usize; 3] {
         }
         first = first.max(passes);
     }
+    // Stages 2 and 3 see only the vertices still in use, renumbered in their order. Each pass of `simplify` costs
+    // time in the vertex count (its adjacency and flags), and stage 1 leaves about one vertex in twenty-five of the
+    // extracted surface: on VRChat Home's 2.2 M vertices stage 2 spent 0.3 s on its 11 passes over 90 k triangles,
+    // on silent-dawn's 3.5 M stages 2 and 3 took 1.7 s (lab report `mc-fast.md`). Renumbering in order keeps every
+    // edge key's order, so each pass sorts, chooses and collapses exactly as before: the same collider.
+    let mut used = vec![false; nv];
+    for t in &m.triangles {
+        for &v in t {
+            used[v as usize] = true;
+        }
+    }
+    let mut renumbered = vec![u32::MAX; nv];
+    let (mut positions, mut quadrics) = (Vec::new(), Vec::new());
+    for v in (0..nv).filter(|&v| used[v]) {
+        renumbered[v] = positions.len() as u32;
+        positions.push(m.positions[v]);
+        quadrics.push(q[v]);
+    }
+    drop(used);
+    for t in &mut m.triangles {
+        *t = t.map(|v| renumbered[v as usize]);
+    }
+    drop(renumbered);
+    m.positions = positions;
+    q = quadrics;
     // Stage 2: everything, seams included.
-    let none = vec![false; nv];
+    let none = vec![false; m.positions.len()];
     let second = simplify(&m.positions, &mut m.triangles, &mut q, &none, &Options { into_locked: true, ..o });
     // Stage 3: the budget.
     let mut third = 0;

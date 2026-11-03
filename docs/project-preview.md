@@ -150,6 +150,13 @@ frame. The file was in the system's cache in these runs; a 3.8 MB read from a co
 a hard disk about 50 ms. The first preview of a session compiles the pipelines (about 0.2 s with the driver's shader
 cache, longer the very first time after a driver update), in parallel with reading the file.
 
+Built from the files (3 November 2026; `scene_preview` example, debug build, projects on Enzo's H: hard disk, each
+project's last-open scene): 19 of the 19 projects with a scene got a preview (the 20th has none) in 0.1-61 s, 88 MB
+of cache for all of them; the same scenes load in the viewer in 34-150 ms. A card's still takes 95-631 ms to draw on
+the worker. MCB Test's `Canine.unity` built from the files against Toolkit's exact preview: the same meshes to the
+vertex (MCB's binary body 89,166 vertices, 99,642 triangles), the same looks per material and the same bounds to the
+millimetre; it is a little brighter, the sky's ambient light being unknown outside Unity (the default sky's stands in).
+
 ## Code
 
 | Where | What |

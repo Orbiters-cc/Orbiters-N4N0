@@ -221,7 +221,7 @@ impl Viewer {
         let position = flip(vector("position").unwrap_or([0.0, 1.6, 0.0]));
         let target = flip(vector("target").unwrap_or([0.0, 1.6, -3.0]));
         let forward = normalize([target[0] - position[0], target[1] - position[1], target[2] - position[2]]);
-        Self::open_source(ctx, gpu, path, title, integrated, Some(View { position, forward, fov_y: 60.0f32.to_radians(), time_ns: None }))
+        Self::open_source(ctx, gpu, path, title, integrated, Some(View { position, forward, fov_y: 60.0f32.to_radians(), time_ns: None, framed: false }))
     }
 
     fn open_source(ctx: &egui::Context, gpu: &Handles, session: &Path, title: String, integrated: bool, view: Option<View>) -> Self {

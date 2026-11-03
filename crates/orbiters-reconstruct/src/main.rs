@@ -102,6 +102,9 @@ fn args() -> anyhow::Result<Args> {
             "--no-noise-gate" => settings.noise_gate = false,
             "--noise-visible" => settings.noise_visible = true,
             "--noise-dead-max" => settings.noise_dead_max = it.next().context("--noise-dead-max needs a value")?.parse().context("--noise-dead-max takes a share (0–1)")?,
+            // A 3D picture's detail views' share of the colour steps (orbiters_reconstruct::dataset::detail_views,
+            // train::Settings::detail_share, a quarter by default; 0: trained as any keyframe).
+            "--detail-share" => settings.detail_share = it.next().context("--detail-share needs a value")?.parse().context("--detail-share takes a share (0–1)")?,
             "--depth-births" => settings.depth_births = it.next().context("--depth-births needs a value")?.parse().context("--depth-births takes a number (0–1)")?,
             "--gpu" => {
                 device.low_power = match it.next().as_deref() {
@@ -142,7 +145,7 @@ fn run(args: Args) -> anyhow::Result<Report> {
         eprintln!("{line}");
     }
     let data = &prepared.data;
-    let held_out = train::held_out(data.views.len(), args.settings.hold_out_every);
+    let held_out = train::held_out_views(data, args.settings.hold_out_every);
     let mut gpu = device.join().map_err(|_| anyhow::anyhow!("the GPU device's thread panicked"))??;
     let dev = gpu.device.clone();
     let mut settings = args.settings.clone();

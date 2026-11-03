@@ -21,7 +21,7 @@ const GRID_H: f32 = 500.0;
 /// What each of a 3D picture's camera flights does (1 s, 4 s, 8 s), here and on Home's 3D picture page.
 pub(super) const FLIGHT_HINTS: [&str; 3] = [
     "A gentle sweep around what the camera aims at",
-    "Around you, then straight up and down and 10 m out every way",
+    "Zoomed-in close-ups of what the camera aims at (sharper faces), then around you, straight up and down and 10 m out every way",
     "As 4 s, plus circles around four points 8 m away",
 ];
 

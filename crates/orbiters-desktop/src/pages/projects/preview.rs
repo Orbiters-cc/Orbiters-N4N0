@@ -18,7 +18,7 @@
 
 use super::builds::{self, Builder, Done};
 use super::preview_gpu::{self, LightMode, Pipelines, Scene, View};
-use super::state::{Outcome, State};
+use super::state::State;
 use crate::gpu::Handles;
 use crate::pages::{Cx, Job};
 use egui::{pos2, vec2, Align2, Color32, Id, Order, Rect, Sense, Ui, UiBuilder};
@@ -1004,11 +1004,7 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             }
         }
         Some(WindowAct::Open) => {
-            let p = project.clone();
-            state.task(&ctx, "Opening Unity…", move || {
-                orbiters_projects::open_project(&p)?;
-                Ok(Outcome::Changed("Project sent to Unity".into()))
-            });
+            state.open_unity(&ctx, &project, false);
         }
         None => {}
     }

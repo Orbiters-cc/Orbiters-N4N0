@@ -189,6 +189,9 @@ pub struct State {
     pub(super) storage_job: Job<(PathBuf, orbiters_projects::storage::Health)>,
     pub(super) storage_health: Option<(PathBuf, orbiters_projects::storage::Health)>,
     pub(super) storage_checked: Option<Instant>,
+    pub(super) storage: super::storage_card::Storage,
+    /// Screenshots: a real run's Repair storage was pressed.
+    pub(super) stage_repair_started: bool,
     pub(super) error: Option<String>,
     pub(super) query: String,
     pub(super) package_query: String,
@@ -351,6 +354,8 @@ impl Default for State {
             storage_job: Job::default(),
             storage_health: None,
             storage_checked: None,
+            storage: Default::default(),
+            stage_repair_started: false,
             error: None,
             query: String::new(),
             package_query: String::new(),
@@ -662,6 +667,7 @@ impl State {
         }
         self.poll_updates(ctx);
         self.poll_editors(ctx, cx);
+        self.poll_repair(ctx, cx);
         self.load_icons(ctx);
         self.load_repo_icons(ctx);
         if let Some(covers) = self.banner_job.take() {
@@ -1667,6 +1673,7 @@ impl State {
     /// hidden projects (`screenshot/projects_panel.rs`).
     fn stage_panel(&mut self, name: &str) {
         self.stage_packages(name);
+        self.stage_storage(name);
         use crate::state::{MapsMine, UploadKind, UploadState, UploadStatus};
         use orbiters_core::maps::{MinePicture, MinePreview, MineWorld};
         // Every project measured (its Library a good part of it), but the one the panel measures in `-measuring`.
@@ -1811,6 +1818,9 @@ impl State {
     /// Screenshots: what the person does at `frame` of the scenario `name` (a press on a control where it was drawn,
     /// the pointer over a card), for states reached through the interface and frames in the middle of their motion.
     pub fn stage_frame(&mut self, name: &str, frame: u32) -> Option<Poke> {
+        if let Some(poke) = self.stage_storage_frame(name, frame) {
+            return Some(poke);
+        }
         // The page left (frame 50) and entered again (62, the harness), then what a new VRChat session does (80): the
         // scan's list again and every picture asked for again, as `poll` takes them.
         // Right-click menus: a project card's, a found project's, an avatar's row.

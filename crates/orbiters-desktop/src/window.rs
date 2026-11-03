@@ -11,6 +11,19 @@ use std::sync::Arc;
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let endpoint = Endpoint::from_args(args).context("--window needs --service <port> <token>")?;
     let splash = args.iter().any(|a| a == "--splash");
+    // What a Library move interrupted by closing the window left, on a worker: never in the way of starting. Here and not
+    // in the service, which goes on running after its window closed: a move runs in this process, so closing the window is
+    // what ends one, and opening it again is the next start. Screenshot runs and benches never come through here.
+    let _ = std::thread::Builder::new().name("unity-cache-orphans".into()).spawn(|| {
+        orbiters_projects::discovery::low_priority();
+        let swept = orbiters_projects::storage::remove_orphans(&std::sync::atomic::AtomicBool::new(false));
+        for cache in &swept.removed {
+            eprintln!("removed the cache an interrupted repair left: {}", cache.display());
+        }
+        for (path, why) in &swept.failed {
+            eprintln!("could not remove {}: {why}", path.display());
+        }
+    });
     let backend: Ctl = Arc::new(Remote(Client::connect(&endpoint, Role::Window)?));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

@@ -450,12 +450,18 @@ pub fn find_editor(version: &str) -> Option<PathBuf> {
         return Some(p.clone());
     }
     // Editors VCC or ALCOM found or were given (outside Unity Hub's lists).
-    crate::runtime().ok()?.block_on(async {
-        let io = vrc_get_vpm::io::DefaultEnvironmentIo::new(crate::vcc_dir().into());
-        let db = vrc_get_vpm::environment::VccDatabaseConnection::connect(&io).await.ok()?;
-        let wanted = vrc_get_vpm::version::UnityVersion::parse(version)?;
-        db.get_unity_installations().iter().filter(|u| u.version() == Some(wanted)).filter_map(|u| u.path().map(PathBuf::from)).find(|p| p.is_file())
+    // VCC's database can be held by VCC itself: a wait there must not hold up Open in Unity, whose answer is then "not
+    // installed" as for any version not in the lists above.
+    let version = version.to_string();
+    crate::within(std::time::Duration::from_secs(5), move || {
+        crate::runtime().ok()?.block_on(async {
+            let io = vrc_get_vpm::io::DefaultEnvironmentIo::new(crate::vcc_dir().into());
+            let db = vrc_get_vpm::environment::VccDatabaseConnection::connect(&io).await.ok()?;
+            let wanted = vrc_get_vpm::version::UnityVersion::parse(&version)?;
+            db.get_unity_installations().iter().filter(|u| u.version() == Some(wanted)).filter_map(|u| u.path().map(PathBuf::from)).find(|p| p.is_file())
+        })
     })
+    .flatten()
 }
 fn editor_entries(v: &serde_json::Value, version: &str, out: &mut Vec<PathBuf>) {
     match v {

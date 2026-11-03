@@ -169,6 +169,14 @@ pub struct Settings {
     /// best 90 % of pixels lost 0.25 dB (43.22 against 43.47, three runs, about 2 standard deviations) for 0.23 dB more
     /// on the whole image.
     pub noise_gate: bool,
+    /// Render the training steps with the forward whose loop is nested (shaders/raster_forward_nested.wgsl,
+    /// crate::gpu::Gpu::nested_forward): the same entries, order and outputs bit for bit, the loop structure of the
+    /// gpu-stacks experiment's CUDA C++ port, 7–10 % faster than the flattened forward on dumped steps. Default since
+    /// 2026-11-03: whole training runs on the RTX 4080 (Vulkan), the same binary with it off and on, 3 pairs a session,
+    /// took 3.0 % less time on plaza, 4.4 % on exo, 2.2 % on Home and 2.8 % on Silent Dawn (one pair), 8 of 9 pairs on the
+    /// large sessions faster and none slower, quality within noise (the SOTA lab's reports/gpu-stacks.md). Changes
+    /// nothing on D3D12 (the flattened forward there: FXC compiles the nested one slowly). `--flat-forward` turns it off.
+    pub nested_forward: bool,
     /// The noise moves only the Gaussians the step's view shows (Brush weights its noise by visibility): dense Adam
     /// steps every Gaussian every step, and on a long walk a faint Gaussian no view of the moment constrains wanders
     /// for thousands of steps. Off: on Silent Dawn, without the budget rule, it lost 0.44 dB held-out and 0.60 dB on
@@ -284,6 +292,7 @@ impl Default for Settings {
             split: Split::Footprint,
             noise: NOISE,
             noise_gate: true,
+            nested_forward: true,
             noise_visible: false,
             noise_dead_max: NOISE_DEAD_MAX,
             depth_births: 0.0,
@@ -572,6 +581,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     gpu.noise = settings.noise;
     gpu.noise_visible = settings.noise_visible;
     gpu.noise_gate = settings.noise_gate;
+    gpu.nested_forward = settings.nested_forward;
     let spawner = (settings.depth_births > 0.0).then(|| crate::births::Spawner::new(data, &held_out));
     // Each phase of the colour steps' sub-grid (Settings::stride): its size, mask and scene pixels.
     let stride = settings.stride.max(1);

@@ -55,6 +55,8 @@ pub struct Report {
 }
 
 const BUDGET: u64 = 2_000_000;
+/// Half the diagonal an avatar's posed part may span (the tallest avatars are a few metres).
+const MAX_AVATAR_PART: f32 = 4.0;
 
 struct Candidate {
     renderer: i64,
@@ -305,6 +307,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     let mut bounds = Bounds { min: [f32::MAX; 3], max: [f32::MIN; 3] };
     let mut focus = Bounds { min: [f32::MAX; 3], max: [f32::MIN; 3] };
     let mut vertices_total = 0u64;
+    let mut skipped_pose = 0u32;
     let identity = math::IDENTITY;
     for (c, slots) in candidates.iter().zip(&draws_materials) {
         limits.check("posing the meshes")?;
@@ -312,6 +315,16 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
         let posed = c.skinned && (c.mesh.skin.is_some() || c.blend.iter().any(|w| *w != 0.0));
         let (mesh_index, matrix, world_b) = if posed {
             let (positions, normals) = pose(&c.mesh, &c.blend, &c.bones, &world, m);
+            if c.avatar.is_some() && c.mesh.skin.is_some() && bounds_of(&positions).radius() > MAX_AVATAR_PART {
+                // An avatar's part its bones fling metres away (a model changed since Unity imported it, a part
+                // re-rigged by a tool at upload): left out rather than drawn across the scene.
+                skipped_pose += 1;
+                let what = format!("{} left out: posed {:.0} m wide", c.mesh.name, bounds_of(&positions).radius() * 2.0);
+                if loader.missing.len() < 64 {
+                    loader.missing.push(what);
+                }
+                continue;
+            }
             let (mesh, b) = push_mesh(&mut writer, &positions, &normals, &c.mesh.uvs, &c.mesh.submeshes);
             out_meshes.push(mesh);
             vertices_total += positions.len() as u64;
@@ -360,6 +373,9 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     let mut skipped = std::collections::BTreeMap::new();
     if skipped_budget > 0 {
         skipped.insert("budget".to_string(), skipped_budget);
+    }
+    if skipped_pose > 0 {
+        skipped.insert("pose".to_string(), skipped_pose);
     }
     let missing_meshes = meshes.values().filter(|m| m.is_none()).count() as u32;
     if missing_meshes > 0 {
@@ -468,6 +484,15 @@ impl<'g> World<'g> {
         }
     }
 
+    /// The name of a transform's GameObject.
+    pub fn name_of(&self, t: i64) -> Option<&'g str> {
+        let Some(Obj::Transform(tr)) = self.graph.objects.get(&t) else { return None };
+        match self.graph.objects.get(&tr.game_object) {
+            Some(Obj::GameObject(g)) => Some(g.name.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn matrix(&self, t: i64) -> [f32; 16] {
         self.matrices.get(&t).copied().unwrap_or(math::IDENTITY)
     }
@@ -536,7 +561,7 @@ fn clone_mesh(m: &ModelMesh) -> ModelMesh {
         normals: m.normals.clone(),
         uvs: m.uvs.clone(),
         submeshes: m.submeshes.clone(),
-        skin: m.skin.as_ref().map(|s| Skin { bones: s.bones.clone(), bind_poses: s.bind_poses.clone(), weights: s.weights.clone() }),
+        skin: m.skin.as_ref().map(|s| Skin { bones: s.bones.clone(), names: s.names.clone(), bind_poses: s.bind_poses.clone(), weights: s.weights.clone() }),
         blend_shapes: m
             .blend_shapes
             .iter()
@@ -715,10 +740,24 @@ fn pose(mesh: &ModelMesh, weights: &[f32], bones: &[i64], world: &World, rendere
     let Some(skin) = &mesh.skin else { return (positions, mesh.normals.clone()) };
     // Each bone's skinning matrix: its pose times its bind pose; a bone the renderer does not have stays where the
     // mesh is (the renderer's matrix).
+    // A model's bones are found among the renderer's by name (its list may drop and reorder them); a mesh asset's by
+    // index. A name two of the renderer's bones share falls back to the index.
+    let mut by_name: HashMap<&str, Option<i64>> = HashMap::new();
+    if !skin.names.is_empty() {
+        for &t in bones {
+            if let Some(n) = world.name_of(t) {
+                by_name.entry(n).and_modify(|e| *e = None).or_insert(Some(t));
+            }
+        }
+    }
     let skinning: Vec<[f32; 16]> = (0..skin.bind_poses.len())
-        .map(|b| match bones.get(b).copied().filter(|t| *t != 0 && world.matrices.contains_key(t)) {
-            Some(t) => math::mul(&world.matrix(t), &skin.bind_poses[b]),
-            None => renderer,
+        .map(|b| {
+            let named = skin.names.get(b).and_then(|n| by_name.get(n.as_str()).copied().flatten());
+            let t = if skin.names.is_empty() { bones.get(b).copied() } else { named.or_else(|| bones.get(b).copied().filter(|_| by_name.is_empty())) };
+            match t.filter(|t| *t != 0 && world.matrices.contains_key(t)) {
+                Some(t) => math::mul(&world.matrix(t), &skin.bind_poses[b]),
+                None => renderer,
+            }
         })
         .collect();
     let mut out_p = Vec::with_capacity(positions.len());
@@ -889,6 +928,66 @@ fn decode_next(jobs: &[(String, bool, Option<PathBuf>, bool)], next: &std::sync:
 mod tests {
     use super::*;
     use crate::scene::prefab::tests::project;
+
+    /// An unpacked avatar's renderer, saved in the scene: its bones listed in Unity's order (a bone first that the
+    /// model's skin does not have), matched to the model's skin by name.
+    #[test]
+    fn a_saved_renderers_bones_are_matched_by_name() {
+        use crate::scene::model;
+        use crate::scene::prefab::tests::{MODEL_GUID, RED_GUID};
+        let dir = tempfile::tempdir().unwrap();
+        let mut assets = project(dir.path());
+        let mesh = model::file_id("Mesh", "Body", 0);
+        let scene = format!(
+            "%YAML 1.1
+--- !u!1 &1
+GameObject:
+  m_Name: Other
+  m_IsActive: 1
+--- !u!4 &2
+Transform:
+  m_GameObject: {{fileID: 1}}
+  m_LocalPosition: {{x: 9, y: 9, z: 9}}
+  m_Father: {{fileID: 0}}
+--- !u!1 &3
+GameObject:
+  m_Name: Bone
+  m_IsActive: 1
+--- !u!4 &4
+Transform:
+  m_GameObject: {{fileID: 3}}
+  m_LocalPosition: {{x: 0, y: 5, z: 0}}
+  m_Father: {{fileID: 0}}
+--- !u!1 &5
+GameObject:
+  m_Name: Body
+  m_IsActive: 1
+--- !u!4 &6
+Transform:
+  m_GameObject: {{fileID: 5}}
+  m_Father: {{fileID: 0}}
+--- !u!137 &7
+SkinnedMeshRenderer:
+  m_GameObject: {{fileID: 5}}
+  m_Enabled: 1
+  m_Materials:
+  - {{fileID: 2100000, guid: {RED_GUID}, type: 2}}
+  m_Mesh: {{fileID: {mesh}, guid: {MODEL_GUID}, type: 3}}
+  m_Bones:
+  - {{fileID: 2}}
+  - {{fileID: 4}}
+"
+        );
+        std::fs::write(dir.path().join("Assets/Unpacked.unity"), scene).unwrap();
+        assets.insert("ffff0000000000000000000000000010", dir.path().join("Assets/Unpacked.unity"));
+        let file = SceneFile { path: dir.path().join("Assets/Unpacked.unity"), guid: "f".repeat(32), name: "Unpacked".into() };
+        let built = build(dir.path(), &file, &assets, &Limits::default()).unwrap();
+        let h = &built.header;
+        assert_eq!(h.draws.len(), 1);
+        let b = h.meshes[h.draws[0].mesh as usize].bounds;
+        // Bound one metre up, its bone now five metres up: the quad four to five metres up.
+        assert!((b.min[1] - 4.0).abs() < 1e-3 && (b.max[1] - 5.0).abs() < 1e-3, "{b:?}");
+    }
 
     #[test]
     fn a_scene_builds_into_a_preview_the_desktop_reads() {

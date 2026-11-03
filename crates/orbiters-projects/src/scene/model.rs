@@ -62,6 +62,10 @@ pub struct NodeIds {
 pub struct Skin {
     /// The bones (node indices), in the order the mesh's bind poses are.
     pub bones: Vec<usize>,
+    /// Their names (a model's; empty for a mesh asset, whose bind poses are already in the renderer's bones' order).
+    /// A renderer saved in a file lists its bones in Unity's order, which drops the bones without weights
+    /// (`optimizeBones`), so a model's bones are matched to the renderer's by name.
+    pub names: Vec<String>,
     /// Unity's bind poses: from the mesh's space to each bone's, at bind time (column-major).
     pub bind_poses: Vec<[f32; 16]>,
     /// Up to four (bone, weight) a vertex, the weights summing to one.
@@ -72,7 +76,8 @@ pub struct BlendShape {
     pub name: String,
     /// The shape's frames: (weight 0–100 where it is whole, sparse position offsets).
     pub frames: Vec<(f32, Vec<(u32, [f32; 3])>)>,
-    /// The weight the file sets (0–100).
+    /// The weight a renderer starts with: 0, as Unity imports every blend shape (a value the file keeps, a shape key
+    /// left on in Blender, is not applied; Ultirex 4.1's tail has a 100 % shape that flings it metres away).
     pub default_weight: f32,
 }
 
@@ -527,11 +532,13 @@ fn mesh_of(
 
     let skin = mesh.skin_deformers.first().map(|skin| {
         let mut bones = Vec::new();
+        let mut names = Vec::new();
         let mut bind_poses = Vec::new();
         let n2g = invert(&g2n);
         for cluster in skin.clusters.iter() {
             let bone = cluster.bone_node.as_ref().and_then(|b| node_index.get(&b.element.element_id).copied()).unwrap_or(0);
             bones.push(bone);
+            names.push(cluster.bone_node.as_ref().map(|b| b.element.name.to_string()).unwrap_or_default());
             // Mesh (node) space → bone space at bind: geometry_to_bone · node_to_geometry.
             bind_poses.push(unity_matrix(&mul(&cluster.geometry_to_bone, &n2g), unit));
         }
@@ -553,7 +560,7 @@ fn mesh_of(
                 w
             })
             .collect();
-        Skin { bones, bind_poses, weights }
+        Skin { bones, names, bind_poses, weights }
     });
 
     let mut blend_shapes = Vec::new();
@@ -583,7 +590,7 @@ fn mesh_of(
                     frames.push((key.target_weight as f32 * 100.0, offsets));
                 }
                 frames.sort_by(|a, b| a.0.total_cmp(&b.0));
-                blend_shapes.push(BlendShape { name: channel.element.name.to_string(), frames, default_weight: channel.weight as f32 * 100.0 });
+                blend_shapes.push(BlendShape { name: channel.element.name.to_string(), frames, default_weight: 0.0 });
             }
         }
     }

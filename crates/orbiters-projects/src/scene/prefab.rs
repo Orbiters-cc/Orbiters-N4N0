@@ -235,8 +235,18 @@ impl<'a> Loader<'a> {
         let text = self.read_text(path)?;
         let mut graph = Graph::default();
         let mut instances = Vec::new();
+        let mut aliases: HashMap<i64, i64> = HashMap::new();
         for doc in yaml::documents(&text) {
             if doc.stripped {
+                // A stand-in for an object of an instance: older files give it an ID of its own (the instance's plus
+                // one, …), newer ones the mixed ID. The file's own objects refer to it by that ID.
+                let v = doc.parse();
+                let source = v.get("m_CorrespondingSourceObject").as_ref().map_or(0, |r| r.file_id);
+                let instance = v.get("m_PrefabInstance").as_ref().map_or(0, |r| r.file_id);
+                let real = mixed(instance, source);
+                if source != 0 && instance != 0 && real != doc.id {
+                    aliases.insert(doc.id, real);
+                }
                 continue;
             }
             match doc.class {
@@ -323,6 +333,12 @@ impl<'a> Loader<'a> {
         drop(text);
         for (id, pi) in instances {
             self.instantiate(id, &pi, &mut graph, depth)?;
+        }
+        if !aliases.is_empty() {
+            // References to stand-ins (a parent, a GameObject, a bone, an instance's parent) lead to the real objects.
+            for obj in graph.objects.values_mut() {
+                obj.remap(|x| aliases.get(&x).copied().unwrap_or(x));
+            }
         }
         Ok(graph)
     }
@@ -787,6 +803,58 @@ Material:
         assert_eq!(g.ambient.as_ref().map(|a| a.mode), Some(3));
         // The model was read once although two prefabs lead to it.
         assert_eq!(loader.models.len(), 1);
+    }
+
+    #[test]
+    fn an_older_scenes_stand_ins_with_ids_of_their_own_lead_to_the_real_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut assets = project(dir.path());
+        let root_go = model::file_id("GameObject", "//RootNode/root", 0);
+        let bone_tr = model::file_id("Transform", "//RootNode/root/Armature/Bone/Transform", 0);
+        // As Unity 2019 saved scenes: the stand-ins numbered after their instance, a descriptor and a child under them.
+        let scene = format!(
+            "%YAML 1.1
+--- !u!1001 &100
+PrefabInstance:
+  m_Modification:
+    m_TransformParent: {{fileID: 0}}
+    m_Modifications: []
+  m_SourcePrefab: {{fileID: 100100000, guid: {MODEL_GUID}, type: 3}}
+--- !u!1 &101 stripped
+GameObject:
+  m_CorrespondingSourceObject: {{fileID: {root_go}, guid: {MODEL_GUID},
+    type: 3}}
+  m_PrefabInstance: {{fileID: 100}}
+--- !u!4 &102 stripped
+Transform:
+  m_CorrespondingSourceObject: {{fileID: {bone_tr}, guid: {MODEL_GUID}, type: 3}}
+  m_PrefabInstance: {{fileID: 100}}
+--- !u!114 &103
+MonoBehaviour:
+  m_GameObject: {{fileID: 101}}
+  m_Enabled: 1
+  m_Script: {{fileID: 542108242, guid: 67cc4cb7839cd3741b63733d5adf0442, type: 3}}
+--- !u!1 &110
+GameObject:
+  m_Name: Hat
+  m_IsActive: 1
+--- !u!4 &111
+Transform:
+  m_GameObject: {{fileID: 110}}
+  m_LocalPosition: {{x: 0, y: 0.1, z: 0}}
+  m_Father: {{fileID: 102}}
+"
+        );
+        std::fs::write(dir.path().join("Assets/Old.unity"), scene).unwrap();
+        assets.insert("ffff0000000000000000000000000009", dir.path().join("Assets/Old.unity"));
+        let limits = Limits::default();
+        let mut loader = Loader::new(&assets, &limits);
+        let g = loader.file(&dir.path().join("Assets/Old.unity")).unwrap();
+        let Obj::Behaviour(d) = &g.objects[&103] else { panic!() };
+        assert_eq!(d.game_object, mixed(100, root_go), "the descriptor is on the model's root");
+        assert!(g.objects.contains_key(&d.game_object));
+        let Obj::Transform(hat) = &g.objects[&111] else { panic!() };
+        assert_eq!(hat.father, mixed(100, bone_tr), "the hat hangs under the model's bone");
     }
 
     #[test]

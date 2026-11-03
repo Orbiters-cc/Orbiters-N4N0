@@ -177,7 +177,7 @@ pub fn parse(m: &Value) -> anyhow::Result<ModelMesh> {
                 w
             })
             .collect();
-        Skin { bones: (0..bind.len()).collect(), bind_poses: bind.clone(), weights }
+        Skin { bones: (0..bind.len()).collect(), names: Vec::new(), bind_poses: bind.clone(), weights }
     });
 
     let shapes = m.get("m_Shapes");

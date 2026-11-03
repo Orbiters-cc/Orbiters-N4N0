@@ -156,6 +156,16 @@ pub fn menu_button(ui: &mut Ui, id_salt: impl egui::AsIdSalt, rect: Rect, glyph:
     list(&ctx, id, rect, items, None, menu_width(ui, items), false)
 }
 
+/// The list of `items` for a control its caller draws (a chip): `pressed` this frame opens or closes it, and it closes
+/// as the others do (a press elsewhere, Escape, a pick), under `anchor` or above it when there is no room below.
+/// Returns the index picked this frame.
+pub fn list_from(ctx: &egui::Context, id: Id, anchor: Rect, pressed: bool, items: &[Item<'_>], selected: Option<usize>, width: f32) -> Option<usize> {
+    if pressed {
+        set_open(ctx, id, !is_open(ctx, id));
+    }
+    list(ctx, id, anchor, items, selected, width, false)
+}
+
 fn menu_width(ui: &Ui, items: &[Item<'_>]) -> f32 {
     let label = items.iter().map(|i| widgets::text_size(ui, &Txt::new(i.label, 13.0)).x).fold(0.0, f32::max);
     let detail = items.iter().filter_map(|i| i.detail).map(|d| widgets::text_size(ui, &Txt::new(d, 11.5)).x + 10.0).fold(0.0, f32::max);

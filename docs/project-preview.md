@@ -3,7 +3,65 @@
 Enzo asked for a quick 3D preview of a Unity project in Orbiters - N4N0 before opening it, loading in at most about
 3 seconds. The Unity projects page now shows the selected project's last saved scene in 3D in its panel's hero card,
 in place of the avatar pictures, and grows it into a window over the page on a press. The file format is in contracts'
-Docs/project-preview.md.
+Docs/project-preview.md. Since 3 November 2026 a project Toolkit never wrote one for gets one built from its own files,
+for each of its scenes (below).
+
+## Built from the project's files (3 November 2026)
+
+Enzo asked for previews of projects that were never opened, or never with Orbiters Toolkit, and for every scene of a
+project, not only the one saved last. Orbiters - N4N0 now builds a scene's preview itself from the project's files
+(`orbiters_projects::scene`), in the same format Toolkit writes, so the viewer draws both alike:
+
+- **What it reads.** The scene's YAML with every prefab instance resolved as Unity resolves it (nested prefabs,
+  variants, overrides, removed components and GameObjects), models through ufbx (FBX binary and ASCII, OBJ) as Unity
+  imports them (X mirrored, triangles reversed, file units to metres, Z-up files turned upright, Unity's object IDs:
+  xxHash64 of `Type:<class>->//RootNode/root/<path>0`), skinned meshes posed by their bones after their blend shapes,
+  Unity's built-in meshes and mesh `.asset` files saved as text, materials (`.mat`) by shader family with Toolkit's
+  rules (lilToon, Poiyomi, MToon, Unity Toon Shader, Standard), their main and emission textures (PNG, JPEG, TGA, BMP,
+  TIFF, GIF, PSD and PSB's merged picture) shrunk to Toolkit's budget, VRChat avatar and world descriptors, the
+  scene's directional lights and gradient or flat ambient light. GUIDs come from Unity's own database
+  (`Library/SourceAssetDB`, read as LMDB without LMDB) when the project was opened once, else from the `.meta` files
+  (read on 8 threads, the kinds a preview needs first, kept in the cache by modification time): on Enzo's hard disk a
+  cold `.meta` costs about 12 ms, 87 s for a 7,000-asset project, against 0.3 s for the database.
+- **Never into the project.** Previews and what they were built from go to the app's cache folder,
+  `%LOCALAPPDATA%/Orbiters/Desktop/cache/project-previews/<project>/` (`<scene GUID>.preview`, `<scene GUID>.json`:
+  every file read with its size and time, or why the build failed; `guids.txt`, the cards' `cover.jpg`), at most
+  1.5 GB with everything in it counted, the previews shown least recently first out (their record's time, touched
+  when shown: Windows keeps no last-access times on large disks), a project left without one going whole. A
+  screenshot run builds into a cache of its own (`screenshot.rs`, `sandbox_user_data`).
+- **Bounded on odd files.** Reviewed 3 November 2026 against damaged and hostile files: a flow value nested deeper
+  than 64 is passed over (it once looped, filling the memory), a mesh asset's stream, offset and counts are checked
+  against Unity's ranges and its buffers, a binary file makes at most 4 million values and never repeats records of
+  no size, Unity's database read gives up on a tree whose branches point back up, a PSD header cannot ask for more
+  than its file could hold, nested prefabs copy at most a million objects, and a source that failed is not read again
+  for each instance. A build that panics anyway is caught on the worker (the scene says so until its files change).
+- **Retried, stopped, never waiting.** A build that ran out of time (the first look at a project never opened, on a
+  hard disk) is tried again after 30 minutes, not kept as a failure for two weeks; a build the panel or the window
+  asks for stops the card still or other build running (put back in its queue); the app closing stops the build
+  running; a scene saved during its build is built again.
+- **Which preview a scene gets.** Toolkit's when it is at least as new as the scene file (2 s of slack for copied file
+  times): Unity drew it, it is exact. Else the one built here while none of the files it read changed (sizes and
+  modification times, the project's package manifests too, at most 14 days); a changed one stays on screen while it is
+  built again. A failed build is kept with its reason until a file it read changes.
+- **Scenes.** All of a project's scenes under `Assets` (and those in its build settings): the one Unity had open last
+  first (`Library/LastSceneManagerSetup.txt`), then the build settings' in order, then the others from the most
+  recently saved. The card opens on the first (another that has a preview when the first cannot be built). The window
+  lists them as chips, as many as fit between the facts and the buttons (the shown one always), the others under
+  "All scenes · N"; a chip says when its scene is building (a spinner) or has no preview (a warning, the reason on
+  hover). Picking one not built yet builds it first; the scene before stays, dimmed under "Building <scene> from the
+  project's files…", or "No preview of <scene>: <why>".
+- **In the background.** One worker (`pages/projects/builds.rs`, below normal priority, its picture threads too) builds
+  the scene the panel or the window asks for before anything else, then draws the gallery cards' stills. A build
+  stops with its reason after 120 s, at a model over 600 MB or 6 million triangles, ufbx past 2 GB of memory, a scene
+  or prefab over 256 MB, a texture over 256 MB or 8192 pixels on a side.
+- **The gallery's cards.** A project whose card has no avatar picture gets a still of its first scene, drawn by the
+  same renderer as the 3D view on the worker (640×360, read back, kept as `cover.jpg` beside the preview): one kept
+  from before shows at once, a new one only when its preview changed. Stills are asked for in the gallery's order
+  whatever is on screen, two seconds after the window opens (the avatar pictures kept from before show first), and only
+  change a card's picture, never its place or size. Avatar pictures stay first: they are what the person chose.
+- **On the card without a preview**: "Building 3D preview…" with a spinner while it builds, "No scene to preview" for
+  a project without one, "No preview: <why>" (the full reason and what Toolkit would do on hover), beside "Add Toolkit
+  for 3D" or "Update Toolkit for 3D" when the project's Toolkit can be added or updated.
 
 ## How it looks and behaves
 
@@ -38,8 +96,9 @@ Docs/project-preview.md.
   2022.3.22f1 (linear, never baked): a new scene about 1.2; the default sky without a sun 0.17 (kept, dim and flat as
   in Unity); no skybox and no sun 0.055 (the Lighting window's Ambient Color alone: studio); a scene read by Toolkit
   0.4.15 in the editor update it was opened in, before Unity computed its ambient probe, 0 (`ambient: null`, the
-  previews of sunless scenes 0.4.15 wrote: studio). Previews N4N0 builds itself, without `lighting`, get the studio
-  light by the same rule.
+  previews of sunless scenes 0.4.15 wrote: studio). Previews N4N0 builds itself go by the same rule: they record the
+  scene's directional lights and a gradient or flat ambient light, never a skybox's (only Unity computes it: `null`),
+  and none at all when the scene has neither (the studio light).
 - **The studio light** is the desktop's own, the same for every project and as bright as Unity's default scene (2
   November 2026, after Enzo found his avatar glossy and redder than in Unity): Unity's default directional light (colour
   1, 0.956, 0.839, intensity 1) as the key from the front left of the avatar, about 50° up as in a new scene, with a
@@ -70,15 +129,18 @@ Docs/project-preview.md.
   press adds it), or "3D preview unreadable" with the reason. The two offers are green and show a spinner while the
   package changes. A spinner shows while a preview loads.
 
-## Why a snapshot written by Toolkit
+## Why Toolkit's snapshot first
 
 Nothing outside Unity can draw a project's scene cheaply: scenes reference prefabs, FBX models, materials of custom
 shaders (Poiyomi, lilToon, locked variants) and textures whose usable forms live in `Library`; posing an avatar needs
-its skinning, blendshape weights and constraints. Reproducing that in the desktop would be a second Unity importer,
-slow on first open and never quite right. Inside Unity all of it is a few calls away, so Toolkit keeps a small
+its skinning, blendshape weights and constraints. The desktop's own builder (above) is a second, partial Unity
+importer: seconds to a minute the first time, and never quite right where Unity's own processing matters (shaders'
+real looks, constraints, tools that build the avatar at upload such as VRCFury or Modular Avatar, meshes saved in
+Unity's binary format). Inside Unity all of it is a few calls away, so Toolkit keeps a small
 ready-to-draw copy (`UserSettings/Orbiters/Previews/<scene GUID>.preview`): posed meshes, base-colour pictures (JPEG,
 PNG where alpha matters) and where everything stands. The desktop reads the file in one go and uploads its vertex and
-index blobs as they are; it converts nothing. A project never opened with such a Toolkit has no preview and says so.
+index blobs as they are; it converts nothing. Its preview is used whenever it is as new as the scene; the builder
+fills in the other scenes and the projects without Toolkit.
 
 Toolkit writes one a few seconds after a scene is saved (the last of several saves), after an avatar upload, and once
 after the editor loads when the open scene has none or an older one. It reads the scene in steps on
@@ -115,13 +177,22 @@ frame. The file was in the system's cache in these runs; a 3.8 MB read from a co
 a hard disk about 50 ms. The first preview of a session compiles the pipelines (about 0.2 s with the driver's shader
 cache, longer the very first time after a driver update), in parallel with reading the file.
 
+Built from the files (3 November 2026; `scene_preview` example, debug build, projects on Enzo's H: hard disk, each
+project's last-open scene): 19 of the 19 projects with a scene got a preview (the 20th has none) in 0.1-61 s, 88 MB
+of cache for all of them; the same scenes load in the viewer in 34-150 ms. A card's still takes 95-631 ms to draw on
+the worker. MCB Test's `Canine.unity` built from the files against Toolkit's exact preview: the same meshes to the
+vertex (MCB's binary body 89,166 vertices, 99,642 triangles), the same looks per material and the same bounds to the
+millimetre; it is a little brighter, the sky's ambient light being unknown outside Unity (the default sky's stands in).
+
 ## Code
 
 | Where | What |
 | --- | --- |
 | `orbiters_projects::preview` | the format: header types, `read`/`parse` (every blob checked to lie in the file and fit its use), `list` (headers only, newest first), `Writer`, octahedral normals and half floats; tests |
 | `pages/projects/preview_gpu.rs` | loading (parallel decode and mipmaps, pipelines on another thread) and drawing: WGSL, shadow pass, mirrored pass, ground, background, MSAA resolved into a texture egui samples (`register_native_texture`), drawn again only when the view changes |
-| `pages/projects/preview.rs` | listing and loading jobs, the camera (orbit, goal, inertia, swing-in, reset), the card's cover, the window, the stand-in scene for screenshots |
+| `pages/projects/preview.rs` | listing (scenes and their previews) and loading jobs, the camera (orbit, goal, inertia, swing-in, reset), the card's cover and its notes, the window and its scene chips, the stand-in scene and the real-project fixtures for screenshots |
+| `orbiters_projects::scene` | previews built from a project's files: `scenes`, `list`, `build_scene`, the cache and its freshness (`mod.rs`); `yaml`, `assets` (GUIDs, Unity's LMDB database), `prefab`, `model` (ufbx), `material`, `texture` (PSD/PSB too), `mesh_asset`, `primitives`, `build` (posing, budget, writing); `examples/scene_preview.rs` builds real projects' scenes and prints the table below |
+| `pages/projects/builds.rs` | the background worker: builds first, then the cards' stills (drawn with `preview_gpu::Scene::still`, read back, kept as `cover.jpg`) |
 | Toolkit `Editor/Preview/ProjectPreview.cs`, `PreviewFile.cs` | the capture and the writer; `ProjectPreview.CaptureNow`, `LastResult` for diagnostics |
 | Toolkit `Editor/Preview/PreviewLook.cs` | each material's look by its shader family: shading, metallic, smoothness, normal, surface and emission pictures |
 
@@ -134,13 +205,21 @@ window is back in the card.
 ```powershell
 orbiters-desktop --screenshot <out> --sessions <empty folder> --only projects-preview
 $env:ORBITERS_PREVIEW_FILE = "<a .preview Toolkit wrote>"   # instead of the stand-in scene
+$env:ORBITERS_SCREENSHOT_NO_PICTURES = "1"   # skip this computer's VRChat pictures index (hours on a large archive)
 ```
 
 Scenarios: `projects-preview` (settled), `-reveal` (rising, 0.5 s in), `-swing` (1 s in), `-turned` (dragged),
 `-open-mid` (the window six frames into its morph), `-open`, `-close` (the window on the upper half from close by, to
 judge materials), `-back` (from behind, the side away from the light), `-scene-light` (the window in the scene's
 recorded light) and `-studio-light` (the same after a press on the switch's Studio light), `-scenes` (two scenes to
-switch between), `-sheet` (with `--width 1040`), `-none`, `-no-toolkit` and `-old-toolkit` (the notes). The stand-in is
+switch between), `-sheet` (with `--width 1040`), `-none`, `-no-toolkit` and `-old-toolkit` (a scene with nothing to
+draw: "No preview: …", with the Toolkit offers), `-building` (a build under way), `-no-scene`. With
+`ORBITERS_PREVIEW_PROJECT` set to a Unity project's folder (read only; set `ORBITERS_PREVIEW_CACHE` to keep its
+previews out of the app's cache): `-native` (its last-open scene built on the frame), `-native-building`,
+`-native-open` (the window and its scene chips), `-native-switch` (the second scene picked, building),
+`-native-switched` (the same once built), `-native-all` (the list of every scene). `projects-stills` shows the gallery
+with the projects `ORBITERS_PREVIEW_PROJECTS` names (separated by `|`), without avatar pictures, their stills drawn on
+the frame. The stand-in is
 N4N0's black sphere with white strokes over a plinth, a green ring and two cubes, as an avatar scene, one material look
 each: a glossy sphere, a matte plinth, a glowing unlit ring, a toon cube and a metal one.
 
@@ -160,3 +239,9 @@ light, the switch on Studio light with its Scene light half dimmed.
 - Non-readable meshes (FBX without Read/Write) were checked readable in Edit Mode without errors (FashionSuit's), and
   a non-readable skinned body bakes; a project in Play Mode or compiling waits.
 - The preview needs a Toolkit release with `ProjectPreview` and a desktop release; until then projects show the note.
+- Built from the files: meshes saved in Unity's binary serialization (MCB's generated body, 160 MB) and `.blend`
+  models are left out (counted, the reason in the cache's record); shaders' looks are Toolkit's rules on the saved
+  properties, not the shaders themselves (a missing shader draws its texture rather than Unity's magenta); animators,
+  constraints and what VRCFury or Modular Avatar do at upload are not applied (the scene as saved); a skinned mesh's
+  bones are the renderer's; normal, metallic-smoothness and occlusion maps are not read; the Scene view's camera is
+  not known (worlds open over a corner of their bounds).

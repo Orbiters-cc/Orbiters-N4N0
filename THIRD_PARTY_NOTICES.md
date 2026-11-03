@@ -18,6 +18,8 @@ every crate built into the programs, and of the native libraries next to them, a
 | ALCOM 2022.3.22f1 avatar/world project template assets (anatawa12 and contributors, vendored in orbiters-projects/templates) | MIT |
 | reqwest, hyper, tower, rustls (VPM downloads) | MIT OR Apache-2.0, MIT, MIT, Apache-2.0 OR ISC OR MIT |
 | walkdir, winreg (Unity project discovery) | MIT OR Unlicense, MIT |
+| ufbx (bindings and the bundled ufbx C library, Samuli Raivio; FBX and OBJ models of Unity projects' 3D previews), mint | MIT OR Unlicense, MIT |
+| tiff, weezl (TIFF textures of Unity projects' 3D previews) | MIT |
 | tiny-skia | BSD-3-Clause |
 | png | MIT OR Apache-2.0 |
 | bytemuck | Zlib OR Apache-2.0 OR MIT |

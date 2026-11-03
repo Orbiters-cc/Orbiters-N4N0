@@ -1,6 +1,7 @@
 //! Unity projects, shared with Capture's avatar setup picker. All filesystem and network work lives in jobs.
 pub(crate) mod art;
 mod blend;
+mod builds;
 mod conflict;
 mod dialogs;
 mod duplicate;

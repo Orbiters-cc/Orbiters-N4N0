@@ -262,7 +262,10 @@ pub(super) enum LightMode {
 /// The light a preview is drawn in: the scene's when the person prefers it, the file recorded it and it shows the
 /// scene ([`scene_light_shows`]), else the studio's. So a scene without a sun whose ambient light Unity never computed
 /// (Toolkit 0.4.15 then writes no lights and `ambient: null`), a pitch-dark one, or a preview without `lighting` (Toolkit
-/// 0.4.14 and older, previews N4N0 builds itself) never shows its avatars black.
+/// 0.4.14 and older; a preview N4N0 built from a scene with neither a directional light nor a gradient or flat ambient
+/// light) never shows its avatars black. A built preview that did record its scene's lights goes by the same rule: its
+/// ambient light is `null` when the scene's comes from the sky (only Unity computes that one), so a built sunless
+/// skybox scene is drawn in the studio's light too.
 pub(super) fn light_mode(prefer_scene: bool, h: &preview::Header) -> LightMode {
     if prefer_scene && h.lighting.as_ref().is_some_and(scene_light_shows) {
         LightMode::Scene
@@ -357,6 +360,8 @@ struct Targets {
     resolve: wgpu::TextureView,
     /// The resolved picture as egui samples it (its bytes, encoded sRGB).
     shown: wgpu::TextureView,
+    /// The resolved picture's texture (a gallery card's still is read back from it).
+    picture: wgpu::Texture,
 }
 
 /// A loaded preview on the GPU.
@@ -900,8 +905,25 @@ impl Scene {
             self.shadow_reveal = None;
         }
         self.last = Some((view, size));
-        self.draw(gpu, size, view);
+        self.draw(&gpu.device, &gpu.queue, size, view);
         (id, uv)
+    }
+
+    /// The scene drawn once from `view` into a picture of `size` pixels of its own, read back (a gallery card's still;
+    /// on a worker: it waits for the GPU).
+    pub fn still(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, size: (u32, u32), view: View) -> anyhow::Result<image::RgbaImage> {
+        let saved = self.targets.replace(targets(device, size));
+        if view.light != self.light_mode {
+            self.light = light_for(&self.header, view.light);
+            self.light_mode = view.light;
+            self.shadow_reveal = None;
+        }
+        self.draw(device, queue, size, view);
+        let t = self.targets.take().expect("still targets");
+        self.targets = saved;
+        self.last = None;
+        let pixels = crate::overlay::worlds::render::read_texture(device, queue, &t.picture)?;
+        image::RgbaImage::from_raw(size.0, size.1, pixels).ok_or_else(|| anyhow::anyhow!("a still of the wrong size"))
     }
 
     fn look(&self) -> Look {
@@ -911,7 +933,7 @@ impl Scene {
         }
     }
 
-    fn draw(&mut self, gpu: &crate::gpu::Handles, size: (u32, u32), view: View) {
+    fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, size: (u32, u32), view: View) {
         let h = &self.header;
         let look = self.look();
         let focus = if h.kind == Kind::Avatars { h.focus } else { h.bounds };
@@ -958,7 +980,7 @@ impl Scene {
             u.extend_from_slice(&[ground[0], ground[1], ground[2], 0.0]);
             u
         };
-        let q = &gpu.queue;
+        let q = queue;
         q.write_buffer(&self.frame, 0, bytemuck::cast_slice(&uniform(&view_proj, view.eye, false)));
         // Mirrored in the ground: y → 2g − y.
         let reflect: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0 * ground_y, 0.0, 1.0];
@@ -975,7 +997,7 @@ impl Scene {
         let draws = &self.draws;
         self.blend_order.sort_by(|&a, &b| dist(&draws[b]).total_cmp(&dist(&draws[a])));
 
-        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("project preview") });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("project preview") });
         let pl = &self.pipelines;
         if shadow_needed {
             self.shadow_reveal = Some(reveal_y);
@@ -1044,7 +1066,7 @@ impl Scene {
                 self.draw_one(&mut pass, d);
             }
         }
-        gpu.queue.submit([encoder.finish()]);
+        queue.submit([encoder.finish()]);
     }
 
     fn cull_of(&self, d: &Draw, mirror: bool) -> usize {
@@ -1086,8 +1108,13 @@ fn targets(device: &wgpu::Device, size: (u32, u32)) -> Targets {
     };
     let color = make("preview color", COLOR, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT, &[]);
     let depth = make("preview depth", DEPTH, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT, &[]);
-    let resolve =
-        make("preview picture", COLOR, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING, &[wgpu::TextureFormat::Rgba8Unorm]);
+    let resolve = make(
+        "preview picture",
+        COLOR,
+        1,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        &[wgpu::TextureFormat::Rgba8Unorm],
+    );
     let shown = resolve.create_view(&wgpu::TextureViewDescriptor { format: Some(wgpu::TextureFormat::Rgba8Unorm), ..Default::default() });
     Targets {
         size,
@@ -1095,6 +1122,7 @@ fn targets(device: &wgpu::Device, size: (u32, u32)) -> Targets {
         depth: depth.create_view(&Default::default()),
         resolve: resolve.create_view(&Default::default()),
         shown,
+        picture: resolve,
     }
 }
 
@@ -1676,7 +1704,8 @@ mod tests {
         assert!((scene_light_brightness(&l) - 0.01).abs() < 1e-6, "the faint light alone: the bright one is the third pointed");
         assert_eq!(mode(Some(l)), LightMode::Studio);
 
-        // Previews without the scene's light (schema 1, Toolkit 0.4.14 and older, previews N4N0 builds itself).
+        // Previews without the scene's light (schema 1, Toolkit 0.4.14 and older, built ones of scenes with no sun and a
+        // skybox's ambient light).
         assert_eq!(mode(None), LightMode::Studio, "no lighting recorded");
         // The person's choice of the studio stands whatever the scene's light.
         assert_eq!(

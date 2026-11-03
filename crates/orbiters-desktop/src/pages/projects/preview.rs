@@ -9,19 +9,28 @@
 //! A preview that recorded its scene's lights is drawn in them when they show it (else in the studio's light, so an
 //! avatar never shows black: `preview_gpu::light_mode`); the window's switch shows it in the studio's light
 //! instead (remembered for every preview).
+//!
+//! Every scene of the project is listed (`orbiters_projects::scene::list`: the one Unity had open last first), each
+//! with its preview: Toolkit's when it is at least as new as the scene (exact), else one built from the project's own
+//! files on the background worker ([`super::builds`]), kept in the app's cache until a file it read changes. So a
+//! project never opened with Toolkit, or never opened at all, has its 3D preview too; the window's chips switch
+//! between the scenes, building the one picked if needed; a scene that cannot be built says why ("No preview: …").
 
+use super::builds::{self, Builder, Done};
 use super::preview_gpu::{self, LightMode, Pipelines, Scene, View};
 use super::state::{Outcome, State};
 use crate::gpu::Handles;
 use crate::pages::{Cx, Job};
 use egui::{pos2, vec2, Align2, Color32, Id, Order, Rect, Sense, Ui, UiBuilder};
 use orbiters_projects::discovery::Project;
-use orbiters_projects::preview::{self as file, Entry, Header, Kind};
+use orbiters_projects::preview::{self as file, Header, Kind};
+use orbiters_projects::scene::{self as native, Slot, Source};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::viewer::{self, Morph};
 use orbiters_ui::widgets::{self, Button, IconButton, Size, Variant};
 use orbiters_ui::{feedback, format, icons, paint};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -49,8 +58,21 @@ pub(super) struct Previews {
     window: Option<Morph>,
     /// When the window opened (its hint).
     opened_at: f64,
-    /// Screenshots: the project folder whose previews every project shows; read on the frame (no jobs).
+    /// Builds from the projects' files and the cards' stills, in the background.
+    builds: Builder,
+    /// The gallery cards' stills, by project, and when each arrived (it fades in).
+    stills: HashMap<PathBuf, (egui::TextureHandle, f64)>,
+    /// Projects that get no still (no scene that builds).
+    no_still: HashSet<PathBuf>,
+    /// Screenshots: the project folder whose previews every project shows; read on the frame (no jobs). A real project
+    /// (`ORBITERS_PREVIEW_PROJECT`) is listed and built on the frame too.
     fixture: Option<PathBuf>,
+    /// Screenshots: builds wait (the building state is what is shown).
+    hold_builds: bool,
+    /// Screenshots: the cards' stills drawn on the frame.
+    fixture_stills: bool,
+    /// Where the window's scene chips were drawn (their GUIDs), for screenshots to press.
+    scene_rects: Vec<(String, Rect)>,
     /// Whether previews that recorded their scene's lights are drawn in them (else the studio's): read from
     /// [`PREFS_FILE`] the first time it is needed.
     scene_light: Option<bool>,
@@ -110,15 +132,21 @@ impl Previews {
 
 struct Current {
     project: PathBuf,
-    entries: Vec<Entry>,
-    listing: Job<Vec<Entry>>,
+    /// The project's scenes and their previews (`orbiters_projects::scene::list`).
+    slots: Vec<Slot>,
+    listing: Job<Vec<Slot>>,
     listed_at: f64,
-    /// The scene the person picked in the window (else the newest).
-    chosen: Option<PathBuf>,
+    /// The scene the person picked in the window (its GUID; else the one the project opens on).
+    chosen: Option<String>,
+    /// Builds asked for (scene GUID, when): not asked again while they run or just ran.
+    requested: HashMap<String, f64>,
     /// The file shown or loading, and when it was written.
     file: Option<(PathBuf, SystemTime)>,
-    loading: Job<Result<Scene, String>>,
+    /// A file loading, and the scene (GUID) it shows.
+    loading: Job<Result<(Scene, String), String>>,
     scene: Option<Scene>,
+    /// The scene (GUID) `scene` shows.
+    shown_guid: Option<String>,
     error: Option<String>,
     /// When the scene arrived (its reveal), and whether the camera swings in (a first showing; a re-saved scene
     /// rises again where the camera is).
@@ -135,13 +163,15 @@ impl Current {
     fn new(project: &Path) -> Self {
         Self {
             project: project.to_path_buf(),
-            entries: vec![],
+            slots: vec![],
             listing: Job::default(),
             listed_at: f64::NEG_INFINITY,
             chosen: None,
+            requested: HashMap::new(),
             file: None,
             loading: Job::default(),
             scene: None,
+            shown_guid: None,
             error: None,
             shown_at: 0.0,
             camera: None,
@@ -151,10 +181,35 @@ impl Current {
         }
     }
 
-    fn entry(&self) -> Option<&Entry> {
-        let path = &self.file.as_ref()?.0;
-        self.entries.iter().find(|e| &e.path == path)
+    /// The scene to show: the one picked, else the one the project opens on.
+    fn slot(&self) -> Option<&Slot> {
+        self.chosen.as_ref().and_then(|g| self.slots.iter().find(|s| &s.scene.guid == g)).or_else(|| builds::default_slot(&self.slots))
     }
+
+    /// The scene shown now.
+    fn shown_slot(&self) -> Option<&Slot> {
+        let g = self.shown_guid.as_ref()?;
+        self.slots.iter().find(|s| &s.scene.guid == g)
+    }
+
+    fn listed(&self) -> bool {
+        self.listed_at > f64::NEG_INFINITY
+    }
+}
+
+/// Where the scene to show stands.
+#[derive(Clone, Debug, PartialEq)]
+enum Status {
+    /// Its preview is shown (or loads).
+    Ready,
+    /// Being built from the project's files (or waiting to be).
+    Building,
+    /// It cannot be built: why.
+    Failed(String),
+    /// The project has no scene.
+    NoScene,
+    /// Not listed yet.
+    Listing,
 }
 
 /// An orbit around `pivot`: `yaw` about Unity's up axis (0 looks along +Z), `pitch` up from level.
@@ -303,7 +358,7 @@ fn home(h: &Header) -> Orbit {
 }
 
 impl Previews {
-    /// Keeps `project`'s previews listed and the one to show loaded.
+    /// Keeps `project`'s scenes listed, the one to show built (on the worker) and loaded.
     fn follow(&mut self, ctx: &egui::Context, gpu: &Handles, project: &Path) {
         let now = ctx.input(|i| i.time);
         if self.current.as_ref().is_none_or(|c| c.project != project) {
@@ -320,16 +375,22 @@ impl Previews {
             self.window = None;
         }
         let fixture = self.fixture.clone();
+        if fixture.is_none() {
+            self.builds.start(ctx, &gpu.device, &gpu.queue);
+        }
+        self.receive(ctx);
+        let scene_light = self.prefer_scene_light();
+        self.builds.set_scene_light(scene_light);
         let c = self.current.as_mut().unwrap();
         let folder = fixture.clone().unwrap_or_else(|| project.to_path_buf());
         if fixture.is_some() {
-            if c.listed_at == f64::NEG_INFINITY {
-                c.entries = file::list(&folder);
+            if !c.listed() {
+                c.slots = native::list(&folder);
                 c.listed_at = now;
             }
         } else {
-            if let Some(entries) = c.listing.take() {
-                c.entries = entries;
+            if let Some(slots) = c.listing.take() {
+                c.slots = slots;
                 c.listed_at = now;
             }
             if c._watch.is_none() {
@@ -341,20 +402,45 @@ impl Previews {
             }
             let changed = c.changed.swap(false, std::sync::atomic::Ordering::Relaxed);
             if !c.listing.running() && (changed || now - c.listed_at > RELIST_S) {
-                c.listed_at = now;
-                c.listing = Job::spawn(ctx, move || file::list(&folder));
+                let folder = folder.clone();
+                c.listing = Job::spawn(ctx, move || native::list(&folder));
             }
-            if c.listed_at > now - RELIST_S {
+            if c.listed() {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(RELIST_S));
             }
         }
-        // The scene to show: the one picked, else the newest written.
-        let want = c.chosen.as_ref().and_then(|p| c.entries.iter().find(|e| &e.path == p)).or(c.entries.first()).map(|e| (e.path.clone(), e.modified));
-        if let Some(want) = want.filter(|w| c.file.as_ref() != Some(w)) {
+        // The scene to show: built first when it has no preview yet (or an outdated one, shown meanwhile).
+        // Only the scene is copied (this runs every frame; the slot's preview header holds every draw of the scene).
+        if let Some(scene) = c.slot().filter(|s| s.source.wants_build()).map(|s| s.scene.clone()) {
+            let guid = scene.guid.clone();
+            if fixture.is_some() {
+                // Screenshots of a real project: built on the frame (unless the building state is the picture).
+                if !self.hold_builds {
+                    let result = native::build_scene(&folder, &scene, &native::Limits::default());
+                    apply_build(c, &guid, result);
+                }
+            } else if !self.builds.building(project, &guid) && c.requested.get(&guid).is_none_or(|t| now - t > 20.0) {
+                self.builds.build(project, &scene);
+                c.requested.insert(guid, now);
+            }
+        }
+        let want = c.slot().and_then(|s| {
+            let built = matches!(s.source, Source::Built(_) | Source::Stale(_));
+            s.source.entry().map(|e| (e.path.clone(), e.modified, s.scene.guid.clone(), built))
+        });
+        if let Some((path, modified, guid, built)) = want.filter(|w| c.file.as_ref() != Some(&(w.0.clone(), w.1))) {
             if !c.loading.running() {
-                c.file = Some(want.clone());
+                c.file = Some((path.clone(), modified));
+                c.error = None;
                 let (device, queue, pipelines) = (gpu.device.clone(), gpu.queue.clone(), self.pipelines.clone());
-                let load = move || preview_gpu::load(&device, &queue, pipelines, &want.0).map_err(|e| format!("{e:#}"));
+                let owner = folder.clone();
+                let load = move || {
+                    // Shown: the cache keeps it among the ones used last.
+                    if built {
+                        native::touch(&owner, &guid);
+                    }
+                    preview_gpu::load(&device, &queue, pipelines, &path).map(|s| (s, guid)).map_err(|e| format!("{e:#}"))
+                };
                 if fixture.is_some() {
                     // Screenshots wait for it.
                     let result = load();
@@ -369,7 +455,7 @@ impl Previews {
         }
         if let Some(result) = c.loading.take() {
             match result {
-                Ok(scene) => {
+                Ok((scene, guid)) => {
                     let t = scene.timings;
                     eprintln!(
                         "project preview {}: {:.0} ms (read {:.0}, pictures {:.0}, upload {:.0}, pipelines {:.0}), {:.1} MB",
@@ -383,11 +469,12 @@ impl Previews {
                     );
                     self.pipelines.get_or_insert_with(|| scene.pipelines());
                     let first = c.camera.is_none();
-                    if first || c.scene.as_ref().is_some_and(|s| s.header.scene.guid != scene.header.scene.guid) {
+                    if first || c.shown_guid.as_ref() != Some(&guid) {
                         c.camera = Some(Camera::new(&scene.header, true));
                     }
                     c.shown_at = now;
                     c.scene = Some(scene);
+                    c.shown_guid = Some(guid);
                     c.error = None;
                 }
                 Err(e) => {
@@ -397,6 +484,106 @@ impl Previews {
             }
         }
     }
+
+    /// What the worker finished: a build lands in the project's scenes at once (and they are listed again), a still
+    /// on its card.
+    fn receive(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        for done in self.builds.poll() {
+            match done {
+                Done::Built { project, guid, result } => {
+                    for c in [self.current.as_mut(), self.previous.as_mut()].into_iter().flatten().filter(|c| c.project == project) {
+                        apply_build(c, &guid, result.clone());
+                        c.changed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                Done::Still { project, image } => {
+                    let tex = ctx.load_texture(format!("project-still-{}", project.display()), image, egui::TextureOptions::LINEAR);
+                    let at = self.stills.get(&project).map_or(now, |s| s.1);
+                    self.stills.insert(project, (tex, at));
+                }
+                Done::NoStill { project } => {
+                    self.no_still.insert(project);
+                }
+            }
+        }
+    }
+
+    /// The status of the scene `c` is to show.
+    fn status(&self, c: &Current) -> Status {
+        if !c.listed() {
+            return Status::Listing;
+        }
+        let Some(slot) = c.slot() else { return Status::NoScene };
+        match &slot.source {
+            Source::Failed(why) => Status::Failed(why.clone()),
+            Source::None => Status::Building,
+            _ => Status::Ready,
+        }
+    }
+
+    /// A gallery card's still (a project without avatar pictures), once drawn: its texture and how far it faded in.
+    pub(super) fn still(&self, ctx: &egui::Context, project: &Path) -> Option<(&egui::TextureHandle, f32)> {
+        let (tex, at) = self.stills.get(project)?;
+        let k = (anim::since(ctx, *at, FADE_S) / FADE_S).clamp(0.0, 1.0) as f32;
+        if k < 1.0 {
+            ctx.request_repaint();
+        }
+        Some((tex, k))
+    }
+
+    /// Starts the background worker (the gallery's stills need it before any project is selected) and takes what it
+    /// finished.
+    pub(super) fn start(&mut self, ctx: &egui::Context, gpu: &Handles) {
+        if self.fixture.is_none() && !self.fixture_stills {
+            self.builds.start(ctx, &gpu.device, &gpu.queue);
+        }
+        self.receive(ctx);
+    }
+
+    /// Asks for `project`'s card still (once a session; the worker draws it after the builds). Screenshots draw it on
+    /// the frame.
+    pub(super) fn want_still(&mut self, ctx: &egui::Context, gpu: Option<&Handles>, project: &Path) {
+        if self.no_still.contains(project) || self.stills.contains_key(project) {
+            return;
+        }
+        if self.fixture_stills {
+            let Some(gpu) = gpu else { return };
+            match builds::still_now(project, &gpu.device, &gpu.queue) {
+                Some(image) => {
+                    let tex = ctx.load_texture(format!("project-still-{}", project.display()), image, egui::TextureOptions::LINEAR);
+                    self.stills.insert(project.to_path_buf(), (tex, f64::NEG_INFINITY));
+                }
+                None => {
+                    self.no_still.insert(project.to_path_buf());
+                }
+            }
+            return;
+        }
+        if self.fixture.is_none() {
+            self.builds.still(project);
+        }
+    }
+}
+
+/// A finished build in `c`'s scenes: its preview, or why there is none.
+fn apply_build(c: &mut Current, guid: &str, result: Result<file::Entry, String>) {
+    if let Some(slot) = c.slots.iter_mut().find(|s| s.scene.guid == guid) {
+        slot.source = match result {
+            Ok(e) => Source::Built(e),
+            Err(why) => Source::Failed(why),
+        };
+    }
+}
+
+/// The view a preview opens on, fully risen (a gallery card's still: the 3D view's own framing, avatars a little
+/// closer, the card being smaller and its title below the picture rather than over it).
+pub(super) fn home_view(h: &Header, light: LightMode) -> View {
+    let mut o = home(h);
+    if h.kind == Kind::Avatars {
+        o.distance *= 0.82;
+    }
+    View { eye: o.eye(), forward: o.forward(), fov_y: o.fov, shift: 0.0, reveal: 1.0, light }
 }
 
 /// Moves `camera` with the pointer over `resp`: a drag turns it (a flick keeps it spinning a moment), with `free` the
@@ -490,61 +677,102 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
     let window_open = state.preview.window.is_some();
     let pv = &mut state.preview;
     let scene_light = pv.prefer_scene_light();
+    let status = pv.current.as_ref().map_or(Status::Listing, |c| pv.status(c));
     let c = pv.current.as_mut().unwrap();
     let corner = rect.right() - 12.0 - if sheet { 40.0 } else { 0.0 };
     let id = Id::unique(("project-preview-cover", &project.path));
     if c.scene.is_none() {
-        let note = if c.loading.running() {
-            None
+        let scene_name = c.slot().map(|s| s.scene.name.clone()).unwrap_or_default();
+        // The notes on the cover, right to left: why there is no preview, and an offer of Orbiters Toolkit.
+        let mut notes: Vec<Note> = Vec::new();
+        let busy = c.loading.running() || status == Status::Listing;
+        if c.loading.running() {
         } else if let Some(e) = &c.error {
-            Some((icons::WARNING, "3D preview unreadable", format!("Its file could not be read: {e}"), None))
-        } else if c.listed_at > f64::NEG_INFINITY && c.entries.is_empty() {
-            Some(match &toolkit {
-                Some((None, newest)) => (
-                    icons::PLUS,
-                    if updating { "Adding Toolkit…" } else { "Add Toolkit for 3D" },
-                    format!(
-                        "Orbiters Toolkit draws the scene you save in Unity here.{}",
-                        if newest.is_some() {
-                            " Press to add it, then save the scene once."
-                        } else {
-                            " Add the Orbiters repository, then Orbiters Toolkit below."
-                        }
-                    ),
-                    newest.clone(),
-                ),
-                Some((Some(v), newest)) if version(v) < version(TOOLKIT_PREVIEWS) => (
-                    super::art::glyph::ARROW_UP,
-                    if updating { "Updating Toolkit…" } else { "Update Toolkit for 3D" },
-                    format!(
-                        "Orbiters Toolkit {v} in this project does not draw 3D previews yet ({TOOLKIT_PREVIEWS} does).{}",
-                        match newest {
-                            Some(n) => format!(" Press to update it to {n}: with the project open in Unity, its scene shows here once the editor reloaded."),
-                            None => " Refresh the Orbiters repository to get the newer one.".into(),
-                        }
-                    ),
-                    newest.clone(),
-                ),
-                _ => (
-                    icons::CUBE,
-                    "3D after a save",
-                    "Save the scene in Unity (Ctrl+S): Orbiters Toolkit draws it and it shows here a moment later.".to_string(),
-                    None,
-                ),
-            })
+            notes.push(Note::new(icons::WARNING, "3D preview unreadable".into(), format!("Its file could not be read: {e}")));
         } else {
-            None
-        };
-        if let Some((glyph, label, tip, offer)) = note {
-            let actionable = offer.is_some() && can_act;
-            let k = anim::spring_from(&ctx, id.with("note"), [0.0], [1.0], Spring::SOFT)[0].clamp(0.0, 1.0);
+            match &status {
+                Status::NoScene => {
+                    notes.push(Note::new(icons::CUBE, "No scene to preview".into(), "This project has no scene (.unity file) under Assets yet.".into()))
+                }
+                Status::Building => notes.push(Note {
+                    spinner: true,
+                    ..Note::new(
+                        icons::CUBE,
+                        "Building 3D preview…".into(),
+                        format!(
+                            "Reading {scene_name} from the project's files: its prefabs, models, materials and textures. Kept once built, \
+                             until one of them changes; the first time on a hard disk can take a minute."
+                        ),
+                    )
+                }),
+                Status::Failed(why) => {
+                    let offer = match &toolkit {
+                        Some((None, newest)) => Some((
+                            icons::PLUS,
+                            if updating { "Adding Toolkit…" } else { "Add Toolkit for 3D" },
+                            format!(
+                                "Orbiters Toolkit draws the scene you save in Unity here, exactly.{}",
+                                if newest.is_some() {
+                                    " Press to add it, then save the scene once."
+                                } else {
+                                    " Add the Orbiters repository, then Orbiters Toolkit below."
+                                }
+                            ),
+                            newest.clone(),
+                        )),
+                        Some((Some(v), newest)) if version(v) < version(TOOLKIT_PREVIEWS) => Some((
+                            super::art::glyph::ARROW_UP,
+                            if updating { "Updating Toolkit…" } else { "Update Toolkit for 3D" },
+                            format!(
+                                "Orbiters Toolkit {v} in this project does not draw 3D previews yet ({TOOLKIT_PREVIEWS} does).{}",
+                                match newest {
+                                    Some(n) =>
+                                        format!(" Press to update it to {n}: with the project open in Unity, its scene shows here once the editor reloaded."),
+                                    None => " Refresh the Orbiters repository to get the newer one.".into(),
+                                }
+                            ),
+                            newest.clone(),
+                        )),
+                        _ => None,
+                    };
+                    let hint = if why.starts_with("it took too long") {
+                        // `scene::RETRY_AFTER`: what the first try read is kept, so the next gets further.
+                        "It is tried again in half an hour (the first look at a project on a hard disk is the slowest), or as soon \
+                         as the scene is saved."
+                    } else if offer.is_some() {
+                        "Orbiters Toolkit draws it exactly each time the scene is saved in Unity."
+                    } else {
+                        "Save the scene in Unity (Ctrl+S): Orbiters Toolkit draws it exactly and it shows here a moment later."
+                    };
+                    notes.push(Note::new(icons::WARNING, format!("No preview: {why}"), format!("{scene_name}: no 3D preview, {why}.\n\n{hint}")));
+                    if let Some((glyph, label, tip, offer)) = offer {
+                        notes.push(Note { offer, spinner: updating, ..Note::new(glyph, label.into(), tip) });
+                    }
+                }
+                Status::Ready | Status::Listing => {}
+            }
+        }
+        let k = anim::spring_from(&ctx, id.with("note"), [0.0], [1.0], Spring::SOFT)[0].clamp(0.0, 1.0);
+        let mut right = corner;
+        // Clear of the kind's badge in the top left corner (the hero's).
+        let badge = widgets::text_size(ui, &Txt::new(project.kind.label(), 10.5).weight(weight::SEMIBOLD).tracking(0.02)).x + 36.0;
+        let left = rect.left() + 12.0 + badge + 8.0;
+        // The offer is the rightmost; the reason fills what is left, or says only that there is none (why on hover).
+        for (i, note) in notes.iter().enumerate().rev() {
+            let room = (right - left).max(80.0);
+            let full = Txt::new(&note.label, 11.5).weight(weight::MEDIUM);
+            let fits = widgets::text_size(ui, &full).x + 36.0 <= room;
+            let label = if !fits && note.glyph == icons::WARNING && note.label.starts_with("No preview") { "No 3D preview" } else { note.label.as_str() };
             let txt = Txt::new(label, 11.5).weight(weight::MEDIUM);
-            let w = widgets::text_size(ui, &txt).x + 36.0;
-            let r = Rect::from_min_size(pos2(corner - w, rect.top() + 12.0), vec2(w, 24.0));
-            let resp = ui.interact(r, id.with("note-tip"), if actionable { Sense::click() } else { Sense::hover() });
-            let hover = anim::toggle(&ctx, id.with("note-hover"), actionable && resp.hovered(), Spring::SOFT);
-            let press = anim::toggle(&ctx, id.with("note-press"), actionable && resp.is_pointer_button_down_on(), Spring::SNAPPY);
-            let lit = if offer.is_some() { 1.0 } else { 0.0 };
+            let w = (widgets::text_size(ui, &txt).x + 36.0).min(room);
+            let r = Rect::from_min_size(pos2(right - w, rect.top() + 12.0), vec2(w, 24.0));
+            right = r.left() - 6.0;
+            let actionable = note.offer.is_some() && can_act;
+            let nid = id.with(("note", i));
+            let resp = ui.interact(r, nid, if actionable { Sense::click() } else { Sense::hover() });
+            let hover = anim::toggle(&ctx, nid.with("hover"), actionable && resp.hovered(), Spring::SOFT);
+            let press = anim::toggle(&ctx, nid.with("press"), actionable && resp.is_pointer_button_down_on(), Spring::SNAPPY);
+            let lit = if note.offer.is_some() { 1.0 } else { 0.0 };
             let r = r.shrink(1.5 * press);
             let p = ui.painter();
             p.rect_filled(r, theme::radius(12.0), theme::mix(theme::black(0.55 * k), theme::alpha(theme::INK_900, 0.9 * k), lit));
@@ -552,24 +780,22 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
                 p.rect_filled(r, theme::radius(12.0), theme::alpha(theme::ACCENT, (0.14 + 0.1 * hover) * k));
             }
             let fg = theme::mix(theme::mix(theme::FG_2, theme::ACCENT, lit), theme::FG, hover * 0.4);
-            if updating && offer.is_some() {
-                feedback::spinner(p, pos2(r.left() + 15.0, r.center().y), 5.0, 1.6, theme::alpha(theme::ACCENT, k));
+            let warn = note.glyph == icons::WARNING;
+            if note.spinner {
+                feedback::spinner(p, pos2(r.left() + 15.0, r.center().y), 5.0, 1.6, theme::alpha(if lit > 0.0 { theme::ACCENT } else { theme::FG_2 }, k));
+                ctx.request_repaint();
             } else {
-                widgets::icon(
-                    p,
-                    pos2(r.left() + 15.0, r.center().y - 1.5 * hover * lit),
-                    glyph,
-                    12.0,
-                    theme::alpha(theme::mix(theme::FG_3, theme::ACCENT, lit), k),
-                );
+                let tone = if warn { theme::WARN } else { theme::mix(theme::FG_3, theme::ACCENT, lit) };
+                widgets::icon(p, pos2(r.left() + 15.0, r.center().y - 1.5 * hover * lit), note.glyph, 12.0, theme::alpha(tone, k));
             }
-            widgets::text(p, pos2(r.left() + 25.0, r.center().y), Align2::LEFT_CENTER, &txt.color(theme::alpha(fg, k)));
+            widgets::text_truncated(p, pos2(r.left() + 25.0, r.center().y), Align2::LEFT_CENTER, &txt.color(theme::alpha(fg, k)), r.width() - 25.0 - 10.0);
             let resp = if actionable { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
-            resp.clone().on_hover_text(tip);
+            resp.clone().on_hover_text(&note.tip);
             if actionable && widgets::activated(&resp) {
-                act = offer;
+                act = note.offer.clone();
             }
-        } else if c.loading.running() && c.scene.is_none() {
+        }
+        if notes.is_empty() && busy {
             let r = Rect::from_center_size(pos2(corner - 14.0, rect.top() + 24.0), vec2(28.0, 28.0));
             ui.painter().circle_filled(r.center(), 14.0, theme::black(0.5));
             feedback::spinner(ui.painter(), r.center(), 7.0, 2.0, theme::FG_2);
@@ -613,6 +839,22 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
     }
 }
 
+/// A note on the cover where the preview would be.
+struct Note {
+    glyph: &'static str,
+    label: String,
+    tip: String,
+    /// What pressing it installs (Orbiters Toolkit's version).
+    offer: Option<String>,
+    spinner: bool,
+}
+
+impl Note {
+    fn new(glyph: &'static str, label: String, tip: String) -> Self {
+        Self { glyph, label, tip, offer: None, spinner: false }
+    }
+}
+
 impl Previews {
     fn open_window(&mut self, ctx: &egui::Context, origin: Rect, radius: f32) {
         static OPENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -636,6 +878,8 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let pv = &mut state.preview;
     let scene_light = pv.prefer_scene_light();
     let mut light_switch = None;
+    let scenes = pv.current.as_ref().map(|c| scene_chips(c, &pv.builds)).unwrap_or_default();
+    let mut rects_out: Vec<(String, Rect)> = Vec::new();
     let Some(morph) = pv.window.as_mut() else { return };
     let Some(c) = pv.current.as_mut().filter(|c| c.scene.is_some()) else {
         pv.window = None;
@@ -679,6 +923,28 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         paint::squircle_texture(ui.painter(), f.rect, [theme::squircle(f.radius); 4], tex, uv, Color32::WHITE);
         let _ = resp.on_hover_cursor(if c.touched && ctx.input(|i| i.pointer.any_down()) { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
 
+        // A scene picked that is not shown yet: building, loading, or why it has none (the one before stays, dimmed).
+        let pending = scenes.chips.iter().find(|ch| Some(&ch.guid) == scenes.selected.as_ref() && Some(&ch.guid) != c.shown_guid.as_ref());
+        let pk = anim::toggle(&ctx, wid.with("pending"), pending.is_some() && !closing, Spring::SOFT) * f.content;
+        if let Some(ch) = pending.filter(|_| pk > 0.01) {
+            ui.painter().rect_filled(f.rect, theme::radius(f.radius), theme::black(0.45 * pk));
+            let (glyph, text, spin) = match &ch.state {
+                ChipState::Failed(why) => (icons::WARNING, format!("No preview of {}: {why}", ch.name), false),
+                ChipState::Ready(_) => (icons::CUBE, format!("Opening {}…", ch.name), true),
+                _ => (icons::CUBE, format!("Building {} from the project's files…", ch.name), true),
+            };
+            let txt = Txt::new(&text, 13.0).weight(weight::MEDIUM).color(theme::alpha(theme::FG, pk));
+            let w = (widgets::text_size(ui, &txt).x + 56.0).min(f.rect.width() - 80.0);
+            let r = Rect::from_center_size(f.rect.center(), vec2(w, 40.0));
+            paint::fill_squircle(ui.painter(), r, theme::squircle(20.0), theme::black(0.65 * pk));
+            if spin {
+                feedback::spinner(ui.painter(), pos2(r.left() + 22.0, r.center().y), 6.0, 1.8, theme::alpha(theme::ACCENT, pk));
+                ctx.request_repaint();
+            } else {
+                widgets::icon(ui.painter(), pos2(r.left() + 22.0, r.center().y), glyph, 14.0, theme::alpha(theme::WARN, pk));
+            }
+            widgets::text_truncated(ui.painter(), pos2(r.left() + 38.0, r.center().y), Align2::LEFT_CENTER, &txt, r.width() - 52.0);
+        }
         let mut cu = ui.new_child(UiBuilder::new().max_rect(f.rect).id_salt(wid.with("chrome")));
         cu.set_clip_rect(f.rect.intersect(ui.clip_rect()));
         cu.multiply_opacity(f.content);
@@ -686,10 +952,16 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             cu.disable();
         }
         let header = &c.scene.as_ref().unwrap().header;
-        let written = c.entry().map(|e| e.modified);
-        // The light switch, when the file recorded its scene's lights; its Scene light only when they show the scene.
+        // When the scene was saved (a preview built here is newer than its scene).
+        let shown = c.shown_slot();
+        let written = shown.map(|s| s.scene.modified).or(c.file.as_ref().map(|f| f.1));
+        let source = shown.map(|s| &s.source);
+        // The light switch, when the file recorded its scene's lights (Toolkit's, or the directional lights and gradient
+        // or flat ambient light a built one read); its Scene light only when they show the scene.
         let light = header.lighting.as_ref().map(|l| LightSwitch { prefer_scene: scene_light, scene_shows: preview_gpu::scene_light_shows(l) });
-        chrome(&mut cu, cx, &project, header, written, &c.entries, c.file.as_ref().map(|f| f.0.clone()), busy, f.rect, light, &mut light_switch, &mut act);
+        let mut scene_rects = Vec::new();
+        chrome(&mut cu, cx, &project, header, written, source, &scenes, &mut scene_rects, busy, f.rect, light, &mut light_switch, &mut act);
+        rects_out = scene_rects;
         if viewer::close_button(&mut cu, f.rect, "Close") {
             close = true;
         }
@@ -699,7 +971,7 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         if hk > 0.01 {
             let txt = Txt::new("Drag to turn  ·  right-drag to move  ·  scroll to zoom  ·  double-click to frame", 12.0).color(theme::alpha(theme::FG_2, hk));
             let w = widgets::text_size(ui, &txt).x + 32.0;
-            let y = f.rect.bottom() - 26.0 - if c.entries.len() > 1 { 52.0 } else { 0.0 } + 8.0 * (1.0 - hk);
+            let y = f.rect.bottom() - 26.0 - if scenes.chips.len() > 1 { 52.0 } else { 0.0 } + 8.0 * (1.0 - hk);
             let r = Rect::from_center_size(pos2(f.rect.center().x, y), vec2(w, 30.0));
             if w < f.rect.width() - 360.0 {
                 cu.painter().rect_filled(r, theme::radius(15.0), theme::black(0.5 * hk));
@@ -714,13 +986,17 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         close = true;
     }
     pv.light_switch = light_switch;
+    pv.scene_rects = rects_out;
     match act {
         Some(WindowAct::SceneLight(on)) => {
             state.preview.set_scene_light(on);
             ctx.request_repaint();
         }
-        Some(WindowAct::Scene(path)) => {
-            c.chosen = Some(path);
+        Some(WindowAct::Scene(guid)) => {
+            if let Some(c) = state.preview.current.as_mut() {
+                c.chosen = Some(guid);
+            }
+            ctx.request_repaint();
         }
         Some(WindowAct::Reset) => {
             if let Some(cam) = c.camera.as_mut() {
@@ -752,7 +1028,8 @@ struct LightSwitch {
 }
 
 enum WindowAct {
-    Scene(PathBuf),
+    /// Show the scene (its GUID).
+    Scene(String),
     /// The scene's light (true) or the studio's.
     SceneLight(bool),
     Reset,
@@ -767,8 +1044,9 @@ fn chrome(
     project: &Project,
     h: &Header,
     written: Option<SystemTime>,
-    entries: &[Entry],
-    shown: Option<PathBuf>,
+    source: Option<&Source>,
+    scenes: &SceneChips,
+    scene_rects: &mut Vec<(String, Rect)>,
     busy: bool,
     rect: Rect,
     light: Option<LightSwitch>,
@@ -839,6 +1117,18 @@ fn chrome(
         Kind::Scene => (theme::CYAN, icons::CUBE),
     };
     let tile = Rect::from_min_size(chip.min + vec2(10.0, 10.0), vec2(34.0, 34.0));
+    let from = match source {
+        Some(Source::Toolkit(_)) => "Drawn by Orbiters Toolkit when the scene was saved in Unity: exactly as Unity shows it.",
+        Some(Source::Stale(_)) => "Built from the project's files; something changed since, so it is built again and updates here.",
+        Some(_) => {
+            "Built by Orbiters - N4N0 from the project's files (scene, prefabs, models, materials, textures), without Unity. \
+                    Orbiters Toolkit draws it exactly each time the scene is saved in Unity."
+        }
+        None => "",
+    };
+    if !from.is_empty() {
+        ui.interact(chip, Id::unique("project-preview-title"), Sense::hover()).on_hover_text(from);
+    }
     p.rect_filled(tile, theme::radius(10.0), theme::alpha(tint, 0.16));
     widgets::icon(&p, tile.center(), glyph, 16.0, tint);
     widgets::text_truncated(&p, pos2(tile.right() + 12.0, chip.top() + 19.0), Align2::LEFT_CENTER, &title, chip.right() - tile.right() - 24.0);
@@ -853,7 +1143,7 @@ fn chrome(
     facts.push(format!("{} triangles", compact(s.triangles)));
     facts.push(if h.materials.len() == 1 { "1 material".to_string() } else { format!("{} materials", h.materials.len()) });
     // Left out for the budget or unreadable (utility shaders and empty meshes are not worth a word).
-    let skipped: u32 = s.skipped.iter().filter(|(k, _)| matches!(k.as_str(), "budget" | "missing")).map(|(_, n)| n).sum();
+    let skipped: u32 = s.skipped.iter().filter(|(k, _)| matches!(k.as_str(), "budget" | "missing" | "pose")).map(|(_, n)| n).sum();
     let mut x = rect.left() + 14.0;
     let y = rect.bottom() - 14.0 - 15.0;
     for fact in &facts {
@@ -864,16 +1154,23 @@ fn chrome(
         widgets::text(&p, r.center(), Align2::CENTER_CENTER, &txt);
         x = r.right() + 6.0;
     }
+    // Where the "Built from files" note goes once the scenes' chips took their room (drawn last, below).
+    let note_x = x + if skipped > 0 { 36.0 } else { 0.0 };
     if skipped > 0 {
         let r = Rect::from_min_size(pos2(x, y - 15.0), vec2(30.0, 30.0));
         p.circle_filled(r.center(), 15.0, theme::black(0.5));
         widgets::icon(&p, r.center(), icons::INFO, 14.0, theme::FG_3);
         let n = |k: &str| s.skipped.get(k).copied().unwrap_or(0);
-        let why = match (n("budget"), n("missing")) {
-            (0, m) => format!("{m} could not be read"),
-            (b, 0) => format!("{b} beyond the preview's 2 million triangles"),
-            (b, m) => format!("{b} beyond the preview's 2 million triangles, {m} could not be read"),
-        };
+        let why = [
+            (n("budget"), "beyond the preview's 2 million triangles"),
+            (n("missing"), "could not be read"),
+            (n("pose"), "posed out of shape by their bones (built from the project's files)"),
+        ]
+        .iter()
+        .filter(|(k, _)| *k > 0)
+        .map(|(k, what)| format!("{k} {what}"))
+        .collect::<Vec<_>>()
+        .join(", ");
         ui.interact(r, Id::unique("project-preview-skipped"), Sense::hover()).on_hover_text(format!("{skipped} meshes are not in this preview: {why}."));
     }
 
@@ -890,6 +1187,8 @@ fn chrome(
         *act = Some(WindowAct::Open);
     }
     let rr = Rect::from_min_size(pos2(br.left() - 8.0 - 32.0, br.top()), vec2(32.0, 32.0));
+    // The right end of the room the note may take: the chips' row when there is one, else the buttons.
+    let mut note_end = rr.left() - 8.0;
     if widgets::activated(
         &IconButton::new(icons::ARROW_COUNTER_CLOCKWISE, "Frame it again")
             .size(32.0, 15.0)
@@ -900,42 +1199,227 @@ fn chrome(
         *act = Some(WindowAct::Reset);
     }
 
-    // Other scenes of the project, to switch to.
-    if entries.len() > 1 {
-        let labels: Vec<(PathBuf, Txt)> = entries
-            .iter()
-            .map(|e| {
-                let name = if e.header.scene.name.is_empty() { "Scene".to_string() } else { e.header.scene.name.clone() };
-                let on = Some(&e.path) == shown.as_ref();
-                (
-                    e.path.clone(),
-                    Txt::new(name, 12.5).weight(if on { weight::SEMIBOLD } else { weight::MEDIUM }).color(if on { theme::FG } else { theme::FG_2 }),
-                )
-            })
-            .collect();
-        let widths: Vec<f32> = labels.iter().map(|(_, t)| widgets::text_size(ui, t).x + 28.0).collect();
-        let total = widths.iter().sum::<f32>() + 8.0;
-        let row = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 30.0), vec2(total, 38.0));
-        if row.width() < rect.width() - 2.0 * (bw + 60.0).max(x - rect.left()) {
+    // The project's scenes, to switch between: as many as fit between the facts and the buttons (the one shown always
+    // among them), the others in a list from the last chip.
+    let n = scenes.chips.len();
+    if n > 1 {
+        let selected = scenes.selected.as_deref();
+        let txt_of = |ch: &SceneChip| {
+            let on = Some(ch.guid.as_str()) == selected;
+            Txt::new(&ch.name, 12.5).weight(if on { weight::SEMIBOLD } else { weight::MEDIUM }).color(if on { theme::FG } else { theme::FG_2 })
+        };
+        let width_of = |ch: &SceneChip| widgets::text_size(ui, &txt_of(ch)).x + 28.0 + if ch.state.marked() { 18.0 } else { 0.0 };
+        let more_label = format!("All scenes · {n}");
+        let more_txt = Txt::new(&more_label, 12.5).weight(weight::MEDIUM).color(theme::FG_2);
+        let more_w = widgets::text_size(ui, &more_txt).x + 44.0;
+        let side = (bw + 60.0).max(x - rect.left() + 12.0);
+        let room = rect.width() - 2.0 * side - 8.0;
+        let widths: Vec<f32> = scenes.chips.iter().map(&width_of).collect();
+        let mut picked: Vec<usize> = Vec::new();
+        let mut used = 0.0;
+        for (i, w) in widths.iter().enumerate() {
+            let reserve = if i + 1 < n { more_w } else { 0.0 };
+            if used + w + reserve > room {
+                break;
+            }
+            picked.push(i);
+            used += w;
+        }
+        if let Some(si) = scenes.chips.iter().position(|ch| Some(ch.guid.as_str()) == selected) {
+            if !picked.contains(&si) {
+                while !picked.is_empty() && used + widths[si] + more_w > room {
+                    used -= widths[picked.pop().unwrap()];
+                }
+                picked.push(si);
+                used += widths[si];
+            }
+        }
+        let overflow = picked.len() < n;
+        let total = used + if overflow { more_w } else { 0.0 } + 8.0;
+        if total <= room + 8.0 && !picked.is_empty() || overflow && more_w + 8.0 <= room {
+            let row = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 30.0), vec2(total, 38.0));
+            note_end = row.left() - 8.0;
             paint::fill_squircle(&p, row, theme::squircle(19.0), theme::black(0.5));
             let mut sx = row.left() + 4.0;
-            for ((path, txt), w) in labels.iter().zip(&widths) {
-                let r = Rect::from_min_size(pos2(sx, row.top() + 4.0), vec2(*w, 30.0));
-                let on = Some(path) == shown.as_ref();
-                let resp = ui.interact(r, Id::unique(("preview-scene", path)), Sense::click());
-                let k = anim::toggle(ui.ctx(), Id::unique(("preview-scene-on", path)), on, Spring::SNAPPY);
-                let hk = anim::toggle(ui.ctx(), Id::unique(("preview-scene-hover", path)), resp.hovered(), Spring::SNAPPY);
+            for &i in &picked {
+                let ch = &scenes.chips[i];
+                let r = Rect::from_min_size(pos2(sx, row.top() + 4.0), vec2(widths[i], 30.0));
+                scene_rects.push((ch.guid.clone(), r));
+                let on = Some(ch.guid.as_str()) == selected;
+                let resp = ui.interact(r, Id::unique(("preview-scene", &ch.guid)), Sense::click());
+                let k = anim::toggle(ui.ctx(), Id::unique(("preview-scene-on", &ch.guid)), on, Spring::SNAPPY);
+                let hk = anim::toggle(ui.ctx(), Id::unique(("preview-scene-hover", &ch.guid)), resp.hovered(), Spring::SNAPPY);
                 if k > 0.01 || hk > 0.01 {
                     p.rect_filled(r, theme::radius(15.0), theme::white(0.13 * k + 0.05 * hk * (1.0 - k)));
                 }
-                widgets::text(&p, r.center(), Align2::CENTER_CENTER, txt);
+                let mut tx = r.left() + 14.0;
+                match &ch.state {
+                    ChipState::Building => {
+                        feedback::spinner(&p, pos2(tx + 5.0, r.center().y), 5.0, 1.6, theme::FG_3);
+                        ui.ctx().request_repaint();
+                        tx += 18.0;
+                    }
+                    ChipState::Failed(_) => {
+                        widgets::icon(&p, pos2(tx + 5.0, r.center().y), icons::WARNING, 12.0, theme::WARN);
+                        tx += 18.0;
+                    }
+                    _ => {}
+                }
+                widgets::text(&p, pos2(tx, r.center().y), Align2::LEFT_CENTER, &txt_of(ch));
+                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(ch.tip());
                 if widgets::activated(&resp) && !on {
-                    *act = Some(WindowAct::Scene(path.clone()));
+                    *act = Some(WindowAct::Scene(ch.guid.clone()));
                 }
                 sx = r.right();
             }
+            if overflow {
+                let r = Rect::from_min_size(pos2(sx, row.top() + 4.0), vec2(more_w, 30.0));
+                scene_rects.push(("all".into(), r));
+                let mid = Id::unique("preview-scenes-all");
+                let resp = ui.interact(r, mid, Sense::click());
+                let open = orbiters_ui::popup::is_open(ui.ctx(), mid.with("list"));
+                let hk = anim::toggle(ui.ctx(), mid.with("hover"), resp.hovered() || open, Spring::SNAPPY);
+                if hk > 0.01 {
+                    p.rect_filled(r, theme::radius(15.0), theme::white(0.07 * hk));
+                }
+                widgets::text(&p, pos2(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, &more_txt);
+                widgets::icon(&p, pos2(r.right() - 16.0, r.center().y), super::art::glyph::CARET_UP, 11.0, theme::FG_3);
+                let pressed = widgets::activated(&resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Every scene of the project"));
+                let details: Vec<String> = scenes.chips.iter().map(|ch| ch.state.detail().to_string()).collect();
+                let items: Vec<orbiters_ui::popup::Item> = scenes
+                    .chips
+                    .iter()
+                    .zip(&details)
+                    .map(|(ch, d)| {
+                        let item = orbiters_ui::popup::Item::new(&ch.name);
+                        if d.is_empty() {
+                            item
+                        } else {
+                            item.detail(d)
+                        }
+                    })
+                    .collect();
+                let current = scenes.chips.iter().position(|ch| Some(ch.guid.as_str()) == selected);
+                // As wide as the longest name needs (within reason), the list's own padding and detail included.
+                let list_w = scenes
+                    .chips
+                    .iter()
+                    .zip(&details)
+                    .map(|(ch, d)| widgets::text_size(ui, &Txt::new(&ch.name, 13.0)).x + widgets::text_size(ui, &Txt::new(d, 11.5)).x + 72.0)
+                    .fold(260.0, f32::max)
+                    .min(440.0);
+                if let Some(k) = orbiters_ui::popup::list_from(ui.ctx(), mid.with("list"), r, pressed, &items, current, list_w) {
+                    if Some(k) != current {
+                        *act = Some(WindowAct::Scene(scenes.chips[k].guid.clone()));
+                    }
+                }
+            }
         }
     }
+
+    // Where it comes from, when the desktop built it (Toolkit's is the exact one, and needs no word): quieter than the
+    // facts, after them, only in the room the scenes' chips leave (it never takes one of their places), the title's
+    // tooltip saying the same when it does not fit.
+    if matches!(source, Some(Source::Built(_) | Source::Stale(_))) {
+        let txt = Txt::new("Built from files", 12.0).color(theme::FG_3);
+        let fw = widgets::text_size(ui, &txt).x + 24.0 + 18.0;
+        if note_x + fw <= note_end {
+            let r = Rect::from_min_size(pos2(note_x, y - 15.0), vec2(fw, 30.0));
+            p.rect_filled(r, theme::radius(15.0), theme::black(0.35));
+            widgets::icon(&p, pos2(r.left() + 19.0, r.center().y), icons::CUBE, 12.0, theme::FG_3);
+            widgets::text(&p, pos2(r.left() + 31.0, r.center().y), Align2::LEFT_CENTER, &txt);
+            ui.interact(r, Id::unique("project-preview-built"), Sense::hover()).on_hover_text(
+                "Built by Orbiters - N4N0 from the project's files, without Unity: close to what Unity shows, not exact (no \
+                 normal maps, animators or what tools do at upload). Orbiters Toolkit draws the exact one each time the scene \
+                 is saved in Unity.",
+            );
+        }
+    }
+}
+
+/// The project's scenes as the window's chips show them, and the one picked.
+#[derive(Default)]
+struct SceneChips {
+    chips: Vec<SceneChip>,
+    selected: Option<String>,
+}
+
+struct SceneChip {
+    guid: String,
+    name: String,
+    rel: String,
+    state: ChipState,
+}
+
+enum ChipState {
+    /// Its preview is there: from Toolkit (true) or built here.
+    Ready(bool),
+    /// Built here, outdated: built again when shown.
+    Outdated,
+    /// No preview yet: built when picked.
+    Unbuilt,
+    Building,
+    Failed(String),
+}
+
+impl ChipState {
+    /// Marked on its chip (a spinner, a warning).
+    fn marked(&self) -> bool {
+        matches!(self, ChipState::Building | ChipState::Failed(_))
+    }
+
+    /// Its line in the list of every scene.
+    fn detail(&self) -> &str {
+        match self {
+            ChipState::Ready(true) => "Toolkit",
+            ChipState::Ready(false) | ChipState::Outdated => "",
+            ChipState::Unbuilt => "Not built yet",
+            ChipState::Building => "Building…",
+            ChipState::Failed(_) => "No preview",
+        }
+    }
+}
+
+impl SceneChip {
+    fn tip(&self) -> String {
+        let what = match &self.state {
+            ChipState::Ready(true) => "Drawn by Orbiters Toolkit when it was saved in Unity".to_string(),
+            ChipState::Ready(false) => "Built from the project's files".to_string(),
+            ChipState::Outdated => "Built from the project's files; changed since, built again when shown".to_string(),
+            ChipState::Unbuilt => "Press to build its preview from the project's files".to_string(),
+            ChipState::Building => "Building its preview from the project's files…".to_string(),
+            ChipState::Failed(why) => format!("No preview: {why}"),
+        };
+        format!("{}\n{what}", self.rel)
+    }
+}
+
+/// `c`'s scenes and where each stands. Scenes of the same name (`Main` in two folders) carry their folder's name too,
+/// so that their chips and lines in the list tell them apart.
+fn scene_chips(c: &Current, builds: &Builder) -> SceneChips {
+    let named = |n: &str| c.slots.iter().filter(|s| s.scene.name.eq_ignore_ascii_case(n)).count();
+    let chips = c
+        .slots
+        .iter()
+        .map(|s| {
+            let building = builds.building(&c.project, &s.scene.guid);
+            let state = match &s.source {
+                Source::Toolkit(_) => ChipState::Ready(true),
+                Source::Built(_) => ChipState::Ready(false),
+                Source::Stale(_) if building => ChipState::Building,
+                Source::Stale(_) => ChipState::Outdated,
+                Source::None if building => ChipState::Building,
+                Source::None => ChipState::Unbuilt,
+                Source::Failed(why) => ChipState::Failed(why.clone()),
+            };
+            let name = match s.scene.rel.rsplit('/').nth(1) {
+                Some(folder) if named(&s.scene.name) > 1 => format!("{} · {folder}", s.scene.name),
+                _ => s.scene.name.clone(),
+            };
+            SceneChip { guid: s.scene.guid.clone(), name, rel: s.scene.rel.clone(), state }
+        })
+        .collect();
+    SceneChips { chips, selected: c.slot().map(|s| s.scene.guid.clone()) }
 }
 
 /// 312400 → "312k", 1840000 → "1.8M".
@@ -958,15 +1442,52 @@ fn compact(n: u64) -> String {
 }
 
 /// Screenshots: a stand-in preview (or the file `ORBITERS_PREVIEW_FILE` names, a real one from Toolkit) shown for the
-/// selected project, and the presses that open its window.
+/// selected project, and the presses that open its window. `projects-preview-native*` show a real project
+/// (`ORBITERS_PREVIEW_PROJECT`), its scenes listed and built from its files on the frame (read only; previews go to
+/// the cache, `ORBITERS_PREVIEW_CACHE` when set); `projects-stills` shows the gallery with real projects
+/// (`ORBITERS_PREVIEW_PROJECTS`, separated by `|`) without avatar pictures, their stills drawn on the frame.
 impl State {
     pub fn stage_preview(&mut self, name: &str) {
         let dir = std::env::temp_dir().join("orbiters-preview-stand-in");
         let folder = dir.join(file::FOLDER);
+        let _ = std::fs::remove_dir_all(dir.join("Assets"));
         for old in ["stand-in.preview", "second.preview"] {
             let _ = std::fs::remove_file(folder.join(old));
         }
-        if !matches!(name, "projects-preview-none" | "projects-preview-no-toolkit" | "projects-preview-old-toolkit") {
+        let _ = std::fs::remove_dir_all(native::cache_dir(&dir));
+        // Screenshots start from the default (the scene's light), whatever this machine remembers.
+        self.preview.scene_light = Some(true);
+        if name.starts_with("projects-preview-native") {
+            let real = PathBuf::from(std::env::var_os("ORBITERS_PREVIEW_PROJECT").expect("ORBITERS_PREVIEW_PROJECT: a Unity project's folder"));
+            if let Some(p) = self.scan.projects.first_mut() {
+                p.name = real.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                p.path = real.clone();
+            }
+            self.preview.fixture = Some(real);
+            self.preview.hold_builds = name == "projects-preview-native-building";
+            return;
+        }
+        if name == "projects-stills" {
+            let reals: Vec<PathBuf> =
+                std::env::var("ORBITERS_PREVIEW_PROJECTS").unwrap_or_default().split('|').filter(|s| !s.is_empty()).map(PathBuf::from).collect();
+            for (p, real) in self.scan.projects.iter_mut().zip(&reals) {
+                p.name = real.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                p.path = real.clone();
+                p.avatars.clear();
+                p.worlds.clear();
+            }
+            self.preview.fixture_stills = true;
+            return;
+        }
+        let scene = matches!(name, "projects-preview-none" | "projects-preview-no-toolkit" | "projects-preview-old-toolkit" | "projects-preview-building");
+        if scene {
+            // A scene that has nothing a preview draws (its build fails with the reason), or that is being built.
+            let assets = dir.join("Assets");
+            std::fs::create_dir_all(&assets).expect("stand-in folder");
+            std::fs::write(assets.join("Avatar.unity"), "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n").expect("stand-in scene");
+            std::fs::write(assets.join("Avatar.unity.meta"), format!("fileFormatVersion: 2\nguid: {}\n", "5".repeat(32))).expect("stand-in scene");
+            self.preview.hold_builds = name == "projects-preview-building";
+        } else if name != "projects-preview-no-scene" {
             std::fs::create_dir_all(&folder).expect("stand-in folder");
             let bytes = match std::env::var_os("ORBITERS_PREVIEW_FILE") {
                 Some(p) => std::fs::read(p).expect("ORBITERS_PREVIEW_FILE"),
@@ -978,8 +1499,6 @@ impl State {
             }
         }
         self.preview.fixture = Some(dir);
-        // Screenshots start from the default (the scene's light), whatever this machine remembers.
-        self.preview.scene_light = Some(true);
         if name == "projects-preview-old-toolkit" {
             // A world project's Toolkit before previews (Enzo's had 0.4.8), the repositories offering a newer one.
             for p in self.view.packages.iter_mut().filter(|p| p.name == "orbiters.toolkit") {
@@ -997,6 +1516,9 @@ impl State {
     pub fn stage_preview_frame(&mut self, name: &str, frame: u32) -> Option<super::state::Poke> {
         use super::state::Poke;
         let at = |key: &str| self.anchors.get(key).map(|r| r.center());
+        // The second scene's chip, and the list of every scene.
+        let chip = |s: &Self, k: usize| s.preview.scene_rects.iter().filter(|(g, _)| g != "all").nth(k).map(|(_, r)| r.center());
+        let all = |s: &Self| s.preview.scene_rects.iter().find(|(g, _)| g == "all").map(|(_, r)| r.center());
         match (name, frame) {
             (
                 "projects-preview-open"
@@ -1005,10 +1527,21 @@ impl State {
                 | "projects-preview-close"
                 | "projects-preview-back"
                 | "projects-preview-scene-light"
-                | "projects-preview-studio-light",
+                | "projects-preview-studio-light"
+                | "projects-preview-native-open"
+                | "projects-preview-native-switch"
+                | "projects-preview-native-switched"
+                | "projects-preview-native-all",
                 90,
             ) => at("preview-cover").map(Poke::Press),
             ("projects-preview-studio-light", 150) => self.preview.light_switch.map(|r| Poke::Press(r[1].center())),
+            ("projects-preview-native-switch", 149) => {
+                // The scene picked is built while the picture is taken.
+                self.preview.hold_builds = true;
+                None
+            }
+            ("projects-preview-native-switch" | "projects-preview-native-switched", 150) => chip(self, 1).map(Poke::Press),
+            ("projects-preview-native-all", 150) => all(self).map(Poke::Press),
             ("projects-preview-close" | "projects-preview-back", 140) => {
                 self.preview.frame_for_screenshot(name == "projects-preview-close");
                 None
@@ -1316,6 +1849,46 @@ mod tests {
             assert!(frames < 600, "never rests");
         }
         assert_eq!(c.now, c.home);
+    }
+
+    fn slot(name: &str, source: Source) -> Slot {
+        Slot {
+            scene: native::SceneInfo {
+                path: PathBuf::from(format!("P/Assets/{name}.unity")),
+                rel: format!("Assets/{name}.unity"),
+                guid: name.repeat(32).chars().take(32).collect(),
+                name: name.into(),
+                modified: std::time::UNIX_EPOCH,
+                last_open: false,
+                in_build: false,
+            },
+            source,
+        }
+    }
+
+    #[test]
+    fn a_finished_build_lands_in_its_scene_and_the_states_follow() {
+        let pv = Previews::default();
+        let mut c = Current::new(Path::new("P"));
+        assert_eq!(pv.status(&c), Status::Listing);
+        c.listed_at = 1.0;
+        assert_eq!(pv.status(&c), Status::NoScene);
+        c.slots = vec![slot("a", Source::None), slot("b", Source::None)];
+        assert_eq!(pv.status(&c), Status::Building, "the first scene, not built yet: it is built");
+        let guid_a = c.slots[0].scene.guid.clone();
+        apply_build(&mut c, &guid_a, Err("the scene has nothing to draw".into()));
+        assert_eq!(pv.status(&c), Status::Failed("the scene has nothing to draw".into()));
+        let entry = file::Entry { path: PathBuf::from("b.preview"), modified: std::time::UNIX_EPOCH, size: 1, header: Default::default() };
+        let guid_b = c.slots[1].scene.guid.clone();
+        apply_build(&mut c, &guid_b, Ok(entry));
+        assert_eq!(pv.status(&c), Status::Ready, "the first cannot be built: the project opens on the one that has a preview");
+        assert_eq!(c.slot().unwrap().scene.name, "b");
+        c.chosen = Some(guid_a);
+        assert!(matches!(pv.status(&c), Status::Failed(_)), "picked in the window: its reason");
+        let chips = scene_chips(&c, &pv.builds);
+        assert_eq!(chips.chips.len(), 2);
+        assert!(matches!(chips.chips[0].state, ChipState::Failed(_)) && matches!(chips.chips[1].state, ChipState::Ready(false)));
+        assert!(chips.chips[0].tip().contains("No preview: the scene has nothing to draw"));
     }
 
     #[test]

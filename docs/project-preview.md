@@ -71,7 +71,21 @@ project, not only the one saved last. Orbiters - N4N0 now builds a scene's previ
   the top of the window, beside the close button, shows "Scene light" or "Studio light" instead (remembered for every
   preview in `project-preview.json` in the configuration folder; the scene's light by default); it is there only
   when the file recorded the scene's light, and the view changes as soon as it is pressed (the shadow map is drawn
-  again from the new key). A preview without it, from Toolkit 0.4.14 or older, keeps the studio light.
+  again from the new key). A preview without it, from Toolkit 0.4.14 or older, keeps the studio light. There is no
+  light switch on the project's card: its cover follows the same choice.
+- **A scene whose light would show nothing gets the studio light** (Enzo, 3 November 2026: avatars must never show
+  black), whatever the switch says (`preview_gpu::light_mode`, `scene_light_shows`). The rule takes the brightest a
+  white matte surface gets from the scene's own light: the brightest channel of the two directional lights drawn,
+  summed, plus the brightest of the ambient light's three directions, an unknown ambient light (`null`) counting as
+  none. Under `SCENE_LIGHT_MIN` = 0.1 (a tenth of Unity's default sun: a white surface turned to the light stays
+  under sRGB 0.35, an avatar's usual colours under about 0.19, hardly above the background's 0.1) the studio's light
+  draws it, and the switch's Scene light half is dimmed, not pressable, its tooltip saying why. Measured in Unity
+  2022.3.22f1 (linear, never baked): a new scene about 1.2; the default sky without a sun 0.17 (kept, dim and flat as
+  in Unity); no skybox and no sun 0.055 (the Lighting window's Ambient Color alone: studio); a scene read by Toolkit
+  0.4.15 in the editor update it was opened in, before Unity computed its ambient probe, 0 (`ambient: null`, the
+  previews of sunless scenes 0.4.15 wrote: studio). Previews N4N0 builds itself go by the same rule: they record the
+  scene's directional lights and a gradient or flat ambient light, never a skybox's (only Unity computes it: `null`),
+  and none at all when the scene has neither (the studio light).
 - **The studio light** is the desktop's own, the same for every project and as bright as Unity's default scene (2
   November 2026, after Enzo found his avatar glossy and redder than in Unity): Unity's default directional light (colour
   1, 0.956, 0.839, intensity 1) as the key from the front left of the avatar, about 50° up as in a new scene, with a
@@ -195,6 +209,10 @@ with the projects `ORBITERS_PREVIEW_PROJECTS` names (separated by `|`), without 
 the frame. The stand-in is
 N4N0's black sphere with white strokes over a plinth, a green ring and two cubes, as an avatar scene, one material look
 each: a glossy sphere, a matte plinth, a glowing unlit ring, a toon cube and a metal one.
+
+`-scene-light` with `ORBITERS_PREVIEW_FILE` naming a preview whose `lighting` is `{ "lights": [], "ambient": null }`
+(what Toolkit 0.4.15 wrote for a scene without a sun whose ambient light Unity had not computed) shows it in the studio
+light, the switch on Studio light with its Scene light half dimmed.
 
 ## Not done or untested
 

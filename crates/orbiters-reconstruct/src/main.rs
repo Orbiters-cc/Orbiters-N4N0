@@ -5,6 +5,7 @@
 //!     [--regularise-unseen] [--adam-restart] [--filter-3d S] [--cleanup]
 //!     [--sources opacity|gradient|error|confidence] [--sources-by-opacity] [--split footprint|long-axis|long-axis-on-depth]
 //!     [--noise λ | --no-noise] [--no-noise-gate] [--noise-visible] [--noise-dead-max share] [--depth-births share]
+//!     [--nested-forward | --flat-forward] [--gpu-profile]
 //! ```
 //!
 //! Prints one [`Event`] per line on stdout for the app and writes the session's `reconstruction/` folder: the splats
@@ -102,6 +103,9 @@ fn args() -> anyhow::Result<Args> {
             "--no-noise-gate" => settings.noise_gate = false,
             "--noise-visible" => settings.noise_visible = true,
             "--noise-dead-max" => settings.noise_dead_max = it.next().context("--noise-dead-max needs a value")?.parse().context("--noise-dead-max takes a share (0–1)")?,
+            // A 3D picture's detail views' share of the colour steps (orbiters_reconstruct::dataset::detail_views,
+            // train::Settings::detail_share, a quarter by default; 0: trained as any keyframe).
+            "--detail-share" => settings.detail_share = it.next().context("--detail-share needs a value")?.parse().context("--detail-share takes a share (0–1)")?,
             "--depth-births" => settings.depth_births = it.next().context("--depth-births needs a value")?.parse().context("--depth-births takes a number (0–1)")?,
             "--gpu" => {
                 device.low_power = match it.next().as_deref() {
@@ -110,6 +114,12 @@ fn args() -> anyhow::Result<Args> {
                     _ => bail!("--gpu takes integrated or fastest"),
                 }
             }
+            // Lab: GPU timestamps around every pass of the whole run, printed as one `gpu_profile {json}` line on
+            // stderr at the end (per section: milliseconds and passes summed over all steps). The timestamps are read
+            // back after each step, which waits for it: the run is slower, the shares are what to read.
+            "--gpu-profile" => device.profile = true,
+            "--nested-forward" => settings.nested_forward = true,
+            "--flat-forward" => settings.nested_forward = false,
             _ if a.starts_with("--") => bail!("unknown option {a}"),
             _ => session = Some(PathBuf::from(a)),
         }
@@ -142,7 +152,7 @@ fn run(args: Args) -> anyhow::Result<Report> {
         eprintln!("{line}");
     }
     let data = &prepared.data;
-    let held_out = train::held_out(data.views.len(), args.settings.hold_out_every);
+    let held_out = train::held_out_views(data, args.settings.hold_out_every);
     let mut gpu = device.join().map_err(|_| anyhow::anyhow!("the GPU device's thread panicked"))??;
     let dev = gpu.device.clone();
     let mut settings = args.settings.clone();
@@ -264,6 +274,11 @@ fn run(args: Args) -> anyhow::Result<Report> {
     timing::section("7 replace", None, || replace(dir, &partial))?;
     timing::add("0 run", run_start.elapsed());
     timing::print();
+    if let Some(p) = &gpu.profiler {
+        let (span, steps) = p.span.get();
+        let sections: serde_json::Map<String, serde_json::Value> = p.totals.borrow().iter().map(|(k, (ms, n))| (k.to_string(), serde_json::json!({"ms": ms, "passes": n}))).collect();
+        eprintln!("gpu_profile {}", serde_json::json!({"steps": steps, "span_ms": span, "sections": sections, "gaussians": report.gaussians, "iterations": report.iterations, "seconds": report.seconds}));
+    }
     Ok(report)
 }
 

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/orbiters-projects", "crates/orbiters-core", "crates/orbiters-spout", "crates/orbiters-capture", "crates/orbiters-ui", "crates/orbiters-desktop", "crates/orbiters-openvr", "crates/orbiters-reconstruct", "crates/orbiters-sound", "crates/orbiters-n4n0-core", "crates/orbiters-n4n0", "crates/orbiters-audio", "crates/orbiters-voice", "crates/orbiters-call", "crates/orbiters-update", "crates/orbiters-setup", "crates/orbiters-smooth", "crates/orbiters-smooth-driver", "xtask"]
 
 [workspace.package]
-version = "0.3.4-dev.19"
+version = "0.3.4-dev.22"
 edition = "2021"
 authors = ["Enzo DUTRA / blackorbit"]
 publish = false

@@ -8,6 +8,19 @@
 //! N4N0's camera rig (contracts' Docs/rig-frames.md) follows the camera, from the avatar's hips, and is on for the
 //! whole flight (controller/rig.rs): about every other colour frame then carries six more views, one along each axis
 //! around it.
+//!
+//! The 4 s and 8 s pictures first take close-ups ([`closeups`]): for about a second, before it flies, the camera stays
+//! where it stands, zoomed in (`/usercamera/Zoom`) and turned over what it aims at, nine views that together cover the
+//! picture's own framing at 2.35 times its pixels a degree, the rig off so each frame is a whole picture. Why: in the
+//! 3D pictures Enzo took with friends on 2026-11-03 (Penthouse Palace, 4 and 8 s), the faces came out mushy because
+//! the people moved while the camera flew (the start and the end frame, from the same place 4.3 s apart, differ by
+//! 15 dB on them), only the first keyframe saw them as framed, and the model blurred their poses together (rendered at
+//! that very keyframe, half its sharpness). The close-ups show them within a second, at more than twice the
+//! resolution, and the reconstruction learns the picture's subject from them (orbiters_reconstruct's detail views:
+//! never held out, a quarter of the colour steps on top): emulated on those pictures, the people in the start view went
+//! from 22 to 36 dB (8 s) and 22 to 28 dB (4 s), the desktop repository's docs/3d-picture-close-ups-2026-11-03.md.
+//! Every frame carries its exact pose and projection in its strip, zoomed or not, so nothing about VRChat's zoom has
+//! to be assumed but which way to turn.
 
 use super::{NoticeKind, Shared};
 use crate::state::CaptureState;
@@ -29,6 +42,29 @@ const STRAIGHT: f32 = 88.0;
 const RATE_HZ: u32 = 90;
 /// After the recording started, before the camera moves: Spout and the kit's first frames.
 const SETTLE: Duration = Duration::from_millis(700);
+/// VRChat's camera zoomed in as far as it goes: `/usercamera/Zoom` runs from 20 to 150 (its vertical field of view in
+/// degrees; 45 by default).
+pub const ZOOM_NARROWEST: f32 = 20.0;
+/// How many times the close-ups magnify the picture's framing (the tangent of their half field of view against the
+/// start's), at most: VRChat's default 45° zoomed to 20° is 2.35. Three rows of them then overlap by 30 % of their
+/// height, so the band of each lower row's frames that the capture strip covers (6.7 to 22 % from their top,
+/// contracts' Docs/capture-strip.md: training leaves it out) is seen clear in the row above.
+const MAGNIFY: f32 = 2.4;
+/// Less magnification than this adds too little to be worth the second (a camera already zoomed in): no close-ups.
+/// Also what keeps the rows apart by at least the strip's 15 % of a frame's height (they are `(magnification − 1) / 2`
+/// of it apart), so that a lower row's strip band never falls on the row above's own; [`MAGNIFY`] keeps them under the
+/// 73 % beyond which it would fall below the row above.
+const MAGNIFY_LEAST: f32 = 1.35;
+/// How long the camera holds each close-up, the first one longer (VRChat zooms in meanwhile), and how long it then
+/// stands zoomed back out before it flies. VRChat's camera streamed about 34 frames a second in the recordings of
+/// 2026-11-03 (29 ms apart, 33 ms at the 90th percentile), a quarter of them depth frames: 0.1 s is three frames, at
+/// least two colour ones, and the capture keeps the first that shows a close-up as a keyframe (orbiters_core::keyframes:
+/// a zoom, or a turn by a third of the view). All told 0.2 + 8 × 0.1 + 0.1 = 1.1 s.
+const CLOSEUP_S: f32 = 0.1;
+const FIRST_CLOSEUP_S: f32 = 0.2;
+const ZOOMED_OUT_S: f32 = 0.1;
+/// The stream's frames are 16:9 (VRChat's camera in landscape).
+const ASPECT: f32 = 16.0 / 9.0;
 
 /// Eases in and out.
 fn smooth(t: f32) -> f32 {
@@ -186,6 +222,56 @@ pub fn path(start: [f32; 6], length: Photo3dLength, focus: f32, rate: u32) -> Ve
     poses
 }
 
+/// The close-ups of a 3D picture taken from `start` with VRChat's camera at `zoom` (its vertical field of view in
+/// degrees): the camera where it stands, zoomed to the returned field of view (at most [`MAGNIFY`] times the start's
+/// pixels a degree, no narrower than [`ZOOM_NARROWEST`]), turned to each of nine points of its framing in turn: three
+/// rows from the top, each row the other way from the last so the camera never swings back across. The rows and
+/// columns are spread so that the close-ups together cover the start's view, each lower row's strip band inside the
+/// row above. None when they would magnify less than [`MAGNIFY_LEAST`] (the camera is zoomed in already) or the zoom
+/// is not a usable one.
+pub fn closeups(start: [f32; 6], zoom: f32) -> Option<(f32, Vec<[f32; 6]>)> {
+    if !(ZOOM_NARROWEST..=150.0).contains(&zoom) {
+        return None;
+    }
+    let half = |fov: f32| (fov.to_radians() / 2.0).tan();
+    let wide = half(zoom);
+    let narrow = (wide / MAGNIFY).max(half(ZOOM_NARROWEST));
+    if wide / narrow < MAGNIFY_LEAST {
+        return None;
+    }
+    let fov = 2.0 * narrow.atan().to_degrees();
+    // Centres in the start view's image plane (tangents): the outer close-ups' edges on the start's.
+    let (dy, dx) = (wide - narrow, (wide - narrow) * ASPECT);
+    let [right, up, forward] = super::dolly::axes(&start);
+    let mut poses = Vec::with_capacity(9);
+    for row in 0..3 {
+        for k in 0..3 {
+            let col = if row % 2 == 0 { k } else { 2 - k };
+            let (x, y) = ((col as f32 - 1.0) * dx, (1.0 - row as f32) * dy);
+            let d: [f32; 3] = std::array::from_fn(|i| forward[i] + right[i] * x + up[i] * y);
+            let flat = (d[0] * d[0] + d[2] * d[2]).sqrt();
+            let yaw = near(start[4], d[0].atan2(d[2]).to_degrees());
+            let pitch = -d[1].atan2(flat).to_degrees();
+            poses.push([start[0], start[1], start[2], pitch, yaw, start[5]]);
+        }
+    }
+    Some((fov, poses))
+}
+
+/// The close-ups of [`closeups`] as steps of `rate` a second, each a pose and the zoom to send with it: each close-up
+/// held [`CLOSEUP_S`] (the first [`FIRST_CLOSEUP_S`]), then the start with its own `zoom` for [`ZOOMED_OUT_S`]. Empty
+/// when there are none.
+pub fn closeup_steps(start: [f32; 6], zoom: f32, rate: u32) -> Vec<([f32; 6], f32)> {
+    let Some((fov, poses)) = closeups(start, zoom) else { return Vec::new() };
+    let ticks = |s: f32| ((s * rate as f32).round() as usize).max(1);
+    let mut steps = Vec::new();
+    for (i, p) in poses.iter().enumerate() {
+        steps.extend(std::iter::repeat_n((*p, fov), ticks(if i == 0 { FIRST_CLOSEUP_S } else { CLOSEUP_S })));
+    }
+    steps.extend(std::iter::repeat_n((start, zoom), ticks(ZOOMED_OUT_S)));
+    steps
+}
+
 /// N4N0's camera rig's parameters for a camera pose, with the avatar's hips at `hips`: following it, where it stands
 /// from the hips (each axis over [`rig::REACH_M`]) and its turn from them (over [`rig::YAW_DEG`]), level on upright
 /// hips (`rig::follow_values`). VRChat takes OSC floats from -1 to 1.
@@ -224,14 +310,19 @@ impl super::Controller {
     /// 2025.3.3, whose tree has no camera).
     pub fn camera_open(&self) -> Option<bool> {
         // VRChat's camera node alone (its tree), else what VRChat sent when it last changed.
-        let query = self.with_osc(|o| o.vrchat_query()).flatten();
-        let camera = query.map(|addr| orbiters_core::osc::vrchat_camera_values(addr, Duration::from_millis(500))).unwrap_or_default();
-        let mode = camera.into_iter().find(|(p, _)| p == super::CAMERA_MODE).map(|(_, v)| v);
+        let mode = self.camera_values().into_iter().find(|(p, _)| p == super::CAMERA_MODE).map(|(_, v)| v);
         let mode = mode.or_else(|| self.osc_values.lock().unwrap().latest.get(super::CAMERA_MODE).and_then(|(v, _)| v.first().cloned()));
         match mode {
             Some(OscValue::Int(mode)) => Some(mode != 0),
             _ => None,
         }
+    }
+
+    /// VRChat's camera's values as its OSCQuery tree has them now (`/usercamera/Mode`, `/usercamera/Zoom`…): empty when
+    /// VRChat does not say (not found, or before 2025.3.3, whose tree has no camera).
+    fn camera_values(&self) -> Vec<(String, OscValue)> {
+        let query = self.with_osc(|o| o.vrchat_query()).flatten();
+        query.map(|addr| orbiters_core::osc::vrchat_camera_values(addr, Duration::from_millis(500))).unwrap_or_default()
     }
 
     /// Takes a 3D picture with VRChat's camera where it stands now.
@@ -243,9 +334,16 @@ impl super::Controller {
             let pose = osc.latest.get(POSE).map(|(v, _)| floats(v)).filter(|v| v.len() == 6 && v.iter().any(|f| *f != 0.0));
             let focus = osc.latest.get(FOCAL_DISTANCE).and_then(|(v, _)| floats(v).first().copied()).unwrap_or(2.0).clamp(0.5, 8.0);
             let smooth = osc.latest.get(SMOOTH).and_then(|(v, _)| v.first().map(OscValue::truthy));
-            let zoom = osc.latest.get(ZOOM).and_then(|(v, _)| floats(v).first().copied()).filter(|z| (20.0..=150.0).contains(z)).unwrap_or(45.0);
+            let zoom = osc.latest.get(ZOOM).and_then(|(v, _)| floats(v).first().copied());
             (pose, focus, smooth, zoom)
         };
+        // The zoom as VRChat last sent it, else as its tree has it now: the close-ups put it back after them, so without
+        // it known there are none.
+        let usable = |z: &f32| (ZOOM_NARROWEST..=150.0).contains(z);
+        let zoom = zoom.filter(usable).or_else(|| {
+            let values = self.camera_values();
+            values.into_iter().find(|(p, _)| p == ZOOM).and_then(|(_, v)| floats(&[v]).first().copied()).filter(usable)
+        });
         let length = self.settings().photo_3d;
         // VRChat's camera must be open: OSC switches its mode once it is (to Stream, for Spout), nothing opens it
         // (VRChat's `/usercamera/Mode` changes nothing while the camera is closed, and there is no endpoint to open it).
@@ -277,14 +375,28 @@ impl super::Controller {
             };
             // Smoothing would trail the swing behind.
             send(SMOOTH, vec![rosc::OscType::Bool(false)]);
-            // The rig where the camera starts, then on (an avatar without it ignores both); put back off when VRChat is,
-            // whatever ends the recording.
+            // The rig where the camera starts (an avatar without it ignores it), still off for the close-ups.
             ctl.place_rig(None, &pose);
-            ctl.hold_rig(true);
             let tick = Duration::from_secs_f32(1.0 / RATE_HZ as f32);
+            // The 4 and 8 s pictures' close-ups: zoomed in on the picture's framing from where the camera stands, each
+            // pose with its zoom in one bundle (VRChat applies them together), back at the start's zoom at the end.
+            let closeups = match (length, zoom) {
+                (Photo3dLength::Standard | Photo3dLength::Full, Some(zoom)) => closeup_steps(pose, zoom, RATE_HZ),
+                _ => Vec::new(),
+            };
+            let begin = Instant::now();
+            for (i, (p, z)) in closeups.iter().enumerate() {
+                let camera = (POSE.to_string(), p.iter().map(|v| rosc::OscType::Float(*v)).collect());
+                let _ = ctl.with_osc(|o| o.send_bundle(vec![camera, (ZOOM.to_string(), vec![rosc::OscType::Float(*z)])]));
+                if let Some(wait) = (tick * (i as u32 + 1)).checked_sub(begin.elapsed()) {
+                    std::thread::sleep(wait);
+                }
+            }
+            // The rig on for the flight; put back off when VRChat is, whatever ends the recording.
+            ctl.hold_rig(true);
             let flight = path(pose, length, focus, RATE_HZ);
             // Experimental (VRC+): the camera dolly flies the camera and three more cameras around it (controller/dolly.rs).
-            let dolly = ctl.with_settings(|s| s.dolly_streams) && ctl.start_dolly(&flight, zoom, focus);
+            let dolly = ctl.with_settings(|s| s.dolly_streams) && ctl.start_dolly(&flight, zoom.unwrap_or(45.0), focus);
             let begin = Instant::now();
             for (i, p) in flight.into_iter().enumerate() {
                 // The camera and the rig in one bundle: VRChat applies them together. The dolly moves the camera
@@ -300,6 +412,9 @@ impl super::Controller {
                 ctl.stop_dolly();
             }
             send(POSE, pose.iter().map(|v| rosc::OscType::Float(*v)).collect());
+            if let (false, Some(zoom)) = (closeups.is_empty(), zoom) {
+                send(ZOOM, vec![rosc::OscType::Float(zoom)]);
+            }
             ctl.hold_rig(false);
             if let Some(smooth) = smooth.filter(|s| *s) {
                 send(SMOOTH, vec![rosc::OscType::Bool(smooth)]);
@@ -454,6 +569,103 @@ mod tests {
         assert!(reach(&|p| POSE[2] - p[2]) > 9.9, "right");
         assert!(reach(&|p| p[2] - POSE[2]) > 9.9, "left");
         assert!(reach(&|p| p[1] - POSE[1]) > 9.9, "up");
+    }
+
+    /// The camera-to-world of a pose (Unity's, rows of a 3×4 matrix: its right, up and forward axes as columns).
+    fn camera_to_world(p: &[f32; 6]) -> [f32; 12] {
+        let [r, u, f] = super::super::dolly::axes(p);
+        [r[0], u[0], f[0], p[0], r[1], u[1], f[1], p[1], r[2], u[2], f[2], p[2]]
+    }
+
+    /// Whether the point of the start view at (u, v) (fractions of its width and height, top-down) shows clear (outside
+    /// the capture strip's and the skeleton band's areas, which training leaves out) in the close-up `c` at `fov`.
+    fn clear_in(start: &[f32; 6], zoom: f32, u: f32, v: f32, c: &[f32; 6], fov: f32) -> bool {
+        let half = |f: f32| (f.to_radians() / 2.0).tan();
+        let [r0, u0, f0] = super::super::dolly::axes(start);
+        let (x, y) = ((2.0 * u - 1.0) * half(zoom) * ASPECT, (1.0 - 2.0 * v) * half(zoom));
+        let d: [f32; 3] = std::array::from_fn(|i| f0[i] + r0[i] * x + u0[i] * y);
+        let [r, up, f] = super::super::dolly::axes(c);
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let z = dot(d, f);
+        if z <= 0.0 {
+            return false;
+        }
+        let (cu, cv) = (0.5 + dot(d, r) / z / (2.0 * half(fov) * ASPECT), 0.5 - dot(d, up) / z / (2.0 * half(fov)));
+        let (w, h) = (1920.0, 1080.0);
+        let (px, py) = (cu * w, cv * h);
+        let strip = orbiters_contracts::strip::StripLayout::new(1920, 1080).unwrap().reserved;
+        let band = orbiters_contracts::skeleton::BandLayout::new(1920, 1080).unwrap().reserved();
+        let inside = |x0: u32, y0: u32, x1: u32, y1: u32| px >= x0 as f32 && px < x1 as f32 && py >= y0 as f32 && py < y1 as f32;
+        (0.0..w).contains(&px) && (0.0..h).contains(&py) && !inside(strip.x0, strip.y0, strip.x1, strip.y1) && !inside(band.x0, band.y0, band.x1, band.y1)
+    }
+
+    #[test]
+    fn close_ups_zoom_in_on_the_whole_framing_from_where_the_camera_stands() {
+        for (start, zoom) in [(POSE, 45.0), ([3.0, 1.2, -4.0, -12.0, 200.0, 0.0], 47.3), (POSE, 60.0), (POSE, 90.0)] {
+            let (fov, poses) = closeups(start, zoom).expect("close-ups");
+            assert_eq!(poses.len(), 9);
+            // As narrow as VRChat goes from its default (2.35 times); from 45.9° on, 2.4 times.
+            let magnify = (zoom.to_radians() / 2.0).tan() / (fov.to_radians() / 2.0).tan();
+            if zoom <= 45.0 {
+                assert_eq!(fov, ZOOM_NARROWEST, "{zoom}");
+                assert!(magnify > 2.3, "{magnify}");
+            } else {
+                assert!((magnify - MAGNIFY).abs() < 1e-3 && fov > ZOOM_NARROWEST, "{zoom}: {fov}");
+            }
+            for c in &poses {
+                assert_eq!(c[..3], start[..3], "from where it stands");
+                assert_eq!(c[5], start[5]);
+            }
+            // Every point of the framing below the top's strip band shows clear in a close-up, and nearly all of it.
+            let (mut clear, mut all) = (0, 0);
+            for j in 0..60 {
+                for i in 0..80 {
+                    let (u, v) = ((i as f32 + 0.5) / 80.0, (j as f32 + 0.5) / 60.0);
+                    let seen = poses.iter().any(|c| clear_in(&start, zoom, u, v, c, fov));
+                    if (0.03..0.97).contains(&u) && (0.25..0.93).contains(&v) {
+                        assert!(seen, "{zoom}: ({u}, {v}) seen in no close-up");
+                    }
+                    clear += seen as u32;
+                    all += 1;
+                }
+            }
+            assert!(clear as f32 > 0.9 * all as f32, "{zoom}: {clear} of {all}");
+        }
+        // Zoomed in already, or a zoom VRChat does not have: none.
+        assert!(closeups(POSE, 25.0).is_none() && closeups(POSE, 10.0).is_none() && closeups(POSE, f32::NAN).is_none());
+        assert_eq!(closeups(POSE, 30.0).map(|(fov, _)| fov), Some(ZOOM_NARROWEST), "1.5 times: worth it");
+    }
+
+    #[test]
+    fn close_ups_take_about_a_second_and_the_capture_keeps_each_one() {
+        let steps = closeup_steps(POSE, 45.0, 90);
+        let seconds = steps.len() as f32 / 90.0;
+        assert!((seconds - 1.1).abs() < 0.02, "{seconds}");
+        assert_eq!(steps.last(), Some(&(POSE, 45.0)), "back at the start's zoom where it started");
+        assert!(steps[..steps.len() - 9].iter().all(|(_, z)| *z == ZOOM_NARROWEST));
+        // The first close-up is held longer while VRChat zooms in.
+        assert!(steps[..18].iter().all(|s| s.0 == steps[0].0) && steps[18].0 != steps[0].0);
+        // Frames as the capture sees them (the strip's pose and P11), one every 33 ms: every close-up becomes a keyframe
+        // (after the start's own), and so does the start zoomed back out.
+        let mut selector = orbiters_core::keyframes::KeyframeSelector::new(orbiters_core::settings::KeyframeSettings::default(), false);
+        let p11 = |fov: f32| 1.0 / (fov.to_radians() / 2.0).tan();
+        assert!(selector.consider_view(&camera_to_world(&POSE), p11(45.0), 0.0));
+        let mut kept = Vec::new();
+        let mut t = 0.0;
+        while t < seconds {
+            let (p, z) = steps[((t * 90.0) as usize).min(steps.len() - 1)];
+            if selector.consider_view(&camera_to_world(&p), p11(z), 1.0 + t) {
+                kept.push((p, z));
+            }
+            t += 0.033;
+        }
+        let (_, poses) = closeups(POSE, 45.0).unwrap();
+        for c in &poses {
+            assert!(kept.iter().any(|(p, _)| p == c), "close-up {c:?} kept");
+        }
+        assert_eq!(kept.last(), Some(&(POSE, 45.0)));
+        // No close-ups for the 1 s picture's caller to send, nor without a usable zoom.
+        assert!(closeup_steps(POSE, 22.0, 90).is_empty());
     }
 
     #[test]

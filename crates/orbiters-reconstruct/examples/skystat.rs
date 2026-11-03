@@ -21,7 +21,7 @@ fn main() -> anyhow::Result<()> {
     let session = session.context("usage: skystat <session> [--width N]")?;
     let prepared = prepare::prepare(&session, &prepare::Options { width, ..Default::default() }, |_| {})?;
     let data = &prepared.data;
-    let held_out = train::held_out(data.views.len(), train::Settings::default().hold_out_every);
+    let held_out = train::held_out_views(data, train::Settings::default().hold_out_every);
     let (_, found) = sky::seed_map(data, 2048, &held_out);
     println!(
         "{}: {} sky pixels, {} texels seen; {} of the {} cells seen from both halves of the walk differ between them",

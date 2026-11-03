@@ -259,13 +259,63 @@ pub(super) enum LightMode {
     Scene,
 }
 
-/// The light a preview is drawn in: the scene's when the person prefers it and the file recorded it, else the studio's.
+/// The light a preview is drawn in: the scene's when the person prefers it, the file recorded it and it shows the
+/// scene ([`scene_light_shows`]), else the studio's. So a scene without a sun whose ambient light Unity never computed
+/// (Toolkit 0.4.15 then writes no lights and `ambient: null`), a pitch-dark one, or a preview without `lighting` (Toolkit
+/// 0.4.14 and older; a preview N4N0 built from a scene with neither a directional light nor a gradient or flat ambient
+/// light) never shows its avatars black. A built preview that did record its scene's lights goes by the same rule: its
+/// ambient light is `null` when the scene's comes from the sky (only Unity computes that one), so a built sunless
+/// skybox scene is drawn in the studio's light too.
 pub(super) fn light_mode(prefer_scene: bool, h: &preview::Header) -> LightMode {
-    if prefer_scene && h.lighting.is_some() {
+    if prefer_scene && h.lighting.as_ref().is_some_and(scene_light_shows) {
         LightMode::Scene
     } else {
         LightMode::Studio
     }
+}
+
+/// The least [`scene_light_brightness`] a scene's own light must reach to be drawn in: a tenth of Unity's default sun.
+/// Below it a white matte surface turned to the light stays under about a third of full brightness on screen (sRGB 0.35)
+/// and an avatar's usual colours (albedo about 0.3) under 0.19 where the light falls best, hardly above the avatar
+/// background's 0.1: the avatar does not stand out.
+/// Measured in Unity 2022.3.22f1 (linear colour space, never baked, 3 November 2026): the default scene gives about 1.2
+/// (its sun 1 plus its sky's ambient light), the default sky without a sun 0.17 (kept: dim, as in Unity), no skybox and
+/// no sun 0.055 (the Lighting window's Ambient Color, (54, 58, 66), alone: the studio), and a probe read before the
+/// editor computed it (in the editor's first update after it opened the scene) 0.
+pub(super) const SCENE_LIGHT_MIN: f32 = 0.1;
+
+/// How bright the scene's own light makes a white matte surface at most, in linear units (Unity's default sun is 1):
+/// the brightest channel of the directional lights [`light_for`] draws (the first two that can be pointed, their
+/// colours summed, as if both shone on it) plus the brightest of its ambient light's three directions. An unknown
+/// ambient light (`null`: never computed) adds nothing: it is not the scene's light, even though a scene with a sun
+/// borrows the studio's in its place. Emission and reflections are left out: they show nothing without light.
+pub(super) fn scene_light_brightness(l: &preview::Lighting) -> f32 {
+    let mut direct = [0.0f32; 3];
+    for s in l.lights.iter().filter(|s| towards(s.direction).is_some()).take(2) {
+        let c = light_colour(s.color);
+        (0..3).for_each(|k| direct[k] += c[k]);
+    }
+    let ambient = l.ambient.map_or([0.0; 3], |a| {
+        let (sky, equator, ground) = (light_colour(a.sky), light_colour(a.equator), light_colour(a.ground));
+        std::array::from_fn(|k| sky[k].max(equator[k]).max(ground[k]))
+    });
+    (0..3).map(|k| direct[k] + ambient[k]).fold(0.0, f32::max)
+}
+
+/// Whether a scene's own light shows its preview (at least [`SCENE_LIGHT_MIN`]); the window's switch offers it only then.
+pub(super) fn scene_light_shows(l: &preview::Lighting) -> bool {
+    scene_light_brightness(l) >= SCENE_LIGHT_MIN
+}
+
+/// A recorded light colour as drawn: finite, 0 to 16.
+fn light_colour(c: [f32; 3]) -> [f32; 3] {
+    c.map(|v| if v.is_finite() { v.clamp(0.0, 16.0) } else { 0.0 })
+}
+
+/// Towards a light, from the way it travels (the file's `direction`); none that cannot be pointed.
+fn towards(d: [f32; 3]) -> Option<[f32; 3]> {
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    (len.is_finite() && len > 1e-6).then(|| [-d[0] / len, -d[1] / len, -d[2] / len])
 }
 
 /// What the loading thread measured (docs/project-preview.md).
@@ -767,12 +817,7 @@ fn light_for(h: &preview::Header, mode: LightMode) -> Light {
         view_proj: [0.0; 16],
     };
     if let (LightMode::Scene, Some(l)) = (mode, &h.lighting) {
-        let colour = |c: [f32; 3]| c.map(|v| if v.is_finite() { v.clamp(0.0, 16.0) } else { 0.0 });
-        // Towards the light (the file has the way it travels); none that cannot be pointed.
-        let towards = |d: [f32; 3]| {
-            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-            (len.is_finite() && len > 1e-6).then(|| [-d[0] / len, -d[1] / len, -d[2] / len])
-        };
+        let colour = light_colour;
         let mut lights = l.lights.iter().filter_map(|s| towards(s.direction).map(|d| (d, s)));
         light.studio = false;
         light.fill = [0.0; 3];
@@ -1598,6 +1643,75 @@ mod tests {
         let studio = light_for(&with, LightMode::Studio);
         assert!(studio.studio && studio.color == STUDIO_SUN && studio.shadow == 0.65);
         assert_eq!(studio, light_for(&without, LightMode::Scene), "without the scene's light, the studio's");
+    }
+
+    /// The `lighting` Toolkit writes, read as the desktop reads it.
+    fn lighting(json: serde_json::Value) -> preview::Lighting {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn a_scene_whose_light_shows_nothing_is_drawn_in_the_studio() {
+        let mode = |l: Option<preview::Lighting>| light_mode(true, &lit_header(l));
+        // What Toolkit 0.4.15 wrote for a scene without a sun whose ambient probe Unity had not computed yet (previews
+        // already on disk), and what it writes for a black one (ambient intensity 0, a black flat or gradient colour).
+        let uncomputed = lighting(serde_json::json!({ "lights": [], "ambient": null, "reflectionIntensity": 1.0 }));
+        assert_eq!(scene_light_brightness(&uncomputed), 0.0);
+        assert_eq!(mode(Some(uncomputed.clone())), LightMode::Studio, "no sun, ambient light never computed");
+        let black = lighting(serde_json::json!({ "lights": [],
+            "ambient": { "mode": "skybox", "sky": [0.0, 0.0, 0.0], "equator": [0.0, 0.0, 0.0], "ground": [0.0, 0.0, 0.0] } }));
+        assert_eq!(mode(Some(black)), LightMode::Studio, "no sun, black ambient light");
+        // And whatever the person chose, the studio's light is what is drawn: the same as the switch's Studio light.
+        assert_eq!(light_for(&lit_header(Some(uncomputed)), mode(None)), light_for(&lit_header(None), LightMode::Studio));
+
+        // No sun but a real ambient light: Unity's default sky alone (measured: 0.17 at its brightest), drawn as in Unity.
+        let sky = lighting(serde_json::json!({ "lights": [],
+            "ambient": { "mode": "skybox", "sky": [0.108, 0.145, 0.171], "equator": [0.138, 0.144, 0.123], "ground": [0.081, 0.050, 0.016] } }));
+        assert!((scene_light_brightness(&sky) - 0.171).abs() < 1e-6);
+        assert_eq!(mode(Some(sky)), LightMode::Scene, "no sun, the default sky's ambient light");
+        // No sun and no skybox: Unity's Ambient Color (54, 58, 66) alone, 0.055: too dark to see an avatar by.
+        let grey = lighting(serde_json::json!({ "lights": [],
+            "ambient": { "mode": "skybox", "sky": [0.037, 0.042, 0.055], "equator": [0.037, 0.042, 0.055], "ground": [0.037, 0.042, 0.055] } }));
+        assert_eq!(mode(Some(grey)), LightMode::Studio, "no sun, no skybox");
+
+        // A sun: Unity's default directional light, even with the ambient light unknown (the studio's stands in for it).
+        let sun = |intensity: f32| preview::SceneLight {
+            direction: [0.19, -0.88, -0.44],
+            color: [1.0 * intensity, 0.903 * intensity, 0.672 * intensity],
+            intensity,
+            shadows: true,
+            shadow_strength: 1.0,
+        };
+        let sunny = preview::Lighting { lights: vec![sun(1.0)], ambient: None, reflection_intensity: 1.0 };
+        assert_eq!(scene_light_brightness(&sunny), 1.0);
+        assert_eq!(mode(Some(sunny)), LightMode::Scene, "a sun");
+
+        // Very dark: a sun at intensity 0.02 over an ambient light of 0.01 shows nothing; at the threshold it does.
+        let ambient = |v: f32| preview::Ambient { mode: preview::AmbientMode::Flat, sky: [v; 3], equator: [v; 3], ground: [v; 3] };
+        let dark = preview::Lighting { lights: vec![sun(0.02)], ambient: Some(ambient(0.01)), reflection_intensity: 1.0 };
+        assert!((scene_light_brightness(&dark) - 0.03).abs() < 1e-6);
+        assert_eq!(mode(Some(dark)), LightMode::Studio, "a very dark scene");
+        let dim = preview::Lighting { lights: vec![sun(0.06)], ambient: Some(ambient(SCENE_LIGHT_MIN - 0.06)), reflection_intensity: 1.0 };
+        assert!(scene_light_shows(&dim) && mode(Some(dim)) == LightMode::Scene, "dim, but enough");
+        let night = preview::Lighting { lights: vec![], ambient: Some(ambient(SCENE_LIGHT_MIN * 0.99)), reflection_intensity: 1.0 };
+        assert_eq!(mode(Some(night)), LightMode::Studio, "just under the threshold");
+
+        // Only what is drawn counts: lights that cannot be pointed, a third light, colours that are not numbers.
+        let unpointed = preview::SceneLight { direction: [0.0; 3], ..sun(5.0) };
+        let nan = preview::SceneLight { color: [f32::NAN, f32::INFINITY, -1.0], ..sun(1.0) };
+        let faint = sun(0.01);
+        let l = preview::Lighting { lights: vec![unpointed, nan, faint, sun(5.0)], ambient: None, reflection_intensity: 1.0 };
+        assert!((scene_light_brightness(&l) - 0.01).abs() < 1e-6, "the faint light alone: the bright one is the third pointed");
+        assert_eq!(mode(Some(l)), LightMode::Studio);
+
+        // Previews without the scene's light (schema 1, Toolkit 0.4.14 and older, built ones of scenes with no sun and a
+        // skybox's ambient light).
+        assert_eq!(mode(None), LightMode::Studio, "no lighting recorded");
+        // The person's choice of the studio stands whatever the scene's light.
+        assert_eq!(
+            light_mode(false, &lit_header(Some(preview::Lighting { lights: vec![sun(1.0)], ambient: None, reflection_intensity: 1.0 }))),
+            LightMode::Studio
+        );
     }
 
     #[test]

@@ -262,6 +262,16 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[Project]) {
     let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + GAP) - GAP), Sense::hover());
     let mut opened = None;
     let mut picked = None;
+    // Cards without an avatar picture get a still of their 3D preview, asked for in the gallery's order whatever is on
+    // screen, once the pictures kept from before had their moment to show (screenshots: at once).
+    let pictures_settled = state.fixture || ctx.input(|i| i.time) > 2.0;
+    if let Some(gpu) = cx.gpu {
+        state.preview.start(&ctx, gpu);
+    }
+    let unpictured: Vec<&Project> = projects.iter().filter(|p| pictures_settled && !state.is_hidden(&p.path) && art::pictured(state, p).is_empty()).collect();
+    for p in unpictured {
+        state.preview.want_still(&ctx, cx.gpu, &p.path);
+    }
     for (i, p) in projects.iter().enumerate() {
         // Each card springs to its place (in the grid's own coordinates, so scrolling never animates): when the panel
         // takes room or gives it back, the cards reflow instead of jumping.

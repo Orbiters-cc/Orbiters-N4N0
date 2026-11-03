@@ -20,6 +20,7 @@ pub(super) mod glyph {
     pub const ARROW_RIGHT: &str = "\u{E06C}";
     pub const ARROW_UP: &str = "\u{E08E}";
     pub const ARROW_DOWN: &str = "\u{E03E}";
+    pub const CARET_UP: &str = "\u{E13C}";
     pub const GIT_BRANCH: &str = "\u{E278}";
     pub const GIT_DIFF: &str = "\u{E27C}";
     pub const GITHUB: &str = "\u{E576}";
@@ -76,7 +77,8 @@ pub(super) fn pictured<'a>(state: &State, project: &'a Project) -> Vec<&'a Avata
 
 /// A project's cover in `rect` (squircle corners `radii`): the pictures it has, as a collage (one alone, two side by
 /// side, three as one large and two small, four or more in a square with how many more on the last); avatars without
-/// a picture are left out. A project without any picture shows its kind's icon on a tile.
+/// a picture are left out. A project without any picture shows a still of its last-open scene's 3D preview once the
+/// worker drew it (`super::builds`), its kind's icon on a tile until then (or without one).
 pub(super) fn cover(p: &Painter, state: &State, project: &Project, rect: Rect, radii: [f32; 4], zoom: f32) {
     let pictures = pictured(state, project);
     let [tl, tr, br, bl] = radii;
@@ -90,6 +92,12 @@ pub(super) fn cover(p: &Painter, state: &State, project: &Project, rect: Rect, r
         let tile = Rect::from_center_size(rect.center(), vec2(s, s));
         p.rect_filled(tile, theme::radius(s * 0.3), theme::alpha(tint, 0.14));
         widgets::icon(p, tile.center(), glyph, s * 0.46, tint);
+        // Without an avatar picture: a still of its last-open scene's 3D preview, once drawn.
+        if pictures.is_empty() {
+            if let Some((tex, k)) = state.preview.still(p.ctx(), &project.path) {
+                feedback::cover(p, rect, radii, tex, zoom * (1.0 + 0.03 * (1.0 - k)), k);
+            }
+        }
     }
     match pictures.len() {
         0 => {}

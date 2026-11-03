@@ -206,7 +206,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     // Visited worlds: the world with the most captures has a 3D preview shared; in the one with the most pictures, the
     // first two count as shared and the next two as being sent.
-    let visited = crate::worlds::load(&settings.sessions_dir);
+    // The pictures' index is this computer's (it reads every VRChat picture not indexed yet, hours on a large archive
+    // on a hard disk): `ORBITERS_SCREENSHOT_NO_PICTURES` leaves it out, for scenarios that do not show pictures.
+    let visited = if std::env::var_os("ORBITERS_SCREENSHOT_NO_PICTURES").is_some() { Vec::new() } else { crate::worlds::load(&settings.sessions_dir) };
     let captured = visited.iter().max_by_key(|w| (w.reconstructed(), w.sessions.len())).cloned();
     let pictured = visited.iter().max_by_key(|w| w.shots.len()).cloned();
     let signed_in = with_account(&idle, crate::state::AccountState::SignedIn { username: "Desktop Tester".into() }, None);
@@ -1540,6 +1542,15 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         ("projects-preview-none", 90),
         ("projects-preview-no-toolkit", 90),
         ("projects-preview-old-toolkit", 90),
+        ("projects-preview-building", 90),
+        ("projects-preview-no-scene", 90),
+        ("projects-preview-native", 200),
+        ("projects-preview-native-building", 90),
+        ("projects-preview-native-open", 230),
+        ("projects-preview-native-switch", 200),
+        ("projects-preview-native-switched", 300),
+        ("projects-preview-native-all", 200),
+        ("projects-stills", 120),
     ] {
         let mut snapshot = scenarios[0].snapshot.clone();
         snapshot.account.development = true;
@@ -1823,7 +1834,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             if sc.name.starts_with("projects-") {
                 app.projects_mut().stage(&ctx, sc.name);
             }
-            if sc.name.starts_with("projects-preview") {
+            if sc.name.starts_with("projects-preview") || sc.name == "projects-stills" {
                 app.projects_mut().stage_preview(sc.name);
             }
             if sc.page == Page::Videos {

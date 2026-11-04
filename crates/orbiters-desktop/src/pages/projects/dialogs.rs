@@ -982,10 +982,7 @@ fn setup_footer(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             .id_salt("setup-open");
         if widgets::activated(&b.show(ui)) {
             let ctx = ui.ctx().clone();
-            state.task(&ctx, "Opening Unity…", move || {
-                orbiters_projects::open_project(&project)?;
-                Ok(Outcome::Picked(None))
-            });
+            state.open_unity(&ctx, &project, true);
             if let Some(f) = state.flow.as_mut() {
                 f.unity_open = true;
             }

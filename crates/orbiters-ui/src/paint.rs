@@ -133,6 +133,22 @@ pub fn fill_squircle(painter: &Painter, rect: Rect, radius: f32, color: Color32)
     painter.add(Shape::mesh(squircle_mesh(rect, radius, color, feather(painter))));
 }
 
+/// The corner radius for a shape `inner` inside a squircle frame, for the two outlines to run side by side: the corner
+/// that leaves the same centre as the frame's. `frame_radius` as given to [`fill_squircle`] (it is limited there to half
+/// the frame's shorter side, and so here); the gap is the one above and below `inner`, its sides being free to sit anywhere
+/// along a row (a segmented control's middle choice).
+pub fn nested_radius(frame: Rect, frame_radius: f32, inner: Rect) -> f32 {
+    let limit = (frame.width() * 0.5).min(frame.height() * 0.5).max(0.0);
+    let gap = (inner.top() - frame.top()).min(frame.bottom() - inner.bottom()).max(0.0);
+    (frame_radius.min(limit) - gap).max(0.0)
+}
+
+/// A highlight inside a squircle frame (a segmented control's chosen half): the same corner shape as the frame's and
+/// concentric with it. A circular corner inside a squircle one never follows it, whatever its radius.
+pub fn fill_nested_squircle(painter: &Painter, frame: Rect, frame_radius: f32, inner: Rect, color: Color32) {
+    fill_squircle(painter, inner, nested_radius(frame, frame_radius, inner), color);
+}
+
 /// The fill of [`fill_squircle`] as a mesh (for shapes set later with `Painter::set`); `feather` in points.
 pub fn squircle_mesh(rect: Rect, radius: f32, color: Color32, feather: f32) -> Mesh {
     convex_mesh(&squircle_points(rect, radius), |_| color, feather * 0.5)
@@ -451,6 +467,32 @@ pub fn ring(painter: &Painter, center: Pos2, radius: f32, width: f32, color: Col
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How far the highlight's outline runs from the frame's, around their top-left corners.
+    fn gaps(frame: Rect, frame_r: f32, inner: Rect, inner_points: &[Pos2]) -> (f32, f32) {
+        let outer = squircle_points(frame, frame_r);
+        let corner = |p: &&Pos2| p.x < inner.left() + nested_radius(frame, frame_r, inner) && p.y < inner.top() + nested_radius(frame, frame_r, inner);
+        let distances: Vec<f32> = inner_points.iter().filter(corner).map(|p| outer.iter().map(|q| p.distance(*q)).fold(f32::MAX, f32::min)).collect();
+        assert!(distances.len() > 4);
+        (distances.iter().copied().fold(f32::MAX, f32::min), distances.iter().copied().fold(0.0, f32::max))
+    }
+
+    #[test]
+    fn a_nested_highlight_follows_its_frames_corner() {
+        // The preview window's light switch: frame 38 high, highlight inset by 4.
+        let frame = Rect::from_min_size(pos2(100.0, 50.0), vec2(240.0, 38.0));
+        let r = crate::theme::squircle(19.0);
+        let inner = Rect::from_min_size(pos2(104.0, 54.0), vec2(116.0, 30.0));
+        assert_eq!(nested_radius(frame, r, inner), 15.0);
+        let (near, far) = gaps(frame, r, inner, &squircle_points(inner, nested_radius(frame, r, inner)));
+        assert!(near >= 3.5 && far <= 5.5, "the gap stays about 4 all the way round the corner: {near}..{far}");
+        // What it was: a circular corner, which pinches the gap at the corner's start and opens it at the diagonal.
+        let (old_near, old_far) = gaps(frame, r, inner, &rounded_rect_points(inner, 15.0));
+        assert!(old_far - old_near > far - near + 1.0, "circle {old_near}..{old_far}, squircle {near}..{far}");
+        // A frame's radius past half its height counts for what is drawn; a square frame leaves nothing to follow.
+        assert_eq!(nested_radius(frame, 500.0, inner), 15.0);
+        assert_eq!(nested_radius(frame, 2.0, inner), 0.0);
+    }
 
     #[test]
     fn shadows_fall_off_smoothly_even_on_shapes_thinner_than_their_blur() {

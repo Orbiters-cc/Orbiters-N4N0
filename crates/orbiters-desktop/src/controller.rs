@@ -120,6 +120,8 @@ pub struct Controller {
     /// The capture kit's toggles as they were before a recording started from the app switched them on (Some while
     /// the app drives them), and when the avatar last (re)loaded, which resets them.
     avatar_before: Mutex<Option<AvatarToggles>>,
+    /// Recording without the wearer, and what is known about the strip.
+    hide: Mutex<hide_self::HideRuntime>,
     avatar_changed_at: Mutex<Option<Instant>>,
     /// The Orbiters account's credential and a sign-in in progress (controller/account.rs).
     account_runtime: Mutex<account::AccountRuntime>,
@@ -279,6 +281,7 @@ mod burst;
 mod calls;
 mod cleanup;
 mod dolly;
+pub(crate) mod hide_self;
 mod maps;
 pub(crate) mod menu_shares;
 mod n4n0;
@@ -322,6 +325,7 @@ impl Controller {
             reconstruct_queue: Mutex::new(VecDeque::new()),
             camera_before: Mutex::new(None),
             avatar_before: Mutex::new(None),
+            hide: Mutex::new(hide_self::HideRuntime::default()),
             avatar_changed_at: Mutex::new(None),
             account_runtime: Mutex::new(account::AccountRuntime::default()),
             vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
@@ -673,6 +677,7 @@ impl Controller {
             WorkerEvent::Coverage(map) => self.snapshot.lock().unwrap().capture.coverage = Some(map),
             WorkerEvent::Hips { position, rotation } => self.rig_hips(position, rotation),
             WorkerEvent::Stats(stats) => {
+                let missing_s = stats.strip_missing_s;
                 let over_limit = {
                     let mut s = self.snapshot.lock().unwrap();
                     if let Some(p) = stats.position {
@@ -688,6 +693,7 @@ impl Controller {
                     s.capture.stats = Some(stats);
                     over
                 };
+                self.check_strip(missing_s);
                 // Stats arrive four times a second; that is also the interface's refresh rate while recording.
                 self.publish();
                 if over_limit {
@@ -714,8 +720,20 @@ impl Controller {
                     s.storage.sessions += 1;
                 });
                 self.bump_library();
+                // Frames, but not one with a pose: no capture, whatever a green "saved" would say, and nothing to reconstruct.
+                let nothing = !restarting && manifest.stats.frames > 0 && manifest.stats.keyframes == 0;
+                if nothing {
+                    self.burst.lock().unwrap().recording = false;
+                    self.scan.lock().unwrap().recording = false;
+                    let why = self.snapshot.lock().unwrap().capture.no_strip.unwrap_or_else(|| self.why_no_strip_now());
+                    self.update(|s| s.capture.no_strip = Some(why));
+                    self.notify(
+                        NoticeKind::Error,
+                        format!("No 3D capture: {} frames came, none with the capture strip, so there are no keyframes. {}", manifest.stats.frames, why.message()),
+                    );
+                }
                 self.push_notice(Notice::SessionSaved {
-                    reason,
+                    reason: if nothing { "restarted".into() } else { reason },
                     frames: manifest.stats.frames,
                     keyframes: manifest.stats.keyframes,
                     depth_frames: manifest.stats.depth_frames,
@@ -810,6 +828,7 @@ impl Controller {
             s.capture.coverage = None;
             s.capture.from_osc = from_osc;
             s.capture.photo_3d = self.burst.lock().unwrap().recording;
+            s.capture.no_strip = None;
         });
         // Training takes the whole GPU: the game and the recording come first; the run starts over once they are done
         // (stopped once the state says capturing, so the run's exit does not start it again).
@@ -837,6 +856,8 @@ impl Controller {
         if drive_avatar {
             self.switch_kit_on(&vrchat);
             self.start_rig();
+            // After the kit's toggle: the avatar's layer only hides while the kit records.
+            self.start_hide_self(&vrchat, drive_camera);
         }
         let sent = {
             let mut osc = self.osc_values.lock().unwrap();
@@ -887,6 +908,8 @@ impl Controller {
     fn put_vrchat_back(&self) {
         self.osc_values.lock().unwrap().forwarding = false;
         self.stop_rig();
+        // Before the camera, which may close and take the mask's message with it, and the kit, whose toggle ends the hiding.
+        self.restore_hide_self();
         self.restore_camera();
         self.restore_kit();
     }
@@ -982,6 +1005,7 @@ impl Controller {
                 ctl.switch_kit_on(&[]);
                 // The new avatar's rig rests at its hips until told to follow again.
                 ctl.rig_avatar_changed();
+                ctl.hide_self_avatar_changed();
             }
         });
         if spawned.is_err() {
@@ -1162,6 +1186,7 @@ impl Controller {
     /// datagram.
     fn on_osc_events(self: &Shared, events: &mut Vec<OscEvent>, at_ns: u64, record_parameter: &str) {
         let mut messages = Vec::with_capacity(events.len());
+        let mut went_off = false;
         for event in events.drain(..) {
             match event {
                 OscEvent::Parameter { name, value } => {
@@ -1180,10 +1205,19 @@ impl Controller {
                     self.n4n0.on_avatar(id.clone());
                     messages.push((AVATAR_CHANGE.to_string(), vec![OscValue::Text(id)]));
                 }
-                OscEvent::Values { address, values } => messages.push((address, values)),
+                OscEvent::Values { address, values } => {
+                    let mask_off = address == hide_self::LOCAL_PLAYER && values.first().is_some_and(|v| !v.truthy());
+                    messages.push((address, values));
+                    if mask_off {
+                        went_off = true;
+                    }
+                }
             }
         }
         self.on_osc(messages, at_ns);
+        if went_off {
+            let _ = self.osc_action(|c| c.local_user_went_off());
+        }
     }
 
     /// Keeps what VRChat said (and passes it to a session recording it). An avatar change forgets the last avatar's
@@ -1606,6 +1640,9 @@ impl Controller {
         let root = self.settings().sessions_dir;
         if !inside(&root, &dir) || !dir.join("manifest.json").is_file() {
             anyhow::bail!("Only sessions inside the sessions folder can be reconstructed.");
+        }
+        if orbiters_core::bundle::read_manifest(&dir).is_ok_and(|m| m.stats.frames > 0 && m.stats.keyframes == 0) {
+            anyhow::bail!("This recording has no keyframes: its frames came without the capture strip, so there is nothing to reconstruct.");
         }
         self.ensure_frames_kept(&dir)?;
         if self.is_capturing() {

@@ -245,6 +245,14 @@ pub struct SessionSummary {
     pub damaged: Option<String>,
 }
 
+impl SessionSummary {
+    /// Frames came and none had a camera pose (the capture strip): this recording cannot become a 3D view. (Local User
+    /// off in VRChat's camera, or an avatar without N4N0's capture kit.)
+    pub fn has_no_keyframes(&self) -> bool {
+        self.manifest.stats.frames > 0 && self.manifest.stats.keyframes == 0
+    }
+}
+
 /// A session's manifest. One written by another version (a field it does not know the shape of) keeps every field
 /// that fits rather than leaving the session out of the library ([`crate::json_lenient`]); a file that is not JSON is
 /// an error.

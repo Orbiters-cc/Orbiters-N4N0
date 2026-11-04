@@ -258,6 +258,22 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         ..Default::default()
     });
     recording.capture.coverage = Some(sample_coverage(&trail));
+    // Frames coming, none with the strip, as with Local User off on an upload that could not hide itself: the tile says why.
+    let mut no_strip = recording.clone();
+    no_strip.capture.trail.clear();
+    no_strip.capture.coverage = None;
+    no_strip.capture.no_strip = Some(crate::state::NoStrip::MaskOff);
+    no_strip.capture.stats = Some(CaptureStats {
+        frames: 419,
+        strip_ok: 0,
+        strip_failed: 419,
+        fps: 44.0,
+        elapsed_s: 9.5,
+        width: 1920,
+        height: 1080,
+        strip_missing_s: 9.5,
+        ..Default::default()
+    });
     let mut consent = idle.clone();
     consent.settings.consent_acknowledged = false;
     let mut reconstructing = idle.clone();
@@ -972,6 +988,20 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             splash: false,
             open_detail: false,
             toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-no-strip",
+            page: Page::Capture,
+            snapshot: no_strip,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![(toast::Kind::Warning, crate::state::NoStrip::MaskOff.message())],
             pointer: None,
             scroll: 0.0,
             world: None,

@@ -75,6 +75,9 @@ pub struct Entry {
     pub remote: Option<Item>,
     pub content: Content,
     pub ready: bool,
+    /// A recording whose frames never had the capture strip: no keyframes, nothing to make a 3D view from.
+    #[serde(default)]
+    pub no_keyframes: bool,
     #[serde(skip)]
     pub picture: Option<crate::worlds::Picture>,
     /// The picture's size in pixels when the listing knows it (a screenshot's header, a capture's frame, what Orbiters
@@ -412,6 +415,7 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
                 remote,
                 content: Content::read(&s.dir),
                 ready: s.reconstruction.is_some(),
+                no_keyframes: s.has_no_keyframes(),
                 picture: Some(crate::worlds::Picture::Session(s.dir.clone())),
                 size: session_picture_size(s.manifest.capture.width, s.manifest.capture.height),
                 layers: Vec::new(),
@@ -450,6 +454,7 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
                 remote,
                 content,
                 ready: true,
+                no_keyframes: false,
                 picture: Some(picture),
                 size: (shot.info.width > 0 && shot.info.height > 0).then_some([shot.info.width, shot.info.height]),
                 layers,
@@ -481,6 +486,7 @@ pub fn remote_entry(item: Item) -> Entry {
         local: None,
         content: Content { explicit: item.explicit, explicit_reasons: item.explicit_reasons.clone() },
         ready: true,
+        no_keyframes: false,
         picture,
         size: item.picture.as_ref().filter(|p| p.width > 0 && p.height > 0).map(|p| [p.width, p.height]),
         layers: Vec::new(),

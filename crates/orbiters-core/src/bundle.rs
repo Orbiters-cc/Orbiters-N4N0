@@ -97,6 +97,11 @@ impl BundleWriter {
 
     pub fn append_record(&mut self, record: &FrameRecord) -> anyhow::Result<()> {
         self.frames.write_all(&record.to_bytes())?;
+        // A 3D picture's flight reads the depth frames as they come (the desktop's controller/around.rs): at about ten a
+        // second, this write is nothing beside the depth file just written for each.
+        if record.has(record_flags::DEPTH) {
+            self.frames.flush()?;
+        }
         let s = &mut self.manifest.stats;
         s.frames += 1;
         s.bytes += RECORD_SIZE as u64;
@@ -471,6 +476,21 @@ mod tests {
     }
     use crate::contracts::manifest::SessionManifest;
     use std::time::Duration;
+
+    #[test]
+    fn a_depth_frames_record_can_be_read_while_recording() {
+        let root = std::env::temp_dir().join(format!("orbiters-bundle-live-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut w = BundleWriter::create(&root, "Live", SessionManifest::new("id-5".into(), crate::now_utc_iso(), "0.1.0")).unwrap();
+        let dir = w.dir().to_path_buf();
+        let on_disk = || fs::read(dir.join(manifest::FRAMES_FILE)).unwrap().len();
+        w.append_record(&FrameRecord { frame_index: 0, flags: record_flags::STRIP_OK, ..Default::default() }).unwrap();
+        assert_eq!(on_disk(), 0, "a colour frame waits in the buffer");
+        w.append_record(&FrameRecord { frame_index: 1, flags: record_flags::STRIP_OK | record_flags::DEPTH, depth_index: 0, ..Default::default() }).unwrap();
+        assert_eq!(on_disk(), 2 * RECORD_SIZE, "a depth frame's record is there for a 3D picture's flight, and those before it");
+        w.finish().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_damaged_session_is_listed_and_its_good_records_read() {

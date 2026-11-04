@@ -1,8 +1,8 @@
 //! Keyframe selection from exact strip poses: a frame becomes a keyframe when the camera moved or turned
 //! enough since the last keyframe, when it zoomed in or out, or when too much time passed. Turning enough is a share of
-//! the view: [`KeyframeSettings::min_rotation_deg`] at VRChat's default 45° field of view, a third of a narrower one
-//! (`fov / 3`): a 3D picture starts with VRChat's camera zoomed in to 20° and turned from one part of its view to the
-//! next (the desktop's controller/burst.rs), 8 to 23° apart, and every one of those detail views must be kept.
+//! the view: [`KeyframeSettings::min_rotation_deg`] at VRChat's default field of view of 47°, a third of a narrower one
+//! (`fov / 3`), so a recording zoomed in keeps as many views of what it turns over. VRChat's slider is a focal length: its
+//! largest value, 150, is its narrowest, 15°, and 20 is 89° (measured in the 3D pictures of 2026-11-04).
 
 use crate::settings::KeyframeSettings;
 

@@ -158,14 +158,13 @@ pub struct Dataset {
 }
 
 /// How much longer than the session's usual focal length a keyframe's must be for it to be a detail view
-/// ([`detail_views`]). VRChat's camera zoomed from its default 45° to its narrowest, 20°, is 2.35 times; a user's own
-/// zoom changes during a recording are seldom that large, and the 3D picture's zoom-in (the desktop's
-/// controller/burst.rs) always is.
+/// ([`detail_views`]). 3D pictures took such views for a while (none reached the capture: 2026-11-04, the desktop's
+/// controller/burst.rs); what is left of them is a person zooming in during a recording, seldom this far.
 pub const DETAIL_ZOOM: f32 = 1.3;
 
 /// Which of keyframes with these focal lengths (any one unit) are detail views: those whose focal length is at least
-/// [`DETAIL_ZOOM`] times the median one, when they are fewer than a third of all. A 3D picture starts with a few frames
-/// of VRChat's camera zoomed in on what it aims at, from where it stands (the desktop's controller/burst.rs): through
+/// [`DETAIL_ZOOM`] times the median one, when they are fewer than a third of all. Measured when 3D pictures were to start with
+/// a few frames of VRChat's camera zoomed in on what it aims at, from where it stands, emulated: through
 /// the same 1080p stream they show its subject — the people in the picture — with 2.35 times the pixels a degree of the
 /// other keyframes, all within about a second, while the people hardly move. Measured on the real 3D pictures of
 /// 2026-11-03 (Penthouse Palace), the reconstruction was mushy on the faces because the people moved during the

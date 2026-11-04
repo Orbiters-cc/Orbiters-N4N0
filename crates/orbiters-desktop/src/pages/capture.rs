@@ -21,8 +21,8 @@ const GRID_H: f32 = 500.0;
 /// What each of a 3D picture's camera flights does (1 s, 4 s, 8 s), here and on Home's 3D picture page.
 pub(super) const FLIGHT_HINTS: [&str; 3] = [
     "A gentle sweep around what the camera aims at",
-    "Close looks at the faces in the picture and at yours, zoomed-in close-ups of what the camera aims at, then around you, straight up and down and 10 m out every way",
-    "As 4 s, plus circles around four points 8 m away",
+    "Looks around, goes around the people in the picture and you, then through the room as far as it can see it goes",
+    "As 4 s, with more views of each person and more of the place",
 ];
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State, projects: &mut super::projects::State) {
@@ -123,7 +123,7 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
             let w3 = b3.desired_width(ui);
             let r3 = Rect::from_min_size(pos2(r.left() - 8.0 - w3, rect.bottom() - 34.0), vec2(w3, 32.0));
             picture = b3.show_at(ui, r3).clicked();
-            // How long the camera flies: 1 s gentle, 4 s around you and out every way, 8 s with far circles too.
+            // How long the camera flies: 1 s gentle, 4 s around the people and through the room, 8 s with more of both.
             let mut length = snap.settings.photo_3d;
             let lengths = [Photo3dLength::Quick, Photo3dLength::Standard, Photo3dLength::Full]
                 .into_iter()

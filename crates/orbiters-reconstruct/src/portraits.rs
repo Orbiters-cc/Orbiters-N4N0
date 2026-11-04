@@ -53,9 +53,23 @@ pub const MARGIN: f32 = 0.15;
 pub const CONFIDENCE: f32 = 0.4;
 /// Boxes overlapping by more than this are one face.
 const OVERLAP: f32 = 0.5;
-/// Keyframes a detection pass reads at most: a 3D picture has 15 to 70. A longer recording is a walk, not a picture: it
-/// spends no time on this.
+/// Keyframes a session may have to be read for faces, however long it lasts, and how long it may last, game seconds, to be
+/// read whatever its keyframes: a 3D picture flying around its people keeps 80 to 150 in its 4 to 8 s (the desktop's
+/// controller/around.rs). A longer recording is a walk, not a picture: it spends no time on this.
 pub const MOST_KEYFRAMES: usize = 80;
+pub const PICTURE_S: f32 = 15.0;
+/// Keyframes a detection pass reads at most, spread over the picture, the first ones among them. At 60 to 70 ms each, about
+/// three seconds: more boxes than [`STEPS`] can use.
+pub const MOST_DETECTED: usize = 40;
+
+/// The keyframes a detection pass reads out of `views`: all of them, up to [`MOST_DETECTED`], else evenly spread.
+pub fn detected_views(views: usize) -> Vec<usize> {
+    if views <= MOST_DETECTED {
+        (0..views).collect()
+    } else {
+        (0..MOST_DETECTED).map(|i| i * views / MOST_DETECTED).collect()
+    }
+}
 
 /// A face seen in a keyframe.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -86,7 +100,11 @@ impl Portrait {
 }
 
 /// Which view of a face each tile step draws: by its box's size (a face seen close has more to teach), a later view for
-/// less, over [`MOMENT`] seconds from the first face seen, unless it is known not to have moved.
+/// less, over [`MOMENT`] seconds from the first face seen, unless it is known not to have moved. The moment stays with a 3D
+/// picture that flies around its people: tiles over their whole bodies in every view that shows them, the moment not applying,
+/// took a friend's face in the first frame from 33.8 to 18.3 dB (LPIPS 0.014 to 0.456; 8 s picture of 2026-11-03, three runs)
+/// for 1.5 dB more on held-out views, and gained nothing from the side on a still avatar whose views ring it (23.3 to 23.4 dB on
+/// its body, within the noise; the desktop repository's docs/3d-picture-angles-2026-11-04.md).
 pub struct Picker {
     cumulative: Vec<f32>,
 }
@@ -511,14 +529,17 @@ pub struct Found {
 /// The faces of a session's keyframes (see the module's comment).
 pub fn find(data: &Dataset) -> Found {
     let mut found = Found::default();
-    if data.views.is_empty() || data.views.len() > MOST_KEYFRAMES {
+    let times = data.views.iter().map(|v| v.game_time);
+    let span = times.clone().fold(f32::MIN, f32::max) - times.fold(f32::MAX, f32::min);
+    if data.views.is_empty() || (data.views.len() > MOST_KEYFRAMES && span > PICTURE_S) {
         return found;
     }
     let start = std::time::Instant::now();
     let Some(mut detector) = Detector::load(crate::priority::loading_threads()) else { return found };
     found.ran = true;
     let mut detections = Vec::new();
-    for (i, v) in data.views.iter().enumerate() {
+    for i in detected_views(data.views.len()) {
+        let v = &data.views[i];
         match detector.detect(&v.image, &data.mask, data.width, data.height) {
             Ok(list) => detections.extend(list.into_iter().map(|(b, confidence)| Detection { view: i, b, confidence })),
             Err(e) => {
@@ -593,6 +614,16 @@ mod tests {
     }
 
     #[test]
+    fn a_long_picture_is_read_in_part_from_its_start() {
+        assert_eq!(detected_views(3), vec![0, 1, 2]);
+        assert_eq!(detected_views(MOST_DETECTED), (0..MOST_DETECTED).collect::<Vec<_>>());
+        let picks = detected_views(120);
+        assert_eq!(picks.len(), MOST_DETECTED);
+        assert_eq!(picks[0], 0);
+        assert!(picks.windows(2).all(|w| w[1] - w[0] == 3), "{picks:?}");
+    }
+
+    #[test]
     fn a_few_views_get_few_steps() {
         assert_eq!(steps_for(2, STEPS), 800);
         assert_eq!(steps_for(9, STEPS), 3600);
@@ -620,7 +651,10 @@ mod tests {
         assert!((share(&[at(100.0, 0.0), at(100.0, 1.0)], 1.0) - 0.731).abs() < 0.02);
         assert!((share(&[at(300.0, 0.0), at(100.0, 0.0)], 1.0) - 0.75).abs() < 0.02);
         assert!((share(&[at(100.0, 0.0), at(100.0, 5.0)], 0.0) - 0.5).abs() < 0.02, "a moment of 0: all alike");
-        assert!((share(&[Portrait { still: true, ..at(100.0, 0.0) }, Portrait { still: true, ..at(100.0, 5.0) }], 1.0) - 0.5).abs() < 0.02, "a still head: all alike");
+        assert!(
+            (share(&[Portrait { still: true, ..at(100.0, 0.0) }, Portrait { still: true, ..at(100.0, 5.0) }], 1.0) - 0.5).abs() < 0.02,
+            "a still head: all alike"
+        );
     }
 
     #[test]

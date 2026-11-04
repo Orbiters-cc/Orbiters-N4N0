@@ -18,6 +18,7 @@ pub mod ground;
 pub mod init;
 pub mod metrics;
 pub mod ply;
+pub mod portraits;
 pub mod prepare;
 pub mod priority;
 pub mod select;

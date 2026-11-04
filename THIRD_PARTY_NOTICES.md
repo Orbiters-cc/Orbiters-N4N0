@@ -40,6 +40,7 @@ every crate built into the programs, and of the native libraries next to them, a
 | if-addrs | MIT OR BSD-3-Clause |
 | rayon, fastrand (the reconstruction; rayon also the photo editor) | MIT OR Apache-2.0, Apache-2.0 OR MIT |
 | zune-jpeg, zune-core (N4N0's thumbnails) | MIT OR Apache-2.0 OR Zlib |
+| ort, ort-sys (ONNX Runtime bindings; the reconstruction's face detector) | MIT OR Apache-2.0 |
 | rosc | MIT OR Apache-2.0 |
 | mdns-sd | Apache-2.0 OR MIT |
 | sysinfo | MIT |
@@ -62,6 +63,12 @@ every crate built into the programs, and of the native libraries next to them, a
 |---|---|
 | sherpa-onnx C API (`sherpa-onnx-c-api.dll`, prebuilt by k2-fsa) | Apache-2.0 |
 | ONNX Runtime (`onnxruntime.dll`, Microsoft) | MIT |
+
+## Models distributed with the app
+
+| Model | License |
+|---|---|
+| FacesV1 (`faces-v1-int8.onnx`, next to the reconstruction worker): a YOLOv8m face detector (one class, `face`) trained with Ultralytics 8.0.211 on 2023-11-17 from `yolov8m.pt`; exported to ONNX and its convolutions quantized to int8 by Orbiters. No Ultralytics code ships or runs: ONNX Runtime runs the file. | Published on Civitai under MIT, as its uploader tagged it (reported by Enzo Dutra, 2026-11-04; no link, author or licence text known, and the checkpoint carries none). **Unconfirmed:** weights trained from Ultralytics' pretrained `yolov8m.pt` may fall under Ultralytics' AGPL-3.0 or Enterprise terms whatever the tag says. To be settled before a release outside development. |
 
 ## Models downloaded when the person asks (N4N0's ears), not distributed with the app
 

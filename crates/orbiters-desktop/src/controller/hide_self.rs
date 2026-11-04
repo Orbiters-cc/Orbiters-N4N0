@@ -118,6 +118,11 @@ impl super::Controller {
         heard.or(self.hide.lock().unwrap().mask)
     }
 
+    /// Whether this recording holds the wearer's avatar hidden.
+    pub(super) fn hiding_self(&self) -> bool {
+        self.hide.lock().unwrap().hiding
+    }
+
     /// A recording starts: `vrchat` is VRChat's tree as read for it.
     pub(super) fn start_hide_self(self: &Shared, vrchat: &[(String, OscValue)], may_drive: bool) {
         let (kit, can_hide) = avatar_support(vrchat);

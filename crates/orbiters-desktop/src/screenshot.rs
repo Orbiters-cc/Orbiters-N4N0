@@ -1540,6 +1540,19 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         "projects-repos",
         "projects-repos-loading",
         "projects-repos-mid",
+        "projects-repos-cards",
+        "projects-repos-scrolled",
+        "projects-repos-search",
+        "projects-repos-search-japanese",
+        "projects-repos-search-owner",
+        "projects-repos-nothing",
+        "projects-repos-many",
+        "projects-repos-added",
+        "projects-repos-unreachable",
+        "projects-repos-partly",
+        "projects-repos-bare",
+        "projects-panel-cut",
+        "projects-panel-cut-top",
         "projects-new",
         "projects-new-custom",
         "projects-new-duplicate",
@@ -1622,8 +1635,15 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             splash: false,
             open_detail: false,
             toasts: vec![],
-            pointer: None,
-            scroll: if name == "projects-proposals" { 560.0 } else { 0.0 },
+            // The wheel over the panel, not the cards beside it.
+            pointer: (name == "projects-panel-cut-top").then_some(pos2(1050.0, 500.0)),
+            scroll: match name {
+                "projects-proposals" => 560.0,
+                "projects-repos-scrolled" => 5000.0,
+                "projects-repos-added" => 520.0,
+                "projects-panel-cut-top" => 110.0,
+                _ => 0.0,
+            },
             world: None,
             home: None,
             library: None,
@@ -1927,7 +1947,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             input.events.push(Event::PointerMoved(p));
         }
         if sc.scroll != 0.0 && f + 30 == sc.frames {
-            input.events.push(Event::PointerMoved(pos2(760.0, 500.0)));
+            input.events.push(Event::PointerMoved(sc.pointer.unwrap_or(pos2(760.0, 500.0))));
             input.events.push(Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Point,
                 delta: vec2(0.0, -sc.scroll),

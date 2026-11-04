@@ -8,7 +8,7 @@ use super::state::{server, Modal, Outcome, State};
 use super::ui::errors;
 use crate::pages::{Cx, Go};
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, Sense, Ui, UiBuilder};
-use orbiters_projects::{avatars::Avatar, discovery::Project, network, setup, templates, vpm};
+use orbiters_projects::{avatars::Avatar, discovery::Project, setup, templates, vpm};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::dialog::{Dialog, Part};
 use orbiters_ui::layout;
@@ -263,70 +263,12 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
 
     ui.add_space(6.0);
-    art::caps(ui, "Suggested");
-    let mut seen = std::collections::HashSet::new();
-    let list: Vec<network::Listing> =
-        state.catalog.known.iter().chain(&state.catalog.public).filter(|l| seen.insert(l.url.trim_end_matches('/').to_string())).cloned().collect();
-    if list.is_empty() {
-        if state.catalog_job.running() {
-            for _ in 0..2 {
-                let (r, _) = ui.allocate_exact_size(vec2(w, 60.0), Sense::hover());
-                feedback::shimmer(ui.painter(), r, 14.0);
-            }
-        } else if state.catalog.errors.is_empty() {
-            widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 10.0), Align2::LEFT_CENTER, &Txt::new("No suggestion right now.", 12.5).color(theme::FG_3));
-            ui.add_space(20.0);
-        }
-    }
-    for l in list {
-        let (row, _) = ui.allocate_exact_size(vec2(w, 60.0), Sense::hover());
-        let p = ui.painter();
-        widgets::frame(p, row, 14.0, theme::surface_soft());
-        let t = Rect::from_min_size(pos2(row.left() + 12.0, row.center().y - 17.0), vec2(34.0, 34.0));
-        state.repo_icons_wanted.push(l.url.clone());
-        art::repo_icon(p, state.repo_icons.get(&l.url), t, &l.url, true);
-        let x = t.right() + 12.0;
-        let added = state.view.repos.iter().any(|repo| repo.url.trim_end_matches('/') == l.url.trim_end_matches('/'));
-        let b = Button::new(if added { "Added" } else { "Add" })
-            .icon(if added { icons::CHECK } else { icons::PLUS })
-            .size(Size::Sm)
-            .enabled(!added && !busy)
-            .id_salt(("suggested", &l.url));
-        let bw = b.desired_width(ui);
-        let tw = row.right() - 12.0 - bw - 12.0 - x;
-        widgets::text_truncated(p, pos2(x, row.center().y - 8.0), Align2::LEFT_CENTER, &Txt::new(&l.name, 13.5).weight(weight::MEDIUM), tw);
-        widgets::text_truncated(
-            p,
-            pos2(x, row.center().y + 10.0),
-            Align2::LEFT_CENTER,
-            &Txt::new(if l.description.is_empty() { &l.url } else { &l.description }, 11.5).color(theme::FG_3),
-            tw,
-        );
-        if widgets::activated(&b.show_at(ui, Rect::from_min_size(pos2(row.right() - 12.0 - bw, row.center().y - 16.0), vec2(bw, 32.0)))) {
-            add_repo(state, &ctx, l.url.clone(), BTreeMap::new());
-        }
-    }
-    if !state.catalog.errors.is_empty() {
-        feedback::banner(ui, Id::unique("repos-catalog-error"), Tone::Warn, "Orbiters' suggestions could not be loaded.", false);
-        let b = Button::new("Try again")
-            .icon(icons::ARROW_COUNTER_CLOCKWISE)
-            .variant(Variant::Ghost)
-            .size(Size::Sm)
-            .enabled(!state.catalog_job.running())
-            .id_salt("catalog-retry");
-        let bw = b.desired_width(ui);
-        let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
-        if widgets::activated(&b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
-            state.catalog(&ctx, server(cx));
-        }
-    }
-    if let Some(label) = state.acting() {
-        let label = label.to_string();
-        progress_line(ui, &label);
+    if super::repo_cards::section(ui, state) {
+        state.catalog(&ctx, server(cx));
     }
 }
 
-fn add_repo(state: &mut State, ctx: &egui::Context, url: String, headers: BTreeMap<String, String>) {
+pub(super) fn add_repo(state: &mut State, ctx: &egui::Context, url: String, headers: BTreeMap<String, String>) {
     state.task(ctx, "Adding the repository…", move || {
         orbiters_projects::runtime()?.block_on(vpm::add_repo(&orbiters_projects::vcc_dir(), &url, headers))?;
         Ok(Outcome::Changed("Repository added: its packages are listed now".into()))

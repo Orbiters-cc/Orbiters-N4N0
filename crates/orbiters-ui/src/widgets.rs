@@ -621,14 +621,22 @@ pub fn slider(
 pub fn text_field(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut String, hint: &str, width: f32, mono: bool) -> Response {
     let id = ui.scope_id().with(id_salt);
     let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
-    field_frame(ui, rect, id, value, hint, Well { mono, leading: None, radius: 12.0 })
+    field_frame(ui, rect, id, value, hint, Well { mono, leading: None, radius: 12.0, clear: false })
 }
 
 /// Search field: pill with a magnifier.
 pub fn search_field(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut String, hint: &str, width: f32) -> Response {
     let id = ui.scope_id().with(id_salt);
     let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
-    field_frame(ui, rect, id, value, hint, Well { mono: false, leading: Some(icons::MAGNIFYING_GLASS), radius: 20.0 })
+    field_frame(ui, rect, id, value, hint, Well { mono: false, leading: Some(icons::MAGNIFYING_GLASS), radius: 20.0, clear: false })
+}
+
+/// A [`search_field`] with an × at its end while something is typed: it empties the field (a change, like typing) and
+/// leaves the focus there to type the next thing.
+pub fn search_field_clearable(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut String, hint: &str, width: f32) -> Response {
+    let id = ui.scope_id().with(id_salt);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
+    field_frame(ui, rect, id, value, hint, Well { mono: false, leading: Some(icons::MAGNIFYING_GLASS), radius: 20.0, clear: true })
 }
 
 /// Look of a text well.
@@ -636,10 +644,12 @@ struct Well<'a> {
     mono: bool,
     leading: Option<&'a str>,
     radius: f32,
+    /// Room for an × at its end, shown while there is text.
+    clear: bool,
 }
 
 fn field_frame(ui: &mut Ui, rect: Rect, id: Id, value: &mut String, hint: &str, well: Well<'_>) -> Response {
-    let Well { mono, leading, radius } = well;
+    let Well { mono, leading, radius, clear } = well;
     let focused = ui.memory(|m| m.has_focus(id));
     let ring = anim::toggle(ui.ctx(), id.with("ring"), focused, Spring::SNAPPY);
     let p = ui.painter().clone();
@@ -653,6 +663,9 @@ fn field_frame(ui: &mut Ui, rect: Rect, id: Id, value: &mut String, hint: &str, 
         icon(&p, pos2(rect.left() + 18.0, rect.center().y), glyph, 15.0, theme::FG_4);
         inner.min.x = rect.left() + 34.0;
     }
+    if clear {
+        inner.max.x = rect.right() - 38.0;
+    }
     let font = if mono { FontId::new(12.0, egui::FontFamily::Monospace) } else { theme::font(13.0, weight::REGULAR) };
     let edit = egui::TextEdit::singleline(value)
         .id(id)
@@ -663,7 +676,16 @@ fn field_frame(ui: &mut Ui, rect: Rect, id: Id, value: &mut String, hint: &str, 
         .desired_width(inner.width())
         .margin(egui::Margin::ZERO)
         .align(egui::Align2::LEFT_CENTER);
-    ui.put(inner, edit)
+    let mut resp = ui.put(inner, edit);
+    if clear && !value.is_empty() {
+        let x = Rect::from_center_size(pos2(rect.right() - 22.0, rect.center().y), vec2(28.0, 28.0));
+        if activated(&IconButton::new(icons::X, "Clear").size(28.0, 13.0).id_salt(id.with("clear")).show_at(ui, x)) {
+            value.clear();
+            resp.mark_changed();
+            resp.request_focus();
+        }
+    }
+    resp
 }
 
 /// Status chip of the capture page: tinted icon tile, caption and a value that slides when it changes.

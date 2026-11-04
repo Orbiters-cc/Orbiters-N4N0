@@ -117,6 +117,11 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
             ui.add_space(8.0);
         });
     });
+    // The list's cut follows the frame's corners, at all four and at any scroll: over the content, under the bar that
+    // floats over it. The left and bottom of what is clipped are as the scroll area's, its right where the cards end (the
+    // gutter beyond holds the scroll bar and no content).
+    let cut = Rect::from_min_max(rect.min + vec2(8.0, 8.0), pos2(rect.right() - 3.0 - 11.0, rect.bottom() - 8.0));
+    paint::round_clipped_corners(ui.painter(), rect, theme::squircle(24.0), cut, theme::INK_900);
     sticky_bar(ui, cx, state, &project, rect, from, out.state.offset().y, !split.docked);
 }
 

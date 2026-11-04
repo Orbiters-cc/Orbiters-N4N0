@@ -3,17 +3,54 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// A repository the server suggests. `GET /vpm/known` answers `{ repositories: [...] }` and `GET /vpm/public`
+/// `{ listings: [...] }`, the same fields in each but for `packageCount` (known) and the logos (public). Everything but
+/// the name and the address may be missing or null: a server older than these fields still answers, and one repository
+/// without an owner must not lose the person the 329 others.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Listing {
     pub name: String,
     pub url: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub description: String,
+    /// Who keeps the repository.
+    #[serde(default, deserialize_with = "or_default")]
+    pub owner: String,
+    /// What it holds, at least as far as the server looked: searched, and named on a card found through one of them.
+    #[serde(default, deserialize_with = "or_default")]
+    pub packages: Vec<ListingPackage>,
+    /// How many packages it has, where the server counts them apart from `packages`.
+    #[serde(default)]
+    pub package_count: Option<usize>,
     /// Listings Orbiters hosts: the listing's logo and those creators set for its packages (paths on the API).
     #[serde(default)]
     pub logo: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub logos: HashMap<String, String>,
+}
+
+impl Listing {
+    /// How many packages the repository has, when the server said anything about them.
+    pub fn package_total(&self) -> Option<usize> {
+        self.package_count.or((!self.packages.is_empty()).then_some(self.packages.len()))
+    }
+}
+
+/// A package of a [`Listing`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListingPackage {
+    /// Its id (`nadena.dev.modular-avatar`).
+    pub name: String,
+    #[serde(default, deserialize_with = "or_default")]
+    pub display_name: String,
+}
+
+/// `null` as the type's default: serde's own `default` covers a missing field only, and one null would fail the whole
+/// answer.
+fn or_default<'de, D: serde::Deserializer<'de>, T: Default + Deserialize<'de>>(d: D) -> Result<T, D::Error> {
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 /// The Orbiters server hosting the listing at `url` (its feed is `<website>vpm/<slug>/index.json`), if one does.
@@ -77,14 +114,29 @@ pub struct Catalog {
     pub public: Vec<Listing>,
     pub errors: Vec<String>,
 }
+impl Catalog {
+    /// This answer, keeping from `before` the list it could not get: the dialog asks again each time it opens, and a server
+    /// that does not answer this time is no reason for suggestions already shown to go.
+    pub fn or_what_was_loaded(mut self, before: &Catalog) -> Self {
+        if !self.errors.is_empty() {
+            if self.known.is_empty() {
+                self.known.clone_from(&before.known);
+            }
+            if self.public.is_empty() {
+                self.public.clone_from(&before.public);
+            }
+        }
+        self
+    }
+}
+
 pub fn catalog(server: Server) -> Catalog {
     let api = Api::at(server.api());
     let mut out = Catalog::default();
     for (endpoint, key) in [("vpm/known", "repositories"), ("vpm/public", "listings")] {
         let r = (|| -> anyhow::Result<Vec<Listing>> {
             let response = api.agent().get(api.url(endpoint)).call()?;
-            let v: serde_json::Value = Api::json(response)?;
-            Ok(serde_json::from_value(v[key].clone())?)
+            parse_listings(&Api::json(response)?, key)
         })();
         match r {
             Ok(v) => {
@@ -99,6 +151,12 @@ pub fn catalog(server: Server) -> Catalog {
     }
     out
 }
+
+/// The listings under `key` of one of the server's answers.
+fn parse_listings(answer: &serde_json::Value, key: &str) -> anyhow::Result<Vec<Listing>> {
+    Ok(serde_json::from_value(answer[key].clone())?)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Thumbnail {
     pub path: PathBuf,
@@ -157,6 +215,76 @@ pub fn thumbnails(server: Server, ids: Vec<String>) -> anyhow::Result<HashMap<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_known_repositories_answer_gives_owner_count_and_packages() {
+        let answer = serde_json::json!({ "repositories": [{
+            "name": "bd_",
+            "url": "https://vpm.nadena.dev/vpm.json",
+            "description": "Non-destructive avatar tools",
+            "owner": "bdunderscore",
+            "packageCount": 4,
+            "packages": [{ "name": "nadena.dev.modular-avatar", "displayName": "Modular Avatar" }, { "name": "nadena.dev.ndmf" }],
+        }]});
+        let list = parse_listings(&answer, "repositories").unwrap();
+        assert_eq!(list[0].owner, "bdunderscore");
+        assert_eq!(list[0].package_total(), Some(4), "its own count, more than the packages it lists");
+        assert_eq!(list[0].packages[0], ListingPackage { name: "nadena.dev.modular-avatar".into(), display_name: "Modular Avatar".into() });
+        assert_eq!(list[0].packages[1].display_name, "");
+    }
+
+    #[test]
+    fn the_public_listings_answer_counts_its_packages_and_keeps_its_logos() {
+        let answer = serde_json::json!({ "listings": [{
+            "name": "Orbiters",
+            "url": "https://orbiters.cc/vpm/orbiters/index.json",
+            "description": "",
+            "owner": "Orbiters",
+            "logo": "/vpm/orbiters/logo.png",
+            "logos": { "orbiters.toolkit": "/vpm/orbiters/toolkit.png" },
+            "packages": [{ "name": "orbiters.toolkit", "displayName": "Toolkit" }, { "name": "orbiters.myavatar", "displayName": "My Avatar" }],
+        }]});
+        let list = parse_listings(&answer, "listings").unwrap();
+        assert_eq!(list[0].package_total(), Some(2));
+        assert_eq!(list[0].logo.as_deref(), Some("/vpm/orbiters/logo.png"));
+        assert_eq!(list[0].logos["orbiters.toolkit"], "/vpm/orbiters/toolkit.png");
+    }
+
+    /// What the server answers until its new fields land, and what it may send for a repository it knows little about.
+    #[test]
+    fn an_answer_without_the_new_fields_or_with_nulls_still_parses() {
+        let older = serde_json::json!({ "repositories": [{ "name": "32ba VPM repository", "url": "https://vpm.32ba.net/index.json", "description": "" }] });
+        let list = parse_listings(&older, "repositories").unwrap();
+        assert_eq!((list[0].owner.as_str(), list[0].packages.len(), list[0].package_total()), ("", 0, None));
+        let nulls = serde_json::json!({ "listings": [{ "name": "A", "url": "https://a/", "description": null, "owner": null, "packages": null, "logo": null, "logos": null, "packageCount": null }] });
+        let list = parse_listings(&nulls, "listings").unwrap();
+        assert_eq!((list[0].description.as_str(), list[0].owner.as_str(), list[0].package_total()), ("", "", None));
+        // An answer that is not a list at all is an error the dialog shows, not an empty list.
+        assert!(parse_listings(&serde_json::json!({ "error": "nope" }), "listings").is_err());
+    }
+
+    #[test]
+    fn suggestions_already_loaded_stay_when_the_server_stops_answering() {
+        let listing = |name: &str| Listing { name: name.into(), ..Default::default() };
+        let before = Catalog { known: vec![listing("old known")], public: vec![listing("old public")], errors: vec![] };
+        // Neither list: both stay, and the person is told.
+        let failed = Catalog { errors: vec!["no".into()], ..Default::default() }.or_what_was_loaded(&before);
+        assert_eq!((failed.known[0].name.as_str(), failed.public[0].name.as_str(), failed.errors.len()), ("old known", "old public", 1));
+        // One list: the fresh one, and the other as it was.
+        let partly = Catalog { known: vec![listing("new known")], errors: vec!["no".into()], ..Default::default() }.or_what_was_loaded(&before);
+        assert_eq!((partly.known[0].name.as_str(), partly.public[0].name.as_str()), ("new known", "old public"));
+        // An answer saying a list is now empty is believed.
+        let empty = Catalog::default().or_what_was_loaded(&before);
+        assert!(empty.known.is_empty() && empty.public.is_empty());
+    }
+
+    /// The directory is kept on disk: what was written must read back whole.
+    #[test]
+    fn a_listing_kept_on_disk_reads_back() {
+        let l = Listing { name: "A".into(), url: "https://a/".into(), package_count: Some(3), packages: vec![ListingPackage { name: "a.b".into(), display_name: "B".into() }], ..Default::default() };
+        let back: Listing = serde_json::from_value(serde_json::to_value(&l).unwrap()).unwrap();
+        assert_eq!((back.package_count, back.packages), (Some(3), l.packages));
+    }
 
     #[test]
     fn listings_orbiters_hosts_are_told_by_their_address() {

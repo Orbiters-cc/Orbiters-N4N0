@@ -12,6 +12,7 @@ mod packages_card;
 mod panel;
 mod preview;
 mod preview_gpu;
+mod repo_cards;
 mod state;
 mod storage_card;
 mod thumb_cache;

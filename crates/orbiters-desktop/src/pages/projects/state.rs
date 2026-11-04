@@ -126,6 +126,13 @@ pub struct State {
     pub(super) templates: Vec<templates::Template>,
     pub(super) catalog: network::Catalog,
     pub(super) catalog_job: Job<network::Catalog>,
+    /// The catalog's repositories as the dialog lists them, and what the search finds among them: kept, as it is asked for
+    /// every frame ([`Self::set_catalog`]).
+    pub(super) suggestions: orbiters_projects::suggestions::Suggestions,
+    /// What is typed in the dialog's search.
+    pub(super) repo_query: String,
+    /// The suggested repository being added, for its card to say so.
+    pub(super) repo_adding: Option<String>,
     pub(super) thumbs: HashMap<String, TextureHandle>,
     /// The sum ([`thumb_cache::sum`]) of the picture each texture shows: a picture asked for again changes nothing
     /// when it is the same.
@@ -312,6 +319,9 @@ impl Default for State {
             templates: vec![],
             catalog: network::Catalog::default(),
             catalog_job: Job::default(),
+            suggestions: Default::default(),
+            repo_query: String::new(),
+            repo_adding: None,
             thumbs: HashMap::new(),
             thumb_sums: HashMap::new(),
             thumb_before: HashMap::new(),
@@ -475,6 +485,9 @@ impl State {
             self.modal_origin =
                 if origin.is_finite() && origin.is_positive() { origin } else { Rect::from_center_size(ctx.content_rect().center(), egui::vec2(160.0, 48.0)) };
         }
+        if !open && modal == Modal::Repos {
+            self.repo_query.clear();
+        }
         self.modal = Some(modal);
     }
     /// Starts closing the open dialog (it is dropped once its morph back ended).
@@ -598,6 +611,13 @@ impl State {
     pub(super) fn updates_of(&self, path: &std::path::Path) -> Option<&updates::Updates> {
         self.updates.as_ref().filter(|(p, _)| p == path).map(|(_, c)| c.get(self.prerelease))
     }
+    /// The server's catalog arrived: it replaces the suggestions and what was found among them.
+    pub(super) fn set_catalog(&mut self, catalog: network::Catalog) {
+        self.suggestions = orbiters_projects::suggestions::Suggestions::new(&catalog);
+        // What is being looked at stays: this is not a new search.
+        self.suggestions.set_query(&self.repo_query);
+        self.catalog = catalog;
+    }
     pub(super) fn catalog(&mut self, ctx: &egui::Context, server: Server) {
         if !self.fixture {
             self.catalog_job = Job::spawn(ctx, move || network::catalog(server));
@@ -680,11 +700,13 @@ impl State {
             }
         }
         if let Some(c) = self.catalog_job.take() {
-            self.catalog = c;
+            let c = c.or_what_was_loaded(&self.catalog);
+            self.set_catalog(c);
         }
         if let Some(result) = self.action.take() {
             self.action_label.clear();
             self.busy_package = None;
+            self.repo_adding = None;
             let change = self.last_change.take();
             if result.is_ok() {
                 self.missing = None;
@@ -1363,7 +1385,7 @@ impl State {
         }
         self.new_location = "H:/Unity projects".into();
         self.new_name = "My new avatar".into();
-        self.catalog.known = vec![
+        let known = vec![
             network::Listing {
                 name: "VRCFury".into(),
                 url: "https://vcc.vrcfury.com".into(),
@@ -1377,12 +1399,13 @@ impl State {
                 ..Default::default()
             },
         ];
-        self.catalog.public = vec![network::Listing {
+        let public = vec![network::Listing {
             name: "Orbiters".into(),
             url: vpm::ORBITERS_REPOSITORY.into(),
             description: "My Avatar, Toolkit, Mixer and more".into(),
             ..Default::default()
         }];
+        self.set_catalog(network::Catalog { known, public, errors: vec![] });
         let first = self.scan.projects[0].clone();
         let flow = |unity_open: bool, result: Option<(setup::Status, &str)>, packages_only: bool| Flow {
             project: first.clone(),
@@ -1553,6 +1576,21 @@ impl State {
                 self.scroll_to_mixer = true;
             }
             "projects-repos" => self.modal = Some(Modal::Repos),
+            "projects-repos-cards"
+            | "projects-repos-scrolled"
+            | "projects-repos-search"
+            | "projects-repos-search-japanese"
+            | "projects-repos-search-owner"
+            | "projects-repos-nothing"
+            | "projects-repos-many"
+            | "projects-repos-added"
+            | "projects-repos-unreachable"
+            | "projects-repos-partly"
+            | "projects-repos-bare" => self.stage_repo_cards(ctx, name),
+            "projects-panel-cut" | "projects-panel-cut-top" => {
+                self.selected = Some(first.path.clone());
+                self.scroll_to_packages = name == "projects-panel-cut";
+            }
             "projects-repos-crossfade" => {
                 self.modal = Some(Modal::Repos);
                 self.fixture_repo_icons_later = std::mem::take(&mut self.repo_icons);
@@ -1578,7 +1616,7 @@ impl State {
             }
             "projects-repos-loading" => {
                 self.modal = Some(Modal::Repos);
-                self.catalog = network::Catalog::default();
+                self.set_catalog(network::Catalog::default());
                 self.catalog_job = Job::spawn(ctx, || {
                     std::thread::sleep(Duration::from_secs(3600));
                     network::Catalog::default()
@@ -1841,6 +1879,7 @@ impl State {
             self.thumbs = std::mem::take(&mut self.fixture_later);
             self.icons = std::mem::take(&mut self.fixture_icons_later);
         }
+        self.stage_repo_query(name, frame);
         if name == "projects-repos-crossfade" && frame == 60 {
             self.repo_icons = std::mem::take(&mut self.fixture_repo_icons_later);
         }
@@ -1880,7 +1919,7 @@ impl State {
 }
 /// How a stand-in package icon looks (screenshots).
 #[derive(Clone, Copy)]
-enum Look {
+pub(super) enum Look {
     /// A picture filling its tile: a gradient in this colour and a white speech bubble.
     Picture([f32; 3]),
     /// Orbiters' wings on a dark square, as orbiters.cc's icon.
@@ -1889,7 +1928,7 @@ enum Look {
     Mark([f32; 3]),
 }
 
-fn stand_in_icon(ctx: &egui::Context, name: &str, look: Look) -> PackageIcon {
+pub(super) fn stand_in_icon(ctx: &egui::Context, name: &str, look: Look) -> PackageIcon {
     let n = 96usize;
     let wings = orbiters_ui::n4n0_face::rasterize(64, 57, egui::Color32::WHITE);
     let mut rgba = vec![0u8; n * n * 4];

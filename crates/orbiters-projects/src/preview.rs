@@ -21,6 +21,8 @@ pub const SCHEMA: u32 = 2;
 pub const OLDEST_SCHEMA: u32 = 1;
 /// Position (3 × f32), octahedral normal (2 × snorm16), UV (2 × f16).
 pub const VERTEX_SIZE: usize = 20;
+/// Lightmap UV (2 × unorm16), in a stream of its own.
+pub const LIGHTMAP_UV_SIZE: usize = 4;
 const START: usize = 16;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,6 +272,10 @@ pub struct SceneLight {
     pub shadows: bool,
     #[serde(default = "one")]
     pub shadow_strength: f32,
+    /// Baked: what samples a lightmap has this light in it already, what does not still gets it (as Unity's light
+    /// probes would give it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub baked: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,6 +308,66 @@ pub struct Lighting {
     pub ambient: Option<Ambient>,
     #[serde(default = "one")]
     pub reflection_intensity: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fog: Option<Fog>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FogMode {
+    #[default]
+    Linear,
+    Exponential,
+    Squared,
+}
+
+/// The scene's fog, as Unity's built-in shaders add it (colour linear).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Fog {
+    #[serde(default)]
+    pub mode: FogMode,
+    pub color: [f32; 3],
+    #[serde(default)]
+    pub start: f32,
+    #[serde(default)]
+    pub end: f32,
+    #[serde(default)]
+    pub density: f32,
+}
+
+/// A baked lightmap: a picture whose colours, read as sRGB, are the light divided by `scale`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Lightmap {
+    pub texture: u32,
+    pub scale: f32,
+}
+
+/// The lightmap a draw samples.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DrawLightmap {
+    /// An index into the header's `lightmaps`.
+    pub index: u32,
+    /// `uv2 * [x, y] + [z, w]`: where in the lightmap, as Unity's `m_LightmapTilingOffset`.
+    pub st: [f32; 4],
+}
+
+/// What is behind the scene: its skybox (a latitude-longitude picture, or colours when only those could be read).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Sky {
+    /// A picture of the whole sphere, or -1: rows from straight up to straight down, its colours read as sRGB and
+    /// multiplied by `scale` (linear).
+    #[serde(default = "none")]
+    pub texture: i32,
+    #[serde(default = "one")]
+    pub scale: f32,
+    /// Degrees it is turned round the vertical, as Unity's `_Rotation`.
+    #[serde(default)]
+    pub rotation: f32,
+    /// Linear colours straight up, at the horizon, straight down: drawn without a picture.
+    pub top: [f32; 3],
+    pub horizon: [f32; 3],
+    pub bottom: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -336,6 +402,9 @@ pub struct Mesh {
     pub submeshes: Vec<Submesh>,
     #[serde(default)]
     pub bounds: Bounds,
+    /// The second UV set (lightmaps'): two `unorm16` a vertex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lightmap_uv: Option<Blob>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -354,6 +423,8 @@ pub struct Draw {
     pub shadows: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lightmap: Option<DrawLightmap>,
 }
 
 fn yes() -> bool {
@@ -420,6 +491,10 @@ pub struct Header {
     pub draws: Vec<Draw>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lighting: Option<Lighting>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lightmaps: Vec<Lightmap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sky: Option<Sky>,
     #[serde(default)]
     pub stats: Stats,
     #[serde(default)]
@@ -493,6 +568,10 @@ fn check(p: &Preview) -> anyhow::Result<()> {
         ensure!(m.data.length == m.vertices as u64 * VERTEX_SIZE as u64, "mesh {i} has {} vertices in {} bytes", m.vertices, m.data.length);
         let count = m.indices.length / m.index_format.size() as u64;
         ensure!(m.indices.length % m.index_format.size() as u64 == 0, "mesh {i}'s indices are cut short");
+        if let Some(uv) = m.lightmap_uv {
+            inside(uv, &format!("mesh {i}'s lightmap UVs"))?;
+            ensure!(uv.length == m.vertices as u64 * LIGHTMAP_UV_SIZE as u64, "mesh {i} has {} vertices in {} bytes of lightmap UVs", m.vertices, uv.length);
+        }
         for s in &m.submeshes {
             ensure!(s.start as u64 + s.count as u64 <= count && s.count % 3 == 0, "mesh {i} has a submesh outside its indices");
         }
@@ -504,11 +583,20 @@ fn check(p: &Preview) -> anyhow::Result<()> {
         let Some(mesh) = h.meshes.get(d.mesh as usize) else { bail!("a draw of mesh {} of {}", d.mesh, h.meshes.len()) };
         ensure!(d.materials.len() <= mesh.submeshes.len(), "a draw with more materials than its mesh has submeshes");
         ensure!(d.materials.iter().all(|&m| m < h.materials.len() as i32), "a draw of a material the preview does not have");
+        if let Some(l) = d.lightmap {
+            ensure!((l.index as usize) < h.lightmaps.len(), "a draw of lightmap {} of {}", l.index, h.lightmaps.len());
+        }
     }
     for (i, m) in h.materials.iter().enumerate() {
         for t in [m.texture, m.surface_texture, m.normal_texture, m.emission_texture] {
             ensure!(t < h.textures.len() as i32, "material {i} uses a texture the preview does not have");
         }
+    }
+    for l in &h.lightmaps {
+        ensure!((l.texture as usize) < h.textures.len(), "a lightmap uses a texture the preview does not have");
+    }
+    if let Some(s) = h.sky {
+        ensure!(s.texture < h.textures.len() as i32, "the sky uses a texture the preview does not have");
     }
     Ok(())
 }
@@ -748,9 +836,9 @@ mod tests {
                 emission: [2.0, 0.0, 0.0],
                 ..Default::default()
             }],
-            meshes: vec![Mesh { vertices: 3, data, index_format: IndexFormat::U16, indices, submeshes: vec![Submesh { start: 0, count: 3 }], bounds: b }],
+            meshes: vec![Mesh { vertices: 3, data, index_format: IndexFormat::U16, indices, submeshes: vec![Submesh { start: 0, count: 3 }], bounds: b, lightmap_uv: None }],
             instances: Instances { count: 1, matrices },
-            draws: vec![Draw { instance: 0, mesh: 0, materials: vec![0], shadows: true, avatar: None }],
+            draws: vec![Draw { instance: 0, mesh: 0, materials: vec![0], shadows: true, avatar: None, lightmap: None }],
             ..Default::default()
         };
         w.finish(&header)
@@ -882,6 +970,25 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[test]
+    fn a_preview_without_lightmaps_or_sky_reads_and_one_with_them_is_checked() {
+        // What Toolkit writes has none of these fields.
+        let p = parse(triangle_scene()).unwrap();
+        assert!(p.header.lightmaps.is_empty() && p.header.sky.is_none());
+        assert!(p.header.draws[0].lightmap.is_none() && p.header.meshes[0].lightmap_uv.is_none());
+        // A draw of a lightmap that is not there, UVs of the wrong length: refused.
+        let mut h = p.header.clone();
+        h.draws[0].lightmap = Some(DrawLightmap { index: 0, st: [1.0, 1.0, 0.0, 0.0] });
+        let mut w = Writer::default();
+        w.push(&vec![0u8; p.size()]);
+        assert!(parse(w.finish(&h)).is_err());
+        let mut h = p.header.clone();
+        h.meshes[0].lightmap_uv = Some(Blob { offset: 0, length: 5 });
+        let mut w = Writer::default();
+        w.push(&vec![0u8; p.size()]);
+        assert!(parse(w.finish(&h)).is_err());
+    }
+
     #[test]
     fn a_new_preview_is_seen_at_once() {
         let temp = tempfile::tempdir().unwrap();

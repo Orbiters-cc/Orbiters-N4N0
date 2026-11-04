@@ -14,18 +14,23 @@
 //!
 //! How a scene is read: [`yaml`] (Unity's text format), [`assets`] (GUIDs to files), [`prefab`] (instances, nested
 //! prefabs, variants and overrides), [`model`] (FBX and OBJ through ufbx, as Unity imports them), [`material`] and
-//! [`texture`] (a material's look and pictures), [`build`] (posing, skinning and writing the file).
+//! [`texture`] (a material's look and pictures), [`artifact`] (what Unity's import left in `Library`: `.blend` models,
+//! and any model it is as new as), [`terrain`], [`world`] (lightmaps, sky, fog, framing), [`build`] (posing, skinning
+//! and writing the file).
 
+pub mod artifact;
 pub mod assets;
 pub mod build;
 pub mod material;
 pub mod math;
-mod mesh_asset;
+pub mod mesh_asset;
 pub mod model;
 pub mod prefab;
 mod primitives;
 pub mod serialized;
+pub mod terrain;
 pub mod texture;
+pub mod world;
 pub mod yaml;
 
 use crate::preview;
@@ -57,6 +62,8 @@ pub struct Limits {
     pub threads: usize,
     /// Its threads run below normal priority (a build in the background never slows the window).
     pub background: bool,
+    /// Reads models from what Unity's import left in the project's `Library` when it can ([`artifact`]).
+    pub use_artifacts: bool,
 }
 
 impl Limits {
@@ -76,6 +83,7 @@ impl Limits {
             max_texture_bytes: 256 << 20,
             threads: 4,
             background: false,
+            use_artifacts: true,
         }
     }
 
@@ -234,7 +242,7 @@ pub fn cache_dir(project: &Path) -> PathBuf {
 }
 
 /// Bumped when a build would come out differently: older previews are built again.
-const BUILDER_VERSION: u32 = 4;
+const BUILDER_VERSION: u32 = 5;
 /// A Toolkit preview this much older than its scene file is still the scene's (file times copied across disks).
 const SLACK: Duration = Duration::from_secs(2);
 /// A built preview is built again after this long, whatever changed (an asset added since that it lacked).

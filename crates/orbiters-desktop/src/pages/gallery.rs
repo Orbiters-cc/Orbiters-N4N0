@@ -1217,7 +1217,7 @@ fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_
         }
         Some(controller::Local::Session(dir)) => {
             let busy = cx.snap.reconstruct_queue.contains(dir) || cx.snap.reconstruction.as_ref().is_some_and(|j| &j.session_dir == dir);
-            if !e.ready && !busy {
+            if !e.ready && !busy && !e.no_keyframes {
                 acts.push((Menu::Reconstruct, "Reconstruct".into(), icons::MAGIC_WAND));
             }
             mine_shares(&mut acts);
@@ -1572,7 +1572,13 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         _ => None,
     };
     let queued = matches!(&e.local, Some(controller::Local::Session(d)) if cx.snap.reconstruct_queue.contains(d));
-    let (kind_label, kind_color) = if e.is_picture() { ("Picture", theme::FG_2) } else { ("3D", theme::ACCENT) };
+    let (kind_label, kind_color) = if e.is_picture() {
+        ("Picture", theme::FG_2)
+    } else if e.no_keyframes {
+        ("No 3D", theme::DANGER)
+    } else {
+        ("3D", theme::ACCENT)
+    };
     // The check on its corner; the badges step aside for it.
     let card_radius = if tile { TILE_RADIUS } else { theme::CARD_RADIUS };
     let check =
@@ -1635,6 +1641,8 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         "VRChat picture"
     } else if e.ready {
         "3D capture"
+    } else if e.no_keyframes {
+        "No keyframes"
     } else {
         "Capture"
     };
@@ -1670,6 +1678,7 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
             Some(i) if !i.grants.is_empty() => (icons::USERS, format!("Shared with {}", i.grants.len()), theme::FG_2),
             Some(_) => (icons::LOCK_SIMPLE, "Only you".to_string(), theme::FG_3),
             None if look.about.is_some() => (icons::TAG, look.about.as_ref().map(|a| a.1.clone()).unwrap_or_default(), theme::ACCENT),
+            None if e.no_keyframes => (icons::WARNING, "Recorded without the capture strip: nothing to make 3D from".to_string(), theme::DANGER),
             None if !e.ready && !e.is_picture() => (icons::MAGIC_WAND, "Reconstruct it to share it".to_string(), theme::FG_3),
             None => (icons::HARD_DRIVE, "On this computer".to_string(), theme::FG_3),
         };

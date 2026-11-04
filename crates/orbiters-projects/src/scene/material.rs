@@ -18,6 +18,8 @@ pub struct Look {
     pub material: Material,
     pub main_texture: Option<String>,
     pub emission_texture: Option<String>,
+    /// Its normal map, read for what is not an avatar (Toolkit's rules for a material's pictures stay its own).
+    pub normal_texture: Option<String>,
     pub shader: String,
 }
 
@@ -32,24 +34,24 @@ pub struct Props {
 }
 
 impl Props {
-    fn has(&self, k: &str) -> bool {
+    pub fn has(&self, k: &str) -> bool {
         self.floats.contains_key(k) || self.colors.contains_key(k) || self.textures.contains_key(k)
     }
-    fn f(&self, k: &str, otherwise: f32) -> f32 {
+    pub fn f(&self, k: &str, otherwise: f32) -> f32 {
         self.floats.get(k).copied().unwrap_or(otherwise)
     }
     fn on(&self, k: &str) -> bool {
         self.f(k, 0.0) > 0.5
     }
-    fn color(&self, k: &str) -> Option<[f32; 4]> {
+    pub fn color(&self, k: &str) -> Option<[f32; 4]> {
         self.colors.get(k).copied()
     }
     /// A colour as the shader computes with it (linear, HDR kept).
-    fn linear(&self, k: &str, otherwise: [f32; 4]) -> [f32; 4] {
+    pub fn linear(&self, k: &str, otherwise: [f32; 4]) -> [f32; 4] {
         let c = self.color(k).unwrap_or(otherwise);
         [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3]]
     }
-    fn texture(&self, k: &str) -> Option<&String> {
+    pub fn texture(&self, k: &str) -> Option<&String> {
         self.textures.get(k).and_then(|t| t.0.as_ref())
     }
     fn keyword(&self, k: &str) -> bool {
@@ -68,7 +70,11 @@ pub fn srgb_to_linear(c: f32) -> f32 {
 /// Reads a `.mat` file's text.
 pub fn props(text: &str) -> Option<(String, Option<yaml::Ref>, Props)> {
     let doc = yaml::documents(text).into_iter().find(|d| d.class == 21)?;
-    let m = doc.parse();
+    Some(props_of(&doc.parse()))
+}
+
+/// A material's fields (from a `.mat` file, or from Unity's binary form, which names them alike).
+pub fn props_of(m: &Value) -> (String, Option<yaml::Ref>, Props) {
     let saved = m.get("m_SavedProperties");
     let mut floats = HashMap::new();
     let mut colors = HashMap::new();
@@ -108,7 +114,7 @@ pub fn props(text: &str) -> Option<(String, Option<yaml::Ref>, Props)> {
     }
     let tags = m.get("stringTagMap").entries().iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect();
     let props = Props { floats, colors, textures, keywords, queue: m.get("m_CustomRenderQueue").as_i64().unwrap_or(-1), tags };
-    Some((m.get("m_Name").str_or("").to_string(), m.get("m_Shader").as_ref(), props))
+    (m.get("m_Name").str_or("").to_string(), m.get("m_Shader").as_ref(), props)
 }
 
 /// A material's look from its properties and its shader's name (lowercase; empty when unknown).
@@ -152,8 +158,45 @@ pub fn look(name: &str, shader: &str, p: &Props) -> Look {
     } else {
         standard(&mut m, &mut look, shader, p);
     }
+    if shader.contains("water") {
+        water(&mut m, &mut look, p);
+    } else if let Some((guid, scale, offset)) = p.textures.get("_BumpMap").filter(|t| t.0.is_some()).map(|t| (t.0.clone(), t.1, t.2)) {
+        look.normal_texture = guid;
+        m.normal_scale = p.f("_BumpScale", 1.0);
+        // Without a main picture its tiling is the only one the material has.
+        if look.main_texture.is_none() {
+            m.tiling = scale;
+            m.offset = offset;
+        }
+    }
     look.material = m;
     look
+}
+
+/// A water shader (Mochie's, and those like it) draws no picture: its colour comes from what it reflects and what
+/// lies under it. A preview draws a see-through surface of its emission's tint with its ripples, smooth enough for the
+/// sun to glint on them, which reads as water from the distances a preview looks from.
+fn water(m: &mut Material, look: &mut Look, p: &Props) {
+    let tint = p.linear("_EmissionColor", [0.35, 0.65, 0.75, 1.0]);
+    let base = p.color("_Color").unwrap_or([1.0; 4]);
+    // The tint lifted towards white: a shallow sea over sand.
+    let lift = |t: f32, c: f32| (0.55 + t * 1.1).min(1.0) * c;
+    m.color = [lift(tint[0], base[0]), lift(tint[1], base[1]), lift(tint[2], base[2]), p.f("_Opacity", 0.75).clamp(0.45, 0.85)];
+    m.alpha = Alpha::Blend;
+    m.shading = Shading::Lit;
+    m.smoothness = 0.9;
+    m.metallic = 0.0;
+    m.emission = [0.0; 3];
+    look.emission_texture = None;
+    let scale = p.textures.get("_NormalMap0").map_or([1.0, 1.0], |t| t.1);
+    let tile = p.f("_NormalMapScale0", 0.0);
+    if let Some(guid) = p.texture("_NormalMap0").or_else(|| p.texture("_BumpMap")).or_else(|| p.texture("_NormalMap")) {
+        look.normal_texture = Some(guid.clone());
+        m.normal_scale = p.f("_NormalStr0", 0.4).clamp(0.0, 1.0).max(0.2);
+        if look.main_texture.is_none() {
+            m.tiling = if tile > 0.0 { [tile, tile] } else { scale };
+        }
+    }
 }
 
 /// From the render queue (as Unity sorts it), else the shader's own blend mode.
@@ -327,6 +370,10 @@ pub fn builtin_shader(file_id: i64) -> &'static str {
         10753 => "unlit/color",
         10755 => "unlit/texture",
         200 | 7 => "legacy shaders/diffuse",
+        103 => "skybox/cubemap",
+        104 => "skybox/6 sided",
+        106 => "skybox/procedural",
+        108 => "skybox/panoramic",
         _ => "standard",
     }
 }

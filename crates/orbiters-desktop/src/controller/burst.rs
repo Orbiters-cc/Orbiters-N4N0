@@ -576,8 +576,9 @@ impl super::Controller {
                     std::thread::sleep(wait);
                 }
             }
-            // Around the faces, the camera at its own zoom: the picture's people from more sides within a second.
-            let faces = frame.as_ref().map_or_else(Vec::new, |f| face_steps(pose, &heads_to_visit(pose, f, eye_height), f.p11, f.height, RATE_HZ));
+            // Around the faces, the camera at its own zoom: the picture's people from more sides within a second. A wearer hidden from
+            // the picture (Local User off, hide_self.rs) has no face to go and see.
+            let faces = frame.as_ref().map_or_else(Vec::new, |f| face_steps(pose, &heads_to_visit(pose, f, eye_height.filter(|_| !ctl.hiding_self())), f.p11, f.height, RATE_HZ));
             let begin = Instant::now();
             for (i, p) in faces.iter().enumerate() {
                 send(POSE, p.iter().map(|v| rosc::OscType::Float(*v)).collect());

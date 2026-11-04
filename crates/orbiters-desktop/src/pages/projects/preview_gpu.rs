@@ -3,7 +3,8 @@
 //! casting its shadow, its ambient light and reflections) or by a studio as bright as Unity's default scene (its
 //! directional light as the key, whose soft shadow falls on the scene and on a ground of our own, the default sky's
 //! ambient light and reflections, a faint cool fill and rim for the side away from it), each material as its shader takes the light (Standard's metallic and smoothness, toon
-//! bands, flat, unlit; normal maps, emission), the scene mirrored faintly in that ground, a sweep that reveals it from
+//! bands, flat, unlit; normal maps, emission), a baked world in its lightmaps with its fog, under its sky, the scene
+//! mirrored faintly in that ground, a sweep that reveals it from
 //! the ground up, then 4× multisampling resolved into a texture egui paints like any picture (squircle corners, fading
 //! over the avatar pictures). Loading runs on a worker: one file read, pictures decoded on every core
 //! with their mipmaps, vertex and index blobs uploaded as they are, while the pipelines compile on another thread.
@@ -21,6 +22,8 @@ const DATA: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SAMPLES: u32 = 4;
 const SHADOW_SIZE: u32 = 2048;
+/// A world's sun covers a hundred times an avatar's width.
+const WORLD_SHADOW_SIZE: u32 = 4096;
 
 /// Orbiters green, linear: the reveal's edge.
 const ACCENT: [f32; 3] = [0.0, 0.701, 0.153];
@@ -30,6 +33,7 @@ pub(super) struct Layouts {
     frame: wgpu::BindGroupLayout,
     shadow_frame: wgpu::BindGroupLayout,
     material: wgpu::BindGroupLayout,
+    lightmap: wgpu::BindGroupLayout,
 }
 
 impl Layouts {
@@ -59,6 +63,23 @@ impl Layouts {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                // The sky's picture.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -92,7 +113,20 @@ impl Layouts {
                 picture(5),
             ],
         });
-        Self { frame, shadow_frame, material }
+        // A draw's lightmap: where in it (one uniform buffer, the draw's offset into it), and the picture.
+        let lightmap = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("preview lightmap"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: both,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: true, min_binding_size: None },
+                    count: None,
+                },
+                picture(1),
+            ],
+        });
+        Self { frame, shadow_frame, material, lightmap }
     }
 }
 
@@ -123,7 +157,7 @@ impl Pipelines {
             device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("project preview"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
         let scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("preview scene"),
-            bind_group_layouts: &[Some(&layouts.frame), Some(&layouts.material)],
+            bind_group_layouts: &[Some(&layouts.frame), Some(&layouts.material), Some(&layouts.lightmap)],
             immediate_size: 0,
         });
         let frame_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -155,6 +189,12 @@ impl Pipelines {
                     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 5 },
                     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 6 },
                 ],
+            }),
+            // Lightmap UVs, a stream of their own that most meshes do not have.
+            Some(wgpu::VertexBufferLayout {
+                array_stride: preview::LIGHTMAP_UV_SIZE as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Unorm16x2, offset: 0, shader_location: 7 }],
             }),
         ];
         let over = Some(wgpu::BlendState::ALPHA_BLENDING);
@@ -267,7 +307,7 @@ pub(super) enum LightMode {
 /// ambient light is `null` when the scene's comes from the sky (only Unity computes that one), so a built sunless
 /// skybox scene is drawn in the studio's light too.
 pub(super) fn light_mode(prefer_scene: bool, h: &preview::Header) -> LightMode {
-    if prefer_scene && h.lighting.as_ref().is_some_and(scene_light_shows) {
+    if prefer_scene && h.lighting.is_some() && scene_light_shows_header(h) {
         LightMode::Scene
     } else {
         LightMode::Studio
@@ -305,6 +345,11 @@ pub(super) fn scene_light_brightness(l: &preview::Lighting) -> f32 {
 /// Whether a scene's own light shows its preview (at least [`SCENE_LIGHT_MIN`]); the window's switch offers it only then.
 pub(super) fn scene_light_shows(l: &preview::Lighting) -> bool {
     scene_light_brightness(l) >= SCENE_LIGHT_MIN
+}
+
+/// The same for a whole preview: a baked world's light is its lightmaps, whatever its lights and ambient light add up to.
+pub(super) fn scene_light_shows_header(h: &preview::Header) -> bool {
+    !h.lightmaps.is_empty() || h.lighting.as_ref().is_some_and(scene_light_shows)
 }
 
 /// A recorded light colour as drawn: finite, 0 to 16.
@@ -345,12 +390,16 @@ struct Draw {
     mirrored: bool,
     shadows: bool,
     center: [f32; 3],
+    /// Which lightmap's bind group, and its offset in their uniform buffer (the first group and offset: none).
+    lightmap: usize,
+    lightmap_offset: u32,
 }
 
 struct MeshBuffers {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     format: wgpu::IndexFormat,
+    lightmap_uv: Option<wgpu::Buffer>,
 }
 
 struct Targets {
@@ -371,6 +420,10 @@ pub(super) struct Scene {
     pipelines: Arc<Pipelines>,
     meshes: Vec<MeshBuffers>,
     instances: wgpu::Buffer,
+    /// Zeros for a mesh without lightmap UVs (as long as the longest mesh).
+    no_lightmap_uv: wgpu::Buffer,
+    /// One for no lightmap, then one per lightmap.
+    lightmaps: Vec<wgpu::BindGroup>,
     materials: Vec<Material>,
     draws: Vec<Draw>,
     /// See-through draws, far to near for the last view.
@@ -414,6 +467,9 @@ struct Light {
     second_color: [f32; 3],
     /// The studio's fill (towards it), the studio's alone.
     fill: [f32; 3],
+    /// The key light and the second one are in the lightmaps already: what samples one gets them from there.
+    key_baked: bool,
+    second_baked: bool,
     studio: bool,
     /// The ambient light facing up, round the horizon, facing down (linear).
     ambient: [[f32; 3]; 3],
@@ -569,8 +625,22 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
                 preview::IndexFormat::U16 => wgpu::IndexFormat::Uint16,
                 preview::IndexFormat::U32 => wgpu::IndexFormat::Uint32,
             },
+            lightmap_uv: m.lightmap_uv.map(|uv| {
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("preview lightmap uvs"),
+                    contents: nonempty(p.blob(uv)),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+            }),
         })
         .collect();
+    let longest = h.meshes.iter().map(|m| m.vertices as u64).max().unwrap_or(0).max(4);
+    let no_lightmap_uv = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("preview no lightmap uvs"),
+        size: longest * preview::LIGHTMAP_UV_SIZE as u64,
+        usage: wgpu::BufferUsages::VERTEX,
+        mapped_at_creation: false,
+    });
     let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("preview instances"),
         contents: nonempty(p.blob(h.instances.matrices)),
@@ -616,8 +686,27 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
         })
         .collect();
 
+    // Where each draw samples its lightmap: a uniform per place (`uv2 * xy + zw`, the lightmap's scale), all in one
+    // buffer at the device's alignment. The first is no lightmap at all.
+    let align = device.limits().min_uniform_buffer_offset_alignment.max(16) as usize;
+    let mut places: Vec<[f32; 8]> = vec![[1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
+    let mut place_of: std::collections::HashMap<(u32, [u32; 4]), u32> = std::collections::HashMap::new();
+    let scale_of = |l: &preview::Lightmap| if l.scale.is_finite() { l.scale.clamp(0.0, 256.0) } else { 1.0 };
+
     let mut draws = Vec::new();
     for d in &h.draws {
+        let (lightmap, lightmap_offset) = match d.lightmap {
+            // Uploaded, the picture read: else as if it had none.
+            Some(l) if h.lightmaps.get(l.index as usize).is_some_and(|m| textures.get(m.texture as usize).is_some_and(Option::is_some)) => {
+                let st = l.st.map(|v| if v.is_finite() { v } else { 0.0 });
+                let slot = *place_of.entry((l.index, st.map(f32::to_bits))).or_insert_with(|| {
+                    places.push([st[0], st[1], st[2], st[3], scale_of(&h.lightmaps[l.index as usize]), 1.0, 0.0, 0.0]);
+                    places.len() as u32 - 1
+                });
+                (l.index as usize + 1, slot * align as u32)
+            }
+            _ => (0, 0),
+        };
         let m = p.matrix(d.instance);
         let det = m[0] * (m[5] * m[10] - m[6] * m[9]) - m[4] * (m[1] * m[10] - m[2] * m[9]) + m[8] * (m[1] * m[6] - m[2] * m[5]);
         let mesh = &h.meshes[d.mesh as usize];
@@ -636,12 +725,50 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
                 mirrored: det < 0.0,
                 shadows: d.shadows,
                 center,
+                lightmap,
+                lightmap_offset,
             });
         }
     }
     // Opaque draws grouped by material.
     draws.sort_by_key(|d| (materials[d.material].alpha == Alpha::Blend, d.material, d.mesh));
     let blend_order = (0..draws.len()).filter(|&i| materials[draws[i].material].alpha == Alpha::Blend).collect();
+
+    let mut place_bytes = vec![0u8; places.len() * align];
+    for (i, place) in places.iter().enumerate() {
+        place_bytes[i * align..i * align + 32].copy_from_slice(bytemuck::cast_slice(place));
+    }
+    let places_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("preview lightmap places"),
+        contents: &place_bytes,
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+    let lightmap_group = |view: &wgpu::TextureView| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("preview lightmap"),
+            layout: &layouts.lightmap,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &places_buffer, offset: 0, size: wgpu::BufferSize::new(32) }),
+                },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view) },
+            ],
+        })
+    };
+    let mut lightmaps = vec![lightmap_group(&white)];
+    for l in &h.lightmaps {
+        lightmaps.push(lightmap_group(textures.get(l.texture as usize).and_then(|t| t.as_ref()).unwrap_or(&white)));
+    }
+    let sky_view = h.sky.and_then(|s| usize::try_from(s.texture).ok()).and_then(|i| textures.get(i)).and_then(|t| t.as_ref()).unwrap_or(&white);
+    let sky_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("preview sky"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
 
     let frame_buffer = |label| {
         device.create_buffer(&wgpu::BufferDescriptor {
@@ -654,7 +781,7 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
     let (frame, mirror_frame, shadow_frame) = (frame_buffer("preview frame"), frame_buffer("preview mirror"), frame_buffer("preview shadow"));
     let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("preview shadow map"),
-        size: wgpu::Extent3d { width: SHADOW_SIZE, height: SHADOW_SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d { width: shadow_size(h), height: shadow_size(h), depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -678,6 +805,8 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
                 wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&compare) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(sky_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&sky_sampler) },
             ],
         })
     };
@@ -695,6 +824,8 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
         pipelines: pipelines.clone(),
         meshes,
         instances,
+        no_lightmap_uv,
+        lightmaps,
         materials,
         draws,
         blend_order,
@@ -763,6 +894,15 @@ fn material_uniform(m: &preview::Material, tex: bool, normal: bool, surface: boo
     ]
 }
 
+/// Texels on a side of a preview's shadow map.
+fn shadow_size(h: &preview::Header) -> u32 {
+    if h.kind == Kind::Avatars {
+        SHADOW_SIZE
+    } else {
+        WORLD_SHADOW_SIZE
+    }
+}
+
 /// wgpu refuses empty buffers.
 fn nonempty(b: &[u8]) -> &[u8] {
     if b.is_empty() {
@@ -811,6 +951,8 @@ fn light_for(h: &preview::Header, mode: LightMode) -> Light {
         second: [0.0, 1.0, 0.0],
         second_color: [0.0; 3],
         fill,
+        key_baked: false,
+        second_baked: false,
         studio: true,
         ambient: STUDIO_AMBIENT,
         reflection: 1.0,
@@ -825,6 +967,7 @@ fn light_for(h: &preview::Header, mode: LightMode) -> Light {
             Some((d, key)) => {
                 light.direction = d;
                 light.color = colour(key.color);
+                light.key_baked = key.baked;
                 let strength = if key.shadows && key.shadow_strength.is_finite() { key.shadow_strength.clamp(0.0, 1.0) } else { 0.0 };
                 (light.shadow, light.ground_shadow) = (strength, strength);
             }
@@ -837,6 +980,7 @@ fn light_for(h: &preview::Header, mode: LightMode) -> Light {
         if let Some((d, second)) = lights.next() {
             light.second = d;
             light.second_color = colour(second.color);
+            light.second_baked = second.baked;
         }
         if let Some(a) = l.ambient {
             light.ambient = [colour(a.sky), colour(a.equator), colour(a.ground)];
@@ -844,7 +988,7 @@ fn light_for(h: &preview::Header, mode: LightMode) -> Light {
         light.reflection = if l.reflection_intensity.is_finite() { l.reflection_intensity.clamp(0.0, 4.0) } else { 1.0 };
     }
     let dir = light.direction;
-    let box_ = if h.kind == Kind::Avatars { h.focus } else { h.bounds };
+    let box_ = h.focus;
     let center = box_.center();
     let radius = box_.radius().clamp(0.5, 120.0) * if h.kind == Kind::Avatars { 1.6 } else { 1.05 };
     // Looking along -dir from beyond the scene.
@@ -855,8 +999,8 @@ fn light_for(h: &preview::Header, mode: LightMode) -> Light {
     light
 }
 
-/// Bytes of the frame uniform (two matrices, seventeen vectors).
-const FRAME_SIZE: usize = 64 * 2 + 16 * 17;
+/// Bytes of the frame uniform (two matrices, twenty-six vectors).
+const FRAME_SIZE: usize = 64 * 2 + 16 * 26;
 
 /// How an orbit's frame is drawn: the background and ground looks of the preview's kind.
 struct Look {
@@ -936,7 +1080,7 @@ impl Scene {
     fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, size: (u32, u32), view: View) {
         let h = &self.header;
         let look = self.look();
-        let focus = if h.kind == Kind::Avatars { h.focus } else { h.bounds };
+        let focus = h.focus;
         let center = focus.center();
         let radius = focus.radius().max(0.05);
         let ground_y = h.ground.unwrap_or(focus.min[1]);
@@ -953,31 +1097,78 @@ impl Scene {
         let reveal_y = if view.reveal >= 1.0 { f32::MAX } else { ground_y - band + (height + band * 2.5) * k };
         let ground_radius = radius * 4.0;
         let light = self.light;
+        // The sky, for what is not an avatar on our floor, in either light; the fog with the scene's light.
+        let backdrop = h.sky.filter(|_| h.kind != Kind::Avatars);
+        let fog = h.lighting.as_ref().and_then(|l| l.fog).filter(|_| view.light == LightMode::Scene);
+        let basis = {
+            let f = normalize(view.forward);
+            let up = if f[1].abs() > 0.999 { [0.0, 0.0, 1.0] } else { [0.0, 1.0, 0.0] };
+            let r = normalize(cross(up, f));
+            (r, cross(f, r), f)
+        };
         let uniform = |vp: &[f32; 16], eye: [f32; 3], mirror: bool| -> Vec<f32> {
             let mut u = Vec::with_capacity(FRAME_SIZE / 4);
             u.extend_from_slice(vp);
             u.extend_from_slice(&light.view_proj);
             u.extend_from_slice(&[eye[0], eye[1], eye[2], if mirror { 1.0 } else { 0.0 }]);
             u.extend_from_slice(&[light.direction[0], light.direction[1], light.direction[2], light.shadow]);
-            u.extend_from_slice(&[light.fill[0], light.fill[1], light.fill[2], 0.0]);
+            u.extend_from_slice(&[light.fill[0], light.fill[1], light.fill[2], if light.key_baked { 1.0 } else { 0.0 }]);
             u.extend_from_slice(&[ground_y, ground_radius, if look.ground { 1.0 } else { 0.0 }, 0.22]);
             u.extend_from_slice(&[reveal_y, band, view.reveal, (1.0 - view.reveal).clamp(0.0, 1.0)]);
             u.extend_from_slice(&[center[0], center[1], center[2], radius]);
-            u.extend_from_slice(&[w as f32, hgt as f32, aspect, 0.0]);
+            u.extend_from_slice(&[w as f32, hgt as f32, aspect, shadow_size(h) as f32]);
             u.extend_from_slice(&[look.sky_top[0], look.sky_top[1], look.sky_top[2], 0.0]);
             u.extend_from_slice(&[look.sky_bottom[0], look.sky_bottom[1], look.sky_bottom[2], 0.0]);
             u.extend_from_slice(&[ACCENT[0], ACCENT[1], ACCENT[2], 0.0]);
             // Where the subject is on screen (the spot behind it).
             let c = transform(&view_proj, [center[0], center[1], center[2]]);
-            u.extend_from_slice(&[c[0] * 0.5 + 0.5, 0.5 - c[1] * 0.5, 0.0, 0.0]);
+            // How far a shadow's test leans away from its surface: a tenth of a metre on a world, whatever its size; an
+            // avatar's as it always was. Depth runs over four radii of the shadow's box.
+            let lit_radius = focus.radius().clamp(0.5, 120.0) * if h.kind == Kind::Avatars { 1.6 } else { 1.05 };
+            let (depth_bias, normal_bias) = if h.kind == Kind::Avatars { (0.0015, radius * 0.004) } else { ((0.25 / (lit_radius * 4.0)).min(0.0015), (radius * 0.004).min(0.12)) };
+            u.extend_from_slice(&[c[0] * 0.5 + 0.5, 0.5 - c[1] * 0.5, depth_bias, normal_bias]);
             let [r, g, b] = light.color;
             u.extend_from_slice(&[r, g, b, if light.studio { 1.0 } else { 0.0 }]);
-            u.extend_from_slice(&[light.second[0], light.second[1], light.second[2], 0.0]);
+            u.extend_from_slice(&[light.second[0], light.second[1], light.second[2], if light.second_baked { 1.0 } else { 0.0 }]);
             u.extend_from_slice(&[light.second_color[0], light.second_color[1], light.second_color[2], 0.0]);
             let [sky, equator, ground] = light.ambient;
             u.extend_from_slice(&[sky[0], sky[1], sky[2], light.ground_shadow]);
             u.extend_from_slice(&[equator[0], equator[1], equator[2], light.reflection]);
             u.extend_from_slice(&[ground[0], ground[1], ground[2], 0.0]);
+            let (r, up, f) = basis;
+            u.extend_from_slice(&[r[0], r[1], r[2], (view.fov_y * 0.5).tan()]);
+            u.extend_from_slice(&[up[0], up[1], up[2], view.shift]);
+            u.extend_from_slice(&[f[0], f[1], f[2], 0.0]);
+            let finite = |c: [f32; 3]| c.map(|v| if v.is_finite() { v.clamp(0.0, 64.0) } else { 0.0 });
+            match backdrop {
+                Some(s) => {
+                    let (sin, cos) = s.rotation.to_radians().sin_cos();
+                    let mode = if s.texture >= 0 { 2.0 } else { 1.0 };
+                    u.extend_from_slice(&[mode, if s.scale.is_finite() { s.scale.clamp(0.0, 4096.0) } else { 1.0 }, cos, sin]);
+                    for c in [s.top, s.horizon, s.bottom] {
+                        let c = finite(c);
+                        u.extend_from_slice(&[c[0], c[1], c[2], 0.0]);
+                    }
+                }
+                None => u.extend_from_slice(&[0.0; 16]),
+            }
+            match fog {
+                Some(g) => {
+                    let mode = match g.mode {
+                        preview::FogMode::Linear => 1.0,
+                        preview::FogMode::Exponential => 2.0,
+                        preview::FogMode::Squared => 3.0,
+                    };
+                    let c = finite(g.color);
+                    // Fog is a depth cue, never a curtain: it is measured from where the framed part of the scene
+                    // starts, so a camera drawn back to see the whole of it does not look through all of the fog
+                    // (Avatorbit's ends at 390 m, a view of its 120 m town from 400 m away would be all fog).
+                    let to_focus = (0..3).map(|k| (eye[k] - center[k]).powi(2)).sum::<f32>().sqrt();
+                    u.extend_from_slice(&[mode, g.start, g.end.max(g.start + 1e-3), g.density.max(0.0)]);
+                    u.extend_from_slice(&[c[0], c[1], c[2], (to_focus - radius).max(0.0)]);
+                }
+                None => u.extend_from_slice(&[0.0; 8]),
+            }
             u
         };
         let q = queue;
@@ -1016,8 +1207,11 @@ impl Scene {
             pass.set_pipeline(&pl.shadow);
             pass.set_bind_group(0, &self.shadow_group, &[]);
             pass.set_vertex_buffer(1, self.instances.slice(..));
-            for d in self.draws.iter().filter(|d| d.shadows) {
-                self.draw_one(&mut pass, d);
+            // Only when it is seen: a baked world's key light casts nothing, its shadows are in its lightmaps.
+            if light.shadow > 0.0 || light.ground_shadow > 0.0 {
+                for d in self.draws.iter().filter(|d| d.shadows) {
+                    self.draw_one(&mut pass, d);
+                }
             }
         }
         let t = self.targets.as_ref().unwrap();
@@ -1052,18 +1246,18 @@ impl Scene {
                 pass.set_bind_group(0, &self.mirror_group, &[]);
                 for d in &self.draws {
                     pass.set_pipeline(&pl.mirror[self.cull_of(d, true)]);
-                    self.draw_one(&mut pass, d);
+                    self.draw_lit(&mut pass, d);
                 }
                 pass.set_bind_group(0, &self.frame_group, &[]);
             }
             for d in self.draws.iter().filter(|d| self.materials[d.material].alpha != Alpha::Blend) {
                 pass.set_pipeline(&pl.opaque[self.cull_of(d, false)]);
-                self.draw_one(&mut pass, d);
+                self.draw_lit(&mut pass, d);
             }
             for &i in &self.blend_order {
                 let d = &self.draws[i];
                 pass.set_pipeline(&pl.blend[self.cull_of(d, false)]);
-                self.draw_one(&mut pass, d);
+                self.draw_lit(&mut pass, d);
             }
         }
         queue.submit([encoder.finish()]);
@@ -1083,10 +1277,17 @@ impl Scene {
         })
     }
 
+    /// A draw through the pipelines that sample lightmaps.
+    fn draw_lit(&self, pass: &mut wgpu::RenderPass<'_>, d: &Draw) {
+        pass.set_bind_group(2, &self.lightmaps[d.lightmap], &[d.lightmap_offset]);
+        self.draw_one(pass, d);
+    }
+
     fn draw_one(&self, pass: &mut wgpu::RenderPass<'_>, d: &Draw) {
         let m = &self.meshes[d.mesh];
         pass.set_bind_group(1, &self.materials[d.material].bind_group, &[]);
         pass.set_vertex_buffer(0, m.vertices.slice(..));
+        pass.set_vertex_buffer(2, m.lightmap_uv.as_ref().unwrap_or(&self.no_lightmap_uv).slice(..));
         pass.set_index_buffer(m.indices.slice(..), m.format);
         pass.draw_indexed(d.start..d.start + d.count, 0, d.instance..d.instance + 1);
     }
@@ -1200,11 +1401,26 @@ struct Frame {
     ambient_sky: vec4<f32>,
     ambient_equator: vec4<f32>,
     ambient_ground: vec4<f32>,
+    // The camera's axes (w: the tangent of half the view's height; the picture's shift; nothing).
+    view_right: vec4<f32>,
+    view_up: vec4<f32>,
+    view_forward: vec4<f32>,
+    // The sky: 0 none, 1 colours, 2 a picture; its scale; the cosine and sine of its turn. Its colours.
+    sky: vec4<f32>,
+    sky_a: vec4<f32>,
+    sky_b: vec4<f32>,
+    sky_c: vec4<f32>,
+    // The fog: 0 none, 1 linear, 2 exponential, 3 squared; its start, end and density. Its colour, how far off it starts
+    // counting.
+    fog: vec4<f32>,
+    fog_color: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var shadow_map: texture_depth_2d;
 @group(0) @binding(2) var shadow_cmp: sampler_comparison;
+@group(0) @binding(3) var sky_map: texture_2d<f32>;
+@group(0) @binding(4) var sky_sampler: sampler;
 
 struct Material {
     color: vec4<f32>,
@@ -1228,6 +1444,15 @@ struct Material {
 @group(1) @binding(4) var surface_map: texture_2d<f32>;
 @group(1) @binding(5) var emission_map: texture_2d<f32>;
 
+struct LightmapPlace {
+    st: vec4<f32>,
+    // The light its picture's 1 stands for; has a lightmap.
+    info: vec4<f32>,
+}
+
+@group(2) @binding(0) var<uniform> lightmap_place: LightmapPlace;
+@group(2) @binding(1) var lightmap: texture_2d<f32>;
+
 struct VIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec2<f32>,
@@ -1236,6 +1461,7 @@ struct VIn {
     @location(4) m1: vec4<f32>,
     @location(5) m2: vec4<f32>,
     @location(6) m3: vec4<f32>,
+    @location(7) uv2: vec2<f32>,
 }
 
 struct VOut {
@@ -1243,6 +1469,7 @@ struct VOut {
     @location(0) world: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) lightmap_uv: vec2<f32>,
 }
 
 fn oct_decode(e: vec2<f32>) -> vec3<f32> {
@@ -1269,12 +1496,16 @@ fn place(v: VIn) -> VOut {
     // Unity's v runs up the picture; its rows are stored from the top.
     let uv = v.uv * material.st.xy + material.st.zw;
     o.uv = vec2<f32>(uv.x, 1.0 - uv.y);
+    o.lightmap_uv = vec2<f32>(0.0);
     return o;
 }
 
 @vertex
 fn vs_scene(v: VIn) -> VOut {
-    return place(v);
+    var o = place(v);
+    let l = v.uv2 * lightmap_place.st.xy + lightmap_place.st.zw;
+    o.lightmap_uv = vec2<f32>(l.x, 1.0 - l.y);
+    return o;
 }
 
 @vertex
@@ -1294,6 +1525,9 @@ struct Surface {
     metallic: f32,
     smoothness: f32,
     emission: vec3<f32>,
+    // The baked light it receives (a lightmap's), and whether it does.
+    baked: vec3<f32>,
+    is_baked: bool,
 }
 
 // The normal map's normal in the frame the UVs make on screen (no tangents stored): Schüler's cotangent frame.
@@ -1318,6 +1552,9 @@ fn perturb(n: vec3<f32>, world: vec3<f32>, uv: vec2<f32>, packed: vec4<f32>) -> 
 fn surface_at(i: VOut, front: bool) -> Surface {
     var s: Surface;
     s.albedo = albedo_at(i.uv);
+    s.baked = textureSample(lightmap, base_sampler, i.lightmap_uv).rgb * lightmap_place.info.x;
+    // The studio's light is the studio's own, whatever the scene baked.
+    s.is_baked = lightmap_place.info.y > 0.5 && !studio();
     let packed = textureSample(normal_map, base_sampler, i.uv);
     let ms = textureSample(surface_map, base_sampler, i.uv);
     let glow = textureSample(emission_map, base_sampler, i.uv);
@@ -1337,15 +1574,15 @@ const TAPS = array<vec2<f32>, 12>(
 );
 
 fn shadow_at(world: vec3<f32>, n: vec3<f32>, softness: f32) -> f32 {
-    let lp = frame.light_view_proj * vec4<f32>(world + n * frame.focus.w * 0.004, 1.0);
+    let lp = frame.light_view_proj * vec4<f32>(world + n * frame.spot.w, 1.0);
     let uv = vec2<f32>(lp.x * 0.5 + 0.5, 0.5 - lp.y * 0.5);
     if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || lp.z > 1.0) {
         return 1.0;
     }
-    let texel = softness / 2048.0;
+    let texel = softness / frame.viewport.w;
     var sum = 0.0;
     for (var i = 0; i < 12; i = i + 1) {
-        sum = sum + textureSampleCompareLevel(shadow_map, shadow_cmp, uv + TAPS[i] * texel, lp.z - 0.0015);
+        sum = sum + textureSampleCompareLevel(shadow_map, shadow_cmp, uv + TAPS[i] * texel, lp.z - frame.spot.z);
     }
     return sum / 12.0;
 }
@@ -1411,10 +1648,11 @@ fn shade(s: Surface, world: vec3<f32>) -> vec3<f32> {
     let v = normalize(frame.camera.xyz - world);
     let nl = dot(n, l);
     let shadow = mix(1.0, shadow_at(world, n, 2.5), frame.light.w);
-    let sun = frame.key_color.rgb;
-    let sun2 = frame.light2_color.rgb;
+    // What samples a lightmap has the baked lights in it, and the sky's light.
+    let sun = select(frame.key_color.rgb, vec3<f32>(0.0), s.is_baked && frame.fill.w > 0.5);
+    let sun2 = select(frame.light2_color.rgb, vec3<f32>(0.0), s.is_baked && frame.light2.w > 0.5);
     // Every light and the sky together, capped at white as toon shaders cap it.
-    let toon_light = min(sun + sun2 + ambient_mean(), vec3<f32>(1.0));
+    let toon_light = min(sun + sun2 + select(ambient_mean(), s.baked, s.is_baked), vec3<f32>(1.0));
     if (mode > 1.5) {
         // Flat: lit alike whichever way it faces.
         return albedo * toon_light + s.emission;
@@ -1439,7 +1677,8 @@ fn shade(s: Surface, world: vec3<f32>) -> vec3<f32> {
     let in_studio = select(0.0, 1.0, studio());
     let fill = max(dot(n, frame.fill.xyz), 0.0) * vec3<f32>(0.06, 0.07, 0.09) * in_studio;
     let rim = pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 4.0) * clamp(n.y + 0.6, 0.0, 1.0) * vec3<f32>(0.05, 0.06, 0.08) * in_studio;
-    return diffuse * (ambient(n) + direct + fill) + standard_specular(s, n, l, v, nl, shadow) + rim * diffuse * 2.0 + s.emission;
+    let indirect = select(ambient(n), s.baked, s.is_baked);
+    return diffuse * (indirect + direct + fill) + standard_specular(s, n, l, v, nl, shadow) + rim * diffuse * 2.0 + s.emission;
 }
 
 // Standard's highlight from the light and reflection of the sky.
@@ -1463,7 +1702,27 @@ fn standard_specular(s: Surface, n: vec3<f32>, l: vec3<f32>, v: vec3<f32>, nl_ra
     let grazing = clamp(s.smoothness + (1.0 - one_minus_reflectivity), 0.0, 1.0);
     let fresnel_lerp = mix(spec_color, vec3<f32>(grazing), pow(1.0 - nv, 5.0));
     let r = reflect(-v, n);
-    return term * frame.key_color.rgb * shadow * fresnel + reduction * environment(r, perceptual) * fresnel_lerp;
+    let key = select(frame.key_color.rgb, vec3<f32>(0.0), s.is_baked && frame.fill.w > 0.5);
+    return term * key * shadow * fresnel + reduction * environment(r, perceptual) * fresnel_lerp;
+}
+
+// The scene's fog over what is at a distance, as Unity's built-in shaders add it.
+fn fogged(c: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
+    let mode = frame.fog.x;
+    if (mode < 0.5) {
+        return c;
+    }
+    let d = max(length(frame.camera.xyz - world) - frame.fog_color.w, 0.0);
+    var seen = 1.0;
+    if (mode < 1.5) {
+        seen = (frame.fog.z - d) / (frame.fog.z - frame.fog.y);
+    } else if (mode < 2.5) {
+        seen = exp(-frame.fog.w * d);
+    } else {
+        let k = frame.fog.w * d;
+        seen = exp(-k * k);
+    }
+    return mix(frame.fog_color.rgb, c, clamp(seen, 0.0, 1.0));
 }
 
 // The reveal's glowing edge, just under the rising plane.
@@ -1482,7 +1741,7 @@ fn fs_scene(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
     if (material.params.y > 0.5 && material.params.y < 1.5 && a.a < material.params.x) {
         discard;
     }
-    let c = shoulder(shade(s, i.world)) + frame.accent.rgb * edge(i.world) * 3.0;
+    let c = shoulder(fogged(shade(s, i.world), i.world)) + frame.accent.rgb * edge(i.world) * 3.0;
     let alpha = select(1.0, a.a, material.params.y > 1.5);
     return vec4<f32>(c, alpha);
 }
@@ -1537,8 +1796,36 @@ fn hash(p: vec2<f32>) -> f32 {
     return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
 }
 
+// The scene's sky in a direction: its picture (as Unity's Panoramic reads one), or its three colours.
+fn sky_at(d: vec3<f32>) -> vec3<f32> {
+    let t = textureSampleLevel(sky_map, sky_sampler, sky_uv(d), 0.0).rgb * frame.sky.y;
+    if (frame.sky.x > 1.5) {
+        return t;
+    }
+    let up = clamp(d.y, -1.0, 1.0);
+    if (up >= 0.0) {
+        return mix(frame.sky_b.rgb, frame.sky_a.rgb, sqrt(up));
+    }
+    return mix(frame.sky_b.rgb, frame.sky_c.rgb, sqrt(-up));
+}
+
+fn sky_uv(d: vec3<f32>) -> vec2<f32> {
+    // Against the way it is turned.
+    let x = d.x * frame.sky.z + d.z * frame.sky.w;
+    let z = -d.x * frame.sky.w + d.z * frame.sky.z;
+    let longitude = atan2(z, x);
+    let latitude = acos(clamp(d.y, -1.0, 1.0));
+    return vec2<f32>(0.5 - longitude / (2.0 * PI), latitude / PI);
+}
+
 @fragment
 fn fs_background(f: Flat) -> @location(0) vec4<f32> {
+    if (frame.sky.x > 0.5) {
+        let ndc = vec2<f32>(f.uv.x * 2.0 - 1.0, 1.0 - f.uv.y * 2.0);
+        let t = frame.view_right.w;
+        let d = normalize(frame.view_forward.xyz + frame.view_right.xyz * ndc.x * t * frame.viewport.z + frame.view_up.xyz * (ndc.y - frame.view_up.w) * t);
+        return vec4<f32>(shoulder(sky_at(d)), 1.0);
+    }
     var c = mix(frame.sky_top.rgb, frame.sky_bottom.rgb, f.uv.y);
     // A soft spot of light behind the subject, and a vignette.
     let aspect = frame.viewport.z;
@@ -1622,10 +1909,30 @@ mod tests {
         preview::Header { kind: Kind::Avatars, bounds: b, focus: b, ground: Some(0.0), lighting, ..Default::default() }
     }
 
+    /// A baked world's light is its lightmaps: no sun and no ambient light of its own still shows it.
+    #[test]
+    fn a_baked_scene_is_drawn_in_its_own_light() {
+        let dark = preview::Lighting { lights: vec![], ambient: None, reflection_intensity: 0.0, fog: None };
+        let mut h = lit_header(Some(dark));
+        assert_eq!(light_mode(true, &h), LightMode::Studio, "nothing to show it");
+        h.lightmaps.push(preview::Lightmap { texture: 0, scale: 2.0 });
+        assert!(scene_light_shows_header(&h));
+        assert_eq!(light_mode(true, &h), LightMode::Scene);
+        assert_eq!(light_mode(false, &h), LightMode::Studio, "the switch on the studio");
+    }
+
+    #[test]
+    fn a_baked_key_light_is_marked_for_what_samples_a_lightmap() {
+        let sun = preview::SceneLight { direction: [0.0, -1.0, 0.0], color: [1.0; 3], intensity: 1.0, shadows: true, shadow_strength: 1.0, baked: true };
+        let h = lit_header(Some(preview::Lighting { lights: vec![sun], ambient: None, reflection_intensity: 1.0, fog: None }));
+        assert!(light_for(&h, LightMode::Scene).key_baked);
+        assert!(!light_for(&h, LightMode::Studio).key_baked, "the studio's own light is never baked");
+    }
+
     #[test]
     fn the_scenes_light_is_used_when_preferred_and_recorded() {
-        let sun = preview::SceneLight { direction: [0.0, -1.0, 0.0], color: [2.0, 1.0, 0.5], intensity: 2.0, shadows: false, shadow_strength: 1.0 };
-        let lighting = preview::Lighting { lights: vec![sun], ambient: None, reflection_intensity: 0.5 };
+        let sun = preview::SceneLight { direction: [0.0, -1.0, 0.0], color: [2.0, 1.0, 0.5], intensity: 2.0, shadows: false, shadow_strength: 1.0, baked: false };
+        let lighting = preview::Lighting { lights: vec![sun], ambient: None, reflection_intensity: 0.5, fog: None };
         let with = lit_header(Some(lighting));
         let without = lit_header(None);
         assert_eq!(light_mode(true, &with), LightMode::Scene);
@@ -1681,26 +1988,27 @@ mod tests {
             intensity,
             shadows: true,
             shadow_strength: 1.0,
+            baked: false,
         };
-        let sunny = preview::Lighting { lights: vec![sun(1.0)], ambient: None, reflection_intensity: 1.0 };
+        let sunny = preview::Lighting { lights: vec![sun(1.0)], ambient: None, reflection_intensity: 1.0, fog: None };
         assert_eq!(scene_light_brightness(&sunny), 1.0);
         assert_eq!(mode(Some(sunny)), LightMode::Scene, "a sun");
 
         // Very dark: a sun at intensity 0.02 over an ambient light of 0.01 shows nothing; at the threshold it does.
         let ambient = |v: f32| preview::Ambient { mode: preview::AmbientMode::Flat, sky: [v; 3], equator: [v; 3], ground: [v; 3] };
-        let dark = preview::Lighting { lights: vec![sun(0.02)], ambient: Some(ambient(0.01)), reflection_intensity: 1.0 };
+        let dark = preview::Lighting { lights: vec![sun(0.02)], ambient: Some(ambient(0.01)), reflection_intensity: 1.0, fog: None };
         assert!((scene_light_brightness(&dark) - 0.03).abs() < 1e-6);
         assert_eq!(mode(Some(dark)), LightMode::Studio, "a very dark scene");
-        let dim = preview::Lighting { lights: vec![sun(0.06)], ambient: Some(ambient(SCENE_LIGHT_MIN - 0.06)), reflection_intensity: 1.0 };
+        let dim = preview::Lighting { lights: vec![sun(0.06)], ambient: Some(ambient(SCENE_LIGHT_MIN - 0.06)), reflection_intensity: 1.0, fog: None };
         assert!(scene_light_shows(&dim) && mode(Some(dim)) == LightMode::Scene, "dim, but enough");
-        let night = preview::Lighting { lights: vec![], ambient: Some(ambient(SCENE_LIGHT_MIN * 0.99)), reflection_intensity: 1.0 };
+        let night = preview::Lighting { lights: vec![], ambient: Some(ambient(SCENE_LIGHT_MIN * 0.99)), reflection_intensity: 1.0, fog: None };
         assert_eq!(mode(Some(night)), LightMode::Studio, "just under the threshold");
 
         // Only what is drawn counts: lights that cannot be pointed, a third light, colours that are not numbers.
         let unpointed = preview::SceneLight { direction: [0.0; 3], ..sun(5.0) };
         let nan = preview::SceneLight { color: [f32::NAN, f32::INFINITY, -1.0], ..sun(1.0) };
         let faint = sun(0.01);
-        let l = preview::Lighting { lights: vec![unpointed, nan, faint, sun(5.0)], ambient: None, reflection_intensity: 1.0 };
+        let l = preview::Lighting { lights: vec![unpointed, nan, faint, sun(5.0)], ambient: None, reflection_intensity: 1.0, fog: None };
         assert!((scene_light_brightness(&l) - 0.01).abs() < 1e-6, "the faint light alone: the bright one is the third pointed");
         assert_eq!(mode(Some(l)), LightMode::Studio);
 
@@ -1709,7 +2017,7 @@ mod tests {
         assert_eq!(mode(None), LightMode::Studio, "no lighting recorded");
         // The person's choice of the studio stands whatever the scene's light.
         assert_eq!(
-            light_mode(false, &lit_header(Some(preview::Lighting { lights: vec![sun(1.0)], ambient: None, reflection_intensity: 1.0 }))),
+            light_mode(false, &lit_header(Some(preview::Lighting { lights: vec![sun(1.0)], ambient: None, reflection_intensity: 1.0, fog: None }))),
             LightMode::Studio
         );
     }
@@ -1717,14 +2025,14 @@ mod tests {
     #[test]
     fn a_scene_without_directional_lights_is_lit_by_its_ambient_light_alone() {
         let ambient = preview::Ambient { mode: preview::AmbientMode::Flat, sky: [0.5; 3], equator: [0.5; 3], ground: [0.5; 3] };
-        let broken = preview::SceneLight { direction: [0.0; 3], color: [f32::NAN, 1.0, 1e9], intensity: 1.0, shadows: true, shadow_strength: 1.0 };
-        let h = lit_header(Some(preview::Lighting { lights: vec![broken], ambient: Some(ambient), reflection_intensity: 1.0 }));
+        let broken = preview::SceneLight { direction: [0.0; 3], color: [f32::NAN, 1.0, 1e9], intensity: 1.0, shadows: true, shadow_strength: 1.0, baked: false };
+        let h = lit_header(Some(preview::Lighting { lights: vec![broken], ambient: Some(ambient), reflection_intensity: 1.0, fog: None }));
         let l = light_for(&h, LightMode::Scene);
         assert_eq!((l.color, l.shadow, l.ambient), ([0.0; 3], 0.0, [[0.5; 3]; 3]), "a light that cannot be pointed is none");
         // A second light beside the key; colours kept finite.
-        let key = preview::SceneLight { direction: [0.0, 0.0, 1.0], color: [f32::NAN, 1.0, 1e9], intensity: 1.0, shadows: true, shadow_strength: 0.7 };
-        let back = preview::SceneLight { direction: [0.0, 0.0, -2.0], color: [0.1, 0.2, 0.3], intensity: 1.0, shadows: false, shadow_strength: 1.0 };
-        let h = lit_header(Some(preview::Lighting { lights: vec![key, back], ambient: None, reflection_intensity: f32::NAN }));
+        let key = preview::SceneLight { direction: [0.0, 0.0, 1.0], color: [f32::NAN, 1.0, 1e9], intensity: 1.0, shadows: true, shadow_strength: 0.7, baked: false };
+        let back = preview::SceneLight { direction: [0.0, 0.0, -2.0], color: [0.1, 0.2, 0.3], intensity: 1.0, shadows: false, shadow_strength: 1.0, baked: false };
+        let h = lit_header(Some(preview::Lighting { lights: vec![key, back], ambient: None, reflection_intensity: f32::NAN, fog: None }));
         let l = light_for(&h, LightMode::Scene);
         assert_eq!((l.direction, l.color, l.shadow), ([0.0, 0.0, -1.0], [0.0, 1.0, 16.0], 0.7));
         assert_eq!((l.second, l.second_color, l.reflection), ([0.0, 0.0, 1.0], [0.1, 0.2, 0.3], 1.0));

@@ -35,6 +35,9 @@ fn source<'a>(state: &'a State, path: &Path) -> Option<&'a Project> {
 /// What the dialog's place for the copy says: the name refused, a folder there already, or not enough room.
 fn problem(state: &State, project: &Project) -> Option<String> {
     let d = &state.dup;
+    if state.repairing(&project.path) {
+        return Some("Orbiters is moving this project's Library: duplicate it once that ends.".into());
+    }
     if let Err(e) = templates::validate_name(&d.name) {
         return Some(if d.name.is_empty() { "Name the copy.".into() } else { e.to_string() });
     }

@@ -38,6 +38,192 @@ pub fn decode(path: &Path, max_bytes: u64) -> anyhow::Result<RgbaImage> {
     Ok(reader.decode().with_context(|| format!("a .{ext} the preview cannot read"))?.to_rgba8())
 }
 
+/// A picture in linear light: lightmaps and skies, whose values run far above 1.
+pub struct Linear {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<[f32; 3]>,
+}
+
+/// The largest HDR picture read, in memory: a 4096² lightmap takes 200 MB.
+const MAX_LINEAR_ALLOC: u64 = 1 << 30;
+
+/// Reads a picture as linear light: EXR and Radiance HDR as they are, the others from sRGB.
+pub fn decode_linear(path: &Path, max_bytes: u64) -> anyhow::Result<Linear> {
+    let size = std::fs::metadata(path)?.len();
+    ensure!(size <= max_bytes, "{} MB", size >> 20);
+    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if ext != "exr" && ext != "hdr" {
+        let img = decode(path, max_bytes)?;
+        let (width, height) = img.dimensions();
+        let pixels = img.pixels().map(|p| [0, 1, 2].map(|k| super::material::srgb_to_linear(p[k] as f32 / 255.0))).collect();
+        return Ok(Linear { width, height, pixels });
+    }
+    let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_SIDE);
+    limits.max_image_height = Some(MAX_SIDE);
+    limits.max_alloc = Some(MAX_LINEAR_ALLOC);
+    reader.limits(limits);
+    let img = reader.decode().with_context(|| format!("a .{ext} the preview cannot read"))?.into_rgb32f();
+    let (width, height) = img.dimensions();
+    // No light of NaN or below zero (a bake's stray pixels).
+    let pixels = img.pixels().map(|p| [0, 1, 2].map(|k| if p[k].is_finite() { p[k].max(0.0) } else { 0.0 })).collect();
+    Ok(Linear { width, height, pixels })
+}
+
+impl Linear {
+    /// At most `max_side` on a side, each pixel the average of those it covers. With `atlas` an atlas's empty
+    /// (exactly black) pixels count for nothing and a pixel left empty takes its neighbours' light, so an island's edge
+    /// does not darken as it shrinks (its padding was only a few pixels at the full size).
+    pub fn shrink(&self, max_side: u32, atlas: bool) -> Linear {
+        let (w, h) = (self.width.max(1), self.height.max(1));
+        let scale = (max_side as f32 / w.max(h) as f32).min(1.0);
+        let (nw, nh) = (((w as f32 * scale).round() as u32).max(1), ((h as f32 * scale).round() as u32).max(1));
+        let mut sum = vec![[0.0f32; 3]; (nw * nh) as usize];
+        let mut count = vec![0u32; (nw * nh) as usize];
+        for y in 0..h {
+            let ty = (y as u64 * nh as u64 / h as u64) as usize;
+            let row = &self.pixels[(y * w) as usize..((y + 1) * w) as usize];
+            for (x, p) in row.iter().enumerate() {
+                if atlas && p[0] == 0.0 && p[1] == 0.0 && p[2] == 0.0 {
+                    continue;
+                }
+                let i = ty * nw as usize + (x as u64 * nw as u64 / w as u64) as usize;
+                for k in 0..3 {
+                    sum[i][k] += p[k];
+                }
+                count[i] += 1;
+            }
+        }
+        let mut pixels: Vec<[f32; 3]> = sum.iter().zip(&count).map(|(s, &c)| if c > 0 { s.map(|v| v / c as f32) } else { [0.0; 3] }).collect();
+        if atlas {
+            // Twice: the empty pixels next to an island take the mean of their filled neighbours.
+            for _ in 0..2 {
+                let before = pixels.clone();
+                let filled = |i: usize| before[i] != [0.0; 3];
+                for y in 0..nh as usize {
+                    for x in 0..nw as usize {
+                        let i = y * nw as usize + x;
+                        if filled(i) {
+                            continue;
+                        }
+                        let (mut acc, mut n) = ([0.0f32; 3], 0.0f32);
+                        for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                            let (ax, ay) = (x as i32 + dx, y as i32 + dy);
+                            if ax < 0 || ay < 0 || ax >= nw as i32 || ay >= nh as i32 {
+                                continue;
+                            }
+                            let j = ay as usize * nw as usize + ax as usize;
+                            if filled(j) {
+                                for k in 0..3 {
+                                    acc[k] += before[j][k];
+                                }
+                                n += 1.0;
+                            }
+                        }
+                        if n > 0.0 {
+                            pixels[i] = acc.map(|v| v / n);
+                        }
+                    }
+                }
+            }
+        }
+        Linear { width: nw, height: nh, pixels }
+    }
+
+    /// A whole sphere's light by direction: facing up (the upper half, cosine-weighted), round the horizon, facing down.
+    pub fn sphere_light(&self) -> [[f32; 3]; 3] {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let (mut up, mut down, mut round) = ([0.0f32; 3], [0.0f32; 3], [0.0f32; 3]);
+        let (mut up_w, mut down_w, mut round_w) = (0.0f32, 0.0f32, 0.0f32);
+        for y in 0..h {
+            let theta = (y as f32 + 0.5) / h as f32 * std::f32::consts::PI;
+            let (sin, cos) = theta.sin_cos();
+            let mut row = [0.0f32; 3];
+            for p in &self.pixels[y * w..(y + 1) * w] {
+                for k in 0..3 {
+                    row[k] += p[k] / w as f32;
+                }
+            }
+            let (uw, dw, rw) = ((cos.max(0.0)) * sin, (-cos).max(0.0) * sin, sin * sin * sin);
+            for k in 0..3 {
+                up[k] += row[k] * uw;
+                down[k] += row[k] * dw;
+                round[k] += row[k] * rw;
+            }
+            up_w += uw;
+            down_w += dw;
+            round_w += rw;
+        }
+        [up.map(|v| v / up_w.max(1e-6)), round.map(|v| v / round_w.max(1e-6)), down.map(|v| v / down_w.max(1e-6))]
+    }
+}
+
+/// Six pictures of a skybox (front +Z, back -Z, left +X, right -X, up, down) as one picture of the whole sphere, rows
+/// from straight up.
+pub fn sphere_from_cube(faces: &[Linear]) -> Linear {
+    let (width, height) = (2048u32, 1024u32);
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        let theta = (y as f32 + 0.5) / height as f32 * std::f32::consts::PI;
+        for x in 0..width {
+            // Unity's latitude-longitude mapping: u = 0.5 - atan2(z, x) / 2π.
+            let phi = (0.5 - (x as f32 + 0.5) / width as f32) * std::f32::consts::TAU;
+            let d = [theta.sin() * phi.cos(), theta.cos(), theta.sin() * phi.sin()];
+            pixels.push(cube_sample(faces, d));
+        }
+    }
+    Linear { width, height, pixels }
+}
+
+/// A direction's colour on a skybox's six pictures.
+fn cube_sample(faces: &[Linear], d: [f32; 3]) -> [f32; 3] {
+    let a = d.map(f32::abs);
+    // Which face, and where on it: (right, up on the picture), each -1 to 1.
+    let (face, u, v) = if a[2] >= a[0] && a[2] >= a[1] {
+        if d[2] > 0.0 {
+            (0, d[0] / a[2], d[1] / a[2])
+        } else {
+            (1, -d[0] / a[2], d[1] / a[2])
+        }
+    } else if a[0] >= a[1] {
+        if d[0] > 0.0 {
+            (2, -d[2] / a[0], d[1] / a[0])
+        } else {
+            (3, d[2] / a[0], d[1] / a[0])
+        }
+    } else if d[1] > 0.0 {
+        (4, d[0] / a[1], -d[2] / a[1])
+    } else {
+        (5, d[0] / a[1], d[2] / a[1])
+    };
+    let Some(f) = faces.get(face) else { return [0.0; 3] };
+    let (fw, fh) = (f.width.max(1), f.height.max(1));
+    let x = (((u + 1.0) * 0.5 * fw as f32) as u32).min(fw - 1);
+    let y = (((1.0 - v) * 0.5 * fh as f32) as u32).min(fh - 1);
+    f.pixels.get((y * fw + x) as usize).copied().unwrap_or([0.0; 3])
+}
+
+/// Light as a picture a viewer samples like any other: its colours, read as sRGB, are the light over the returned
+/// scale. The scale leaves the brightest `1 - keep` of the pixels out (a sun's disc, a bake's hot pixel), which would
+/// else crush the rest into a few shades.
+pub fn encode_light(p: &Linear, keep: f32, quality: u8) -> anyhow::Result<(Encoded, f32)> {
+    let mut peaks: Vec<f32> = p.pixels.iter().step_by((p.pixels.len() / 65536).max(1)).map(|c| c[0].max(c[1]).max(c[2])).collect();
+    peaks.sort_by(f32::total_cmp);
+    let at = ((peaks.len() as f32 * keep) as usize).min(peaks.len().saturating_sub(1));
+    let scale = peaks.get(at).copied().unwrap_or(1.0).max(1e-3);
+    let oetf = |c: f32| {
+        let c = (c / scale).clamp(0.0, 1.0);
+        let v = if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+        (v * 255.0 + 0.5) as u8
+    };
+    let rgb: Vec<u8> = p.pixels.iter().flat_map(|c| [oetf(c[0]), oetf(c[1]), oetf(c[2])]).collect();
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality).encode(&rgb, p.width, p.height, image::ExtendedColorType::Rgb8)?;
+    Ok((Encoded { width: p.width, height: p.height, png: false, bytes, has_alpha: false }, scale))
+}
+
 /// `image` made to fit `max_side` (never larger) and encoded: PNG when `keep_alpha` and some pixel is not opaque.
 pub fn encode(image: &RgbaImage, max_side: u32, keep_alpha: bool) -> anyhow::Result<Encoded> {
     let (w, h) = image.dimensions();

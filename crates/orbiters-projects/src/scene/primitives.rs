@@ -21,6 +21,7 @@ pub fn builtin(file_id: i64) -> Option<ModelMesh> {
         positions: verts.iter().map(|v| v.0).collect(),
         normals: verts.iter().map(|v| v.1).collect(),
         uvs: verts.iter().map(|v| v.2).collect(),
+        uv2: Vec::new(),
         submeshes: vec![idx],
         skin: None,
         blend_shapes: vec![],

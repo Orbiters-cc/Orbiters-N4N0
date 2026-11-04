@@ -19,7 +19,7 @@ project, not only the one saved last. Orbiters - N4N0 now builds a scene's previ
   Unity's built-in meshes and mesh `.asset` files saved as text, materials (`.mat`) by shader family with Toolkit's
   rules (lilToon, Poiyomi, MToon, Unity Toon Shader, Standard), their main and emission textures (PNG, JPEG, TGA, BMP,
   TIFF, GIF, PSD and PSB's merged picture) shrunk to Toolkit's budget, VRChat avatar and world descriptors, the
-  scene's directional lights and gradient or flat ambient light. GUIDs come from Unity's own database
+  scene's directional lights and gradient or flat ambient light; for worlds, see "Worlds" below. GUIDs come from Unity's own database
   (`Library/SourceAssetDB`, read as LMDB without LMDB) when the project was opened once, else from the `.meta` files
   (read on 8 threads, the kinds a preview needs first, kept in the cache by modification time): on Enzo's hard disk a
   cold `.meta` costs about 12 ms, 87 s for a 7,000-asset project, against 0.3 s for the database.
@@ -63,6 +63,81 @@ project, not only the one saved last. Orbiters - N4N0 now builds a scene's previ
   a project without one, "No preview: <why>" (the full reason and what Toolkit would do on hover), beside "Add Toolkit
   for 3D" or "Update Toolkit for 3D" when the project's Toolkit can be added or updated.
 
+## Worlds (4 November 2026)
+
+Enzo opened his Avatorbit world and saw six tiny avatars and two campfires in a dark void, 81k triangles of a scene that
+is a desert, a sea and a large building. Reading that scene to find out why, reason by reason (`Report::dropped`, the
+`scene_preview` example prints it):
+
+| What Avatorbit's `VRCDefaultWorldScene` lost | Renderers | Cause | Now |
+| --- | ---: | --- | --- |
+| **Its sand, water, rocks, palm trees, the building: all of `avatorbit.blend`, and `branch pen.blend`** | 307 in all | The whole world is one Blender file, which only Unity's import can read (it runs Blender) | Read from what that import left in `Library` |
+| Its sun | 1 light | A light *inside* the `.blend`, which is also `RenderSettings.m_Sun`; the "Directional Light" object is off | Lights of imported models are read |
+| Its baked light | 188 lit by 7 lightmaps | Not in the format | Lightmaps, from Bakery's storage or `LightingData` |
+| Its sky and fog | | Not in the format | Sky picture, fog |
+| Renderers off, inactive, `EditorOnly`, without a mesh | 58 of 478 | As Unity draws them | Still not drawn, as in Unity |
+
+There is no Terrain in that scene at all: the sand that looks like one is a mesh in the `.blend`. Terrains are read now
+too (below), and were tested on the project's real `SandTerrain.asset` (BruteForce's demo scene).
+
+- **What Unity's import left in `Library`** (`scene::artifact`). A project opened once keeps each imported asset as a
+  binary file of its own (`Library/Artifacts/<first two digits>/<hash>`): the GameObjects, transforms, renderers,
+  meshes, materials and lights the import made, under the very IDs prefabs and scenes refer to them by. Which file comes
+  from `Library/ArtifactDB`, an LMDB file of hundreds of megabytes read a page at a time without LMDB (`CurrentRevisions`
+  once, a few pages per asset after), and its objects are read one by one, so a 130 MB artifact
+  costs what the preview takes of it. Any model is read this way when its artifact is at least as new as the file and
+  its `.meta` (it is exact, and holds a generated second UV set a lightmap needs); an FBX or OBJ whose artifact is older
+  or unreadable (one over 600 MB) is read from its file by ufbx as before. A `.blend` (or `.max`, `.ma`, `.mb`, `.c4d`,
+  `.lxo`, `.3ds`, `.dae`, `.dxf`, `.skp`) without one cannot be read: the build says "open the project in Unity once".
+  Unity may have the project open: everything is only read, and a database that does not add up is no database.
+- **Lightmaps** (`scene::world`). Bakery's `ftLightmapsStorage` when the scene has one (it sets the lightmaps when the
+  scene loads, so its word counts for the renderers it lists), else each renderer's `m_LightmapIndex` and
+  `m_LightmapTilingOffset` with the scene's `LightingData` asset. Each HDR picture (EXR, Radiance HDR, or sRGB) is averaged
+  down to 2048 pixels on a side, 1024 above four of them, at most 16, its empty atlas pixels left out of the average and
+  filled from their neighbours so that an island's edge does not darken, then stored as a JPEG whose colours read as
+  sRGB are the light over a scale (the 99.9th percentile: a hot pixel does not crush the rest). The second UV set is
+  a stream of its own, `unorm16` pairs, only on meshes something samples a lightmap with, the first UV set standing in
+  when a mesh has none, as in Unity. In the viewer a lit draw's indirect light is its lightmap in place of the ambient
+  light, for the scene's light only: the studio's stays the studio's. A baked light (`m_Lightmapping` 2) adds nothing
+  more to what samples a lightmap, and still lights what does not. Realtime lights add to it, as Avatorbit's sun does.
+- **The sky** (`scene::world::sky`). `RenderSettings.m_SkyboxMaterial`: a latitude-longitude picture (Panoramic, a
+  Cubemap imported from one, a shader of its own whose main picture is a whole sphere) at 2048×1024 with its tint,
+  exposure and turn; six pictures made into one (6 Sided); Procedural as three colours from its tint and ground colour;
+  Unity's default sky as three colours; any other shader the default's colours under its own `_Color`. A sky picture
+  also gives the scene's ambient light when that comes from the sky (`m_AmbientMode` 0), which otherwise only Unity
+  computes. Drawn behind worlds and scenes in both lights, never behind avatars.
+- **Fog.** Unity's three modes, in the scene's light. It starts counting where the framed part of the scene starts: a
+  depth cue, never a curtain (Avatorbit's ends at 390 m, and a view of its 120 m town from 400 m away would be all fog).
+- **Terrains** (`scene::terrain`). `TerrainData`, binary or text: the heightmap thinned to at most 512 samples on a side
+  (half a million triangles), its normals from its slopes; the terrain layers' pictures blended by the splat maps on the
+  CPU into one picture of at most 2048 pixels (softer than Unity's up close); trees as their prefab's most detailed LOD
+  at each place, at most 4,000 (more are thinned evenly and counted in `stats.skipped.trees`). Grass and other details
+  are not drawn and are counted (`stats.skipped.details`). A terrain samples its lightmap by its own 0-to-1 UVs.
+- **LOD groups** draw their most detailed level only, in every scene: the others stand in for it from far away, and
+  would draw over it.
+- **Meshes saved in the scene or a prefab** (ProBuilder and tools' meshes) are read, in text or binary.
+- **Pictures.** A world has dozens, most on small props: those that cover the most of it (from their renderers' bounds)
+  keep their detail: the eight largest 1024 pixels, the next twenty-four 512, the rest 256. Normal maps are read for
+  what is not an avatar, at most 512 pixels. A water shader (by its name; Mochie's in Avatorbit) draws no picture: a
+  see-through surface of its emission's tint, its ripples as a normal map, smooth enough for the sun to glint on.
+- **Framing.** `focus` is what a preview frames: for a world, all but the outer 3 % on each axis of up to 32 points of
+  each drawn object, so a sky dome, a floor reaching for miles or one thing far off do not make the rest tiny (Avatorbit:
+  everything 1,000 m across, its town 120 m). A scene that was last open opens from the Scene view's camera in
+  `UserSettings/Layouts/*.dwlt` (Unity saves it with the window layout, its pivot, rotation and size), when that lies in
+  the scene, drawn back along its line of sight to at least 0.38 of the framed radius when it was left close up on one
+  wall. Else over a corner of the framed part.
+- **Shadows.** A world's shadow map has 4096² texels (2048² for avatars) and a bias of a tenth of a metre whatever its size;
+  no shadow pass is drawn when the key light casts none.
+
+The tail of Ultirex 4.1, in the same work (Enzo: "I haven't touched those files in months"): `orbit-tail-2.fbx` was not
+replaced after its import. Its dates are April 2024, and against the artifact Unity made of it in five projects all 52,656
+vertices are in the same order at the same place and all 185 bind poses agree to 5e-6. The 7 blend shape weights the
+prefab holds are stale values Unity ignores on a mesh without shapes. The fault was the reader's: 1,743 of the mesh's
+vertices have no skin weights in the file, Unity binds such a vertex wholly to its first bone (the artifact's weights say so:
+`(0, 1.0)`), and the reader left it in the mesh's own space, where a skewed bind pose puts vertices tens of metres out.
+The reader now binds them to the bone nearest the root. The workaround (a part posed over 4 m out left out, `skipped.pose`)
+is gone: the tail draws, 5 of 25 renderers in Golden ulti against 4, in both reading paths.
+
 ## How it looks and behaves
 
 - **In the card.** As soon as the project is selected its preview loads (usually in tens of milliseconds). The avatar
@@ -99,6 +174,8 @@ project, not only the one saved last. Orbiters - N4N0 now builds a scene's previ
   previews of sunless scenes 0.4.15 wrote: studio). Previews N4N0 builds itself go by the same rule: they record the
   scene's directional lights and a gradient or flat ambient light, never a skybox's (only Unity computes it: `null`),
   and none at all when the scene has neither (the studio light).
+- **A baked world's light is its lightmaps**: a preview with `lightmaps` always offers Scene light, whatever its lights and
+  ambient light add up to (`preview_gpu::scene_light_shows_header`).
 - **The studio light** is the desktop's own, the same for every project and as bright as Unity's default scene (2
   November 2026, after Enzo found his avatar glossy and redder than in Unity): Unity's default directional light (colour
   1, 0.956, 0.839, intensity 1) as the key from the front left of the avatar, about 50° up as in a new scene, with a
@@ -184,6 +261,26 @@ the worker. MCB Test's `Canine.unity` built from the files against Toolkit's exa
 vertex (MCB's binary body 89,166 vertices, 99,642 triangles), the same looks per material and the same bounds to the
 millimetre; it is a little brighter, the sky's ambient light being unknown outside Unity (the default sky's stands in).
 
+Worlds, built from the files (4 November 2026; `scene_preview` example, release build, H: hard disk, last-open scenes,
+in the project's files only before and with its import's artifacts after):
+
+| Project, scene | | Renderers drawn | Triangles | Materials | Pictures | Build | File |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Avatorbit, `VRCDefaultWorldScene` | before | 113 of 171 | 81,167 | 22 | 7 | 1.2 s | 2.8 MB |
+| | after | 420 of 478 | 521,457 | 89 | 39, 7 lightmaps and the sky among them | 3.3-5.9 s | 21.9 MB |
+| Avatorbit Quest | after | 486 of 568 | 554,307 | 109 | 43 | 4.7-7.4 s | 24.2 MB |
+| Orbital Oween Quest LTCGI | after | 486 of 570 | 554,307 | 110 | 43 | 4.3-7.8 s | 24.2 MB |
+| WinMaze | after (2 triangles before) | 6 of 8 | 2,726 | 6 | 2 | 0.5-6.3 s | 0.2 MB |
+| Avatorbit, BruteForce's `02_SandTerrain` | after: a terrain | 1 of 1 | 131,072 | 1 | 2 | 0.6 s | 3.5 MB |
+
+Viewer: Avatorbit's preview loads in 350-1,280 ms over eight runs (read 10-16 ms, pictures 320-850 ms on all cores, upload
+15-460 ms, the first of a process compiling its pipelines beside it), debug build. Avatars read from their artifacts come out
+with the same triangles as from their files (Golden ulti 223,677, MCB 119,708, Ultirex V5 229,203) or within a few of them
+(XZavier 180,242 against 180,338, Rexouium 199,678 against 199,684, UltiPaw 252,832 against 252,836); the tail of Ultirex 4.1
+adds its part in both. The files in the system's cache, an import
+reads faster than its FBX (Kohryu 0.8 s against 2.5, SupaKenji 1.1 against 2.1, XZavier 1.4 against 3.1); the first read of
+an avatar's project off the hard disk took 0.4-27 s, within the 120 s a build has.
+
 ## Code
 
 | Where | What |
@@ -191,7 +288,7 @@ millimetre; it is a little brighter, the sky's ambient light being unknown outsi
 | `orbiters_projects::preview` | the format: header types, `read`/`parse` (every blob checked to lie in the file and fit its use), `list` (headers only, newest first), `Writer`, octahedral normals and half floats; tests |
 | `pages/projects/preview_gpu.rs` | loading (parallel decode and mipmaps, pipelines on another thread) and drawing: WGSL, shadow pass, mirrored pass, ground, background, MSAA resolved into a texture egui samples (`register_native_texture`), drawn again only when the view changes |
 | `pages/projects/preview.rs` | listing (scenes and their previews) and loading jobs, the camera (orbit, goal, inertia, swing-in, reset), the card's cover and its notes, the window and its scene chips, the stand-in scene and the real-project fixtures for screenshots |
-| `orbiters_projects::scene` | previews built from a project's files: `scenes`, `list`, `build_scene`, the cache and its freshness (`mod.rs`); `yaml`, `assets` (GUIDs, Unity's LMDB database), `prefab`, `model` (ufbx), `material`, `texture` (PSD/PSB too), `mesh_asset`, `primitives`, `build` (posing, budget, writing); `examples/scene_preview.rs` builds real projects' scenes and prints the table below |
+| `orbiters_projects::scene` | previews built from a project's files: `scenes`, `list`, `build_scene`, the cache and its freshness (`mod.rs`); `yaml`, `assets` (GUIDs, Unity's LMDB database), `prefab`, `model` (ufbx), `artifact` (Unity's imports in `Library`), `terrain`, `world` (lightmaps, sky, fog, framing, the Scene view's camera), `material`, `texture` (PSD/PSB too, HDR pictures), `mesh_asset`, `primitives`, `build` (posing, budget, writing); `examples/scene_preview.rs` builds real projects' scenes and prints the table below (`--scene <part of its path>`, `--no-artifacts`; `--dump <file> [class]`, `--artifact <project> <guid>`, `--compare <project> <model>` show what a binary file or an import holds, and a model against its import) |
 | `pages/projects/builds.rs` | the background worker: builds first, then the cards' stills (drawn with `preview_gpu::Scene::still`, read back, kept as `cover.jpg`) |
 | Toolkit `Editor/Preview/ProjectPreview.cs`, `PreviewFile.cs` | the capture and the writer; `ProjectPreview.CaptureNow`, `LastResult` for diagnostics |
 | Toolkit `Editor/Preview/PreviewLook.cs` | each material's look by its shader family: shading, metallic, smoothness, normal, surface and emission pictures |
@@ -229,19 +326,23 @@ light, the switch on Studio light with its Scene light half dimmed.
 
 ## Not done or untested
 
-- A real world project's capture (only the synthetic world was timed and drawn); terrains and lightmaps are not in the
-  format. Of a scene's lights only directional ones are used (two of them, the main one's shadow), not point and spot
-  lights, light probes, a skybox's picture in reflections (its ambient light's three colours stand in), fog or
-  post-processing; nor occlusion and detail maps, toon ramps' pictures, matcaps, rim lights and outlines of toon
-  shaders, specular-setup colours, or metallic and smoothness from two different textures (the smoothness one is kept).
+- Toolkit's capture of a real world (only the synthetic world was timed and drawn), and Toolkit writing lightmaps, sky or
+  terrains: previews it writes have none of them, so Toolkit's preview of a world is plainer than one built from the
+  files. Of a scene's lights only directional ones are used (two of them, the main one's shadow), not point and spot
+  lights, light probes (what does not sample a lightmap gets the ambient light), reflection probes, a skybox's picture
+  in reflections (its ambient light's three colours stand in), or post-processing; nor occlusion and detail maps, toon
+  ramps' pictures, matcaps, rim lights and outlines of toon shaders, specular-setup colours, or metallic and smoothness
+  from two different textures (the smoothness one is kept). Terrains' grass and details, holes, and their per-pixel
+  blending up close.
 - The first capture after a domain reload makes one step of about 27 ms (JIT and first use); later ones stay under
   about 6 ms.
 - Non-readable meshes (FBX without Read/Write) were checked readable in Edit Mode without errors (FashionSuit's), and
   a non-readable skinned body bakes; a project in Play Mode or compiling waits.
 - The preview needs a Toolkit release with `ProjectPreview` and a desktop release; until then projects show the note.
-- Built from the files: meshes saved in Unity's binary serialization (MCB's generated body, 160 MB) and `.blend`
-  models are left out (counted, the reason in the cache's record); shaders' looks are Toolkit's rules on the saved
-  properties, not the shaders themselves (a missing shader draws its texture rather than Unity's magenta); animators,
-  constraints and what VRCFury or Modular Avatar do at upload are not applied (the scene as saved); a skinned mesh's
-  bones are the renderer's; normal, metallic-smoothness and occlusion maps are not read; the Scene view's camera is
-  not known (worlds open over a corner of their bounds).
+- Built from the files: `.blend` models of a project never opened in Unity are left out (counted, the reason in the
+  cache's record, "open the project in Unity once"): a reader of Blender's own format would still miss its modifiers.
+  A compressed mesh in an artifact (`meshCompression` above 0) falls back on the FBX, and is left out for a `.blend`.
+  Shaders' looks are Toolkit's rules on the saved properties, not the shaders themselves (a missing shader draws its
+  texture rather than Unity's magenta); animators, constraints and what VRCFury or Modular Avatar do at upload are not
+  applied (the scene as saved); a skinned mesh's bones are the renderer's; metallic-smoothness and occlusion maps are not
+  read, normal maps only for worlds.

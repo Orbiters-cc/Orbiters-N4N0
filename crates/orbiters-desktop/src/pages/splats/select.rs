@@ -22,6 +22,7 @@ use super::*;
 use egui::{PointerButton, Pos2};
 use orbiters_reconstruct::edit::{self, DELETED, Edit, Found, HIDDEN, History, Identity, SELECTED};
 use orbiters_reconstruct::select::{self as pick, Splats};
+use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::widgets::Size;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -539,6 +540,9 @@ enum Drag {
     },
 }
 
+/// How long the ring of a pick lasts, seconds.
+const PULSE_S: f64 = 0.55;
+
 /// The brush's radius, points.
 const BRUSH: std::ops::RangeInclusive<f32> = 4.0..=120.0;
 
@@ -555,11 +559,139 @@ pub(super) struct State {
     drag: Option<Drag>,
     /// A word under the tools (nothing under the cursor), and when it was said.
     notice: Option<(String, f64)>,
+    /// Where a pick landed and when: a ring leaves that point. One splat of hundreds of thousands, tinted, shows nothing;
+    /// this says the click did something, there.
+    pulse: Option<(Pos2, f64)>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { on: false, tool: Tool::Pick, brush: 24.0, splats: None, loading: None, error: None, view: None, drag: None, notice: None }
+        Self { on: false, tool: Tool::Pick, brush: 24.0, splats: None, loading: None, error: None, view: None, drag: None, notice: None, pulse: None }
+    }
+}
+
+/// What Select splats' whole-capture chip can do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Whole {
+    Invert,
+    SelectAll,
+    ShowAll,
+    RestoreAll,
+}
+
+/// What the selection's bar can do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum On {
+    Hide,
+    Delete,
+    Grow,
+    Shrink,
+    Clear,
+}
+
+/// What Select splats is for, in one line, while nothing is selected.
+pub(super) const PURPOSE: &str = "For cleaning up: select floaters or stray splats, then hide or delete them from what is shown, shared and exported.";
+
+/// [`PURPOSE`] in a chip over the middle of the view, its bottom at `bottom`.
+fn purpose_line(p: &egui::Painter, ui: &Ui, rect: Rect, bottom: f32) {
+    let t = Txt::new(PURPOSE, 12.5).color(theme::FG);
+    let room = rect.width() - 32.0 - 56.0;
+    let tw = widgets::text_size(ui, &t).x.min(room);
+    let r = Rect::from_center_size(pos2(rect.center().x, bottom - 20.0), vec2(tw + 56.0, 40.0));
+    p.rect_filled(r, theme::radius(20.0), theme::black(0.72));
+    widgets::icon(p, pos2(r.left() + 24.0, r.center().y), icons::SPARKLE, 15.0, theme::ACCENT);
+    widgets::text_truncated(p, pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, &t, tw);
+}
+
+/// The selection with what can be done to it, over the view's middle with its bottom at `bottom`, `k` of the way in.
+/// Hide and Delete, the reason to select anything, are the large ones; on a filled panel, unlike the view's chips.
+fn selection_bar(ui: &mut Ui, rect: Rect, bottom: f32, k: f32, selected: usize, ready: bool) -> Option<On> {
+    let count = Txt::new(if selected == 1 { "1 splat selected".to_string() } else { format!("{} splats selected", format::integer(selected as f64)) }, 13.5).weight(weight::SEMIBOLD);
+    let count_w = widgets::text_size(ui, &count).x;
+    let hide = Button::new("Hide").icon(icons::EYE_SLASH).variant(Variant::Secondary).hint("Hides the selection: not drawn, not shared; Show all brings it back (H)").id_salt("splat-select-hide");
+    let delete = Button::new("Delete")
+        .icon(icons::TRASH)
+        .variant(Variant::Danger)
+        .hint("Deletes the selection from everything shared or exported; undo brings it back (Delete)")
+        .id_salt("splat-select-delete");
+    let grow = Button::new("Grow").icon(icons::ARROWS_OUT).variant(Variant::Ghost).size(Size::Sm).enabled(ready).hint("Adds the splats right beside the selection").id_salt("splat-select-grow");
+    let shrink = Button::new("Shrink").icon(icons::CORNERS_IN).variant(Variant::Ghost).size(Size::Sm).enabled(ready).hint("Takes the selection's edge away").id_salt("splat-select-shrink");
+    let (hw, dw, gw, sw) = (hide.desired_width(ui), delete.desired_width(ui), grow.desired_width(ui), shrink.desired_width(ui));
+    // The dot, the count, the large ones, then the small ones and the ×.
+    let lead = 20.0 + 16.0 + count_w;
+    let w = lead + 16.0 + hw + 8.0 + dw + 12.0 + gw + 4.0 + sw + 4.0 + 32.0 + 12.0;
+    let r = Rect::from_center_size(pos2(rect.center().x, bottom - 28.0), vec2(w.min(rect.width() - 32.0), 56.0));
+    let mut bu = ui.new_child(UiBuilder::new().max_rect(r).id_salt("splat-select-bar"));
+    bu.multiply_opacity(k);
+    let bp = bu.painter().clone();
+    // Takes the clicks that land between its buttons: a press on the bar is not a pick behind it.
+    let _ = bu.interact(r, Id::unique("splat-select-bar-back"), Sense::click_and_drag());
+    widgets::panel(&bp, r, 28.0);
+    bp.circle_filled(pos2(r.left() + 25.0, r.center().y), 5.0, SELECTION);
+    widgets::text(&bp, pos2(r.left() + 20.0 + 16.0, r.center().y), Align2::LEFT_CENTER, &count);
+    let mut x = r.left() + lead + 16.0;
+    let mut acted = None;
+    let large = |x: f32, w: f32| Rect::from_min_size(pos2(x, r.center().y - 20.0), vec2(w, 40.0));
+    let small = |x: f32, w: f32| Rect::from_min_size(pos2(x, r.center().y - 16.0), vec2(w, 32.0));
+    if hide.show_at(&mut bu, large(x, hw)).clicked() {
+        acted = Some(On::Hide);
+    }
+    x += hw + 8.0;
+    if delete.show_at(&mut bu, large(x, dw)).clicked() {
+        acted = Some(On::Delete);
+    }
+    x += dw + 12.0;
+    if grow.show_at(&mut bu, small(x, gw)).clicked() && ready {
+        acted = Some(On::Grow);
+    }
+    x += gw + 4.0;
+    if shrink.show_at(&mut bu, small(x, sw)).clicked() && ready {
+        acted = Some(On::Shrink);
+    }
+    x += sw + 4.0;
+    if IconButton::new(icons::X, "Clear").size(32.0, 15.0).id_salt("splat-select-clear").show_at(&mut bu, small(x, 32.0)).clicked() {
+        acted = Some(On::Clear);
+    }
+    acted
+}
+
+/// How Select splats' bottom row fits a view `view_w` wide: the tools (`tools_w` without the brush's size) from the left,
+/// what works on the whole capture (`whole_w`) from the right. At 1030 points the brush's full 284 point slider ran under
+/// Grow and hid its own value; it narrows first, and only when even a short one does not fit does the chip at the right
+/// move up a row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Bottom {
+    /// The brush's slider (0 for the other tools).
+    slider: f32,
+    /// The chip at the right sits above the tools instead of beside them.
+    stacked: bool,
+}
+
+/// The brush's slider at its full width, and the narrowest that still reads.
+const SLIDER_MAX: f32 = 284.0;
+const SLIDER_MIN: f32 = 120.0;
+
+impl Bottom {
+    fn of(view_w: f32, tools_w: f32, whole_w: f32, brush: bool) -> Self {
+        let beside = view_w - 2.0 * 16.0 - tools_w - 10.0 - whole_w;
+        if !brush {
+            return Self { slider: 0.0, stacked: beside < 0.0 };
+        }
+        let room = beside - 16.0;
+        if room >= SLIDER_MIN {
+            Self { slider: room.min(SLIDER_MAX), stacked: false }
+        } else {
+            Self { slider: (view_w - 2.0 * 16.0 - tools_w - 16.0).clamp(SLIDER_MIN, SLIDER_MAX), stacked: true }
+        }
+    }
+
+    /// What the slider adds to the tools' chip.
+    fn slider_room(self) -> f32 {
+        if self.slider > 0.0 {
+            self.slider + 16.0
+        } else {
+            0.0
+        }
     }
 }
 
@@ -709,6 +841,7 @@ impl Viewer {
                             }
                         } else {
                             edits.select(&ids, mode);
+                            s.pulse = Some((at, now));
                         }
                     }
                 }
@@ -835,6 +968,17 @@ impl Viewer {
         if s.drag.is_some() {
             ctx.request_repaint();
         }
+        if let Some((at, when)) = s.pulse {
+            let k = ((now - when) / PULSE_S) as f32;
+            if k < 1.0 {
+                let e = anim::ease::out_cubic(k.max(0.0));
+                p.circle_stroke(at, 5.0 + 26.0 * e, egui::Stroke::new(2.5 * (1.0 - e), theme::alpha(SELECTION, 1.0 - e)));
+                p.circle_filled(at, 4.0 * (1.0 - e), SELECTION);
+                ctx.request_repaint();
+            } else {
+                s.pulse = None;
+            }
+        }
         if s.notice.as_ref().is_some_and(|(_, at)| now - at > 2.5) {
             s.notice = None;
         }
@@ -900,9 +1044,9 @@ impl Viewer {
         }
     }
 
-    /// The top bar while Select splats is open, after the title: Done, undo and redo, and what is selected, hidden and
-    /// deleted, and whether it is saved.
-    pub(super) fn select_bar(&mut self, ui: &mut Ui, p: &egui::Painter, title_r: Rect) {
+    /// The top bar while Select splats is open, after the title: Done, undo and redo, and what is hidden and deleted (what
+    /// is selected has its bar) and whether it is saved, up to `right`, where the view's own controls start.
+    pub(super) fn select_bar(&mut self, ui: &mut Ui, p: &egui::Painter, title_r: Rect, right: f32) {
         let ctx = ui.ctx().clone();
         let done = Button::new("Done").icon(icons::CHECK).variant(Variant::Primary).hint("Leaves Select splats (Esc)").id_salt("splat-select-done");
         let dw = done.desired_width(ui);
@@ -934,13 +1078,8 @@ impl Viewer {
             }
             x += 44.0;
         }
-        // What is selected, hidden and deleted; saved or not.
-        let counts = format!(
-            "{} selected · {} hidden · {} deleted",
-            format::integer(e.selected() as f64),
-            format::integer(e.hidden() as f64),
-            format::integer(e.deleted() as f64)
-        );
+        // What is hidden and deleted; saved or not.
+        let counts = format!("{} hidden · {} deleted", format::integer(e.hidden() as f64), format::integer(e.deleted() as f64));
         let (state, tone) = match (&e.save_error, e.drawing.is_some()) {
             (Some(_), _) => ("Not saved", theme::DANGER),
             (None, true) => ("Saved · drawing its picture again…", theme::FG_3),
@@ -948,12 +1087,15 @@ impl Viewer {
         };
         let t1 = Txt::new(counts, 12.5).color(theme::FG);
         let t2 = Txt::new(state, 11.0).color(tone);
-        let tw = widgets::text_size(ui, &t1).x.max(widgets::text_size(ui, &t2).x);
         let retry = e.save_error.is_some();
-        let status_r = Rect::from_min_size(pos2(chip_r.right() + 10.0, title_r.top()), vec2(tw + 40.0 + if retry { 84.0 } else { 0.0 }, 44.0));
+        let extra = 40.0 + if retry { 84.0 } else { 0.0 };
+        // Short of the view's controls whatever the title and the counts are (a long world name, a narrow window).
+        let room = right - 10.0 - (chip_r.right() + 10.0) - extra;
+        let tw = widgets::text_size(ui, &t1).x.max(widgets::text_size(ui, &t2).x).min(room.max(0.0));
+        let status_r = Rect::from_min_size(pos2(chip_r.right() + 10.0, title_r.top()), vec2(tw + extra, 44.0));
         p.rect_filled(status_r, theme::radius(22.0), theme::black(0.55));
-        widgets::text(p, pos2(status_r.left() + 20.0, status_r.center().y - 7.0), Align2::LEFT_CENTER, &t1);
-        widgets::text(p, pos2(status_r.left() + 20.0, status_r.center().y + 9.0), Align2::LEFT_CENTER, &t2);
+        widgets::text_truncated(p, pos2(status_r.left() + 20.0, status_r.center().y - 7.0), Align2::LEFT_CENTER, &t1, tw);
+        widgets::text_truncated(p, pos2(status_r.left() + 20.0, status_r.center().y + 9.0), Align2::LEFT_CENTER, &t2, tw);
         if retry {
             let r = Rect::from_min_size(pos2(status_r.right() - 84.0, status_r.center().y - 16.0), vec2(76.0, 32.0));
             if Button::new("Retry")
@@ -969,12 +1111,37 @@ impl Viewer {
         }
     }
 
-    /// The tools at the bottom left (above them its hint and anything to say) and the actions at the bottom right,
-    /// in the view's chips.
+    /// Select splats' controls over the view's bottom ([`Bottom`]): the tools at the left with its hint above them; what
+    /// works on the whole capture at the right; and, in the middle above them, the moment's own line. While nothing is
+    /// selected it says what all this is for; once something is, it is the selection with what can be done to it, Hide and
+    /// Delete first.
+    ///
+    /// Why they are not all one row in the corner, as they were: at Enzo's window (1030 x 800) every action was drawn and
+    /// took clicks, and he still asked what selecting is for. A click (Pick) selects one splat of hundreds of thousands,
+    /// which changes nothing to see; Hide and Delete, in the bottom right corner where the view keeps its display pills,
+    /// went from dim to a little less dim. So the place, the look and the moment all said "not for you".
     pub(super) fn select_controls(&mut self, ui: &mut Ui, p: &egui::Painter, rect: Rect) {
         let ctx = ui.ctx().clone();
         let chip = |r: Rect| p.rect_filled(r, theme::radius(r.height() * 0.5), theme::black(0.55));
-        // The tools: a segmented control, and the brush's size.
+        let ready = self.select.splats.is_some();
+        let Some((selected, hidden, deleted)) = self.loaded.as_ref().and_then(|l| l.edits.as_ref()).map(|e| (e.selected(), e.hidden(), e.deleted())) else { return };
+
+        // What works on the whole capture, at the right: its width says how much room the tools have.
+        type Act = (&'static str, &'static str, &'static str, bool, Whole);
+        let whole: [Act; 4] = [
+            (icons::CIRCLE_HALF, "Invert", "Selects everything else (Ctrl+I)", true, Whole::Invert),
+            (icons::SQUARES_FOUR, "Select all", "Selects every splat drawn (Ctrl+A)", true, Whole::SelectAll),
+            (icons::EYE, "Show all", "Shows every hidden splat again (Alt+H)", hidden > 0, Whole::ShowAll),
+            (icons::ARROW_COUNTER_CLOCKWISE, "Restore all", "Brings back every hidden and deleted splat: the capture as reconstructed", hidden + deleted > 0, Whole::RestoreAll),
+        ];
+        let buttons: Vec<Button> = whole
+            .iter()
+            .map(|&(glyph, label, hint, enabled, _)| Button::new(label).icon(glyph).variant(Variant::Ghost).size(Size::Sm).enabled(enabled).hint(hint).id_salt(("splat-select-whole", label)))
+            .collect();
+        let widths: Vec<f32> = buttons.iter().map(|b| b.desired_width(ui)).collect();
+        let whole_w = widths.iter().sum::<f32>() + 6.0 * (widths.len() as f32 - 1.0) + 12.0;
+
+        // The tools: a segmented control, and the brush's size in the room left beside what works on the whole capture.
         let label = Txt::new("Select", 12.0).color(theme::FG_3);
         let label_w = widgets::text_size(ui, &label).x;
         let options = [
@@ -984,8 +1151,9 @@ impl Viewer {
             SegOption::new(Tool::Sphere, "Sphere").hint("Press on a surface, drag out a sphere (4)"),
         ];
         let seg_w = options.iter().map(|o| widgets::text_size(ui, &Txt::new(o.label, 12.0).weight(weight::MEDIUM)).x + 24.0).sum::<f32>() + 8.0;
-        let slider_w = if self.select.tool == Tool::Brush { 284.0 + 16.0 } else { 0.0 };
-        let tools_r = Rect::from_min_size(pos2(rect.left() + 16.0, rect.bottom() - 16.0 - 44.0), vec2(18.0 + label_w + 12.0 + seg_w + slider_w + 6.0, 44.0));
+        let tools_w = 18.0 + label_w + 12.0 + seg_w + 6.0;
+        let bottom = Bottom::of(rect.width(), tools_w, whole_w, self.select.tool == Tool::Brush);
+        let tools_r = Rect::from_min_size(pos2(rect.left() + 16.0, rect.bottom() - 16.0 - 44.0), vec2(tools_w + bottom.slider_room(), 44.0));
         chip(tools_r);
         widgets::text(p, pos2(tools_r.left() + 18.0, tools_r.center().y), Align2::LEFT_CENTER, &label);
         let seg_r = Rect::from_min_size(pos2(tools_r.left() + 18.0 + label_w + 12.0, tools_r.center().y - 18.0), vec2(seg_w, 36.0));
@@ -996,114 +1164,95 @@ impl Viewer {
             self.stop_drag();
         }
         if self.select.tool == Tool::Brush {
-            let slider_r = Rect::from_min_size(pos2(seg_r.right() + 16.0, tools_r.center().y - 14.0), vec2(284.0, 28.0));
+            let slider_r = Rect::from_min_size(pos2(seg_r.right() + 16.0, tools_r.center().y - 14.0), vec2(bottom.slider, 28.0));
             let mut su = ui.new_child(UiBuilder::new().max_rect(slider_r).id_salt("splat-select-brush"));
             widgets::slider(&mut su, "splat-select-brush", &mut self.select.brush, BRUSH, 1.0, |v| format!("{v:.0} px"));
         }
-        // Above it: the hint, or what there is to say (the geometry still being read, why not, nothing there).
-        let (text, color) = match (&self.select.error, self.select.splats.is_some(), &self.select.notice) {
+
+        // What works on the whole capture, in a chip at the right: on the tools' row, or above it where they do not fit.
+        let whole_bottom = if bottom.stacked { tools_r.top() - 10.0 } else { rect.bottom() - 16.0 };
+        let whole_r = Rect::from_min_size(pos2(rect.right() - 16.0 - whole_w, whole_bottom - 44.0), vec2(whole_w, 44.0));
+        chip(whole_r);
+        let mut clicked = None;
+        let mut x = whole_r.left() + 6.0;
+        for ((b, bw), act) in buttons.into_iter().zip(widths).zip(whole.iter()) {
+            if b.show_at(ui, Rect::from_min_size(pos2(x, whole_r.center().y - 16.0), vec2(bw, 32.0))).clicked() && act.3 {
+                clicked = Some(act.4);
+            }
+            x += bw + 6.0;
+        }
+
+        // Above the tools: the hint, or what there is to say (the geometry still being read, why not, nothing there).
+        let (text, color) = match (&self.select.error, ready, &self.select.notice) {
             (Some(e), _, _) => (format!("The splats cannot be selected: {e}"), theme::DANGER),
             (None, false, _) => ("Getting the splats ready to select…".to_string(), theme::FG_2),
             (None, true, Some((n, _))) => (n.clone(), theme::WARN),
             (None, true, None) => (self.select.tool.hint().to_string(), theme::FG_2),
         };
         let hint = Txt::new(text, 11.5).color(color);
-        let hs = widgets::text_size(ui, &hint);
-        let hint_r = Rect::from_min_size(pos2(rect.left() + 16.0, tools_r.top() - 10.0 - 30.0), vec2(hs.x + 28.0, 30.0));
+        // Not under the chip at the right when that came up to this row.
+        let hint_max = if bottom.stacked { whole_r.left() - 10.0 - rect.left() - 16.0 } else { rect.width() - 32.0 };
+        let hint_w = (widgets::text_size(ui, &hint).x + 28.0).min(hint_max);
+        let hint_r = Rect::from_min_size(pos2(rect.left() + 16.0, tools_r.top() - 10.0 - 30.0), vec2(hint_w, 30.0));
         chip(hint_r);
-        widgets::text(p, hint_r.center(), Align2::CENTER_CENTER, &hint);
+        widgets::text_truncated(p, hint_r.center(), Align2::CENTER_CENTER, &hint, hint_w - 28.0);
         if self.select.loading.is_some() {
             orbiters_ui::feedback::spinner(p, pos2(hint_r.right() + 18.0, hint_r.center().y), 8.0, 2.0, theme::ACCENT);
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
 
-        // The actions, right to left from the bottom right: on the selection, then on everything.
-        let Some(e) = self.loaded.as_mut().and_then(|l| l.edits.as_mut()) else { return };
-        let ready = self.select.splats.is_some();
-        let some = e.selected() > 0;
-        type Act = (&'static str, &'static str, &'static str, bool, u8);
-        let rows: [&[Act]; 2] = [
-            &[
-                (icons::ARROWS_OUT, "Grow", "Adds the splats right beside the selection", some && ready, 0),
-                (icons::CORNERS_IN, "Shrink", "Takes the selection's edge away", some && ready, 1),
-                (icons::CIRCLE_HALF, "Invert", "Selects everything else (Ctrl+I)", true, 2),
-                (icons::EYE_SLASH, "Hide", "Hides the selection: not drawn, not shared; Show all brings it back (H)", some, 3),
-                (icons::TRASH, "Delete", "Deletes the selection from everything shared or exported; undo brings it back (Delete)", some, 4),
-            ],
-            &[
-                (icons::SQUARES_FOUR, "Select all", "Selects every splat drawn (Ctrl+A)", true, 5),
-                (icons::EYE, "Show all", "Shows every hidden splat again (Alt+H)", e.hidden() > 0, 6),
-                (
-                    icons::ARROW_COUNTER_CLOCKWISE,
-                    "Restore all",
-                    "Brings back every hidden and deleted splat: the capture as reconstructed",
-                    e.hidden() + e.deleted() > 0,
-                    7,
-                ),
-            ],
-        ];
-        let mut bottom = rect.bottom() - 16.0;
-        let mut clicked = None;
-        for acts in rows {
-            let buttons: Vec<Button> = acts
-                .iter()
-                .map(|&(glyph, label, hint, enabled, _)| {
-                    let b = Button::new(label)
-                        .icon(glyph)
-                        .variant(if label == "Delete" { Variant::Danger } else { Variant::Ghost })
-                        .size(Size::Sm)
-                        .enabled(enabled)
-                        .hint(hint);
-                    b.id_salt(("splat-select-action", label))
-                })
-                .collect();
-            let widths: Vec<f32> = buttons.iter().map(|b| b.desired_width(ui)).collect();
-            let w = widths.iter().sum::<f32>() + 6.0 * (widths.len() as f32 - 1.0) + 12.0;
-            let r = Rect::from_min_size(pos2(rect.right() - 16.0 - w, bottom - 44.0), vec2(w, 44.0));
-            chip(r);
-            let mut x = r.left() + 6.0;
-            for ((b, bw), act) in buttons.into_iter().zip(widths).zip(acts.iter()) {
-                if b.show_at(ui, Rect::from_min_size(pos2(x, r.center().y - 16.0), vec2(bw, 32.0))).clicked() && act.3 {
-                    clicked = Some(act.4);
-                }
-                x += bw + 6.0;
-            }
-            bottom = r.top() - 10.0;
+        // The moment's own line, in the middle above all of them: what it is for, or the selection and its actions.
+        let line_bottom = hint_r.top().min(whole_r.top()) - 10.0;
+        let some = anim::toggle(&ctx, Id::unique("splat-select-some"), selected > 0, Spring::SOFT).clamp(0.0, 1.0);
+        if some < 0.99 {
+            let mut lp = p.clone();
+            lp.multiply_opacity(1.0 - some);
+            purpose_line(&lp, ui, rect, line_bottom + 8.0 * some);
         }
-        match clicked {
-            Some(0) | Some(1) => {
+        let mut acted = None;
+        if selected > 0 {
+            acted = selection_bar(ui, rect, line_bottom + 12.0 * (1.0 - some), some, selected, ready);
+        }
+
+        let Some(e) = self.loaded.as_mut().and_then(|l| l.edits.as_mut()) else { return };
+        match acted {
+            Some(On::Grow) | Some(On::Shrink) => {
                 if let Some(splats) = self.select.splats.clone() {
                     // A step of three times the selection's median size (orbiters_reconstruct::select::step).
                     let radius = pick::step(&splats, &e.edit.marks);
-                    let ids = if clicked == Some(0) { pick::grow(&splats, &e.edit.marks, radius) } else { pick::shrink(&splats, &e.edit.marks, radius) };
-                    let mode = if clicked == Some(0) { Mode::Add } else { Mode::Remove };
+                    let grow = acted == Some(On::Grow);
+                    let ids = if grow { pick::grow(&splats, &e.edit.marks, radius) } else { pick::shrink(&splats, &e.edit.marks, radius) };
+                    let mode = if grow { Mode::Add } else { Mode::Remove };
                     if !e.select(&ids, mode) {
-                        self.select.notice = Some((
-                            if mode == Mode::Add { "Nothing beside the selection to add" } else { "Nothing to take away" }.into(),
-                            ctx.input(|i| i.time),
-                        ));
+                        self.select.notice = Some((if grow { "Nothing beside the selection to add" } else { "Nothing to take away" }.into(), ctx.input(|i| i.time)));
                     }
                 }
             }
-            Some(2) => {
-                e.invert();
-            }
-            Some(3) => {
+            Some(On::Hide) => {
                 e.remove(HIDDEN);
             }
-            Some(4) => {
+            Some(On::Delete) => {
                 e.remove(DELETED);
             }
-            Some(5) => {
+            Some(On::Clear) => {
+                e.clear();
+            }
+            None => {}
+        }
+        match clicked {
+            Some(Whole::Invert) => {
+                e.invert();
+            }
+            Some(Whole::SelectAll) => {
                 e.select_all();
             }
-            Some(6) => {
+            Some(Whole::ShowAll) => {
                 e.show_all();
             }
-            Some(7) => {
+            Some(Whole::RestoreAll) => {
                 e.restore_all();
             }
-            _ => {}
+            None => {}
         }
     }
 
@@ -1138,6 +1287,31 @@ fn metres(m: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// At Enzo's window the brush's slider narrows to stay clear of the chip at the right, and only below the narrowest
+    /// that reads does that chip move up a row; the other tools stay on one row down to the window's minimum and below.
+    #[test]
+    fn select_splats_bottom_row_never_overlaps() {
+        // As measured on the real view: the tools 276 wide, the chip at the right 412.
+        let (tools, whole) = (276.0, 412.0);
+        for width in [720.0, 800.0, 900.0, 1030.0, 1280.0, 1920.0, 3840.0] {
+            for brush in [false, true] {
+                let b = Bottom::of(width, tools, whole, brush);
+                let tools_right = 16.0 + tools + b.slider_room();
+                let whole_left = width - 16.0 - whole;
+                assert!(b.stacked || tools_right + 10.0 <= whole_left + 0.001, "{width} {brush}: {tools_right} into {whole_left}");
+                assert!(tools_right <= width - 16.0 + 0.001, "{width} {brush}: past the view's edge");
+                assert_eq!(b.slider > 0.0, brush);
+                if brush {
+                    assert!((SLIDER_MIN..=SLIDER_MAX).contains(&b.slider), "{width}: {}", b.slider);
+                }
+            }
+        }
+        assert!(!Bottom::of(1030.0, tools, whole, true).stacked, "at 1030 it fits narrowed");
+        assert!(Bottom::of(900.0, tools, whole, true).slider < SLIDER_MAX, "narrowed before it moves");
+        assert_eq!(Bottom::of(1920.0, tools, whole, true), Bottom { slider: SLIDER_MAX, stacked: false });
+        assert!(!Bottom::of(1030.0, tools, whole, false).stacked);
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("orbiters-select-{name}-{}", uuid::Uuid::new_v4()));

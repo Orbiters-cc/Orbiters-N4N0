@@ -11,6 +11,7 @@ mod folders;
 #[path = "gallery_assets.rs"]
 mod assets;
 
+use super::reconstruct_again::{self as again, Offer};
 use super::{
     gallery_layout as arrangement,
     sharing::{self, Dialog},
@@ -143,6 +144,8 @@ pub struct State {
     editor: Option<super::editor::Editor>,
     /// Export… of a 3D capture of this computer (its card's menu), over the page ([`super::splat_export`]).
     export: Option<super::splat_export::Export>,
+    /// Reconstruct again's question from a card's menu, over the page ([`super::reconstruct_again`]).
+    again: Option<again::Ask>,
 }
 impl State {
     pub fn stage_folders(&mut self) { self.folders.stage(); }
@@ -253,6 +256,12 @@ impl State {
         self.stage_locals();
     }
 
+    /// Screenshots: as if this was typed in the search field.
+    pub fn stage_query(&mut self, query: &str) {
+        self.query = query.into();
+        self.shown_key = None;
+    }
+
     /// Screenshots: the groups laid out so.
     pub fn stage_layout(&mut self, layout: GalleryLayout) {
         self.layout = layout;
@@ -323,6 +332,8 @@ impl State {
             "gallery-update-replacing",
             "gallery-updated",
             "gallery-update-failed",
+            "gallery-reconstructed",
+            "gallery-again-shared",
         ]
         .contains(&name)
         {
@@ -1108,6 +1119,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             state.export = None;
         }
     }
+    // Reconstruct again's question, from a card's menu.
+    if let Some(a) = state.again.as_mut() {
+        if !a.show(&ctx, cx) {
+            state.again = None;
+        }
+    }
     if let Some((key, thumb)) = asset_clicked {
         let keys: Vec<String> = entries.iter().filter(|e| assets::owns(&e.key)).map(|e| e.key.clone()).collect();
         if let Some((list, about, index, stand_ins)) = state.assets.window(&keys, &key, development) {
@@ -1152,7 +1169,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         }
     }
     instance_popover(&ctx, cx, state);
-    let modal = state.dialog.is_some() || state.instance.is_some() || state.community.is_open() || state.export.is_some();
+    let modal = state.dialog.is_some() || state.instance.is_some() || state.community.is_open() || state.export.is_some() || state.again.is_some();
     state.select.bar(ui, page, &entries, &mut state.pictures, modal);
     state.shown = entries;
     manage
@@ -1171,6 +1188,8 @@ enum Menu {
     CopyLayers,
     Folder,
     Reconstruct,
+    StopReconstruct,
+    Unqueue,
     Download,
     OnOrbiters,
     Instance,
@@ -1179,13 +1198,28 @@ enum Menu {
     Export,
 }
 
+/// A capture's reconstruction as a row of its card's menu: the press it takes, what the row says, its glyph, and why it
+/// takes none (none where it takes a press). A capture without a 3D view and without what makes one has no row: its card
+/// says why.
+fn again_row(o: Offer, ready: bool) -> Option<(Menu, String, &'static str, Option<&'static str>)> {
+    match o {
+        Offer::Start { .. } => Some((Menu::Reconstruct, o.label().into(), icons::MAGIC_WAND, None)),
+        Offer::Blocked { short, .. } => ready.then(|| (Menu::Reconstruct, o.label().into(), icons::MAGIC_WAND, Some(short))),
+        Offer::Running { fraction, .. } => Some((Menu::StopReconstruct, format!("Stop reconstruction · {:.0}%", fraction * 100.0), icons::X, None)),
+        Offer::Waiting { .. } => Some((Menu::Unqueue, o.label().into(), icons::X, None)),
+    }
+}
+
 /// A card's menu (a right press on it): what can be done with this item. A picture on this computer: Open, Edit, Share
-/// publicly, Share to …, Copy (with its layers for a multi-layer picture), Show in folder; a 3D capture: Reconstruct
-/// or the shares, Copy public link once public, Export… once reconstructed, Copy its picture, Open its folder; what is on Orbiters only: Ask to share
+/// publicly, Share to …, Copy (with its layers for a multi-layer picture), Show in folder; a 3D capture: Edit in 3D once
+/// reconstructed, the shares, Copy public link once public, Export… once reconstructed, Reconstruct or Reconstruct again
+/// (or its run to stop, or why not), Copy its picture, Open its folder; what is on Orbiters only: Ask to share
 /// or the owner's shares, Copy, Download, Open on Orbiters; then the group's Instance… and World on VRChat, and Select
 /// (or Deselect). With the card in a selection of several, Copy copies the selection. The picked action, once.
 fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_select::Selection, cx: &Cx) -> Option<Menu> {
     let mut acts: Vec<(Menu, String, &'static str)> = vec![(Menu::Open, "Open".into(), icons::ARROWS_OUT)];
+    // Why the row at this place takes no press.
+    let mut off: Option<(usize, &'static str)> = None;
     let item = e.remote.as_ref();
     let public = item.is_some_and(|i| i.public);
     let several = select.has(&e.key) && select.keys.len() > 1;
@@ -1215,10 +1249,22 @@ fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_
             }
             acts.push((Menu::Folder, "Show in folder".into(), icons::FOLDER_OPEN));
         }
-        Some(controller::Local::Session(dir)) => {
-            let busy = cx.snap.reconstruct_queue.contains(dir) || cx.snap.reconstruction.as_ref().is_some_and(|j| &j.session_dir == dir);
-            if !e.ready && !busy && !e.no_keyframes {
-                acts.push((Menu::Reconstruct, "Reconstruct".into(), icons::MAGIC_WAND));
+        Some(controller::Local::Session(_)) => {
+            let row = again::offer_of(e, cx.snap).and_then(|o| again_row(o, e.ready));
+            let mut reconstruct = |acts: &mut Vec<(Menu, String, &'static str)>| {
+                if let Some((m, label, glyph, why)) = row.clone() {
+                    if let Some(why) = why {
+                        off = Some((acts.len(), why));
+                    }
+                    acts.push((m, label, glyph));
+                }
+            };
+            // Without a 3D view it is the first thing to do; with one, it stands with what else is done to it.
+            if !e.ready {
+                reconstruct(&mut acts);
+            }
+            if e.ready && cx.gpu.is_some() {
+                acts.push((Menu::Edit, "Edit in 3D".into(), icons::SLIDERS_HORIZONTAL));
             }
             mine_shares(&mut acts);
             if public {
@@ -1226,6 +1272,7 @@ fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_
             }
             if e.ready {
                 acts.push((Menu::Export, "Export…".into(), icons::UPLOAD_SIMPLE));
+                reconstruct(&mut acts);
             }
             acts.push((Menu::Copy, copy("Copy its picture"), icons::COPY));
             acts.push((Menu::Folder, "Open its folder".into(), icons::FOLDER_OPEN));
@@ -1263,7 +1310,17 @@ fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_
     }
     let selected = select.has(&e.key);
     acts.push((Menu::Select, if selected { "Deselect" } else { "Select" }.into(), if selected { icons::X_CIRCLE } else { icons::CHECK_CIRCLE }));
-    let items: Vec<orbiters_ui::popup::Item<'_>> = acts.iter().map(|(_, label, glyph)| orbiters_ui::popup::Item::new(label).icon(glyph)).collect();
+    let items: Vec<orbiters_ui::popup::Item<'_>> = acts
+        .iter()
+        .enumerate()
+        .map(|(i, (_, label, glyph))| {
+            let item = orbiters_ui::popup::Item::new(label).icon(glyph);
+            match off {
+                Some((at, why)) if at == i => item.detail(why).disabled(),
+                _ => item,
+            }
+        })
+        .collect();
     orbiters_ui::popup::context_menu(ui, resp, "card-menu", &items).map(|i| acts[i].0)
 }
 
@@ -1341,8 +1398,15 @@ fn act_menu(ctx: &egui::Context, cx: &mut Cx, state: &mut State, entries: &[Entr
         }
         Menu::Reconstruct => {
             if let Some(controller::Local::Session(dir)) = &e.local {
-                cx.ctl.reconstruct(dir.clone());
-                state.select.say(ctx, "Reconstruction started: share it once its 3D view is ready");
+                state.again = again::press(ctx, cx, dir, &e.world_name, e.remote.as_ref(), thumb);
+            }
+        }
+        Menu::StopReconstruct => {
+            cx.ctl.stop_reconstruction();
+        }
+        Menu::Unqueue => {
+            if let Some(controller::Local::Session(dir)) = &e.local {
+                cx.ctl.unqueue_reconstruction(dir.clone());
             }
         }
         Menu::Download => {
@@ -1672,7 +1736,13 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
             // Its splats edited since it was uploaded: what Orbiters shows is not what its 3D view shows.
             _ if e.edited_since_upload() && !look.updating => {
                 let shared = e.remote.as_ref().is_some_and(|i| i.public || !i.grants.is_empty());
-                (icons::CLOUD_ARROW_UP, if shared { "Edited since shared: update it" } else { "Edited since uploaded: update it" }.to_string(), theme::WARN)
+                let label = match (e.reconstructed_since_upload(), shared) {
+                    (true, true) => "Reconstructed since shared: update it",
+                    (true, false) => "Reconstructed since uploaded: update it",
+                    (false, true) => "Edited since shared: update it",
+                    (false, false) => "Edited since uploaded: update it",
+                };
+                (icons::CLOUD_ARROW_UP, label.to_string(), theme::WARN)
             }
             Some(i) if i.public => (icons::GLOBE, "Public on Orbiters".to_string(), theme::OK),
             Some(i) if !i.grants.is_empty() => (icons::USERS, format!("Shared with {}", i.grants.len()), theme::FG_2),
@@ -1994,6 +2064,24 @@ fn encode(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A card's menu row of a capture: what it offers, says and takes in each state of its reconstruction.
+    #[test]
+    fn a_cards_menu_says_where_its_reconstruction_stands() {
+        use super::{again_row, Menu, Offer};
+        let (menu, label, _, why) = again_row(Offer::Start { again: true }, true).unwrap();
+        assert_eq!((menu, label.as_str(), why), (Menu::Reconstruct, "Reconstruct again", None));
+        let (menu, label, _, why) = again_row(Offer::Start { again: false }, false).unwrap();
+        assert_eq!((menu, label.as_str(), why), (Menu::Reconstruct, "Reconstruct", None));
+        let blocked = Offer::Blocked { again: true, reason: "why", short: "capture files deleted" };
+        let (menu, label, _, why) = again_row(blocked, true).unwrap();
+        assert_eq!((menu, label.as_str(), why), (Menu::Reconstruct, "Reconstruct again", Some("capture files deleted")), "dim, and why");
+        assert!(again_row(Offer::Blocked { again: false, reason: "why", short: "no keyframes" }, false).is_none(), "without a 3D view its card says why");
+        let (menu, label, _, why) = again_row(Offer::Running { fraction: 0.42, stage: "Training splats" }, true).unwrap();
+        assert_eq!((menu, label.as_str(), why), (Menu::StopReconstruct, "Stop reconstruction · 42%", None));
+        let (menu, label, _, why) = again_row(Offer::Waiting { hint: "Starts in a moment" }, true).unwrap();
+        assert_eq!((menu, label.as_str(), why), (Menu::Unqueue, "Waiting · cancel", None));
+    }
+
     use super::*;
     /// A capture of this computer shared publicly, then edited: its card says so where it says who sees it ("Edited since
     /// shared: update it"), and "Updating…" while the update runs; painted on the CPU into `ORBITERS_TEST_OUT`

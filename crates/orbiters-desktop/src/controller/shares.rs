@@ -78,6 +78,15 @@ pub struct Entry {
     /// A recording whose frames never had the capture strip: no keyframes, nothing to make a 3D view from.
     #[serde(default)]
     pub no_keyframes: bool,
+    /// A session recorded without depth frames: it cannot be reconstructed.
+    #[serde(default)]
+    pub no_depth: bool,
+    /// Its capture files were deleted ([`orbiters_core::cleanup::trimmed`]): with a 3D view, that view is all it has left.
+    #[serde(default)]
+    pub trimmed: bool,
+    /// When its reconstruction was made, none without one: another value is a new result.
+    #[serde(default)]
+    pub result: Option<String>,
     #[serde(skip)]
     pub picture: Option<crate::worlds::Picture>,
     /// The picture's size in pixels when the listing knows it (a screenshot's header, a capture's frame, what Orbiters
@@ -339,6 +348,22 @@ impl Entry {
         uploaded && self.mine() && matches!(self.local, Some(Local::Session(_))) && matches!(&self.edits, Some(Ok(now)) if now != made_with)
     }
 
+    /// [`Entry::edited_since_upload`] because it was reconstructed again since ([`reconstructed`]): what it says differs.
+    pub fn reconstructed_since_upload(&self) -> bool {
+        self.edited_since_upload() && self.uploaded_edits.as_deref() == Some(RECONSTRUCTED)
+    }
+
+    /// What its session says now ([`session_state`]), a capture's window following a reconstruction that finished.
+    pub fn set_session(&mut self, s: SessionState) {
+        self.ready = s.ready;
+        self.no_keyframes = s.no_keyframes;
+        self.no_depth = s.no_depth;
+        self.trimmed = s.trimmed;
+        self.result = s.result;
+        self.edits = s.edits;
+        self.uploaded_edits = s.uploaded_edits;
+    }
+
     /// Whether the entry's own file is the picture of all its layers (and not one of them).
     pub fn has_composite(&self) -> bool {
         let own = self.local.as_ref().map(Local::path);
@@ -416,6 +441,9 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
                 content: Content::read(&s.dir),
                 ready: s.reconstruction.is_some(),
                 no_keyframes: s.has_no_keyframes(),
+                no_depth: s.manifest.stats.depth_frames == 0,
+                trimmed: s.trimmed,
+                result: s.reconstruction.as_ref().map(|r| r.created_utc.clone()),
                 picture: Some(crate::worlds::Picture::Session(s.dir.clone())),
                 size: session_picture_size(s.manifest.capture.width, s.manifest.capture.height),
                 layers: Vec::new(),
@@ -455,6 +483,9 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
                 content,
                 ready: true,
                 no_keyframes: false,
+                no_depth: false,
+                trimmed: false,
+                result: None,
                 picture: Some(picture),
                 size: (shot.info.width > 0 && shot.info.height > 0).then_some([shot.info.width, shot.info.height]),
                 layers,
@@ -487,6 +518,9 @@ pub fn remote_entry(item: Item) -> Entry {
         content: Content { explicit: item.explicit, explicit_reasons: item.explicit_reasons.clone() },
         ready: true,
         no_keyframes: false,
+        no_depth: false,
+        trimmed: false,
+        result: None,
         picture,
         size: item.picture.as_ref().filter(|p| p.width > 0 && p.height > 0).map(|p| [p.width, p.height]),
         layers: Vec::new(),
@@ -522,6 +556,118 @@ struct Record {
     /// (orbiters_reconstruct::edit::generation); none in records of uploads made before edits existed (as trained).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     edits: Option<String>,
+}
+
+/// What a capture's upload record says it was made with once a new reconstruction replaced the result it was uploaded
+/// from. Never an edits' generation (`unedited`, or two hashes), so that [`Entry::edited_since_upload`] says the copy on
+/// Orbiters is not what its 3D view shows, and Update the shared capture sends the new result; without this a capture
+/// uploaded unedited and reconstructed unedited looks up to date for good, the link showing the old result.
+pub const RECONSTRUCTED: &str = "reconstructed";
+
+/// A reconstruction of `dir` finished: its uploads are of the result it replaced. In every account's records, signed in
+/// now or not ([`records_path`]: one file for each account on each server): one signed out while it trained comes back
+/// to a capture that says so.
+pub fn reconstructed(dir: &Path) {
+    let Ok(files) = std::fs::read_dir(orbiters_core::paths::config_dir()) else { return };
+    for file in files.flatten() {
+        let name = file.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("capture-uploads-") && name.ends_with(".json") {
+            mark_reconstructed(&file.path(), dir);
+        }
+    }
+}
+
+fn mark_reconstructed(path: &Path, dir: &Path) {
+    let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut records = read_records(path);
+    let mut changed = false;
+    for r in records.iter_mut().filter(|r| r.path == dir && r.uploaded.kind == Kind::Capture) {
+        r.edits = Some(RECONSTRUCTED.into());
+        changed = true;
+    }
+    if changed {
+        let written = serde_json::to_vec(&records).map_err(anyhow::Error::from).and_then(|b| orbiters_core::write_atomic(path, &b).map_err(anyhow::Error::from));
+        if let Err(e) = written {
+            share_log(&format!("3D capture {} reconstructed, its upload record not updated: {e:#}", dir.display()));
+        }
+    }
+}
+
+/// What a finished reconstruction of the session `dir` takes from what it has now, as sentences for the person (none:
+/// nothing they could miss, it may start without asking). `remote`: what the page knows of its share, else its record.
+pub fn reconstruct_replaces(dir: &Path, server: Server, remote: Option<&Item>) -> Vec<String> {
+    let records = records_path(server).ok();
+    replaces(&orbiters_core::reconstruction::result_dir(dir), records.as_deref(), dir, remote)
+}
+
+fn replaces(result: &Path, records: Option<&Path>, dir: &Path, remote: Option<&Item>) -> Vec<String> {
+    let mut lines = Vec::new();
+    // The worker deletes the edits with the result they name splats of.
+    if let Ok(bytes) = std::fs::read(result.join(orbiters_core::reconstruction::EDIT_FILE)) {
+        match orbiters_reconstruct::edit::Edit::decode(&bytes) {
+            Ok(e) => lines.extend(edits_line(e.hidden() + e.deleted())),
+            Err(_) => lines.push("Its splat edits, which could not be read, go with the current one.".to_string()),
+        }
+    }
+    let record = records.and_then(|p| read_records(p).into_iter().find(|r| r.path == dir));
+    let item = remote.filter(|i| i.mine).or(record.as_ref().and_then(|r| r.item.as_ref()));
+    let public = item.map_or(record.as_ref().is_some_and(|r| r.uploaded.visibility == "public"), |i| i.public);
+    let friends = item.map_or(0, |i| i.grants.len());
+    lines.extend(shared_line(public, friends));
+    lines
+}
+
+/// What a new result takes of `removed` splats hidden or deleted.
+pub(crate) fn edits_line(removed: usize) -> Option<String> {
+    match removed {
+        0 => None,
+        1 => Some("The splat hidden or deleted in its 3D view comes back: you can select it again in the new one.".to_string()),
+        n => Some(format!("The {} splats hidden or deleted in its 3D view come back: you can select them again in the new one.", orbiters_ui::format::integer(n as f64))),
+    }
+}
+
+/// What a new result does to a capture shared publicly and with `friends`: nothing at once, and that is what to know.
+pub(crate) fn shared_line(public: bool, friends: usize) -> Option<String> {
+    let update = "until you update the shared capture, which its window offers once the new one is ready.";
+    let them = if friends == 1 { "the friend you shared it with".to_string() } else { format!("the {friends} friends you shared it with") };
+    match (public, friends) {
+        (false, 0) => None,
+        (true, 0) => Some(format!("Its public link stays, and goes on showing the current version {update}")),
+        (false, 1) => Some(format!("The friend you shared it with keeps seeing the current version {update}")),
+        (false, n) => Some(format!("The {n} friends you shared it with keep seeing the current version {update}")),
+        (true, _) => Some(format!("Its public link and {them} keep the current version {update}")),
+    }
+}
+
+/// What a capture's window follows of its session.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionState {
+    pub ready: bool,
+    pub no_keyframes: bool,
+    pub no_depth: bool,
+    pub trimmed: bool,
+    pub result: Option<String>,
+    pub edits: Option<Result<String, String>>,
+    pub uploaded_edits: Option<String>,
+}
+
+/// What the session `dir` says now, read from its own files alone (a capture's window asks when the library changed,
+/// without listing every picture again); none when it is gone.
+pub fn session_state(dir: &Path, server: Server) -> Option<SessionState> {
+    let manifest = orbiters_core::bundle::read_manifest(dir).ok()?;
+    let report = orbiters_core::reconstruction::read_report(dir);
+    let records = records_path(server).ok().map(|p| read_records(&p)).unwrap_or_default();
+    let record = records.iter().find(|r| r.path == dir);
+    Some(SessionState {
+        ready: report.is_some(),
+        no_keyframes: manifest.stats.frames > 0 && manifest.stats.keyframes == 0,
+        no_depth: manifest.stats.depth_frames == 0,
+        trimmed: orbiters_core::cleanup::trimmed(dir),
+        edits: report.as_ref().map(|_| orbiters_reconstruct::edit::generation(&orbiters_core::reconstruction::result_dir(dir)).map_err(|e| e.to_string())),
+        result: report.map(|r| r.created_utc),
+        uploaded_edits: record.map(|r| r.edits.clone().unwrap_or_else(|| orbiters_reconstruct::edit::UNEDITED.into())),
+    })
 }
 
 /// Why a capture is not shared when its splat edits changed while it was being shared.
@@ -1396,6 +1542,62 @@ pub(crate) mod tests {
         let refused = update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &moving).unwrap_err().to_string();
         assert!(refused.contains("changed while it was being prepared"), "{refused}");
         assert_eq!(requests(&seen), ["GET /captures/capture/3"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Reconstructed again, an upload made without edits has nothing in its edits to say it is out of date: its record
+    /// says so, whatever the new result's edits are, the window offers the update, and updating sends the new result and
+    /// settles it. A capture never uploaded has no record to touch.
+    #[test]
+    fn a_capture_reconstructed_again_asks_to_update_what_is_shared() {
+        let (dir, session, records, mut entry) = uploaded_session("reconstructed", None);
+        entry.edits = Some(Ok(orbiters_reconstruct::edit::UNEDITED.into()));
+        assert!(!entry.edited_since_upload(), "uploaded unedited, unedited now");
+        mark_reconstructed(&records, &session);
+        let record = record_of(&records).unwrap();
+        assert_eq!(record.edits.as_deref(), Some(RECONSTRUCTED));
+        entry.uploaded_edits = record.edits.clone();
+        assert!(entry.edited_since_upload() && entry.reconstructed_since_upload());
+        let (api, _seen) = stand_in(vec![("GET /captures/capture/3", 200, capture_at(3, 1)), ("PUT /captures/capture/3/files", 200, capture_at(3, 2))]);
+        let (_, edits) = update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &prepared).unwrap();
+        assert_eq!(edits, orbiters_reconstruct::edit::UNEDITED);
+        assert_eq!(record_of(&records).unwrap().edits.as_deref(), Some(orbiters_reconstruct::edit::UNEDITED), "updated: the record has what was sent");
+        entry.uploaded_edits = Some(edits);
+        assert!(!entry.edited_since_upload(), "updated: nothing to update any more");
+        mark_reconstructed(&records, &std::env::temp_dir().join("another session"));
+        assert_eq!(record_of(&records).unwrap().edits.as_deref(), Some(orbiters_reconstruct::edit::UNEDITED), "another session's result is not this one's");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// What reconstructing again takes is said before it runs: splats hidden or deleted (and only those: a selection is
+    /// not kept), edits that cannot be read, a public link, friends. A capture with none of these starts without asking.
+    #[test]
+    fn what_a_new_reconstruction_replaces_is_said_before_it_runs() {
+        let (dir, session, records, _) = uploaded_session("replaces", None);
+        let result = orbiters_core::reconstruction::result_dir(&session);
+        let asked = |remote: Option<&Item>| replaces(&result, Some(&records), &session, remote);
+        // Uploaded and public in its record, no edits.
+        assert_eq!(asked(None).len(), 1, "{:?}", asked(None));
+        assert!(asked(None)[0].starts_with("Its public link stays"));
+        let private = Item { kind: Kind::Capture, id: 3, mine: true, public: false, ..Default::default() };
+        assert!(asked(Some(&private)).is_empty(), "uploaded, private, shared with nobody: nothing anybody sees changes");
+        // One then two splats deleted.
+        delete_splat(&session, 1);
+        assert!(asked(Some(&private))[0].starts_with("The splat hidden or deleted"), "{:?}", asked(Some(&private)));
+        delete_splat(&session, 2);
+        assert!(asked(Some(&private))[0].starts_with("The 2 splats hidden or deleted"), "{:?}", asked(Some(&private)));
+        let friend = |id: u64| shares::Grant { id, vrchat_user_id: format!("usr_{id}"), ..Default::default() };
+        let shared = Item { grants: vec![friend(1), friend(2)], ..private.clone() };
+        let lines = asked(Some(&shared));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[1].starts_with("The 2 friends you shared it with keep seeing"), "{lines:?}");
+        let both = Item { public: true, ..shared.clone() };
+        assert!(asked(Some(&both))[1].starts_with("Its public link and the 2 friends"), "{:?}", asked(Some(&both)));
+        std::fs::write(result.join(orbiters_core::reconstruction::EDIT_FILE), b"damaged").unwrap();
+        assert!(asked(Some(&private))[0].starts_with("Its splat edits, which could not be read"), "{:?}", asked(Some(&private)));
+        std::fs::remove_file(result.join(orbiters_core::reconstruction::EDIT_FILE)).unwrap();
+        std::fs::remove_file(&records).unwrap();
+        assert!(asked(None).is_empty(), "never uploaded, no edits: it starts without asking");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

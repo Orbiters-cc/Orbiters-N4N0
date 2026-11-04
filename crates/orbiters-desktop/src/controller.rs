@@ -435,7 +435,7 @@ impl Controller {
         }
     }
 
-    fn bump_library(&self) {
+    pub(crate) fn bump_library(&self) {
         let version = self.library_version.fetch_add(1, Ordering::Relaxed) + 1;
         self.broadcast(|| ToClient::Library { version });
     }
@@ -1578,10 +1578,8 @@ impl Controller {
 
     /// Trains splats from a session: now when nothing runs and nothing records, else once its turn comes.
     pub fn reconstruct(self: &Shared, dir: PathBuf) -> anyhow::Result<()> {
-        // Splat edits name splats of the result they were made on: the new result replaces them with it.
-        if orbiters_core::reconstruction::result_dir(&dir).join(orbiters_core::reconstruction::EDIT_FILE).is_file() {
-            self.notify(NoticeKind::Warning, "The splats hidden or deleted in its 3D view come back with the new reconstruction: select them again there.".to_string());
-        }
+        // Splat edits name splats of the result they were made on, so a finished run replaces them with it; every press
+        // that can lose them asks first (pages::reconstruct_again).
         if self.queue_reconstruction(dir)? {
             self.notify(NoticeKind::Info, format!("Waiting its turn: the reconstruction starts {}.", self.reconstruction_waits_for()));
         }
@@ -1776,6 +1774,8 @@ impl Controller {
                 self.mark_reconstruction_told();
                 // Its upload files, prepared once nothing else runs: sharing it is then at once (crate::upload_prep).
                 if let Some(dir) = self.running_reconstruction() {
+                    // What is shared is the result this one replaced: its window offers to update it.
+                    shares::reconstructed(&dir);
                     crate::upload_prep::queue(dir);
                 }
                 let quality = report.psnr_held_out.map(|p| format!(", {p:.1} dB on views it never saw")).unwrap_or_default();

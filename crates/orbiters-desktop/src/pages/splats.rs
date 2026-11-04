@@ -215,6 +215,14 @@ impl Viewer {
         Self::open_source(ctx, gpu, session, title, integrated, None)
     }
 
+    /// Opens the 3D view of `session` directly in Edit in 3D ([`edit3d`]), as soon as its splats are there: a capture's
+    /// Edit in its window. Leaving the mode leaves the 3D view open, one step back.
+    pub fn open_editing(ctx: &egui::Context, gpu: &Handles, session: &Path, title: String, integrated: bool) -> Self {
+        let mut v = Self::open(ctx, gpu, session, title, integrated);
+        v.edit3d.enter_once_loaded();
+        v
+    }
+
     pub fn open_shared(ctx: &egui::Context, gpu: &Handles, path: &Path, title: String, view: &serde_json::Value, integrated: bool) -> Self {
         let vector = |key: &str| view.get(key).and_then(|v| serde_json::from_value::<[f32; 3]>(v.clone()).ok()).filter(|v| v.iter().all(|n| n.is_finite()));
         let flip = |p: [f32; 3]| [p[0], p[1], -p[2]];
@@ -432,7 +440,9 @@ impl Viewer {
         widgets::text_truncated(&p, pos2(title_r.left() + 20.0, title_r.center().y - 7.0), Align2::LEFT_CENTER, &title_t, title_w - 40.0);
         widgets::text_truncated(&p, pos2(title_r.left() + 20.0, title_r.center().y + 9.0), Align2::LEFT_CENTER, &sub_t, title_w - 40.0);
         if self.select.on() {
-            self.select_bar(ui, &p, title_r);
+            let views = self.loaded.as_ref().map_or(0, |l| l.views.len());
+            let controls = bar.right() - 44.0 - 10.0 - RESET_W - if views > 1 { 10.0 + 2.0 * STEP_W + STEP_LABEL_W } else { 0.0 };
+            self.select_bar(ui, &p, title_r, controls);
         } else {
             self.save_view(ui, &p, rect, title_r);
         }

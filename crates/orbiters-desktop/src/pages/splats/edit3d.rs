@@ -30,12 +30,18 @@ pub(super) struct State {
     kept: Option<Edit>,
     /// A copy's view and edit to open once the splats are there (Edit in 3D on a copy saved here).
     pending: Option<(files::View3d, Edit)>,
+    /// The mode to open as soon as the splats are there (a capture's Edit, its window landing directly here).
+    enter: bool,
 }
 
 impl State {
     pub(super) fn reopen(&mut self, view: files::View3d, edit: Edit) {
         self.pending = Some((view, edit));
         self.editing = None;
+    }
+
+    pub(super) fn enter_once_loaded(&mut self) {
+        self.enter = true;
     }
 }
 
@@ -145,6 +151,11 @@ impl Viewer {
 /// A copy's view asked for (Edit in 3D on it): the camera and the display as they were, then the mode with its edit,
 /// once the splats are there.
 fn resume(v: &mut Viewer, ctx: &egui::Context, rect: Rect) {
+    if v.edit3d.enter && v.loaded.is_some() {
+        v.edit3d.enter = false;
+        v.enter_edit(ctx, rect);
+        return;
+    }
     if v.loaded.is_none() || v.edit3d.pending.is_none() {
         return;
     }

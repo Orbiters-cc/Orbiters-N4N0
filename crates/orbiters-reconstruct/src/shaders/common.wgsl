@@ -16,7 +16,7 @@ struct Frame {
     // Gaussians, 1 for a viewer's guards (project.wgsl), depth bits of a sort key, 1 to regularise the Gaussians a
     // training step does not show too.
     counts: vec4<u32>,
-    // Loss weights: colour L1, depth, unused, scene pixels or depth samples in this view.
+    // Loss weights: colour L1, depth (a colour step: the robust threshold), D-SSIM, scene pixels or depth samples in this view.
     loss: vec4<f32>,
     // Regulariser weights per Gaussian: opacity, scale (per metre); the 2D filter's variance in pixels² along x and y
     // (cpu::FILTER_2D at the training resolution; renders on the depth-sample grid scale it to keep the same

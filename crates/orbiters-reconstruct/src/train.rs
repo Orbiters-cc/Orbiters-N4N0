@@ -203,6 +203,13 @@ pub struct Settings {
     /// on the synthetic plaza at 300k (three runs), and 0.68 dB on Home's best 90 % at 300k (−0.11 on the whole
     /// image), where ConeGS gains most: worth a switch for small budgets.
     pub depth_births: f32,
+    /// Faces seen in the keyframes (crate::portraits).
+    pub portraits: Vec<crate::portraits::Portrait>,
+    /// The steps on tiles over them, on top of the others and all in the run's second half (crate::portraits); 0: none,
+    /// and the detector does not run.
+    pub portrait_steps: u32,
+    /// How quickly a later view of a face counts for less among them, seconds (crate::portraits::Picker); 0: all alike.
+    pub portrait_moment: f32,
 }
 
 /// Which live Gaussians a relocation round copies onto the dead and new slots (crate::train::plan_relocation), from
@@ -296,6 +303,9 @@ impl Default for Settings {
             noise_visible: false,
             noise_dead_max: NOISE_DEAD_MAX,
             depth_births: 0.0,
+            portraits: Vec::new(),
+            portrait_steps: crate::portraits::STEPS,
+            portrait_moment: crate::portraits::MOMENT,
         }
     }
 }
@@ -532,6 +542,22 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
         0 => detail_iterations(data.views.len() - detail.len(), settings.detail_share),
         n => n,
     };
+    // A session's faces (crate::portraits): tile steps on top of the others, all in the second half. Without any the run
+    // is the same step for step: no extra draw from the random stream, the same progress.
+    let tile = crate::portraits::TILE;
+    let fits = data.width >= tile && data.height >= tile;
+    let portraits: Vec<crate::portraits::Portrait> = if settings.portrait_steps > 0 && fits { settings.portraits.iter().filter(|p| held_out.binary_search(&p.view).is_err()).copied().collect() } else { Vec::new() };
+    let picker = (!portraits.is_empty()).then(|| crate::portraits::Picker::new(&portraits, settings.portrait_moment));
+    let base_iterations = iterations;
+    let extra = if picker.is_some() { crate::portraits::steps_for(portraits.len(), settings.portrait_steps) } else { 0 };
+    let iterations = base_iterations + extra;
+    let first_half = base_iterations / 2;
+    let tile_chance = crate::portraits::tile_chance(base_iterations, extra);
+    let tile_px = (tile * tile) as usize;
+    let (mut tile_target, mut tile_mask): (Vec<u32>, Vec<f32>) = if picker.is_some() { (vec![0; tile_px], vec![0.0; tile_px]) } else { (Vec::new(), Vec::new()) };
+    if !portraits.is_empty() {
+        eprintln!("{} views of faces: {extra} steps on tiles over them, on top of {base_iterations}", portraits.len());
+    }
     if !detail.is_empty() {
         eprintln!("{} detail views (keyframes {:?}): {:.0} % of the colour steps", detail.len(), detail.iter().map(|&i| data.views[i].keyframe).collect::<Vec<_>>(), settings.detail_share * 100.0);
     }
@@ -616,7 +642,8 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     regularise(gpu, init.len());
     gpu.step = 0;
     crate::timing::add("4a train setup", setup_start.elapsed());
-    let relocate_until = (iterations as f32 * settings.relocate_until) as u32;
+    // Relocation ends where it would without the tile steps: they come after it (crate::portraits).
+    let relocate_until = (base_iterations as f32 * settings.relocate_until) as u32;
     // Relocation rounds off the steps' path: a round's weights come back while training goes on, a helper thread plans
     // it (its own random stream), and the plan lands a few steps later (VRChat Home: −4 %, quality equal): the plan took
     // 20–30 ms of the CPU a round, with the GPU waiting.
@@ -635,7 +662,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                 None => {}
             }
         }
-        let progress = (it - 1) as f32 / iterations as f32;
+        let progress = crate::portraits::progress(it, base_iterations, extra);
         if it > relocate_until {
             // Exploration only while relocation can still reuse what it moves (gsplat stops it with refinement too).
             gpu.noise = 0.0;
@@ -659,7 +686,27 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
         let depth_step = !depth_views.is_empty() && settings.depth_weight > 0.0 && it % settings.depth_every.max(1) == 0;
         // Drawn only when there are detail views: a session without keeps its random stream, step for step.
         let detail_step = !depth_step && !detail.is_empty() && rng.f32() < settings.detail_share;
-        let intersections = if depth_step {
+        let portrait_step = !depth_step && picker.is_some() && it > first_half && rng.f32() < tile_chance;
+        let intersections = if let Some(p) = picker.as_ref().filter(|_| portrait_step) {
+            let portrait = &portraits[p.pick(&mut rng)];
+            let v = &data.views[portrait.view];
+            let (ox, oy) = crate::portraits::tile_over(portrait, data.width, data.height, &mut rng);
+            let t = tile as usize;
+            for j in 0..t {
+                let row = (oy as usize + j) * data.width as usize + ox as usize;
+                tile_target[j * t..(j + 1) * t].copy_from_slice(&v.image[row..row + t]);
+                tile_mask[j * t..(j + 1) * t].copy_from_slice(&data.mask[row..row + t]);
+            }
+            gpu.set_mask(tile, tile, &tile_mask)?;
+            let robust = if progress >= settings.robust_from { settings.robust } else { 0.0 };
+            let sky_lr = std::mem::replace(&mut gpu.sky_lr, 0.0);
+            // A tile's pixel counts as a whole frame's does: over its own few pixels the loss's gradient would be eight
+            // times a frame's, and Adam would take the frames' steps for noise.
+            let cam = crate::portraits::tile_camera(&v.camera, ox, oy);
+            let stepped = gpu.step(&cam, settings.background, Target::Color { rgba: &tile_target, scene_pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr));
+            gpu.sky_lr = sky_lr;
+            stepped?
+        } else if depth_step {
             // Built for the step (all of a long session's targets at once would take GBs).
             let t = depth_target(&data.depth_views[depth_views[rng.usize(..depth_views.len())]]);
             let full = gpu.filter_2d;

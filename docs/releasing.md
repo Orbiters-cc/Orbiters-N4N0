@@ -40,7 +40,7 @@ All of them take `--channel <name>`, `stable` by default. An app follows the cha
 1. Builds the five programs in release (`target/release`, like any other release build).
 2. Builds the setup without programs inside, with the C runtime linked in (`+crt-static`, in its own target folder).
    This is the uninstaller kept in the install folder, so it must start on any Windows.
-3. Gathers the programs, `onnxruntime.dll`, `onnxruntime_providers_shared.dll`, `sherpa-onnx-c-api.dll`, Visual
+3. Gathers the programs, the face detector (`crates/orbiters-reconstruct/assets/faces-v1-int8.onnx`), `onnxruntime.dll`, `onnxruntime_providers_shared.dll`, `sherpa-onnx-c-api.dll`, Visual
    C++'s `vcruntime140.dll`, the licences and the uninstaller. Every program needs `vcruntime140.dll`, which a clean
    Windows lacks, so it ships beside them (app-local, as Microsoft allows). Each `.exe` and `.dll` is then checked:
    it may load only DLLs that come with Windows or ship beside it. If anything else is needed, `dist` stops.

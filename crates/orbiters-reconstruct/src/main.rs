@@ -41,6 +41,7 @@ struct Args {
     /// `--budget`: the most Gaussians whatever the session (else train::budget_for picks it).
     budget: Option<usize>,
     device: gpu::DeviceOptions,
+    portrait_boxes: Option<PathBuf>,
 }
 
 fn args() -> anyhow::Result<Args> {
@@ -50,6 +51,7 @@ fn args() -> anyhow::Result<Args> {
     let mut settings = train::Settings::default();
     let mut budget = None;
     let mut device = gpu::DeviceOptions::default();
+    let mut portrait_boxes = None;
     while let Some(a) = it.next() {
         let mut number = |name: &str| -> anyhow::Result<u64> { it.next().with_context(|| format!("{name} needs a value"))?.parse().with_context(|| format!("{name} takes a number")) };
         match a.as_str() {
@@ -106,6 +108,9 @@ fn args() -> anyhow::Result<Args> {
             // A 3D picture's detail views' share of the colour steps (orbiters_reconstruct::dataset::detail_views,
             // train::Settings::detail_share, a quarter by default; 0: trained as any keyframe).
             "--detail-share" => settings.detail_share = it.next().context("--detail-share needs a value")?.parse().context("--detail-share takes a share (0–1)")?,
+            "--portrait-steps" => settings.portrait_steps = number("--portrait-steps")? as u32,
+            "--portrait-moment" => settings.portrait_moment = it.next().context("--portrait-moment needs a value")?.parse().context("--portrait-moment takes seconds")?,
+            "--portrait-boxes" => portrait_boxes = Some(PathBuf::from(it.next().context("--portrait-boxes needs a file")?)),
             "--depth-births" => settings.depth_births = it.next().context("--depth-births needs a value")?.parse().context("--depth-births takes a number (0–1)")?,
             "--gpu" => {
                 device.low_power = match it.next().as_deref() {
@@ -124,7 +129,7 @@ fn args() -> anyhow::Result<Args> {
             _ => session = Some(PathBuf::from(a)),
         }
     }
-    Ok(Args { session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]")?, width, settings, budget, device })
+    Ok(Args { portrait_boxes, session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]")?, width, settings, budget, device })
 }
 
 fn rgb8(img: &[[f32; 4]]) -> Vec<u8> {
@@ -156,6 +161,16 @@ fn run(args: Args) -> anyhow::Result<Report> {
     let mut gpu = device.join().map_err(|_| anyhow::anyhow!("the GPU device's thread panicked"))??;
     let dev = gpu.device.clone();
     let mut settings = args.settings.clone();
+    // The faces in its keyframes, for the extra training they get (orbiters_reconstruct::portraits).
+    if let Some(file) = &args.portrait_boxes {
+        settings.portraits = orbiters_reconstruct::portraits::from_lab_file(file, data)?;
+    } else if settings.portrait_steps > 0 {
+        let found = timing::section("1b faces", None, || orbiters_reconstruct::portraits::find(data));
+        if found.ran {
+            eprintln!("faces: {} heads ({} known still), {} of {} boxes in {} keyframes kept, {:.2} s", found.heads, found.still, found.portraits.len(), found.detections, found.keyframes, found.seconds);
+        }
+        settings.portraits = found.portraits;
+    }
     // As many Gaussians as the session's views can tell apart (train::budget_for), within the graphics memory the GPU
     // has free (beside VRChat, what it leaves).
     let views = data.views.len() + data.faces.as_ref().map_or(0, |f| f.views.len());
@@ -476,6 +491,7 @@ fn main() {
         Some("--mesh") => Some(orbiters_reconstruct::mesh::cli),
         Some("--web-preview") => Some(web_preview),
         Some("--vrchat") => Some(vrchat),
+        Some("--find-faces") => Some(orbiters_reconstruct::portraits::find_faces_cli),
         Some("--export-gltf") => Some(orbiters_reconstruct::export::gltf_cli),
         Some("--export-spz") => Some(orbiters_reconstruct::export::spz_cli),
         _ => None,

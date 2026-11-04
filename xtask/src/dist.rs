@@ -20,6 +20,9 @@ use std::process::Command;
 const PROGRAMS: [&str; 5] = ["orbiters-desktop", "orbiters-capture", "orbiters-reconstruct", "orbiters-voice", "orbiters-call"];
 /// The libraries they load, beside them in `target/release` (sherpa-onnx's prebuilt ones, which its build copies there).
 const LIBRARIES: [&str; 3] = ["onnxruntime.dll", "onnxruntime_providers_shared.dll", "sherpa-onnx-c-api.dll"];
+/// The reconstruction's face detector (orbiters_reconstruct::portraits), from the repository; the worker finds it beside
+/// itself, and without it trains as it did. See THIRD_PARTY_NOTICES.md.
+const FACE_MODEL: &str = "crates/orbiters-reconstruct/assets/faces-v1-int8.onnx";
 /// Tracking smoothing's SteamVR driver (`orbiters-smooth-driver`), which the app installs for SteamVR when it is
 /// switched on.
 const DRIVER: &str = "driver_orbiters_smooth.dll";
@@ -89,6 +92,8 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     for library in LIBRARIES {
         copy(&bin.join(library), &stage.join(library))?;
     }
+    let face_model = crate::root().join(FACE_MODEL);
+    copy(&face_model, &stage.join(face_model.file_name().expect("a file")))?;
     copy(&bin.join(DRIVER), &stage.join(DRIVER))?;
     ours.push(stage.join(DRIVER));
     copy(&vcruntime(config)?, &stage.join(VCRUNTIME))?;

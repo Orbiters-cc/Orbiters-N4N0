@@ -237,9 +237,8 @@ pub struct CaptureStats {
     pub extra_keyframes: u64,
     #[serde(default)]
     pub extra_other_size: u64,
-    /// Seconds since a frame's strip was last read, while frames keep coming and after it was read once (0 while it
-    /// is read): frames without it have no camera pose, so no keyframe. An avatar uploaded with an older N4N0 (up to
-    /// 1.0.15) draws it only while the camera sees the avatar or is near it.
+    /// Seconds since a frame's strip was last read, or since the first frame when none was yet (0 while it is read):
+    /// frames without it have no camera pose, so no keyframe. The service says why (`controller::hide_self::NoStrip`).
     pub strip_missing_s: f32,
     /// What went wrong that the recording goes on without (a microphone that could not be opened, files that could
     /// not be written), the latest of each kind. The strip's state is in `last_error`. The worker also sends each as

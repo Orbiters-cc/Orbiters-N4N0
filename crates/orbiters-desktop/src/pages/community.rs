@@ -668,6 +668,7 @@ pub(super) fn picture_entry(key: String, name: String, p: &community::Picture, d
         remote: None,
         content: Default::default(),
         ready: true,
+        no_keyframes: false,
         picture: source(p, false, development, stand_ins),
         size: (p.width > 0 && p.height > 0).then_some([p.width, p.height]),
         layers: Vec::new(),

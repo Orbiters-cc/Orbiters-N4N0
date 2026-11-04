@@ -42,14 +42,10 @@ pub enum Warning {
     Disk,
     /// The frame source (a Spout sender that cannot be opened, frames of a raw capture that cannot be read).
     Source,
-    /// The capture strip, seen once and then for a while not (no camera pose, so no keyframes).
-    Strip,
 }
 
 /// A stretch without the strip shorter than this is a moment's trouble (a fast turn, a flash): not counted.
 const STRIP_GAP_NS: u64 = 1_000_000_000;
-/// A stretch without the strip this long is told while recording.
-const STRIP_GAP_TOLD_NS: u64 = 3_000_000_000;
 
 /// A picture for the encoders: a keyframe (its frame's record waits for it), or a depth frame kept as received.
 struct Picture {
@@ -532,10 +528,8 @@ pub struct CaptureSession {
     latest: Vec<(Warning, String)>,
     /// Why the recording must stop (the disk is full).
     stop: Option<String>,
-    /// When a frame's strip was last read and since when it has not been (after it was once), on the session clock;
-    /// the time without it, in stretches of at least [`STRIP_GAP_NS`]; the latest frame's time. An avatar uploaded
-    /// with an older N4N0 (up to 1.0.15) draws its kit only while the camera sees the avatar or its surroundings; a
-    /// world's depth of field or motion blur can wipe the strip anywhere.
+    /// When a frame's strip was last read and since when it has not been, on the session clock; the time without it, in
+    /// stretches of at least [`STRIP_GAP_NS`], once it was seen; the latest frame's time.
     strip_first_ns: Option<u64>,
     strip_seen_ns: Option<u64>,
     strip_lost_ns: Option<u64>,
@@ -767,22 +761,12 @@ impl CaptureSession {
         self.warnings.push((kind, message));
     }
 
-    /// A frame without a readable strip at `now`: a stretch without it starts (once the strip was seen), and one long
-    /// enough is told, once a stretch.
+    /// A frame without a readable strip at `now`: a stretch without it starts or goes on, from the recording's first
+    /// frame when no strip came yet (with Local User off in VRChat's camera, or on an avatar without the kit, none ever
+    /// does). The service reads `strip_missing_s` and says why: only it knows VRChat's camera and the avatar.
     fn strip_missed(&mut self, now: u64) {
-        if self.strip_seen_ns.is_none() {
-            return;
-        }
         let lost = *self.strip_lost_ns.get_or_insert(now);
-        let gap = now.saturating_sub(lost);
-        let told = self.stats.strip_missing_s >= STRIP_GAP_TOLD_NS as f32 / 1e9;
-        self.stats.strip_missing_s = gap as f32 / 1e9;
-        if gap >= STRIP_GAP_TOLD_NS && !told {
-            self.warn(
-                Warning::Strip,
-                "No capture strip for a few seconds: no camera pose, so no keyframes. If your avatar was uploaded with an older N4N0, the strip is drawn only while the camera sees your avatar or is near it: update N4N0 in My Avatar and upload the avatar again.".into(),
-            );
-        }
+        self.stats.strip_missing_s = now.saturating_sub(lost) as f32 / 1e9;
     }
 
     /// A frame whose strip was read at `now`: a stretch without it ends, counted when long enough.
@@ -1492,10 +1476,11 @@ impl CaptureSession {
         let (strip_missing_ns, strip_since_ns) = self.strip_missing();
         let Self { mut writer, parameters, skeleton, audio, tracking, calibrations, calibrations_written, written, write_errors, .. } = self;
         let mut warnings = Vec::new();
-        // Long stretches without the strip leave parts of the walk without keyframes: how much, and why it happens.
-        if strip_missing_ns >= 5_000_000_000 && strip_missing_ns * 10 >= strip_since_ns {
+        // Long stretches without the strip leave parts of the walk without keyframes: how much. (No strip at all is the
+        // service's to tell, knowing why: the manifest's keyframes say so.)
+        if strip_since_ns > 0 && strip_missing_ns >= 5_000_000_000 && strip_missing_ns * 10 >= strip_since_ns {
             warnings.push(format!(
-                "no camera pose for {:.0} s of {:.0} s: the capture strip was not seen, so those parts have no keyframes. An avatar uploaded with an older N4N0 draws it only while the camera sees the avatar or is near it: update N4N0 in My Avatar and upload the avatar again to film anywhere",
+                "no camera pose for {:.0} s of {:.0} s: the capture strip was not seen, so those parts have no keyframes",
                 strip_missing_ns as f64 / 1e9,
                 strip_since_ns as f64 / 1e9
             ));
@@ -1864,27 +1849,51 @@ mod tests {
     /// The strip lost while recording (a camera that no longer sees an avatar uploaded with an older N4N0, a world's
     /// depth of field): the stats say for how long, a long stretch is told once, and the end of the session says how
     /// much had no pose.
+    /// What a recording gets with Local User off in VRChat's camera, or on an avatar without the kit: real frames, none
+    /// with a strip (Enzo's sessions of 2026-11-03 at 22:56, 22:59 and 23:00). The time without it runs from the first frame,
+    /// for the service to tell why, and the session says plainly that it has nothing.
     #[test]
-    fn stretches_without_the_strip_are_told_and_counted() {
+    fn frames_that_never_have_a_strip_are_timed_from_the_first_and_leave_no_keyframes() {
+        let (root, mut session, _) = pattern_session("never-a-strip", 0);
+        let (w, h) = (1280u32, 720u32);
+        let pixels = vec![90u8; (w * h * 4) as usize];
+        let t0 = session.epoch_ns;
+        for i in 0..90u64 {
+            let view = ImageView::new(w, h, (w * 4) as usize, &pixels, PixelOrder::Rgba);
+            let mut frame = crate::sources::Whole { view, seen_ns: t0 + i * 33_000_000 };
+            assert_eq!(session.process(&mut frame).unwrap(), Processed::Frame);
+        }
+        assert!(session.stats.strip_missing_s > 2.9, "{}", session.stats.strip_missing_s);
+        assert_eq!((session.stats.frames, session.stats.strip_ok, session.stats.keyframes), (90, 0, 0));
+        let finished = session.finish();
+        assert_eq!((finished.manifest.stats.frames, finished.manifest.stats.keyframes, finished.manifest.stats.depth_frames), (90, 0, 0));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn stretches_without_the_strip_are_counted() {
         let (root, mut session, _) = pattern_session("strip-gaps", 0);
         session.take_warnings();
         let s = |seconds: f64| (seconds * 1e9) as u64;
-        // Nothing seen yet (no kit, or not yet in view): nothing is missing.
+        // No strip yet: the service reads how long (Local User off, or an avatar without the kit, never give one).
         session.strip_missed(s(0.5));
-        assert_eq!((session.stats.strip_missing_s, session.strip_missing()), (0.0, (0, 0)));
-        session.strip_read(s(1.0));
+        session.last_frame_ns = s(3.0);
+        session.strip_missed(s(3.0));
+        assert_eq!(session.stats.strip_missing_s, 2.5);
+        session.strip_read(s(3.5));
+        assert_eq!(session.stats.strip_missing_s, 0.0);
+        session.strip_missing_ns = 0;
+        session.strip_first_ns = Some(s(1.0));
         // A blink of half a second is no stretch.
         session.strip_missed(s(2.0));
         session.strip_read(s(2.5));
         assert_eq!(session.strip_missing().0, 0);
-        // Eight seconds without it: told once, past three seconds.
+        // Eight seconds without it, read by the service as they go.
         for tenth in 30..110 {
             session.last_frame_ns = s(tenth as f64 / 10.0);
             session.strip_missed(session.last_frame_ns);
         }
         assert!((session.stats.strip_missing_s - 7.9).abs() < 0.01, "{}", session.stats.strip_missing_s);
-        let told: Vec<_> = session.take_warnings().into_iter().filter(|(k, _)| *k == Warning::Strip).collect();
-        assert_eq!(told.len(), 1, "{told:?}");
         session.strip_read(s(11.0));
         assert_eq!(session.stats.strip_missing_s, 0.0);
         // A stretch still open at the end counts too: 8 s, then 4 of the last 4.

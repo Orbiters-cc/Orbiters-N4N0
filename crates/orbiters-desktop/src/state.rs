@@ -77,6 +77,44 @@ pub struct CaptureStatus {
     /// The running capture is a 3D picture (its camera flies on its own: no coverage to follow).
     #[serde(default)]
     pub photo_3d: bool,
+    /// Why frames come without the capture strip, while they do and after a recording that never had it.
+    #[serde(default)]
+    pub no_strip: Option<NoStrip>,
+}
+
+/// Why frames come without the capture strip: no camera pose, so no keyframes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoStrip {
+    /// VRChat's camera has Local User off, which culls the capture kit with the avatar.
+    MaskOff,
+    /// The worn avatar has no capture kit.
+    NoKit,
+    /// The kit and the mask are on: a world's depth of field or motion blur, or an old upload.
+    NotDrawn,
+    /// VRChat does not say (OSC is off, or it did not answer).
+    Unknown,
+}
+
+impl NoStrip {
+    /// The sentence the person reads, once a stretch.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::MaskOff => "VRChat's camera has Local User off, which hides your avatar from the camera and N4N0's capture kit with it, so there is no camera pose and there are no keyframes. Turn Local User on in the camera's Mask menu.",
+            Self::NoKit => "The avatar you are wearing has no N4N0 capture kit, so there is no camera pose and there are no keyframes. Wear an avatar with N4N0, or add N4N0 to this one in My Avatar and upload it.",
+            Self::NotDrawn => "N4N0's capture kit and Local User are on, but the capture strip is not in the picture, so there are no keyframes. A world's depth of field or motion blur can wipe it. If it never shows, update N4N0 in My Avatar and upload the avatar again.",
+            Self::Unknown => "No capture strip in the picture, so there is no camera pose and there are no keyframes. Check that you wear an avatar with N4N0 and that Local User is on in the camera's Mask menu.",
+        }
+    }
+
+    /// The few words the page's tile has room for.
+    pub fn short(self) -> &'static str {
+        match self {
+            Self::MaskOff => "Local User is off",
+            Self::NoKit => "no capture kit on this avatar",
+            Self::NotDrawn => "the world may wipe it",
+            Self::Unknown => "no camera pose",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -413,6 +451,7 @@ impl Snapshot {
                 from_osc: false,
                 coverage: None,
                 photo_3d: false,
+                no_strip: None,
             },
             storage: StorageStatus { sessions_dir: settings.sessions_dir.clone(), limit_gb: settings.storage_limit_gb, ..Default::default() },
             settings,

@@ -1024,7 +1024,9 @@ impl Dialog {
         // The actions this item has.
         let mut actions: Vec<(Act, Button)> = Vec::new();
         if mine {
-            if !self.entry.ready && matches!(self.entry.local, Some(controller::Local::Session(_))) {
+            if self.entry.no_keyframes {
+                // Nothing to reconstruct or share: the card says why.
+            } else if !self.entry.ready && matches!(self.entry.local, Some(controller::Local::Session(_))) {
                 let queued = matches!(&self.entry.local, Some(controller::Local::Session(d)) if cx.snap.reconstruct_queue.contains(d) || cx.snap.reconstruction.as_ref().is_some_and(|j| &j.session_dir == d));
                 actions.push((
                     Act::Reconstruct,

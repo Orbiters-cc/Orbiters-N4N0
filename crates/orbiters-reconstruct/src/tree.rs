@@ -215,19 +215,35 @@ pub fn importances(g: &Gaussians) -> Vec<f32> {
     (0..g.len()).into_par_iter().map(|i| importance(g, i)).collect()
 }
 
-/// The splats that can be in a tree: visible and finite.
-pub fn eligible(g: &Gaussians) -> usize {
-    (0..g.len()).filter(|&i| g.is_finite(i) && sigmoid(g.opacity_logits[i]) >= MIN_OPACITY).count()
+/// How far from the world's origin a splat can be, and how large, along any axis, to be in a tree. The server takes
+/// positions and scales up to 100 km in a file (services/maps/mapTrees.js), and a box's merged splat spans what it holds:
+/// half of that keeps the top boxes of a tree inside it (at most about 87 km across all three axes). Training throws a few
+/// nearly invisible floaters very far: 39 beyond 100 km in YONAGA FISHING (2026-11-04), up to 900 km, at about 1 % opacity.
+/// Merged into the top of its tree they made the PC file one the server refuses, while the Quest file, which has fewer
+/// splats, had lost them by importance and passed.
+pub const MAX_REACH: f32 = 50_000.0;
+
+/// Whether a splat can be in a tree: visible, finite and within [`MAX_REACH`].
+fn treeable(g: &Gaussians, i: usize) -> bool {
+    g.is_finite(i)
+        && sigmoid(g.opacity_logits[i]) >= MIN_OPACITY
+        && g.means[i].iter().all(|v| v.abs() <= MAX_REACH)
+        && g.log_scales[i].iter().all(|v| v.exp() <= MAX_REACH)
 }
 
-/// The splats worth a tree: visible and finite, at most `max` of them (the most important).
+/// The splats that can be in a tree.
+pub fn eligible(g: &Gaussians) -> usize {
+    (0..g.len()).filter(|&i| treeable(g, i)).count()
+}
+
+/// The splats worth a tree ([`treeable`]), at most `max` of them (the most important).
 pub fn leaves(g: &Gaussians, max: usize) -> Vec<usize> {
     leaves_by(g, max, &importances(g))
 }
 
-/// The splats worth a tree: visible and finite, at most `max` of them, those `score` (one a splat) ranks highest.
+/// The splats worth a tree ([`treeable`]), at most `max` of them, those `score` (one a splat) ranks highest.
 pub fn leaves_by(g: &Gaussians, max: usize, score: &[f32]) -> Vec<usize> {
-    let mut keep: Vec<usize> = (0..g.len()).filter(|&i| g.is_finite(i) && sigmoid(g.opacity_logits[i]) >= MIN_OPACITY).collect();
+    let mut keep: Vec<usize> = (0..g.len()).filter(|&i| treeable(g, i)).collect();
     if keep.len() > max {
         keep.select_nth_unstable_by(max, |&a, &b| score[b].total_cmp(&score[a]));
         keep.truncate(max);
@@ -448,6 +464,35 @@ mod tests {
             g.push([k as f32, 3.0, 0.0], [-1.0; 3], [0.9, 0.1, 0.3, 0.2], 0.0, [1.0, 0.0, 0.0]);
         }
         g
+    }
+
+    /// What the server takes in a file (services/maps/mapTrees.js), for floaters as far as training threw them.
+    #[test]
+    fn floaters_far_away_stay_out_of_a_tree_and_its_top_stays_within_what_the_server_takes() {
+        let mut g = scene(20_000);
+        let (kept, floaters) = (g.len(), 39);
+        // Inside the limit but as far apart as it lets them be: the worst the top boxes can get.
+        for k in [-1.0f32, 1.0] {
+            for _ in 0..2_000 {
+                g.push([k * MAX_REACH, k * MAX_REACH, k * MAX_REACH], [-3.0; 3], [1.0, 0.0, 0.0, 0.0], 2.0, [0.5; 3]);
+            }
+        }
+        let inside = g.len();
+        for i in 0..floaters {
+            let far = 100_000.0 + 20_000.0 * i as f32;
+            g.push([far, -far, 3.0 * far], [-1.0; 3], [1.0, 0.0, 0.0, 0.0], logit(0.01), [0.5; 3]);
+        }
+        // A huge splat near the world is as bad.
+        g.push([0.0; 3], [12.0; 3], [1.0, 0.0, 0.0, 0.0], 2.0, [0.5; 3]);
+        assert_eq!(eligible(&g), inside, "kept {kept} of the scene and all within the limit");
+        let keep = leaves(&g, usize::MAX);
+        assert_eq!(keep.len(), inside);
+        let tree = build(&g, &keep);
+        let (limit, log_limit) = (100_000.0f32, 100_000.0f32.ln());
+        assert!(tree.nodes.iter().all(|n| n.center.iter().all(|v| v.abs() <= limit)), "every box's centre");
+        let all = tree.select(|_| true);
+        assert!(all.means.iter().flatten().all(|v| v.abs() <= limit), "every splat's place");
+        assert!(all.log_scales.iter().flatten().all(|v| *v <= log_limit), "every splat's scale");
     }
 
     #[test]

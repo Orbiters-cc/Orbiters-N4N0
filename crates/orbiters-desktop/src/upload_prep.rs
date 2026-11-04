@@ -22,8 +22,9 @@ use std::time::{Duration, Instant};
 
 // Change the format/policy marker whenever preparation changes its outputs or tuning policy. 03: splat trees of version 2
 // (20-byte records, OrbitersContracts Docs/splat-tree.md) tuned as the file stores them; caches of version 1 trees
-// prepare again (the file keeps its name, so they are replaced rather than left beside the new one).
-const MAGIC: &[u8; 8] = b"N4PREP03";
+// prepare again (the file keeps its name, so they are replaced rather than left beside the new one). 04: floaters far
+// from the world stay out of the trees (orbiters_reconstruct::tree::MAX_REACH): files prepared with them are refused.
+const MAGIC: &[u8; 8] = b"N4PREP04";
 const FILE: &str = "upload-prep-v1.bin";
 const MAX_BYTES: u64 = 100 << 20;
 pub static PREPARING: std::sync::Mutex<()> = std::sync::Mutex::new(());

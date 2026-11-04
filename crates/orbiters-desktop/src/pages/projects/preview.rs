@@ -313,11 +313,7 @@ impl Camera {
 
 /// What a preview frames first: the avatars, else everything.
 fn focus_of(h: &Header) -> file::Bounds {
-    if h.kind == Kind::Avatars {
-        h.focus
-    } else {
-        h.bounds
-    }
+    h.focus
 }
 
 /// The framing a preview opens with: avatars from the front and a little to their left, slightly from above, whole
@@ -626,7 +622,7 @@ fn steer(ctx: &egui::Context, resp: &egui::Response, camera: &mut Camera, rect: 
             let (scroll, pinch) = ctx.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
             if scroll != 0.0 || pinch != 1.0 {
                 let r = camera.radius;
-                camera.goal.distance = (camera.goal.distance * (-scroll * 0.0018).exp() / pinch).clamp(r * 0.12, r * 40.0);
+                camera.goal.distance = (camera.goal.distance * (-scroll * 0.0018).exp() / pinch).clamp(r * 0.01, r * 40.0);
                 touched = true;
             }
         }
@@ -958,7 +954,7 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         let source = shown.map(|s| &s.source);
         // The light switch, when the file recorded its scene's lights (Toolkit's, or the directional lights and gradient
         // or flat ambient light a built one read); its Scene light only when they show the scene.
-        let light = header.lighting.as_ref().map(|l| LightSwitch { prefer_scene: scene_light, scene_shows: preview_gpu::scene_light_shows(l) });
+        let light = header.lighting.as_ref().map(|_| LightSwitch { prefer_scene: scene_light, scene_shows: preview_gpu::scene_light_shows_header(&header) });
         let mut scene_rects = Vec::new();
         chrome(&mut cu, cx, &project, header, written, source, &scenes, &mut scene_rects, busy, f.rect, light, &mut light_switch, &mut act);
         rects_out = scene_rects;
@@ -1139,7 +1135,7 @@ fn chrome(
     facts.push(format!("{} triangles", compact(s.triangles)));
     facts.push(if h.materials.len() == 1 { "1 material".to_string() } else { format!("{} materials", h.materials.len()) });
     // Left out for the budget or unreadable (utility shaders and empty meshes are not worth a word).
-    let skipped: u32 = s.skipped.iter().filter(|(k, _)| matches!(k.as_str(), "budget" | "missing" | "pose")).map(|(_, n)| n).sum();
+    let skipped: u32 = s.skipped.iter().filter(|(k, _)| matches!(k.as_str(), "budget" | "missing")).map(|(_, n)| n).sum();
     let mut x = rect.left() + 14.0;
     let y = rect.bottom() - 14.0 - 15.0;
     for fact in &facts {
@@ -1160,7 +1156,6 @@ fn chrome(
         let why = [
             (n("budget"), "beyond the preview's 2 million triangles"),
             (n("missing"), "could not be read"),
-            (n("pose"), "posed out of shape by their bones (built from the project's files)"),
         ]
         .iter()
         .filter(|(k, _)| *k > 0)
@@ -1599,6 +1594,7 @@ fn stand_in_scene(scene: &str) -> Vec<u8> {
             indices,
             submeshes: vec![Submesh { start: 0, count: idx.len() as u32 }],
             bounds: b,
+            lightmap_uv: None,
         });
     };
     add_mesh(&mut w, sphere(0.34, 48, 32));
@@ -1657,7 +1653,7 @@ fn stand_in_scene(scene: &str) -> Vec<u8> {
     ];
     let matrices = w.push(&instances.iter().flatten().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>());
     let draws = [(0, 0, 0), (1, 1, 1), (2, 2, 2), (3, 3, 3), (4, 3, 4)]
-        .map(|(i, m, mat)| Draw { instance: i, mesh: m, materials: vec![mat], shadows: true, avatar: Some(0) })
+        .map(|(i, m, mat)| Draw { instance: i, mesh: m, materials: vec![mat], shadows: true, avatar: Some(0), lightmap: None })
         .to_vec();
     let bounds = Bounds { min: [-0.72, 0.0, -0.55], max: [0.78, 0.96, 0.55] };
     let header = Header {
@@ -1679,8 +1675,8 @@ fn stand_in_scene(scene: &str) -> Vec<u8> {
         // Its scene's light: a low warm sun from the right casting shadows, a cool light from behind, a dusky sky.
         lighting: Some(file::Lighting {
             lights: vec![
-                file::SceneLight { direction: [-0.8, -0.45, 0.4], color: [1.25, 0.82, 0.52], intensity: 1.25, shadows: true, shadow_strength: 0.9 },
-                file::SceneLight { direction: [0.2, -0.3, -0.93], color: [0.18, 0.3, 0.6], intensity: 0.6, shadows: false, shadow_strength: 1.0 },
+                file::SceneLight { direction: [-0.8, -0.45, 0.4], color: [1.25, 0.82, 0.52], intensity: 1.25, shadows: true, shadow_strength: 0.9, baked: false },
+                file::SceneLight { direction: [0.2, -0.3, -0.93], color: [0.18, 0.3, 0.6], intensity: 0.6, shadows: false, shadow_strength: 1.0, baked: false },
             ],
             ambient: Some(file::Ambient {
                 mode: file::AmbientMode::Trilight,
@@ -1689,7 +1685,10 @@ fn stand_in_scene(scene: &str) -> Vec<u8> {
                 ground: [0.05, 0.04, 0.04],
             }),
             reflection_intensity: 1.0,
+            fog: None,
         }),
+        lightmaps: Vec::new(),
+        sky: None,
         stats: file::Stats { renderers: 5, triangles: 24_576, vertices: 14_000, skipped: Default::default() },
         cost: None,
     };

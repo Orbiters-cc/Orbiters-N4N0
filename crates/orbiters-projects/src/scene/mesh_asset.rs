@@ -136,6 +136,7 @@ pub fn parse(m: &Value) -> anyhow::Result<ModelMesh> {
         vec![[0.0, 1.0, 0.0]; count]
     };
     let uvs: Vec<[f32; 2]> = if has(4) { (0..count).map(|v| [read(4, v, 0), read(4, v, 1)]).collect() } else { vec![[0.0; 2]; count] };
+    let uv2: Vec<[f32; 2]> = if has(5) { (0..count).map(|v| [read(5, v, 0), read(5, v, 1)]).collect() } else { Vec::new() };
 
     let index_bytes = match m.get("m_IndexBuffer") {
         Value::Bytes(b) => b.clone(),
@@ -216,7 +217,7 @@ pub fn parse(m: &Value) -> anyhow::Result<ModelMesh> {
             .collect();
         blend_shapes.push(BlendShape { name: c.get("name").str_or("").to_string(), frames, default_weight: 0.0 });
     }
-    Ok(ModelMesh { name: m.get("m_Name").str_or("").to_string(), positions, normals, uvs, submeshes, skin, blend_shapes })
+    Ok(ModelMesh { name: m.get("m_Name").str_or("").to_string(), positions, normals, uvs, uv2, submeshes, skin, blend_shapes })
 }
 
 #[cfg(test)]

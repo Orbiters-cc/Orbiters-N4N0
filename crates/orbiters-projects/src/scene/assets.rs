@@ -185,7 +185,7 @@ fn likely(asset: &str) -> bool {
     let ext = asset.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     matches!(
         ext.as_str(),
-        "prefab" | "fbx" | "obj" | "mat" | "png" | "jpg" | "jpeg" | "tga" | "psd" | "psb" | "bmp" | "tif" | "tiff" | "gif" | "shader" | "mesh"
+        "prefab" | "fbx" | "obj" | "blend" | "mat" | "png" | "jpg" | "jpeg" | "tga" | "psd" | "psb" | "bmp" | "tif" | "tiff" | "gif" | "exr" | "hdr" | "shader" | "mesh"
     )
 }
 

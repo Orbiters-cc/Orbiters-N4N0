@@ -1,9 +1,8 @@
 //! The cameras a session recorded at its keyframes, and where a view of its splats starts: the 3D view
 //! (pages/splats.rs) and the web preview shared on the Map explorer (controller/maps.rs) open looking the way the same
 //! camera looked, from its place but at the eye height of the person who captured over the ground they stood on
-//! (orbiters_reconstruct::ground), orbiting what it looks at. A 3D picture with close-ups (controller/burst.rs: VRChat's
-//! camera zoomed in on its framing before it flies) opens exactly as the camera framed it, where its people are
-//! sharpest.
+//! (orbiters_reconstruct::ground), orbiting what it looks at. A 3D picture (controller/burst.rs) opens exactly as its camera
+//! framed it: that moment is what its owner chose.
 
 use orbiters_core::contracts::frame_record::record_flags;
 use orbiters_core::{bundle, reconstruction};
@@ -20,13 +19,17 @@ pub struct View {
     pub fov_y: f32,
     /// When it was recorded (the session's clock), for a recorded keyframe.
     pub time_ns: Option<u64>,
-    /// A 3D picture's own framing (the camera where it stood for its close-ups): a view opens exactly there, not at
-    /// the eye height of the person who took it ([`eye_level`]).
+    /// A 3D picture's own framing (the camera where it stood when the picture was taken): a view opens exactly there, not
+    /// at the eye height of the person who took it ([`eye_level`]).
     pub framed: bool,
 }
 
-/// Every keyframe's camera, and which one to start from: a 3D picture's framing when it took close-ups ([`framing`]),
-/// else the keyframe the reconstruction's preview shows, else the first.
+/// How long a recording can be to count as a 3D picture here, game seconds: an 8 s flight, the pause before it and what the
+/// capture adds around them came to 11 in the pictures of 2026-11-04.
+const PICTURE_S: f32 = 15.0;
+
+/// Every keyframe's camera, and which one to start from: a 3D picture's first frame, else the keyframe the reconstruction's
+/// preview shows, else the first. A short recording of another kind opens on its first frame too, which is as good a view.
 pub fn recorded(dir: &Path) -> anyhow::Result<(Vec<View>, usize)> {
     let report = reconstruction::read_report(dir);
     let records = bundle::read_records(dir)?;
@@ -35,32 +38,26 @@ pub fn recorded(dir: &Path) -> anyhow::Result<(Vec<View>, usize)> {
     let mut views: Vec<View> = cameras
         .iter()
         .zip(&keyframes)
-        .map(|(cam, r)| View { position: cam.position(), forward: cam.forward(), fov_y: usable_fov(cam.fov_y()), time_ns: Some(r.capture_time_ns), framed: false })
+        .map(|(cam, r)| View {
+            position: cam.position(),
+            forward: cam.forward(),
+            fov_y: usable_fov(cam.fov_y()),
+            time_ns: Some(r.capture_time_ns),
+            framed: false,
+        })
         .collect();
     anyhow::ensure!(!views.is_empty(), "this session has no keyframe to look from");
-    // Focal lengths of the frames only, of their most common size: a rig face's 90° square is no zoom (in a 3D
-    // picture the faces outnumber the frames six to one), nor is a frame of another size.
+    // Of the frames, a rig face's 90° square being no view of the picture.
     use orbiters_core::contracts::strip::flags;
-    let face = |r: &&orbiters_core::contracts::frame_record::FrameRecord| flags::kind(r.strip_flags) == flags::KIND_RIG && flags::face(r.strip_flags) != 0;
-    let sizes: Vec<Option<(u32, u32)>> = keyframes.iter().map(|r| (!face(r)).then_some((r.width, r.height))).collect();
-    let main = sizes.iter().flatten().copied().max_by_key(|s| sizes.iter().filter(|t| **t == Some(*s)).count());
-    let focals: Vec<f32> = cameras.iter().zip(&sizes).map(|(c, s)| if s.is_some() && *s == main { c.fy / c.height as f32 } else { f32::NAN }).collect();
-    if let Some(i) = framing(&focals) {
+    let frame = keyframes.iter().position(|r| !(flags::kind(r.strip_flags) == flags::KIND_RIG && flags::face(r.strip_flags) != 0));
+    let times = keyframes.iter().map(|r| r.game_time);
+    let span = times.clone().fold(f32::MIN, f32::max) - times.fold(f32::MAX, f32::min);
+    if let Some(i) = frame.filter(|_| span <= PICTURE_S) {
         views[i].framed = true;
         return Ok((views, i));
     }
     let start = report.as_ref().and_then(|r| r.held_out_keyframes.first()).and_then(|k| keyframes.iter().position(|r| r.keyframe_index == *k)).unwrap_or(0);
     Ok((views, start))
-}
-
-/// Of keyframes with these focal lengths (in record order; NaN for those that are not frames of the session's size),
-/// a 3D picture's framing when it took close-ups (orbiters_reconstruct::dataset::detail_views: the camera zoomed in where
-/// it stood before it flew): the last keyframe before the first close-up that is not one, the picture as the camera
-/// framed it (the close-ups that follow look over the same view at more than twice its resolution).
-pub fn framing(focals: &[f32]) -> Option<usize> {
-    let detail = orbiters_reconstruct::dataset::detail_views(focals);
-    let first = *detail.first()?;
-    (0..first).rev().find(|i| focals[*i].is_finite() && detail.binary_search(i).is_err())
 }
 
 /// Where a view of `dir`'s splats `g` starts, from its recorded view `v`: looking the same way from the same place, at
@@ -102,39 +99,18 @@ pub fn depth_ahead(g: &Gaussians, v: &View) -> f32 {
 mod tests {
     use super::*;
 
+    /// A 3D picture's frames.bin as the capture writes it: the start, then a flight whose every other frame is a rig frame
+    /// with six 90° faces (keyframes of their own, 420 px square, outnumbering the frames). It opens at the start, exactly
+    /// where the camera stood, even when a rig face comes first; a longer recording, at the first held-out keyframe as before.
     #[test]
-    fn a_3d_picture_with_close_ups_opens_as_its_camera_framed_it() {
-        // Focal length over the image height at 47.3 degrees and at VRChat's narrowest, 20.
-        let (wide, zoomed) = (1.143, 2.836);
-        // The start, nine close-ups, the start zoomed back out, then the flight (a rig face is no frame of the size).
-        let mut picture = vec![wide];
-        picture.extend([zoomed; 9]);
-        picture.extend([wide; 30]);
-        picture.insert(20, f32::NAN);
-        assert_eq!(framing(&picture), Some(0));
-        // The start keyframe lost: nothing before the close-ups, so no framing to open.
-        assert_eq!(framing(&picture[1..]), None);
-        // A recording without close-ups, or one zoomed in all along: none (the preview's keyframe, as before).
-        assert_eq!(framing(&[wide; 40]), None);
-        assert_eq!(framing(&[zoomed; 40]), None);
-        // A slight zoom is no close-up.
-        let mut slight = vec![wide; 40];
-        slight[5] = wide * 1.2;
-        assert_eq!(framing(&slight), None);
-    }
-
-    /// A 3D picture's frames.bin as the capture writes it: the start, nine close-ups (20°), the start zoomed back out,
-    /// then a flight whose every other frame is a rig frame with six 90° faces (keyframes of their own, 420 px square,
-    /// outnumbering the frames). It opens at the start, exactly where the camera stood; without close-ups, at the first
-    /// held-out keyframe as before.
-    #[test]
-    fn a_session_with_close_ups_opens_at_its_start() {
+    fn a_3d_picture_opens_at_its_start() {
         use orbiters_core::contracts::frame_record::{FrameRecord, RECORD_SIZE};
         use orbiters_core::contracts::strip::flags;
         let p11 = |fov: f32| 1.0 / (fov.to_radians() / 2.0).tan();
-        let frame = |i: usize, x: f32, fov: f32, key: i32| FrameRecord {
+        let frame = |i: usize, x: f32, fov: f32, key: i32, time: f32| FrameRecord {
             flags: record_flags::STRIP_OK | record_flags::KEYFRAME,
             frame_index: i as u64,
+            game_time: time,
             camera_to_world: [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, 1.2, 0.0, 0.0, 1.0, 0.0],
             projection: [p11(fov) * 9.0 / 16.0, p11(fov), 0.0, 0.0],
             width: 1920,
@@ -142,18 +118,15 @@ mod tests {
             keyframe_index: key,
             ..Default::default()
         };
-        let write = |dir: &std::path::Path, close_ups: bool| {
-            let mut records = vec![frame(0, 0.0, 47.3, 0)];
-            if close_ups {
-                records.extend((1..=9).map(|k| frame(k, 0.0, 20.0, k as i32)));
-                records.push(frame(10, 0.0, 47.3, 10));
-            }
+        let write = |dir: &std::path::Path, seconds_apart: f32| {
+            let mut records = vec![frame(0, 0.0, 47.3, 0, 0.0)];
             for k in 0..30 {
                 let key = records.len() as i32;
-                records.push(frame(records.len(), 0.5 + k as f32, 47.3, key));
+                let time = k as f32 * seconds_apart;
+                records.push(frame(records.len(), 0.5 + k as f32, 47.3, key, time));
                 for face in 1..=6 {
                     let key = records.len() as i32;
-                    let mut f = frame(records.len(), 0.5 + k as f32, 90.0, key);
+                    let mut f = frame(records.len(), 0.5 + k as f32, 90.0, key, time);
                     (f.width, f.height, f.projection) = (420, 420, [1.0, 1.0, 0.0, 0.0]);
                     f.strip_flags = flags::compose(flags::KIND_RIG, 0, 0, face, 0);
                     records.push(f);
@@ -169,14 +142,14 @@ mod tests {
             let report = reconstruction::Report { held_out_keyframes: vec![25], ..Default::default() };
             std::fs::write(result.join(reconstruction::REPORT_FILE), serde_json::to_vec(&report).unwrap()).unwrap();
         };
-        let root = std::env::temp_dir().join(format!("orbiters-views-close-ups-{}", std::process::id()));
-        write(&root.join("picture"), true);
+        let root = std::env::temp_dir().join(format!("orbiters-views-picture-{}", std::process::id()));
+        write(&root.join("picture"), 0.2);
         let (views, start) = recorded(&root.join("picture")).unwrap();
         assert_eq!(start, 0, "the start keyframe");
         assert!(views[0].framed && views.iter().filter(|v| v.framed).count() == 1);
-        assert!((views[0].fov_y.to_degrees() - 47.3).abs() < 0.01, "its own field of view, not a close-up's");
-        write(&root.join("plain"), false);
-        let (views, start) = recorded(&root.join("plain")).unwrap();
+        assert!((views[0].fov_y.to_degrees() - 47.3).abs() < 0.01);
+        write(&root.join("long"), 2.0);
+        let (views, start) = recorded(&root.join("long")).unwrap();
         assert_eq!(start, 25, "the preview's keyframe, as before");
         assert!(views.iter().all(|v| !v.framed));
         let _ = std::fs::remove_dir_all(&root);

@@ -227,8 +227,8 @@ pub enum ViewGpu {
     Never,
 }
 
-/// A 3D picture's length: a gentle 1 s sweep, 4 s that circle you and fly 10 m out every way, or 8 s that also circle
-/// four points 8 m away.
+/// A 3D picture's length: a gentle 1 s sweep, or 4 or 8 s around the people in it and through the room (with no depth frames to go by, 4 s that circle you and fly 10 m out every way, or 8 s that also circle
+/// four points 8 m away).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Photo3dLength {

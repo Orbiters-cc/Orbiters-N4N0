@@ -142,6 +142,11 @@ impl super::Controller {
         }
     }
 
+    /// Where the capture kit last said the avatar's hips are, during a recording.
+    pub(super) fn hips_now(&self) -> Option<[f32; 3]> {
+        self.rig.lock().unwrap().hips.map(|h| h.0)
+    }
+
     /// Switches the rig on or off when it is not already.
     fn switch_rig(&self, on: bool) {
         let mut rig = self.rig.lock().unwrap();

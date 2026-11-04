@@ -149,6 +149,83 @@ pub fn fill_nested_squircle(painter: &Painter, frame: Rect, frame_radius: f32, i
     fill_squircle(painter, inner, nested_radius(frame, frame_radius, inner), color);
 }
 
+/// Rounds what a scroll area inside a squircle frame cuts off. egui clips to rectangles only, so a list scrolled in a
+/// rounded frame is cut square; this paints over the four corners of `inner` (the rectangle the content is clipped to)
+/// what is outside the frame's shape nested in it ([`nested_radius`]), in `color`, which has to be the frame's fill. Call
+/// it after the content, before anything meant to float over it.
+pub fn round_clipped_corners(painter: &Painter, frame: Rect, frame_radius: f32, inner: Rect, color: Color32) {
+    painter.add(Shape::mesh(clipped_corners_mesh(inner, nested_radius(frame, frame_radius, inner), color, feather(painter) * 0.5)));
+}
+
+/// How far the masks of [`clipped_corners_mesh`] reach past `inner`'s sides: content's anti-aliased edge lies half a pixel
+/// over its rectangle, and would show beside a mask ending right on it.
+const MASK_BLEED: f32 = 1.0;
+
+/// The four corner masks of [`round_clipped_corners`], each a fan from the square corner to the curve (with the frame's
+/// fill on the square corner's side), anti-aliased along the curve only: their other edges lie on the frame's own fill.
+fn clipped_corners_mesh(inner: Rect, radius: f32, color: Color32, f: f32) -> Mesh {
+    let limit = (inner.width() * 0.5).min(inner.height() * 0.5).max(0.0);
+    let r = radius.clamp(0.0, limit);
+    let mut mesh = Mesh::default();
+    if r < 0.5 {
+        return mesh;
+    }
+    let root = |v: f32| v.signum() * v.abs().sqrt();
+    let steps = ((r * 0.5).ceil() as usize).clamp(8, 24);
+    let corners = [
+        (inner.left_top(), pos2(inner.left() + r, inner.top() + r), 180.0f32, vec2(-1.0, -1.0)),
+        (inner.right_top(), pos2(inner.right() - r, inner.top() + r), 270.0, vec2(1.0, -1.0)),
+        (inner.right_bottom(), pos2(inner.right() - r, inner.bottom() - r), 0.0, vec2(1.0, 1.0)),
+        (inner.left_bottom(), pos2(inner.left() + r, inner.bottom() - r), 90.0, vec2(-1.0, 1.0)),
+    ];
+    for (hub, centre, start, out) in corners {
+        // The curve as `squircle_points_corners` draws it, so that it is the frame's shape and not a likeness of it.
+        let curve: Vec<Pos2> = (0..=steps)
+            .map(|i| {
+                let a = (start + 90.0 * i as f32 / steps as f32).to_radians();
+                centre + vec2(root(a.cos()), root(a.sin())) * r
+            })
+            .collect();
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(hub, color);
+        // The rim the fan goes round: from beside the square corner out along one of its sides, the curve, and back along
+        // the other side. Each side bleeds outwards, stopping short of the square corner itself, which is as far as the
+        // frame's own curve leaves room for.
+        let (first, last) = (curve[0], curve[steps]);
+        let side_a = if (first.x - hub.x).abs() < (first.y - hub.y).abs() { vec2(out.x, 0.0) } else { vec2(0.0, out.y) };
+        let side_b = out - side_a;
+        mesh.colored_vertex(hub + (side_a - side_b) * MASK_BLEED, color);
+        mesh.colored_vertex(first + side_a * MASK_BLEED, color);
+        // The curve's vertices: filled on the corner's side, transparent a feather into what shows.
+        let rim_curve = mesh.vertices.len() as u32;
+        for i in 0..=steps {
+            let (before, after) = (curve[i.saturating_sub(1)], curve[(i + 1).min(steps)]);
+            let tangent = (after - before).normalized();
+            let mut normal = vec2(tangent.y, -tangent.x);
+            if normal.dot(hub - curve[i]) < 0.0 {
+                normal = -normal;
+            }
+            mesh.colored_vertex(curve[i] + normal * f, color);
+            mesh.colored_vertex(curve[i] - normal * f, Color32::TRANSPARENT);
+        }
+        mesh.colored_vertex(last + side_b * MASK_BLEED, color);
+        mesh.colored_vertex(hub + (side_b - side_a) * MASK_BLEED, color);
+        // The fan.
+        let after_curve = rim_curve + 2 * (steps as u32 + 1);
+        let rim: Vec<u32> = [base + 1, base + 2].into_iter().chain((0..=steps as u32).map(|i| rim_curve + 2 * i)).chain([after_curve, after_curve + 1]).collect();
+        for pair in rim.windows(2) {
+            mesh.add_triangle(base, pair[0], pair[1]);
+        }
+        // The feather.
+        for i in 0..steps as u32 {
+            let (a, a_out, b, b_out) = (rim_curve + 2 * i, rim_curve + 2 * i + 1, rim_curve + 2 * i + 2, rim_curve + 2 * i + 3);
+            mesh.add_triangle(a, a_out, b_out);
+            mesh.add_triangle(a, b_out, b);
+        }
+    }
+    mesh
+}
+
 /// The fill of [`fill_squircle`] as a mesh (for shapes set later with `Painter::set`); `feather` in points.
 pub fn squircle_mesh(rect: Rect, radius: f32, color: Color32, feather: f32) -> Mesh {
     convex_mesh(&squircle_points(rect, radius), |_| color, feather * 0.5)
@@ -517,6 +594,77 @@ mod tests {
         let thin = shadow_mesh(Rect::from_min_size(pos2(0.0, 0.0), vec2(120.0, 28.0)), 14.0, 40.0, black).vertices.last().unwrap().color.a();
         assert!(thin > 60 && thin < 180, "{thin}");
         assert!((normal_cdf(0.0) - 0.5).abs() < 1e-6 && (normal_cdf(1.96) - 0.975).abs() < 1e-3 && (normal_cdf(-1.96) - 0.025).abs() < 1e-3);
+    }
+
+    /// How opaque a mesh of plain triangles is at `p` (the most of any triangle over it).
+    fn coverage(mesh: &Mesh, p: Pos2) -> u8 {
+        let mut most = 0.0f32;
+        for t in mesh.indices.chunks(3) {
+            let [a, b, c] = [t[0], t[1], t[2]].map(|i| mesh.vertices[i as usize]);
+            let d = (b.pos - a.pos).x * (c.pos - a.pos).y - (b.pos - a.pos).y * (c.pos - a.pos).x;
+            if d.abs() < 1e-6 {
+                continue;
+            }
+            let u = ((p - a.pos).x * (c.pos - a.pos).y - (p - a.pos).y * (c.pos - a.pos).x) / d;
+            let v = ((b.pos - a.pos).x * (p - a.pos).y - (b.pos - a.pos).y * (p - a.pos).x) / d;
+            if u >= -1e-4 && v >= -1e-4 && u + v <= 1.0 + 1e-4 {
+                most = most.max(a.color.a() as f32 * (1.0 - u - v) + b.color.a() as f32 * u + c.color.a() as f32 * v);
+            }
+        }
+        most.round() as u8
+    }
+
+    /// Outside (above 1), on (1) or inside (below 1) a squircle of radius `r` in `rect`, `p` being in one of its corners.
+    fn squircle_side(rect: Rect, r: f32, p: Pos2) -> f32 {
+        let centre = pos2(p.x.clamp(rect.left() + r, rect.right() - r), p.y.clamp(rect.top() + r, rect.bottom() - r));
+        ((p.x - centre.x).abs() / r).powi(4) + ((p.y - centre.y).abs() / r).powi(4)
+    }
+
+    /// The side panel's list: a frame of squircle radius 48, the list clipped 8 points inside it (14 on the right, where
+    /// its scroll bar runs).
+    #[test]
+    fn corner_masks_cover_exactly_what_the_frames_shape_leaves_out_and_stay_inside_the_frame() {
+        let frame = Rect::from_min_size(pos2(100.0, 50.0), vec2(400.0, 600.0));
+        let inner = Rect::from_min_max(frame.min + vec2(8.0, 8.0), frame.max - vec2(14.0, 8.0));
+        let r = nested_radius(frame, 48.0, inner);
+        assert_eq!(r, 40.0);
+        let mesh = clipped_corners_mesh(inner, r, Color32::RED, 0.5);
+        // No part of a mask shows outside the frame, whatever is behind it there.
+        for v in &mesh.vertices {
+            if v.color.a() > 0 {
+                assert!(squircle_side(frame, 48.0, v.pos) <= 1.0, "{:?} is outside the frame", v.pos);
+            }
+        }
+        let (mut covered, mut open) = (0, 0);
+        let mut y = inner.top() + 0.25;
+        while y < inner.bottom() {
+            let mut x = inner.left() + 0.25;
+            while x < inner.right() {
+                let p = pos2(x, y);
+                let side = squircle_side(inner, r, p);
+                // Clear of the feather: well outside the shape or inside it.
+                if side > 1.15 {
+                    assert_eq!(coverage(&mesh, p), 255, "content shows at {p:?} outside the frame's shape ({side})");
+                    covered += 1;
+                } else if side < 0.85 {
+                    assert_eq!(coverage(&mesh, p), 0, "a mask covers content at {p:?} ({side})");
+                    open += 1;
+                }
+                x += 1.0;
+            }
+            y += if y - inner.top() > 60.0 && inner.bottom() - y > 60.0 { 20.0 } else { 1.0 };
+        }
+        assert!(covered > 100 && open > 1000, "{covered} {open}");
+        // A hair beside the list's left edge too: a card's soft edge lies there.
+        let beside = pos2(inner.left() - 0.5, inner.bottom() - 10.0);
+        assert_eq!(coverage(&mesh, beside), 255);
+    }
+
+    #[test]
+    fn a_clip_as_far_inside_as_the_frames_radius_has_no_mask() {
+        let frame = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 600.0));
+        let inner = frame.shrink(48.0);
+        assert!(clipped_corners_mesh(inner, nested_radius(frame, 48.0, inner), Color32::RED, 0.5).vertices.is_empty());
     }
 
     #[test]

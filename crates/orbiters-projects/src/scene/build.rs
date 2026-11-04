@@ -769,6 +769,14 @@ fn clone_mesh(m: &ModelMesh) -> ModelMesh {
     }
 }
 
+/// A material slot's name and base picture, as a preview would resolve them (diagnostics: `scene_preview --materials`).
+pub fn material_of_slot(loader: &mut Loader, src: &MatSource, shader_names: &mut HashMap<String, String>) -> String {
+    match resolve_material(loader, src, shader_names) {
+        Ok(look) => format!("{} [{}]", look.material.name, look.main_texture.unwrap_or_default()),
+        Err(e) => format!("(failed: {e:#})"),
+    }
+}
+
 /// A material slot's look.
 fn resolve_material(loader: &mut Loader, src: &MatSource, shader_names: &mut HashMap<String, String>) -> anyhow::Result<Look> {
     match src {
@@ -795,9 +803,10 @@ fn resolve_material(loader: &mut Loader, src: &MatSource, shader_names: &mut Has
                 if prefab::only_unity_reads(&ext) {
                     anyhow::bail!("a material of {}, only in its import", prefab::rel(loader.assets, &path));
                 }
-                // A model's own material, by Unity's ID of it.
+                // A model's own material, by Unity's ID of it: its name's hash, or a name an older import numbered.
                 let m = loader.model(guid)?;
-                let k = m.materials.iter().position(|mm| super::model::file_id("Material", &mm.name, 0) == r.file_id).unwrap_or(0);
+                let named = loader.model_settings(guid).material_ids.get(&r.file_id).cloned();
+                let k = m.materials.iter().position(|mm| super::model::file_id("Material", &mm.name, 0) == r.file_id || named.as_deref() == Some(mm.name.as_str())).unwrap_or(0);
                 return model_slot(loader, guid, k, shader_names);
             }
             mat_file(loader, &path, shader_names)
@@ -851,16 +860,22 @@ fn shader_name_of(loader: &mut Loader, shader: Option<super::yaml::Ref>, shader_
     }
 }
 
-/// What Unity draws in a model's material slot: the material its import remaps there, the legacy external material
-/// found by name, or the model's own (its colour and its texture found by name in the project).
+/// What Unity draws in a model's material slot: nothing of the file's when its import makes no materials, the material
+/// its import remaps there, the legacy external material found by name, or the model's own (its colour and its texture
+/// found by name in the project).
 fn model_slot(loader: &mut Loader, guid: &str, k: usize, shader_names: &mut HashMap<String, String>) -> anyhow::Result<Look> {
     let model = loader.model(guid)?;
     let settings = loader.model_settings(guid);
+    if !settings.import_materials {
+        return Ok(Look { material: file::Material { name: "Default-Material".into(), ..Default::default() }, ..Default::default() });
+    }
     let mm = model.materials.get(k).cloned().unwrap_or_default();
     if let Some(remap) = settings.remapped.get(&mm.name) {
-        if let Some(p) = loader.assets.path(remap) {
-            return mat_file(loader, &p, shader_names);
-        }
+        // A remap to a material no longer in the project leaves the slot empty in Unity's import, not the file's own.
+        return match loader.assets.path(remap) {
+            Some(p) => mat_file(loader, &p, shader_names),
+            None => resolve_material(loader, &MatSource::None, shader_names),
+        };
     }
     let model_path = loader.assets.path(guid).unwrap_or_default();
     let dir = model_path.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -1329,6 +1344,165 @@ fn tree_parts(src: &Graph, loader: &mut Loader) -> Vec<TreePart> {
 mod tests {
     use super::*;
     use crate::scene::prefab::tests::project;
+
+    const BODY_MODEL: &str = "abab0000000000000000000000000001";
+    const MISC_MAT: &str = "abab0000000000000000000000000002";
+    const BODY_MAT: &str = "abab0000000000000000000000000003";
+
+    /// A project never opened in Unity: the model whose first face is its second slot's ([`FIRST_FACE_MISC`]), with this
+    /// `.meta`, two materials of the project, and a scene placing the model with these overrides of its renderer.
+    ///
+    /// [`FIRST_FACE_MISC`]: crate::scene::model::tests::FIRST_FACE_MISC
+    fn body_scene(dir: &Path, meta: &str, overrides: &str) -> Built {
+        use crate::scene::model::{self, tests::FIRST_FACE_MISC};
+        let mut assets = Assets::empty(dir);
+        let a = dir.join("Assets");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::write(a.join("Body.fbx"), FIRST_FACE_MISC).unwrap();
+        std::fs::write(a.join("Body.fbx.meta"), format!("fileFormatVersion: 2\nguid: {BODY_MODEL}\nModelImporter:\n{meta}")).unwrap();
+        assets.insert(BODY_MODEL, a.join("Body.fbx"));
+        for (guid, name) in [(MISC_MAT, "misc"), (BODY_MAT, "body")] {
+            let text = format!("%YAML 1.1\n--- !u!21 &2100000\nMaterial:\n  m_Name: {name}\n  m_Shader: {{fileID: 46, guid: 0000000000000000f000000000000000, type: 0}}\n");
+            let path = a.join(format!("{name}.mat"));
+            std::fs::write(&path, text).unwrap();
+            assets.insert(guid, path);
+        }
+        let renderer = model::file_id("MeshRenderer", "//RootNode/root/MeshRenderer", 0);
+        let overrides = overrides.replace("RENDERER", &renderer.to_string());
+        let file = scene_file(
+            dir,
+            &mut assets,
+            &format!(
+                "%YAML 1.1
+--- !u!1001 &500
+PrefabInstance:
+  m_Modification:
+    m_TransformParent: {{fileID: 0}}
+    m_Modifications:
+{overrides}    m_RemovedComponents: []
+  m_SourcePrefab: {{fileID: 100100000, guid: {BODY_MODEL}, type: 3}}
+"
+            ),
+        );
+        build(dir, &file, &assets, &Limits::default()).unwrap()
+    }
+
+    /// Each submesh of the only draw: its triangles and its material's name.
+    fn parts_of(built: &Built) -> Vec<(u32, String)> {
+        let h = &built.header;
+        assert_eq!(h.draws.len(), 1, "{:?}", built.report);
+        let d = &h.draws[0];
+        h.meshes[d.mesh as usize].submeshes.iter().zip(&d.materials).map(|(s, &m)| (s.count / 3, h.materials[m as usize].name.clone())).collect()
+    }
+
+    /// What Enzo saw on Ultirex 4.1 before opening it: the scene gives slot 0 the misc material and slot 1 the body's, as
+    /// saved against Unity's order of the submeshes, and the body drew the misc material.
+    #[test]
+    fn a_scenes_materials_land_on_the_submeshes_unity_gave_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let overrides = format!(
+            "    - target: {{fileID: RENDERER, guid: {BODY_MODEL}, type: 3}}
+      propertyPath: m_Materials.Array.data[0]
+      value:
+      objectReference: {{fileID: 2100000, guid: {MISC_MAT}, type: 2}}
+    - target: {{fileID: RENDERER, guid: {BODY_MODEL}, type: 3}}
+      propertyPath: m_Materials.Array.data[1]
+      value:
+      objectReference: {{fileID: 2100000, guid: {BODY_MAT}, type: 2}}
+"
+        );
+        let built = body_scene(dir.path(), "  materials:\n    materialImportMode: 2\n", &overrides);
+        assert_eq!(parts_of(&built), [(1, "misc".to_string()), (2, "body".to_string())]);
+    }
+
+    /// A model changed after its last import: its artifact is passed over and the file is read, which must come out as
+    /// the import of that file will, or the preview changes again once Unity has imported it.
+    #[test]
+    fn a_stale_import_is_passed_over_and_the_scenes_materials_still_land_right() {
+        use crate::scene::artifact::tests::{install, model_artifact};
+        let dir = tempfile::tempdir().unwrap();
+        // One submesh, unlike the model: drawn from this, the test could not see two.
+        install(dir.path(), BODY_MODEL, &model_artifact());
+        let artifact = dir.path().join("Library/Artifacts/1b").join("1b".repeat(16));
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&artifact).unwrap().set_modified(old).unwrap();
+        let overrides = format!(
+            "    - target: {{fileID: RENDERER, guid: {BODY_MODEL}, type: 3}}
+      propertyPath: m_Materials.Array.data[0]
+      value:
+      objectReference: {{fileID: 2100000, guid: {MISC_MAT}, type: 2}}
+    - target: {{fileID: RENDERER, guid: {BODY_MODEL}, type: 3}}
+      propertyPath: m_Materials.Array.data[1]
+      value:
+      objectReference: {{fileID: 2100000, guid: {BODY_MAT}, type: 2}}
+"
+        );
+        let built = body_scene(dir.path(), "  materials:\n    materialImportMode: 2\n", &overrides);
+        assert_eq!(parts_of(&built), [(1, "misc".to_string()), (2, "body".to_string())]);
+    }
+
+    #[test]
+    fn a_models_own_materials_stay_on_their_submeshes() {
+        let dir = tempfile::tempdir().unwrap();
+        let built = body_scene(dir.path(), "  materials:\n    materialImportMode: 2\n", "");
+        assert_eq!(parts_of(&built), [(1, "MiscMatt".to_string()), (2, "BodyMatt".to_string())]);
+    }
+
+    /// A scene saved against an older import names a model's own material by that import's number, kept in the `.meta`
+    /// (as `1 FBX.fbx` in Enzo's Ulti Zika Wolf V2 does): the first material, always, was not it.
+    #[test]
+    fn a_models_own_material_is_found_by_an_older_imports_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let overrides = format!(
+            "    - target: {{fileID: RENDERER, guid: {BODY_MODEL}, type: 3}}
+      propertyPath: m_Materials.Array.data[0]
+      value:
+      objectReference: {{fileID: 2100002, guid: {BODY_MODEL}, type: 3}}
+"
+        );
+        let meta = "  fileIDToRecycleName:\n    2100000: MiscMatt\n    2100002: BodyMatt\n";
+        let built = body_scene(dir.path(), meta, &overrides);
+        assert_eq!(parts_of(&built), [(1, "BodyMatt".to_string()), (2, "BodyMatt".to_string())]);
+    }
+
+    /// As Bakery's example models in Enzo's Avatorbit: a `.meta` from before `materialLocation` uses the external materials
+    /// found by name, and a model without such a file keeps its own (Unity's default for a new model, a `.meta` without
+    /// materials settings at all).
+    #[test]
+    fn a_meta_older_than_material_location_finds_its_materials_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("Assets/Materials");
+        std::fs::create_dir_all(&folder).unwrap();
+        let text = "%YAML 1.1\n--- !u!21 &2100000\nMaterial:\n  m_Name: external body\n  m_Shader: {fileID: 46, guid: 0000000000000000f000000000000000, type: 0}\n";
+        std::fs::write(folder.join("BodyMatt.mat"), text).unwrap();
+        let built = body_scene(dir.path(), "  materials:\n    importMaterials: 1\n    materialName: 1\n    materialSearch: 1\n", "");
+        assert_eq!(parts_of(&built), [(1, "MiscMatt".to_string()), (2, "external body".to_string())]);
+        let built = body_scene(dir.path(), "  materials:\n    materialImportMode: 2\n    materialLocation: 1\n", "");
+        assert_eq!(parts_of(&built), [(1, "MiscMatt".to_string()), (2, "BodyMatt".to_string())], "kept in the model");
+        let built = body_scene(dir.path(), "  meshes:\n    globalScale: 1\n", "");
+        assert_eq!(parts_of(&built), [(1, "MiscMatt".to_string()), (2, "BodyMatt".to_string())], "no materials settings at all");
+    }
+
+    /// As Hoodie.fbx's import in Enzo's orbit v4 did: told to make no materials, Unity draws its default one.
+    #[test]
+    fn a_model_imported_without_materials_draws_unitys_default_one() {
+        for meta in ["  materials:\n    materialImportMode: 0\n", "  materials:\n    importMaterials: 0\n"] {
+            let dir = tempfile::tempdir().unwrap();
+            let built = body_scene(dir.path(), meta, "");
+            assert_eq!(parts_of(&built), [(1, "Default-Material".to_string()), (2, "Default-Material".to_string())], "{meta}");
+        }
+    }
+
+    /// As ALController.fbx's in AudioLink: a remap to a material that is not there leaves the slot empty in Unity's import.
+    #[test]
+    fn a_remap_to_a_missing_material_leaves_its_slot_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = format!(
+            "  externalObjects:\n  - first:\n      type: UnityEngine:Material\n      assembly: UnityEngine.CoreModule\n      name: BodyMatt\n    second: {{fileID: 2100000, guid: abab0000000000000000000000000099, type: 2}}\n  - first:\n      type: UnityEngine:Material\n      assembly: UnityEngine.CoreModule\n      name: MiscMatt\n    second: {{fileID: 2100000, guid: {MISC_MAT}, type: 2}}\n"
+        );
+        let built = body_scene(dir.path(), &meta, "");
+        assert_eq!(parts_of(&built), [(1, "misc".to_string()), (2, "None".to_string())]);
+    }
 
     /// An unpacked avatar's renderer, saved in the scene: its bones listed in Unity's order (a bone first that the
     /// model's skin does not have), matched to the model's skin by name.

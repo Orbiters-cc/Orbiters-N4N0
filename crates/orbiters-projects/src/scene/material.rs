@@ -79,10 +79,13 @@ pub fn props_of(m: &Value) -> (String, Option<yaml::Ref>, Props) {
     let mut floats = HashMap::new();
     let mut colors = HashMap::new();
     let mut textures = HashMap::new();
-    // Older materials store each as `- first: {name: _Color} second: …`; newer as `- _Color: …`.
+    // Older materials store each as `- first: {name: _Color} second: …`, newer ones as `- _Color: …`, and a binary file
+    // (a material only in a model's import) as `- first: _Color second: …`. Read as text only, a model's own material
+    // from Unity's import lost its colours and every picture and drew white.
     let each = |list: &Value, f: &mut dyn FnMut(&str, &Value)| {
         for item in list.items() {
-            match (item.get("first").get("name").as_str(), item.entries()) {
+            let first = item.get("first");
+            match (first.get("name").as_str().or(first.as_str()), item.entries()) {
                 (Some(name), _) => f(name, item.get("second")),
                 (None, [(k, v)]) => f(k, v),
                 _ => {}
@@ -112,7 +115,14 @@ pub fn props_of(m: &Value) -> (String, Option<yaml::Ref>, Props) {
     if let Some(s) = m.get("m_ShaderKeywords").as_str() {
         keywords.extend(s.split_whitespace().map(str::to_string));
     }
-    let tags = m.get("stringTagMap").entries().iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect();
+    // A map in a text file, a list of pairs in a binary one.
+    let tag_map = m.get("stringTagMap");
+    let tags = tag_map
+        .entries()
+        .iter()
+        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+        .chain(tag_map.items().iter().filter_map(|t| Some((t.get("first").as_str()?.to_string(), t.get("second").as_str()?.to_string()))))
+        .collect();
     let props = Props { floats, colors, textures, keywords, queue: m.get("m_CustomRenderQueue").as_i64().unwrap_or(-1), tags };
     (m.get("m_Name").str_or("").to_string(), m.get("m_Shader").as_ref(), props)
 }

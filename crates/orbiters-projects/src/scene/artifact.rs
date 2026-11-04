@@ -644,6 +644,49 @@ pub(crate) mod tests {
         assert_eq!((l.kind, l.intensity), (1, 2.0));
     }
 
+    /// A model's own material as Unity's import keeps it: pairs of a plain name and a value, unlike any text file. Those
+    /// read as text files' lost every colour and picture, and an imported model's own materials drew plain white.
+    #[test]
+    fn a_models_own_material_keeps_its_look_from_the_import() {
+        let colour = |r, g, b, a| F::Rec("second", vec![F::Float("r", r), F::Float("g", g), F::Float("b", b), F::Float("a", a)]);
+        let scale = |name, x, y| F::Rec(name, vec![F::Float("x", x), F::Float("y", y)]);
+        let picture = |name: &'static str, file, id| vec![F::Text("first", name), F::Rec("second", vec![F::Ptr("m_Texture", file, id), scale("m_Scale", 2.0, 3.0), scale("m_Offset", 0.5, 0.25)])];
+        let material = serialized(
+            &[(
+                70,
+                21,
+                vec![
+                    F::Text("m_Name", "BodyMatt.001"),
+                    F::Ptr("m_Shader", 0, 0),
+                    F::Int("m_CustomRenderQueue", -1),
+                    F::List("stringTagMap", vec![vec![F::Text("first", "RenderType"), F::Text("second", "Transparent")]]),
+                    F::Rec(
+                        "m_SavedProperties",
+                        vec![
+                            F::List("m_TexEnvs", vec![picture("_MainTex", 1, 2800000), picture("_DetailMask", 0, 0)]),
+                            F::List("m_Floats", vec![vec![F::Text("first", "_Metallic"), F::Float("second", 0.75)]]),
+                            F::List("m_Colors", vec![vec![F::Text("first", "_Color"), colour(0.5, 0.25, 1.0, 1.0)]]),
+                        ],
+                    ),
+                ],
+            )],
+            &["dddd0000000000000000000000000004"],
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("artifact");
+        std::fs::write(&path, material).unwrap();
+        let a = Artifact::open(&path, "aaaa0000000000000000000000000009", 1 << 20).unwrap();
+        let (name, _, props) = crate::scene::material::props_of(&a.object(70, 21).unwrap());
+        let look = crate::scene::material::look(&name, "standard", &props);
+        assert_eq!(look.material.name, "BodyMatt.001");
+        assert_eq!(look.main_texture.as_deref(), Some("dddd0000000000000000000000000004"));
+        assert_eq!(look.material.color, [0.5, 0.25, 1.0, 1.0]);
+        assert_eq!(look.material.tiling, [2.0, 3.0]);
+        assert_eq!(look.material.offset, [0.5, 0.25]);
+        assert_eq!(look.material.metallic, 0.75);
+        assert_eq!(look.material.alpha, crate::preview::Alpha::Blend, "its tag, a list of pairs here");
+    }
+
     /// A one-table LMDB file of `page`-byte pages: two meta pages, the main tree naming `table` at page 3, whose leaf
     /// holds `records`.
     pub(crate) fn database(tables: &[(&str, Vec<(Vec<u8>, Vec<u8>)>)]) -> Vec<u8> {

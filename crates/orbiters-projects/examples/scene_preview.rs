@@ -3,6 +3,9 @@
 //!
 //! `cargo run -p orbiters-projects --example scene_preview -- [--scenes N] [--seconds S] <project>...`
 //! (`--scenes` builds the first N scenes of each project, 1 by default.)
+//!
+//! `--materials <project>` compares the two ways of reading a model, material by material; `--draws <preview>...` lists
+//! what a built preview draws (`docs/project-preview.md`, Models read from the file against Unity's import).
 use orbiters_projects::scene;
 use std::time::{Duration, Instant};
 
@@ -15,6 +18,201 @@ fn print(v: &scene::yaml::Value) -> String {
         Value::Bytes(b) => format!("<{} bytes>", b.len()),
         Value::Seq(l) => format!("[{}{}]", l.iter().take(8).map(print).collect::<Vec<_>>().join(", "), if l.len() > 8 { format!(", ... {}", l.len()) } else { String::new() }),
         Value::Map(m) => format!("{{{}}}", m.iter().map(|(k, v)| format!("{k}: {}", print(v))).collect::<Vec<_>>().join(", ")),
+    }
+}
+
+mod materials {
+    use orbiters_projects::scene;
+    use scene::prefab::{Loader, MatSource, MeshSource, Obj};
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    /// Each submesh's triangles and where they are, to tell one submesh from another whatever order they come in.
+    fn signature(m: &scene::model::ModelMesh) -> Vec<(usize, [f32; 3])> {
+        m.submeshes
+            .iter()
+            .map(|t| {
+                let mut c = [0.0f64; 3];
+                for &i in t {
+                    let p = m.positions[i as usize];
+                    for k in 0..3 {
+                        c[k] += p[k] as f64;
+                    }
+                }
+                let n = t.len().max(1) as f64;
+                (t.len() / 3, [(c[0] / n) as f32, (c[1] / n) as f32, (c[2] / n) as f32])
+            })
+            .collect()
+    }
+
+    /// Unity's submesh as a submesh of the file's: nearly as many triangles (Unity's import drops degenerate ones, which
+    /// the file still has), the nearest.
+    fn same_part(of: (usize, [f32; 3]), among: &[(usize, [f32; 3])]) -> Option<usize> {
+        let d = |a: [f32; 3], b: [f32; 3]| (0..3).map(|k| (a[k] - b[k]).powi(2)).sum::<f32>();
+        let near = |n: usize| n.abs_diff(of.0) * 10 <= of.0.max(1);
+        (0..among.len()).filter(|&j| near(among[j].0)).min_by(|&x, &y| d(of.1, among[x].1).total_cmp(&d(of.1, among[y].1)))
+    }
+
+    #[derive(Default)]
+    struct Totals {
+        models: usize,
+        unreadable: usize,
+        no_import: usize,
+        renderers: usize,
+        unmatched: usize,
+        multi: usize,
+        reordered: usize,
+        degenerate: usize,
+        own_materials: usize,
+        own_unknown: usize,
+        slots: usize,
+        misplaced: usize,
+        wrong_slot: usize,
+        wrong_part: usize,
+        pictures: usize,
+        parts_differ: usize,
+    }
+
+    pub fn compare(project: &Path, only: Option<&str>) {
+        let mut limits = scene::Limits::new(std::time::Duration::from_secs(7200));
+        limits.background = true;
+        limits.lower_priority();
+        let assets = scene::assets::index(project, None, &limits).expect("an index");
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        for root in ["Assets", "Packages"] {
+            for e in walkdir::WalkDir::new(project.join(root)).follow_links(true).into_iter().flatten() {
+                let ext = e.path().extension().map(|x| x.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+                if (ext == "fbx" || ext == "obj") && only.is_none_or(|o| e.path().to_string_lossy().contains(o)) {
+                    files.push(e.path().to_path_buf());
+                }
+            }
+        }
+        files.sort();
+        let mut t = Totals::default();
+        for path in files {
+            // One model at a time: a project's models together are more than a preview would ever hold.
+            let mut loader = Loader::new(&assets, &limits);
+            let meta = scene::prefab::meta_path(&path);
+            let Ok(text) = std::fs::read_to_string(&meta) else { continue };
+            let Some(guid) = scene::yaml::meta_guid(&text) else { continue };
+            let Some(a) = loader.artifact(&guid, &path, false) else {
+                t.no_import += 1;
+                continue;
+            };
+            let rel = scene::prefab::rel(&assets, &path);
+            let (Ok(g), Ok(m)) = (a.graph(), loader.model(&guid)) else {
+                t.unreadable += 1;
+                println!("{rel}: unreadable");
+                continue;
+            };
+            t.models += 1;
+            let filters: HashMap<i64, &MeshSource> = g.objects.values().filter_map(|o| if let Obj::Filter(f) = o { Some((f.game_object, &f.mesh)) } else { None }).collect();
+            let mut shaders = HashMap::new();
+            // A prefab refers to a model's own material by Unity's ID of it.
+            for id in a.ids(21) {
+                t.own_materials += 1;
+                let Ok(v) = a.object(id, 21) else { continue };
+                let name = v.get("m_Name").str_or("");
+                if !m.materials.iter().any(|mm| scene::model::file_id("Material", &mm.name, 0) == id) {
+                    t.own_unknown += 1;
+                    println!("{rel}: Unity's material {name:?} has ID {id}, not the one its name makes (the file has {:?})", m.materials.iter().map(|x| x.name.as_str()).collect::<Vec<_>>());
+                }
+            }
+            for o in g.objects.values() {
+                let Obj::Renderer(r) = o else { continue };
+                let source = if r.skinned { Some(&r.mesh) } else { filters.get(&r.game_object).copied() };
+                let Some(MeshSource::Asset(mesh_ref)) = source else { continue };
+                let Ok(u) = a.mesh(mesh_ref.file_id) else { continue };
+                let Some(Obj::GameObject(go)) = g.objects.get(&r.game_object) else { continue };
+                t.renderers += 1;
+                // By the name of its node, else its mesh's (the model's root takes the file's name).
+                let Some(node) = m.nodes.iter().find(|n| n.mesh.is_some() && n.name == go.name).or_else(|| m.nodes.iter().find(|n| n.mesh.is_some_and(|k| m.meshes[k].name == u.name))) else {
+                    t.unmatched += 1;
+                    println!("{rel}: {:?} is not in the file", go.name);
+                    continue;
+                };
+                let mine = &m.meshes[node.mesh.unwrap()];
+                let (us, ms) = (signature(&u), signature(mine));
+                if u.submeshes.len() > 1 || mine.submeshes.len() > 1 {
+                    t.multi += 1;
+                }
+                let order: Vec<Option<usize>> = if us.len() == 1 && ms.len() == 1 { vec![Some(0)] } else { us.iter().map(|s| same_part(*s, &ms)).collect() };
+                let differ = u.submeshes.len() != mine.submeshes.len() || order.iter().any(Option::is_none);
+                t.degenerate += us.iter().zip(&order).filter(|(s, j)| j.is_some_and(|j| ms[j].0 != s.0)).count();
+                if differ {
+                    t.parts_differ += 1;
+                }
+                let look = |loader: &mut Loader, src: Option<&MatSource>, shaders: &mut HashMap<String, String>| -> String {
+                    match src {
+                        Some(s) => scene::build::material_of_slot(loader, s, shaders),
+                        None => "(nothing)".into(),
+                    }
+                };
+                // What a prefab's or a scene's list of materials lands on: slot `i` is submesh `i`, whichever geometry
+                // that is. Names only (two materials of one name are one, here), pictures counted apart.
+                // A mesh without a material draws plain white under either name, whichever import mode named it.
+                let name = |s: &str| s.rsplit_once(" [").map_or(s, |x| x.0).replace("No Name", "Default-Material");
+                let mut lines = Vec::new();
+                let (mut misplaced, mut wrong_slot, mut wrong_part, mut pictures) = (0, 0, 0, 0);
+                for (i, s) in us.iter().enumerate() {
+                    t.slots += 1;
+                    let truth = look(&mut loader, r.materials.get(i), &mut shaders);
+                    let model_slot = |j: usize| node.materials.get(j).map(|&k| MatSource::Model { guid: guid.clone(), material: k });
+                    let in_slot = look(&mut loader, model_slot(i).as_ref(), &mut shaders);
+                    let on_part = look(&mut loader, order[i].and_then(model_slot).as_ref(), &mut shaders);
+                    let moved = order[i] != Some(i);
+                    misplaced += moved as usize;
+                    let bad_slot = name(&truth) != name(&in_slot);
+                    wrong_slot += bad_slot as usize;
+                    let bad_part = name(&truth) != name(&on_part);
+                    wrong_part += bad_part as usize;
+                    let picture = !bad_part && truth.rsplit_once(" [").map(|x| x.1) != on_part.rsplit_once(" [").map(|x| x.1);
+                    pictures += picture as usize;
+                    lines.push(format!(
+                        "    unity slot {i} ({} tris) = file slot {:?}: unity {truth:?}, file's slot {i} {in_slot:?}{}{}{}",
+                        s.0,
+                        order[i],
+                        if bad_slot { "  <-- SLOT" } else { "" },
+                        if bad_part { "  <-- GEOMETRY" } else { "" },
+                        if picture { "  <-- PICTURE" } else { "" }
+                    ));
+                }
+                t.misplaced += misplaced;
+                t.wrong_slot += wrong_slot;
+                t.wrong_part += wrong_part;
+                t.pictures += pictures;
+                if misplaced > 0 {
+                    t.reordered += 1;
+                }
+                if misplaced > 0 || wrong_slot > 0 || wrong_part > 0 || pictures > 0 || differ {
+                    println!("{rel}: {:?} unity {} submeshes, file {}, order {:?}", go.name, u.submeshes.len(), mine.submeshes.len(), order);
+                    if differ {
+                        println!("    file's slots: {:?}", ms.iter().zip(&node.materials).map(|(s, &k)| (s.0, m.materials[k].name.as_str())).collect::<Vec<_>>());
+                    }
+                    lines.iter().for_each(|l| println!("{l}"));
+                }
+            }
+        }
+        println!(
+            "TOTAL {}: models {} (no current import {}, unreadable {}), renderers {} (several submeshes {}, not in file {}), submeshes differ {}, renderers reordered {}, slots {} (other geometry {}, other material in the slot {}, other material on the geometry {}, same name other picture {}, triangle count off {}), model's own materials {} (ID not its name's {})",
+            project.display(),
+            t.models,
+            t.no_import,
+            t.unreadable,
+            t.renderers,
+            t.multi,
+            t.unmatched,
+            t.parts_differ,
+            t.reordered,
+            t.slots,
+            t.misplaced,
+            t.wrong_slot,
+            t.wrong_part,
+            t.pictures,
+            t.degenerate,
+            t.own_materials,
+            t.own_unknown
+        );
     }
 }
 
@@ -135,6 +333,34 @@ fn main() {
             let same = u.positions.iter().zip(&mine.positions).filter(|(a, b)| (0..3).all(|c| (a[c] - b[c]).abs() < 1e-3)).count();
             println!("  vertices the same in the same order: {same} of {}", u.positions.len());
         }
+        return;
+    }
+    // `--draws <preview file>...`: each draw of built previews, biggest first: its submeshes' triangles and materials,
+    // to compare a scene built from the files with one built from Unity's import (diagnostics).
+    if args.first().map(String::as_str) == Some("--draws") {
+        for path in &args[1..] {
+            let h = orbiters_projects::preview::read_header(std::path::Path::new(path)).expect("a preview");
+            println!("{path}");
+            let mut draws: Vec<_> = h.draws.iter().collect();
+            draws.sort_by_key(|d| std::cmp::Reverse(h.meshes[d.mesh as usize].submeshes.iter().map(|s| s.count).sum::<u32>()));
+            for d in draws {
+                let parts: Vec<String> = h.meshes[d.mesh as usize]
+                    .submeshes
+                    .iter()
+                    .zip(&d.materials)
+                    .map(|(s, &m)| format!("{} tris: {}", s.count / 3, if m < 0 { "(not drawn)" } else { h.materials[m as usize].name.as_str() }))
+                    .collect();
+                let b = h.meshes[d.mesh as usize].bounds;
+                let colours: Vec<[f32; 4]> = d.materials.iter().filter(|&&m| m >= 0).map(|&m| h.materials[m as usize].color).collect();
+                println!("  {} (bounds {:?}..{:?}, colours {colours:?})", parts.join(" | "), b.min, b.max);
+            }
+        }
+        return;
+    }
+    // `--materials <project> [part of a path]`: for every model with a current import, which material each submesh gets
+    // from the file against Unity's import (diagnostics; the import is the truth, a difference is a bug of the file's path).
+    if args.first().map(String::as_str) == Some("--materials") {
+        materials::compare(std::path::Path::new(&args[1]), args.get(2).map(String::as_str));
         return;
     }
     // `--model <file.fbx>`: a model's meshes, unskinned and posed by its own bones at rest (diagnostics).

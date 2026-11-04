@@ -20,6 +20,7 @@ every crate built into the programs, and of the native libraries next to them, a
 | walkdir, winreg (Unity project discovery) | MIT OR Unlicense, MIT |
 | ufbx (bindings and the bundled ufbx C library, Samuli Raivio; FBX and OBJ models of Unity projects' 3D previews), mint | MIT OR Unlicense, MIT |
 | tiff, weezl (TIFF textures of Unity projects' 3D previews) | MIT |
+| exr, lebe, zune-inflate, pulp, raw-cpuid, reborrow, bit_field, num-complex, paste (EXR lightmaps and skies of Unity projects' 3D previews) | BSD-3-Clause, BSD-3-Clause, MIT OR Apache-2.0 OR Zlib, MIT, MIT, MIT, MIT OR Apache-2.0, MIT OR Apache-2.0, MIT OR Apache-2.0 |
 | tiny-skia | BSD-3-Clause |
 | png | MIT OR Apache-2.0 |
 | bytemuck | Zlib OR Apache-2.0 OR MIT |

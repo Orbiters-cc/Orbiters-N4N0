@@ -10,9 +10,12 @@
 //! resolved first, so nesting and variants come out of the same rule.
 //!
 //! Only what a preview draws is kept: GameObjects (name, active, `EditorOnly`), transforms, mesh renderers, mesh
-//! filters, skinned mesh renderers (mesh, materials, bones, blend shape weights), directional lights and which
-//! behaviours are VRChat avatar or world descriptors. Particles, UI, scripts and the rest are skipped unread.
+//! filters, skinned mesh renderers (mesh, materials, bones, blend shape weights, the lightmap a renderer samples),
+//! terrains, LOD groups, directional lights, the scene's render settings (ambient light, fog, skybox), Bakery's list
+//! of the lightmaps it baked and which behaviours are VRChat avatar or world descriptors. Particles, UI, scripts and
+//! the rest are skipped unread.
 
+use super::artifact::{Artifact, ArtifactDb};
 use super::assets::Assets;
 use super::model::{self, ImportSettings, Model};
 use super::yaml::{self, Ref, Value};
@@ -36,6 +39,10 @@ pub fn mixed(instance: i64, id: i64) -> i64 {
 /// VRChat's descriptors (SDK 3): an avatar's root, a world's scene.
 pub const AVATAR_DESCRIPTOR: (i64, &str) = (542108242, "67cc4cb7839cd3741b63733d5adf0442");
 pub const SCENE_DESCRIPTOR: (i64, &str) = (-17141911, "661092b4961be7145bfbe56e1e62337b");
+/// Bakery's `ftLightmapsStorage`: the lightmaps it baked and which renderer samples which.
+const BAKERY_STORAGE: &str = "b7fa80e7116296f4eb4f49ec1544ee22";
+/// A renderer without a lightmap (`m_LightmapIndex`; 65534 is lit by realtime GI alone).
+pub const NO_LIGHTMAP: i64 = 65534;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum MeshSource {
@@ -58,6 +65,8 @@ pub enum MatSource {
         material: usize,
     },
     Asset(Ref),
+    /// A look the build made itself (a terrain's blended picture), by its number.
+    Baked(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +95,22 @@ pub struct Renderer {
     pub mesh: MeshSource,
     pub bones: Vec<i64>,
     pub blend_weights: Vec<f32>,
+    /// The scene's lightmap it samples (65534 and above: none), and where in it (`uv2 * xy + zw`).
+    pub lightmap_index: i64,
+    pub lightmap_st: [f32; 4],
+    pub casts_shadows: bool,
+}
+
+/// A terrain: its data lives in a `TerrainData` asset.
+#[derive(Clone, Debug)]
+pub struct TerrainObject {
+    pub game_object: i64,
+    pub enabled: bool,
+    pub data: Option<Ref>,
+    pub trees: bool,
+    pub casts_shadows: bool,
+    pub lightmap_index: i64,
+    pub lightmap_st: [f32; 4],
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +129,8 @@ pub struct Light {
     pub intensity: f32,
     pub shadows: bool,
     pub shadow_strength: f32,
+    /// Baked (`m_Lightmapping` 2): its light is in the lightmaps, not added again to what samples them.
+    pub baked: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +142,14 @@ pub struct Behaviour {
     pub avatar_fields: bool,
 }
 
+/// A LOD group: only its most detailed level is drawn (the others stand in for it from far away, and would draw over
+/// it). The renderers of the levels below it.
+#[derive(Clone, Debug)]
+pub struct LodGroup {
+    pub game_object: i64,
+    pub lower: Vec<i64>,
+}
+
 #[derive(Clone, Debug)]
 pub enum Obj {
     GameObject(GameObject),
@@ -123,6 +158,8 @@ pub enum Obj {
     Filter(Filter),
     Light(Light),
     Behaviour(Behaviour),
+    Terrain(TerrainObject),
+    Lod(LodGroup),
 }
 
 impl Obj {
@@ -134,6 +171,24 @@ impl Obj {
             Obj::Filter(f) => Some(f.game_object),
             Obj::Light(l) => Some(l.game_object),
             Obj::Behaviour(b) => Some(b.game_object),
+            Obj::Terrain(t) => Some(t.game_object),
+            Obj::Lod(l) => Some(l.game_object),
+        }
+    }
+
+    /// A mesh saved inside the file this object came from (a tool's mesh, a ProBuilder shape), reached from elsewhere.
+    fn own_references(&mut self, source: &str) {
+        let own = |m: &mut MeshSource| {
+            if let MeshSource::Asset(r) = m {
+                if r.guid.is_none() && r.file_id != 0 {
+                    r.guid = Some(source.to_string());
+                }
+            }
+        };
+        match self {
+            Obj::Renderer(r) => own(&mut r.mesh),
+            Obj::Filter(f) => own(&mut f.mesh),
+            _ => {}
         }
     }
 
@@ -153,6 +208,13 @@ impl Obj {
             Obj::Filter(f) => f.game_object = k(f.game_object),
             Obj::Light(l) => l.game_object = k(l.game_object),
             Obj::Behaviour(b) => b.game_object = k(b.game_object),
+            Obj::Terrain(t) => t.game_object = k(t.game_object),
+            Obj::Lod(l) => {
+                l.game_object = k(l.game_object);
+                for r in &mut l.lower {
+                    *r = k(*r);
+                }
+            }
         }
     }
 }
@@ -168,11 +230,43 @@ pub struct Ambient {
     pub intensity: f32,
 }
 
+/// The scene's fog (`RenderSettings`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Fog {
+    /// 1 linear, 2 exponential, 3 exponential squared.
+    pub mode: i64,
+    pub color: [f32; 4],
+    pub start: f32,
+    pub end: f32,
+    pub density: f32,
+}
+
+/// The rest of a scene's `RenderSettings` and `LightmapSettings`, of a scene file only (a prefab has none).
+#[derive(Clone, Debug, Default)]
+pub struct SceneSettings {
+    pub fog: Option<Fog>,
+    pub skybox: Option<Ref>,
+    pub reflection_intensity: Option<f32>,
+    pub lighting_data: Option<Ref>,
+}
+
+/// What Bakery's storage says of a scene's lightmaps: it sets them when the scene loads, so it is its word that counts,
+/// whatever an earlier bake left in the renderers.
+#[derive(Clone, Debug, Default)]
+pub struct Bakery {
+    /// The lightmaps' GUIDs.
+    pub maps: Vec<String>,
+    /// Which renderer (or terrain) samples which of them, and where.
+    pub renderers: HashMap<i64, (usize, [f32; 4])>,
+}
+
 /// A file's objects with its instances resolved, by ID in the file.
 #[derive(Clone, Debug, Default)]
 pub struct Graph {
     pub objects: HashMap<i64, Obj>,
     pub ambient: Option<Ambient>,
+    pub settings: SceneSettings,
+    pub bakery: Option<Bakery>,
 }
 
 /// Resolves files and their sources, each source once (a prefab placed fifty times in a world is read once).
@@ -194,6 +288,14 @@ pub struct Loader<'a> {
     pub objects_made: usize,
     /// Triangles of the models loaded so far ([`Limits::max_loaded_triangles`]).
     pub model_triangles: usize,
+    /// Unity's database of its imports, opened when first needed (none in a project never opened).
+    artifact_db: Option<Option<ArtifactDb>>,
+    /// Models' artifacts by GUID, once looked for.
+    artifacts: HashMap<String, Option<Arc<Artifact>>>,
+    /// Models read from their artifacts so far.
+    pub artifact_models: usize,
+    /// The scene file (a mesh saved in it is read from it).
+    pub scene: Option<PathBuf>,
 }
 
 const MAX_DEPTH: usize = 24;
@@ -213,7 +315,51 @@ impl<'a> Loader<'a> {
             prefab_instances: 0,
             objects_made: 0,
             model_triangles: 0,
+            artifact_db: None,
+            artifacts: HashMap::new(),
+            artifact_models: 0,
+            scene: None,
         }
+    }
+
+    /// What Unity's import made of the model `guid`, when the project has it and it is not older than the model (a
+    /// model changed while Unity was closed keeps its old artifact until the next import): the file's own format
+    /// decides how far that matters, so `stale_too` takes one that is older (a format only Unity's import reads).
+    pub fn artifact(&mut self, guid: &str, path: &Path, stale_too: bool) -> Option<Arc<Artifact>> {
+        if !self.limits.use_artifacts {
+            return None;
+        }
+        if let Some(a) = self.artifacts.get(guid) {
+            return a.clone();
+        }
+        let db = self.artifact_db.get_or_insert_with(|| ArtifactDb::open(&self.assets.project));
+        let found = db.as_ref().and_then(|db| db.file_of(guid)).and_then(|file| {
+            let time = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+            let source = time(path).into_iter().chain(time(&meta_path(path))).max();
+            let fresh = match (time(&file), source) {
+                (Some(a), Some(s)) => a + std::time::Duration::from_secs(2) >= s,
+                _ => false,
+            };
+            if !fresh && !stale_too {
+                return None;
+            }
+            match Artifact::open(&file, guid, self.limits.max_model_bytes) {
+                Ok(a) => Some(Arc::new(a)),
+                Err(e) => {
+                    // Only worth saying when nothing else can read the model: an FBX is then read from its file.
+                    if stale_too {
+                        let what = format!("{}: its import in Library could not be read: {e:#}", rel(self.assets, path));
+                        self.note_missing(what);
+                    }
+                    None
+                }
+            }
+        });
+        if found.is_some() {
+            self.artifact_models += 1;
+        }
+        self.artifacts.insert(guid.to_string(), found.clone());
+        found
     }
 
     fn note_missing(&mut self, what: String) {
@@ -259,68 +405,22 @@ impl<'a> Loader<'a> {
                 continue;
             }
             match doc.class {
-                1 => {
-                    let v = doc.parse();
-                    graph.objects.insert(
-                        doc.id,
-                        Obj::GameObject(GameObject {
-                            name: v.get("m_Name").str_or("").to_string(),
-                            active: v.get("m_IsActive").as_bool().unwrap_or(true),
-                            editor_only: v.get("m_TagString").as_str() == Some("EditorOnly"),
-                        }),
-                    );
-                }
-                4 | 224 => {
-                    let v = doc.parse();
-                    graph.objects.insert(doc.id, Obj::Transform(transform_of(&v)));
-                }
-                23 | 137 => {
-                    let v = doc.parse();
-                    let skinned = doc.class == 137;
-                    graph.objects.insert(
-                        doc.id,
-                        Obj::Renderer(Renderer {
-                            game_object: go_of(&v),
-                            enabled: v.get("m_Enabled").as_bool().unwrap_or(true),
-                            skinned,
-                            materials: v.get("m_Materials").items().iter().map(|m| m.as_ref().map_or(MatSource::None, mat_source)).collect(),
-                            mesh: if skinned { mesh_source(v.get("m_Mesh").as_ref()) } else { MeshSource::None },
-                            bones: v.get("m_Bones").items().iter().filter_map(|b| b.as_ref()).map(|r| if r.guid.is_none() { r.file_id } else { 0 }).collect(),
-                            blend_weights: v.get("m_BlendShapeWeights").items().iter().map(|w| w.f32_or(0.0)).collect(),
-                        }),
-                    );
-                }
-                33 => {
-                    let v = doc.parse();
-                    graph.objects.insert(doc.id, Obj::Filter(Filter { game_object: go_of(&v), mesh: mesh_source(v.get("m_Mesh").as_ref()) }));
-                }
-                108 => {
-                    let v = doc.parse();
-                    graph.objects.insert(
-                        doc.id,
-                        Obj::Light(Light {
-                            game_object: go_of(&v),
-                            enabled: v.get("m_Enabled").as_bool().unwrap_or(true),
-                            kind: v.get("m_Type").as_i64().unwrap_or(2),
-                            color: v.get("m_Color").color().unwrap_or([1.0; 4]),
-                            intensity: v.get("m_Intensity").f32_or(1.0),
-                            shadows: v.at(&["m_Shadows", "m_Type"]).as_i64().unwrap_or(0) != 0,
-                            shadow_strength: v.at(&["m_Shadows", "m_Strength"]).f32_or(1.0),
-                        }),
-                    );
-                }
                 114 => {
                     // Only its first lines: behaviours can be megabytes of a tool's data.
                     let head: String = doc.body.lines().take(16).collect::<Vec<_>>().join("\n");
                     let v = yaml::parse(&head);
                     let v = v.entries().first().map(|(_, v)| v.clone()).unwrap_or_default();
                     let avatar_fields = doc.mentions("\n  ViewPosition:") && doc.mentions("\n  Animations:");
+                    let script = v.get("m_Script").as_ref();
+                    if script.as_ref().and_then(|s| s.guid.as_deref()) == Some(BAKERY_STORAGE) {
+                        graph.bakery = bakery_of(&doc.parse());
+                    }
                     graph.objects.insert(
                         doc.id,
                         Obj::Behaviour(Behaviour {
                             game_object: go_of(&v),
                             enabled: v.get("m_Enabled").as_bool().unwrap_or(true),
-                            script: v.get("m_Script").as_ref(),
+                            script,
                             avatar_fields,
                         }),
                     );
@@ -334,6 +434,26 @@ impl<'a> Loader<'a> {
                         ground: v.get("m_AmbientGroundColor").color().unwrap_or([0.047, 0.043, 0.035, 1.0]),
                         intensity: v.get("m_AmbientIntensity").f32_or(1.0),
                     });
+                    if v.get("m_Fog").as_bool().unwrap_or(false) {
+                        graph.settings.fog = Some(Fog {
+                            mode: v.get("m_FogMode").as_i64().unwrap_or(3),
+                            color: v.get("m_FogColor").color().unwrap_or([0.5, 0.5, 0.5, 1.0]),
+                            start: v.get("m_LinearFogStart").f32_or(0.0),
+                            end: v.get("m_LinearFogEnd").f32_or(300.0),
+                            density: v.get("m_FogDensity").f32_or(0.01),
+                        });
+                    }
+                    graph.settings.skybox = v.get("m_SkyboxMaterial").as_ref().filter(|r| !r.is_null());
+                    graph.settings.reflection_intensity = v.get("m_ReflectionIntensity").as_f32();
+                }
+                157 => {
+                    let v = doc.parse();
+                    graph.settings.lighting_data = v.get("m_LightingDataAsset").as_ref().filter(|r| !r.is_null());
+                }
+                1 | 4 | 224 | 23 | 137 | 33 | 108 | 205 | 218 => {
+                    if let Some(obj) = object_of(doc.class as i32, &doc.parse()) {
+                        graph.objects.insert(doc.id, obj);
+                    }
                 }
                 1001 => instances.push((doc.id, doc.parse())),
                 _ => {}
@@ -348,12 +468,15 @@ impl<'a> Loader<'a> {
             for obj in graph.objects.values_mut() {
                 obj.remap(|x| aliases.get(&x).copied().unwrap_or(x));
             }
+            if let Some(b) = &mut graph.bakery {
+                b.renderers = std::mem::take(&mut b.renderers).into_iter().map(|(k, v)| (aliases.get(&k).copied().unwrap_or(k), v)).collect();
+            }
         }
         Ok(graph)
     }
 
     /// The resolved objects of the asset `guid` in its own IDs: a prefab's, or a model's.
-    fn source(&mut self, guid: &str, depth: usize) -> anyhow::Result<Arc<Graph>> {
+    pub fn source(&mut self, guid: &str, depth: usize) -> anyhow::Result<Arc<Graph>> {
         if let Some(g) = self.sources.get(guid) {
             return Ok(g.clone());
         }
@@ -368,8 +491,19 @@ impl<'a> Loader<'a> {
             match ext.as_str() {
                 "prefab" | "unity" => self.file_at(&path, depth + 1),
                 "fbx" | "obj" => {
+                    if let Some(g) = self.artifact(guid, &path, false).and_then(|a| artifact_graph(&a).ok()) {
+                        self.files.push(path.clone());
+                        return Ok(g);
+                    }
                     let m = self.model(guid)?;
                     Ok(model_graph(guid, &m, &path))
+                }
+                other if only_unity_reads(other) => {
+                    let name = rel(self.assets, &path);
+                    let a = self.artifact(guid, &path, true).with_context(|| format!("{name} is a .{other} model only Unity's import reads: open the project in Unity once"))?;
+                    self.files.push(path.clone());
+                    self.files.push(meta_path(&path));
+                    artifact_graph(&a).with_context(|| name)
                 }
                 other => bail!("{} is a .{other} model, which previews do not read", rel(self.assets, &path)),
             }
@@ -451,6 +585,7 @@ impl<'a> Loader<'a> {
         for (id, obj) in &src.objects {
             let mut o = obj.clone();
             o.remap(|x| mixed(instance, x));
+            o.own_references(&source);
             if let Obj::Transform(t) = &mut o {
                 if t.father == 0 {
                     t.father = parent;
@@ -479,6 +614,116 @@ impl<'a> Loader<'a> {
         }
         Ok(())
     }
+}
+
+/// Model formats Unity hands to another program at import (Blender, Maya, 3ds Max…) or reads with its own importers:
+/// only the result of that import can be read.
+pub fn only_unity_reads(ext: &str) -> bool {
+    matches!(ext, "blend" | "max" | "ma" | "mb" | "c4d" | "lxo" | "3ds" | "dae" | "dxf" | "skp" | "jas" | "lwo" | "lws")
+}
+
+/// A model's objects from its artifact.
+fn artifact_graph(a: &Artifact) -> anyhow::Result<Graph> {
+    a.graph()
+}
+
+/// An object of the classes a preview draws, from its fields (a text file's or a binary file's: both read alike).
+pub fn object_of(class: i32, v: &Value) -> Option<Obj> {
+    Some(match class {
+        1 => Obj::GameObject(GameObject {
+            name: v.get("m_Name").str_or("").to_string(),
+            active: v.get("m_IsActive").as_bool().unwrap_or(true),
+            editor_only: v.get("m_TagString").as_str() == Some("EditorOnly"),
+        }),
+        4 | 224 => Obj::Transform(transform_of(v)),
+        23 | 137 => {
+            let skinned = class == 137;
+            Obj::Renderer(Renderer {
+                game_object: go_of(v),
+                enabled: v.get("m_Enabled").as_bool().unwrap_or(true),
+                skinned,
+                materials: v.get("m_Materials").items().iter().map(|m| m.as_ref().map_or(MatSource::None, mat_source)).collect(),
+                mesh: if skinned { mesh_source(v.get("m_Mesh").as_ref()) } else { MeshSource::None },
+                bones: v.get("m_Bones").items().iter().filter_map(|b| b.as_ref()).map(|r| if r.guid.is_none() { r.file_id } else { 0 }).collect(),
+                blend_weights: v.get("m_BlendShapeWeights").items().iter().map(|w| w.f32_or(0.0)).collect(),
+                lightmap_index: v.get("m_LightmapIndex").as_i64().unwrap_or(65535),
+                lightmap_st: scale_offset(v.get("m_LightmapTilingOffset")),
+                casts_shadows: v.get("m_CastShadows").as_i64().unwrap_or(1) != 0,
+            })
+        }
+        33 => Obj::Filter(Filter { game_object: go_of(v), mesh: mesh_source(v.get("m_Mesh").as_ref()) }),
+        108 => Obj::Light(Light {
+            game_object: go_of(v),
+            enabled: v.get("m_Enabled").as_bool().unwrap_or(true),
+            kind: v.get("m_Type").as_i64().unwrap_or(2),
+            color: v.get("m_Color").color().unwrap_or([1.0; 4]),
+            intensity: v.get("m_Intensity").f32_or(1.0),
+            shadows: v.at(&["m_Shadows", "m_Type"]).as_i64().unwrap_or(0) != 0,
+            shadow_strength: v.at(&["m_Shadows", "m_Strength"]).f32_or(1.0),
+            baked: v.get("m_Lightmapping").as_i64() == Some(2),
+        }),
+        205 => {
+            let mut lower = Vec::new();
+            let levels = v.get("m_LODs").items();
+            let first: Vec<i64> = levels.first().map(lod_renderers).unwrap_or_default();
+            for level in levels.iter().skip(1) {
+                lower.extend(lod_renderers(level).into_iter().filter(|r| !first.contains(r)));
+            }
+            Obj::Lod(LodGroup { game_object: go_of(v), lower })
+        }
+        218 => Obj::Terrain(TerrainObject {
+            game_object: go_of(v),
+            enabled: v.get("m_Enabled").as_bool().unwrap_or(true),
+            data: v.get("m_TerrainData").as_ref().filter(|r| !r.is_null()),
+            trees: v.get("m_DrawTreesAndFoliage").as_bool().unwrap_or(true),
+            casts_shadows: v.get("m_CastShadows").as_i64().unwrap_or(1) != 0,
+            lightmap_index: v.get("m_LightmapIndex").as_i64().unwrap_or(65535),
+            lightmap_st: scale_offset(v.get("m_LightmapTilingOffset")),
+        }),
+        _ => return None,
+    })
+}
+
+fn lod_renderers(level: &Value) -> Vec<i64> {
+    level.get("renderers").items().iter().filter_map(|r| r.get("renderer").as_ref()).filter(|r| r.guid.is_none() && r.file_id != 0).map(|r| r.file_id).collect()
+}
+
+/// `{x, y, z, w}`: a scale and an offset (a mesh's default, whole and in place, without one).
+fn scale_offset(v: &Value) -> [f32; 4] {
+    v.quat().unwrap_or([1.0, 1.0, 0.0, 0.0])
+}
+
+/// Bakery's storage: a list of lightmaps, then each baked renderer with the index of its lightmap and where in it.
+/// Indices read as a hex run of little-endian 32-bit numbers (Unity's text for a list of ints), or as a list.
+fn bakery_of(v: &Value) -> Option<Bakery> {
+    let maps: Vec<String> = v.get("maps").items().iter().map(|m| m.as_ref().and_then(|r| r.guid).unwrap_or_default()).collect();
+    let ints = |v: &Value| -> Vec<i64> {
+        match v {
+            Value::Str(h) => h
+                .as_bytes()
+                .chunks_exact(8)
+                .map(|c| {
+                    let s = std::str::from_utf8(c).unwrap_or("");
+                    let raw = u32::from_str_radix(s, 16).unwrap_or(0);
+                    u32::from_le_bytes(raw.to_be_bytes()) as i32 as i64
+                })
+                .collect(),
+            v => v.items().iter().filter_map(Value::as_i64).collect(),
+        }
+    };
+    let mut renderers = HashMap::new();
+    for (list, ids, st) in [("bakedRenderers", "bakedIDs", "bakedScaleOffset"), ("bakedRenderersTerrain", "bakedIDsTerrain", "bakedScaleOffsetTerrain")] {
+        let ids = ints(v.get(ids));
+        let offsets = v.get(st).items();
+        for (i, r) in v.get(list).items().iter().enumerate() {
+            let (Some(r), Some(&id), Some(so)) = (r.as_ref(), ids.get(i), offsets.get(i)) else { continue };
+            let Ok(id) = usize::try_from(id) else { continue };
+            if r.guid.is_none() && r.file_id != 0 && id < maps.len() {
+                renderers.insert(r.file_id, (id, scale_offset(so)));
+            }
+        }
+    }
+    (!maps.is_empty()).then_some(Bakery { maps, renderers })
 }
 
 pub fn meta_path(asset: &Path) -> PathBuf {
@@ -586,8 +831,31 @@ fn apply(obj: &mut Obj, path: &str, value: &Value, reference: Option<Ref>) {
                 if let Some(n) = value.as_i64().filter(|n| (0..=4096).contains(n)) {
                     r.bones.resize(n as usize, 0);
                 }
+            } else if path == "m_LightmapIndex" {
+                r.lightmap_index = value.as_i64().unwrap_or(r.lightmap_index);
+            } else if path == "m_CastShadows" {
+                r.casts_shadows = value.as_i64().unwrap_or(1) != 0;
+            } else if let Some(a) = path.strip_prefix("m_LightmapTilingOffset.") {
+                match a {
+                    "x" => set(&mut r.lightmap_st[0]),
+                    "y" => set(&mut r.lightmap_st[1]),
+                    "z" => set(&mut r.lightmap_st[2]),
+                    "w" => set(&mut r.lightmap_st[3]),
+                    _ => {}
+                }
             }
         }
+        Obj::Terrain(t) => match path {
+            "m_Enabled" => t.enabled = value.as_bool().unwrap_or(t.enabled),
+            "m_TerrainData" => t.data = reference.filter(|r| !r.is_null()),
+            "m_LightmapIndex" => t.lightmap_index = value.as_i64().unwrap_or(t.lightmap_index),
+            "m_LightmapTilingOffset.x" => set(&mut t.lightmap_st[0]),
+            "m_LightmapTilingOffset.y" => set(&mut t.lightmap_st[1]),
+            "m_LightmapTilingOffset.z" => set(&mut t.lightmap_st[2]),
+            "m_LightmapTilingOffset.w" => set(&mut t.lightmap_st[3]),
+            _ => {}
+        },
+        Obj::Lod(_) => {}
         Obj::Filter(fl) => {
             if path == "m_Mesh" {
                 fl.mesh = mesh_source(reference);
@@ -602,6 +870,7 @@ fn apply(obj: &mut Obj, path: &str, value: &Value, reference: Option<Ref>) {
             "m_Color.b" => set(&mut l.color[2]),
             "m_Shadows.m_Type" => l.shadows = value.as_i64().unwrap_or(0) != 0,
             "m_Shadows.m_Strength" => set(&mut l.shadow_strength),
+            "m_Lightmapping" => l.baked = value.as_i64() == Some(2),
             _ => {}
         },
         Obj::Behaviour(b) => {
@@ -644,6 +913,9 @@ fn model_graph(guid: &str, m: &Model, path: &Path) -> Graph {
                 mesh: if skinned { source.clone() } else { MeshSource::None },
                 bones: mm.skin.as_ref().map(|s| s.bones.iter().map(|&b| m.nodes[b].ids.transform).collect()).unwrap_or_default(),
                 blend_weights: mm.blend_shapes.iter().map(|b| b.default_weight).collect(),
+                lightmap_index: 65535,
+                lightmap_st: [1.0, 1.0, 0.0, 0.0],
+                casts_shadows: true,
             }),
         );
         if !skinned {

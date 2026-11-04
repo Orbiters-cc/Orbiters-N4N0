@@ -13,13 +13,17 @@ use super::assets::Assets;
 use super::material::{self, Look};
 use super::model::{ModelMesh, Skin};
 use super::prefab::{self, Graph, Loader, MatSource, MeshSource, Obj};
-use super::{math, primitives, texture, Limits};
+use super::{math, primitives, terrain, texture, world as place, Limits};
 use crate::preview::{self as file, Bounds, Draw, Header, ImageFormat, IndexFormat, Instances, Kind, Mesh, Submesh, Texture, Writer};
 use anyhow::Context as _;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+
+// Which of a scene's renderers are drawn and why the others are not is counted (`Report::dropped`), so that "99 % of the
+// world is missing" has an answer per reason rather than a guess: Avatorbit's world was one `.blend` model, 307 of its
+// renderers and all of its ground, water, rocks and buildings, its sun among them.
 
 /// The scene to build.
 #[derive(Clone, Debug)]
@@ -51,16 +55,18 @@ pub struct Report {
     pub triangles: u64,
     pub prefab_instances: usize,
     pub missing: Vec<String>,
+    /// What was left out and why, by reason: every renderer the scene holds is either drawn or counted here.
+    #[serde(default)]
+    pub dropped: std::collections::BTreeMap<String, u32>,
     pub ms: f64,
 }
 
 const BUDGET: u64 = 2_000_000;
-/// Half the diagonal an avatar's posed part may span (the tallest avatars are a few metres).
-const MAX_AVATAR_PART: f32 = 4.0;
 
 struct Candidate {
     renderer: i64,
-    transform: i64,
+    /// Where it stands (its transform's world matrix, or a terrain tree's place).
+    matrix: [f32; 16],
     mesh: Arc<ModelMesh>,
     key: String,
     skinned: bool,
@@ -70,11 +76,15 @@ struct Candidate {
     avatar: Option<u32>,
     world_bounds: Bounds,
     triangles: u64,
+    shadows: bool,
+    /// The lightmap it samples (its picture's GUID) and where in it.
+    lightmap: Option<(String, [f32; 4])>,
 }
 
 pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits) -> anyhow::Result<Built> {
     let start = Instant::now();
     let mut loader = Loader::new(assets, limits);
+    loader.scene = Some(scene.path.clone());
     let graph = loader.file(&scene.path)?;
     let meta = prefab::meta_path(&scene.path);
     loader.files.push(meta);
@@ -120,6 +130,16 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
             filters.insert(f.game_object, &f.mesh);
         }
     }
+    // The levels of LOD groups below the most detailed: they stand in for it from far away, and would draw over it.
+    let mut lower_lods = std::collections::HashSet::new();
+    for obj in graph.objects.values() {
+        if let Obj::Lod(l) = obj {
+            lower_lods.extend(l.lower.iter().copied());
+        }
+    }
+    let unity_lightmaps = place::lighting_data_maps(&mut loader, &graph);
+    let mut dropped: std::collections::BTreeMap<String, u32> = Default::default();
+    let mut drop = |why: &str| *dropped.entry(why.to_string()).or_insert(0) += 1;
     let mut meshes: HashMap<String, Option<Arc<ModelMesh>>> = HashMap::new();
     let mut candidates = Vec::new();
     let mut ids: Vec<&i64> = graph.objects.keys().collect();
@@ -127,13 +147,28 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     for id in ids {
         let Obj::Renderer(r) = &graph.objects[id] else { continue };
         report.renderers += 1;
-        let Some(&t) = world.transform_of.get(&r.game_object) else { continue };
-        if !r.enabled || !world.shown(t) {
+        let Some(&t) = world.transform_of.get(&r.game_object) else {
+            drop("no transform");
+            continue;
+        };
+        if !r.enabled {
+            drop("renderer off");
+            continue;
+        }
+        if !world.shown(t) {
+            drop("inactive or EditorOnly");
+            continue;
+        }
+        if lower_lods.contains(id) {
+            drop("lower LOD");
             continue;
         }
         let source = if r.skinned { &r.mesh } else { filters.get(&r.game_object).copied().unwrap_or(&MeshSource::None) };
         let key = match source {
-            MeshSource::None => continue,
+            MeshSource::None => {
+                drop("no mesh set (UI text, or made at run time)");
+                continue;
+            }
             MeshSource::Model { guid, mesh } => format!("{guid}:{mesh}"),
             MeshSource::Asset(r) => format!("{}:{}", r.guid.as_deref().unwrap_or("-"), r.file_id),
         };
@@ -152,17 +187,25 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
             };
             meshes.insert(key.clone(), m);
         }
-        let Some(mesh) = meshes[&key].clone() else { continue };
+        let Some(mesh) = meshes[&key].clone() else {
+            drop("mesh could not be read");
+            continue;
+        };
         if mesh.positions.is_empty() || mesh.triangles() == 0 {
+            drop("empty mesh");
             continue;
         }
         let avatar = avatars.iter().position(|(at, _)| world.under(t, *at)).map(|i| i as u32);
         let m = world.matrix(t);
         let local = bounds_of(&mesh.positions);
         let world_bounds = transform_bounds(&m, &local);
+        // A skinned mesh moves: Unity lights it by probes, not a lightmap.
+        let lightmap = if r.skinned { None } else { place::lightmap_of(&graph, &unity_lightmaps, *id, r.lightmap_index, r.lightmap_st) };
         candidates.push(Candidate {
             renderer: *id,
-            transform: t,
+            matrix: m,
+            shadows: r.casts_shadows,
+            lightmap,
             triangles: mesh.triangles() as u64,
             mesh,
             key,
@@ -174,6 +217,10 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
             world_bounds,
         });
     }
+    // Terrains: a mesh and a blended picture each, their trees at their places.
+    let mut baked_looks: Vec<(Look, image::RgbaImage)> = Vec::new();
+    add_terrains(&graph, &world, &mut loader, &unity_lightmaps, &mut candidates, &mut baked_looks, &mut dropped)?;
+    report.renderers += graph.objects.values().filter(|o| matches!(o, Obj::Terrain(_))).count();
     if candidates.is_empty() {
         match loader.missing.first() {
             Some(why) => anyhow::bail!("nothing could be drawn: {why}"),
@@ -194,6 +241,9 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
         used += c.triangles;
         true
     });
+    if skipped_budget > 0 {
+        dropped.insert("budget".to_string(), skipped_budget);
+    }
 
     // Materials and the pictures they need.
     let mut looks: HashMap<String, (usize, Look)> = HashMap::new();
@@ -213,10 +263,15 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
                 MatSource::None => "none".to_string(),
                 MatSource::Model { guid, material } => format!("m:{guid}:{material}"),
                 MatSource::Asset(r) => format!("a:{}:{}", r.guid.as_deref().unwrap_or("-"), r.file_id),
+                MatSource::Baked(k) => format!("b:{k}"),
             };
             if !looks.contains_key(&key) {
                 limits.check("reading the materials")?;
-                let look = resolve_material(&mut loader, src, &mut shader_names).unwrap_or_else(|e| {
+                let resolved = match src {
+                    MatSource::Baked(k) => Ok(baked_looks[*k].0.clone()),
+                    src => resolve_material(&mut loader, src, &mut shader_names),
+                };
+                let look = resolved.unwrap_or_else(|e| {
                     let what = format!("{e:#}");
                     if !loader.missing.contains(&what) && loader.missing.len() < 64 {
                         loader.missing.push(what);
@@ -234,49 +289,84 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     report.materials = materials.len();
 
     // Pictures: decoded on several threads, at the budget's size.
-    let mut wanted: Vec<(String, bool)> = Vec::new();
+    let mut wanted: Vec<(String, Use)> = Vec::new();
     for l in &look_list {
-        for (t, main) in [(&l.main_texture, true), (&l.emission_texture, false)] {
+        let normal = l.normal_texture.as_ref().filter(|_| kind != Kind::Avatars);
+        for (t, how) in [(l.main_texture.as_ref(), Use::Main), (l.emission_texture.as_ref(), Use::Emission), (normal, Use::Normal)] {
             if let Some(g) = t {
-                if !wanted.iter().any(|(w, m)| w == g && *m == main) {
-                    wanted.push((g.clone(), main));
+                if !wanted.iter().any(|(w, m)| w == g && *m == how) {
+                    wanted.push((g.clone(), how));
                 }
             }
         }
     }
-    let side = match wanted.len() {
+    // Toolkit's sizes for a scene with avatars, by how many pictures it has. A world has many, most on small props, and
+    // is seen from far off: those that cover the most of it keep their detail, the sand before a fruit's skin.
+    let mut coverage: HashMap<&str, f32> = HashMap::new();
+    if kind != Kind::Avatars {
+        for (c, slots) in candidates.iter().zip(&draws_materials) {
+            let s = c.world_bounds.size();
+            let area = (s[0] * s[2]).max(s[0] * s[1]).max(s[1] * s[2]).max(0.0);
+            for &m in slots {
+                if let Some(g) = usize::try_from(m).ok().and_then(|m| look_list.get(m)).and_then(|l| l.main_texture.as_deref()) {
+                    *coverage.entry(g).or_insert(0.0) += area;
+                }
+            }
+        }
+    }
+    let mut largest: Vec<(&String, f32)> = wanted.iter().filter(|w| w.1 == Use::Main).map(|w| (&w.0, coverage.get(w.0.as_str()).copied().unwrap_or(0.0))).collect();
+    largest.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let rank: HashMap<&String, usize> = largest.iter().enumerate().map(|(i, (g, _))| (*g, i)).collect();
+    let count_side = match wanted.len() {
         0..=8 => 1024,
         9..=32 => 512,
         _ => 256,
     };
-    let jobs: Vec<(String, bool, Option<PathBuf>, bool)> = wanted
+    let side_of = |g: &String| -> u32 {
+        match rank.get(g) {
+            Some(r) if kind != Kind::Avatars => match *r {
+                0..=7 => 1024,
+                8..=31 => 512,
+                _ => 256,
+            },
+            _ => count_side,
+        }
+    };
+    let jobs: Vec<(String, Use, Option<PathBuf>, bool, u32)> = wanted
         .iter()
-        .map(|(g, main)| {
-            let keep_alpha = look_list.iter().any(|l| l.main_texture.as_deref() == Some(g) && l.material.alpha != file::Alpha::Opaque);
-            (g.clone(), *main, assets.path(g), keep_alpha)
+        .filter(|(g, _)| !g.starts_with("baked:"))
+        .map(|(g, how)| {
+            let keep_alpha = *how == Use::Main && look_list.iter().any(|l| l.main_texture.as_deref() == Some(g) && l.material.alpha != file::Alpha::Opaque);
+            (g.clone(), *how, assets.path(g), keep_alpha, side_of(g))
         })
         .collect();
-    for (_, _, p, _) in &jobs {
+    for (_, _, p, _, _) in &jobs {
         if let Some(p) = p {
             loader.files.push(p.clone());
             loader.files.push(prefab::meta_path(p));
         }
     }
     limits.check("reading the pictures")?;
-    let decoded = decode_all(&jobs, side, limits);
+    let decoded = decode_all(&jobs, limits);
     let mut writer = Writer::default();
     let mut textures: Vec<Texture> = Vec::new();
-    let mut texture_index: HashMap<(String, bool), i32> = HashMap::new();
-    for ((g, main, path, _), result) in jobs.iter().zip(decoded) {
+    let mut texture_index: HashMap<(String, Use), i32> = HashMap::new();
+    for (k, (_, image)) in baked_looks.iter().enumerate() {
+        let e = texture::encode(image, 2048, false)?;
+        let data = writer.push(&e.bytes);
+        texture_index.insert((format!("baked:{k}"), Use::Main), textures.len() as i32);
+        textures.push(Texture { width: e.width, height: e.height, format: ImageFormat::Jpeg, linear: false, data });
+    }
+    for ((g, how, path, _, _), result) in jobs.iter().zip(decoded) {
         match result {
             Ok(e) => {
                 let data = writer.push(&e.bytes);
-                texture_index.insert((g.clone(), *main), textures.len() as i32);
+                texture_index.insert((g.clone(), *how), textures.len() as i32);
                 textures.push(Texture {
                     width: e.width,
                     height: e.height,
                     format: if e.png { ImageFormat::Png } else { ImageFormat::Jpeg },
-                    linear: false,
+                    linear: *how == Use::Normal,
                     data,
                 });
             }
@@ -290,8 +380,9 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
         }
     }
     for (i, l) in look_list.iter().enumerate() {
-        materials[i].texture = l.main_texture.as_ref().and_then(|g| texture_index.get(&(g.clone(), true))).copied().unwrap_or(-1);
-        materials[i].emission_texture = l.emission_texture.as_ref().and_then(|g| texture_index.get(&(g.clone(), false))).copied().unwrap_or(-1);
+        materials[i].texture = l.main_texture.as_ref().and_then(|g| texture_index.get(&(g.clone(), Use::Main))).copied().unwrap_or(-1);
+        materials[i].emission_texture = l.emission_texture.as_ref().and_then(|g| texture_index.get(&(g.clone(), Use::Emission))).copied().unwrap_or(-1);
+        materials[i].normal_texture = l.normal_texture.as_ref().and_then(|g| texture_index.get(&(g.clone(), Use::Normal))).copied().unwrap_or(-1);
         if l.emission_texture.is_some() && materials[i].emission_texture < 0 {
             // A glow masked by a picture that could not be read would light the whole surface: none.
             materials[i].emission = [0.0; 3];
@@ -299,33 +390,85 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     }
     report.textures = textures.len();
 
+    // Lightmaps: read on several threads, the same one once.
+    let mut lightmap_guids: Vec<String> = Vec::new();
+    for c in &candidates {
+        if let Some((g, _)) = &c.lightmap {
+            if !lightmap_guids.contains(g) && lightmap_guids.len() < place::MAX_LIGHTMAPS {
+                lightmap_guids.push(g.clone());
+            }
+        }
+    }
+    let lightmap_side = place::lightmap_side(lightmap_guids.len());
+    let lightmap_paths: Vec<Option<PathBuf>> = lightmap_guids.iter().map(|g| assets.path(g)).collect();
+    for p in lightmap_paths.iter().flatten() {
+        loader.files.push(p.clone());
+    }
+    // Two at a time: a 4096² lightmap takes 200 MB while it is decoded, a build in the background should not hold more.
+    let lightmap_limits = Limits { threads: limits.threads.min(2), ..limits.clone() };
+    let read_lightmaps = in_parallel(&lightmap_paths, &lightmap_limits, |p| {
+        let p = p.as_ref().context("not in the project")?;
+        place::lightmap(p, lightmap_side, limits)
+    });
+    let mut lightmaps: Vec<file::Lightmap> = Vec::new();
+    let mut lightmap_slot: HashMap<&str, u32> = HashMap::new();
+    for ((g, p), result) in lightmap_guids.iter().zip(&lightmap_paths).zip(read_lightmaps) {
+        match result {
+            Ok((e, scale)) => {
+                let data = writer.push(&e.bytes);
+                lightmap_slot.insert(g.as_str(), lightmaps.len() as u32);
+                lightmaps.push(file::Lightmap { texture: textures.len() as u32, scale });
+                textures.push(Texture { width: e.width, height: e.height, format: ImageFormat::Jpeg, linear: false, data });
+            }
+            Err(e) => {
+                let name = p.as_ref().map(|p| prefab::rel(assets, p)).unwrap_or_else(|| format!("a lightmap ({g})"));
+                let what = format!("{name}: {e:#}");
+                if !loader.missing.contains(&what) && loader.missing.len() < 64 {
+                    loader.missing.push(what);
+                }
+            }
+        }
+    }
+
+    // The sky.
+    limits.check("reading the sky")?;
+    let built_sky = place::sky(&mut loader, &graph);
+    let mut sky = None;
+    let mut sky_ambient = None;
+    if let Some(b) = built_sky {
+        loader.files.extend(b.files);
+        let mut s = b.sky;
+        match b.picture {
+            Some(e) => {
+                let data = writer.push(&e.bytes);
+                s.texture = textures.len() as i32;
+                textures.push(Texture { width: e.width, height: e.height, format: ImageFormat::Jpeg, linear: false, data });
+            }
+            None => s.texture = -1,
+        }
+        sky = Some(s);
+        sky_ambient = b.ambient;
+    }
+
     // Meshes: skinned ones posed into the world, the others once each with their matrices.
     let mut out_meshes: Vec<Mesh> = Vec::new();
     let mut mesh_slot: HashMap<String, u32> = HashMap::new();
     let mut matrices: Vec<[f32; 16]> = Vec::new();
+    let mut matrix_slot: HashMap<[u32; 16], u32> = HashMap::new();
+    let mut points: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let scene_has_lightmaps = !lightmaps.is_empty();
     let mut draws: Vec<Draw> = Vec::new();
     let mut bounds = Bounds { min: [f32::MAX; 3], max: [f32::MIN; 3] };
     let mut focus = Bounds { min: [f32::MAX; 3], max: [f32::MIN; 3] };
     let mut vertices_total = 0u64;
-    let mut skipped_pose = 0u32;
     let identity = math::IDENTITY;
     for (c, slots) in candidates.iter().zip(&draws_materials) {
         limits.check("posing the meshes")?;
-        let m = world.matrix(c.transform);
+        let m = c.matrix;
         let posed = c.skinned && (c.mesh.skin.is_some() || c.blend.iter().any(|w| *w != 0.0));
         let (mesh_index, matrix, world_b) = if posed {
             let (positions, normals) = pose(&c.mesh, &c.blend, &c.bones, &world, m);
-            if c.avatar.is_some() && c.mesh.skin.is_some() && bounds_of(&positions).radius() > MAX_AVATAR_PART {
-                // An avatar's part its bones fling metres away (a model changed since Unity imported it, a part
-                // re-rigged by a tool at upload): left out rather than drawn across the scene.
-                skipped_pose += 1;
-                let what = format!("{} left out: posed {:.0} m wide", c.mesh.name, bounds_of(&positions).radius() * 2.0);
-                if loader.missing.len() < 64 {
-                    loader.missing.push(what);
-                }
-                continue;
-            }
-            let (mesh, b) = push_mesh(&mut writer, &positions, &normals, &c.mesh.uvs, &c.mesh.submeshes);
+            let (mesh, b) = push_mesh(&mut writer, &positions, &normals, &c.mesh.uvs, &[], &c.mesh.submeshes);
             out_meshes.push(mesh);
             vertices_total += positions.len() as u64;
             let wb = if c.mesh.skin.is_some() { b } else { transform_bounds(&m, &b) };
@@ -334,7 +477,14 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
             let index = match mesh_slot.get(&c.key) {
                 Some(&i) => i,
                 None => {
-                    let (mesh, _) = push_mesh(&mut writer, &c.mesh.positions, &c.mesh.normals, &c.mesh.uvs, &c.mesh.submeshes);
+                    // The second UV set when something samples a lightmap through it (Unity falls back on the first).
+                    let lit = scene_has_lightmaps && candidates.iter().any(|o| o.key == c.key && o.lightmap.is_some());
+                    let second: &[[f32; 2]] = match (lit, c.mesh.uv2.is_empty()) {
+                        (false, _) => &[],
+                        (true, false) => &c.mesh.uv2,
+                        (true, true) => &c.mesh.uvs,
+                    };
+                    let (mesh, _) = push_mesh(&mut writer, &c.mesh.positions, &c.mesh.normals, &c.mesh.uvs, second, &c.mesh.submeshes);
                     out_meshes.push(mesh);
                     vertices_total += c.mesh.positions.len() as u64;
                     let i = out_meshes.len() as u32 - 1;
@@ -344,18 +494,26 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
             };
             (index, m, c.world_bounds)
         };
-        let instance = match matrices.iter().position(|x| *x == matrix) {
-            Some(i) => i as u32,
-            None => {
-                matrices.push(matrix);
-                matrices.len() as u32 - 1
-            }
-        };
+        let instance = *matrix_slot.entry(matrix.map(f32::to_bits)).or_insert_with(|| {
+            matrices.push(matrix);
+            matrices.len() as u32 - 1
+        });
         grow(&mut bounds, &world_b);
         if c.avatar.is_some() {
             grow(&mut focus, &world_b);
         }
-        draws.push(Draw { instance, mesh: mesh_index, materials: slots.clone(), shadows: true, avatar: c.avatar });
+        if kind != Kind::Avatars {
+            // A few of each object's points, wherever they stand (a skinned one's are in the world already).
+            let step = (c.mesh.positions.len() / 32).max(1);
+            for p in c.mesh.positions.iter().step_by(step) {
+                let q = if posed && c.mesh.skin.is_some() { p_center(&world_b) } else { math::point(&matrix, *p) };
+                for k in 0..3 {
+                    points[k].push(q[k]);
+                }
+            }
+        }
+        let lightmap = c.lightmap.as_ref().and_then(|(g, st)| lightmap_slot.get(g.as_str()).map(|&index| file::DrawLightmap { index, st: *st }));
+        draws.push(Draw { instance, mesh: mesh_index, materials: slots.clone(), shadows: c.shadows, avatar: c.avatar, lightmap });
     }
     report.drawn = draws.len();
     report.meshes = out_meshes.len();
@@ -365,17 +523,32 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
         bounds = Bounds { min: [-0.5, 0.0, -0.5], max: [0.5, 1.0, 0.5] };
     }
     if focus.min[0] > focus.max[0] {
-        focus = bounds;
+        focus = place::framing(&mut points, bounds);
     }
     let matrices_blob = writer.push(&matrices.iter().flatten().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>());
     let ground = (kind == Kind::Avatars).then(|| avatars.iter().map(|a| a.1.position[1]).fold(f32::MAX, f32::min));
-    let lighting = lighting_of(&graph, &world);
+    let lighting = lighting_of(&graph, &world, sky_ambient, scene_has_lightmaps);
+    // Where the Scene view looked, for the scene it had open, when that lies in the scene.
+    let camera = if kind == Kind::Avatars || !place::is_last_open(project, &scene.path, assets) {
+        None
+    } else {
+        place::scene_view_camera(project)
+            .filter(|c| {
+                (0..3).all(|k| {
+                    let margin = (bounds.max[k] - bounds.min[k]).max(1.0) * 0.25;
+                    c.pivot[k] >= bounds.min[k] - margin && c.pivot[k] <= bounds.max[k] + margin
+                })
+            })
+            .map(|c| place::far_enough(c, focus.radius()))
+    };
     let mut skipped = std::collections::BTreeMap::new();
     if skipped_budget > 0 {
         skipped.insert("budget".to_string(), skipped_budget);
     }
-    if skipped_pose > 0 {
-        skipped.insert("pose".to_string(), skipped_pose);
+    for (why, key) in [("terrain trees thinned", "trees"), ("terrain details", "details")] {
+        if let Some(&n) = dropped.get(why) {
+            skipped.insert(key.to_string(), n);
+        }
     }
     let missing_meshes = meshes.values().filter(|m| m.is_none()).count() as u32;
     if missing_meshes > 0 {
@@ -383,6 +556,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     }
     report.prefab_instances = loader.prefab_instances;
     report.missing = loader.missing.clone();
+    report.dropped = dropped;
     report.ms = start.elapsed().as_secs_f64() * 1000.0;
     let header = Header {
         written_utc: now_utc(),
@@ -393,7 +567,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
         bounds,
         focus,
         ground,
-        camera: None,
+        camera,
         avatars: avatars.into_iter().map(|a| a.1).collect(),
         textures,
         materials,
@@ -401,6 +575,8 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
         instances: Instances { count: matrices.len() as u32, matrices: matrices_blob },
         draws,
         lighting,
+        lightmaps,
+        sky,
         stats: file::Stats { renderers: report.renderers as u32, triangles: used, vertices: vertices_total, skipped },
         cost: Some(file::Cost { total_ms: report.ms as f32, ..Default::default() }),
     };
@@ -524,13 +700,32 @@ fn resolve_mesh(loader: &mut Loader, source: &MeshSource) -> anyhow::Result<Arc<
             Ok(Arc::new(clone_mesh(&m.meshes[*mesh])))
         }
         MeshSource::Asset(r) => {
-            let guid = r.guid.as_deref().context("a mesh in the scene itself")?;
+            // A mesh saved in the scene itself (a tool's mesh, a ProBuilder shape).
+            let Some(guid) = r.guid.as_deref() else {
+                let path = loader.scene.clone().context("a mesh in the scene itself")?;
+                return super::mesh_asset::read(&path, r.file_id, loader.limits).map(Arc::new).with_context(|| prefab::rel(loader.assets, &path));
+            };
             if guid == "0000000000000000e000000000000000" {
                 return primitives::builtin(r.file_id).map(Arc::new).with_context(|| format!("Unity's built-in mesh {}", r.file_id));
             }
             let path = loader.assets.path(guid).with_context(|| format!("a mesh that is not in the project ({guid})"))?;
             let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            if ext == "fbx" || ext == "obj" || prefab::only_unity_reads(&ext) {
+                // What Unity's import made, by Unity's ID of it; an FBX falls back to reading the file.
+                if let Some(a) = loader.artifact(guid, &path, prefab::only_unity_reads(&ext)) {
+                    loader.files.push(path.clone());
+                    match a.mesh(r.file_id) {
+                        Ok(m) => return Ok(Arc::new(m)),
+                        Err(e) if prefab::only_unity_reads(&ext) => return Err(e).with_context(|| format!("a mesh of {}", prefab::rel(loader.assets, &path))),
+                        Err(_) => {}
+                    }
+                }
+            }
             match ext.as_str() {
+                "prefab" | "unity" => {
+                    loader.files.push(path.clone());
+                    super::mesh_asset::read(&path, r.file_id, loader.limits).map(Arc::new).with_context(|| prefab::rel(loader.assets, &path))
+                }
                 "fbx" | "obj" => {
                     let m = loader.model(guid)?;
                     let index = m
@@ -547,6 +742,9 @@ fn resolve_mesh(loader: &mut Loader, source: &MeshSource) -> anyhow::Result<Arc<
                     loader.files.push(path.clone());
                     super::mesh_asset::read(&path, r.file_id, loader.limits).map(Arc::new).with_context(|| prefab::rel(loader.assets, &path))
                 }
+                other if prefab::only_unity_reads(other) => {
+                    anyhow::bail!("{} is a .{other} model only Unity's import reads: open the project in Unity once", prefab::rel(loader.assets, &path))
+                }
                 other => anyhow::bail!("{} is a .{other} mesh, which previews do not read", prefab::rel(loader.assets, &path)),
             }
         }
@@ -560,6 +758,7 @@ fn clone_mesh(m: &ModelMesh) -> ModelMesh {
         positions: m.positions.clone(),
         normals: m.normals.clone(),
         uvs: m.uvs.clone(),
+        uv2: m.uv2.clone(),
         submeshes: m.submeshes.clone(),
         skin: m.skin.as_ref().map(|s| Skin { bones: s.bones.clone(), names: s.names.clone(), bind_poses: s.bind_poses.clone(), weights: s.weights.clone() }),
         blend_shapes: m
@@ -584,7 +783,18 @@ fn resolve_material(loader: &mut Loader, src: &MatSource, shader_names: &mut Has
             }
             let path = loader.assets.path(guid).with_context(|| format!("a material that is not in the project ({guid})"))?;
             let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-            if ext == "fbx" || ext == "obj" {
+            if ext == "fbx" || ext == "obj" || prefab::only_unity_reads(&ext) {
+                // A model's own material as its import made it, its properties read as a `.mat` file's.
+                if let Some(a) = loader.artifact(guid, &path, prefab::only_unity_reads(&ext)) {
+                    if let Ok(v) = a.object(r.file_id, 21) {
+                        let (name, shader, props) = material::props_of(&v);
+                        let shader_name = shader_name_of(loader, shader, shader_names);
+                        return Ok(material::look(&name, &shader_name, &props));
+                    }
+                }
+                if prefab::only_unity_reads(&ext) {
+                    anyhow::bail!("a material of {}, only in its import", prefab::rel(loader.assets, &path));
+                }
                 // A model's own material, by Unity's ID of it.
                 let m = loader.model(guid)?;
                 let k = m.materials.iter().position(|mm| super::model::file_id("Material", &mm.name, 0) == r.file_id).unwrap_or(0);
@@ -593,6 +803,7 @@ fn resolve_material(loader: &mut Loader, src: &MatSource, shader_names: &mut Has
             mat_file(loader, &path, shader_names)
         }
         MatSource::Model { guid, material } => model_slot(loader, guid, *material, shader_names),
+        MatSource::Baked(_) => anyhow::bail!("a look the build keeps itself"),
     }
 }
 
@@ -601,7 +812,14 @@ fn mat_file(loader: &mut Loader, path: &Path, shader_names: &mut HashMap<String,
     loader.files.push(path.to_path_buf());
     let (name, shader, props) =
         material::props(&text).with_context(|| format!("{} is not a material Unity saved as text", prefab::rel(loader.assets, path)))?;
-    let shader_name = match shader {
+    let shader_name = shader_name_of(loader, shader, shader_names);
+    Ok(material::look(&name, &shader_name, &props))
+}
+
+/// A material's shader's name, lower-case: the built-in ones by their ID, a `.shader` file by its first line, a Shader
+/// Graph or an Amplify file by its file's name.
+fn shader_name_of(loader: &mut Loader, shader: Option<super::yaml::Ref>, shader_names: &mut HashMap<String, String>) -> String {
+    match shader {
         Some(s) if s.guid.as_deref() == Some("0000000000000000f000000000000000") => material::builtin_shader(s.file_id).to_string(),
         Some(s) => match s.guid {
             Some(g) => match shader_names.get(&g) {
@@ -630,8 +848,7 @@ fn mat_file(loader: &mut Loader, path: &Path, shader_names: &mut HashMap<String,
             None => String::new(),
         },
         None => String::new(),
-    };
-    Ok(material::look(&name, &shader_name, &props))
+    }
 }
 
 /// What Unity draws in a model's material slot: the material its import remaps there, the legacy external material
@@ -790,7 +1007,7 @@ fn pose(mesh: &ModelMesh, weights: &[f32], bones: &[i64], world: &World, rendere
     (out_p, out_n)
 }
 
-fn push_mesh(writer: &mut Writer, positions: &[[f32; 3]], normals: &[[f32; 3]], uvs: &[[f32; 2]], submeshes: &[Vec<u32>]) -> (Mesh, Bounds) {
+fn push_mesh(writer: &mut Writer, positions: &[[f32; 3]], normals: &[[f32; 3]], uvs: &[[f32; 2]], lightmap_uvs: &[[f32; 2]], submeshes: &[Vec<u32>]) -> (Mesh, Bounds) {
     let mut data = Vec::with_capacity(positions.len() * file::VERTEX_SIZE);
     for (i, p) in positions.iter().enumerate() {
         data.extend_from_slice(&file::vertex(*p, normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]), uvs.get(i).copied().unwrap_or([0.0; 2])));
@@ -818,6 +1035,10 @@ fn push_mesh(writer: &mut Writer, positions: &[[f32; 3]], normals: &[[f32; 3]], 
         indices: writer.push(&indices),
         submeshes: subs,
         bounds: b,
+        lightmap_uv: (lightmap_uvs.len() == positions.len()).then(|| {
+            let unorm = |v: f32| ((v.clamp(0.0, 1.0) * 65535.0).round() as u16).to_le_bytes();
+            writer.push(&lightmap_uvs.iter().flat_map(|uv| [unorm(uv[0]), unorm(uv[1])]).flatten().collect::<Vec<u8>>())
+        }),
     };
     (mesh, b)
 }
@@ -857,7 +1078,7 @@ fn grow(into: &mut Bounds, b: &Bounds) {
 }
 
 /// The scene's directional lights and ambient light, as shaders receive them (linear).
-fn lighting_of(graph: &Graph, world: &World) -> Option<file::Lighting> {
+fn lighting_of(graph: &Graph, world: &World, sky_ambient: Option<[[f32; 3]; 3]>, lightmaps: bool) -> Option<file::Lighting> {
     let mut lights: Vec<file::SceneLight> = Vec::new();
     for o in graph.objects.values() {
         let Obj::Light(l) = o else { continue };
@@ -871,7 +1092,7 @@ fn lighting_of(graph: &Graph, world: &World) -> Option<file::Lighting> {
         let m = world.matrix(t);
         let direction = math::normalize([m[8], m[9], m[10]]);
         let c = [0, 1, 2].map(|k| material::srgb_to_linear(l.color[k]) * l.intensity);
-        lights.push(file::SceneLight { direction, color: c, intensity: l.intensity, shadows: l.shadows, shadow_strength: l.shadow_strength });
+        lights.push(file::SceneLight { direction, color: c, intensity: l.intensity, shadows: l.shadows, shadow_strength: l.shadow_strength, baked: l.baked });
     }
     lights.sort_by(|a, b| b.intensity.total_cmp(&a.intensity));
     lights.truncate(4);
@@ -880,48 +1101,228 @@ fn lighting_of(graph: &Graph, world: &World) -> Option<file::Lighting> {
         match a.mode {
             1 => Some(file::Ambient { mode: file::AmbientMode::Trilight, sky: lin(a.sky), equator: lin(a.equator), ground: lin(a.ground) }),
             3 => Some(file::Ambient { mode: file::AmbientMode::Flat, sky: lin(a.sky), equator: lin(a.sky), ground: lin(a.sky) }),
-            // The sky's light is only known once Unity computed it: the desktop uses the default sky's.
-            _ => None,
+            // From the sky: its picture's light when it has one. Otherwise only Unity computes it: the desktop uses the
+            // default sky's.
+            _ => sky_ambient.map(|[sky, equator, ground]| {
+                let k = |c: [f32; 3]| c.map(|v| v * a.intensity);
+                file::Ambient { mode: file::AmbientMode::Skybox, sky: k(sky), equator: k(equator), ground: k(ground) }
+            }),
         }
     });
-    if lights.is_empty() && ambient.is_none() {
+    if lights.is_empty() && ambient.is_none() && !lightmaps {
         // Nothing recorded worth drawing in (no directional light, the default sky): the studio's light.
         return None;
     }
-    Some(file::Lighting { lights, ambient, reflection_intensity: 1.0 })
+    Some(file::Lighting { lights, ambient, reflection_intensity: graph.settings.reflection_intensity.unwrap_or(1.0), fog: place::fog(graph) })
 }
 
-fn decode_all(jobs: &[(String, bool, Option<PathBuf>, bool)], side: u32, limits: &Limits) -> Vec<anyhow::Result<texture::Encoded>> {
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, limits.threads.max(1));
+/// `f` on each of `jobs` on several threads below normal priority when the build is: results in the same order.
+fn in_parallel<T: Sync, R: Send>(jobs: &[T], limits: &Limits, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, limits.threads.max(1)).min(jobs.len().max(1));
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let results: Vec<Decoded> = jobs.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    let results: Vec<std::sync::Mutex<Option<R>>> = jobs.iter().map(|_| std::sync::Mutex::new(None)).collect();
     std::thread::scope(|scope| {
-        for _ in 0..threads.min(jobs.len().max(1)) {
+        for _ in 0..threads {
             scope.spawn(|| {
                 limits.lower_priority();
-                decode_next(jobs, &next, &results, side, limits)
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(job) = jobs.get(i) else { break };
+                    *results[i].lock().unwrap() = Some(f(job));
+                }
             });
         }
     });
-    results.into_iter().map(|r| r.into_inner().unwrap().unwrap_or_else(|| Err(anyhow::anyhow!("not read")))).collect()
+    results.into_iter().map(|r| r.into_inner().unwrap().expect("every job ran")).collect()
 }
 
-type Decoded = std::sync::Mutex<Option<anyhow::Result<texture::Encoded>>>;
+/// What a material uses a picture for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Use {
+    Main,
+    Emission,
+    Normal,
+}
 
-/// Decodes pictures from `jobs` until none is left (one of [`decode_all`]'s threads).
-fn decode_next(jobs: &[(String, bool, Option<PathBuf>, bool)], next: &std::sync::atomic::AtomicUsize, results: &[Decoded], side: u32, limits: &Limits) {
-    loop {
-        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let Some((_, main, path, keep_alpha)) = jobs.get(i) else { break };
-        let r = (|| {
-            limits.check("reading the pictures")?;
-            let path = path.as_ref().context("not in the project")?;
-            let img = texture::decode(path, limits.max_texture_bytes)?;
-            // An emission mask needs less detail than the colour.
-            texture::encode(&img, if *main { side } else { side.min(256) }, *keep_alpha)
-        })();
-        *results[i].lock().unwrap() = Some(r);
+fn decode_all(jobs: &[(String, Use, Option<PathBuf>, bool, u32)], limits: &Limits) -> Vec<anyhow::Result<texture::Encoded>> {
+    in_parallel(jobs, limits, |(_, how, path, keep_alpha, side)| {
+        limits.check("reading the pictures")?;
+        let path = path.as_ref().context("not in the project")?;
+        let img = texture::decode(path, limits.max_texture_bytes)?;
+        // An emission mask needs less detail than the colour, ripples and grain a little less.
+        let side = match how {
+            Use::Main => *side,
+            Use::Emission => (*side).min(256),
+            Use::Normal => (*side).min(512),
+        };
+        texture::encode(&img, side, *keep_alpha)
+    })
+}
+
+fn p_center(b: &Bounds) -> [f32; 3] {
+    b.center()
+}
+
+/// Each terrain's ground and picture as a candidate of its own, its trees as their prefabs' renderers at their places.
+#[allow(clippy::too_many_arguments)]
+fn add_terrains(
+    graph: &Graph,
+    world: &World,
+    loader: &mut Loader,
+    unity_lightmaps: &[Option<String>],
+    candidates: &mut Vec<Candidate>,
+    baked: &mut Vec<(Look, image::RgbaImage)>,
+    dropped: &mut std::collections::BTreeMap<String, u32>,
+) -> anyhow::Result<()> {
+    let mut ids: Vec<i64> = graph.objects.iter().filter(|(_, o)| matches!(o, Obj::Terrain(_))).map(|(id, _)| *id).collect();
+    ids.sort();
+    for id in ids {
+        let Some(Obj::Terrain(t)) = graph.objects.get(&id) else { continue };
+        let Some(&tr) = world.transform_of.get(&t.game_object) else { continue };
+        if !t.enabled || !world.shown(tr) {
+            continue;
+        }
+        loader.limits.check("reading the terrain")?;
+        let Some(r) = &t.data else { continue };
+        let Some(path) = r.guid.as_deref().and_then(|g| loader.assets.path(g)) else {
+            let what = "a terrain whose data is not in the project".to_string();
+            if !loader.missing.contains(&what) {
+                loader.missing.push(what);
+            }
+            *dropped.entry("mesh could not be read".to_string()).or_insert(0) += 1;
+            continue;
+        };
+        let name = prefab::rel(loader.assets, &path);
+        let mut files = Vec::new();
+        let data = match terrain::read(&path, r.file_id, loader.assets, loader.limits, &mut files) {
+            Ok(d) => d,
+            Err(e) => {
+                let what = format!("{name}: {e:#}");
+                if !loader.missing.contains(&what) && loader.missing.len() < 64 {
+                    loader.missing.push(what);
+                }
+                *dropped.entry("mesh could not be read".to_string()).or_insert(0) += 1;
+                continue;
+            }
+        };
+        let picture = data.picture(loader.assets, loader.limits, &mut files);
+        loader.files.extend(files);
+        let k = baked.len();
+        let material = file::Material { name: data.name.clone(), smoothness: 0.0, ..Default::default() };
+        baked.push((Look { material, main_texture: Some(format!("baked:{k}")), ..Default::default() }, picture));
+        let mesh = Arc::new(data.mesh());
+        // Terrains stand at their transform's place, turned and scaled by nothing else.
+        let m = world.matrix(tr);
+        let at = [m[12], m[13], m[14]];
+        let matrix = math::trs(at, [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]);
+        let local = bounds_of(&mesh.positions);
+        candidates.push(Candidate {
+            renderer: id,
+            matrix,
+            triangles: mesh.triangles() as u64,
+            world_bounds: transform_bounds(&matrix, &local),
+            key: format!("terrain:{id}"),
+            mesh,
+            skinned: false,
+            materials: vec![MatSource::Baked(k)],
+            bones: Vec::new(),
+            blend: Vec::new(),
+            avatar: None,
+            shadows: t.casts_shadows,
+            lightmap: place::lightmap_of(graph, unity_lightmaps, id, t.lightmap_index, t.lightmap_st),
+        });
+        if data.detail_patches > 0 {
+            *dropped.entry("terrain details".to_string()).or_insert(0) += data.detail_patches as u32;
+        }
+        if !t.trees {
+            continue;
+        }
+        // Each prototype's renderers relative to its prefab's root.
+        let mut protos: Vec<Vec<(String, Arc<ModelMesh>, Vec<MatSource>, [f32; 16], bool)>> = Vec::new();
+        for p in &data.prototypes {
+            let mut parts = Vec::new();
+            if let Some(g) = p.guid.as_deref() {
+                match loader.source(g, 0) {
+                    Ok(src) => parts = tree_parts(&src, loader),
+                    Err(e) => {
+                        let what = format!("{e:#}");
+                        if !loader.missing.contains(&what) && loader.missing.len() < 64 {
+                            loader.missing.push(what);
+                        }
+                    }
+                }
+            }
+            protos.push(parts);
+        }
+        let step = data.trees.len().div_ceil(terrain::MAX_TREES).max(1);
+        if step > 1 {
+            *dropped.entry("terrain trees thinned".to_string()).or_insert(0) += (data.trees.len() - data.trees.len() / step) as u32;
+        }
+        for (i, tree) in data.trees.iter().step_by(step).enumerate() {
+            let Some(parts) = protos.get(tree.prototype) else { continue };
+            loader.limits.check("placing the trees")?;
+            let place = [at[0] + tree.position[0] * data.size[0], at[1] + tree.position[1] * data.size[1], at[2] + tree.position[2] * data.size[2]];
+            let (s, c) = (tree.rotation * 0.5).sin_cos();
+            let m = math::trs(place, [0.0, s, 0.0, c], [tree.width, tree.height, tree.width]);
+            for (key, mesh, materials, local, shadows) in parts {
+                let matrix = math::mul(&m, local);
+                candidates.push(Candidate {
+                    renderer: id ^ ((i as i64 + 1) << 32),
+                    matrix,
+                    triangles: mesh.triangles() as u64,
+                    world_bounds: transform_bounds(&matrix, &bounds_of(&mesh.positions)),
+                    key: key.clone(),
+                    mesh: mesh.clone(),
+                    skinned: false,
+                    materials: materials.clone(),
+                    bones: Vec::new(),
+                    blend: Vec::new(),
+                    avatar: None,
+                    shadows: *shadows,
+                    lightmap: None,
+                });
+            }
+        }
     }
+    Ok(())
+}
+
+type TreePart = (String, Arc<ModelMesh>, Vec<MatSource>, [f32; 16], bool);
+
+/// What a tree's prefab draws, each part relative to its root, its most detailed level only.
+fn tree_parts(src: &Graph, loader: &mut Loader) -> Vec<TreePart> {
+    let w = World::new(src);
+    let mut lower = std::collections::HashSet::new();
+    let mut filters: HashMap<i64, &MeshSource> = HashMap::new();
+    for o in src.objects.values() {
+        match o {
+            Obj::Lod(l) => lower.extend(l.lower.iter().copied()),
+            Obj::Filter(f) => {
+                filters.insert(f.game_object, &f.mesh);
+            }
+            _ => {}
+        }
+    }
+    let mut parts = Vec::new();
+    for (id, o) in &src.objects {
+        let Obj::Renderer(r) = o else { continue };
+        if r.skinned || !r.enabled || lower.contains(id) {
+            continue;
+        }
+        let Some(&t) = w.transform_of.get(&r.game_object) else { continue };
+        if !w.shown(t) {
+            continue;
+        }
+        let Some(source) = filters.get(&r.game_object).copied() else { continue };
+        let key = match source {
+            MeshSource::None => continue,
+            MeshSource::Model { guid, mesh } => format!("{guid}:{mesh}"),
+            MeshSource::Asset(r) => format!("{}:{}", r.guid.as_deref().unwrap_or("-"), r.file_id),
+        };
+        let Ok(mesh) = resolve_mesh(loader, source) else { continue };
+        parts.push((key, mesh, r.materials.clone(), w.matrix(t), r.casts_shadows));
+    }
+    parts
 }
 
 #[cfg(test)]
@@ -986,6 +1387,317 @@ SkinnedMeshRenderer:
         assert_eq!(h.draws.len(), 1);
         let b = h.meshes[h.draws[0].mesh as usize].bounds;
         // Bound one metre up, its bone now five metres up: the quad four to five metres up.
+        assert!((b.min[1] - 4.0).abs() < 1e-3 && (b.max[1] - 5.0).abs() < 1e-3, "{b:?}");
+    }
+
+    const WORLD_MODEL: &str = "eeee0000000000000000000000000001";
+    const LIGHTMAP: &str = "eeee0000000000000000000000000002";
+    const LIGHTING: &str = "eeee0000000000000000000000000003";
+    const SKY_MAT: &str = "eeee0000000000000000000000000004";
+    const SKY_PICTURE: &str = "eeee0000000000000000000000000005";
+    const TERRAIN: &str = "eeee0000000000000000000000000006";
+    const TREE: &str = "eeee0000000000000000000000000007";
+
+    fn scene_file(dir: &Path, assets: &mut Assets, text: &str) -> SceneFile {
+        let p = dir.join("Assets/World.unity");
+        std::fs::write(&p, text).unwrap();
+        assets.insert("ffff0000000000000000000000000020", p.clone());
+        SceneFile { path: p, guid: "f".repeat(32), name: "World".into() }
+    }
+
+    /// A world whose ground is a `.blend` model: a scene placing it 10 m along, with a descriptor saying it is a world.
+    fn blend_world(dir: &Path, assets: &mut Assets, extra: &str) -> SceneFile {
+        let a = dir.join("Assets");
+        std::fs::write(a.join("World.blend"), b"BLENDER").unwrap();
+        std::fs::write(a.join("World.blend.meta"), format!("fileFormatVersion: 2\nguid: {WORLD_MODEL}\n")).unwrap();
+        assets.insert(WORLD_MODEL, a.join("World.blend"));
+        let text = format!(
+            "%YAML 1.1
+--- !u!1001 &500
+PrefabInstance:
+  m_Modification:
+    m_TransformParent: {{fileID: 0}}
+    m_Modifications:
+    - target: {{fileID: 11, guid: {WORLD_MODEL}, type: 3}}
+      propertyPath: m_LocalPosition.z
+      value: 10
+      objectReference: {{fileID: 0}}
+  m_SourcePrefab: {{fileID: 100100000, guid: {WORLD_MODEL}, type: 3}}
+{extra}"
+        );
+        scene_file(dir, assets, &text)
+    }
+
+    #[test]
+    fn a_model_only_unity_reads_comes_from_its_import_with_its_sun() {
+        use crate::scene::artifact::tests::{install, model_artifact};
+        let dir = tempfile::tempdir().unwrap();
+        let mut assets = project(dir.path());
+        let file = blend_world(dir.path(), &mut assets, "");
+        // Never opened in Unity: said plainly.
+        let e = build(dir.path(), &file, &assets, &Limits::default()).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("open the project in Unity once"), "{e}");
+        install(dir.path(), WORLD_MODEL, &model_artifact());
+        let built = build(dir.path(), &file, &assets, &Limits::default()).unwrap();
+        let h = &built.header;
+        assert_eq!(h.draws.len(), 1, "{:?}", built.report);
+        // The part stands 3 m from the root, which stands 2 m along X and, by the scene's override, 10 m along Z.
+        let p = file::parse(built.bytes.clone()).unwrap();
+        let m = p.matrix(h.draws[0].instance);
+        assert_eq!([m[12], m[13], m[14]], [5.0, 0.0, 10.0]);
+        // The model's material is the project's red one.
+        assert_eq!(h.materials[0].color, [1.0, 0.0, 0.0, 1.0]);
+        let l = h.lighting.as_ref().expect("the model's sun");
+        assert_eq!(l.lights.len(), 1);
+        assert_eq!(l.lights[0].intensity, 2.0);
+        assert!(built.files.iter().any(|f| f.ends_with("World.blend")), "built again when the model changes");
+    }
+
+    #[test]
+    fn a_renderers_lightmap_comes_from_the_scene_and_its_uv2_goes_along() {
+        use crate::scene::artifact::tests::{install, model_artifact};
+        use crate::scene::prefab::mixed;
+        let dir = tempfile::tempdir().unwrap();
+        let mut assets = project(dir.path());
+        install(dir.path(), WORLD_MODEL, &model_artifact());
+        let a = dir.path().join("Assets");
+        image::RgbImage::from_pixel(8, 8, image::Rgb([128, 64, 32])).save(a.join("Lightmap-0.png")).unwrap();
+        assets.insert(LIGHTMAP, a.join("Lightmap-0.png"));
+        std::fs::write(a.join("LightingData.asset"), format!("%YAML 1.1\n--- !u!1120 &112000000\nLightingDataAsset:\n  m_Lightmaps:\n  - m_Lightmap: {{fileID: 2800000, guid: {LIGHTMAP}, type: 3}}\n")).unwrap();
+        assets.insert(LIGHTING, a.join("LightingData.asset"));
+        // Unity's own: the renderer's index and place, overridden on the instance.
+        let renderer = 23;
+        let extra = format!(
+            "--- !u!157 &3
+LightmapSettings:
+  m_LightingDataAsset: {{fileID: 112000000, guid: {LIGHTING}, type: 2}}
+"
+        );
+        let file = blend_world(dir.path(), &mut assets, &extra);
+        let text = std::fs::read_to_string(&file.path).unwrap().replace(
+            "  m_SourcePrefab:",
+            &format!(
+                "    - target: {{fileID: {renderer}, guid: {WORLD_MODEL}, type: 3}}\n      propertyPath: m_LightmapIndex\n      value: 0\n      objectReference: {{fileID: 0}}\n    - target: {{fileID: {renderer}, guid: {WORLD_MODEL}, type: 3}}\n      propertyPath: m_LightmapTilingOffset.x\n      value: 0.5\n      objectReference: {{fileID: 0}}\n  m_SourcePrefab:"
+            ),
+        );
+        std::fs::write(&file.path, text).unwrap();
+        let built = build(dir.path(), &file, &assets, &Limits::default()).unwrap();
+        let h = &built.header;
+        let l = h.draws[0].lightmap.expect("a lightmap");
+        assert_eq!((l.index, l.st), (0, [0.5, 1.0, 0.0, 0.0]));
+        assert_eq!(h.lightmaps.len(), 1);
+        assert!(h.lightmaps[0].scale > 0.0);
+        let uv = h.meshes[h.draws[0].mesh as usize].lightmap_uv.expect("its second UV set");
+        assert_eq!(uv.length, 3 * file::LIGHTMAP_UV_SIZE as u64);
+        let p = file::parse(built.bytes.clone()).expect("a valid preview");
+        assert_eq!(u16::from_le_bytes(p.blob(uv)[..2].try_into().unwrap()), (0.25f32 * 65535.0).round() as u16);
+        assert!(built.files.iter().any(|f| f.ends_with("Lightmap-0.png")));
+        // Bakery's list counts over the renderer's: its storage names the same renderer in another place.
+        let bakery = format!(
+            "--- !u!114 &900
+MonoBehaviour:
+  m_GameObject: {{fileID: 0}}
+  m_Enabled: 1
+  m_Script: {{fileID: 11500000, guid: b7fa80e7116296f4eb4f49ec1544ee22, type: 3}}
+  maps:
+  - {{fileID: 2800000, guid: {LIGHTMAP}, type: 3}}
+  bakedRenderers:
+  - {{fileID: {}}}
+  bakedIDs: 00000000
+  bakedScaleOffset:
+  - {{x: 0.25, y: 0.25, z: 0.5, w: 0.5}}
+",
+            mixed(500, renderer)
+        );
+        let text = std::fs::read_to_string(&file.path).unwrap() + &bakery;
+        std::fs::write(&file.path, text).unwrap();
+        let built = build(dir.path(), &file, &assets, &Limits::default()).unwrap();
+        assert_eq!(built.header.draws[0].lightmap.unwrap().st, [0.25, 0.25, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn a_scene_keeps_its_sky_fog_and_ambient_light_from_its_picture() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut assets = project(dir.path());
+        let a = dir.path().join("Assets");
+        // Blue above, brown below.
+        let mut sky = image::RgbImage::new(16, 8);
+        for (_, y, p) in sky.enumerate_pixels_mut() {
+            *p = if y < 4 { image::Rgb([60, 120, 240]) } else { image::Rgb([120, 80, 40]) };
+        }
+        sky.save(a.join("Sky.png")).unwrap();
+        assets.insert(SKY_PICTURE, a.join("Sky.png"));
+        std::fs::write(
+            a.join("Sky.mat"),
+            format!(
+                "%YAML 1.1\n--- !u!21 &2100000\nMaterial:\n  m_Name: Sky\n  m_Shader: {{fileID: 108, guid: 0000000000000000f000000000000000, type: 0}}\n  m_SavedProperties:\n    m_TexEnvs:\n    - _MainTex:\n        m_Texture: {{fileID: 2800000, guid: {SKY_PICTURE}, type: 3}}\n        m_Scale: {{x: 1, y: 1}}\n        m_Offset: {{x: 0, y: 0}}\n    m_Floats:\n    - _Exposure: 1\n    - _Rotation: 90\n    m_Colors:\n    - _Tint: {{r: 0.5, g: 0.5, b: 0.5, a: 1}}\n"
+            ),
+        )
+        .unwrap();
+        assets.insert(SKY_MAT, a.join("Sky.mat"));
+        let text = format!(
+            "%YAML 1.1
+--- !u!104 &2
+RenderSettings:
+  m_Fog: 1
+  m_FogColor: {{r: 1, g: 1, b: 1, a: 1}}
+  m_FogMode: 1
+  m_LinearFogStart: 5
+  m_LinearFogEnd: 50
+  m_AmbientMode: 0
+  m_AmbientIntensity: 1
+  m_SkyboxMaterial: {{fileID: 2100000, guid: {SKY_MAT}, type: 2}}
+  m_ReflectionIntensity: 0.5
+--- !u!1 &1
+GameObject:
+  m_Name: Cube
+  m_IsActive: 1
+--- !u!4 &4
+Transform:
+  m_GameObject: {{fileID: 1}}
+  m_Father: {{fileID: 0}}
+--- !u!33 &5
+MeshFilter:
+  m_GameObject: {{fileID: 1}}
+  m_Mesh: {{fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}}
+--- !u!23 &6
+MeshRenderer:
+  m_GameObject: {{fileID: 1}}
+  m_Enabled: 1
+"
+        );
+        let file = scene_file(dir.path(), &mut assets, &text);
+        let built = build(dir.path(), &file, &assets, &Limits::default()).unwrap();
+        let h = &built.header;
+        let s = h.sky.expect("a sky");
+        assert_eq!(s.rotation, 90.0);
+        assert!(s.texture >= 0 && (s.texture as usize) < h.textures.len());
+        let l = h.lighting.as_ref().expect("its light");
+        assert_eq!(l.reflection_intensity, 0.5);
+        let fog = l.fog.expect("its fog");
+        assert_eq!((fog.mode, fog.start, fog.end), (file::FogMode::Linear, 5.0, 50.0));
+        // The ambient light the picture gives: blue from above, brown from below.
+        let am = l.ambient.expect("from the sky's picture");
+        assert_eq!(am.mode, file::AmbientMode::Skybox);
+        assert!(am.sky[2] > am.sky[0] && am.ground[0] > am.ground[2], "{am:?}");
+    }
+
+    #[test]
+    fn a_terrain_draws_its_ground_and_its_trees() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut assets = project(dir.path());
+        let a = dir.path().join("Assets");
+        std::fs::write(
+            a.join("Tree.prefab"),
+            "%YAML 1.1
+--- !u!1 &1
+GameObject:
+  m_Name: Tree
+  m_IsActive: 1
+--- !u!4 &2
+Transform:
+  m_GameObject: {fileID: 1}
+  m_Father: {fileID: 0}
+--- !u!33 &3
+MeshFilter:
+  m_GameObject: {fileID: 1}
+  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}
+--- !u!23 &4
+MeshRenderer:
+  m_GameObject: {fileID: 1}
+  m_Enabled: 1
+--- !u!1 &5
+GameObject:
+  m_Name: TreeFar
+  m_IsActive: 1
+--- !u!4 &6
+Transform:
+  m_GameObject: {fileID: 5}
+  m_Father: {fileID: 2}
+--- !u!33 &7
+MeshFilter:
+  m_GameObject: {fileID: 5}
+  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}
+--- !u!23 &8
+MeshRenderer:
+  m_GameObject: {fileID: 5}
+  m_Enabled: 1
+--- !u!205 &9
+LODGroup:
+  m_GameObject: {fileID: 1}
+  m_LODs:
+  - renderers:
+    - renderer: {fileID: 4}
+  - renderers:
+    - renderer: {fileID: 8}
+",
+        )
+        .unwrap();
+        assets.insert(TREE, a.join("Tree.prefab"));
+        std::fs::write(a.join("Small.asset"), crate::scene::terrain::tests::asset(TREE)).unwrap();
+        assets.insert(TERRAIN, a.join("Small.asset"));
+        let text = format!(
+            "%YAML 1.1
+--- !u!1 &1
+GameObject:
+  m_Name: Ground
+  m_IsActive: 1
+--- !u!4 &2
+Transform:
+  m_GameObject: {{fileID: 1}}
+  m_LocalPosition: {{x: 100, y: 1, z: 0}}
+  m_Father: {{fileID: 0}}
+--- !u!218 &3
+Terrain:
+  m_GameObject: {{fileID: 1}}
+  m_Enabled: 1
+  m_TerrainData: {{fileID: 15600000, guid: {TERRAIN}, type: 2}}
+  m_DrawTreesAndFoliage: 1
+"
+        );
+        let file = scene_file(dir.path(), &mut assets, &text);
+        let built = build(dir.path(), &file, &assets, &Limits::default()).unwrap();
+        let h = &built.header;
+        // The ground and two trees: each the prefab's most detailed level only.
+        assert_eq!(h.draws.len(), 3, "{:?}", built.report);
+        let p = file::parse(built.bytes.clone()).unwrap();
+        let places: Vec<[f32; 3]> = h.draws.iter().map(|d| {
+            let m = p.matrix(d.instance);
+            [m[12], m[13], m[14]]
+        }).collect();
+        // Ground at the transform; a tree at the terrain's middle, 2 wide and 3 tall; one at its far corner, half up.
+        assert!(places.contains(&[100.0, 1.0, 0.0]), "{places:?}");
+        assert!(places.contains(&[105.0, 1.0, 5.0]), "{places:?}");
+        assert!(places.contains(&[110.0, 3.0, 10.0]), "{places:?}");
+        let tree = h.draws.iter().find(|d| p.matrix(d.instance)[12] == 105.0).unwrap();
+        let m = p.matrix(tree.instance);
+        assert_eq!((m[0], m[5]), (2.0, 3.0));
+        // The ground's picture was made by the build.
+        let ground = h.draws.iter().find(|d| p.matrix(d.instance)[12] == 100.0).unwrap();
+        assert!(h.materials[ground.materials[0] as usize].texture >= 0);
+        assert!(built.files.iter().any(|f| f.ends_with("Small.asset")));
+    }
+
+    /// Ultirex 4.1's tail: a skin whose file gives some vertices no weight. Unity binds them wholly to the first bone;
+    /// so does the reader, so they move with the skeleton instead of staying in the mesh's own space, metres away.
+    #[test]
+    fn a_vertex_without_weights_follows_the_first_bone_as_in_unity() {
+        use crate::scene::model;
+        let dir = tempfile::tempdir().unwrap();
+        let p = model::tests::rig_file_with_weights(dir.path(), "0,1", "1,1");
+        let m = model::load(&p, &model::ImportSettings::default(), &Limits::default()).unwrap();
+        let quad = m.meshes.iter().find(|x| x.skin.is_some()).unwrap();
+        let skin = quad.skin.as_ref().unwrap();
+        assert!(skin.weights.iter().all(|w| w[0] == (0, 1.0)), "{:?}", skin.weights);
+        // Posed with its bone moved up 4 m: all of the mesh moves up 4 m, also what has no weight in the file.
+        let t = math::trs([0.0, 5.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0; 3]);
+        let mut objects = HashMap::new();
+        objects.insert(1, Obj::GameObject(prefab::GameObject { name: "Bone".into(), active: true, editor_only: false }));
+        objects.insert(2, Obj::Transform(prefab::Transform { game_object: 1, position: [0.0, 5.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3], father: 0 }));
+        let g = Graph { objects, ..Default::default() };
+        let w = World::new(&g);
+        let (posed, _) = pose(quad, &[], &[2], &w, t);
+        let b = bounds_of(&posed);
         assert!((b.min[1] - 4.0).abs() < 1e-3 && (b.max[1] - 5.0).abs() < 1e-3, "{b:?}");
     }
 

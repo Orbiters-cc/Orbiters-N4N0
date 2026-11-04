@@ -68,7 +68,10 @@ pub struct Skin {
     pub names: Vec<String>,
     /// Unity's bind poses: from the mesh's space to each bone's, at bind time (column-major).
     pub bind_poses: Vec<[f32; 16]>,
-    /// Up to four (bone, weight) a vertex, the weights summing to one.
+    /// Up to four (bone, weight) a vertex, the weights summing to one. Unity binds a vertex the file gives no weight to
+    /// (Ultirex 4.1's tail has 1,743 of them, hidden inside the body) wholly to its first bone, the one nearest the
+    /// root: such a vertex here is bound the same way, so it moves with the skeleton. Left unbound, it stayed where the
+    /// mesh's own space put it, tens of metres away for a mesh bound with a small skew in its bind poses.
     pub weights: Vec<[(u16, f32); 4]>,
 }
 
@@ -77,7 +80,7 @@ pub struct BlendShape {
     /// The shape's frames: (weight 0–100 where it is whole, sparse position offsets).
     pub frames: Vec<(f32, Vec<(u32, [f32; 3])>)>,
     /// The weight a renderer starts with: 0, as Unity imports every blend shape (a value the file keeps, a shape key
-    /// left on in Blender, is not applied; Ultirex 4.1's tail has a 100 % shape that flings it metres away).
+    /// left on in Blender, is not applied).
     pub default_weight: f32,
 }
 
@@ -86,6 +89,8 @@ pub struct ModelMesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
+    /// The second UV set, which lightmaps use (empty without one: Unity then uses the first).
+    pub uv2: Vec<[f32; 2]>,
     /// Triangles of each submesh (Unity's winding).
     pub submeshes: Vec<Vec<u32>>,
     pub skin: Option<Skin>,
@@ -482,12 +487,14 @@ fn mesh_of(
 ) -> anyhow::Result<(ModelMesh, Vec<u32>)> {
     let g2n = node.geometry_to_node;
     let normal_matrix = normal_matrix_t(&invert(&g2n));
-    // Vertices are welded on (control point, normal, UV), as Unity's importer does.
-    let mut map: HashMap<(u32, [u32; 3], [u32; 2]), u32> = HashMap::with_capacity(mesh.num_vertices * 2);
+    // Vertices are welded on (control point, normal, both UV sets), as Unity's importer does.
+    let mut map: HashMap<(u32, [u32; 3], [u32; 2], [u32; 2]), u32> = HashMap::with_capacity(mesh.num_vertices * 2);
     let mut corner_point: Vec<u32> = Vec::new();
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut uvs = Vec::new();
+    let mut uv2 = Vec::new();
+    let second = mesh.uv_sets.get(1).filter(|s| s.vertex_uv.exists);
     let has_normals = mesh.vertex_normal.exists && settings.normals != 1;
     let has_uv = mesh.vertex_uv.exists;
     let mut parts: Vec<(u32, Vec<u32>)> = Vec::new();
@@ -511,12 +518,19 @@ fn mesh_of(
             let p = mesh.vertex_position[ix];
             let nrm = if has_normals { mesh.vertex_normal[ix] } else { ufbx::Vec3 { x: 0.0, y: 0.0, z: 0.0 } };
             let uv = if has_uv { mesh.vertex_uv[ix] } else { ufbx::Vec2 { x: 0.0, y: 0.0 } };
-            let key = (point, [nrm.x as f32, nrm.y as f32, nrm.z as f32].map(f32::to_bits), [uv.x as f32, uv.y as f32].map(f32::to_bits));
+            let lit = second.map_or([0.0; 2], |s| {
+                let t = s.vertex_uv[ix];
+                [t.x as f32, t.y as f32]
+            });
+            let key = (point, [nrm.x as f32, nrm.y as f32, nrm.z as f32].map(f32::to_bits), [uv.x as f32, uv.y as f32].map(f32::to_bits), lit.map(f32::to_bits));
             let v = *map.entry(key).or_insert_with(|| {
                 positions.push(pos(transform_point(&g2n, p), unit));
                 let n = transform_dir(&normal_matrix, nrm);
                 normals.push(normalize(dir(n)));
                 uvs.push([uv.x as f32, uv.y as f32]);
+                if second.is_some() {
+                    uv2.push(lit);
+                }
                 corner_point.push(point);
                 (positions.len() - 1) as u32
             });
@@ -542,17 +556,21 @@ fn mesh_of(
             // Mesh (node) space → bone space at bind: geometry_to_bone · node_to_geometry.
             bind_poses.push(unity_matrix(&mul(&cluster.geometry_to_bone, &n2g), unit));
         }
+        // The bone nearest the root (Unity's first, its list follows the hierarchy).
+        let root = (0..skin.clusters.len()).min_by_key(|&i| skin.clusters[i].bone_node.as_ref().map_or(u32::MAX, |b| b.node_depth)).unwrap_or(0) as u16;
         let weights = corner_point
             .iter()
             .map(|&p| {
-                let mut w = [(0u16, 0.0f32); 4];
-                if let Some(sv) = skin.vertices.get(p as usize) {
+                let mut w = [(root, 0.0f32); 4];
+                w[0].1 = 1.0;
+                if let Some(sv) = skin.vertices.get(p as usize).filter(|sv| (0..sv.num_weights).any(|k| skin.weights.get((sv.weight_begin + k) as usize).is_some_and(|sw| sw.weight > 0.0))) {
                     let mut list: Vec<(u16, f32)> = (0..sv.num_weights)
                         .filter_map(|k| skin.weights.get((sv.weight_begin + k) as usize))
                         .map(|sw| (sw.cluster_index as u16, sw.weight as f32))
                         .collect();
                     list.sort_by(|a, b| b.1.total_cmp(&a.1));
                     let sum: f32 = list.iter().take(4).map(|x| x.1).sum();
+                    w = [(0, 0.0); 4];
                     for (k, (b, wt)) in list.into_iter().take(4).enumerate() {
                         w[k] = (b, if sum > 0.0 { wt / sum } else { 0.0 });
                     }
@@ -594,7 +612,7 @@ fn mesh_of(
             }
         }
     }
-    Ok((ModelMesh { name: node.element.name.to_string(), positions, normals, uvs, submeshes, skin, blend_shapes }, used))
+    Ok((ModelMesh { name: node.element.name.to_string(), positions, normals, uvs, uv2, submeshes, skin, blend_shapes }, used))
 }
 
 /// The transpose of a matrix's linear part (normals go through the inverse transpose).
@@ -837,6 +855,16 @@ Connections:  {
     pub(crate) fn rig_file(dir: &Path) -> std::path::PathBuf {
         let p = dir.join("Rig.fbx");
         std::fs::write(&p, RIG).unwrap();
+        p
+    }
+
+    /// The rig with its cluster naming only some of the mesh's vertices.
+    pub(crate) fn rig_file_with_weights(dir: &Path, indexes: &str, weights: &str) -> std::path::PathBuf {
+        let n = indexes.split(',').count();
+        let text = String::from_utf8_lossy(RIG.as_bytes()).replace("Indexes: *4 {\n\t\t\ta: 0,1,2,3", &format!("Indexes: *{n} {{\n\t\t\ta: {indexes}")).replace("Weights: *4 {\n\t\t\ta: 1,1,1,1", &format!("Weights: *{n} {{\n\t\t\ta: {weights}"));
+        assert!(text.contains(&format!("a: {indexes}\n")), "the rig's cluster changed");
+        let p = dir.join("RigPart.fbx");
+        std::fs::write(&p, text).unwrap();
         p
     }
 

@@ -6,8 +6,137 @@
 use orbiters_projects::scene;
 use std::time::{Duration, Instant};
 
+/// A value for reading: long runs of bytes as their length.
+fn print(v: &scene::yaml::Value) -> String {
+    use scene::yaml::Value;
+    match v {
+        Value::Null => "null".into(),
+        Value::Str(s) => s.clone(),
+        Value::Bytes(b) => format!("<{} bytes>", b.len()),
+        Value::Seq(l) => format!("[{}{}]", l.iter().take(8).map(print).collect::<Vec<_>>().join(", "), if l.len() > 8 { format!(", ... {}", l.len()) } else { String::new() }),
+        Value::Map(m) => format!("{{{}}}", m.iter().map(|(k, v)| format!("{k}: {}", print(v))).collect::<Vec<_>>().join(", ")),
+    }
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `--dump <binary file> [class]`: the objects of a Unity binary file (diagnostics).
+    if args.first().map(String::as_str) == Some("--dump") {
+        let bytes = std::fs::read(&args[1]).expect("file");
+        let class: Option<i32> = args.get(2).and_then(|c| c.parse().ok());
+        let limit: usize = args.get(3).and_then(|c| c.parse().ok()).unwrap_or(4000);
+        let file = scene::serialized::SerializedFile::parse(&bytes).expect("a serialized file");
+        let mut counts = std::collections::BTreeMap::new();
+        for o in file.objects() {
+            *counts.entry(o.class).or_insert(0usize) += 1;
+        }
+        println!("classes {counts:?}");
+        for o in file.objects().iter().filter(|o| Some(o.class) == class) {
+            let at = (file.data_offset + o.start) as usize;
+            let v = file.value(o, &bytes[at..at + o.size as usize]).expect("object");
+            let text = print(&v);
+            println!("--- class {} id {} size {}: {}", o.class, o.id, o.size, &text[..text.len().min(limit)]);
+        }
+        return;
+    }
+    // `--artifact <project> <guid>`: what Unity's import made of an asset (diagnostics).
+    if args.first().map(String::as_str) == Some("--artifact") {
+        let db = scene::artifact::ArtifactDb::open(std::path::Path::new(&args[1])).expect("a database");
+        let file = db.file_of(&args[2]).expect("an artifact");
+        println!("{}", file.display());
+        let a = scene::artifact::Artifact::open(&file, &args[2], 2 << 30).expect("artifact");
+        for class in [1, 4, 21, 23, 28, 33, 43, 74, 95, 137] {
+            println!("class {class}: {}", a.count(class));
+        }
+        for id in a.ids(43) {
+            let m = a.mesh(id);
+            match m {
+                Ok(m) => {
+                    let b = scene::build::bounds_of(&m.positions);
+                    println!(
+                        "mesh {id} {:?} v={} tris={} subs={} uv2={} shapes={} bones={} {:?}..{:?}",
+                        m.name,
+                        m.positions.len(),
+                        m.triangles(),
+                        m.submeshes.len(),
+                        m.uv2.len(),
+                        m.blend_shapes.len(),
+                        m.skin.as_ref().map_or(0, |s| s.bind_poses.len()),
+                        b.min,
+                        b.max
+                    );
+                }
+                Err(e) => println!("mesh {id}: {e:#}"),
+            }
+        }
+        return;
+    }
+    // `--compare <project> <model>`: the file as ufbx reads it against Unity's import of it, bone by bone (diagnostics).
+    if args.first().map(String::as_str) == Some("--compare") {
+        use scene::prefab::Obj;
+        let project = std::path::Path::new(&args[1]);
+        let model = std::path::Path::new(&args[2]);
+        let text = std::fs::read_to_string(format!("{}.meta", model.display())).unwrap_or_default();
+        let guid = scene::yaml::meta_guid(&text).expect("a guid");
+        let db = scene::artifact::ArtifactDb::open(project).expect("a database");
+        let a = scene::artifact::Artifact::open(&db.file_of(&guid).expect("an artifact"), &guid, 2 << 30).expect("artifact");
+        let m = scene::model::load(model, &scene::model::ImportSettings::read(&text), &scene::Limits::default()).expect("model");
+        let g = a.graph().expect("graph");
+        for (id, o) in &g.objects {
+            let Obj::Renderer(r) = o else { continue };
+            let mesh_id = match (&r.mesh, r.skinned) {
+                (scene::prefab::MeshSource::Asset(x), true) => x.file_id,
+                _ => continue,
+            };
+            let u = a.mesh(mesh_id).expect("mesh");
+            let name_of = |t: i64| -> String {
+                let Some(Obj::Transform(tr)) = g.objects.get(&t) else { return "?".into() };
+                match g.objects.get(&tr.game_object) {
+                    Some(Obj::GameObject(go)) => go.name.clone(),
+                    _ => "?".into(),
+                }
+            };
+            println!("renderer {id} mesh {:?} unity: v={} bones={} renderer bones={}", u.name, u.positions.len(), u.skin.as_ref().map_or(0, |s| s.bind_poses.len()), r.bones.len());
+            let Some(mine) = m.meshes.iter().find(|x| x.name == u.name) else { println!("  not in the file by that name"); continue };
+            println!("  file: v={} bones={}", mine.positions.len(), mine.skin.as_ref().map_or(0, |s| s.bind_poses.len()));
+            let b = |p: &[[f32; 3]]| scene::build::bounds_of(p);
+            println!("  unity vertices {:?}\n  file vertices  {:?}", b(&u.positions), b(&mine.positions));
+            let (Some(us), Some(ms)) = (&u.skin, &mine.skin) else { continue };
+            let mut worst = Vec::new();
+            let mut missing = 0;
+            for (i, t) in r.bones.iter().enumerate() {
+                let n = name_of(*t);
+                let Some(k) = ms.names.iter().position(|x| *x == n) else { missing += 1; continue };
+                let d: f32 = (0..16).map(|c| (us.bind_poses[i][c] - ms.bind_poses[k][c]).abs()).fold(0.0, f32::max);
+                worst.push((d, n, i));
+            }
+            worst.sort_by(|a, b| b.0.total_cmp(&a.0));
+            println!("  bones by name: {} matched, {missing} not in the file; largest differences {:?}", worst.len(), &worst[..worst.len().min(5)]);
+            if let Some((_, n, i)) = worst.first() {
+                let k = ms.names.iter().position(|x| x == n).unwrap();
+                println!("  {n}: unity {:?}\n  {n}: file  {:?}", us.bind_poses[*i], ms.bind_poses[k]);
+            }
+            let none: Vec<usize> = (0..ms.weights.len()).filter(|&i| ms.weights[i].iter().map(|w| w.1).sum::<f32>() < 1e-6).collect();
+            println!("  file vertices without a weight: {} of {}", none.len(), ms.weights.len());
+            for &i in none.iter().take(4) {
+                println!("    vertex {i}: position {:?}, unity's weights {:?} (unity's bone 0 is {:?})", mine.positions[i], us.weights.get(i), r.bones.first().map(|t| name_of(*t)));
+            }
+            let differ = (0..ms.weights.len().min(us.weights.len()))
+                .filter(|&i| {
+                    let named = |w: &[(u16, f32); 4], n: &dyn Fn(u16) -> String| -> Vec<(String, i32)> {
+                        let mut l: Vec<(String, i32)> = w.iter().filter(|x| x.1 > 1e-3).map(|x| (n(x.0), (x.1 * 100.0).round() as i32)).collect();
+                        l.sort();
+                        l
+                    };
+                    named(&ms.weights[i], &|b| ms.names[b as usize].clone()) != named(&us.weights[i], &|b| name_of(r.bones[b as usize]))
+                })
+                .count();
+            println!("  vertices whose weights differ (by bone name, to 1 %): {differ}");
+            let same = u.positions.iter().zip(&mine.positions).filter(|(a, b)| (0..3).all(|c| (a[c] - b[c]).abs() < 1e-3)).count();
+            println!("  vertices the same in the same order: {same} of {}", u.positions.len());
+        }
+        return;
+    }
     // `--model <file.fbx>`: a model's meshes, unskinned and posed by its own bones at rest (diagnostics).
     if args.first().map(String::as_str) == Some("--model") {
         let path = std::path::Path::new(&args[1]);
@@ -97,6 +226,12 @@ fn main() {
     };
     let scenes_n = take("--scenes", 1) as usize;
     let seconds = take("--seconds", 60);
+    let no_artifacts = args.iter().position(|a| a == "--no-artifacts").map(|i| args.remove(i)).is_some();
+    let only = args.iter().position(|a| a == "--scene").map(|i| {
+        let v = args.remove(i + 1);
+        args.remove(i);
+        v
+    });
     println!("| Project | Scenes | Scene | Objects | Renderers drawn | Models | Meshes | Materials | Textures | Triangles | Build | File | Cache | Result |");
     println!("| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |");
     let cache_mb = |p: &std::path::Path| -> f64 {
@@ -112,8 +247,13 @@ fn main() {
             println!("| {name} | 0 | | | | | | | | | | | | no scene ({list_ms:.0} ms to look) |");
             continue;
         }
-        for s in list.iter().take(scenes_n) {
-            let limits = scene::Limits::new(Duration::from_secs(seconds));
+        let wanted: Vec<_> = match &only {
+            Some(name) => list.iter().filter(|s| s.rel.contains(name.as_str())).take(1).collect(),
+            None => list.iter().take(scenes_n).collect(),
+        };
+        for s in wanted {
+            let mut limits = scene::Limits::new(Duration::from_secs(seconds));
+            limits.use_artifacts = !no_artifacts;
             let t = Instant::now();
             let r = scene::build_scene(path, s, &limits);
             let ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -147,7 +287,9 @@ fn main() {
                         if rep.missing.is_empty() { String::new() } else { format!(", {} unresolved", rep.missing.len()) }
                     );
                     eprintln!("  {} -> {}", s.rel, e.path.display());
-                    for m in rep.missing.iter().take(6) {
+                    eprintln!("    {:?} kind {:?} bounds {:?} focus {:?}", e.header.stats, e.header.kind, e.header.bounds, e.header.focus);
+                    eprintln!("    dropped {:?}", rep.dropped);
+                    for m in rep.missing.iter().take(40) {
                         eprintln!("    unresolved: {m}");
                     }
                 }

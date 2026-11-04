@@ -162,6 +162,8 @@ struct Reader<'a> {
     big: bool,
     /// Values made so far ([`MAX_VALUES`]).
     values: usize,
+    /// The files pointers name (their GUIDs), when reading an object.
+    externals: &'a [String],
 }
 
 /// The most values one object is read into: a mesh of four million vertices, its blend shapes and bones make a few
@@ -210,96 +212,189 @@ struct Type {
     nodes: Vec<Node>,
 }
 
+/// What a binary serialized file holds: its types, its objects and the other files it refers to, read from its start
+/// (everything before its data). An artifact of Unity's import is often hundreds of megabytes of which a preview wants
+/// a few objects: they are read one by one ([`SerializedFile::value`]), nothing else is held.
+pub struct SerializedFile {
+    types: Vec<Type>,
+    /// Every object: its ID in the file, where its data starts and how long it is, its type.
+    objects: Vec<ObjectInfo>,
+    /// The GUIDs of the files a pointer's `m_FileID` (one-based) names.
+    externals: Vec<String>,
+    /// Where the objects' data starts in the file.
+    pub data_offset: u64,
+    big: bool,
+}
+
+/// An object of a [`SerializedFile`].
+#[derive(Clone, Copy, Debug)]
+pub struct ObjectInfo {
+    pub id: i64,
+    /// From the file's data section.
+    pub start: u64,
+    pub size: u32,
+    /// Unity's class ID (0 for a type the file does not describe).
+    pub class: i32,
+    ty: usize,
+}
+
+impl SerializedFile {
+    /// The bytes to read from a file's start to know where its metadata ends: at most this many of them are needed
+    /// to call [`SerializedFile::head_size`].
+    pub const HEAD: usize = 64;
+
+    /// How many of a file's first bytes hold its metadata (`head` is at least its first [`Self::HEAD`] bytes).
+    pub fn head_size(head: &[u8]) -> anyhow::Result<u64> {
+        ensure!(is_serialized(head), "not a Unity serialized file");
+        let mut h = Reader { b: head, at: 0, big: true, values: 0, externals: &[] };
+        let _meta_size = h.u32()?;
+        let _file_size = h.u32()?;
+        let version = h.u32()?;
+        let mut data_offset = h.u32()? as u64;
+        h.take(4)?;
+        if version >= 22 {
+            let _meta = h.u32()?;
+            let _size = h.u64()?;
+            data_offset = h.u64()?;
+        }
+        Ok(data_offset)
+    }
+
+    /// Reads the metadata of a file from its first bytes (`b`, at least [`Self::head_size`] of them).
+    pub fn parse(b: &[u8]) -> anyhow::Result<Self> {
+        ensure!(is_serialized(b), "not a Unity serialized file");
+        let mut h = Reader { b, at: 0, big: true, values: 0, externals: &[] };
+        let _meta_size = h.u32()?;
+        let _file_size = h.u32()?;
+        let version = h.u32()?;
+        let mut data_offset = h.u32()? as u64;
+        ensure!((17..=22).contains(&version), "Unity's binary format version {version} (17 to 22 are read)");
+        let big = h.u8()? != 0;
+        h.take(3)?;
+        if version >= 22 {
+            let _meta = h.u32()?;
+            let _size = h.u64()?;
+            data_offset = h.u64()?;
+            h.u64()?;
+        }
+        let mut r = Reader { b, at: h.at, big, values: 0, externals: &[] };
+        let _unity = r.cstr()?;
+        let _platform = r.u32()?;
+        let trees = r.u8()? != 0;
+        ensure!(trees, "saved without type trees");
+        let types_n = r.i32()?;
+        ensure!((0..10_000).contains(&types_n), "{types_n} types");
+        let mut types = Vec::new();
+        for _ in 0..types_n {
+            types.push(read_type(&mut r, version, big)?);
+        }
+        let objects_n = r.i32()?;
+        ensure!((0..10_000_000).contains(&objects_n), "{objects_n} objects");
+        let mut objects = Vec::with_capacity(objects_n as usize);
+        for _ in 0..objects_n {
+            r.align();
+            let id = r.u64()? as i64;
+            let start = if version >= 22 { r.u64()? } else { r.u32()? as u64 };
+            let size = r.u32()?;
+            let ty = r.i32()? as usize;
+            objects.push(ObjectInfo { id, start, size, class: types.get(ty).map_or(0, |t| t.class), ty });
+        }
+        // What follows does not stop the objects from being read: a pointer to another file is then only unknown.
+        let externals = externals(&mut r).unwrap_or_default();
+        Ok(Self { types, objects, externals, data_offset, big })
+    }
+
+    pub fn objects(&self) -> &[ObjectInfo] {
+        &self.objects
+    }
+
+    /// An object's fields from its bytes. Pointers read as a text file writes them: `{fileID: <its ID in the other
+    /// file>, guid: <that file's GUID>}`, or only the ID for an object of this file.
+    pub fn value(&self, info: &ObjectInfo, data: &[u8]) -> anyhow::Result<Value> {
+        let t = self.types.get(info.ty).context("an object of an unknown type")?;
+        let mut d = Reader { b: data, at: 0, big: self.big, values: 0, externals: &self.externals };
+        Ok(read(&t.nodes, 0, &mut d, 0)?.0)
+    }
+}
+
+fn read_type(r: &mut Reader, version: u32, big: bool) -> anyhow::Result<Type> {
+    let class_id = r.i32()?;
+    let _stripped = r.u8()?;
+    let _script = r.u16()?;
+    if class_id == 114 {
+        r.take(16)?;
+    }
+    r.take(16)?;
+    let nodes_n = r.i32()?;
+    let strings_n = r.i32()?;
+    ensure!((0..100_000).contains(&nodes_n) && (0..10_000_000).contains(&strings_n), "a type tree of {nodes_n} nodes");
+    let node_size = if version >= 19 { 32 } else { 24 };
+    let raw = r.take(nodes_n as usize * node_size)?;
+    let strings = r.take(strings_n as usize)?;
+    let name = |off: u32| -> String {
+        if off & 0x8000_0000 != 0 {
+            return common(off & 0x7fff_ffff).unwrap_or("?").to_string();
+        }
+        let s = strings.get(off as usize..).unwrap_or(&[]);
+        String::from_utf8_lossy(s.split(|&c| c == 0).next().unwrap_or(&[])).into_owned()
+    };
+    let mut nodes = Vec::with_capacity(nodes_n as usize);
+    for k in 0..nodes_n as usize {
+        let mut n = Reader { b: &raw[k * node_size..(k + 1) * node_size], at: 0, big, values: 0, externals: &[] };
+        let _v = n.u16()?;
+        let level = n.u8()?;
+        let flags = n.u8()?;
+        let ty = n.u32()?;
+        let nm = n.u32()?;
+        let size = n.i32()?;
+        let _index = n.i32()?;
+        let meta = n.u32()?;
+        nodes.push(Node { ty: name(ty), name: name(nm), size, level, flags, meta });
+    }
+    if version >= 21 {
+        let deps = r.i32()?;
+        ensure!((0..100_000).contains(&deps), "{deps} type dependencies");
+        r.take(deps as usize * 4)?;
+    }
+    Ok(Type { class: class_id, nodes })
+}
+
+/// The list after the objects: the scripts the file uses, then the other files it refers to, by GUID.
+fn externals(r: &mut Reader) -> anyhow::Result<Vec<String>> {
+    let scripts = r.i32()?;
+    ensure!((0..1_000_000).contains(&scripts), "{scripts} scripts");
+    for _ in 0..scripts {
+        let _file = r.i32()?;
+        r.align();
+        r.take(8)?;
+    }
+    let n = r.i32()?;
+    ensure!((0..1_000_000).contains(&n), "{n} other files");
+    let mut out = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let _empty = r.cstr()?;
+        let guid = r.take(16)?;
+        let _kind = r.i32()?;
+        let _path = r.cstr()?;
+        // A GUID as `.meta` files write it: each byte's two hex digits swapped.
+        out.push(guid.iter().map(|b| format!("{:x}{:x}", b & 0xf, b >> 4)).collect());
+    }
+    Ok(out)
+}
+
 /// The object `path_id` of a binary serialized file (else its first of class `class`): its class and fields.
 pub fn object(b: &[u8], path_id: i64, class: i32) -> anyhow::Result<(i32, Value)> {
-    ensure!(is_serialized(b), "not a Unity serialized file");
-    let mut h = Reader { b, at: 0, big: true, values: 0 };
-    let _meta_size = h.u32()?;
-    let _file_size = h.u32()?;
-    let version = h.u32()?;
-    let mut data_offset = h.u32()? as u64;
-    ensure!((17..=22).contains(&version), "Unity's binary format version {version} (17 to 22 are read)");
-    let big = h.u8()? != 0;
-    h.take(3)?;
-    if version >= 22 {
-        let _meta = h.u32()?;
-        let _size = h.u64()?;
-        data_offset = h.u64()?;
-        h.u64()?;
-    }
-    let mut r = Reader { b, at: h.at, big, values: 0 };
-    let _unity = r.cstr()?;
-    let _platform = r.u32()?;
-    let trees = r.u8()? != 0;
-    ensure!(trees, "saved without type trees");
-    let types_n = r.i32()?;
-    ensure!((0..10_000).contains(&types_n), "{types_n} types");
-    let mut types = Vec::new();
-    for _ in 0..types_n {
-        let class_id = r.i32()?;
-        let _stripped = r.u8()?;
-        let _script = r.u16()?;
-        if class_id == 114 {
-            r.take(16)?;
-        }
-        r.take(16)?;
-        let nodes_n = r.i32()?;
-        let strings_n = r.i32()?;
-        ensure!((0..100_000).contains(&nodes_n) && (0..10_000_000).contains(&strings_n), "a type tree of {nodes_n} nodes");
-        let node_size = if version >= 19 { 32 } else { 24 };
-        let raw = r.take(nodes_n as usize * node_size)?;
-        let strings = r.take(strings_n as usize)?;
-        let name = |off: u32| -> String {
-            if off & 0x8000_0000 != 0 {
-                return common(off & 0x7fff_ffff).unwrap_or("?").to_string();
-            }
-            let s = strings.get(off as usize..).unwrap_or(&[]);
-            String::from_utf8_lossy(s.split(|&c| c == 0).next().unwrap_or(&[])).into_owned()
-        };
-        let mut nodes = Vec::with_capacity(nodes_n as usize);
-        for k in 0..nodes_n as usize {
-            let mut n = Reader { b: &raw[k * node_size..(k + 1) * node_size], at: 0, big, values: 0 };
-            let _v = n.u16()?;
-            let level = n.u8()?;
-            let flags = n.u8()?;
-            let ty = n.u32()?;
-            let nm = n.u32()?;
-            let size = n.i32()?;
-            let _index = n.i32()?;
-            let meta = n.u32()?;
-            nodes.push(Node { ty: name(ty), name: name(nm), size, level, flags, meta });
-        }
-        if version >= 21 {
-            let deps = r.i32()?;
-            ensure!((0..100_000).contains(&deps), "{deps} type dependencies");
-            r.take(deps as usize * 4)?;
-        }
-        types.push(Type { class: class_id, nodes });
-    }
-    let objects_n = r.i32()?;
-    ensure!((0..10_000_000).contains(&objects_n), "{objects_n} objects");
-    let mut found: Option<(u64, u32, usize)> = None;
-    let mut first_of_class: Option<(u64, u32, usize)> = None;
-    for _ in 0..objects_n {
-        r.align();
-        let id = r.u64()? as i64;
-        let start = if version >= 22 { r.u64()? } else { r.u32()? as u64 };
-        let size = r.u32()?;
-        let ty = r.i32()? as usize;
-        if id == path_id {
-            found = Some((start, size, ty));
-        }
-        if first_of_class.is_none() && types.get(ty).is_some_and(|t| t.class == class) {
-            first_of_class = Some((start, size, ty));
-        }
-    }
-    let (start, size, ty) = found.or(first_of_class).context("the object is not in the file")?;
-    let t = types.get(ty).context("an object of an unknown type")?;
-    let begin = usize::try_from(data_offset.checked_add(start).context("an object past the file's end")?)?;
-    let data = b.get(begin..begin.checked_add(size as usize).context("an object past the file's end")?).context("an object past the file's end")?;
-    let mut d = Reader { b: data, at: 0, big, values: 0 };
-    let (value, _) = read(&t.nodes, 0, &mut d, 0)?;
-    Ok((t.class, value))
+    let file = SerializedFile::parse(b)?;
+    let info = file
+        .objects
+        .iter()
+        .find(|o| o.id == path_id)
+        .or_else(|| file.objects.iter().find(|o| o.class == class))
+        .copied()
+        .context("the object is not in the file")?;
+    let begin = usize::try_from(file.data_offset.checked_add(info.start).context("an object past the file's end")?)?;
+    let data = b.get(begin..begin.checked_add(info.size as usize).context("an object past the file's end")?).context("an object past the file's end")?;
+    Ok((info.class, file.value(&info, data)?))
 }
 
 /// The children of node `i` (the nodes one level down until the level comes back up).
@@ -410,15 +505,20 @@ fn read(nodes: &[Node], i: usize, r: &mut Reader, depth: usize) -> anyhow::Resul
         // vector, set, map, staticvector: the array itself.
         read(nodes, kids[0], r, depth + 1)?.0
     } else if node.ty.starts_with("PPtr<") {
-        let mut fields = Vec::new();
+        // As a text file writes a reference: the object's ID in its file, and that file's GUID unless it is this one.
+        let (mut file, mut id) = (0i64, Value::Str("0".to_string()));
         for &k in &kids {
             let (v, _) = read(nodes, k, r, depth + 1)?;
-            let key = match nodes[k].name.as_str() {
-                "m_FileID" => "fileID".to_string(),
-                "m_PathID" => "pathID".to_string(),
-                other => other.to_string(),
-            };
-            fields.push((key, v));
+            match nodes[k].name.as_str() {
+                "m_FileID" => file = v.as_i64().unwrap_or(0),
+                "m_PathID" => id = v,
+                _ => {}
+            }
+        }
+        let mut fields = vec![("fileID".to_string(), id)];
+        let external = usize::try_from(file - 1).ok().and_then(|i| r.externals.get(i));
+        if let Some(guid) = external {
+            fields.push(("guid".to_string(), Value::Str(guid.clone())));
         }
         Value::Map(fields)
     } else {

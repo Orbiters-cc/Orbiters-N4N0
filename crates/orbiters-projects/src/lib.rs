@@ -15,6 +15,7 @@ pub mod scene;
 pub mod setup;
 pub mod size;
 pub mod storage;
+pub mod suggestions;
 pub mod templates;
 pub mod updates;
 pub mod vpm;

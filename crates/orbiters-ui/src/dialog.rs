@@ -76,6 +76,9 @@ const HEAD_H: f32 = 44.0;
 const FOOT_H: f32 = 40.0;
 /// Room around the body's content inside its scroll.
 const BODY_ROOM: i8 = 6;
+/// More of it on the right, reaching into the dialog's padding: egui's bar sits at the scroll area's own right edge, and
+/// there it runs beside the content and not over what reaches its edge (a count at the end of a heading, a button).
+const BAR_GUTTER: i8 = 10;
 
 impl<'a> Dialog<'a> {
     /// A dialog `id` titled `title` that grows out of `origin`.
@@ -237,20 +240,27 @@ impl<'a> Dialog<'a> {
         // Body, scrolling once it is taller than the window allows.
         let body = Rect::from_min_size(pos2(inner.left(), head.bottom() + 16.0), vec2(inner.width(), body_h));
         // A few points of room around the content (selection rings, a pressed tile) inside the scroll's clip.
-        let room = body.expand(BODY_ROOM as f32);
+        let mut room = body.expand(BODY_ROOM as f32);
+        room.max.x += BAR_GUTTER as f32;
         let mut bu = du.new_child(UiBuilder::new().max_rect(room).id_salt(id.with("body")));
         bu.set_clip_rect(room.intersect(du.clip_rect()));
         let bars = if landed { egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded } else { egui::scroll_area::ScrollBarVisibility::AlwaysHidden };
-        let out =
-            egui::ScrollArea::vertical().id_salt(id.with("scroll")).auto_shrink([false, false]).max_height(room.height()).scroll_bar_visibility(bars).show(
-                &mut bu,
-                |ui| {
-                    egui::Frame::NONE.inner_margin(BODY_ROOM).show(ui, |ui| {
-                        ui.spacing_mut().item_spacing = vec2(0.0, 12.0);
-                        contents(ui, Part::Body);
-                    });
-                },
-            );
+        // A body scrolling itself does it at once and for sure (the results of a search brought into view, a list held still
+        // while something appears above it): egui's animated requests are dropped the moment the pointer is over the area,
+        // which it is, having just pressed something there.
+        let out = egui::ScrollArea::vertical()
+            .id_salt(id.with("scroll"))
+            .auto_shrink([false, false])
+            .max_height(room.height())
+            .scroll_bar_visibility(bars)
+            .animated(false)
+            .show(&mut bu, |ui| {
+                let room = egui::Margin { left: BODY_ROOM, right: BODY_ROOM + BAR_GUTTER, top: BODY_ROOM, bottom: BODY_ROOM };
+                egui::Frame::NONE.inner_margin(room).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(0.0, 12.0);
+                    contents(ui, Part::Body);
+                });
+            });
         ctx.data_mut(|d| d.insert_temp(id.with("content-h"), (out.content_size.y - 2.0 * BODY_ROOM as f32).ceil()));
 
         if self.footer {

@@ -68,6 +68,9 @@ impl Prepared {
                 l.faces_skipped
             ));
         }
+        if l.keyframes_blown + l.faces_blown > 0 {
+            out.push(format!("left out as blown to white: {} keyframes, {} rig faces", l.keyframes_blown, l.faces_blown));
+        }
         if let Some(p) = &l.first_problem {
             out.push(format!("first unreadable keyframe: {p}"));
         }

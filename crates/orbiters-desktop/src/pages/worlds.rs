@@ -46,6 +46,8 @@ struct Open {
     viewer_serial: u64,
     /// Each picture's tile as last drawn (by index): the large picture grows out of it and lands back on it.
     tiles: HashMap<usize, Rect>,
+    /// Reconstruct again's question, over the page ([`super::reconstruct_again`]).
+    again: Option<super::reconstruct_again::Ask>,
 }
 
 #[derive(Default)]
@@ -161,6 +163,11 @@ impl State {
     }
 
     /// Starts closing the open world's page back into its card (screenshots).
+    /// The world whose page is open (screenshots).
+    pub fn open_world_id(&self) -> Option<&str> {
+        self.open.as_ref().map(|o| o.id.as_str())
+    }
+
     pub fn close_world(&mut self) {
         if let Some(o) = self.open.as_mut() {
             o.closing = true;
@@ -191,6 +198,7 @@ impl State {
             viewer_closing: false,
             viewer_serial: 0,
             tiles: HashMap::new(),
+            again: None,
         });
     }
 }
@@ -748,7 +756,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     let mut select_new = false;
     let mut clear = false;
     let mut share_preview: Option<(PathBuf, bool, Rect)> = None;
-    let mut reconstruct: Option<PathBuf> = None;
+    let mut reconstruct: Option<(PathBuf, Rect)> = None;
     let selecting = !o.selected.is_empty();
 
     let from = orbiters_ui::blur::next_shape(ui);
@@ -760,18 +768,8 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                 ui.add_space(cx.top + 8.0);
                 let w = ui.available_width();
 
-                // Back.
-                let (back_row, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
-                {
-                    let mut bu = ui.new_child(UiBuilder::new().max_rect(back_row).id_salt("back"));
-                    bu.multiply_opacity(content);
-                    let b = Button::new("Visited worlds").icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(Size::Sm);
-                    let bw = b.desired_width(&bu);
-                    if b.show_at(&mut bu, Rect::from_min_size(back_row.min, vec2(bw, 32.0))).clicked() {
-                        close = true;
-                    }
-                }
-                ui.add_space(12.0);
+                // The back button's place at rest: it floats there, over the scrolling page ([`back_rect`]).
+                ui.add_space(BACK_H + 12.0);
 
                 // The hero flies in from the card.
                 let hero_h = (w * 0.36).clamp(220.0, 340.0);
@@ -889,7 +887,10 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                     let row = r.translate(vec2(0.0, dy));
                     match session_row(&mut cu, cx, row, s, tex.as_ref(), &sharing) {
                         Some(RowAction::Share(public)) => share_preview = Some((s.dir.clone(), public, row_thumb(row))),
-                        Some(RowAction::Reconstruct) => reconstruct = Some(s.dir.clone()),
+                        Some(RowAction::Reconstruct(origin)) => reconstruct = Some((s.dir.clone(), origin)),
+                        Some(RowAction::Stop) => {
+                            cx.ctl.stop_reconstruction();
+                        }
                         Some(RowAction::Unqueue) => cx.ctl.unqueue_reconstruction(s.dir.clone()),
                         None => {}
                     }
@@ -966,6 +967,20 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     // Its own band: while the card flies open or closed, the grid draws one in the same frame.
     super::under_top(&du, cx, "world", from, page.top() + cx.top);
 
+    // Back: over the page wherever it is scrolled, at the place it has at rest, and under whatever the window draws over
+    // the page (the picture viewer, a share's window, toasts: they are layers above this one). Filled and lifted off what
+    // passes under it, a photo or the page's own text; a ghost button would vanish on photos.
+    {
+        let mut bu = du.new_child(UiBuilder::new().max_rect(page).id_salt("back"));
+        bu.multiply_opacity(content);
+        let b = Button::new("Visited worlds").icon(icons::ARROW_LEFT).variant(Variant::Glass).size(Size::Sm);
+        let r = back_rect(page, cx.top, b.desired_width(&bu));
+        orbiters_ui::paint::shadow(bu.painter(), r, BACK_H * 0.5, vec2(0.0, 4.0), 16.0, 0.0, theme::black(0.4));
+        if b.show_at(&mut bu, r).clicked() {
+            close = true;
+        }
+    }
+
     // Actions gathered while drawing.
     let Some(o) = state.open.as_mut() else { return };
     if let Some(p) = toggle {
@@ -982,12 +997,8 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     if let Some(i) = view {
         o.show_large(i);
     }
-    if let Some(dir) = reconstruct {
-        // Waiting its turn: the service says so.
-        if cx.snap.reconstruction.is_none() && !cx.snap.is_capturing() {
-            cx.toasts.push(&ctx, toast::Kind::Info, "Reconstruction started: follow it here or in Photos & captures.");
-        }
-        cx.ctl.reconstruct(dir);
+    if let Some((dir, origin)) = reconstruct {
+        o.again = super::reconstruct_again::press(&ctx, cx, &dir, &world.name, None, origin);
     }
     if let Some((dir, public, origin)) = share_preview {
         state.share_public = public;
@@ -1024,11 +1035,19 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         o.selected.clear();
     }
 
+    // Reconstruct again's question, over the page.
+    let asking = o.again.is_some();
+    if let Some(a) = o.again.as_mut() {
+        if !a.show(&ctx, cx) {
+            o.again = None;
+        }
+    }
+
     if o.viewer.is_some() {
         let fixed: HashSet<PathBuf> = world.shots.iter().filter(|s| sharing.shared(s) || sharing.sending(&s.path).is_some()).map(|s| s.path.clone()).collect();
         let pickable = sharing.blocked.is_none();
         viewer(&ctx, cx, state, &world, &fixed, pickable);
-    } else if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+    } else if !asking && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         if let Some(o) = state.open.as_mut() {
             if o.selected.is_empty() {
                 close = true;
@@ -1176,8 +1195,37 @@ fn note(ui: &Ui, rect: Rect, glyph: &str, title: &str, text: &str) {
 
 enum RowAction {
     Share(bool),
-    Reconstruct,
+    /// Reconstruct or Reconstruct again, pressed in this rect.
+    Reconstruct(Rect),
+    Stop,
     Unqueue,
+}
+
+/// The floating back button's height.
+const BACK_H: f32 = 32.0;
+
+#[cfg(test)]
+mod back_tests {
+    use super::*;
+
+    /// Wherever the window is, the button stays on the page's first line under the title bar, whose height the page
+    /// leaves empty at rest; and its place is the page's, not the scrolled content's (nothing here reads a scroll).
+    #[test]
+    fn the_back_button_floats_over_the_pages_first_line() {
+        for (w, h) in [(1040.0, 700.0), (1280.0, 820.0), (3840.0, 2160.0)] {
+            let page = Rect::from_min_size(pos2(0.0, 0.0), vec2(w, h));
+            let r = back_rect(page, 40.0, 150.0);
+            assert_eq!((r.left(), r.top(), r.height()), (32.0, 48.0, BACK_H));
+            assert!(page.contains_rect(r));
+        }
+    }
+}
+
+/// Where the world page's back button floats, `width` wide: the top left of the page under the title bar, where it would
+/// rest as the page's first line. That line stays empty in the scrolling content, so that at rest the button covers none
+/// of it, and everything scrolls on under it after that.
+fn back_rect(page: Rect, top: f32, width: f32) -> Rect {
+    Rect::from_min_size(pos2(page.left() + 32.0, page.top() + top + 8.0), vec2(width, BACK_H))
 }
 
 /// Where a session row's thumbnail sits.
@@ -1222,6 +1270,8 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
     if upload.is_some_and(|u| matches!(u.state, UploadState::Done { .. })) {
         line.push_str(" · shared");
     }
+    let offer = super::reconstruct_again::offer(&super::reconstruct_again::Facts::of_session(s), cx.snap);
+    use super::reconstruct_again::Offer;
     let right_w = 330.0;
     widgets::text_truncated(&p, pos2(x, rect.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::FG_3), rect.right() - x - right_w - 16.0);
     widgets::text_truncated(
@@ -1238,28 +1288,74 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
         p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), theme::radius(1.5), theme::ACCENT);
     }
 
-    let b = Rect::from_min_size(pos2(rect.right() - 16.0 - right_w + 16.0, rect.center().y - 20.0), vec2(right_w - 16.0, 40.0));
-    if job.is_some() || upload.is_some_and(|u| u.running()) {
+    if let (Offer::Running { fraction, .. }, Some(j)) = (offer, job) {
+        let bar = Rect::from_min_size(pos2(x, rect.bottom() - 6.0), vec2(rect.right() - x - right_w - 16.0, 3.0));
+        let f = anim::spring_from(ui.ctx(), Id::unique(("row-reconstruct", &j.session_dir)), [0.0], [fraction], Spring::SOFT)[0].clamp(0.0, 1.0);
+        p.rect_filled(bar, theme::radius(1.5), theme::white(0.08));
+        p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), theme::radius(1.5), theme::ACCENT);
+    }
+    let b = Rect::from_min_size(pos2(rect.right() - 16.0 - 314.0, rect.center().y - 20.0), vec2(314.0, 40.0));
+    if upload.is_some_and(|u| u.running()) {
         return None;
     }
     // Every row has the same buttons in the same place: the session tells them apart.
     let salt = ("session-row", &s.dir);
-    if waiting {
-        if Button::new("Waiting · cancel").icon(icons::X).variant(Variant::Secondary).width(b.width()).id_salt(salt).show_at(ui, b).clicked() {
-            return Some(RowAction::Unqueue);
+    match offer {
+        Offer::Running { .. } => {
+            if Button::new(offer.label()).icon(icons::X).variant(Variant::Secondary).hint("Stops it: its 3D view stays as it is").width(b.width()).id_salt(salt).show_at(ui, b).clicked() {
+                return Some(RowAction::Stop);
+            }
         }
-    } else if s.reconstruction.is_some() {
-        if let Some(public) = super::sharing::morph(ui, Id::unique(("world-session-share", &s.dir)), pos2(b.right(), b.top()), 304.0, sharing.account) {
-            return Some(RowAction::Share(public));
+        Offer::Waiting { hint } => {
+            if Button::new(offer.label()).icon(icons::X).variant(Variant::Secondary).hint(hint).width(b.width()).id_salt(salt).show_at(ui, b).clicked() {
+                return Some(RowAction::Unqueue);
+            }
         }
-    } else {
-        let blocked = (st.depth_frames == 0).then_some("This session has no depth frames: record with the capture kit's depth frames on");
-        let mut button = Button::new("Reconstruct").icon(icons::MAGIC_WAND).variant(Variant::Secondary).enabled(blocked.is_none()).width(b.width());
-        if let Some(h) = blocked {
-            button = button.hint(h);
+        Offer::Start { again: false } | Offer::Blocked { again: false, .. } => {
+            let blocked = match offer {
+                Offer::Blocked { reason, .. } => Some(reason),
+                _ => None,
+            };
+            let mut button = Button::new(offer.label()).icon(icons::MAGIC_WAND).variant(Variant::Secondary).enabled(blocked.is_none()).width(b.width());
+            if let Some(h) = blocked {
+                button = button.hint(h);
+            }
+            if button.id_salt(salt).show_at(ui, b).clicked() && blocked.is_none() {
+                return Some(RowAction::Reconstruct(b));
+            }
         }
-        if button.id_salt(salt).show_at(ui, b).clicked() {
-            return Some(RowAction::Reconstruct);
+        Offer::Start { again: true } | Offer::Blocked { again: true, .. } => {
+            let blocked = match offer {
+                Offer::Blocked { reason, .. } => Some(reason),
+                _ => None,
+            };
+            let hint = blocked.unwrap_or("Trains a new 3D view from its frames: it replaces this one once it is done");
+            // Beside Share, in the room Share and Share publicly stretch into: it steps aside while they are out.
+            let share_id = Id::unique(("world-session-share", &s.dir));
+            let out = ui.ctx().data(|d| d.get_temp::<bool>(share_id)).unwrap_or(false);
+            let shown = anim::toggle(ui.ctx(), share_id.with("again-shown"), !out, Spring::SNAPPY).clamp(0.0, 1.0);
+            let again = Button::new(offer.label())
+                .icon(icons::MAGIC_WAND)
+                .variant(Variant::Secondary)
+                .enabled(blocked.is_none())
+                .hint(hint)
+                .id_salt(("session-row-again", &s.dir));
+            let share_w = Button::new("Share").icon(icons::CLOUD_ARROW_UP).desired_width(ui);
+            let again_w = again.desired_width(ui);
+            let at = Rect::from_min_size(pos2(b.right() - share_w - 8.0 - again_w, b.top()), vec2(again_w, 40.0));
+            if shown > 0.01 {
+                let mut au = ui.new_child(UiBuilder::new().max_rect(at).id_salt(("session-row-again-at", &s.dir)));
+                au.multiply_opacity(shown);
+                if out {
+                    au.disable();
+                }
+                if again.show_at(&mut au, at).clicked() && blocked.is_none() && !out {
+                    return Some(RowAction::Reconstruct(at));
+                }
+            }
+            if let Some(public) = super::sharing::morph(ui, share_id, pos2(b.right(), b.top()), 304.0, sharing.account) {
+                return Some(RowAction::Share(public));
+            }
         }
     }
     None

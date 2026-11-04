@@ -45,6 +45,8 @@ struct Detail {
     progress: f32,
     trail: Job<Vec<[f32; 3]>>,
     confirm_trash: bool,
+    /// Reconstruct again's question, over the detail ([`super::reconstruct_again`]).
+    again: Option<super::reconstruct_again::Ask>,
     /// "Keep only the 3D view" asks first, over the detail.
     trim: Option<TrimDialog>,
     view: View,
@@ -192,6 +194,7 @@ impl State {
             progress: 0.0,
             trail: Job::spawn(ctx, move || controller::session_trail(&d).unwrap_or_default()),
             confirm_trash: false,
+            again: None,
             trim: None,
             view: if reconstructed { View::Splats } else { View::Path },
             preview: None,
@@ -910,7 +913,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
     let mut open_export: Option<Rect> = None;
     let serial = state.serial + 1;
     // Escape and clicks outside go to the dialog first, when one asks (this frame closes it, not the detail).
-    let asking = d.trim.is_some() || state.export.is_some();
+    let asking = d.trim.is_some() || state.export.is_some() || d.again.is_some();
 
     // The whole window dims, sidebar and title bar included; a click anywhere but the title bar (which still moves,
     // minimises and closes the window) closes the detail.
@@ -1060,32 +1063,42 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         let cleaning = cx.snap.cleanup.as_ref().and_then(|j| j.of(&session.dir));
         let view_only = session.reconstruction.is_some() && (session.trimmed || cleaning == Some(false));
         let queued = cx.snap.reconstruct_queue.contains(&session.dir);
+        let offer = super::reconstruct_again::offer(&super::reconstruct_again::Facts::of_session(&session), cx.snap);
         let recording = cx.snap.capture.state != crate::state::CaptureState::Idle && cx.snap.capture.session_dir.as_ref() == Some(&session.dir);
         if view_only && job.is_none() && !queued {
             storage::view_only(&cp, full(y), cleaning.is_some());
-        } else if job.is_some() {
-            if Button::new("Stop reconstruction").icon(icons::X).width(side.width()).show_at(&mut cu, full(y)).clicked() {
-                cx.ctl.stop_reconstruction();
-            }
-        } else if cx.snap.reconstruct_queue.contains(&session.dir) {
-            let hint = if cx.snap.is_capturing() { "Starts when the capture ends" } else { "Starts after the reconstructions before it" };
-            if Button::new("Waiting · cancel").icon(icons::X).variant(Variant::Secondary).hint(hint).width(side.width()).show_at(&mut cu, full(y)).clicked() {
-                cx.ctl.unqueue_reconstruction(session.dir.clone());
-            }
         } else {
-            let blocked = (st.depth_frames == 0).then_some("This session has no depth frames: record with the capture kit's depth frames on");
-            let again = session.reconstruction.is_some();
-            let mut b = Button::new(if again { "Reconstruct again" } else { "Reconstruct" })
-                .icon(icons::MAGIC_WAND)
-                .variant(if again { Variant::Secondary } else { Variant::Primary })
-                .enabled(blocked.is_none())
-                .width(side.width());
-            if let Some(h) = blocked {
-                b = b.hint(h);
-            }
-            if b.show_at(&mut cu, full(y)).clicked() {
-                cx.ctl.reconstruct(session.dir.clone());
-                d.view = View::Splats;
+            use super::reconstruct_again::{self as again, Offer};
+            match offer {
+                Offer::Running { .. } => {
+                    if Button::new(offer.label()).icon(icons::X).width(side.width()).show_at(&mut cu, full(y)).clicked() {
+                        cx.ctl.stop_reconstruction();
+                    }
+                }
+                Offer::Waiting { hint } => {
+                    if Button::new(offer.label()).icon(icons::X).variant(Variant::Secondary).hint(hint).width(side.width()).show_at(&mut cu, full(y)).clicked() {
+                        cx.ctl.unqueue_reconstruction(session.dir.clone());
+                    }
+                }
+                Offer::Start { again: replaces } | Offer::Blocked { again: replaces, .. } => {
+                    let blocked = match offer {
+                        Offer::Blocked { reason, .. } => Some(reason),
+                        _ => None,
+                    };
+                    let mut b = Button::new(offer.label())
+                        .icon(icons::MAGIC_WAND)
+                        .variant(if replaces { Variant::Secondary } else { Variant::Primary })
+                        .enabled(blocked.is_none())
+                        .width(side.width());
+                    if let Some(h) = blocked {
+                        b = b.hint(h);
+                    }
+                    if b.show_at(&mut cu, full(y)).clicked() && blocked.is_none() {
+                        // What a finished run takes is asked first; the run shows in Splats once it goes.
+                        d.again = again::press(ctx, cx, &session.dir, &title(&session), None, full(y));
+                        d.view = View::Splats;
+                    }
+                }
             }
         }
         y += 52.0;
@@ -1167,6 +1180,11 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             }
         }
     });
+    if let Some(a) = d.again.as_mut() {
+        if !a.show(ctx, cx) {
+            d.again = None;
+        }
+    }
     if asked {
         // A dialog of its own each time (its entrance plays again).
         state.serial = serial;

@@ -19,11 +19,13 @@ pub struct Item<'a> {
     pub glyph: Option<&'a str>,
     /// Red, for destructive actions.
     pub danger: bool,
+    /// Shown dim and takes no press: what cannot be done now, its [`Item::detail`] saying why.
+    pub disabled: bool,
 }
 
 impl<'a> Item<'a> {
     pub fn new(label: &'a str) -> Self {
-        Self { label, detail: None, glyph: None, danger: false }
+        Self { label, detail: None, glyph: None, danger: false, disabled: false }
     }
 
     pub fn detail(mut self, d: &'a str) -> Self {
@@ -38,6 +40,11 @@ impl<'a> Item<'a> {
 
     pub fn danger(mut self) -> Self {
         self.danger = true;
+        self
+    }
+
+    pub fn disabled(mut self) -> Self {
+        self.disabled = true;
         self
     }
 }
@@ -209,7 +216,9 @@ fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected:
         ctx.data_mut(|d| d.insert_temp(Id::unique("orbiters-popup-open-pass"), pass));
     }
     let screen = ctx.content_rect();
-    let h = (items.len() as f32 * ROW_H + 2.0 * PAD).min(MAX_LIST_H);
+    // A control's list keeps to its height and scrolls; a context menu's rows are actions to see at a glance, as tall as the
+    // window allows.
+    let h = (items.len() as f32 * ROW_H + 2.0 * PAD).min(if at_point { screen.height() - 16.0 } else { MAX_LIST_H });
     let gap = if at_point { 2.0 } else { 6.0 };
     let below = anchor.bottom() + gap + h <= screen.bottom() - 8.0 || anchor.top() - gap - h < screen.top() + 8.0;
     // Under the control's left edge, or its right edge on the right half of the window (it stays over what it belongs
@@ -248,18 +257,22 @@ fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected:
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             for (i, item) in items.iter().enumerate() {
                 let (r, _) = ui.allocate_exact_size(vec2(inner.width(), ROW_H), Sense::hover());
-                let resp = ui.interact(r, id.with(("row", i)), if open { Sense::click() } else { Sense::hover() });
-                if open && widgets::pressed(&resp) {
+                let live = open && !item.disabled;
+                widgets::note_control(ctx, item.label, r, live);
+                let resp = ui.interact(r, id.with(("row", i)), if live { Sense::click() } else { Sense::hover() });
+                if live && widgets::pressed(&resp) {
                     picked = Some(i);
                 }
-                let hover = anim::toggle(ctx, id.with(("row-hover", i)), open && resp.hovered(), Spring::SNAPPY);
+                let hover = anim::toggle(ctx, id.with(("row-hover", i)), live && resp.hovered(), Spring::SNAPPY);
                 let p = ui.painter();
                 if hover > 0.01 {
                     let fill = if item.danger { theme::alpha(theme::DANGER, 0.12 * hover) } else { theme::white(0.07 * hover) };
                     p.rect_filled(r, theme::radius(9.0), fill);
                 }
                 let chosen = selected == Some(i);
-                let fg = if item.danger {
+                let fg = if item.disabled {
+                    theme::FG_4
+                } else if item.danger {
                     theme::DANGER
                 } else if chosen {
                     theme::FG
@@ -281,7 +294,7 @@ fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected:
                 if chosen {
                     icon(p, pos2(r.right() - 18.0, r.center().y), icons::CHECK, 14.0, theme::ACCENT);
                 }
-                if open {
+                if live {
                     resp.on_hover_cursor(CursorIcon::PointingHand);
                 }
             }

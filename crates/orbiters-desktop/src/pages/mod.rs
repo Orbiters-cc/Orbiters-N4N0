@@ -11,6 +11,7 @@ pub mod home;
 pub mod mic;
 pub mod n4n0;
 pub mod projects;
+pub mod reconstruct_again;
 pub mod sessions;
 pub mod gallery;
 mod gallery_layers;

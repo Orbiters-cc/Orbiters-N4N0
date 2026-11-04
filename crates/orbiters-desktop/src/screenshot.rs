@@ -39,6 +39,7 @@ mod projects_panel;
 mod editor;
 mod splat_export;
 mod splats_select;
+mod capture_actions;
 mod vrchat_login;
 mod vr_audio;
 mod worlds_overlay;
@@ -194,6 +195,15 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("splats-select") {
         return splats_select::shots(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("capture-actions-select") {
+        return capture_actions::select(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("capture-actions-tint") {
+        return capture_actions::tint(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("capture-actions") {
+        return capture_actions::walk(&mut Offscreen::new()?, &out, &settings, scale);
     }
     if only.as_deref() == Some("splat-export") {
         return splat_export::shots(&mut Offscreen::new()?, &out, &settings, scale);
@@ -1744,6 +1754,8 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         "gallery-update-replacing",
         "gallery-updated",
         "gallery-update-failed",
+        "gallery-reconstructed",
+        "gallery-again-shared",
         "world-share-window",
         "world-share-public",
         "world-share-sending",
@@ -2349,6 +2361,8 @@ struct Run<'a> {
     release: Option<Pos2>,
     /// Pause between frames (longer while a reconstruction trains).
     pace: Duration,
+    /// The window's size in points.
+    size: Vec2,
 }
 
 impl<'a> Run<'a> {
@@ -2359,7 +2373,7 @@ impl<'a> Run<'a> {
         backend.attach(&ctx);
         let mut app = App::offline(backend);
         app.skip_splash();
-        Self { gpu: Some(gpu), cpu: None, ctx, app, scale, start: Instant::now(), release: None, pace: Duration::from_millis(16) }
+        Self { gpu: Some(gpu), cpu: None, ctx, app, scale, start: Instant::now(), release: None, pace: Duration::from_millis(16), size: vec2(1280.0, 820.0) }
     }
 
     /// A run painted on the CPU: no GPU, no 3D view.
@@ -2371,7 +2385,7 @@ impl<'a> Run<'a> {
         let mut app = App::offline(backend);
         app.skip_splash();
         let painter = orbiters_ui::software::Software::new((1280.0 * scale).round() as u32, (820.0 * scale).round() as u32);
-        Run { gpu: None, cpu: Some(painter), ctx, app, scale, start: Instant::now(), release: None, pace: Duration::from_millis(16) }
+        Run { gpu: None, cpu: Some(painter), ctx, app, scale, start: Instant::now(), release: None, pace: Duration::from_millis(16), size: vec2(1280.0, 820.0) }
     }
 
     fn time(&self) -> f64 {
@@ -2381,7 +2395,7 @@ impl<'a> Run<'a> {
     /// One frame with `events` (and the release of last frame's press); its picture when `capture`.
     fn frame(&mut self, mut events: Vec<Event>, capture: bool) -> anyhow::Result<Option<egui::ColorImage>> {
         let t = self.time();
-        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))), time: Some(t), ..Default::default() };
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)), time: Some(t), ..Default::default() };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.scale), focused: Some(true), ..Default::default() });
         if let Some(p) = self.release.take() {
             events.insert(0, Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });

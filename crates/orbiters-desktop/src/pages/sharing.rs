@@ -3,6 +3,7 @@
 //! to its shape, the details and compact actions under it (beside tall pictures): share publicly, share to friends
 //! (a picker of chips), who it is shared with (chips with an ×), the explicit warning, and what a share is doing,
 //! did or could not do. Panels slide in under the actions; the window follows their height on the same spring.
+use super::reconstruct_again::{self as again, Offer};
 use super::{Cx, Job};
 use crate::controller::shares::{self as controller, Entry, Operation as Action, Outcome, Request, Stage};
 use egui::{pos2, vec2, Align2, Color32, Id, Order, Rect, Sense, Ui, UiBuilder};
@@ -100,6 +101,15 @@ pub struct Dialog {
     /// drawn last (the dialog grows out of it).
     export: Option<super::splat_export::Export>,
     export_button: Rect,
+    /// Reconstruct again's question over the window ([`again`]), and where its button was drawn last.
+    again: Option<again::Ask>,
+    again_button: Rect,
+    /// Edit on a 3D capture: its 3D view to open in Edit in 3D (it takes the window's GPU, known when it is drawn).
+    edit_3d: bool,
+    /// The library as last seen, and its session read again when that changes: a reconstruction that finished while the
+    /// window is open shows here (whichever page opened it).
+    library: Option<u64>,
+    session_job: Job<Option<controller::SessionState>>,
     /// Where it opens from (a card's picture) and that rect's corner radius; the middle of the page when not given.
     origin: Option<(Rect, f32)>,
     morph: Option<Morph>,
@@ -178,6 +188,11 @@ impl Dialog {
             editor: None,
             export: None,
             export_button: Rect::NOTHING,
+            again: None,
+            again_button: Rect::NOTHING,
+            edit_3d: false,
+            library: None,
+            session_job: Job::default(),
             origin: None,
             morph: None,
             measured: HashMap::new(),
@@ -276,12 +291,16 @@ impl Dialog {
 
     /// Whether another item may take this one's place now (nothing running, nothing being typed or asked).
     pub fn can_navigate(&self) -> bool {
-        self.operation_id.is_none() && self.warning.is_none() && !self.picker && self.morph.as_ref().is_some_and(|m| !m.is_closing())
+        self.operation_id.is_none() && self.warning.is_none() && !self.picker && self.again.is_none() && self.morph.as_ref().is_some_and(|m| !m.is_closing())
     }
 
-    /// Opens the photo editor on a copy of this picture (a multi-layer picture with a stack of effects for each of its
-    /// layers, whichever layer the window shows).
+    /// Edit: a 3D capture's 3D view directly in Edit in 3D; for a picture the photo editor on a copy of it (a multi-layer
+    /// picture with a stack of effects for each of its layers, whichever layer the window shows).
     pub fn edit(&mut self, ctx: &egui::Context) {
+        if matches!(self.entry.local, Some(controller::Local::Session(_))) {
+            self.edit_3d = true;
+            return;
+        }
         let entry = self.layers.layered(&self.entry);
         if let Some(source) = super::editor::source_of(entry) {
             self.editor = Some(super::editor::Editor::open(ctx, source, entry.world_name.clone()));
@@ -365,6 +384,27 @@ impl Dialog {
             self.last = Some(Action::Update);
             self.error = Some(format!("Not updated: Orbiters could not be reached. {}", controller::KEPT));
         }
+        // Reconstructed again since it was shared: Update the shared capture, saying why.
+        if state == "reconstructed" {
+            self.entry.local = Some(controller::Local::Session(std::path::PathBuf::from("C:/Sessions/VRChat Home 2026-11-02 21-30-00")));
+            self.entry.ready = true;
+            self.entry.edits = Some(Ok(orbiters_reconstruct::edit::UNEDITED.into()));
+            self.entry.uploaded_edits = Some(controller::RECONSTRUCTED.into());
+            if let Some(item) = self.entry.remote.as_mut() {
+                (item.public, item.mine, item.can_share) = (true, true, true);
+            }
+        }
+        // The question before it, on a capture with splats removed and shared publicly and with two friends.
+        if state == "again-shared" {
+            let dir = std::path::PathBuf::from("C:/Sessions/VRChat Home 2026-11-02 21-30-00");
+            self.entry.local = Some(controller::Local::Session(dir.clone()));
+            self.entry.ready = true;
+            if let Some(item) = self.entry.remote.as_mut() {
+                (item.public, item.mine, item.can_share) = (true, true, true);
+            }
+            let lost = [controller::edits_line(12_480), controller::shared_line(true, 2)].into_iter().flatten().collect();
+            self.again = Some(again::Ask::new(dir, &self.entry.world_name.clone(), lost, Rect::from_min_size(pos2(720.0, 500.0), vec2(150.0, 32.0))));
+        }
         if state == "copy-link" {
             if let Some(item) = self.entry.remote.as_mut() {
                 item.public = true;
@@ -398,6 +438,26 @@ impl Dialog {
     #[cfg(test)]
     pub(crate) fn asked(&self) -> Option<(&Action, bool)> {
         self.pending.as_ref().map(|r| (&r.operation, self.copy_after))
+    }
+
+    /// A reconstruction that finished while the window is open: the library changed, so its session is read again and the
+    /// window goes on from the new result (what its buttons offer, what is out of date on Orbiters), saying so. What the
+    /// window shows of a capture is the recording's own picture, which a new result does not change.
+    fn watch_session(&mut self, ctx: &egui::Context, cx: &Cx, server: Server) {
+        if let Some(Some(state)) = self.session_job.take() {
+            let before = self.entry.result.clone();
+            let new = state.result.is_some() && state.result != before;
+            self.entry.set_session(state);
+            if new {
+                self.notice = Some(if before.is_some() { "Reconstructed: View in 3D shows the new one" } else { "Reconstructed: View in 3D shows it, and it can be shared" }.into());
+            }
+        }
+        let Some(controller::Local::Session(dir)) = self.entry.local.as_ref().filter(|_| !self.fixture_active) else { return };
+        let version = cx.ctl.library_version();
+        if self.library.replace(version).is_some_and(|v| v != version) {
+            let dir = dir.clone();
+            self.session_job = Job::spawn(ctx, move || controller::session_state(&dir, server));
+        }
     }
 
     /// The capture's splat edits, read on a worker every [`EDITS_EVERY`] seconds while the window is open on a capture of
@@ -552,6 +612,12 @@ impl Dialog {
             }
         }
         self.watch_edits(&ctx);
+        self.watch_session(&ctx, cx, server);
+        if std::mem::take(&mut self.edit_3d) {
+            if let (Some(controller::Local::Session(dir)), Some(gpu)) = (&self.entry.local, cx.gpu) {
+                self.viewer = Some(super::splats::Viewer::open_editing(&ctx, gpu, dir, self.entry.world_name.clone(), super::splats::on_integrated(cx)));
+            }
+        }
         let job = self.operation_id.as_ref().and_then(|id| cx.snap.capture_shares.iter().find(|j| &j.id == id));
         if let Some(j) = job {
             self.stage = j.stage;
@@ -599,6 +665,12 @@ impl Dialog {
         if let Some(e) = self.export.as_mut() {
             if !e.show(&ctx) {
                 self.export = None;
+            }
+        }
+        // As is Reconstruct again's question.
+        if let Some(a) = self.again.as_mut() {
+            if !a.show(&ctx, cx) {
+                self.again = None;
             }
         }
         closed
@@ -839,6 +911,13 @@ impl Dialog {
             if viewer::close_button(&mut cu, f.rect, "Close") {
                 close = true;
             }
+            // Edit, on the close button's row: the photo editor for a picture, Edit in 3D for a 3D capture.
+            if let Some(b) = self.edit_button(cx) {
+                let r = viewer::beside_close(f.rect, b.desired_width(&cu));
+                if pressed(b.show_at(&mut cu, r)) {
+                    act = Some(Act::Edit);
+                }
+            }
             // The items before and after it, over the picture's sides.
             let can = self.can_navigate() || self.fixture_active;
             for (dir, glyph, label, x, there) in [
@@ -890,7 +969,7 @@ impl Dialog {
         if let Some(a) = act {
             self.act(&ctx, cx, server, a);
         }
-        if !closing && self.export.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if !closing && self.export.is_none() && self.again.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.full {
                 self.full = false;
             } else if self.warning.is_some() {
@@ -915,7 +994,19 @@ impl Dialog {
         f.closed
     }
 
-    /// Over the picture: what it is (top left), its 3D view or folder (bottom right), a share's progress (bottom edge).
+    /// What the window's Edit opens, on what it can open: a picture's photo editor, a reconstructed capture's Edit in 3D.
+    /// What is merely shared with you has its 3D view (View in 3D, once downloaded) and Edit in 3D in there.
+    fn edit_button(&self, cx: &Cx) -> Option<Button<'static>> {
+        let b = Button::new("Edit").icon(icons::SLIDERS_HORIZONTAL).variant(Variant::Glass).id_salt("capture-window-edit");
+        if matches!(self.entry.local, Some(controller::Local::Session(_))) {
+            let can = cx.gpu.is_some();
+            return self.entry.ready.then(|| b.enabled(can).hint(if can { "Edit in 3D: this capture's 3D view with the photo editor's layers" } else { "Edit in 3D takes a graphics card this window does not have" }));
+        }
+        super::editor::source_of(self.layers.layered(&self.entry)).is_some().then_some(b.hint("Edits a copy in the photo editor: this picture stays as it is"))
+    }
+
+    /// Over the picture: what it is (top left), its 3D view or folder (bottom right), a share's or a reconstruction's
+    /// progress (bottom edge).
     fn picture_overlays(&mut self, ui: &mut Ui, cx: &Cx, picture: Rect, busy: bool, full: f32, act: &mut Option<Act>) {
         let p = ui.painter().clone();
         let (glyph, label, color) = if self.entry.is_picture() { (icons::IMAGES, "Picture", theme::FG) } else { (icons::CUBE, "3D capture", theme::ACCENT) };
@@ -932,13 +1023,19 @@ impl Dialog {
         widgets::icon(&p, pos2(badge.left() + 17.0, badge.center().y), glyph, 14.0, color);
         widgets::text(&p, pos2(badge.left() + 29.0, badge.center().y), Align2::LEFT_CENTER, &t);
 
-        // A share running: a light running along the picture's bottom edge, or how much is sent while sending.
-        let running = anim::toggle(ui.ctx(), Id::unique(("capture-window-busy", &self.entry.key)), busy, Spring::SOFT).clamp(0.0, 1.0);
+        // A share running: a light running along the picture's bottom edge, or how much is sent while sending. A
+        // reconstruction: how far it got.
+        let offer = again::offer_of(&self.entry, cx.snap);
+        let rebuilt = match offer {
+            Some(Offer::Running { fraction, .. }) => Some(fraction),
+            _ => None,
+        };
+        let running = anim::toggle(ui.ctx(), Id::unique(("capture-window-busy", &self.entry.key)), busy || rebuilt.is_some(), Spring::SOFT).clamp(0.0, 1.0);
         if running > 0.01 {
             let bar = Rect::from_min_max(pos2(picture.left(), picture.bottom() - 3.0), picture.max);
             let bp = p.with_clip_rect(bar.intersect(p.clip_rect()));
             bp.rect_filled(bar, 0.0, theme::alpha(theme::ACCENT, 0.18 * running));
-            let sent = sent_part(self.stage).filter(|_| busy);
+            let sent = sent_part(self.stage).filter(|_| busy).or(rebuilt);
             let shown = anim::spring(ui.ctx(), Id::unique(("capture-window-sent", &self.entry.key)), [sent.unwrap_or(0.0)], Spring::SOFT)[0].clamp(0.0, 1.0);
             if sent.is_some() {
                 bp.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * shown, 3.0)), theme::radius(1.5), theme::alpha(theme::ACCENT, running));
@@ -999,6 +1096,26 @@ impl Dialog {
             }
             right = r.left() - 8.0;
         }
+        // Beside what shows its 3D view, what makes it again: while it has one, and while a run goes on (a capture without
+        // one has Reconstruct to share among its actions).
+        if let Some(o) = offer.filter(|o| self.entry.ready || matches!(o, Offer::Running { .. } | Offer::Waiting { .. })) {
+            let (glyph, hint, pressed_does) = match o {
+                Offer::Start { .. } => (icons::MAGIC_WAND, "Trains a new 3D view from its frames: it replaces this one once it is done", Some(Act::Reconstruct)),
+                Offer::Blocked { reason, .. } => (icons::MAGIC_WAND, reason, None),
+                Offer::Running { .. } => (icons::X, "Stops it: the 3D view stays as it is", Some(Act::StopReconstruct)),
+                Offer::Waiting { hint } => (icons::X, hint, Some(Act::Unqueue)),
+            };
+            let b = Button::new(o.label()).icon(glyph).variant(Variant::Glass).size(Size::Sm).enabled(pressed_does.is_some()).hint(hint).id_salt("capture-window-again");
+            let w = b.desired_width(ui);
+            let r = Rect::from_min_size(pos2(right - w, bottom - 32.0), vec2(w, 32.0));
+            self.again_button = r;
+            if pressed(b.show_at(ui, r)) {
+                if let Some(a) = pressed_does {
+                    *act = Some(a);
+                }
+            }
+            right = r.left() - 8.0;
+        }
         if self.entry.is_picture() {
             let r = Rect::from_min_size(pos2(right - 32.0, bottom - 32.0), vec2(32.0, 32.0));
             let resp = widgets::IconButton::new(icons::CORNERS_OUT, "See it whole").size(32.0, 15.0).backdrop(theme::black(0.5)).show_at(ui, r);
@@ -1016,7 +1133,10 @@ impl Dialog {
         let item = self.entry.remote.clone();
         let hidden = item.as_ref().is_some_and(|i| i.hidden.is_some());
         let public = item.as_ref().is_some_and(|i| i.public);
-        let can_share = self.entry.ready && !hidden && self.warning.is_none();
+        // A new result on its way: sharing or exporting now would send the one going away.
+        let offer = again::offer_of(&self.entry, cx.snap);
+        let rebuilding = offer.is_some_and(Offer::running);
+        let can_share = self.entry.ready && !hidden && self.warning.is_none() && !rebuilding;
         // Its splats edited since it was uploaded: the copy on Orbiters is not what its 3D view shows.
         let edited = mine && self.entry.edited_since_upload();
         let updating = busy && matches!(self.last, Some(Action::Update));
@@ -1027,14 +1147,16 @@ impl Dialog {
             if self.entry.no_keyframes {
                 // Nothing to reconstruct or share: the card says why.
             } else if !self.entry.ready && matches!(self.entry.local, Some(controller::Local::Session(_))) {
-                let queued = matches!(&self.entry.local, Some(controller::Local::Session(d)) if cx.snap.reconstruct_queue.contains(d) || cx.snap.reconstruction.as_ref().is_some_and(|j| &j.session_dir == d));
-                actions.push((
-                    Act::Reconstruct,
-                    Button::new(if queued { "Reconstructing…" } else { "Reconstruct to share" })
-                        .icon(icons::MAGIC_WAND)
-                        .variant(Variant::Primary)
-                        .enabled(!queued),
-                ));
+                let (label, can, hint) = match offer {
+                    Some(Offer::Blocked { reason, .. }) => ("Reconstruct to share", false, Some(reason)),
+                    Some(Offer::Running { .. } | Offer::Waiting { .. }) => ("Reconstructing…", false, None),
+                    _ => ("Reconstruct to share", true, None),
+                };
+                let mut b = Button::new(label).icon(icons::MAGIC_WAND).variant(Variant::Primary).enabled(can);
+                if let Some(h) = hint {
+                    b = b.hint(h);
+                }
+                actions.push((Act::Reconstruct, b));
             } else {
                 if !public {
                     let label = if busy && matches!(&self.last, Some(Action::Share(s)) if s.public) { "Sharing…" } else { "Share publicly" };
@@ -1047,13 +1169,12 @@ impl Dialog {
                 }
                 // A capture of this computer, reconstructed: what its 3D view shows, as a file for other tools.
                 if self.entry.ready && matches!(self.entry.local, Some(controller::Local::Session(_))) {
-                    let b = Button::new("Export…").icon(icons::UPLOAD_SIMPLE).variant(Variant::Secondary).hint(
-                        "Saves what its 3D view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender",
-                    );
+                    let b = Button::new("Export…").icon(icons::UPLOAD_SIMPLE).variant(Variant::Secondary).enabled(!rebuilding).hint(if rebuilding {
+                        "Once the new 3D view is ready: the file holds its splats"
+                    } else {
+                        "Saves what its 3D view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender"
+                    });
                     actions.push((Act::Export, b));
-                }
-                if super::editor::source_of(self.layers.layered(&self.entry)).is_some() {
-                    actions.push((Act::Edit, Button::new("Edit").icon(icons::SLIDERS_HORIZONTAL).variant(Variant::Secondary)));
                 }
             }
         } else {
@@ -1061,10 +1182,6 @@ impl Dialog {
             actions.push((Act::ShareTo, Button::new(label).icon(icons::PAPER_PLANE_TILT).variant(Variant::Primary).enabled(can_share && !busy)));
             if self.entry.is_picture() {
                 actions.push((Act::Download, Button::new("Download").icon(icons::DOWNLOAD_SIMPLE).enabled(!busy)));
-                // A copy of it edited (downloaded at its full size), saved among this computer's pictures.
-                if super::editor::source_of(&self.entry).is_some() {
-                    actions.push((Act::Edit, Button::new("Edit").icon(icons::SLIDERS_HORIZONTAL).variant(Variant::Secondary)));
-                }
             } else if public && !hidden {
                 actions.push((Act::CopyLink, self.copy_button(ui, busy, true)));
             }
@@ -1105,6 +1222,9 @@ impl Dialog {
             if matches!(a, Act::Export) {
                 self.export_button = r;
             }
+            if matches!(a, Act::Reconstruct) {
+                self.again_button = r;
+            }
             if pressed(b.show_at(ui, r)) {
                 *act = Some(a);
             }
@@ -1138,7 +1258,13 @@ impl Dialog {
         if edited && !updating && self.error.is_none() {
             let shared = item.as_ref().is_some_and(|i| i.public || !i.grants.is_empty());
             ui.add_space(14.0);
-            let why = if shared {
+            let why = if self.entry.reconstructed_since_upload() {
+                if shared {
+                    "Reconstructed since it was shared: whoever sees it, on Orbiters and in VRChat, still sees the previous version."
+                } else {
+                    "Reconstructed since it was uploaded: its copy on Orbiters is still the previous version."
+                }
+            } else if shared {
                 "Edited since it was shared: whoever sees it, on Orbiters and in VRChat, still sees its splats as they were then."
             } else {
                 "Edited since it was uploaded: its copy on Orbiters still has its splats as they were then."
@@ -1184,6 +1310,24 @@ impl Dialog {
                 ui.add_space(6.0);
                 paragraph(ui, "You can close this window: it carries on.", 11.5, theme::FG_4, w);
             }
+        }
+        // A reconstruction of this capture: how far, or what it waits for, or why there can be none.
+        match offer {
+            Some(Offer::Running { fraction, stage }) => {
+                ui.add_space(14.0);
+                working_part(ui, &format!("{stage} · {:.0}%", fraction * 100.0), Some(fraction));
+                ui.add_space(6.0);
+                paragraph(ui, "You can close this window: it carries on. Its 3D view stays as it is until the new one is ready.", 11.5, theme::FG_4, w);
+            }
+            Some(Offer::Waiting { hint }) => {
+                ui.add_space(14.0);
+                paragraph(ui, &format!("Waiting to reconstruct. {hint}."), 12.0, theme::FG_3, w);
+            }
+            Some(Offer::Blocked { reason, again: true, .. }) => {
+                ui.add_space(14.0);
+                paragraph(ui, &format!("{reason}."), 12.0, theme::FG_3, w);
+            }
+            _ => {}
         }
         let panel = self.panel();
         let key = (panel as u8, self.panel_key.1);
@@ -1592,9 +1736,16 @@ impl Dialog {
                 _ => self.start(ctx, server, Action::Download),
             },
             Act::Reconstruct => {
+                if let Some(controller::Local::Session(path)) = self.entry.local.clone() {
+                    self.again = again::press(ctx, cx, &path, &self.entry.world_name, self.entry.remote.as_ref(), self.again_button);
+                }
+            }
+            Act::StopReconstruct => {
+                cx.ctl.stop_reconstruction();
+            }
+            Act::Unqueue => {
                 if let Some(controller::Local::Session(path)) = &self.entry.local {
-                    cx.ctl.reconstruct(path.clone());
-                    self.notice = Some("Reconstruction started: share it once its 3D view is ready".into());
+                    cx.ctl.unqueue_reconstruction(path.clone());
                 }
             }
             Act::Folder => {
@@ -1692,6 +1843,8 @@ enum Act {
     Download,
     View3d,
     Reconstruct,
+    StopReconstruct,
+    Unqueue,
     Folder,
     Full,
     Unshare(Unshare),
@@ -1883,6 +2036,7 @@ mod tests {
     /// `ORBITERS_TEST_OUT` when it is set (`window-<name>.png`).
     struct Harness {
         ctx: egui::Context,
+        ctl: crate::controller::Shared,
         backend: crate::backend::Ctl,
         dialog: Dialog,
         time: f64,
@@ -1896,14 +2050,14 @@ mod tests {
             orbiters_ui::install(&ctx);
             orbiters_ui::widgets::watch_controls();
             let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
-            let backend: crate::backend::Ctl = Arc::new(crate::backend::Local::new(ctl));
+            let backend: crate::backend::Ctl = Arc::new(crate::backend::Local::new(ctl.clone()));
             let mut dialog = Dialog::new(&ctx, entry, false);
             // Friends are not read here (Share to … is not what this harness is about; it would read VRChat's data).
             dialog.friend_scope = Some(crate::controller::vrchat_data::Scope::of(&backend.view()));
             dialog.friends_requested = true;
             let painter =
                 std::env::var_os("ORBITERS_TEST_OUT").map(|d| (PathBuf::from(d), orbiters_ui::software::Software::new(SCREEN.x as u32, SCREEN.y as u32)));
-            let mut h = Self { ctx, backend, dialog, time: 0.0, painter, shapes: None };
+            let mut h = Self { ctx, ctl, backend, dialog, time: 0.0, painter, shapes: None };
             h.settle();
             h
         }
@@ -2062,6 +2216,99 @@ mod tests {
 
     /// The window's other update states as the screenshot fixtures stage them (their bytes under way, the switch), shot
     /// for review.
+    /// A capture of this computer, reconstructed.
+    fn capture(name: &str) -> (PathBuf, PathBuf, Entry) {
+        let (dir, session, _, mut entry) = uploaded_session(name, None);
+        entry.ready = true;
+        entry.uploaded_edits = None;
+        (dir, session, entry)
+    }
+
+    /// Its window offers Reconstruct again and Edit; what is merely shared with you offers neither, whatever it is.
+    #[test]
+    fn only_a_capture_of_this_computer_is_offered_reconstruct_again_in_its_window() {
+        let (dir, _, entry) = capture("again-offered");
+        let h = Harness::new(entry);
+        assert_eq!(h.control("Reconstruct again").map(|c| c.1), Some(true));
+        assert!(h.control("Edit").is_some(), "Edit on the capture's window");
+        std::fs::remove_dir_all(dir).unwrap();
+        let shared = Item { kind: orbiters_core::shares::Kind::Capture, id: 7, mine: false, can_share: true, ..Default::default() };
+        let mut entry = controller::remote_entry(shared);
+        entry.ready = true;
+        let h = Harness::new(entry);
+        assert!(h.control("Reconstruct again").is_none(), "shared with you: nothing here to train from");
+        assert!(h.control("Stop reconstruction").is_none());
+        assert!(h.control("Edit").is_none());
+    }
+
+    /// Disabled with the reason, on a capture reduced to its 3D view.
+    #[test]
+    fn a_capture_reduced_to_its_3d_view_says_why_not() {
+        let (dir, _, mut entry) = capture("again-view-only");
+        entry.trimmed = true;
+        let h = Harness::new(entry);
+        assert_eq!(h.control("Reconstruct again").map(|c| c.1), Some(false));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// While it runs or waits, the window shows that with the way out; sharing and exporting wait for the new result.
+    #[test]
+    fn a_running_or_waiting_reconstruction_shows_in_the_window_with_its_way_out() {
+        let (dir, session, entry) = capture("again-running");
+        let mut h = Harness::new(entry);
+        let mut snap = (*h.backend.view()).clone();
+        snap.reconstruction = Some(crate::state::ReconstructionJob::new(session.clone(), false));
+        h.ctl.set_snapshot(snap.clone());
+        h.settle();
+        assert_eq!(h.control("Stop reconstruction").map(|c| c.1), Some(true));
+        assert!(h.control("Reconstruct again").is_none());
+        assert_eq!(h.control("Export…").map(|c| c.1), Some(false), "the file would hold the result going away");
+        assert_eq!(h.control("Share publicly").map(|c| c.1), Some(false), "as would a share");
+        snap.reconstruction = None;
+        snap.reconstruct_queue = vec![session];
+        h.ctl.set_snapshot(snap);
+        h.settle();
+        assert_eq!(h.control("Waiting · cancel").map(|c| c.1), Some(true));
+        assert_eq!(h.control("Export…").map(|c| c.1), Some(true), "only waiting: the result stands");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// With splats removed it asks first and nothing starts; Cancel leaves everything as it was. Without, no question.
+    #[test]
+    fn reconstruct_again_asks_before_it_takes_splats_removed() {
+        let (dir, session, entry) = capture("again-asks");
+        delete_splat(&session, 3);
+        let mut h = Harness::new(entry);
+        h.click("Reconstruct again");
+        assert!(h.dialog.again.is_some(), "the question");
+        assert!(h.backend.view().reconstruction.is_none() && h.backend.view().reconstruct_queue.is_empty(), "nothing started");
+        assert!(!h.dialog.can_navigate(), "the arrows wait for the answer");
+        h.settle();
+        h.click("Cancel");
+        for _ in 0..200 {
+            h.frame(Vec::new());
+        }
+        assert!(h.dialog.again.is_none(), "answered and gone");
+        assert!(h.backend.view().reconstruction.is_none() && h.backend.view().reconstruct_queue.is_empty(), "Cancel starts nothing");
+        assert!(orbiters_core::reconstruction::result_dir(&session).join(orbiters_core::reconstruction::EDIT_FILE).is_file(), "and keeps its edits");
+        std::fs::remove_file(orbiters_core::reconstruction::result_dir(&session).join(orbiters_core::reconstruction::EDIT_FILE)).unwrap();
+        h.click("Reconstruct again");
+        assert!(h.dialog.again.is_none(), "nothing to lose: no question");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A picture's Edit sits on the close button's row, as a capture's does, and once: not among the actions as well.
+    #[test]
+    fn edit_sits_on_the_close_buttons_row() {
+        let (dir, _, entry) = capture("edit-row");
+        let h = Harness::new(entry);
+        let (edit, _) = h.control("Edit").unwrap();
+        let (close, _) = h.control("Close").unwrap();
+        assert_eq!((edit.top(), edit.height()), (close.top(), close.height()));
+        assert_eq!(edit.right() + 8.0, close.left());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn the_update_states_of_the_screenshot_fixtures() {
         let mut entry = crate::controller::shares::remote_entry(Item { kind: shares::Kind::Capture, id: 3, mine: true, can_share: true, ..Default::default() });

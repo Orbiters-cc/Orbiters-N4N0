@@ -669,6 +669,9 @@ pub(super) fn picture_entry(key: String, name: String, p: &community::Picture, d
         content: Default::default(),
         ready: true,
         no_keyframes: false,
+        no_depth: false,
+        trimmed: false,
+        result: None,
         picture: source(p, false, development, stand_ins),
         size: (p.width > 0 && p.height > 0).then_some([p.width, p.height]),
         layers: Vec::new(),
@@ -1041,9 +1044,8 @@ impl PictureWindow {
             // Edit a copy of a gallery's picture, or of an asset's by its link.
             let linked = [&p.full_url, &p.src].into_iter().flatten().any(|u| u.starts_with("https://"));
             if p.id != 0 || linked {
-                let b = widgets::Button::new("Edit").icon(icons::SLIDERS_HORIZONTAL).size(widgets::Size::Sm).variant(widgets::Variant::Glass).id_salt(wid.with("edit"));
-                let bw = b.desired_width(&cu);
-                let br = Rect::from_min_size(pos2(picture.right() - 16.0 - bw, picture.bottom() - 16.0 - 32.0), vec2(bw, 32.0));
+                let b = widgets::Button::new("Edit").icon(icons::SLIDERS_HORIZONTAL).variant(widgets::Variant::Glass).id_salt(wid.with("edit"));
+                let br = viewer::beside_close(f.rect, b.desired_width(&cu));
                 if sharing::pressed(b.show_at(&mut cu, br)) {
                     edit = true;
                 }

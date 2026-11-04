@@ -188,6 +188,12 @@ pub fn close_rect(window: Rect) -> Rect {
     Rect::from_min_size(pos2(window.right() - 12.0 - 40.0, window.top() + 12.0), vec2(40.0, 40.0))
 }
 
+/// Where a control of `width` goes on [`close_button`]'s row, just left of it: the window's Edit.
+pub fn beside_close(window: Rect, width: f32) -> Rect {
+    let close = close_rect(window);
+    Rect::from_min_size(pos2(close.left() - 8.0 - width, close.top()), vec2(width, close.height()))
+}
+
 /// How a picture window is arranged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arrangement {

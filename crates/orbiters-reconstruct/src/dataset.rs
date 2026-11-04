@@ -210,6 +210,9 @@ pub struct Loaded {
     pub faces: usize,
     pub faces_over_budget: usize,
     pub faces_skipped: usize,
+    /// Keyframes and rig faces left out as blown to white ([`leave_out_blown`]).
+    pub keyframes_blown: usize,
+    pub faces_blown: usize,
     /// Why the first skipped keyframe was skipped.
     pub first_problem: Option<String>,
 }
@@ -393,6 +396,8 @@ pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl 
             Item::Face(Err(_)) => loaded.faces_skipped += 1,
         }
     }
+    loaded.keyframes_blown = leave_out_blown(&mut views);
+    loaded.faces_blown = leave_out_blown(&mut face_views);
     face_views.sort_by_key(|v| v.keyframe);
     loaded.faces = face_views.len();
     let faces = match (rig_layout, face_geometry) {
@@ -429,6 +434,37 @@ pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl 
         }
     }
     Ok(Dataset { dir: dir.to_path_buf(), views, depth_views, faces, width: w, height: h, geometry, mask, loaded })
+}
+
+/// The share of a keyframe's pixels at white from which it counts as blown out.
+const BLOWN_SHARE: f32 = 0.25;
+/// A session whose typical keyframe is this white already keeps them all: a snowfield or a white room is the world.
+const BLOWN_TYPICAL: f32 = 0.05;
+
+/// The share of an image's pixels at white.
+fn blown_share(image: &[u32]) -> f32 {
+    let white = image.iter().filter(|&&p| (p & 0xff) >= 250 && ((p >> 8) & 0xff) >= 250 && ((p >> 16) & 0xff) >= 250).count();
+    white as f32 / image.len().max(1) as f32
+}
+
+/// Leaves out the views mostly blown to white when the session's others are not, the worst first and at most one view
+/// in ten (at least one), and says how many left. A camera inside or just behind the world's geometry sees that (a
+/// translucent wall or a haze at its near plane), and no scene explains it from elsewhere: training pays for it with
+/// bright fog in front of that camera, seen from everywhere else. One such frame out of 37 turned the wearer into a
+/// white ghost from behind in ちま部屋 2026-11-04 12-14-49, and the views it spoils lie off the camera's path, so scores on
+/// held-out frames hardly move.
+fn leave_out_blown(views: &mut Vec<View>) -> usize {
+    if views.len() < 3 {
+        return 0;
+    }
+    let mut shares: Vec<(f32, i32)> = views.iter().map(|v| (blown_share(&v.image), v.keyframe)).collect();
+    shares.sort_by(|a, b| b.0.total_cmp(&a.0));
+    if shares[shares.len() / 2].0 >= BLOWN_TYPICAL {
+        return 0;
+    }
+    let out: Vec<i32> = shares.iter().take((views.len() / 10).max(1)).filter(|s| s.0 >= BLOWN_SHARE).map(|s| s.1).collect();
+    views.retain(|v| !out.contains(&v.keyframe));
+    out.len()
 }
 
 /// A face's mask at its training resolution: a training pixel is scene when the captured pixels it averages are
@@ -886,6 +922,30 @@ mod tests {
         }
         let e = load_with(&s.dir, 640, Budget::UNLIMITED, |_| {}).err().expect("one keyframe left");
         assert!(format!("{e:#}").contains("Only 1 of this session's 5 keyframes"), "{e:#}");
+    }
+
+    /// A frame mostly blown to white leaves, as long as the session is not a white world: the fog it trains is seen from
+    /// everywhere else. In a white world every frame stays.
+    #[test]
+    fn blown_out_keyframes_are_left_out_unless_the_world_is_white() {
+        let (w, h) = (64u32, 36u32);
+        let white = |s: &fixture::Session, k: i32, share: f32| {
+            let n = (w * h) as usize;
+            let rgb: Vec<u8> = (0..n).flat_map(|i| if (i as f32) < share * n as f32 { [255u8; 3] } else { [40u8; 3] }).collect();
+            std::fs::write(s.dir.join(KEYFRAMES_DIR).join(bundle::keyframe_file(k)), orbiters_contracts::qoi::encode(&rgb, w, h, 3)).unwrap();
+        };
+        let s = fixture::session("blown", w, h, 12, &[]);
+        white(&s, 7, 0.5);
+        // White in a part of the frame is a lamp or a window.
+        white(&s, 3, 0.1);
+        let data = load_with(&s.dir, w, Budget::UNLIMITED, |_| {}).expect("load");
+        assert_eq!(data.loaded.keyframes_blown, 1);
+        assert!(data.views.iter().all(|v| v.keyframe != 7) && data.views.iter().any(|v| v.keyframe == 3));
+
+        let s = fixture::session("blown-world", w, h, 12, &[]);
+        (0..12).for_each(|k| white(&s, k, 0.6));
+        let data = load_with(&s.dir, w, Budget::UNLIMITED, |_| {}).expect("load");
+        assert_eq!((data.loaded.keyframes_blown, data.views.len()), (0, 12));
     }
 
     /// Records may name files the capture never finished writing (CAP-5): a missing keyframe and a damaged or missing

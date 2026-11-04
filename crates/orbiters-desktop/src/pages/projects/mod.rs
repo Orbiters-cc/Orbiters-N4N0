@@ -13,6 +13,7 @@ mod panel;
 mod preview;
 mod preview_gpu;
 mod state;
+mod storage_card;
 mod thumb_cache;
 mod ui;
 mod unity_session;

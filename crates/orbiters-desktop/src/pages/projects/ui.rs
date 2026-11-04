@@ -591,8 +591,20 @@ fn activity(ui: &mut Ui, state: &mut State, area: Rect) {
         fraction: copying.then(|| p.copied as f32 / p.total.max(1) as f32),
         cancel: copying && p.phase == "Copying project",
     });
-    if feedback::activity(ui, Id::unique("projects-activity"), area, a.as_ref()) {
-        state.copy_cancel.store(true, Ordering::Relaxed);
+    // A Library move elsewhere than the panel on screen: an action of the page has the capsule while it runs, a moment.
+    let repair = if a.is_none() && !shown_in_dialog { state.repair_capsule() } else { None };
+    let b = repair.as_ref().map(|(label, detail, fraction, cancel)| feedback::Activity {
+        label,
+        detail: (!detail.is_empty()).then_some(detail.as_str()),
+        fraction: *fraction,
+        cancel: *cancel,
+    });
+    if feedback::activity(ui, Id::unique("projects-activity"), area, a.as_ref().or(b.as_ref())) {
+        if repair.is_some() {
+            state.cancel_repair();
+        } else {
+            state.copy_cancel.store(true, Ordering::Relaxed);
+        }
     }
 }
 

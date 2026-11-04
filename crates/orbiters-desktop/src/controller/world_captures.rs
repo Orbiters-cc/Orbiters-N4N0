@@ -298,6 +298,7 @@ fn session_entry(s: &SessionSummary, world: &str, world_name: &str, remote: Opti
         remote,
         content: Content::read(&s.dir),
         ready: s.reconstruction.is_some(),
+        no_keyframes: s.has_no_keyframes(),
         picture: None,
         size: None,
         layers: Vec::new(),

@@ -3967,7 +3967,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-audio"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "orbiters-core",
@@ -3977,7 +3977,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-call"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-capture"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -4021,7 +4021,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-core"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4045,7 +4045,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-desktop"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4087,7 +4087,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-n4n0"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "orbiters-contracts",
@@ -4101,7 +4101,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-n4n0-core"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "orbiters-contracts",
@@ -4117,7 +4117,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-openvr"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "orbiters-contracts",
  "serde_json",
@@ -4126,7 +4126,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-projects"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -4153,7 +4153,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-reconstruct"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "ash",
@@ -4177,7 +4177,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-setup"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -4198,7 +4198,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-smooth"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -4206,14 +4206,14 @@ dependencies = [
 
 [[package]]
 name = "orbiters-smooth-driver"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "orbiters-smooth",
 ]
 
 [[package]]
 name = "orbiters-sound"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "windows 0.62.2",
@@ -4221,7 +4221,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-spout"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "orbiters-contracts",
  "windows 0.62.2",
@@ -4229,7 +4229,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-ui"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -4246,7 +4246,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-update"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4264,7 +4264,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-voice"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "bzip2 0.4.4",
@@ -8152,7 +8152,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.3.4-dev.23"
+version = "0.3.4-dev.25"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

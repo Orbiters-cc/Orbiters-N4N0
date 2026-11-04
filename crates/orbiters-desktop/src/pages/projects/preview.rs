@@ -18,7 +18,7 @@
 
 use super::builds::{self, Builder, Done};
 use super::preview_gpu::{self, LightMode, Pipelines, Scene, View};
-use super::state::{Outcome, State};
+use super::state::State;
 use crate::gpu::Handles;
 use crate::pages::{Cx, Job};
 use egui::{pos2, vec2, Align2, Color32, Id, Order, Rect, Sense, Ui, UiBuilder};
@@ -1000,11 +1000,7 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             }
         }
         Some(WindowAct::Open) => {
-            let p = project.clone();
-            state.task(&ctx, "Opening Unity…", move || {
-                orbiters_projects::open_project(&p)?;
-                Ok(Outcome::Changed("Project sent to Unity".into()))
-            });
+            state.open_unity(&ctx, &project, false);
         }
         None => {}
     }
@@ -1072,7 +1068,7 @@ fn chrome(
             let k = anim::toggle(ui.ctx(), Id::unique(("preview-light-on", i)), chosen, Spring::SNAPPY);
             let hk = anim::toggle(ui.ctx(), Id::unique(("preview-light-hover", i)), offered && resp.hovered(), Spring::SNAPPY);
             if k > 0.01 || hk > 0.01 {
-                p.rect_filled(r, theme::radius(15.0), theme::white(0.13 * k + 0.05 * hk * (1.0 - k)));
+                paint::fill_nested_squircle(&p, row, theme::squircle(19.0), r, theme::white(0.13 * k + 0.05 * hk * (1.0 - k)));
             }
             let fg = if offered { theme::mix(theme::FG_2, theme::FG, k) } else { theme::FG_3 };
             let glyph_tint = if offered { theme::mix(theme::FG_3, theme::ACCENT, k) } else { theme::alpha(theme::FG_3, 0.6) };
@@ -1245,7 +1241,7 @@ fn chrome(
                 let k = anim::toggle(ui.ctx(), Id::unique(("preview-scene-on", &ch.guid)), on, Spring::SNAPPY);
                 let hk = anim::toggle(ui.ctx(), Id::unique(("preview-scene-hover", &ch.guid)), resp.hovered(), Spring::SNAPPY);
                 if k > 0.01 || hk > 0.01 {
-                    p.rect_filled(r, theme::radius(15.0), theme::white(0.13 * k + 0.05 * hk * (1.0 - k)));
+                    paint::fill_nested_squircle(&p, row, theme::squircle(19.0), r, theme::white(0.13 * k + 0.05 * hk * (1.0 - k)));
                 }
                 let mut tx = r.left() + 14.0;
                 match &ch.state {

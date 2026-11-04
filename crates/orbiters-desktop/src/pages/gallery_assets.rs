@@ -197,6 +197,7 @@ impl State {
                     remote: None,
                     content: Default::default(),
                     ready: true,
+                    no_keyframes: false,
                     picture,
                     size: (p.width > 0 && p.height > 0).then_some([p.width, p.height]),
                     layers: Vec::new(),

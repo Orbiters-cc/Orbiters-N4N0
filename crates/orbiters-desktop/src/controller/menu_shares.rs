@@ -349,6 +349,7 @@ mod tests {
             remote: None,
             content: Default::default(),
             ready,
+            no_keyframes: false,
             picture: None,
             size: None,
             layers: Vec::new(),

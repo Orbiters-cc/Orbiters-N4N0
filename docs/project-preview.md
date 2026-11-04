@@ -90,6 +90,21 @@ too (below), and were tested on the project's real `SandTerrain.asset` (BruteFor
   or unreadable (one over 600 MB) is read from its file by ufbx as before. A `.blend` (or `.max`, `.ma`, `.mb`, `.c4d`,
   `.lxo`, `.3ds`, `.dae`, `.dxf`, `.skp`) without one cannot be read: the build says "open the project in Unity once".
   Unity may have the project open: everything is only read, and a database that does not add up is no database.
+- **Models read from the file against Unity's import** (4 November 2026). The two must agree on which material goes on
+  which submesh, or a preview changes when Unity first imports the project: Enzo's Ultirex 4.1 drew its Misc material on
+  the 176,661 triangles of its body until then. A renderer's list of materials goes by submesh, and scenes and prefabs
+  override that list as saved against Unity's order, so the file's path follows Unity's rules: one submesh per material
+  (two slots holding one material are one), in the order the faces first use them, not the order of the file's slots;
+  `materialImportMode: 0` or `importMaterials: 0` draws Unity's default material; a remap to a material no longer there
+  leaves its slot empty; a `.meta` with materials settings but no `materialLocation` uses the external materials found
+  by name; a model's own material goes by the number an older import gave it (`fileIDToRecycleName`,
+  `internalIDToNameTable`). A model's own material read from the import keeps its colours and pictures (a binary file's
+  pairs are `first: _Color`, which only text forms were read as). `scene_preview --materials <project>` measures this.
+  On 20 of Enzo's projects (687 models with a current import, 1,581 renderers, 2,177 slots), with only the old order put
+  back: 117 of the 192 renderers with several submeshes reordered and 347 slots holding another material; now 0 and 0.
+  What still differs is 7 slots' base picture: Unity's choice between two pictures of one name (6, it depends on the
+  import's history) and a picture Unity did not find that the name search does (1). A stale import is passed over, so
+  this same path draws a project whose model changed since Unity last imported it.
 - **Lightmaps** (`scene::world`). Bakery's `ftLightmapsStorage` when the scene has one (it sets the lightmaps when the
   scene loads, so its word counts for the renderers it lists), else each renderer's `m_LightmapIndex` and
   `m_LightmapTilingOffset` with the scene's `LightingData` asset. Each HDR picture (EXR, Radiance HDR, or sRGB) is averaged

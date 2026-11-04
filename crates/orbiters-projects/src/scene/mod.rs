@@ -242,7 +242,7 @@ pub fn cache_dir(project: &Path) -> PathBuf {
 }
 
 /// Bumped when a build would come out differently: older previews are built again.
-const BUILDER_VERSION: u32 = 5;
+const BUILDER_VERSION: u32 = 6;
 /// A Toolkit preview this much older than its scene file is still the scene's (file times copied across disks).
 const SLACK: Duration = Duration::from_secs(2);
 /// A built preview is built again after this long, whatever changed (an asset added since that it lacked).

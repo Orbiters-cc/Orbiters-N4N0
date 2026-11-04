@@ -43,7 +43,8 @@ pub struct ModelNode {
     pub scale: [f32; 3],
     /// Its mesh, drawn by a SkinnedMeshRenderer (skinned or with blend shapes) or a MeshRenderer.
     pub mesh: Option<usize>,
-    /// The model's materials of its submeshes, in order (indices into [`Model::materials`]).
+    /// The model's materials of its submeshes, in the submeshes' order, which is Unity's ([`mesh_of`]) (indices into
+    /// [`Model::materials`]).
     pub materials: Vec<usize>,
     /// Hidden in the file (Unity turns the renderer off when it imports visibility).
     pub visible: bool,
@@ -141,12 +142,16 @@ pub struct ImportSettings {
     pub remapped: HashMap<String, String>,
     /// `materialImportMode` 0: none (Unity draws the default material).
     pub import_materials: bool,
-    /// `materialLocation` 0: the legacy external materials, found by name next to the model.
+    /// `materialLocation` 0: the legacy external materials, found by name next to the model. A `.meta` older than that
+    /// setting has materials settings without it, and means the same (Bakery's examples: `Materials/Light.mat`).
     pub legacy_materials: bool,
     /// 0: by base texture name, 1: the model's material name, 2: both, 3: model name + material name.
     pub material_name: i64,
     /// 0: local Materials folder, 1: recursive up, 2: everywhere.
     pub material_search: i64,
+    /// The names of the model's own materials by the IDs an older import gave them (`fileIDToRecycleName`,
+    /// `internalIDToNameTable`: 2100000, 2100002, …), which prefabs and scenes saved then still use.
+    pub material_ids: HashMap<i64, String>,
 }
 
 impl Default for ImportSettings {
@@ -163,6 +168,7 @@ impl Default for ImportSettings {
             legacy_materials: false,
             material_name: 1,
             material_search: 1,
+            material_ids: HashMap::new(),
         }
     }
 }
@@ -182,9 +188,25 @@ impl ImportSettings {
         s.normals = m.at(&["tangentSpace", "normalImportMode"]).as_i64().unwrap_or(0);
         let mats = m.get("materials");
         s.import_materials = mats.get("materialImportMode").as_i64().unwrap_or(1) != 0 && mats.get("importMaterials").as_i64().unwrap_or(1) != 0;
-        s.legacy_materials = mats.get("materialLocation").as_i64() == Some(0);
+        s.legacy_materials = match mats.get("materialLocation").as_i64() {
+            Some(location) => location == 0,
+            None => !mats.entries().is_empty(),
+        };
         s.material_name = mats.get("materialName").as_i64().unwrap_or(1);
         s.material_search = mats.get("materialSearch").as_i64().unwrap_or(1);
+        for (id, name) in m.get("fileIDToRecycleName").entries() {
+            if let (Ok(id), Some(name)) = (id.parse::<i64>(), name.as_str()) {
+                if (2_100_000..2_200_000).contains(&id) {
+                    s.material_ids.insert(id, name.to_string());
+                }
+            }
+        }
+        for e in m.get("internalIDToNameTable").items() {
+            let Some(name) = e.get("second").as_str() else { continue };
+            if let Some(id) = e.get("first").get("21").as_i64() {
+                s.material_ids.insert(id, name.to_string());
+            }
+        }
         for e in m.get("externalObjects").items() {
             let first = e.get("first");
             if !first.get("type").str_or("").ends_with("Material") {
@@ -478,6 +500,11 @@ fn material_of(m: &ufbx::Material) -> ModelMaterial {
 }
 
 /// A node's mesh in Unity's space, split by material (the material indices used, in order).
+///
+/// One submesh a material, in the order the faces first use the materials, as in Unity's import, not in the order of the
+/// file's material slots: a renderer's list of materials goes by submesh, and every prefab and scene overriding that list
+/// was saved against Unity's order. Ultirex 4.1's body has the slots Body, Misc, and its first face is Misc's; sorted by
+/// slot, the scene's Misc material landed on the 176,661 triangles of the body until Unity had imported the model.
 fn mesh_of(
     node: &ufbx::Node,
     mesh: &ufbx::Mesh,
@@ -500,6 +527,9 @@ fn mesh_of(
     let mut parts: Vec<(u32, Vec<u32>)> = Vec::new();
     let mut tri = vec![0u32; mesh.max_face_triangles.max(1) * 3];
     let material_of_face = |f: usize| -> u32 { mesh.face_material.get(f).copied().unwrap_or(0) };
+    // Two slots holding one material are one submesh in Unity's import (`1 FBX.fbx` in Enzo's Zika project: 226 and 82
+    // triangles of beat_head, one submesh of 308, so a list of materials saved against it would shift by one).
+    let material_id = |k: u32| node.materials.get(k as usize).or_else(|| mesh.materials.get(k as usize)).map_or(u32::MAX, |m| m.element.element_id);
     let mut part_of: HashMap<u32, usize> = HashMap::new();
     for (f, face) in mesh.faces.iter().enumerate() {
         if face.num_indices < 3 {
@@ -507,7 +537,7 @@ fn mesh_of(
         }
         let n = mesh.triangulate_face(&mut tri, *face) as usize;
         let mat = material_of_face(f);
-        let part = *part_of.entry(mat).or_insert_with(|| {
+        let part = *part_of.entry(material_id(mat)).or_insert_with(|| {
             parts.push((mat, Vec::new()));
             parts.len() - 1
         });
@@ -537,7 +567,6 @@ fn mesh_of(
             parts[part].1.push(v);
         }
     }
-    parts.sort_by_key(|p| p.0);
     if !has_normals || normals.iter().all(|n| *n == [0.0; 3]) {
         smooth_normals(&positions, &parts, &mut normals);
     }
@@ -914,6 +943,101 @@ Connections:  {
         assert!((skin.bind_poses[0][13] + 1.0).abs() < 1e-4, "{:?}", skin.bind_poses[0]);
         assert!(skin.weights.iter().all(|w| w[0] == (0, 1.0)));
         assert_eq!(m.mesh_ids.get(&file_id("Mesh", "Body", 0)), Some(&body.mesh.unwrap()));
+    }
+
+    /// The shape of Ultirex 4.1's body, small: the slots Body then Misc, the first face Misc's and the two after it Body's.
+    /// One top node, merged into the model's root, with a plain MeshRenderer.
+    pub(crate) const FIRST_FACE_MISC: &str = r#"; FBX 7.4.0 project file
+FBXHeaderExtension:  {
+	FBXHeaderVersion: 1003
+	FBXVersion: 7400
+}
+GlobalSettings:  {
+	Version: 1000
+	Properties70:  {
+		P: "UnitScaleFactor", "double", "Number", "",1
+	}
+}
+Objects:  {
+	Geometry: 1000, "Geometry::Body", "Mesh" {
+		Vertices: *27 {
+			a: 0,0,0,100,0,0,0,100,0,200,0,0,300,0,0,200,100,0,400,0,0,500,0,0,400,100,0
+		}
+		PolygonVertexIndex: *9 {
+			a: 0,1,-3,3,4,-6,6,7,-9
+		}
+		LayerElementMaterial: 0 {
+			MappingInformationType: "ByPolygon"
+			ReferenceInformationType: "IndexToDirect"
+			Materials: *3 {
+				a: 1,0,0
+			}
+		}
+		Layer: 0 {
+			LayerElement:  {
+				Type: "LayerElementMaterial"
+				TypedIndex: 0
+			}
+		}
+	}
+	Model: 2000, "Model::Body", "Mesh" {
+		Version: 232
+	}
+	Material: 3000, "Material::BodyMatt", "" {
+		Version: 102
+		ShadingModel: "phong"
+	}
+	Material: 3001, "Material::MiscMatt", "" {
+		Version: 102
+		ShadingModel: "phong"
+	}
+}
+Connections:  {
+	C: "OO",2000,0
+	C: "OO",1000,2000
+	C: "OO",3000,2000
+	C: "OO",3001,2000
+}
+"#;
+
+    #[test]
+    fn two_slots_holding_one_material_are_one_submesh() {
+        let text = FIRST_FACE_MISC.replace("a: 1,0,0", "a: 1,2,0").replace("\tC: \"OO\",3001,2000\n", "\tC: \"OO\",3001,2000\n\tC: \"OO\",3000,2000\n");
+        assert_ne!(text, FIRST_FACE_MISC);
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("Body.fbx");
+        std::fs::write(&p, text).unwrap();
+        let m = load(&p, &ImportSettings::default(), &Limits::default()).unwrap();
+        let node = m.nodes.iter().find(|n| n.mesh.is_some()).unwrap();
+        let names: Vec<&str> = node.materials.iter().map(|&k| m.materials[k].name.as_str()).collect();
+        assert_eq!(names, ["MiscMatt", "BodyMatt"]);
+        assert_eq!(m.meshes[node.mesh.unwrap()].submeshes.iter().map(|s| s.len() / 3).collect::<Vec<_>>(), [1, 2]);
+    }
+
+    #[test]
+    fn an_older_imports_ids_of_a_models_materials_are_read_from_its_meta() {
+        let s = ImportSettings::read("ModelImporter:\n  fileIDToRecycleName:\n    100000: Root\n    2100000: Skin\n    2100002: Hair\n");
+        assert_eq!(s.material_ids.get(&2100002).map(String::as_str), Some("Hair"));
+        assert_eq!(s.material_ids.len(), 2, "materials only");
+        let s = ImportSettings::read("ModelImporter:\n  internalIDToNameTable:\n  - first:\n      21: 2100004\n    second: Eyes\n  - first:\n      43: 4300000\n    second: Body\n");
+        assert_eq!(s.material_ids.get(&2100004).map(String::as_str), Some("Eyes"));
+        assert_eq!(s.material_ids.len(), 1, "materials only");
+    }
+
+    #[test]
+    fn submeshes_come_in_the_order_the_faces_first_use_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("Body.fbx");
+        std::fs::write(&p, FIRST_FACE_MISC).unwrap();
+        let m = load(&p, &ImportSettings::default(), &Limits::default()).unwrap();
+        let node = m.nodes.iter().find(|n| n.mesh.is_some()).unwrap();
+        let names: Vec<&str> = node.materials.iter().map(|&k| m.materials[k].name.as_str()).collect();
+        assert_eq!(names, ["MiscMatt", "BodyMatt"], "Unity's order, what a renderer's list of materials goes by");
+        let mesh = &m.meshes[node.mesh.unwrap()];
+        assert_eq!(mesh.submeshes.iter().map(|s| s.len() / 3).collect::<Vec<_>>(), [1, 2]);
+        // Each submesh still has its own geometry: the first the face within 1 m of the origin (mirrored), the other the rest.
+        assert!(mesh.submeshes[0].iter().all(|&i| mesh.positions[i as usize][0] >= -1.0), "{:?}", mesh.positions);
+        assert!(mesh.submeshes[1].iter().all(|&i| mesh.positions[i as usize][0] <= -2.0), "{:?}", mesh.positions);
     }
 
     #[test]

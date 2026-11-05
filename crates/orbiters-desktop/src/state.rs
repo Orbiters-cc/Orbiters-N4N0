@@ -80,6 +80,21 @@ pub struct CaptureStatus {
     /// Why frames come without the capture strip, while they do and after a recording that never had it.
     #[serde(default)]
     pub no_strip: Option<NoStrip>,
+    /// What the running or last 3D picture is of: `None` for a recording.
+    #[serde(default)]
+    pub picture: Option<orbiters_core::settings::PictureMode>,
+    /// Who the running or last capture left out, and what the person should know about it.
+    #[serde(default)]
+    pub left_out: LeftOut,
+}
+
+/// Who a capture left out of the picture.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeftOut {
+    pub wearer: orbiters_core::picture::Left,
+    pub others: orbiters_core::picture::Left,
+    /// Why somebody is in the picture after all, and what to do about it.
+    pub why: Option<String>,
 }
 
 /// Why frames come without the capture strip: no camera pose, so no keyframes.
@@ -452,6 +467,8 @@ impl Snapshot {
                 coverage: None,
                 photo_3d: false,
                 no_strip: None,
+                picture: None,
+                left_out: LeftOut::default(),
             },
             storage: StorageStatus { sessions_dir: settings.sessions_dir.clone(), limit_gb: settings.storage_limit_gb, ..Default::default() },
             settings,

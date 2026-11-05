@@ -1664,6 +1664,10 @@ impl N4n0 {
             Command::EndCall => self.host.call(CallRequest::End),
             Command::MuteCall { on } => self.host.call(CallRequest::Mute(on)),
             Command::Photo3D => self.photo_3d_now(),
+            Command::Photo3DOf { mode } => {
+                self.update_settings(|s| s.photo_3d_mode = mode);
+                self.photo_3d_now();
+            }
             Command::TestCycle => {
                 let mut rt = self.n4n0.lock().unwrap();
                 rt.test_cycle = Some(Instant::now());

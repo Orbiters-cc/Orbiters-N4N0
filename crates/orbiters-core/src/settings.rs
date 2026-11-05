@@ -34,6 +34,8 @@ pub struct Settings {
     pub walk_boost: WalkBoostSettings,
     /// How long a 3D picture's camera flight lasts (more seconds, more of the place seen).
     pub photo_3d: Photo3dLength,
+    /// What a 3D picture is of, the last one chosen: what N4N0's menu and the Action Menu take, which have one button.
+    pub photo_3d_mode: PictureMode,
     /// Seconds before a 3D picture taken from N4N0's menu starts (0: at once).
     pub photo_3d_timer: u32,
     /// Where reconstructions train while VRChat runs.
@@ -236,6 +238,18 @@ pub enum Photo3dLength {
     #[default]
     Standard,
     Full,
+}
+
+/// What a 3D picture is of (`crate::picture`): the flight's time, who is left out of the picture, and what training
+/// spends its steps on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PictureMode {
+    /// Most of the flight around the people in the picture.
+    #[default]
+    People,
+    /// Most of the flight through the place, the avatars left out of the picture.
+    World,
 }
 
 /// How often N4N0's camera rig takes its six views during a recording (the app's own flights, 3D pictures and scans,
@@ -539,6 +553,7 @@ impl Default for Settings {
             world_performance: false,
             walk_boost: WalkBoostSettings::default(),
             photo_3d: Photo3dLength::default(),
+            photo_3d_mode: PictureMode::default(),
             photo_3d_timer: 0,
             reconstruct_while_playing: WhilePlaying::default(),
             window_gpu: WindowGpu::default(),

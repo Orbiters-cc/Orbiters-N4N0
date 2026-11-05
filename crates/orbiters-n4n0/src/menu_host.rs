@@ -8,7 +8,7 @@
 
 use crate::media::Watcher;
 use crate::platform::Locale;
-use crate::screen::{keyboard, photo_length, photo_setting};
+use crate::screen::{keyboard, mode_setting, photo_length, photo_mode, photo_setting};
 use crate::status::{N4n0Status, StateAction};
 use crate::Command;
 use orbiters_core::settings::Settings;
@@ -146,6 +146,7 @@ impl<P: Pictures> MenuHost<P> {
         self.menu.layout = keyboard(settings.n4n0.menu.keyboard, &*self.locale);
         self.menu.photo_timer = settings.photo_3d_timer;
         self.menu.photo_length = photo_length(settings.photo_3d);
+        self.menu.photo_mode = photo_mode(settings.photo_3d_mode);
         self.menu.pages = Pages::ALL;
         self.menu.open();
         self.dirty = true;
@@ -222,6 +223,7 @@ impl<P: Pictures> MenuHost<P> {
         }
         changed |= set(&mut m.photo_timer, settings.photo_3d_timer);
         changed |= set(&mut m.photo_length, photo_length(settings.photo_3d));
+        changed |= set(&mut m.photo_mode, photo_mode(settings.photo_3d_mode));
         // Tracking smoothing, the versions, and how the last suggestion sent from here went.
         let tracking = n4n0.tracking.as_ref().map(|t| orbiters_n4n0_core::menu::Tracking { on: t.on, levels: t.levels, note: t.note.clone() });
         changed |= set(&mut m.tracking, tracking);
@@ -452,11 +454,12 @@ impl<P: Pictures> MenuHost<P> {
                 Effect::CallContact { id } => service.command(Command::Call { contact: id }),
                 Effect::Answer => service.command(Command::AnswerCall),
                 Effect::HangUp => service.command(Command::EndCall),
-                Effect::PhotoChoice { timer, length } | Effect::Photo3d { timer, length } => {
+                Effect::PhotoChoice { timer, length, mode } | Effect::Photo3d { timer, length, mode } => {
                     let take = matches!(effect, Effect::Photo3d { .. });
                     let mut changed = settings.clone();
                     changed.photo_3d_timer = timer;
                     changed.photo_3d = photo_setting(length);
+                    changed.photo_3d_mode = mode_setting(mode);
                     service.save_settings(settings, &changed);
                     if take {
                         service.command(Command::Photo3DIn { seconds: timer });
@@ -660,7 +663,7 @@ mod tests {
             vec![
                 Effect::Copy { link: "https://x.y/".into(), title: "t".into() },
                 Effect::FastWalk(true),
-                Effect::Photo3d { timer: 5, length: orbiters_n4n0_core::menu::PhotoLength::Full },
+                Effect::Photo3d { timer: 5, length: orbiters_n4n0_core::menu::PhotoLength::Full, mode: orbiters_n4n0_core::menu::PhotoMode::People },
                 Effect::SaveState { name: "State 2".into(), size: true, pose: false, default: false },
                 Effect::Drop { link: "https://x.y/".into(), title: "t".into(), video: None },
                 Effect::Close,

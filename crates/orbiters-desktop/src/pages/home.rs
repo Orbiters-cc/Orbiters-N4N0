@@ -17,7 +17,7 @@ use orbiters_contracts::n4n0::{LIGHT_COLORS, LIGHT_LEVELS};
 use orbiters_core::settings::Settings;
 use orbiters_n4n0_core::menu::layout::{self, Content, Icon, Tint, HOME_TILES, LENGTH_LABELS, MORE_CARDS_QR, TIMER_LABELS};
 use orbiters_n4n0_core::menu::strings::Text;
-use orbiters_n4n0_core::menu::{Call, Effect, Media, MediaCommand, Menu, Page, PhotoLength, Target, Volume, SMOOTHING_LABELS, TIMERS, TRACKING_KINDS};
+use orbiters_n4n0_core::menu::{Call, Effect, Media, MediaCommand, Menu, Page, PhotoLength, PhotoMode, Target, Volume, SMOOTHING_LABELS, TIMERS, TRACKING_KINDS};
 use orbiters_n4n0_core::youtube::Video;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
@@ -810,17 +810,61 @@ fn call(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
 }
 
 fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Vec<Act>) {
-    // What stopped the last picture ("Open the camera before") shows by the button, plainly.
+    // What stopped the last picture ("Open the camera before") shows by the buttons, plainly.
     let warning = menu.notice.as_deref().filter(|_| menu.countdown.is_none());
-    let sub = match warning {
-        Some(_) => "VRChat's camera flies around what it looks at".to_string(),
-        None => layout::text(menu, Content::PhotoStatus),
+    let sub = match menu.countdown {
+        Some(n) => format!("Starting in {n}\u{2026} hold still"),
+        None => "VRChat's camera flies, then comes back where it was".to_string(),
     };
     top(ui, cx, "3D picture", &sub, acts);
-    section(ui, cx, 1, icons::CUBE_FOCUS, "Camera", Some("The timer and the flight stay as chosen"), |ui| {
+    // The two pictures, as on the Capture page.
+    let w = ui.available_width();
+    let gap = 16.0;
+    let card_w = (w - gap) / 2.0;
+    let (row, _) = ui.allocate_exact_size(vec2(w, 112.0), Sense::hover());
+    let takes = [
+        (PhotoMode::People, icons::USERS, theme::VIOLET, "3D picture of people", "Goes around the people here"),
+        (PhotoMode::World, icons::GLOBE_HEMISPHERE_WEST, theme::ACCENT, "3D picture of the world", "Goes through the place, avatars left out"),
+    ];
+    for (i, (mode, glyph, tint, title, note)) in takes.into_iter().enumerate() {
+        let rect = Rect::from_min_size(row.min + vec2(i as f32 * (card_w + gap), 0.0), vec2(card_w, 112.0));
+        let (rect, alpha) = super::entering(ui, cx, 1 + i, rect);
+        let enabled = menu.countdown.is_none() && blocked.is_none();
+        let id = Id::unique(("orbiters-home-take", i));
+        let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
+        widgets::note_control(ui.ctx(), title, rect, enabled);
+        let hover = anim::toggle(ui.ctx(), id.with("hover"), enabled && resp.hovered(), Spring::SOFT);
+        let press = anim::toggle(ui.ctx(), id.with("press"), enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
+        if enabled && widgets::pressed(&resp) {
+            acts.push(Act::Press(Target::TakeOf(mode)));
+        }
+        if enabled {
+            resp.on_hover_cursor(CursorIcon::PointingHand);
+        } else if let Some(why) = blocked {
+            resp.on_hover_text(why);
+        }
+        let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.02 * press));
+        let mut p = ui.painter().clone();
+        p.multiply_opacity(alpha * if enabled { 1.0 } else { 0.5 });
+        widgets::frame(&p, r, theme::CARD_RADIUS, theme::mix(theme::surface(), tint, 0.10 + 0.08 * hover));
+        let chip = Rect::from_min_size(pos2(r.left() + 22.0, r.center().y - 26.0), vec2(52.0, 52.0));
+        p.rect_filled(chip, theme::radius(16.0), theme::alpha(tint, 0.18));
+        widgets::icon(&p, chip.center(), glyph, 26.0, tint);
+        let x = chip.right() + 18.0;
+        widgets::text_truncated(&p, pos2(x, r.center().y - 12.0), Align2::LEFT_CENTER, &Txt::new(title, 19.0).weight(weight::SEMIBOLD), r.right() - x - 16.0);
+        widgets::text_truncated(&p, pos2(x, r.center().y + 14.0), Align2::LEFT_CENTER, &Txt::new(note, 13.5).color(theme::FG_2), r.right() - x - 16.0);
+    }
+    if let Some(warning) = warning {
+        let galley = ui.painter().layout_job(Txt::new(warning, 14.0).weight(weight::SEMIBOLD).color(theme::WARN).line_height(20.0).job(w - 28.0));
+        let (row, _) = ui.allocate_exact_size(vec2(w, galley.size().y), Sense::hover());
+        let p = ui.painter();
+        widgets::icon(p, pos2(row.left() + 9.0, row.top() + 10.0), icons::WARNING, 18.0, theme::WARN);
+        p.galley(pos2(row.left() + 28.0, row.top()), galley, theme::WARN);
+    }
+    section(ui, cx, 3, icons::CUBE_FOCUS, "Camera", Some("The timer and the flight stay as chosen"), |ui| {
         let mut timer = menu.photo_timer;
         let timers: Vec<SegOption<u32>> = TIMERS.iter().zip(TIMER_LABELS).map(|(&t, label)| SegOption::new(t, label)).collect();
-        widgets::field(ui, "Timer", Some("Time to get ready after Take."), 240.0, |ui| {
+        widgets::field(ui, "Timer", Some("Time to get ready after you press."), 240.0, |ui| {
             if widgets::segmented(ui, "orbiters-home-timer", &mut timer, &timers, true) {
                 if let Some(i) = TIMERS.iter().position(|&t| t == timer) {
                     acts.push(Act::Press(Target::Timer(i as u8)));
@@ -835,40 +879,13 @@ fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Ve
             .zip(super::capture::FLIGHT_HINTS)
             .map(|((&l, label), hint)| SegOption::new(l, label).hint(hint))
             .collect();
-        widgets::field(ui, "Camera flight", Some("Longer flights see more of the place."), 200.0, |ui| {
+        widgets::field(ui, "Camera flight", Some("Longer flights see more."), 200.0, |ui| {
             if widgets::segmented(ui, "orbiters-home-length", &mut length, &lengths, true) {
                 if let Some(i) = PhotoLength::ALL.iter().position(|&l| l == length) {
                     acts.push(Act::Press(Target::Length(i as u8)));
                 }
             }
         });
-        widgets::separator(ui);
-        ui.add_space(20.0);
-        let label = match menu.countdown {
-            Some(n) => format!("Starting in {n} s…"),
-            None => "Take 3D picture".to_string(),
-        };
-        let mut take = Button::new(&label)
-            .icon(icons::CUBE_FOCUS)
-            .variant(Variant::Primary)
-            .enabled(menu.countdown.is_none() && blocked.is_none())
-            .id_salt("orbiters-home-take");
-        if let Some(why) = blocked {
-            take = take.hint(why);
-        }
-        let w = take.desired_width(ui).max(200.0);
-        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
-        if take.width(w).show_at(ui, Rect::from_min_size(row.min, vec2(w, 40.0))).clicked() {
-            acts.push(Act::Press(Target::Take));
-        }
-        if let Some(warning) = warning {
-            let x = row.left() + w + 16.0;
-            let p = ui.painter();
-            widgets::icon(p, pos2(x + 9.0, row.center().y), icons::WARNING, 18.0, theme::WARN);
-            let txt = Txt::new(warning, 14.0).weight(weight::SEMIBOLD).color(theme::WARN);
-            widgets::text_truncated(p, pos2(x + 26.0, row.center().y), Align2::LEFT_CENTER, &txt, (row.right() - x - 26.0).max(40.0));
-        }
-        ui.add_space(8.0);
     });
 }
 

@@ -1,10 +1,12 @@
-//! Capture page: what VRChat and the sources are doing, the recorder, live statistics and the camera path.
+//! Capture page: three big actions (a 3D picture of people, one of the world, a free recording) and, under them, what VRChat and
+//! the sources are doing, the recording's settings, live statistics and the camera path.
 
 use super::{block, entering, Cx};
 use crate::state::CaptureState;
 use egui::{pos2, vec2, Align, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder, Vec2};
 use orbiters_contracts::manifest::{CaptureMode, StorageQuality};
-use orbiters_core::settings::{Photo3dLength, Settings};
+use orbiters_core::picture::Left;
+use orbiters_core::settings::{Photo3dLength, PictureMode, Settings};
 use orbiters_n4n0_core::menu::layout::LENGTH_LABELS;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::format;
@@ -14,23 +16,27 @@ use orbiters_ui::widgets::{self, Button, SegOption, Size, Tone, Variant};
 use orbiters_ui::{icons, trail};
 
 #[derive(Default)]
-pub struct State;
+pub struct State {
+    /// The avatar worn, and whether its upload can hide itself, as its manifest says (read once per avatar).
+    upload: Option<(String, Option<bool>)>,
+}
 
-const GRID_H: f32 = 500.0;
+const GRID_H: f32 = 212.0;
 
 /// What each of a 3D picture's camera flights does (1 s, 4 s, 8 s), here and on Home's 3D picture page.
 pub(super) const FLIGHT_HINTS: [&str; 3] = [
     "A gentle sweep around what the camera aims at",
-    "Looks around, goes around the people in the picture and you, then through the room as far as it can see it goes",
-    "As 4 s, with more views of each person and more of the place",
+    "Looks around, then goes around the people or through the place, as far as it can see it goes",
+    "As 4 s, with more views of each person, or more of the place",
 ];
 
-pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State, projects: &mut super::projects::State) {
+pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::projects::State) {
     let from = orbiters_ui::blur::next_shape(ui);
     egui::ScrollArea::vertical().id_salt("capture").auto_shrink([false, false]).scroll_bar_rect(super::below_bar(ui, cx)).show(ui, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 32 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             header(ui, cx);
+            actions(ui, cx, state);
             chips(ui, cx, projects);
             grid(ui, cx);
             performance(ui, cx);
@@ -41,6 +47,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State, projects: &mut super::
     super::under_top(ui, cx, "capture", from, ui.max_rect().top() + cx.top + 8.0);
     super::projects::modals(ui, cx, projects);
 }
+
+/// The height of the three big actions, and of the card that takes their place while something is under way.
+const ACTION_H: f32 = 176.0;
 
 fn rec_state(s: CaptureState) -> RecState {
     match s {
@@ -58,11 +67,6 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
     let c = &snap.capture;
     let world = &snap.vrchat.world;
     let recording = matches!(c.state, CaptureState::Recording | CaptureState::Paused);
-    let capturing = snap.is_capturing() || c.state == CaptureState::Stopping;
-    let consent = snap.settings.consent_acknowledged;
-    let mut test = false;
-    let mut picture = false;
-    let mut scan = false;
     block(ui, cx, 0, 72.0, |ui, rect| {
         let caption = if recording {
             "Live capture"
@@ -103,59 +107,304 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
                 widgets::text_truncated(p, pos2(rect.left(), sub_y), Align2::LEFT_CENTER, &Txt::new(hint, 13.0).color(theme::FG_3), rect.width() * 0.7);
             }
         }
-        if !capturing {
-            let b = Button::new("Test pattern")
-                .icon(icons::FLASK)
-                .variant(Variant::Ghost)
-                .size(Size::Sm)
-                .enabled(consent)
-                .hint("Record a generated test pattern (no VRChat needed)");
-            let w = b.desired_width(ui);
-            let r = Rect::from_min_size(pos2(rect.right() - w, rect.bottom() - 34.0), vec2(w, 32.0));
-            test = b.show_at(ui, r).clicked();
-            // A second of VRChat's camera swinging around what it looks at, reconstructed.
-            let b3 = Button::new("3D picture")
-                .icon(icons::CUBE_FOCUS)
-                .variant(Variant::Secondary)
-                .size(Size::Sm)
-                .enabled(consent && snap.vrchat.running)
-                .hint("VRChat's camera swings around what it looks at for a second, then it is reconstructed in 3D");
-            let w3 = b3.desired_width(ui);
-            let r3 = Rect::from_min_size(pos2(r.left() - 8.0 - w3, rect.bottom() - 34.0), vec2(w3, 32.0));
-            picture = b3.show_at(ui, r3).clicked();
-            // How long the camera flies: 1 s gentle, 4 s around the people and through the room, 8 s with more of both.
-            let mut length = snap.settings.photo_3d;
-            let lengths = [Photo3dLength::Quick, Photo3dLength::Standard, Photo3dLength::Full]
-                .into_iter()
-                .zip(LENGTH_LABELS.into_iter().zip(FLIGHT_HINTS))
-                .map(|(length, (label, hint))| SegOption::new(length, label).hint(hint))
-                .collect::<Vec<_>>();
-            let seg_w = 150.0;
-            let seg_rect = Rect::from_min_size(pos2(r3.left() - 8.0 - seg_w, rect.bottom() - 36.0), vec2(seg_w, 36.0));
-            let mut seg = ui.new_child(UiBuilder::new().max_rect(seg_rect).layout(Layout::right_to_left(Align::Center)));
-            if widgets::segmented(&mut seg, "photo-3d-length", &mut length, &lengths, true) {
-                super::form::save(cx.ctl, &snap.settings, &Settings { photo_3d: length, ..snap.settings.clone() });
-            }
-            // The camera looks around, then circles at three heights, looking in and out: views a walk never gives.
-            let bs = Button::new("Scan")
-                .icon(icons::PATH)
-                .variant(Variant::Secondary)
-                .size(Size::Sm)
-                .enabled(consent && snap.vrchat.running)
-                .hint("VRChat's camera looks around, then circles where it stands at three heights, looking in and out (about a minute); the recording is then reconstructed in 3D");
-            let ws = bs.desired_width(ui);
-            let rs = Rect::from_min_size(pos2(seg.min_rect().left() - 20.0 - ws, rect.bottom() - 34.0), vec2(ws, 32.0));
-            scan = bs.show_at(ui, rs).clicked();
+    });
+}
+
+/// What the page is for: a 3D picture of people, a 3D picture of the world, or a free recording. While one of them is under way,
+/// what it is doing and how to stop it take their place. Before the capture notice is accepted, the notice does.
+fn actions(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
+    let snap = cx.snap;
+    if !snap.settings.consent_acknowledged {
+        return consent(ui, cx);
+    }
+    if snap.is_capturing() || snap.capture.state == CaptureState::Stopping {
+        return under_way(ui, cx);
+    }
+    // The worn avatar's upload, read once per avatar: a picture of the world says beforehand that it would show.
+    let worn = snap.n4n0.avatar_id.clone();
+    if state.upload.as_ref().map(|(id, _)| id) != worn.as_ref() {
+        state.upload = worn.map(|id| {
+            let can = crate::controller::upload_can_hide(&id);
+            (id, can)
+        });
+    }
+    let cannot_hide = state.upload.as_ref().is_some_and(|(_, can)| *can == Some(false));
+    let vrchat = snap.vrchat.running;
+    let w = ui.available_width();
+    let gap = 16.0;
+    let card_w = (w - 2.0 * gap) / 3.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(w, ACTION_H), Sense::hover());
+    let (rect, alpha) = entering(ui, cx, 1, rect);
+    let mut row = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("capture-actions"));
+    row.multiply_opacity(alpha);
+    let cell = |i: usize| Rect::from_min_size(rect.min + vec2(i as f32 * (card_w + gap), 0.0), vec2(card_w, ACTION_H));
+    let not_running = "Start VRChat first: its camera takes the picture";
+    let world_note =
+        if cannot_hide { "Your avatar would show: upload it again with Orbiters Toolkit 0.4.18 or later" } else { "Goes through the place, avatars left out" };
+    let people = BigAction {
+        glyph: icons::USERS,
+        tint: theme::VIOLET,
+        title: "3D picture of people",
+        note: "Goes around the people here",
+        warn: false,
+        enabled: vrchat,
+        why_not: not_running,
+    };
+    let place = BigAction {
+        glyph: icons::GLOBE_HEMISPHERE_WEST,
+        tint: theme::ACCENT,
+        title: "3D picture of the world",
+        note: world_note,
+        warn: cannot_hide,
+        enabled: vrchat,
+        why_not: not_running,
+    };
+    let record = BigAction {
+        glyph: icons::RECORD,
+        tint: theme::REC,
+        title: "Record",
+        note: "You move the camera. Press again to stop",
+        warn: false,
+        enabled: true,
+        why_not: "",
+    };
+    let chosen = [
+        people.show(&mut row, cell(0), "capture-people").then_some(PictureMode::People),
+        place.show(&mut row, cell(1), "capture-world").then_some(PictureMode::World),
+    ];
+    if let Some(mode) = chosen.into_iter().flatten().next() {
+        cx.ctl.n4n0(crate::ipc::N4n0Command::Photo3DOf { mode });
+    }
+    if record.show(&mut row, cell(2), record::LABEL) {
+        cx.ctl.start_capture();
+    }
+    why_last(ui, cx);
+    quiet_row(ui, cx);
+}
+
+/// A big, clear button: a filled card in its colour, its icon, what it does in a few words.
+struct BigAction<'a> {
+    glyph: &'a str,
+    tint: egui::Color32,
+    title: &'a str,
+    note: &'a str,
+    warn: bool,
+    enabled: bool,
+    why_not: &'a str,
+}
+
+impl BigAction<'_> {
+    fn show(&self, ui: &mut Ui, rect: Rect, label: &str) -> bool {
+        let ctx = ui.ctx().clone();
+        let id = Id::unique(("capture-action", label));
+        let resp = ui.interact(rect, id, if self.enabled { Sense::click() } else { Sense::hover() });
+        widgets::note_control(&ctx, label, rect, self.enabled);
+        let hover = anim::toggle(&ctx, id.with("hover"), self.enabled && resp.hovered(), Spring::SOFT);
+        let press = anim::toggle(&ctx, id.with("press"), self.enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
+        let clicked = self.enabled && widgets::pressed(&resp);
+        if self.enabled {
+            resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        } else if !self.why_not.is_empty() {
+            resp.on_hover_text(self.why_not);
         }
+        let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.02 * press));
+        let mut p = ui.painter().clone();
+        if !self.enabled {
+            p.multiply_opacity(0.5);
+        }
+        widgets::frame(&p, r, theme::CARD_RADIUS, theme::mix(theme::surface(), self.tint, 0.10 + 0.08 * hover));
+        let chip = Rect::from_min_size(r.min + vec2(22.0, 22.0), vec2(56.0, 56.0));
+        p.rect_filled(chip, theme::radius(17.0), theme::alpha(self.tint, 0.18));
+        widgets::icon(&p, chip.center(), self.glyph, 28.0, self.tint);
+        widgets::text_truncated(
+            &p,
+            pos2(r.left() + 22.0, r.bottom() - 62.0),
+            Align2::LEFT_CENTER,
+            &Txt::new(self.title, 20.0).weight(weight::SEMIBOLD),
+            r.width() - 44.0,
+        );
+        let note = if self.enabled { self.note } else { self.why_not };
+        let (color, line) = if self.warn && self.enabled { (theme::WARN, 18.0) } else { (theme::FG_2, 18.0) };
+        let galley = p.layout_job(Txt::new(note, 13.5).color(color).line_height(line).job(r.width() - 44.0));
+        p.galley(pos2(r.left() + 22.0, r.bottom() - 46.0), galley, color);
+        clicked
+    }
+}
+
+/// What the last capture could not do, until the next one starts: the toast that said so is gone, and the person may have been
+/// in a headset.
+fn why_last(ui: &mut Ui, cx: &mut Cx) {
+    let Some(why) = cx.snap.capture.left_out.why.clone() else { return };
+    let w = ui.available_width();
+    let galley = ui.painter().layout_job(Txt::new(why, 13.5).color(theme::WARN).line_height(19.0).job(w - 68.0));
+    let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y + 24.0), Sense::hover());
+    let p = ui.painter();
+    widgets::frame(p, rect, 14.0, theme::alpha(theme::WARN, 0.10));
+    widgets::icon(p, pos2(rect.left() + 26.0, rect.top() + 12.0 + 9.5), icons::WARNING, 18.0, theme::WARN);
+    p.galley(pos2(rect.left() + 48.0, rect.top() + 12.0), galley, theme::WARN);
+}
+
+/// What rarely changes: how long a picture flies, the longer scan and the test pattern. In reach and out of the way.
+fn quiet_row(ui: &mut Ui, cx: &mut Cx) {
+    let snap = cx.snap;
+    let mut scan = false;
+    let mut test = false;
+    block(ui, cx, 2, 36.0, |ui, rect| {
+        let p = ui.painter();
+        let label = widgets::text(p, pos2(rect.left() + 2.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new("Picture length", 13.0).color(theme::FG_3));
+        let mut length = snap.settings.photo_3d;
+        let lengths = [Photo3dLength::Quick, Photo3dLength::Standard, Photo3dLength::Full]
+            .into_iter()
+            .zip(LENGTH_LABELS.into_iter().zip(FLIGHT_HINTS))
+            .map(|(length, (label, hint))| SegOption::new(length, label).hint(hint))
+            .collect::<Vec<_>>();
+        let seg_rect = Rect::from_min_size(pos2(label.right() + 12.0, rect.top()), vec2(150.0, 36.0));
+        let mut seg = ui.new_child(UiBuilder::new().max_rect(seg_rect).layout(Layout::left_to_right(Align::Center)));
+        if widgets::segmented(&mut seg, "photo-3d-length", &mut length, &lengths, true) {
+            super::form::save(cx.ctl, &snap.settings, &Settings { photo_3d: length, ..snap.settings.clone() });
+        }
+        let consent = snap.settings.consent_acknowledged;
+        let t = Button::new("Test pattern")
+            .icon(icons::FLASK)
+            .variant(Variant::Ghost)
+            .size(Size::Sm)
+            .enabled(consent)
+            .hint("Record a generated test pattern (no VRChat needed)");
+        let tw = t.desired_width(ui);
+        let tr = Rect::from_min_size(pos2(rect.right() - tw, rect.top() + 2.0), vec2(tw, 32.0));
+        test = t.show_at(ui, tr).clicked();
+        // The camera looks around, then circles at three heights, looking in and out: views a walk never gives.
+        let s = Button::new("Scan")
+            .icon(icons::PATH)
+            .variant(Variant::Ghost)
+            .size(Size::Sm)
+            .enabled(consent && snap.vrchat.running)
+            .hint("VRChat's camera looks around, then circles where it stands at three heights, looking in and out (about a minute); the recording is then reconstructed in 3D");
+        let sw = s.desired_width(ui);
+        let sr = Rect::from_min_size(pos2(tr.left() - 8.0 - sw, rect.top() + 2.0), vec2(sw, 32.0));
+        scan = s.show_at(ui, sr).clicked();
     });
     if test {
         cx.ctl.start_test_capture();
     }
-    if picture {
-        cx.ctl.n4n0(crate::ipc::N4n0Command::Photo3D);
-    }
     if scan {
         cx.ctl.scan();
+    }
+}
+
+/// What a capture under way is doing, who it left out, and how to stop it: in the place of the three actions.
+fn under_way(ui: &mut Ui, cx: &mut Cx) {
+    let ctx = ui.ctx().clone();
+    let snap = cx.snap;
+    let c = &snap.capture;
+    let recording = matches!(c.state, CaptureState::Recording | CaptureState::Paused);
+    // Who is out of the picture, or why not, or why no keyframes come.
+    let warning = c.left_out.why.clone().or_else(|| c.no_strip.map(|n| n.message().to_string()));
+    let w = ui.available_width();
+    // Room for that as well as a free recording's Pause.
+    let extra = if warning.is_some() && recording && c.picture.is_none() { 36.0 } else { 0.0 };
+    let (rect, _) = ui.allocate_exact_size(vec2(w, ACTION_H + extra), Sense::hover());
+    let (rect, alpha) = entering(ui, cx, 1, rect);
+    let mut ui = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("capture-under-way"));
+    ui.multiply_opacity(alpha);
+    let tint = match c.picture {
+        Some(PictureMode::People) => theme::VIOLET,
+        Some(PictureMode::World) => theme::ACCENT,
+        None => theme::REC,
+    };
+    widgets::frame(ui.painter(), rect, theme::CARD_RADIUS, theme::mix(theme::surface(), tint, 0.10));
+
+    // The button at the right: the same one, now stopping.
+    let size = ACTION_H - 40.0;
+    let button = Rect::from_min_size(pos2(rect.right() - size - 28.0, rect.top() + 12.0), Vec2::splat(size));
+    let health = c.stats.as_ref().map(|s| if s.frames > 0 { s.strip_ok as f32 / s.frames as f32 } else { 1.0 }).unwrap_or(1.0);
+    let rb = RecordButton { state: rec_state(c.state), disabled: c.state == CaptureState::Importing, health };
+    let (_, toggled) = rb.show_at(&mut ui, button);
+    if toggled && snap.is_capturing() {
+        cx.ctl.stop_capture();
+    }
+    let stop = match c.state {
+        CaptureState::Stopping => "Saving…",
+        CaptureState::Importing => "Importing…",
+        CaptureState::Starting => "Starting…",
+        _ if c.picture.is_some() => "Stop this picture",
+        _ => "Stop recording",
+    };
+    widgets::text(
+        ui.painter(),
+        pos2(button.center().x, rect.bottom() - 16.0),
+        Align2::CENTER_CENTER,
+        &Txt::new(stop, 13.0).weight(weight::MEDIUM).color(theme::FG_2),
+    );
+
+    // What is happening.
+    let x = rect.left() + 26.0;
+    let room = button.left() - 24.0 - x;
+    let title = match c.picture {
+        Some(PictureMode::People) => "Taking a 3D picture of people",
+        Some(PictureMode::World) => "Taking a 3D picture of the world",
+        None if c.state == CaptureState::Importing => "Importing a raw capture",
+        None if c.state == CaptureState::Paused => "Recording paused",
+        None => "Recording",
+    };
+    let p = ui.painter().clone();
+    if recording {
+        let dot = pos2(x + 5.0, rect.top() + 28.0);
+        widgets::status_dot(&p, dot, Tone::Rec, c.state == CaptureState::Recording);
+        let elapsed = format::duration(c.stats.as_ref().map(|s| s.elapsed_s).unwrap_or(0.0));
+        let kept = c.stats.as_ref().map_or(0, |s| s.keyframes);
+        let line = format!("{elapsed}   ·   {} keyframes", format::integer(kept as f64));
+        widgets::text(&p, pos2(x + 18.0, rect.top() + 28.0), Align2::LEFT_CENTER, &Txt::new(line, 13.0).weight(weight::MEDIUM).color(theme::FG));
+    }
+    widgets::text_truncated(&p, pos2(x, rect.top() + 60.0), Align2::LEFT_CENTER, &Txt::new(title, 24.0).weight(weight::SEMIBOLD).tracking(-0.01), room);
+    let doing = match (c.picture, c.state) {
+        (_, CaptureState::Stopping) => "Saving the session…".to_string(),
+        (Some(PictureMode::People), _) => "VRChat's camera goes around the people here, then comes back where it was".to_string(),
+        (Some(PictureMode::World), _) => "VRChat's camera goes through the place, then comes back where it was".to_string(),
+        // Nothing comes before VRChat's camera streams (the worker names the sender once it is connected).
+        _ if snap.sources.is_empty() && c.stats.as_ref().is_none_or(|s| s.frames == 0) => {
+            if snap.settings.osc.enabled && snap.settings.osc.drive_camera {
+                "Waiting for VRChat's camera: Orbiters asked for Stream mode with Spout Stream on (OSC must be on in VRChat)".to_string()
+            } else {
+                "Waiting for VRChat's camera: open it in Stream mode and turn Spout Stream on".to_string()
+            }
+        }
+        _ => c.source.clone().unwrap_or_default(),
+    };
+    widgets::text_truncated(&p, pos2(x, rect.top() + 88.0), Align2::LEFT_CENTER, &Txt::new(doing, 13.5).color(theme::FG_2), room);
+    if let Some(warning) = warning {
+        let galley = p.layout_job(Txt::new(warning, 13.0).color(theme::WARN).line_height(17.0).job(room));
+        p.galley(pos2(x, rect.top() + 104.0), galley, theme::WARN);
+    } else {
+        let mut out = Vec::new();
+        if c.left_out.wearer == Left::Out {
+            out.push("Your avatar is hidden on your side");
+        }
+        if c.left_out.others == Left::Out {
+            out.push("other players are hidden from the camera");
+        }
+        if !out.is_empty() {
+            widgets::text_truncated(&p, pos2(x, rect.top() + 114.0), Align2::LEFT_CENTER, &Txt::new(out.join(", "), 13.5).color(theme::ACCENT), room);
+        }
+    }
+    // A free recording's pause, and its folder.
+    if recording && c.picture.is_none() {
+        let paused = c.state == CaptureState::Paused;
+        let pause = Button::new(if paused { "Resume" } else { "Pause" }).icon(if paused { icons::PLAY } else { icons::PAUSE }).size(Size::Sm);
+        let folder = c.session_dir.as_ref().map(|d| (d.clone(), format::folder_name(d)));
+        let folder_btn = folder.as_ref().map(|(_, name)| Button::new(name).icon(icons::FOLDER_OPEN).variant(Variant::Ghost).size(Size::Sm));
+        let pw = pause.desired_width(&ui);
+        let y = rect.bottom() - 46.0;
+        if pause.show_at(&mut ui, Rect::from_min_size(pos2(x, y), vec2(pw, 32.0))).clicked() {
+            cx.ctl.pause_capture(!paused);
+        }
+        if let (Some(b), Some((dir, _))) = (folder_btn, folder.as_ref()) {
+            let fw = b.desired_width(&ui).min(220.0).min(room - pw - 8.0);
+            if b.width(fw).show_at(&mut ui, Rect::from_min_size(pos2(x + pw + 8.0, y), vec2(fw, 32.0))).clicked() {
+                let r = crate::controller::open_path(dir);
+                cx.run(&ctx, r);
+            }
+        }
     }
 }
 
@@ -250,194 +499,77 @@ fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
 }
 
 fn grid(ui: &mut Ui, cx: &mut Cx) {
-    // The recorder card grows by a row of buttons while recording.
-    let recording = matches!(cx.snap.capture.state, CaptureState::Recording | CaptureState::Paused);
-    let h = anim::value(ui.ctx(), Id::unique("capture-grid-h"), if recording { GRID_H + 46.0 } else { GRID_H }, Spring::SOFT);
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
-    let left_w = ((rect.width() - 20.0) * 1.05 / 2.05).max(420.0);
-    let card = Rect::from_min_size(rect.min, vec2(left_w, rect.height()));
-    let right = Rect::from_min_max(pos2(card.right() + 20.0, rect.top()), rect.max);
-    recorder(ui, cx, card);
-    tiles(ui, cx, right);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), GRID_H), Sense::hover());
+    tiles(ui, cx, rect);
+    recording_settings(ui, cx);
 }
 
-fn recorder(ui: &mut Ui, cx: &mut Cx, card: Rect) {
-    let ctx = ui.ctx().clone();
+/// How a free recording is kept: what it does while recording, and how much of it stays. On one row: it rarely changes.
+fn recording_settings(ui: &mut Ui, cx: &mut Cx) {
     let snap = cx.snap;
-    let c = &snap.capture;
     let settings = &snap.settings;
-    let recording = matches!(c.state, CaptureState::Recording | CaptureState::Paused);
-    let consent = settings.consent_acknowledged;
-    let (card, alpha) = entering(ui, cx, 2, card);
-    let mut ui = ui.new_child(UiBuilder::new().max_rect(card).id_salt("recorder"));
-    ui.multiply_opacity(alpha);
-    widgets::card(ui.painter(), card, theme::CARD_RADIUS);
-
-    // Header: caption and the REC badge.
-    let p = ui.painter();
-    widgets::text(p, pos2(card.left() + 24.0, card.top() + 36.0), Align2::LEFT_CENTER, &Txt::caps("Recorder"));
-    let badge_k = anim::toggle(&ctx, Id::unique("rec-badge"), recording, Spring::BOUNCY);
-    if badge_k > 0.01 {
-        let label = if c.state == CaptureState::Paused { "PAUSED" } else { "REC" };
-        let elapsed = format::duration(c.stats.as_ref().map(|s| s.elapsed_s).unwrap_or(0.0));
-        let lt = Txt::new(label, 12.0).weight(weight::SEMIBOLD).color(theme::REC);
-        let et = Txt::new(&elapsed, 12.0).weight(weight::MEDIUM).color(theme::FG);
-        let w = 12.0 + 10.0 + 8.0 + widgets::text_size(&ui, &lt).x + 8.0 + widgets::text_size(&ui, &et).x + 12.0;
-        let full = Rect::from_min_size(pos2(card.right() - 24.0 - w, card.top() + 23.0), vec2(w, 26.0));
-        let r = Rect::from_center_size(full.center(), full.size() * (0.8 + 0.2 * badge_k));
-        let mut bp = ui.painter().clone();
-        bp.multiply_opacity(badge_k.clamp(0.0, 1.0));
-        bp.rect_filled(r, theme::radius(13.0), theme::alpha(theme::REC, 0.15));
-        widgets::status_dot(&bp, pos2(r.left() + 17.0, r.center().y), Tone::Rec, c.state == CaptureState::Recording);
-        let tr = widgets::text(&bp, pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, &lt);
-        widgets::text(&bp, pos2(tr.right() + 8.0, r.center().y), Align2::LEFT_CENTER, &et);
-    }
-
-    // The button.
-    let button_rect = Rect::from_center_size(pos2(card.center().x, card.top() + 68.0 + record::SIZE * 0.5), Vec2::splat(record::SIZE));
-    let health = c.stats.as_ref().map(|s| if s.frames > 0 { s.strip_ok as f32 / s.frames as f32 } else { 1.0 }).unwrap_or(1.0);
-    let rb = RecordButton { state: rec_state(c.state), disabled: !consent || c.state == CaptureState::Importing, health };
-    let (_, toggled) = rb.show_at(&mut ui, button_rect);
-    if toggled {
-        if snap.is_capturing() {
-            cx.ctl.stop_capture();
-        } else {
-            cx.ctl.start_capture();
+    block(ui, cx, 9, 76.0, |ui, card| {
+        widgets::card(ui.painter(), card, theme::CARD_RADIUS);
+        let p = ui.painter().clone();
+        widgets::text(&p, pos2(card.left() + 22.0, card.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps("Recording"));
+        let sub = if snap.osc.listening { "Also from your Action Menu" } else { "Saved as a session" };
+        widgets::text_truncated(&p, pos2(card.left() + 22.0, card.top() + 50.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3), 180.0);
+        let mut mode = settings.capture_mode;
+        let mut quality = settings.storage_quality;
+        let modes = [
+            SegOption::new(CaptureMode::RecordOnly, "Record").hint("Record now, reconstruct afterwards with the whole GPU"),
+            SegOption::new(CaptureMode::LiveRefine, "Live + refine").hint("Map live while playing, refine afterwards").disabled("soon"),
+            SegOption::new(CaptureMode::LiveOnly, "Live only").hint("The live map is the result").disabled("soon"),
+        ];
+        let qualities = [
+            SegOption::new(StorageQuality::Lossless, "Lossless").hint("Every frame saved losslessly (very large)"),
+            SegOption::new(StorageQuality::High, "High").hint("Lossless keyframes, poses and depth"),
+            SegOption::new(StorageQuality::Compact, "Compact").hint("Fewer keyframes, smaller sessions"),
+        ];
+        let area = Rect::from_min_max(pos2(card.left() + 200.0, card.top()), pos2(card.right() - 20.0, card.bottom()));
+        let mut seg = ui.new_child(UiBuilder::new().max_rect(area).layout(Layout::right_to_left(Align::Center)));
+        seg.spacing_mut().item_spacing = vec2(16.0, 0.0);
+        let quality_changed = widgets::segmented(&mut seg, "storage-quality", &mut quality, &qualities, true);
+        let mode_changed = widgets::segmented(&mut seg, "capture-mode", &mut mode, &modes, false);
+        if mode_changed || quality_changed {
+            super::form::save(cx.ctl, settings, &Settings { capture_mode: mode, storage_quality: quality, ..settings.clone() });
         }
-    }
-
-    // What the button does now.
-    let title = match c.state {
-        CaptureState::Idle => "Start recording",
-        CaptureState::Starting => "Starting…",
-        CaptureState::Recording | CaptureState::Paused => "Stop recording",
-        CaptureState::Stopping => "Saving the session…",
-        CaptureState::Importing => "Importing…",
-    };
-    let sub = match c.state {
-        CaptureState::Idle if snap.osc.listening => "or use the Record toggle in your Action Menu".to_string(),
-        CaptureState::Idle => "Spout frames are decoded and saved as a session".to_string(),
-        // Nothing comes before VRChat's camera streams (the worker names the sender once it is connected).
-        _ if snap.sources.is_empty() && c.stats.as_ref().is_none_or(|s| s.frames == 0) => {
-            if snap.settings.osc.enabled && snap.settings.osc.drive_camera {
-                "Waiting for VRChat's camera: Orbiters asked for Stream mode with Spout Stream on (OSC must be on in VRChat)".to_string()
-            } else {
-                "Waiting for VRChat's camera: open it in Stream mode and turn Spout Stream on".to_string()
-            }
-        }
-        _ => c.source.clone().unwrap_or_default(),
-    };
-    let y = button_rect.bottom() + 8.0;
-    widgets::sliding_value(
-        &ui,
-        Id::unique("rec-title"),
-        pos2(card.center().x, y + 10.0),
-        Align2::CENTER_CENTER,
-        title,
-        &Txt::new("", 15.0).weight(weight::SEMIBOLD),
-        card.width() - 48.0,
-    );
-    widgets::sliding_value(
-        &ui,
-        Id::unique("rec-sub"),
-        pos2(card.center().x, y + 31.0),
-        Align2::CENTER_CENTER,
-        &sub,
-        &Txt::new("", 12.0).color(theme::FG_3),
-        card.width() - 48.0,
-    );
-
-    // Mode and quality.
-    let mut mode = settings.capture_mode;
-    let mut quality = settings.storage_quality;
-    let seg_top = y + 60.0;
-    let mut seg = ui.new_child(
-        UiBuilder::new().max_rect(Rect::from_min_size(pos2(card.left(), seg_top), vec2(card.width(), 140.0))).layout(Layout::top_down(Align::Center)),
-    );
-    seg.spacing_mut().item_spacing = vec2(0.0, 12.0);
-    let modes = [
-        SegOption::new(CaptureMode::RecordOnly, "Record").hint("Record now, reconstruct afterwards with the whole GPU"),
-        SegOption::new(CaptureMode::LiveRefine, "Live + refine").hint("Map live while playing, refine afterwards").disabled("soon"),
-        SegOption::new(CaptureMode::LiveOnly, "Live only").hint("The live map is the result").disabled("soon"),
-    ];
-    let qualities = [
-        SegOption::new(StorageQuality::Lossless, "Lossless").hint("Every frame saved losslessly (very large)"),
-        SegOption::new(StorageQuality::High, "High").hint("Lossless keyframes, poses and depth"),
-        SegOption::new(StorageQuality::Compact, "Compact").hint("Fewer keyframes, smaller sessions"),
-    ];
-    let mode_changed = widgets::segmented(&mut seg, "capture-mode", &mut mode, &modes, false);
-    let quality_changed = widgets::segmented(&mut seg, "storage-quality", &mut quality, &qualities, true);
-    if mode_changed || quality_changed {
-        super::form::save(cx.ctl, settings, &Settings { capture_mode: mode, storage_quality: quality, ..settings.clone() });
-    }
-
-    if !consent {
-        consent_overlay(&mut ui, cx, card);
-        return;
-    }
-
-    // Pause and the session folder while recording.
-    let row_k = anim::toggle(&ctx, Id::unique("rec-row"), recording, Spring::SOFT).clamp(0.0, 1.0);
-    if recording {
-        ui.multiply_opacity(row_k);
-        let paused = c.state == CaptureState::Paused;
-        let pause = Button::new(if paused { "Resume" } else { "Pause" }).icon(if paused { icons::PLAY } else { icons::PAUSE }).size(Size::Sm);
-        let folder = c.session_dir.as_ref().map(|d| (d.clone(), format::folder_name(d)));
-        let folder_btn = folder.as_ref().map(|(_, name)| Button::new(name).icon(icons::FOLDER_OPEN).variant(Variant::Ghost).size(Size::Sm));
-        let pw = pause.desired_width(&ui);
-        let fw = folder_btn.as_ref().map(|b| b.desired_width(&ui).min(220.0) + 8.0).unwrap_or(0.0);
-        let row_y = seg_top + 40.0 + 12.0 + 36.0 + 14.0;
-        let x0 = card.center().x - (pw + fw) * 0.5;
-        if pause.show_at(&mut ui, Rect::from_min_size(pos2(x0, row_y), vec2(pw, 32.0))).clicked() {
-            cx.ctl.pause_capture(!paused);
-        }
-        if let (Some(b), Some((dir, _))) = (folder_btn, folder.as_ref()) {
-            if b.width(fw - 8.0).show_at(&mut ui, Rect::from_min_size(pos2(x0 + pw + 8.0, row_y), vec2(fw - 8.0, 32.0))).clicked() {
-                let r = crate::controller::open_path(dir);
-                cx.run(&ctx, r);
-            }
-        }
-    }
+    });
 }
 
-fn consent_overlay(ui: &mut Ui, cx: &mut Cx, card: Rect) {
-    let ctx = ui.ctx().clone();
-    let id = Id::unique("consent");
-    // Swallow clicks on the recorder below.
-    ui.interact(card, id.with("shield"), Sense::click());
-    let k = anim::spring_from(&ctx, id.with("in"), [0.0], [1.0], Spring::BOUNCY)[0];
-    let p = ui.painter();
-    widgets::frame(p, card, theme::CARD_RADIUS, theme::alpha(theme::INK_950, 0.78 * k.clamp(0.0, 1.0)));
-    let w = (card.width() - 48.0).min(420.0);
+/// The capture notice, in the place of the actions until it is accepted.
+fn consent(ui: &mut Ui, cx: &mut Cx) {
+    let w = ui.available_width();
     let mut bullets = vec![
         "Capture your own worlds, or worlds whose creators agreed, and keep the results private.",
-        "Other players are left out: hide them in the Stream camera (Remote Players off).",
+        "Other players are left out: a 3D picture of the world hides them from the Stream camera, or turn Remote Players off.",
     ];
     // With VRChat sign-in open to the member, the app can hold their VRChat session: the promise would not hold.
     if !cx.snap.vrchat_login.allowed {
         bullets.push("Orbiters - N4N0 never asks for your VRChat login and only reads VRChat's local log, OSC and Spout.");
     }
-    let galleys: Vec<_> = bullets.iter().map(|b| p.layout_job(Txt::new(*b, 13.0).color(theme::FG_2).line_height(20.0).job(w - 48.0 - 16.0))).collect();
+    let galleys: Vec<_> = bullets.iter().map(|b| ui.painter().layout_job(Txt::new(*b, 13.0).color(theme::FG_2).line_height(20.0).job(w - 300.0))).collect();
     let text_h: f32 = galleys.iter().map(|g| g.size().y + 8.0).sum();
-    let h = 24.0 + 36.0 + 16.0 + text_h + 12.0 + 40.0 + 24.0;
-    let base = Rect::from_center_size(card.center(), vec2(w, h));
-    let dialog = Rect::from_center_size(base.center() + vec2(0.0, 16.0 * (1.0 - k)), base.size() * (0.92 + 0.08 * k));
-    let mut dp = p.clone();
-    dp.multiply_opacity(k.clamp(0.0, 1.0));
-    widgets::panel(&dp, dialog, 24.0);
-    let tile = Rect::from_min_size(dialog.min + vec2(24.0, 24.0), vec2(36.0, 36.0));
-    dp.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12));
-    widgets::icon(&dp, tile.center(), icons::SHIELD_CHECK, 18.0, theme::ACCENT);
-    widgets::text(&dp, pos2(tile.right() + 10.0, tile.center().y), Align2::LEFT_CENTER, &Txt::new("Before you capture", 16.0).weight(weight::SEMIBOLD));
+    let h = (24.0 + 36.0 + 16.0 + text_h + 16.0).max(ACTION_H);
+    let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let (rect, alpha) = entering(ui, cx, 1, rect);
+    let mut ui = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("capture-consent"));
+    ui.multiply_opacity(alpha);
+    let p = ui.painter().clone();
+    widgets::card(&p, rect, theme::CARD_RADIUS);
+    let tile = Rect::from_min_size(rect.min + vec2(24.0, 24.0), vec2(36.0, 36.0));
+    p.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12));
+    widgets::icon(&p, tile.center(), icons::SHIELD_CHECK, 18.0, theme::ACCENT);
+    widgets::text(&p, pos2(tile.right() + 10.0, tile.center().y), Align2::LEFT_CENTER, &Txt::new("Before you capture", 16.0).weight(weight::SEMIBOLD));
     let mut y = tile.bottom() + 16.0;
     for g in galleys {
-        dp.circle_filled(pos2(dialog.left() + 30.0, y + 10.0), 2.0, theme::FG_3);
+        p.circle_filled(pos2(rect.left() + 30.0, y + 10.0), 2.0, theme::FG_3);
         let gh = g.size().y;
-        dp.galley(pos2(dialog.left() + 24.0 + 16.0, y), g, theme::FG_2);
+        p.galley(pos2(rect.left() + 24.0 + 16.0, y), g, theme::FG_2);
         y += gh + 8.0;
     }
-    let button = Rect::from_min_size(pos2(dialog.left() + 24.0, dialog.bottom() - 24.0 - 40.0), vec2(dialog.width() - 48.0, 40.0));
-    if Button::new("I understand").variant(Variant::Primary).width(button.width()).show_at(ui, button).clicked() {
+    let button = Rect::from_min_size(pos2(rect.right() - 24.0 - 200.0, rect.center().y - 22.0), vec2(200.0, 44.0));
+    if Button::new("I understand").variant(Variant::Primary).width(button.width()).show_at(&mut ui, button).clicked() {
         super::form::save(cx.ctl, &cx.snap.settings, &Settings { consent_acknowledged: true, ..cx.snap.settings.clone() });
     }
 }
@@ -446,8 +578,8 @@ fn tiles(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
     let snap = cx.snap;
     let s = snap.capture.stats.as_ref();
     let health = s.map(|s| if s.frames > 0 { s.strip_ok as f64 / s.frames as f64 } else { 1.0 }).unwrap_or(1.0);
-    let w = (rect.width() - 12.0) / 2.0;
-    let h = (rect.height() - 24.0) / 3.0;
+    let w = (rect.width() - 24.0) / 3.0;
+    let h = (rect.height() - 12.0) / 2.0;
     let n = |ui: &Ui, i: usize, v: f64| widgets::animated_number(ui, Id::unique(("capture-number", i)), v);
     let frames = n(ui, 0, s.map(|s| s.frames as f64).unwrap_or(0.0));
     let decoded = n(ui, 1, health * 100.0);
@@ -472,7 +604,9 @@ fn tiles(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
             s.map(|_| if decoded > 99.95 { format!("{decoded:.0}%") } else { format!("{decoded:.1}%") }).unwrap_or_else(|| "–".into()),
             match s {
                 // Gone for a while, and why: no keyframes come meanwhile.
-                Some(s) if s.strip_missing_s >= 2.0 => format!("none for {:.0} s: {}", s.strip_missing_s, snap.capture.no_strip.unwrap_or(crate::state::NoStrip::Unknown).short()),
+                Some(s) if s.strip_missing_s >= 2.0 => {
+                    format!("none for {:.0} s: {}", s.strip_missing_s, snap.capture.no_strip.unwrap_or(crate::state::NoStrip::Unknown).short())
+                }
                 Some(s) => format!("{} unreadable", format::integer(s.strip_failed as f64)),
                 None => "pose strip in every frame".into(),
             },
@@ -516,7 +650,7 @@ fn tiles(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
         ),
     ];
     for (i, (glyph, label, number, sub, accent)) in tiles.iter().enumerate() {
-        let r = Rect::from_min_size(pos2(rect.left() + (i % 2) as f32 * (w + 12.0), rect.top() + (i / 2) as f32 * (h + 12.0)), vec2(w, h));
+        let r = Rect::from_min_size(pos2(rect.left() + (i % 3) as f32 * (w + 12.0), rect.top() + (i / 3) as f32 * (h + 12.0)), vec2(w, h));
         let (r, alpha) = entering(ui, cx, 3 + i, r);
         let mut child = ui.new_child(UiBuilder::new().max_rect(r.expand(8.0)).id_salt(("tile", i)));
         child.multiply_opacity(alpha);

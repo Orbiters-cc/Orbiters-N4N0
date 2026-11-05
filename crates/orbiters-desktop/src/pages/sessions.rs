@@ -687,6 +687,13 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
         badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), "No keyframes", theme::alpha(theme::DANGER, 0.2), theme::DANGER, true);
     } else if s.manifest.consent.own_world {
         badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), "Own world", theme::alpha(theme::OK, 0.2), theme::OK, true);
+    } else if let Some(picture) = &s.picture {
+        // What the 3D picture is of.
+        let (label, tint) = match picture.mode {
+            orbiters_core::settings::PictureMode::People => ("People", theme::VIOLET),
+            orbiters_core::settings::PictureMode::World => ("World", theme::ACCENT),
+        };
+        badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), label, theme::black(0.55), tint, true);
     }
 
     let x = r.left() + 16.0;

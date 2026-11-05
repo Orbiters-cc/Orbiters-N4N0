@@ -43,6 +43,10 @@ pub enum Command {
     CancelVoiceInstall,
     /// A 3D picture with VRChat's camera where it stands (recorded, then reconstructed).
     Photo3D,
+    /// A 3D picture of `mode` with VRChat's camera where it stands, which is also the mode the menus' one button takes next.
+    Photo3DOf {
+        mode: orbiters_core::settings::PictureMode,
+    },
     /// Calls a friend (a contact id from the calls status).
     Call {
         contact: String,

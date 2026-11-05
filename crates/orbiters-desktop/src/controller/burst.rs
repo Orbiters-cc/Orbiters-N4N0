@@ -24,7 +24,7 @@ use super::{around, NoticeKind, Shared};
 use crate::state::CaptureState;
 use orbiters_contracts::rig;
 use orbiters_core::osc::{OscValue, PARAMETERS_PREFIX};
-use orbiters_core::settings::Photo3dLength;
+use orbiters_core::settings::{Photo3dLength, PictureMode};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -296,6 +296,17 @@ pub fn rig_switch(on: bool) -> (String, Vec<rosc::OscType>) {
 pub struct BurstRuntime {
     /// A 3D picture's recording is under way (its reconstruction starts when it is saved).
     pub(super) recording: bool,
+    /// What it is of.
+    pub(super) mode: PictureMode,
+    /// How long it flies.
+    pub(super) length: Photo3dLength,
+}
+
+impl BurstRuntime {
+    /// What the recording under way is a picture of, `None` for a free recording.
+    pub(super) fn picture_mode(&self) -> Option<PictureMode> {
+        self.recording.then_some(self.mode)
+    }
 }
 
 pub(super) fn floats(values: &[OscValue]) -> Vec<f32> {
@@ -334,7 +345,7 @@ impl super::Controller {
             let eye_height = osc.latest.get("/avatar/eyeheight").and_then(|(v, _)| floats(v).first().copied());
             (pose, focus, smooth, eye_height)
         };
-        let length = self.settings().photo_3d;
+        let (length, mode) = self.with_settings(|s| (s.photo_3d, s.photo_3d_mode));
         // VRChat's camera must be open: OSC switches its mode once it is (to Stream, for Spout), nothing opens it
         // (VRChat's `/usercamera/Mode` changes nothing while the camera is closed, and there is no endpoint to open it).
         anyhow::ensure!(self.camera_open() != Some(false), orbiters_n4n0::platform::CAMERA_CLOSED);
@@ -344,7 +355,7 @@ impl super::Controller {
         let pose: [f32; 6] = pose.try_into().expect("six values");
         // N4N0's menu and link card stand in front of their owner: while the capture kit records (N4N0/Capture/Record),
         // the avatar hides them on its owner's client, out of the picture, and shows them again after it.
-        self.burst.lock().unwrap().recording = true;
+        *self.burst.lock().unwrap() = BurstRuntime { recording: true, mode, length };
         if let Err(e) = self.start_capture(false) {
             self.burst.lock().unwrap().recording = false;
             return Err(e);
@@ -362,7 +373,10 @@ impl super::Controller {
             // The frame the recording started on is read while the camera already looks around: the people wait less.
             let session = ctl.snapshot.lock().unwrap().capture.session_dir.clone();
             let picture = matches!(length, Photo3dLength::Standard | Photo3dLength::Full);
-            let reading = session.clone().filter(|_| picture).map(|dir| std::thread::spawn(move || read_start_frame(&dir)));
+            // Nobody to go around in a picture of the world: its first frame says nothing the flight needs.
+            let reading = session.clone().filter(|_| picture && mode == PictureMode::People).map(|dir| std::thread::spawn(move || read_start_frame(&dir)));
+            // Remote User hides the other players from VRChat's camera; the rig's six cameras have no such mask.
+            let room_rig = mode == PictureMode::People || ctl.others_here() == 0;
             std::thread::sleep(SETTLE);
             let send = |address: &str, args: Vec<rosc::OscType>| {
                 let _ = ctl.with_osc(|o| o.send(address, args));
@@ -403,6 +417,13 @@ impl super::Controller {
                     // Up to what the capture's threads still hold of the turn.
                     std::thread::sleep(DEPTH_LATENCY);
                     live.poll(&mut seen);
+                    // No depth with Remote User off is the one thing no recording shows the answer to: it may be what took
+                    // the kit away. The blind flight goes through walls, so it comes back on, and the camera looks again.
+                    if seen.frames.len() < LEAST_DEPTH_FRAMES && ctl.hiding_others() && ctl.others_cost_the_strip() {
+                        flying = flying && fly(&around::look(pose, RATE_HZ), false);
+                        std::thread::sleep(DEPTH_LATENCY);
+                        live.poll(&mut seen);
+                    }
                     if seen.frames.len() >= LEAST_DEPTH_FRAMES {
                         around = true;
                         let hips = frame.as_ref().and_then(|f| f.hips).or_else(|| ctl.hips_now());
@@ -412,7 +433,7 @@ impl super::Controller {
                         // A wearer hidden from the picture (Local User off, hide_self.rs) has nobody to go and see.
                         let people = around::people(pose, framing, boxes, hips, eye_height.filter(|_| !ctl.hiding_self()), &seen);
                         let p11 = frame.as_ref().map_or(DEFAULT_P11, |f| f.p11).max(0.1);
-                        let mut flight = around::Flight::new(pose, p11, RATE_HZ, length, &people);
+                        let mut flight = around::Flight::new(pose, p11, RATE_HZ, length, mode, &people, room_rig);
                         while let Some(piece) = flying.then(|| flight.next(&seen)).flatten() {
                             if piece.rig {
                                 // The rig where the camera is, then on: every other colour frame gets its six views.
@@ -434,7 +455,7 @@ impl super::Controller {
             }
             if !around {
                 // The rig on for the blind flight; put back off when VRChat is, whatever ends the recording.
-                ctl.hold_rig(true);
+                ctl.hold_rig(room_rig);
                 let flight = path(pose, length, focus, RATE_HZ);
                 // Experimental (VRC+): the camera dolly flies the camera and three more cameras around it (controller/dolly.rs).
                 let dolly = dolly_wanted && ctl.start_dolly(&flight, frame.as_ref().map_or(DEFAULT_P11, |f| f.p11) * ZOOM_PER_P11, focus);
@@ -504,8 +525,17 @@ impl super::Controller {
 
     /// A recording was saved: a 3D picture's goes on to its reconstruction.
     pub(super) fn burst_saved(self: &Shared, session: Option<PathBuf>) {
-        let was = std::mem::take(&mut self.burst.lock().unwrap().recording);
+        let (was, mode, length) = {
+            let mut burst = self.burst.lock().unwrap();
+            (std::mem::take(&mut burst.recording), burst.mode, burst.length)
+        };
         let Some(dir) = session.filter(|_| was) else { return };
+        // Before its reconstruction: it reads where training's steps go from this.
+        let left_out = self.snapshot.lock().unwrap().capture.left_out.clone();
+        let picture = orbiters_core::picture::Picture { mode, length, wearer: left_out.wearer, others: left_out.others };
+        if let Err(e) = picture.save(&dir) {
+            self.notify(NoticeKind::Warning, format!("Could not note what this 3D picture is of: {e}"));
+        }
         match self.queue_reconstruction(dir) {
             Ok(false) => self.notify(NoticeKind::Success, "3D picture taken: it is being reconstructed."),
             Ok(true) => self.notify(NoticeKind::Success, format!("3D picture taken: its reconstruction starts {}.", self.reconstruction_waits_for())),
@@ -575,6 +605,30 @@ mod tests {
         let m = |k: usize| v[k] * rig::REACH_M;
         assert!(m(0).abs() < 1e-3 && (m(1) - 1.5).abs() < 1e-3 && (m(2) - 2.0).abs() < 1e-3, "{v:?}");
         assert!(v[3].abs() < 1e-5, "the hips' heading");
+    }
+
+    /// What the reconstruction and the gallery read of a picture: its mode, and who it left out.
+    #[test]
+    fn a_saved_picture_says_what_it_is_of() {
+        use orbiters_core::picture::{Left, Picture};
+        let dir = std::env::temp_dir().join(format!("orbiters-burst-picture-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctl = super::super::Controller::new(orbiters_core::settings::Settings::default());
+        *ctl.burst.lock().unwrap() = BurstRuntime { recording: true, mode: PictureMode::World, length: Photo3dLength::Full };
+        assert_eq!(ctl.burst.lock().unwrap().picture_mode(), Some(PictureMode::World));
+        ctl.update(|s| {
+            s.capture.left_out.wearer = Left::InPicture;
+            s.capture.left_out.others = Left::Out;
+        });
+        ctl.burst_saved(Some(dir.clone()));
+        assert_eq!(Picture::read(&dir), Some(Picture { mode: PictureMode::World, length: Photo3dLength::Full, wearer: Left::InPicture, others: Left::Out }));
+        assert!(!Picture::trains_faces(&dir));
+        // A free recording writes nothing, and no longer counts as a picture.
+        assert_eq!(ctl.burst.lock().unwrap().picture_mode(), None);
+        std::fs::remove_file(dir.join(orbiters_core::picture::FILE)).unwrap();
+        ctl.burst_saved(Some(dir.clone()));
+        assert!(Picture::read(&dir).is_none() && Picture::trains_faces(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

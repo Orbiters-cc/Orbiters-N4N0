@@ -449,6 +449,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn a_command_is_given_its_time_and_no_more() {
         assert!(run_within(Command::new("/usr/bin/true").arg(""), Duration::from_secs(10)).unwrap());
         assert!(!run_within(Command::new("/usr/bin/false").arg(""), Duration::from_secs(10)).unwrap());

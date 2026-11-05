@@ -626,24 +626,28 @@ fn recorder(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
             ctl.pause_capture(!paused);
         }
     } else if c.state == CaptureState::Idle {
-        // A second of the camera swinging around its subject, reconstructed: a picture you can walk around.
-        // The length (1 s, 4 s or 8 s) on the left, the button on the right.
-        use orbiters_core::settings::Photo3dLength;
-        let b = Button::new("3D picture").icon(icons::CUBE_FOCUS).variant(Variant::Secondary).size(Size::Md).enabled(consent && snap.vrchat.running);
-        let w = b.desired_width(ui).max(160.0);
-        let seg_w = 168.0;
-        let left = card.center().x - (w + 12.0 + seg_w) / 2.0;
+        // The two 3D pictures, a little of their length: as the Capture page has them.
+        use orbiters_core::settings::{Photo3dLength, PictureMode};
+        let enabled = consent && snap.vrchat.running;
+        let people = Button::new("People").icon(icons::USERS).variant(Variant::Secondary).size(Size::Md).enabled(enabled);
+        let world = Button::new("World").icon(icons::GLOBE_HEMISPHERE_WEST).variant(Variant::Secondary).size(Size::Md).enabled(enabled);
+        let (pw, ww) = (people.desired_width(ui).max(120.0), world.desired_width(ui).max(120.0));
+        let seg_w = 150.0;
+        let left = card.center().x - (pw + 8.0 + ww + 12.0 + seg_w) / 2.0;
+        let y = card.bottom() - 64.0;
+        if people.width(pw).show_at(ui, Rect::from_min_size(pos2(left, y), vec2(pw, 40.0))).clicked() {
+            ctl.n4n0(N4n0Command::Photo3DOf { mode: PictureMode::People });
+        }
+        if world.width(ww).show_at(ui, Rect::from_min_size(pos2(left + pw + 8.0, y), vec2(ww, 40.0))).clicked() {
+            ctl.n4n0(N4n0Command::Photo3DOf { mode: PictureMode::World });
+        }
         let mut length = snap.settings.photo_3d;
         let lengths = [SegOption::new(Photo3dLength::Quick, "1 s"), SegOption::new(Photo3dLength::Standard, "4 s"), SegOption::new(Photo3dLength::Full, "8 s")];
-        let mut seg = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(left, card.bottom() - 64.0), vec2(seg_w, 40.0))).id_salt("overlay-photo-length"));
+        let mut seg = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(left + pw + 8.0 + ww + 12.0, y), vec2(seg_w, 40.0))).id_salt("overlay-photo-length"));
         if widgets::segmented(&mut seg, "overlay-photo-length", &mut length, &lengths, false) {
             let mut settings = snap.settings.clone();
             settings.photo_3d = length;
             ctl.save_changes(&snap.settings, &settings);
-        }
-        let r = b.width(w).show_at(ui, Rect::from_min_size(pos2(left + seg_w + 12.0, card.bottom() - 64.0), vec2(w, 40.0)));
-        if r.clicked() {
-            ctl.n4n0(N4n0Command::Photo3D);
         }
     }
 }

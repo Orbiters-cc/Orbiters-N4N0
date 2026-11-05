@@ -299,6 +299,7 @@ fn session_entry(s: &SessionSummary, world: &str, world_name: &str, remote: Opti
         content: Content::read(&s.dir),
         ready: s.reconstruction.is_some(),
         no_keyframes: s.has_no_keyframes(),
+        picture_mode: s.picture.map(|p| p.mode),
         no_depth: s.manifest.stats.depth_frames == 0,
         trimmed: s.trimmed,
         result: s.reconstruction.as_ref().map(|r| r.created_utc.clone()),

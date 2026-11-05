@@ -269,6 +269,20 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     });
     recording.capture.coverage = Some(sample_coverage(&trail));
     // Frames coming, none with the strip, as with Local User off on an upload that could not hide itself: the tile says why.
+    // The two 3D pictures under way, the avatar hidden or not, and what stays on the page after the second.
+    let mut picture_world = recording.clone();
+    picture_world.capture.photo_3d = true;
+    picture_world.capture.picture = Some(orbiters_core::settings::PictureMode::World);
+    picture_world.capture.coverage = None;
+    picture_world.capture.left_out = crate::state::LeftOut { wearer: orbiters_core::picture::Left::Out, others: orbiters_core::picture::Left::Out, why: None };
+    let mut picture_people = picture_world.clone();
+    picture_people.capture.picture = Some(orbiters_core::settings::PictureMode::People);
+    picture_people.capture.left_out = Default::default();
+    let cannot: &'static str = Box::leak(crate::controller::hide_self::cannot_hide_text(Some("The 1MB Ultirex"), Some("Orbiters Toolkit 0.4.11")).into_boxed_str());
+    let mut picture_world_shows = picture_world.clone();
+    picture_world_shows.capture.left_out = crate::state::LeftOut { wearer: orbiters_core::picture::Left::InPicture, others: orbiters_core::picture::Left::Out, why: Some(cannot.to_string()) };
+    let mut idle_after = idle.clone();
+    idle_after.capture.left_out = picture_world_shows.capture.left_out.clone();
     let mut no_strip = recording.clone();
     no_strip.capture.trail.clear();
     no_strip.capture.coverage = None;
@@ -994,6 +1008,62 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             name: "capture-recording",
             page: Page::Capture,
             snapshot: recording,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-picture-people",
+            page: Page::Capture,
+            snapshot: picture_people,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-picture-world",
+            page: Page::Capture,
+            snapshot: picture_world,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-picture-world-shows",
+            page: Page::Capture,
+            snapshot: picture_world_shows,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![(toast::Kind::Warning, cannot)],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-idle-after",
+            page: Page::Capture,
+            snapshot: idle_after,
             frames: 120,
             splash: false,
             open_detail: false,

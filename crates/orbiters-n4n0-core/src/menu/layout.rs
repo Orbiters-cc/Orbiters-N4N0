@@ -1011,6 +1011,7 @@ pub fn layout(page: ScreenPage) -> Layout {
             // Clear of the chips (the last one ends at 632).
             icons.push((Rect::new(712, 140, 240, 240), Icon::Cube, Some(Tint::Violet)));
             slots.add(100, 504, 56, 28, Style::Accent, Content::PhotoStatus);
+            elements.push(with(element(Target::PhotoMode, Rect::new(100, 488, 444, 56), Look::Row), None, None));
         }
         ScreenPage::HomeSix => {
             // Two rows of three: the first four as on the four-tile Home, then music and light.
@@ -1338,6 +1339,7 @@ pub fn layout(page: ScreenPage) -> Layout {
             pictures.push(Picture { rect: Rect::new(672, 128, 320, 180), result: 0 });
             // Clear of the last capture's column (from 672).
             slots.add(100, 504, 40, 28, Style::Accent, Content::PhotoStatus);
+            elements.push(with(element(Target::PhotoMode, Rect::new(100, 488, 444, 56), Look::Row), None, None));
             slots.add(672, 320, 22, 28, Style::Primary, Content::LastWorld);
             slots.add(672, 352, 26, 24, Style::Accent, Content::LastState);
             for i in 0..LAST_NOTE_LINES as u8 {
@@ -1886,8 +1888,12 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             None => match &menu.notice {
                 Some(notice) => notice.clone(),
                 // Shorter beside the last capture (from screen version 12).
-                None if menu.pages.share() => "The camera circles what it looks at".into(),
-                None => "VRChat's camera flies around what it looks at".into(),
+                // Which of the two Take takes, and how to change it: the line itself is the button, the screen's picture of
+                // this page having room for one Take.
+                None => match menu.photo_mode {
+                    super::PhotoMode::People => "Of the people here. Tap: of the world".into(),
+                    super::PhotoMode::World => "Of the world, no avatars. Tap: of people".into(),
+                },
             },
         },
         Content::MediaTitle => match &menu.media {
@@ -2392,7 +2398,7 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::Contact(i) => i as usize >= menu.page_contacts().len() || menu.call.is_some(),
         Target::Previous => !menu.has_previous(),
         Target::Next => !menu.has_next(),
-        Target::Take => menu.countdown.is_some(),
+        Target::Take | Target::TakeOf(_) => menu.countdown.is_some(),
         Target::MediaPlayPause => !menu.media.as_ref().is_some_and(|m| m.can_play_pause),
         // Previous, or back to the start of what has nothing before it.
         Target::MediaPrevious => !menu.media.as_ref().is_some_and(|m| m.can_previous || (m.can_seek && m.duration.is_some())),
@@ -2468,6 +2474,24 @@ pub fn timeline_lit(media: &super::Media, i: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The line under Take is what chooses the picture on a screen whose page has one Take, and it fits both pages' slots.
+    #[test]
+    fn the_line_under_take_says_which_picture_and_presses() {
+        for (page, pages) in [(ScreenPage::Photo, Pages::Mirror), (ScreenPage::PhotoShare, Pages::Mirror)] {
+            let l = layout(page);
+            let slot = l.slots.iter().find(|s| s.content == Content::PhotoStatus).expect("the line");
+            let mut menu = Menu::new(KeyboardLayout::Qwerty, 0, super::super::PhotoLength::Standard);
+            menu.pages = pages;
+            for mode in [super::super::PhotoMode::People, super::super::PhotoMode::World] {
+                menu.photo_mode = mode;
+                let line = text(&menu, Content::PhotoStatus);
+                assert!(line.chars().count() <= slot.cols as usize, "{page:?}: {line}");
+            }
+            assert!(l.elements.iter().any(|e| e.target == Target::PhotoMode), "{page:?}");
+            assert_eq!(hit(&l, 200.0, 512.0).map(|(_, t)| t), Some(Target::PhotoMode), "{page:?}");
+        }
+    }
 
     /// A label's room stays on the page, clear of its edge, and every Home tile's title is a Home text.
     #[test]

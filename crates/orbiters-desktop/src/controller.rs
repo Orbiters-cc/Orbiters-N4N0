@@ -283,6 +283,7 @@ mod calls;
 mod cleanup;
 mod dolly;
 pub(crate) mod hide_self;
+pub use hide_self::upload_can_hide;
 mod maps;
 pub(crate) mod menu_shares;
 mod n4n0;
@@ -829,6 +830,8 @@ impl Controller {
             s.capture.coverage = None;
             s.capture.from_osc = from_osc;
             s.capture.photo_3d = self.burst.lock().unwrap().recording;
+            s.capture.picture = self.burst.lock().unwrap().picture_mode();
+            s.capture.left_out = Default::default();
             s.capture.no_strip = None;
         });
         // Training takes the whole GPU: the game and the recording come first; the run starts over once they are done
@@ -858,7 +861,8 @@ impl Controller {
             self.switch_kit_on(&vrchat);
             self.start_rig();
             // After the kit's toggle: the avatar's layer only hides while the kit records.
-            self.start_hide_self(&vrchat, drive_camera);
+            let world = self.burst.lock().unwrap().picture_mode() == Some(orbiters_core::settings::PictureMode::World);
+            self.start_hide_self(&vrchat, drive_camera, world);
         }
         let sent = {
             let mut osc = self.osc_values.lock().unwrap();

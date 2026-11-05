@@ -8,12 +8,14 @@
 
 use crate::aberration::Undo;
 use crate::camera::Camera;
+use crate::checkpoint::{Interrupted, Lab, Pause, StepState, TrainedState};
 use crate::dataset::{channel, Dataset, DepthView};
-use crate::gaussians::{logit, sigmoid, Gaussians};
+use crate::gaussians::{logit, sigmoid, Gaussians, PACKED as PACKED_FLOATS};
 #[cfg(test)]
 use crate::gaussians::{rotation_matrix, PACKED};
 use crate::gpu::{Gpu, LearningRates, Relocation, Target};
 use anyhow::ensure;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Clone, Debug)]
@@ -494,6 +496,7 @@ pub fn score_held_out(
     use rayon::prelude::*;
     let mut scores = Vec::with_capacity(views.len());
     for chunk in views.chunks(8) {
+        gpu.stop_if_paused()?;
         let renders: Vec<(usize, Vec<[f32; 4]>)> = chunk.iter().map(|&i| Ok((i, render(gpu, &data.views[i].camera, background)?))).collect::<anyhow::Result<_>>()?;
         let chunk_scores: Vec<anyhow::Result<f32>> = crate::priority::on_loading_threads(|| {
             renders
@@ -538,7 +541,52 @@ pub fn live(g: &Gaussians) -> Vec<bool> {
     (0..g.len()).map(|i| g.is_finite(i) && sigmoid(g.opacity_logits[i]) >= DEAD).collect()
 }
 
-pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings, mut report: impl FnMut(&Progress)) -> anyhow::Result<Outcome> {
+/// What a run starts from: the seeds, or where a paused run stood (crate::checkpoint).
+pub enum Start {
+    Seeds(Gaussians),
+    /// In the middle of its steps: everything the steps carry from one to the next.
+    Steps(Box<StepState>),
+    /// Its steps done: only what follows them is left ([`finish`]).
+    Trained(Box<TrainedState>),
+}
+
+/// How a run ended.
+pub enum Ran {
+    Finished(Outcome),
+    /// Asked to pause (crate::checkpoint::Pause): what its next start takes. The device can go now: a run paused holds
+    /// nothing on it that this does not hold.
+    Paused(Start),
+}
+
+/// What asks a run to pause, and the lab's asks at chosen points of it (crate::checkpoint::Lab).
+#[derive(Clone, Copy, Default)]
+pub struct Control<'a> {
+    pub pause: Option<&'a Arc<Pause>>,
+    pub lab: Option<&'a Lab>,
+}
+
+impl Control<'_> {
+    /// Whether the run should pause before step `done + 1`, having started this time after step `from`.
+    fn pause_before(&self, done: u32, from: u32, iterations: u32) -> bool {
+        self.pause.is_some_and(|p| p.asked()) || self.lab.is_some_and(|l| l.pause_at_step(done, from, iterations))
+    }
+}
+
+/// [`train_from`], from seeds and to its end.
+pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings, report: impl FnMut(&Progress)) -> anyhow::Result<Outcome> {
+    match train_from(data, gpu, Start::Seeds(init), settings, Control::default(), report)? {
+        Ran::Finished(outcome) => Ok(outcome),
+        Ran::Paused(_) => anyhow::bail!("a run nothing can pause paused"),
+    }
+}
+
+/// The run from `from`. Asked to pause, it stops between two steps (any relocation round on its way lands first, as it
+/// would have a few steps later: its plan is 20–30 ms of the CPU), reads back what the steps carry
+/// (crate::gpu::Gpu::training_state) and returns it. Resumed, the steps go on with the same random stream, the same
+/// learning-rate position and the same optimiser state, and end as an uninterrupted run does: no two runs of a session
+/// are the same bit for bit (two without a pause or a relocation round differ too, the gradients' atomic sums taking
+/// their floats in whatever order the GPU runs them), so what counts is the scores (the lab's reports/pause-resume.md).
+pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Settings, control: Control<'_>, mut report: impl FnMut(&Progress)) -> anyhow::Result<Ran> {
     let start = Instant::now();
     let held_out = held_out_views(data, settings.hold_out_every);
     // A 3D picture's zoomed-in views of its subject (never held out): their share of the colour steps, on top of the
@@ -571,7 +619,17 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     if !detail.is_empty() {
         eprintln!("{} detail views (keyframes {:?}): {:.0} % of the colour steps", detail.len(), detail.iter().map(|&i| data.views[i].keyframe).collect::<Vec<_>>(), settings.detail_share * 100.0);
     }
-    ensure!(!init.is_empty(), "no Gaussians to start from");
+    let (seeds, steps, trained) = match from {
+        Start::Seeds(g) => (Some(g), None, None),
+        Start::Steps(s) => (None, Some(s), None),
+        Start::Trained(t) => (None, None, Some(t)),
+    };
+    ensure!(seeds.as_ref().is_none_or(|g| !g.is_empty()), "no Gaussians to start from");
+    if let Some(s) = &steps {
+        ensure!(s.iterations == iterations, "a paused run of {} steps resumed as one of {iterations}", s.iterations);
+    }
+    // The training time before this start (what the report and the time left go by).
+    let earlier = steps.as_ref().map_or(0.0, |s| s.seconds) + trained.as_ref().map_or(0.0, |t| t.seconds);
     // A session's frames whose every pixel is strip or band (or a mask never set) would train on nothing and score
     // nothing.
     let scene_pixels = data.mask.iter().filter(|m| **m > 0.5).count() as f32;
@@ -585,7 +643,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let face_steps = face_share(face_cams.len(), data.views.len(), settings.face_share);
     let extent = extent(data);
     eprintln!("extent: {extent:.2} m");
-    let mut rng = fastrand::Rng::with_seed(settings.seed);
+    let mut rng = fastrand::Rng::with_seed(steps.as_ref().map_or(settings.seed, |s| s.rng));
     // Mid-run scores on at most 16 held-out keyframes: enough to follow, cheap at any session length.
     let probe = evenly(&held_out, 16);
 
@@ -594,8 +652,26 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let dev = gpu.device.clone();
     let setup_start = Instant::now();
     // The set grows to the budget: buffers of that size from the start never grow (and copy) on the way.
-    gpu.reserve(settings.budget.max(init.len()));
-    gpu.upload(&init);
+    let held = seeds.as_ref().map_or(0, Gaussians::len).max(steps.as_ref().map_or(0, |s| s.buffers.params.len() / PACKED_FLOATS));
+    gpu.reserve(settings.budget.max(held));
+    let first_set = match (&seeds, &steps, &trained) {
+        (Some(g), ..) => {
+            gpu.upload(g);
+            g.len()
+        }
+        (_, Some(s), _) => {
+            gpu.restore_training(&s.buffers);
+            gpu.restore_sky_learning(s.sky.as_ref())?;
+            s.buffers.params.len() / PACKED_FLOATS
+        }
+        (_, _, Some(t)) => {
+            // What the device held when the run paused (the worker gave it back its sky map).
+            gpu.upload(&t.gaussians);
+            t.gaussians.len()
+        }
+        _ => unreachable!("a run starts from one of them"),
+    };
+    drop(seeds);
     // The 3D filter follows the keyframes trained on, at their full resolution (the finest sampling).
     let filter_cams: Vec<Camera> = train_views.iter().map(|&i| data.views[i].camera).chain(face_cams.iter().copied()).collect();
     gpu.update_filter_3d(&filter_cams, settings.filter_3d)?;
@@ -642,29 +718,69 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     // upload no pixels.
     const LEFT: u64 = 1 << 30;
     let keyframe_bytes: u64 = data.views.iter().map(|v| v.image.len() as u64 * 4).sum();
-    let resident = gpu.free_memory().is_some_and(|free| free >= gpu.training_memory(settings.budget) + keyframe_bytes + LEFT);
+    let paused_already = control.pause.is_some_and(|p| p.asked());
+    let resident = !paused_already && gpu.free_memory().is_some_and(|free| free >= gpu.training_memory(settings.budget) + keyframe_bytes + LEFT);
     if resident {
         let images: Vec<&[u32]> = data.views.iter().map(|v| v.image.as_slice()).collect();
         gpu.set_keyframes(&images);
     }
-    let regularise = |gpu: &mut Gpu, n: usize| {
-        gpu.opacity_reg = settings.opacity_reg / n.max(1) as f32;
-        gpu.scale_reg = settings.scale_reg / (n.max(1) as f32 * extent);
-    };
-    regularise(gpu, init.len());
+    regularise_for(gpu, settings, first_set, extent);
     gpu.step = 0;
+    gpu.pause = control.pause.cloned();
     crate::timing::add("4a train setup", setup_start.elapsed());
     // Relocation ends where it would without the tile steps: they come after it (crate::portraits).
     let relocate_until = (base_iterations as f32 * settings.relocate_until) as u32;
     // Relocation rounds off the steps' path: a round's weights come back while training goes on, a helper thread plans
     // it (its own random stream), and the plan lands a few steps later (VRChat Home: −4 %, quality equal): the plan took
     // 20–30 ms of the CPU a round, with the GPU waiting.
-    let mut pending_weights: Option<(u32, crate::gpu::PendingWeights, Vec<[f32; 14]>)> = None;
-    let mut pending_plan: Option<std::thread::JoinHandle<Relocation>> = None;
+    let mut rounds = Rounds::default();
+    let mut last_psnr = steps.as_ref().and_then(|s| s.psnr).or(trained.as_ref().and_then(|t| t.psnr));
     // What the last fading round found (unseen, of how many), and whether rounds still fade (Settings::fade_until_rising).
     let mut last_round: Option<(usize, usize)> = None;
     let mut fading = true;
-    for it in 1..=iterations {
+    // A fading round a pause cut short runs again right after the next step.
+    let mut fade_again = false;
+    let mut from_step = 0;
+    if let Some(s) = &steps {
+        from_step = s.iteration;
+        gpu.step = s.gpu_step;
+        gpu.noise = s.noise;
+        gpu.opacity_reg = s.opacity_reg;
+        gpu.scale_reg = s.scale_reg;
+        last_round = s.last_round;
+        fading = s.fading;
+        fade_again = s.fade_again;
+    }
+    drop(steps);
+    // A run resumed past its steps goes straight to what follows them.
+    let first_step = if trained.is_some() { iterations + 1 } else { from_step + 1 };
+    for it in first_step..=iterations {
+        if control.pause_before(it - 1, from_step, iterations) {
+            if let Some(p) = control.pause {
+                p.ask();
+            }
+            // What is on its way lands first: nothing of a round is kept half done.
+            rounds.settle(gpu, &dev, settings, it - 1, relocate_until, scored, extent, &filter_cams)?;
+            eprintln!("it {}: pausing", it - 1);
+            let state = StepState {
+                iteration: it - 1,
+                iterations,
+                gaussians: gpu.count,
+                gpu_step: gpu.step,
+                rng: rng.get_seed(),
+                noise: gpu.noise,
+                opacity_reg: gpu.opacity_reg,
+                scale_reg: gpu.scale_reg,
+                last_round,
+                fading,
+                fade_again,
+                seconds: earlier + start.elapsed().as_secs_f32(),
+                psnr: last_psnr,
+                buffers: gpu.training_state()?,
+                sky: gpu.sky_learning()?,
+            };
+            return Ok(Ran::Paused(Start::Steps(Box::new(state))));
+        }
         feeding.follow();
         if it % 500 == 1 {
             // While VRChat runs on this GPU, SteamVR's frame timing paces the steps (crate::governor).
@@ -776,14 +892,21 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                 gpu.step(camera, settings.background, Target::Color { rgba, scene_pixels: pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr))?
             }
         };
-        if fading && fade_due(it, settings, relocate_until) {
+        if fading && (std::mem::take(&mut fade_again) || fade_due(it, settings, relocate_until)) {
             let _sync = crate::timing::on().then(|| dev.poll(wgpu::PollType::wait_indefinitely()));
             let fade_start = Instant::now();
             let _cpu = crate::priority::CpuWork::start();
             wearer_masks.settle(gpu, data)?;
             // The faces' views count: what only they see is not unseen.
             let cams: Vec<Camera> = train_views.iter().map(|&i| data.views[i].camera).chain(face_cams.iter().copied()).collect();
-            let seen = gpu.visibility(&cams, settings.background, settings.unseen_weight)?;
+            let seen = match gpu.visibility(&cams, settings.background, settings.unseen_weight) {
+                Err(e) if e.is::<Interrupted>() => {
+                    // The next start does this round again: nothing of it was applied.
+                    fade_again = true;
+                    continue;
+                }
+                seen => seen?,
+            };
             if seen.iter().all(|w| *w <= 0.0) {
                 // Nothing seen at all is a broken round (a mask of zeros, a lost readback), not a model nothing sees.
                 eprintln!("it {it}: no training pixel sees any Gaussian; nothing faded");
@@ -812,58 +935,18 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             } else {
                 None
             };
-            report(&Progress { iteration: it, iterations, gaussians: gpu.count, intersections, psnr, seconds: start.elapsed().as_secs_f32() });
+            last_psnr = psnr.or(last_psnr);
+            report(&Progress { iteration: it, iterations, gaussians: gpu.count, intersections, psnr, seconds: earlier + start.elapsed().as_secs_f32() });
         }
-        {
-            // A plan that is ready lands now; weights that arrived go to a planner.
-            if pending_plan.as_ref().is_some_and(|h| h.is_finished()) {
-                let plan = pending_plan.take().expect("checked").join().map_err(|_| anyhow::anyhow!("the relocation planner panicked"))?;
-                crate::timing::section("4d3 relocation apply", None, || gpu.apply_relocation(&plan))?;
-                regularise(gpu, plan.len);
-                gpu.update_filter_3d(&filter_cams, settings.filter_3d)?;
-            }
-            if pending_plan.is_none() {
-                if let Some((round, w, spawns)) = pending_weights.take() {
-                    match w.take()? {
-                        Some(mut weights) => {
-                            // With birth scores, they follow the weights (Gpu::request_relocation_weights).
-                            let scores = if scored { weights.split_off(weights.len() / 4) } else { Vec::new() };
-                            let n = weights.len();
-                            if settings.noise > 0.0 && settings.noise_dead_max > 0.0 && it <= relocate_until {
-                                // The noise runs while the budget binds: not in a round whose relocation found much of
-                                // the set dead (Settings::noise_dead_max).
-                                let share = weights.iter().filter(|w| **w == -1.0 || !w.is_finite()).count() as f32 / n.max(1) as f32;
-                                let on = share <= settings.noise_dead_max;
-                                if on != (gpu.noise > 0.0) {
-                                    eprintln!("it {round}: {:.0} % dead: noise {}", share * 100.0, if on { "on" } else { "off" });
-                                }
-                                gpu.noise = if on { settings.noise } else { 0.0 };
-                            }
-                            if round % 500 == 0 {
-                                let dead = weights.iter().filter(|w| **w == -1.0).count();
-                                eprintln!("it {round}: {n} Gaussians, {dead} dead or huge, {intersections} entries");
-                            }
-                            let (grow_to, starved) = ((n + n / 20).min(settings.budget), settings.starved && n < settings.budget / 4);
-                            let mut plan_rng = fastrand::Rng::with_seed(settings.seed ^ (round as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
-                            let (sources, by_opacity, split, share) = (settings.sources, settings.sources_by_opacity, settings.split, settings.depth_births);
-                            pending_plan = Some(std::thread::spawn(move || {
-                                let births = Births { sources, by_opacity, split, scores: scored.then_some(scores.as_slice()), spawns: &spawns, spawn_share: share };
-                                plan_relocation_by(&weights, grow_to, starved, &births, &mut plan_rng)
-                            }));
-                        }
-                        None => pending_weights = Some((round, w, spawns)),
-                    }
-                }
-            }
-        }
+        rounds.advance(gpu, settings, it, relocate_until, scored, extent, &filter_cams)?;
         if it % settings.relocate_every == 0 && it >= 500 && it <= relocate_until {
             // The last round's plan must land before the next round reads the set (rare: rounds are 100 steps apart).
-            if let Some(h) = pending_plan.take() {
+            if let Some(h) = rounds.plan.take() {
                 let plan = h.join().map_err(|_| anyhow::anyhow!("the relocation planner panicked"))?;
                 gpu.apply_relocation(&plan)?;
-                regularise(gpu, plan.len);
+                regularise_for(gpu, settings, plan.len, extent);
             }
-            if pending_weights.is_none() {
+            if rounds.weights.is_none() {
                 // Births at measured depth for this round, drawn now from what the device holds (crate::births).
                 let spawns = match &spawner {
                     Some(sp) => {
@@ -873,7 +956,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                     }
                     None => Vec::new(),
                 };
-                pending_weights = Some((it, gpu.request_relocation_weights(settings.max_radius, scored)?, spawns));
+                rounds.weights = Some((it, gpu.request_relocation_weights(settings.max_radius, scored)?, spawns));
             }
         } else if it % 100 == 0 && it + 100 <= iterations {
             // As Mip-Splatting does: every 100 steps but the last 100's.
@@ -882,57 +965,159 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     }
     drop(feeding);
     // A round still on its way (none should be: rounds end at `relocate_until`) moves nothing now.
-    if let Some(h) = pending_plan.take() {
+    if let Some(h) = rounds.plan.take() {
         let _ = h.join();
     }
-    drop(pending_weights);
+    drop(rounds);
     let _sync = crate::timing::on().then(|| dev.poll(wgpu::PollType::wait_indefinitely()));
     let end_start = Instant::now();
     if let Some(g) = &gpu.governor {
         eprintln!("governor: {:.1} s waiting for VRChat's frames, {} back-offs", g.waited.as_secs_f32(), g.backoffs);
     }
-    // The result keeps the filter in its scales and opacities: the PLY renders what training rendered.
+    // The session's masks again: what follows the steps reads them, and a step's own stayed on the device.
     wearer_masks.settle(gpu, data)?;
-    let mut g = gpu.download_params()?;
-    g.fuse_filter();
-    g.retain(&live(&g));
-    let (mut wearer_left, mut floor_patched) = (0, 0);
-    if let Some(volume) = &settings.wearer {
-        wearer_left = volume.retain_outside(&mut g) + crate::wearer::leave_out_unseen(data, &held_out, volume, &mut g);
-        floor_patched = crate::wearer::patch_floor(volume, &mut g);
-        eprintln!("the wearer's volume: {wearer_left} Gaussians left; the floor they stood on: {floor_patched} patched");
+    let (mut wearer_left, mut floor_patched) = trained.as_ref().map_or((0, 0), |t| (t.wearer_left, t.floor_patched));
+    let mut g = match trained {
+        // The wearer went before this was kept: never twice.
+        Some(t) => t.gaussians,
+        None => {
+            // The result keeps the filter in its scales and opacities: the PLY renders what training rendered.
+            let mut g = gpu.download_params()?;
+            g.fuse_filter();
+            g.retain(&live(&g));
+            if let Some(volume) = &settings.wearer {
+                wearer_left = volume.retain_outside(&mut g) + crate::wearer::leave_out_unseen(data, &held_out, volume, &mut g);
+                floor_patched = crate::wearer::patch_floor(volume, &mut g);
+                eprintln!("the wearer's volume: {wearer_left} Gaussians left; the floor they stood on: {floor_patched} patched");
+            }
+            ensure!(!g.is_empty(), "training left no Gaussian that shows anywhere");
+            if settings.sky_fill {
+                // The sky shell's far field, as the measurements took it: beyond half the shell's distance from the cameras.
+                let added = crate::sky::complete(&mut g, camera_centre(data), crate::init::SKY * 0.5, crate::init::SKY);
+                eprintln!("sky: {added} Gaussians where no view saw the sky");
+            }
+            // From here on the device holds the result: what the PLY keeps is what scores.
+            gpu.upload(&g);
+            g
+        }
+    };
+    if let Some(lab) = control.lab {
+        lab.entering(crate::checkpoint::LabStage::Finish, control.pause);
     }
-    ensure!(!g.is_empty(), "training left no Gaussian that shows anywhere");
-    if settings.sky_fill {
-        // The sky shell's far field, as the measurements took it: beyond half the shell's distance from the cameras.
-        let added = crate::sky::complete(&mut g, camera_centre(data), crate::init::SKY * 0.5, crate::init::SKY);
-        eprintln!("sky: {added} Gaussians where no view saw the sky");
-    }
-    // From here on the device holds the result: what the PLY keeps is what scores.
-    gpu.upload(&g);
-    // And what the keyframes saw of each, which the PLY keeps for viewers (crate::gaussians::Seen).
-    g.seen = gpu.seen(&filter_cams, settings.background)?;
-    let beyond = crate::cleanup::beyond(&g, &data.depth_views);
-    for (s, b) in g.seen.iter_mut().zip(beyond) {
+    let psnr_train = match finish(data, gpu, &mut g, settings, &train_views, &filter_cams) {
+        Ok(psnr) => psnr,
+        Err(e) if e.is::<Interrupted>() => {
+            // Seconds of renders to do again, with what they read kept: the steps are done, the set is final.
+            eprintln!("pausing after the last step");
+            let seconds = earlier + start.elapsed().as_secs_f32();
+            return Ok(Ran::Paused(Start::Trained(Box::new(TrainedState { gaussians: g, iterations, seconds, psnr: last_psnr, wearer_left, floor_patched }))));
+        }
+        Err(e) => return Err(e),
+    };
+    crate::timing::add("4f train end (download, seen, cleanup, train score)", end_start.elapsed());
+    Ok(Ran::Finished(Outcome { gaussians: g, iterations, held_out, psnr_train, seconds: earlier + start.elapsed().as_secs_f32(), wearer_left, floor_patched }))
+}
+
+/// What follows the steps, on the device holding the result: what the keyframes saw of each Gaussian, the clean-up and the
+/// score on the training views. Renders that take seconds, and a pause cuts them short ([`Interrupted`]) with nothing
+/// lost but them: `g` stays as it was until they are done.
+fn finish(data: &Dataset, gpu: &mut Gpu, g: &mut Gaussians, settings: &Settings, train_views: &[usize], filter_cams: &[Camera]) -> anyhow::Result<f32> {
+    // What the keyframes saw of each, which the PLY keeps for viewers (crate::gaussians::Seen).
+    let mut seen = gpu.seen(filter_cams, settings.background)?;
+    let beyond = crate::cleanup::beyond(g, &data.depth_views);
+    for (s, b) in seen.iter_mut().zip(beyond) {
         s.beyond = b;
     }
+    g.seen = seen;
     if settings.cleanup {
         let _cpu = crate::priority::CpuWork::start();
         let focal = filter_cams[0].fx.max(filter_cams[0].fy);
-        let (keep, cleaned) = crate::cleanup::clean(&g, &data.depth_views, &filter_cams, focal);
+        let (keep, cleaned) = crate::cleanup::clean(g, &data.depth_views, filter_cams, focal);
         eprintln!("cleanup: {} floaters and {} islands left out of {}", cleaned.floaters, cleaned.islands, g.len());
         if cleaned.floaters + cleaned.islands > 0 {
             g.retain(&keep);
-            gpu.upload(&g);
+            gpu.upload(g);
         }
     }
     if gpu.overflows > 0 {
         eprintln!("{} steps had more tile entries than the sort expected (dropped for that step)", gpu.overflows);
     }
     let sample: Vec<usize> = train_views.iter().copied().step_by((train_views.len() / 8).max(1)).collect();
-    let psnr_train = evaluate(gpu, data, &sample, settings.background)?.unwrap_or(0.0);
-    crate::timing::add("4f train end (download, seen, cleanup, train score)", end_start.elapsed());
-    Ok(Outcome { gaussians: g, iterations, held_out, psnr_train, seconds: start.elapsed().as_secs_f32(), wearer_left, floor_patched })
+    Ok(evaluate(gpu, data, &sample, settings.background)?.unwrap_or(0.0))
+}
+
+/// The regularisers' weights per Gaussian of a set of `n`.
+fn regularise_for(gpu: &mut Gpu, settings: &Settings, n: usize, extent: f32) {
+    gpu.opacity_reg = settings.opacity_reg / n.max(1) as f32;
+    gpu.scale_reg = settings.scale_reg / (n.max(1) as f32 * extent);
+}
+
+/// The relocation rounds off the steps' path: a round's weights on their way back from the device, and a plan being made
+/// from them on a helper thread.
+#[derive(Default)]
+struct Rounds {
+    weights: Option<(u32, crate::gpu::PendingWeights, Vec<[f32; 14]>)>,
+    plan: Option<std::thread::JoinHandle<Relocation>>,
+}
+
+impl Rounds {
+    /// A plan that is ready lands now; weights that arrived go to a planner.
+    #[allow(clippy::too_many_arguments)]
+    fn advance(&mut self, gpu: &mut Gpu, settings: &Settings, it: u32, relocate_until: u32, scored: bool, extent: f32, filter_cams: &[Camera]) -> anyhow::Result<()> {
+        if self.plan.as_ref().is_some_and(|h| h.is_finished()) {
+            let plan = self.plan.take().expect("checked").join().map_err(|_| anyhow::anyhow!("the relocation planner panicked"))?;
+            crate::timing::section("4d3 relocation apply", None, || gpu.apply_relocation(&plan))?;
+            regularise_for(gpu, settings, plan.len, extent);
+            gpu.update_filter_3d(filter_cams, settings.filter_3d)?;
+        }
+        if self.plan.is_none() {
+            if let Some((round, w, spawns)) = self.weights.take() {
+                match w.take()? {
+                    Some(mut weights) => {
+                        // With birth scores, they follow the weights (Gpu::request_relocation_weights).
+                        let scores = if scored { weights.split_off(weights.len() / 4) } else { Vec::new() };
+                        let n = weights.len();
+                        if settings.noise > 0.0 && settings.noise_dead_max > 0.0 && it <= relocate_until {
+                            // The noise runs while the budget binds: not in a round whose relocation found much of
+                            // the set dead (Settings::noise_dead_max).
+                            let share = weights.iter().filter(|w| **w == -1.0 || !w.is_finite()).count() as f32 / n.max(1) as f32;
+                            let on = share <= settings.noise_dead_max;
+                            if on != (gpu.noise > 0.0) {
+                                eprintln!("it {round}: {:.0} % dead: noise {}", share * 100.0, if on { "on" } else { "off" });
+                            }
+                            gpu.noise = if on { settings.noise } else { 0.0 };
+                        }
+                        if round % 500 == 0 {
+                            let dead = weights.iter().filter(|w| **w == -1.0).count();
+                            eprintln!("it {round}: {n} Gaussians, {dead} dead or huge");
+                        }
+                        let (grow_to, starved) = ((n + n / 20).min(settings.budget), settings.starved && n < settings.budget / 4);
+                        let mut plan_rng = fastrand::Rng::with_seed(settings.seed ^ (round as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+                        let (sources, by_opacity, split, share) = (settings.sources, settings.sources_by_opacity, settings.split, settings.depth_births);
+                        self.plan = Some(std::thread::spawn(move || {
+                            let births = Births { sources, by_opacity, split, scores: scored.then_some(scores.as_slice()), spawns: &spawns, spawn_share: share };
+                            plan_relocation_by(&weights, grow_to, starved, &births, &mut plan_rng)
+                        }));
+                    }
+                    None => self.weights = Some((round, w, spawns)),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Waits for what is on its way, and lands it: the GPU's queue, the weights, the planner.
+    #[allow(clippy::too_many_arguments)]
+    fn settle(&mut self, gpu: &mut Gpu, dev: &wgpu::Device, settings: &Settings, it: u32, relocate_until: u32, scored: bool, extent: f32, filter_cams: &[Camera]) -> anyhow::Result<()> {
+        while self.weights.is_some() || self.plan.is_some() {
+            dev.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("waiting for the GPU: {e}"))?;
+            if self.plan.as_ref().is_some_and(|h| !h.is_finished()) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            self.advance(gpu, settings, it, relocate_until, scored, extent, filter_cams)?;
+        }
+        Ok(())
+    }
 }
 
 /// Keyframes at a coarser resolution: images box-filtered by 2 or 4 from the training resolution, their cameras, and

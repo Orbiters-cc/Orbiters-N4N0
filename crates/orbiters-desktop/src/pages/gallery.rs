@@ -1212,7 +1212,7 @@ fn again_row(o: Offer, ready: bool) -> Option<(Menu, String, &'static str, Optio
     match o {
         Offer::Start { .. } => Some((Menu::Reconstruct, o.label().into(), icons::MAGIC_WAND, None)),
         Offer::Blocked { short, .. } => ready.then(|| (Menu::Reconstruct, o.label().into(), icons::MAGIC_WAND, Some(short))),
-        Offer::Running { fraction, .. } => Some((Menu::StopReconstruct, format!("Stop reconstruction · {:.0}%", fraction * 100.0), icons::X, None)),
+        Offer::Running { fraction, .. } | Offer::Paused { fraction, .. } => Some((Menu::StopReconstruct, format!("Stop reconstruction · {:.0}%", fraction * 100.0), icons::X, None)),
         Offer::Waiting { .. } => Some((Menu::Unqueue, o.label().into(), icons::X, None)),
     }
 }
@@ -1687,15 +1687,8 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         x += super::gallery_layers::badge(&p, ui, pos2(x, thumb.top() + 12.0), icons::STACK, &layers, false) + 6.0;
     }
     if let Some(j) = job {
-        super::sessions::badge(
-            &p,
-            ui,
-            pos2(x, thumb.top() + 12.0),
-            &format!("Reconstructing {:.0}%", super::sessions::overall_progress(j) * 100.0),
-            theme::black(0.55),
-            theme::ACCENT,
-            false,
-        );
+        let (label, color) = super::sessions::job_badge(j, cx.snap);
+        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), &label, theme::black(0.55), color, false);
     } else if queued {
         super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), "Waiting to reconstruct", theme::black(0.55), theme::FG_2, false);
     } else if look.updating {
@@ -1725,7 +1718,7 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         let f = anim::spring_from(&ctx, id.with("reconstruct"), [0.0], [super::sessions::overall_progress(j)], Spring::SOFT)[0].clamp(0.0, 1.0);
         let round = if tile { 1.5 } else { 0.0 };
         p.rect_filled(bar, round, theme::white(0.08));
-        p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), round, theme::ACCENT);
+        p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), round, super::sessions::job_bar(j));
     }
 
     // Kind and time, then who sees it or who it is from.

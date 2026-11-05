@@ -120,7 +120,8 @@ impl MenuShares {
         }
         if !matches!(row.phase, CapturePhase::Recording | CapturePhase::Saving) {
             if let Some(job) = snap.reconstruction.as_ref().filter(|j| is(&j.session_dir)) {
-                row.phase = CapturePhase::Making { percent: (crate::pages::sessions::overall_progress(job) * 100.0).clamp(0.0, 99.0) as u8 };
+                let percent = (crate::pages::sessions::overall_progress(job) * 100.0).clamp(0.0, 99.0) as u8;
+                row.phase = if job.paused { CapturePhase::Paused { percent } } else { CapturePhase::Making { percent } };
             } else if snap.reconstruct_queue.iter().any(|d| is(d)) {
                 row.phase = CapturePhase::Waiting;
             } else if self.made.contains(&name) {

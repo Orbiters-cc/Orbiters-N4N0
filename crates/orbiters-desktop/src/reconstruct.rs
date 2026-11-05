@@ -1,14 +1,17 @@
 //! The reconstruction worker process (`orbiters-reconstruct <session folder>`): one at a time, started on demand,
-//! its events read line by line. Cancelling kills it; it only replaces the session's result once it is complete.
+//! its events read line by line. Cancelling kills it; it only replaces the session's result once it is complete. Pausing
+//! asks it to leave the GPU and to write where it stands (orbiters_reconstruct::checkpoint): the next one goes on from
+//! there, which is why every start asks for `--resume`. A press on Stop, not this module, is what deletes that file.
 
 use crate::worker::sibling_exe;
 use orbiters_core::reconstruction::Event;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write as _};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 
 pub struct ReconstructHandle {
     child: Child,
+    stdin: Option<ChildStdin>,
 }
 
 impl ReconstructHandle {
@@ -24,7 +27,7 @@ impl ReconstructHandle {
         let path = sibling_exe("orbiters-reconstruct");
         anyhow::ensure!(path.is_file(), "reconstruction worker not found at {}", path.display());
         let mut cmd = Command::new(&path);
-        cmd.arg(session).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.arg(session).arg("--resume");
         if integrated {
             cmd.args(["--gpu", "integrated"]);
         }
@@ -36,8 +39,20 @@ impl ReconstructHandle {
             // not even reach that while another program keeps every core busy.
             cmd.creation_flags(0x0800_0000);
         }
+        Self::spawn_command(cmd, on_event, on_log, on_exit)
+    }
+
+    /// Starts `cmd` as the worker (the program itself, or a test's stand-in for it).
+    pub(crate) fn spawn_command(
+        mut cmd: Command,
+        on_event: impl Fn(Event) + Send + 'static,
+        on_log: impl Fn(String) + Send + 'static,
+        on_exit: impl FnOnce() + Send + 'static,
+    ) -> anyhow::Result<Self> {
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn()?;
         crate::worker::keep_with_service(&child);
+        let stdin = child.stdin.take();
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         std::thread::Builder::new().name("reconstruct-stdout".into()).spawn(move || {
@@ -57,7 +72,14 @@ impl ReconstructHandle {
                 on_log(line);
             }
         })?;
-        Ok(Self { child })
+        Ok(Self { child, stdin })
+    }
+
+    /// Asks it to pause. This never waits for it: a capture is starting. A worker that cannot be asked has already gone.
+    pub fn pause(&mut self) -> std::io::Result<()> {
+        let stdin = self.stdin.as_mut().ok_or(std::io::ErrorKind::BrokenPipe)?;
+        writeln!(stdin, "{}", orbiters_reconstruct::checkpoint::PAUSE_LINE)?;
+        stdin.flush()
     }
 
     pub fn cancel(&mut self) {

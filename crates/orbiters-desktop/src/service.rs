@@ -311,6 +311,8 @@ impl Service {
             ToService::N4n0 { command } => ctl.n4n0_command(command),
             ToService::OscReconnect => ctl.osc_rediscover(),
             ToService::Updates { action } => ctl.update_action(action),
+            // Quickly, on this thread: Stop is the person taking control back.
+            ToService::Bridge { command } => ctl.bridge_command(command),
             ToService::Quit => self.quit(),
         }
     }
@@ -437,6 +439,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     let _ = std::fs::create_dir_all(&settings.raw_captures_dir);
     let ctl = Controller::new(settings);
     ctl.start();
+    ctl.start_bridge();
 
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let endpoint = Endpoint { port: listener.local_addr()?.port(), token: uuid::Uuid::new_v4().simple().to_string() };

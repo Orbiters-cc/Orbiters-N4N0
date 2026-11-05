@@ -8,7 +8,9 @@
 //! following VRChat: orbiters_reconstruct::priority). The service starts it only when nothing records or reconstructs,
 //! and beside VRChat only while SteamVR runs, whose frame timing paces it ([`start_next`]); a capture, a reconstruction
 //! or VRChat started without SteamVR stops it and the session waits again ([`pause`]); a share of a session waits for
-//! that session's own preparation rather than starting a second one ([`claim`]).
+//! that session's own preparation rather than starting a second one ([`claim`]). Being stopped costs the stage it was in:
+//! each stage finished goes into a file beside the cache ([`PartialFile`], orbiters_reconstruct::tree_tune::Keep), and
+//! the next preparation of the same reconstruction, in the background or for a share, goes on after it.
 
 use orbiters_core::{contracts::manifest, maps::PreviewFiles, reconstruction, visited::sha256_file};
 use serde::{Deserialize, Serialize};
@@ -26,6 +28,9 @@ use std::time::{Duration, Instant};
 // from the world stay out of the trees (orbiters_reconstruct::tree::MAX_REACH): files prepared with them are refused.
 const MAGIC: &[u8; 8] = b"N4PREP04";
 const FILE: &str = "upload-prep-v1.bin";
+/// What a preparation that was stopped has finished so far (orbiters_reconstruct::tree_tune::Stages), beside [`FILE`].
+const PARTIAL_FILE: &str = "upload-prep-partial.bin";
+const PARTIAL_MAGIC: &[u8; 8] = b"N4PREPP1";
 const MAX_BYTES: u64 = 100 << 20;
 pub static PREPARING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -142,7 +147,78 @@ pub fn save(result: &Path, fingerprint: &Fingerprint, files: &PreviewFiles, meta
     let digest = Sha256::digest(&bytes[40..]);
     bytes[8..40].copy_from_slice(&digest);
     orbiters_core::write_atomic(&result.join(FILE), &bytes)?;
+    forget_partial(result);
     Ok(())
+}
+
+/// How far a stopped preparation of the result in a folder got, for the same result only.
+pub struct PartialFile {
+    path: PathBuf,
+    fingerprint: Fingerprint,
+}
+
+impl PartialFile {
+    pub fn new(result: &Path, fingerprint: &Fingerprint) -> Self {
+        Self { path: result.join(PARTIAL_FILE), fingerprint: fingerprint.clone() }
+    }
+
+    /// `bytes` of its file, when they are whole and of this result.
+    fn open<'a>(&self, bytes: &'a [u8]) -> Option<&'a [u8]> {
+        if bytes.get(..8)? != PARTIAL_MAGIC {
+            return None;
+        }
+        let payload = bytes.get(40..)?;
+        if &Sha256::digest(payload)[..] != bytes.get(8..40)? {
+            return None;
+        }
+        let length = u32::from_le_bytes(payload.get(..4)?.try_into().ok()?) as usize;
+        if length > 16_384 {
+            return None;
+        }
+        let fingerprint: Fingerprint = serde_json::from_slice(payload.get(4..4 + length)?).ok()?;
+        (fingerprint == self.fingerprint).then(|| payload.get(4 + length..)).flatten()
+    }
+}
+
+impl orbiters_reconstruct::tree_tune::Keep for PartialFile {
+    fn load(&mut self) -> Option<orbiters_reconstruct::tree_tune::Partial> {
+        let bytes = std::fs::read(&self.path).ok()?;
+        let partial = self.open(&bytes).and_then(orbiters_reconstruct::tree_tune::Partial::from_bytes);
+        if partial.is_none() {
+            eprintln!("{} is of another result, or damaged: preparing from the start", self.path.display());
+        }
+        partial
+    }
+
+    fn save(&mut self, bytes: Vec<u8>) {
+        let Ok(header) = serde_json::to_vec(&self.fingerprint) else { return };
+        let mut out = Vec::with_capacity(44 + header.len() + bytes.len());
+        out.extend_from_slice(PARTIAL_MAGIC);
+        out.extend_from_slice(&[0; 32]);
+        out.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        out.extend_from_slice(&header);
+        out.extend_from_slice(&bytes);
+        let digest = Sha256::digest(&out[40..]);
+        out[8..40].copy_from_slice(&digest);
+        if let Err(e) = orbiters_core::write_atomic(&self.path, &out) {
+            eprintln!("could not keep how far the upload preparation got: {e}");
+        }
+    }
+}
+
+/// How far a stopped preparation got goes, and any write a kill cut short.
+fn forget_partial(result: &Path) {
+    let Ok(entries) = std::fs::read_dir(result) else { return };
+    for e in entries.flatten() {
+        if e.file_name().to_string_lossy().starts_with(PARTIAL_FILE) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// Whether a preparation of this session stopped halfway: its session waits in line again when the app opens.
+pub fn has_partial(session: &Path) -> bool {
+    reconstruction::result_dir(session).join(PARTIAL_FILE).is_file()
 }
 
 pub fn sky(result: &Path) -> Option<PathBuf> {
@@ -334,6 +410,34 @@ mod tests {
         forget(&a);
         assert!(queued().is_empty());
         claim(&a);
+    }
+
+    /// A stopped preparation goes on only on the very result it was made from, and its file goes once it is done.
+    #[test]
+    fn how_far_a_preparation_got_is_kept_for_its_own_result_only() {
+        use orbiters_reconstruct::tree_tune::Keep;
+        let dir = std::env::temp_dir().join(format!("orbiters-prep-{}", uuid::Uuid::new_v4()));
+        let result = dir.join(reconstruction::DIR);
+        std::fs::create_dir_all(&result).unwrap();
+        let fingerprint = Fingerprint(vec![Some("fixture".into())]);
+        let mut kept = PartialFile::new(&result, &fingerprint);
+        assert!(kept.load().is_none(), "nothing yet");
+        // The smallest export there is: stage 3, no splats, no boxes, no Quest tree.
+        let mut bytes = 3u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&[0; 4 * 5]);
+        kept.save(bytes.clone());
+        assert!(has_partial(&dir));
+        assert_eq!(kept.load().map(|p| p.done), Some(3));
+        assert!(PartialFile::new(&result, &Fingerprint(vec![Some("another".into())])).load().is_none());
+        let mut damaged = std::fs::read(result.join(PARTIAL_FILE)).unwrap();
+        *damaged.last_mut().unwrap() ^= 1;
+        std::fs::write(result.join(PARTIAL_FILE), &damaged).unwrap();
+        assert!(kept.load().is_none());
+        kept.save(bytes);
+        let files = PreviewFiles { vrchat_pc: tree_fixture(), vrchat_quest: tree_fixture(), vrchat_coarse: tree_fixture() };
+        save(&result, &fingerprint, &files, &serde_json::json!({})).unwrap();
+        assert!(!has_partial(&dir), "prepared: gone");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

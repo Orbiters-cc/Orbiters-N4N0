@@ -18,7 +18,7 @@ mdns-sd = { workspace = true }
 flate2 = { workspace = true }
 if-addrs = "0.15"
 memchr = "2"
-socket2 = "0.6"
+socket2 = { version = "0.6", features = ["all"] }
 sha2 = "0.10"
 base64 = "0.22"
 rusqlite = { version = "0.40", features = ["bundled"] }

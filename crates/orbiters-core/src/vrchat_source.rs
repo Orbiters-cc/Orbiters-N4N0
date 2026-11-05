@@ -102,6 +102,13 @@ impl Source {
         };
         api.find_worlds(list, page)
     }
+    /// A new private instance of `world`, owned by the signed-in account. Needs the personal session.
+    pub fn create_private_instance(&self, world: &str, region: &str) -> anyhow::Result<String> {
+        match self.direct(|c| c.create_private_instance(world, region)) {
+            Some(r) => r,
+            None => Err(Error::Unauthorized.into()),
+        }
+    }
     /// An invite to oneself to `world`'s instance `instance`, shown in VRChat. Needs the personal session.
     pub fn invite_self(&self, world: &str, instance: &str) -> anyhow::Result<()> {
         match self.direct(|c| c.invite_self(world, instance)) {

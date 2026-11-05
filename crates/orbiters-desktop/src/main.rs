@@ -10,6 +10,7 @@ mod app;
 mod audio_devices;
 mod backend;
 mod bench;
+mod bridge;
 mod capture_picture;
 mod controller;
 mod coverage_window;
@@ -66,6 +67,10 @@ fn main() -> anyhow::Result<()> {
         Some("--prepare-upload") => upload_prep::run(&args[1..]),
         #[cfg(windows)]
         Some("--eye-picture") => overlay::eye_picture::run(&args[1..]),
+        // The VRChat bridge's helpers: a window's picture, what releases input if this app dies, and its lab.
+        Some("--bridge-shot") => bridge::capture::run(&args[1..]),
+        Some("--bridge-guard") => bridge::guard::run(),
+        Some("--bridge-lab") => bridge::lab::run(&args[1..]),
         Some("--quit") => {
             single::signal(single::Request::Quit);
             Ok(())

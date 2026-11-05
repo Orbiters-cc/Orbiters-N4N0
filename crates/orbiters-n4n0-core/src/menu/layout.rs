@@ -2196,7 +2196,7 @@ fn last_note(capture: Option<&CaptureRow>) -> String {
     }
     match capture.phase {
         CapturePhase::Recording | CapturePhase::Saving => "Share it once it is saved".into(),
-        CapturePhase::Waiting | CapturePhase::Making { .. } | CapturePhase::NoView => "Share it now: it goes once its 3D view is made".into(),
+        CapturePhase::Waiting | CapturePhase::Making { .. } | CapturePhase::Paused { .. } | CapturePhase::NoView => "Share it now: it goes once its 3D view is made".into(),
         CapturePhase::Ready if capture.explicit => "Flagged explicit: sharing it publicly asks first".into(),
         CapturePhase::Ready => "Publicly, or with the friends you choose".into(),
     }

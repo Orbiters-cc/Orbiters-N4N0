@@ -57,7 +57,7 @@ fn drag(run: &mut Run<'_>, from: Pos2, to: Pos2) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn key(run: &mut Run<'_>, key: egui::Key) -> anyhow::Result<()> {
+pub(super) fn key(run: &mut Run<'_>, key: egui::Key) -> anyhow::Result<()> {
     let modifiers = Default::default();
     run.frame(vec![Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }], false)?;
     run.frame(vec![Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers }], false)?;
@@ -137,7 +137,7 @@ fn select_walk(run: &mut Run<'_>, out: &Path, name: &str) -> anyhow::Result<()> 
 }
 
 /// The controller on this library, what the app talks to it through, and the offscreen GPU's handles.
-fn library(settings: &Settings, gpu: &mut Offscreen) -> (crate::controller::Shared, Ctl, crate::gpu::Handles) {
+pub(super) fn library(settings: &Settings, gpu: &mut Offscreen) -> (crate::controller::Shared, Ctl, crate::gpu::Handles) {
     let ctl = Controller::new(settings.clone());
     let sessions = controller::list_sessions(&settings.sessions_dir);
     ctl.set_snapshot(idle_snapshot(settings, &sessions));
@@ -251,7 +251,7 @@ fn named(settings: &Settings, end: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// Opens the window of the capture in `dir` as a click on its card would.
-fn open_window(run: &mut Run<'_>, dir: &Path) -> anyhow::Result<usize> {
+pub(super) fn open_window(run: &mut Run<'_>, dir: &Path) -> anyhow::Result<usize> {
     let mine = |e: &Entry| matches!(&e.local, Some(OnThisComputer::Session(d)) if d == dir);
     run.until("the capture's card", 60.0, |run| {
         let g = run.app.sessions_mut().gallery_mut();
@@ -264,13 +264,13 @@ fn open_window(run: &mut Run<'_>, dir: &Path) -> anyhow::Result<usize> {
     Ok(n)
 }
 
-fn close_window(run: &mut Run<'_>) -> anyhow::Result<()> {
+pub(super) fn close_window(run: &mut Run<'_>) -> anyhow::Result<()> {
     run.click("Close", 10.0)?;
     run.wait(1.0)
 }
 
 /// Whether the control `label` is there and takes clicks.
-fn on(run: &Run<'_>, label: &str) -> Option<bool> {
+pub(super) fn on(run: &Run<'_>, label: &str) -> Option<bool> {
     widgets::control(&run.ctx, label).map(|(_, enabled)| enabled)
 }
 

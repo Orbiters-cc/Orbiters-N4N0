@@ -340,7 +340,11 @@ fn find_body(samples: &[(u32, [f32; 3], [f32; 3])], hips: [f32; 3], eye: f32) ->
     // version did on The 1MB Ultirex, and took half the body), and the ground: anything low and facing up, for terrain.
     let mut world: HashSet<Key> = HashSet::new();
     let mut queue: VecDeque<(Key, [f32; 3], [f32; 3])> = VecDeque::new();
-    for (k, c) in &cells {
+    // In a fixed order, as each voxel keeps the plane it came along: a run resumed after a pause finds the very mask it trained on.
+    let mut ordered: Vec<Key> = cells.keys().copied().collect();
+    ordered.sort_unstable();
+    for k in &ordered {
+        let c = &cells[k];
         let p = c.mean();
         if !core(p) && (axis_distance(p, hips) > radius || p[1] > top || p[1] < floor - FLOOR_BAND * eye || on_floor(p, c)) {
             world.insert(*k);

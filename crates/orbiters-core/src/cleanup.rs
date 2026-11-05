@@ -28,8 +28,9 @@ pub enum Part {
     Video,
     /// Sound, avatar parameters, tracking, the T-pose calibration and the skeleton band (contracts `Docs/performance.md`).
     Performance,
-    /// Reconstructions that are not the result: a run cut short (`reconstruction.partial/`), and the previous result
-    /// while the latest is in place (`reconstruction.old/`).
+    /// Reconstructions that are not the result: a run cut short (`reconstruction.partial/`), a paused run's checkpoint
+    /// (`reconstruction.checkpoint`, no session waits on it once it can be cleaned up), and the previous result while the
+    /// latest is in place (`reconstruction.old/`).
     Leftovers,
 }
 
@@ -58,6 +59,7 @@ pub fn capture_part(name: &str, video: Option<&str>, result_in_place: bool) -> O
         KEYFRAMES_DIR | KEYFRAMES_GOING => Some(Part::Keyframes),
         DEPTH_DIR | RAW_DEPTH_DIR => Some(Part::Depth),
         reconstruction::PARTIAL_DIR => Some(Part::Leftovers),
+        _ if name.starts_with(reconstruction::CHECKPOINT_FILE) => Some(Part::Leftovers),
         reconstruction::OLD_DIR if result_in_place => Some(Part::Leftovers),
         _ if PERFORMANCE.contains(&name) => Some(Part::Performance),
         _ if video.is_some_and(|v| plain_name(v) == Some(name)) => Some(Part::Video),

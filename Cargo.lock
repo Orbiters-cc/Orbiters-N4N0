@@ -3663,6 +3663,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbiters-n4n0-mobile"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "orbiters-core",
+ "orbiters-n4n0",
+ "orbiters-orb",
+ "rosc",
+ "serde",
+ "serde_json",
+ "time",
+]
+
+[[package]]
 name = "orbiters-openvr"
 version = "0.3.0"
 dependencies = [

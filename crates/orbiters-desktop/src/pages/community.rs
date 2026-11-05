@@ -669,6 +669,7 @@ pub(super) fn picture_entry(key: String, name: String, p: &community::Picture, d
         content: Default::default(),
         ready: true,
         no_keyframes: false,
+        picture_mode: None,
         no_depth: false,
         trimmed: false,
         result: None,

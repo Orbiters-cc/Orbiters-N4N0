@@ -1703,6 +1703,10 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         kind.as_str()
     } else if e.is_picture() {
         "VRChat picture"
+    } else if e.picture_mode == Some(orbiters_core::settings::PictureMode::World) {
+        "3D picture of the world"
+    } else if e.picture_mode == Some(orbiters_core::settings::PictureMode::People) {
+        "3D picture of people"
     } else if e.ready {
         "3D capture"
     } else if e.no_keyframes {

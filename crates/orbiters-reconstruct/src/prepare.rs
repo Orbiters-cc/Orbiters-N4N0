@@ -90,14 +90,16 @@ impl Prepared {
         )];
         if let Some(f) = &self.data.faces {
             out.push(format!(
-                "{} of the capture rig's {} faces at {}×{} ({} over the budget, {} unreadable or of another size)",
+                "{} of the capture rig's {} faces at {} ({} over the budget, {} unreadable or too small)",
                 f.views.len(),
                 l.faces + l.faces_over_budget,
-                f.width,
-                f.height,
+                f.sizes.iter().map(|s| format!("{}×{}", s.width, s.height)).collect::<Vec<_>>().join(", "),
                 l.faces_over_budget,
                 l.faces_skipped
             ));
+        }
+        if l.faces_vignette > 0 {
+            out.push(format!("the world's vignette, {} % at the frame's corners, undone in the rig's faces", l.faces_vignette));
         }
         if l.keyframes_blown + l.faces_blown > 0 {
             out.push(format!("left out as blown to white: {} keyframes, {} rig faces", l.keyframes_blown, l.faces_blown));

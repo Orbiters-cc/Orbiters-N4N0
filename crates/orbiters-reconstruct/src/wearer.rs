@@ -593,9 +593,9 @@ pub fn leave_out_unseen(data: &Dataset, held_out: &[usize], volume: &Volume, g: 
         mask[k] > 0.5 && !is_out(v.image[k])
     };
     let views: Vec<&View> = data.views.iter().enumerate().filter(|(i, _)| !held_out.contains(i)).map(|(_, v)| v).collect();
-    let faces: &[View] = data.faces.as_ref().map_or(&[], |f| f.views.as_slice());
-    let empty: Vec<f32> = Vec::new();
-    let face_mask: &[f32] = data.faces.as_ref().map_or(empty.as_slice(), |f| f.mask.as_slice());
+    // Rig faces come in the sizes the session has (an old upload's and a new one's), each with its own mask.
+    let faces: Vec<(&View, &[f32])> =
+        data.faces.iter().flat_map(|f| f.views.iter().filter_map(|v| f.size_of(&v.camera).map(|s| (v, s.mask.as_slice())))).collect();
     let keep: Vec<bool> = (0..g.len())
         .into_par_iter()
         .map(|i| {
@@ -604,7 +604,7 @@ pub fn leave_out_unseen(data: &Dataset, held_out: &[usize], volume: &Volume, g: 
                 return true;
             }
             let seen = views.iter().filter(|v| shows(v, &data.mask, p)).take(SEEN_BY).count();
-            seen + faces.iter().filter(|v| shows(v, face_mask, p)).take(SEEN_BY - seen).count() >= SEEN_BY
+            seen + faces.iter().filter(|(v, mask)| shows(v, mask, p)).take(SEEN_BY - seen).count() >= SEEN_BY
         })
         .collect();
     let out = keep.iter().filter(|k| !**k).count();
@@ -779,10 +779,10 @@ pub fn remove(data: &mut Dataset, track: &Track) -> Option<(Volume, Stats)> {
     }
     if let Some(f) = &mut data.faces {
         let counts: Vec<usize> = f.views.par_iter_mut().map(|v| mask_for(v, &posed).map_or(0, |m| leave_out(v, &m))).collect();
-        for c in &counts {
+        for (c, v) in counts.iter().zip(&f.views) {
             out += *c as u64;
             touched += usize::from(*c > 0);
-            pixels += (f.width * f.height) as u64;
+            pixels += (v.camera.width * v.camera.height) as u64;
         }
     }
     stats.views = touched;
@@ -836,8 +836,8 @@ impl LossMask {
             return Ok(());
         }
         gpu.set_mask(data.width, data.height, &data.mask)?;
-        if let Some(f) = data.faces.as_ref().filter(|f| (f.width, f.height) != (data.width, data.height)) {
-            gpu.set_mask(f.width, f.height, &f.mask)?;
+        for s in data.faces.iter().flat_map(|f| &f.sizes).filter(|s| (s.width, s.height) != (data.width, data.height)) {
+            gpu.set_mask(s.width, s.height, &s.mask)?;
         }
         Ok(())
     }

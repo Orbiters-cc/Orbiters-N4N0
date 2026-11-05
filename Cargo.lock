@@ -4142,7 +4142,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-n4n0-mobile"
-version = "0.3.4-dev.31"
+version = "0.3.4-dev.32"
 dependencies = [
  "anyhow",
  "orbiters-core",

@@ -50,6 +50,12 @@ pub fn fetch_release(channel: &str, key: &[u8; 32]) -> anyhow::Result<Release> {
     SignedRelease::open(&bytes, key, channel)
 }
 
+/// Whether asking for a release failed only because the channel has none here yet (`fetch_release`'s error), which is no
+/// fault: a platform's first release is not out, say.
+pub fn none_published(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| matches!(cause.downcast_ref::<ureq::Error>(), Some(ureq::Error::StatusCode(404))))
+}
+
 /// Downloads `artifact` (resolved against [`feed`]) to `to`, through `to` with `.part` added: a download that stopped
 /// goes on from where it was, and only a whole file of the right size and SHA-256 takes `to`'s name. `progress` hears
 /// the bytes there are of the size; `stop` ends it early (an error).
@@ -176,6 +182,14 @@ mod tests {
         };
         let _ = stream.write_all(head.as_bytes());
         let _ = stream.write_all(&body[from.unwrap_or(0)..]);
+    }
+
+    #[test]
+    fn a_channel_without_a_release_is_no_failure() {
+        let not_there = anyhow::Error::from(ureq::Error::StatusCode(404)).context("https://orbiters.cc/downloads/desktop/macos/stable.json");
+        assert!(none_published(&not_there));
+        assert!(!none_published(&anyhow::Error::from(ureq::Error::StatusCode(500))));
+        assert!(!none_published(&anyhow::anyhow!("signature")));
     }
 
     #[test]

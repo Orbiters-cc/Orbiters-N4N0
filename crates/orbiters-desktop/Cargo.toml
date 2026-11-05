@@ -50,6 +50,8 @@ tray-icon = "0.26"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tray-icon = "0.26"
+# eframe's: the window process's activation policy (window.rs).
+winit = { version = "0.30", default-features = false }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSURL", "NSGeometry", "NSNotification", "NSObject", "NSProcessInfo", "NSRunLoop", "NSDate"] }
 objc2-app-kit = { version = "0.3", features = [

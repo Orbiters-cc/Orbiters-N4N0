@@ -71,7 +71,7 @@ walk, tracking, the SteamVR overlay, world view). Everything else works: Unity p
 reconstruction, the 3D view and the editors, Visited worlds and Events through your account, calls, N4N0 and its menu, and
 OSC with a **VRChat on another device of the network**.
 
-That VRChat is found by itself: a Quest, a Pico or an Android phone on the same Wi-Fi, with OSC on in VRChat's Action Menu
+What you make is in `~/Orbiters` (not Documents, which iCloud may sync). That VRChat is found by itself: a Quest, a Pico or an Android phone on the same Wi-Fi, with OSC on in VRChat's Action Menu
 (Options › OSC › Enabled), shows up in Home and Settings within seconds, and the only one found is connected at once
 (several: you choose; some routers keep devices from finding each other: type its address). A PC needs one launch option,
 which the same card writes out for you to copy: `--osc=9000:<this Mac's address>:9001`.

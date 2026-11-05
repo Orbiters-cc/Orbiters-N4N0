@@ -4183,6 +4183,7 @@ dependencies = [
  "ureq 3.4.2",
  "uuid",
  "windows 0.62.2",
+ "winit",
  "winresource",
 ]
 

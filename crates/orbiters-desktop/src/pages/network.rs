@@ -23,6 +23,7 @@ pub fn sidebar_status(lan: &LanStatus) -> (String, Tone) {
     match lan.link {
         LanLink::Off => ("OSC off".into(), Tone::Off),
         LanLink::NoNetwork => ("No local network".into(), Tone::Warn),
+        LanLink::NotAllowed => ("Allow the local network".into(), Tone::Warn),
         LanLink::Looking => ("Looking on the network".into(), Tone::Off),
         LanLink::Choose => (format!("{} found: choose one", lan.found.len()), Tone::Warn),
         LanLink::Waiting => (format!("Waiting for {}", short()), Tone::Warn),
@@ -36,6 +37,7 @@ pub fn summary(lan: &LanStatus) -> String {
     match lan.link {
         LanLink::Off => "OSC is off: turn on Action Menu control below".into(),
         LanLink::NoNetwork => "This Mac is on no local network".into(),
+        LanLink::NotAllowed => "macOS keeps this app off your local network".into(),
         LanLink::Looking => "Looking on your network…".into(),
         LanLink::Choose => "Several found: choose one".into(),
         LanLink::Waiting => format!("Waiting for {label}"),
@@ -67,7 +69,17 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, index: usize, state: &mut State, draft: &m
     let mut look_again = false;
     let mut copied = None;
     let mut refused = None;
+    let mut open_privacy = false;
     section(ui, cx, index, icons::BROADCAST, "VRChat on your network", Some(&subtitle), |ui| {
+        if lan.link == LanLink::NotAllowed {
+            let why = "Answer macOS's question if it is on the screen, or turn on Orbiters - N4N0 in System Settings › Privacy & Security › Local Network. VRChat cannot be found or reached until then.";
+            widgets::field(ui, "Allow the local network", Some(why), 150.0, |ui| {
+                if Button::new("Open Settings").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).size(Size::Sm).show(ui).clicked() {
+                    open_privacy = true;
+                }
+            });
+            widgets::separator(ui);
+        }
         for found in &lan.found {
             let chosen = lan.peer == Some(found.ip);
             widgets::field(ui, &found.label(), Some(&describe(found)), 120.0, |ui| {
@@ -93,7 +105,7 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, index: usize, state: &mut State, draft: &m
             widgets::separator(ui);
         }
         if lan.found.is_empty() || lan.link != LanLink::Connected {
-            let standalone = "On a Quest, a Pico or an Android phone: same Wi-Fi as this Mac, then in VRChat's Action Menu, Options › OSC › Enabled. It shows up here by itself. macOS asks once whether Orbiters may use the local network: allow it (System Settings › Privacy & Security › Local Network).";
+            let standalone = "On a Quest, a Pico or an Android phone: same Wi-Fi as this Mac, then in VRChat's Action Menu, Options › OSC › Enabled. It shows up here by itself.";
             widgets::field(ui, "VRChat on a headset or a phone", Some(standalone), 140.0, |ui| {
                 if Button::new("Look again").icon(icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).show(ui).clicked() {
                     look_again = true;
@@ -134,6 +146,12 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, index: usize, state: &mut State, draft: &m
     if look_again {
         cx.ctl.osc_reconnect();
     }
+    if open_privacy {
+        // System Settings' page, by the address macOS gives it.
+        if let Err(e) = std::process::Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork").spawn() {
+            cx.toasts.push(&ctx, toast::Kind::Error, format!("System Settings did not open: {e}"));
+        }
+    }
     if let Some(option) = copied {
         ctx.copy_text(option);
         cx.toasts.push(&ctx, toast::Kind::Success, "Copied.");
@@ -166,6 +184,7 @@ mod tests {
         assert_eq!(sidebar_status(&status(LanLink::Connected)), ("Quest-3".to_string(), Tone::Ok));
         assert_eq!(sidebar_status(&status(LanLink::Waiting)).0, "Waiting for Quest-3");
         assert_eq!(sidebar_status(&LanStatus { link: LanLink::Looking, ..Default::default() }), ("Looking on the network".to_string(), Tone::Off));
+        assert_eq!(sidebar_status(&LanStatus { link: LanLink::NotAllowed, ..Default::default() }), ("Allow the local network".to_string(), Tone::Warn));
         let at = LanStatus { link: LanLink::Connected, peer_label: Some("VRChat at 10.0.0.2".into()), ..Default::default() };
         assert_eq!(sidebar_status(&at).0, "10.0.0.2");
     }

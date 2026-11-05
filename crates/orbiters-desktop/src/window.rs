@@ -41,6 +41,15 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     let viewport = viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false).with_titlebar_buttons_shown(false);
     let options = eframe::NativeOptions {
+        // The application is an agent to macOS (Info.plist's LSUIElement: nothing in the Dock for the service alone): its
+        // window is what makes it one with a Dock tile and a menu bar. Set by winit, when AppKit is ready for it.
+        #[cfg(target_os = "macos")]
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+            builder.with_activation_policy(ActivationPolicy::Regular);
+            // Its menu is ours (mac.rs).
+            builder.with_default_menu(false);
+        })),
         viewport,
         renderer: eframe::Renderer::Wgpu,
         centered: true,

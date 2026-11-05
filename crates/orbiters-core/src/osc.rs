@@ -1112,13 +1112,33 @@ fn announce(a: &Announcement, ttl: u32) -> std::io::Result<()> {
     Ok(())
 }
 
+/// macOS keeps an app off the local network until the person allows it (Privacy & Security, Local Network): sends fail with
+/// "no route to host" while it asks and after a no. Noticed on the announcements, and cleared by the first that goes out.
+static NETWORK_REFUSED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the system keeps this app off the local network, as far as its last announcement could tell.
+pub fn local_network_refused() -> bool {
+    NETWORK_REFUSED.load(Ordering::Relaxed)
+}
+
+/// Whether a send failed because the system refused it (`EHOSTUNREACH` on Apple's systems).
+fn refused_by_system(e: &std::io::Error) -> bool {
+    cfg!(target_vendor = "apple") && e.raw_os_error() == Some(65)
+}
+
 /// [`announce`] after each pause of `waits` (milliseconds, in turn), on a thread of its own.
 fn announce_later(a: Announcement, waits: &'static [u64]) {
     let _ = std::thread::Builder::new().name("oscquery-announce".into()).spawn(move || {
         for &wait in waits {
             std::thread::sleep(Duration::from_millis(wait));
-            if let Err(e) = announce(&a, ANSWER_TTL) {
-                eprintln!("OSCQuery announcement failed: {e}");
+            match announce(&a, ANSWER_TTL) {
+                Ok(()) => NETWORK_REFUSED.store(false, Ordering::Relaxed),
+                Err(e) if refused_by_system(&e) => {
+                    if !NETWORK_REFUSED.swap(true, Ordering::Relaxed) {
+                        eprintln!("the system keeps this app off the local network until it is allowed: {e}");
+                    }
+                }
+                Err(e) => eprintln!("OSCQuery announcement failed: {e}"),
             }
         }
     });

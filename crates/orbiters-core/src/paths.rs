@@ -1,5 +1,5 @@
 //! Default locations. Everything the user produces lives under `Documents/Orbiters/` (sessions under the home folder's
-//! `Orbiters/` when OneDrive syncs Documents); settings under the platform config folder (`%APPDATA%/Orbiters/Desktop`
+//! `Orbiters/` when OneDrive syncs Documents, and all of it there on a Mac); settings under the platform config folder (`%APPDATA%/Orbiters/Desktop`
 //! on Windows, `~/.config/orbiters-desktop` on Linux); logs and caches, which stay on this computer, under
 //! `%LOCALAPPDATA%/Orbiters`. An app whose platform keeps its files elsewhere (Android: the app's own files folder)
 //! gives them once at start ([`set_roots`]).
@@ -47,6 +47,9 @@ pub fn documents_root() -> PathBuf {
 fn documents_root_in(roots: Option<&Roots>) -> PathBuf {
     match roots {
         Some(r) => r.documents.clone(),
+        // Not in a Mac's Documents: gigabytes of captures would go to iCloud where it keeps that folder (as OneDrive does on
+        // Windows, below), and the app would ask for permission before it could show anything.
+        None if cfg!(target_os = "macos") => fallback_dir().join("Orbiters"),
         None => dirs::document_dir().unwrap_or_else(fallback_dir).join("Orbiters"),
     }
 }
@@ -66,6 +69,9 @@ fn synced_by_onedrive(dir: &Path) -> bool {
 pub fn default_sessions_dir() -> PathBuf {
     if let Some(r) = roots() {
         return documents_root_in(Some(r)).join("Sessions");
+    }
+    if cfg!(target_os = "macos") {
+        return documents_root().join("Sessions");
     }
     match (dirs::document_dir(), dirs::home_dir()) {
         (Some(documents), Some(home)) if synced_by_onedrive(&documents) && !synced_by_onedrive(&home) => home.join("Orbiters").join("Sessions"),

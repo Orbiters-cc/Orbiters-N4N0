@@ -7,7 +7,7 @@ use crate::state::{LanLink, LanStatus};
 use orbiters_core::lan::{self, Choice, LanBrowser};
 use orbiters_core::osc::{Discovery, LanVrchat, Network, Ports};
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 const EVERY: Duration = Duration::from_millis(500);
@@ -15,6 +15,8 @@ const EVERY: Duration = Duration::from_millis(500);
 const QUIET_NS: u64 = 60_000_000_000;
 /// Keeps the service's own browsing from binding to one VRChat while several are there and none is chosen.
 const NO_NAME: &str = "VRChat-Client-none-chosen";
+/// While the system keeps the app off the network, its turns between two tries: the answer to its question comes unannounced.
+const TRY_AGAIN_EVERY: u32 = 10;
 
 /// What the controller keeps for this.
 #[derive(Default)]
@@ -22,6 +24,7 @@ pub(super) struct Runtime {
     look: AtomicBool,
     settings: AtomicBool,
     alive: AtomicBool,
+    turns: AtomicU32,
 }
 
 impl Runtime {
@@ -51,10 +54,11 @@ struct Running {
     asked: bool,
 }
 
-/// What the link is, from what is chosen and heard.
-fn link(choice: &Choice, here: Option<Ipv4Addr>, heard: bool) -> LanLink {
+/// What the link is, from what is chosen and heard, and whether the system lets the app on the network.
+fn link(choice: &Choice, here: Option<Ipv4Addr>, heard: bool, refused: bool) -> LanLink {
     match (here, choice) {
         (None, _) => LanLink::NoNetwork,
+        _ if refused && !heard => LanLink::NotAllowed,
         (_, Choice::Nobody) => LanLink::Looking,
         (_, Choice::Ask) => LanLink::Choose,
         (_, _) if heard => LanLink::Connected,
@@ -164,7 +168,11 @@ impl super::Controller {
             let answers = osc.as_ref().is_some_and(|o| o.vrchat_query().is_some());
             answers || received.is_some_and(|t| orbiters_core::clock::now_ns().saturating_sub(t) < QUIET_NS)
         };
-        let link = link(&choice, here, heard);
+        let refused = orbiters_core::osc::local_network_refused();
+        if refused && self.lan.turns.fetch_add(1, Ordering::Relaxed) % TRY_AGAIN_EVERY == 0 {
+            self.with_osc(|o| o.rediscover());
+        }
+        let link = link(&choice, here, heard, refused);
         if self.lan.alive.swap(link == LanLink::Connected, Ordering::Relaxed) != (link == LanLink::Connected) {
             eprintln!("VRChat on the network: {link:?} {}", peer.map(|p| p.to_string()).unwrap_or_default());
         }
@@ -194,15 +202,19 @@ mod tests {
     #[test]
     fn the_link_says_what_is_going_on() {
         let here = Some(Ipv4Addr::new(192, 168, 1, 20));
-        assert_eq!(link(&Choice::Nobody, None, false), LanLink::NoNetwork);
-        assert_eq!(link(&found(Some(9000)), None, true), LanLink::NoNetwork, "without a network, nothing else counts");
-        assert_eq!(link(&Choice::Nobody, here, false), LanLink::Looking);
-        assert_eq!(link(&Choice::Ask, here, false), LanLink::Choose);
+        assert_eq!(link(&Choice::Nobody, None, false, false), LanLink::NoNetwork);
+        assert_eq!(link(&found(Some(9000)), None, true, false), LanLink::NoNetwork, "without a network, nothing else counts");
+        assert_eq!(link(&Choice::Nobody, here, false, false), LanLink::Looking);
+        assert_eq!(link(&Choice::Ask, here, false, false), LanLink::Choose);
         // A headset answers over the network; a PC only by what it sends.
-        assert_eq!(link(&found(Some(9000)), here, false), LanLink::Connected);
-        assert_eq!(link(&found(None), here, false), LanLink::Waiting);
-        assert_eq!(link(&found(None), here, true), LanLink::Connected);
-        assert_eq!(link(&Choice::Typed(Ipv4Addr::new(10, 0, 0, 2)), here, false), LanLink::Waiting);
-        assert_eq!(link(&Choice::Last(Ipv4Addr::new(10, 0, 0, 2)), here, true), LanLink::Connected);
+        assert_eq!(link(&found(Some(9000)), here, false, false), LanLink::Connected);
+        assert_eq!(link(&found(None), here, false, false), LanLink::Waiting);
+        assert_eq!(link(&found(None), here, true, false), LanLink::Connected);
+        assert_eq!(link(&Choice::Typed(Ipv4Addr::new(10, 0, 0, 2)), here, false, false), LanLink::Waiting);
+        assert_eq!(link(&Choice::Last(Ipv4Addr::new(10, 0, 0, 2)), here, true, false), LanLink::Connected);
+        // The system says no: that first, unless something was heard all the same.
+        assert_eq!(link(&Choice::Nobody, here, false, true), LanLink::NotAllowed);
+        assert_eq!(link(&found(Some(9000)), here, false, true), LanLink::NotAllowed);
+        assert_eq!(link(&found(Some(9000)), here, true, true), LanLink::Connected);
     }
 }

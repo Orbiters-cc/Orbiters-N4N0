@@ -51,6 +51,8 @@ pub enum LanLink {
     Off,
     /// This computer is on no local network.
     NoNetwork,
+    /// The system keeps the app off the local network: it is asking, or was told no.
+    NotAllowed,
     /// No VRChat found yet.
     Looking,
     /// Several found: the person chooses.

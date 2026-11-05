@@ -210,6 +210,15 @@ impl Controller {
         }
         let release = match orbiters_update::net::fetch_release(&channel, &key) {
             Ok(release) => release,
+            // Nothing out on this channel yet: this app is the newest there is.
+            Err(e) if orbiters_update::net::none_published(&e) => {
+                let checked = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default();
+                self.update(|s| {
+                    s.update.checked = Some(checked);
+                    s.update.state = UpdateState::Idle;
+                });
+                return;
+            }
             Err(e) => {
                 eprintln!("updates: {e:#}");
                 if !ready {

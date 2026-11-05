@@ -200,6 +200,41 @@ pub struct World {
     pub image_url: String,
     pub author_id: String,
 }
+/// Whether `instance` (as VRChat's log writes it: `11027~private(usr_…)~region(eu)~nonce(…)`) is a private instance
+/// `owner` owns: the strict kind only. Invite+ (`~canRequestInvite`), friends, hidden (friends+), group and public
+/// instances are not, nor is one anybody else owns.
+pub fn private_instance_of(instance: &str, owner: &str) -> bool {
+    let mut parts = instance.split('~');
+    let number = parts.next().unwrap_or_default();
+    if number.is_empty() || !number.bytes().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let mut private = false;
+    for part in parts {
+        match part.split_once('(') {
+            Some(("private", who)) => private = !owner.is_empty() && who.strip_suffix(')') == Some(owner),
+            Some(("region" | "nonce", _)) => {}
+            // `canRequestInvite`, `friends(…)`, `hidden(…)`, `group(…)`, and whatever VRChat adds next.
+            _ => return false,
+        }
+    }
+    private
+}
+
+/// The instance VRChat says it made for `POST /instances`: its `instanceId`, else what follows the world in its
+/// `location`, when that is `world` and a private instance of `owner`.
+fn created_instance(reply: &serde_json::Value, world: &str, owner: &str) -> Option<String> {
+    let text = |key: &str| reply.get(key).and_then(serde_json::Value::as_str);
+    let instance = text("instanceId").map(str::to_owned).or_else(|| {
+        let (at, instance) = text("location")?.split_once(':')?;
+        (at == world).then(|| instance.to_owned())
+    })?;
+    if text("worldId").is_some_and(|w| w != world) {
+        return None;
+    }
+    private_instance_of(&instance, owner).then_some(instance)
+}
+
 /// What a picture belongs to, told by its ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
@@ -878,6 +913,17 @@ impl Client {
         self.world_lists.insert(path, (Instant::now(), worlds.clone(), more));
         Ok((worlds, more))
     }
+    /// A new private instance of `world` in `region`, owned by the signed-in account (`12345~private(usr_…)~region(eu)~nonce(…)`):
+    /// invite only, nobody can ask to join it. An answer that names anything else is refused here, so that what comes
+    /// out of this is always such an instance ([`private_instance_of`]).
+    pub fn create_private_instance(&mut self, world: &str, region: &str) -> Result<String> {
+        self.authenticated()?;
+        let owner = self.user.as_ref().map(|u| u.id.clone()).ok_or(Error::Unauthorized)?;
+        let body = serde_json::json!({ "worldId": world, "type": "private", "ownerId": owner, "region": region, "canRequestInvite": false });
+        let r = self.request("instances", "POST", format!("{BASE}/instances"), None, Some(body.to_string()))?;
+        let reply: serde_json::Value = serde_json::from_slice(&r.body).map_err(|_| Error::InvalidResponse)?;
+        created_instance(&reply, world, &owner).ok_or(Error::InvalidResponse)
+    }
     /// Sends the signed-in account an invite to `world`'s instance `instance` (`48213~region(eu)`: a public one, made
     /// when someone joins it), which VRChat shows in the game: the one way to join from outside it while it runs.
     pub fn invite_self(&mut self, world: &str, instance: &str) -> Result<()> {
@@ -1341,6 +1387,40 @@ fn image_url_allowed(url: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn only_the_strict_private_instance_of_its_owner_counts() {
+        let me = "usr_1339e525-d75d-4832-9104-98dd89287681";
+        assert!(private_instance_of(&format!("11027~private({me})~region(eu)"), me));
+        assert!(private_instance_of(&format!("11027~private({me})~region(eu)~nonce(ab-cd)"), me));
+        for other in [
+            "12345".to_string(),
+            "12345~region(eu)".to_string(),
+            format!("11027~private({me})~canRequestInvite~region(eu)"),
+            format!("11027~friends({me})~region(eu)"),
+            format!("11027~hidden({me})~region(eu)"),
+            "11027~group(grp_1)~groupAccessType(public)~region(eu)".to_string(),
+            "11027~private(usr_someone-else)~region(eu)".to_string(),
+            format!("~private({me})"),
+            format!("11027~private({me}"),
+            format!("11027~private({me})~whatever(next)"),
+            String::new(),
+        ] {
+            assert!(!private_instance_of(&other, me), "{other}");
+        }
+        assert!(!private_instance_of("11027~private()~region(eu)", ""), "no account, no owner");
+    }
+    #[test]
+    fn a_made_instance_is_read_only_when_it_is_the_private_one_asked_for() {
+        let (world, me) = ("wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b", "usr_1");
+        let instance = "98765~private(usr_1)~region(eu)~nonce(x)";
+        let read = |v: serde_json::Value| created_instance(&v, world, me);
+        assert_eq!(read(serde_json::json!({ "instanceId": instance, "worldId": world })).as_deref(), Some(instance));
+        assert_eq!(read(serde_json::json!({ "location": format!("{world}:{instance}") })).as_deref(), Some(instance));
+        assert_eq!(read(serde_json::json!({ "location": format!("wrld_other:{instance}") })), None);
+        assert_eq!(read(serde_json::json!({ "instanceId": instance, "worldId": "wrld_other" })), None);
+        assert_eq!(read(serde_json::json!({ "instanceId": "98765~region(eu)" })), None, "VRChat made a public one");
+        assert_eq!(read(serde_json::json!({})), None);
+    }
     use super::*;
     use std::collections::VecDeque;
     use std::sync::Mutex;

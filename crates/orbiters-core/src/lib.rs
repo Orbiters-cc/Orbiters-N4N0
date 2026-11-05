@@ -87,6 +87,29 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
     write_atomic_as(path, bytes, false)
 }
 
+/// `plain` protected for this user of this computer (Windows' DPAPI, with `entropy` telling this use from others; as it is
+/// elsewhere, where a private file is all there is).
+pub fn seal_for_user(plain: &[u8], entropy: &[u8]) -> anyhow::Result<Vec<u8>> {
+    #[cfg(windows)]
+    return dpapi::crypt(plain, entropy, true);
+    #[cfg(not(windows))]
+    {
+        let _ = entropy;
+        Ok(plain.to_vec())
+    }
+}
+
+/// What [`seal_for_user`] protected: an error when it was not sealed for this user, or was tampered with.
+pub fn open_for_user(sealed: &[u8], entropy: &[u8]) -> anyhow::Result<Vec<u8>> {
+    #[cfg(windows)]
+    return dpapi::crypt(sealed, entropy, false);
+    #[cfg(not(windows))]
+    {
+        let _ = entropy;
+        Ok(sealed.to_vec())
+    }
+}
+
 /// [`write_atomic`] for a file only its owner may read (Unix permissions 0600; on Windows the folder's, which is the
 /// user's own): a credential.
 pub fn write_atomic_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {

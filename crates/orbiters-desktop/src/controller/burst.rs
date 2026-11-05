@@ -324,6 +324,11 @@ impl super::Controller {
 
     /// Takes a 3D picture with VRChat's camera where it stands now.
     pub fn take_3d_picture(self: &Shared) -> anyhow::Result<()> {
+        self.take_3d_picture_of(self.settings().photo_3d)
+    }
+
+    /// [`Self::take_3d_picture`] of a given length.
+    pub fn take_3d_picture_of(self: &Shared, length: Photo3dLength) -> anyhow::Result<()> {
         anyhow::ensure!(self.snapshot.lock().unwrap().vrchat.running, "Start VRChat and open its camera first.");
         self.ensure_capture_idle()?;
         let (pose, focus, smooth, eye_height) = {
@@ -334,7 +339,6 @@ impl super::Controller {
             let eye_height = osc.latest.get("/avatar/eyeheight").and_then(|(v, _)| floats(v).first().copied());
             (pose, focus, smooth, eye_height)
         };
-        let length = self.settings().photo_3d;
         // VRChat's camera must be open: OSC switches its mode once it is (to Stream, for Spout), nothing opens it
         // (VRChat's `/usercamera/Mode` changes nothing while the camera is closed, and there is no endpoint to open it).
         anyhow::ensure!(self.camera_open() != Some(false), orbiters_n4n0::platform::CAMERA_CLOSED);

@@ -425,6 +425,9 @@ pub struct Snapshot {
     /// What "When SteamVR starts" last did to Windows' sound devices (Settings).
     #[serde(default)]
     pub vr_audio: crate::controller::vr_audio::Status,
+    /// The experimental VRChat bridge (`crate::bridge`): only filled in for an account the server says has it.
+    #[serde(default)]
+    pub bridge: crate::bridge::Status,
 }
 
 impl Snapshot {
@@ -467,6 +470,7 @@ impl Snapshot {
             update: UpdateStatus::default(),
             cleanup: None,
             vr_audio: Default::default(),
+            bridge: Default::default(),
         }
     }
 

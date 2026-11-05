@@ -126,6 +126,10 @@ pub struct Controller {
     /// The Orbiters account's credential and a sign-in in progress (controller/account.rs).
     account_runtime: Mutex<account::AccountRuntime>,
     vrchat_login: Mutex<vrchat_login::Runtime>,
+    /// The VRChat bridge's keeper (`crate::bridge`), in the tray service once it started.
+    bridge: Mutex<Option<Arc<crate::bridge::keeper::Keeper>>>,
+    /// The bridge restarts VRChat between two worlds: the moments it is closed start no reconstruction.
+    bridge_holds_reconstructions: AtomicBool,
     /// What this member added to the Map explorer, and the uploads' numbering (controller/maps.rs).
     maps_mine: Mutex<Option<MapsMine>>,
     upload_serial: AtomicU64,
@@ -278,6 +282,7 @@ pub type Shared = Arc<Controller>;
 
 mod account;
 mod around;
+mod bridge_game;
 mod burst;
 mod calls;
 mod cleanup;
@@ -330,6 +335,8 @@ impl Controller {
             avatar_changed_at: Mutex::new(None),
             account_runtime: Mutex::new(account::AccountRuntime::default()),
             vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
+            bridge: Mutex::new(None),
+            bridge_holds_reconstructions: AtomicBool::new(false),
             maps_mine: Mutex::new(None),
             upload_serial: AtomicU64::new(0),
             n4n0: {
@@ -1538,6 +1545,7 @@ impl Controller {
     /// still tell VRChat; OSC then stops before the worker leaves, so VRChat's echo of the record toggle starts or
     /// stops nothing, and nothing queued starts once the capture or the running reconstruction ends.
     pub fn shutdown(self: &Shared) {
+        self.stop_bridge();
         self.pending_start.lock().unwrap().take();
         self.change_queue(VecDeque::clear);
         if let Err(e) = self.stop_capture() {
@@ -1601,6 +1609,9 @@ impl Controller {
     /// Reconstructions wait for VRChat to close (settings' `reconstruct_while_playing`), or for a break: the headset off
     /// for a minute.
     fn held_for_vrchat(&self) -> bool {
+        if self.bridge_holds_reconstructions.load(Ordering::Relaxed) {
+            return true;
+        }
         self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.running && !self.headset_on_break()
     }
 

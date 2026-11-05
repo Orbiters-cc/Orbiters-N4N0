@@ -12,7 +12,8 @@
 //!   the game's process, reads none of its memory, injects nothing, and does nothing around Easy Anti-Cheat.
 
 pub mod capture;
-#[cfg(test)]
+// It drives a real game window through Windows; the bridge does nothing where VRChat does not run.
+#[cfg(all(test, windows))]
 mod e2e;
 pub mod game;
 pub mod guard;

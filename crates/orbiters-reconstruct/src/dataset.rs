@@ -505,8 +505,9 @@ const VIGNETTE_MIN: f32 = 0.02;
 /// The world's vignette, measured from the rig's own stamps and undone in its faces. Faces are drawn before the world's
 /// post-processing, so its vignette darkens them by where their tile stands in the frame, not by what they show. Tiles that fill
 /// the frame reach its corners: 18 % darker in Calling all villains and 11 % in Kitty Lounge of 2026-11-04, nothing in Dia de
-/// Muertos or Rainy Skyline. Emulated on those two, faces trained with it lost 0.33 dB on held-out views of the rig (0.44 and
-/// 0.21; three runs each, noise about 0.3) where the same frames undone lost nothing. Each stamp's `on` blocks are one grey, linear 0.3, at a known place in the
+/// Muertos or Rainy Skyline. Emulated on those two, three runs each, faces trained with it lost 0.33 dB on held-out views of the
+/// rig against the square layout (0.44 in the lounge, 0.21 in the hall) and undone 0.02 (0.30 gained, 0.34 lost: the lounge recovers,
+/// the hall varies too much between runs to tell, its LPIPS level either way). Each stamp's `on` blocks are one grey, linear 0.3, at a known place in the
 /// frame: in every rig frame they measure the world's vignette along two rows across the frame's whole width, whatever the
 /// world looks like. The median of a session's blocks by distance from the frame's middle is its curve (spread 2 % of its value at the
 /// far end on real faces, against 0.11 to 0.18 of effect, and it agrees with the darkening found by comparing keyframes to their

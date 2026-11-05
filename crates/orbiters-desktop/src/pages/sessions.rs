@@ -54,6 +54,8 @@ struct Detail {
     preview: Option<(String, Thumb)>,
     /// A reconstruction of this session was running last frame.
     reconstructing: bool,
+    /// What can be asked about its wearer (orbiters_core::picture::wearer_row), read once per result.
+    wearer_row: Option<Option<orbiters_core::picture::WearerRow>>,
 }
 
 /// What the area under the stats shows.
@@ -199,6 +201,7 @@ impl State {
             view: if reconstructed { View::Splats } else { View::Path },
             preview: None,
             reconstructing: false,
+            wearer_row: None,
         });
     }
 }
@@ -1060,6 +1063,10 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         if job.is_some() && !d.reconstructing {
             d.view = View::Splats;
         }
+        if d.reconstructing && job.is_none() {
+            // A new result: what can be asked about its wearer may have changed.
+            d.wearer_row = None;
+        }
         d.reconstructing = job.is_some();
         let splats = job.is_some() || session.reconstruction.is_some();
         if !splats {
@@ -1170,6 +1177,37 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             }
         }
         y += 52.0;
+        // With or without the wearer (orbiters_core::picture::wearer_row), once there is a result to redo.
+        if matches!(offer, super::reconstruct_again::Offer::Start { .. }) {
+            let dir = &session.dir;
+            if let Some(row) = *d.wearer_row.get_or_insert_with(|| orbiters_core::picture::wearer_row(dir)) {
+                let b = Button::new(row.label()).icon(if row.takes_out() { icons::USER_MINUS } else { icons::USER_PLUS }).variant(Variant::Ghost).width(side.width()).id_salt("wearer-row").hint(if row.takes_out() {
+                    "A new 3D view with the avatar you wore taken out: what stood behind it comes from other frames, where they saw it. Anyone touching your avatar comes out with it"
+                } else {
+                    "A new 3D view with the avatar you wore left in it"
+                });
+                if b.show_at(&mut cu, full(y)).clicked() {
+                    match (orbiters_core::picture::WearerChoice { take_out: row.takes_out() }).save(&session.dir) {
+                        Ok(()) => {
+                            d.again = super::reconstruct_again::press(ctx, cx, &session.dir, &title(&session), None, full(y));
+                            d.view = View::Splats;
+                            d.wearer_row = None;
+                        }
+                        Err(e) => {
+                            cx.run(ctx, Err(e));
+                        }
+                    }
+                }
+                y += 52.0;
+            }
+        }
+        // What was done about the wearer, in its own words.
+        if let Some(line) = session.reconstruction.as_ref().and_then(orbiters_core::picture::wearer_line) {
+            let job = cu.painter().layout_job(Txt::new(line, 12.0).color(theme::FG_3).line_height(17.0).job(side.width() - 8.0));
+            let h = job.size().y;
+            cu.painter().galley(pos2(side.left() + 4.0, y), job, theme::FG_3);
+            y += h + 12.0;
+        }
         // Send to Mixer, and beside it Export… (what its 3D view shows, as a file for other tools).
         let ready = session.reconstruction.is_some() && job.is_none();
         let mut export = Button::new("Export…").icon(icons::UPLOAD_SIMPLE).enabled(ready).id_salt("detail-export");

@@ -195,6 +195,9 @@ pub struct TrainedState {
     pub iterations: u32,
     pub seconds: f32,
     pub psnr: Option<f32>,
+    /// What leaving the wearer out did to this set (crate::wearer), once, before it was kept: the report's.
+    pub wearer_left: usize,
+    pub floor_patched: usize,
 }
 
 /// What the worker worked out before the steps, which a resumed run does not work out again.
@@ -233,6 +236,10 @@ pub struct Header {
     fading: bool,
     fade_again: bool,
     sky_width: u32,
+    #[serde(default)]
+    wearer_left: usize,
+    #[serde(default)]
+    floor_patched: usize,
     sky_trained: u32,
     /// Sections' lengths in bytes, in the order they follow, and a checksum of them all.
     sections: Vec<(String, u64)>,
@@ -406,6 +413,8 @@ pub fn write(session: &Path, key: &str, state: &Start, extras: &Extras) -> anyho
         gaussians: 0,
         seconds: 0.0,
         psnr: None,
+        wearer_left: 0,
+        floor_patched: 0,
         budget: extras.budget,
         starved: extras.starved,
         sky_fill: extras.sky_fill,
@@ -465,6 +474,8 @@ pub fn write(session: &Path, key: &str, state: &Start, extras: &Extras) -> anyho
             header.gaussians = t.gaussians.len();
             header.seconds = t.seconds;
             header.psnr = t.psnr;
+            header.wearer_left = t.wearer_left;
+            header.floor_patched = t.floor_patched;
             sections.push(("gaussians", owned(&t.gaussians.pack())));
             if let Some((width, rgb)) = &extras.trained_sky {
                 header.sky_width = *width;
@@ -547,7 +558,7 @@ pub fn read_body(session: &Path, header: &Header) -> anyhow::Result<Checkpoint> 
             ensure!(rgb.len() == texels, "{} sky texels for {} across", rgb.len(), header.sky_width);
             extras.trained_sky = Some((header.sky_width, rgb));
         }
-        Start::Trained(Box::new(TrainedState { gaussians, iterations: header.iterations, seconds: header.seconds, psnr: header.psnr }))
+        Start::Trained(Box::new(TrainedState { gaussians, iterations: header.iterations, seconds: header.seconds, psnr: header.psnr, wearer_left: header.wearer_left, floor_patched: header.floor_patched }))
     } else {
         let buffers = TrainingBuffers { params: r.next("params")?, m1: r.next("moment 1")?, m2: r.next("moment 2")?, stats: r.next("stats")? };
         let n = header.gaussians;
@@ -663,7 +674,7 @@ mod tests {
         let mut g = Gaussians::default();
         g.push([1.0, 2.0, 3.0], [0.1, 0.2, 0.3], [1.0, 0.0, 0.0, 0.0], 0.5, [0.4, 0.5, 0.6]);
         g.sky[0] = true;
-        let state = Start::Trained(Box::new(TrainedState { gaussians: g.clone(), iterations: 900, seconds: 40.0, psnr: None }));
+        let state = Start::Trained(Box::new(TrainedState { gaussians: g.clone(), iterations: 900, seconds: 40.0, psnr: None, wearer_left: 12, floor_patched: 34 }));
         let sky = (4, vec![[0.25, 0.5, 0.75]; 8]);
         let e = Extras { trained_sky: Some(sky.clone()), ..extras() };
         write(&dir, "k", &state, &e).unwrap();
@@ -673,7 +684,7 @@ mod tests {
         let cp = read_body(&dir, &header).unwrap();
         assert_eq!(cp.extras.trained_sky, Some(sky));
         let Start::Trained(t) = cp.start else { panic!("its steps are done") };
-        assert_eq!((t.gaussians, t.iterations, t.seconds), (g, 900, 40.0));
+        assert_eq!((t.gaussians, t.iterations, t.seconds, t.wearer_left, t.floor_patched), (g, 900, 40.0, 12, 34));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -300,7 +300,7 @@ mod calls;
 mod cleanup;
 mod dolly;
 pub(crate) mod hide_self;
-pub use hide_self::upload_can_hide;
+pub use hide_self::{upload_can_hide, uploaded_avatar_name};
 mod maps;
 pub(crate) mod menu_shares;
 mod n4n0;

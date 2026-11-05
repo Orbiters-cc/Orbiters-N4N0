@@ -47,6 +47,24 @@ pub fn from_depth(data: &Dataset, budget: usize, held_out: &[usize], mut progres
     times.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
     let nearest: Vec<Vec<usize>> = data.depth_views.par_iter().map(|dv| nearest_in_time(&times, dv.game_time, 4)).collect();
     let seeds: Vec<Seed> = candidates.par_iter().map(|&(v, i)| seed(data, &data.depth_views[v as usize], i as usize, &nearest[v as usize])).collect();
+    // A session the wearer left: the floor behind them may show in no keyframe near a depth frame's moment. Any other keyframe
+    // that shows it colours it; one no keyframe shows goes, or it would stay the grey of a seed no colour step ever reaches,
+    // a pale smudge where they stood (Calling all villains 22-14-24).
+    let every: Vec<usize> = times.iter().map(|t| t.1).collect();
+    let left = data.views.par_iter().any(|v| v.image.par_iter().any(|p| crate::wearer::is_out(*p)));
+    let seeds: Vec<Seed> = if left {
+        seeds
+            .into_par_iter()
+            .filter_map(|mut s| {
+                if !s.seen && !s.sky {
+                    s.color = color_at(data, s.mean, &every)?;
+                }
+                Some(s)
+            })
+            .collect()
+    } else {
+        seeds
+    };
     let mut g = Gaussians::default();
     let opacity = logit(0.6);
     for s in seeds {
@@ -94,6 +112,9 @@ fn rays(g: &mut Gaussians, views: &[&View], mask: &[f32], width: u32, height: u3
         let p = scene[rng.usize(..scene.len())];
         let (x, y) = ((p % width) as f32, (p / width) as f32);
         let z = 1.0 / (far + rng.f32() * (near - far));
+        if crate::wearer::is_out(v.image[p as usize]) {
+            continue;
+        }
         let Some(color) = sample_rgb(&v.image, width, height, x, y) else { continue };
         let s = (z * spacing / v.camera.fx).max(1e-4).ln();
         g.push(v.camera.unproject(x, y, z), [s; 3], [1.0, 0.0, 0.0, 0.0], opacity, color);
@@ -183,6 +204,8 @@ struct Seed {
     rotation: [f32; 4],
     color: [f32; 3],
     sky: bool,
+    /// A keyframe it was to take its colour from shows it.
+    seen: bool,
 }
 
 /// The disc of sample `i` of a depth frame: facing its neighbours' surface (or the camera), coloured from `views`.
@@ -190,7 +213,8 @@ fn seed(data: &Dataset, dv: &DepthView, i: usize, views: &[usize]) -> Seed {
     let (p, footprint, sky) = point(dv, i);
     let normal = facing_normal(dv, i, p, sky);
     let s = (footprint * 0.75).max(1e-3).ln();
-    Seed { mean: p, log_scale: [s, s, (footprint * 0.1).max(1e-4).ln()], rotation: quat_from_z(normal), color: color_at(data, p, views).unwrap_or([0.5, 0.5, 0.5]), sky }
+    let color = color_at(data, p, views);
+    Seed { mean: p, log_scale: [s, s, (footprint * 0.1).max(1e-4).ln()], rotation: quat_from_z(normal), color: color.unwrap_or([0.5, 0.5, 0.5]), sky, seen: color.is_some() }
 }
 
 /// The normal of the surface sample `i` of a depth frame hit at `p`, from its neighbours (else the direction to the
@@ -241,8 +265,11 @@ pub(crate) fn color_at(data: &Dataset, p: [f32; 3], views: &[usize]) -> Option<[
         if let Some((u, vv, _)) = cam.project(p) {
             let (x, y) = (u.round() as i64, vv.round() as i64);
             if x >= 0 && y >= 0 && (x as u32) < data.width && (y as u32) < data.height && data.mask[(y as u32 * data.width + x as u32) as usize] > 0.5 {
-                if let Some(c) = sample_rgb(&v.image, data.width, data.height, u, vv) {
-                    return Some(c);
+                // Not from a pixel that shows the wearer who left (crate::wearer).
+                if !crate::wearer::is_out(v.image[(y as u32 * data.width + x as u32) as usize]) {
+                    if let Some(c) = sample_rgb(&v.image, data.width, data.height, u, vv) {
+                        return Some(c);
+                    }
                 }
             }
         }
@@ -389,6 +416,27 @@ mod tests {
             data.depth_views[0].unknown.insert(i);
         }
         assert!(from_depth(&data, usize::MAX, &[], |_| {}).is_empty());
+    }
+
+    /// In a session the wearer left, a seed takes no colour from a pixel that shows them, looks further for a keyframe that
+    /// shows it, and goes when none does: it would stay grey, as nothing trains what no pixel sees.
+    #[test]
+    fn seeds_take_no_colour_from_the_wearer_and_go_when_nothing_shows_them() {
+        // The red keyframe, nearest in time, has its right half left out; the green one, long after, sees it all.
+        let mut data = session(3, 0.0);
+        let half = |v: &mut View| v.image.iter_mut().enumerate().filter(|(p, _)| *p as u32 % W >= W / 2).for_each(|(_, px)| *px &= 0x00FF_FFFF);
+        half(&mut data.views[0]);
+        let walls = |g: &Gaussians| g.colors.iter().zip(&g.sky).filter(|(_, s)| !**s).map(|(c, _)| *c).collect::<Vec<_>>();
+        let colours = walls(&from_depth(&data, usize::MAX, &[], |_| {}));
+        let (red, green) = (colours.iter().filter(|c| c[0] > 0.7).count(), colours.iter().filter(|c| c[1] > 0.7).count());
+        assert!(red > 0 && green > 0 && red + green == colours.len(), "{red} red, {green} green of {}", colours.len());
+        // Left out of both: that half of the wall has no colour to take, and leaves no grey behind.
+        half(&mut data.views[1]);
+        let colours = walls(&from_depth(&data, usize::MAX, &[], |_| {}));
+        assert!(!colours.is_empty() && colours.iter().all(|c| c[0] > 0.7), "only what a keyframe shows, red");
+        // A session nobody left keeps its grey seeds as ever.
+        let plain = session(3, 0.0);
+        assert!(!from_depth(&plain, usize::MAX, &[], |_| {}).is_empty());
     }
 
     /// Colours come from the training keyframes: a held-out keyframe nearer in time does not paint the seeds.

@@ -28,6 +28,12 @@
 //! picture, and the person reads why and what to do on the menus, the toast and the Capture page, at that moment
 //! ([`cannot_hide_text`]).
 //!
+//! **What happens to the wearer then.** Nothing from outside can change an uploaded avatar, so the frames show them: the capture
+//! goes on, and reconstruction takes them out afterwards (orbiters_reconstruct::wearer, told by `picture.json` or the recording's
+//! camera mask). On Enzo's seven recordings that left the place as it was with nothing of the avatar but its shadow, so this is no
+//! longer said as a failure; an upload with the current Toolkit stays the cleaner way, as nothing has to be guessed, and the
+//! Capture page offers it in a press.
+//!
 //! **The others.** `/usercamera/RemotePlayer` is the mask's other half: read and set like Local User, and put back at the end
 //! exactly as it was. No recording had it off with Local User on, so whether the kit survives it is unknown (it should: the kit
 //! draws for its wearer only). If the strip goes away while it is off, it is turned back on and the person is told
@@ -76,7 +82,7 @@ const HIDE_SELF_TOOLKIT: (u32, u32, u32) = (0, 4, 18);
 
 const WITHOUT_YOU: &str = "Recording without your avatar, as Local User is off in VRChat's camera: it is hidden on your side while this records, and comes back after. Others still see you.";
 const NOT_CONFIRMED: &str =
-    "VRChat did not confirm your avatar hid itself. Check this capture: if your avatar shows, upload it again with the current Orbiters Toolkit.";
+    "VRChat did not confirm your avatar hid itself. Check this capture: if your avatar shows, Reconstruct without my avatar takes it out, and an upload with the current Orbiters Toolkit keeps it out cleanly.";
 const NOT_TAKEN: &str =
     "VRChat kept Local User off, so your avatar is shown again and this recording has no keyframes. Turn Local User on in the camera's Mask menu.";
 const OTHERS_KEPT: &str = "VRChat kept Remote User on, so other players are in this picture.";
@@ -120,18 +126,19 @@ fn toolkit_version(generator: &str) -> Option<(u32, u32, u32)> {
 pub fn cannot_hide_text(name: Option<&str>, generator: Option<&str>) -> String {
     let avatar = name.unwrap_or("this avatar");
     let (a, b, c) = HIDE_SELF_TOOLKIT;
+    const AFTER: &str = "It is in the frames, and comes out of the 3D view when this capture is reconstructed.";
     match generator.and_then(|g| toolkit_version(g).map(|v| (v, g))) {
         Some((version, generator)) if version >= HIDE_SELF_TOOLKIT => {
             let toolkit = generator.strip_prefix("Orbiters ").unwrap_or(generator);
             format!(
-                "Your avatar IS in this capture. {avatar} was uploaded with {toolkit} and can hide itself, but VRChat does not list the parameter: it keeps an old list for this avatar. In VRChat's Action Menu press Options, OSC, Reset Config, then change avatar and back."
+                "{avatar} could not hide itself this time: it was uploaded with {toolkit}, but VRChat keeps an old list of its parameters. {AFTER} For a cleaner result, with nothing guessed and no shadow left: in VRChat's Action Menu press Options, OSC, Reset Config, then change avatar and back."
             )
         }
         Some((_, generator)) => {
             let toolkit = generator.strip_prefix("Orbiters ").unwrap_or(generator);
-            format!("Your avatar IS in this capture. {avatar} was uploaded with {toolkit}, which cannot hide it. Update Orbiters Toolkit to {a}.{b}.{c} or later in its project and upload it again.")
+            format!("{avatar} was uploaded with {toolkit}, which cannot hide it while the camera records. {AFTER} An upload with Orbiters Toolkit {a}.{b}.{c} or later gives a cleaner result, with nothing guessed and no shadow left.")
         }
-        None => format!("Your avatar IS in this capture: {avatar} did not answer the message that hides it. Update Orbiters Toolkit to {a}.{b}.{c} or later in its project and upload it again."),
+        None => format!("{avatar} did not answer the message that hides it. {AFTER} An upload with Orbiters Toolkit {a}.{b}.{c} or later gives a cleaner result, with nothing guessed and no shadow left."),
     }
 }
 
@@ -140,6 +147,12 @@ pub fn upload_can_hide(avatar_id: &str) -> Option<bool> {
     let file = orbiters_core::paths::avatars_dir().join(orbiters_contracts::avatar::file_name(avatar_id));
     let manifest = AvatarManifest::parse(&std::fs::read_to_string(file).ok()?).ok()?;
     Some(toolkit_version(manifest.generator.as_deref()?)? >= HIDE_SELF_TOOLKIT)
+}
+
+/// The name of the avatar `avatar_id`, as its manifest says.
+pub fn uploaded_avatar_name(avatar_id: &str) -> Option<String> {
+    let file = orbiters_core::paths::avatars_dir().join(orbiters_contracts::avatar::file_name(avatar_id));
+    AvatarManifest::parse(&std::fs::read_to_string(file).ok()?).ok()?.name
 }
 
 /// Why frames come without a strip, from what VRChat says. The mask first: it culls the kit whatever the avatar has.
@@ -282,7 +295,7 @@ impl super::Controller {
         let manifest = self.worn_manifest();
         let text = cannot_hide_text(manifest.as_ref().and_then(|m| m.name.as_deref()), manifest.as_ref().and_then(|m| m.generator.as_deref()));
         self.update(|s| s.capture.left_out.wearer = Left::InPicture);
-        self.tell_about_picture(NoticeKind::Warning, &text, "Your avatar shows: upload it again");
+        self.tell_about_picture(NoticeKind::Info, &text, "Your avatar comes out afterwards");
     }
 
     /// The manifest of the avatar worn, when its upload wrote one here.
@@ -620,19 +633,20 @@ mod tests {
     fn the_message_says_why_and_what_to_do() {
         let his = cannot_hide_text(Some("The 1MB Ultirex"), Some("Orbiters Toolkit 0.4.11"));
         assert!(
-            his.contains("IS in this capture")
+            his.contains("comes out of the 3D view")
                 && his.contains("The 1MB Ultirex")
                 && his.contains("Toolkit 0.4.11")
                 && his.contains("0.4.18 or later")
-                && his.contains("upload it again"),
+                && his.contains("cleaner result")
+                && !his.contains("IS in this capture"),
             "{his}"
         );
         let stale = cannot_hide_text(Some("The 1MB Ultirex"), Some("Orbiters Toolkit 0.4.18"));
-        assert!(stale.contains("IS in this capture") && stale.contains("Reset Config") && !stale.contains("upload it again"), "{stale}");
+        assert!(stale.contains("comes out of the 3D view") && stale.contains("Reset Config") && !stale.contains("An upload"), "{stale}");
         let later = cannot_hide_text(None, Some("Orbiters Toolkit 0.5.0-dev.3"));
         assert!(later.contains("Reset Config") && later.contains("this avatar"), "{later}");
         let unknown = cannot_hide_text(None, None);
-        assert!(unknown.contains("IS in this capture") && unknown.contains("0.4.18 or later"), "{unknown}");
+        assert!(unknown.contains("comes out of the 3D view") && unknown.contains("0.4.18 or later"), "{unknown}");
         assert!(toolkit_version("Unity").is_none());
     }
 
@@ -752,8 +766,8 @@ mod tests {
         assert!(sent.iter().filter(|(_, a, _)| a == &hide).count() >= 3, "it asked: {sent:?}");
         says(ctl, true);
         assert_eq!(ctl.view().capture.left_out.wearer, Left::InPicture);
-        assert!(ctl.view().capture.left_out.why.as_deref().is_some_and(|w| w.contains("IS in this capture")));
-        assert!(toast_with(ctl, NoticeKind::Warning, "IS in this capture"));
+        assert!(ctl.view().capture.left_out.why.as_deref().is_some_and(|w| w.contains("comes out of the 3D view")));
+        assert!(toast_with(ctl, NoticeKind::Info, "comes out of the 3D view"));
         ctl.restore_hide_self();
         let sent = stand.heard(Duration::from_millis(200));
         assert_eq!(sent.iter().map(|(_, a, v)| (a.clone(), v.clone())).collect::<Vec<_>>(), vec![(LOCAL_PLAYER.to_string(), rosc::OscType::Bool(false))]);
@@ -799,7 +813,7 @@ mod tests {
         ctl.start_hide_self(&tree(true, false), true, true);
         assert!(!ctl.hiding_self());
         assert_eq!(ctl.view().capture.left_out.wearer, Left::InPicture);
-        assert!(toast_with(ctl, NoticeKind::Warning, "IS in this capture"));
+        assert!(toast_with(ctl, NoticeKind::Info, "comes out of the 3D view"));
         let flips = stand.heard(Duration::from_millis(400));
         assert!(flips.iter().all(|(_, a, _)| a != LOCAL_PLAYER), "{flips:?}");
         assert!(stand.heard(Duration::from_millis(400)).is_empty(), "the flips ended");

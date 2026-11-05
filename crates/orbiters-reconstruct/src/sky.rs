@@ -250,7 +250,7 @@ pub fn seed_map(data: &Dataset, width: u32, held_out: &[usize]) -> (SkyMap, SkyS
             .map(|y| {
                 let mut hits = Vec::new();
                 for x in (0..iw).step_by(2) {
-                    if data.mask[(y * iw + x) as usize] < 0.5 {
+                    if data.mask[(y * iw + x) as usize] < 0.5 || crate::wearer::is_out(v.image[(y * iw + x) as usize]) {
                         continue;
                     }
                     let far = v.camera.unproject(x as f32, y as f32, 1e4);

@@ -16,11 +16,34 @@ pub struct Options {
     pub validate: bool,
     /// Undo the world's chromatic aberration when it has any (crate::aberration).
     pub aberration: bool,
+    /// Whether the wearer leaves this session's views and depth (crate::wearer).
+    pub wearer: WearerOut,
+}
+
+/// Whether [`prepare`] takes the wearer out (crate::wearer).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WearerOut {
+    /// As the session says (orbiters_core::picture::wearer_goes).
+    #[default]
+    Auto,
+    Keep,
+    Remove,
+}
+
+impl WearerOut {
+    /// Whether the wearer of the session in `dir` leaves it.
+    pub fn goes(self, dir: &Path) -> bool {
+        match self {
+            WearerOut::Auto => orbiters_core::picture::wearer_goes(dir),
+            WearerOut::Keep => false,
+            WearerOut::Remove => true,
+        }
+    }
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { width: 1920, budget: Budget::default(), validate: true, aberration: true }
+        Self { width: 1920, budget: Budget::default(), validate: true, aberration: true, wearer: WearerOut::Auto }
     }
 }
 
@@ -30,14 +53,22 @@ pub struct Prepared {
     pub depth: Option<FixStats>,
     /// The aberration undone, if any: scoring passes renders through it (crate::train::score_held_out).
     pub undo: Option<Undo>,
+    /// The wearer, taken out (crate::wearer): what they filled, and what was done.
+    pub wearer: Option<(crate::wearer::Volume, crate::wearer::Stats)>,
+    /// The wearer should have gone and nothing of them was found (or the session has no skeleton to find them by).
+    pub wearer_not_found: bool,
 }
 
 /// Loads and prepares a session; `progress` (0..1) follows the loading.
 pub fn prepare(dir: &Path, options: &Options, progress: impl FnMut(f32)) -> anyhow::Result<Prepared> {
     let mut data = dataset::load_with(dir, options.width, options.budget, progress)?;
     let depth = options.validate.then(|| crate::priority::on_loading_threads(|| depthfix::mark_untrusted(&mut data, &FixParams::default())));
+    // Before the aberration is undone: its realignment keeps a pixel's alpha, which says it shows the wearer.
+    let goes = options.wearer.goes(dir);
+    let wearer = if goes { crate::wearer::Track::read(dir).and_then(|track| crate::priority::on_loading_threads(|| crate::wearer::remove(&mut data, &track))) } else { None };
+    let wearer_not_found = goes && wearer.is_none();
     let undo = if options.aberration { aberration::undo(&mut data) } else { None };
-    Ok(Prepared { data, depth, undo })
+    Ok(Prepared { data, depth, undo, wearer, wearer_not_found })
 }
 
 impl Prepared {
@@ -88,6 +119,21 @@ impl Prepared {
                 f.near_samples
             ));
         }
+        if let Some((_, s)) = &self.wearer {
+            out.push(format!(
+                "the wearer left: {} of {} depth hits on them, {:.1} % of the pixels of {} of {} views, {} voxels in {} still stretches, floor at {:?}",
+                s.depth_samples,
+                s.depth_hits,
+                s.pixel_share * 100.0,
+                s.views,
+                s.views_total,
+                s.voxels,
+                s.slices,
+                s.floor
+            ));
+        } else if self.wearer_not_found {
+            out.push("the wearer should have left, and nothing of them was found".into());
+        }
         if let Some(u) = &self.undo {
             out.push(format!("chromatic aberration (intensity {:.3}) undone in {} keyframes", u.intensity, self.data.views.len()));
         }
@@ -122,6 +168,15 @@ mod tests {
 
     fn options() -> Options {
         Options { width: 640, budget: Budget::UNLIMITED, ..Default::default() }
+    }
+
+    /// The checkpoint's key takes this answer: a choice changed since a pause cannot go on from what it trained.
+    #[test]
+    fn whether_the_wearer_goes_follows_the_session_and_the_lab() {
+        let s = fixture::session("wearer-goes", 64, 36, 2, &[]);
+        assert!(!WearerOut::Auto.goes(&s.dir) && !WearerOut::Keep.goes(&s.dir) && WearerOut::Remove.goes(&s.dir));
+        orbiters_core::picture::WearerChoice { take_out: true }.save(&s.dir).unwrap();
+        assert!(WearerOut::Auto.goes(&s.dir) && !WearerOut::Keep.goes(&s.dir));
     }
 
     /// A session whose every depth sample the decoder could not read says so (it used to be told to record depth

@@ -71,6 +71,31 @@ pub struct Report {
     /// Depth samples the frames carry, and of those unknown after validation (the decoder's included).
     pub depth_samples: Option<usize>,
     pub depth_unknown: Option<usize>,
+    /// The wearer of the capture kit, taken out of this result because they should not be in it and their avatar could not
+    /// hide itself. `None`: nothing of the kind was done.
+    #[serde(default)]
+    pub wearer: Option<WearerOut>,
+    /// They should have gone and nothing of them was found to take out.
+    #[serde(default)]
+    pub wearer_not_found: bool,
+}
+
+/// What taking the wearer out did: numbers for the gallery's line and for whoever checks it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WearerOut {
+    /// Share of the views' pixels that showed them.
+    pub pixel_share: f32,
+    /// Views (keyframes and rig faces) they were in, of all.
+    pub views: usize,
+    pub views_total: usize,
+    /// Depth samples on them, of those that hit something.
+    pub depth_samples: usize,
+    pub depth_hits: usize,
+    /// Gaussians that still lay where they stood at the end of training, and floor patched under their feet (a guess, from
+    /// the floor's colour around).
+    pub gaussians_left: usize,
+    pub floor_patched: usize,
 }
 
 /// Where a run puts its result (the worker writes here). Readers take [`result_dir`].

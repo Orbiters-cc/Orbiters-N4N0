@@ -293,6 +293,57 @@ fn wheel(run: &mut Run<'_>, at: Pos2, down: f32) -> anyhow::Result<()> {
     run.wait(0.8)
 }
 
+/// `--only capture-wearer`: a capture that shows its wearer, on the real view and the real worker. A disposable library in
+/// `--sessions` with one session whose name ends in `22-25-19` and whose result from before shows them. Its window offers
+/// Reconstruct without my avatar; the press runs the worker; the window follows the new result, says what was done and offers the
+/// way back; the card's menu says the same.
+pub(super) fn wearer(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {
+    use orbiters_core::picture::{WearerChoice, WEARER_FILE};
+    let dir = named(settings, "22-25-19")?;
+    let _ = std::fs::remove_file(dir.join(WEARER_FILE));
+    let (ctl, backend, handles) = library(settings, gpu);
+    let mut run = Run::new(gpu, backend, scale);
+    run.app.set_gpu(handles);
+    let t = run.time();
+    run.app.set_page(Page::Sessions, t);
+    run.until("the session list", 30.0, |run| run.app.sessions_mut().loaded())?;
+    run.wait(1.0)?;
+    run.size = vec2(1280.0, 820.0);
+    let n = open_window(&mut run, &dir)?;
+    run.wait(0.8)?;
+    run.shoot(out, "wearer-window-before")?;
+    let report = || reconstruction::read_report(&dir);
+    anyhow::ensure!(report().is_some_and(|r| r.wearer.is_none()), "a result that shows its wearer to begin with");
+    anyhow::ensure!(on(&run, "Reconstruct without my avatar") == Some(true), "its window offers to take them out");
+    run.click("Reconstruct without my avatar", 10.0)?;
+    run.wait(1.0)?;
+    anyhow::ensure!(WearerChoice::read(&dir) == Some(WearerChoice { take_out: true }), "the choice is kept with the session");
+    // Something to lose asks first; nothing to lose starts at once.
+    if on(&run, "Reconstruct again") == Some(true) && ctl.view().reconstruction.is_none() && ctl.view().reconstruct_queue.is_empty() {
+        run.click("Reconstruct again", 10.0)?;
+    }
+    run.until("the reconstruction to start", 15.0, |_| ctl.view().reconstruction.is_some())?;
+    run.pace = Duration::from_millis(60);
+    run.until("the new result", 900.0, |_| ctl.view().reconstruction.is_none() && report().is_some_and(|r| r.wearer.is_some()))?;
+    run.pace = Duration::ZERO;
+    run.wait(2.0)?;
+    let r = report().context("its report")?;
+    println!("{:?}, wearer_not_found {}", r.wearer, r.wearer_not_found);
+    run.shoot(out, "wearer-window-after")?;
+    anyhow::ensure!(on(&run, "Reconstruct with my avatar") == Some(true), "the way back, once the result has come");
+    close_window(&mut run)?;
+    let ctx = run.ctx.clone();
+    // As a right press on its card.
+    let at = run.app.sessions_mut().gallery_mut().stage_card_centre(n).context("its card")?;
+    run.frame(vec![Event::PointerMoved(at)], false)?;
+    run.frame(vec![Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: true, modifiers: Default::default() }], false)?;
+    run.frame(vec![Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: false, modifiers: Default::default() }], false)?;
+    let _ = ctx;
+    run.wait(0.8)?;
+    run.shoot(out, "wearer-card-menu")?;
+    Ok(())
+}
+
 pub(super) fn walk(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {
     let main = named(settings, "12-14-00")?;
     let other = named(settings, "12-20-00")?;

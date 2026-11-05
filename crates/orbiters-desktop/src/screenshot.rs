@@ -204,6 +204,9 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     if only.as_deref() == Some("capture-actions-tint") {
         return capture_actions::tint(&mut Offscreen::new()?, &out, &settings, scale);
     }
+    if only.as_deref() == Some("capture-wearer") {
+        return capture_actions::wearer(&mut Offscreen::new()?, &out, &settings, scale);
+    }
     if only.as_deref() == Some("pause-resume") {
         return pause_resume::walk(&mut Offscreen::new()?, &out, &settings, scale);
     }
@@ -288,6 +291,11 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     picture_world_shows.capture.left_out = crate::state::LeftOut { wearer: orbiters_core::picture::Left::InPicture, others: orbiters_core::picture::Left::Out, why: Some(cannot.to_string()) };
     let mut idle_after = idle.clone();
     idle_after.capture.left_out = picture_world_shows.capture.left_out.clone();
+    // The worn avatar in a project the fixture has, and in none: Update the Toolkit, and its polite no.
+    let mut toolkit_project = idle_after.clone();
+    toolkit_project.n4n0.avatar_id = Some("avtr_00000000-0000-4000-8000-000000000001".into());
+    let mut toolkit_elsewhere = idle_after.clone();
+    toolkit_elsewhere.n4n0.avatar_id = Some("avtr_4f3b5bc4-0000-4000-8000-000000000000".into());
     let mut no_strip = recording.clone();
     no_strip.capture.trail.clear();
     no_strip.capture.coverage = None;
@@ -1068,7 +1076,35 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             frames: 120,
             splash: false,
             open_detail: false,
-            toasts: vec![(toast::Kind::Warning, cannot)],
+            toasts: vec![(toast::Kind::Info, cannot)],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-toolkit-project",
+            page: Page::Capture,
+            snapshot: toolkit_project,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-toolkit-elsewhere",
+            page: Page::Capture,
+            snapshot: toolkit_elsewhere,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
             pointer: None,
             scroll: 0.0,
             world: None,
@@ -2070,7 +2106,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         }
         if f == 0 {
             app.set_page(sc.page, t);
-            if sc.name.starts_with("projects-") {
+            if sc.name.starts_with("projects-") || sc.name.starts_with("capture-toolkit") {
                 app.projects_mut().stage(&ctx, sc.name);
             }
             if sc.name.starts_with("projects-preview") || sc.name == "projects-stills" {

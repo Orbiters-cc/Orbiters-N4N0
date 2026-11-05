@@ -19,6 +19,8 @@ use orbiters_ui::{icons, trail};
 pub struct State {
     /// The avatar worn, and whether its upload can hide itself, as its manifest says (read once per avatar).
     upload: Option<(String, Option<bool>)>,
+    /// Update the Toolkit was pressed: what went wrong is told here, once it ended.
+    toolkit_asked: bool,
 }
 
 const GRID_H: f32 = 212.0;
@@ -36,7 +38,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::p
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 32 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             header(ui, cx);
-            actions(ui, cx, state);
+            actions(ui, cx, state, projects);
             chips(ui, cx, projects);
             grid(ui, cx);
             performance(ui, cx);
@@ -112,7 +114,7 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
 
 /// What the page is for: a 3D picture of people, a 3D picture of the world, or a free recording. While one of them is under way,
 /// what it is doing and how to stop it take their place. Before the capture notice is accepted, the notice does.
-fn actions(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
+fn actions(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::projects::State) {
     let snap = cx.snap;
     if !snap.settings.consent_acknowledged {
         return consent(ui, cx);
@@ -139,8 +141,7 @@ fn actions(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     row.multiply_opacity(alpha);
     let cell = |i: usize| Rect::from_min_size(rect.min + vec2(i as f32 * (card_w + gap), 0.0), vec2(card_w, ACTION_H));
     let not_running = "Start VRChat first: its camera takes the picture";
-    let world_note =
-        if cannot_hide { "Your avatar would show: upload it again with Orbiters Toolkit 0.4.18 or later" } else { "Goes through the place, avatars left out" };
+    let world_note = if cannot_hide { "Goes through the place; your avatar is taken out afterwards" } else { "Goes through the place, avatars left out" };
     let people = BigAction {
         glyph: icons::USERS,
         tint: theme::VIOLET,
@@ -155,7 +156,7 @@ fn actions(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         tint: theme::ACCENT,
         title: "3D picture of the world",
         note: world_note,
-        warn: cannot_hide,
+        warn: false,
         enabled: vrchat,
         why_not: not_running,
     };
@@ -178,7 +179,7 @@ fn actions(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if record.show(&mut row, cell(2), record::LABEL) {
         cx.ctl.start_capture();
     }
-    why_last(ui, cx);
+    why_last(ui, cx, state, projects);
     quiet_row(ui, cx);
 }
 
@@ -233,15 +234,56 @@ impl BigAction<'_> {
 
 /// What the last capture could not do, until the next one starts: the toast that said so is gone, and the person may have been
 /// in a headset.
-fn why_last(ui: &mut Ui, cx: &mut Cx) {
+fn why_last(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::projects::State) {
+    let ctx = ui.ctx().clone();
+    if state.toolkit_asked && !projects.toolkit_running() {
+        state.toolkit_asked = false;
+        if let Some(e) = projects.take_error() {
+            cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, e);
+        }
+    }
     let Some(why) = cx.snap.capture.left_out.why.clone() else { return };
+    // The worn avatar could not hide: Update the Toolkit, where its project is on this computer.
+    let wearer = cx.snap.capture.left_out.wearer == Left::InPicture;
+    let worn = cx.snap.n4n0.avatar_id.clone().filter(|_| wearer);
+    if worn.is_some() {
+        projects.toolkit_look(&ctx);
+    }
+    let offer = worn.as_deref().map(|id| projects.toolkit_offer(id));
+    let name = worn.as_deref().and_then(crate::controller::uploaded_avatar_name);
+    let tone = if wearer { Tone::Info.color() } else { theme::WARN };
+    let (button, note) = match &offer {
+        Some(super::projects::ToolkitOffer::Project(name)) => (Some(format!("Update the Toolkit in {name}")), None),
+        Some(super::projects::ToolkitOffer::NotHere) => (None, Some(super::projects::toolkit_refusal(name.as_deref()))),
+        _ => (None, None),
+    };
+    let text = note.map_or(why.clone(), |n| format!("{why} {n}"));
     let w = ui.available_width();
-    let galley = ui.painter().layout_job(Txt::new(why, 13.5).color(theme::WARN).line_height(19.0).job(w - 68.0));
-    let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y + 24.0), Sense::hover());
+    let ink = if wearer { theme::FG } else { tone };
+    let galley = ui.painter().layout_job(Txt::new(text, 13.5).color(ink).line_height(19.0).job(w - 68.0));
+    let button_h = if button.is_some() { 44.0 } else { 0.0 };
+    let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y + 24.0 + button_h), Sense::hover());
     let p = ui.painter();
-    widgets::frame(p, rect, 14.0, theme::alpha(theme::WARN, 0.10));
-    widgets::icon(p, pos2(rect.left() + 26.0, rect.top() + 12.0 + 9.5), icons::WARNING, 18.0, theme::WARN);
-    p.galley(pos2(rect.left() + 48.0, rect.top() + 12.0), galley, theme::WARN);
+    widgets::frame(p, rect, 14.0, theme::alpha(tone, 0.10));
+    widgets::icon(p, pos2(rect.left() + 26.0, rect.top() + 12.0 + 9.5), if wearer { icons::INFO } else { icons::WARNING }, 18.0, tone);
+    let text_bottom = rect.top() + 12.0 + galley.size().y;
+    p.galley(pos2(rect.left() + 48.0, rect.top() + 12.0), galley, ink);
+    if let (Some(label), Some(id)) = (button, worn) {
+        let running = projects.toolkit_running();
+        let b = Button::new(&label)
+            .icon(icons::ARROW_UP)
+            .variant(Variant::Secondary)
+            .size(Size::Sm)
+            .enabled(!running)
+            .id_salt("update-toolkit")
+            .hint("Updates Orbiters Toolkit in that project and opens it in Unity. You upload from VRChat's SDK panel: N4N0 uploads nothing by itself.");
+        let bw = b.desired_width(ui);
+        let at = Rect::from_min_size(pos2(rect.left() + 48.0, text_bottom + 8.0), vec2(bw, 32.0));
+        if widgets::activated(&b.show_at(ui, at)) {
+            projects.update_toolkit(&ctx, &id, name.as_deref());
+            state.toolkit_asked = true;
+        }
+    }
 }
 
 /// What rarely changes: how long a picture flies, the longer scan and the test pattern. In reach and out of the way.
@@ -373,8 +415,10 @@ fn under_way(ui: &mut Ui, cx: &mut Cx) {
     };
     widgets::text_truncated(&p, pos2(x, rect.top() + 88.0), Align2::LEFT_CENTER, &Txt::new(doing, 13.5).color(theme::FG_2), room);
     if let Some(warning) = warning {
-        let galley = p.layout_job(Txt::new(warning, 13.0).color(theme::WARN).line_height(17.0).job(room));
-        p.galley(pos2(x, rect.top() + 104.0), galley, theme::WARN);
+        // The wearer comes out afterwards: nothing is going wrong, so it reads as a note.
+        let ink = if c.left_out.wearer == Left::InPicture { theme::FG_2 } else { theme::WARN };
+        let galley = p.layout_job(Txt::new(warning, 13.0).color(ink).line_height(17.0).job(room));
+        p.galley(pos2(x, rect.top() + 104.0), galley, ink);
     } else {
         let mut out = Vec::new();
         if c.left_out.wearer == Left::Out {

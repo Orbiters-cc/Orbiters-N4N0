@@ -29,5 +29,6 @@ pub mod train;
 pub mod tree;
 pub mod tree_file;
 pub mod tree_tune;
+pub mod wearer;
 pub mod web;
 pub mod mesh;

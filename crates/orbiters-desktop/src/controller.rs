@@ -209,17 +209,27 @@ const CAMERA_STREAMING: &str = "/usercamera/Streaming";
 /// `/usercamera/Mode` for the Stream camera (0 off, 1 photo, 2 stream).
 const STREAM_MODE: i32 = 2;
 
-/// The running reconstruction worker, and whether its end was already told (finished, failed or cancelled).
+/// The running reconstruction worker, and whether its end was already told (finished, failed, cancelled or asked to
+/// pause).
 struct Reconstruction {
     handle: ReconstructHandle,
     dir: PathBuf,
     told: bool,
     /// Training on the integrated GPU (VRChat was running).
     integrated: bool,
-    /// Started while VRChat ran because the headset was off ([`HEADSET_BREAK`]): putting it back on puts it back in
-    /// the queue.
-    on_break: bool,
+    /// Asked to pause at this moment: it stays the first in line, and its job stays on show.
+    pausing: Option<Instant>,
+    /// Off the GPU since (orbiters_core::reconstruction::Event::Pausing): what is left is its file.
+    freed: bool,
+    /// Stopped by the person: what it could have gone on from goes with it.
+    stopped: bool,
 }
+
+/// How long a worker asked to pause may stay on the GPU. A step and the read back of the set take under half a second on
+/// the largest sessions: past this it is stuck, and killing it costs what happened since its last checkpoint.
+const PAUSE_LIMIT: Duration = Duration::from_secs(15);
+/// How long quitting waits for a running reconstruction's checkpoint.
+const QUIT_PAUSE_LIMIT: Duration = Duration::from_secs(10);
 
 /// How long the headset stays off before reconstructions held for VRChat start.
 const HEADSET_BREAK: Duration = Duration::from_secs(60);
@@ -284,6 +294,8 @@ mod account;
 mod around;
 mod bridge_game;
 mod burst;
+#[cfg(all(test, windows))]
+mod pause_tests;
 mod calls;
 mod cleanup;
 mod dolly;
@@ -377,6 +389,10 @@ impl Controller {
     /// Starts OSC, the worker and the watchers.
     pub fn start(self: &Shared) {
         self.start_osc();
+        {
+            let ctl = self.clone();
+            let _ = std::thread::Builder::new().name("paused-reconstructions".into()).spawn(move || ctl.go_on_with_paused());
+        }
         // The computer's keyboard for N4N0's menu keyboard: its keys go to N4N0, off the hook's thread.
         let (tx, rx) = mpsc::channel();
         crate::keys::start(tx);
@@ -495,7 +511,7 @@ impl Controller {
         }
     }
 
-    fn update<R>(&self, f: impl FnOnce(&mut Snapshot) -> R) -> R {
+    pub(crate) fn update<R>(&self, f: impl FnOnce(&mut Snapshot) -> R) -> R {
         let r = f(&mut self.snapshot.lock().unwrap());
         self.publish();
         r
@@ -841,15 +857,8 @@ impl Controller {
             s.capture.left_out = Default::default();
             s.capture.no_strip = None;
         });
-        // Training takes the whole GPU: the game and the recording come first; the run starts over once they are done
-        // (stopped once the state says capturing, so the run's exit does not start it again).
         if !importing {
-            crate::upload_prep::pause();
-            if let Some(dir) = self.running_reconstruction() {
-                self.stop_reconstruction();
-                self.change_queue(|q| q.push_front(dir));
-                self.notify(NoticeKind::Warning, "Reconstruction paused: a capture started. It starts again when the capture ends.");
-            }
+            self.capture_takes_the_gpu();
         }
         *self.last_source.lock().unwrap() = (!importing).then_some(source);
         let record_parameters = !importing && settings.osc.enabled && settings.osc.record_parameters;
@@ -1092,7 +1101,7 @@ impl Controller {
     }
 
     /// Someone put the headset on or took it off (`None`: unknown). Put back on, a reconstruction that started because
-    /// it was off goes back to the head of the queue, to wait for VRChat to close (or the next break).
+    /// it was off pauses, to wait for VRChat to close (or the next break).
     pub fn set_headset(self: &Shared, in_use: Option<bool>) {
         self.update_if(|s| {
             let changed = s.steamvr.headset_in_use != in_use;
@@ -1114,22 +1123,7 @@ impl Controller {
         if self.held_for_vrchat() {
             crate::upload_prep::pause();
         }
-        let moved = {
-            let mut guard = self.reconstruction.lock().unwrap();
-            match guard.as_mut() {
-                Some(r) if r.on_break && !r.told && self.held_for_vrchat() => {
-                    r.told = true;
-                    let dir = r.dir.clone();
-                    self.change_queue(|q| q.push_front(dir));
-                    r.handle.cancel();
-                    true
-                }
-                _ => false,
-            }
-        };
-        if moved {
-            self.notify(NoticeKind::Info, "The headset is back on: the reconstruction waits until VRChat closes.");
-        }
+        self.follow_while_playing();
     }
 
     /// The headset has been off long enough for reconstructions held for VRChat to start ([`HEADSET_BREAK`]).
@@ -1403,7 +1397,8 @@ impl Controller {
             self.n4n0.send_parameter(orbiters_contracts::n4n0::params::WALK_BOOST, rosc::OscType::Float(settings.walk_boost.strength));
         }
         if previous.reconstruct_while_playing != settings.reconstruct_while_playing {
-            // Reconstructions held while VRChat runs may start now.
+            // One running where the setting no longer has it pauses; those held while VRChat runs may start now.
+            self.follow_while_playing();
             self.next_reconstruction();
         }
         if previous.development != settings.development {
@@ -1567,6 +1562,14 @@ impl Controller {
         if let Some(worker) = worker {
             worker.quit();
         }
+        // A run under way keeps what it has for the next time the app opens (Controller::go_on_with_paused). Past the
+        // limit it is killed: the file it was writing goes, whole or not at all.
+        if self.pause_reconstruction() {
+            let until = Instant::now() + QUIT_PAUSE_LIMIT;
+            while self.reconstruction.lock().unwrap().is_some() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         *self.reconstruction.lock().unwrap() = None;
         self.flush_settings();
     }
@@ -1619,32 +1622,134 @@ impl Controller {
         self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.running && !self.headset_on_break()
     }
 
-    /// VRChat started or closed. Once it closes, a reconstruction training on the integrated GPU starts again on the
-    /// graphics card (a minute or two there instead of an hour), and the ones held for VRChat start.
-    fn vrchat_changed(self: &Shared, running: bool) {
-        if running {
-            // Preparing uploads in the background goes on beside VRChat only while SteamVR's frame timing paces it.
-            if !self.snapshot.lock().unwrap().steamvr.running {
-                crate::upload_prep::pause();
-            }
-            return;
+    /// VRChat started or closed. A run goes where the setting has it beside VRChat (pausing, and going on there) and those
+    /// held for VRChat start once it closes.
+    pub(crate) fn vrchat_changed(self: &Shared, running: bool) {
+        // Preparing uploads in the background goes on beside VRChat only while SteamVR's frame timing paces it.
+        if running && !self.snapshot.lock().unwrap().steamvr.running {
+            crate::upload_prep::pause();
         }
-        let moved = {
-            let mut guard = self.reconstruction.lock().unwrap();
-            match guard.as_mut() {
-                Some(r) if r.integrated => {
-                    r.told = true;
-                    // Its turn again first, once the stopped worker has exited (on_reconstruct_exit).
-                    let dir = r.dir.clone();
-                    self.change_queue(|q| q.push_front(dir));
-                    r.handle.cancel();
-                    true
-                }
-                _ => false,
-            }
+        self.follow_while_playing();
+        if !running {
+            self.next_reconstruction();
+        }
+    }
+
+    /// A run under way goes where settings' `reconstruct_while_playing` has it as things stand: pausing costs nothing now,
+    /// so it never stays on a GPU that is not its to use. Held for VRChat, it pauses until VRChat closes or the next
+    /// break, whenever it started; on the wrong GPU, it goes on on the right one (the worker's state fits both).
+    fn follow_while_playing(self: &Shared) {
+        let Some(integrated) = self.reconstruction.lock().unwrap().as_ref().filter(|r| !r.told).map(|r| r.integrated) else { return };
+        let playing_there = self.settings().reconstruct_while_playing == WhilePlaying::IntegratedGpu && self.snapshot.lock().unwrap().vrchat.running;
+        let says = if self.held_for_vrchat() {
+            Some("VRChat is running: the reconstruction is paused. It continues from where it was once VRChat closes or the headset has been off a minute.")
+        } else if integrated && !playing_there {
+            Some("The reconstruction continues from where it was on the graphics card.")
+        } else if !integrated && playing_there {
+            Some("VRChat started: the reconstruction continues from where it was on the integrated GPU.")
+        } else {
+            None
         };
-        if moved {
-            self.notify(NoticeKind::Info, "VRChat closed: the reconstruction starts again on the graphics card.");
+        if let Some(says) = says {
+            if self.pause_reconstruction() {
+                self.notify(NoticeKind::Info, says);
+            }
+        }
+    }
+
+    /// The latest lines the workers logged.
+    pub(crate) fn worker_log_lines(&self) -> Vec<String> {
+        self.worker_log.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// A capture is starting. Training takes the whole GPU: the game and the recording come first; the run goes on once they
+    /// are done (paused once the state says capturing, so the worker's exit does not start it again). The capture waits for
+    /// none of this: the worker is asked, and frees the GPU in about a third of a second on its own.
+    pub(crate) fn capture_takes_the_gpu(&self) {
+        crate::upload_prep::pause();
+        if self.pause_reconstruction() {
+            self.notify(NoticeKind::Info, "Reconstruction paused: a capture started. It continues from where it was when the capture ends.");
+        }
+    }
+
+    /// Asks the running reconstruction to pause: it leaves the GPU and writes where it stands
+    /// (orbiters_reconstruct::checkpoint), its job stays on show with its progress, and it is the first in line. Whether
+    /// this paused one (not one already pausing, or one whose end was told).
+    pub(crate) fn pause_reconstruction(&self) -> bool {
+        let dir = {
+            let mut guard = self.reconstruction.lock().unwrap();
+            let Some(r) = guard.as_mut().filter(|r| !r.told) else { return false };
+            r.told = true;
+            r.pausing = Some(Instant::now());
+            let dir = r.dir.clone();
+            self.change_queue(|q| {
+                q.retain(|d| *d != dir);
+                q.push_front(dir.clone());
+            });
+            if let Err(e) = r.handle.pause() {
+                // It has gone or is going by itself: its exit keeps it first in line.
+                eprintln!("could not ask the reconstruction to pause: {e}");
+                r.handle.cancel();
+            }
+            dir
+        };
+        self.update(|s| {
+            if let Some(j) = s.reconstruction.as_mut().filter(|j| j.session_dir == dir) {
+                j.floor = crate::pages::sessions::overall_progress(j);
+                j.paused = true;
+                j.resuming = false;
+            }
+        });
+        true
+    }
+
+    /// A worker that was asked to pause and stays on the GPU is stuck: it goes, and its session goes on from its last
+    /// checkpoint. Called by the watchers every second.
+    fn check_pausing(&self) {
+        let mut guard = self.reconstruction.lock().unwrap();
+        if let Some(r) = guard.as_mut().filter(|r| !r.freed && r.pausing.is_some_and(|t| t.elapsed() > PAUSE_LIMIT)) {
+            eprintln!("the reconstruction did not leave the GPU {} s after it was asked to pause: it was stopped", PAUSE_LIMIT.as_secs());
+            r.freed = true;
+            r.handle.cancel();
+        }
+    }
+
+    /// What the app was closed on: sessions a checkpoint says were paused go on, the one that stood first on show as
+    /// paused, and those whose upload files were being prepared are prepared. Walks the library: off the interface thread.
+    pub(crate) fn go_on_with_paused(self: &Shared) {
+        let root = self.settings().sessions_dir;
+        let mut paused: Vec<(std::time::SystemTime, PathBuf, orbiters_reconstruct::checkpoint::Header)> = Vec::new();
+        for session in list_sessions(&root) {
+            if crate::upload_prep::has_partial(&session.dir) {
+                crate::upload_prep::queue(session.dir.clone());
+            }
+            if let Some(header) = orbiters_reconstruct::checkpoint::peek(&session.dir) {
+                let modified = std::fs::metadata(orbiters_reconstruct::checkpoint::file(&session.dir)).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                paused.push((modified, session.dir, header));
+            }
+        }
+        // In the order they were paused.
+        paused.sort_by_key(|(modified, ..)| *modified);
+        let shown = paused.first().map(|(_, dir, header)| (dir.clone(), header.clone()));
+        let running = self.running_reconstruction();
+        self.change_queue(|q| {
+            for (_, dir, _) in &paused {
+                if !q.contains(dir) && running.as_ref() != Some(dir) {
+                    q.push_back(dir.clone());
+                }
+            }
+        });
+        if let Some((dir, header)) = shown {
+            self.update(|s| {
+                if s.reconstruction.is_none() {
+                    let mut job = ReconstructionJob::new(dir.clone(), false);
+                    job.at(header.iteration, header.iterations, header.gaussians, header.psnr, header.seconds);
+                    job.stage = if header.trained { orbiters_core::reconstruction::Stage::Saving } else { orbiters_core::reconstruction::Stage::Training };
+                    job.floor = crate::pages::sessions::overall_progress(&job);
+                    job.paused = true;
+                    s.reconstruction = Some(job);
+                }
+            });
         }
         self.next_reconstruction();
     }
@@ -1663,7 +1768,6 @@ impl Controller {
             anyhow::bail!("Finish the capture first: reconstruction takes the whole GPU.");
         }
         let integrated = self.settings().reconstruct_while_playing == WhilePlaying::IntegratedGpu && self.snapshot.lock().unwrap().vrchat.running;
-        let on_break = self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.running;
         let mut guard = self.reconstruction.lock().unwrap();
         if guard.is_some() {
             anyhow::bail!("A reconstruction is already running.");
@@ -1688,10 +1792,18 @@ impl Controller {
             let ctl = self.clone();
             move || ctl.on_reconstruct_exit()
         };
-        self.update(|s| s.reconstruction = Some(ReconstructionJob::new(dir.clone(), integrated)));
+        // A paused run keeps what it shows until its worker says otherwise.
+        self.update(|s| match s.reconstruction.as_mut().filter(|j| j.session_dir == dir && j.paused) {
+            Some(j) => {
+                j.paused = false;
+                j.resuming = true;
+                j.integrated = integrated;
+            }
+            None => s.reconstruction = Some(ReconstructionJob::new(dir.clone(), integrated)),
+        });
         match ReconstructHandle::spawn(&dir, integrated, on_event, on_log, on_exit) {
             Ok(handle) => {
-                *guard = Some(Reconstruction { handle, dir, told: false, integrated, on_break });
+                *guard = Some(Reconstruction { handle, dir, told: false, integrated, pausing: None, freed: false, stopped: false });
                 Ok(())
             }
             Err(e) => {
@@ -1702,7 +1814,7 @@ impl Controller {
     }
 
     /// The session being reconstructed.
-    fn running_reconstruction(&self) -> Option<PathBuf> {
+    pub(crate) fn running_reconstruction(&self) -> Option<PathBuf> {
         self.reconstruction.lock().unwrap().as_ref().map(|r| r.dir.clone())
     }
 
@@ -1724,9 +1836,22 @@ impl Controller {
         Ok(self.running_reconstruction().as_ref() != Some(&dir))
     }
 
-    /// Takes a session off the waiting list (it was not started yet).
-    pub fn unqueue_reconstruction(&self, dir: &Path) {
+    /// Takes a session off the waiting list; what a pause kept of it goes too: it was asked not to go on.
+    pub fn unqueue_reconstruction(self: &Shared, dir: &Path) {
         self.change_queue(|q| q.retain(|d| d != dir));
+        self.forget_paused(dir);
+    }
+
+    /// A paused run of `dir` is over: no job on show, no checkpoint.
+    fn forget_paused(self: &Shared, dir: &Path) {
+        self.update(|s| {
+            if s.reconstruction.as_ref().is_some_and(|j| j.session_dir == dir && j.paused) {
+                s.reconstruction = None;
+            }
+        });
+        if self.running_reconstruction().as_deref() != Some(dir) {
+            orbiters_reconstruct::checkpoint::discard(dir);
+        }
     }
 
     /// Changes the waiting list and shows it.
@@ -1740,9 +1865,9 @@ impl Controller {
     }
 
     /// Starts the first waiting session when nothing runs, nothing records and VRChat does not hold them.
-    fn next_reconstruction(self: &Shared) {
+    pub(crate) fn next_reconstruction(self: &Shared) {
         loop {
-            if self.is_capturing() || self.reconstruction.lock().unwrap().is_some() || self.held_for_vrchat() {
+            if self.quitting.load(Ordering::Relaxed) || self.is_capturing() || self.reconstruction.lock().unwrap().is_some() || self.held_for_vrchat() {
                 return;
             }
             let Some(dir) = self.change_queue(VecDeque::pop_front) else {
@@ -1754,28 +1879,91 @@ impl Controller {
                 Err(e) => {
                     let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     self.notify(NoticeKind::Error, format!("{name} was not reconstructed: {e}"));
+                    self.forget_paused(&dir);
                 }
             }
         }
     }
 
-    /// Stops the running reconstruction; the session keeps its previous result. Returns whether one ran.
-    pub fn stop_reconstruction(&self) -> bool {
-        let mut guard = self.reconstruction.lock().unwrap();
-        let Some(r) = guard.as_mut() else { return false };
-        r.told = true;
-        r.handle.cancel();
+    /// Stops the reconstruction on show, running or paused; the session keeps its previous result, and what the run had
+    /// done goes (stopping still means stopping). Returns whether there was one.
+    pub fn stop_reconstruction(self: &Shared) -> bool {
+        {
+            let mut guard = self.reconstruction.lock().unwrap();
+            if let Some(r) = guard.as_mut() {
+                r.told = true;
+                r.stopped = true;
+                r.pausing = None;
+                let dir = r.dir.clone();
+                // Its exit deletes what it leaves, once nothing is writing it.
+                self.change_queue(|q| q.retain(|d| *d != dir));
+                r.handle.cancel();
+                return true;
+            }
+        }
+        let paused = self.snapshot.lock().unwrap().reconstruction.as_ref().filter(|j| j.paused).map(|j| j.session_dir.clone());
+        let Some(dir) = paused else { return false };
+        self.unqueue_reconstruction(&dir);
+        self.next_reconstruction();
         true
     }
 
     fn on_reconstruct_event(self: &Shared, e: ReconstructEvent) {
         match e {
-            ReconstructEvent::Stage { stage, progress } => self.update(|s| {
+            ReconstructEvent::Stage { stage, progress } => {
+                let mut over = false;
+                self.update(|s| {
+                    if let Some(j) = s.reconstruction.as_mut() {
+                        // Seeding only happens from the start: what it was to go on from could not be used.
+                        if stage == orbiters_core::reconstruction::Stage::Seeding && j.floor > 0.0 {
+                            over = j.iteration > 0;
+                            j.floor = 0.0;
+                            j.at(0, j.iterations, 0, None, 0.0);
+                            j.psnr = None;
+                        }
+                        j.stage = stage;
+                        j.progress = progress;
+                        if stage != orbiters_core::reconstruction::Stage::Loading {
+                            j.resuming = false;
+                        }
+                    }
+                });
+                if over {
+                    self.notify(NoticeKind::Info, "The paused reconstruction could not continue from where it was (N4N0 was updated, or its file was damaged): it starts over.");
+                }
+            }
+            ReconstructEvent::Resumed { iteration, iterations, gaussians, psnr, seconds } => self.update(|s| {
                 if let Some(j) = s.reconstruction.as_mut() {
-                    j.stage = stage;
-                    j.progress = progress;
+                    j.at(iteration, iterations, gaussians, psnr, seconds);
+                    let kept = 0.06 + 0.92 * j.progress;
+                    j.floor = j.floor.max(kept);
+                    j.resuming = true;
                 }
             }),
+            // Off the GPU; only its file is left, however long the disk takes beside a capture's frames.
+            ReconstructEvent::Pausing => {
+                if let Some(r) = self.reconstruction.lock().unwrap().as_mut() {
+                    r.freed = true;
+                }
+            }
+            ReconstructEvent::Paused { kept, message } => {
+                if let Some(r) = self.reconstruction.lock().unwrap().as_mut() {
+                    r.freed = true;
+                }
+                if !kept {
+                    // Nothing to go on from: what it shows starts over with it.
+                    self.update(|s| {
+                        if let Some(j) = s.reconstruction.as_mut() {
+                            j.floor = 0.0;
+                            j.at(0, j.iterations, 0, None, 0.0);
+                        }
+                    });
+                }
+                if let Some(message) = message {
+                    let then = if kept { "It continues from an earlier pause" } else { "It starts over" };
+                    self.notify(NoticeKind::Warning, format!("The reconstruction's progress could not be kept ({message}). {then} when it can."));
+                }
+            }
             ReconstructEvent::Progress { iteration, iterations, gaussians, psnr, seconds, .. } => self.update(|s| {
                 if let Some(j) = s.reconstruction.as_mut() {
                     j.iteration = iteration;
@@ -1787,7 +1975,7 @@ impl Controller {
                 }
             }),
             ReconstructEvent::Done { report } => {
-                self.mark_reconstruction_told();
+                self.mark_reconstruction_over();
                 // Its upload files, prepared once nothing else runs: sharing it is then at once (crate::upload_prep).
                 if let Some(dir) = self.running_reconstruction() {
                     // What is shared is the result this one replaced: its window offers to update it.
@@ -1803,7 +1991,7 @@ impl Controller {
                 self.bump_library();
             }
             ReconstructEvent::Error { message } => {
-                self.mark_reconstruction_told();
+                self.mark_reconstruction_over();
                 self.notify(NoticeKind::Error, format!("Reconstruction failed: {message}"));
             }
         }
@@ -1841,18 +2029,33 @@ impl Controller {
         }
     }
 
-    fn mark_reconstruction_told(&self) {
-        if let Some(r) = self.reconstruction.lock().unwrap().as_mut() {
+    /// It finished or failed, also if a pause was asked too late for it: nothing of it waits any more.
+    fn mark_reconstruction_over(&self) {
+        let mut guard = self.reconstruction.lock().unwrap();
+        if let Some(r) = guard.as_mut() {
             r.told = true;
+            r.pausing = None;
+            let dir = r.dir.clone();
+            self.change_queue(|q| q.retain(|d| *d != dir));
         }
     }
 
     fn on_reconstruct_exit(self: &Shared) {
         let ended = self.reconstruction.lock().unwrap().take();
-        if ended.is_some_and(|r| !r.told) {
-            self.notify(NoticeKind::Error, "The reconstruction worker stopped unexpectedly.");
+        let mut keep_on_show = false;
+        if let Some(r) = ended {
+            if !r.told {
+                self.notify(NoticeKind::Error, "The reconstruction worker stopped unexpectedly.");
+            }
+            // Stopped, or crashed (what it would go on from may be why): the next run starts over.
+            if r.stopped || !r.told {
+                orbiters_reconstruct::checkpoint::discard(&r.dir);
+            }
+            keep_on_show = r.pausing.is_some();
         }
-        self.update(|s| s.reconstruction = None);
+        if !keep_on_show {
+            self.update(|s| s.reconstruction = None);
+        }
         // A cancelled run may leave its partial folder behind: the next run clears it.
         self.next_reconstruction();
     }
@@ -1874,6 +2077,8 @@ impl Controller {
             anyhow::bail!("Only session folders inside the sessions folder can be removed.");
         }
         anyhow::ensure!(!self.cleaning(dir), "This session is being cleaned up: try again once that is done.");
+        // Waiting or paused, it no longer goes on.
+        self.unqueue_reconstruction(dir);
         trash::delete(dir)?;
         refresh_storage(self);
         self.bump_library();
@@ -2162,6 +2367,7 @@ fn spawn_watchers(ctl: Shared) {
                     }
                 }
                 ctl.check_stopping();
+                ctl.check_pausing();
 
                 // Spout senders, every 2 s.
                 #[cfg(windows)]

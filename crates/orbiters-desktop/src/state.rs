@@ -283,11 +283,31 @@ pub struct ReconstructionJob {
     pub seconds: f32,
     /// On the integrated GPU, while VRChat runs (settings' `reconstruct_while_playing`).
     pub integrated: bool,
+    /// Paused: its worker has gone or is going, a checkpoint holds where it stood, and it goes on by itself once what it
+    /// gave way to is over.
+    #[serde(default)]
+    pub paused: bool,
+    /// Going on from a pause: reading the session again, before its next step.
+    #[serde(default)]
+    pub resuming: bool,
+    /// The share of the whole run a pause kept: what it shows never falls under this while it reads the session again.
+    #[serde(default)]
+    pub floor: f32,
 }
 
 impl ReconstructionJob {
     pub fn new(session_dir: PathBuf, integrated: bool) -> Self {
-        Self { session_dir, stage: Stage::Loading, progress: 0.0, iteration: 0, iterations: 0, gaussians: 0, psnr: None, seconds: 0.0, integrated }
+        Self { session_dir, stage: Stage::Loading, progress: 0.0, iteration: 0, iterations: 0, gaussians: 0, psnr: None, seconds: 0.0, integrated, paused: false, resuming: false, floor: 0.0 }
+    }
+
+    /// Where a checkpoint says a paused run stands.
+    pub fn at(&mut self, iteration: u32, iterations: u32, gaussians: usize, psnr: Option<f32>, seconds: f32) {
+        self.iteration = iteration;
+        self.iterations = iterations;
+        self.gaussians = gaussians;
+        self.psnr = psnr.or(self.psnr);
+        self.seconds = seconds;
+        self.progress = iteration as f32 / iterations.max(1) as f32;
     }
 }
 

@@ -375,35 +375,171 @@ pub fn vrchat_files(g: &Gaussians, cameras: &[Camera], gpu: Option<&mut Gpu>, ke
     vrchat_files_with(g, cameras, gpu, key, &ExportOptions::default(), progress)
 }
 
+/// How far an export got: the last stage finished (0 the trees built, 1 the PC leaves re-fitted, 2 the Quest ones, 3 PC
+/// tuned, 4 Quest tuned), with what the stages after it read. A background export is stopped whenever a capture starts
+/// (it takes seconds to get going and leaves nothing on the GPU to save: killing it is the instant way off it). What it
+/// redoes then is the stage it was in: at most about 15 s of 51 s on the largest session measured.
+pub struct Partial {
+    pub done: u32,
+    pub score: Vec<f32>,
+    pub pc_keep: Vec<usize>,
+    pub pc: Tree,
+    pub quest: Option<(Vec<usize>, Tree)>,
+}
+
+fn put_tree(out: &mut Vec<u8>, t: &Tree) {
+    out.extend_from_slice(&(t.nodes.len() as u32).to_le_bytes());
+    for n in &t.nodes {
+        for v in [n.center[0], n.center[1], n.center[2], n.radius, n.error] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [n.parent.map_or(u32::MAX, |p| p), n.depth, n.start, n.count, u32::from(n.leaf)] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    let packed = t.splats.pack();
+    out.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytemuck::cast_slice(&packed));
+}
+
+/// The words of a [`Partial`]'s bytes, taken in order.
+struct Words<'a>(&'a [u8]);
+
+impl Words<'_> {
+    fn u32(&mut self) -> Option<u32> {
+        let (head, rest) = self.0.split_first_chunk::<4>()?;
+        self.0 = rest;
+        Some(u32::from_le_bytes(*head))
+    }
+
+    fn f32(&mut self) -> Option<f32> {
+        self.u32().map(f32::from_bits)
+    }
+
+    fn u32s(&mut self) -> Option<Vec<u32>> {
+        let n = self.u32()? as usize;
+        (self.0.len() / 4 >= n).then_some(())?;
+        (0..n).map(|_| self.u32()).collect()
+    }
+
+    fn tree(&mut self) -> Option<Tree> {
+        let count = self.u32()? as usize;
+        // Ten words a box.
+        (self.0.len() / 40 >= count).then_some(())?;
+        let mut nodes = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (center, radius, error) = ([self.f32()?, self.f32()?, self.f32()?], self.f32()?, self.f32()?);
+            let (parent, depth, start, count, leaf) = (self.u32()?, self.u32()?, self.u32()?, self.u32()?, self.u32()?);
+            nodes.push(tree::Node { center, radius, error, parent: (parent != u32::MAX).then_some(parent), depth, start, count, leaf: leaf != 0 });
+        }
+        let packed: Vec<f32> = self.u32s()?.into_iter().map(f32::from_bits).collect();
+        Some(Tree { nodes, splats: Gaussians::unpack(&packed) })
+    }
+}
+
+impl Partial {
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut w = Words(bytes);
+        let done = w.u32()?;
+        let score: Vec<f32> = w.u32s()?.into_iter().map(f32::from_bits).collect();
+        let keep = |v: Vec<u32>| v.into_iter().map(|i| i as usize).collect::<Vec<usize>>();
+        let pc_keep = keep(w.u32s()?);
+        let pc = w.tree()?;
+        let quest = match w.u32()? {
+            0 => None,
+            _ => {
+                let k = keep(w.u32s()?);
+                Some((k, w.tree()?))
+            }
+        };
+        w.0.is_empty().then_some(Self { done, score, pc_keep, pc, quest })
+    }
+}
+
+/// [`Partial`] as bytes, from what the stages hold.
+fn partial_bytes(done: u32, score: &[f32], pc_keep: &[usize], pc: &Tree, quest: Option<&(Vec<usize>, Tree)>) -> Vec<u8> {
+    let mut out = done.to_le_bytes().to_vec();
+    out.extend_from_slice(&(score.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytemuck::cast_slice(score));
+    let put_keep = |out: &mut Vec<u8>, k: &[usize]| {
+        out.extend_from_slice(&(k.len() as u32).to_le_bytes());
+        k.iter().for_each(|i| out.extend_from_slice(&(*i as u32).to_le_bytes()));
+    };
+    put_keep(&mut out, pc_keep);
+    put_tree(&mut out, pc);
+    out.extend_from_slice(&u32::from(quest.is_some()).to_le_bytes());
+    if let Some((k, t)) = quest {
+        put_keep(&mut out, k);
+        put_tree(&mut out, t);
+    }
+    out
+}
+
+/// Where an export keeps how far it got (the app's upload preparation: crate docs of its `upload_prep`).
+pub trait Keep {
+    /// What an earlier export of the same reconstruction finished.
+    fn load(&mut self) -> Option<Partial>;
+    /// Another stage is finished. A failure costs only that stage: the export goes on.
+    fn save(&mut self, bytes: Vec<u8>);
+}
+
 /// [`vrchat_files`] made as `options` say.
 pub fn vrchat_files_with(
+    g: &Gaussians,
+    cameras: &[Camera],
+    gpu: Option<&mut Gpu>,
+    key: u32,
+    options: &ExportOptions,
+    progress: impl FnMut(f32),
+) -> anyhow::Result<VrchatFiles> {
+    vrchat_files_kept(g, cameras, gpu, key, options, None, progress)
+}
+
+/// [`vrchat_files_with`], going on from what `keep` holds and telling it each stage finished.
+pub fn vrchat_files_kept(
     g: &Gaussians,
     cameras: &[Camera],
     mut gpu: Option<&mut Gpu>,
     key: u32,
     options: &ExportOptions,
+    mut keep: Option<&mut dyn Keep>,
     mut progress: impl FnMut(f32),
 ) -> anyhow::Result<VrchatFiles> {
     let poses: Vec<([f32; 3], [f32; 3])> = cameras.iter().map(|c| (c.position(), c.forward())).collect();
     let spread: Vec<Camera> = crate::dataset::spread(&poses, options.cameras).into_iter().map(|i| cameras[i]).collect();
     // The re-fit's cameras at up to `refit_width` pixels wide (whole multiples of the recorded cameras' size).
     let refit_cameras: Vec<Camera> = spread.iter().map(|c| c.upscaled((options.refit_width / c.width.max(1)).max(1))).collect();
-    let score = {
-        let _time = PrepStage::new("tree rank");
-        let ranking: Vec<Camera> = crate::dataset::spread(&poses, options.rank_cameras).into_iter().map(|i| cameras[i]).collect();
-        rank(g, &ranking, gpu.as_deref_mut(), options.rank)?
+    let resumed = keep.as_deref_mut().and_then(Keep::load).filter(|p| p.score.len() == g.len());
+    if let Some(p) = &resumed {
+        eprintln!("trees: going on after stage {} of 4", p.done);
+    }
+    let fresh = resumed.is_none();
+    let (done, score, pc_keep, mut pc, mut quest) = match resumed {
+        Some(p) => (p.done, p.score, p.pc_keep, p.pc, p.quest),
+        None => {
+            let score = {
+                let _time = PrepStage::new("tree rank");
+                let ranking: Vec<Camera> = crate::dataset::spread(&poses, options.rank_cameras).into_iter().map(|i| cameras[i]).collect();
+                rank(g, &ranking, gpu.as_deref_mut(), options.rank)?
+            };
+            let (pc_keep, pc) = {
+                let _time = PrepStage::new("tree build pc");
+                fitting(g, PC_SPLATS, &score, PC_SPLATS * 3 / 4, options.tight)
+            };
+            anyhow::ensure!(pc.leaf_splats().len() >= 1000, "This reconstruction has too few splats to show the world.");
+            let quest = if pc.len() <= QUEST_SPLATS {
+                None
+            } else {
+                let _time = PrepStage::new("tree build quest");
+                Some(fitting(g, QUEST_SPLATS, &score, QUEST_SPLATS * 3 / 4, options.tight))
+            };
+            (0, score, pc_keep, pc, quest)
+        }
     };
-    let (pc_keep, mut pc) = {
-        let _time = PrepStage::new("tree build pc");
-        fitting(g, PC_SPLATS, &score, PC_SPLATS * 3 / 4, options.tight)
-    };
-    anyhow::ensure!(pc.leaf_splats().len() >= 1000, "This reconstruction has too few splats to show the world.");
-    let same = pc.len() <= QUEST_SPLATS;
-    let mut quest = if same {
-        None
-    } else {
-        let _time = PrepStage::new("tree build quest");
-        Some(fitting(g, QUEST_SPLATS, &score, QUEST_SPLATS * 3 / 4, options.tight))
+    let save_stage = |keep: &mut Option<&mut dyn Keep>, done: u32, pc: &Tree, quest: &Option<(Vec<usize>, Tree)>| {
+        if let Some(k) = keep.as_deref_mut() {
+            k.save(partial_bytes(done, &score, &pc_keep, pc, quest.as_ref()));
+        }
     };
     eprintln!(
         "trees: PC {} leaves ({} splats), Quest {} leaves ({} splats), of {} splats ({} visible)",
@@ -416,12 +552,15 @@ pub fn vrchat_files_with(
     );
     progress(0.1);
     if let Some(gpu) = gpu {
-        if options.refit_steps > 0 && !spread.is_empty() {
+        if fresh {
+            save_stage(&mut keep, 0, &pc, &quest);
+        }
+        if options.refit_steps > 0 && !spread.is_empty() && done < 2 {
             let available = tree::eligible(g);
             // Decode-aware, every tree's leaves are re-fitted (the colour bytes clip what a full tree keeps too).
             let cut = |keep: &[usize]| keep.len() < available || options.decoded;
             let cut_pc = pc_keep.len() < available;
-            if cut(&pc_keep) || quest.as_ref().is_some_and(|q| cut(&q.0)) {
+            if (done < 1 && cut(&pc_keep)) || quest.as_ref().is_some_and(|q| cut(&q.0)) {
                 let _time = PrepStage::new("refit targets");
                 let rendered = full_renders(g, &refit_cameras, gpu)?;
                 // One camera in eight checks the re-fit instead of training it.
@@ -434,7 +573,7 @@ pub fn vrchat_files_with(
                     }
                 }
                 drop(_time);
-                if cut(&pc_keep) {
+                if done < 1 && cut(&pc_keep) {
                     let _time = PrepStage::new("refit pc");
                     if let Some(t) = refit(
                         g,
@@ -451,30 +590,37 @@ pub fn vrchat_files_with(
                     )? {
                         pc = t;
                     }
+                    save_stage(&mut keep, 1, &pc, &quest);
                 }
-                if let Some((keep, q)) = quest.as_mut().filter(|q| cut(&q.0)) {
+                if let Some((keep_quest, q)) = quest.as_mut().filter(|q| cut(&q.0)) {
                     let _time = PrepStage::new("refit quest");
-                    if let Some(t) = refit(g, keep, &score, QUEST_SPLATS, &train, &check, gpu, options.refit_steps, options.decoded, false, "quest")? {
+                    if let Some(t) = refit(g, keep_quest, &score, QUEST_SPLATS, &train, &check, gpu, options.refit_steps, options.decoded, false, "quest")? {
                         *q = t;
                     }
                 }
+                save_stage(&mut keep, 2, &pc, &quest);
             }
         }
         // Decode-aware tuning keeps the merged depths' colours within 0–1 too; what the file stores of leaves and merged
         // depths is what tune_for scores either way (crate::tree_file, Tree::select_stored).
         let share = if quest.is_none() { 0.85 } else { 0.55 };
-        let _time = PrepStage::new("tune pc");
-        gpu.clamp_colors = options.decoded;
-        let tuned = tune_for(&mut pc, cameras, gpu, "pc", options.tune_steps, options.drawn_at[0], |p| progress(0.1 + share * p));
-        gpu.clamp_colors = false;
-        tuned?;
-        drop(_time);
-        if let Some((_, q)) = quest.as_mut() {
+        if done < 3 {
+            let _time = PrepStage::new("tune pc");
+            gpu.clamp_colors = options.decoded;
+            let tuned = tune_for(&mut pc, cameras, gpu, "pc", options.tune_steps, options.drawn_at[0], |p| progress(0.1 + share * p));
+            gpu.clamp_colors = false;
+            tuned?;
+            drop(_time);
+            save_stage(&mut keep, 3, &pc, &quest);
+        }
+        if let Some((_, q)) = quest.as_mut().filter(|_| done < 4) {
             let _time = PrepStage::new("tune quest");
             gpu.clamp_colors = options.decoded;
             let tuned = tune_for(q, cameras, gpu, "quest", options.tune_steps, options.drawn_at[1], |p| progress(0.65 + 0.3 * p));
             gpu.clamp_colors = false;
             tuned?;
+            drop(_time);
+            save_stage(&mut keep, 4, &pc, &quest);
         }
     }
     let _time = PrepStage::new("tree serialize");
@@ -701,6 +847,27 @@ mod tests {
             );
         }
         g
+    }
+
+    /// How far an export got comes back exactly, and a damaged record is no record.
+    #[test]
+    fn a_partial_export_comes_back_as_it_was_kept() {
+        let mut g = Gaussians::default();
+        for i in 0..3 {
+            g.push([i as f32, 1.0, 2.0], [-3.0; 3], [1.0, 0.0, 0.0, 0.0], 0.5, [0.25; 3]);
+        }
+        let node = |parent, leaf| tree::Node { center: [1.0, 2.0, 3.0], radius: 4.0, error: 0.5, parent, depth: 2, start: 1, count: 2, leaf };
+        let pc = Tree { nodes: vec![node(None, false), node(Some(0), true)], splats: g.clone() };
+        let q = (vec![0usize, 2], pc.clone());
+        let bytes = partial_bytes(3, &[0.5, 1.5, 2.5], &[2, 1], &pc, Some(&q));
+        let read = Partial::from_bytes(&bytes).expect("reads");
+        assert_eq!((read.done, read.score, read.pc_keep), (3, vec![0.5, 1.5, 2.5], vec![2, 1]));
+        assert_eq!((&read.pc.nodes, &read.pc.splats.means), (&pc.nodes, &g.means));
+        let (keep, tree) = read.quest.expect("a Quest tree");
+        assert_eq!((keep, tree.nodes), (q.0.clone(), pc.nodes.clone()));
+        assert!(Partial::from_bytes(&bytes[..bytes.len() - 1]).is_none());
+        let none = partial_bytes(0, &[], &[], &pc, None);
+        assert!(Partial::from_bytes(&none).expect("reads").quest.is_none());
     }
 
     #[test]

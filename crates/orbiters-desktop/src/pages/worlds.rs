@@ -1288,11 +1288,11 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
         p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), theme::radius(1.5), theme::ACCENT);
     }
 
-    if let (Offer::Running { fraction, .. }, Some(j)) = (offer, job) {
+    if let (Offer::Running { fraction, .. } | Offer::Paused { fraction, .. }, Some(j)) = (offer, job) {
         let bar = Rect::from_min_size(pos2(x, rect.bottom() - 6.0), vec2(rect.right() - x - right_w - 16.0, 3.0));
         let f = anim::spring_from(ui.ctx(), Id::unique(("row-reconstruct", &j.session_dir)), [0.0], [fraction], Spring::SOFT)[0].clamp(0.0, 1.0);
         p.rect_filled(bar, theme::radius(1.5), theme::white(0.08));
-        p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), theme::radius(1.5), theme::ACCENT);
+        p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), theme::radius(1.5), super::sessions::job_bar(j));
     }
     let b = Rect::from_min_size(pos2(rect.right() - 16.0 - 314.0, rect.center().y - 20.0), vec2(314.0, 40.0));
     if upload.is_some_and(|u| u.running()) {
@@ -1303,6 +1303,11 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
     match offer {
         Offer::Running { .. } => {
             if Button::new(offer.label()).icon(icons::X).variant(Variant::Secondary).hint("Stops it: its 3D view stays as it is").width(b.width()).id_salt(salt).show_at(ui, b).clicked() {
+                return Some(RowAction::Stop);
+            }
+        }
+        Offer::Paused { why, .. } => {
+            if Button::new(offer.label()).icon(icons::X).variant(Variant::Secondary).hint(why).width(b.width()).id_salt(salt).show_at(ui, b).clicked() {
                 return Some(RowAction::Stop);
             }
         }

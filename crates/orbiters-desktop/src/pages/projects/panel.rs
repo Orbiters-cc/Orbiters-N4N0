@@ -324,7 +324,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     if !open && !project.missing && widgets::activated(&folder.show_at(ui, round(2))) {
         let path = project.path.clone();
         state.task(&ctx, "Opening the folder…", move || {
-            orbiters_projects::hidden_command("explorer.exe").arg(path).spawn()?;
+            orbiters_projects::reveal(&path)?;
             Ok(Outcome::Picked(None))
         });
     }

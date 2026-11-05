@@ -126,7 +126,8 @@ pub fn validate_name(name: &str) -> anyhow::Result<()> {
         || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || ["COM", "LPT"].iter().any(|s| stem.strip_prefix(s).is_some_and(|v| v.len() == 1 && v.chars().all(|c| c.is_ascii_digit())))
     {
-        bail!("Choose a valid Windows folder name.");
+        // Projects travel: the rule is Windows' on every computer, though only there is it the system's own.
+        bail!(if cfg!(windows) { "Choose a valid Windows folder name." } else { "Choose a folder name that also works on Windows: none of < > : \" / \\ | ? *, no space or dot at its end, not CON or NUL." });
     }
     Ok(())
 }
@@ -210,6 +211,17 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
                 break;
             }
             output.write_all(&buffer[..n]).with_context(|| format!("Could not copy {}", rel.display()))?;
+        }
+        // A new file is not executable here, and a copy must be usable: a package's tools, a plugin's programs.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let executable = input.metadata()?.permissions().mode() & 0o111;
+            if executable != 0 {
+                let mut permissions = output.metadata()?.permissions();
+                permissions.set_mode(permissions.mode() | executable);
+                output.set_permissions(permissions)?;
+            }
         }
         *progress.lock().unwrap() = Progress { copied: i + 1, total: files.len(), file: rel.display().to_string(), phase: "Copying project".into() };
     }
@@ -428,6 +440,36 @@ mod tests {
         assert_eq!(std::fs::read(destination.join("Packages/external.package/payload.bin")).unwrap(), vec![42u8; 4096]);
         let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(destination.join("Packages/manifest.json")).unwrap()).unwrap();
         assert_eq!(manifest["dependencies"]["external.package"], "file:external.package");
+    }
+
+    #[test]
+    fn a_name_that_would_not_travel_is_refused_in_words_for_this_computer() {
+        for name in ["a:b", "a/b", "a?", "CON", "name.", "name "] {
+            let said = validate_name(name).unwrap_err().to_string();
+            assert_eq!(said.contains("Windows folder name"), cfg!(windows), "{said}");
+            assert!(cfg!(windows) || said.contains("also works on Windows"), "{said}");
+        }
+        validate_name("My avatars copy").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_keeps_programs_runnable_and_stays_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(source.join("Packages/tool/bin")).unwrap();
+        let tool = source.join("Packages/tool/bin/run");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let locked = source.join("Packages/locked.json");
+        std::fs::write(&locked, "{}").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let copy = temp.path().join("copy");
+        copy_keeping(&source, &copy, Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())).unwrap();
+        assert_eq!(std::fs::metadata(copy.join("Packages/tool/bin/run")).unwrap().permissions().mode() & 0o111, 0o111);
+        // As on Windows, what comes next may write to it: a copy's settings are retargeted.
+        assert!(!std::fs::metadata(copy.join("Packages/locked.json")).unwrap().permissions().readonly());
     }
 
     #[test]

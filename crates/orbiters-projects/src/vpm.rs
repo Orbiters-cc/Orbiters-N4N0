@@ -8,6 +8,29 @@ use vrc_get_vpm::io::{DefaultEnvironmentIo, DefaultProjectIo};
 use vrc_get_vpm::{PackageCollection as _, UnityProject, VersionSelector};
 
 pub const ORBITERS_REPOSITORY: &str = "https://orbiters.cc/vpm/orbiters/index.json";
+
+/// One operation on the shared folder at a time, across this app's processes, until the guard is dropped.
+#[cfg(windows)]
+async fn named_lock(io: &DefaultEnvironmentIo, _root: &Path, name: &str) -> std::io::Result<Box<dyn Send + Sync>> {
+    Ok(Box::new(io.new_mutex(name.as_ref()).await?))
+}
+
+/// Off Windows upstream's `new_mutex` ignores the name: it is one lock for the process, which
+/// `VccDatabaseConnection::connect` takes too, so holding it while connecting waits on itself for ever. A file of our own
+/// beside the settings does the job here.
+#[cfg(not(windows))]
+async fn named_lock(_io: &DefaultEnvironmentIo, root: &Path, name: &str) -> std::io::Result<std::fs::File> {
+    let path = root.join(format!(".{}.lock", name.rsplit('\\').next().unwrap_or(name)));
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
+        let file = std::fs::File::options().create(true).write(true).truncate(false).open(&path)?;
+        file.lock()?;
+        Ok(file)
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Repository {
     pub name: String,
@@ -75,7 +98,7 @@ pub async fn registered(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
 pub async fn register(root: &Path, path: &Path, add: bool) -> anyhow::Result<()> {
     std::fs::create_dir_all(root)?;
     let io = DefaultEnvironmentIo::new(root.into());
-    let _lock = io.new_mutex("Global\\Orbiters.Vpm.Settings".as_ref()).await?;
+    let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Settings").await?;
     let mut settings = Settings::load(&io).await?;
     let mut db = VccDatabaseConnection::connect(&io).await?;
     if add {
@@ -225,7 +248,7 @@ pub async fn view(root: &Path, project: Option<&Path>, refresh: bool) -> anyhow:
 
 pub async fn add_repo(root: &Path, url: &str, headers: BTreeMap<String, String>) -> anyhow::Result<()> {
     let io = DefaultEnvironmentIo::new(root.into());
-    let _lock = io.new_mutex("Global\\Orbiters.Vpm.Settings".as_ref()).await?;
+    let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Settings").await?;
     let mut settings = Settings::load(&io).await?;
     let url = url::Url::parse(url)?;
     if !matches!(url.scheme(), "https" | "http") {
@@ -240,7 +263,7 @@ pub async fn add_repo(root: &Path, url: &str, headers: BTreeMap<String, String>)
 }
 pub async fn remove_repo(root: &Path, id: &str) -> anyhow::Result<()> {
     let io = DefaultEnvironmentIo::new(root.into());
-    let _lock = io.new_mutex("Global\\Orbiters.Vpm.Settings".as_ref()).await?;
+    let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Settings").await?;
     let mut settings = Settings::load(&io).await?;
     settings.remove_repo(|r| r.id() == Some(id));
     settings.save(&io).await?;
@@ -248,7 +271,7 @@ pub async fn remove_repo(root: &Path, id: &str) -> anyhow::Result<()> {
 }
 pub async fn set_enabled(root: &Path, id: &str, enabled: bool) -> anyhow::Result<()> {
     let io = DefaultEnvironmentIo::new(root.into());
-    let _lock = io.new_mutex("Global\\Orbiters.Vpm.Settings".as_ref()).await?;
+    let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Settings").await?;
     let mut config = read_gui(root);
     let mut ids = hidden(root);
     if enabled {
@@ -272,7 +295,7 @@ pub enum Change {
 pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<()> {
     // Serialize mutations across this app's windows. VCC's database has its own upstream shared LiteDB mutex.
     let io = DefaultEnvironmentIo::new(root.into());
-    let _lock = io.new_mutex("Global\\Orbiters.Vpm.Packages".as_ref()).await?;
+    let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Packages").await?;
     let (_, packages) = collection(root, true).await?;
     let client = http()?;
     let mut project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;

@@ -91,7 +91,7 @@ pub(super) fn project_act(ctx: &egui::Context, cx: &mut Cx, state: &mut State, p
         ProjectAct::Folder => {
             let path = project.path.clone();
             state.task(ctx, "Opening the folder…", move || {
-                orbiters_projects::hidden_command("explorer.exe").arg(path).spawn()?;
+                orbiters_projects::reveal(&path)?;
                 Ok(Outcome::Picked(None))
             });
         }

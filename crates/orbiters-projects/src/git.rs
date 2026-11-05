@@ -37,13 +37,32 @@ pub struct Repo {
     pub host: Option<String>,
 }
 
+/// Git, if there is one. On the Mac `/usr/bin/git` is a stub that puts up the system's offer to install the developer
+/// tools when they are not there, which looking at a project must not do, and an app started from the Dock does not have
+/// Homebrew on its `PATH`.
+fn program() -> Option<std::path::PathBuf> {
+    #[cfg(not(target_os = "macos"))]
+    return Some("git".into());
+    #[cfg(target_os = "macos")]
+    {
+        static FOUND: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+        FOUND
+            .get_or_init(|| {
+                let tools = || std::process::Command::new("/usr/bin/xcode-select").arg("-p").output().is_ok_and(|o| o.status.success());
+                ["/opt/homebrew/bin/git", "/usr/local/bin/git"].iter().map(std::path::PathBuf::from).find(|p| p.is_file()).or_else(|| tools().then(|| "/usr/bin/git".into()))
+            })
+            .clone()
+    }
+}
+
 /// `project`'s repository, when it is one (`None` without `.git` or Git).
 pub fn read(project: &Path) -> Option<Repo> {
     if !project.join(".git").exists() {
         return None;
     }
+    let program = program()?;
     let git = |args: &[&str]| -> Option<String> {
-        let o = crate::hidden_command("git").arg("-C").arg(project).args(args).output().ok()?;
+        let o = crate::hidden_command(&program).arg("-C").arg(project).args(args).output().ok()?;
         o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
     };
     let log = git(&["log", &format!("-{COMMITS}"), "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e"])?;

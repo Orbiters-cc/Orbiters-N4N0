@@ -54,10 +54,26 @@ pub(crate) struct Storage {
     fixture: Option<Fixture>,
 }
 
+#[cfg(not(target_os = "macos"))]
 fn drive_of(path: &Path) -> String {
     let text = path.to_string_lossy();
     let text = text.strip_prefix(r"\\?\").unwrap_or(&text).to_string();
     Path::new(&text).components().next().map_or(text.clone(), |c| c.as_os_str().to_string_lossy().into_owned())
+}
+
+/// A disk as the Mac's Finder names it: an external one by its name, the one the system starts from by what it is.
+#[cfg(target_os = "macos")]
+fn drive_of(path: &Path) -> String {
+    match path.strip_prefix("/Volumes").ok().and_then(|p| p.components().next()) {
+        Some(name) => name.as_os_str().to_string_lossy().into_owned(),
+        None => "the startup disk".to_string(),
+    }
+}
+
+/// The same at the start of a sentence.
+fn starting(disk: &str) -> String {
+    let mut chars = disk.chars();
+    chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
 fn bytes(n: u64) -> String {
@@ -321,7 +337,7 @@ pub(super) fn card(ui: &mut Ui, state: &mut State, project: &Project) {
             "This disk is running low",
             theme::WARN,
             icons::WARNING,
-            format!("{disk} has {free} free. Unity opens as usual, but a large import can run out of room: Orbiters looks for at least {} GB free.", storage::IMPORT_RESERVE >> 30),
+            format!("{} has {free} free. Unity opens as usual, but a large import can run out of room: Orbiters looks for at least {} GB free.", starting(&disk), storage::IMPORT_RESERVE >> 30),
         ),
         Notice::OutOfSpace => (
             "Unity ran out of disk space",
@@ -390,7 +406,7 @@ pub(super) fn card(ui: &mut Ui, state: &mut State, project: &Project) {
                     )));
                     para(cu, note(format!(
                         "Every file is checked before the old Library goes, and you can cancel until then. {} has to be connected whenever you use this project.",
-                        drive_of(cache_root)
+                        starting(&drive_of(cache_root))
                     )));
                     true
                 }
@@ -405,7 +421,12 @@ pub(super) fn card(ui: &mut Ui, state: &mut State, project: &Project) {
                 }
                 Verdict::NoRoom { needed, best } => {
                     let most = best.as_ref().map(|(root, free)| format!(" The most on another disk is {} on {}.", bytes(*free), drive_of(root))).unwrap_or_default();
-                    para(cu, body(format!("Moving it needs {} on another disk (the Library and room for Unity's imports).{most} Free some space on one of them.", bytes(*needed))));
+                    if cfg!(target_os = "macos") && best.is_none() {
+                        // Most Macs have the one disk.
+                        para(cu, body(format!("Moving it needs {} on another disk (the Library and room for Unity's imports), and none is connected. Free some space on {disk}, or connect a disk with room.", bytes(*needed))));
+                    } else {
+                        para(cu, body(format!("Moving it needs {} on another disk (the Library and room for Unity's imports).{most} Free some space on one of them.", bytes(*needed))));
+                    }
                     false
                 }
                 Verdict::Unsupported => {
@@ -549,7 +570,7 @@ mod tests {
             still: true,
         });
         let (label, _, fraction, cancel) = state.repair_capsule().expect("no panel: the capsule");
-        assert_eq!(label, "Avatorbit: Copying the Library to I:");
+        assert_eq!(label, if cfg!(target_os = "macos") { "Avatorbit: Copying the Library to the startup disk" } else { "Avatorbit: Copying the Library to I:" });
         assert_eq!(fraction, Some(0.5));
         assert!(cancel);
         state.selected = Some(PathBuf::from("H:/Other"));
@@ -592,13 +613,15 @@ impl State {
         let first = self.scan.projects[0].path.clone();
         self.selected = Some(first.clone());
         const GB: u64 = 1_000_000_000;
-        let low = Health { free: Some(7_200_000_000), disk: Some(PathBuf::from(r"H:\")), ..Health::default() };
-        let cache_root = PathBuf::from(r"I:\Orbiters\UnityCache");
+        let (project_disk, cache_root) = if cfg!(target_os = "macos") { ("/", "/Volumes/Archive/Orbiters/UnityCache") } else { (r"H:\", r"I:\Orbiters\UnityCache") };
+        let project_disk = PathBuf::from(project_disk);
+        let low = Health { free: Some(7_200_000_000), disk: Some(project_disk.clone()), ..Health::default() };
+        let cache_root = PathBuf::from(cache_root);
         let ready = |bytes: u64| Plan { bytes, files: 212_431, verdict: Verdict::Ready { cache_root: cache_root.clone(), free: 1_240 * GB } };
         let mut fixture = Fixture { health: low.clone(), plan: Some(Ok(ready(38_200_000_000))), measuring: None };
         match name {
             "projects-storage-failed" => fixture.health.disk_error = true,
-            "projects-storage-earlier" => fixture.health = Health { free: Some(41 * GB), disk_error: true, disk: Some(PathBuf::from(r"H:\")), open: false },
+            "projects-storage-earlier" => fixture.health = Health { free: Some(41 * GB), disk_error: true, disk: Some(project_disk), open: false },
             "projects-storage-unity-open" => fixture.health.open = true,
             "projects-storage-measuring" => {
                 fixture.plan = None;
@@ -608,11 +631,11 @@ impl State {
                 fixture.plan = Some(Ok(Plan {
                     bytes: 38_200_000_000,
                     files: 212_431,
-                    verdict: Verdict::NoRoom { needed: 46_800_000_000, best: Some((PathBuf::from(r"D:\Orbiters\UnityCache"), 20 * GB)) },
+                    verdict: Verdict::NoRoom { needed: 46_800_000_000, best: Some((PathBuf::from(if cfg!(target_os = "macos") { "/Volumes/Archive/Orbiters/UnityCache" } else { r"D:\Orbiters\UnityCache" }), 20 * GB)) },
                 }));
             }
             "projects-storage-redirected" => {
-                fixture.plan = Some(Ok(Plan { bytes: 0, files: 0, verdict: Verdict::Redirected { to: Some(PathBuf::from(r"I:\Orbiters\UnityCache\4b8c601f16724fd9aa5a31e1b3af4335")) } }));
+                fixture.plan = Some(Ok(Plan { bytes: 0, files: 0, verdict: Verdict::Redirected { to: Some(PathBuf::from(if cfg!(target_os = "macos") { "/Volumes/Archive/Orbiters/UnityCache/4b8c601f16724fd9aa5a31e1b3af4335" } else { r"I:\Orbiters\UnityCache\4b8c601f16724fd9aa5a31e1b3af4335" })) } }));
             }
             "projects-repair-copying" | "projects-repair-cancelling" | "projects-repair-removing" | "projects-repair-other" => {
                 let mut p = Progress {

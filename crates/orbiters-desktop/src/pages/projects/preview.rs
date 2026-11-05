@@ -738,7 +738,11 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
                     } else if offer.is_some() {
                         "Orbiters Toolkit draws it exactly each time the scene is saved in Unity."
                     } else {
-                        "Save the scene in Unity (Ctrl+S): Orbiters Toolkit draws it exactly and it shows here a moment later."
+                        if cfg!(target_os = "macos") {
+                            "Save the scene in Unity (Cmd+S): Orbiters Toolkit draws it exactly and it shows here a moment later."
+                        } else {
+                            "Save the scene in Unity (Ctrl+S): Orbiters Toolkit draws it exactly and it shows here a moment later."
+                        }
                     };
                     notes.push(Note::new(icons::WARNING, format!("No preview: {why}"), format!("{scene_name}: no 3D preview, {why}.\n\n{hint}")));
                     if let Some((glyph, label, tip, offer)) = offer {

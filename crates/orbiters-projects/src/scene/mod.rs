@@ -96,6 +96,10 @@ impl Limits {
                 let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
             }
         }
+        #[cfg(target_os = "macos")]
+        if self.background {
+            crate::discovery::low_priority();
+        }
     }
 
     /// Fails once the time is up or the build was cancelled, saying what it was doing.

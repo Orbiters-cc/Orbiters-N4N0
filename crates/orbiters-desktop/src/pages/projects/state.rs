@@ -1243,7 +1243,7 @@ impl State {
                     })
                     .collect();
                 Project {
-                    path: PathBuf::from(format!("H:/Unity projects/{label}")),
+                    path: PathBuf::from(format!("{STAND_IN_PROJECTS}/{label}")),
                     name: label,
                     unity: if i == 5 { "2019.4.31f1".into() } else { "2022.3.22f1".into() },
                     kind,
@@ -1383,7 +1383,7 @@ impl State {
         ] {
             self.repo_icons.insert(url.into(), stand_in_icon(ctx, &format!("repo-{url}"), look));
         }
-        self.new_location = "H:/Unity projects".into();
+        self.new_location = STAND_IN_PROJECTS.into();
         self.new_name = "My new avatar".into();
         let known = vec![
             network::Listing {
@@ -1730,7 +1730,7 @@ impl State {
         let world_id = "wrld_00000000-0000-4000-8000-000000000001".to_string();
         let now = discovery::now();
         let links = |project: &str| -> Vec<blender::Link> {
-            let at = |file: &str| PathBuf::from(format!("H:/Unity projects/{project}/{file}"));
+            let at = |file: &str| PathBuf::from(format!("{STAND_IN_PROJECTS}/{project}/{file}"));
             match project {
                 "My avatars" => vec![
                     blender::Link::new(
@@ -1741,7 +1741,7 @@ impl State {
                         now - 3 * 3600,
                     ),
                     blender::Link::new(
-                        PathBuf::from("H:/Blender/Hoodie outfit.blend"),
+                        PathBuf::from(if cfg!(target_os = "macos") { "/Volumes/Archive/Blender/Hoodie outfit.blend" } else { "H:/Blender/Hoodie outfit.blend" }),
                         blender::Tool::Mixer,
                         Some("Assets/MasculineCanine/Avatar.unity".into()),
                         None,
@@ -1823,9 +1823,9 @@ impl State {
                 let copy = if name == "projects-duplicate-taken" { "Weekend avatar" } else { "My avatars copy" };
                 self.dup = Dup {
                     name: copy.into(),
-                    location: "H:/Unity projects".into(),
+                    location: STAND_IN_PROJECTS.into(),
                     library: name == "projects-duplicate-library",
-                    checked: Some(("H:/Unity projects".into(), copy.into(), name == "projects-duplicate-taken", Some(412_000_000_000))),
+                    checked: Some((STAND_IN_PROJECTS.into(), copy.into(), name == "projects-duplicate-taken", Some(412_000_000_000))),
                     ..Default::default()
                 };
                 if name == "projects-duplicate-copying" {
@@ -1927,6 +1927,9 @@ pub(super) enum Look {
     /// A diamond in this colour on nothing (a mark to frame).
     Mark([f32; 3]),
 }
+
+/// Where screenshots' stand-in projects say they are.
+pub(super) const STAND_IN_PROJECTS: &str = if cfg!(target_os = "macos") { "/Users/enzo/Unity projects" } else { "H:/Unity projects" };
 
 pub(super) fn stand_in_icon(ctx: &egui::Context, name: &str, look: Look) -> PackageIcon {
     let n = 96usize;

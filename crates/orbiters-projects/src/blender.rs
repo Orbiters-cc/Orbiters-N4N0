@@ -253,13 +253,17 @@ fn parse_version(s: &str) -> Option<(u32, u32)> {
 }
 
 /// The version of the Blender whose program is `exe`: Blender keeps its scripts and data in a folder named after its
-/// version beside the program (Steam's leaves older ones behind: the newest is the one installed).
+/// version beside the program (Steam's leaves older ones behind: the newest is the one installed), on the Mac in its
+/// bundle's `Contents/Resources`.
 fn version_of(exe: &Path) -> Option<(u32, u32)> {
-    let entries = std::fs::read_dir(exe.parent()?).ok()?;
+    let beside = exe.parent()?;
+    let resources = beside.parent().map(|contents| contents.join("Resources")).filter(|_| cfg!(target_os = "macos") && beside.ends_with("Contents/MacOS"));
+    let entries = std::fs::read_dir(resources.as_deref().unwrap_or(beside)).ok()?;
     entries.flatten().filter(|e| e.path().is_dir()).filter_map(|e| parse_version(&e.file_name().to_string_lossy())).max()
 }
 
 /// The program of a shell command (`"C:\…\blender.exe" "%1"`, or unquoted up to `.exe`).
+#[cfg_attr(not(windows), allow(dead_code))]
 fn command_program(command: &str) -> Option<PathBuf> {
     let c = command.trim();
     let program = if let Some(rest) = c.strip_prefix('"') {
@@ -282,7 +286,18 @@ fn associated() -> Option<PathBuf> {
         let command: String = root.open_subkey(format!(r"{}\shell\open\command", prog.trim())).ok()?.get_value("").ok()?;
         command_program(&command)
     }
-    #[cfg(not(windows))]
+    // Launch Services answers about a file that exists: an empty one of that kind, in its own temporary folder.
+    #[cfg(target_os = "macos")]
+    {
+        let folder = std::env::temp_dir().join(format!("orbiters-blend-{}", std::process::id()));
+        let file = folder.join("association.blend");
+        std::fs::create_dir_all(&folder).ok()?;
+        std::fs::write(&file, b"").ok()?;
+        let app = crate::mac::default_app(&file);
+        let _ = std::fs::remove_dir_all(&folder);
+        app.map(|app| crate::mac::bundle_program(&app))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     None
 }
 
@@ -304,7 +319,16 @@ fn steam_libraries() -> Vec<PathBuf> {
         }
         out
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let Some(steam) = dirs::config_dir().map(|d| d.join("Steam")) else { return vec![] };
+        let mut out = vec![steam.clone()];
+        if let Ok(vdf) = std::fs::read_to_string(steam.join("steamapps/libraryfolders.vdf")) {
+            out.extend(vdf_paths(&vdf));
+        }
+        out
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     vec![]
 }
 
@@ -319,15 +343,43 @@ fn vdf_paths(vdf: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The Blender applications in a folder of applications: `Blender.app`, `Blender 4.2.app`.
+#[cfg(target_os = "macos")]
+fn apps_in(folder: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(folder) else { return vec![] };
+    let mut apps: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            name.starts_with("blender") && name.ends_with(".app")
+        })
+        .map(|e| e.path())
+        .collect();
+    apps.sort();
+    apps
+}
+
 /// The Blenders on this computer, the one .blend files open with first: then Steam's (in each library) and those under
-/// Program Files\Blender Foundation. Each once.
+/// Program Files\Blender Foundation; on the Mac those of the Applications folders, then any other Spotlight knows. Each
+/// once.
 pub fn installs() -> Vec<Blender> {
     let mut exes: Vec<PathBuf> = associated().into_iter().collect();
-    exes.extend(steam_libraries().into_iter().map(|l| l.join("steamapps/common/Blender/blender.exe")));
-    if let Some(pf) = std::env::var_os("ProgramFiles") {
-        if let Ok(entries) = std::fs::read_dir(PathBuf::from(pf).join("Blender Foundation")) {
-            exes.extend(entries.flatten().map(|e| e.path().join("blender.exe")));
+    #[cfg(not(target_os = "macos"))]
+    {
+        exes.extend(steam_libraries().into_iter().map(|l| l.join("steamapps/common/Blender/blender.exe")));
+        if let Some(pf) = std::env::var_os("ProgramFiles") {
+            if let Ok(entries) = std::fs::read_dir(PathBuf::from(pf).join("Blender Foundation")) {
+                exes.extend(entries.flatten().map(|e| e.path().join("blender.exe")));
+            }
         }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut apps: Vec<PathBuf> = steam_libraries().into_iter().map(|l| l.join("steamapps/common/Blender/Blender.app")).collect();
+        apps.extend(apps_in(Path::new("/Applications")));
+        apps.extend(dirs::home_dir().map(|h| apps_in(&h.join("Applications"))).unwrap_or_default());
+        apps.extend(crate::mac::spotlight("kMDItemCFBundleIdentifier == 'org.blenderfoundation.blender'"));
+        exes.extend(apps.iter().map(|app| crate::mac::bundle_program(app)));
     }
     let mut out: Vec<Blender> = vec![];
     for exe in exes {
@@ -338,8 +390,8 @@ pub fn installs() -> Vec<Blender> {
     out
 }
 
-/// The Blender versions whose user settings (`config`, Blender's `%APPDATA%\Blender Foundation\Blender`) have Mixer's
-/// or MCB's add-on, as an add-on or an extension.
+/// The Blender versions whose user settings (`config`, Blender's `%APPDATA%\Blender Foundation\Blender`, on the Mac
+/// `~/Library/Application Support/Blender`) have Mixer's or MCB's add-on, as an add-on or an extension.
 fn with_addons(config: &Path) -> Vec<(u32, u32)> {
     let Ok(entries) = std::fs::read_dir(config) else { return vec![] };
     let has = |dir: &Path| ["orbiters_mixer", "mcb_blender"].iter().any(|a| dir.join(a).is_dir());
@@ -366,7 +418,8 @@ pub fn choose<'a>(installs: &'a [Blender], with_addons: &[(u32, u32)]) -> Option
 
 /// The Blender [`open`] uses, if one is found.
 pub fn find() -> Option<Blender> {
-    let config = dirs::config_dir().map(|d| d.join("Blender Foundation/Blender")).map(|d| with_addons(&d)).unwrap_or_default();
+    let settings = if cfg!(target_os = "macos") { "Blender" } else { "Blender Foundation/Blender" };
+    let config = dirs::config_dir().map(|d| d.join(settings)).map(|d| with_addons(&d)).unwrap_or_default();
     let all = installs();
     choose(&all, &config).cloned()
 }
@@ -375,18 +428,53 @@ pub fn find() -> Option<Blender> {
 /// tell the person.
 pub fn open(blend: &Path) -> anyhow::Result<String> {
     anyhow::ensure!(blend.is_file(), "{} is not there anymore.", blend.display());
-    if let Some(b) = find() {
-        let mut c = crate::hidden_command(&b.exe);
-        c.arg(blend);
-        if let Some(dir) = blend.parent() {
-            c.current_dir(dir);
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(b) = find() {
+            if open_on_mac(&b.exe, blend).status().is_ok_and(|s| s.success()) {
+                return Ok(b.label());
+            }
         }
-        if c.spawn().is_ok() {
-            return Ok(b.label());
+        let answer = crate::mac::open_command().arg(blend).output()?;
+        anyhow::ensure!(answer.status.success(), "No program here opens .blend files. Install Blender from blender.org.");
+        Ok("the program .blend files open with".into())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(b) = find() {
+            let mut c = crate::hidden_command(&b.exe);
+            c.arg(blend);
+            if let Some(dir) = blend.parent() {
+                c.current_dir(dir);
+            }
+            if c.spawn().is_ok() {
+                return Ok(b.label());
+            }
+        }
+        crate::reveal(blend)?;
+        Ok("the program .blend files open with".into())
+    }
+}
+
+/// What opens `blend` in the Blender whose program is `exe`: a new one through the system when it is in a bundle (a Blender
+/// already running would otherwise drop what it has open for this file), else that program with the file.
+#[cfg(target_os = "macos")]
+fn open_on_mac(exe: &Path, blend: &Path) -> std::process::Command {
+    match crate::mac::enclosing_app(exe) {
+        Some(app) => {
+            let mut c = crate::mac::start_app(&app);
+            c.arg(blend);
+            c
+        }
+        None => {
+            let mut c = crate::hidden_command(exe);
+            c.arg(blend);
+            if let Some(dir) = blend.parent() {
+                c.current_dir(dir);
+            }
+            c
         }
     }
-    crate::hidden_command("explorer.exe").arg(blend).spawn()?;
-    Ok("the program .blend files open with".into())
 }
 
 #[cfg(test)]
@@ -498,6 +586,48 @@ mod tests {
         assert_eq!(root("H:/Elsewhere/UltiZear.blend"), None);
         assert_eq!(global_id_scene(&format!("GlobalObjectId_V1-2-{CANINE}-1-0")).as_deref(), Some(CANINE));
         assert_eq!(global_id_scene(&format!("GlobalObjectId_V1-1-{CANINE}-1-0")), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn blender_is_found_in_its_bundles_with_their_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = |at: &str, versions: &[&str]| {
+            let app = temp.path().join(at);
+            std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+            std::fs::write(app.join("Contents/MacOS/Blender"), "#!/bin/sh\n").unwrap();
+            for v in versions {
+                std::fs::create_dir_all(app.join("Contents/Resources").join(v)).unwrap();
+            }
+            std::fs::create_dir_all(app.join("Contents/Resources/lib")).unwrap();
+            let mut info = plist::Dictionary::new();
+            info.insert("CFBundleExecutable".into(), plist::Value::String("Blender".into()));
+            plist::Value::Dictionary(info).to_file_xml(app.join("Contents/Info.plist")).unwrap();
+            app
+        };
+        let current = bundle("Applications/Blender.app", &["4.2"]);
+        let older = bundle("Applications/Blender 3.6.app", &["3.6"]);
+        std::fs::create_dir_all(temp.path().join("Applications/Safari.app")).unwrap();
+        let steam = bundle("Steam/steamapps/common/Blender/Blender.app", &["4.5", "5.2"]);
+        assert_eq!(apps_in(&temp.path().join("Applications")), [older.clone(), current.clone()]);
+        assert!(apps_in(&temp.path().join("not there")).is_empty());
+        // The version is in the bundle's Resources, where Blender keeps its scripts.
+        let program = |app: &Path| crate::mac::bundle_program(app);
+        assert_eq!(program(&current), current.join("Contents/MacOS/Blender"));
+        assert_eq!(version_of(&program(&current)), Some((4, 2)));
+        assert_eq!(version_of(&program(&older)), Some((3, 6)));
+        assert_eq!(version_of(&program(&steam)), Some((5, 2)), "Steam's leaves older ones behind");
+
+        // Opened through the system, as a new Blender, with the file.
+        let blend = temp.path().join("My Avatar.blend");
+        let c = open_on_mac(&program(&current), &blend);
+        let args: Vec<_> = c.get_args().map(|a| a.to_os_string()).collect();
+        assert_eq!(c.get_program(), "/usr/bin/open");
+        assert_eq!(args, vec!["-n".into(), "-a".into(), current.clone().into_os_string(), blend.clone().into_os_string()]);
+        // A Blender outside any bundle (built by hand) as on other systems.
+        let c = open_on_mac(Path::new("/usr/local/bin/blender"), &blend);
+        assert_eq!(c.get_program(), "/usr/local/bin/blender");
+        assert_eq!(c.get_args().collect::<Vec<_>>(), [blend.as_os_str()]);
     }
 
     #[test]

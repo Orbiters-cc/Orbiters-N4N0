@@ -78,6 +78,7 @@ pub fn matches_disk_error(log: &str, project: &Path) -> bool {
 }
 
 /// The disk a path really is on, through links: "H:\".
+#[cfg(not(unix))]
 fn disk_of(path: &Path) -> Option<PathBuf> {
     let real = path.canonicalize().ok()?;
     let text = real.to_string_lossy();
@@ -86,10 +87,22 @@ fn disk_of(path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(format!("{}\\", root.as_os_str().to_string_lossy())))
 }
 
+/// The disk a path really is on, through links: `/` for the startup disk, `/Volumes/<name>` for another.
+#[cfg(target_os = "macos")]
+fn disk_of(path: &Path) -> Option<PathBuf> {
+    crate::mac::volume_of(path).map(|v| v.mount)
+}
+
+/// Other systems of this kind list no disks to move a Library to ([`fixed_disks`](crate::discovery::fixed_disks)).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn disk_of(path: &Path) -> Option<PathBuf> {
+    path.canonicalize().ok().map(|_| PathBuf::from("/"))
+}
+
 pub fn inspect(project: &Path) -> Health {
     let library = project.join("Library");
     let location = if library.is_dir() { &library } else { project };
-    let log = dirs::data_local_dir().map(|p| p.join("Unity/Editor/Editor.log"));
+    let log = crate::editor_log();
     let mut text = Vec::new();
     if let Some(mut file) = log.and_then(|p| std::fs::File::open(p).ok()) {
         let len = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -120,7 +133,43 @@ fn cache_roots() -> Vec<PathBuf> {
     if let Some(dir) = std::env::var_os(CACHE_DIR_VAR).filter(|d| !d.is_empty()) {
         return vec![PathBuf::from(dir)];
     }
+    #[cfg(target_os = "macos")]
+    return disks_used();
+    #[cfg(not(target_os = "macos"))]
     crate::discovery::fixed_disks().iter().map(|d| cache_root_of(d)).collect()
+}
+
+/// The list of cache folders repairs copied to, on the Mac. macOS asks the person's permission before an app looks at an
+/// external disk, so that cannot happen each time the window opens on the chance that a repair once used it.
+#[cfg(target_os = "macos")]
+fn used_file() -> PathBuf {
+    crate::data_dir().join("unity-cache-folders.json")
+}
+
+/// The cache folders that may hold something: this disk's and the ones repairs copied to.
+#[cfg(target_os = "macos")]
+fn disks_used() -> Vec<PathBuf> {
+    let listed: Vec<PathBuf> = std::fs::read(used_file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut roots = vec![cache_root_of(Path::new("/"))];
+    for root in listed {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
+/// Keeps `root` in that list, before anything is copied there. A stand-in folder ([`CACHE_DIR_VAR`]) is not listed: it is
+/// the only one looked at for as long as it is set.
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+fn remember_cache_root(root: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    if std::env::var_os(CACHE_DIR_VAR).is_none_or(|d| d.is_empty()) && !disks_used().iter().any(|r| r == root) {
+        let mut roots = disks_used();
+        roots.push(root.to_path_buf());
+        crate::write_json(&used_file(), &roots)?;
+    }
+    Ok(())
 }
 
 /// Cache folders to copy into, best first: the system disk's while it has room (it is the fastest here), then the disk
@@ -142,6 +191,12 @@ fn destinations(library: &Path) -> Vec<(PathBuf, u64)> {
             (d, free)
         })
         .collect();
+    // A second APFS volume shares all its room with the first when they are of one container: nothing would be freed.
+    #[cfg(target_os = "macos")]
+    {
+        let own = crate::mac::volume_of(library).or_else(|| library.parent().and_then(crate::mac::volume_of));
+        disks.retain(|(d, _)| !own.as_ref().is_some_and(|own| crate::mac::volume_of(d).is_some_and(|v| crate::mac::share_room(own, &v))));
+    }
     disks.sort_by_key(|(d, free)| (!local.as_ref().is_some_and(|p| p.starts_with(d)), std::cmp::Reverse(*free)));
     disks.into_iter().map(|(d, free)| (cache_root_of(&d), free)).collect()
 }
@@ -225,17 +280,19 @@ pub fn preflight(project: &Path) -> anyhow::Result<Option<PathBuf>> {
         ..Health::default()
     };
     preflight_with(project, &health, |library, needed| {
-        with_room(&destinations(library), needed).map(|(root, _)| root).context("No local disk has room for this project's Library.")
+        let root = with_room(&destinations(library), needed).map(|(root, _)| root).context("No local disk has room for this project's Library.")?;
+        remember_cache_root(&root)?;
+        Ok(root)
     })
 }
 
 /// [`preflight`] with its health and destination given. `pick`: the cache folder for a Library of `needed` bytes.
-#[cfg_attr(not(windows), allow(unused_variables))]
+#[cfg_attr(not(any(windows, unix)), allow(unused_variables))]
 fn preflight_with(project: &Path, health: &Health, pick: impl FnOnce(&Path, u64) -> anyhow::Result<PathBuf>) -> anyhow::Result<Option<PathBuf>> {
     let Preflight::Move(files) = preflight_decision(project, health) else { return Ok(None) };
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, unix)))]
     return Ok(None);
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     {
         drop(files);
         let project = project.canonicalize()?;
@@ -249,7 +306,7 @@ fn preflight_with(project: &Path, health: &Health, pick: impl FnOnce(&Path, u64)
         let progress = SharedProgress::default();
         let cancel = AtomicBool::new(false);
         let work = Work { progress: &progress, cancel: &cancel };
-        match relocate(&project, &target, &files, &work, |target, library| junction::create(target, library))? {
+        match relocate(&project, &target, &files, &work, |target, library| redirect(target, library))? {
             RepairEnd::Moved(_) => Ok(Some(target)),
             RepairEnd::Cancelled { .. } => Ok(None),
         }
@@ -339,7 +396,7 @@ pub enum Verdict {
     HasLink { at: PathBuf },
     /// No other local disk has room for the Library and Unity's imports.
     NoRoom { needed: u64, best: Option<(PathBuf, u64)> },
-    /// Off Windows there are no junctions to redirect with.
+    /// Where there is nothing to redirect a folder with.
     Unsupported,
 }
 
@@ -405,7 +462,7 @@ fn link_target(link: &Path) -> Option<PathBuf> {
 pub fn plan(project: &Path, progress: &SharedProgress, cancel: &AtomicBool) -> anyhow::Result<Option<Plan>> {
     update(progress, |p| *p = Progress { phase: Phase::Measuring, ..Progress::default() });
     let library = project.join("Library");
-    if cfg!(not(windows)) {
+    if cfg!(not(any(windows, unix))) {
         return Ok(Some(Plan { bytes: 0, files: 0, verdict: Verdict::Unsupported }));
     }
     if std::fs::symlink_metadata(&library).is_ok_and(|m| crate::discovery::is_link(&m)) {
@@ -452,12 +509,12 @@ pub struct Moved {
 /// it at any time before the switch: Library stays as it was and the partial copy is deleted. A failure does the same
 /// and says so. Unity must have quit: this holds the project's lock, so Unity cannot open it meanwhile (and is told so).
 pub fn repair(project: &Path, progress: &SharedProgress, cancel: &AtomicBool) -> anyhow::Result<RepairEnd> {
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = (project, progress, cancel);
         bail!("Not enough space for Unity imports. Free at least 8 GB on the project's disk.");
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     {
         update(progress, |p| *p = Progress { phase: Phase::Leftovers, ..Progress::default() });
         // Whatever an interrupted repair left may be what stands between this one and the room it needs.
@@ -467,16 +524,18 @@ pub fn repair(project: &Path, progress: &SharedProgress, cancel: &AtomicBool) ->
         }
         repair_with(project, progress, cancel, |library, needed| {
             let found = destinations(library);
-            with_room(&found, needed).map(|(root, _)| root).with_context(|| match found.iter().max_by_key(|(_, free)| *free) {
+            let root = with_room(&found, needed).map(|(root, _)| root).with_context(|| match found.iter().max_by_key(|(_, free)| *free) {
                 Some((root, free)) => format!("No local disk has room: the Library and Unity's imports need {needed} bytes; the most any other disk has is {free} bytes ({}).", root.display()),
                 None => "No other local disk was found to move the Library to.".to_string(),
-            })
+            })?;
+            remember_cache_root(&root)?;
+            Ok(root)
         })
     }
 }
 
 /// [`repair`] with its destination given. `pick`: the cache folder for a Library needing `needed` bytes.
-#[cfg(windows)]
+#[cfg(any(windows, unix))]
 fn repair_with(project: &Path, progress: &SharedProgress, cancel: &AtomicBool, pick: impl FnOnce(&Path, u64) -> anyhow::Result<PathBuf>) -> anyhow::Result<RepairEnd> {
     anyhow::ensure!(project.is_dir(), "The project's folder is missing: {}", project.display());
     anyhow::ensure!(!crate::unity_open(project), "Unity has this project open. Quit its window, then choose Repair storage.");
@@ -493,11 +552,44 @@ fn repair_with(project: &Path, progress: &SharedProgress, cancel: &AtomicBool, p
     // Checked again now, not only when the panel said what it would do: the disks may have filled since.
     let root = pick(&library, room_needed(bytes))?;
     let target = root.join(uuid::Uuid::new_v4().simple().to_string());
-    relocate(&project, &target, &files, &Work { progress, cancel }, |target, library| junction::create(target, library))
+    relocate(&project, &target, &files, &Work { progress, cancel }, |target, library| redirect(target, library))
+}
+
+/// Makes `link` lead to the folder `target`: an NTFS junction.
+#[cfg(windows)]
+fn redirect(target: impl AsRef<Path>, link: impl AsRef<Path>) -> std::io::Result<()> {
+    junction::create(target, link)
+}
+
+#[cfg(windows)]
+fn is_redirect(link: impl AsRef<Path>) -> std::io::Result<bool> {
+    junction::exists(link)
+}
+
+#[cfg(windows)]
+fn remove_redirect(link: impl AsRef<Path>) -> std::io::Result<()> {
+    junction::delete(link)
+}
+
+/// Makes `link` lead to the folder `target`: a symbolic link, naming the whole path so that it holds wherever it is read
+/// from (a project moved by hand takes it along, as on Windows).
+#[cfg(unix)]
+fn redirect(target: impl AsRef<Path>, link: impl AsRef<Path>) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(std::path::absolute(target)?, link)
+}
+
+#[cfg(unix)]
+fn is_redirect(link: impl AsRef<Path>) -> std::io::Result<bool> {
+    Ok(std::fs::symlink_metadata(link)?.file_type().is_symlink())
+}
+
+#[cfg(unix)]
+fn remove_redirect(link: impl AsRef<Path>) -> std::io::Result<()> {
+    std::fs::remove_file(link)
 }
 
 /// What a move reports to and is stopped by.
-#[cfg(windows)]
+#[cfg(any(windows, unix))]
 struct Work<'a> {
     progress: &'a SharedProgress,
     cancel: &'a AtomicBool,
@@ -516,9 +608,27 @@ fn project_lock(project: &Path) -> anyhow::Result<std::fs::File> {
         .context("Close this project's Unity window before repairing storage")
 }
 
+/// The project's lock here is a lock on the same file, which also stops Unity if it takes one (`flock` and POSIX locks
+/// meet on the Mac). An editor that has the project open without one is looked for by its command line too.
+#[cfg(unix)]
+fn project_lock(project: &Path) -> anyhow::Result<std::fs::File> {
+    const HELD: &str = "Close this project's Unity window before repairing storage";
+    std::fs::create_dir_all(project.join("Temp"))?;
+    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(project.join("Temp/UnityLockfile")).context(HELD)?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => bail!(HELD),
+        // A file system that has no locks (exFAT): nobody can hold one there, Unity included.
+        Err(std::fs::TryLockError::Error(e)) if e.kind() == std::io::ErrorKind::Unsupported || e.raw_os_error() == Some(libc::ENOTSUP) => {}
+        Err(std::fs::TryLockError::Error(e)) => return Err(e).context(HELD),
+    }
+    anyhow::ensure!(crate::editor::of(&crate::editor::running(), project, false).is_none(), HELD);
+    Ok(file)
+}
+
 /// Copies one file and reads it back. `false` when cancelled, partway through it if it is a large one. The copy keeps
 /// the original's modification time and read-only flag, as Library's other readers (and `std::fs::copy`) expect.
-#[cfg(windows)]
+#[cfg(any(windows, unix))]
 fn copy_and_check(from: &Path, to: &Path, buffers: &mut [Vec<u8>; 2], work: &Work) -> anyhow::Result<bool> {
     let [left, right] = buffers;
     let mut source = std::fs::File::open(from)?;
@@ -550,7 +660,8 @@ fn copy_and_check(from: &Path, to: &Path, buffers: &mut [Vec<u8>; 2], work: &Wor
         Some(true) => {}
         Some(false) => bail!("A copied file differs from its original: {}", from.display()),
     }
-    if meta.permissions().readonly() {
+    // Here a new file is not executable either, and Library holds programs (Burst's compiler, in a package).
+    if cfg!(unix) || meta.permissions().readonly() {
         let _ = std::fs::set_permissions(to, meta.permissions());
     }
     Ok(true)
@@ -558,7 +669,7 @@ fn copy_and_check(from: &Path, to: &Path, buffers: &mut [Vec<u8>; 2], work: &Wor
 
 /// Deletes the partial copy of a move that did not happen. The path when it could not be: its `.json` stays beside it, so
 /// [`remove_orphans`] finds it.
-#[cfg(windows)]
+#[cfg(any(windows, unix))]
 fn discard_copy(target: &Path, work: &Work) -> Option<PathBuf> {
     let done = work.progress.lock().unwrap_or_else(|e| e.into_inner()).files_done + 1;
     update(work.progress, |p| {
@@ -584,7 +695,7 @@ fn discard_copy(target: &Path, work: &Work) -> Option<PathBuf> {
 }
 
 /// What a failure's message says about the partial copy.
-#[cfg(windows)]
+#[cfg(any(windows, unix))]
 fn partial_note(left: &Option<PathBuf>) -> String {
     match left {
         None => "The partial copy was deleted.".to_string(),
@@ -595,7 +706,7 @@ fn partial_note(left: &Option<PathBuf>) -> String {
 /// Copies `files` (inside the project's Library) to `target`, checks them, then switches Library to a junction there.
 /// Until the switch nothing of the project changes. Any failure or Cancel before it deletes the copy; a failed switch
 /// restores Library first.
-#[cfg(windows)]
+#[cfg(any(windows, unix))]
 fn relocate(project: &Path, target: &Path, files: &[(PathBuf, u64)], work: &Work, link: impl FnOnce(&Path, &Path) -> std::io::Result<()>) -> anyhow::Result<RepairEnd> {
     let library = project.join("Library");
     let bytes: u64 = files.iter().map(|(_, n)| *n).sum();
@@ -649,8 +760,8 @@ fn relocate(project: &Path, target: &Path, files: &[(PathBuf, u64)], work: &Work
     }
     if let Err(error) = link(target, &library) {
         // A failed reparse-point creation can leave an empty directory behind.
-        if junction::exists(&library).unwrap_or(false) {
-            junction::delete(&library)?;
+        if is_redirect(&library).unwrap_or(false) {
+            remove_redirect(&library)?;
         }
         if library.exists() {
             std::fs::remove_dir(&library).context("Could not remove an empty failed Library redirect")?;
@@ -680,7 +791,7 @@ fn relocate(project: &Path, target: &Path, files: &[(PathBuf, u64)], work: &Work
 
 /// Whether two files hold the same bytes; `on_chunk` hears the bytes compared and answers whether to go on (`None` when
 /// it said to stop).
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, unix)), allow(dead_code))]
 fn same_bytes(a: &Path, b: &Path, left: &mut [u8], right: &mut [u8], mut on_chunk: impl FnMut(usize) -> bool) -> std::io::Result<Option<bool>> {
     if std::fs::metadata(a)?.len() != std::fs::metadata(b)?.len() {
         return Ok(Some(false));
@@ -704,10 +815,22 @@ fn same_bytes(a: &Path, b: &Path, left: &mut [u8], right: &mut [u8], mut on_chun
 
 /// Deletes a folder this module made (never following a link out of it), telling `on_file` of each file, going on past a
 /// file that cannot be deleted so that as much as possible is freed. The first error, if any.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, unix)), allow(dead_code))]
 fn remove_tree(root: &Path, on_file: &mut dyn FnMut()) -> std::io::Result<()> {
     fn remove_link(path: &Path) -> std::io::Result<()> {
         std::fs::remove_dir(path).or_else(|_| std::fs::remove_file(path))
+    }
+    /// What stops a removal here is not the file's own read-only mode but its folder's: packages unpack read-only.
+    #[cfg(unix)]
+    fn open_parent(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(parent) = path.parent() {
+            if let Ok(meta) = std::fs::symlink_metadata(parent) {
+                let mut open = meta.permissions();
+                open.set_mode(open.mode() | 0o700);
+                let _ = std::fs::set_permissions(parent, open);
+            }
+        }
     }
     fn remove_file(path: &Path, meta: Option<std::fs::Metadata>) -> std::io::Result<()> {
         match std::fs::remove_file(path) {
@@ -719,7 +842,19 @@ fn remove_tree(root: &Path, on_file: &mut dyn FnMut()) -> std::io::Result<()> {
                     writable.set_readonly(false);
                     let _ = std::fs::set_permissions(path, writable);
                 }
+                #[cfg(unix)]
+                open_parent(path);
                 std::fs::remove_file(path)
+            }
+            other => other,
+        }
+    }
+    fn remove_folder(path: &Path) -> std::io::Result<()> {
+        match std::fs::remove_dir(path) {
+            #[cfg(unix)]
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                open_parent(path);
+                std::fs::remove_dir(path)
             }
             other => other,
         }
@@ -736,7 +871,7 @@ fn remove_tree(root: &Path, on_file: &mut dyn FnMut()) -> std::io::Result<()> {
                 if meta.as_ref().is_some_and(crate::discovery::is_link) {
                     remove_link(e.path())
                 } else if e.file_type().is_dir() {
-                    std::fs::remove_dir(e.path())
+                    remove_folder(e.path())
                 } else {
                     let done = remove_file(e.path(), meta);
                     if done.is_ok() {
@@ -813,7 +948,19 @@ fn points_at(library: &Path, cache: &Path) -> Option<bool> {
     (target.is_some() || real.is_ok()).then_some(false)
 }
 
+/// Whether the disk a path names is connected. Only a path under `/Volumes` names a disk that can be away.
+#[cfg(unix)]
+fn disk_present(path: &Path) -> bool {
+    use std::path::Component::{Normal, RootDir};
+    let mut parts = path.components();
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(RootDir), Some(Normal(volumes)), Some(Normal(disk))) if volumes == "Volumes" => Path::new("/Volumes").join(disk).exists(),
+        _ => true,
+    }
+}
+
 /// Whether the disk a path names is connected.
+#[cfg(not(unix))]
 fn disk_present(path: &Path) -> bool {
     let text = path.to_string_lossy();
     let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
@@ -938,7 +1085,7 @@ fn sweep(roots: &[PathBuf], known: &[PathBuf], cancel: &AtomicBool) -> Swept {
             Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(100)),
         }
     };
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     for cache in caches_in(roots) {
         if is_cancelled(cancel) {
             break;
@@ -997,7 +1144,7 @@ fn sweep(roots: &[PathBuf], known: &[PathBuf], cancel: &AtomicBool) -> Swept {
             }
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, unix)))]
     let _ = (roots, known, cancel);
     swept
 }
@@ -1029,6 +1176,22 @@ mod tests {
 
     fn folder_is_empty(path: &Path) -> bool {
         std::fs::read_dir(path).map_or(true, |mut d| d.next().is_none())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_full_disk_in_unitys_log_on_the_mac_names_the_project_too() {
+        let log = "Failed to write file: ENOSPC: no space left on device, open '/Users/enzo/Unity Projects/Avatar/Library/Artifacts/ab/file'";
+        assert!(matches_disk_error(log, Path::new("/Users/enzo/Unity Projects/Avatar")));
+        assert!(!matches_disk_error(log, Path::new("/Users/enzo/Unity Projects/Avatar copy")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_disk_is_away_only_if_it_is_named_under_volumes() {
+        assert!(disk_present(Path::new("/Users/enzo/Avatar")));
+        assert!(disk_present(Path::new("/Volumes")));
+        assert!(!disk_present(Path::new("/Volumes/Not a disk connected here/Avatar")));
     }
 
     #[test]
@@ -1079,7 +1242,7 @@ mod tests {
         assert_eq!(preflight_decision(&none, &low()), Preflight::Move(vec![]));
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn opening_with_a_low_disk_does_not_copy_an_existing_library() {
         let temp = tempfile::tempdir().unwrap();
@@ -1099,7 +1262,7 @@ mod tests {
         assert!(project.join("Library/Artifacts/ab/0.bin").is_file());
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn opening_moves_a_library_that_barely_exists_and_none_at_all() {
         let temp = tempfile::tempdir().unwrap();
@@ -1113,14 +1276,14 @@ mod tests {
             .unwrap()
             .expect("moved");
             let library = project.join("Library");
-            assert!(junction::exists(&library).unwrap());
+            assert!(is_redirect(&library).unwrap());
             assert!(moved.starts_with(&cache));
             assert_eq!(std::fs::read_dir(&library).unwrap().count() > 0, files > 0);
-            junction::delete(&library).unwrap();
+            remove_redirect(&library).unwrap();
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn a_failed_preflight_leaves_everything_as_it_was() {
         let temp = tempfile::tempdir().unwrap();
@@ -1130,7 +1293,7 @@ mod tests {
         assert!(!crate::discovery::is_link(&std::fs::symlink_metadata(project.join("Library")).unwrap()));
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn another_editor_or_repair_cannot_acquire_the_project_lock() {
         let temp = tempfile::tempdir().unwrap();
@@ -1140,7 +1303,7 @@ mod tests {
         assert!(project_lock(temp.path()).is_ok());
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     fn files_of(project: &Path) -> Vec<(PathBuf, u64)> {
         let library = project.join("Library");
         match walk_library(&library, &SharedProgress::default(), &AtomicBool::new(false)).unwrap().unwrap() {
@@ -1149,7 +1312,7 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn relocation_preserves_cache_and_rolls_back_failed_redirect() {
         let temp = tempfile::tempdir().unwrap();
@@ -1171,16 +1334,16 @@ mod tests {
         assert!(!failed.exists(), "a failed redirect leaves no copy behind");
         assert!(!failed.with_extension("json").exists());
         let target = temp.path().join("relocated");
-        let RepairEnd::Moved(moved) = relocate(&project, &target, &files, &work, |t, l| junction::create(t, l)).unwrap() else { panic!("not moved") };
+        let RepairEnd::Moved(moved) = relocate(&project, &target, &files, &work, |t, l| redirect(t, l)).unwrap() else { panic!("not moved") };
         assert_eq!(moved.old_left, None);
-        assert!(junction::exists(&library).unwrap());
+        assert!(is_redirect(&library).unwrap());
         assert_eq!(std::fs::read(&file).unwrap(), original);
         assert_eq!(std::fs::read(target.join("Artifacts/ab/0.bin")).unwrap(), original);
         assert_eq!(backups(&project), Vec::<PathBuf>::new());
-        junction::delete(&library).unwrap();
+        remove_redirect(&library).unwrap();
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn the_copy_keeps_times_and_the_read_only_flag_and_can_be_deleted_again() {
         let temp = tempfile::tempdir().unwrap();
@@ -1196,19 +1359,19 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let target = temp.path().join("target");
         // The old Library holds a read-only file too: its removal must go through.
-        relocate(&project, &target, &files, &Work { progress: &progress, cancel: &cancel }, |t, l| junction::create(t, l)).unwrap();
+        relocate(&project, &target, &files, &Work { progress: &progress, cancel: &cancel }, |t, l| redirect(t, l)).unwrap();
         let copied = std::fs::metadata(target.join("Artifacts/ab/1.bin")).unwrap();
         assert!(copied.permissions().readonly());
         let delta = copied.modified().unwrap().duration_since(old).unwrap_or_default();
         assert!(delta.as_secs() < 3, "kept its modification time");
         assert_eq!(backups(&project), Vec::<PathBuf>::new());
-        junction::delete(project.join("Library")).unwrap();
+        remove_redirect(project.join("Library")).unwrap();
         remove_tree(&target, &mut || {}).unwrap();
         assert!(!target.exists());
     }
 
     /// Runs a repair on a thread, cancelling it once some of the bytes were copied.
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     fn repair_cancelled_midway(project: &Path, cache: &Path) -> (RepairEnd, Progress) {
         let progress = SharedProgress::default();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1227,7 +1390,7 @@ mod tests {
         (run.join().unwrap().unwrap(), seen)
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn cancel_leaves_the_library_intact_and_no_partial_copy() {
         let temp = tempfile::tempdir().unwrap();
@@ -1250,10 +1413,10 @@ mod tests {
         assert!(!crate::unity_open(&project));
         let RepairEnd::Moved(moved) = repair_with(&project, &SharedProgress::default(), &AtomicBool::new(false), |_, _| Ok(cache.clone())).unwrap() else { panic!("not moved") };
         assert_eq!(moved.files, 96);
-        junction::delete(project.join("Library")).unwrap();
+        remove_redirect(project.join("Library")).unwrap();
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn a_failure_in_the_copy_leaves_the_library_and_says_so() {
         let temp = tempfile::tempdir().unwrap();
@@ -1264,13 +1427,33 @@ mod tests {
         let target = temp.path().join("cache/abc");
         let progress = SharedProgress::default();
         let cancel = AtomicBool::new(false);
-        let error = relocate(&project, &target, &files, &Work { progress: &progress, cancel: &cancel }, |t, l| junction::create(t, l)).unwrap_err();
+        let error = relocate(&project, &target, &files, &Work { progress: &progress, cancel: &cancel }, |t, l| redirect(t, l)).unwrap_err();
         let text = format!("{error:#}");
         assert!(text.contains("stays where it is"), "{text}");
         assert!(text.contains("partial copy was deleted"), "{text}");
         assert!(!target.exists());
         assert!(!target.with_extension("json").exists());
         assert!(project.join("Library/Artifacts/ab/0.bin").is_file());
+    }
+
+    /// Files in use do not stop a rename here, as they do on Windows. A folder that cannot be renamed still can.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_library_that_cannot_be_renamed_stops_the_switch_and_keeps_it() {
+        use std::os::unix::ffi::OsStrExt;
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let project = project(temp.path(), "project", 3, 1024);
+        let library = std::ffi::CString::new(project.join("Library").as_os_str().as_bytes()).unwrap();
+        let set = |flags: libc::c_uint| assert_eq!(unsafe { libc::chflags(library.as_ptr(), flags) }, 0);
+        set(libc::UF_IMMUTABLE);
+        let error = repair_with(&project, &SharedProgress::default(), &AtomicBool::new(false), |_, _| Ok(cache.clone())).unwrap_err();
+        set(0);
+        let text = format!("{error:#}");
+        assert!(text.contains("stays where it is"), "{text}");
+        assert!(project.join("Library/Artifacts/ab/0.bin").is_file());
+        assert!(!crate::discovery::is_link(&std::fs::symlink_metadata(project.join("Library")).unwrap()));
+        assert!(folder_is_empty(&cache), "the checked copy goes too");
     }
 
     #[cfg(windows)]
@@ -1290,7 +1473,7 @@ mod tests {
         assert!(folder_is_empty(&cache), "the checked copy goes too");
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn progress_counts_up_to_the_whole_library() {
         let temp = tempfile::tempdir().unwrap();
@@ -1304,7 +1487,31 @@ mod tests {
         assert_eq!((end.bytes_copied, end.bytes_checked, end.bytes_total), (moved.bytes, moved.bytes, 24 * 512 * 1024));
         assert_eq!(end.destination.as_deref(), Some(moved.target.as_path()));
         assert!(!end.cancellable());
-        junction::delete(project.join("Library")).unwrap();
+        remove_redirect(project.join("Library")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn programs_in_library_stay_programs_and_read_only_folders_are_deleted() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let project = project(temp.path(), "project", 2, 1024);
+        // A package's compiler, in a folder unpacked read-only.
+        let tools = project.join("Library/PackageCache/com.unity.burst/hostmac");
+        std::fs::create_dir_all(&tools).unwrap();
+        let tool = tools.join("bcl");
+        std::fs::write(&tool, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let RepairEnd::Moved(moved) = repair_with(&project, &SharedProgress::default(), &AtomicBool::new(false), |_, _| Ok(cache.clone())).unwrap() else { panic!("not moved") };
+        assert_eq!(moved.old_left, None, "the read-only folder went with the rest");
+        let copied = moved.target.join("Library/PackageCache/com.unity.burst/hostmac/bcl");
+        let copied = if copied.exists() { copied } else { moved.target.join("PackageCache/com.unity.burst/hostmac/bcl") };
+        assert_eq!(std::fs::metadata(&copied).unwrap().permissions().mode() & 0o777, 0o755);
+        // Reached through the project, as Unity does.
+        assert_eq!(std::fs::metadata(project.join("Library/PackageCache/com.unity.burst/hostmac/bcl")).unwrap().permissions().mode() & 0o111, 0o111);
+        assert_eq!(backups(&project), Vec::<PathBuf>::new());
     }
 
     #[test]
@@ -1319,7 +1526,7 @@ mod tests {
         assert_eq!(verdict_for(1, &[]), Verdict::NoRoom { needed: room_needed(1), best: None });
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn a_plan_measures_without_changing_anything_and_sees_a_redirect() {
         let temp = tempfile::tempdir().unwrap();
@@ -1332,12 +1539,12 @@ mod tests {
         std::fs::create_dir_all(&elsewhere).unwrap();
         let junctioned = temp.path().join("junctioned");
         std::fs::create_dir_all(&junctioned).unwrap();
-        junction::create(&elsewhere, junctioned.join("Library")).unwrap();
+        redirect(&elsewhere, junctioned.join("Library")).unwrap();
         let redirected = super::plan(&junctioned, &progress, &AtomicBool::new(false)).unwrap().unwrap();
         assert!(matches!(redirected.verdict, Verdict::Redirected { to: Some(_) }));
         // A cancelled measurement answers nothing.
         assert_eq!(super::plan(&project, &progress, &AtomicBool::new(true)).unwrap(), None);
-        junction::delete(junctioned.join("Library")).unwrap();
+        remove_redirect(junctioned.join("Library")).unwrap();
     }
 
     // The orphans. Every case below names real folders under a temporary directory: `sweep` is never given a real disk.
@@ -1351,12 +1558,12 @@ mod tests {
         cache
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     fn run_sweep(root: &Path, known: &[PathBuf]) -> Swept {
         sweep(&[root.to_path_buf()], known, &AtomicBool::new(false))
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn an_interrupted_copy_is_removed_and_its_project_left_alone() {
         let temp = tempfile::tempdir().unwrap();
@@ -1372,7 +1579,7 @@ mod tests {
         assert!(!crate::discovery::is_link(&std::fs::symlink_metadata(project.join("Library")).unwrap()));
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn a_record_with_verbatim_mixed_separators_is_read_as_the_app_wrote_it() {
         // What the real ones look like: `\\?\H:\…` for the project, `I:\Orbiters/UnityCache\…` for the Library.
@@ -1381,14 +1588,14 @@ mod tests {
         let project = project(temp.path(), "project", 0, 0);
         let canonical = project.canonicalize().unwrap();
         let cache = cache_for(&root, 'b', &canonical);
-        junction::create(&cache, canonical.join("Library")).unwrap();
+        redirect(&cache, canonical.join("Library")).unwrap();
         let swept = run_sweep(&root, &[]);
         assert_eq!(swept.kept, vec![(cache.clone(), Kept::InUse)]);
         assert!(cache.join("Artifacts/data.bin").is_file());
-        junction::delete(project.join("Library")).unwrap();
+        remove_redirect(project.join("Library")).unwrap();
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn a_cache_in_use_is_kept_with_or_without_the_gallery_knowing_its_project() {
         let temp = tempfile::tempdir().unwrap();
@@ -1396,16 +1603,16 @@ mod tests {
         // Named by its record, not in any list: the N4N0 sample avatar's case.
         let named = project(temp.path(), "named", 0, 0);
         let cache = cache_for(&root, 'c', &named);
-        junction::create(&cache, named.join("Library")).unwrap();
+        redirect(&cache, named.join("Library")).unwrap();
         let swept = run_sweep(&root, &[]);
         assert_eq!(swept.kept, vec![(cache.clone(), Kept::InUse)]);
         assert!(swept.removed.is_empty());
         assert!(cache.join("Artifacts/data.bin").is_file());
         assert!(cache.with_extension("json").is_file());
-        junction::delete(named.join("Library")).unwrap();
+        remove_redirect(named.join("Library")).unwrap();
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn a_project_moved_by_hand_keeps_its_cache_when_the_gallery_lists_it() {
         let temp = tempfile::tempdir().unwrap();
@@ -1414,21 +1621,27 @@ mod tests {
         let old_place = project(temp.path(), "old-place", 1, 64);
         let moved = project(temp.path(), "moved", 0, 0);
         let cache = cache_for(&root, 'd', &old_place);
-        junction::create(&cache, moved.join("Library")).unwrap();
+        redirect(&cache, moved.join("Library")).unwrap();
         let swept = run_sweep(&root, &[old_place.clone(), moved.clone()]);
         assert_eq!(swept.kept, vec![(cache.clone(), Kept::InUse)]);
         assert!(cache.join("Artifacts/data.bin").is_file());
-        junction::delete(moved.join("Library")).unwrap();
+        remove_redirect(moved.join("Library")).unwrap();
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn what_cannot_be_checked_is_kept() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("UnityCache");
         // A disk that is not here (no computer has every letter; pick one that is free).
-        let free_letter = (b'D'..=b'Z').rev().map(|l| format!("{}:\\", l as char)).find(|d| !Path::new(d).exists()).expect("a free drive letter");
-        let gone_disk = cache_for(&root, '1', &PathBuf::from(format!(r"{free_letter}Projects\Avatorbit")));
+        #[cfg(windows)]
+        let away = {
+            let free_letter = (b'D'..=b'Z').rev().map(|l| format!("{}:\\", l as char)).find(|d| !Path::new(d).exists()).expect("a free drive letter");
+            PathBuf::from(format!(r"{free_letter}Projects\Avatorbit"))
+        };
+        #[cfg(unix)]
+        let away = PathBuf::from("/Volumes/Not a disk connected here/Projects/Avatorbit");
+        let gone_disk = cache_for(&root, '1', &away);
         // The disk is here, the folder is not (it may have been moved, junction and all).
         let gone_folder = cache_for(&root, '2', &temp.path().join("moved-away"));
         // No record at all.
@@ -1452,7 +1665,7 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn a_repair_running_now_is_not_taken_for_an_interrupted_one() {
         let temp = tempfile::tempdir().unwrap();
@@ -1468,7 +1681,7 @@ mod tests {
         assert_eq!(run_sweep(&root, &[]).removed, vec![cache]);
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn a_kill_between_the_two_renames_puts_the_library_back() {
         let temp = tempfile::tempdir().unwrap();
@@ -1485,7 +1698,7 @@ mod tests {
         assert!(!cache.exists());
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn a_kill_after_the_switch_finishes_removing_the_old_library() {
         let temp = tempfile::tempdir().unwrap();
@@ -1494,17 +1707,17 @@ mod tests {
         let cache = cache_for(&root, '9', &project);
         let old = project.join(format!("{BACKUP_PREFIX}abc"));
         std::fs::rename(project.join("Library"), &old).unwrap();
-        junction::create(&cache, project.join("Library")).unwrap();
+        redirect(&cache, project.join("Library")).unwrap();
         let swept = run_sweep(&root, &[]);
         assert_eq!(swept.kept, vec![(cache.clone(), Kept::InUse)]);
         assert_eq!(swept.old_removed, vec![old.clone()]);
         assert!(!old.exists());
         assert!(cache.join("Artifacts/data.bin").is_file(), "the cache in use stays");
-        junction::delete(project.join("Library")).unwrap();
+        remove_redirect(project.join("Library")).unwrap();
     }
 
     /// The repair the test below kills: run by that test, in a process of its own.
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     #[ignore]
     fn repair_to_be_killed() {
@@ -1514,7 +1727,7 @@ mod tests {
     }
 
     /// Enzo's case for real: the process killed in the middle of a copy, as closing the app does. Nothing runs to clean up.
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn a_repair_killed_midway_leaves_the_library_and_its_copy_goes_at_the_next_sweep() {
         let temp = tempfile::tempdir().unwrap();
@@ -1568,7 +1781,7 @@ mod tests {
 
     /// A move at a size where progress can be read, on the temporary folder's disk:
     /// `ORBITERS_REPAIR_MB=1024 cargo test -p orbiters-projects a_measured_repair -- --ignored --nocapture`.
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     #[ignore]
     fn a_measured_repair() {
@@ -1601,6 +1814,6 @@ mod tests {
         }
         let end = run.join().unwrap().unwrap();
         println!("{:.1} s: {end:?}", start.elapsed().as_secs_f32());
-        junction::delete(project.join("Library")).unwrap();
+        remove_redirect(project.join("Library")).unwrap();
     }
 }

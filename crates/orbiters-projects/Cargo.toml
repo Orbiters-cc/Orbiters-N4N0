@@ -32,5 +32,18 @@ winreg = "0.55"
 windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_IO", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
 junction = "2.1.0"
 
+# Free space, the project lock's probe and the priority of workers off Windows.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Unity's and Blender's bundles, the volumes mounted, and the applications running (mac.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = "1"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSRunningApplication", "NSWorkspace"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGWindow"] }
+
 [dev-dependencies]
 tempfile = "3"

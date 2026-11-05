@@ -8,6 +8,8 @@ pub mod editor;
 pub mod git;
 pub mod hidden;
 pub mod icons;
+#[cfg(target_os = "macos")]
+mod mac;
 pub mod missing;
 pub mod network;
 pub mod preview;
@@ -32,9 +34,52 @@ pub fn data_dir() -> PathBuf {
 pub fn vcc_dir() -> PathBuf {
     match std::env::var_os("ORBITERS_VCC_DIR") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("VRChatCreatorCompanion"),
+        _ => vcc_parent().join("VRChatCreatorCompanion"),
     }
 }
+
+#[cfg(not(target_os = "macos"))]
+fn vcc_parent() -> PathBuf {
+    dirs::data_local_dir().unwrap_or_else(std::env::temp_dir)
+}
+
+/// Where ALCOM and vrc-get keep their environment on the Mac, so that they list the same projects: vrc-get-vpm looks at
+/// `XDG_DATA_HOME`, then `~/.local/share`, and not in Application Support.
+#[cfg(target_os = "macos")]
+fn vcc_parent() -> PathBuf {
+    match std::env::var_os("XDG_DATA_HOME") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => dirs::home_dir().unwrap_or_else(std::env::temp_dir).join(".local/share"),
+    }
+}
+
+/// Unity Hub's own files (its project and editor lists). `ORBITERS_UNITY_HUB_DIR` points them elsewhere, for stand-ins.
+pub fn hub_data_dir() -> Option<PathBuf> {
+    match std::env::var_os("ORBITERS_UNITY_HUB_DIR") {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => dirs::config_dir().map(|d| d.join("UnityHub")),
+    }
+}
+
+/// Where Unity writes the log of the editor last started.
+pub fn editor_log() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        dirs::home_dir().map(|p| p.join("Library/Logs/Unity/Editor.log"))
+    } else if cfg!(windows) {
+        dirs::data_local_dir().map(|p| p.join("Unity/Editor/Editor.log"))
+    } else {
+        dirs::config_dir().map(|p| p.join("unity3d/Editor.log"))
+    }
+}
+
+/// [`editor_log`] as the person is told of it.
+const EDITOR_LOG: &str = if cfg!(target_os = "macos") {
+    "~/Library/Logs/Unity/Editor.log"
+} else if cfg!(windows) {
+    r"%LOCALAPPDATA%\Unity\Editor\Editor.log"
+} else {
+    "~/.config/unity3d/Editor.log"
+};
 
 /// Where Creator Companion itself is installed (its template covers), from its uninstall entry; none when it is not.
 /// `ORBITERS_VCC_APP_DIR` replaces it (empty: not installed).
@@ -79,10 +124,29 @@ fn uninstall_entry(matches: impl Fn(&str, &str) -> bool) -> Option<(Option<PathB
 pub fn unity_hub() -> Option<PathBuf> {
     let settings: serde_json::Value = std::fs::read(vcc_dir().join("settings.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     let configured = settings["pathToUnityHub"].as_str().filter(|s| !s.is_empty()).map(PathBuf::from);
-    let installed = uninstall_entry(|key, name| key == "Unity Technologies - Hub" || name.starts_with("Unity Hub")).and_then(|(location, icon)| {
-        icon.filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))).or(location.map(|l| l.join("Unity Hub.exe")))
-    });
-    [configured, installed, Some(PathBuf::from(r"C:\Program Files\Unity Hub\Unity Hub.exe"))].into_iter().flatten().find(|p| p.is_file())
+    #[cfg(target_os = "macos")]
+    return unity_hub_on_mac(configured);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let installed = uninstall_entry(|key, name| key == "Unity Technologies - Hub" || name.starts_with("Unity Hub")).and_then(|(location, icon)| {
+            icon.filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))).or(location.map(|l| l.join("Unity Hub.exe")))
+        });
+        [configured, installed, Some(PathBuf::from(r"C:\Program Files\Unity Hub\Unity Hub.exe"))].into_iter().flatten().find(|p| p.is_file())
+    }
+}
+
+/// On the Mac: where VCC or ALCOM were told it is (the bundle or its program), the Applications folders, then wherever
+/// Spotlight knows it by its bundle identifier (it can be anywhere: a drag is all it takes to move an app).
+#[cfg(target_os = "macos")]
+fn unity_hub_on_mac(configured: Option<PathBuf>) -> Option<PathBuf> {
+    let configured = configured.map(|p| if p.extension().is_some_and(|e| e == "app") { mac::bundle_program(&p) } else { p });
+    let usual = [Some(PathBuf::from("/Applications")), dirs::home_dir().map(|h| h.join("Applications"))];
+    let usual = usual.into_iter().flatten().map(|d| mac::bundle_program(&d.join("Unity Hub.app")));
+    configured
+        .into_iter()
+        .chain(usual)
+        .find(|p| p.is_file())
+        .or_else(|| mac::spotlight("kMDItemCFBundleIdentifier == 'com.unity3d.unityhub'").iter().map(|app| mac::bundle_program(app)).find(|p| p.is_file()))
 }
 
 pub fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
@@ -116,6 +180,7 @@ pub fn write_json(path: &Path, value: &impl serde::Serialize) -> anyhow::Result<
 }
 
 pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut c = std::process::Command::new(program);
     #[cfg(windows)]
     {
@@ -127,7 +192,34 @@ pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Com
 
 pub fn unity_open(path: &Path) -> bool {
     let lock = path.join("Temp/UnityLockfile");
-    lock.exists() && std::fs::OpenOptions::new().write(true).open(lock).is_err()
+    #[cfg(not(unix))]
+    return lock.exists() && std::fs::OpenOptions::new().write(true).open(lock).is_err();
+    // Unity's lock file is no exclusive open here: anyone can open it, and it stays behind after a crash. What tells is
+    // a lock held on it, or an editor whose command line names the project.
+    #[cfg(unix)]
+    return lock_held(&lock) || editor::of(&editor::running(), path, false).is_some();
+}
+
+/// Whether a process holds a lock on `file`. `F_GETLK` takes none itself, so asking cannot get in the way of Unity
+/// starting at that moment. On the Mac it answers for `flock` locks as well (measured on macOS 27, in both directions).
+#[cfg(unix)]
+fn lock_held(file: &Path) -> bool {
+    use std::os::fd::AsRawFd;
+    let Ok(file) = std::fs::File::open(file) else { return false };
+    // SAFETY: an all-zero flock is a valid value of it, and the descriptor is open for the call.
+    let mut probe: libc::flock = unsafe { std::mem::zeroed() };
+    probe.l_type = libc::F_WRLCK as _;
+    probe.l_whence = libc::SEEK_SET as _;
+    let answered = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut probe) } == 0;
+    if answered && probe.l_type as i32 != libc::F_UNLCK as i32 {
+        return true;
+    }
+    // Elsewhere the two kinds of lock do not see each other. A shared lock of a moment asks about the other kind.
+    #[cfg(not(target_os = "macos"))]
+    if matches!(file.try_lock_shared(), Err(std::fs::TryLockError::WouldBlock)) {
+        return true;
+    }
+    false
 }
 
 /// What Open in Unity did.
@@ -195,11 +287,48 @@ fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
         eprintln!("the storage check of {} did not finish: {e:#}", project.path.display());
         None
     });
-    let mut command = hidden_command(&editor);
-    command.arg("-projectPath").arg(&project.path);
-    start_watched(command, START_WATCH).map_err(|e| anyhow::anyhow!("Unity {} ({}) {e:#}", project.unity, editor.display()))?;
+    #[cfg(not(target_os = "macos"))]
+    let started = {
+        let mut command = hidden_command(&editor);
+        command.arg("-projectPath").arg(&project.path);
+        start_watched(command, START_WATCH)
+    };
+    #[cfg(target_os = "macos")]
+    let started = start_on_mac(&editor, &project.path, START_WATCH);
+    started.map_err(|e| anyhow::anyhow!("Unity {} ({}) {e:#}", project.unity, editor.display()))?;
     Ok(Opened { already_open: false, moved })
 }
+
+/// Starts `editor` on `project`, through the system when it is in an application bundle ([`mac::start_app`]). There is no
+/// exit status to read then. What shows a failure is `open`'s own answer, the editor's process going again within `watch`
+/// of being seen, or never being seen: a process exists as soon as `open` has answered, so one not there after
+/// [`FIRST_SIGHT`] was gone before it could be looked at.
+#[cfg(target_os = "macos")]
+fn start_on_mac(editor: &Path, project: &Path, watch: std::time::Duration) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use std::process::Stdio;
+    let Some(app) = mac::enclosing_app(editor) else {
+        let mut command = hidden_command(editor);
+        command.arg("-projectPath").arg(project).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        return start_watched(command, watch);
+    };
+    let answer = mac::start_app(&app).arg("--args").arg("-projectPath").arg(project).output().context("could not be started")?;
+    anyhow::ensure!(answer.status.success(), "could not be started: {}", String::from_utf8_lossy(&answer.stderr).trim());
+    let start = std::time::Instant::now();
+    let mut seen: Option<std::time::Instant> = None;
+    loop {
+        let here = editor::of(&editor::running(), project, false).is_some();
+        anyhow::ensure!(here || (seen.is_none() && start.elapsed() < FIRST_SIGHT), "quit right after starting. Its log is at {EDITOR_LOG}.");
+        if here && seen.get_or_insert_with(std::time::Instant::now).elapsed() >= watch {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// How long the system may take to show a process for an editor it was told to start.
+#[cfg(target_os = "macos")]
+const FIRST_SIGHT: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// Starts `command` and watches it for `watch`: a program that could not start, or that quit at once with a failure, is an
 /// error rather than a success said too soon. One still running, or ended well (it handed over to another process), is
@@ -210,17 +339,59 @@ fn start_watched(mut command: std::process::Command, watch: std::time::Duration)
     let start = std::time::Instant::now();
     while start.elapsed() < watch {
         if let Some(status) = child.try_wait().context("could not be watched")? {
-            anyhow::ensure!(status.success(), r"quit right after starting ({status}). Its log is at %LOCALAPPDATA%\Unity\Editor\Editor.log.");
+            anyhow::ensure!(status.success(), "quit right after starting ({status}). Its log is at {EDITOR_LOG}.");
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    // A child that ended stays a zombie until it is waited for, and it goes on running by itself.
+    #[cfg(unix)]
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 
 pub fn open_hub() -> anyhow::Result<()> {
     let path = unity_hub().ok_or_else(|| anyhow::anyhow!("Unity Hub is not installed. Download it from unity.com/download."))?;
+    #[cfg(target_os = "macos")]
+    if let Some(app) = mac::enclosing_app(&path) {
+        let answer = mac::open_command().arg(&app).output()?;
+        anyhow::ensure!(answer.status.success(), "Unity Hub could not be opened: {}", String::from_utf8_lossy(&answer.stderr).trim());
+        return Ok(());
+    }
     hidden_command(path).spawn()?;
+    Ok(())
+}
+
+/// What shows `path` in the system's file manager: a folder opened; a file in its folder (selected in the Finder).
+fn reveal_command(path: &Path) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        let mut c = hidden_command("explorer.exe");
+        c.arg(path);
+        c
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut c = mac::open_command();
+        if !path.is_dir() {
+            c.arg("-R");
+        }
+        c.arg(path);
+        c
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let mut c = hidden_command("xdg-open");
+        c.arg(if path.is_dir() { path } else { path.parent().unwrap_or(path) });
+        c
+    }
+}
+
+/// Shows `path` in the system's file manager: Explorer, the Finder.
+pub fn reveal(path: &Path) -> anyhow::Result<()> {
+    reveal_command(path).spawn()?;
     Ok(())
 }
 
@@ -250,6 +421,65 @@ mod open_tests {
         let start = Instant::now();
         start_watched(cmd(&["ping", "-n", "4", "127.0.0.1"]), Duration::from_millis(200)).unwrap();
         assert!(start.elapsed() < Duration::from_secs(2), "the watch ends the wait, not the program");
+    }
+
+    #[cfg(unix)]
+    fn sh(script: &str) -> std::process::Command {
+        let mut c = hidden_command("/bin/sh");
+        c.args(["-c", script]);
+        c
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_program_that_quits_at_once_with_a_failure_says_where_its_log_is() {
+        let error = format!("{:#}", start_watched(sh("exit 3"), Duration::from_secs(10)).unwrap_err());
+        assert!(error.contains("quit right after starting") && error.contains(EDITOR_LOG), "{error}");
+        start_watched(sh("exit 0"), Duration::from_secs(10)).unwrap();
+        let start = Instant::now();
+        start_watched(sh("sleep 3"), Duration::from_millis(200)).unwrap();
+        assert!(start.elapsed() < Duration::from_secs(2), "the watch ends the wait, not the program");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_mac_keeps_things_where_its_other_programs_look() {
+        // Whatever is set in this process, vrc-get-vpm is what ALCOM uses: the same folder.
+        if std::env::var_os("ORBITERS_VCC_DIR").is_none() {
+            let upstream = vrc_get_vpm::io::DefaultEnvironmentIo::new_default();
+            assert_eq!(vcc_dir(), upstream.resolve(Path::new("")).components().collect::<PathBuf>());
+            assert!(!vcc_dir().starts_with(dirs::data_local_dir().unwrap()), "not in Application Support: ALCOM would list other projects");
+        }
+        assert!(editor_log().unwrap().ends_with("Library/Logs/Unity/Editor.log"));
+        assert!(!EDITOR_LOG.contains("LOCALAPPDATA"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn revealing_selects_a_file_in_the_finder_and_opens_a_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("scene.blend");
+        std::fs::write(&file, "x").unwrap();
+        let args = |c: std::process::Command| (c.get_program().to_os_string(), c.get_args().map(|a| a.to_os_string()).collect::<Vec<_>>());
+        assert_eq!(args(reveal_command(temp.path())), ("/usr/bin/open".into(), vec![temp.path().as_os_str().to_os_string()]));
+        assert_eq!(args(reveal_command(&file)), ("/usr/bin/open".into(), vec!["-R".into(), file.as_os_str().to_os_string()]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_held_lock_is_told_from_a_lock_file_left_behind() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("Project");
+        std::fs::create_dir_all(project.join("Temp")).unwrap();
+        assert!(!unity_open(&project), "no lock file");
+        // What a crash leaves: the file, and nobody holding it.
+        std::fs::write(project.join("Temp/UnityLockfile"), "").unwrap();
+        assert!(!unity_open(&project));
+        let held = std::fs::File::open(project.join("Temp/UnityLockfile")).unwrap();
+        held.lock().unwrap();
+        assert!(unity_open(&project), "held, whoever holds it");
+        drop(held);
+        assert!(!unity_open(&project), "let go");
     }
 
     #[test]

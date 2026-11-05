@@ -99,6 +99,20 @@ pub fn skip_dir(name: &str) -> bool {
         n.as_str(),
         "windows" | "programdata" | "$recycle.bin" | "system volume information" | "appdata" | "library" | "temp" | "logs" | "obj" | "node_modules" | ".git"
     ) || n.starts_with("program files")
+        || mac_only_skip(&n)
+}
+/// Hidden folders (the Trash, Spotlight's and Time Machine's, a shell's caches) and what the Finder shows as one file: an
+/// application or a photo library, never a place for a Unity project. A Unity project's own `Library` is never reached,
+/// since a walk stops at a project's folder.
+fn mac_only_skip(name: &str) -> bool {
+    cfg!(target_os = "macos") && (name.starts_with('.') || [".app", ".framework", ".bundle", ".photoslibrary", ".musiclibrary", ".tvlibrary"].iter().any(|x| name.ends_with(x)))
+}
+/// Whether reading this folder makes macOS ask the person for permission in the app's name: the folders of the home
+/// folder it guards (its Library is left out anyway, and Spotlight answers for all of them without asking anybody).
+fn asks_permission(path: &Path) -> bool {
+    cfg!(target_os = "macos")
+        && path.parent().is_some_and(|parent| dirs::home_dir().as_deref() == Some(parent))
+        && path.file_name().is_some_and(|n| ["Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures"].iter().any(|g| n == *g))
 }
 pub fn is_link(m: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
@@ -141,12 +155,23 @@ pub fn cached() -> Scan {
 
 pub fn seeds(registered: &[PathBuf]) -> Vec<PathBuf> {
     let mut paths = registered.to_vec();
-    if let Some(dir) = dirs::config_dir() {
-        if let Ok(text) = std::fs::read_to_string(dir.join("UnityHub/projects-v1.json")) {
+    if let Some(dir) = crate::hub_data_dir() {
+        if let Ok(text) = std::fs::read_to_string(dir.join("projects-v1.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                 collect_paths(&v, &mut paths);
             }
         }
+        // The folder Unity Hub makes new projects in: disks are not walked as widely here as on Windows.
+        #[cfg(target_os = "macos")]
+        if let Ok(text) = std::fs::read_to_string(dir.join("projectDir.json")) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                collect_paths(&v, &mut paths);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(prefs) = dirs::home_dir().map(|h| h.join("Library/Preferences/com.unity3d.UnityEditor5.x.plist")) {
+        paths.extend(recent_projects(&prefs));
     }
     #[cfg(windows)]
     {
@@ -161,6 +186,13 @@ pub fn seeds(registered: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     paths
+}
+/// What Unity's editor keeps of its recent projects, on the Mac in its preferences (`RecentlyUsedProjectPaths-<n>`).
+#[cfg(target_os = "macos")]
+fn recent_projects(prefs: &Path) -> Vec<PathBuf> {
+    let Ok(all) = plist::Value::from_file(prefs) else { return vec![] };
+    let Some(all) = all.into_dictionary() else { return vec![] };
+    all.iter().filter(|(k, _)| k.starts_with("RecentlyUsedProjectPaths-")).filter_map(|(_, v)| v.as_string().map(PathBuf::from)).collect()
 }
 fn collect_paths(v: &serde_json::Value, paths: &mut Vec<PathBuf>) {
     match v {
@@ -202,16 +234,58 @@ pub fn fixed_disks() -> Vec<PathBuf> {
             })
             .collect()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        crate::mac::fixed_disks()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         vec![]
     }
+}
+/// Where a walk of the disks starts. On the Mac the startup disk holds nothing of the person's outside `/Users`, and
+/// walking another volume makes the system ask for permission (it guards external disks): that waits for a press on
+/// Refresh, Spotlight finding what it has indexed there meanwhile.
+fn scan_roots(_force: bool) -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return std::iter::once(PathBuf::from("/Users")).chain(if _force { fixed_disks() } else { vec![] }.into_iter().filter(|d| d != Path::new("/"))).collect();
+    #[cfg(not(target_os = "macos"))]
+    fixed_disks()
+}
+/// The projects Spotlight knows of, wherever they are: what a walk would find, instantly and without a permission
+/// question for the folders macOS guards. Reading a project found in one is what makes it ask, and only then.
+#[cfg(target_os = "macos")]
+fn spotlight_projects() -> Vec<PathBuf> {
+    projects_of_version_files(crate::mac::spotlight("kMDItemFSName == 'ProjectVersion.txt'"))
+}
+/// The projects `<project>/ProjectSettings/ProjectVersion.txt` files name, without those a walk would not go to.
+#[cfg(target_os = "macos")]
+fn projects_of_version_files(files: Vec<PathBuf>) -> Vec<PathBuf> {
+    files
+        .into_iter()
+        .filter(|f| f.ends_with("ProjectSettings/ProjectVersion.txt"))
+        .filter_map(|f| f.parent()?.parent().map(Path::to_path_buf))
+        .filter(|p| !p.components().any(|c| matches!(c, std::path::Component::Normal(n) if skip_dir(&n.to_string_lossy()))))
+        .collect()
 }
 pub fn low_priority() {
     #[cfg(windows)]
     unsafe {
         use windows::Win32::System::Threading::*;
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+    // The class macOS gives work that is not waited for, as the Finder's copies. No thread is made slower than that: the
+    // class below it can take minutes to read a folder while the computer is busy.
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn pthread_set_qos_class_self_np(class: u32, relative_priority: i32) -> i32;
+        }
+        const QOS_CLASS_UTILITY: u32 = 0x11;
+        // SAFETY: only changes the calling thread's class.
+        unsafe {
+            pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+        }
     }
 }
 
@@ -253,7 +327,7 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
         }
     }
     for r in roots {
-        walk(&r, Some(2), cancel, &mut found, &AtomicU64::new(0), None);
+        walk(&r, Some(2), !force, cancel, &mut found, &AtomicU64::new(0), None);
     }
     rebuild(&mut scan, &found, &known);
     publish(&scan);
@@ -264,10 +338,18 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
         publish(&scan);
         let start = Instant::now();
         let mut count = 0;
-        for disk in fixed_disks() {
+        #[cfg(target_os = "macos")]
+        {
+            for p in spotlight_projects() {
+                found.insert(key(&p), p);
+            }
+            rebuild(&mut scan, &found, &known);
+            publish(&scan);
+        }
+        for disk in scan_roots(force) {
             scan.status = format!("Scanning {}", disk.display());
             publish(&scan);
-            count += scan_disk(&disk, cancel, &mut found, &mut scan.warnings);
+            count += scan_disk(&disk, !force, cancel, &mut found, &mut scan.warnings);
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
@@ -329,7 +411,7 @@ enum DiskEvent {
 }
 /// A damaged/offline volume must not hold every other disk hostage. Cancel an enumeration after 60 s without a
 /// single directory completed, retain discoveries already received, and report that volume in the scan warnings.
-fn scan_disk(root: &Path, cancel: &AtomicBool, found: &mut HashMap<String, PathBuf>, warnings: &mut Vec<String>) -> u64 {
+fn scan_disk(root: &Path, quiet: bool, cancel: &AtomicBool, found: &mut HashMap<String, PathBuf>, warnings: &mut Vec<String>) -> u64 {
     let (tx, rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let progress = Arc::new(AtomicU64::new(0));
@@ -339,7 +421,7 @@ fn scan_disk(root: &Path, cancel: &AtomicBool, found: &mut HashMap<String, PathB
         let progress = progress.clone();
         std::thread::spawn(move || {
             low_priority();
-            walk(&root, None, &stop, &mut HashMap::new(), &progress, Some(&tx));
+            walk(&root, None, quiet, &stop, &mut HashMap::new(), &progress, Some(&tx));
             let _ = tx.send(DiskEvent::Done);
         })
     };
@@ -382,9 +464,11 @@ fn scan_disk(root: &Path, cancel: &AtomicBool, found: &mut HashMap<String, PathB
     }
     progress.load(Ordering::Relaxed)
 }
+/// `quiet`: leaving out the folders reading which makes the system ask the person something ([`asks_permission`]).
 fn walk(
     root: &Path,
     depth: Option<usize>,
+    quiet: bool,
     cancel: &AtomicBool,
     found: &mut HashMap<String, PathBuf>,
     count: &AtomicU64,
@@ -412,7 +496,7 @@ fn walk(
         }
         let Ok(entries) = std::fs::read_dir(&p) else { continue };
         for e in entries.flatten() {
-            if e.file_type().is_ok_and(|t| t.is_dir()) && !skip_dir(&e.file_name().to_string_lossy()) {
+            if e.file_type().is_ok_and(|t| t.is_dir()) && !skip_dir(&e.file_name().to_string_lossy()) && !(quiet && asks_permission(&e.path())) {
                 stack.push((e.path(), d + 1));
             }
         }
@@ -420,10 +504,53 @@ fn walk(
 }
 
 pub fn find_editor(version: &str) -> Option<PathBuf> {
+    find_editor_in(version, crate::hub_data_dir().as_deref(), &default_editor_folders(), &crate::vcc_dir())
+}
+
+/// The folders under which Unity Hub puts editors by itself.
+fn default_editor_folders() -> Vec<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let roots = [Some(PathBuf::from("/Applications")), dirs::home_dir().map(|h| h.join("Applications"))];
+        roots.into_iter().flatten().map(|r| r.join("Unity/Hub/Editor")).collect()
+    } else {
+        vec![PathBuf::from(r"C:\Program Files\Unity\Hub\Editor")]
+    }
+}
+
+/// The program of the editor installed in `folder`, a folder Unity Hub made for it (`.../Hub/Editor/<version>`).
+fn editor_in_folder(folder: &Path) -> PathBuf {
+    folder.join(if cfg!(target_os = "macos") { "Unity.app/Contents/MacOS/Unity" } else { "Editor/Unity.exe" })
+}
+
+/// The program of an editor named as Unity Hub's files, VCC or ALCOM do. On the Mac they name the program, the `Unity.app`
+/// bundle or the folder that holds it; elsewhere a path with an extension is the program and one without its folder.
+fn editor_program(path: PathBuf) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")) {
+            path.join("Contents/MacOS/Unity")
+        } else if path.join("Unity.app").is_dir() {
+            editor_in_folder(&path)
+        } else {
+            path
+        }
+    } else if path.extension().is_some() {
+        path
+    } else {
+        editor_in_folder(&path)
+    }
+}
+
+/// [`find_editor`] with its places given.
+fn find_editor_in(version: &str, hub: Option<&Path>, folders: &[PathBuf], vcc: &Path) -> Option<PathBuf> {
     // Search only the requested version: opening another editor could upgrade a project.
-    let mut candidates = vec![PathBuf::from(format!(r"C:\Program Files\Unity\Hub\Editor\{version}\Editor\Unity.exe"))];
-    if let Some(dir) = dirs::config_dir() {
-        let hub = dir.join("UnityHub");
+    let mut candidates = vec![];
+    // Unity Hub names the folder after the version alone, with the architecture too when two are installed side by side
+    // (`-arm64`, `-x86_64`). Unity for Apple silicon first: the other one runs under Rosetta, if at all.
+    let suffixes: &[&str] = if cfg!(target_os = "macos") { &["-arm64", "", "-x86_64"] } else { &[""] };
+    for folder in folders {
+        candidates.extend(suffixes.iter().map(|s| editor_in_folder(&folder.join(format!("{version}{s}")))));
+    }
+    if let Some(hub) = hub {
         if let Ok(s) = std::fs::read_to_string(hub.join("editors-v2.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
                 editor_entries(&v, version, &mut candidates);
@@ -433,16 +560,26 @@ pub fn find_editor(version: &str) -> Option<PathBuf> {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
                 for value in [v.as_str(), v["secondaryInstallPath"].as_str()] {
                     if let Some(p) = value {
-                        candidates.push(PathBuf::from(p).join(version).join("Editor/Unity.exe"));
+                        for suffix in suffixes {
+                            candidates.push(editor_in_folder(&PathBuf::from(p).join(format!("{version}{suffix}"))));
+                        }
                     }
                 }
             }
         }
+        // The install folder given to every user of the computer, in Hub's settings or its machine-wide file.
+        #[cfg(target_os = "macos")]
+        for file in [hub.join("settings.json"), PathBuf::from("/Library/Application Support/Unity/config/services-config.json")] {
+            let settings: serde_json::Value = std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            if let Some(p) = settings["machineWideSecondaryInstallLocation"].as_str().filter(|p| !p.is_empty()) {
+                candidates.extend(suffixes.iter().map(|s| editor_in_folder(&PathBuf::from(p).join(format!("{version}{s}")))));
+            }
+        }
     }
-    if let Ok(s) = std::fs::read_to_string(crate::vcc_dir().join("settings.json")) {
+    if let Ok(s) = std::fs::read_to_string(vcc.join("settings.json")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
             if let Some(p) = v["preferredUnityEditors"][version].as_str() {
-                candidates.push(PathBuf::from(p));
+                candidates.push(if cfg!(target_os = "macos") { editor_program(PathBuf::from(p)) } else { PathBuf::from(p) });
             }
         }
     }
@@ -453,12 +590,18 @@ pub fn find_editor(version: &str) -> Option<PathBuf> {
     // VCC's database can be held by VCC itself: a wait there must not hold up Open in Unity, whose answer is then "not
     // installed" as for any version not in the lists above.
     let version = version.to_string();
+    let vcc = vcc.to_path_buf();
     crate::within(std::time::Duration::from_secs(5), move || {
         crate::runtime().ok()?.block_on(async {
-            let io = vrc_get_vpm::io::DefaultEnvironmentIo::new(crate::vcc_dir().into());
+            let io = vrc_get_vpm::io::DefaultEnvironmentIo::new(vcc.into());
             let db = vrc_get_vpm::environment::VccDatabaseConnection::connect(&io).await.ok()?;
             let wanted = vrc_get_vpm::version::UnityVersion::parse(&version)?;
-            db.get_unity_installations().iter().filter(|u| u.version() == Some(wanted)).filter_map(|u| u.path().map(PathBuf::from)).find(|p| p.is_file())
+            db.get_unity_installations()
+                .iter()
+                .filter(|u| u.version() == Some(wanted))
+                .filter_map(|u| u.path().map(PathBuf::from))
+                .map(|p| if cfg!(target_os = "macos") { editor_program(p) } else { p })
+                .find(|p| p.is_file())
         })
     })
     .flatten()
@@ -474,8 +617,12 @@ fn editor_entries(v: &serde_json::Value, version: &str, out: &mut Vec<PathBuf>) 
             if v["version"].as_str() == Some(version) {
                 for k in ["location", "path"] {
                     if let Some(p) = v[k].as_str() {
-                        let p = PathBuf::from(p);
-                        out.push(if p.extension().is_some() { p } else { p.join("Editor/Unity.exe") });
+                        out.push(editor_program(PathBuf::from(p)));
+                    }
+                    // Unity Hub on the Mac gives a list.
+                    #[cfg(target_os = "macos")]
+                    if let Some(list) = v[k].as_array() {
+                        out.extend(list.iter().filter_map(|p| p.as_str()).map(|p| editor_program(PathBuf::from(p))));
                     }
                 }
             }
@@ -489,5 +636,166 @@ fn editor_entries(v: &serde_json::Value, version: &str, out: &mut Vec<PathBuf>) 
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod mac_tests {
+    use super::*;
+
+    /// An application bundle holding a stand-in for the program.
+    fn fake_editor(folder: &Path) -> PathBuf {
+        let program = folder.join("Unity.app/Contents/MacOS/Unity");
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        program
+    }
+
+    #[test]
+    fn an_editor_is_found_in_every_place_unity_hub_keeps_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let vcc = temp.path().join("vcc");
+        let hub = temp.path().join("hub");
+        std::fs::create_dir_all(&hub).unwrap();
+        let usual = temp.path().join("Applications/Unity/Hub/Editor");
+        let find = |version: &str| find_editor_in(version, Some(&hub), std::slice::from_ref(&usual), &vcc);
+        assert_eq!(find("2022.3.22f1"), None, "nothing installed");
+
+        // Where Unity Hub installs them, an editor for Apple silicon before one for Intel.
+        let intel = fake_editor(&usual.join("2022.3.22f1-x86_64"));
+        assert_eq!(find("2022.3.22f1").as_ref(), Some(&intel));
+        let plain = fake_editor(&usual.join("2022.3.22f1"));
+        assert_eq!(find("2022.3.22f1").as_ref(), Some(&plain));
+        let apple = fake_editor(&usual.join("2022.3.22f1-arm64"));
+        assert_eq!(find("2022.3.22f1").as_ref(), Some(&apple));
+        assert_eq!(find("2022.3.21f1"), None, "only the version asked for: another could upgrade the project");
+
+        // Located by hand: Unity Hub's list, naming the bundle, its folder or the program, as a string or a list.
+        let located = fake_editor(&temp.path().join("Elsewhere/2021.3.8f1"));
+        let bundle = located.parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+        for location in [
+            serde_json::json!(bundle),
+            serde_json::json!([bundle]),
+            serde_json::json!(bundle.parent().unwrap()),
+            serde_json::json!(located),
+        ] {
+            let editors = serde_json::json!({"schema_version": "v2", "data": [{"version": "2021.3.8f1", "location": location, "architecture": "arm64"}]});
+            std::fs::write(hub.join("editors-v2.json"), editors.to_string()).unwrap();
+            assert_eq!(find("2021.3.8f1").as_ref(), Some(&located), "{location}");
+        }
+
+        // The install folder chosen in Unity Hub's preferences, a JSON string.
+        let secondary = temp.path().join("External/Editors");
+        let there = fake_editor(&secondary.join("2020.3.1f1"));
+        std::fs::write(hub.join("secondaryInstallPath.json"), serde_json::json!(secondary).to_string()).unwrap();
+        assert_eq!(find("2020.3.1f1").as_ref(), Some(&there));
+
+        // The one given to every user of the computer.
+        let wide = temp.path().join("Shared/Editors");
+        let shared = fake_editor(&wide.join("2019.4.31f1"));
+        std::fs::write(hub.join("settings.json"), serde_json::json!({"machineWideSecondaryInstallLocation": wide}).to_string()).unwrap();
+        assert_eq!(find("2019.4.31f1").as_ref(), Some(&shared));
+
+        // What VCC's settings prefer, by its bundle.
+        let preferred = fake_editor(&temp.path().join("Preferred"));
+        std::fs::create_dir_all(&vcc).unwrap();
+        let settings = serde_json::json!({"preferredUnityEditors": {"2018.4.20f1": preferred.parent().unwrap().parent().unwrap().parent().unwrap()}});
+        std::fs::write(vcc.join("settings.json"), settings.to_string()).unwrap();
+        assert_eq!(find("2018.4.20f1").as_ref(), Some(&preferred));
+    }
+
+    #[test]
+    fn the_walk_keeps_out_of_what_is_not_the_persons_and_finds_projects_in_folders_named_like_it() {
+        for skipped in [".Trash", ".Spotlight-V100", ".fseventsd", ".cache", "Blender.app", "Photos Library.photoslibrary", "Library"] {
+            assert!(skip_dir(skipped), "{skipped}");
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let project = |at: &str| {
+            let p = temp.path().join(at);
+            std::fs::create_dir_all(p.join("ProjectSettings")).unwrap();
+            std::fs::write(p.join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1\n").unwrap();
+            // A project's own Library is not what the skip is about: the walk stops at the project's folder.
+            std::fs::create_dir_all(p.join("Library/PackageCache")).unwrap();
+            key(&p)
+        };
+        let wanted = [project("Unity Projects/Avatar"), project("Deep/er/still/World")];
+        project(".Trash/Thrown away");
+        project("Library/Application Support/Orbiters/templates/base");
+        project("Applications/Some.app/Contents/Project");
+        project("Unity Projects/Avatar/Assets/Nested");
+        let mut found = HashMap::new();
+        walk(temp.path(), None, true, &AtomicBool::new(false), &mut found, &AtomicU64::new(0), None);
+        let mut keys: Vec<&String> = found.keys().collect();
+        keys.sort();
+        let mut expected: Vec<&String> = wanted.iter().collect();
+        expected.sort();
+        assert_eq!(keys, expected);
+    }
+
+    #[test]
+    fn folders_the_system_guards_are_not_walked_unless_refresh_was_pressed() {
+        let home = dirs::home_dir().unwrap();
+        assert!(asks_permission(&home.join("Documents")));
+        assert!(asks_permission(&home.join("Desktop")));
+        assert!(asks_permission(&home.join("Downloads")));
+        assert!(!asks_permission(&home.join("Documents/Unity")), "inside it, a project already named there got us here");
+        assert!(!asks_permission(&home.join("Unity Projects")));
+        assert!(!asks_permission(Path::new("/Volumes/SSD/Documents")));
+        // /Users always; another disk only for Refresh.
+        assert_eq!(scan_roots(false), [PathBuf::from("/Users")]);
+        assert_eq!(scan_roots(true)[0], PathBuf::from("/Users"));
+        assert!(!scan_roots(true).contains(&PathBuf::from("/")));
+    }
+
+    /// What a walk of this computer's `/Users` finds and how long it takes, printed (reads only, never a folder that makes
+    /// the system ask): `cargo test -p orbiters-projects real_walk -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_walk() {
+        let start = Instant::now();
+        let (mut found, count) = (HashMap::new(), AtomicU64::new(0));
+        walk(Path::new("/Users"), None, true, &AtomicBool::new(false), &mut found, &count, None);
+        println!("{} folders in {:?}: {} projects", count.load(Ordering::Relaxed), start.elapsed(), found.len());
+        let start = Instant::now();
+        let spotlight = spotlight_projects();
+        println!("Spotlight in {:?}: {} projects", start.elapsed(), spotlight.len());
+        for p in found.values().chain(&spotlight) {
+            println!("  {}", p.display());
+        }
+    }
+
+    #[test]
+    fn spotlights_version_files_name_their_projects() {
+        let files = [
+            "/Users/enzo/Documents/Avatar/ProjectSettings/ProjectVersion.txt",
+            "/Volumes/SSD/World/ProjectSettings/ProjectVersion.txt",
+            "/Users/enzo/.Trash/Old/ProjectSettings/ProjectVersion.txt",
+            "/Users/enzo/Library/Application Support/Orbiters/templates/base/ProjectSettings/ProjectVersion.txt",
+            "/Users/enzo/Avatar/Library/PackageCache/x/ProjectSettings/ProjectVersion.txt",
+            "/Users/enzo/Notes/ProjectVersion.txt",
+        ]
+        .map(PathBuf::from);
+        assert_eq!(projects_of_version_files(files.to_vec()), [PathBuf::from("/Users/enzo/Documents/Avatar"), PathBuf::from("/Volumes/SSD/World")]);
+    }
+
+    #[test]
+    fn unity_hub_and_the_editors_preferences_propose_projects() {
+        let temp = tempfile::tempdir().unwrap();
+        let prefs = temp.path().join("com.unity3d.UnityEditor5.x.plist");
+        let mut all = plist::Dictionary::new();
+        all.insert("RecentlyUsedProjectPaths-0".into(), plist::Value::String("/Users/enzo/Avatar".into()));
+        all.insert("RecentlyUsedProjectPaths-1".into(), plist::Value::String("/Volumes/SSD/World".into()));
+        all.insert("kAutoRefresh".into(), plist::Value::Integer(1.into()));
+        // Written as the system does, in binary.
+        plist::Value::Dictionary(all).to_file_binary(&prefs).unwrap();
+        let mut recent = recent_projects(&prefs);
+        recent.sort();
+        assert_eq!(recent, [PathBuf::from("/Users/enzo/Avatar"), PathBuf::from("/Volumes/SSD/World")]);
+        assert!(recent_projects(&temp.path().join("not there")).is_empty());
+        // Unity Hub's two files: every absolute path in them is a proposal.
+        let mut paths = vec![];
+        collect_paths(&serde_json::json!({"schema_version": "v1", "data": {"/Users/enzo/Hub Avatar": {"path": "/Users/enzo/Hub Avatar", "title": "Hub Avatar"}}}), &mut paths);
+        collect_paths(&serde_json::json!({"directoryPath": "/Users/enzo/Unity Projects"}), &mut paths);
+        assert!(paths.contains(&PathBuf::from("/Users/enzo/Hub Avatar")) && paths.contains(&PathBuf::from("/Users/enzo/Unity Projects")));
     }
 }

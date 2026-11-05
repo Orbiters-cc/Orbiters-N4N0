@@ -735,7 +735,7 @@ pub fn f16_bits(v: f32) -> u16 {
 
 /// Watches a project's previews: `changed` runs (on the watcher's thread) shortly after anything in the project's
 /// `UserSettings` changes (Toolkit replacing a preview, the folder first made), until the watch is dropped. Windows'
-/// change notifications; elsewhere nothing (the page also lists again now and then).
+/// change notifications; elsewhere a look at the folder twice a second (the page also lists again now and then).
 pub struct Watch {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -753,8 +753,41 @@ pub fn watch(project: &Path, changed: impl Fn() + Send + 'static) -> Watch {
         std::thread::Builder::new().name("project-preview-watch".into()).spawn(move || watch_loop(&project, &stop, changed)).ok();
     }
     #[cfg(not(windows))]
-    let _ = (project, changed);
+    {
+        let (project, stop) = (project.to_path_buf(), stop.clone());
+        std::thread::Builder::new().name("project-preview-watch".into()).spawn(move || poll_loop(&project, &stop, changed)).ok();
+    }
     Watch { stop }
+}
+
+/// What `UserSettings` holds, to tell it changed: every entry's name, length and modification time; a small folder.
+#[cfg(not(windows))]
+fn settings_state(settings: &Path) -> Option<Vec<(PathBuf, u64, Option<std::time::SystemTime>)>> {
+    settings.is_dir().then(|| {
+        walkdir::WalkDir::new(settings)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| {
+                let m = e.metadata().ok()?;
+                Some((e.into_path(), m.len(), m.modified().ok()))
+            })
+            .collect()
+    })
+}
+
+#[cfg(not(windows))]
+fn poll_loop(project: &Path, stop: &std::sync::atomic::AtomicBool, changed: impl Fn()) {
+    use std::sync::atomic::Ordering;
+    let settings = project.join("UserSettings");
+    let mut last = settings_state(&settings);
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let now = settings_state(&settings);
+        if now != last {
+            last = now;
+            changed();
+        }
+    }
 }
 
 #[cfg(windows)]

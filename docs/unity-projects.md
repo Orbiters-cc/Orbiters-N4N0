@@ -337,3 +337,21 @@ dependency ranges, the SDK held back, Update all applied), missing packages' rep
 again, and the N4N0 sample avatar's SDK conflict (com.vrchat.avatars/base 3.7.5 with Gesture Manager, Av3Manager and
 Fuck OSC Config pinning it) solved into one plan, blocked until removed, and rolled back on failure. Manual acceptance still requires public-repository downloads, VCC/ALCOM cross-app
 synchronization, Toolkit confirmation and a VRChat SDK upload. Those writes must use disposable projects.
+
+## On a Mac
+
+The page is the same; what it reads and runs is the Mac's (`crates/orbiters-projects/src/mac.rs`, `tests/mac_stand_ins.rs`):
+
+- **Projects:** Unity Hub's `~/Library/Application Support/UnityHub` (`projects-v1.json`, `projectDir.json`), Unity's recent
+  projects, Spotlight, and a quiet walk of `/Users` that skips hidden folders, app bundles and every `Library`. So that it
+  asks for no permission, the automatic scan leaves Desktop, Documents, Downloads, Movies, Music, Pictures and other disks to
+  Spotlight; Refresh walks them too.
+- **Editors:** `/Applications/Unity/Hub/Editor/<version>/Unity.app` (and its `-arm64`, `-x86_64` folders), Hub's
+  `editors-v2.json` and `secondaryInstallPath.json`, VCC's settings. Unity starts through `open -n -a ... --args -projectPath`,
+  so that macOS asks Unity, not this app, for what Unity needs. Its log is `~/Library/Logs/Unity/Editor.log`.
+- **Which editors run:** by process name and `-projectPath`, else their working folder, and a lock on `Temp/UnityLockfile`.
+- **Library repair:** the same copy, verify and rollback, through a symbolic link. APFS volumes sharing a container count as
+  one disk, since moving between them frees nothing. Sizes come from `st_blocks`, hard links and clones counted once.
+- **Blender:** `/Applications`, `~/Applications`, Steam, versioned apps, Launch Services and Spotlight.
+- **Files shared with Unity's tools** (`Avatars`, `Mixer/inbox`, `World captures`) are in `~/.local/share/Orbiters`, where
+  Unity's Mono has `LocalApplicationData` on a Mac; the app's own data is in `~/Library/Application Support/Orbiters`.
